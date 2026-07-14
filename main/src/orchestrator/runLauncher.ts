@@ -526,6 +526,11 @@ export class RunLauncher {
       createOpts,
     );
 
+    // The batch this launch seeded (tasks -> In development), hoisted into the
+    // outer catch's scope so a mid-launch failure AFTER the seed can revert those
+    // tasks off stage 7 instead of stranding them until the boot sweep (Fix 3).
+    let seededBatchId: string | null = null;
+
     try {
       // Every run is session-hosted (slice 1b): the run executes inside the owning
       // session's EXISTING worktree. The legacy session-less createDeterministicWorktree
@@ -624,6 +629,8 @@ export class RunLauncher {
         this.db
           .prepare('UPDATE workflow_runs SET batch_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
           .run(batchId, runId);
+        // Record the seed for the outer catch's fail-soft revert (Fix 3).
+        seededBatchId = batchId;
 
         // Move the pulled tasks to 'In development' (migration 061): capture each
         // lane's entry stage, then derive its execution stage. Best-effort so a
@@ -743,6 +750,36 @@ export class RunLauncher {
           originalError: errMsg,
           dbError: dbErr instanceof Error ? dbErr.message : String(dbErr),
         });
+      }
+      // Fail-soft stage reconciliation (Fix 3): the run is now terminal ('failed'),
+      // but the batch-seed (tasks -> In development) and any direct task-link
+      // happened BEFORE the failing step. Re-derive so those tasks revert off
+      // stage 7 immediately rather than waiting for the boot sweep. Each in its own
+      // try/catch so a recompute error never masks the original launch failure;
+      // skipped entirely when no deriver is wired.
+      if (this.taskStageDeriver) {
+        if (seededBatchId) {
+          try {
+            await this.taskStageDeriver.recomputeTasksForBatch(seededBatchId);
+          } catch (recomputeErr) {
+            this.logger.warn('RunLauncher: post-failure batch recompute failed (best-effort)', {
+              runId,
+              batchId: seededBatchId,
+              error: recomputeErr instanceof Error ? recomputeErr.message : String(recomputeErr),
+            });
+          }
+        }
+        if (taskId) {
+          try {
+            await this.taskStageDeriver.recomputeTaskExecutionStage(taskId);
+          } catch (recomputeErr) {
+            this.logger.warn('RunLauncher: post-failure task recompute failed (best-effort)', {
+              runId,
+              taskId,
+              error: recomputeErr instanceof Error ? recomputeErr.message : String(recomputeErr),
+            });
+          }
+        }
       }
       this.logger.error('RunLauncher: launch failed', { runId, workflowId, error: errMsg });
       throw err;

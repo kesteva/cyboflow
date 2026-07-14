@@ -2098,6 +2098,63 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect(stale.stage_id).toBe(stageId(6)); // dead association reverted to entry
     });
 
+    it('sweepStaleDerivedStageTasks: UPGRADE GAP (Fix 5) — a Ready task with a live batch association is projected INTO In development, entry captured', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      // A task at Ready for development (position 6, ASSERTED), entry NOT captured,
+      // that ALREADY holds a live sprint-batch association — the migration-061
+      // upgrade gap (the guard blocks re-pulling it, but the board never projected
+      // it into stage 7). The bidirectional sweep must move it IN.
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+      seedBatchLaneForTask(db, {
+        taskId,
+        batchId: 'bat-1',
+        runId: 'r1',
+        runStatus: 'running',
+        laneStatus: 'running',
+      });
+      // A bystander Ready task with NO run association must stay put.
+      const { taskId: idle } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'Idle' });
+
+      await router.sweepStaleDerivedStageTasks();
+
+      const moved = db
+        .prepare('SELECT stage_id, entry_stage_id FROM tasks WHERE id = ?')
+        .get(taskId) as { stage_id: string; entry_stage_id: string | null };
+      expect(moved.stage_id).toBe(stageId(7)); // projected IN to In development
+      expect(moved.entry_stage_id).toBe(stageId(6)); // entry captured BEFORE the move
+      const still = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(idle) as { stage_id: string };
+      expect(still.stage_id).toBe(stageId(6)); // no association -> untouched
+    });
+
+    it('gatherTaskRuns dedupe (Fix 6): a run linked BOTH directly (merged) AND via a FAILED batch lane does NOT Done the task', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const taskId = await makeTaskWithEntry(db, router);
+      // ONE run carrying BOTH task_id (direct) AND batch_id (lane). The direct copy
+      // is outcome='merged', but the lane ended 'failed'. Without dedupe the direct
+      // copy fires arm 1 (merged + source direct) -> Done; the fix keeps the BATCH
+      // copy (lane-aware) so arm 1 requires an INTEGRATED lane and does not fire.
+      db.prepare(
+        `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`,
+      ).run();
+      db.prepare(
+        `INSERT OR IGNORE INTO sprint_batches (id, project_id, substrate, status) VALUES ('bat-1', 1, 'sdk', 'running')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, task_id, batch_id, outcome)
+         VALUES ('r1', 'wf-1', 1, 'completed', 'default', ?, 'bat-1', 'merged')`,
+      ).run(taskId);
+      db.prepare(`INSERT INTO sprint_batch_tasks (batch_id, task_id, status) VALUES ('bat-1', ?, 'failed')`).run(taskId);
+
+      await router.recomputeTaskExecutionStage(taskId);
+
+      const task = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string };
+      expect(task.stage_id).not.toBe(stageId(9)); // NOT Done
+      // The winning (batch) copy is terminal with no integrated lane -> arm 3 reverts.
+      expect(task.stage_id).toBe(stageId(6)); // entry_stage_id
+    });
+
     // --- entity-type scoping: epics keep the old hold behaviour ----------------
 
     it('an EPIC linked via a running run stays put (no In-development arm)', async () => {

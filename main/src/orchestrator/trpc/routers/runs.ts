@@ -762,10 +762,12 @@ function isNoCommitsToMergeError(err: unknown): boolean {
  * legacy close-out tests whose fixture DB omits the migration-013 columns), this is
  * a complete no-op that touches none of the new columns.
  *
- * The run's `task_id` is read here, AFTER the git/worktree close-out but using the
- * run row that survives teardown (worktree teardown does not delete the run row).
- * The read is kept adjacent to the outcome write so both touch the new columns only
- * under the same gate.
+ * The run's `task_id` AND `batch_id` are read here, AFTER the git/worktree
+ * close-out but using the run row that survives teardown (worktree teardown does
+ * not delete the run row). The read is kept adjacent to the outcome write so both
+ * touch the new columns only under the same gate. A batch-bearing run ALSO
+ * recomputes its sprint lanes so a sessionless legacy sprint run (batch_id set,
+ * task_id NULL) is not stranded on a run-level close-out.
  *
  * Fail-soft: a task-side error is logged-then-swallowed so it never fails an
  * otherwise-successful merge / PR / dismiss.
@@ -783,18 +785,37 @@ async function stampOutcomeAndDeriveTask(
   if (!deriver) return; // migration-013 close-out is opt-in; touch no new columns otherwise
 
   try {
-    // task_id read + outcome write both gated behind the deriver so the legacy
-    // (no-deriver) path never references columns a pre-migration-013 DB lacks.
+    // task_id + batch_id read + outcome write all gated behind the deriver so the
+    // legacy (no-deriver) path never references columns a pre-migration-013 DB lacks.
     const linkRow = db
-      .prepare('SELECT task_id FROM workflow_runs WHERE id = ?')
-      .get(runId) as { task_id: string | null } | undefined;
+      .prepare('SELECT task_id, batch_id FROM workflow_runs WHERE id = ?')
+      .get(runId) as { task_id: string | null; batch_id: string | null } | undefined;
     db.prepare(
       `UPDATE workflow_runs SET outcome = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
     ).run(outcome, runId);
 
+    // Direct task-link recompute (existing).
     const taskId = linkRow?.task_id ?? null;
-    if (!taskId) return;
-    await deriver.recomputeTaskExecutionStage(taskId);
+    if (taskId) await deriver.recomputeTaskExecutionStage(taskId);
+
+    // Sprint-batch lane recompute: a sessionless legacy sprint run carries a
+    // batch_id and a NULL task_id, so the task_id arm alone strands its lanes on a
+    // run-level close-out (dismiss never reverting them; merge/createPr never
+    // Done-ing them). Recompute every lane through the chokepoint singleton so the
+    // merged-lane -> Done / dismissed -> revert derivation fires. Fail-soft in its
+    // own try/catch (same guard style as runs.end's recompute) so a batch recompute
+    // error never masks the task_id recompute or the outcome write.
+    const batchId = linkRow?.batch_id ?? null;
+    if (batchId) {
+      try {
+        await TaskChangeRouter.getInstance().recomputeTasksForBatch(batchId);
+      } catch (batchErr) {
+        console.error(
+          `[runs.closeout] batch lane stage recompute failed (run ${runId}, batch ${batchId}, outcome ${outcome}):`,
+          batchErr instanceof Error ? batchErr.message : String(batchErr),
+        );
+      }
+    }
   } catch (err) {
     console.error(
       `[runs.closeout] task stage derivation failed (run ${runId}, outcome ${outcome}):`,
@@ -978,6 +999,13 @@ export const runsRouter = router({
       // (an explicit variant pin always wins). Mirrors the launchOptions.baseline
       // pin runs.restart already uses to reproduce a baseline run on retry.
       baseline: z.boolean().optional(),
+    }).refine((v) => !(v.taskId !== undefined && v.taskIds !== undefined), {
+      // Fix 6a — a single run must not carry BOTH a direct task link (taskId) and a
+      // sprint batch (taskIds): the run would appear in gatherTaskRuns twice (once
+      // 'direct', once 'batch'), letting a merged session Done the task even when
+      // its lane ended failed. They are mutually exclusive at the launch boundary.
+      message: 'taskId (single direct task link) and taskIds (sprint batch) are mutually exclusive — pass one, not both',
+      path: ['taskIds'],
     }))
     .mutation(async ({ ctx, input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
       if (!startRunDeps) {
@@ -1062,6 +1090,7 @@ export const runsRouter = router({
         let eligibleIds: string[] | null = null;
         let taggedIds: string[] = [];
         let activeRunIds: string[] = [];
+        let expSeedIds: string[] = [];
         try {
           const store = SprintLaneStore.getInstance();
           // Reject a NORMAL sprint selection that names a hidden experiment-arm
@@ -1077,10 +1106,16 @@ export const runsRouter = router({
           // only to make the ineligibility message say "already in development"
           // rather than the generic approval/stage reason (migration 061).
           activeRunIds = store.findActiveRunTaskIds(input.projectId, input.taskIds);
+          // Tasks dropped because they are the ORIGINAL seed of a LIVE A/B
+          // experiment (Fix 2) — the experiment reserves them even though they have
+          // no run of their own; used to give a precise "reserved by live
+          // experiment" reason instead of the generic ineligibility message.
+          expSeedIds = store.findLiveExperimentSeedTaskIds(input.projectId, input.taskIds);
         } catch {
           eligibleIds = null;
           taggedIds = [];
           activeRunIds = [];
+          expSeedIds = [];
         }
         if (taggedIds.length > 0) {
           throw new TRPCError({
@@ -1100,16 +1135,27 @@ export const runsRouter = router({
           if (eligibleIds.length < uniqueSelection.length) {
             const eligibleSet = new Set(eligibleIds);
             const ineligible = uniqueSelection.filter((id) => !eligibleSet.has(id));
-            // Partition the ineligible ids: those dropped for the double-pull guard
-            // (an active run) get an "already in development" reason; the rest keep
-            // the generic approval/stage message. Same TRPCError shape either way.
+            // Partition the ineligible ids into three buckets, each with its own
+            // reason: (1) an active run association -> "already in development";
+            // (2) reserved by a live A/B experiment (Fix 2) -> "reserved by a live
+            // experiment"; (3) everything else -> the generic approval/stage
+            // message. inDev wins over reserved (a task can't be both — a live
+            // experiment's seed has no run of its own) but the exclusion keeps the
+            // buckets disjoint regardless.
             const activeSet = new Set(activeRunIds);
+            const expSeedSet = new Set(expSeedIds);
             const inDev = ineligible.filter((id) => activeSet.has(id));
-            const other = ineligible.filter((id) => !activeSet.has(id));
+            const reserved = ineligible.filter((id) => !activeSet.has(id) && expSeedSet.has(id));
+            const other = ineligible.filter((id) => !activeSet.has(id) && !expSeedSet.has(id));
             const parts: string[] = [];
             if (inDev.length > 0) {
               parts.push(
                 `${inDev.length} already in development (${inDev.join(', ')}) — each is in a live run; cancel or finish it first`,
+              );
+            }
+            if (reserved.length > 0) {
+              parts.push(
+                `${reserved.length} reserved by a live experiment (${reserved.join(', ')}) — each is the seed of a running A/B experiment; decide or abandon it first`,
               );
             }
             if (other.length > 0) {
@@ -1122,6 +1168,37 @@ export const runsRouter = router({
               message: `selection includes ${parts.join('; ')}. Remove them or fix their state, then relaunch.`,
             });
           }
+        }
+      }
+      // Fix 1 — direct-taskId double-pull guard. runs.start also accepts a SINGLE
+      // direct task link (input.taskId), which RunLauncher stamps onto
+      // workflow_runs.task_id with NO active-association check — so two sequential
+      // runs.start({ taskId: T }) calls would both succeed. Run the SAME active-run
+      // check the taskIds batch arm uses, but ONLY for a real TASK: the id may
+      // legitimately be an EPIC (a planning-stage epic run), which never enters
+      // stage 7 and must not be blocked, so tasks-table membership is checked
+      // explicitly. Fail-open on any store/db error (uninitialized store in tests,
+      // pre-042 schema), mirroring the taskIds pre-check's permissive degrade.
+      if (input.taskId !== undefined) {
+        try {
+          const isTask =
+            !!ctx.db &&
+            ctx.db
+              .prepare('SELECT 1 FROM tasks WHERE id = ? AND project_id = ?')
+              .get(input.taskId, input.projectId) !== undefined;
+          if (isTask) {
+            const active = SprintLaneStore.getInstance().findActiveRunTaskIds(input.projectId, [input.taskId]);
+            if (active.length > 0) {
+              throw new TRPCError({
+                code: 'BAD_REQUEST',
+                message: `task ${input.taskId} is already in development — a live run is associated; cancel or finish it first`,
+              });
+            }
+          }
+        } catch (err) {
+          if (err instanceof TRPCError) throw err;
+          // Fail-open: store uninitialized (tests) or pre-042 schema lacking the
+          // columns — createForRun / the launcher remain the authoritative gate.
         }
       }
       const launchWithAgentSelection =

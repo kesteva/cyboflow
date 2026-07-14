@@ -16,7 +16,7 @@ import { writeFileSync, readFileSync, existsSync } from 'fs';
 import { randomUUID } from 'crypto';
 import { join } from 'path';
 import { RunLauncher } from '../runLauncher';
-import type { OrchSocketProvider, BridgeScriptResolver, NodeResolver, StreamEventPublisher } from '../runLauncher';
+import type { OrchSocketProvider, BridgeScriptResolver, NodeResolver, StreamEventPublisher, TaskStageDeriverLike, SprintLanesLike } from '../runLauncher';
 import type { WorkflowRegistry } from '../workflowRegistry';
 import type { WorktreeManager } from '../../services/worktreeManager';
 import type { McpConfigWriter } from '../mcpConfigWriter';
@@ -914,6 +914,86 @@ describe('RunLauncher.launch error handling', () => {
       expect(row.status).not.toBe('starting');
       expect(row.status).toBe('failed');
       expect(row.error_message).not.toBeNull();
+    });
+  });
+
+  it('reverts seeded batch tasks when a later step throws AFTER the batch seed (Fix 3)', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = sessionHostedDb();
+      const adapter = dbAdapter(db);
+      const logger = makeSpyLogger();
+
+      const { workflowId, cannedRunId, fakeRegistry } = makeErrorHandlingFixture(db);
+      seedSession(db, 'sess-err', join(tmpDir, 'session-tree'));
+      const { worktree: fakeWorktree } = sessionWorktreeStub('main');
+
+      // Deriver spy: record the run's status each time the batch is recomputed —
+      // once at the happy-path seed ('starting'), then AGAIN from the outer catch
+      // after the mark-failed ('failed'), which is the Fix 3 behaviour.
+      const statusesAtRecompute: string[] = [];
+      const recomputeTasksForBatch = vi.fn(async (batchId: string) => {
+        const r = db
+          .prepare('SELECT status FROM workflow_runs WHERE batch_id = ?')
+          .get(batchId) as { status: string } | undefined;
+        statusesAtRecompute.push(r?.status ?? 'unknown');
+      });
+      const fakeDeriver = {
+        applyChange: vi.fn().mockResolvedValue({ taskId: 'x', event: { id: 1, seq: 1 } }),
+        recomputeTaskExecutionStage: vi.fn().mockResolvedValue(undefined),
+        recomputeTasksForBatch,
+      } as unknown as TaskStageDeriverLike;
+
+      const fakeSprintLanes = {
+        createForRun: vi.fn(() => ({ batchId: 'bat-1' })),
+      } as unknown as SprintLanesLike;
+
+      // A publisher whose publish() throws AFTER the batch seed (the seed +
+      // batch_id stamp + happy-path recompute all run first).
+      const throwingPublisher: StreamEventPublisher = {
+        publish: vi.fn(() => {
+          throw new Error('publish boom (post-seed)');
+        }),
+      };
+
+      const launcher = new RunLauncher(
+        adapter,
+        fakeRegistry,
+        fakeWorktree,
+        logger,
+        fakeMcpConfigWriter,
+        fakeOrchSocketProvider,
+        fakeBridgeScriptResolver,
+        fakeNodeResolver,
+        throwingPublisher,
+        undefined, // runExecutor
+        undefined, // runQueueRegistry
+        fakeDeriver,
+        fakeSprintLanes,
+      );
+
+      await expect(
+        launcher.launch(
+          workflowId,
+          tmpDir,
+          undefined,
+          undefined,
+          undefined,
+          'sess-err',
+          undefined,
+          undefined,
+          ['tsk_a'],
+          1,
+        ),
+      ).rejects.toThrow('publish boom (post-seed)');
+
+      // The run is terminal…
+      const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(cannedRunId) as { status: string };
+      expect(row.status).toBe('failed');
+      // …and the batch was recomputed a SECOND time from the catch, observing the
+      // already-'failed' run so the seeded tasks revert off stage 7 (Fix 3). Without
+      // the fix, recomputeTasksForBatch fires only once (the happy-path seed).
+      expect(recomputeTasksForBatch).toHaveBeenCalledWith('bat-1');
+      expect(statusesAtRecompute).toEqual(['starting', 'failed']);
     });
   });
 });

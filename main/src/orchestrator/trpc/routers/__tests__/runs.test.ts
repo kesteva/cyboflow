@@ -50,8 +50,9 @@
  *      matching runId event to a subscriber.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import type { MockInstance } from 'vitest';
 import { isAsyncIterable, callProcedure } from '@trpc/server/unstable-core-do-not-import';
-import type Database from 'better-sqlite3';
+import Database from 'better-sqlite3';
 import { TRPCError } from '@trpc/server';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -69,6 +70,8 @@ import type { ResumeRunDeps, ResumeRunResult } from '../../../resumeRunHandler';
 import { RunQueueRegistry } from '../../../RunQueueRegistry';
 import { ApprovalRouter } from '../../../approvalRouter';
 import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
+import { SprintLaneStore } from '../../../sprintLaneStore';
+import { TaskChangeRouter } from '../../../taskChangeRouter';
 import { StepResultStore, type StepResultRow } from '../../../stepResultStore';
 import { stepTransitionEvents } from '../events';
 import type { WorkflowStepTransitionEvent, WorkflowDefinition } from '../../../../../../shared/types/workflows';
@@ -3354,5 +3357,167 @@ describe('cyboflow.runs.gitDiff (run-scoped Diff tab)', () => {
     await expect(caller.cyboflow.runs.gitDiff({ runId })).rejects.toSatisfy(
       (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runs.start double-pull guards (Fix 1 — direct taskId active-run check;
+// Fix 6a — taskId/taskIds mutual exclusion). A minimal hand-rolled schema (only
+// the tables the guard queries) backs SprintLaneStore.findActiveRunTaskIds + the
+// tasks-membership check, keeping the fixture out of the full migration stack.
+// ---------------------------------------------------------------------------
+describe('cyboflow.runs.start — double-pull guards (Fix 1 + Fix 6a)', () => {
+  let db: Database.Database;
+  let adapter: ReturnType<typeof dbAdapter>;
+  let launchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    db = new Database(':memory:');
+    db.exec(`
+      CREATE TABLE tasks (id TEXT PRIMARY KEY, project_id INTEGER);
+      CREATE TABLE epics (id TEXT PRIMARY KEY, project_id INTEGER);
+      CREATE TABLE workflow_runs (id TEXT PRIMARY KEY, project_id INTEGER, status TEXT, task_id TEXT, batch_id TEXT);
+      CREATE TABLE sprint_batch_tasks (batch_id TEXT, task_id TEXT, status TEXT);
+    `);
+    adapter = dbAdapter(db);
+    SprintLaneStore.initialize(adapter);
+
+    launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-x',
+      worktreePath: '/wt',
+      branchName: 'b',
+      permissionMode: 'default',
+    });
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: (id: number) => (id === 1 ? { path: '/proj' } : undefined) },
+    });
+  });
+
+  afterEach(() => {
+    SprintLaneStore._resetForTesting();
+    setStartRunDeps({
+      runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+      sessionManager: { getProjectById: () => undefined },
+    });
+    db.close();
+  });
+
+  it('(Fix 1) rejects a direct taskId launch when that task already has an active run', async () => {
+    db.prepare("INSERT INTO tasks (id, project_id) VALUES ('tsk_a', 1)").run();
+    db.prepare("INSERT INTO workflow_runs (id, project_id, status, task_id) VALUES ('r1', 1, 'running', 'tsk_a')").run();
+    const caller = appRouter.createCaller(createContext({ db: adapter }));
+    await expect(
+      caller.cyboflow.runs.start({ workflowId: 'wf', projectId: 1, sessionId: 'sess-1', taskId: 'tsk_a' }),
+    ).rejects.toThrow(/already in development/);
+    expect(launchMock).not.toHaveBeenCalled();
+  });
+
+  it('(Fix 1) allows a direct taskId launch when the task has no active run', async () => {
+    db.prepare("INSERT INTO tasks (id, project_id) VALUES ('tsk_free', 1)").run();
+    const caller = appRouter.createCaller(createContext({ db: adapter }));
+    await caller.cyboflow.runs.start({ workflowId: 'wf', projectId: 1, sessionId: 'sess-1', taskId: 'tsk_free' });
+    expect(launchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('(Fix 1) does NOT block an EPIC id even when it carries an active run association', async () => {
+    // An epic id is absent from the tasks table, so the membership check skips the
+    // guard — a planning-stage epic run must never be blocked (epics never enter 7).
+    db.prepare("INSERT INTO epics (id, project_id) VALUES ('epc_1', 1)").run();
+    db.prepare("INSERT INTO workflow_runs (id, project_id, status, task_id) VALUES ('r2', 1, 'running', 'epc_1')").run();
+    const caller = appRouter.createCaller(createContext({ db: adapter }));
+    await caller.cyboflow.runs.start({ workflowId: 'wf', projectId: 1, sessionId: 'sess-1', taskId: 'epc_1' });
+    expect(launchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('(Fix 6a) rejects a launch that passes BOTH taskId and taskIds', async () => {
+    const caller = appRouter.createCaller(createContext({ db: adapter }));
+    await expect(
+      caller.cyboflow.runs.start({
+        workflowId: 'wf',
+        projectId: 1,
+        sessionId: 'sess-1',
+        taskId: 'tsk_a',
+        taskIds: ['tsk_a'],
+      }),
+    ).rejects.toThrow(/mutually exclusive/);
+    expect(launchMock).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runs.merge / dismiss — batch-only (sessionless legacy sprint) run recomputes
+// its sprint lanes at close-out (Fix 4). Such a run carries batch_id + a NULL
+// task_id, so the task_id arm alone would strand its lanes; the close-out helper
+// now ALSO calls TaskChangeRouter.recomputeTasksForBatch. Spied (the derivation
+// itself is covered by taskChangeRouter.test.ts).
+// ---------------------------------------------------------------------------
+describe('cyboflow.runs.merge / dismiss — batch-only run recomputes lanes (Fix 4)', () => {
+  let db: Database.Database;
+  let recomputeSpy: MockInstance<(batchId: string) => Promise<void>>;
+
+  function makeWmStub(): RunWorktreeManagerLike {
+    return {
+      getProjectMainBranch: vi.fn().mockResolvedValue('main'),
+      squashAndMergeWorktreeToMain: vi.fn().mockResolvedValue(undefined),
+      mergeWorktreeToMain: vi.fn().mockResolvedValue(undefined),
+      removeWorktreeByPath: vi.fn().mockResolvedValue(undefined),
+      deleteBranch: vi.fn().mockResolvedValue(undefined),
+      gitPush: vi.fn().mockResolvedValue({ output: 'pushed' }),
+      getRemoteUrlAndBranch: vi.fn().mockResolvedValue({ remoteUrl: 'x', branchName: 'b' }),
+    } as unknown as RunWorktreeManagerLike;
+  }
+
+  beforeEach(() => {
+    db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+    TaskChangeRouter.initialize(dbAdapter(db));
+    // Spy the batch recompute — asserting the CALL (task_id NULL must not skip it);
+    // the merged->Done / dismissed->revert derivation is covered elsewhere.
+    recomputeSpy = vi
+      .spyOn(TaskChangeRouter.getInstance(), 'recomputeTasksForBatch')
+      .mockResolvedValue(undefined);
+    setRunCloseoutDeps({
+      worktreeManager: makeWmStub(),
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },
+      clearPendingApprovalsForRun: vi.fn(),
+      disposeMonitorResources: vi.fn(),
+      // A wired deriver flips the migration-013 close-out path ON (the outcome write
+      // + the batch recompute). task_id is NULL so recomputeTaskExecutionStage is
+      // never reached; only the batch path fires.
+      taskStageDeriver: { recomputeTaskExecutionStage: vi.fn() },
+    });
+  });
+
+  afterEach(() => {
+    recomputeSpy.mockRestore();
+    TaskChangeRouter._resetForTesting();
+    db.close();
+    setRunCloseoutDeps({
+      worktreeManager: makeWmStub(),
+      sessionManager: { getProjectById: () => undefined },
+      clearPendingApprovalsForRun: vi.fn(),
+      disposeMonitorResources: vi.fn(),
+    });
+  });
+
+  it('merge of a batch-only run (task_id NULL) recomputes its sprint lanes', async () => {
+    seedRun(db, { id: 'run-batch-merge', status: 'awaiting_review', worktreePath: '/tmp/wt/run-batch-merge' });
+    db.prepare("UPDATE workflow_runs SET batch_id = 'bat-1', task_id = NULL WHERE id = 'run-batch-merge'").run();
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.merge({ runId: 'run-batch-merge', strategy: 'preserve' });
+
+    expect(recomputeSpy).toHaveBeenCalledWith('bat-1');
+  });
+
+  it('dismiss of a batch-only run (task_id NULL) recomputes its sprint lanes', async () => {
+    seedRun(db, { id: 'run-batch-dismiss', status: 'awaiting_review', worktreePath: '/tmp/wt/run-batch-dismiss' });
+    db.prepare("UPDATE workflow_runs SET batch_id = 'bat-1', task_id = NULL WHERE id = 'run-batch-dismiss'").run();
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.dismiss({ runId: 'run-batch-dismiss' });
+
+    expect(recomputeSpy).toHaveBeenCalledWith('bat-1');
   });
 });

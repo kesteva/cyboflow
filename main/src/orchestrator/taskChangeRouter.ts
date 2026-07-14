@@ -2332,19 +2332,29 @@ export class TaskChangeRouter {
    * with a 'T' separator — a raw string compare is skewed by 'T' (0x54) > ' '
    * (0x20), so BOTH sides are wrapped in datetime(). A NULL reopenedAt short-
    * circuits the predicate (the '? IS NULL OR ...' arm) and admits the full history.
+   * datetime() truncates to whole seconds, so same-second boundaries are INCLUSIVE
+   * — deliberately: it errs toward COUNTING a new-cycle run created in the re-open
+   * second; the excluded-direction collision (an old run created, merged AND
+   * re-opened within one second) is not reachable in practice.
+   *
+   * RUN-ID DEDUPE (Fix 6): a single run can appear in BOTH arms — linked directly
+   * (task_id) AND via a sprint-batch lane the task belongs to. Both selects carry
+   * the run id and the result is deduped by it, keeping the BATCH copy (its
+   * laneStatus makes arm 1 lane-aware) over the direct copy so a merged session can
+   * never Done a task whose lane ended failed/blocked.
    */
   private gatherTaskRuns(
     taskId: string,
     reopenedAt: string | null,
-  ): Array<{ status: string; outcome: string | null; source: 'direct' | 'batch'; laneStatus: string | null }> {
+  ): Array<{ id: string; status: string; outcome: string | null; source: 'direct' | 'batch'; laneStatus: string | null }> {
     const direct = (
       this.db
         .prepare(
-          `SELECT status, outcome FROM workflow_runs
+          `SELECT id, status, outcome FROM workflow_runs
             WHERE task_id = ? AND (? IS NULL OR datetime(created_at) >= datetime(?))`,
         )
-        .all(taskId, reopenedAt, reopenedAt) as Array<{ status: string; outcome: string | null }>
-    ).map((r) => ({ status: r.status, outcome: r.outcome, source: 'direct' as const, laneStatus: null }));
+        .all(taskId, reopenedAt, reopenedAt) as Array<{ id: string; status: string; outcome: string | null }>
+    ).map((r) => ({ id: r.id, status: r.status, outcome: r.outcome, source: 'direct' as const, laneStatus: null }));
 
     if (!this.columnExists('workflow_runs', 'batch_id')) {
       return direct;
@@ -2353,16 +2363,22 @@ export class TaskChangeRouter {
     const batch = (
       this.db
         .prepare(
-          `SELECT wr.status AS status, wr.outcome AS outcome, sbt.status AS laneStatus
+          `SELECT wr.id AS id, wr.status AS status, wr.outcome AS outcome, sbt.status AS laneStatus
              FROM workflow_runs wr
              JOIN sprint_batch_tasks sbt ON sbt.batch_id = wr.batch_id AND sbt.task_id = ?
             WHERE wr.batch_id IS NOT NULL
               AND (? IS NULL OR datetime(wr.created_at) >= datetime(?))`,
         )
-        .all(taskId, reopenedAt, reopenedAt) as Array<{ status: string; outcome: string | null; laneStatus: string }>
-    ).map((r) => ({ status: r.status, outcome: r.outcome, source: 'batch' as const, laneStatus: r.laneStatus }));
+        .all(taskId, reopenedAt, reopenedAt) as Array<{ id: string; status: string; outcome: string | null; laneStatus: string }>
+    ).map((r) => ({ id: r.id, status: r.status, outcome: r.outcome, source: 'batch' as const, laneStatus: r.laneStatus }));
 
-    return [...direct, ...batch];
+    // Dedupe by run id — a run linked BOTH directly and via a batch lane appears in
+    // both arms. Insert direct first, then batch, so the batch copy WINS (its
+    // laneStatus makes arm 1 respect the lane instead of firing on outcome alone).
+    const byId = new Map<string, { id: string; status: string; outcome: string | null; source: 'direct' | 'batch'; laneStatus: string | null }>();
+    for (const r of direct) byId.set(r.id, r);
+    for (const r of batch) byId.set(r.id, r);
+    return [...byId.values()];
   }
 
   /**
@@ -2453,24 +2469,54 @@ export class TaskChangeRouter {
   }
 
   /**
-   * BOOT SELF-HEAL (migration 061): recompute every task currently parked at a
-   * DERIVED stage ('In development'). The derived stage is a projection of the
-   * task's live run associations, and several paths can strand it stale — boot
-   * recovery force-fails runs with raw UPDATEs (runRecovery.ts), or the app dies
-   * between a batch seed and its recompute. Sweeping at boot (after run recovery)
-   * makes the projection trustworthy again no matter which seam was interrupted:
-   * a task with a live association is idempotently re-asserted, one without
-   * reverts to its entry stage. Fail-soft per task.
+   * BOOT SELF-HEAL (migration 061) — a BIDIRECTIONAL projection reconciler for the
+   * derived 'In development' stage. Two directions, both healed here:
+   *
+   *  (OUT) a task parked AT a derived stage whose live run association has since
+   *        ended (boot recovery force-fails runs with raw UPDATEs — runRecovery.ts —
+   *        or the app died between a batch seed and its recompute) must revert to
+   *        its entry stage.
+   *  (IN)  the UPGRADE GAP: a task at a NON-terminal ASSERTED stage (e.g. Ready for
+   *        development) that ALREADY had a live (paused/awaiting_review/running) run
+   *        association at migration-061 time never got projected INTO stage 7 — the
+   *        double-pull guard blocks re-pulling it, so guard and board disagree.
+   *        These are captured here too (their entry stage snapshotted first) and
+   *        moved to 'In development'.
+   *
+   * Each swept task runs the SAME per-task body recomputeTasksForBatch uses —
+   * captureEntryStageIfUnset (so the revert target is captured BEFORE any move to 7;
+   * a no-op for derived/terminal-stage tasks) then recomputeTaskExecutionStage.
+   * Sweeping at boot (after run recovery) makes the projection trustworthy again no
+   * matter which seam was interrupted. Fail-soft per task.
    */
   async sweepStaleDerivedStageTasks(): Promise<void> {
     let taskIds: string[];
     try {
+      // The (IN) arm references workflow_runs.batch_id / sprint_batch_tasks (added
+      // in migration 022); gate the batch sub-arm on the column existing so a
+      // pre-022 schema degrades to the direct-only association (mirrors
+      // hasNonTerminalRun) instead of throwing 'no such table/column'.
+      const activeRunExists = this.columnExists('workflow_runs', 'batch_id')
+        ? `EXISTS (
+             SELECT 1 FROM workflow_runs wr
+              WHERE wr.status NOT IN ('completed', 'failed', 'canceled')
+                AND (
+                  wr.task_id = t.id
+                  OR wr.batch_id IN (SELECT sbt.batch_id FROM sprint_batch_tasks sbt WHERE sbt.task_id = t.id)
+                )
+           )`
+        : `EXISTS (
+             SELECT 1 FROM workflow_runs wr
+              WHERE wr.status NOT IN ('completed', 'failed', 'canceled')
+                AND wr.task_id = t.id
+           )`;
       taskIds = (
         this.db
           .prepare(
-            `SELECT t.id FROM tasks t
+            `SELECT DISTINCT t.id FROM tasks t
               JOIN board_stages bs ON bs.id = t.stage_id
-             WHERE bs.write_policy = 'derived'`,
+             WHERE bs.write_policy = 'derived'
+                OR (bs.write_policy = 'asserted' AND bs.is_terminal = 0 AND ${activeRunExists})`,
           )
           .all() as Array<{ id: string }>
       ).map((r) => r.id);
@@ -2479,6 +2525,7 @@ export class TaskChangeRouter {
     }
     for (const taskId of taskIds) {
       try {
+        await this.captureEntryStageIfUnset(taskId);
         await this.recomputeTaskExecutionStage(taskId);
       } catch (err) {
         console.warn(
