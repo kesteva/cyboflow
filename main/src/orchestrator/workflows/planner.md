@@ -171,11 +171,14 @@ even when the batch collapsed to one surviving idea.
 
 ### Phase 2 — Refine
 
-**Materialization is deferred to plan approval.** The `cyboflow-epics` /
-`cyboflow-tasks` subagents return their proposals and you **hold** that
-decomposition in context — you do **not** call any `cyboflow_create_*` tool until
-the `approve-plan` gate returns **Approve**. Nothing lands on the board before the
-human approves the plan.
+**Materialization happens as proposals arrive.** The `cyboflow-epics` /
+`cyboflow-tasks` subagents return their proposals and you **persist each one
+immediately** via `cyboflow_create_task` — these land as **hidden drafts**
+(`approved_at` unset): invisible on the board and ineligible for a sprint until
+the `approve-plan` gate returns **Approve**, so nothing user-visible lands before
+the human signs off. The decomposed-stories artifact fills in with the draft plan
+as you create it, so the human reviews the actual entities at the gate rather than
+a summary held only in your context.
 
 4. **ui-prototype** (optional) → run ONLY when context returned `UI_PROTOTYPE: yes`
    (or the user explicitly asked for a prototype). Report the step, then delegate to
@@ -218,39 +221,45 @@ human approves the plan.
      idea spec in the body via `cyboflow_update_task`, so the spec, prototype, and
      architecture stay in agreement. Do **not** proceed to
      epics until the user answers Approve.
-7. **epics** (large ideas only) → delegate to `cyboflow-epics`; **hold** the returned
-   epics in context — do **not** create them yet. A `small` idea skips straight to
-   tasks. **Batch branch:** skipped — every batched idea is `small` (a `large` one
-   was guarded out).
-8. **tasks** → delegate to `cyboflow-tasks`; **hold** the returned task list in
-   context (title, body, acceptance criteria, file/dependency hints, parent
-   epic/idea linkage) — do **not** call `cyboflow_create_task` yet. You now hold the
-   full decomposition and no `cyboflow_create_*` has run. **Batch branch:** delegate
-   `cyboflow-tasks` once per approved idea and hold each idea's task list tagged with
-   the idea (`id`/`ref`) it decomposes, so you know each task's `originating_idea_id`
-   at create time.
+7. **epics** (large ideas only) → delegate to `cyboflow-epics`; create each
+   returned epic via `cyboflow_create_task` **as its proposal arrives**, linked to
+   the originating idea. A `small` idea skips straight to tasks. **Batch branch:**
+   skipped — every batched idea is `small` (a `large` one was guarded out).
+8. **tasks** → delegate to `cyboflow-tasks`; create each returned task via
+   `cyboflow_create_task` **as its proposal arrives** (title, body, acceptance
+   criteria, file/dependency hints, parent epic/idea linkage). **Batch branch:**
+   delegate `cyboflow-tasks` once per approved idea and create each returned task as
+   it arrives, passing `originating_idea_id` on EVERY create (mandatory — see
+   **Multi-idea batches**) so it's attributed to the idea it decomposes.
 9. **approve-plan** → **human gate, inline.** Use **AskUserQuestion** (header
-   `Approve plan`, options Approve / Revise; put scope, ordering, and acceptance
-   criteria in the option markdown preview). **Batch branch:** run ONE combined gate
-   presenting all held tasks grouped by originating idea. Do **not** proceed until
-   the user answers:
-   - **Approve** → **only now** create each held epic and task via the `cyboflow_*`
-     tools (`cyboflow_create_task` for tasks, linked to their parent epic/idea). In a
-     batch run, pass `originating_idea_id` on every create (mandatory — see
-     **Multi-idea batches**). Approving the plan locks it, so the entities you create
-     land directly at **Ready for development** and are immediately visible — you do
-     **not** drive any board-stage moves by hand. **Approving also takes the
+   `Approve plan`, options **Approve** / **Revise** / **Reject** — labels exactly
+   those words, since the backend matches an `'approve'` / `'reject'` prefix on the
+   PRESENTED option labels; put scope, ordering, and acceptance criteria in the
+   option markdown preview). **Batch branch:** run ONE combined gate presenting
+   every created draft grouped by originating idea. Do **not** proceed until the
+   user answers:
+   - **Approve** → the backend reveals every draft (`approved_at` stamped, tasks
+     land at **Ready for development**) **before your turn resumes** — do **not**
+     re-create anything. Proceed to the `decompose` gate. **Approving also takes the
      originating idea(s) off the board** — the backend stamps `decomposed_at` the
      moment the plan is approved (approving the plan IS the decomposition; the idea's
      tasks now carry the flow). Retirement is **lineage-filtered**: only an idea that
      received ≥1 run-created child retires; an approved idea that ended up with no
      child (and any denied or guarded idea) stays on the board automatically — never
      archive those by hand.
-   - **Revise** → re-delegate to `cyboflow-epics` / `cyboflow-tasks` with the
-     feedback and re-hold the revised decomposition; create nothing until the next
-     Approve.
+   - **Revise** → reconcile the **existing drafts in place**: update changed tasks
+     via `cyboflow_update_task`, create additional drafts via `cyboflow_create_task`
+     for genuinely new tasks, and when the count shrinks **repurpose** a surplus
+     draft (rewrite its `title`/`body` to the next task rather than leaving it
+     orphaned) — never leave a stale draft unaccounted for. Re-present the gate with
+     the updated set.
+   - **Reject** → the backend deletes every draft this run created — the idea ends
+     up with no children. Do **not** recreate anything and do **not** run the
+     `decompose` gate; end the turn here, mirroring the zero-surviving-ideas ending
+     above (**Multi-idea batches** → working set): nothing lands on the board and
+     the run simply ends.
 10. **decompose** → **final human gate, inline — this is the run-completion gate.**
-    After the plan is approved and the tasks created, report the `decompose` step,
+    After the plan is approved and the drafts revealed, report the `decompose` step,
     then present the gate with **AskUserQuestion** (header `Archive idea`, options
     `Archive & finish` / `Keep ideas & finish`; list the idea(s) you planned — by
     ref/title — in the option markdown preview; in a batch, list every planned idea).
@@ -288,8 +297,10 @@ human approves the plan.
   flags call for — just skip those steps' reports (unknown ids are rejected).
 - **The board has no intermediate planning stages.** The idea stays at **Idea** for
   the whole plan — there are no Research / Idea-spec stages to step it through (those
-  positions were removed). The tasks you create at the approved plan land directly at
-  **Ready for development**, so you never drive task board-stage moves by hand. An
+  positions were removed). The tasks you create land as **hidden drafts**
+  (board-invisible, sprint-ineligible) and become visible at **Ready for
+  development** the moment the plan is approved, so you never drive task
+  board-stage moves by hand. An
   idea leaves the board only when the **plan is approved** at `approve-plan` AND it
   received ≥1 run-created child — the backend stamps `decomposed_at` at that moment
   (the idea is reachable thereafter only through its children). Childless, denied, and
