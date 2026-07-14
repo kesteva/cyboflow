@@ -5,6 +5,8 @@
  *   - list           : query        -> BacklogTaskItem[] (backlog, epic-nested + on-read overlays;
  *                                       projectId null = ALL projects)
  *   - get            : query        -> BacklogTaskItem | null (single task, epic-nested)
+ *   - ideaDecomposition : query     -> BacklogTaskItem | null (one idea's decomposition tree)
+ *   - runDecomposition  : query     -> BacklogTaskItem[] (one tree PER idea the run owns)
  *   - boardsForProject : query      -> Board[] (board + ordered stages; projectId null = ALL boards)
  *   - create         : mutation     -> { taskId } (TaskChangeRouter.applyChange, no taskId)
  *   - update         : mutation     -> { taskId } (TaskChangeRouter.applyChange, field updates)
@@ -41,6 +43,7 @@ import {
   selectProjectBacklog,
   selectTaskById,
   selectIdeaDecomposition,
+  selectRunDecomposition,
   boardsForProject,
   selectIdeaAttachments,
 } from '../../taskListing';
@@ -167,6 +170,29 @@ export const tasksRouter = router({
         });
       }
       return selectIdeaDecomposition(ctx.db, input.ideaId);
+    }),
+
+  /**
+   * Fetch a RUN's decomposition — one BacklogTaskItem tree (idea root + nested
+   * epics/tasks, same shape as `ideaDecomposition`) PER idea the run owns.
+   * Covers the multi-idea planner batch: a run seeded with / that created
+   * several ideas surfaces one tree per idea, not just the first. A run that
+   * owns no resolvable idea returns [].
+   *
+   * Dedicated run-scoped read behind a decomposed-stories artifact view that
+   * must cover every idea a run owns — `ideaDecomposition` alone only covers a
+   * single known idea id.
+   */
+  runDecomposition: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .query(async ({ input, ctx }): Promise<BacklogTaskItem[]> => {
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: '[tasks.runDecomposition] db not wired into tRPC context',
+        });
+      }
+      return selectRunDecomposition(ctx.db, input.runId);
     }),
 
   /**

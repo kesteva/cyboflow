@@ -1087,6 +1087,115 @@ describe('autoMintArtifacts.handleEntityWrite', () => {
     expect(specs.map((s) => s.label)).toEqual(['Idea Alpha', 'Idea Beta']);
   });
 
+  // -------------------------------------------------------------------------
+  // decomposed-stories — RUN-SCOPED combined count across ALL owned ideas
+  // (batch fix, IDEA-009): ONE artifact per run, but its label/count now
+  // reflects every owned idea's decomposition, not just the first.
+  // -------------------------------------------------------------------------
+
+  it('combines the epic/task count across ALL owned ideas and appends "across K ideas" for a multi-idea batch', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+    const router = TaskChangeRouter.getInstance();
+
+    seedPlannerRun(db, 'run-batch2');
+    const { taskId: ideaA } = await router.applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Idea Alpha',
+      summary: 'spec A',
+      runId: 'run-batch2',
+    });
+    const { taskId: ideaB } = await router.applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Idea Beta',
+      summary: 'spec B',
+      runId: 'run-batch2',
+    });
+    // Idea A: one epic with one task under it (1 epic, 1 task).
+    const { taskId: epicA } = await router.applyChange(1, {
+      actor: 'orchestrator',
+      entityType: 'epic',
+      title: 'Epic A',
+      originatingIdeaId: ideaA,
+      runId: 'run-batch2',
+    });
+    await router.applyChange(1, {
+      actor: 'orchestrator',
+      entityType: 'task',
+      title: 'Task under Epic A',
+      parentEpicId: epicA,
+      runId: 'run-batch2',
+    });
+    // Idea B: two direct tasks, no epic (0 epics, 2 tasks).
+    await router.applyChange(1, {
+      actor: 'orchestrator',
+      entityType: 'task',
+      title: 'Direct task 1',
+      originatingIdeaId: ideaB,
+      runId: 'run-batch2',
+    });
+    await router.applyChange(1, {
+      actor: 'orchestrator',
+      entityType: 'task',
+      title: 'Direct task 2',
+      originatingIdeaId: ideaB,
+      runId: 'run-batch2',
+    });
+    // seed_idea_ids drives the multi-idea resolution (dual-writes seed_idea_id = ideaA).
+    setSeedIdeaIds(db, 'run-batch2', [ideaA, ideaB]);
+
+    await handleEntityWrite(adapter, 'run-batch2', 'task');
+
+    // ONE decomposed-stories artifact for the run (identity unchanged), sourceRef
+    // = the FIRST owned idea, label = the COMBINED count across both ideas
+    // (1 epic + 0 epics = 1 epic; 1 task + 2 tasks = 3 tasks), plus the
+    // multi-idea suffix.
+    const stories = readArtifact(db, 'run-batch2', 'decomposed-stories');
+    expect(stories).toBeDefined();
+    expect(stories!.source_ref).toBe(ideaA);
+    expect(stories!.label).toBe('1 epic, 3 tasks across 2 ideas');
+    // Still exactly one row per (run, atype) — no per-idea proliferation.
+    expect(
+      db
+        .prepare(`SELECT COUNT(*) AS n FROM artifacts WHERE run_id = 'run-batch2' AND atype = 'decomposed-stories'`)
+        .get() as { n: number },
+    ).toEqual({ n: 1 });
+  });
+
+  it('content gate still skips when the COMBINED count across every owned idea is zero', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+    const router = TaskChangeRouter.getInstance();
+
+    seedPlannerRun(db, 'run-batch-empty');
+    const { taskId: ideaA } = await router.applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Idea Alpha',
+      summary: 'spec A',
+      runId: 'run-batch-empty',
+    });
+    const { taskId: ideaB } = await router.applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Idea Beta',
+      summary: 'spec B',
+      runId: 'run-batch-empty',
+    });
+    // Neither idea has been decomposed yet — combined count is 0 across both.
+    setSeedIdeaIds(db, 'run-batch-empty', [ideaA, ideaB]);
+
+    await handleEntityWrite(adapter, 'run-batch-empty', 'task');
+
+    expect(readArtifact(db, 'run-batch-empty', 'decomposed-stories')).toBeUndefined();
+  });
+
   it("mints decomposed-stories on a 'task' write (step_origin = Plan · decomposition)", async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);

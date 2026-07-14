@@ -272,3 +272,26 @@ export function resolveRunBatchIdeaId(db: DatabaseLike, runId: string): string |
 
   return null;
 }
+
+/**
+ * The idea ids to derive owned-idea artifacts FROM: {@link listRunOwnedIdeaIds}
+ * (seed ideas UNION run-created ideas) when non-empty, else a single-element
+ * array holding the run's sprint-batch idea (a standalone sprint owns no ideas
+ * directly but still executes one idea's decomposition, resolved via
+ * {@link resolveRunBatchIdeaId}). Returns [] when neither resolves.
+ *
+ * SINGLE HOME for the owned-else-batch-fallback resolution: previously inlined
+ * in autoMintArtifacts.mintIdeaSpecForOwnedIdeas, extracted here so every
+ * caller that needs the FULL owned-idea set (the multi-idea idea-spec mint,
+ * taskListing.selectRunDecomposition) shares one derivation instead of
+ * duplicating the fallback logic.
+ *
+ * @param db    Narrow DatabaseLike interface.
+ * @param runId The workflow_runs.id whose idea ids to resolve.
+ */
+export function listRunOwnedOrBatchIdeaIds(db: DatabaseLike, runId: string): string[] {
+  const ownedIds = listRunOwnedIdeaIds(db, runId);
+  if (ownedIds.length > 0) return ownedIds;
+  const batchIdeaId = resolveRunBatchIdeaId(db, runId);
+  return batchIdeaId !== null ? [batchIdeaId] : [];
+}

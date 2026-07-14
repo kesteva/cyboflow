@@ -50,6 +50,7 @@ import type {
   TaskDependencyRef,
 } from '../../../shared/types/tasks';
 import { resolveStepAgentKey } from '../../../shared/types/agentIdentity';
+import { listRunOwnedOrBatchIdeaIds } from './runEntityOwnership';
 import type { DatabaseLike } from './types';
 
 /** The board stage position considered "done" — a blocking prereq is satisfied here. */
@@ -678,6 +679,41 @@ export function selectIdeaDecomposition(db: DatabaseLike, ideaId: string): Backl
   idea.pendingTasks =
     epics.filter((e) => !e.isDone).length + directTasks.filter((t) => !t.isDone).length;
   return idea;
+}
+
+/**
+ * Project a RUN's decomposition — one BacklogTaskItem (idea root + nested
+ * epics/tasks, exactly as {@link selectIdeaDecomposition} returns) PER idea the
+ * run owns. Covers the multi-idea planner batch (IDEA-009): a run seeded with
+ * or that created several ideas surfaces one decomposition tree per idea,
+ * instead of only the first.
+ *
+ * Idea-id resolution mirrors autoMintArtifacts' multi-idea idea-spec mint via
+ * the SHARED {@link listRunOwnedOrBatchIdeaIds} helper (runEntityOwnership.ts):
+ * the run's owned ideas (seed ideas UNION run-created ideas) when non-empty,
+ * else the single sprint-batch idea a standalone sprint operates on. A run that
+ * owns no resolvable idea returns [].
+ *
+ * Drafts are included: selectIdeaDecomposition applies no approved_at filter,
+ * so a hidden-draft idea/epic/task (plan-gated run pending approval) still
+ * projects here — this is a run-scoped decomposition read, not a board read.
+ *
+ * This is the dedicated read behind a run-scoped `decomposed-stories` artifact
+ * view — selectIdeaDecomposition alone only covers a single known idea id.
+ *
+ * @param db    - Narrow DatabaseLike interface (real or test).
+ * @param runId - The workflow_runs.id whose owned ideas' decomposition to project.
+ */
+export function selectRunDecomposition(db: DatabaseLike, runId: string): BacklogTaskItem[] {
+  const ideaIds = listRunOwnedOrBatchIdeaIds(db, runId);
+  if (ideaIds.length === 0) return [];
+
+  const items: BacklogTaskItem[] = [];
+  for (const ideaId of ideaIds) {
+    const item = selectIdeaDecomposition(db, ideaId);
+    if (item !== null) items.push(item);
+  }
+  return items;
 }
 
 /**

@@ -26,7 +26,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'node:path';
 import { ArtifactRouter } from './artifactRouter';
-import { listRunOwnedIdeaIds, resolveRunBatchIdeaId } from './runEntityOwnership';
+import { listRunOwnedOrBatchIdeaIds } from './runEntityOwnership';
 import type { DatabaseLike, LoggerLike } from './types';
 import { resolveWorkflowDefinition, type WorkflowStep } from '../../../shared/types/workflows';
 import { resolveRunFrozenSpec } from './runFrozenSpec';
@@ -269,19 +269,14 @@ function resolveProjectId(db: DatabaseLike, runId: string): number | null {
 
 /**
  * Resolve the single idea this run originates from / operates on for artifact
- * derivation. Resolution order:
- *   1. The FIRST of the run's OWNED ideas (seed_idea_id UNION run-created ideas,
- *      via listRunOwnedIdeaIds) — covers planner and ship (they seed/create the
- *      idea).
- *   2. The idea the run OPERATES ON via its sprint batch (resolveRunBatchIdeaId)
- *      — covers a standalone sprint, whose seed_idea_id is null but whose tasks
- *      carry an originating_idea_id.
- * Returns null when neither resolves.
+ * derivation: the FIRST of `listRunOwnedOrBatchIdeaIds` (the run's owned ideas —
+ * seed_idea_id UNION run-created ideas — else the single sprint-batch idea a
+ * standalone sprint operates on). Returns null when neither resolves. See
+ * `runEntityOwnership.listRunOwnedOrBatchIdeaIds` for the full resolution order.
  */
 function resolveOriginatingIdeaId(db: DatabaseLike, runId: string): string | null {
-  const ownedIds = listRunOwnedIdeaIds(db, runId);
-  if (ownedIds.length > 0) return ownedIds[0];
-  return resolveRunBatchIdeaId(db, runId);
+  const ideaIds = listRunOwnedOrBatchIdeaIds(db, runId);
+  return ideaIds.length > 0 ? ideaIds[0] : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -350,13 +345,13 @@ async function mintIdeaSpecForIdea(
  * idea-spec identity (run_id, atype, source_ref), so the per-idea rows coexist;
  * every OTHER atype stays strictly one-per-(run, atype).
  *
- * Resolution EXPANDS resolveOriginatingIdeaId's owned-first-else-batch order to
- * the FULL owned set: all of listRunOwnedIdeaIds (planner/ship seed/create the
- * ideas), else the single sprint-batch idea (a standalone sprint owns none). No
- * resolvable idea → fail-soft (logs + returns). Each per-idea mint is itself
- * content-gated inside mintIdeaSpecForIdea (a bare idea with no body/summary is
- * skipped), so a batch surfaces a tab only for the ideas that actually have spec
- * content yet.
+ * Resolution is the FULL result of `listRunOwnedOrBatchIdeaIds` — the run's
+ * owned ideas (planner/ship seed/create them), else the single sprint-batch
+ * idea (a standalone sprint owns none) — vs. resolveOriginatingIdeaId, which
+ * takes only the FIRST of that same list. No resolvable idea → fail-soft (logs
+ * + returns). Each per-idea mint is itself content-gated inside
+ * mintIdeaSpecForIdea (a bare idea with no body/summary is skipped), so a batch
+ * surfaces a tab only for the ideas that actually have spec content yet.
  */
 async function mintIdeaSpecForOwnedIdeas(
   db: DatabaseLike,
@@ -366,14 +361,10 @@ async function mintIdeaSpecForOwnedIdeas(
   labelFallback: string,
   logger?: LoggerLike,
 ): Promise<void> {
-  const ownedIds = listRunOwnedIdeaIds(db, runId);
-  const ideaIds = ownedIds.length > 0 ? ownedIds : [];
-  if (ideaIds.length === 0) {
-    // No owned ideas — fall back to the single sprint-batch idea (standalone
-    // sprint), preserving resolveOriginatingIdeaId's second resolution rung.
-    const batchIdeaId = resolveRunBatchIdeaId(db, runId);
-    if (batchIdeaId !== null) ideaIds.push(batchIdeaId);
-  }
+  // Owned ideas, else the single sprint-batch idea (standalone sprint) — the
+  // SHARED owned-else-batch resolution (runEntityOwnership.listRunOwnedOrBatchIdeaIds),
+  // preserving resolveOriginatingIdeaId's second resolution rung.
+  const ideaIds = listRunOwnedOrBatchIdeaIds(db, runId);
   if (ideaIds.length === 0) {
     logger?.debug('[autoMintArtifacts] idea-spec skipped — run owns no resolvable idea', { runId });
     return;
@@ -498,16 +489,23 @@ function pluralize(count: number, noun: string): string {
 }
 
 /**
- * decomposed-stories mint for a KNOWN idea: label = short epic/task count string,
- * e.g. "2 epics, 9 tasks". sourceRef = ideaId. Content is re-derived on read
- * (mode 'template') so payloadJson is left null. Shared by the step-completion
- * path (mintDecomposedStories) and the run-start baseline path (handleRunStart).
+ * decomposed-stories mint, RUN-SCOPED (batch fix, IDEA-009): label reflects the
+ * COMBINED epic/task count across EVERY idea the run owns
+ * (`listRunOwnedOrBatchIdeaIds` — the SAME owned-else-batch resolution the
+ * multi-idea idea-spec mint uses), e.g. "5 epics, 12 tasks across 3 ideas".
+ * sourceRef stays the run's FIRST owned idea (`ideaId`) — artifact IDENTITY is
+ * UNCHANGED: still exactly ONE decomposed-stories artifact per (run_id, atype),
+ * never one per idea like idea-spec (migration 062's per-source-ref identity is
+ * idea-spec-only). Content is re-derived on read (mode 'template') so
+ * payloadJson is left null. Shared by the step-completion path
+ * (mintDecomposedStories) and the run-start baseline path (handleRunStart).
  *
- * CONTENT GATE: only minted when the idea actually has a decomposition —
- * countDecomposition(epics+tasks) > 0. A not-yet-decomposed idea is skipped so
- * the deliverable never appears as an empty "0 epics, 0 tasks" tab. The label is
- * computed from the LIVE count at mint time, so a content-driven re-mint (each
- * task create, idempotent UPSERT) refreshes the count as the decomposition grows.
+ * CONTENT GATE: only minted when the COMBINED count across all owned ideas is
+ * > 0. A run whose owned ideas are ALL not-yet-decomposed is skipped so the
+ * deliverable never appears as an empty "0 epics, 0 tasks" tab. The label is
+ * computed from the LIVE combined count at mint time, so a content-driven
+ * re-mint (each task create, idempotent UPSERT) refreshes the count as ANY
+ * owned idea's decomposition grows — not just the first idea's.
  */
 async function mintDecomposedStoriesForIdea(
   db: DatabaseLike,
@@ -517,19 +515,38 @@ async function mintDecomposedStoriesForIdea(
   stepOrigin: string | null,
   logger?: LoggerLike,
 ): Promise<void> {
-  const { epicCount, taskCount } = countDecomposition(db, projectId, ideaId);
+  // The run's full owned-idea set (falling back to [ideaId] defensively — this
+  // should always include ideaId itself, since ideaId is derived from the same
+  // owned-else-batch resolution by every caller).
+  const ownedIdeaIds = listRunOwnedOrBatchIdeaIds(db, runId);
+  const ideaIds = ownedIdeaIds.length > 0 ? ownedIdeaIds : [ideaId];
 
-  // CONTENT GATE — nothing decomposed yet → do not mint an empty stories tab.
+  let epicCount = 0;
+  let taskCount = 0;
+  for (const id of ideaIds) {
+    const counts = countDecomposition(db, projectId, id);
+    epicCount += counts.epicCount;
+    taskCount += counts.taskCount;
+  }
+
+  // CONTENT GATE — nothing decomposed across ANY owned idea yet → do not mint
+  // an empty stories tab.
   if (epicCount === 0 && taskCount === 0) {
     logger?.debug('[autoMintArtifacts] decomposed-stories skipped — no decomposition yet', {
       runId,
       ideaId,
+      ideaCount: ideaIds.length,
     });
     return;
   }
 
-  // Build the label with plain string concatenation (no nested template literals).
-  const label = pluralize(epicCount, 'epic') + ', ' + pluralize(taskCount, 'task');
+  // Build the label with plain string concatenation (no nested template
+  // literals). Multi-idea runs append ' across K ideas' so the tab reads as a
+  // combined count rather than implying a single idea's decomposition.
+  let label = pluralize(epicCount, 'epic') + ', ' + pluralize(taskCount, 'task');
+  if (ideaIds.length > 1) {
+    label = label + ' across ' + String(ideaIds.length) + ' ideas';
+  }
 
   await ArtifactRouter.getInstance().apply(projectId, {
     op: 'create',
@@ -761,8 +778,11 @@ export async function handleRunStart(
     // mints nothing here (no resolvable idea yet) and relies on handleEntityWrite.
     //
     // idea-spec iterates ALL owned ideas (the multi-idea planner batch surfaces
-    // one spec tab per idea); decomposed-stories + arch-design stay first-idea-
-    // only (`ideaId`) — batch decomposition/architecture are out of scope here.
+    // one spec tab per idea). decomposed-stories is RUN-SCOPED: its label
+    // combines the count across every owned idea, though it still mints as a
+    // SINGLE artifact sourced off the first owned idea (`ideaId`) — identity is
+    // unchanged. arch-design stays first-idea-only (`ideaId`) — architecture is
+    // out of scope for the batch.
     await mintIdeaSpecForOwnedIdeas(db, runId, projectId, stepOrigin, 'Idea spec', logger);
     await mintDecomposedStoriesForIdea(db, runId, projectId, ideaId, stepOrigin, logger);
     // arch-design is content-gated inside its helper (no-op when the idea body
@@ -794,8 +814,10 @@ export async function handleRunStart(
  * auto-navigated the user into it. The mint helpers are CONTENT-GATED (idea-spec
  * needs a non-empty body/summary; decomposed-stories needs count > 0), so a write
  * that did not actually produce content is a no-op. The decomposed-stories label
- * is recomputed from the LIVE count at every call, so the tab's count refreshes
- * as tasks are added (idempotent UPSERT by (runId, atype)).
+ * is recomputed from the LIVE combined count across every idea the run owns at
+ * every call, so the tab's count refreshes as tasks are added under ANY owned
+ * idea, not just the one that triggered this write (idempotent UPSERT by
+ * (runId, atype)).
  *
  * Idempotent: ArtifactRouter op='create' UPSERTs by (runId, atype) — a re-fire is
  * a no-op re-derive, not a duplicate. Fully fail-soft: the whole body is wrapped

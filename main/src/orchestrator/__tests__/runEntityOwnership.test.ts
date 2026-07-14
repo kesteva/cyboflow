@@ -23,6 +23,7 @@ import {
   listRunOwnedIdeaIds,
   listRunCreatedTaskIds,
   listRunDecomposedIdeaIds,
+  listRunOwnedOrBatchIdeaIds,
 } from '../runEntityOwnership';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 
@@ -298,6 +299,26 @@ describe('runEntityOwnership.listRunDecomposedIdeaIds', () => {
 
     expect(() => listRunDecomposedIdeaIds(dbAdapter(db), 'run-notables')).not.toThrow();
     expect(listRunDecomposedIdeaIds(dbAdapter(db), 'run-notables')).toEqual([]);
+  });
+});
+
+describe('runEntityOwnership.listRunOwnedOrBatchIdeaIds', () => {
+  it('returns the FULL owned-idea set when the run owns any (seed + created, de-duped)', () => {
+    const db = buildDbWithSeedIds();
+    insertRun(db, 'run-owned', 'ide_seed');
+    setSeedIdeaIds(db, 'run-owned', JSON.stringify(['ide_seed', 'ide_x']));
+    insertEvent(db, { entityType: 'idea', entityId: 'ide_y', kind: 'created', runId: 'run-owned' });
+
+    const ids = listRunOwnedOrBatchIdeaIds(dbAdapter(db), 'run-owned');
+    expect([...ids].sort()).toEqual(['ide_seed', 'ide_x', 'ide_y']);
+  });
+
+  it('falls back to [] when the run owns no idea and no sprint-batch tables exist (fail-soft)', () => {
+    const db = buildDb(); // no sprint_batch_tasks / batch_id — resolveRunBatchIdeaId degrades to null
+    insertRun(db, 'run-none', null);
+
+    expect(() => listRunOwnedOrBatchIdeaIds(dbAdapter(db), 'run-none')).not.toThrow();
+    expect(listRunOwnedOrBatchIdeaIds(dbAdapter(db), 'run-none')).toEqual([]);
   });
 });
 

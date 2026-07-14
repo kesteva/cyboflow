@@ -17,6 +17,7 @@ import {
   selectProjectBacklog,
   selectTaskById,
   selectIdeaDecomposition,
+  selectRunDecomposition,
   boardsForProject,
   resolveBacklogRef,
 } from '../taskListing';
@@ -66,7 +67,28 @@ function buildDb(): Database.Database {
   // NOT NULL DEFAULT 'feature'); the UNION now selects it bare (not NULL AS ...)
   // on every branch, so every fixture row needs the column.
   db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
+  // 017 (seed_idea_id) + 061 (seed_idea_ids) are needed by selectRunDecomposition's
+  // listRunOwnedOrBatchIdeaIds resolution (the run-owned-ideas fixtures below).
+  db.exec(readFileSync(join(migDir, '017_run_seed_idea.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '061_run_seed_idea_ids.sql'), 'utf-8'));
   return db;
+}
+
+/**
+ * Seed a bare 'planner' workflow_runs row with seed_idea_id/seed_idea_ids
+ * stamped (migrations 017/060), the fixture selectRunDecomposition's owned-idea
+ * resolution (listRunOwnedOrBatchIdeaIds) reads. seed_idea_id is dual-written as
+ * ideaIds[0] (the production invariant); an empty ideaIds leaves both NULL (a
+ * run owning no idea).
+ */
+function seedRunWithIdeas(db: Database.Database, runId: string, ideaIds: string[]): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'planner', '{}')`,
+  ).run();
+  db.prepare(
+    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, seed_idea_id, seed_idea_ids)
+     VALUES (?, 'wf-1', 1, 'running', 'default', ?, ?)`,
+  ).run(runId, ideaIds[0] ?? null, ideaIds.length > 0 ? JSON.stringify(ideaIds) : null);
 }
 
 function stageId(position: number, projectId = 1): string {
@@ -446,6 +468,77 @@ describe('taskListing — 3-table UNION', () => {
     expect(boards.every((b) => b.is_default)).toBe(true);
     // Each board still carries its own full stage set.
     expect(boards[1].stages).toHaveLength(11);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// selectRunDecomposition (run-scoped, multi-idea batch — IDEA-009 batch fix)
+// ---------------------------------------------------------------------------
+
+describe('taskListing — selectRunDecomposition', () => {
+  it('projects one decomposition tree PER idea the run owns, in owned-idea order, DRAFTS included', () => {
+    const db = buildDb();
+
+    // Idea A: an epic (DRAFT — approved_at NULL) with a child task (also a draft).
+    const ideaA = 'ide_a';
+    db.prepare(
+      `INSERT INTO ideas (id, project_id, ref, title, body, board_id, stage_id, created_at)
+       VALUES (?, 1, 'IDEA-A', 'Idea A', 'body a', 'board-1-default', ?, '2026-01-01T00:00:00.000Z')`,
+    ).run(ideaA, stageId(1));
+    const epicA = 'epc_a';
+    db.prepare(
+      `INSERT INTO epics (id, project_id, ref, title, body, board_id, stage_id, originating_idea_id, approved_at, created_at)
+       VALUES (?, 1, 'EPIC-A', 'Epic A', 'epic a body', 'board-1-default', ?, ?, NULL, '2026-01-01T00:00:01.000Z')`,
+    ).run(epicA, stageId(4), ideaA);
+    const taskA = 'tsk_a';
+    db.prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, body, board_id, stage_id, parent_epic_id, originating_idea_id, approved_at, created_at)
+       VALUES (?, 1, 'TASK-A', 'Task A', 'task a body', 'board-1-default', ?, ?, ?, NULL, '2026-01-01T00:00:02.000Z')`,
+    ).run(taskA, stageId(5), epicA, ideaA);
+
+    // Idea B: a small-idea decomposition — a task DIRECTLY under the idea
+    // (no epic layer), also a draft (approved_at NULL).
+    const ideaB = 'ide_b';
+    db.prepare(
+      `INSERT INTO ideas (id, project_id, ref, title, body, board_id, stage_id, created_at)
+       VALUES (?, 1, 'IDEA-B', 'Idea B', 'body b', 'board-1-default', ?, '2026-01-02T00:00:00.000Z')`,
+    ).run(ideaB, stageId(1));
+    const taskB = 'tsk_b';
+    db.prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, body, board_id, stage_id, parent_epic_id, originating_idea_id, approved_at, created_at)
+       VALUES (?, 1, 'TASK-B', 'Task B', 'task b body', 'board-1-default', ?, NULL, ?, NULL, '2026-01-02T00:00:01.000Z')`,
+    ).run(taskB, stageId(5), ideaB);
+
+    seedRunWithIdeas(db, 'run-multi', [ideaA, ideaB]);
+
+    const trees = selectRunDecomposition(dbAdapter(db), 'run-multi');
+    expect(trees).toHaveLength(2);
+    expect(trees.map((t) => t.id)).toEqual([ideaA, ideaB]);
+    expect(trees.every((t) => t.type === 'idea')).toBe(true);
+
+    // Idea A's tree: epic -> task, both drafts (approved_at NULL) surfaced.
+    const treeA = trees[0];
+    expect(treeA.children?.map((c) => c.id)).toEqual([epicA]);
+    expect(treeA.children?.[0].approved_at).toBeNull();
+    expect(treeA.children?.[0].children?.map((c) => c.id)).toEqual([taskA]);
+    expect(treeA.children?.[0].children?.[0].approved_at).toBeNull();
+
+    // Idea B's tree: direct task (no epic), also a draft.
+    const treeB = trees[1];
+    expect(treeB.children?.map((c) => c.id)).toEqual([taskB]);
+    expect(treeB.children?.[0].type).toBe('task');
+    expect(treeB.children?.[0].approved_at).toBeNull();
+  });
+
+  it('returns [] when the run owns no resolvable idea (empty seed, no sprint batch)', () => {
+    const db = buildDb();
+    seedRunWithIdeas(db, 'run-empty', []);
+    expect(selectRunDecomposition(dbAdapter(db), 'run-empty')).toEqual([]);
+  });
+
+  it('returns [] for an unknown run id', () => {
+    const db = buildDb();
+    expect(selectRunDecomposition(dbAdapter(db), 'no-such-run')).toEqual([]);
   });
 });
 
