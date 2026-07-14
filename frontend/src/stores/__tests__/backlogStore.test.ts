@@ -15,6 +15,9 @@ let mockBoardsQuery: ReturnType<typeof vi.fn>;
 let mockSubscribe: ReturnType<typeof vi.fn>;
 let mockUnsubscribe: ReturnType<typeof vi.fn>;
 let mockProjectsGetAll: ReturnType<typeof vi.fn>;
+// Fix 7: the run-status subscription backlogStore now also wires in init().
+let mockRunStatusSubscribe: ReturnType<typeof vi.fn>;
+let mockRunStatusUnsubscribe: ReturnType<typeof vi.fn>;
 
 vi.mock('../../trpc/client', () => ({
   trpc: {
@@ -23,6 +26,9 @@ vi.mock('../../trpc/client', () => ({
         list: { get query() { return mockListQuery; } },
         boardsForProject: { get query() { return mockBoardsQuery; } },
         onTaskChanged: { get subscribe() { return mockSubscribe; } },
+      },
+      events: {
+        onRunStatusChanged: { get subscribe() { return mockRunStatusSubscribe; } },
       },
     },
   },
@@ -116,6 +122,8 @@ beforeEach(() => {
   mockBoardsQuery = vi.fn().mockResolvedValue([board]);
   mockUnsubscribe = vi.fn();
   mockSubscribe = vi.fn().mockReturnValue({ unsubscribe: mockUnsubscribe });
+  mockRunStatusUnsubscribe = vi.fn();
+  mockRunStatusSubscribe = vi.fn().mockReturnValue({ unsubscribe: mockRunStatusUnsubscribe });
   mockProjectsGetAll = vi.fn().mockResolvedValue({
     success: true,
     data: [
@@ -413,5 +421,40 @@ describe('init()', () => {
     await Promise.resolve();
     expect(useBacklogStore.getState().tasks).toHaveLength(0);
     expect(useBacklogStore.getState().loaded).toBe(false);
+  });
+
+  it('subscribes to run-status changes and DEBOUNCE-refetches the task list on one (Fix 7)', async () => {
+    vi.useFakeTimers();
+    try {
+      mockListQuery = vi.fn().mockResolvedValue([makeTask({ id: 'tsk_refreshed' })]);
+      unsub = useBacklogStore.getState().init();
+
+      // The run-status subscription is wired alongside onTaskChanged.
+      expect(mockRunStatusSubscribe).toHaveBeenCalledTimes(1);
+      // The full sync calls list.query synchronously (Promise.all arg eval).
+      expect(mockListQuery).toHaveBeenCalledTimes(1);
+
+      const onData = mockRunStatusSubscribe.mock.calls[0][1].onData as () => void;
+
+      // A burst of run-status events coalesces into ONE debounced refetch.
+      onData();
+      onData();
+      onData();
+      expect(mockListQuery).toHaveBeenCalledTimes(1); // still debounced
+
+      await vi.advanceTimersByTimeAsync(300);
+
+      expect(mockListQuery).toHaveBeenCalledTimes(2); // exactly one refetch
+      expect(mockListQuery).toHaveBeenLastCalledWith({ projectId: null });
+      expect(useBacklogStore.getState().tasks.map((t) => t.id)).toEqual(['tsk_refreshed']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('tears down the run-status subscription on unsubscribe (Fix 7)', () => {
+    const first = useBacklogStore.getState().init();
+    first();
+    expect(mockRunStatusUnsubscribe).toHaveBeenCalledTimes(1);
   });
 });

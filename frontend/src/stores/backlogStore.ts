@@ -243,6 +243,14 @@ export const useBacklogStore = create<BacklogState>((set, get) => {
   let wired = false;
   let wireGeneration = 0;
   let cachedUnsubscribe: (() => void) | null = null;
+  // Debounce handle for the run-status-driven task refresh (Fix 7). A run moving
+  // starting -> running (or running -> awaiting_review) while its task already sits
+  // at 'In development' emits NO task ENTITY event, so the card's pulse (FlowOverlay
+  // .runStatus, projected server-side into each task's list row) goes stale until an
+  // unrelated event lands. onRunStatusChanged is the signal; a short debounce
+  // coalesces bursts (a sprint fanning out several lanes) into one refetch.
+  let runStatusDebounce: ReturnType<typeof setTimeout> | null = null;
+  const RUN_STATUS_REFRESH_DEBOUNCE_MS = 300;
 
   return {
     loaded: false,
@@ -319,6 +327,51 @@ export const useBacklogStore = create<BacklogState>((set, get) => {
           setConnectionStatus('disconnected');
         });
 
+      // Debounced full task-list refetch (Fix 7). tasks.list is the authoritative
+      // source (same query the full sync uses); replaceTasks swaps in the fresh
+      // rows — including each task's re-projected FlowOverlay.runStatus — so a
+      // pulse-only run-status change is picked up without a matching task event.
+      // Only tasks are refreshed (boards/projects don't change on a run-status
+      // transition). Generation-guarded so a refetch in flight when the wiring was
+      // torn down is dropped.
+      const scheduleTaskRefresh = (): void => {
+        if (runStatusDebounce !== null) clearTimeout(runStatusDebounce);
+        runStatusDebounce = setTimeout(() => {
+          runStatusDebounce = null;
+          if (!wired || generation !== wireGeneration) return;
+          trpc.cyboflow.tasks.list
+            .query({ projectId: null })
+            .then((tasks) => {
+              if (!wired || generation !== wireGeneration) return;
+              get().replaceTasks(tasks);
+            })
+            .catch((err: unknown) => {
+              console.warn('[backlogStore] run-status task refresh failed:', err);
+            });
+        }, RUN_STATUS_REFRESH_DEBOUNCE_MS);
+      };
+
+      const clearRunStatusDebounce = (): void => {
+        if (runStatusDebounce !== null) {
+          clearTimeout(runStatusDebounce);
+          runStatusDebounce = null;
+        }
+      };
+
+      // Subscribe to the GLOBAL run-status stream (reuses the existing
+      // onRunStatusChanged surface activeRunsStore relies on — NO new backend
+      // event). Payload is ignored (the refetch is the authoritative resync), so no
+      // local type mirror is needed. onError only logs — the primary onTaskChanged
+      // subscription owns reconnection.
+      const runStatusSubscription = trpc.cyboflow.events.onRunStatusChanged.subscribe(undefined, {
+        onData: () => {
+          scheduleTaskRefresh();
+        },
+        onError: (err: unknown) => {
+          console.warn('[backlogStore] onRunStatusChanged subscription error:', err);
+        },
+      });
+
       // Subscribe to the GLOBAL task-change stream (TASK_ALL_CHANNEL bridge).
       const subscription = trpc.cyboflow.tasks.onTaskChanged.subscribe(
         { projectId: null },
@@ -330,6 +383,8 @@ export const useBacklogStore = create<BacklogState>((set, get) => {
             console.error('[backlogStore] onTaskChanged subscription error:', err);
             setConnectionStatus('disconnected');
             subscription.unsubscribe();
+            runStatusSubscription.unsubscribe();
+            clearRunStatusDebounce();
             // Clear closure state so a subsequent init() re-subscribes.
             if (generation === wireGeneration) {
               wired = false;
@@ -341,6 +396,8 @@ export const useBacklogStore = create<BacklogState>((set, get) => {
 
       const unsubscribe = () => {
         subscription.unsubscribe();
+        runStatusSubscription.unsubscribe();
+        clearRunStatusDebounce();
         if (generation === wireGeneration) {
           wired = false;
           cachedUnsubscribe = null;
