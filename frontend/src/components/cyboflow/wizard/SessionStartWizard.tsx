@@ -87,6 +87,7 @@ import { UltracodeCard } from './UltracodeCard';
 import { buildWorkflowMeta, DEFAULT_WORKFLOW_NAME } from './workflowMeta';
 import type { WorkflowCardMeta } from './workflowMeta';
 import { DEFAULT_SUBSTRATE } from '../../../../../shared/types/substrate';
+import { isCodexModelFamily, isCodexModelOption } from '../../../../../shared/types/agentModels';
 import {
   DEFAULT_SESSION_AGENT_RUNTIME,
 } from '../../../../../shared/types/agentRuntime';
@@ -247,10 +248,10 @@ export default function SessionStartWizard(): React.JSX.Element {
     const effectiveRuntime: LaunchAgentRuntime =
       selection?.kind === 'ultracode' ? 'claude-interactive' : agentRuntime;
     if (isCodexRuntime(effectiveRuntime)) {
-      if (model !== DEFAULT_CODEX_MODEL && model !== 'gpt-5.5') setModel(DEFAULT_CODEX_MODEL);
+      if (!isCodexModelOption(model)) setModel(DEFAULT_CODEX_MODEL);
       return;
     }
-    if (model === 'gpt-5.5') setModel(DEFAULT_QUICK_MODEL);
+    if (isCodexModelFamily(model)) setModel(DEFAULT_QUICK_MODEL);
   }, [selection?.kind, agentRuntime, model]);
   // Whether the user explicitly picked a model this wizard visit. Card selection
   // seeds a per-launcher DEFAULT (quick/workflow → Opus, ultracode → Fable when

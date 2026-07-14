@@ -708,6 +708,12 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     expect(screen.getByTestId('wizard-launch-summary')).toHaveTextContent('Codex SDK');
 
     await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select Codex model'), {
+        target: { value: 'gpt-5.4-mini' },
+      });
+    });
+
+    await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-cta'));
     });
 
@@ -715,7 +721,7 @@ describe('SessionStartWizard — step ③ launch threading', () => {
       expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({
         agentProvider: 'codex',
         agentRuntime: 'codex-sdk',
-        model: 'auto',
+        model: 'gpt-5.4-mini',
       }));
     });
     expect(mockEnsureSession).toHaveBeenCalled();

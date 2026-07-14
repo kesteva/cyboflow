@@ -285,11 +285,14 @@ describe('WorkflowPicker — Quick Session button', () => {
     });
 
     expect(screen.getByLabelText('Select Codex model')).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /GPT-5\.5/i })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /^GPT-5\.5 —/i })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /GPT-5\.4 —/i })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /GPT-5\.4 Mini/i })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /GPT-5\.3 Codex Spark/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start Run' })).toBeDisabled();
 
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select Codex model'), { target: { value: 'gpt-5.5' } });
+      fireEvent.change(screen.getByLabelText('Select Codex model'), { target: { value: 'gpt-5.4' } });
     });
     await act(async () => {
       fireEvent.click(screen.getByTestId('quick-session-button'));
@@ -300,7 +303,7 @@ describe('WorkflowPicker — Quick Session button', () => {
         projectId: 1,
         agentProvider: 'codex',
         agentRuntime: 'codex-pty',
-        agentModel: 'gpt-5.5',
+        agentModel: 'gpt-5.4',
       }),
     );
     expect(mockCreateQuick.mock.calls[0]?.[0]).not.toHaveProperty('substrate');
@@ -316,7 +319,11 @@ describe('WorkflowPicker — Quick Session button', () => {
     });
 
     expect(panelApi.createPanel).toHaveBeenCalledTimes(2);
-    expect(panelApi.createPanel).toHaveBeenCalledWith({ sessionId: 'session-quick-001', type: 'claude' });
+    expect(panelApi.createPanel).toHaveBeenCalledWith({
+      sessionId: 'session-quick-001',
+      type: 'claude',
+      title: 'Chat',
+    });
     expect(panelApi.createPanel).toHaveBeenCalledWith({
       sessionId: 'session-quick-001',
       type: 'terminal',

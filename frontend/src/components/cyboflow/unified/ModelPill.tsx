@@ -5,6 +5,8 @@ import { Dropdown, type DropdownItem } from '../../ui/Dropdown';
 import { Pill } from '../../ui/Pill';
 import { cn } from '../../../utils/cn';
 import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
+import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
+import { CODEX_MODEL_OPTIONS } from '../../../../../shared/types/agentModels';
 
 /**
  * ModelPill — interactive model selector for a quick SDK session's composer.
@@ -48,11 +50,21 @@ export const MODEL_OPTIONS: ReadonlyArray<ModelOption> = [
 ];
 
 const OPTION_BY_ID = new Map(MODEL_OPTIONS.map((o) => [o.id, o] as const));
+const CODEX_PILL_OPTIONS: ReadonlyArray<ModelOption> = CODEX_MODEL_OPTIONS.map((option) => ({
+  ...option,
+  context: null,
+}));
+const CODEX_OPTION_BY_ID = new Map(CODEX_PILL_OPTIONS.map((option) => [option.id, option] as const));
 
 /** Compact "version · context" display for a model id (falls back to the raw id). */
-export function modelDisplayLabel(id: string | null | undefined): string {
+export function modelDisplayLabel(
+  id: string | null | undefined,
+  agentProvider: AgentProvider = 'claude',
+): string {
   const active = id ?? 'auto';
-  const o = OPTION_BY_ID.get(active);
+  const o = agentProvider === 'codex'
+    ? CODEX_OPTION_BY_ID.get(active)
+    : OPTION_BY_ID.get(active);
   if (!o) return active;
   return o.context ? `${o.label} · ${o.context}` : o.label;
 }
@@ -64,17 +76,25 @@ export function isOpusModel(id: string | null | undefined): boolean {
 
 interface ModelPillProps {
   panelId: string;
+  /** Provider owning the panel settings; controls the visible model family. */
+  agentProvider?: AgentProvider;
   /** Current model id/alias (e.g. 'sonnet'); null falls back to the 'auto' display. */
   currentModel: string | null;
   /** Invoked after the model is persisted so the host updates its local state. */
   onModelChange: (model: string) => void;
 }
 
-export function ModelPill({ panelId, currentModel, onModelChange }: ModelPillProps): React.ReactElement {
+export function ModelPill({
+  panelId,
+  agentProvider = 'claude',
+  currentModel,
+  onModelChange,
+}: ModelPillProps): React.ReactElement {
   const [open, setOpen] = useState(false);
   const { isAliasUsable, unavailableReason } = useModelAvailability();
   const active = currentModel ?? 'auto';
-  const label = modelDisplayLabel(active);
+  const label = modelDisplayLabel(active, agentProvider);
+  const options = agentProvider === 'codex' ? CODEX_PILL_OPTIONS : MODEL_OPTIONS;
 
   const handleSelect = async (model: string): Promise<void> => {
     setOpen(false);
@@ -88,8 +108,8 @@ export function ModelPill({ panelId, currentModel, onModelChange }: ModelPillPro
     }
   };
 
-  const items: DropdownItem[] = MODEL_OPTIONS.map((o) => {
-    const usable = isAliasUsable(o.id);
+  const items: DropdownItem[] = options.map((o) => {
+    const usable = agentProvider === 'codex' || isAliasUsable(o.id);
     const baseLabel = o.context ? `${o.label} · ${o.context}` : o.label;
     return {
       id: o.id,
@@ -114,7 +134,7 @@ export function ModelPill({ panelId, currentModel, onModelChange }: ModelPillPro
       variant="default"
       icon={<Cpu className="w-3.5 h-3.5 text-text-secondary" />}
       className="transition-all duration-200 shadow-sm"
-      title="Model — applies on your next message"
+      title={`${agentProvider === 'codex' ? 'Codex' : 'Claude'} model — applies on your next message`}
     >
       {label}
       <ChevronDown

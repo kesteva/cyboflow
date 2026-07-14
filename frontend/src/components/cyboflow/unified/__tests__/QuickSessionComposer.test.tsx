@@ -170,6 +170,24 @@ describe('QuickSessionComposer — SDK', () => {
     fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
     await waitFor(() => expect(sendIn).toHaveBeenCalledTimes(1));
   });
+
+  it('uses the Codex model family for an idle Codex SDK session', async () => {
+    mockGetModel.mockResolvedValue({ success: true, data: 'gpt-5.4' });
+    render(
+      <Harness
+        session={makeSession({
+          status: 'ready',
+          agentProvider: 'codex',
+          agentRuntime: 'codex-sdk',
+        })}
+        interactive={false}
+      />,
+    );
+
+    fireEvent.click(await screen.findByText('GPT-5.4'));
+    expect(await screen.findByText('GPT-5.3 Codex Spark')).toBeInTheDocument();
+    expect(screen.queryByText(/Fable 5/)).toBeNull();
+  });
 });
 
 describe('QuickSessionComposer — Opus-only fast-mode pill', () => {

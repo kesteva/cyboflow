@@ -20,6 +20,48 @@ export type ClaudeModelAlias = (typeof CLAUDE_MODEL_ALIASES)[number];
  */
 export const CODEX_COMPATIBLE_DEFAULT_MODEL = 'gpt-5.5';
 
+/**
+ * Product-owned picker catalog for the bundled Codex runtime.
+ *
+ * Keep this aligned with the visible entries returned by `model/list` when the
+ * pinned `@openai/codex` runtime is upgraded. `auto` is intentionally included:
+ * the spawn seam resolves it to {@link CODEX_COMPATIBLE_DEFAULT_MODEL} so older
+ * account defaults cannot select a model the bundled runtime does not support.
+ */
+export const CODEX_MODEL_OPTIONS = [
+  {
+    id: 'auto',
+    label: 'Auto/default',
+    description: `Use the compatible Codex default (${CODEX_COMPATIBLE_DEFAULT_MODEL})`,
+  },
+  {
+    id: 'gpt-5.5',
+    label: 'GPT-5.5',
+    description: 'Frontier model for complex coding, research, and real-world work',
+  },
+  {
+    id: 'gpt-5.4',
+    label: 'GPT-5.4',
+    description: 'Strong model for everyday coding',
+  },
+  {
+    id: 'gpt-5.4-mini',
+    label: 'GPT-5.4 Mini',
+    description: 'Fast, efficient model for simpler coding tasks',
+  },
+  {
+    id: 'gpt-5.3-codex-spark',
+    label: 'GPT-5.3 Codex Spark',
+    description: 'Ultra-fast coding model',
+  },
+] as const;
+
+const CODEX_MODEL_OPTION_SET = new Set<string>(CODEX_MODEL_OPTIONS.map((option) => option.id));
+
+export function isCodexModelOption(model: string): boolean {
+  return CODEX_MODEL_OPTION_SET.has(model.toLowerCase().trim());
+}
+
 const CLAUDE_MODEL_ALIAS_SET = new Set<string>(CLAUDE_MODEL_ALIASES);
 
 export function isClaudeModelFamily(model: string): boolean {

@@ -33,6 +33,28 @@ describe('ModelPill', () => {
     expect(onChange).toHaveBeenCalledWith('opus');
   });
 
+  it('shows only Codex models for a Codex session and persists the selected id', async () => {
+    const onChange = vi.fn();
+    render(
+      <ModelPill
+        panelId="p1"
+        agentProvider="codex"
+        currentModel="gpt-5.5"
+        onModelChange={onChange}
+      />,
+    );
+
+    fireEvent.click(screen.getByText('GPT-5.5'));
+    expect(await screen.findByText('GPT-5.4')).toBeInTheDocument();
+    expect(screen.getByText('GPT-5.4 Mini')).toBeInTheDocument();
+    expect(screen.getByText('GPT-5.3 Codex Spark')).toBeInTheDocument();
+    expect(screen.queryByText(/Fable 5/)).toBeNull();
+    expect(screen.queryByText(/Opus 4\.8/)).toBeNull();
+
+    fireEvent.click(screen.getByText('GPT-5.4'));
+    await waitFor(() => expect(mockSetModel).toHaveBeenCalledWith('p1', 'gpt-5.4'));
+    expect(onChange).toHaveBeenCalledWith('gpt-5.4');
+  });
   it('does not re-persist when selecting the already-active model', async () => {
     const onChange = vi.fn();
     render(<ModelPill panelId="p1" currentModel="sonnet" onModelChange={onChange} />);
