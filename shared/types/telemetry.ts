@@ -101,6 +101,7 @@ export interface TelemetryEventMap {
   substrate_default_changed: { substrate: CliSubstrate };
   execution_model_default_changed: { executionModel: 'orchestrated' | 'programmatic' };
   quick_worktree_mode_default_changed: { mode: 'worktree' | 'in-place' };
+  quick_substrate_default_changed: { substrate: 'sdk' | 'interactive' };
   theme_changed: { theme: 'paper' | 'light' | 'dark' };
   update_applied: { variant: 'stable' | 'dev' };
 }

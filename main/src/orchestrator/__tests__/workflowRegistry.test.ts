@@ -949,6 +949,60 @@ describe('WorkflowRegistry', () => {
       });
     });
 
+    it("resolves the QUICK sentinel to the quick-session substrate default (interactive) when no per-run request is set", () => {
+      // The __quick__ sentinel resolves against getQuickSessionDefaultSubstrate
+      // (floor 'interactive') as its global-default rung, NOT getDefaultSubstrate
+      // (which stays 'sdk' for workflow runs).
+      const quickCfg: WorkflowConfigProvider = {
+        getDefaultAgentPermissionMode: () => 'default',
+        getDefaultSubstrate: () => 'sdk',
+        getQuickSessionDefaultSubstrate: () => 'interactive',
+      };
+      const cfgRegistry = new WorkflowRegistry(dbAdapter(db), logger, quickCfg);
+      const workflowId = cfgRegistry.ensureQuickWorkflow(1);
+      const result = cfgRegistry.createRun(workflowId, undefined, TEST_SESSION_ID);
+
+      expect(result.substrate).toBe('interactive');
+      interface SubstrateRow { substrate: string }
+      const row = db.prepare('SELECT substrate FROM workflow_runs WHERE id = ?').get(result.runId) as SubstrateRow;
+      expect(row.substrate).toBe('interactive');
+    });
+
+    it("does NOT apply the quick-session substrate default to WORKFLOW runs (they use getDefaultSubstrate)", async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'quick-substrate-scoped.md', '---\n---\n');
+        const cfg: WorkflowConfigProvider = {
+          getDefaultAgentPermissionMode: () => 'default',
+          getDefaultSubstrate: () => 'sdk',
+          getQuickSessionDefaultSubstrate: () => 'interactive',
+        };
+        const cfgRegistry = new WorkflowRegistry(dbAdapter(db), logger, cfg);
+        cfgRegistry.seed(1, [{ name: 'planner', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
+        const result = cfgRegistry.createRun(workflowId, undefined, TEST_SESSION_ID);
+
+        // A real workflow run keeps the workflow substrate default ('sdk') — the
+        // quick-session preference must not leak onto it.
+        expect(result.substrate).toBe('sdk');
+      });
+    });
+
+    it("an explicit per-run request still outranks the quick-session substrate default", () => {
+      const quickCfg: WorkflowConfigProvider = {
+        getDefaultAgentPermissionMode: () => 'default',
+        getDefaultSubstrate: () => 'sdk',
+        getQuickSessionDefaultSubstrate: () => 'interactive',
+      };
+      const cfgRegistry = new WorkflowRegistry(dbAdapter(db), logger, quickCfg);
+      const workflowId = cfgRegistry.ensureQuickWorkflow(1);
+      // Explicit 'sdk' request beats the 'interactive' quick default.
+      const result = cfgRegistry.createRun(workflowId, 'sdk', TEST_SESSION_ID);
+
+      expect(result.substrate).toBe('sdk');
+    });
+
     // ───── execution_model stamping (migration 032) ─────
 
     it("stamps the default execution model 'orchestrated' when no override is set (zero-behavior-change)", async () => {

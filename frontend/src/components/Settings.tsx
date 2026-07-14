@@ -6,6 +6,7 @@ import { API } from '../utils/api';
 import { trackEvent } from '../utils/telemetry';
 import type { AppConfig } from '../types/config';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
+import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import { useConfigStore } from '../stores/configStore';
@@ -70,6 +71,10 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // worktree) or 'in-place' (work directly in the project checkout). A per-session
   // override lives in the launch wizard's Advanced options.
   const [quickSessionWorktreeMode, setQuickSessionWorktreeMode] = useState<QuickSessionWorktreeMode>('worktree');
+  // Global default CLI substrate for NEW quick sessions: 'interactive' (default ·
+  // live PTY terminal) or 'sdk'. Seeds the launch wizard's substrate picker for
+  // quick/ultracode cards; a per-launch override still wins.
+  const [quickSessionDefaultSubstrate, setQuickSessionDefaultSubstrate] = useState<CliSubstrate>('interactive');
   // Global code-review-eval toggle (default ON) — the K=3 Opus jury pass fired at
   // a built-in flow's human-review step. A per-run Configure override outranks it.
   const [codeReviewEvalEnabled, setCodeReviewEvalEnabled] = useState(true);
@@ -144,6 +149,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setInteractivePtyOnly(data.interactivePtyOnly ?? false);
       setDefaultExecutionModel(data.defaultExecutionModel ?? 'orchestrated');
       setQuickSessionWorktreeMode(data.quickSessionWorktreeMode ?? 'worktree');
+      setQuickSessionDefaultSubstrate(data.quickSessionDefaultSubstrate ?? 'interactive');
       setCodeReviewEvalEnabled(data.codeReviewEvalEnabled ?? true);
       setAutoGradeVariantRuns(data.autoGradeVariantRuns ?? true);
       setErrorReportingEnabled(data.telemetry?.errorReportingEnabled ?? true);
@@ -192,6 +198,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         interactivePtyOnly,
         defaultExecutionModel,
         quickSessionWorktreeMode,
+        quickSessionDefaultSubstrate,
         codeReviewEvalEnabled,
         autoGradeVariantRuns,
         // Empty field → undefined → the getter floors to the default (config.json
@@ -761,6 +768,43 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                   commit automation stays off, and a workflow launched from an in-place session opens in a
                   separate worktree-backed session. Only affects sessions created after you save; you can
                   override this per session in the launch wizard's Advanced options.
+                </p>
+              </SettingsSection>
+
+              <SettingsSection
+                title="Quick Session Runtime"
+                description="Which CLI substrate a new quick session starts on — the live terminal or the SDK"
+                icon={<Terminal className="w-4 h-4" />}
+              >
+                <div className="flex flex-col gap-1.5">
+                  {([
+                    { substrate: 'interactive', label: 'Interactive terminal (default)', hint: 'Live PTY — full REPL' },
+                    { substrate: 'sdk', label: 'SDK', hint: 'In-process Agent SDK' },
+                  ] as const).map(({ substrate, label, hint }) => (
+                    <button
+                      key={substrate}
+                      type="button"
+                      onClick={() => {
+                        setQuickSessionDefaultSubstrate(substrate);
+                        trackEvent('quick_substrate_default_changed', { substrate });
+                      }}
+                      aria-pressed={quickSessionDefaultSubstrate === substrate}
+                      className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
+                        quickSessionDefaultSubstrate === substrate
+                          ? 'border-interactive bg-interactive-surface'
+                          : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
+                      }`}
+                    >
+                      <span className="text-text-primary font-medium text-sm">{label}</span>
+                      <span className="text-xs text-text-tertiary">{hint}</span>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-text-tertiary mt-2">
+                  Sets which runtime a new quick session starts on. The interactive terminal is the default —
+                  a full live REPL. This seeds the launch wizard's substrate picker; you can still switch it
+                  per session. The global "Interactive PTY only" lock and demo mode override this. Workflow
+                  runs use the separate default above and are unaffected.
                 </p>
               </SettingsSection>
 

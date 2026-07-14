@@ -2,7 +2,7 @@ import { EventEmitter } from 'events';
 import { app } from 'electron';
 import type { AppConfig, ResolvedIdleSessionReviewConfig } from '../types/config';
 import { IDLE_SESSION_REVIEW_DEFAULTS } from '../types/config';
-import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
+import { type CliSubstrate, DEFAULT_SUBSTRATE, isCliSubstrate } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import {
@@ -362,6 +362,23 @@ export class ConfigManager extends EventEmitter {
   getQuickSessionWorktreeMode(): QuickSessionWorktreeMode {
     const value = this.config.quickSessionWorktreeMode;
     return isQuickSessionWorktreeMode(value) ? value : DEFAULT_QUICK_SESSION_WORKTREE_MODE;
+  }
+
+  /**
+   * Global default CLI substrate for NEW quick sessions. Floors to 'interactive'
+   * (the PTY) when unset OR when the persisted value is not a valid substrate
+   * (config.json is user-editable) — quick sessions default to the live terminal.
+   * Consulted by WorkflowRegistry.createRun as the QUICK sentinel's global-default
+   * substrate rung: it sits BELOW an explicit per-launch request and BELOW the
+   * forced-substrate pins (getForcedSubstrate — demo pins 'sdk', interactivePtyOnly
+   * pins 'interactive'), which still outrank it, so demo runs stay byte-identical.
+   * Separate from getDefaultSubstrate(), which floors WORKFLOW runs to 'sdk'. Like
+   * the other defaults, NOT seeded into the constructor defaults, so existing
+   * config.json files stay byte-identical.
+   */
+  getQuickSessionDefaultSubstrate(): CliSubstrate {
+    const value = this.config.quickSessionDefaultSubstrate;
+    return isCliSubstrate(value) ? value : 'interactive';
   }
 
   /**

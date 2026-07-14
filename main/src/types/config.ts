@@ -64,6 +64,14 @@ export interface AppConfig {
   // seeded into constructor defaults, so existing config.json files stay
   // byte-identical.
   quickSessionWorktreeMode?: QuickSessionWorktreeMode;
+  // Global default CLI substrate for new QUICK sessions ('sdk' | 'interactive').
+  // Read via getQuickSessionDefaultSubstrate() (floor 'interactive' — quick
+  // sessions default to the interactive PTY) as the QUICK sentinel's global-default
+  // rung in WorkflowRegistry.createRun, BELOW an explicit per-launch request and
+  // BELOW the forced-substrate pins (demo / interactivePtyOnly), which still win.
+  // Distinct from defaultSubstrate, which governs WORKFLOW runs. NOT seeded into
+  // constructor defaults, so existing config.json files stay byte-identical.
+  quickSessionDefaultSubstrate?: CliSubstrate;
   // Global on/off for the code-review eval (the K=3 Opus jury pass fired at the
   // sprint-review => human-review boundary). Absent/undefined = ENABLED (the eval
   // costs a real Opus jury pass per built-in flow run reaching human-review; users
@@ -171,6 +179,8 @@ export interface UpdateConfigRequest {
   defaultExecutionModel?: ExecutionModel;
   // Global default for where QUICK sessions work (see AppConfig.quickSessionWorktreeMode).
   quickSessionWorktreeMode?: QuickSessionWorktreeMode;
+  // Global default CLI substrate for new QUICK sessions (see AppConfig.quickSessionDefaultSubstrate).
+  quickSessionDefaultSubstrate?: CliSubstrate;
   // Global on/off for the code-review eval (see AppConfig.codeReviewEvalEnabled).
   codeReviewEvalEnabled?: boolean;
   // Auto-grade variant & experiment runs sub-toggle (see AppConfig.autoGradeVariantRuns).

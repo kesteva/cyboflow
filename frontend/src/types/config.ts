@@ -28,6 +28,12 @@ export interface AppConfig {
   // tri-state overrides it per launch; workflow-host sessions always pin
   // 'worktree' regardless (ensureSessionForLaunch).
   quickSessionWorktreeMode?: QuickSessionWorktreeMode;
+  // Global default CLI substrate for new QUICK sessions ('sdk' | 'interactive').
+  // Floors to 'interactive' (the PTY) when unset — quick sessions default to the
+  // live terminal. Seeds the launch wizard's per-launch substrate picker for
+  // quick/ultracode cards; distinct from defaultSubstrate, which governs workflow
+  // runs. The forced pins (demo / interactivePtyOnly) still override per launch.
+  quickSessionDefaultSubstrate?: CliSubstrate;
   // Global on/off for the code-review eval (the K=3 Opus jury pass fired at a
   // built-in flow's human-review step). Absent/undefined = ENABLED. A per-run
   // Configure override (workflow_runs.eval_enabled) outranks this; NULL inherits it.

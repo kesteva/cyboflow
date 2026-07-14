@@ -66,6 +66,13 @@ export interface WorkflowConfigProvider {
   getDefaultAgentPermissionMode(): PermissionMode;
   getDefaultSubstrate(): CliSubstrate;
   /**
+   * Global-default substrate for the QUICK sentinel specifically (floors to the
+   * interactive PTY). Consulted below the explicit per-run request and below the
+   * forced-substrate pin. Optional so existing test-fixture WorkflowConfigProviders
+   * that omit it fall back to getDefaultSubstrate() (byte-identical 'sdk' floor).
+   */
+  getQuickSessionDefaultSubstrate?(): CliSubstrate;
+  /**
    * Boot-profile override that PINS the substrate for every run, bypassing the
    * whole resolution ladder (even the explicit per-run UI choice). Demo mode
    * returns 'sdk' here so no run/session ever engages the real interactive
@@ -1115,15 +1122,25 @@ export class WorkflowRegistry {
     // DemoTerminalView paints a purely client-side scripted session. Scoped to
     // the __quick__ sentinel so no demo WORKFLOW run can ever resolve interactive
     // (which WOULD dispatch to the real interactive manager via the facade).
+    const isQuickSentinel = workflow.name === QUICK_WORKFLOW_NAME;
     const demoHonorsInteractive =
       demoMode &&
-      workflow.name === QUICK_WORKFLOW_NAME &&
+      isQuickSentinel &&
       substrateRequest === 'interactive';
+    // The QUICK sentinel resolves against its OWN global-default rung
+    // (getQuickSessionDefaultSubstrate, floor 'interactive' — quick sessions
+    // default to the PTY); WORKFLOW runs keep getDefaultSubstrate (floor 'sdk').
+    // Both sit below an explicit per-run request and below the forced pin, so
+    // demo ('sdk') stays byte-identical: only an EXPLICIT interactive request
+    // trips demoHonorsInteractive, never this default.
+    const globalDefaultSubstrate = isQuickSentinel
+      ? (this.config?.getQuickSessionDefaultSubstrate?.() ?? this.config?.getDefaultSubstrate())
+      : this.config?.getDefaultSubstrate();
     const substrate = demoHonorsInteractive
       ? 'interactive'
       : forcedSubstrate ?? resolveSubstrate({
           requestedSubstrate: substrateRequest,
-          globalDefaultSubstrate: this.config?.getDefaultSubstrate(),
+          globalDefaultSubstrate,
           env: process.env,
         });
     if (codexSdkRequested && substrate !== 'sdk') {

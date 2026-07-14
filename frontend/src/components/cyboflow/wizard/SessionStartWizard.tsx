@@ -58,6 +58,7 @@ import { API } from '../../../utils/api';
 import type { Project } from '../../../types/project';
 import { useNavigationStore } from '../../../stores/navigationStore';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
+import { useConfigStore } from '../../../stores/configStore';
 import { useQuickSession } from '../../../hooks/useQuickSession';
 import { useAgentPermissionMode } from '../../../hooks/useAgentPermissionMode';
 import { ensureSessionForLaunch } from '../../../utils/ensureSessionForLaunch';
@@ -226,6 +227,19 @@ export default function SessionStartWizard(): React.JSX.Element {
   // and threaded into runs.start / useQuickSession.
   const { mode: permissionMode, setMode: setPermissionMode } = useAgentPermissionMode();
   const [agentRuntime, setAgentRuntime] = useState<LaunchAgentRuntime>(DEFAULT_SESSION_AGENT_RUNTIME);
+  // Whether the user explicitly picked a runtime this wizard visit (mirrors
+  // modelTouchedRef below). Card selection seeds a per-launcher default — quick /
+  // ultracode → the quick-session substrate preference projected onto a Claude
+  // runtime (PTY by default), workflow → the SDK default runtime — but seeding must
+  // never clobber an explicit pick when the user bounces between cards, so it is
+  // gated on this latch.
+  const runtimeTouchedRef = useRef(false);
+  // The global quick-session substrate default (floors to 'interactive'), read
+  // reactively from the config store. Projected onto a Claude runtime to seed the
+  // runtime picker for quick + ultracode cards so quick sessions default to the PTY.
+  const quickDefaultSubstrate = useConfigStore(
+    (s) => s.config?.quickSessionDefaultSubstrate ?? 'interactive',
+  );
   // Per-launch Claude model for QUICK, ULTRACODE and workflow launches (Configure
   // ③). Defaults to Opus (DEFAULT_QUICK_MODEL === DEFAULT_WORKFLOW_MODEL); the
   // Ultracode card re-seeds Fable when the availability snapshot says it's usable
@@ -273,6 +287,24 @@ export default function SessionStartWizard(): React.JSX.Element {
       );
     },
     [isAliasUsable],
+  );
+  // Seed the per-launcher default RUNTIME on card selection (no-op once the user
+  // has touched the picker). Quick + Ultracode default to the quick-session
+  // substrate preference projected onto a Claude runtime (PTY → 'claude-interactive',
+  // SDK → 'claude-sdk'); WORKFLOW launches keep the SDK default runtime so an SDK
+  // flow run can still resolve 'programmatic' (interactive hard-pins orchestrated).
+  const seedDefaultRuntimeFor = useCallback(
+    (kind: WizardSelection['kind']) => {
+      if (runtimeTouchedRef.current) return;
+      setAgentRuntime(
+        kind === 'workflow'
+          ? DEFAULT_SESSION_AGENT_RUNTIME
+          : quickDefaultSubstrate === 'interactive'
+            ? 'claude-interactive'
+            : 'claude-sdk',
+      );
+    },
+    [quickDefaultSubstrate],
   );
   // Advanced (Configure ③, WORKFLOW only): per-run code-review-eval override.
   // 'inherit' → omit `evalEnabled` (the run inherits the global codeReviewEvalEnabled
@@ -918,6 +950,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                 onSelect={() => {
                   setSelection({ kind: 'quick' });
                   seedDefaultModelFor('quick');
+                  seedDefaultRuntimeFor('quick');
                   setStep(3);
                 }}
               />
@@ -931,6 +964,7 @@ export default function SessionStartWizard(): React.JSX.Element {
               onSelect={() => {
                 setSelection({ kind: 'ultracode' });
                 seedDefaultModelFor('ultracode');
+                seedDefaultRuntimeFor('ultracode');
                 setStep(3);
               }}
             />
@@ -969,6 +1003,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                     // auto-jump on load; only a user click advances.
                     setSelection({ kind: 'workflow', workflowId: meta.id });
                     seedDefaultModelFor('workflow');
+                    seedDefaultRuntimeFor('workflow');
                     setStep(3);
                   }}
                 />
@@ -990,7 +1025,12 @@ export default function SessionStartWizard(): React.JSX.Element {
               <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.substrateSelect }}>
                 <SubstrateSelector
                   value={agentRuntime}
-                  onChange={setAgentRuntime}
+                  onChange={(next) => {
+                    // A real per-launch pick — stop card-selection seeding from
+                    // overriding it when the user bounces between cards.
+                    runtimeTouchedRef.current = true;
+                    setAgentRuntime(next);
+                  }}
                   id="wizard-substrate"
                   caveatsTestId="wizard-substrate-caveats"
                   runtimeScope={selection.kind === 'quick' ? 'session' : 'workflow'}
