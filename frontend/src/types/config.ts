@@ -20,8 +20,9 @@ export interface AppConfig {
   // Global default agent permission mode for workflow runs on both substrates ('default' | 'acceptEdits' | 'auto' | 'dontAsk'). Floors to 'default' when unset.
   defaultAgentPermissionMode?: PermissionMode;
   // Global default execution model for new SDK workflow runs ('orchestrated' |
-  // 'programmatic'). Floors to 'orchestrated' when unset; the interactive
-  // substrate always hard-pins 'orchestrated' regardless of this value.
+  // 'programmatic'). Floors to 'programmatic' when unset — new SDK flow runs
+  // default to the in-process host loop; the interactive substrate always
+  // hard-pins 'orchestrated' regardless of this value.
   defaultExecutionModel?: ExecutionModel;
   // Global default for where QUICK sessions work ('worktree' | 'in-place').
   // Floors to 'worktree' when unset. The launch wizard's Advanced "Workspace"

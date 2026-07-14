@@ -64,9 +64,10 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // Global CLI runtime: false = allow SDK (per-run picker available, default
   // 'sdk'); true = force the interactive PTY substrate everywhere (SDK disabled).
   const [interactivePtyOnly, setInteractivePtyOnly] = useState(false);
-  // Global default execution model for new SDK runs: 'orchestrated' (default) or
-  // 'programmatic' (the in-process WorkflowController host walks the run's DAG).
-  const [defaultExecutionModel, setDefaultExecutionModel] = useState<ExecutionModel>('orchestrated');
+  // Global default execution model for new SDK runs: 'programmatic' (default · the
+  // in-process WorkflowController host walks the run's DAG) or 'orchestrated' (the
+  // classic orchestrator agent drives the steps).
+  const [defaultExecutionModel, setDefaultExecutionModel] = useState<ExecutionModel>('programmatic');
   // Default workspace for NEW quick sessions: 'worktree' (default · isolated git
   // worktree) or 'in-place' (work directly in the project checkout). A per-session
   // override lives in the launch wizard's Advanced options.
@@ -147,7 +148,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setEnableCyboflowFooter(data.enableCyboflowFooter !== false); // Default to true
       setDefaultAgentPermissionMode(data.defaultAgentPermissionMode ?? 'default');
       setInteractivePtyOnly(data.interactivePtyOnly ?? false);
-      setDefaultExecutionModel(data.defaultExecutionModel ?? 'orchestrated');
+      setDefaultExecutionModel(data.defaultExecutionModel ?? 'programmatic');
       setQuickSessionWorktreeMode(data.quickSessionWorktreeMode ?? 'worktree');
       setQuickSessionDefaultSubstrate(data.quickSessionDefaultSubstrate ?? 'interactive');
       setCodeReviewEvalEnabled(data.codeReviewEvalEnabled ?? true);
@@ -702,8 +703,8 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
               >
                 <div className="flex flex-col gap-1.5">
                   {([
-                    { model: 'orchestrated', label: 'Orchestrated', hint: 'Default · orchestrator-driven steps' },
-                    { model: 'programmatic', label: 'Programmatic', hint: 'In-process host walks the DAG' },
+                    { model: 'programmatic', label: 'Programmatic', hint: 'Default · in-process host walks the DAG' },
+                    { model: 'orchestrated', label: 'Orchestrated', hint: 'Classic orchestrator-driven steps' },
                   ] as const).map(({ model, label, hint }) => (
                     <button
                       key={label}

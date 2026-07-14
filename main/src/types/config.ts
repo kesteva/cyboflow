@@ -54,9 +54,10 @@ export interface AppConfig {
   // Global default agent permission mode for workflow runs on both substrates ('default' | 'acceptEdits' | 'auto' | 'dontAsk'). Floors to 'default' when unset.
   defaultAgentPermissionMode?: PermissionMode;
   // Global default execution model for new SDK workflow runs ('orchestrated' | 'programmatic').
-  // The global-default rung of resolveExecutionModel; floors to 'orchestrated' when unset and is
-  // ignored on the interactive substrate (which hard-pins 'orchestrated'). NOT seeded into the
-  // constructor defaults, so existing config.json files stay byte-identical.
+  // The global-default rung of resolveExecutionModel; floors to 'programmatic' when unset (new
+  // SDK flow runs default to the in-process host loop) and is ignored on the interactive substrate
+  // (which hard-pins 'orchestrated'). NOT seeded into the constructor defaults, so existing
+  // config.json files stay byte-identical.
   defaultExecutionModel?: ExecutionModel;
   // Global default for where QUICK sessions work ('worktree' | 'in-place').
   // Read via getQuickSessionWorktreeMode() (floor 'worktree') by the

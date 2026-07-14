@@ -1024,6 +1024,48 @@ describe('WorkflowRegistry', () => {
       });
     });
 
+    it("defaults an SDK WORKFLOW run to 'programmatic' via the injected global default", async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'exec-programmatic-default.md', '---\n---\n');
+        const cfg: WorkflowConfigProvider = {
+          getDefaultAgentPermissionMode: () => 'default',
+          getDefaultSubstrate: () => 'sdk',
+          // ConfigManager floors this to 'programmatic'; model the resolved value.
+          getDefaultExecutionModel: () => 'programmatic',
+        };
+        const cfgRegistry = new WorkflowRegistry(dbAdapter(db), logger, cfg);
+        cfgRegistry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        const result = cfgRegistry.createRun(workflowId, undefined, TEST_SESSION_ID);
+
+        expect(result.substrate).toBe('sdk');
+        expect(result.executionModel).toBe('programmatic');
+      });
+    });
+
+    it("hard-pins the QUICK sentinel to 'orchestrated' even when the global default is 'programmatic'", () => {
+      // A quick session is ad-hoc chat, never DAG-walked by the host loop — it must
+      // stay orchestrated regardless of the programmatic global default, even on the
+      // SDK substrate (forced here so the interactive hard-pin isn't what's tested).
+      const cfg: WorkflowConfigProvider = {
+        getDefaultAgentPermissionMode: () => 'default',
+        getDefaultSubstrate: () => 'sdk',
+        getQuickSessionDefaultSubstrate: () => 'sdk',
+        getDefaultExecutionModel: () => 'programmatic',
+      };
+      const cfgRegistry = new WorkflowRegistry(dbAdapter(db), logger, cfg);
+      const workflowId = cfgRegistry.ensureQuickWorkflow(1);
+      const result = cfgRegistry.createRun(workflowId, 'sdk', TEST_SESSION_ID);
+
+      expect(result.substrate).toBe('sdk');
+      expect(result.executionModel).toBe('orchestrated');
+      interface ExecRow { execution_model: string }
+      const row = db.prepare('SELECT execution_model FROM workflow_runs WHERE id = ?').get(result.runId) as ExecRow;
+      expect(row.execution_model).toBe('orchestrated');
+    });
+
     // ───── model stamping (migration 037) ─────
 
     it('stamps a NULL model when no per-run model is requested (no pin → SDK default)', async () => {

@@ -1169,12 +1169,21 @@ export class WorkflowRegistry {
     // at INSERT and is immutable for the run lifetime — there is no UPDATE path.
     // Execution-model ladder (A/B): explicit per-run request > variant default >
     // global default > env > 'orchestrated' floor (interactive still hard-pins).
-    const executionModel = resolveExecutionModel({
-      substrate,
-      requestedExecutionModel: opts?.requestedExecutionModel ?? opts?.variantExecutionModel,
-      globalDefaultExecutionModel: this.config?.getDefaultExecutionModel?.(),
-      env: process.env,
-    });
+    // The __quick__ sentinel is ad-hoc chat, NOT a DAG walked by the programmatic
+    // host loop (RunExecutor drives programmatic runs through WorkflowController),
+    // so it is hard-pinned 'orchestrated' regardless of the global default — a
+    // quick session must never be handed to the host loop. Real workflow runs
+    // resolve normally: the global default now floors to 'programmatic' via
+    // ConfigManager.getDefaultExecutionModel (SDK only; interactive hard-pins
+    // orchestrated inside the resolver).
+    const executionModel = isQuickSentinel
+      ? 'orchestrated'
+      : resolveExecutionModel({
+          substrate,
+          requestedExecutionModel: opts?.requestedExecutionModel ?? opts?.variantExecutionModel,
+          globalDefaultExecutionModel: this.config?.getDefaultExecutionModel?.(),
+          env: process.env,
+        });
 
     // Per-run model pin (migration 037). The explicit launch choice
     // (opts.requestedModel, from the Configure surface → runs.start →
