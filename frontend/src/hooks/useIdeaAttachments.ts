@@ -1,18 +1,20 @@
 /**
- * useIdeaAttachments — image-attachment state for the idea editors (migration 028).
+ * useIdeaAttachments — file-attachment state for the idea editors (migration 028).
  *
- * Owns the list of an idea's image attachments while the editor is open and
- * exposes the handlers the editor wires onto its body textarea / drop zone:
- *   - handlePaste  : intercept image items pasted INTO the body text box
- *   - handleDrop   : accept images dropped on the editor
- *   - addFiles     : the "Attach image" file-picker path
+ * Owns the list of an idea's attachments (any file type, not just images) while
+ * the editor is open and exposes the handlers the editor wires onto its body
+ * textarea / drop zone:
+ *   - handlePaste  : intercept file items pasted INTO the body text box
+ *   - handleDrop   : accept files dropped on the editor
+ *   - addFiles     : the "Attach file" file-picker path
  *   - remove       : drop one attachment
  *
- * Image BYTES are written to disk immediately on add (window.electronAPI.ideas
+ * File BYTES are written to disk immediately on add (window.electronAPI.ideas
  * .saveAttachments → CYBOFLOW_DIR/artifacts/ideas/<ownerKey>/), returning the
  * IdeaAttachment METADATA the editor persists through tasks.create/update. For
- * RENDERING, freshly-added images keep their in-memory data URL; pre-existing
- * attachments (on reopen) are hydrated from disk via ideas.loadAttachments.
+ * RENDERING, freshly-added files keep their in-memory data URL; pre-existing
+ * attachments (on reopen) are hydrated from disk via ideas.loadAttachments —
+ * though only image types render a preview from it (see IdeaAttachmentStrip).
  *
  * The metadata array (`attachments`) is what the editor submits; `previews`
  * (metadata + an optional data URL) is what it renders.
@@ -25,7 +27,7 @@ const MAX_FILE_BYTES = 10 * 1024 * 1024;
 
 /** A renderable attachment: persisted metadata + an optional in-memory preview. */
 export interface AttachmentPreview extends IdeaAttachment {
-  /** data: URL for the <img> thumbnail; undefined while a saved file is still loading. */
+  /** data: URL for the image <img> thumbnail; unused for non-image types. */
   dataUrl?: string;
 }
 
@@ -84,21 +86,28 @@ export function useIdeaAttachments(ownerKey: string, initial: IdeaAttachment[]):
 
   const addFiles = useCallback(
     async (files: FileList | File[]): Promise<void> => {
-      const images = Array.from(files).filter((f) => f.type.startsWith('image/'));
-      if (images.length === 0) return;
+      const incoming = Array.from(files);
+      if (incoming.length === 0) return;
 
       setBusy(true);
       setError(null);
       try {
         const payload: Array<{ name: string; dataUrl: string; type: string }> = [];
-        for (const file of images) {
+        for (const file of incoming) {
           if (file.size > MAX_FILE_BYTES) {
-            setError(`"${file.name || 'image'}" is larger than 10MB and was skipped.`);
+            setError(`"${file.name || 'file'}" is larger than 10MB and was skipped.`);
             continue;
           }
           const dataUrl = await readAsDataUrl(file);
           if (dataUrl) {
-            payload.push({ name: file.name || 'pasted-image.png', dataUrl, type: file.type });
+            // Clipboard-pasted images often arrive with an empty File.name; other
+            // sources (drop / file-picker) always carry a real OS filename.
+            const fallbackName = file.type.startsWith('image/') ? 'pasted-image.png' : 'attachment';
+            payload.push({
+              name: file.name || fallbackName,
+              dataUrl,
+              type: file.type || 'application/octet-stream',
+            });
           }
         }
         if (payload.length === 0) return;
@@ -126,7 +135,9 @@ export function useIdeaAttachments(ownerKey: string, initial: IdeaAttachment[]):
       if (!items) return;
       const files: File[] = [];
       for (let i = 0; i < items.length; i++) {
-        if (items[i].type.startsWith('image/')) {
+        // 'file' kind covers any pasted file (image, PDF, etc.); 'string' items
+        // are plain-text clipboard content and must fall through to normal paste.
+        if (items[i].kind === 'file') {
           const file = items[i].getAsFile();
           if (file) files.push(file);
         }

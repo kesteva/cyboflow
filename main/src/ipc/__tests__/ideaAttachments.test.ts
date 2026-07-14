@@ -2,15 +2,18 @@
  * Behavioral tests for the ideas:save-attachments / ideas:load-attachments IPC
  * handlers (main/src/ipc/ideaAttachments.ts, migration 028).
  *
- * These handlers move image BYTES to/from disk under
- * CYBOFLOW_DIR/artifacts/ideas/<ownerKey>/. The security-critical behaviors are:
+ * These handlers move attachment BYTES (any file type, not just images) to/from
+ * disk under CYBOFLOW_DIR/artifacts/ideas/<ownerKey>/. The security-critical
+ * behaviors are:
  *  - ownerKey sanitization: a traversal-shaped key can NEVER escape the
  *    artifacts/ideas/ directory (retires directory-escape data placement).
- *  - duplicate filenames DON'T overwrite: two images with the same display name
+ *  - duplicate filenames DON'T overwrite: two files with the same display name
  *    each get a unique on-disk file (randomBytes id), so a paste of two
  *    same-named screenshots keeps both.
  *  - load containment guard: a path OUTSIDE the artifacts root is skipped, so the
  *    renderer cannot read arbitrary files via ideas:load-attachments.
+ *  - extension handling: the original filename's extension is preserved where
+ *    present, falling back to one derived from the MIME subtype, then to 'bin'.
  *
  * Real fs under an os.tmpdir() CYBOFLOW_DIR (set via setCyboflowDirectory) — the
  * assertions are about real on-disk effects, so no fs mock.
@@ -96,6 +99,66 @@ describe('ideas:save-attachments — ownerKey sanitization', () => {
   });
 });
 
+describe('ideas:save-attachments — arbitrary (non-image) file types', () => {
+  it('preserves the original filename extension for a PDF and round-trips it through load', async () => {
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerIdeaAttachmentHandlers(ipcMain as unknown as Parameters<typeof registerIdeaAttachmentHandlers>[0], {} as AppServices);
+
+    // Arbitrary bytes — only the extension/round-trip behavior is under test.
+    const pdfDataUrl = 'data:application/pdf;base64,JVBERi0xLjQKJcTl8uXrp/Og==';
+    const saved = (await invoke(handlers, 'ideas:save-attachments', 'idea-77', [
+      { name: 'report.pdf', dataUrl: pdfDataUrl, type: 'application/pdf' },
+    ])) as IdeaAttachment[];
+
+    expect(saved).toHaveLength(1);
+    expect(saved[0].path.endsWith('.pdf')).toBe(true);
+    expect(saved[0].name).toBe('report.pdf');
+    expect(saved[0].type).toBe('application/pdf');
+    expect(existsSync(saved[0].path)).toBe(true);
+
+    const loaded = (await invoke(handlers, 'ideas:load-attachments', [saved[0].path])) as Array<{
+      path: string;
+      dataUrl: string;
+    }>;
+    expect(loaded).toHaveLength(1);
+    // Non-image extensions fall back to a generic octet-stream data URL mime.
+    expect(loaded[0].dataUrl.startsWith('data:application/octet-stream;base64,')).toBe(true);
+  });
+
+  it('falls back to a safe "bin" extension when the filename has none and no mime type is given', async () => {
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerIdeaAttachmentHandlers(ipcMain as unknown as Parameters<typeof registerIdeaAttachmentHandlers>[0], {} as AppServices);
+
+    const saved = (await invoke(handlers, 'ideas:save-attachments', 'idea-78', [
+      { name: 'noextension', dataUrl: 'data:application/octet-stream;base64,AAAA', type: '' },
+    ])) as IdeaAttachment[];
+
+    expect(saved).toHaveLength(1);
+    expect(saved[0].path.endsWith('.bin')).toBe(true);
+    // Falsy type also gets a safe default persisted, not an empty string.
+    expect(saved[0].type).toBe('application/octet-stream');
+  });
+
+  it('sanitizes and bounds an unwieldy MIME subtype used as a fallback extension', async () => {
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerIdeaAttachmentHandlers(ipcMain as unknown as Parameters<typeof registerIdeaAttachmentHandlers>[0], {} as AppServices);
+
+    // Long, punctuation-heavy MIME subtype (docx) and no filename extension.
+    const saved = (await invoke(handlers, 'ideas:save-attachments', 'idea-79', [
+      {
+        name: 'contract',
+        dataUrl: 'data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,AAAA',
+        type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      },
+    ])) as IdeaAttachment[];
+
+    expect(saved).toHaveLength(1);
+    const ext = saved[0].path.split('.').pop() ?? '';
+    expect(ext.length).toBeLessThanOrEqual(12);
+    expect(/^[a-zA-Z0-9]+$/.test(ext)).toBe(true);
+  });
+});
+
 describe('ideas:save-attachments — duplicate filenames do not overwrite', () => {
   it('writes two distinct files for two images sharing the same display name', async () => {
     const { ipcMain, handlers } = makeHandlerCapture();
@@ -156,6 +219,27 @@ describe('ideas:load-attachments — containment guard', () => {
     expect(loaded).toHaveLength(1);
     expect(loaded[0].path).toBe(saved[0].path);
     expect(loaded[0].dataUrl.startsWith('data:image/png;base64,')).toBe(true);
+  });
+
+  it('applies the same containment guard to a non-image attachment', async () => {
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerIdeaAttachmentHandlers(ipcMain as unknown as Parameters<typeof registerIdeaAttachmentHandlers>[0], {} as AppServices);
+
+    const saved = (await invoke(handlers, 'ideas:save-attachments', 'idea-98', [
+      { name: 'notes.log', dataUrl: 'data:text/plain;base64,aGVsbG8=', type: 'text/plain' },
+    ])) as IdeaAttachment[];
+
+    const outsideFile = path.join(tmpRoot, 'outside-notes.log');
+    await fs.writeFile(outsideFile, 'top secret log');
+
+    const loaded = (await invoke(handlers, 'ideas:load-attachments', [
+      saved[0].path,
+      outsideFile,
+    ])) as Array<{ path: string; dataUrl: string }>;
+
+    // The non-image attachment inside artifacts/ is still readable; the escape is not.
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0].path).toBe(saved[0].path);
   });
 
   it('skips a traversal path that resolves outside artifacts even when it exists', async () => {

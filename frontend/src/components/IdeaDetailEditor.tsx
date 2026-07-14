@@ -193,7 +193,7 @@ export function IdeaDetailEditor({ idea, isOpen, onClose, onSaved }: IdeaDetailE
                 onDrop={attachmentsCtl.handleDrop}
                 onDragOver={(e) => e.preventDefault()}
                 rows={10}
-                placeholder="# Idea&#10;&#10;Markdown body — the full spec / notes for this idea.&#10;Paste or drop an image to attach it."
+                placeholder="# Idea&#10;&#10;Markdown body — the full spec / notes for this idea.&#10;Paste or drop a file to attach it."
                 className="resize-y rounded-input border border-border-primary bg-input-bg px-2 py-1.5 font-mono text-sm text-input-text placeholder:text-input-placeholder"
                 aria-label="Idea body"
                 data-testid="idea-body-input"

@@ -34,18 +34,19 @@ export type Priority = 'P0' | 'P1' | 'P2';
 export type EntityCategory = 'feature' | 'bug' | 'chore';
 
 /**
- * One user-attached image on an idea (migration 028). The image BYTES live on
- * disk (CYBOFLOW_DIR/artifacts/ideas/<ideaId>/<file>, written by the
- * ideas:save-attachments IPC); only this metadata is persisted, as a JSON array
- * in the ideas.attachments column. `path` is the absolute on-disk file path.
+ * One user-attached file on an idea (migration 028) — any file type, not just
+ * images. The file BYTES live on disk (CYBOFLOW_DIR/artifacts/ideas/<ideaId>/<file>,
+ * written by the ideas:save-attachments IPC); only this metadata is persisted, as
+ * a JSON array in the ideas.attachments column. `path` is the absolute on-disk
+ * file path.
  */
 export interface IdeaAttachment {
   id: string;
-  /** Original filename (or a synthesized name for pasted images). */
+  /** Original filename (or a synthesized name for pasted/undownloadable files). */
   name: string;
-  /** Absolute on-disk path to the saved image file. */
+  /** Absolute on-disk path to the saved file. */
   path: string;
-  /** MIME type, e.g. 'image/png'. */
+  /** MIME type, e.g. 'image/png' or 'application/pdf'. */
   type: string;
   /** Byte size of the saved file. */
   size: number;

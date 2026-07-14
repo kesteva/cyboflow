@@ -92,15 +92,17 @@ const categorySchema = z.enum(['feature', 'bug', 'chore']);
 const scopeSchema = z.enum(['small', 'large']);
 
 /**
- * One idea image attachment (migration 028). Mirrors the IdeaAttachment shared
- * type; `path` is the absolute on-disk path returned by the ideas:save-attachments
- * IPC. Ideas-only — the chokepoint ignores it on epics/tasks.
+ * One idea file attachment (migration 028) — any file type, not just images.
+ * Mirrors the IdeaAttachment shared type; `path` is the absolute on-disk path
+ * returned by the ideas:save-attachments IPC. Ideas-only — the chokepoint
+ * ignores it on epics/tasks. `type` (the MIME type) is validated non-empty but
+ * intentionally unconstrained — never regex'd to `image/*`.
  */
 const attachmentSchema = z.object({
   id: z.string().min(1),
   name: z.string(),
   path: z.string().min(1),
-  type: z.string(),
+  type: z.string().min(1),
   size: z.number().int().nonnegative(),
 });
 
@@ -168,10 +170,10 @@ export const tasksRouter = router({
     }),
 
   /**
-   * Fetch the image attachments (migration 028) for a single idea. Kept OUT of
+   * Fetch the file attachments (migration 028) for a single idea. Kept OUT of
    * the BacklogTaskItem read model (attachments are only needed when the idea
    * editor opens), so the editor fetches them on demand. Returns [] for a
-   * non-idea / missing id / no attachments. The image BYTES are loaded
+   * non-idea / missing id / no attachments. The file BYTES are loaded
    * separately via the ideas:load-attachments IPC (renderer → dataURL).
    */
   getAttachments: protectedProcedure
@@ -224,7 +226,7 @@ export const tasksRouter = router({
         /** Entity category — feature/bug/chore (migration 059); create-time attribute, unlike scope. */
         category: categorySchema.optional(),
         repo: z.string().nullable().optional(),
-        /** Image attachments — only meaningful on type='idea' (chokepoint ignores it otherwise). */
+        /** File attachments — only meaningful on type='idea' (chokepoint ignores it otherwise). */
         attachments: z.array(attachmentSchema).nullable().optional(),
         parentEpicId: z.string().nullable().optional(),
         boardId: z.string().optional(),
@@ -276,7 +278,7 @@ export const tasksRouter = router({
         repo: z.string().nullable().optional(),
         /** Idea size hint — only meaningful on type='idea' (chokepoint ignores it otherwise). */
         scope: scopeSchema.nullable().optional(),
-        /** Image attachments — whole-array replace; only meaningful on type='idea'. */
+        /** File attachments — whole-array replace; only meaningful on type='idea'. */
         attachments: z.array(attachmentSchema).nullable().optional(),
         parentEpicId: z.string().nullable().optional(),
         /** Manual rank (migration 057); null clears the rank. Valid on all three entity types. */

@@ -56,7 +56,7 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
   const [projectOverride, setProjectOverride] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Attachments (ideas only, migration 028). The item has no id yet, so images
+  // Attachments (ideas only, migration 028). The item has no id yet, so files
   // save under a stable pending key; their paths ride the create mutation.
   const [pendingKey] = useState(() => `pending_${Math.random().toString(36).slice(2)}`);
   const attachmentsCtl = useIdeaAttachments(pendingKey, NO_ATTACHMENTS);
@@ -167,7 +167,7 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
               rows={3}
               placeholder={
                 type === 'idea'
-                  ? 'Optional — a sentence or two of context. Paste or drop an image to attach it.'
+                  ? 'Optional — a sentence or two of context. Paste or drop a file to attach it.'
                   : 'Optional — a sentence or two of context'
               }
               className="resize-none rounded-input border border-border-primary bg-input-bg px-2 py-1.5 text-sm text-input-text placeholder:text-input-placeholder"

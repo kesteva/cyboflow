@@ -8,9 +8,9 @@ import { getCyboflowSubdirectory } from '../utils/cyboflowDirectory';
 import type { IdeaAttachment } from '../../../shared/types/tasks';
 
 /**
- * IPC handlers for idea image attachments (migration 028).
+ * IPC handlers for idea file attachments (migration 028).
  *
- * The image BYTES live on disk under CYBOFLOW_DIR/artifacts/ideas/<ownerKey>/ —
+ * The attachment BYTES live on disk under CYBOFLOW_DIR/artifacts/ideas/<ownerKey>/ —
  * the same artifact machinery as sessions:save-images, but WITHOUT a session
  * existence check (an idea — or a not-yet-created idea, keyed by a `pending_*`
  * id — is the owner). Only the small IdeaAttachment METADATA is persisted in the
@@ -18,10 +18,15 @@ import type { IdeaAttachment } from '../../../shared/types/tasks';
  * handlers move bytes both ways:
  *
  *   ideas:save-attachments  base64 dataURL[] -> files on disk -> IdeaAttachment[]
- *   ideas:load-attachments  absolute path[]  -> { path, dataURL }[] (for thumbnails)
+ *   ideas:load-attachments  absolute path[]  -> { path, dataURL }[] (for previews)
  *
  * load is path-validated: a requested path is only read when it resolves INSIDE
  * the artifacts directory, so the renderer cannot read arbitrary files.
+ *
+ * Any file type is accepted (not just images) — the on-disk extension is taken
+ * from the ORIGINAL filename when present (sanitized, alphanumeric, length-bounded),
+ * falling back to one derived from the MIME subtype, and finally to a safe 'bin'
+ * default. The containment guard on load applies regardless of file type.
  */
 
 /** Sanitize an owner key into a safe single path segment (no traversal). */
@@ -30,14 +35,39 @@ function safeOwnerKey(ownerKey: string): string {
   return cleaned.length > 0 ? cleaned : 'unknown';
 }
 
+/** Bounds a derived extension's length regardless of input (e.g. a long MIME subtype). */
+const MAX_EXTENSION_LENGTH = 12;
+
+/** Reduce to a safe alphanumeric extension, bounded in length. */
+function sanitizeExtension(raw: string): string {
+  return raw.replace(/[^a-zA-Z0-9]/g, '').slice(0, MAX_EXTENSION_LENGTH);
+}
+
+/** The extension from an original filename (e.g. "report.pdf" -> "pdf"), or '' if absent/unsafe. */
+function extensionFromName(name: string): string {
+  const match = /\.([a-zA-Z0-9]+)$/.exec(name);
+  return match ? sanitizeExtension(match[1]) : '';
+}
+
+/** Known image extensions -> MIME, used to reconstruct a data URL for thumbnails on load. */
+const IMAGE_MIME_BY_EXTENSION: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  svg: 'image/svg+xml',
+  bmp: 'image/bmp',
+};
+
 export function registerIdeaAttachmentHandlers(ipcMain: IpcMain, _services: AppServices): void {
-  // Persist pasted/dropped/picked images to disk and return their metadata.
+  // Persist pasted/dropped/picked files to disk and return their metadata.
   ipcMain.handle(
     'ideas:save-attachments',
     async (
       _event,
       ownerKey: string,
-      images: Array<{ name: string; dataUrl: string; type: string }>,
+      files: Array<{ name: string; dataUrl: string; type: string }>,
     ): Promise<IdeaAttachment[]> => {
       const dir = getCyboflowSubdirectory('artifacts', 'ideas', safeOwnerKey(ownerKey));
       if (!existsSync(dir)) {
@@ -45,22 +75,25 @@ export function registerIdeaAttachmentHandlers(ipcMain: IpcMain, _services: AppS
       }
 
       const saved: IdeaAttachment[] = [];
-      for (const image of images) {
-        const extension = (image.type.split('/')[1] || 'png').replace(/[^a-zA-Z0-9]/g, '') || 'png';
+      for (const file of files) {
+        // Prefer the original filename's extension; fall back to one derived from
+        // the MIME subtype, then to a safe default — never trust either blindly.
+        const extension =
+          extensionFromName(file.name) || sanitizeExtension(file.type.split('/')[1] || '') || 'bin';
         const id = `att_${randomBytes(8).toString('hex')}`;
         const filename = `${id}.${extension}`;
         const filePath = path.join(dir, filename);
 
         // dataURL form: "data:<mime>;base64,<payload>"
-        const base64Data = image.dataUrl.split(',')[1] ?? '';
+        const base64Data = file.dataUrl.split(',')[1] ?? '';
         const buffer = Buffer.from(base64Data, 'base64');
         await fs.writeFile(filePath, buffer);
 
         saved.push({
           id,
-          name: image.name || filename,
+          name: file.name || filename,
           path: filePath,
-          type: image.type || `image/${extension}`,
+          type: file.type || 'application/octet-stream',
           size: buffer.byteLength,
         });
       }
@@ -68,7 +101,9 @@ export function registerIdeaAttachmentHandlers(ipcMain: IpcMain, _services: AppS
     },
   );
 
-  // Read saved attachment files back as data URLs for in-renderer thumbnails.
+  // Read saved attachment files back as data URLs for in-renderer previews
+  // (only image types render a thumbnail client-side; other types return the
+  // bytes as a data URL too, but the renderer only uses it for image previews).
   ipcMain.handle(
     'ideas:load-attachments',
     async (_event, paths: string[]): Promise<Array<{ path: string; dataUrl: string }>> => {
@@ -83,11 +118,11 @@ export function registerIdeaAttachmentHandlers(ipcMain: IpcMain, _services: AppS
           }
           if (!existsSync(resolved)) continue;
           const buffer = await fs.readFile(resolved);
-          const ext = (path.extname(resolved).slice(1) || 'png').toLowerCase();
-          const mime = ext === 'jpg' ? 'image/jpeg' : `image/${ext}`;
+          const ext = path.extname(resolved).slice(1).toLowerCase();
+          const mime = IMAGE_MIME_BY_EXTENSION[ext] ?? 'application/octet-stream';
           results.push({ path: p, dataUrl: `data:${mime};base64,${buffer.toString('base64')}` });
         } catch {
-          // Skip unreadable files — a missing thumbnail must not fail the batch.
+          // Skip unreadable files — a missing preview must not fail the batch.
         }
       }
       return results;
