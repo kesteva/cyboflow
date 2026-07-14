@@ -22,8 +22,7 @@ import {
   FolderOpen,
   ScanEye,
   AlarmClock,
-  Compass,
-  Plug
+  Compass
 } from 'lucide-react';
 import { Textarea, Checkbox } from './ui/Input';
 import { Button } from './ui/Button';
@@ -33,7 +32,7 @@ import { CollapsibleCard } from './ui/CollapsibleCard';
 import { SettingsSection } from './ui/SettingsSection';
 import { PERMISSION_MODE_OPTIONS } from './cyboflow/AgentPermissionModeSelector';
 import { useOnboardingStore } from '../stores/onboardingStore';
-import { EmptyState } from './EmptyState';
+import { IntegrationsSettings } from './settings/IntegrationsSettings';
 
 interface SettingsProps {
   isOpen: boolean;
@@ -899,11 +898,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         )}
 
         {activeTab === 'integrations' && (
-          <EmptyState
-            icon={Plug}
-            title="Integrations"
-            description="Connected services and integrations will appear here."
-          />
+          <IntegrationsSettings />
         )}
 
         {activeTab === 'notifications' && (

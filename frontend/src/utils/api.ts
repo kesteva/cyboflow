@@ -5,7 +5,7 @@ import type { SessionCreationPreferences } from '../stores/sessionPreferencesSto
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/types/modelAvailability';
 import type { FastModeStateNotice } from '../../../shared/types/panels';
-import type { ClaudeDetectionResult } from '../../../shared/types/onboarding';
+import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../shared/types/onboarding';
 import type { CodexModelCatalog } from '../../../shared/types/agentModels';
 
 // Type for IPC response.
@@ -589,6 +589,17 @@ export class API {
     async detect(): Promise<IPCResponse<ClaudeDetectionResult>> {
       if (!isElectron() || !window.electronAPI.claude) throw new Error('Electron API not available');
       return window.electronAPI.claude.detect();
+    },
+  };
+
+  static codex = {
+    /**
+     * On-demand bundled Codex runtime and ChatGPT account probe. Uncached so
+     * Settings can recheck immediately after the user signs in.
+     */
+    async detect(): Promise<IPCResponse<CodexDetectionResult>> {
+      if (!isElectron() || !window.electronAPI.codex) throw new Error('Electron API not available');
+      return window.electronAPI.codex.detect();
     },
   };
 
