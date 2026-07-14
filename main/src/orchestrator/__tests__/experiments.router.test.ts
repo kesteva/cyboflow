@@ -687,6 +687,63 @@ describe('experiments router orchestration (slice B)', () => {
     expect(h.launches).toHaveLength(0);
   });
 
+  it('rejects a seed task already the ORIGINAL seed of another LIVE experiment (Fix 2)', async () => {
+    const h = makeHarness();
+    const seededElsewhere = await seedEligibleTask(h, 'seeded-elsewhere', 'b');
+    // A live (running) experiment E1 already reserves `seededElsewhere` — its
+    // original has NO run of its own, so only this experiment-seed predicate stops
+    // a SECOND experiment from folding two outcomes onto the same original.
+    h.db
+      .prepare(
+        `INSERT INTO experiments (id, project_id, workflow_id, status) VALUES ('exp-E1', 1, 'wf-sprint', 'running')`,
+      )
+      .run();
+    h.db
+      .prepare(
+        `INSERT INTO experiment_seed_tasks (experiment_id, arm, original_task_id, clone_task_id)
+         VALUES ('exp-E1', 'A', ?, 'clone-a-E1')`,
+      )
+      .run(seededElsewhere);
+
+    await expect(
+      startExperiment(h.deps, {
+        projectId: 1,
+        workflowId: 'wf-sprint',
+        variantAId: 'vA-sprint',
+        variantBId: 'vB-sprint',
+        seedTaskIds: [seededElsewhere],
+      }),
+    ).rejects.toThrow(/not eligible for a sprint experiment/i);
+    expect(h.launches).toHaveLength(0);
+  });
+
+  it('accepts the same seed task once the prior experiment has SETTLED (Fix 2)', async () => {
+    const h = makeHarness();
+    const t1 = await seedEligibleTask(h, 'reusable', 'b');
+    // A SETTLED (decided) prior experiment no longer reserves its original seed.
+    h.db
+      .prepare(
+        `INSERT INTO experiments (id, project_id, workflow_id, status) VALUES ('exp-old', 1, 'wf-sprint', 'decided')`,
+      )
+      .run();
+    h.db
+      .prepare(
+        `INSERT INTO experiment_seed_tasks (experiment_id, arm, original_task_id, clone_task_id)
+         VALUES ('exp-old', 'A', ?, 'clone-a-old')`,
+      )
+      .run(t1);
+
+    const res = await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf-sprint',
+      variantAId: 'vA-sprint',
+      variantBId: 'vB-sprint',
+      seedTaskIds: [t1],
+    });
+    expect(res.experimentId).toBeTruthy();
+    expect(h.launches).toHaveLength(2);
+  });
+
   it('accepts a seed task whose ONLY run association is terminal (not in development)', async () => {
     const h = makeHarness();
     const t1 = await seedEligibleTask(h, 'done-before', 'b');

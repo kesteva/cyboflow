@@ -197,10 +197,39 @@ export class SprintLaneStore {
    */
   private readonly fanOutInnerCache = new Map<string, readonly FanOutInnerStep[] | null>();
 
+  /**
+   * Cached table-existence checks (backward-compat shim for pre-049/051 / partial
+   * test DBs). Mirrors TaskChangeRouter.columnExistsCache: a fresh store instance
+   * is created per DB, so a cached true/false can never go stale within a process.
+   */
+  private readonly tableExistsCache = new Map<string, boolean>();
+
   constructor(
     private readonly db: DatabaseLike,
     private readonly logger?: LoggerLike,
   ) {}
+
+  /**
+   * True when `table` exists in the DB. Used to gate the experiment-seed-reservation
+   * clause in filterEligibleTaskIds so a post-042 / pre-049 schema keeps FILTERING
+   * (the try/catch permissive degrade fires only on genuinely-broken reads, not on
+   * the merely-absent A/B tables). Fail-closed to false on any error.
+   */
+  private tableExists(table: string): boolean {
+    const cached = this.tableExistsCache.get(table);
+    if (cached !== undefined) return cached;
+    let exists = false;
+    try {
+      const row = this.db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get(table);
+      exists = row !== undefined;
+    } catch {
+      exists = false;
+    }
+    this.tableExistsCache.set(table, exists);
+    return exists;
+  }
 
   /** Cached resolveRunFanOutInner — see fanOutInnerCache's doc for why. */
   private resolveFanOutInnerCached(runId: string): readonly FanOutInnerStep[] | null {
@@ -332,6 +361,22 @@ export class SprintLaneStore {
     if (unique.length === 0) return [];
     try {
       const placeholders = unique.map(() => '?').join(', ');
+      // EXPERIMENT-SEED RESERVATION (Fix 2): a task that is the ORIGINAL seed of a
+      // LIVE (non-settled) A/B experiment has no run of its own, so the double-pull
+      // run guard below misses it — but the experiment's decide/fold will overwrite
+      // the original's body/stage, so a normal sprint must not pull it concurrently.
+      // Live = experiments.status NOT IN the terminal set (matches isExperimentSettled).
+      // GATED on experiment_seed_tasks existing so a post-042 / pre-049 schema keeps
+      // filtering the OTHER predicates instead of tripping the permissive catch (the
+      // A/B tables being merely absent must not disable approval/stage/run guards).
+      const expSeedClause = this.tableExists('experiment_seed_tasks')
+        ? `AND NOT EXISTS (
+                SELECT 1 FROM experiment_seed_tasks est
+                  JOIN experiments e ON e.id = est.experiment_id
+                 WHERE est.original_task_id = t.id
+                   AND e.status NOT IN ('decided', 'abandoned', 'superseded')
+              )`
+        : '';
       // DOUBLE-PULL GUARD (migration 061): exclude any task with an ACTIVE run
       // association — a non-terminal workflow_runs row linked DIRECTLY (task_id) or
       // via a sprint BATCH the task belongs to. The run-association (not stage
@@ -357,17 +402,62 @@ export class SprintLaneStore {
                           SELECT sbt.batch_id FROM sprint_batch_tasks sbt WHERE sbt.task_id = t.id
                         )
                    )
-              )`,
+              )
+              ${expSeedClause}`,
         )
         .all(projectId, ...unique) as Array<{ id: string }>;
       const eligible = new Set(rows.map((r) => r.id));
       return unique.filter((id) => eligible.has(id));
     } catch (err) {
       if (err instanceof Error && /no such (column|table)/i.test(err.message)) {
-        this.logger?.debug('[SprintLaneStore] eligibility filter skipped (pre-042/pre-022 schema)', {
+        this.logger?.debug('[SprintLaneStore] eligibility filter skipped (pre-042/pre-022/pre-049 schema)', {
           error: err.message,
         });
         return unique;
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Return the subset of `taskIds` that are the ORIGINAL seed of a LIVE (non-settled)
+   * A/B experiment (Fix 2). While an experiment runs, only its CLONED arm tasks carry
+   * run associations — the original seed has none, so the double-pull run guard in
+   * filterEligibleTaskIds / findActiveRunTaskIds misses it. This SEPARATE query lets
+   * the runs.start launch boundary give such a task a precise "reserved by a live
+   * experiment" reason instead of the generic ineligibility message (mirrors the
+   * separate-query pattern of findActiveRunTaskIds / findExperimentTaggedTaskIds).
+   * "Live" = experiments.status NOT IN the terminal set ('decided'/'abandoned'/
+   * 'superseded'), matching isExperimentSettled. Degrades to EMPTY on a pre-049/051
+   * schema lacking experiment_seed_tasks / experiments.
+   */
+  findLiveExperimentSeedTaskIds(projectId: number, taskIds: string[]): string[] {
+    const unique = [...new Set(taskIds)];
+    if (unique.length === 0) return [];
+    try {
+      const placeholders = unique.map(() => '?').join(', ');
+      const rows = this.db
+        .prepare(
+          `SELECT t.id AS id
+             FROM tasks t
+            WHERE t.project_id = ?
+              AND t.id IN (${placeholders})
+              AND EXISTS (
+                SELECT 1 FROM experiment_seed_tasks est
+                  JOIN experiments e ON e.id = est.experiment_id
+                 WHERE est.original_task_id = t.id
+                   AND e.status NOT IN ('decided', 'abandoned', 'superseded')
+              )`,
+        )
+        .all(projectId, ...unique) as Array<{ id: string }>;
+      const reserved = new Set(rows.map((r) => r.id));
+      return unique.filter((id) => reserved.has(id));
+    } catch (err) {
+      if (err instanceof Error && /no such (column|table)/i.test(err.message)) {
+        this.logger?.debug('[SprintLaneStore] live-experiment-seed scope skipped (pre-049/051 schema)', {
+          error: err.message,
+        });
+        return [];
       }
       throw err;
     }

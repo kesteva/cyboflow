@@ -461,6 +461,92 @@ describe('SprintLaneStore', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // findLiveExperimentSeedTaskIds + filterEligibleTaskIds — live-experiment-seed
+  // reservation (Fix 2). A task that is the ORIGINAL seed of a LIVE experiment has
+  // NO run of its own, so the double-pull run guard misses it; this predicate
+  // reserves it so a normal sprint can't concurrently pull a task whose original
+  // the experiment's decide/fold will overwrite.
+  // ---------------------------------------------------------------------------
+
+  describe('live-experiment-seed reservation (Fix 2)', () => {
+    let rdb: Database.Database;
+    let rstore: SprintLaneStore;
+
+    /** buildReadyLaneDb + migration 049 (experiments) and 051 (experiment_seed_tasks). */
+    function buildExperimentSeedDb(): Database.Database {
+      const db = buildReadyLaneDb();
+      const migDir = join(__dirname, '..', '..', 'database', 'migrations');
+      db.exec(readFileSync(join(migDir, '049_experiments.sql'), 'utf-8'));
+      db.exec(readFileSync(join(migDir, '051_experiment_seed_tasks.sql'), 'utf-8'));
+      return db;
+    }
+
+    function seedExperiment(db: Database.Database, id: string, status: string): void {
+      db.prepare(
+        `INSERT INTO experiments (id, project_id, workflow_id, base_branch, base_sha, variant_a_id, variant_b_id, status)
+         VALUES (?, 1, 'wf', 'main', 'sha0', 'va', 'vb', ?)`,
+      ).run(id, status);
+    }
+
+    function seedSeedMapping(db: Database.Database, experimentId: string, originalTaskId: string): void {
+      db.prepare(
+        `INSERT INTO experiment_seed_tasks (experiment_id, arm, original_task_id, clone_task_id)
+         VALUES (?, 'A', ?, ?)`,
+      ).run(experimentId, originalTaskId, `${originalTaskId}_clone_a`);
+    }
+
+    beforeEach(() => {
+      rdb = buildExperimentSeedDb();
+      rstore = SprintLaneStore.initialize(dbAdapter(rdb));
+    });
+
+    afterEach(() => {
+      rdb.close();
+    });
+
+    it('excludes an original seed of a LIVE experiment and re-allows it once the experiment settles', () => {
+      seedReadyTask(rdb, 'tsk_seed', 'TASK-001', 'Seed', { approved: true });
+      seedExperiment(rdb, 'exp-1', 'running');
+      seedSeedMapping(rdb, 'exp-1', 'tsk_seed');
+
+      // Live (running) -> ineligible + flagged as a live-experiment seed.
+      expect(rstore.filterEligibleTaskIds(1, ['tsk_seed'])).toEqual([]);
+      expect(rstore.findLiveExperimentSeedTaskIds(1, ['tsk_seed'])).toEqual(['tsk_seed']);
+
+      // 'grading' is still live.
+      rdb.prepare("UPDATE experiments SET status = 'grading' WHERE id = 'exp-1'").run();
+      expect(rstore.filterEligibleTaskIds(1, ['tsk_seed'])).toEqual([]);
+      expect(rstore.findLiveExperimentSeedTaskIds(1, ['tsk_seed'])).toEqual(['tsk_seed']);
+
+      // Settled ('decided') -> the reservation lifts; the task is pullable again.
+      rdb.prepare("UPDATE experiments SET status = 'decided' WHERE id = 'exp-1'").run();
+      expect(rstore.filterEligibleTaskIds(1, ['tsk_seed'])).toEqual(['tsk_seed']);
+      expect(rstore.findLiveExperimentSeedTaskIds(1, ['tsk_seed'])).toEqual([]);
+    });
+
+    it('leaves a non-seed eligible task untouched', () => {
+      seedReadyTask(rdb, 'tsk_free', 'TASK-002', 'Free', { approved: true });
+      seedReadyTask(rdb, 'tsk_seed', 'TASK-003', 'Seed', { approved: true });
+      seedExperiment(rdb, 'exp-1', 'running');
+      seedSeedMapping(rdb, 'exp-1', 'tsk_seed');
+
+      expect(rstore.filterEligibleTaskIds(1, ['tsk_free', 'tsk_seed'])).toEqual(['tsk_free']);
+      expect(rstore.findLiveExperimentSeedTaskIds(1, ['tsk_free', 'tsk_seed'])).toEqual(['tsk_seed']);
+    });
+
+    it('degrades to permissive / EMPTY on a pre-049/051 schema lacking the A/B tables', () => {
+      const bareDb = buildReadyLaneDb(); // no experiment tables
+      const bareStore = SprintLaneStore.initialize(dbAdapter(bareDb));
+      seedReadyTask(bareDb, 'tsk_a', 'TASK-001', 'A', { approved: true });
+      // filterEligibleTaskIds still FILTERS the other predicates (the merely-absent
+      // A/B tables must not disable the approval/stage/run guards).
+      expect(bareStore.filterEligibleTaskIds(1, ['tsk_a'])).toEqual(['tsk_a']);
+      expect(bareStore.findLiveExperimentSeedTaskIds(1, ['tsk_a'])).toEqual([]);
+      bareDb.close();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // listLanes
   // ---------------------------------------------------------------------------
 

@@ -329,6 +329,34 @@ function taskHasActiveRun(db: DatabaseLike, taskId: string): boolean {
 }
 
 /**
+ * True when `taskId` is the ORIGINAL seed of a LIVE (non-settled) A/B experiment
+ * (Fix 2) — it already reserves the task via experiment_seed_tasks, so it must not
+ * be seeded into a SECOND experiment (E1 already live => cannot seed E2). "Live" =
+ * experiments.status NOT IN the terminal set ('decided'/'abandoned'/'superseded'),
+ * matching isExperimentSettled. Mirrors SprintLaneStore.findLiveExperimentSeedTaskIds'
+ * predicate, replicated here to preserve the router's injected-deps + standalone-
+ * typecheck invariant. Degrades PERMISSIVELY (returns false) on a schema lacking
+ * experiment_seed_tasks / experiments.
+ */
+function taskIsLiveExperimentSeed(db: DatabaseLike, taskId: string): boolean {
+  try {
+    const row = db
+      .prepare(
+        `SELECT 1 FROM experiment_seed_tasks est
+           JOIN experiments e ON e.id = est.experiment_id
+          WHERE est.original_task_id = ?
+            AND e.status NOT IN ('decided', 'abandoned', 'superseded')
+          LIMIT 1`,
+      )
+      .get(taskId);
+    return row !== undefined;
+  } catch (err) {
+    if (err instanceof Error && /no such (column|table)/i.test(err.message)) return false;
+    throw err;
+  }
+}
+
+/**
  * Read + validate ONE seed task for a sprint experiment. Returns null (the caller
  * rejects) unless the task exists, belongs to the project, is NOT already
  * experiment-tagged, is sprint-eligible, AND has no active run association — the
@@ -379,6 +407,10 @@ function readSeedTask(db: DatabaseLike, taskId: string, projectId: number): Seed
   // run NOT EXISTS arm — never seed a task that already has a live run association
   // (a task currently 'In development' would be double-pulled into the experiment).
   if (taskHasActiveRun(db, taskId)) return null;
+  // EXPERIMENT-SEED RESERVATION (Fix 2): never re-seed a task that is already the
+  // ORIGINAL seed of another LIVE experiment — E1 already reserves it, and decide
+  // would fold two experiments' outcomes onto the same original.
+  if (taskIsLiveExperimentSeed(db, taskId)) return null;
   return {
     id: taskId,
     title: typeof row.title === 'string' ? row.title : 'Untitled',
@@ -618,7 +650,7 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
         code: 'BAD_REQUEST',
         message: `${ineligible.length} seed task(s) not eligible for a sprint experiment: ${ineligible.join(
           ', ',
-        )} — each must exist in this project, be approved + at "Ready for development" or later (not archived/done/won't-do), not already part of an experiment, and not already in development (a live run is associated — cancel it first)`,
+        )} — each must exist in this project, be approved + at "Ready for development" or later (not archived/done/won't-do), not already part of an experiment (including seeding another live experiment), and not already in development (a live run is associated — cancel it first)`,
       });
     }
     seedTasks = resolved;
