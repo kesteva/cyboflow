@@ -117,13 +117,20 @@ export function AgentEditorModal({
   // default to revert to — it would use deleteCustom instead).
   const showReset = isOverridden && !isCustom;
 
-  // Description is required and must never name an MCP write tool.
+  // Description is required and must never name an MCP write tool. The rule
+  // targets a cyboflow_ reference the USER introduces — a built-in agent's own
+  // baseline description may legitimately name an MCP tool (e.g. visual-verify
+  // says "fires ONE cyboflow_request_verification"), so exempt it when the
+  // seeded baseline already contains one. Otherwise every such built-in would be
+  // permanently un-savable.
+  const baselineDescription = entry?.description ?? '';
   const descriptionError = useMemo<string | null>(() => {
     const d = state.draft.description.trim();
     if (d.length === 0) return 'A description is required.';
-    if (d.includes('cyboflow_')) return 'Description must not reference a cyboflow_ tool.';
+    if (d.includes('cyboflow_') && !baselineDescription.includes('cyboflow_'))
+      return 'Description must not reference a cyboflow_ tool.';
     return null;
-  }, [state.draft.description]);
+  }, [state.draft.description, baselineDescription]);
 
   // Create mode mints a NEW custom: the server derives the agentKey from a
   // non-empty name and requires ≥1 tool (toolsSchema.min(1)). Gate Save on both

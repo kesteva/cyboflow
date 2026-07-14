@@ -272,6 +272,27 @@ describe('AgentEditorModal — built-in edit', () => {
     );
     expect(screen.getByTestId('agent-editor-save-button')).toBeDisabled();
   });
+
+  it("does not reject a built-in whose baseline description legitimately names a cyboflow_ tool", async () => {
+    // A built-in like visual-verify ships a description that names an MCP tool.
+    // Seeding it must NOT fire the validation error, and an unrelated edit must
+    // stay savable — otherwise the agent is permanently un-editable.
+    const withCyboflowRef: AgentEntry = {
+      ...BUILTIN_ENTRY,
+      description: 'Fires ONE cyboflow_request_verification for the task deliverable.',
+    };
+    await renderModal({ entry: withCyboflowRef });
+
+    expect(screen.queryByTestId('agent-description-error')).toBeNull();
+    // Make an unrelated edit to dirty the form; Save must enable.
+    fireEvent.change(screen.getByTestId('agent-system-prompt'), {
+      target: { value: 'Edited body.' },
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId('agent-editor-save-button')).not.toBeDisabled(),
+    );
+    expect(screen.queryByTestId('agent-description-error')).toBeNull();
+  });
 });
 
 describe('AgentEditorModal — Reset to default', () => {
