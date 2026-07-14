@@ -819,6 +819,34 @@ describe('SprintLaneStore', () => {
       expect(lane?.currentStepId).toBe('design');
     });
 
+    it("the 'Agent' dispatch tool name (CLI ≥~2.1.2xx) derives lanes exactly like the legacy 'Task'", () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      seedOwningRunWithSpec(db, batchId, 'run-1', 'wf-custom', 'custom-flow', CUSTOM_CHAIN_SPEC);
+
+      store.deriveLaneFromTaskDispatch({
+        runId: 'run-1',
+        toolName: 'Agent',
+        toolInput: { subagent_type: 'cyboflow-design' },
+      });
+
+      const lane = laneFor(batchId, 'tsk_a');
+      expect(lane?.status).toBe('running');
+      expect(lane?.currentStepId).toBe('design');
+    });
+
+    it('a non-dispatch tool name is a strict no-op', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      seedOwningRunWithSpec(db, batchId, 'run-1', 'wf-custom', 'custom-flow', CUSTOM_CHAIN_SPEC);
+
+      store.deriveLaneFromTaskDispatch({
+        runId: 'run-1',
+        toolName: 'AgentOutput',
+        toolInput: { subagent_type: 'cyboflow-design' },
+      });
+
+      expect(laneFor(batchId, 'tsk_a')?.status).toBe('queued');
+    });
+
     it("advances the SAME custom lane further on a later inner-step dispatch ('build')", () => {
       const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
       seedOwningRunWithSpec(db, batchId, 'run-1', 'wf-custom', 'custom-flow', CUSTOM_CHAIN_SPEC);

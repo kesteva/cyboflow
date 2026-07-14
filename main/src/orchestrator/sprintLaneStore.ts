@@ -785,7 +785,11 @@ export class SprintLaneStore {
     const { runId, toolName, toolInput } = args;
     try {
       if (runId === 'orchestrator') return;
-      if (toolName !== 'Task') return;
+      // The dispatch tool is 'Agent' on CLI ≥~2.1.2xx (empirically verified on
+      // 2.1.209) and 'Task' on older CLIs — the runtime version is whatever
+      // `claude` resolves on the user's PATH, so match BOTH. A 'Task'-only match
+      // silently killed this backstop on current CLIs.
+      if (toolName !== 'Task' && toolName !== 'Agent') return;
 
       const subagentType = toolInput['subagent_type'];
       if (typeof subagentType !== 'string') return;
