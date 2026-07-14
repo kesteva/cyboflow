@@ -56,6 +56,12 @@ interface SessionOutputData {
   panelId?: string;
 }
 
+interface SessionOutputAvailableData {
+  sessionId: string;
+  panelId?: string;
+  hasNewOutput?: boolean;
+}
+
 interface Folder {
   id: string;
   name: string;
@@ -487,8 +493,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.on('session-logs-cleared', wrappedCallback);
       return () => ipcRenderer.removeListener('session-logs-cleared', wrappedCallback);
     },
-    onSessionOutputAvailable: (callback: (info: { sessionId: string; hasNewOutput: boolean }) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, info: { sessionId: string; hasNewOutput: boolean }) => callback(info);
+    onSessionOutputAvailable: (callback: (info: SessionOutputAvailableData) => void) => {
+      const wrappedCallback = (_event: Electron.IpcRendererEvent, info: SessionOutputAvailableData) => callback(info);
       ipcRenderer.on('session:output-available', wrappedCallback);
       return () => ipcRenderer.removeListener('session:output-available', wrappedCallback);
     },

@@ -1,6 +1,26 @@
-import { describe, expect, it } from 'vitest';
+import { act, renderHook, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { UnifiedMessage } from '../../../../../../shared/types/unifiedMessage';
-import { mergePanelMessageSources } from '../useUnifiedPanelMessages';
+import {
+  mergePanelMessageSources,
+  useUnifiedPanelMessages,
+} from '../useUnifiedPanelMessages';
+
+const apiMocks = vi.hoisted(() => ({
+  getConversationMessages: vi.fn(),
+  getJsonMessages: vi.fn(),
+}));
+
+vi.mock('../../../../utils/api', () => ({
+  API: {
+    panels: apiMocks,
+  },
+}));
+
+beforeEach(() => {
+  apiMocks.getConversationMessages.mockReset().mockResolvedValue({ success: true, data: [] });
+  apiMocks.getJsonMessages.mockReset().mockResolvedValue({ success: true, data: [] });
+});
 
 function user(id: string, text: string, timestamp: string): UnifiedMessage {
   return {
@@ -59,5 +79,25 @@ describe('mergePanelMessageSources', () => {
     );
 
     expect(result.map((message) => message.id)).toEqual(['conversation']);
+  });
+});
+
+describe('useUnifiedPanelMessages', () => {
+  it('refetches when output becomes available for its panel', async () => {
+    renderHook(() => useUnifiedPanelMessages('panel-1'));
+
+    await waitFor(() => {
+      expect(apiMocks.getJsonMessages).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('session-output-available', {
+        detail: { sessionId: 'session-1', panelId: 'panel-1' },
+      }));
+    });
+
+    await waitFor(() => {
+      expect(apiMocks.getJsonMessages).toHaveBeenCalledTimes(2);
+    }, { timeout: 1_500 });
   });
 });
