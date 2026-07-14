@@ -24,7 +24,7 @@
  *
  * Design hexes are inline (warm-paper palette); the M7 polish pass tokenizes them.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactElement, ReactNode } from 'react';
 import { trpc } from '../../trpc/client';
 import { MarkdownPreview } from '../MarkdownPreview';
@@ -1051,17 +1051,26 @@ function gateIdeaRefs(payload: ReviewItem['payload']): string[] | null {
   return null;
 }
 
-/** One idea row: ref/title/scope/summary + the segmented Approve/Deny control. */
+/**
+ * One idea row: ref/title/scope/summary + the segmented Approve/Deny control.
+ * The text block is itself a button — clicking it opens the idea's full
+ * markdown spec in TaskDetailModal (a run only ever gets ONE idea-spec
+ * artifact tab, so this is the only way to inspect a non-first idea's spec
+ * before voting on it). The Approve/Deny control is a sibling, not a
+ * descendant, so its clicks never bubble into onOpenSpec.
+ */
 function IdeaVerdictRow({
   idea,
   verdict,
   readOnly,
   onSetVerdict,
+  onOpenSpec,
 }: {
   idea: ApproveIdeasArtifactPayload['ideas'][number];
   verdict: IdeaVerdict | null;
   readOnly: boolean;
   onSetVerdict: (verdict: IdeaVerdict) => void;
+  onOpenSpec: () => void;
 }): ReactElement {
   const buttonStyle = (active: boolean, activeColor: string): CSSProperties => ({
     fontSize: '10.5px',
@@ -1087,7 +1096,21 @@ function IdeaVerdictRow({
         marginBottom: 8,
       }}
     >
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <button
+        type="button"
+        data-testid={`approve-ideas-open-spec-${idea.ref}`}
+        onClick={onOpenSpec}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          background: 'none',
+          border: 'none',
+          padding: 0,
+          textAlign: 'left',
+          font: 'inherit',
+          cursor: 'pointer',
+        }}
+      >
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
           <span style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '.04em', color: ARTIFACT_COLORS['approve-ideas'] }}>
             {idea.ref}
@@ -1097,10 +1120,11 @@ function IdeaVerdictRow({
               {idea.scope}
             </span>
           )}
+          <span style={{ fontSize: '9px', color: FAINT }}>View spec →</span>
         </div>
         <div style={{ fontSize: '12px', fontWeight: 600, color: INK, marginTop: 2 }}>{idea.title}</div>
         {idea.summary && <div style={{ fontSize: '10.5px', color: MUTED, marginTop: 3, lineHeight: 1.4 }}>{idea.summary}</div>}
-      </div>
+      </button>
       <div
         data-testid={`approve-ideas-verdict-${idea.ref}`}
         style={{ display: 'flex', border: `1px solid ${HAIRLINE}`, borderRadius: 3, overflow: 'hidden', flexShrink: 0 }}
@@ -1168,6 +1192,35 @@ function ApproveIdeasBody({ artifact, projectId }: { artifact: Artifact; project
     setVerdicts((prev) => ({ ...prev, [ref]: verdict }));
   };
 
+  // Spec viewing (orthogonal to verdicts — works read-only and gated). The
+  // artifact payload's rows carry only a display ref, not an opaque entity
+  // id, so a click resolves the ref against the live project backlog. An
+  // incrementing token guards against a slow first fetch clobbering a faster
+  // later one when the user clicks another row before the first resolves.
+  const [specIdea, setSpecIdea] = useState<BacklogTaskItem | null>(null);
+  const [specError, setSpecError] = useState<string | null>(null);
+  const specRequestToken = useRef(0);
+
+  const openSpec = (ref: string): void => {
+    setSpecError(null);
+    const token = ++specRequestToken.current;
+    trpc.cyboflow.tasks.list
+      .query({ projectId })
+      .then((rows) => {
+        if (specRequestToken.current !== token) return; // superseded by a later click
+        const idea = rows.find((t) => t.type === 'idea' && t.ref === ref) ?? null;
+        if (idea) {
+          setSpecIdea(idea);
+        } else {
+          setSpecError(`Couldn't load the spec for ${ref}.`);
+        }
+      })
+      .catch(() => {
+        if (specRequestToken.current !== token) return;
+        setSpecError(`Couldn't load the spec for ${ref}.`);
+      });
+  };
+
   const approvedCount = ideas.filter((idea) => verdicts[idea.ref] === 'approve').length;
   const deniedCount = ideas.filter((idea) => verdicts[idea.ref] === 'deny').length;
   const undecidedCount = ideas.length - approvedCount - deniedCount;
@@ -1227,8 +1280,14 @@ function ApproveIdeasBody({ artifact, projectId }: { artifact: Artifact; project
                 verdict={verdicts[idea.ref] ?? null}
                 readOnly={readOnly}
                 onSetVerdict={(verdict) => setVerdict(idea.ref, verdict)}
+                onOpenSpec={() => openSpec(idea.ref)}
               />
             ))}
+            {specError && (
+              <span data-testid="approve-ideas-spec-error" style={{ fontSize: '10px', color: VERDICT_FAIL }}>
+                {specError}
+              </span>
+            )}
           </div>
           {gateItem && (
             <div
@@ -1277,6 +1336,7 @@ function ApproveIdeasBody({ artifact, projectId }: { artifact: Artifact; project
           )}
         </div>
       )}
+      <TaskDetailModal task={specIdea} onClose={() => setSpecIdea(null)} />
     </Shell>
   );
 }

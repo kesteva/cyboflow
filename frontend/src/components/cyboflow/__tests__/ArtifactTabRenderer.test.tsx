@@ -43,6 +43,9 @@ vi.mock('../../MarkdownPreview', () => ({
 const commitMutate = vi.fn().mockResolvedValue({ artifactId: 'art-1' });
 const acceptBaselineMutate = vi.fn().mockResolvedValue({ baselineKey: 'IDEA-018' });
 const reviewItemsResolveMutate = vi.fn().mockResolvedValue({ reviewItemId: 'rvw_gate', resumed: true });
+// approve-ideas resolves a row's display ref to its full entity (incl. body)
+// via tasks.list — the artifact payload carries only ref/title/scope/summary.
+const tasksListQuery = vi.fn();
 vi.mock('../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
@@ -52,6 +55,9 @@ vi.mock('../../../trpc/client', () => ({
       },
       reviewItems: {
         resolve: { mutate: (...args: unknown[]) => reviewItemsResolveMutate(...args) },
+      },
+      tasks: {
+        list: { query: (...args: unknown[]) => tasksListQuery(...args) },
       },
     },
   },
@@ -144,6 +150,7 @@ describe('ArtifactTabRenderer', () => {
     commitMutate.mockClear();
     acceptBaselineMutate.mockClear();
     reviewItemsResolveMutate.mockClear();
+    tasksListQuery.mockReset();
     setReviewItems([]);
     mockReviewInit.mockClear();
   });
@@ -898,5 +905,116 @@ describe('ArtifactTabRenderer', () => {
     setReviewItems([makeGateItem()]);
     renderApproveIdeas(null);
     expect(screen.getByTestId('artifact-approve-ideas-empty')).toHaveTextContent('No ideas to review.');
+  });
+
+  // --- approve-ideas: click-through to the full spec (TaskDetailModal) -------
+  // A run only ever gets ONE idea-spec artifact tab, so in a multi-idea batch
+  // the row's text block resolves its display ref against the live backlog
+  // (tasks.list — the payload row itself carries no opaque entity id) and
+  // opens the shared TaskDetailModal.
+
+  function makeSpecIdea(overrides: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
+    return makeIdea({
+      id: 'idea-014',
+      ref: 'IDEA-014',
+      title: 'Ship the widget',
+      body: '# Widget spec\n\nFull detail for IDEA-014.',
+      ...overrides,
+    });
+  }
+
+  it('clicking a row resolves the ref via tasks.list and opens the modal with the full spec', async () => {
+    setReviewItems([makeGateItem()]);
+    tasksListQuery.mockResolvedValue([makeSpecIdea()]);
+    renderApproveIdeas();
+
+    expect(screen.queryByTestId('task-detail-modal')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('approve-ideas-open-spec-IDEA-014'));
+
+    await waitFor(() => expect(screen.getByTestId('task-detail-modal')).toBeInTheDocument());
+    expect(tasksListQuery).toHaveBeenCalledWith({ projectId: 1 });
+    expect(screen.getByTestId('md-preview')).toHaveTextContent('Full detail for IDEA-014.');
+  });
+
+  it('names the ref in an inline error and does not open the modal when the ref is missing from the list', async () => {
+    setReviewItems([makeGateItem()]);
+    tasksListQuery.mockResolvedValue([]); // IDEA-014 not present
+    renderApproveIdeas();
+
+    fireEvent.click(screen.getByTestId('approve-ideas-open-spec-IDEA-014'));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('approve-ideas-spec-error')).toHaveTextContent("Couldn't load the spec for IDEA-014."),
+    );
+    expect(screen.queryByTestId('task-detail-modal')).not.toBeInTheDocument();
+  });
+
+  it('shows the same inline error without an unhandled rejection when tasks.list rejects', async () => {
+    setReviewItems([makeGateItem()]);
+    tasksListQuery.mockRejectedValue(new Error('network down'));
+    renderApproveIdeas();
+
+    fireEvent.click(screen.getByTestId('approve-ideas-open-spec-IDEA-014'));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('approve-ideas-spec-error')).toHaveTextContent("Couldn't load the spec for IDEA-014."),
+    );
+    expect(screen.queryByTestId('task-detail-modal')).not.toBeInTheDocument();
+  });
+
+  it('clicking an Approve verdict button does not open the spec modal', () => {
+    setReviewItems([makeGateItem()]);
+    renderApproveIdeas();
+
+    fireEvent.click(screen.getByTestId('approve-ideas-approve-IDEA-014'));
+    expect(screen.queryByTestId('task-detail-modal')).not.toBeInTheDocument();
+    expect(tasksListQuery).not.toHaveBeenCalled();
+  });
+
+  it('closes the modal via the shared close affordance', async () => {
+    setReviewItems([makeGateItem()]);
+    tasksListQuery.mockResolvedValue([makeSpecIdea()]);
+    renderApproveIdeas();
+
+    fireEvent.click(screen.getByTestId('approve-ideas-open-spec-IDEA-014'));
+    await waitFor(() => expect(screen.getByTestId('task-detail-modal')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByLabelText('Close modal'));
+    expect(screen.queryByTestId('task-detail-modal')).not.toBeInTheDocument();
+  });
+
+  it('spec viewing works read-only too (no pending gate for this run)', async () => {
+    setReviewItems([]); // no gate item -> readOnly rows
+    tasksListQuery.mockResolvedValue([makeSpecIdea()]);
+    renderApproveIdeas();
+
+    expect(screen.getByTestId('approve-ideas-no-gate-note')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('approve-ideas-open-spec-IDEA-014'));
+    await waitFor(() => expect(screen.getByTestId('task-detail-modal')).toBeInTheDocument());
+  });
+
+  it('the last click wins when a second row is clicked before the first fetch resolves', async () => {
+    setReviewItems([makeGateItem()]);
+    let resolveFirst: (rows: BacklogTaskItem[]) => void = () => {};
+    const firstPromise = new Promise<BacklogTaskItem[]>((res) => {
+      resolveFirst = res;
+    });
+    tasksListQuery
+      .mockReturnValueOnce(firstPromise)
+      .mockResolvedValueOnce([
+        makeSpecIdea({ id: 'idea-015', ref: 'IDEA-015', title: 'Rework the gadget', body: 'Gadget detail.' }),
+      ]);
+    renderApproveIdeas();
+
+    fireEvent.click(screen.getByTestId('approve-ideas-open-spec-IDEA-014'));
+    fireEvent.click(screen.getByTestId('approve-ideas-open-spec-IDEA-015'));
+
+    await waitFor(() => expect(screen.getByTestId('task-detail-modal')).toBeInTheDocument());
+    expect(screen.getByTestId('task-detail-title')).toHaveTextContent('Rework the gadget');
+
+    // The slower first fetch resolving afterward must not clobber the second's result.
+    resolveFirst([makeSpecIdea()]);
+    await Promise.resolve();
+    expect(screen.getByTestId('task-detail-title')).toHaveTextContent('Rework the gadget');
   });
 });
