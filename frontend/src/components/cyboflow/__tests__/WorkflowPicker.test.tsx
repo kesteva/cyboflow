@@ -839,6 +839,8 @@ describe('WorkflowPicker — Planner idea-selection gate (migration 017)', () =>
       workflowId: 'wf-planner',
       projectId: 1,
       substrate: 'sdk',
+      agentProvider: 'claude',
+      agentRuntime: 'claude-sdk',
       sessionId: 'session-quick-001',
       permissionMode: 'default',
       model: 'opus',
