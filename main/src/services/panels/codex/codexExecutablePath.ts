@@ -3,7 +3,7 @@ import * as path from 'node:path';
 import { createRequire } from 'node:module';
 import { app } from 'electron';
 
-export const CODEX_EXECUTABLE_VERSION = '0.143.0' as const;
+export const CODEX_EXECUTABLE_VERSION = '0.144.3' as const;
 
 export type CodexExecutableTarget =
   | 'x86_64-unknown-linux-musl'

@@ -26,7 +26,7 @@ interface HarnessOptions {
 const CODEX_PACKAGE_JSON = path.join(
   '/virtual',
   '.pnpm',
-  '@openai+codex@0.143.0',
+  '@openai+codex@0.144.3',
   'node_modules',
   '@openai',
   'codex',
@@ -60,7 +60,7 @@ function createHarness(options: HarnessOptions = {}): {
   const platformPackageJson = path.join('/virtual', 'native', platformPackage, 'package.json');
   const manifest = options.manifest ?? {
     layoutVersion: 1,
-    version: '0.143.0',
+    version: '0.144.3',
     target,
     variant: 'codex',
     entrypoint,
@@ -164,7 +164,7 @@ describe('resolveCodexExecutablePath', () => {
       entrypoint: 'bin/codex.exe',
     },
   ])(
-    'uses the Codex 0.143.0 native package for $platform/$arch',
+    'uses the Codex 0.144.3 native package for $platform/$arch',
     ({ platform, arch, target, platformPackage, entrypoint }) => {
       const harness = createHarness({ platform, arch, target, platformPackage, entrypoint });
 
@@ -187,7 +187,7 @@ describe('resolveCodexExecutablePath', () => {
       expect(result).toEqual({
         executablePath: path.join(targetRoot, entrypoint),
         pathDir: path.join(targetRoot, 'codex-path'),
-        version: '0.143.0',
+        version: '0.144.3',
         target,
       });
     },
@@ -218,14 +218,14 @@ describe('resolveCodexExecutablePath', () => {
   it.each([
     ['malformed JSON', undefined, '{not-json', /malformed JSON/],
     ['layout version', { layoutVersion: 2 }, undefined, /layoutVersion must be 1/],
-    ['package version', { version: '0.144.0' }, undefined, /version must be 0\.143\.0/],
+    ['package version', { version: '0.144.0' }, undefined, /version must be 0\.144\.3/],
     ['target', { target: 'x86_64-apple-darwin' }, undefined, /target must be aarch64-apple-darwin/],
     ['entrypoint', { entrypoint: '../codex' }, undefined, /entrypoint must be bin\/codex/],
     ['PATH directory', { pathDir: '../bin' }, undefined, /pathDir must be codex-path/],
   ])('rejects an invalid %s manifest', (_name, manifestPatch, manifestText, expected) => {
     const validManifest = {
       layoutVersion: 1,
-      version: '0.143.0',
+      version: '0.144.3',
       target: 'aarch64-apple-darwin',
       entrypoint: 'bin/codex',
       pathDir: 'codex-path',

@@ -23,7 +23,7 @@ class FakeAppServerClient implements CodexAppServerClientLike {
   readonly start = vi.fn(() => undefined);
   readonly stop = vi.fn(async (_signal?: NodeJS.Signals) => undefined);
   readonly initialize = vi.fn(async (_params: AppServerInitializeParams) => ({
-    userAgent: 'codex-cli/0.143.0',
+    userAgent: 'codex-cli/0.144.3',
     codexHome: '/home/user/.codex',
     platformFamily: 'unix',
     platformOs: 'macos',
@@ -94,7 +94,7 @@ function makeManager(
     () => ({
       executablePath: '/app/codex/bin/codex',
       pathDir: '/app/codex/codex-path',
-      version: '0.143.0',
+      version: '0.144.3',
       target: 'aarch64-apple-darwin',
     }),
     '0.1.test',
@@ -189,7 +189,7 @@ describe('CodexSdkManager app-server runtime', () => {
         runtime: {
           found: true,
           path: '/app/codex/bin/codex',
-          version: '0.143.0',
+          version: '0.144.3',
         },
         account: {
           found: true,
@@ -459,7 +459,7 @@ describe('CodexSdkManager app-server runtime', () => {
         provider: 'codex',
         runtime: 'codex-sdk',
         external_session_id: 'codex-thread-1',
-        sdk_version: 'codex-cli/0.143.0',
+        sdk_version: 'codex-cli/0.144.3',
         mcp_servers: [{ name: 'cyboflow', status: 'configured' }],
       });
       expect(JSON.parse(rows[2].payloadJson)).toMatchObject({

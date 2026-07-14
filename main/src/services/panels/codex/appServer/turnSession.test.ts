@@ -229,7 +229,7 @@ describe('CodexAppServerTurnSession', () => {
     expect(session.activeTurnId).toBe('turn-1');
   });
 
-  it('maps exact 0.143.0 token usage notifications for the active turn', async () => {
+  it('maps exact 0.144.3 token usage notifications for the active turn', async () => {
     const client = new FakeTurnSessionClient();
     const events: TurnSessionEvent[] = [];
     const session = await activeSession(client, events);

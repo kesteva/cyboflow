@@ -17,7 +17,7 @@ const DETECTED: ClaudeDetectionResult = {
 };
 
 const CODEX_DETECTED: CodexDetectionResult = {
-  runtime: { found: true, path: '/app/codex', version: '0.143.0' },
+  runtime: { found: true, path: '/app/codex', version: '0.144.3' },
   account: { found: true, email: 'codex@example.com', planType: 'plus' },
   state: 'detected',
 };

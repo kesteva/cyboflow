@@ -51,8 +51,8 @@ Keep `sessions.substrate` and `workflow_runs.substrate` during the migration win
 
 Current v1 implementation decisions:
 
-- The workflow execution transport is the native Codex 0.143.0 app-server over
-  stdio JSON-RPC. Cyboflow packages `@openai/codex` at exactly `0.143.0` and does
+- The workflow execution transport is the native Codex 0.144.3 app-server over
+  stdio JSON-RPC. Cyboflow packages `@openai/codex` at exactly `0.144.3` and does
   not use `@openai/codex-sdk` for workflow execution.
 - `codex-sdk` remains the persisted `AgentRuntime` value, wire value, fixture
   name, and manager/factory compatibility name. It now means "the structured
@@ -80,7 +80,7 @@ Completed foundations:
 - Provider-neutral agent-event projection, normalized-event persistence,
   run/session message projection, Codex event correlation, and a separate
   `codex_app_server_notification` audit row for each original notification.
-- Codex 0.143.0 app-server transport, initialize/thread/turn lifecycle,
+- Codex 0.144.3 app-server transport, initialize/thread/turn lifecycle,
   thread-start/thread-resume primitives, interruption, terminal error handling,
   and internal runtime dispatch. Codex SDK quick-session follow-ups route through
   `sessions:send-input` and resume the latest Codex thread; the manager's legacy
@@ -136,7 +136,7 @@ The initial research covered the Codex SDK, `codex exec --json`, MCP, sandbox,
 and auth surfaces. Phase 0 then established that the pinned app-server protocol is
 the correct workflow integration surface for this repository:
 
-- `@openai/codex` 0.143.0 supplies the platform-native executable that Cyboflow
+- `@openai/codex` 0.144.3 supplies the platform-native executable that Cyboflow
   launches as `codex app-server --listen stdio://`.
 - App-server supports structured initialize, account, thread, turn, item, usage,
   and error traffic over stdio JSON-RPC.
@@ -158,8 +158,8 @@ the correct workflow integration surface for this repository:
 Primary source links:
 
 - Codex manual: https://developers.openai.com/codex/codex-manual.md
-- Codex app-server README: https://github.com/openai/codex/blob/rust-v0.143.0/codex-rs/app-server/README.md
-- Codex app-server generated protocol: generated from the pinned `@openai/codex@0.143.0` executable with `codex app-server generate-ts`
+- Codex app-server README: https://github.com/openai/codex/blob/rust-v0.144.3/codex-rs/app-server/README.md
+- Codex app-server generated protocol: generated from the pinned `@openai/codex@0.144.3` executable with `codex app-server generate-ts`
 
 Local Cyboflow seams reviewed:
 
@@ -179,9 +179,9 @@ Local Cyboflow seams reviewed:
 
 ## Recommended Integration Surface
 
-### Primary: Pinned Codex 0.143.0 App-Server
+### Primary: Pinned Codex 0.144.3 App-Server
 
-Use the packaged native executable from `@openai/codex` 0.143.0 and communicate
+Use the packaged native executable from `@openai/codex` 0.144.3 and communicate
 with `app-server --listen stdio://` as the workflow runtime.
 
 Reasons:
@@ -411,7 +411,7 @@ This follows the current Claude SDK precedent: the class can inherit PTY lifecyc
 
 Expected flow:
 
-1. Resolve and validate the packaged `@openai/codex` 0.143.0 native executable.
+1. Resolve and validate the packaged `@openai/codex` 0.144.3 native executable.
 2. Launch `codex app-server --listen stdio://` with run-scoped environment.
 3. Initialize the app-server and verify its `userAgent` contains the pinned version.
 4. Call `account/read` and require ChatGPT auth before creating any thread.
