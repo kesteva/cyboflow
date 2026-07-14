@@ -738,6 +738,26 @@ describe('SubstrateDispatchFacade — fan-in re-emits both managers events', () 
     expect(received[1]).toBe(interactiveExit);
   });
 
+  it("re-emits a 'spawned' from either manager with the identical payload object (turn-start waiter seam)", () => {
+    const run = makeWorkflowRunRow();
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    const received: unknown[] = [];
+    facade.on('spawned', (p) => received.push(p));
+
+    const sdkSpawned = { panelId: run.id, sessionId: run.id };
+    const interactiveSpawned = { panelId: 'panel-X', sessionId: 'sess-X' };
+    sdk.emit('spawned', sdkSpawned);
+    interactive.emit('spawned', interactiveSpawned);
+
+    expect(received).toEqual([sdkSpawned, interactiveSpawned]);
+    expect(received[0]).toBe(sdkSpawned);
+    expect(received[1]).toBe(interactiveSpawned);
+  });
+
   it('dispose() unsubscribes from both managers so no further events are re-emitted', () => {
     const run = makeWorkflowRunRow();
     const registry = makeRegistry(run);
@@ -747,16 +767,21 @@ describe('SubstrateDispatchFacade — fan-in re-emits both managers events', () 
 
     const received: unknown[] = [];
     facade.on('output', (p) => received.push(p));
+    facade.on('spawned', (p) => received.push(p));
 
     facade.dispose();
 
     sdk.emit('output', makeGoldenOutput(run.id));
     interactive.emit('output', makeGoldenOutput(run.id));
+    sdk.emit('spawned', { panelId: run.id, sessionId: run.id });
+    interactive.emit('spawned', { panelId: run.id, sessionId: run.id });
 
     expect(received).toHaveLength(0);
     // Underlying managers no longer have facade listeners attached.
     expect(sdk.listenerCount('output')).toBe(0);
     expect(interactive.listenerCount('output')).toBe(0);
+    expect(sdk.listenerCount('spawned')).toBe(0);
+    expect(interactive.listenerCount('spawned')).toBe(0);
   });
 });
 

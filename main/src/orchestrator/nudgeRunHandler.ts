@@ -43,12 +43,45 @@ export interface NudgeRunExecutorLike {
   execute(runId: string): Promise<void>;
 }
 
+/**
+ * One-shot turn-start waiter for a run. `started` resolves when the resumed
+ * turn has actually STARTED (the per-logical-turn 'spawned' event for
+ * panelId === runId — emitted after the prompt is committed to the SDK
+ * conversation, on both cold spawns and warm pushes). `cancel()` detaches the
+ * underlying listener; it must be safe to call after `started` resolved.
+ */
+export interface TurnStartWaiter {
+  started: Promise<void>;
+  cancel: () => void;
+}
+
 export interface NudgeRunDeps {
   db: DatabaseLike;
   runQueues: RunQueueRegistry;
   runExecutor: NudgeRunExecutorLike;
   logger?: LoggerLike;
+  /**
+   * Optional turn-start waiter factory (wired at boot over the substrate
+   * facade's 'spawned' fan-in). Only consulted when a caller opts into
+   * `deliveredAt: 'turn-start'`; absent → that mode degrades to awaiting the
+   * full execute() drain (today's behavior).
+   */
+  awaitTurnStart?: (runId: string) => TurnStartWaiter;
 }
+
+/**
+ * When a nudge counts as delivered:
+ *  - 'drain' (default): after the resumed turn ran to its rest boundary —
+ *    execute() resolved. A turn that parks MID-TURN at an AskUserQuestion gate
+ *    defers this indefinitely.
+ *  - 'turn-start': as soon as the resumed turn actually STARTED (the prompt is
+ *    committed to the SDK conversation). Used by the gate-resolution paths
+ *    (approve-ideas verdicts, recovery-gate answers) so resolving the gate is
+ *    not held hostage by whatever the resumed turn does next — the planner's
+ *    post-verdict turn immediately minting the approve-plan question is the
+ *    canonical case.
+ */
+export type NudgeDeliveredAt = 'drain' | 'turn-start';
 
 // ---------------------------------------------------------------------------
 // Result type
@@ -99,17 +132,26 @@ const TERMINAL_STATUSES = new Set<string>(TERMINAL_RUN_STATUSES);
  *   7. guarded UPDATE → running; 0 rows changed → { noOp: 'race' }
  *      (awaiting_review → running is legal — stateMachine ALLOWED_TRANSITIONS.)
  *
- * Then OUTSIDE the queue guard: setPendingNudge(runId, text) + execute(runId)
- * (runs to drain, re-rests in awaiting_review) → { delivered: true }. An
- * execute() rejection is logged and surfaced as { noOp: 'execute_failed' } —
- * the run was already flipped to `running`; the executor's own failed-phase
- * transition (or boot-recovery on next launch) owns the terminal state.
+ * Then OUTSIDE the queue guard: setPendingNudge(runId, text) + execute(runId).
+ * With the default `deliveredAt: 'drain'` the handler awaits the full drain
+ * (runs to rest in awaiting_review) → { delivered: true }; an execute()
+ * rejection is logged and surfaced as { noOp: 'execute_failed' } — the run was
+ * already flipped to `running`; the executor's own failed-phase transition (or
+ * boot-recovery on next launch) owns the terminal state.
+ *
+ * With `deliveredAt: 'turn-start'` (and `deps.awaitTurnStart` wired) the
+ * handler races execute() against the run's turn-start signal and returns
+ * { delivered: true } as soon as the resumed turn STARTED — execute() keeps
+ * running detached (its rejection is logged; the executor owns the run's
+ * failure lifecycle). An execute() rejection BEFORE the turn starts still
+ * surfaces as { noOp: 'execute_failed' }, so a spawn failure never counts as
+ * delivered. If the signal never arrives the race degrades to the drain arm.
  */
 export async function nudgeRunHandler(
   runId: string,
   text: string,
   deps: NudgeRunDeps,
-  opts: { ignoreBlockingReviewItemId?: string | string[] } = {},
+  opts: { ignoreBlockingReviewItemId?: string | string[]; deliveredAt?: NudgeDeliveredAt } = {},
 ): Promise<NudgeRunResult> {
   const { db, runQueues, runExecutor, logger } = deps;
 
@@ -175,15 +217,45 @@ export async function nudgeRunHandler(
   // Phase 2: stash the nudge + re-drive OUTSIDE the queue guard (execute() and
   // its lifecycle transitions re-enter the same run queue — see header note).
   runExecutor.setPendingNudge(runId, trimmed);
-  try {
-    await runExecutor.execute(runId);
-  } catch (err) {
-    logger?.error('[nudgeRun] execute() rejected after running flip', {
-      runId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return { noOp: true, reason: 'execute_failed' };
+
+  // Turn-start delivery mode: register the waiter BEFORE execute() so the
+  // 'spawned' emit cannot be missed, then race turn-start against execute()'s
+  // own settlement. Falls through to the drain path when the caller did not
+  // opt in or no waiter factory is wired (tests/legacy boot).
+  const waiter = opts.deliveredAt === 'turn-start' ? deps.awaitTurnStart?.(runId) : undefined;
+
+  if (!waiter) {
+    try {
+      await runExecutor.execute(runId);
+    } catch (err) {
+      logger?.error('[nudgeRun] execute() rejected after running flip', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return { noOp: true, reason: 'execute_failed' };
+    }
+    return { delivered: true };
   }
 
+  // execSettled never rejects: both arms map to a value, so the detached
+  // execute() can never become an unhandled rejection after the race resolves
+  // via turn-start. A post-start rejection is only logged — the executor's own
+  // 'failed' transition owns the run state, and the nudge text is already
+  // committed to the conversation.
+  const execSettled = runExecutor.execute(runId).then(
+    () => 'drained' as const,
+    (err: unknown) => {
+      logger?.error('[nudgeRun] execute() rejected after running flip', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return 'execute_failed' as const;
+    },
+  );
+  const outcome = await Promise.race([waiter.started.then(() => 'started' as const), execSettled]);
+  waiter.cancel();
+  if (outcome === 'execute_failed') {
+    return { noOp: true, reason: 'execute_failed' };
+  }
   return { delivered: true };
 }

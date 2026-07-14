@@ -994,12 +994,14 @@ describe('cyboflow.reviewItems.resolve — approve-ideas verdict delivery (agent
       verdicts: { 'IDEA-1': 'approve', 'IDEA-2': 'deny' },
     });
 
-    // Nudge FIRST, ignoring the gate's own blocking row so it does not block its resume.
+    // Nudge FIRST, ignoring the gate's own blocking row so it does not block its
+    // resume — and delivered-at-turn-start, so the resolve is not parked behind
+    // the resumed turn's own next gate (the planner's approve-plan question).
     expect(nudge).toHaveBeenCalledTimes(1);
     expect(nudge).toHaveBeenCalledWith(
       'run-agent',
       expect.stringContaining('# Approve-ideas decisions'),
-      { ignoreBlockingReviewItemId: ['rvw_agent'] },
+      { ignoreBlockingReviewItemId: ['rvw_agent'], deliveredAt: 'turn-start' },
     );
     const deliveredText = nudge.mock.calls[0][1];
     expect(deliveredText).toContain('- IDEA-1: approve');

@@ -3075,23 +3075,50 @@ app.whenReady().then(async () => {
     // module-scoped RunExecutor built in initializeServices(). The handler
     // re-drives runExecutor.execute(runId) with a stashed nudge so the run
     // resumes its SDK conversation.
-    setNudgeRunDeps({
+    //
+    // awaitTurnStart: one-shot waiter over the facade's per-logical-turn
+    // 'spawned' fan-in (panelId === runId for flow runs). Only consumed by
+    // callers opting into `deliveredAt: 'turn-start'` (the gate-resolution
+    // paths: approve-ideas verdicts, recovery-gate answers) — the plain
+    // runs.nudge mutation keeps its await-the-drain behavior.
+    const nudgeDeps = {
       db,
       runQueues,
       runExecutor,
       logger: loggerLike,
-    });
+      awaitTurnStart: (runId: string) => {
+        let onSpawned: ((payload: unknown) => void) | null = null;
+        const started = new Promise<void>((resolveStarted) => {
+          onSpawned = (payload: unknown) => {
+            const evt = payload as { panelId?: unknown };
+            if (evt !== null && typeof evt === 'object' && evt.panelId === runId) {
+              if (onSpawned) substrateFacade.off('spawned', onSpawned);
+              resolveStarted();
+            }
+          };
+          substrateFacade.on('spawned', onSpawned);
+        });
+        return {
+          started,
+          cancel: () => {
+            if (onSpawned) substrateFacade.off('spawned', onSpawned);
+          },
+        };
+      },
+    };
+    setNudgeRunDeps(nudgeDeps);
     console.log('[Main] runs.nudge deps wired');
 
     // Approve-ideas verdict delivery (IDEA-009 / TASK-035B): the default
     // ORCHESTRATED planner parks its SDK conversation at a drained REST after
     // minting the approve-ideas gate via cyboflow_report_finding, so a submitted
     // per-idea verdict map must be DELIVERED as the run's next turn (it cannot read
-    // review items via MCP). Wrap nudgeRunHandler with the SAME {db, runQueues,
-    // runExecutor} the nudge mutation uses so the resume re-drives the same warm
-    // executor; reviewItems.resolve nudges FIRST and resolves only on delivery.
+    // review items via MCP). Wrap nudgeRunHandler with the SAME deps bag the nudge
+    // mutation uses so the resume re-drives the same warm executor; reviewItems.
+    // resolve nudges FIRST and resolves once the resumed turn STARTS (the caller
+    // passes `deliveredAt: 'turn-start'`, backed by awaitTurnStart above).
     setResolveVerdictNudgeDeps({
-      nudge: (runId, text, opts) => nudgeRunHandler(runId, text, { db, runQueues, runExecutor, logger: loggerLike }, opts),
+      nudge: (runId, text, opts) => nudgeRunHandler(runId, text, nudgeDeps, opts),
     });
     console.log('[Main] reviewItems approve-ideas verdict-delivery deps wired');
 

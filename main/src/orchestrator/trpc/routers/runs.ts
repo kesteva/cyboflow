@@ -1994,7 +1994,12 @@ export const runsRouter = router({
       const deps = nudgeRunDeps;
       return answerRecoveryGateHandler(input.projectId, input.reviewItemId, input.answerText, {
         db: ctx.db,
-        nudge: (runId, text, opts) => nudgeRunHandler(runId, text, deps, opts),
+        // 'turn-start': delivered = the resumed turn STARTED with the answer as
+        // its input. Awaiting the full drain would park this mutation (and the
+        // gate resolve) behind any gate the resumed turn mints mid-turn, and an
+        // app restart would orphan the recovery gate pending with the answer
+        // already consumed — same failure class as the approve-ideas verdicts.
+        nudge: (runId, text, opts) => nudgeRunHandler(runId, text, deps, { ...opts, deliveredAt: 'turn-start' }),
         resolveReviewItem: (projectId, reviewItemId, resolution) =>
           ReviewItemRouter.getInstance()
             .applyReviewItem(projectId, { op: 'resolve', actor: 'user', reviewItemId, resolution })

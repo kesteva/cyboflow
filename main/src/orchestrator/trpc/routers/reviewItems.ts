@@ -52,7 +52,7 @@ import {
   type ResolveReviewItemDeps,
   type ResolveReviewItemInput,
 } from '../../resolveReviewItemHandler';
-import type { NudgeRunResult } from '../../nudgeRunHandler';
+import type { NudgeDeliveredAt, NudgeRunResult } from '../../nudgeRunHandler';
 import { eventToAsyncIterable } from './events';
 import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../../../../shared/types/cyboflow';
 
@@ -162,13 +162,17 @@ export function resumeWouldStrandEndedWalk(runId: string): boolean {
 /**
  * Verdict-delivery nudge: resume `runId` with `text`, ignoring the gate's own
  * blocking row PLUS the batch's co-pending idea-size guards (they are resolved
- * out-of-session and gate run COMPLETION, not this resume).
+ * out-of-session and gate run COMPLETION, not this resume). `deliveredAt:
+ * 'turn-start'` is passed so `delivered` means the resumed turn STARTED (the
+ * decisions are committed to the conversation) — NOT that it ran to drain,
+ * which would park this mutation behind whatever gate the resumed turn mints
+ * next (the planner's approve-plan question, canonically).
  */
 export interface ResolveVerdictNudgeDeps {
   nudge: (
     runId: string,
     text: string,
-    opts: { ignoreBlockingReviewItemId: string | string[] },
+    opts: { ignoreBlockingReviewItemId: string | string[]; deliveredAt?: NudgeDeliveredAt },
   ) => Promise<NudgeRunResult>;
 }
 
@@ -352,11 +356,15 @@ function buildResolveDeps(db: DatabaseLike): ResolveReviewItemDeps {
  * malformed map rejects (BAD_REQUEST) BEFORE any nudge — the gate stays pending
  * and the planner is never handed a bad block. Then nudge FIRST (ignoring this
  * gate's own blocking row, which would otherwise block its own resume) and resolve
- * ONLY on a confirmed `delivered`. A refused resume throws CONFLICT and records
- * NOTHING, so the card/artifact can retry once the run is idle. On delivered the
- * SHARED resolveReviewItem runs exactly as the scalar path (it re-validates + folds
- * deterministically); its aggregate-unblock resume is a no-op here because the
- * strand guard sees the run has re-rested with no live walk after the nudge.
+ * ONLY on a confirmed `delivered` — which, via `deliveredAt: 'turn-start'`, means
+ * the resumed turn STARTED with the decisions as its input (NOT that it drained;
+ * the turn keeps running while the resolve below lands, so the gate clears
+ * immediately instead of lingering behind the turn's own next gate). A refused
+ * resume throws CONFLICT and records NOTHING, so the card/artifact can retry once
+ * the run is idle. On delivered the SHARED resolveReviewItem runs exactly as the
+ * scalar path (it re-validates + folds deterministically); its aggregate-unblock
+ * resume is a no-op here because the nudge already resumed the run (the strand
+ * guard / guarded status flip both refuse, with a diagnostic warn).
  */
 async function deliverApproveIdeasVerdicts(
   db: DatabaseLike,
@@ -423,8 +431,15 @@ async function deliverApproveIdeasVerdicts(
     // Table/read failure — fall back to ignoring only the gate's own row.
   }
 
+  // 'turn-start': delivered = the resumed turn STARTED with the decisions as
+  // its input. Awaiting the full drain instead would hang this mutation behind
+  // the resumed turn's OWN next gate (the planner mints the approve-plan
+  // question mid-turn), deferring the resolve below indefinitely — and an app
+  // restart would orphan the gate as pending forever with the verdicts already
+  // consumed (the live-smoke bug this mode exists for, 2026-07-14).
   const nudge = await resolveVerdictNudgeDeps.nudge(runId, delivered, {
     ignoreBlockingReviewItemId: ignoreIds,
+    deliveredAt: 'turn-start',
   });
   if (!('delivered' in nudge && nudge.delivered)) {
     const reason = 'noOp' in nudge ? nudge.reason : 'unknown';

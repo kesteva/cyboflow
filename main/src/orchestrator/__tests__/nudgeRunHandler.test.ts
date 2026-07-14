@@ -275,3 +275,184 @@ describe('nudgeRunHandler — delivery', () => {
     db.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Turn-start delivery mode (deliveredAt: 'turn-start')
+// ---------------------------------------------------------------------------
+
+/** A manually-settled promise pair for controlling execute()/waiter timing. */
+function deferred(): { promise: Promise<void>; resolve: () => void; reject: (err: Error) => void } {
+  let resolve!: () => void;
+  let reject!: (err: Error) => void;
+  const promise = new Promise<void>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+describe("nudgeRunHandler — deliveredAt: 'turn-start'", () => {
+  it('returns delivered as soon as the turn-start waiter fires, while execute() is still mid-turn', async () => {
+    const db = makeDb();
+    const { runId } = seedRun(db, { status: 'awaiting_review' });
+    setSession(db, runId, 'sess-1');
+
+    const exec = deferred(); // never settled during the assertion window = turn still running
+    const start = deferred();
+    const cancel = vi.fn();
+    const executor: NudgeRunExecutorLike = {
+      setPendingNudge: vi.fn(),
+      execute: vi.fn(() => exec.promise),
+    };
+
+    const resultPromise = nudgeRunHandler(
+      runId,
+      'decisions',
+      {
+        db: dbAdapter(db),
+        runQueues: new RunQueueRegistry(),
+        runExecutor: executor,
+        awaitTurnStart: () => ({ started: start.promise, cancel }),
+      },
+      { deliveredAt: 'turn-start' },
+    );
+
+    start.resolve(); // the resumed turn started streaming
+    const result = await resultPromise;
+
+    expect(result).toEqual({ delivered: true });
+    expect(cancel).toHaveBeenCalledTimes(1);
+    // The turn is deliberately still in flight — the handler must not await it.
+    exec.resolve(); // settle for cleanliness
+    db.close();
+  });
+
+  it('execute() rejection BEFORE turn start → { noOp: execute_failed } (spawn failure never counts as delivered)', async () => {
+    const db = makeDb();
+    const { runId } = seedRun(db, { status: 'awaiting_review' });
+    setSession(db, runId, 'sess-1');
+
+    const start = deferred(); // never fires
+    const cancel = vi.fn();
+    const executor: NudgeRunExecutorLike = {
+      setPendingNudge: vi.fn(),
+      execute: vi.fn(() => Promise.reject(new Error('spawn boom'))),
+    };
+    const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
+
+    const result = await nudgeRunHandler(
+      runId,
+      'decisions',
+      {
+        db: dbAdapter(db),
+        runQueues: new RunQueueRegistry(),
+        runExecutor: executor,
+        logger,
+        awaitTurnStart: () => ({ started: start.promise, cancel }),
+      },
+      { deliveredAt: 'turn-start' },
+    );
+
+    expect(result).toEqual({ noOp: true, reason: 'execute_failed' });
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalled();
+    db.close();
+  });
+
+  it('execute() draining before the signal still returns delivered (waiter miss degrades to drain semantics)', async () => {
+    const db = makeDb();
+    const { runId } = seedRun(db, { status: 'awaiting_review' });
+    setSession(db, runId, 'sess-1');
+
+    const start = deferred(); // signal never arrives
+    const cancel = vi.fn();
+    const executor: NudgeRunExecutorLike = {
+      setPendingNudge: vi.fn(),
+      execute: vi.fn(() => Promise.resolve()),
+    };
+
+    const result = await nudgeRunHandler(
+      runId,
+      'decisions',
+      {
+        db: dbAdapter(db),
+        runQueues: new RunQueueRegistry(),
+        runExecutor: executor,
+        awaitTurnStart: () => ({ started: start.promise, cancel }),
+      },
+      { deliveredAt: 'turn-start' },
+    );
+
+    expect(result).toEqual({ delivered: true });
+    expect(cancel).toHaveBeenCalledTimes(1);
+    db.close();
+  });
+
+  it("deliveredAt: 'turn-start' with NO awaitTurnStart dep wired → awaits the full drain (legacy fallback)", async () => {
+    const db = makeDb();
+    const { runId } = seedRun(db, { status: 'awaiting_review' });
+    setSession(db, runId, 'sess-1');
+
+    const exec = deferred();
+    let drained = false;
+    const executor: NudgeRunExecutorLike = {
+      setPendingNudge: vi.fn(),
+      execute: vi.fn(() =>
+        exec.promise.then(() => {
+          drained = true;
+        }),
+      ),
+    };
+
+    const resultPromise = nudgeRunHandler(
+      runId,
+      'decisions',
+      { db: dbAdapter(db), runQueues: new RunQueueRegistry(), runExecutor: executor },
+      { deliveredAt: 'turn-start' },
+    );
+
+    exec.resolve();
+    const result = await resultPromise;
+    expect(result).toEqual({ delivered: true });
+    expect(drained).toBe(true); // resolved only after the full drain
+    db.close();
+  });
+
+  it('post-start execute() rejection is logged and never becomes an unhandled rejection', async () => {
+    const db = makeDb();
+    const { runId } = seedRun(db, { status: 'awaiting_review' });
+    setSession(db, runId, 'sess-1');
+
+    const exec = deferred();
+    const start = deferred();
+    const logger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
+    const executor: NudgeRunExecutorLike = {
+      setPendingNudge: vi.fn(),
+      execute: vi.fn(() => exec.promise),
+    };
+
+    const resultPromise = nudgeRunHandler(
+      runId,
+      'decisions',
+      {
+        db: dbAdapter(db),
+        runQueues: new RunQueueRegistry(),
+        runExecutor: executor,
+        logger,
+        awaitTurnStart: () => ({ started: start.promise, cancel: vi.fn() }),
+      },
+      { deliveredAt: 'turn-start' },
+    );
+
+    start.resolve();
+    const result = await resultPromise;
+    expect(result).toEqual({ delivered: true });
+
+    // The detached turn now fails mid-flight: the pre-attached settle handler
+    // logs it; nothing rejects unhandled (vitest would fail the test if it did).
+    exec.reject(new Error('mid-turn boom'));
+    await new Promise((res) => setTimeout(res, 0));
+    expect(logger.error).toHaveBeenCalled();
+    db.close();
+  });
+});

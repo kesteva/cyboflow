@@ -83,8 +83,10 @@ export async function answerRecoveryGateHandler(
     return { resolved: false, nudge: { noOp: true, reason: 'not_found' } };
   }
 
-  // Resume FIRST (ignoring this gate's own blocking row). nudgeRunHandler awaits
-  // the resumed turn, so `delivered` means the agent received the answer.
+  // Resume FIRST (ignoring this gate's own blocking row). The production wrapper
+  // passes `deliveredAt: 'turn-start'`, so `delivered` means the resumed turn
+  // STARTED with the answer as its input — the agent received it, without
+  // holding this handler (and the resolve below) hostage to the whole turn.
   const nudge = await deps.nudge(item.runId, answerText, { ignoreBlockingReviewItemId: reviewItemId });
 
   if ('delivered' in nudge && nudge.delivered) {

@@ -100,6 +100,12 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
   // Stored bound handler references so dispose() can off() the exact listeners.
   private readonly sdkOutputHandler: ForwardHandler;
   private readonly sdkExitHandler: ForwardHandler;
+  // Per-logical-turn start fan-in — BOTH managers emit 'spawned' once per turn
+  // (SDK: cold spawn AND warm push; interactive: PTY spawn). Re-emitted by
+  // reference so boot wiring can await a run's turn-start (nudgeRunHandler's
+  // `deliveredAt: 'turn-start'` waiter) without reaching past the facade.
+  private readonly sdkSpawnedHandler: ForwardHandler;
+  private readonly interactiveSpawnedHandler: ForwardHandler;
   private readonly interactiveOutputHandler: ForwardHandler;
   private readonly interactiveExitHandler: ForwardHandler;
   // Raw-PTY byte fan-in (TASK-814 / IDEA-030) — interactive manager ONLY. The SDK
@@ -156,6 +162,8 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     // so the default 10-listener cap is never hit (no setMaxListeners needed).
     this.sdkOutputHandler = (payload) => this.emit('output', payload);
     this.sdkExitHandler = (payload) => this.emit('exit', payload);
+    this.sdkSpawnedHandler = (payload) => this.emit('spawned', payload);
+    this.interactiveSpawnedHandler = (payload) => this.emit('spawned', payload);
     this.interactiveOutputHandler = (payload) => this.emit('output', payload);
     this.interactiveExitHandler = (payload) => {
       // Drop the run's PTY backlog when its REPL exits (resolved through the
@@ -186,6 +194,8 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
 
     this.sdkManager.on('output', this.sdkOutputHandler);
     this.sdkManager.on('exit', this.sdkExitHandler);
+    this.sdkManager.on('spawned', this.sdkSpawnedHandler);
+    this.interactiveManager.on('spawned', this.interactiveSpawnedHandler);
     this.interactiveManager.on('output', this.interactiveOutputHandler);
     this.interactiveManager.on('exit', this.interactiveExitHandler);
     this.interactiveManager.on('pty-output', this.interactivePtyHandler);
@@ -473,6 +483,8 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
   dispose(): void {
     this.sdkManager.off('output', this.sdkOutputHandler);
     this.sdkManager.off('exit', this.sdkExitHandler);
+    this.sdkManager.off('spawned', this.sdkSpawnedHandler);
+    this.interactiveManager.off('spawned', this.interactiveSpawnedHandler);
     this.interactiveManager.off('output', this.interactiveOutputHandler);
     this.interactiveManager.off('exit', this.interactiveExitHandler);
     this.interactiveManager.off('pty-output', this.interactivePtyHandler);
