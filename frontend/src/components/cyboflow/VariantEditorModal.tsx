@@ -17,6 +17,7 @@
  * override per agent key, `WorkflowVariantAgentOverrides`).
  */
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { Pencil } from 'lucide-react';
 import { Modal } from '../ui/Modal';
 import { trpc } from '../../trpc/client';
 import { useVariantsStore, type WorkflowVariantRow } from '../../stores/variantsStore';
@@ -76,6 +77,12 @@ export function VariantEditorModal({
 
   const [isBusy, setIsBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Local display copy of the label: the parent's `variant` prop object is a
+  // snapshot taken when the modal opened, so after an in-modal rename it would
+  // keep showing the stale label until the modal is re-opened.
+  const [displayLabel, setDisplayLabel] = useState<string>(variant.label);
+  const [renaming, setRenaming] = useState(false);
+  const [labelDraft, setLabelDraft] = useState<string>(variant.label);
   const [model, setModel] = useState<string>(variant.model ?? INHERIT);
   const [executionModel, setExecutionModel] = useState<string>(variant.execution_model ?? INHERIT);
   const [agentKeys, setAgentKeys] = useState<string[]>([]);
@@ -89,6 +96,9 @@ export function VariantEditorModal({
   useEffect(() => {
     if (!isOpen) return;
     dispatch({ type: 'SET_DEFINITION', definition: parseVariantDefinition(variant.spec_json), name: variant.label });
+    setDisplayLabel(variant.label);
+    setLabelDraft(variant.label);
+    setRenaming(false);
     setModel(variant.model ?? INHERIT);
     setExecutionModel(variant.execution_model ?? INHERIT);
     setOverrides(parseAgentOverrides(variant.agent_overrides_json));
@@ -162,6 +172,35 @@ export function VariantEditorModal({
     }
   }, [variant.id, state.definition, overrides, overrideCount, model, executionModel, workflowId, onSaved, onClose]);
 
+  // Inline header rename (IDEA-018 follow-up): label-only variants.update.
+  // The UNIQUE(workflow_id, label) CONFLICT from the registry surfaces in the
+  // modal's existing error bar; frozen snapshots (experiment_arms.label,
+  // workflow_runs.variant_label) are intentionally untouched by a rename.
+  const handleRename = useCallback(async () => {
+    const next = labelDraft.trim();
+    if (next === '' || next === displayLabel) {
+      setRenaming(false);
+      setLabelDraft(displayLabel);
+      return;
+    }
+    if (actionInFlightRef.current) return;
+    actionInFlightRef.current = true;
+    setIsBusy(true);
+    setError(null);
+    try {
+      await trpc.cyboflow.variants.update.mutate({ variantId: variant.id, label: next });
+      await useVariantsStore.getState().invalidate(workflowId);
+      setDisplayLabel(next);
+      setRenaming(false);
+      onSaved?.();
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to rename variant');
+    } finally {
+      setIsBusy(false);
+      actionInFlightRef.current = false;
+    }
+  }, [labelDraft, displayLabel, variant.id, workflowId, onSaved]);
+
   return (
     <Modal isOpen={isOpen} onClose={onClose} size="full" showCloseButton={false}>
       <div
@@ -173,8 +212,47 @@ export function VariantEditorModal({
           className="flex items-center gap-3 px-4 py-3 border-b border-border-primary"
           style={{ background: 'var(--color-bg-secondary)', flexShrink: 0 }}
         >
-          <h2 className="text-sm font-semibold text-text-primary" style={{ letterSpacing: '0.04em' }}>
-            Edit variant · {variant.label}
+          <h2
+            className="flex items-center gap-1.5 text-sm font-semibold text-text-primary"
+            style={{ letterSpacing: '0.04em' }}
+          >
+            <span>Edit variant ·</span>
+            {renaming ? (
+              <input
+                value={labelDraft}
+                onChange={(e) => setLabelDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void handleRename();
+                  if (e.key === 'Escape') {
+                    setRenaming(false);
+                    setLabelDraft(displayLabel);
+                  }
+                }}
+                disabled={isBusy}
+                autoFocus
+                aria-label="Variant name"
+                data-testid="variant-editor-rename-input"
+                className="rounded-button border border-border-primary bg-bg-primary px-1.5 py-0.5 text-sm font-semibold text-text-primary"
+              />
+            ) : (
+              <>
+                <span>{displayLabel}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLabelDraft(displayLabel);
+                    setRenaming(true);
+                  }}
+                  disabled={isBusy}
+                  title="Rename variant"
+                  aria-label="Rename variant"
+                  data-testid="variant-editor-rename-button"
+                  className="text-text-tertiary hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Pencil size={13} />
+                </button>
+              </>
+            )}
           </h2>
           {variant.status === 'draft' && (
             <span
