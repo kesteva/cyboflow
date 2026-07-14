@@ -94,6 +94,8 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
   } = props;
 
   const transport = interactive ? 'interactive' : 'sdk';
+  const agentProvider = activeSession.agentProvider
+    ?? (activeSession.agentRuntime?.startsWith('codex-') ? 'codex' : 'claude');
   const running = activeSession.status === 'running';
   const updateSession = useSessionStore((s) => s.updateSession);
 
@@ -304,7 +306,11 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       ? 'Enter your response…  (⌘↵ to send)'
       : 'Write a command…  (⌘↵ to send)';
 
-  const modelLabel = interactive ? null : modelId ? modelDisplayLabel(modelId) : null;
+  const modelLabel = interactive
+    ? null
+    : modelId
+      ? modelDisplayLabel(modelId, agentProvider)
+      : null;
 
   // Interactive model selector for an IDLE quick SDK session — replaces the
   // read-only "Sonnet 🔒" pill. While running, fall through to the read-only
@@ -312,7 +318,12 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
   // in-flight turn already chose its model). PTY/flow runs never get this.
   const modelSlot =
     !interactive && !running && panelId ? (
-      <ModelPill panelId={panelId} currentModel={modelId} onModelChange={handleModelChange} />
+      <ModelPill
+        panelId={panelId}
+        agentProvider={agentProvider}
+        currentModel={modelId}
+        onModelChange={handleModelChange}
+      />
     ) : undefined;
 
   // Opus-only fast-mode toggle, next to the checkpoint pill. Mirrors the model

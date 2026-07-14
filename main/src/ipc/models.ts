@@ -2,23 +2,42 @@ import { IpcMain } from 'electron';
 import type { AppServices } from './types';
 import { ModelAvailabilityService } from '../services/modelAvailabilityService';
 import type { ModelAvailabilityMap } from '../../../shared/types/modelAvailability';
+import type { CodexModelCatalog } from '../../../shared/types/agentModels';
+
+type ModelCatalogResponse =
+  | { success: true; data: CodexModelCatalog }
+  | { success: false; error: string };
 
 /**
- * Model availability IPC — exposes the guarded-model (Fable 5) availability
- * snapshot to the renderer so the pickers can grey out a model that's been pulled
- * from release. The live push (`model-availability-changed`) is broadcast from
- * events.ts when the service's status flips.
+ * Model IPC exposes both Claude guarded-model availability and the model catalog
+ * advertised by the bundled Codex runtime. Codex discovery remains main-owned so
+ * renderer reloads and multiple picker mounts do not spawn redundant probes.
  *
  * Returns an empty map when the service isn't initialized (early boot / tests) —
  * every alias then reads as usable, the optimistic default.
  */
-export function registerModelHandlers(ipcMain: IpcMain, _services: AppServices): void {
-  void _services;
+export function registerModelHandlers(ipcMain: IpcMain, services: AppServices): void {
   ipcMain.handle(
     'models:get-availability',
     (): { success: true; data: ModelAvailabilityMap } => ({
       success: true,
       data: ModelAvailabilityService.tryGetInstance()?.snapshot() ?? {},
     }),
+  );
+  ipcMain.handle(
+    'models:get-codex-catalog',
+    async (): Promise<ModelCatalogResponse> => {
+      try {
+        return {
+          success: true,
+          data: await services.codexSdkManager.getCodexModelCatalog(),
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    },
   );
 }

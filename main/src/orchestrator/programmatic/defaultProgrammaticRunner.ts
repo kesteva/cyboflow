@@ -134,6 +134,14 @@ export interface DefaultProgrammaticRunnerDeps {
    * dependencies" and the dependents fail). Absent / returns null ⇒ no task block.
    */
   seedTasksProvider?: (batchId: string) => string | null;
+  /**
+   * LIVE run-owned idea scope. Resolves the authoritative union of the run's
+   * `workflow_runs.seed_idea_id` and ideas it created in entity_events. Invoked
+   * per step instead of snapshotting at run start: a raw-prompt Ship run has no
+   * seed, but its context step creates an idea before the later optional design
+   * steps need to evaluate that idea's flags.
+   */
+  runOwnedIdeaIdsProvider?: (runId: string) => readonly string[];
   logger?: LoggerLike;
 }
 
@@ -177,6 +185,11 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       return batchId ? (this.deps.seedTasksProvider?.(batchId) ?? undefined) : undefined;
     };
 
+    // Resolve the idea scope per step, never from an in-memory "active idea"
+    // guess. A raw-prompt Ship run starts with no seed_idea_id; its context turn
+    // can create the idea whose flags later control ui-prototype / architecture.
+    const runOwnedIdeaIds = (): readonly string[] => this.deps.runOwnedIdeaIdsProvider?.(ctx.runId) ?? [];
+
     // Live operator steering for this run (RunDirectives). RunExecutor owns the
     // per-run object and threads it in; absent (tests / no monitor wiring) ⇒ an
     // empty no-op set so the walk is byte-identical. Read by reference at the
@@ -192,6 +205,12 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         runId: ctx.runId,
         worktreePath: ctx.worktreePath,
         workflowName: ctx.workflow.name,
+        ...(ctx.run.model ? { model: ctx.run.model } : {}),
+        promptRenderContext: {
+          provider: ctx.run.agent_provider ?? 'claude',
+          runtime: ctx.run.agent_runtime ?? 'claude-sdk',
+          executionModel: ctx.run.execution_model ?? 'programmatic',
+        },
         // Per-step resolver (permission-mode redesign §3c#2): SpawnStepRunner
         // invokes this each step, reading the run's session-resolved mode off the
         // context rather than the demoted `permission_mode_snapshot` audit column.
@@ -200,6 +219,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         // this step's guidance off the SAME directives object each turn.
         stepGuidance: (stepId) => directives.stepGuidance.get(stepId),
         taskScope,
+        runOwnedIdeaIds,
       },
       this.deps.logger,
     );

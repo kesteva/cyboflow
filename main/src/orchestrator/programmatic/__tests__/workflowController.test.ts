@@ -708,6 +708,7 @@ describe('WorkflowController', () => {
         itemId: string;
         status?: SprintBatchTaskStatus;
         currentStepId?: string | null;
+        attempt?: number;
         allowedStepIds: readonly string[];
       }>;
     } {
@@ -715,6 +716,7 @@ describe('WorkflowController', () => {
         itemId: string;
         status?: SprintBatchTaskStatus;
         currentStepId?: string | null;
+        attempt?: number;
         allowedStepIds: readonly string[];
       }> = [];
       return {
@@ -722,8 +724,8 @@ describe('WorkflowController', () => {
         resolveItems() {
           return [...items];
         },
-        driveLane({ itemId, status, currentStepId, allowedStepIds }) {
-          lanes.push({ itemId, status, currentStepId, allowedStepIds });
+        driveLane({ itemId, status, currentStepId, attempt, allowedStepIds }) {
+          lanes.push({ itemId, status, currentStepId, attempt, allowedStepIds });
         },
       };
     }
@@ -955,6 +957,50 @@ describe('WorkflowController', () => {
       const integrated = driver.lanes.filter((l) => l.status === 'integrated');
       expect(failed.length).toBe(1);
       expect(integrated.length).toBe(1);
+    });
+
+    it('re-drives a declared required-inner loopback through attempt 3, persists it, and keeps siblings running', async () => {
+      const d = def([
+        phase('p1', [
+          step({
+            id: 'execute',
+            agent: 'orchestrate',
+            fanOut: {
+              over: 'tasks',
+              maxConcurrency: 2,
+              inner: [
+                { id: 'implement', agent: 'implement' },
+                { id: 'task-verify', agent: 'task-verify', loopback: 'implement' },
+              ],
+            },
+          }),
+        ]),
+      ]);
+      const driver = makeFanOutDriver(['t1', 't2']);
+      const calls: Array<{ itemId: string; stepId: string; attempt: number }> = [];
+      const runner: StepRunner = {
+        async runStep(s, ctx) {
+          if (ctx.item) calls.push({ itemId: ctx.item.id, stepId: s.id, attempt: ctx.attempt });
+          // t1 fails every required verification: two declared loopbacks (attempts
+          // 2 and 3), then the Ship cap fails only t1's lane. t2 keeps integrating.
+          if (ctx.item?.id === 't1' && s.id === 'task-verify') return { status: 'failed', error: 'verify failed' };
+          return { status: 'ok' };
+        },
+      };
+
+      const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      expect(calls.filter((call) => call.itemId === 't1' && call.stepId === 'implement').map((call) => call.attempt)).toEqual([1, 2, 3]);
+      expect(calls.filter((call) => call.itemId === 't2').map((call) => call.stepId)).toEqual(['implement', 'task-verify']);
+      expect(
+        driver.lanes
+          .filter((lane) => lane.itemId === 't1' && lane.currentStepId === 'implement')
+          .map((lane) => lane.attempt)
+          .filter((attempt): attempt is number => attempt !== undefined),
+      ).toEqual([2, 3]);
+      expect(driver.lanes.filter((lane) => lane.itemId === 't1').at(-1)?.status).toBe('failed');
+      expect(driver.lanes.filter((lane) => lane.itemId === 't2').at(-1)?.status).toBe('integrated');
     });
 
     it("gates off a closing stage (reports 'skipped') when a fan-out lane fails", async () => {
@@ -1420,6 +1466,45 @@ describe('WorkflowController', () => {
       expect(runner.calls.length).toBe(0); // neither task could ever run
       const failedLanes = base.lanes.filter((l) => l.status === 'failed').map((l) => l.itemId);
       expect(new Set(failedLanes)).toEqual(new Set(['t1', 't2']));
+    });
+
+    it('separates overlapping expected files into later waves while disjoint tasks still run concurrently', async () => {
+      const d = def([phase('p1', [fanStep('execute', ['implement'], 3)])]);
+      const base = makeFanOutDriver(['t1', 't2', 't3']);
+      const expectedFiles = new Map([
+        ['t1', ['src/shared.ts']],
+        ['t2', ['src/shared.ts']],
+        ['t3', ['src/disjoint.ts']],
+      ]);
+      const driver: FanOutDriver = { ...base, expectedFiles: () => expectedFiles };
+      const active = new Set<string>();
+      const pathsByItem = expectedFiles;
+      let overlapObserved = false;
+      let maxInFlight = 0;
+      const runner: StepRunner = {
+        async runStep(_s, ctx) {
+          const itemId = ctx.item?.id;
+          if (!itemId) return { status: 'ok' };
+          const files = pathsByItem.get(itemId) ?? [];
+          for (const activeItem of active) {
+            const activeFiles = pathsByItem.get(activeItem) ?? [];
+            if (files.some((file) => activeFiles.includes(file))) overlapObserved = true;
+          }
+          active.add(itemId);
+          maxInFlight = Math.max(maxInFlight, active.size);
+          await new Promise((resolve) => setTimeout(resolve, 1));
+          active.delete(itemId);
+          return { status: 'ok' };
+        },
+      };
+
+      const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      expect(overlapObserved).toBe(false);
+      // t1 and t3 share the first wave, proving the conflict guard did not make
+      // the entire fan-out serial merely because t2 overlaps t1.
+      expect(maxInFlight).toBe(2);
     });
 
     // ── operator skip of a fan-out INNER step (RunDirectives) ─────────────────

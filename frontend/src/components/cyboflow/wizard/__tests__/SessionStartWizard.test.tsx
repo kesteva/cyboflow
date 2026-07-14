@@ -15,7 +15,7 @@
  *      + `substrate` into API.sessions.createQuick.
  */
 import '@testing-library/jest-dom';
-import { render, screen, act, fireEvent } from '@testing-library/react';
+import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
@@ -150,6 +150,15 @@ vi.mock('../../../../utils/api', () => ({
       setModel: vi.fn().mockResolvedValue({ success: true }),
       setFastMode: vi.fn().mockResolvedValue({ success: true }),
     },
+    models: {
+      getCodexCatalog: vi.fn().mockResolvedValue({
+        success: true,
+        data: {
+          models: [{ id: 'gpt-5.4', label: 'GPT-5.4', description: 'Strong coding model', isDefault: true }],
+          defaultModel: 'gpt-5.4',
+        },
+      }),
+    },
   },
 }));
 
@@ -262,6 +271,7 @@ beforeEach(() => {
   });
   mockRunStart.mockClear();
   mockCreateQuick.mockClear();
+  mockEnsureSession.mockClear();
   modelAvailability.fableUnavailable = false;
   mockCreateQuick.mockResolvedValue({
     success: true,
@@ -308,11 +318,17 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
   it('shows substrate + blueprint editor for a WORKFLOW selection', async () => {
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
-    expect(screen.getByLabelText('Select CLI substrate')).toBeInTheDocument();
+    const runtimeSelect = screen.getByLabelText('Select agent runtime');
+    const modelSelect = screen.getByLabelText('Select Claude model');
+    expect(runtimeSelect).toBeInTheDocument();
+    expect(runtimeSelect.compareDocumentPosition(modelSelect) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
+    expect(screen.getByRole('option', { name: /Codex PTY/i })).toBeDisabled();
     expect(screen.getByTestId('wizard-edit-flow')).toBeInTheDocument();
     expect(screen.getByTestId('wizard-new-flow')).toBeInTheDocument();
     // Permission selector + summary always present.
     expect(screen.getByLabelText('Permission mode: Auto')).toBeInTheDocument();
+    expect(screen.getByText('Native Claude classifier')).toBeInTheDocument();
     expect(screen.getByTestId('wizard-launch-summary')).toBeInTheDocument();
   });
 
@@ -320,9 +336,11 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
     await renderLockedWizard();
     await selectQuickAndConfigure();
 
-    // Quick sessions prompt for the CLI substrate the same way workflow
-    // launches do (opt-in interactive PTY quick sessions).
-    expect(screen.getByLabelText('Select CLI substrate')).toBeInTheDocument();
+    // Quick sessions can launch both structured Codex SDK chat and Codex PTY;
+    // workflows keep Codex disabled until workflow compatibility ships.
+    expect(screen.getByLabelText('Select agent runtime')).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Codex SDK/i })).not.toBeDisabled();
+    expect(screen.getByRole('option', { name: /Codex PTY/i })).not.toBeDisabled();
     expect(screen.queryByTestId('wizard-edit-flow')).toBeNull();
     expect(screen.queryByTestId('wizard-new-flow')).toBeNull();
     // Permission selector + summary still present.
@@ -348,11 +366,40 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
     // disabledMcpjsonServers + enabledPlugins via --settings), so the Advanced
     // controls stay visible when Interactive is selected.
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select CLI substrate'), {
-        target: { value: 'interactive' },
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
+        target: { value: 'claude-interactive' },
       });
     });
     expect(screen.getByTestId('wizard-advanced-toggle')).toBeInTheDocument();
+  });
+
+  it('distinguishes Codex SDK auto-review from PTY Auto and omits unsupported MCP/plugin controls', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
+        target: { value: 'codex-sdk' },
+      });
+    });
+    expect(screen.getByText('Workspace writes · Codex auto-reviews')).toBeInTheDocument();
+    expect(screen.getByText(/other requested approvals use the Cyboflow review queue/i)).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
+        target: { value: 'codex-pty' },
+      });
+    });
+
+    expect(screen.getByText('Currently same as Allow edits')).toBeInTheDocument();
+    expect(screen.getByText(/prompts appear in its terminal/i)).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-advanced-toggle'));
+    });
+    expect(screen.queryByText('MCP servers')).toBeNull();
+    expect(screen.queryByText('Plugins')).toBeNull();
+    expect(screen.getByText('Workspace')).toBeInTheDocument();
   });
 });
 
@@ -392,8 +439,8 @@ describe('SessionStartWizard — Workspace tri-state (quick)', () => {
 
     // Interactive substrate → still selectable (no SDK-only constraint).
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select CLI substrate'), {
-        target: { value: 'interactive' },
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
+        target: { value: 'claude-interactive' },
       });
     });
     expect(screen.getByTestId('wizard-worktree-inplace')).not.toBeDisabled();
@@ -430,8 +477,8 @@ describe('SessionStartWizard — Workspace tri-state (quick)', () => {
 
     // Flipping to interactive no longer resets the choice — in-place works there.
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select CLI substrate'), {
-        target: { value: 'interactive' },
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
+        target: { value: 'claude-interactive' },
       });
     });
     expect(screen.getByTestId('wizard-worktree-inplace')).toHaveAttribute('aria-checked', 'true');
@@ -471,6 +518,8 @@ describe('SessionStartWizard — step ③ launch threading', () => {
         projectId: 1,
         sessionId: 'session-ensured-001',
         substrate: 'sdk',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-sdk',
         permissionMode: 'default',
       }),
     );
@@ -621,7 +670,12 @@ describe('SessionStartWizard — step ③ launch threading', () => {
       fireEvent.click(screen.getByTestId('wizard-cta'));
     });
 
-    expect(mockEnsureSession).toHaveBeenCalledWith(1, { forceNew: true });
+    expect(mockEnsureSession).toHaveBeenCalledWith(1, {
+      forceNew: true,
+      agentProvider: 'claude',
+      agentRuntime: 'claude-sdk',
+      agentModel: 'opus',
+    });
   });
 
   it('threads an explicit per-run substrate + permission override', async () => {
@@ -632,15 +686,54 @@ describe('SessionStartWizard — step ③ launch threading', () => {
       fireEvent.click(screen.getByLabelText('Permission mode: Auto'));
     });
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select CLI substrate'), { target: { value: 'interactive' } });
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'claude-interactive' } });
     });
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-cta'));
     });
 
     expect(mockRunStart).toHaveBeenCalledWith(
-      expect.objectContaining({ substrate: 'interactive', permissionMode: 'auto' }),
+      expect.objectContaining({
+        substrate: 'interactive',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-interactive',
+        permissionMode: 'auto',
+      }),
     );
+  });
+
+  it('selects and launches the Codex SDK workflow runtime', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    const runtimeSelect = screen.getByLabelText('Select agent runtime') as HTMLSelectElement;
+    expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
+    await act(async () => {
+      fireEvent.change(runtimeSelect, { target: { value: 'codex-sdk' } });
+    });
+
+    expect(screen.getByLabelText('Select Codex model')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Select Claude model')).toBeNull();
+    expect(screen.getByTestId('wizard-launch-summary')).toHaveTextContent('Codex SDK');
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select Codex model'), {
+        target: { value: 'gpt-5.4' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    await waitFor(() => {
+      expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({
+        agentProvider: 'codex',
+        agentRuntime: 'codex-sdk',
+        model: 'gpt-5.4',
+      }));
+    });
+    expect(mockEnsureSession).toHaveBeenCalled();
   });
 
   it('seeds the permission selector from the global default', async () => {
@@ -679,7 +772,7 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     await selectQuickAndConfigure();
 
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select CLI substrate'), { target: { value: 'interactive' } });
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'claude-interactive' } });
     });
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-cta'));
@@ -687,8 +780,35 @@ describe('SessionStartWizard — step ③ launch threading', () => {
 
     expect(mockRunStart).not.toHaveBeenCalled();
     expect(mockCreateQuick).toHaveBeenCalledWith(
-      expect.objectContaining({ projectId: 1, substrate: 'interactive' }),
+      expect.objectContaining({
+        projectId: 1,
+        substrate: 'interactive',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-interactive',
+      }),
     );
+  });
+
+  it('does not carry Codex PTY from quick configure into a workflow launch', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-pty' } });
+    });
+    expect(screen.getByLabelText('Select Codex model')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-back-to-workflow'));
+    });
+    await selectWorkflowAndConfigure();
+
+    const runtimeSelect = screen.getByLabelText('Select agent runtime') as HTMLSelectElement;
+    await waitFor(() => expect(runtimeSelect.value).toBe('claude-sdk'));
+
+    expect(mockEnsureSession).not.toHaveBeenCalled();
+    expect(mockRunStart).not.toHaveBeenCalled();
+    expect(mockCreateQuick).not.toHaveBeenCalled();
   });
 
   it('defaults the model to Opus, surfaces the fast-mode toggle (off), and threads both on launch', async () => {
@@ -754,7 +874,7 @@ describe('SessionStartWizard — Ultracode configure + launch', () => {
     expect(screen.queryByTestId('wizard-fast-mode-row')).toBeNull();
 
     // Substrate is pinned to interactive — no selector.
-    expect(screen.queryByLabelText('Select CLI substrate')).toBeNull();
+    expect(screen.queryByLabelText('Select agent runtime')).toBeNull();
 
     // Advanced (MCP/plugin) disclosure is offered, same as a quick launch.
     expect(screen.getByTestId('wizard-advanced-toggle')).toBeInTheDocument();
@@ -775,6 +895,8 @@ describe('SessionStartWizard — Ultracode configure + launch', () => {
       expect.objectContaining({
         projectId: 1,
         substrate: 'interactive',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-interactive',
         effort: 'ultracode',
         claudeConfig: { model: 'fable', fastMode: false },
       }),
@@ -876,6 +998,8 @@ describe('SessionStartWizard — Sprint batch gate', () => {
         projectId: 1,
         sessionId: 'session-ensured-001',
         substrate: 'sdk',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-sdk',
         permissionMode: 'default',
         taskIds: ['IDEA-1', 'IDEA-2'],
       }),
@@ -998,6 +1122,8 @@ describe('SessionStartWizard — Ship idea gate', () => {
         projectId: 1,
         sessionId: 'session-ensured-001',
         substrate: 'sdk',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-sdk',
         permissionMode: 'default',
         ideaId: 'IDEA-7',
       }),
@@ -1132,6 +1258,8 @@ describe('SessionStartWizard — compound finding seed (D4)', () => {
         sessionId: 'session-ensured-001',
         // substrate + permission still flow from the step-③ controls.
         substrate: 'sdk',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-sdk',
         permissionMode: 'default',
         findingIds: ['finding-1', 'finding-2', 'finding-3'],
       }),
@@ -1177,8 +1305,8 @@ describe('SessionStartWizard — compound finding seed (D4)', () => {
       fireEvent.click(screen.getByLabelText('Permission mode: Auto'));
     });
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select CLI substrate'), {
-        target: { value: 'interactive' },
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
+        target: { value: 'claude-interactive' },
       });
     });
     await act(async () => {
@@ -1188,6 +1316,8 @@ describe('SessionStartWizard — compound finding seed (D4)', () => {
     expect(mockRunStart).toHaveBeenCalledWith(
       expect.objectContaining({
         substrate: 'interactive',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-interactive',
         permissionMode: 'auto',
         findingIds: ['finding-1'],
       }),

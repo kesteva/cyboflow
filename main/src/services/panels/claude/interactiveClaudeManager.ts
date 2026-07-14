@@ -11,7 +11,8 @@ import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { captureSeamError } from '../../telemetry';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
 import { readInstalledPluginIds, buildExclusiveEnabledPluginsMap } from '../../../orchestrator/integrations/installedPlugins';
-import { resolveModelAlias, interactiveModelArg, applyModelAvailabilityFallback } from './modelContext';
+import { interactiveModelArg, applyModelAvailabilityFallback } from './modelContext';
+import { displayAgentModelSelection, resolveAgentModelAlias } from '../agentModelContext';
 import { isModelUsable } from '../../modelAvailabilityService';
 import { ApprovalRouter } from '../../../orchestrator/approvalRouter';
 import { QuestionRouter } from '../../../orchestrator/questionRouter';
@@ -514,14 +515,14 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     const args: string[] = [];
 
     // model: pass `--model X` ONLY for a concrete model; 'auto'/'default' omit.
-    // Pin the bare alias ('opus'/'sonnet'/'haiku', incl. '-250k' variants) to the
-    // current concrete snapshot (mirrors the SDK seam) so the CLI doesn't resolve
-    // it to a previous-generation model. interactiveModelArg keeps Opus's `[1m]`
-    // id but strips a `[1m]` Sonnet marker (the CLI has no 1M-beta path).
-    // Apply the availability guard (Fable 5 → Opus when pulled) before the
-    // interactive-arg translation, mirroring the SDK seam.
+    // Resolve in the Claude provider namespace so stale Codex model ids from a
+    // reused row do not become a Claude `--model` value. The helper still pins
+    // Claude aliases to current snapshots (mirroring the SDK seam).
+    // interactiveModelArg keeps Opus's `[1m]` id but strips a `[1m]` Sonnet
+    // marker (the CLI has no 1M-beta path). Apply the availability guard
+    // (Fable 5 → Opus when pulled) before the interactive-arg translation.
     const resolvedModel = interactiveModelArg(
-      applyModelAvailabilityFallback(resolveModelAlias(options.model), isModelUsable),
+      applyModelAvailabilityFallback(resolveAgentModelAlias('claude', options.model), isModelUsable),
     );
     if (resolvedModel && resolvedModel !== 'auto' && resolvedModel !== 'default') {
       args.push('--model', resolvedModel);
@@ -1065,7 +1066,8 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     this.logger?.info(`[${this.getCliToolName()}-command] Working directory: ${worktreePath}`);
 
     // Emit a session_info descriptor field-identical in shape to the SDK path so
-    // the renderer has the run context. model uses (model || 'default').
+    // the renderer has the run context. Stale cross-provider model ids display as
+    // default, matching the spawn seam that suppresses them.
     this.emit('output', {
       panelId,
       sessionId,
@@ -1075,7 +1077,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
         initial_prompt: options.prompt,
         claude_command: cliCommand,
         worktree_path: worktreePath,
-        model: options.model || 'default',
+        model: displayAgentModelSelection('claude', options.model, 'default'),
         permission_mode: options.permissionMode || 'approve',
         timestamp: new Date().toISOString(),
       },

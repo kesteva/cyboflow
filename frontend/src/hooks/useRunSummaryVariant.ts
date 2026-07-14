@@ -82,21 +82,16 @@ export function isAtHumanReviewGate(
  *      keep the canvas rather than flash a wrong card off a stale/empty snapshot.
  *   2. The flow has no steps at all → true (trivially at the end).
  *   3. currentStepId is the LAST flat step across all phases → true.
- *   4. There is at least one step state and every one of them is settled —
- *      'done' or 'skipped' — → true (getPhaseState force-marks all steps done
- *      for completed/canceled runs, so a self-terminated run also satisfies
- *      this; a surviving 'skipped' marker on a finished walk counts as settled).
- *   5. No step-transition data has been observed at all (currentStepId null and
- *      stepStates empty) → true. There's no positive evidence of an open,
- *      non-terminal step to withhold 'complete' over, so this falls back to
- *      trusting endEligible alone (the pre-fix behavior) rather than blocking a
- *      genuinely rested run on missing telemetry.
+ * Missing step-transition data is not evidence of completion. Keep the canvas
+ * visible until one of the positive terminal signals above arrives; otherwise a
+ * drained mid-flow Codex turn can flash a false completion card before its MCP
+ * step transition refresh reaches the renderer.
  *
  * Anything else — a known, non-last currentStepId, or concrete step states that
  * aren't all 'done' — is the regression case: false.
  */
 export function isTerminalStepReached(phaseState: UseWorkflowPhaseStateResult): boolean {
-  const { definition, currentStepId, stepStates } = phaseState;
+  const { definition, currentStepId } = phaseState;
   if (definition === null) return false;
 
   const flatSteps = definition.phases.flatMap((p) => p.steps);
@@ -104,18 +99,6 @@ export function isTerminalStepReached(phaseState: UseWorkflowPhaseStateResult): 
 
   const lastStepId = flatSteps[flatSteps.length - 1].id;
   if (currentStepId === lastStepId) return true;
-
-  // 'skipped' is a SETTLED state (failed-optional / gated-off step whose marker
-  // survives the walk) — it must not withhold the 'complete' summary from a
-  // genuinely finished run.
-  if (
-    stepStates.length > 0 &&
-    stepStates.every((s) => s.status === 'done' || s.status === 'skipped')
-  ) {
-    return true;
-  }
-
-  if (currentStepId === null && stepStates.length === 0) return true;
 
   return false;
 }

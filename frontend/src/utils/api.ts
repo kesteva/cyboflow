@@ -5,7 +5,8 @@ import type { SessionCreationPreferences } from '../stores/sessionPreferencesSto
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/types/modelAvailability';
 import type { FastModeStateNotice } from '../../../shared/types/panels';
-import type { ClaudeDetectionResult } from '../../../shared/types/onboarding';
+import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../shared/types/onboarding';
+import type { CodexModelCatalog } from '../../../shared/types/agentModels';
 
 // Type for IPC response.
 // T defaults to `unknown` (not `any`) so callers must narrow before reading .data.
@@ -591,6 +592,17 @@ export class API {
     },
   };
 
+  static codex = {
+    /**
+     * On-demand bundled Codex runtime and ChatGPT account probe. Uncached so
+     * Settings can recheck immediately after the user signs in.
+     */
+    async detect(): Promise<IPCResponse<CodexDetectionResult>> {
+      if (!isElectron() || !window.electronAPI.codex) throw new Error('Electron API not available');
+      return window.electronAPI.codex.detect();
+    },
+  };
+
   static models = {
     /** Snapshot of guarded-model (Fable 5) availability. Empty map = all usable. */
     async getAvailability() {
@@ -598,6 +610,13 @@ export class API {
       // should degrade to optimistic, not crash the picker.
       if (!isElectron() || !window.electronAPI.models) throw new Error('Electron API not available');
       return window.electronAPI.models.getAvailability();
+    },
+    /** Models advertised by the bundled Codex runtime for the signed-in account. */
+    async getCodexCatalog(): Promise<IPCResponse<CodexModelCatalog>> {
+      if (!isElectron() || !window.electronAPI.models?.getCodexCatalog) {
+        throw new Error('Electron API not available');
+      }
+      return window.electronAPI.models.getCodexCatalog();
     },
     /** Subscribe to live availability flips; returns an unsubscribe fn. No-op off Electron. */
     onAvailabilityChanged(callback: (map: ModelAvailabilityMap) => void): () => void {

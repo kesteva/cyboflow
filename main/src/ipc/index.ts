@@ -24,6 +24,7 @@ import { registerIdeaAttachmentHandlers } from './ideaAttachments';
 import { registerTelemetryHandlers } from './telemetry';
 import { registerModelHandlers } from './models';
 import { registerClaudeDetectionHandlers } from './claudeDetection';
+import { registerCodexDetectionHandlers } from './codexDetection';
 
 
 export function registerIpcHandlers(services: AppServices): void {
@@ -51,4 +52,5 @@ export function registerIpcHandlers(services: AppServices): void {
   registerTelemetryHandlers(ipcMain, services);
   registerModelHandlers(ipcMain, services);
   registerClaudeDetectionHandlers(ipcMain, services);
+  registerCodexDetectionHandlers(ipcMain, services);
 }

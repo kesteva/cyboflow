@@ -121,6 +121,29 @@ describe('selectRunMessages', () => {
     expect(result[1].createdAt).toBe(new Date('2026-01-01T00:00:02Z').toISOString());
   });
 
+  it('reads provider-neutral message rows alongside legacy rows', () => {
+    const db = makeRawEventsDb();
+    const runId = 'run-agent-events';
+    db.prepare(
+      `INSERT INTO raw_events (run_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)`,
+    ).run(runId, 'agent_assistant', JSON.stringify({
+      type: 'agent_message',
+      provider: 'codex',
+      runtime: 'codex-sdk',
+      role: 'assistant',
+      id: 'codex-message-1',
+      content: [{ type: 'text', text: 'Hello from Codex' }],
+    }), '2026-01-01T00:00:01Z');
+
+    expect(selectRunMessages(dbAdapter(db), runId)).toEqual([{
+      id: 'codex-message-1',
+      runId,
+      role: 'assistant',
+      text: 'Hello from Codex',
+      createdAt: new Date('2026-01-01T00:00:01Z').toISOString(),
+    }]);
+  });
+
   it('skips pure tool_use assistant events (no text block)', () => {
     const db = makeRawEventsDb();
     const adapter = dbAdapter(db);

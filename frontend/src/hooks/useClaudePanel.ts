@@ -3,7 +3,22 @@ import { useSessionStore } from '../stores/sessionStore';
 import { useTheme } from '../contexts/ThemeContext';
 import { API } from '../utils/api';
 import { GitCommands } from '../types/session';
-import type { AttachedImage, AttachedText } from '../types/session';
+import type { AttachedImage, AttachedText, Session } from '../types/session';
+
+export async function dispatchQuickSessionInput(
+  session: Session,
+  panelId: string,
+  input: string,
+  mode: 'initial' | 'continue',
+  modelOverride?: string,
+): Promise<{ success: boolean; error?: string }> {
+  const response = session.agentRuntime === 'codex-sdk'
+    ? await API.sessions.sendInput(session.id, input)
+    : mode === 'initial'
+      ? await API.panels.sendInput(panelId, `${input}\n`)
+      : await API.panels.continue(panelId, input, modelOverride);
+  return { success: response.success, error: response.error };
+}
 
 export const useClaudePanel = (
   panelId: string,
@@ -290,8 +305,7 @@ export const useClaudePanel = (
       finalInput = `${finalInput}${attachmentsMessage}`;
     }
     
-    const response = await API.panels.sendInput(panelId, `${finalInput}\n`);
-    return { success: response.success, error: response.error };
+    return dispatchQuickSessionInput(activeSession, panelId, finalInput, 'initial');
   };
 
   const handleContinueConversation = async (
@@ -363,9 +377,8 @@ export const useClaudePanel = (
       finalInput = `${finalInput}${attachmentsMessage}`;
     }
     
-    const response = await API.panels.continue(panelId, finalInput, modelOverride);
     // Output will be loaded automatically when session status changes.
-    return { success: response.success, error: response.error };
+    return dispatchQuickSessionInput(activeSession, panelId, finalInput, 'continue', modelOverride);
   };
 
   const handleTerminalCommand = async () => {

@@ -19,16 +19,21 @@ import type { UnifiedMessage } from '../../../../../../shared/types/unifiedMessa
 vi.mock('../../../chat/ChatTranscript', () => ({
   ChatTranscript: ({
     messages,
+    agentName,
     renderToolCallExtra,
+    transcriptEndSlot,
     messagesEndRef,
   }: {
     messages: UnifiedMessage[];
+    agentName: string;
     renderToolCallExtra?: (toolCallId: string) => ReactNode;
+    transcriptEndSlot?: ReactNode;
     messagesEndRef?: RefObject<HTMLDivElement | null>;
   }) => (
-    <div data-testid="chat-transcript" data-count={messages.length}>
+    <div data-testid="chat-transcript" data-agent-name={agentName} data-count={messages.length}>
       ChatTranscript
       {renderToolCallExtra?.('tool-use-card')}
+      {transcriptEndSlot}
       <div ref={messagesEndRef} data-testid="messages-end" />
     </div>
   ),
@@ -95,6 +100,20 @@ describe('UnifiedChatView — substrate branch', () => {
     expect(screen.queryByTestId('interactive-body')).not.toBeInTheDocument();
   });
 
+  it('passes the runtime-specific surface name to the transcript', () => {
+    render(
+      <UnifiedChatView
+        {...baseProps}
+        name="Codex"
+        transport="sdk"
+        mode="quick"
+        messages={[assistantMsg('a1', 'done')]}
+      />,
+    );
+
+    expect(screen.getByTestId('chat-transcript')).toHaveAttribute('data-agent-name', 'Codex');
+  });
+
   it('interactive: renders the interactiveBody, drops transcript + rail + toggle, keeps bottomSlot', () => {
     render(
       <UnifiedChatView
@@ -142,6 +161,22 @@ describe('UnifiedChatView — substrate branch', () => {
       />,
     );
     expect(screen.getByTestId('extra')).toHaveTextContent('extra:tool-use-card');
+  });
+
+  it('keeps transcript-end content inside the scrollable transcript', () => {
+    render(
+      <UnifiedChatView
+        {...baseProps}
+        transport="sdk"
+        mode="flow"
+        messages={[assistantMsg('a1', 'question follows')]}
+        transcriptEndSlot={<div data-testid="transcript-end-slot">question card</div>}
+      />,
+    );
+
+    expect(screen.getByTestId('chat-transcript')).toContainElement(
+      screen.getByTestId('transcript-end-slot'),
+    );
   });
 
   it('derives prompt markers from user turns', () => {

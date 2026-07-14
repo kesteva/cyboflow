@@ -21,10 +21,10 @@
  * which only sets selection state and NEVER auto-advances.
  *
  * Step ③ (Configure) is the launch surface and adapts to the selection:
- *   - workflow: agent-permission override + CLI substrate (+ caveats) + model
+ *   - workflow: agent-permission override + agent runtime (+ caveats) + model
  *     pin (default Opus, threaded into runs.start → workflow_runs.model) + workflow
  *     blueprint editor access + a launch summary.
- *   - quick: agent-permission override + CLI substrate (+ caveats) + model pin
+ *   - quick: agent-permission override + agent runtime (+ caveats) + model pin
  *     (+ the Opus-only fast-mode toggle) + launch summary (there is no workflow to
  *     edit, so the blueprint editor is omitted).
  *
@@ -66,7 +66,7 @@ import { TaskBatchPickerModal } from '../TaskBatchPickerModal';
 import { CreateProjectDialog } from '../../CreateProjectDialog';
 import { AgentPermissionModeSelector, PERMISSION_MODE_OPTIONS } from '../AgentPermissionModeSelector';
 import { SubstrateSelector } from '../SubstrateSelector';
-import { ModelSelector, DEFAULT_QUICK_MODEL, ULTRACODE_DEFAULT_MODEL } from '../ModelSelector';
+import { ModelSelector, DEFAULT_CODEX_MODEL, DEFAULT_QUICK_MODEL, ULTRACODE_DEFAULT_MODEL } from '../ModelSelector';
 import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
 import { VariantSelector } from '../VariantSelector';
 import { variantSelectionToStartInput, type VariantSelection } from '../variantSelectorLogic';
@@ -86,7 +86,19 @@ import { QuickSessionCard } from './QuickSessionCard';
 import { UltracodeCard } from './UltracodeCard';
 import { buildWorkflowMeta, DEFAULT_WORKFLOW_NAME } from './workflowMeta';
 import type { WorkflowCardMeta } from './workflowMeta';
-import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../../../shared/types/substrate';
+import { DEFAULT_SUBSTRATE } from '../../../../../shared/types/substrate';
+import { isCodexModelFamily, isCodexModelSelection } from '../../../../../shared/types/agentModels';
+import {
+  DEFAULT_SESSION_AGENT_RUNTIME,
+} from '../../../../../shared/types/agentRuntime';
+import type { LaunchAgentRuntime } from '../agentRuntimeUi';
+import {
+  isCodexRuntime,
+  providerForRuntime,
+  quickSessionRuntimeForLaunch,
+  substrateForRuntime,
+  workflowRuntimeForLaunch,
+} from '../agentRuntimeUi';
 import type { ExecutionModel } from '../../../../../shared/types/executionModel';
 import type { QuickSessionWorktreeMode } from '../../../../../shared/types/worktreeMode';
 import { trackEvent } from '../../../utils/telemetry';
@@ -209,11 +221,11 @@ export default function SessionStartWizard(): React.JSX.Element {
 
   // ── Step ③ Configure ─────────────────────────────────────────────────────
   // Per-run/per-session agent permission (seeded from the global default, race-
-  // guarded by the shared hook) + per-launch CLI substrate. Substrate is
-  // threaded into runs.start for workflow launches and into useQuickSession
-  // (→ sessions.substrate) for quick launches.
+  // guarded by the shared hook) + per-launch agent runtime. Runtime is projected
+  // onto the legacy substrate field during the Claude provider/runtime migration
+  // and threaded into runs.start / useQuickSession.
   const { mode: permissionMode, setMode: setPermissionMode } = useAgentPermissionMode();
-  const [substrate, setSubstrate] = useState<CliSubstrate>(DEFAULT_SUBSTRATE);
+  const [agentRuntime, setAgentRuntime] = useState<LaunchAgentRuntime>(DEFAULT_SESSION_AGENT_RUNTIME);
   // Per-launch Claude model for QUICK, ULTRACODE and workflow launches (Configure
   // ③). Defaults to Opus (DEFAULT_QUICK_MODEL === DEFAULT_WORKFLOW_MODEL); the
   // Ultracode card re-seeds Fable when the availability snapshot says it's usable
@@ -224,6 +236,23 @@ export default function SessionStartWizard(): React.JSX.Element {
   // QUICK-only, surfaced only while Opus is selected.
   const [model, setModel] = useState<string>(DEFAULT_QUICK_MODEL);
   const [fastMode, setFastMode] = useState<boolean>(false);
+  useEffect(() => {
+    if (
+      selection?.kind === 'workflow' &&
+      workflowRuntimeForLaunch(agentRuntime) === null
+    ) {
+      setAgentRuntime(DEFAULT_SESSION_AGENT_RUNTIME);
+    }
+  }, [selection?.kind, agentRuntime]);
+  useEffect(() => {
+    const effectiveRuntime: LaunchAgentRuntime =
+      selection?.kind === 'ultracode' ? 'claude-interactive' : agentRuntime;
+    if (isCodexRuntime(effectiveRuntime)) {
+      if (!isCodexModelSelection(model)) setModel(DEFAULT_CODEX_MODEL);
+      return;
+    }
+    if (isCodexModelFamily(model)) setModel(DEFAULT_QUICK_MODEL);
+  }, [selection?.kind, agentRuntime, model]);
   // Whether the user explicitly picked a model this wizard visit. Card selection
   // seeds a per-launcher DEFAULT (quick/workflow → Opus, ultracode → Fable when
   // available) but must never clobber an explicit choice when the user bounces
@@ -519,6 +548,11 @@ export default function SessionStartWizard(): React.JSX.Element {
       setLaunchError(null);
       setIsLaunching(true);
       try {
+        const workflowRuntime = workflowRuntimeForLaunch(agentRuntime);
+        if (workflowRuntime === null) {
+          throw new Error('Codex PTY is only available for quick sessions.');
+        }
+        const launchSubstrate = substrateForRuntime(workflowRuntime);
         // Ensure the run executes INSIDE a session. This wizard IS the explicit
         // "Start a new session" surface, so it ALWAYS creates a fresh session
         // (forceNew) — it must never silently absorb the quick session the user
@@ -527,7 +561,12 @@ export default function SessionStartWizard(): React.JSX.Element {
         // a session the run would take the legacy PARENTLESS path
         // (workflow_runs.session_id null), with nothing to bind the close-out
         // (Merge / PR / Dismiss) or the File Explorer / Diff to.
-        const sessionId = await ensureSessionForLaunch(selectedProjectId, { forceNew: true });
+        const sessionId = await ensureSessionForLaunch(selectedProjectId, {
+          forceNew: true,
+          agentProvider: providerForRuntime(workflowRuntime),
+          agentRuntime: workflowRuntime,
+          agentModel: model,
+        });
         // Resolve the launched flow's meta BEFORE the mutate so the seed gate can
         // read meta?.name — the triage-tray finding ids are only seeded into a
         // `compound` run.
@@ -539,7 +578,9 @@ export default function SessionStartWizard(): React.JSX.Element {
           workflowId,
           projectId: selectedProjectId,
           sessionId,
-          substrate,
+          ...(launchSubstrate ? { substrate: launchSubstrate } : {}),
+          agentProvider: providerForRuntime(workflowRuntime),
+          agentRuntime: workflowRuntime,
           permissionMode,
           // Per-run model pin (migration 037) — the Configure picker, default Opus.
           model,
@@ -576,7 +617,7 @@ export default function SessionStartWizard(): React.JSX.Element {
             meta && (CYBOFLOW_WORKFLOW_NAMES as readonly string[]).includes(meta.name)
               ? (meta.name as TelemetryFlow)
               : 'custom',
-          substrate,
+          ...(launchSubstrate ? { substrate: launchSubstrate } : {}),
           permission_mode: permissionMode,
         });
         notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'wizard' });
@@ -588,7 +629,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, selectedFindingIds, variantSelection],
+    [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, selectedFindingIds, variantSelection],
   );
 
   // Sprint launch — ONE session-hosted run seeded with the multi-selected task
@@ -605,13 +646,25 @@ export default function SessionStartWizard(): React.JSX.Element {
       setLaunchError(null);
       setIsLaunching(true);
       try {
+        const workflowRuntime = workflowRuntimeForLaunch(agentRuntime);
+        if (workflowRuntime === null) {
+          throw new Error('Codex PTY is only available for quick sessions.');
+        }
+        const launchSubstrate = substrateForRuntime(workflowRuntime);
         // forceNew: the wizard always starts a NEW session (see launchRun).
-        const sessionId = await ensureSessionForLaunch(selectedProjectId, { forceNew: true });
+        const sessionId = await ensureSessionForLaunch(selectedProjectId, {
+          forceNew: true,
+          agentProvider: providerForRuntime(workflowRuntime),
+          agentRuntime: workflowRuntime,
+          agentModel: model,
+        });
         const result: RunStartResult = await trpc.cyboflow.runs.start.mutate({
           workflowId,
           projectId: selectedProjectId,
           sessionId,
-          substrate,
+          ...(launchSubstrate ? { substrate: launchSubstrate } : {}),
+          agentProvider: providerForRuntime(workflowRuntime),
+          agentRuntime: workflowRuntime,
           permissionMode,
           // Per-run model pin (migration 037) — the Configure picker, default Opus.
           model,
@@ -639,34 +692,39 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, variantSelection],
+    [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, variantSelection],
   );
 
   const handleStart = useCallback(() => {
     if (selection === null || startInFlightRef.current) return;
 
     if (selection.kind === 'quick') {
+      const sessionRuntime = quickSessionRuntimeForLaunch(agentRuntime);
       // Fast mode is Opus-only; never request it for another model even if the
       // toggle was left on before the model was switched.
       //
-      // MCP deny + plugin selection are enforced on BOTH substrates (SDK:
+      // MCP deny + plugin selection are enforced on both CLAUDE substrates (SDK:
       // composeMcpServers delete + disallowedTools; interactive: --disallowed-tools
       // + disabledMcpjsonServers + enabledPlugins via --settings). Plugins reflect
       // the current enabled set, so send the selection ONLY when the user changed
       // it — `undefined` (unchanged) leaves the column NULL (inherit); an explicit
       // array (incl []) pins the exclusive set for the session.
       const pluginSelection = sameStringSet(enabledPlugins, pluginBaseline) ? undefined : enabledPlugins;
+      const quickSubstrate = substrateForRuntime(sessionRuntime);
+      const quickProvider = providerForRuntime(sessionRuntime);
       void startQuickSession(
         permissionMode,
-        substrate,
+        quickSubstrate,
         undefined,
         model,
-        isOpusModel(model) && fastMode,
+        quickProvider === 'claude' && isOpusModel(model) && fastMode,
         disabledMcpServers,
         pluginSelection,
         // Workspace override (Advanced) — 'inherit' omits it (server floors to the
         // global default); an explicit choice threads into sessions.in_place.
         worktreeModeOverride !== 'inherit' ? worktreeModeOverride : undefined,
+        quickProvider,
+        sessionRuntime,
       );
       return;
     }
@@ -688,6 +746,9 @@ export default function SessionStartWizard(): React.JSX.Element {
         false,
         disabledMcpServers,
         pluginSelection,
+        undefined,
+        'claude',
+        'claude-interactive',
       );
       return;
     }
@@ -713,7 +774,7 @@ export default function SessionStartWizard(): React.JSX.Element {
       return;
     }
     void launchRun(selection.workflowId);
-  }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode, substrate, model, fastMode, disabledMcpServers, enabledPlugins, pluginBaseline, worktreeModeOverride]);
+  }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode, agentRuntime, model, fastMode, disabledMcpServers, enabledPlugins, pluginBaseline, worktreeModeOverride]);
 
   const handleIdeaPicked = useCallback(
     // `opts.separateIdeaIds` ("Plan separately", IDEA-009) is deliberately NOT
@@ -751,6 +812,12 @@ export default function SessionStartWizard(): React.JSX.Element {
 
   // ── CTA label / disabled ─────────────────────────────────────────────────
   const ctaBusy = isLaunching || isQuickStarting;
+  const workflowRuntimeBlocked =
+    selection?.kind === 'workflow' && workflowRuntimeForLaunch(agentRuntime) === null;
+  const effectiveRuntime: LaunchAgentRuntime =
+    selection?.kind === 'ultracode' ? 'claude-interactive' : agentRuntime;
+  const effectiveProvider = providerForRuntime(effectiveRuntime);
+  const effectiveSubstrate = substrateForRuntime(effectiveRuntime);
   const selectedMeta =
     selection?.kind === 'workflow'
       ? workflowMetas.find((m) => m.id === selection.workflowId)
@@ -915,21 +982,41 @@ export default function SessionStartWizard(): React.JSX.Element {
           <div className="flex flex-col gap-4" data-testid="wizard-step3">
             {projectBannerCard}
 
+            {/* Agent runtime — shown before the model because runtime controls
+                which model family is available. Workflow launches allow workflow
+                runtimes only; quick launches also allow Codex PTY. Hidden for Ultracode, which always uses Claude
+                interactive PTY. */}
+            {selection.kind !== 'ultracode' && (
+              <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.substrateSelect }}>
+                <SubstrateSelector
+                  value={agentRuntime}
+                  onChange={setAgentRuntime}
+                  id="wizard-substrate"
+                  caveatsTestId="wizard-substrate-caveats"
+                  runtimeScope={selection.kind === 'quick' ? 'session' : 'workflow'}
+                />
+              </div>
+            )}
+
             {/* Session permission — shown for BOTH workflow and quick launches; an
                 explicit choice writes the host session's agent_permission_mode (the
-                sole execution authority) for either launch kind. The wrapper divs
-                here and below carry the onboarding coachmark anchors (tour steps
-                5-7 point at these three controls). */}
+                sole execution authority) for either launch kind. Provider-specific
+                copy stays below runtime because runtime controls the provider. */}
             <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.sessionPermission }}>
-              <AgentPermissionModeSelector value={permissionMode} onChange={setPermissionMode} />
+              <AgentPermissionModeSelector
+                value={permissionMode}
+                onChange={setPermissionMode}
+                agentProvider={effectiveProvider}
+                agentRuntime={effectiveRuntime}
+              />
             </div>
 
-            {/* Model picker — shown for ALL launch kinds. Quick + ultracode thread
-                it into useQuickSession (→ the claude panel / interactive eager
-                spawn); workflow threads it into runs.start ({ model }) →
-                workflow_runs.model (migration 037). Ultracode defaults to Fable
-                when available (seedDefaultModelFor). Fast mode (Opus-only premium
-                research preview) stays QUICK-only. */}
+            {/* Model picker — shown for ALL launch kinds and scoped to the selected
+                runtime/provider. Quick + ultracode thread it into useQuickSession
+                (→ the claude panel / interactive eager spawn); workflow threads
+                it into runs.start ({ model }) → workflow_runs.model (migration
+                037). Ultracode defaults to Fable when available
+                (seedDefaultModelFor). Fast mode stays QUICK-only. */}
             <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.modelSelect }}>
               <ModelSelector
                 value={model}
@@ -940,9 +1027,11 @@ export default function SessionStartWizard(): React.JSX.Element {
                   if (!isOpusModel(m)) setFastMode(false);
                 }}
                 id="wizard-model"
+                agentProvider={effectiveProvider}
+                agentRuntime={effectiveRuntime}
               />
             </div>
-            {selection.kind === 'quick' && isOpusModel(model) && (
+            {selection.kind === 'quick' && effectiveProvider === 'claude' && isOpusModel(model) && (
               <div
                 data-testid="wizard-fast-mode-row"
                 className="flex items-center justify-between gap-3 rounded-button border border-border-secondary bg-surface-secondary px-3 py-2"
@@ -962,21 +1051,6 @@ export default function SessionStartWizard(): React.JSX.Element {
               </div>
             )}
 
-            {/* CLI substrate — shown for workflow + quick launches (workflow:
-                threaded into runs.start; quick: threaded into useQuickSession →
-                sessions.substrate). Hidden for Ultracode, which always runs on
-                the interactive PTY substrate. */}
-            {selection.kind !== 'ultracode' && (
-              <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.substrateSelect }}>
-                <SubstrateSelector
-                  value={substrate}
-                  onChange={setSubstrate}
-                  id="wizard-substrate"
-                  caveatsTestId="wizard-substrate-caveats"
-                />
-              </div>
-            )}
-
             {/* Per-run A/B variant selector (migration 048), WORKFLOW only — hidden
                 entirely for a workflow with zero variants. Threaded into
                 runs.start as variantId / baseline (never both); rotation sends
@@ -989,8 +1063,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                 id="wizard-variant"
               />
             )}
-
-            {/* Advanced (QUICK + ULTRACODE, both substrates): MCP / plugin
+            {/* Advanced (QUICK + ULTRACODE): workspace plus Claude-only MCP/plugin
                 selection. These are a session-START decision — the deny-list is
                 enforced at the first spawn, so toggling mid-conversation was
                 confusing and could leak a disabled server back via the CLI's
@@ -998,7 +1071,9 @@ export default function SessionStartWizard(): React.JSX.Element {
                 SDK (composeMcpServers delete + strictMcpConfig + disallowedTools)
                 and interactive PTY (--disallowed-tools mcp__<srv> +
                 disabledMcpjsonServers + enabledPlugins via --settings) — ultracode
-                is an interactive quick session, so it gets the same controls.
+                is an interactive Claude quick session, so it gets the same controls.
+                Codex quick runtimes do not consume these launch selections, so the
+                MCP/plugin rows are omitted instead of implying enforcement.
                 Collapsed by default; the pills are controlled (no sessionId yet →
                 wizard owns the state and threads it into createQuick). */}
             {(selection.kind === 'quick' || selection.kind === 'ultracode') && (
@@ -1023,24 +1098,28 @@ export default function SessionStartWizard(): React.JSX.Element {
                     className="flex flex-col gap-3 border-t border-border-secondary px-3 py-3"
                     data-testid="wizard-advanced-body"
                   >
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="flex flex-col">
-                        <span className="text-sm font-medium text-text-primary">MCP servers</span>
-                        <span className="text-xs text-text-tertiary">
-                          Disable servers this session should not load
-                        </span>
-                      </div>
-                      <McpTogglePill disabled={disabledMcpServers} onChange={setDisabledMcpServers} />
-                    </div>
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="flex flex-col">
-                        <span className="text-sm font-medium text-text-primary">Plugins</span>
-                        <span className="text-xs text-text-tertiary">
-                          Reflects your enabled plugins — turn any off for this session
-                        </span>
-                      </div>
-                      <PluginTogglePill selected={enabledPlugins} onChange={setEnabledPlugins} />
-                    </div>
+                    {effectiveProvider === 'claude' && (
+                      <>
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex flex-col">
+                            <span className="text-sm font-medium text-text-primary">MCP servers</span>
+                            <span className="text-xs text-text-tertiary">
+                              Disable servers this session should not load
+                            </span>
+                          </div>
+                          <McpTogglePill disabled={disabledMcpServers} onChange={setDisabledMcpServers} />
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex flex-col">
+                            <span className="text-sm font-medium text-text-primary">Plugins</span>
+                            <span className="text-xs text-text-tertiary">
+                              Reflects your enabled plugins — turn any off for this session
+                            </span>
+                          </div>
+                          <PluginTogglePill selected={enabledPlugins} onChange={setEnabledPlugins} />
+                        </div>
+                      </>
+                    )}
 
                     {/* Workspace — where this quick session's working tree lives.
                         'Use global setting' omits worktreeMode (createQuick floors to
@@ -1276,16 +1355,23 @@ export default function SessionStartWizard(): React.JSX.Element {
               />
               <SummaryRow label="Permission" value={permissionLabel} />
               <SummaryRow
-                label="Substrate"
+                label="Runtime"
                 value={
-                  selection.kind === 'ultracode' || substrate === 'interactive'
-                    ? 'Interactive (PTY)'
-                    : 'SDK'
+                  effectiveRuntime === 'claude-interactive'
+                    ? 'Claude interactive (PTY)'
+                    : effectiveRuntime === 'codex-pty'
+                      ? 'Codex PTY'
+                      : effectiveRuntime === 'codex-sdk'
+                        ? 'Codex SDK'
+                        : 'Claude SDK'
                 }
               />
-              <SummaryRow label="Model" value={modelDisplayLabel(model)} />
+              <SummaryRow
+                label="Model"
+                value={effectiveProvider === 'codex' ? model : modelDisplayLabel(model)}
+              />
 
-              {selection.kind === 'quick' && isOpusModel(model) && (
+              {selection.kind === 'quick' && effectiveProvider === 'claude' && isOpusModel(model) && (
                 <SummaryRow label="Fast mode" value={fastMode ? 'On' : 'Off'} />
               )}
               {selection.kind === 'ultracode' && (
@@ -1310,7 +1396,7 @@ export default function SessionStartWizard(): React.JSX.Element {
               <button
                 type="button"
                 onClick={handleStart}
-                disabled={selection === null || ctaBusy}
+                disabled={selection === null || ctaBusy || workflowRuntimeBlocked}
                 data-testid="wizard-cta"
                 className="w-full bg-interactive px-4 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
               >
@@ -1358,7 +1444,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         <TaskBatchPickerModal
           isOpen
           projectId={selectedProjectId}
-          substrate={substrate}
+          substrate={effectiveSubstrate ?? DEFAULT_SUBSTRATE}
           onClose={() => setBatchPickerOpen(false)}
           onPicked={handleBatchPicked}
         />

@@ -9,6 +9,8 @@
  *   Case A: CSC_DISABLE=true       → unsigned posture (hardenedRuntime false, notarize false, no entitlements)
  *   Case B: All Apple env vars set → signed posture (hardenedRuntime true, notarize truthy, entitlements set)
  *   Case C: BUILD_VARIANT=dev      → dev appId / productName / artifactName / publish URL overrides
+ *   Case D: lean packaging plan    → every foreign Claude/Codex native package excluded
+ *   Case E: BUILD_ARCH=<host arch> → generated config applies the tested plan
  *
  * Every case also asserts that package.json on disk is byte-for-byte UNCHANGED (the whole
  * point of the generated-config approach) and that the on-disk generated file matches the
@@ -163,36 +165,90 @@ try {
 }
 
 try {
-  // Case D: BUILD_ARCH=<arch> → lean per-arch packaging excludes the OTHER arch's
-  // claude-agent-sdk binary. The preflight requires the TARGET arch's binary on
-  // disk (else it process.exit(1)s), and CI does not install the darwin binaries,
-  // so only run this case when the host arch's binary is actually present.
+  // Case D is pure so every CI host covers both target architectures even when
+  // optional darwin packages are not installed there.
+  const { getLeanPackagingPlan } = require('./configure-build.js');
+  for (const targetArch of ['arm64', 'x64']) {
+    const otherArch = targetArch === 'arm64' ? 'x64' : 'arm64';
+    const plan = getLeanPackagingPlan(targetArch);
+    assert(plan !== null, `a ${targetArch} lean-packaging plan should exist`);
+    assert(plan.requiredBinaries.length === 2, 'both agent binaries should be required');
+    assert(
+      plan.requiredBinaries.some((entry) => entry.packageName === `@openai/codex-darwin-${targetArch}`),
+      `the ${targetArch} Codex binary should be required`
+    );
+    assert(
+      plan.exclusions.includes(`!node_modules/@openai/codex-darwin-${otherArch}/**`),
+      `the foreign Codex darwin package should be excluded for ${targetArch}`
+    );
+    assert(
+      plan.exclusions.includes('!node_modules/@openai/codex-linux-x64/**') &&
+        plan.exclusions.includes('!node_modules/@openai/codex-win32-arm64/**'),
+      'foreign Codex operating-system packages should be excluded'
+    );
+    assert(
+      !plan.exclusions.includes(`!node_modules/@openai/codex-darwin-${targetArch}/**`),
+      'the target Codex package must not be excluded'
+    );
+    assert(
+      !plan.exclusions.includes('!node_modules/@openai/codex/**'),
+      'the portable Codex launcher must remain packaged'
+    );
+  }
+  assert(getLeanPackagingPlan(undefined) === null, 'an unset architecture should preserve universal packaging');
+  console.log('\nPASS: Case D (lean Claude/Codex packaging plans)');
+} catch (err) {
+  console.error('FAIL: Case D — ' + err.message);
+  failed = true;
+}
+
+try {
+  // Case E applies the plan to the generated config. The preflight requires both
+  // TARGET binaries on disk, so only run when this darwin host has both packages.
   const hostArch = process.arch === 'x64' ? 'x64' : 'arm64';
   const otherArch = hostArch === 'x64' ? 'arm64' : 'x64';
-  const hostBinary = path.join(
+  const claudeHostBinary = path.join(
     __dirname, '..', 'node_modules', '@anthropic-ai', `claude-agent-sdk-darwin-${hostArch}`, 'claude'
   );
-  if (process.platform === 'darwin' && fs.existsSync(hostBinary)) {
+  const codexTriple = hostArch === 'arm64' ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
+  const codexHostBinary = path.join(
+    __dirname, '..', 'node_modules', '@openai', `codex-darwin-${hostArch}`,
+    'vendor', codexTriple, 'bin', 'codex'
+  );
+  if (
+    process.platform === 'darwin' &&
+    fs.existsSync(claudeHostBinary) &&
+    fs.existsSync(codexHostBinary)
+  ) {
     runCase(
-      `Case D: BUILD_ARCH=${hostArch} (lean per-arch exclusion)`,
+      `Case E: BUILD_ARCH=${hostArch} (lean per-arch exclusion)`,
       { BUILD_ARCH: hostArch, CSC_DISABLE: 'true' },
       function (config) {
-        const exclusion = `!node_modules/@anthropic-ai/claude-agent-sdk-darwin-${otherArch}/**`;
+        const claudeExclusion = `!node_modules/@anthropic-ai/claude-agent-sdk-darwin-${otherArch}/**`;
+        const codexExclusion = `!node_modules/@openai/codex-darwin-${otherArch}/**`;
         assert(
-          Array.isArray(config.files) && config.files.includes(exclusion),
-          `files should exclude the non-target arch (${exclusion})`
+          Array.isArray(config.files) && config.files.includes(claudeExclusion),
+          `files should exclude the non-target Claude arch (${claudeExclusion})`
+        );
+        assert(
+          config.files.includes(codexExclusion),
+          `files should exclude the non-target Codex arch (${codexExclusion})`
         );
         assert(
           !config.files.includes(`!node_modules/@anthropic-ai/claude-agent-sdk-darwin-${hostArch}/**`),
-          'files must NOT exclude the target arch'
+          'files must not exclude the target Claude arch'
+        );
+        assert(
+          !config.files.includes(`!node_modules/@openai/codex-darwin-${hostArch}/**`),
+          'files must not exclude the target Codex arch'
         );
       }
     );
   } else {
-    console.log('\n--- Case D: skipped (no darwin claude-agent-sdk binary on this host) ---');
+    console.log('\n--- Case E: skipped (both darwin agent binaries are not installed on this host) ---');
   }
 } catch (err) {
-  console.error('FAIL: Case D — ' + err.message);
+  console.error('FAIL: Case E — ' + err.message);
   failed = true;
 }
 

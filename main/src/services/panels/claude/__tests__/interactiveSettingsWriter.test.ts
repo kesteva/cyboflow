@@ -29,6 +29,7 @@ import {
   resolveInlineGatingHooks,
   resolveShellHookScriptPath,
   resolveStopHookScriptPath,
+  resolveShellHookScriptPathForFilename,
 } from '../interactiveSettingsWriter';
 import { makeSpyLogger } from '../../../../orchestrator/__test_fixtures__/loggerLikeSpy';
 
@@ -37,6 +38,14 @@ import { makeSpyLogger } from '../../../../orchestrator/__test_fixtures__/logger
 // ---------------------------------------------------------------------------
 
 const HOOK_DIR = '/fake/dist/orchestrator/shellHooks';
+
+describe('resolveShellHookScriptPathForFilename', () => {
+  it('resolves a requested hook filename within the shell hooks directory', () => {
+    expect(resolveShellHookScriptPathForFilename('codexPreToolUseHook.js', HOOK_DIR)).toBe(
+      path.join(HOOK_DIR, 'codexPreToolUseHook.js'),
+    );
+  });
+});
 
 interface HookCommandEntry {
   type: string;

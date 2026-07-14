@@ -27,7 +27,9 @@ describe('API — Electron-absent guard', () => {
     await expect(API.sessions.getAll()).rejects.toThrow('Electron API not available');
     await expect(API.projects.getAll()).rejects.toThrow('Electron API not available');
     await expect(API.config.get()).rejects.toThrow('Electron API not available');
+    await expect(API.codex.detect()).rejects.toThrow('Electron API not available');
     await expect(API.models.getAvailability()).rejects.toThrow('Electron API not available');
+    await expect(API.models.getCodexCatalog()).rejects.toThrow('Electron API not available');
   });
 
   it('models.onAvailabilityChanged returns a no-op unsubscribe off Electron (no throw)', () => {
@@ -51,6 +53,10 @@ describe('API.models — preload skew (electronAPI present, .models absent)', ()
     await expect(API.models.getAvailability()).rejects.toThrow('Electron API not available');
   });
 
+  it('getCodexCatalog throws rather than crashing on a skewed models bridge', async () => {
+    await expect(API.models.getCodexCatalog()).rejects.toThrow('Electron API not available');
+  });
+
   it('onAvailabilityChanged degrades to a no-op unsubscribe (does not read undefined.models)', () => {
     const unsub = API.models.onAvailabilityChanged(() => {});
     expect(unsub).toBeTypeOf('function');
@@ -66,17 +72,36 @@ describe('API.models — preload skew (electronAPI present, .models absent)', ()
 describe('API — happy path forwards args verbatim', () => {
   const get = vi.fn();
   const create = vi.fn();
+  const codexDetect = vi.fn();
   const modelsGetAvailability = vi.fn();
+  const modelsGetCodexCatalog = vi.fn();
   const modelsOnChanged = vi.fn().mockReturnValue(() => {});
 
   beforeEach(() => {
     get.mockReset().mockResolvedValue({ success: true, data: { id: 's1' } });
     create.mockReset().mockResolvedValue({ success: true });
+    codexDetect.mockReset().mockResolvedValue({
+      success: true,
+      data: {
+        state: 'detected',
+        runtime: { found: true, path: '/app/codex', version: '0.144.3' },
+        account: { found: true, email: 'codex@example.com', planType: 'plus' },
+      },
+    });
     modelsGetAvailability.mockReset().mockResolvedValue({ success: true, data: {} });
+    modelsGetCodexCatalog.mockReset().mockResolvedValue({
+      success: true,
+      data: { models: [], defaultModel: null },
+    });
     modelsOnChanged.mockClear();
     setElectronAPI({
       sessions: { get, create },
-      models: { getAvailability: modelsGetAvailability, onAvailabilityChanged: modelsOnChanged },
+      codex: { detect: codexDetect },
+      models: {
+        getAvailability: modelsGetAvailability,
+        getCodexCatalog: modelsGetCodexCatalog,
+        onAvailabilityChanged: modelsOnChanged,
+      },
     });
   });
   afterEach(() => {
@@ -95,9 +120,19 @@ describe('API — happy path forwards args verbatim', () => {
     expect(create).toHaveBeenCalledWith(request);
   });
 
+  it('codex.detect forwards to the preload bridge', async () => {
+    await API.codex.detect();
+    expect(codexDetect).toHaveBeenCalledTimes(1);
+  });
+
   it('models.getAvailability forwards to the bridge when present', async () => {
     await API.models.getAvailability();
     expect(modelsGetAvailability).toHaveBeenCalledTimes(1);
+  });
+
+  it('models.getCodexCatalog forwards to the bridge when present', async () => {
+    await API.models.getCodexCatalog();
+    expect(modelsGetCodexCatalog).toHaveBeenCalledTimes(1);
   });
 
   it('models.onAvailabilityChanged registers the callback and returns the bridge unsubscribe', () => {

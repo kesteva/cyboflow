@@ -32,6 +32,10 @@ import type { StepRunner, StepRunResult, ControllerStepContext } from './types';
 import { composeStepPrompt } from './stepPrompt';
 import { isSystemicStepError } from './systemicError';
 import type { WorkflowStep } from '../../../../shared/types/workflows';
+import {
+  renderWorkflowPromptForRuntime,
+  type WorkflowPromptRenderContext,
+} from '../workflowPromptRenderer';
 
 /** Per-run spawn parameters bound when the runner is constructed. */
 export interface SpawnStepRunnerOptions {
@@ -72,6 +76,20 @@ export interface SpawnStepRunnerOptions {
    * undefined ⇒ no task block (output unchanged).
    */
   taskScope?: () => string | undefined;
+  /**
+   * Per-step run-owned IDEA scope. Resolves the ids from the run's authoritative
+   * ownership projection (seed idea plus ideas created during this run). It is a
+   * thunk because Ship may create its idea during context, after this runner was
+   * constructed but before its optional design steps run.
+   */
+  runOwnedIdeaIds?: () => readonly string[];
+  /**
+   * Provider/runtime prompt envelope for this run. Claude is identity; Codex gets
+   * the compatibility adapter around each fresh per-step prompt.
+   */
+  promptRenderContext?: WorkflowPromptRenderContext;
+  /** Provider-scoped model pinned on the owning workflow run. */
+  model?: string;
 }
 
 export class SpawnStepRunner implements StepRunner {
@@ -93,14 +111,30 @@ export class SpawnStepRunner implements StepRunner {
     // construction) so a lane added mid-run is grounded with its real title/body
     // on its first dispatch, exactly like userGuidance/agentPermissionMode.
     const taskScope = this.opts.taskScope?.();
-    const prompt = composeStepPrompt({
+    // Re-resolve the run-owned idea ids per step. This prevents conditional Ship
+    // steps from inspecting unrelated project ideas and picks up ideas context
+    // creates mid-run.
+    const runOwnedIdeaIds = this.opts.runOwnedIdeaIds?.();
+    const basePrompt = composeStepPrompt({
       step,
       workflowName: this.opts.workflowName,
       attempt: ctx.attempt,
       ...(ctx.item ? { item: ctx.item } : {}),
       ...(taskScope ? { taskScope } : {}),
+      ...(runOwnedIdeaIds && runOwnedIdeaIds.length > 0 ? { runOwnedIdeaIds } : {}),
       ...(userGuidance ? { userGuidance } : {}),
     });
+    const { prompt } = renderWorkflowPromptForRuntime(
+      { prompt: basePrompt, systemPromptAppend: '' },
+      {
+        ...(this.opts.promptRenderContext ?? {
+          provider: 'claude' as const,
+          runtime: 'claude-sdk' as const,
+          executionModel: 'programmatic' as const,
+        }),
+        turnKind: 'programmatic-step',
+      },
+    );
     // Re-resolve the agent permission mode PER STEP (permission-mode redesign
     // §3c#2) — never captured at construction — so a mid-run mode change is
     // honored on the next step turn.
@@ -112,6 +146,9 @@ export class SpawnStepRunner implements StepRunner {
         runId: this.opts.runId,
         worktreePath: this.opts.worktreePath,
         prompt,
+        hidePromptFromTranscript: true,
+        agentInvocationStepId: step.id,
+        ...(this.opts.model ? { model: this.opts.model } : {}),
         ...(agentPermissionMode ? { agentPermissionMode } : {}),
         // Additive per-lane spawn identity — forwarded ONLY when present so the
         // non-fan-out (no-item) case stays byte-identical; the spawner defaults

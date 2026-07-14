@@ -23,18 +23,19 @@
  *      run has ANY live questionStore Question, every `source === 'question'`
  *      review item for that run is dropped from the render — suppression is by
  *      RUN, not by toolUseId.
- *   2. The CHAT-TRANSCRIPT inline card — `RunChatView.renderToolCallExtra`
- *      renders an AskUserQuestionCard at the question's tool_use position, but
- *      only when the Chat tab is the visible bottom-dock surface.
+ *   2. The CHAT card — `RunChatView` renders an AskUserQuestionCard at the
+ *      question's tool_use position when one exists, or appends it to the
+ *      transcript when provider and host ids cannot be correlated.
  *   3. THIS strip's own AskUserQuestionCard — the guaranteed-visible fallback
- *      for every NON-chat tab (and a collapsed dock).
+ *      for Terminal/Agent tabs and a collapsed dock.
  *
  * To keep a single interactive surface, the strip stands down its own live
  * question card (#3) exactly when the chat transcript already renders it (#2) —
- * i.e. `chatSurfaceVisible` (Chat tab active AND the dock open). Any other tab,
- * or a collapsed dock, keeps the strip's card so the gate is never hidden. The
- * folded-row suppression (#1) still fires whenever the run has a live question,
- * regardless of which of #2/#3 is showing it.
+ * i.e. `chatSurfaceVisible` (Chat tab active AND the dock open). Data Stream also
+ * suppresses the strip card while visible so event inspection is never displaced
+ * by the form; the same question remains waiting in Chat. Terminal/Agent tabs and
+ * a collapsed dock keep the strip fallback. Folded-row suppression (#1) still
+ * fires whenever the run has a live question.
  */
 import { useEffect, useMemo, type ReactElement } from 'react';
 import { useReviewItemsSlice, pendingReviewItemsForRun } from '../../stores/reviewItemsSlice';
@@ -54,12 +55,15 @@ interface RunPendingInputStripProps {
    * every non-chat tab / collapsed dock, and for callers that don't thread it.
    */
   chatSurfaceVisible?: boolean;
+  /** Keep the visible Data Stream dedicated to raw events, without a question form. */
+  suppressLiveQuestions?: boolean;
 }
 
 export function RunPendingInputStrip({
   runId,
   projectId,
   chatSurfaceVisible = false,
+  suppressLiveQuestions = false,
 }: RunPendingInputStripProps): ReactElement | null {
   useEffect(() => {
     if (projectId === null) return;
@@ -87,10 +91,10 @@ export function RunPendingInputStrip({
     [questionQueue, runId],
   );
 
-  // Live question cards THIS strip renders. When the chat transcript is the
-  // visible surface it already renders them inline, so the strip stands down —
-  // one interactive surface per live question (surface #2 vs #3, see docstring).
-  const stripQuestions = chatSurfaceVisible ? [] : liveQuestions;
+  // Live question cards THIS strip renders. When the chat surface is visible it
+  // renders every question either inline or in its transcript-tail fallback, so the strip
+  // stands down — one interactive surface per live question.
+  const stripQuestions = chatSurfaceVisible || suppressLiveQuestions ? [] : liveQuestions;
 
   const pendingItems = useMemo(() => {
     const pending = pendingReviewItemsForRun(items, runId);

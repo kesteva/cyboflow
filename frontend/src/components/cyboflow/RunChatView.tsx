@@ -8,9 +8,9 @@
  * surface a quick session renders (ClaudePanel). This file owns only the
  * run-specific wiring:
  *   - the interactive-substrate body (the live PTY xterm, InteractiveTerminalView),
- *   - the inline `AskUserQuestionCard` injected at its tool_use position (via
- *     UnifiedChatView's `renderToolCallExtra` hook) + its artifact "open in pane"
- *     affordances,
+ *   - the `AskUserQuestionCard`, injected at its tool_use position when the
+ *     transcript has a matching anchor and appended to the transcript otherwise,
+ *     plus its artifact "open in pane" affordances,
  *   - the bottom region: the per-run `PendingApprovalsForRun` strip, the
  *     permission-change confirmation toast, and the run composer (`ChatInput`).
  *
@@ -74,6 +74,7 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
     return null;
   }, [runId, runsByProject]);
   const isInteractive = run?.substrate === 'interactive';
+  const agentName = run?.agent_provider === 'codex' ? 'Codex' : 'Claude';
   const running = run?.status === 'running' || run?.status === 'starting';
   const worktreePath = run?.worktree_path ?? null;
   const branchName = run?.branch_name ?? null;
@@ -213,6 +214,46 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
     [questionQueue, onOpenArtifact, primaryArtifact],
   );
 
+  // Codex request_user_input uses a host request id for the Question record,
+  // while app-server exposes a different provider tool-call id. The provider
+  // call also remains in-progress until the human answers, so there may be no
+  // completed transcript tool row to anchor against at all. Keep those live
+  // questions at the scrollable transcript tail; Claude questions with matching
+  // tool_use ids remain inline at their transcript position.
+  const transcriptToolCallIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const message of messages) {
+      for (const segment of message.segments) {
+        if (segment.type === 'tool_call') ids.add(segment.tool.id);
+      }
+    }
+    return ids;
+  }, [messages]);
+  const unanchoredQuestions = useMemo(
+    () => questionQueue.filter(
+      (question) => question.runId === runId && !transcriptToolCallIds.has(question.toolUseId),
+    ),
+    [questionQueue, runId, transcriptToolCallIds],
+  );
+  const unanchoredQuestionSlot = useMemo(
+    () => unanchoredQuestions.length > 0 ? (
+      <div
+        className="overflow-hidden border border-border-primary bg-bg-secondary"
+        data-testid="run-chat-unanchored-questions"
+      >
+        {unanchoredQuestions.map((question) => (
+          <AskUserQuestionCard
+            key={question.id}
+            item={question}
+            onOpenArtifact={onOpenArtifact}
+            openArtifactLabel={primaryArtifact?.label}
+          />
+        ))}
+      </div>
+    ) : undefined,
+    [unanchoredQuestions, onOpenArtifact, primaryArtifact],
+  );
+
   // -------------------------------------------------------------------------
   // Placeholder branches (no active run)
   // -------------------------------------------------------------------------
@@ -233,7 +274,7 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   // -------------------------------------------------------------------------
   return (
     <UnifiedChatView
-      name={isInteractive ? 'Terminal' : 'Claude'}
+      name={isInteractive ? 'Terminal' : agentName}
       transport={isInteractive ? 'interactive' : 'sdk'}
       mode="flow"
       running={running}
@@ -242,6 +283,7 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
       loadError={loadError}
       isWaitingForResponse={running}
       liveTail={liveTail}
+      transcriptEndSlot={unanchoredQuestionSlot}
       folderLabel={folderLabel}
       folderTitle={worktreePath}
       branchName={branchName}

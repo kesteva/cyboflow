@@ -12,7 +12,13 @@ const thinkingMessages = [
   { text: "Preparing insights", icon: Sparkles },
 ];
 
-export const ThinkingPlaceholder: React.FC = () => {
+interface ThinkingPlaceholderProps {
+  agentName?: string;
+}
+
+export const ThinkingPlaceholder: React.FC<ThinkingPlaceholderProps> = ({
+  agentName = 'Claude',
+}) => {
   const [messageIndex, setMessageIndex] = useState(0);
   const [dots, setDots] = useState('');
 
@@ -64,7 +70,7 @@ export const ThinkingPlaceholder: React.FC = () => {
             {/* Status text */}
             <div className="text-center space-y-2">
               <h3 className="text-lg font-medium text-text-primary">
-                Claude is thinking{dots}
+                {agentName} is thinking{dots}
               </h3>
               <p className="text-sm text-text-secondary animate-fadeIn">
                 {currentMessage.text}
@@ -91,7 +97,7 @@ export const ThinkingPlaceholder: React.FC = () => {
         {/* Fun fact or tip */}
         <div className="mt-6 text-center">
           <p className="text-xs text-text-tertiary italic">
-            💡 Tip: You can view Claude's thinking process by enabling "Show Thinking" in settings
+            💡 Tip: You can view {agentName}'s thinking process by enabling "Show Thinking" in settings
           </p>
         </div>
       </div>
@@ -101,7 +107,7 @@ export const ThinkingPlaceholder: React.FC = () => {
 
 // Fun wacky status messages for inline indicator
 export const wackyStatusMessages = [
-  "Clauding intensely...",
+  "Thinking intensely...",
   "Synthesizing brilliance...",
   "Cooking up something special...",
   "Turbo-thinking engaged...",

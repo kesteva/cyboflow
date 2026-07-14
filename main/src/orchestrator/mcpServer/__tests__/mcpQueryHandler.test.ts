@@ -34,6 +34,7 @@ import { TaskChangeRouter, taskChangeEvents } from '../../taskChangeRouter';
 import { ReviewItemRouter, reviewItemChangeEvents } from '../../reviewItemRouter';
 import { SprintLaneStore, sprintLaneEvents, sprintLaneChannel } from '../../sprintLaneStore';
 import { ApprovalRouter } from '../../approvalRouter';
+import { QuestionRouter } from '../../questionRouter';
 import { VerificationScheduler } from '../../verify/verificationScheduler';
 import type { VerdictV1 } from '../../../../../shared/types/visualVerification';
 import type { WorkflowDefinition, WorkflowStepTransitionEvent } from '../../../../../shared/types/workflows';
@@ -2694,6 +2695,8 @@ describe('mcp-report-step does not pause on human steps', () => {
     gateDb.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
     const migDir = join(__dirname, '..', '..', '..', 'database', 'migrations');
     gateDb.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
+    gateDb.exec(readFileSync(join(migDir, '007_add_stuck_reason.sql'), 'utf-8'));
+    gateDb.exec(readFileSync(join(migDir, '010_questions.sql'), 'utf-8'));
     gateDb.exec(readFileSync(join(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
     gateDb.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
     gateDb.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
@@ -2719,10 +2722,12 @@ describe('mcp-report-step does not pause on human steps', () => {
   beforeEach(() => {
     gateDb = buildGateDb();
     gateHandler = new McpQueryHandler(dbAdapter(gateDb));
+    QuestionRouter.initialize(dbAdapter(gateDb));
     stepTransitionEvents.removeAllListeners('transition');
   });
 
   afterEach(() => {
+    QuestionRouter._resetForTesting();
     stepTransitionEvents.removeAllListeners('transition');
   });
 
@@ -2766,6 +2771,44 @@ describe('mcp-report-step does not pause on human steps', () => {
       .status;
     expect(status).toBe('running');
     expect(gateDb.prepare("SELECT COUNT(*) AS n FROM review_items WHERE run_id = 'run-g'").get()).toEqual({ n: 0 });
+  });
+
+  it('blocks an MCP question until QuestionRouter receives the human answer', async () => {
+    seedSprintRun(gateDb, 'run-g');
+    const { socket, writes } = makeSocketDouble();
+    const request = gateHandler.handleMessage({
+      type: 'mcp-request-user-input',
+      requestId: 'question-1',
+      runId: 'run-g',
+      questions: [{
+        header: 'Review',
+        question: 'Approve the sprint?',
+        multiSelect: false,
+        options: [{ label: 'Approve' }, { label: 'Reject' }],
+      }],
+    }, socket);
+
+    await vi.waitFor(() => {
+      expect(gateDb.prepare("SELECT status FROM workflow_runs WHERE id = 'run-g'").get()).toEqual({
+        status: 'awaiting_input',
+      });
+    });
+    expect(writes).toHaveLength(0);
+
+    const row = gateDb.prepare("SELECT id FROM questions WHERE run_id = 'run-g'").get() as { id: string };
+    await QuestionRouter.getInstance().respond(row.id, {
+      answers: { 'Approve the sprint?': 'Approve' },
+    });
+    await request;
+
+    expect(parseLastWrite(writes)).toMatchObject({
+      requestId: 'question-1',
+      ok: true,
+      data: { answers: { 'Approve the sprint?': 'Approve' } },
+    });
+    expect(gateDb.prepare("SELECT status FROM workflow_runs WHERE id = 'run-g'").get()).toEqual({
+      status: 'running',
+    });
   });
 });
 

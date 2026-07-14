@@ -46,6 +46,11 @@ import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../shared/types/subs
  */
 type ForwardHandler = (payload: unknown) => void;
 
+function isFailedExit(payload: unknown): boolean {
+  return typeof payload === 'object' && payload !== null &&
+    'exitCode' in payload && typeof payload.exitCode === 'number' && payload.exitCode !== 0;
+}
+
 /**
  * Bytes of interactive-PTY output retained per run for replay-on-attach
  * (IDEA-030 blank-xterm fix). Capped to the last N bytes so a long session does
@@ -128,6 +133,8 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
   private readonly interactiveSpawnedHandler: ForwardHandler;
   private readonly interactiveOutputHandler: ForwardHandler;
   private readonly interactiveExitHandler: ForwardHandler;
+  private readonly codexSdkOutputHandler: ForwardHandler | null = null;
+  private readonly codexSdkExitHandler: ForwardHandler | null = null;
   // Raw-PTY byte fan-in (TASK-814 / IDEA-030) — interactive manager ONLY. The SDK
   // manager has no PTY and never emits 'pty-output', so it is deliberately NOT
   // subscribed here (the path is interactive-only by construction).
@@ -138,6 +145,11 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
   // NEVER emits 'turn-end' (it drains via the query() iterator), so it is
   // deliberately NOT subscribed — the SDK path is structurally untouched.
   private readonly interactiveTurnEndHandler: ForwardHandler;
+  private readonly additionalPtyHandlers: Array<{
+    manager: AbstractCliManager;
+    ptyHandler: ForwardHandler;
+    exitHandler: ForwardHandler;
+  }> = [];
 
   /**
    * Per-run rolling backlog of the interactive PTY's VERBATIM output bytes
@@ -168,12 +180,15 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    */
   private readonly interactiveRunToPanel = new Map<string, string>();
   private readonly interactivePanelToRun = new Map<string, string>();
+  private readonly livePtyOwners = new Map<string, AbstractCliManager>();
 
   constructor(
     private readonly sdkManager: AbstractCliManager,
     private readonly interactiveManager: AbstractCliManager,
     private readonly registry: WorkflowRegistryLike,
     private readonly logger: LoggerLike,
+    additionalPtyManagers: AbstractCliManager[] = [],
+    private readonly codexSdkManager?: AbstractCliManager,
   ) {
     super();
 
@@ -199,7 +214,7 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     // (blank-xterm fix), then re-emit 'pty-output' by reference (live channel
     // unchanged). Interactive manager ONLY (the SDK manager is never subscribed).
     this.interactivePtyHandler = (payload) => {
-      this.recordInteractivePanelMapping(payload);
+      this.recordInteractivePanelMapping(payload, this.interactiveManager);
       this.recordPtyBacklog(payload);
       this.emit('pty-output', payload);
     };
@@ -208,7 +223,7 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     // { panelId, runId } — a second mapping source so the runId→panelId
     // translation is available even before any PTY byte flows.
     this.interactiveTurnEndHandler = (payload) => {
-      this.recordInteractivePanelMapping(payload);
+      this.recordInteractivePanelMapping(payload, this.interactiveManager);
       this.emit('turn-end', payload);
     };
 
@@ -220,6 +235,34 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     this.interactiveManager.on('exit', this.interactiveExitHandler);
     this.interactiveManager.on('pty-output', this.interactivePtyHandler);
     this.interactiveManager.on('turn-end', this.interactiveTurnEndHandler);
+
+    if (this.codexSdkManager) {
+      this.codexSdkOutputHandler = (payload) => this.emit('output', payload);
+      this.codexSdkExitHandler = (payload) => this.emit('exit', payload);
+      this.codexSdkManager.on('output', this.codexSdkOutputHandler);
+      this.codexSdkManager.on('exit', this.codexSdkExitHandler);
+    }
+
+    for (const manager of additionalPtyManagers) {
+      const ptyHandler: ForwardHandler = (payload) => {
+        this.recordInteractivePanelMapping(payload, manager);
+        this.recordPtyBacklog(payload);
+        this.emit('pty-output', payload);
+      };
+      const exitHandler: ForwardHandler = (payload) => {
+        // Keep a failed startup/runtime tail available for replay when the
+        // terminal mounts after the process has already exited. Successful
+        // close-out still drops the backlog normally.
+        if (!isFailedExit(payload)) {
+          this.clearPtyBacklog(payload);
+        }
+        this.clearInteractivePanelMapping(payload);
+        this.emit('exit', payload);
+      };
+      manager.on('pty-output', ptyHandler);
+      manager.on('exit', exitHandler);
+      this.additionalPtyHandlers.push({ manager, ptyHandler, exitHandler });
+    }
 
     this.logger.debug('[SubstrateDispatchFacade] subscribed to both substrate managers', {
       defaultSubstrate: DEFAULT_SUBSTRATE,
@@ -233,6 +276,12 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    */
   private resolveManager(runId: string): AbstractCliManager {
     const run = this.registry.getRunById(runId);
+    if (run?.agent_runtime === 'codex-sdk' || run?.agent_provider === 'codex') {
+      if (!this.codexSdkManager) {
+        throw new Error(`[SubstrateDispatchFacade] run ${runId} requested Codex SDK but no codex-sdk manager is wired`);
+      }
+      return this.codexSdkManager;
+    }
     const substrate: CliSubstrate = run?.substrate ?? DEFAULT_SUBSTRATE;
     return substrate === 'interactive' ? this.interactiveManager : this.sdkManager;
   }
@@ -246,8 +295,9 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     const { panelId } = options;
     const mgr = this.resolveManager(panelId);
     const substrate: CliSubstrate = mgr === this.interactiveManager ? 'interactive' : 'sdk';
+    const runtime = mgr === this.codexSdkManager ? 'codex-sdk' : substrate;
     this.panelOwners.set(panelId, mgr);
-    this.logger.info('[SubstrateDispatchFacade] dispatch spawn', { panelId, substrate });
+    this.logger.info('[SubstrateDispatchFacade] dispatch spawn', { panelId, substrate, runtime });
     // AbstractCliManager.spawnCliProcess accepts the CliSpawnOptions superset of
     // ClaudeSpawnerOptions (it adds an index signature for CLI-specific keys). Binding
     // the method to a ClaudeSpawnerLike-shaped reference narrows the parameter via the
@@ -293,6 +343,20 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    * panel-preservation).
    */
   relayInput(runId: string, text: string): void {
+    const liveOwner = this.livePtyOwners.get(runId);
+    if (liveOwner) {
+      const panelId = this.toLivePanelId(runId);
+      if (!liveOwner.isPanelRunning(panelId)) {
+        this.logger.debug('[SubstrateDispatchFacade] relayInput dropped — live PTY not running', {
+          runId,
+          panelId,
+        });
+        return;
+      }
+      liveOwner.sendInput(panelId, text);
+      return;
+    }
+
     const mgr = this.resolveManager(runId);
     if (mgr !== this.interactiveManager) {
       // SDK substrate has no PTY — relaying input is a no-op (Q3 byte-identical).
@@ -330,6 +394,14 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    * `isResizeCapable` guard own the feature detection.
    */
   relayResize(runId: string, cols: number, rows: number): void {
+    const liveOwner = this.livePtyOwners.get(runId);
+    if (liveOwner) {
+      if (isResizeCapable(liveOwner)) {
+        liveOwner.resizePanel(this.toLivePanelId(runId), cols, rows);
+      }
+      return;
+    }
+
     const mgr = this.resolveManager(runId);
     if (mgr !== this.interactiveManager) {
       this.logger.debug('[SubstrateDispatchFacade] relayResize no-op for SDK substrate', { runId });
@@ -411,6 +483,17 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    * interface (no `any`) so it is harmless if that manager ever lacks the seam.
    */
   async endSession(runId: string): Promise<void> {
+    const liveOwner = this.livePtyOwners.get(runId);
+    if (liveOwner) {
+      const panelId = this.toLivePanelId(runId);
+      if (isEndSessionCapable(liveOwner)) {
+        await liveOwner.endSession(panelId);
+        return;
+      }
+      await liveOwner.killProcess(panelId);
+      return;
+    }
+
     const mgr = this.resolveManager(runId);
     if (mgr !== this.interactiveManager) {
       this.logger.info('[SubstrateDispatchFacade] endSession dispatch kill for SDK substrate', { runId });
@@ -445,6 +528,12 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    * feature-detection is needed.
    */
   async killSession(runId: string): Promise<void> {
+    const liveOwner = this.livePtyOwners.get(runId);
+    if (liveOwner) {
+      await liveOwner.killProcess(this.toLivePanelId(runId));
+      return;
+    }
+
     const mgr = this.resolveManager(runId);
     if (mgr !== this.interactiveManager) {
       this.logger.info('[SubstrateDispatchFacade] killSession dispatch kill for SDK substrate', { runId });
@@ -511,8 +600,19 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    * interactive 'exit' like any event-fed entry.
    */
   registerInteractivePanel(runId: string, panelId: string): void {
+    this.registerPtyPanel(runId, panelId, this.interactiveManager);
+  }
+
+  /**
+   * Deterministic at-spawn registration for any live PTY-backed quick-session
+   * runtime. Claude interactive remains the workflow-capable owner; Codex PTY
+   * uses this session-scoped path so xterm input/backlog can share the existing
+   * `cyboflow:pty:<runId>` channel without widening the legacy substrate enum.
+   */
+  registerPtyPanel(runId: string, panelId: string, manager: AbstractCliManager): void {
     this.interactiveRunToPanel.set(runId, panelId);
     this.interactivePanelToRun.set(panelId, runId);
+    this.livePtyOwners.set(runId, manager);
   }
 
   /**
@@ -520,11 +620,12 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    * ('pty-output' / 'turn-end' — both carry { panelId, runId }). Idempotent;
    * silently skips payloads missing either id.
    */
-  private recordInteractivePanelMapping(payload: unknown): void {
+  private recordInteractivePanelMapping(payload: unknown, manager?: AbstractCliManager): void {
     const evt = payload as { panelId?: unknown; runId?: unknown };
     if (typeof evt.panelId !== 'string' || typeof evt.runId !== 'string') return;
     this.interactiveRunToPanel.set(evt.runId, evt.panelId);
     this.interactivePanelToRun.set(evt.panelId, evt.runId);
+    if (manager) this.livePtyOwners.set(evt.runId, manager);
   }
 
   /**
@@ -535,7 +636,10 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     const evt = payload as { panelId?: unknown };
     if (typeof evt.panelId !== 'string') return;
     const runId = this.interactivePanelToRun.get(evt.panelId);
-    if (runId !== undefined) this.interactiveRunToPanel.delete(runId);
+    if (runId !== undefined) {
+      this.interactiveRunToPanel.delete(runId);
+      this.livePtyOwners.delete(runId);
+    }
     this.interactivePanelToRun.delete(evt.panelId);
   }
 
@@ -553,11 +657,21 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     this.interactiveManager.off('exit', this.interactiveExitHandler);
     this.interactiveManager.off('pty-output', this.interactivePtyHandler);
     this.interactiveManager.off('turn-end', this.interactiveTurnEndHandler);
+    if (this.codexSdkManager && this.codexSdkOutputHandler && this.codexSdkExitHandler) {
+      this.codexSdkManager.off('output', this.codexSdkOutputHandler);
+      this.codexSdkManager.off('exit', this.codexSdkExitHandler);
+    }
+    for (const { manager, ptyHandler, exitHandler } of this.additionalPtyHandlers) {
+      manager.off('pty-output', ptyHandler);
+      manager.off('exit', exitHandler);
+    }
     this.removeAllListeners();
     this.panelOwners.clear();
     this.ptyBacklog.clear();
     this.interactiveRunToPanel.clear();
     this.interactivePanelToRun.clear();
+    this.livePtyOwners.clear();
+    this.additionalPtyHandlers.length = 0;
     this.logger.debug('[SubstrateDispatchFacade] disposed — unsubscribed from both managers');
   }
 }

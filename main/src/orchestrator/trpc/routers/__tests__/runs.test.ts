@@ -336,6 +336,155 @@ describe('cyboflow.runs.start', () => {
     }
   });
 
+  it('forwards codex-sdk workflow launches to the launcher', async () => {
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-start-codex',
+      worktreePath: '/tmp/wt/codex',
+      branchName: 'cyboflow/sprint/codex123',
+    });
+    const sessionManagerStub = {
+      getProjectById: (_id: number) => ({ path: '/projects/my-project' }),
+    };
+
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await caller.cyboflow.runs.start({
+        workflowId: 'wf-sprint',
+        projectId: 1,
+        sessionId: 'sess-1',
+        agentProvider: 'codex',
+      });
+      await caller.cyboflow.runs.start({
+        workflowId: 'wf-sprint',
+        projectId: 1,
+        sessionId: 'sess-1',
+        agentRuntime: 'codex-sdk',
+      });
+
+      expect(launchMock).toHaveBeenCalledTimes(2);
+      expect(launchMock).toHaveBeenNthCalledWith(1, 'wf-sprint', '/projects/my-project', 'sdk', undefined, undefined, 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined, undefined, 'codex', undefined);
+      expect(launchMock).toHaveBeenNthCalledWith(2, 'wf-sprint', '/projects/my-project', 'sdk', undefined, undefined, 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'codex-sdk');
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  it('rejects codex-sdk workflows when paired with the interactive substrate', async () => {
+    const launchMock = vi.fn();
+    const sessionManagerStub = {
+      getProjectById: (_id: number) => ({ path: '/projects/my-project' }),
+    };
+
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await expect(
+        caller.cyboflow.runs.start({
+          workflowId: 'wf-sprint',
+          projectId: 1,
+          sessionId: 'sess-1',
+          substrate: 'interactive',
+          agentProvider: 'codex',
+          agentRuntime: 'codex-sdk',
+        }),
+      ).rejects.toSatisfy(
+        (err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST',
+      );
+      expect(launchMock).not.toHaveBeenCalled();
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  it('rejects codex-pty on workflow launches at the tRPC boundary', async () => {
+    const launchMock = vi.fn();
+    const sessionManagerStub = {
+      getProjectById: (_id: number) => ({ path: '/projects/my-project' }),
+    };
+
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await expect(
+        caller.cyboflow.runs.start({
+          workflowId: 'wf-sprint',
+          projectId: 1,
+          sessionId: 'sess-1',
+          // @ts-expect-error deliberate invalid workflow runtime; zod must reject it.
+          agentRuntime: 'codex-pty',
+        }),
+      ).rejects.toSatisfy(
+        (err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST',
+      );
+      expect(launchMock).not.toHaveBeenCalled();
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  it('restarts a persisted failed Codex workflow run through codex-sdk', async () => {
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
+    const { runId } = seedRun(db, {
+      id: 'run-failed-codex',
+      workflowId: 'wf-codex-restart',
+      status: 'failed',
+      projectId: 1,
+      workflowName: 'sprint',
+    });
+    db.prepare(
+      `UPDATE workflow_runs
+          SET session_id = ?,
+              substrate = ?,
+              permission_mode_snapshot = ?,
+              model = ?,
+              agent_provider = ?,
+              agent_runtime = ?
+        WHERE id = ?`,
+    ).run('sess-1', 'sdk', 'acceptEdits', 'gpt-5.5', 'codex', 'codex-sdk', runId);
+
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-restarted-codex',
+      worktreePath: '/tmp/wt/codex',
+      branchName: 'cyboflow/sprint/restart',
+    });
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/my-project' }) },
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+      await expect(caller.cyboflow.runs.restart({ runId })).resolves.toEqual({
+        runId: 'run-restarted-codex',
+        worktreePath: '/tmp/wt/codex',
+        branchName: 'cyboflow/sprint/restart',
+      });
+
+      expect(launchMock).toHaveBeenCalledOnce();
+      expect(launchMock).toHaveBeenCalledWith('wf-codex-restart', '/projects/my-project', 'sdk', undefined, undefined, 'sess-1', undefined, undefined, undefined, 1, 'orchestrated', undefined, 'gpt-5.5', undefined, undefined, { baseline: true }, 'codex', 'codex-sdk');
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+      db.close();
+    }
+  });
+
   // -------------------------------------------------------------------------
   // (a2) ideaId supplied (migration 017) → full-form launch with the seed idea.
   // -------------------------------------------------------------------------
@@ -973,8 +1122,7 @@ describe('cyboflow.runs.start', () => {
 
 describe('cyboflow.runs.nudge', () => {
   it('forwards a delivered nudge: flips the run to running and returns { delivered: true }', async () => {
-    const db = createTestDb({ disableForeignKeys: true });
-    db.exec('ALTER TABLE workflow_runs ADD COLUMN claude_session_id TEXT');
+    const db = createTestDb({ disableForeignKeys: true, includeWorkflowRunTaskColumns: true });
     const { runId } = seedRun(db, { status: 'awaiting_review' });
     db.prepare('UPDATE workflow_runs SET claude_session_id = ? WHERE id = ?').run('sess-1', runId);
 
@@ -1001,8 +1149,7 @@ describe('cyboflow.runs.nudge', () => {
   });
 
   it('forwards a noOp result verbatim (idle guard: not_idle)', async () => {
-    const db = createTestDb({ disableForeignKeys: true });
-    db.exec('ALTER TABLE workflow_runs ADD COLUMN claude_session_id TEXT');
+    const db = createTestDb({ disableForeignKeys: true, includeWorkflowRunTaskColumns: true });
     const { runId } = seedRun(db, { status: 'running' });
 
     const execute = vi.fn<(id: string) => Promise<void>>().mockResolvedValue(undefined);

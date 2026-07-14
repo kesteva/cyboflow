@@ -221,6 +221,9 @@ export interface ResultEvent {
   usage?: {
     input_tokens?: number;
     output_tokens?: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
+    reasoning_output_tokens?: number;
   };
   /** camelCase on the wire per SamSaffron CLI spec — intentional exception to snake_case rule */
   modelUsage?: Record<string, unknown>;

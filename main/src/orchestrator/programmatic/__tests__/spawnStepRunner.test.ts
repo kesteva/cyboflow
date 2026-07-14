@@ -40,7 +40,39 @@ describe('SpawnStepRunner', () => {
     expect(passed.panelId).toBe('r');
     expect(passed.worktreePath).toBe('/wt');
     expect(passed.agentPermissionMode).toBe('auto');
+    expect(passed.agentInvocationStepId).toBe('epics');
     expect(passed.prompt).toContain('`epics`'); // the step-scoped prompt
+  });
+
+  it('threads the run model into each step invocation', async () => {
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, { ...opts, model: 'gpt-5.6-codex' });
+
+    await runner.runStep(step({ id: 'review' }), ctx);
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(passed.model).toBe('gpt-5.6-codex');
+    expect(passed.agentInvocationStepId).toBe('review');
+  });
+
+  it('wraps Codex programmatic step prompts with the runtime adapter', async () => {
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, {
+      ...opts,
+      promptRenderContext: {
+        provider: 'codex',
+        runtime: 'codex-sdk',
+        executionModel: 'programmatic',
+      },
+    });
+
+    const result = await runner.runStep(step({ id: 'epics', agent: 'epics' }), ctx);
+
+    expect(result.status).toBe('ok');
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.prompt).toContain('# Runtime adapter: Codex');
+    expect(passed.prompt).toContain('`epics`');
+    expect(passed.hidePromptFromTranscript).toBe(true);
   });
 
   it('forwards ctx.item into the composed prompt (fan-out item scope)', async () => {
@@ -76,6 +108,19 @@ describe('SpawnStepRunner', () => {
 
     expect(result.status).toBe('failed');
     expect(result.error).toBe('turn aborted');
+  });
+
+  it('stamps a preserved Codex usage-limit failure as systemic', async () => {
+    const error = [
+      'Unhandled error. (usageLimitExceeded)',
+      'Codex provider error: {"code":"usageLimitExceeded","message":"You have reached your usage limit."}',
+    ].join('\n');
+    const spawner = makeSpawner(() => Promise.reject(new Error(error)));
+    const runner = new SpawnStepRunner(spawner, opts);
+
+    const result = await runner.runStep(step({ id: 'sprint-verify' }), ctx);
+
+    expect(result).toEqual({ status: 'failed', error, systemic: true });
   });
 
   it('omits agentPermissionMode from the spawn when none is bound', async () => {
@@ -263,5 +308,22 @@ describe('SpawnStepRunner', () => {
     const calls = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls;
     expect((calls[0][0] as ClaudeSpawnerOptions).prompt).not.toContain('TASK-002');
     expect((calls[1][0] as ClaudeSpawnerOptions).prompt).toContain('TASK-002: Added mid-run');
+  });
+
+  it('RE-RESOLVES run-owned idea ids per step so a context-created idea scopes a later optional step', async () => {
+    const spawner = makeSpawner();
+    let ideaIds: readonly string[] = [];
+    const resolveIdeaIds = vi.fn<() => readonly string[]>(() => ideaIds);
+    const runner = new SpawnStepRunner(spawner, { ...opts, runOwnedIdeaIds: resolveIdeaIds });
+
+    await runner.runStep(step({ id: 'context', agent: 'context' }), ctx);
+    ideaIds = ['IDEA-raw-ship'];
+    await runner.runStep(step({ id: 'ui-prototype', agent: 'ui-prototype' }), ctx);
+
+    expect(resolveIdeaIds).toHaveBeenCalledTimes(2);
+    const calls = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls;
+    expect((calls[0][0] as ClaudeSpawnerOptions).prompt).not.toContain('## Run-owned idea scope');
+    expect((calls[1][0] as ClaudeSpawnerOptions).prompt).toContain('`IDEA-raw-ship`');
+    expect((calls[1][0] as ClaudeSpawnerOptions).prompt).not.toContain('cyboflow_list_tasks');
   });
 });

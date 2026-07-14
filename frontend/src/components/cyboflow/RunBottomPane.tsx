@@ -35,12 +35,12 @@ import { cn } from '../../utils/cn';
 // Types
 // ---------------------------------------------------------------------------
 
-type TabKind = 'chat' | 'agent' | 'terminal' | 'data-stream';
+export type RunBottomTabKind = 'chat' | 'agent' | 'terminal' | 'data-stream';
 
 interface RunTab {
   /** Unique tab id — the kind for fixed tabs, the terminalId for terminal tabs. */
   id: string;
-  kind: TabKind;
+  kind: RunBottomTabKind;
   label: string;
   /** For kind==='terminal': the per-terminal id (primary === runId). */
   terminalId?: string;
@@ -48,7 +48,7 @@ interface RunTab {
   closeable?: boolean;
 }
 
-function tabIcon(kind: TabKind) {
+function tabIcon(kind: RunBottomTabKind) {
   switch (kind) {
     case 'chat':
       return <MessageSquare className="h-4 w-4" />;
@@ -67,15 +67,14 @@ function tabIcon(kind: TabKind) {
 
 interface RunBottomPaneProps {
   /**
-   * Reports whether the CHAT tab is the active bottom-dock tab. RunCenterPane
-   * combines this with the dock-open state to tell RunPendingInputStrip whether
-   * the chat transcript is the visible surface for a run's live question (so the
-   * strip can stand down its duplicate card). Optional — the pane works stand-alone.
+   * Reports the active bottom-dock surface. RunCenterPane combines this with the
+   * dock-open state to decide whether Chat owns the live question card or Data
+   * Stream should remain unobstructed. Optional — the pane works stand-alone.
    */
-  onChatTabActiveChange?: (active: boolean) => void;
+  onActiveTabKindChange?: (kind: RunBottomTabKind) => void;
 }
 
-export function RunBottomPane({ onChatTabActiveChange }: RunBottomPaneProps = {}) {
+export function RunBottomPane({ onActiveTabKindChange }: RunBottomPaneProps = {}) {
   // Default to the unified Chat transcript so a run opens to the same rich
   // experience as a quick session.
   const [activeId, setActiveId] = useState<string>('chat');
@@ -149,12 +148,12 @@ export function RunBottomPane({ onChatTabActiveChange }: RunBottomPaneProps = {}
   // away with the substrate, or a terminal was closed), fall back to Chat.
   const activeTab = tabs.find((t) => t.id === activeId) ?? tabs[0];
 
-  // Report Chat-tab activeness up so the pending-input strip can de-dupe the
-  // live-question card (the chat transcript renders it inline on the Chat tab).
-  const chatTabActive = activeTab?.kind === 'chat';
+  // Report the active surface so the parent can keep live questions in Chat,
+  // retain the Terminal fallback, and avoid overlaying the Data Stream.
+  const activeTabKind = activeTab?.kind ?? 'chat';
   useEffect(() => {
-    onChatTabActiveChange?.(chatTabActive);
-  }, [chatTabActive, onChatTabActiveChange]);
+    onActiveTabKindChange?.(activeTabKind);
+  }, [activeTabKind, onActiveTabKindChange]);
 
   const handleAddTerminal = useCallback(() => {
     if (activeRunId === null) return;

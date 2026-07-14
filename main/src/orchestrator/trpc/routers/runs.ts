@@ -26,6 +26,10 @@ import { withRunFileErrorMapping } from '../runFileErrors';
 import type { RunFileEntry, RunFileContent, RunGitDiff } from '../../../../../shared/types/runFiles';
 import type { StreamEnvelope } from '../../../../../shared/types/claudeStream';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
+import {
+  type AgentProvider,
+  type WorkflowAgentRuntime,
+} from '../../../../../shared/types/agentRuntime';
 import type { ExecutionModel } from '../../../../../shared/types/executionModel';
 import type { ExperimentArm } from '../../../../../shared/types/experiments';
 import type { SprintLaneRow, SprintLaneChangedEvent } from '../../../../../shared/types/sprintBatch';
@@ -316,8 +320,11 @@ export interface RunLauncherLike {
    * per-run model choice (Configure surface) — a user-facing alias stamped onto
    * workflow_runs.model and resolved to a concrete snapshot at the spawn seam; when
    * omitted the run pins no model and falls through to the SDK default.
+   * `requestedAgentProvider` / `requestedAgentRuntime` carry the workflow's
+   * run-scoped agent route. Omitted means the registry keeps the Claude default;
+   * `codex-sdk` routes through the SDK substrate compatibility path.
    */
-  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, requestedVerifyEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean; ideaIds?: string[] }): Promise<{
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, requestedVerifyEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean; ideaIds?: string[] }, requestedAgentProvider?: AgentProvider, requestedAgentRuntime?: WorkflowAgentRuntime): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -848,6 +855,11 @@ export const runsRouter = router({
       workflowId: z.string().min(1),
       projectId: z.number().int().positive(),
       substrate: z.enum(['sdk', 'interactive']).optional(),
+      // Provider/runtime are the forward-compatible agent selection surface.
+      // Codex SDK routes through the SDK substrate compatibility path; Claude
+      // runtimes project onto the legacy substrate.
+      agentProvider: z.enum(['claude', 'codex']).optional(),
+      agentRuntime: z.enum(['claude-sdk', 'claude-interactive', 'codex-sdk']).optional(),
       // Optional native-task link (migration 014). When supplied, the launcher
       // records workflow_runs.task_id and derives the task's execution stage.
       taskId: z.string().min(1).optional(),
@@ -965,6 +977,33 @@ export const runsRouter = router({
           message: `Project ${input.projectId} not found`,
         });
       }
+      if (input.agentProvider === 'codex' && input.agentRuntime !== undefined && input.agentRuntime !== 'codex-sdk') {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: `agentProvider codex conflicts with agentRuntime ${input.agentRuntime}`,
+        });
+      }
+      if (input.agentProvider === 'claude' && input.agentRuntime === 'codex-sdk') {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'agentProvider claude conflicts with agentRuntime codex-sdk',
+        });
+      }
+      const codexSdkRequested =
+        input.agentProvider === 'codex' || input.agentRuntime === 'codex-sdk';
+      const substrateFromRuntime =
+        input.agentRuntime === 'claude-interactive'
+          ? 'interactive'
+          : input.agentRuntime === 'claude-sdk' || codexSdkRequested
+            ? 'sdk'
+            : undefined;
+      if (input.substrate && substrateFromRuntime && input.substrate !== substrateFromRuntime) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: `substrate ${input.substrate} conflicts with agentRuntime ${input.agentRuntime}`,
+        });
+      }
+      const launchSubstrate = input.substrate ?? substrateFromRuntime;
       // Substrate-keyed sprint selection cap (defense in depth — the batch
       // picker also enforces it client-side). Keyed off the forced pin FIRST
       // (demo 'sdk' / interactive-PTY-only lock 'interactive'), mirroring both
@@ -973,7 +1012,7 @@ export const runsRouter = router({
       // back to the requested substrate or the 'sdk' default.
       if (input.taskIds !== undefined) {
         const forced = ctx.getForcedSubstrate?.() ?? null;
-        const capSubstrate: CliSubstrate = forced ?? input.substrate ?? 'sdk';
+        const capSubstrate: CliSubstrate = forced ?? launchSubstrate ?? 'sdk';
         const max = SPRINT_BATCH_MAX_TASKS[capSubstrate];
         if (input.taskIds.length > max) {
           throw new TRPCError({
@@ -1035,6 +1074,8 @@ export const runsRouter = router({
           }
         }
       }
+      const launchWithAgentSelection =
+        input.agentProvider !== undefined || input.agentRuntime !== undefined;
       // Forward the per-run substrate choice (IDEA-013), native-task link
       // (migration 014), planner seed idea (migration 017), session host
       // (Phase 1 / migration 019), per-run agent permission override
@@ -1051,28 +1092,7 @@ export const runsRouter = router({
       // the wizard's per-run Orchestration override (undefined = inherit the
       // resolver ladder); findingIds, requestedModel, then requestedEvalEnabled
       // (migration 044) are the LAST positional args, AFTER requestedExecutionModel.
-      const { runId, worktreePath, branchName } = await startRunDeps.runLauncher.launch(
-        input.workflowId,
-        project.path,
-        input.substrate,
-        input.taskId,
-        input.ideaId,
-        input.sessionId,
-        input.permissionMode,
-        undefined,
-        input.taskIds,
-        input.projectId,
-        input.executionModel,
-        input.findingIds,
-        input.model,
-        input.evalEnabled,
-        input.verifyEnabled,
-        // The trailing launchOptions object carries the A/B variant/baseline pin
-        // (migration 048) PLUS the planner multi-idea seed (IDEA-009 / migration
-        // 060). An explicit variant pin wins over a baseline pin (VariantSelector
-        // only ever sends one or the other); rotation (neither supplied) and
-        // experiment stamps are resolved/supplied elsewhere. ideaIds is orthogonal
-        // and threaded whenever supplied (planner-only; the launcher enforces that).
+      const launchOptions =
         input.variantId !== undefined || input.baseline || input.ideaIds !== undefined
           ? {
               ...(input.variantId !== undefined
@@ -1082,8 +1102,46 @@ export const runsRouter = router({
                   : {}),
               ...(input.ideaIds !== undefined ? { ideaIds: input.ideaIds } : {}),
             }
-          : undefined,
-      );
+          : undefined;
+      const { runId, worktreePath, branchName } = launchWithAgentSelection
+        ? await startRunDeps.runLauncher.launch(
+            input.workflowId,
+            project.path,
+            launchSubstrate,
+            input.taskId,
+            input.ideaId,
+            input.sessionId,
+            input.permissionMode,
+            undefined,
+            input.taskIds,
+            input.projectId,
+            input.executionModel,
+            input.findingIds,
+            input.model,
+            input.evalEnabled,
+            input.verifyEnabled,
+            launchOptions,
+            input.agentProvider,
+            input.agentRuntime,
+          )
+        : await startRunDeps.runLauncher.launch(
+            input.workflowId,
+            project.path,
+            launchSubstrate,
+            input.taskId,
+            input.ideaId,
+            input.sessionId,
+            input.permissionMode,
+            undefined,
+            input.taskIds,
+            input.projectId,
+            input.executionModel,
+            input.findingIds,
+            input.model,
+            input.evalEnabled,
+            input.verifyEnabled,
+           launchOptions,
+         );
       return { runId, worktreePath, branchName };
     }),
 
@@ -1098,17 +1156,19 @@ export const runsRouter = router({
    * stays terminal ('failed') — this never mutates it.
    *
    * Provenance is COPIED off the failed row so the caller does not re-thread it:
-   * workflow_id, substrate, model pin, permission_mode_snapshot, and the seed params
-   * (task_id / seed_idea_id / seed_finding_ids, plus the sprint batch's task ids read
-   * back from sprint_batch_tasks). NO lineage column is added — no consumer needs a
-   * restarted_from link, so a schema change would be dead weight.
+   * workflow_id, substrate, provider/runtime, execution model, model pin, and the
+   * seed params (task_id / seed_idea_id / seed_finding_ids, plus the sprint batch's
+   * task ids read back from sprint_batch_tasks). The host session's live permission
+   * mode is deliberately re-read rather than copying permission_mode_snapshot. NO
+   * lineage column is added — no consumer needs a restarted_from link, so a schema
+   * change would be dead weight.
    *
-   * Contrast runs.reopen, which REVIVES the same row via --resume and REQUIRES a
-   * captured claude_session_id; restart instead starts a clean run that re-reads DB
-   * state, so it works even for a run that died before capturing a session.
+   * Contrast runs.reopen, which REVIVES the same row and REQUIRES a captured
+   * provider session/thread id; restart instead starts a clean run that re-reads
+   * DB state, so it works even for a run that died before capturing one.
    *
-   * Reuses the start deps (runLauncher + sessionManager); until wired it throws
-   * METHOD_NOT_SUPPORTED. Returns the new run's ids, or a typed no-op.
+   * Reuses the start deps (runLauncher + sessionManager). Returns the new run's
+   * ids, or a typed no-op.
    */
   restart: protectedProcedure
     .input(z.object({ runId: z.string().min(1) }))
@@ -1129,7 +1189,8 @@ export const runsRouter = router({
         .prepare(
           `SELECT workflow_id, project_id, status, substrate, session_id,
                   permission_mode_snapshot, model, task_id, seed_idea_id, seed_idea_ids, seed_finding_ids, batch_id,
-                  eval_enabled, variant_id, experiment_id
+                  eval_enabled, variant_id, experiment_id, agent_provider, agent_runtime,
+                  execution_model
              FROM workflow_runs WHERE id = ?`,
         )
         .get(input.runId) as
@@ -1149,6 +1210,9 @@ export const runsRouter = router({
             eval_enabled: number | null;
             variant_id: string | null;
             experiment_id: string | null;
+            agent_provider: AgentProvider | null;
+            agent_runtime: WorkflowAgentRuntime | null;
+            execution_model: ExecutionModel | null;
           }
         | undefined;
       if (!row) return { noOp: true, reason: 'not_found' };
@@ -1212,8 +1276,9 @@ export const runsRouter = router({
       }
 
       // SAME chokepoint runs.start uses. session_id is reused so the new run lands in
-      // the failed run's worktree; substrate / permission / model re-resolve through
-      // their seams inside createRun. baseBranch + requestedExecutionModel are not
+      // the failed run's worktree; substrate / provider / runtime / permission /
+      // model re-resolve through their seams inside createRun. baseBranch +
+      // requestedExecutionModel are not
       // threaded over IPC (undefined placeholders), mirroring start.
       const { runId, worktreePath, branchName } = await startRunDeps.runLauncher.launch(
         row.workflow_id,
@@ -1222,11 +1287,13 @@ export const runsRouter = router({
         row.task_id ?? undefined,
         row.seed_idea_id ?? undefined,
         row.session_id,
-        row.permission_mode_snapshot ?? undefined,
+        // Restart must not overwrite the host session's live permission setting
+        // with the failed run's audit snapshot.
+        undefined,
         undefined,
         taskIds,
         row.project_id,
-        undefined,
+        row.execution_model ?? undefined,
         findingIds,
         row.model ?? undefined,
         // Copy the failed run's per-run eval pin (1/0 → true/false; NULL → inherit
@@ -1251,6 +1318,8 @@ export const runsRouter = router({
           ...(row.variant_id !== null ? { requestedVariantId: row.variant_id } : { baseline: true }),
           ...(ideaIds !== undefined ? { ideaIds } : {}),
         },
+        row.agent_provider ?? undefined,
+        row.agent_runtime ?? undefined,
       );
       return { runId, worktreePath, branchName };
     }),

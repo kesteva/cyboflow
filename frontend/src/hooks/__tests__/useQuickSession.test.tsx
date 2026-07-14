@@ -156,14 +156,18 @@ describe('useQuickSession — start() signature', () => {
 });
 
 describe('useQuickSession — always creates both panels', () => {
-  it('creates Claude panel first', async () => {
+  it('creates the Chat panel first while retaining the internal claude type', async () => {
     const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
 
     await act(async () => {
       await result.current.start();
     });
 
-    expect(mockCreatePanel).toHaveBeenCalledWith({ sessionId: 'sess-001', type: 'claude' });
+    expect(mockCreatePanel).toHaveBeenCalledWith({
+      sessionId: 'sess-001',
+      type: 'claude',
+      title: 'Chat',
+    });
   });
 
   it('creates Terminal panel second with cwd=worktreePath', async () => {
@@ -205,6 +209,38 @@ describe('useQuickSession — always creates both panels', () => {
     });
 
     expect(callOrder).toEqual(['claude', 'terminal']);
+  });
+
+  it('creates a provider-neutral Chat panel for codex-sdk quick sessions', async () => {
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+
+    await act(async () => {
+      await result.current.start(
+        undefined,
+        undefined,
+        undefined,
+        'gpt-5.5',
+        false,
+        undefined,
+        undefined,
+        undefined,
+        'codex',
+        'codex-sdk',
+      );
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(expect.objectContaining({
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      agentModel: 'gpt-5.5',
+    }));
+    expect(mockCreatePanel).toHaveBeenCalledWith({
+      sessionId: 'sess-001',
+      type: 'claude',
+      title: 'Chat',
+    });
+    expect(mockSetModel).toHaveBeenCalledWith('panel-001', 'gpt-5.5');
+    expect(mockSetFastMode).not.toHaveBeenCalled();
   });
 });
 
@@ -251,6 +287,39 @@ describe('useQuickSession — server-created claude panel (claudePanelId)', () =
     expect(useCyboflowStore.getState().selectedSessionId).toBe('sess-001');
     expect(mockSubscribe).toHaveBeenCalledOnce();
     expect(onSuccess).toHaveBeenCalledWith('sess-001');
+  });
+});
+
+describe('useQuickSession — Codex PTY fallback panel', () => {
+  it('creates a usable Chat panel when eager server-side panel creation failed', async () => {
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+
+    await act(async () => {
+      await result.current.start(
+        undefined,
+        'interactive',
+        undefined,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        undefined,
+        'codex',
+        'codex-pty',
+      );
+    });
+
+    expect(mockCreatePanel).toHaveBeenNthCalledWith(1, {
+      sessionId: 'sess-001',
+      type: 'claude',
+      title: 'Chat',
+    });
+    expect(mockCreatePanel).toHaveBeenNthCalledWith(2, {
+      sessionId: 'sess-001',
+      type: 'terminal',
+      title: 'Terminal',
+      initialState: { cwd: '/tmp/wt-001' },
+    });
   });
 });
 

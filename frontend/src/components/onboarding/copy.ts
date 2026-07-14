@@ -15,13 +15,13 @@
 /** Header/popover title per step (index === step). Step 0 uses the hero, not this. */
 export const ONBOARDING_TITLES: ReadonlyArray<string> = [
   'Welcome to Cyboflow',
-  'Connect Claude Code',
+  'Connect an agent',
   'Set your permission mode',
   'Add a project',
   'Start your first session',
+  'Choose a runtime',
   'Session permission',
   'Pick a model',
-  'Choose a substrate',
   'Run your first flow',
   'Watch it in Human review',
   'Find your way around',

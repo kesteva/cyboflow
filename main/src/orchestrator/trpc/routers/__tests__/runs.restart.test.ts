@@ -4,8 +4,8 @@
  * restart reads the failed run's provenance off workflow_runs and forwards it to
  * the SAME RunLauncher.launch chokepoint runs.start uses, creating a NEW run row
  * while the failed run stays terminal. These tests pin:
- *   (a) happy path — copies workflow / substrate / model / permission / seed idea
- *       into the full-form launch and returns the new run ids;
+ *   (a) happy path — copies workflow / substrate / provider/runtime / model /
+ *       permission / seed idea into the full-form launch and returns the new run ids;
  *   (b) sprint seed-task recovery — batch_id → task ids read back from
  *       sprint_batch_tasks and threaded as seedTaskIds;
  *   (c) a non-failed run is a typed no-op ('not_failed') — never relaunched;
@@ -66,6 +66,7 @@ describe('cyboflow.runs.restart', () => {
     db.prepare(
       `UPDATE workflow_runs
           SET substrate = 'interactive', session_id = 'sess-host', model = 'opus',
+              agent_provider = 'claude', agent_runtime = 'claude-interactive',
               permission_mode_snapshot = 'acceptEdits', seed_idea_id = 'IDEA-9',
               error_message = 'You hit your limit', eval_enabled = 1
         WHERE id = ?`,
@@ -90,20 +91,21 @@ describe('cyboflow.runs.restart', () => {
       branchName: 'cyboflow/planner/new',
     });
     // Full-form launch: workflow, project path, substrate, taskId(undef), ideaId,
-    // sessionId, permissionMode, baseBranch(undef), seedTaskIds(undef), projectId,
-    // requestedExecutionModel(undef), findingIds(undef), model, evalEnabled
+    // sessionId, permissionMode(undef: preserve live session setting),
+    // baseBranch(undef), seedTaskIds(undef), projectId,
+    // requestedExecutionModel, findingIds(undef), model, evalEnabled
     // (per-run pin 1 → true; NULL would thread undefined = inherit global),
     // verifyEnabled (restart always threads undefined — verify_enabled is the
     // resolved posture, not a request, so a restart re-inherits it),
     // then the trailing A/B launchOptions — `{ baseline: true }` here because the
     // failed run is a baseline run (variant_id NULL): the resolver must PIN
     // baseline and NOT rotate, reproducing the retried config even if the workflow
-    // gained active variants ("restart inherits, no re-roll").
+    // gained active variants ("restart inherits, no re-roll"), then provider/runtime.
     expect(launchMock).toHaveBeenCalledOnce();
     expect(launchMock).toHaveBeenCalledWith(
       workflowId, '/projects/p', 'interactive', undefined, 'IDEA-9', 'sess-host',
-      'acceptEdits', undefined, undefined, 1, undefined, undefined, 'opus', true,
-      undefined, { baseline: true },
+      undefined, undefined, undefined, 1, 'orchestrated', undefined, 'opus', true,
+      undefined, { baseline: true }, 'claude', 'claude-interactive',
     );
 
     // The failed run stays terminal — restart never mutates it.

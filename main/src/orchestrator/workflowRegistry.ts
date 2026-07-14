@@ -18,6 +18,12 @@ import type { LoggerLike, DatabaseLike } from './types';
 import type { PermissionMode, WorkflowRow, WorkflowRunRow, CyboflowWorkflowName, WorkflowDefinition } from '../../../shared/types/workflows';
 import { isCyboflowWorkflowName, resolveWorkflowDefinition } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
+import {
+  claudeRuntimeFromSubstrate,
+  type AgentProvider,
+  type WorkflowAgentRuntime,
+} from '../../../shared/types/agentRuntime';
+import { normalizeAgentModelSelection } from '../../../shared/types/agentModels';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type {
   ExperimentArm,
@@ -66,6 +72,8 @@ export interface WorkflowConfigProvider {
    * manager. null (or absent) = no pin, resolve normally.
    */
   getForcedSubstrate?(): CliSubstrate | null;
+  /** True only for the scripted demo boot profile. */
+  isDemoMode?(): boolean;
   /**
    * Global default for the execution model (orchestrated vs programmatic),
    * consulted by resolveExecutionModel below its env level. Optional + absent =>
@@ -972,6 +980,8 @@ export class WorkflowRegistry {
        * threaded from a launch surface.)
        */
       verifyDeliverable?: VerificationRequestInput | null;
+      requestedAgentProvider?: AgentProvider;
+      requestedAgentRuntime?: WorkflowAgentRuntime;
     },
   ): { runId: string; permissionMode: PermissionMode; substrate: CliSubstrate; executionModel: ExecutionModel } {
     const workflow = this.getById(workflowId);
@@ -1020,6 +1030,49 @@ export class WorkflowRegistry {
       globalDefaultMode: this.config?.getDefaultAgentPermissionMode(),
     });
 
+    // Provider/runtime are the forward-compatible agent route. During the
+    // migration window, Claude runtimes project to the legacy substrate. The
+    // Codex SDK requests keep the substrate on the SDK compatibility path and
+    // route through the provider/runtime dispatch facade.
+    // Demo mode ignores every provider/runtime request: its scripted
+    // manager consumes Claude-shaped events, and no persisted run may resolve to
+    // a real Codex dispatch route.
+    const demoMode = this.config?.isDemoMode?.() === true;
+    const requestedAgentProvider = demoMode ? undefined : opts?.requestedAgentProvider;
+    const requestedAgentRuntime = demoMode ? undefined : opts?.requestedAgentRuntime;
+    if (
+      requestedAgentProvider === 'codex' &&
+      requestedAgentRuntime !== undefined &&
+      requestedAgentRuntime !== 'codex-sdk'
+    ) {
+      throw new Error(
+        `WorkflowRegistry.createRun: agentProvider codex conflicts with agentRuntime ${requestedAgentRuntime}`,
+      );
+    }
+    if (requestedAgentProvider === 'claude' && requestedAgentRuntime === 'codex-sdk') {
+      throw new Error(
+        'WorkflowRegistry.createRun: agentProvider claude conflicts with agentRuntime codex-sdk',
+      );
+    }
+    const codexSdkRequested =
+      requestedAgentProvider === 'codex' || requestedAgentRuntime === 'codex-sdk';
+    const substrateFromRuntime: CliSubstrate | undefined =
+      requestedAgentRuntime === 'claude-interactive'
+        ? 'interactive'
+        : requestedAgentRuntime === 'claude-sdk' || codexSdkRequested
+          ? 'sdk'
+          : undefined;
+    if (
+      requestedSubstrate !== undefined &&
+      substrateFromRuntime !== undefined &&
+      requestedSubstrate !== substrateFromRuntime
+    ) {
+      throw new Error(
+        `WorkflowRegistry.createRun: substrate ${requestedSubstrate} conflicts with agentRuntime ${requestedAgentRuntime}`,
+      );
+    }
+    const substrateRequest = requestedSubstrate ?? substrateFromRuntime;
+
     // Resolve the substrate via the override ladder. The explicit per-run UI
     // choice (requestedSubstrate, from WorkflowPicker → runs.start →
     // RunLauncher.launch) is the HIGHEST-precedence level and is threaded here.
@@ -1029,7 +1082,9 @@ export class WorkflowRegistry {
     // A boot-profile pin (demo mode → 'sdk') outranks the whole ladder,
     // including the explicit per-run UI choice — demo runs must never spawn a
     // real agent regardless of what the launch surface requested.
-    const forcedSubstrate = this.config?.getForcedSubstrate?.() ?? null;
+    const forcedSubstrate = demoMode
+      ? 'sdk'
+      : this.config?.getForcedSubstrate?.() ?? null;
     // Demo carve-out (illustration only): the boot-profile pin is 'sdk', but a
     // quick session that EXPLICITLY requested 'interactive' is honored so the
     // canned PTY terminal can be shown in demo mode. This is safe because the
@@ -1039,16 +1094,29 @@ export class WorkflowRegistry {
     // the __quick__ sentinel so no demo WORKFLOW run can ever resolve interactive
     // (which WOULD dispatch to the real interactive manager via the facade).
     const demoHonorsInteractive =
-      forcedSubstrate === 'sdk' &&
+      demoMode &&
       workflow.name === QUICK_WORKFLOW_NAME &&
-      requestedSubstrate === 'interactive';
+      substrateRequest === 'interactive';
     const substrate = demoHonorsInteractive
       ? 'interactive'
       : forcedSubstrate ?? resolveSubstrate({
-          requestedSubstrate,
+          requestedSubstrate: substrateRequest,
           globalDefaultSubstrate: this.config?.getDefaultSubstrate(),
           env: process.env,
         });
+    if (codexSdkRequested && substrate !== 'sdk') {
+      throw new Error(
+        `WorkflowRegistry.createRun: codex-sdk workflow runs require sdk substrate compatibility (got ${substrate})`,
+      );
+    }
+    const agentProvider: AgentProvider = demoMode
+      ? 'claude'
+      : codexSdkRequested ? 'codex' : 'claude';
+    const agentRuntime: WorkflowAgentRuntime = demoMode
+      ? 'claude-sdk'
+      : codexSdkRequested
+        ? 'codex-sdk'
+        : claudeRuntimeFromSubstrate(substrate);
 
     // Resolve the execution model (orchestrated vs programmatic) — the sibling
     // immutable stamp that decides WHO walks the run's DAG. The interactive
@@ -1071,14 +1139,13 @@ export class WorkflowRegistry {
 
     // Per-run model pin (migration 037). The explicit launch choice
     // (opts.requestedModel, from the Configure surface → runs.start →
-    // RunLauncher.launch) is a USER-FACING alias ('opus' | 'sonnet' | 'haiku' |
-    // 'auto' | …) resolved to a concrete snapshot at the spawn seam. There is no
-    // resolver ladder (unlike substrate / permission / execution model): a run
-    // either pins a model or it does not. Stamped ONCE here and immutable for the
-    // run; NULL (no pin) is the legacy/zero-behavior-change floor — RunExecutor
-    // then passes no `model` and the SDK uses its own default.
+    // RunLauncher.launch) is a provider-scoped USER-FACING alias. Normalize it
+    // after provider/runtime resolution so a stale picker value from another
+    // runtime is stored as no pin instead of being silently carried into this run.
     // Model ladder (A/B): explicit per-run request > variant default > NULL.
-    const model = opts?.requestedModel ?? opts?.variantModel ?? null;
+    // Runtime spawn seams still do concrete provider-specific translation.
+    const model =
+      normalizeAgentModelSelection(agentProvider, opts?.requestedModel ?? opts?.variantModel) ?? null;
 
     // Per-run code-review-eval override (migration 044). Like model, there is no
     // resolver ladder: a run either pins an explicit ON/OFF or leaves it NULL to
@@ -1135,8 +1202,8 @@ export class WorkflowRegistry {
     const specHash = computeSpecHash(effectiveSpecJson);
 
     const insert = this.db.prepare(`
-      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, session_id, spec_hash, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id)
-      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, agent_provider, agent_runtime, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, session_id, spec_hash, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id)
+      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const createTx = this.db.transaction(() => {
@@ -1161,6 +1228,8 @@ export class WorkflowRegistry {
         runProjectId,
         permissionMode,
         substrate,
+        agentProvider,
+        agentRuntime,
         executionModel,
         model,
         evalEnabled,
@@ -1196,7 +1265,7 @@ export class WorkflowRegistry {
    */
   getRunById(runId: string): WorkflowRunRow | null {
     const stmt = this.db.prepare(
-      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, seed_finding_ids, seed_idea_ids, outcome, base_branch, base_sha, steps_snapshot_json, substrate, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id, merge_sha, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
+      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, seed_finding_ids, seed_idea_ids, outcome, base_branch, base_sha, steps_snapshot_json, substrate, agent_provider, agent_runtime, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id, merge_sha, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
     );
     const row = stmt.get(runId) as WorkflowRunRow | undefined;
     return row ?? null;

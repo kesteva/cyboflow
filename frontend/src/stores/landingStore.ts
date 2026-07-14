@@ -42,7 +42,11 @@ import { trpc } from '../trpc/client';
 import { API } from '../utils/api';
 import type { Project } from '../types/project';
 import type { ReviewItem } from '../../../shared/types/reviews';
-import { useActiveRunsStore, type ActiveRunRow } from './activeRunsStore';
+import {
+  isTerminalRunStatus,
+  useActiveRunsStore,
+  type ActiveRunRow,
+} from './activeRunsStore';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -93,6 +97,52 @@ export function flattenPendingReviewItems(
         out.push(item);
       }
     }
+  }
+  return out;
+}
+
+/**
+ * Collect pending run IDs gated by any blocking review item, including findings.
+ * The landing queue deliberately hides findings from its visible groups, but a
+ * blocking finding still parks its run at `awaiting_review` and must suppress
+ * the clean-drain Ready-to-review group.
+ */
+export function collectPendingBlockingRunIds(
+  byProject: Record<number, ReviewItem[]>,
+): Set<string> {
+  const out = new Set<string>();
+  for (const list of Object.values(byProject)) {
+    for (const item of list) {
+      if (item.status === 'pending' && item.blocking && item.run_id !== null) {
+        out.add(item.run_id);
+      }
+    }
+  }
+  return out;
+}
+
+/** Blocking findings must remain actionable even though advisory findings stay in Insights. */
+export function flattenPendingBlockingFindings(
+  byProject: Record<number, ReviewItem[]>,
+): ReviewItem[] {
+  const out: ReviewItem[] = [];
+  for (const list of Object.values(byProject)) {
+    for (const item of list) {
+      if (item.status === 'pending' && item.kind === 'finding' && item.blocking) {
+        out.push(item);
+      }
+    }
+  }
+  return out;
+}
+
+/** Flatten only genuinely active rows; the rail store also retains terminal history. */
+export function flattenActiveRunRows(
+  byProject: Record<number, ActiveRunRow[]>,
+): ActiveRunRow[] {
+  const out: ActiveRunRow[] = [];
+  for (const runs of Object.values(byProject)) {
+    out.push(...runs.filter((run) => !isTerminalRunStatus(run.status)));
   }
   return out;
 }
@@ -317,17 +367,29 @@ export function useAggregatedReviewItems(): ReviewItem[] {
 }
 
 /**
- * All active runs across every project, flattened from the REUSED
- * {@link useActiveRunsStore} (never re-fetched here). Memoized on the stable
- * `runsByProject` slice.
+ * Pending blocking run IDs across the raw review-item buckets. This remains
+ * separate from `useAggregatedReviewItems()` so findings stay out of visible
+ * landing groups while still affecting Ready-to-review classification.
+ */
+export function useAggregatedBlockingRunIds(): ReadonlySet<string> {
+  const byProject = useLandingStore((s) => s.reviewItemsByProject);
+  return useMemo(() => collectPendingBlockingRunIds(byProject), [byProject]);
+}
+
+/** Pending blocking findings across every project, for the global human-review inbox. */
+export function useAggregatedBlockingFindings(): ReviewItem[] {
+  const byProject = useLandingStore((s) => s.reviewItemsByProject);
+  return useMemo(() => flattenPendingBlockingFindings(byProject), [byProject]);
+}
+
+/**
+ * All genuinely active runs across every project, flattened from the REUSED
+ * {@link useActiveRunsStore} (never re-fetched here). Terminal rows retained for
+ * sidebar history are excluded. Memoized on the stable `runsByProject` slice.
  */
 export function useAggregatedRuns(): ActiveRunRow[] {
   const runsByProject = useActiveRunsStore((s) => s.runsByProject);
-  return useMemo(() => {
-    const out: ActiveRunRow[] = [];
-    for (const runs of Object.values(runsByProject)) out.push(...runs);
-    return out;
-  }, [runsByProject]);
+  return useMemo(() => flattenActiveRunRows(runsByProject), [runsByProject]);
 }
 
 /**

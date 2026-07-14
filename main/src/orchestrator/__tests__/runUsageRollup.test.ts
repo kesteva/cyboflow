@@ -104,10 +104,22 @@ function assistantPayload(usage: {
 }
 
 /** Result payload carrying cost + turns. */
-function resultPayload(cost: number | null, turns: number | null): Record<string, unknown> {
+function resultPayload(
+  cost: number | null,
+  turns: number | null,
+  usage?: { input?: number; output?: number; cacheRead?: number; cacheCreation?: number },
+): Record<string, unknown> {
   const payload: Record<string, unknown> = { type: 'result', subtype: 'success' };
   if (cost !== null) payload.total_cost_usd = cost;
   if (turns !== null) payload.num_turns = turns;
+  if (usage !== undefined) {
+    payload.usage = {
+      input_tokens: usage.input ?? 0,
+      output_tokens: usage.output ?? 0,
+      cache_read_input_tokens: usage.cacheRead ?? 0,
+      cache_creation_input_tokens: usage.cacheCreation ?? 0,
+    };
+  }
   return payload;
 }
 
@@ -163,6 +175,52 @@ describe('rollupRunUsage', () => {
     });
     // Success path logs nothing at warn.
     expect(logger.warn).not.toHaveBeenCalled();
+  });
+
+  it('uses result-level usage when no assistant event reports tokens', () => {
+    const db = makeRollupDb();
+    const runId = 'run-result-usage';
+    seedEvent(db, runId, 'assistant', {
+      type: 'assistant',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+    });
+    seedEvent(db, runId, 'result', resultPayload(null, 1, {
+      input: 100,
+      output: 40,
+      cacheRead: 25,
+    }));
+
+    rollupRunUsage(dbAdapter(db), runId);
+
+    expect(readRunUsage(db, runId)).toMatchObject({
+      input_tokens: 100,
+      output_tokens: 40,
+      cache_read_tokens: 25,
+      total_tokens: 140,
+      num_turns: 1,
+      assistant_message_count: 1,
+    });
+  });
+
+  it('does not double-count result usage when assistant usage exists', () => {
+    const db = makeRollupDb();
+    const runId = 'run-assistant-usage';
+    seedEvent(db, runId, 'assistant', assistantPayload({ input: 100, output: 40, cacheRead: 25 }));
+    seedEvent(db, runId, 'result', resultPayload(null, 1, {
+      input: 100,
+      output: 40,
+      cacheRead: 25,
+    }));
+
+    rollupRunUsage(dbAdapter(db), runId);
+
+    expect(readRunUsage(db, runId)).toMatchObject({
+      input_tokens: 100,
+      output_tokens: 40,
+      cache_read_tokens: 25,
+      total_tokens: 140,
+      assistant_message_count: 1,
+    });
   });
 
   it('writes a zeroed row when the run has no events', () => {

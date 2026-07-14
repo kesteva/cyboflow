@@ -63,14 +63,15 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
     state.sessions.find((s) => s.id === panel.sessionId),
   );
   const substrateSession = sessionCtx?.session ?? panelStoreSession;
-  const interactiveRunId =
-    substrateSession?.substrate === 'interactive' ? substrateSession.chatRunId ?? null : null;
+  const isCodexPtySession = substrateSession?.agentRuntime === 'codex-pty';
+  const isPtyBackedSession = isCodexPtySession || substrateSession?.substrate === 'interactive';
+  const interactiveRunId = isPtyBackedSession ? substrateSession.chatRunId ?? null : null;
   // Demo mode: an interactive quick session is stamped 'interactive' so this
   // panel swaps in a terminal surface, but the real PTY is never spawned
   // (ipc/session.ts). Render the canned DemoTerminalView instead of the live
   // InteractiveTerminalView (which would subscribe to an empty pty channel).
   const demoModeEnabled = useConfigStore((state) => state.config?.demoMode ?? false);
-  const showDemoTerminal = demoModeEnabled && interactiveRunId !== null;
+  const showDemoTerminal = !isCodexPtySession && demoModeEnabled && interactiveRunId !== null;
 
   // Interactive quick sessions are driven by typing DIRECTLY into the live PTY
   // terminal above, so the separate "Message the live session" composer is
@@ -121,7 +122,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
     setResumePromptDismissed(false);
     setResumeArmed(false);
     setCanOfferResume(false);
-    if (interactiveRunId === null || showDemoTerminal || !sessionId) return;
+    if (interactiveRunId === null || showDemoTerminal || isCodexPtySession || !sessionId) return;
     // The user already chose "Start fresh" for this session this app run — don't
     // re-offer until the REPL is live again (a new loss episode).
     if (declinedResumeSessions.has(sessionId)) return;
@@ -139,7 +140,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
     return () => {
       cancelled = true;
     };
-  }, [panel.sessionId, interactiveRunId, showDemoTerminal]);
+  }, [panel.sessionId, interactiveRunId, showDemoTerminal, isCodexPtySession]);
 
   // The "Resuming…" hint is a transient cue shown while claude reopens the prior
   // conversation. Auto-clear it so it never sticks forever.
@@ -194,6 +195,12 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // activeSession can point at a different / lagging session than this panel.
   const paneSession = substrateSession ?? activeSession;
   const isInteractive = interactiveRunId !== null;
+  const agentName =
+    isCodexPtySession || paneSession?.agentRuntime === 'codex-sdk'
+      ? 'Codex'
+      : isInteractive
+        ? 'Terminal'
+        : 'Claude';
 
   // SDK structured transcript source (panel-scoped). Disabled on the interactive
   // substrate, whose live xterm owns the conversation surface.
@@ -222,7 +229,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   );
   const liveTail =
     liveTailState.activeBlocks.length > 0 ? (
-      <LiveTail blocks={liveTailState.activeBlocks} agentName="Claude" />
+      <LiveTail blocks={liveTailState.activeBlocks} agentName={agentName} />
     ) : undefined;
 
   if (!activeSession || !paneSession) {
@@ -238,12 +245,16 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   }
 
   const sessionRunning = paneSession.status === 'running';
+  const hasSendingPending = pendingSends?.some((entry) => entry.status === 'sending') ?? false;
+  const sessionWorking = sessionRunning || liveTailState.isGenerating || hasSendingPending;
   // Working indicator parity with the prior RichOutputView: show it while the
-  // agent is producing (running) OR when the session is waiting and the last
-  // turn was the user's (the agent is about to respond).
+  // agent is producing, as soon as an SDK send is dispatched, OR when the
+  // session is waiting and the last turn was the user's. The optimistic-send
+  // edge matters for Codex because app-server startup can precede the durable
+  // session status update and first projected event.
   const lastMessage = messages.length > 0 ? messages[messages.length - 1] : undefined;
   const isWaitingForResponse =
-    sessionRunning || (paneSession.status === 'waiting' && lastMessage?.role === 'user');
+    sessionWorking || (paneSession.status === 'waiting' && lastMessage?.role === 'user');
   const worktreePath = paneSession.worktreePath ?? null;
   const folderLabel =
     worktreePath !== null ? worktreePath.split('/').filter(Boolean).pop() ?? null : null;
@@ -340,10 +351,10 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   return (
     <div className="relative flex-1 flex flex-col h-full bg-background">
       <UnifiedChatView
-        name={isInteractive ? 'Terminal' : 'Claude'}
+        name={agentName}
         transport={isInteractive ? 'interactive' : 'sdk'}
         mode="quick"
-        running={sessionRunning}
+        running={sessionWorking}
         messages={messages}
         loadError={loadError}
         isWaitingForResponse={isWaitingForResponse}

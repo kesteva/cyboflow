@@ -139,6 +139,7 @@ async function invoke(
 // getPanelsForSession is restored to the empty default.
 beforeEach(() => {
   vi.mocked(panelManager.createPanel).mockClear();
+  vi.mocked(panelManager.getPanel).mockReset();
   vi.mocked(panelManager.getPanelsForSession).mockReset();
   vi.mocked(panelManager.getPanelsForSession).mockReturnValue([]);
   // The core's claim set spans the module lifetime; fixtures here reuse the
@@ -219,8 +220,11 @@ function makeServices(opts?: {
     },
     removeListener: vi.fn(),
     getSession: vi.fn(() => fakeSession),
+    refreshSessionFromDatabase: vi.fn(() => fakeSession),
     updateSession: vi.fn(),
     addSessionOutput: vi.fn(),
+    addPanelConversationMessage: vi.fn(),
+    addPanelOutput: vi.fn(),
   };
 
   const fakeTaskQueue = {
@@ -254,9 +258,29 @@ function makeServices(opts?: {
     startPanel: vi.fn(() => new Promise<void>(() => {})),
   };
 
+  const fakeCodexPtyManager = {
+    isPanelRunning: vi.fn(() => false),
+    relayUserTurn: vi.fn(),
+    startPanel: vi.fn(() => new Promise<void>(() => {})),
+    stopPanel: vi.fn(),
+  };
+
+  const codexListeners = new Map<string, (payload: Record<string, unknown>) => void>();
+  const fakeCodexSdkManager = {
+    on: vi.fn((event: string, listener: (payload: Record<string, unknown>) => void) => {
+      codexListeners.set(event, listener);
+    }),
+    isPanelRunning: vi.fn(() => false),
+    spawnCliProcess: vi.fn(async () => undefined),
+  };
+  const emitCodex = (event: string, payload: Record<string, unknown>): void => {
+    codexListeners.get(event)?.(payload);
+  };
+
   // At-spawn runId→panelId seed (facade.registerInteractivePanel) — the spawn
   // sites must call it BEFORE the fire-and-forget startPanel.
   const fakeRegisterLivePanel = vi.fn();
+  const fakeRegisterCodexPtyPanel = vi.fn();
 
   const services = {
     sessionManager: fakeSessionManager,
@@ -266,9 +290,12 @@ function makeServices(opts?: {
     cliManagerFactory: {},
     claudeCodeManager: fakeClaudeCodeManager,
     interactiveCliManager: fakeInteractiveCliManager,
+    codexSdkManager: fakeCodexSdkManager,
+    codexPtyManager: fakeCodexPtyManager,
     endLiveSession: vi.fn(async () => {}),
     killLiveSession: vi.fn(async () => {}),
     registerLivePanel: fakeRegisterLivePanel,
+    registerCodexPtyPanel: fakeRegisterCodexPtyPanel,
     gitStatusManager: {},
     archiveProgressManager: undefined,
     // Demo-mode probe used by the eager-spawn + sessions:input interactive
@@ -294,7 +321,11 @@ function makeServices(opts?: {
     fakeDatabaseService,
     fakeClaudeCodeManager,
     fakeInteractiveCliManager,
+    fakeCodexSdkManager,
+    emitCodex,
+    fakeCodexPtyManager,
     fakeRegisterLivePanel,
+    fakeRegisterCodexPtyPanel,
   };
 }
 
@@ -403,6 +434,7 @@ describe('sessions:create-quick handler - workflow_runs pipeline', () => {
       expect(sessionIdStamps).toHaveLength(0);
     }
   });
+
 });
 
 // ---------------------------------------------------------------------------
@@ -449,13 +481,13 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
     // The invalid value is never persisted — sessions.substrate is ALWAYS
     // stamped with the RESOLVED value from createRun ('sdk' here), never the
     // raw request value.
-    const stamps = dbRunCalls.filter((c) => c.sql.includes('UPDATE sessions SET substrate'));
+    const stamps = dbRunCalls.filter((c) => /UPDATE\s+sessions\s+SET\s+substrate/.test(c.sql));
     expect(stamps).toHaveLength(2);
     // The second invoke resolves the SECOND emitted session (the claimed-session
     // set hands each create-quick caller a distinct session).
     expect(stamps.map((c) => c.args)).toEqual([
-      ['sdk', 'sess-001'],
-      ['sdk', 'sess-002'],
+      ['sdk', 'claude-sdk', 'sess-001'],
+      ['sdk', 'claude-sdk', 'sess-002'],
     ]);
   });
 
@@ -482,9 +514,59 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
       substrate: 'interactive',
     });
 
-    const stamp = dbRunCalls.find((c) => c.sql.includes('UPDATE sessions SET substrate'));
+    const stamp = dbRunCalls.find((c) => /UPDATE\s+sessions\s+SET\s+substrate/.test(c.sql));
     expect(stamp).toBeDefined();
-    expect(stamp?.args).toEqual(['interactive', 'sess-001']);
+    expect(stamp?.args).toEqual(['interactive', 'claude-interactive', 'sess-001']);
+  });
+
+  it('drops stale Codex model values from Claude quick sessions and falls back to claudeConfig', async () => {
+    const {
+      services,
+      dbRunCalls,
+      fakeDatabaseService,
+      fakeInteractiveCliManager,
+    } = makeServices();
+    const handlers = registerWith(services);
+
+    await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      substrate: 'interactive',
+      agentModel: 'gpt-5.5',
+      claudeConfig: { model: 'sonnet', fastMode: true },
+    });
+
+    const stamp = dbRunCalls.find((c) => /UPDATE\s+sessions\s+SET\s+substrate/.test(c.sql));
+    expect(stamp?.args).toEqual(['interactive', 'claude-interactive', 'sess-001']);
+    expect(fakeDatabaseService.updatePanelSettings).toHaveBeenCalledWith('panel-quick-1', {
+      model: 'sonnet',
+      fastMode: true,
+    });
+    expect(fakeInteractiveCliManager.startPanel).toHaveBeenCalledWith(
+      'panel-quick-1',
+      'sess-001',
+      `/tmp/project/${TEST_BRANCH}`,
+      expect.stringContaining('cyboflow'),
+      undefined,
+      'sonnet',
+      undefined,
+      true,
+    );
+  });
+
+  it('refreshes the session read model after stamping default agent fields', async () => {
+    const { services, fakeSessionManager } = makeServices();
+    const handlers = registerWith(services);
+
+    await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      agentProvider: 'codex',
+      agentRuntime: 'codex-pty',
+      agentModel: 'gpt-5.5',
+    });
+
+    expect(fakeSessionManager.refreshSessionFromDatabase).toHaveBeenCalledWith('sess-001');
   });
 
   it('persists sessions.effort = ultracode when the Ultracode card is chosen (migration 029)', async () => {
@@ -542,7 +624,7 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
     expect(vi.mocked(panelManager.createPanel)).toHaveBeenCalledWith({
       sessionId: 'sess-001',
       type: 'claude',
-      title: 'Claude',
+      title: 'Chat',
     });
     expect(fakeInteractiveCliManager.startPanel).toHaveBeenCalledTimes(1);
     const [panelId, sessionId, worktreePath, briefing] =
@@ -581,8 +663,8 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
     expect(result.success).toBe(true);
     expect(result.data?.claudePanelId).toBe('panel-quick-1');
 
-    const stamp = dbRunCalls.find((c) => c.sql.includes('UPDATE sessions SET substrate'));
-    expect(stamp?.args).toEqual(['interactive', 'sess-001']);
+    const stamp = dbRunCalls.find((c) => /UPDATE\s+sessions\s+SET\s+substrate/.test(c.sql));
+    expect(stamp?.args).toEqual(['interactive', 'claude-interactive', 'sess-001']);
 
     expect(fakeInteractiveCliManager.startPanel).toHaveBeenCalledTimes(1);
     expect(fakeRegisterLivePanel).toHaveBeenCalledWith('test-run-id-abc', 'panel-quick-1');
@@ -602,6 +684,129 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
     expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
     expect(fakeRegisterLivePanel).not.toHaveBeenCalled();
     expect(result.data ?? {}).not.toHaveProperty('claudePanelId');
+  });
+
+  it('accepts codex-pty for quick sessions, stamps the session runtime, and eager-spawns Codex PTY', async () => {
+    const {
+      services,
+      dbRunCalls,
+      fakeCodexPtyManager,
+      fakeInteractiveCliManager,
+      fakeRegisterLivePanel,
+      fakeRegisterCodexPtyPanel,
+    } =
+      makeServices();
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      agentProvider: 'codex',
+      agentRuntime: 'codex-pty',
+      agentModel: 'gpt-5.5',
+    })) as { success: boolean; data?: { claudePanelId?: string } };
+
+    expect(result.success).toBe(true);
+    expect(result.data?.claudePanelId).toBe('panel-quick-1');
+
+    const stamp = dbRunCalls.find((c) => /UPDATE\s+sessions\s+SET\s+substrate/.test(c.sql));
+    expect(stamp?.args).toEqual(['interactive', 'codex-pty', 'sess-001']);
+
+    expect(vi.mocked(panelManager.createPanel)).toHaveBeenCalledWith({
+      sessionId: 'sess-001',
+      type: 'claude',
+      title: 'Chat',
+    });
+    expect(fakeCodexPtyManager.startPanel).toHaveBeenCalledTimes(1);
+    expect(fakeCodexPtyManager.startPanel).toHaveBeenCalledWith(
+      'panel-quick-1',
+      'sess-001',
+      `/tmp/project/${TEST_BRANCH}`,
+      expect.stringContaining('cyboflow'),
+      undefined,
+      'gpt-5.5',
+      'test-run-id-abc',
+    );
+    expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeRegisterLivePanel).not.toHaveBeenCalled();
+    expect(fakeRegisterCodexPtyPanel).toHaveBeenCalledWith('test-run-id-abc', 'panel-quick-1');
+    expect(fakeRegisterCodexPtyPanel.mock.invocationCallOrder[0]).toBeLessThan(
+      fakeCodexPtyManager.startPanel.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('drops stale Claude model values from Codex PTY quick sessions', async () => {
+    const {
+      services,
+      dbRunCalls,
+      fakeCodexPtyManager,
+      fakeDatabaseService,
+    } = makeServices();
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      agentProvider: 'codex',
+      agentRuntime: 'codex-pty',
+      agentModel: 'opus',
+    })) as { success: boolean; data?: { claudePanelId?: string } };
+
+    expect(result.success).toBe(true);
+
+    const stamp = dbRunCalls.find((c) => /UPDATE\s+sessions\s+SET\s+substrate/.test(c.sql));
+    expect(stamp?.args).toEqual(['interactive', 'codex-pty', 'sess-001']);
+    expect(fakeDatabaseService.updatePanelSettings).not.toHaveBeenCalled();
+    expect(fakeCodexPtyManager.startPanel).toHaveBeenCalledWith(
+      'panel-quick-1',
+      'sess-001',
+      `/tmp/project/${TEST_BRANCH}`,
+      expect.stringContaining('cyboflow'),
+      undefined,
+      undefined,
+      'test-run-id-abc',
+    );
+  });
+
+  it('accepts codex-sdk for quick sessions, stamps the session and sentinel, and waits for first input', async () => {
+    const {
+      services,
+      createRunArgs,
+      dbRunCalls,
+      fakeCodexPtyManager,
+      fakeCodexSdkManager,
+      fakeInteractiveCliManager,
+      fakeTaskQueue,
+    } = makeServices();
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      agentModel: 'gpt-5.5',
+    })) as { success: boolean; data?: { claudePanelId?: string } };
+
+    expect(result.success).toBe(true);
+    expect(result.data ?? {}).not.toHaveProperty('claudePanelId');
+    expect(fakeTaskQueue.createSession).toHaveBeenCalledWith(expect.objectContaining({
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      agentModel: 'gpt-5.5',
+    }));
+    const sessionStamp = dbRunCalls.find((c) => /UPDATE\s+sessions\s+SET\s+substrate/.test(c.sql));
+    expect(sessionStamp?.args).toEqual(['sdk', 'codex-sdk', 'sess-001']);
+    expect(sessionStamp?.sql).not.toMatch(/agent_provider|agent_model/);
+    expect(createRunArgs[0][4]).toEqual({
+      requestedModel: 'gpt-5.5',
+      requestedAgentProvider: 'codex',
+      requestedAgentRuntime: 'codex-sdk',
+    });
+    expect(dbRunCalls.some((c) => /UPDATE\s+workflow_runs\s+SET\s+agent_provider/.test(c.sql))).toBe(false);
+    expect(fakeCodexSdkManager.spawnCliProcess).not.toHaveBeenCalled();
+    expect(fakeCodexPtyManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
   });
 });
 
@@ -696,12 +901,13 @@ describe('sessions:input handler - substrate routing', () => {
   const SESSION_ID = 'sess-001';
   const PANEL = { id: 'panel-1', sessionId: SESSION_ID, type: 'claude', state: {} };
 
-  function setupInput(opts: { substrate?: string; replRunning?: boolean; runId?: string }) {
+  function setupInput(opts: { substrate?: string; agentRuntime?: string; replRunning?: boolean; codexRunning?: boolean; runId?: string }) {
     const made = makeServices();
     (made.fakeDatabaseService.getSession as ReturnType<typeof vi.fn>).mockReturnValue({
       id: SESSION_ID,
       commit_mode: undefined,
       substrate: opts.substrate,
+      agent_runtime: opts.agentRuntime,
       run_id: opts.runId,
       // For a quick session the chat-gate sentinel coincides with run_id (migration
       // 038 / §6). The interactive re-spawn now registers the chat_run_id sentinel
@@ -711,7 +917,12 @@ describe('sessions:input handler - substrate routing', () => {
     vi.mocked(panelManager.getPanelsForSession).mockReturnValue(
       [PANEL] as unknown as ReturnType<typeof panelManager.getPanelsForSession>,
     );
+    vi.mocked(panelManager.getPanel).mockReturnValue(
+      PANEL as unknown as ReturnType<typeof panelManager.getPanel>,
+    );
     made.fakeInteractiveCliManager.isPanelRunning.mockReturnValue(opts.replRunning ?? false);
+    made.fakeCodexPtyManager.isPanelRunning.mockReturnValue(opts.codexRunning ?? false);
+    made.fakeCodexSdkManager.isPanelRunning.mockReturnValue(opts.codexRunning ?? false);
     const handlers = registerWith(made.services);
     return { ...made, handlers };
   }
@@ -794,5 +1005,153 @@ describe('sessions:input handler - substrate routing', () => {
     expect(fakeClaudeCodeManager.startPanel).toHaveBeenCalled();
     expect(fakeInteractiveCliManager.relayUserTurn).not.toHaveBeenCalled();
     expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
+  });
+
+  it('relays a codex-pty session turn into the live Codex PTY, never Claude managers', async () => {
+    const {
+      handlers,
+      fakeCodexPtyManager,
+      fakeInteractiveCliManager,
+      fakeClaudeCodeManager,
+      fakeSessionManager,
+    } = setupInput({ agentRuntime: 'codex-pty', codexRunning: true });
+
+    const result = (await invoke(handlers, 'sessions:input', SESSION_ID, 'hello codex')) as {
+      success: boolean;
+    };
+
+    expect(result.success).toBe(true);
+    expect(fakeCodexPtyManager.relayUserTurn).toHaveBeenCalledWith('panel-1', 'hello codex');
+    expect(fakeCodexPtyManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeInteractiveCliManager.relayUserTurn).not.toHaveBeenCalled();
+    expect(fakeClaudeCodeManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeSessionManager.updateSession).toHaveBeenCalledWith(SESSION_ID, { status: 'running' });
+  });
+
+  it('re-spawns a dead codex-pty session fire-and-forget with the input as first prompt', async () => {
+    const {
+      handlers,
+      fakeCodexPtyManager,
+      fakeInteractiveCliManager,
+      fakeClaudeCodeManager,
+      fakeSessionManager,
+    } = setupInput({ agentRuntime: 'codex-pty', codexRunning: false });
+
+    const result = (await invoke(handlers, 'sessions:input', SESSION_ID, 'wake codex')) as {
+      success: boolean;
+    };
+
+    expect(result.success).toBe(true);
+    expect(fakeCodexPtyManager.startPanel).toHaveBeenCalledWith(
+      'panel-1',
+      SESSION_ID,
+      `/tmp/project/${TEST_BRANCH}`,
+      'wake codex',
+      undefined,
+      undefined,
+      undefined,
+    );
+    expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeClaudeCodeManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeSessionManager.updateSession).toHaveBeenCalledWith(SESSION_ID, { status: 'running' });
+  });
+
+  it('routes a codex-sdk session turn through the structured Codex manager', async () => {
+    const {
+      handlers,
+      fakeCodexSdkManager,
+      fakeCodexPtyManager,
+      fakeInteractiveCliManager,
+      fakeClaudeCodeManager,
+      fakeSessionManager,
+      fakeDatabaseService,
+    } = setupInput({ agentRuntime: 'codex-sdk', runId: 'run-quick-001' });
+    fakeDatabaseService.getPanelSettings.mockReturnValue({ model: 'gpt-5.5' });
+
+    const result = (await invoke(handlers, 'sessions:input', SESSION_ID, 'hello sdk')) as {
+      success: boolean;
+    };
+
+    expect(result.success).toBe(true);
+    expect(fakeCodexSdkManager.spawnCliProcess).toHaveBeenCalledWith(
+      expect.objectContaining({
+        panelId: 'panel-1',
+        sessionId: SESSION_ID,
+        runId: 'run-quick-001',
+        worktreePath: `/tmp/project/${TEST_BRANCH}`,
+        prompt: 'hello sdk',
+        model: 'gpt-5.5',
+        systemPromptAppend: expect.stringContaining('cyboflow'),
+      }),
+    );
+    expect(fakeSessionManager.addPanelConversationMessage).toHaveBeenCalledWith('panel-1', 'user', 'hello sdk');
+    expect(fakeSessionManager.updateSession).toHaveBeenCalledWith(SESSION_ID, { status: 'running' });
+    expect(fakeCodexPtyManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeClaudeCodeManager.startPanel).not.toHaveBeenCalled();
+  });
+
+  it('keeps Codex SDK queued input out of ClaudeCodeManager and preserves pending-send ids', async () => {
+    const {
+      handlers,
+      fakeCodexSdkManager,
+      fakeClaudeCodeManager,
+    } = setupInput({ agentRuntime: 'codex-sdk', codexRunning: true, runId: 'run-quick-001' });
+    vi.mocked(panelManager.getPanel).mockReturnValue(
+      PANEL as unknown as ReturnType<typeof panelManager.getPanel>,
+    );
+
+    await invoke(handlers, 'panels:queue-input', 'panel-1', 'pending-a', 'first');
+    await invoke(handlers, 'panels:queue-input', 'panel-1', 'pending-b', 'second');
+    const listed = (await invoke(handlers, 'panels:list-queued-input', 'panel-1')) as {
+      success: boolean;
+      data: Array<{ id: string; text: string }>;
+    };
+    expect(listed.data).toEqual([
+      { id: 'pending-a', text: 'first' },
+      { id: 'pending-b', text: 'second' },
+    ]);
+
+    const dequeued = (await invoke(
+      handlers,
+      'panels:dequeue-input',
+      'panel-1',
+      'pending-a',
+    )) as { data: { dequeued: boolean } };
+    expect(dequeued.data.dequeued).toBe(true);
+    expect(fakeCodexSdkManager.spawnCliProcess).not.toHaveBeenCalled();
+    expect(fakeClaudeCodeManager.sendInput).not.toHaveBeenCalled();
+  });
+
+  it.each([0, 1])('drains Codex SDK queued input once whenever turn exit %i leaves the panel idle', async (exitCode) => {
+    const {
+      handlers,
+      fakeCodexSdkManager,
+      fakeSessionManager,
+      emitCodex,
+    } = setupInput({ agentRuntime: 'codex-sdk', codexRunning: true, runId: 'run-quick-001' });
+    vi.mocked(panelManager.getPanel).mockReturnValue(
+      PANEL as unknown as ReturnType<typeof panelManager.getPanel>,
+    );
+
+    await invoke(handlers, 'panels:queue-input', 'panel-1', 'pending-a', 'first');
+    await invoke(handlers, 'panels:queue-input', 'panel-1', 'pending-b', 'second');
+    fakeCodexSdkManager.isPanelRunning.mockReturnValue(false);
+    emitCodex('exit', { panelId: 'panel-1', sessionId: SESSION_ID, exitCode });
+    await vi.waitFor(() => expect(fakeCodexSdkManager.spawnCliProcess).toHaveBeenCalledTimes(1));
+
+    expect(fakeCodexSdkManager.spawnCliProcess).toHaveBeenCalledWith(expect.objectContaining({
+      panelId: 'panel-1',
+      prompt: 'first\n\nsecond',
+    }));
+    expect(fakeSessionManager.addPanelConversationMessage).toHaveBeenCalledWith(
+      'panel-1',
+      'user',
+      'first\n\nsecond',
+    );
+    const listed = (await invoke(handlers, 'panels:list-queued-input', 'panel-1')) as {
+      data: unknown[];
+    };
+    expect(listed.data).toEqual([]);
   });
 });

@@ -692,7 +692,7 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
           const panel = await panelManager.createPanel({
             sessionId: session.id,
             type: 'claude',
-            title: 'Claude',
+            title: 'Chat',
             initialState: customState
           });
 

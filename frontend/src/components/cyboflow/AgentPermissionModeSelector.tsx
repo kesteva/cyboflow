@@ -7,6 +7,7 @@
  * options + button markup are single-sourced (no drift in labels/hints/styling).
  */
 import type { PermissionMode } from '../../../../shared/types/workflows';
+import type { AgentProvider, SessionAgentRuntime } from '../../../../shared/types/agentRuntime';
 
 /**
  * The session agent-permission options. Selecting one writes the host session's
@@ -16,16 +17,46 @@ import type { PermissionMode } from '../../../../shared/types/workflows';
  * launch-time audit value that may diverge). The session column is the sole
  * execution authority.
  */
-export const PERMISSION_MODE_OPTIONS: ReadonlyArray<{ id: PermissionMode; label: string; hint: string }> = [
+type PermissionModeOption = Readonly<{ id: PermissionMode; label: string; hint: string }>;
+
+export const PERMISSION_MODE_OPTIONS: ReadonlyArray<PermissionModeOption> = [
   { id: 'default', label: 'Ask before edits', hint: 'Prompt for each edit' },
   { id: 'acceptEdits', label: 'Allow edits', hint: 'Auto-allow edits, safe reads & git' },
   { id: 'auto', label: 'Auto', hint: 'Native Claude classifier' },
   { id: 'dontAsk', label: "Don't ask", hint: 'No prompts · skip permissions' },
 ];
 
+const CODEX_SDK_PERMISSION_MODE_OPTIONS: ReadonlyArray<PermissionModeOption> = [
+  { id: 'default', label: 'Ask before edits', hint: 'Read-only · asks to write' },
+  { id: 'acceptEdits', label: 'Allow edits', hint: 'Workspace writes · asks when needed' },
+  { id: 'auto', label: 'Auto', hint: 'Workspace writes · Codex auto-reviews' },
+  { id: 'dontAsk', label: "Don't ask", hint: 'Full access · approvals off' },
+];
+
+const CODEX_PTY_PERMISSION_MODE_OPTIONS: ReadonlyArray<PermissionModeOption> = [
+  { id: 'default', label: 'Ask before edits', hint: 'Read-only · asks to write' },
+  { id: 'acceptEdits', label: 'Allow edits', hint: 'Workspace writes · asks when needed' },
+  { id: 'auto', label: 'Auto', hint: 'Currently same as Allow edits' },
+  { id: 'dontAsk', label: "Don't ask", hint: 'Full access · approvals off' },
+];
+
+function permissionModeOptionsForProvider(
+  agentProvider: AgentProvider,
+  agentRuntime?: SessionAgentRuntime,
+): ReadonlyArray<PermissionModeOption> {
+  if (agentProvider !== 'codex') return PERMISSION_MODE_OPTIONS;
+  return agentRuntime === 'codex-pty'
+    ? CODEX_PTY_PERMISSION_MODE_OPTIONS
+    : CODEX_SDK_PERMISSION_MODE_OPTIONS;
+}
+
 interface AgentPermissionModeSelectorProps {
   value: PermissionMode;
   onChange: (mode: PermissionMode) => void;
+  /** Provider whose runtime will execute the next launch/message. */
+  agentProvider?: AgentProvider;
+  /** Distinguishes structured Codex auto-review from Codex PTY CLI flags. */
+  agentRuntime?: SessionAgentRuntime;
   /** Heading text above the buttons; pass null to omit the heading. */
   label?: string | null;
   /** Extra classes on the wrapper. */
@@ -35,13 +66,17 @@ interface AgentPermissionModeSelectorProps {
 export function AgentPermissionModeSelector({
   value,
   onChange,
+  agentProvider = 'claude',
+  agentRuntime,
   label = 'Session permission',
   className,
 }: AgentPermissionModeSelectorProps): React.JSX.Element {
+  const options = permissionModeOptionsForProvider(agentProvider, agentRuntime);
+
   return (
     <div className={`flex flex-col gap-1.5${className ? ` ${className}` : ''}`}>
       {label !== null && <span className="text-xs font-medium text-text-secondary">{label}</span>}
-      {PERMISSION_MODE_OPTIONS.map(({ id, label: optLabel, hint }) => (
+      {options.map(({ id, label: optLabel, hint }) => (
         <button
           key={id}
           type="button"
@@ -58,6 +93,13 @@ export function AgentPermissionModeSelector({
           <span className="text-xs text-text-tertiary">{hint}</span>
         </button>
       ))}
+      {agentProvider === 'codex' && (
+        <p className="text-xs text-text-tertiary">
+          {agentRuntime === 'codex-pty'
+            ? 'Codex prompts appear in its terminal; they do not enter the Cyboflow review queue.'
+            : 'Auto lets Codex review approval requests; other requested approvals use the Cyboflow review queue.'}
+        </p>
+      )}
     </div>
   );
 }

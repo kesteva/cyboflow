@@ -338,8 +338,11 @@ export class PanelManager {
     const samePType = existingPanels.filter(p => p.type === type);
     const nextNumber = samePType.length + 1;
     
-    // Capitalize first letter of type
-    const capitalizedType = type.charAt(0).toUpperCase() + type.slice(1);
+    // The persisted panel type remains `claude` for compatibility, but its UI
+    // surface is provider-neutral and can host Claude or Codex.
+    const capitalizedType = type === 'claude'
+      ? 'Chat'
+      : type.charAt(0).toUpperCase() + type.slice(1);
     
     return `${capitalizedType} ${nextNumber}`;
   }

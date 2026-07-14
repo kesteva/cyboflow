@@ -136,6 +136,22 @@ describe('reopenRunHandler — guard matrix', () => {
     expect(executor.execute).not.toHaveBeenCalled();
     db.close();
   });
+
+  it('programmatic run does not require a top-level provider session', async () => {
+    const db = makeDb();
+    const { runId } = seedRun(db, { status: 'failed' });
+    setSubstrate(db, runId, 'sdk');
+    db.prepare("UPDATE workflow_runs SET execution_model = 'programmatic' WHERE id = ?").run(runId);
+    const executor = makeFakeExecutor();
+    const deps = makeDeps(dbAdapter(db), executor);
+
+    const result = await reopenRunHandler(runId, 'retry from host state', deps);
+
+    expect(result).toEqual({ delivered: true });
+    expect(executor.setPendingNudge).toHaveBeenCalledWith(runId, 'retry from host state');
+    expect(executor.execute).toHaveBeenCalledWith(runId);
+    db.close();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -195,10 +211,10 @@ describe('reopenRunHandler — delivery', () => {
     const adapter: DatabaseLike = {
       prepare: (sql: string): PreparedStatement => {
         const stmt = real.prepare(sql);
-        if (sql.includes('SELECT status, substrate, claude_session_id')) {
+        if (sql.includes('SELECT status, substrate, execution_model FROM workflow_runs')) {
           return {
             run: (...params: unknown[]) => stmt.run(...params),
-            get: () => ({ status: 'failed', substrate: 'sdk', claude_session_id: 'sess-1' }),
+            get: () => ({ status: 'failed', substrate: 'sdk', execution_model: 'orchestrated' }),
             all: (...params: unknown[]) => stmt.all(...params),
           };
         }

@@ -7,6 +7,7 @@
  */
 
 import type { CliSubstrate } from './substrate';
+import type { AgentProvider, WorkflowAgentRuntime } from './agentRuntime';
 import type { ExecutionModel } from './executionModel';
 import type { VerificationType } from './visualVerification';
 import type { WorkflowRunStatus } from './cyboflow';
@@ -129,6 +130,13 @@ export interface WorkflowRunRow {
   /** CLI substrate stamped at launch ('sdk' | 'interactive'). Resolved once and immutable for the run. Reads back 'sdk' for every legacy row. IDEA-013 / TASK-806. */
   substrate?: CliSubstrate;
   /**
+   * Provider/runtime stamps (migrations 051-052). These supersede the Claude-only
+   * substrate concept for new integrations. Existing substrate remains a
+   * compatibility projection during migration.
+   */
+  agent_provider?: AgentProvider;
+  agent_runtime?: WorkflowAgentRuntime;
+  /**
    * Execution model stamped at launch ('orchestrated' | 'programmatic') — the
    * sibling immutable stamp to `substrate` (migration 032). Decides WHO walks the
    * run's DAG: the orchestrator agent ('orchestrated', today's behavior + the
@@ -138,14 +146,10 @@ export interface WorkflowRunRow {
    */
   execution_model?: ExecutionModel;
   /**
-   * Per-run Claude model alias pinned at launch ('fable' | 'opus' | 'sonnet' |
-   * 'haiku' | 'auto'; legacy 'opus-250k' still resolves for back-compat but is
-   * no longer offered in the picker), resolved to a concrete snapshot at the spawn seam
-   * (modelContext.resolveModelAlias). Stamped once at createRun, immutable for the
-   * run (migration 037). NULL — and the migrated state of every legacy row — means
-   * "no pin": RunExecutor passes no `model` to the spawner so the bundled Agent SDK
-   * uses its own default. 'auto' resolves identically to NULL at the seam. Read
-   * FRESH per spawn by RunExecutor.buildOptionsOverrides.
+   * Per-run provider-scoped model alias pinned at launch ('fable' | 'opus' |
+   * 'sonnet' | 'gpt-*' | 'auto'), normalized against agent_provider at createRun
+   * and resolved to a runtime-specific spawn value at the spawn seam. Stamped once
+   * at createRun, immutable for the run (migration 037). NULL means "no pin".
    */
   model?: string | null;
   /**
@@ -236,6 +240,9 @@ export interface WorkflowRunListRow {
    * IDEA-013 / TASK-806.
    */
   substrate?: CliSubstrate;
+  /** Provider/runtime stamps surfaced additively for migrations 051-052. */
+  agent_provider?: AgentProvider;
+  agent_runtime?: WorkflowAgentRuntime;
   /** Parent session (migration 019) — soft link to sessions.id, NULL for legacy parentless flow runs. The left-rail will group runs by session_id in Phase 3. */
   session_id?: string | null;
   /** Sprint lane batch (migration 022) — soft link to sprint_batches.id; stamped on seeded 'sprint' runs, NULL for every other run. */
@@ -250,9 +257,10 @@ export interface WorkflowRunListRow {
    */
   seed_idea_ids?: string | null;
   /**
-   * Per-run pinned model alias (migration 037) — the user-facing alias stamped
-   * onto workflow_runs.model at launch (Configure surface), resolved to a concrete
-   * snapshot at the spawn seam. Surfaced on the list row so the run composer can
+   * Per-run pinned provider-scoped model alias (migration 037) — the user-facing
+   * alias stamped onto workflow_runs.model at launch (Configure surface), resolved
+   * to a runtime-specific spawn value at the spawn seam. Surfaced on the list row
+   * so the run composer can
    * show a READ-ONLY model pill. NULL/'auto' → no pin (SDK default), so the pill
    * is omitted. Optional + additive, mirroring `substrate?` (fixtures unaffected).
    */
@@ -344,7 +352,7 @@ export interface FanOutInnerStep {
   agent: string;
   /** When true a failed inner step is skipped (lane continues) rather than failing the item. */
   optional?: boolean;
-  /** Intra-chain loopback target id (v1: reserved/simple — see controller note). */
+  /** Intra-chain loopback target id, re-driven by both execution planes on required failure. */
   loopback?: string;
   /** Human-readable name for prompts/UI; falls back to id when absent. */
   name?: string;
@@ -705,8 +713,8 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
   // cyboflow_update_sprint_task. One holistic verify/review/human gate at the
   // end; N=1 degenerates to a normal single-task sprint. The inner chain's
   // `loopback: 'implement'` fields encode today's "on failure, re-delegate to
-  // implement" behavior as data, consumed by the orchestrated prompt generator;
-  // the programmatic controller does not yet re-drive on them in v1.
+  // implement" behavior as data, consumed by both the orchestrated prompt
+  // generator and the programmatic controller.
   sprint: {
     id: 'sprint',
     phases: [

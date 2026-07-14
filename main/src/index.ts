@@ -25,6 +25,8 @@ import { CliManagerFactory } from './services/cliManagerFactory';
 import { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './services/panels/claude/interactiveClaudeManager';
+import { CodexPtyManager } from './services/panels/codex/codexPtyManager';
+import { CodexSdkManager } from './services/panels/codex/codexSdkManager';
 import { SubstrateDispatchFacade } from './services/substrateDispatchFacade';
 import { setupConsoleWrapper } from './utils/consoleWrapper';
 import { Orchestrator } from './orchestrator/Orchestrator';
@@ -138,6 +140,7 @@ import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
 import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReaderLike, FindingReaderLike, WorkflowPromptReaderLike } from './orchestrator/runExecutor';
 import { buildSeedTasksBlock } from './orchestrator/seedTasksBlock';
+import { listRunOwnedIdeaIds } from './orchestrator/runEntityOwnership';
 import { selectTaskById, selectIdeaAttachments } from './orchestrator/taskListing';
 import { selectFindingForSeed } from './orchestrator/reviewItemListing';
 import { buildStepTransitionEvent, resolveRunLevelStepId } from './orchestrator/stepTransitionBridge';
@@ -301,6 +304,7 @@ let sessionManager: SessionManager;
 let worktreeManager: WorktreeManager;
 let cliManagerFactory: CliManagerFactory;
 let defaultCliManager: AbstractCliManager;
+let codexPtyManager: CodexPtyManager;
 let gitDiffManager: GitDiffManager;
 let gitStatusManager: GitStatusManager;
 let executionTracker: ExecutionTracker;
@@ -731,6 +735,31 @@ async function initializeServices() {
   if (!(interactiveCliManager instanceof InteractiveClaudeManager)) {
     throw new Error('[Main] cliManagerFactory returned a non-InteractiveClaudeManager for claude-interactive');
   }
+
+  const createdCodexSdkManager = await cliManagerFactory.createManager('codex-sdk', {
+    sessionManager,
+    logger,
+    configManager,
+    additionalOptions: {
+      db: databaseService.getDb(),
+      appVersion: app.getVersion(),
+    },
+    skipValidation: true,
+  });
+  if (!(createdCodexSdkManager instanceof CodexSdkManager)) {
+    throw new Error('[Main] cliManagerFactory returned a non-CodexSdkManager for codex-sdk');
+  }
+
+  const createdCodexPtyManager = await cliManagerFactory.createManager('codex-pty', {
+    sessionManager,
+    logger,
+    configManager,
+    skipValidation: true,
+  });
+  if (!(createdCodexPtyManager instanceof CodexPtyManager)) {
+    throw new Error('[Main] cliManagerFactory returned a non-CodexPtyManager for codex-pty');
+  }
+  codexPtyManager = createdCodexPtyManager;
   gitDiffManager = new GitDiffManager(logger);
   gitStatusManager = new GitStatusManager(sessionManager, worktreeManager, gitDiffManager, logger);
   executionTracker = new ExecutionTracker(sessionManager, gitDiffManager);
@@ -1421,6 +1450,8 @@ async function initializeServices() {
     interactiveCliManager,
     workflowRegistry,
     cyboflowLogger,
+    [codexPtyManager],
+    createdCodexSdkManager,
   );
 
   // LifecycleTransitions adapter — keeps RunExecutor free of services/* imports by
@@ -1559,6 +1590,11 @@ async function initializeServices() {
       reviewItemProjectChannel,
       cyboflowLogger,
     ),
+    // Per-step idea scope for programmatic prompts. The ownership projection
+    // unions workflow_runs.seed_idea_id with ideas created by this run, so Ship's
+    // raw-prompt path picks up the idea its context step creates before optional
+    // design steps evaluate UI_PROTOTYPE / ARCH_DESIGN.
+    runOwnedIdeaIdsProvider: (runId) => listRunOwnedIdeaIds(cyboflowDb, runId),
     // Blocking-review-items checkpoint: parks a programmatic run at each step
     // boundary while a PENDING BLOCKING review_item exists (e.g. a blocking finding
     // the agent recorded), awaits it clearing on reviewItemChangeEvents, then
@@ -1781,7 +1817,25 @@ async function initializeServices() {
           }
           return map;
         },
-        driveLane: ({ runId: rid, itemId, status, currentStepId, allowedStepIds }) => {
+        // Same task-file rows the task editor persists are the concurrency source
+        // of truth. This deliberately does not inspect task prompt/body text.
+        expectedFiles: (_runId, over) => {
+          const map = new Map<string, string[]>();
+          if (over !== 'tasks') return map;
+          const taskIds = sprintLaneStore.listLanes(batchId).map((lane) => lane.taskId);
+          if (taskIds.length === 0) return map;
+          const placeholders = taskIds.map(() => '?').join(',');
+          const rows = rawDb
+            .prepare(`SELECT task_id, file_path FROM task_files WHERE task_id IN (${placeholders})`)
+            .all(...taskIds) as Array<{ task_id: string; file_path: string }>;
+          for (const row of rows) {
+            const files = map.get(row.task_id) ?? [];
+            files.push(row.file_path);
+            map.set(row.task_id, files);
+          }
+          return map;
+        },
+        driveLane: ({ runId: rid, itemId, status, currentStepId, attempt, allowedStepIds }) => {
           try {
             sprintLaneStore.updateLane({
               runId: rid,
@@ -1790,6 +1844,7 @@ async function initializeServices() {
               allowedStepIds,
               ...(status !== undefined ? { status } : {}),
               ...(currentStepId !== undefined ? { currentStepId } : {}),
+              ...(attempt !== undefined ? { attempt } : {}),
             });
           } catch (err) {
             cyboflowLogger.debug('[fanOutDriver] driveLane skipped (fail-soft)', {
@@ -2055,6 +2110,13 @@ async function initializeServices() {
       orchSocketServer.cancelInFlightShellApprovals(runId),
     );
   }
+  createdCodexSdkManager.setCyboflowMcpRuntimeConfig({
+    orchSocketPath: socketPath,
+    bridgeScriptPath: bridgeScriptResolver.getScriptPath(),
+    nodeExecutablePath: await nodeResolver.getNodePath(),
+  });
+  createdCodexSdkManager.setApprovalRouterProvider(() => ApprovalRouter.getInstance());
+  createdCodexSdkManager.setQuestionRouterProvider(() => QuestionRouter.getInstance());
 
   // OrchestratorHealth — constructed with the real McpServerLifecycle so both the
   // raw-IPC cyboflow:mcp-health channel and the tRPC cyboflow.health.mcpServer
@@ -2084,6 +2146,8 @@ async function initializeServices() {
     cliManagerFactory,
     claudeCodeManager: defaultCliManager, // Backward compatibility
     interactiveCliManager, // PTY substrate sibling (narrowed to the concrete class above)
+    codexSdkManager: createdCodexSdkManager,
+    codexPtyManager,
     // Live-session close-out seams for quick sessions (IDEA-030): route the
     // session merge/rebase/dismiss handlers through the SubstrateDispatchFacade
     // so a quick session's persistent process is never orphaned — interactive
@@ -2099,6 +2163,8 @@ async function initializeServices() {
     // 'pty-output'/'turn-end').
     registerLivePanel: (runId: string, panelId: string) =>
       substrateFacade.registerInteractivePanel(runId, panelId),
+    registerCodexPtyPanel: (runId: string, panelId: string) =>
+      substrateFacade.registerPtyPanel(runId, panelId, codexPtyManager),
     gitDiffManager,
     gitStatusManager,
     executionTracker,

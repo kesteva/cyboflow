@@ -216,7 +216,7 @@ describe('output handlers — validateEventSession missing-sessionId drop', () =
     expect(useSessionStore.getState().getTerminalOutput('s1')).toEqual(['hello']);
   });
 
-  it('onSessionOutputAvailable dispatches only for a valid sessionId', () => {
+  it('onSessionOutputAvailable preserves panel identity for transcript refetches', () => {
     const events = collectEvents('session-output-available');
     renderHook(() => useIPCEvents());
     fire('onSessionOutputAvailable', {} as unknown as { sessionId: string });
@@ -224,6 +224,9 @@ describe('output handlers — validateEventSession missing-sessionId drop', () =
     fire('onSessionOutputAvailable', { sessionId: 's2' });
     expect(events).toHaveLength(1);
     expect(events[0].detail).toEqual({ sessionId: 's2' });
+    fire('onSessionOutputAvailable', { sessionId: 's2', panelId: 'p2' });
+    expect(events).toHaveLength(2);
+    expect(events[1].detail).toEqual({ sessionId: 's2', panelId: 'p2' });
   });
 });
 

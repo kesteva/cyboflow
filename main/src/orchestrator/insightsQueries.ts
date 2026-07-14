@@ -356,13 +356,23 @@ function fetchMaterializedRollups(
  *     object is present.
  *   - result → total_cost_usd (SUMmed; null when never present) and num_turns
  *     (SUMmed; null when never present).
- * `result.usage` tokens are intentionally NOT added (they restate turn totals).
+ *   - result.usage → token fallback used only when the run has no assistant usage
+ *     blocks. Codex reports turn usage on its terminal result, while Claude
+ *     normally reports it on assistant messages; the fallback avoids both zeroed
+ *     Codex totals and double-counting Claude totals.
  */
 function scanRawEventRollups(
   db: DatabaseLike,
   runIds: readonly string[],
 ): Map<string, RunUsageRollup> {
   const acc = new Map<string, RunUsageRollup>();
+  const resultUsageFallback = new Map<string, {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+    messageCount: number;
+  }>();
   for (const id of runIds) acc.set(id, zeroRollup(id));
   if (runIds.length === 0) return acc;
 
@@ -372,7 +382,7 @@ function scanRawEventRollups(
         `SELECT run_id AS runId, event_type AS eventType, payload_json AS payloadJson
          FROM raw_events
          WHERE run_id IN (${placeholders(ids.length)})
-           AND event_type IN ('assistant', 'result')
+           AND event_type IN ('assistant', 'result', 'agent_assistant', 'agent_result')
          ORDER BY run_id, id`,
       )
       .all(...ids) as RawEventUsageRow[];
@@ -389,7 +399,7 @@ function scanRawEventRollups(
       }
       if (!isRecord(payload)) continue;
 
-      if (row.eventType === 'assistant') {
+      if (row.eventType === 'assistant' || row.eventType === 'agent_assistant') {
         const message = payload.message;
         if (!isRecord(message)) continue;
         const usage = message.usage;
@@ -409,11 +419,35 @@ function scanRawEventRollups(
         if (typeof payload.num_turns === 'number' && Number.isFinite(payload.num_turns)) {
           target.numTurns = (target.numTurns ?? 0) + payload.num_turns;
         }
+        const usage = payload.usage;
+        if (isRecord(usage)) {
+          const fallback = resultUsageFallback.get(row.runId) ?? {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+            messageCount: 0,
+          };
+          fallback.inputTokens += asNumber(usage.input_tokens);
+          fallback.outputTokens += asNumber(usage.output_tokens);
+          fallback.cacheReadTokens += asNumber(usage.cache_read_input_tokens);
+          fallback.cacheCreationTokens += asNumber(usage.cache_creation_input_tokens);
+          fallback.messageCount += 1;
+          resultUsageFallback.set(row.runId, fallback);
+        }
       }
     }
   }
 
   for (const rollup of acc.values()) {
+    const fallback = resultUsageFallback.get(rollup.runId);
+    if (rollup.assistantMessageCount === 0 && fallback !== undefined) {
+      rollup.inputTokens = fallback.inputTokens;
+      rollup.outputTokens = fallback.outputTokens;
+      rollup.cacheReadTokens = fallback.cacheReadTokens;
+      rollup.cacheCreationTokens = fallback.cacheCreationTokens;
+      rollup.assistantMessageCount = fallback.messageCount;
+    }
     rollup.totalTokens = rollup.inputTokens + rollup.outputTokens;
   }
   return acc;
@@ -1147,7 +1181,7 @@ function buildTransitionStream(rows: readonly StepEventRow[]): StepStreamItem[] 
 function buildToolUseFallbackStream(rows: readonly StepEventRow[]): StepStreamItem[] {
   const items: StepStreamItem[] = [];
   for (const row of rows) {
-    if (row.eventType !== 'assistant') continue;
+    if (row.eventType !== 'assistant' && row.eventType !== 'agent_assistant') continue;
     let payload: unknown;
     try {
       payload = JSON.parse(row.payloadJson);
@@ -1223,7 +1257,7 @@ export function selectStepTokenBuckets(
         `SELECT run_id AS runId, id AS rowId, event_type AS eventType, payload_json AS payloadJson
          FROM raw_events
          WHERE run_id IN (${placeholders(ids.length)})
-           AND event_type IN ('assistant', 'step_transition')
+           AND event_type IN ('assistant', 'agent_assistant', 'step_transition')
          ORDER BY run_id, id`,
       )
       .all(...ids) as StepEventRow[];
@@ -2127,12 +2161,12 @@ export function selectDailyModelUsage(
     projectId === null
       ? `SELECT e.payload_json AS payloadJson, e.created_at AS createdAt
          FROM raw_events e
-         WHERE e.event_type = 'assistant'
+         WHERE e.event_type IN ('assistant', 'agent_assistant')
            AND e.created_at >= datetime('now', ?)`
       : `SELECT e.payload_json AS payloadJson, e.created_at AS createdAt
          FROM raw_events e
          JOIN workflow_runs r ON r.id = e.run_id
-         WHERE e.event_type = 'assistant'
+         WHERE e.event_type IN ('assistant', 'agent_assistant')
            AND e.created_at >= datetime('now', ?)
            AND r.project_id = ?`;
 

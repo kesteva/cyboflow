@@ -20,6 +20,12 @@
 import type Database from 'better-sqlite3';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
+import {
+  isWorkflowRuntimeSupported,
+  type AgentProvider,
+  type SessionAgentRuntime,
+  type WorkflowAgentRuntime,
+} from '../../../shared/types/agentRuntime';
 import { transitionToRunning } from './cyboflow/transitions';
 import { assertTransitionAllowed } from './cyboflow/stateMachine';
 
@@ -44,6 +50,9 @@ export interface QuickSessionJobData {
   toolType?: 'claude' | 'none';
   commitMode?: 'structured' | 'checkpoint' | 'disabled';
   commitModeSettings?: string;
+  agentProvider?: AgentProvider;
+  agentRuntime?: SessionAgentRuntime;
+  agentModel?: string | null;
   /** Work directly in the project checkout — no dedicated worktree (migration 047). */
   inPlace?: boolean;
   claudeConfig?: { model?: string; permissionMode?: 'approve' | 'ignore'; ultrathink?: boolean };
@@ -64,6 +73,11 @@ export interface CreateQuickSessionCoreDeps {
       requestedSubstrate?: CliSubstrate,
       sessionId?: string,
       requestedPermissionMode?: PermissionMode,
+      opts?: {
+        requestedModel?: string;
+        requestedAgentProvider?: AgentProvider;
+        requestedAgentRuntime?: WorkflowAgentRuntime;
+      },
     ): { runId: string; substrate: CliSubstrate };
   };
   getDb(): Database.Database;
@@ -81,6 +95,10 @@ export interface CreateQuickSessionCoreOptions {
   toolType?: 'claude' | 'none';
   commitMode?: 'structured' | 'checkpoint' | 'disabled';
   commitModeSettings?: string;
+  /** Persist ownership on the initial session INSERT, before session-created fires. */
+  agentProvider?: AgentProvider;
+  agentRuntime?: SessionAgentRuntime;
+  agentModel?: string | null;
   claudeConfig?: { model?: string; permissionMode?: 'approve' | 'ignore'; ultrathink?: boolean };
   /** Per-run substrate/permission choice threaded into the sentinel createRun (quick handler). */
   requestedSubstrate?: CliSubstrate;
@@ -152,6 +170,9 @@ export async function createQuickSessionCore(
     toolType: opts.toolType ?? 'claude',
     commitMode: inPlace ? 'disabled' : opts.commitMode,
     commitModeSettings: opts.commitModeSettings,
+    agentProvider: opts.agentProvider,
+    agentRuntime: opts.agentRuntime,
+    agentModel: opts.agentModel,
     inPlace,
     claudeConfig: opts.claudeConfig,
   });
@@ -191,11 +212,21 @@ export async function createQuickSessionCore(
 
   // Wire the __quick__ sentinel run so ApprovalRouter/chat gating work.
   const sentinelWorkflowId = workflowRegistry.ensureQuickWorkflow(opts.projectId);
+  const sentinelAgentRuntime = isWorkflowRuntimeSupported(opts.agentRuntime)
+    ? opts.agentRuntime
+    : undefined;
   const { runId, substrate: resolvedSubstrate } = workflowRegistry.createRun(
     sentinelWorkflowId,
     opts.requestedSubstrate,
     session.id,
     opts.requestedAgentMode,
+    {
+      ...(sentinelAgentRuntime && opts.agentModel ? { requestedModel: opts.agentModel } : {}),
+      ...(sentinelAgentRuntime && opts.agentProvider
+        ? { requestedAgentProvider: opts.agentProvider }
+        : {}),
+      ...(sentinelAgentRuntime ? { requestedAgentRuntime: sentinelAgentRuntime } : {}),
+    },
   );
 
   const db = deps.getDb();

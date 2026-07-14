@@ -11,7 +11,8 @@ import type { PermissionMode } from '../../../shared/types/workflows';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import type { UpdaterEvent, UpdateCheckResult } from '../../../shared/types/updater';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/types/modelAvailability';
-import type { ClaudeDetectionResult } from '../../../shared/types/onboarding';
+import type { CodexModelCatalog } from '../../../shared/types/agentModels';
+import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../shared/types/onboarding';
 
 interface LogEntry {
   timestamp: string;
@@ -309,7 +310,7 @@ interface ElectronAPI {
     onSessionOutput: (callback: (output: SessionOutput) => void) => () => void;
     onSessionLog: (callback: (data: { sessionId: string; entry: LogEntry }) => void) => () => void;
     onSessionLogsCleared: (callback: (data: { sessionId: string }) => void) => () => void;
-    onSessionOutputAvailable: (callback: (info: { sessionId: string; hasNewOutput: boolean }) => void) => () => void;
+    onSessionOutputAvailable: (callback: (info: { sessionId: string; panelId?: string; hasNewOutput?: boolean }) => void) => () => void;
     onGitStatusUpdated: (callback: (data: { sessionId: string; gitStatus: GitStatus }) => void) => () => void;
     onGitStatusLoading: (callback: (data: { sessionId: string }) => void) => () => void;
     onGitStatusLoadingBatch?: (callback: (sessionIds: string[]) => void) => () => void;
@@ -377,10 +378,14 @@ interface ElectronAPI {
   claude: {
     detect: () => Promise<IPCResponse<ClaudeDetectionResult>>;
   };
+  codex: {
+    detect: () => Promise<IPCResponse<CodexDetectionResult>>;
+  };
 
   // Model availability (guarded models, e.g. Fable 5)
   models: {
     getAvailability: () => Promise<IPCResponse<ModelAvailabilityMap>>;
+    getCodexCatalog: () => Promise<IPCResponse<CodexModelCatalog>>;
     onAvailabilityChanged: (callback: (map: ModelAvailabilityMap) => void) => () => void;
     onModelFallback: (callback: (notice: ModelFallbackNotice) => void) => () => void;
   };

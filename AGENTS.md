@@ -38,5 +38,12 @@
 - Keep changes minimal and scoped; prefer small patches.
 - Update docs alongside code; do not alter build targets without discussion.
 - Use repository scripts (pnpm) and keep formatting consistent with existing files.
-- Always review the root `CLAUDE.md` before beginning any work. 
-- Scan the repository for every `CLAUDE.md`, and when working in a folder or any of its subfolders that has one, read and follow that file too.
+
+## Codex Notes
+- Treat this file as the automation entrypoint. It points to deeper project practices rather than duplicating the full handbook.
+- Always review the root `CLAUDE.md` before beginning non-trivial work.
+- Before editing or reasoning about files, scan for every `CLAUDE.md` in the repository.
+- Apply `CLAUDE.md` files by directory scope: read the root `CLAUDE.md` first, then any `CLAUDE.md` files on the path from the repository root to the files being changed. The closest `CLAUDE.md` to the changed file provides the most specific local guidance.
+- If `AGENTS.md` and `CLAUDE.md` conflict, follow `AGENTS.md` as the automation entrypoint unless the user explicitly says otherwise. If two `CLAUDE.md` files conflict, the lower-level directory-scoped file wins for files under its directory.
+- Do not use `cyboflow_*` MCP tools unless the user explicitly asks to modify live Cyboflow app data.
+- Use `pnpm test:unit` as the code-change verifier gate unless the user explicitly asks for a different verification path.

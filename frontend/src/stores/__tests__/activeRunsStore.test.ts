@@ -2,7 +2,8 @@
  * activeRunsStore — filtering / projection unit tests.
  *
  * Covers buildActiveRunRows:
- *   (a) terminal runs (completed / failed / canceled) are excluded
+ *   (a) all non-terminal rows are kept, while terminal retention is limited to
+ *       the newest row per parent session plus the selected row
  *   (b) __quick__ sentinel-workflow runs are excluded
  *   (c) active runs are projected with their resolved workflowName
  *   (d) unknown workflow_id falls back to a generic name
@@ -38,7 +39,7 @@ const workflows: Wf[] = [
 ];
 
 describe('buildActiveRunRows', () => {
-  it('(a) excludes terminal runs', () => {
+  it('(a) excludes unpinned parentless terminal runs', () => {
     const rows = buildActiveRunRows(
       [
         makeRun({ id: 'r-run', status: 'running' }),
@@ -51,6 +52,44 @@ describe('buildActiveRunRows', () => {
     expect(rows.map((r) => r.id)).toEqual(['r-run']);
   });
 
+  it('(a1) keeps only the newest terminal run for each non-null parent session', () => {
+    const rows = buildActiveRunRows(
+      [
+        makeRun({
+          id: 'sess-a-old',
+          status: 'completed',
+          session_id: 'sess-a',
+          created_at: '2026-01-01',
+        }),
+        makeRun({
+          id: 'sess-b-new',
+          status: 'failed',
+          session_id: 'sess-b',
+          created_at: '2026-02-03',
+        }),
+        makeRun({
+          id: 'sess-a-new',
+          status: 'canceled',
+          session_id: 'sess-a',
+          created_at: '2026-02-02',
+        }),
+        makeRun({
+          id: 'sess-b-old',
+          status: 'completed',
+          session_id: 'sess-b',
+          created_at: '2026-01-04',
+        }),
+        makeRun({ id: 'live', status: 'running', session_id: 'sess-a' }),
+        makeRun({ id: 'parentless', status: 'completed', session_id: null }),
+      ],
+      workflows,
+    );
+
+    // Input order is deliberately not newest-first for sess-a. Selection is by
+    // created_at, while the returned rows preserve the source list order.
+    expect(rows.map((r) => r.id)).toEqual(['sess-b-new', 'sess-a-new', 'live']);
+  });
+
   it('(a2) keeps the pinned (currently-selected) run even when terminal', () => {
     const rows = buildActiveRunRows(
       [
@@ -61,8 +100,22 @@ describe('buildActiveRunRows', () => {
       workflows,
       'r-done', // the run the user is viewing
     );
-    // Active run + the pinned terminal run remain; other terminals stay dropped.
+    // Active run + the pinned parentless terminal run remain; other parentless
+    // terminal history stays dropped.
     expect(rows.map((r) => r.id).sort()).toEqual(['r-done', 'r-run']);
+  });
+
+  it('(a2b) keeps an older terminal row when pinned in addition to the newest session row', () => {
+    const rows = buildActiveRunRows(
+      [
+        makeRun({ id: 'new', status: 'completed', session_id: 'sess-a', created_at: '2026-02-01' }),
+        makeRun({ id: 'old', status: 'failed', session_id: 'sess-a', created_at: '2026-01-01' }),
+      ],
+      workflows,
+      'old',
+    );
+
+    expect(rows.map((r) => r.id)).toEqual(['new', 'old']);
   });
 
   it('(a3) never resurrects a pinned __quick__ run', () => {

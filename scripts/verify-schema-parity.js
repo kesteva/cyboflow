@@ -6,7 +6,7 @@
  * cyboflow database initialization:
  *   1) schema.sql + every numbered migration applied in order (the
  *      "fresh-install + upgrade" path used by DatabaseService.initialize)
- *   2) migrations only, starting from an empty DB (the "minimal" path)
+ *   2) migrations starting from the inherited Crystal sessions baseline
  *
  * If path (1) and path (2) produce different schemas, schema.sql is out
  * of sync with the migration set — exactly the FIND-SPRINT-015-21 drift class.
@@ -37,6 +37,26 @@ const MIGRATIONS_DIR = process.env.MIGRATIONS_DIR || path.join(REPO_ROOT, 'main/
 
 const verbose = process.argv.includes('--verbose');
 
+// File migrations extend this inherited table but never create it. Keep the
+// baseline explicit and independent from schema.sql so sessions columns added
+// by migrations participate in parity instead of being filtered out wholesale.
+const INHERITED_SESSIONS_SCHEMA = `
+  CREATE TABLE sessions (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    initial_prompt TEXT NOT NULL,
+    worktree_name TEXT NOT NULL,
+    worktree_path TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    last_output TEXT,
+    exit_code INTEGER,
+    pid INTEGER,
+    claude_session_id TEXT
+  );
+`;
+
 function listMigrationFiles() {
   return fs.readdirSync(MIGRATIONS_DIR)
     .filter((f) => /^\d{3}_.*\.sql$/.test(f))
@@ -49,7 +69,7 @@ function applySql(db, sql) {
 }
 
 function schemaSignature(db) {
-  // Capture (table, column) pairs + PK/FK info — order-independent.
+  // Capture columns (including defaults) + PK/FK info — order-independent.
   const tables = db
     .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
     .all().map((r) => r.name);
@@ -58,7 +78,13 @@ function schemaSignature(db) {
     const cols = db.prepare(`PRAGMA table_info(${t})`).all();
     const fks = db.prepare(`PRAGMA foreign_key_list(${t})`).all();
     sig[t] = {
-      columns: cols.map((c) => ({ name: c.name, type: c.type, notnull: c.notnull, pk: c.pk })).sort((a, b) => a.name.localeCompare(b.name)),
+      columns: cols.map((c) => ({
+        name: c.name,
+        type: c.type,
+        notnull: c.notnull,
+        default: c.dflt_value,
+        pk: c.pk,
+      })).sort((a, b) => a.name.localeCompare(b.name)),
       fks: fks.map((f) => ({ table: f.table, from: f.from, to: f.to })).sort((a, b) => a.from.localeCompare(b.from)),
     };
   }
@@ -96,11 +122,12 @@ function buildPath1Db() {
 
 function buildPath2Db() {
   const db = new Database(':memory:');
+  applySql(db, INHERITED_SESSIONS_SCHEMA);
   for (const f of listMigrationFiles()) {
     try { applySql(db, fs.readFileSync(path.join(MIGRATIONS_DIR, f), 'utf-8')); }
     catch (err) {
-      // Migrations 003/004/005 may reference inherited Crystal tables
-      // (sessions, tool_panels) not declared by themselves. We tolerate
+      // Migrations 004/005 may reference other inherited Crystal tables not
+      // declared by themselves. We tolerate
       // "no such table" AND "no such column" errors for symmetry with
       // buildPath1Db — divergent error policies between the two paths would
       // allow path-1 to silently skip a migration that path-2 throws on,
@@ -120,7 +147,7 @@ function diffSignatures(a, b) {
   const allTables = new Set([...Object.keys(a), ...Object.keys(b)]);
   const diffs = [];
   for (const t of [...allTables].sort()) {
-    if (!a[t]) { diffs.push(`+ table ${t} only in path-2 (migrations-only)`); continue; }
+    if (!a[t]) { diffs.push(`+ table ${t} only in path-2 (migrations + inherited sessions)`); continue; }
     if (!b[t]) { diffs.push(`- table ${t} only in path-1 (schema.sql + migrations)`); continue; }
     const colsA = JSON.stringify(a[t].columns);
     const colsB = JSON.stringify(b[t].columns);
@@ -145,7 +172,9 @@ function main() {
   path2.close();
 
   // The asymmetry is intentional: path-1 includes legacy schema.sql tables
-  // (sessions, tool_panels, user_preferences) that migrations don't re-declare.
+  // (such as session_outputs and conversation_messages) that migrations don't
+  // re-declare. sessions is intentionally present in both signatures because
+  // its agent permission/provider/runtime/model columns are migration-owned.
   // We assert path-2 ⊆ path-1 (every migration-declared table exists in path-1
   // with matching columns), but not the reverse.
   const onlyPath1Tables = Object.keys(sig1).filter((t) => !(t in sig2));
@@ -163,13 +192,13 @@ function main() {
     for (const d of diffs) console.error('  ' + d);
     process.exit(1);
   }
-  if (verbose) console.log('[schema-parity] OK — no drift between schema.sql and migrations.');
+  if (verbose) console.log('[schema-parity] OK — no drift between schema.sql and migration replay.');
   process.exit(0);
 }
 
 if (process.argv.includes('--help')) {
   console.log('Usage: node scripts/verify-schema-parity.js [--verbose]');
-  console.log('  Compares schema.sql + migrations vs migrations-only; exits non-0 on drift.');
+  console.log('  Compares schema.sql + migrations vs migrations on the inherited sessions baseline; exits non-0 on drift.');
   console.log('');
   console.log('Environment overrides:');
   console.log('  SCHEMA_PATH     — path to schema.sql');

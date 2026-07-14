@@ -2,7 +2,7 @@ export interface ToolPanel {
   id: string;                    // Unique panel instance ID (uuid)
   sessionId: string;             // Associated session/worktree
   type: ToolPanelType;          // 'terminal' for now
-  title: string;                 // Display title (e.g., "Terminal 1")
+  title: string;                 // Display title (e.g., "Terminal 1" or "Chat 1")
   state: ToolPanelState;         // Panel-specific state
   metadata: ToolPanelMetadata;   // Creation time, position, etc.
 }

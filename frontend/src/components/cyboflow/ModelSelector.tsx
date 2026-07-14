@@ -10,11 +10,14 @@
  * snapshot (Opus 4.8, Sonnet 5, …), so "Opus" actually runs Opus 4.8 and the
  * "· 1M context" labels are honest.
  *
- * Options + descriptions are single-sourced from {@link MODEL_OPTIONS} (shared
- * with the in-composer ModelPill) so the two surfaces never drift.
+ * Claude options are shared with the in-composer ModelPill. Codex options come
+ * from the bundled runtime's `model/list` response through the shared renderer
+ * catalog store, so launch and in-session pickers stay aligned.
  */
 import { MODEL_OPTIONS } from './unified/ModelPill';
 import { useModelAvailability } from '../../stores/modelAvailabilityStore';
+import { useCodexModelCatalog } from '../../stores/codexModelCatalogStore';
+import type { AgentProvider, AgentRuntime } from '../../../../shared/types/agentRuntime';
 
 /** The quick-session default model — Opus, per product direction. */
 export const DEFAULT_QUICK_MODEL = 'opus';
@@ -37,6 +40,7 @@ export const ULTRACODE_DEFAULT_MODEL = 'fable';
  * default; this constant only seeds the user-facing pickers.
  */
 export const DEFAULT_WORKFLOW_MODEL = 'opus';
+export const DEFAULT_CODEX_MODEL = 'auto';
 
 interface ModelSelectorProps {
   value: string;
@@ -45,6 +49,9 @@ interface ModelSelectorProps {
   id?: string;
   /** Heading text above the select. */
   label?: string;
+  /** Runtime context; model availability is provider/runtime scoped. */
+  agentProvider?: AgentProvider;
+  agentRuntime?: AgentRuntime;
 }
 
 export function ModelSelector({
@@ -52,8 +59,13 @@ export function ModelSelector({
   onChange,
   id = 'model-select',
   label = 'Model',
+  agentProvider = 'claude',
+  agentRuntime = 'claude-sdk',
 }: ModelSelectorProps): React.JSX.Element {
-  const active = MODEL_OPTIONS.find((o) => o.id === value);
+  const isCodexRuntime = agentProvider === 'codex' || agentRuntime.startsWith('codex-');
+  const { options: codexOptions } = useCodexModelCatalog(isCodexRuntime);
+  const codexActive = codexOptions.find((o) => o.id === value);
+  const claudeActive = MODEL_OPTIONS.find((o) => o.id === value);
   const { isAliasUsable, unavailableReason } = useModelAvailability();
   const activeReason = unavailableReason(value);
 
@@ -67,25 +79,37 @@ export function ModelSelector({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-text-primary"
-        aria-label="Select Claude model"
+        aria-label={isCodexRuntime ? 'Select Codex model' : 'Select Claude model'}
       >
-        {MODEL_OPTIONS.map((o) => {
-          const disabled = !isAliasUsable(o.id);
-          return (
-            <option key={o.id} value={o.id} disabled={disabled}>
-              {o.context ? `${o.label} · ${o.context}` : o.label} — {o.description}
-              {disabled ? ' (unavailable)' : ''}
+        {isCodexRuntime ? (
+          codexOptions.map((o) => (
+            <option key={o.id} value={o.id}>
+              {o.label} — {o.description}
             </option>
-          );
-        })}
+          ))
+        ) : (
+          MODEL_OPTIONS.map((o) => {
+            const disabled = !isAliasUsable(o.id);
+            return (
+              <option key={o.id} value={o.id} disabled={disabled}>
+                {o.context ? `${o.label} · ${o.context}` : o.label} — {o.description}
+                {disabled ? ' (unavailable)' : ''}
+              </option>
+            );
+          })
+        )}
       </select>
-      {active !== undefined && (
+      {isCodexRuntime ? (
+        <p className="text-xs text-text-tertiary">
+          {codexActive?.description ?? 'Choose a Codex model for this runtime.'}
+        </p>
+      ) : claudeActive !== undefined && (
         <p className="text-xs text-text-tertiary">
           {activeReason
-            ? `${active.label} is currently unavailable — runs will use Opus.`
-            : active.context
-              ? `${active.description} · ${active.context} context`
-              : active.description}
+            ? `${claudeActive.label} is currently unavailable — runs will use Opus.`
+            : claudeActive.context
+              ? `${claudeActive.description} · ${claudeActive.context} context`
+              : claudeActive.description}
         </p>
       )}
     </div>

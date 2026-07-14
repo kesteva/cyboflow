@@ -3,6 +3,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import * as net from 'net';
+import type { QuestionPayload } from '../../../../shared/types/questions';
 
 // ---------------------------------------------------------------------------
 // Env-var bootstrap — must happen before anything else
@@ -101,7 +102,11 @@ function connectToOrchestrator(): net.Socket {
   return socket;
 }
 
-function sendQuery(type: string, params: Record<string, unknown>): Promise<unknown> {
+function sendQuery(
+  type: string,
+  params: Record<string, unknown>,
+  timeoutMs = 30_000,
+): Promise<unknown> {
   return new Promise<unknown>((resolve, reject) => {
     if (!ipcClient || ipcClient.destroyed) {
       reject(new Error('[Cyboflow MCP] IPC client not connected'));
@@ -109,8 +114,7 @@ function sendQuery(type: string, params: Record<string, unknown>): Promise<unkno
     }
     const requestId = `req-${++requestCounter}-${Date.now()}`;
 
-    // 30-second timeout — removes the pending entry to prevent memory leaks
-    const timer = setTimeout(() => { pendingRequests.delete(requestId); reject(new Error('orchestrator_timeout')); }, 30_000);
+    const timer = setTimeout(() => { pendingRequests.delete(requestId); reject(new Error('orchestrator_timeout')); }, timeoutMs);
 
     pendingRequests.set(requestId, {
       resolve: (response: unknown) => {
@@ -185,6 +189,45 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             status: { type: 'string', enum: ['running', 'done'], description: "Optional step status; defaults to 'running'" },
           },
           required: ['step_id'],
+        },
+      },
+      {
+        name: 'cyboflow_request_user_input',
+        description:
+          'Ask one or more workflow questions through the Cyboflow Human Review queue. This call BLOCKS until the human answers. Use it whenever a workflow asks for AskUserQuestion or request_user_input; never continue past the gate before this tool returns.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            questions: {
+              type: 'array',
+              minItems: 1,
+              maxItems: 4,
+              items: {
+                type: 'object',
+                properties: {
+                  header: { type: 'string', description: 'Short label for the question.' },
+                  question: { type: 'string', description: 'Full question text.' },
+                  multi_select: { type: 'boolean', description: 'Whether multiple options may be selected. Defaults to false.' },
+                  options: {
+                    type: 'array',
+                    minItems: 2,
+                    maxItems: 4,
+                    items: {
+                      type: 'object',
+                      properties: {
+                        label: { type: 'string' },
+                        description: { type: 'string' },
+                        preview: { type: 'string', description: 'Optional markdown preview shown with this option.' },
+                      },
+                      required: ['label'],
+                    },
+                  },
+                },
+                required: ['header', 'question', 'options'],
+              },
+            },
+          },
+          required: ['questions'],
         },
       },
       {
@@ -681,9 +724,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 async function executeMcpQuery(
   type: string,
   params: Record<string, unknown>,
+  timeoutMs?: number,
 ): Promise<CallToolResult> {
   try {
-    const queryPromise = sendQuery(type, params);
+    const queryPromise = sendQuery(type, params, timeoutMs);
     const response = await queryPromise;
     if (
       typeof response !== 'object' ||
@@ -715,6 +759,18 @@ async function executeMcpQuery(
  */
 function invalidArgs(expected: string): CallToolResult {
   return { content: [{ type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected }) }] };
+}
+
+function invalidQuestionArguments(): CallToolResult {
+  return {
+    content: [{
+      type: 'text',
+      text: JSON.stringify({
+        error: 'invalid_arguments',
+        expected: 'each question requires header, question, 2-4 valid options, and optional multi_select',
+      }),
+    }],
+  };
 }
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -793,6 +849,65 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const queryParams: Record<string, unknown> = { stepId: step_id };
       if (status !== undefined) queryParams['status'] = status;
       return executeMcpQuery('mcp-report-step', queryParams);
+    }
+
+    case 'cyboflow_request_user_input': {
+      const args = (request.params.arguments ?? {}) as { questions?: unknown };
+      if (!Array.isArray(args.questions) || args.questions.length < 1 || args.questions.length > 4) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'questions: array (1-4)' }) }],
+        };
+      }
+
+      const questions: QuestionPayload[] = [];
+      for (const rawQuestion of args.questions) {
+        if (typeof rawQuestion !== 'object' || rawQuestion === null || Array.isArray(rawQuestion)) {
+          return invalidQuestionArguments();
+        }
+        const question = rawQuestion as Record<string, unknown>;
+        if (
+          typeof question['header'] !== 'string'
+          || question['header'].trim().length === 0
+          || typeof question['question'] !== 'string'
+          || question['question'].trim().length === 0
+          || !Array.isArray(question['options'])
+          || question['options'].length < 2
+          || question['options'].length > 4
+          || (question['multi_select'] !== undefined && typeof question['multi_select'] !== 'boolean')
+        ) {
+          return invalidQuestionArguments();
+        }
+
+        const options: QuestionPayload['options'][number][] = [];
+        for (const rawOption of question['options']) {
+          if (typeof rawOption !== 'object' || rawOption === null || Array.isArray(rawOption)) {
+            return invalidQuestionArguments();
+          }
+          const option = rawOption as Record<string, unknown>;
+          if (
+            typeof option['label'] !== 'string'
+            || option['label'].trim().length === 0
+            || (option['description'] !== undefined && typeof option['description'] !== 'string')
+            || (option['preview'] !== undefined && typeof option['preview'] !== 'string')
+          ) {
+            return invalidQuestionArguments();
+          }
+          options.push({
+            label: option['label'],
+            ...(typeof option['description'] === 'string' ? { description: option['description'] } : {}),
+            ...(typeof option['preview'] === 'string' ? { preview: option['preview'] } : {}),
+          });
+        }
+
+        questions.push({
+          header: question['header'],
+          question: question['question'],
+          multiSelect: question['multi_select'] === true,
+          options,
+        });
+      }
+
+      return executeMcpQuery('mcp-request-user-input', { questions }, 30 * 60_000);
     }
 
     case 'cyboflow_create_task': {

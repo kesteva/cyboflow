@@ -28,6 +28,7 @@ import { useCyboflowStore } from '../stores/cyboflowStore';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
+import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
 
 interface UseQuickSessionOptions {
   projectId: number | null;
@@ -63,6 +64,8 @@ interface UseQuickSessionReturn {
     disabledMcpServers?: string[],
     enabledPlugins?: string[],
     worktreeMode?: QuickSessionWorktreeMode,
+    agentProvider?: AgentProvider,
+    agentRuntime?: SessionAgentRuntime,
   ) => Promise<void>;
   isStarting: boolean;
   error: string | null;
@@ -82,6 +85,8 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
       disabledMcpServers?: string[],
       enabledPlugins?: string[],
       worktreeMode?: QuickSessionWorktreeMode,
+      agentProvider?: AgentProvider,
+      agentRuntime?: SessionAgentRuntime,
     ): Promise<void> => {
       if (opts.projectId === null || isStarting) return;
 
@@ -89,12 +94,14 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
       setIsStarting(true);
 
       try {
+        const isCodexRuntime =
+          agentProvider === 'codex' || agentRuntime === 'codex-sdk' || agentRuntime === 'codex-pty';
         // model + fastMode ride the request as claudeConfig so the INTERACTIVE
         // eager spawn (server-side) receives them; the SDK panel is created on the
         // frontend below and persisted there. Sending both ways is harmless — the
         // SDK create-quick path ignores claudeConfig (no panel to start yet).
         const claudeConfig =
-          model !== undefined || fastMode === true
+          !isCodexRuntime && (model !== undefined || fastMode === true)
             ? { ...(model !== undefined ? { model } : {}), fastMode: fastMode === true }
             : undefined;
 
@@ -103,6 +110,9 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
           projectId: opts.projectId,
           ...(agentPermissionMode ? { agentPermissionMode } : {}),
           ...(substrate ? { substrate } : {}),
+          ...(agentProvider ? { agentProvider } : {}),
+          ...(agentRuntime ? { agentRuntime } : {}),
+          ...(isCodexRuntime && model !== undefined ? { agentModel: model } : {}),
           ...(effort ? { effort } : {}),
           ...(claudeConfig ? { claudeConfig } : {}),
           // Per-session MCP deny / plugin selection chosen in the wizard's Advanced
@@ -125,17 +135,23 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
 
         const { sessionId, worktreePath, runId, claudePanelId } = result.data;
 
-        // Claude panel first (unless the server eagerly created it — interactive
-        // sessions spawn the PTY REPL during create-quick and return its panel id),
+        // Agent panel first (unless the server eagerly created it — interactive
+        // PTY sessions spawn during create-quick and return their panel id),
         // then Terminal.
         if (claudePanelId === undefined) {
-          const claudePanel = await panelApi.createPanel({ sessionId, type: 'claude' });
+          const claudePanel = await panelApi.createPanel({
+            sessionId,
+            type: 'claude',
+            title: 'Chat',
+          });
           // Persist the launch model + fast-mode on the SDK panel so the first
           // (and every) sessions:input turn spawns with them — the request's
           // claudeConfig only reaches the interactive eager spawn, never this
           // frontend-created SDK panel.
           if (model !== undefined) await API.claudePanels.setModel(claudePanel.id, model);
-          await API.claudePanels.setFastMode(claudePanel.id, fastMode === true);
+          if (!isCodexRuntime) {
+            await API.claudePanels.setFastMode(claudePanel.id, fastMode === true);
+          }
         }
         await panelApi.createPanel({
           sessionId,

@@ -93,6 +93,13 @@ export interface ChatTranscriptProps {
    * the existing placeholder/indicator.
    */
   liveTail?: React.ReactNode;
+  /**
+   * Host-owned content rendered at the end of the scrollable transcript. Used
+   * for pending workflow questions that cannot be correlated to a provider
+   * tool-call id, so they stay in conversation flow instead of displacing the
+   * composer.
+   */
+  transcriptEndSlot?: React.ReactNode;
 
   /** Per-message collapse state (keyed by message id). Owned by the caller. */
   collapsedMessages: Set<string>;
@@ -141,6 +148,7 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
   showSystemMessages: showSystemMessagesProp,
   isWaitingForResponse = false,
   liveTail,
+  transcriptEndSlot,
   collapsedMessages,
   onToggleMessageCollapse,
   expandedTools,
@@ -1280,18 +1288,19 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
         }}
       >
         <div className={`mx-auto ${settings.compactMode ? 'max-w-6xl' : 'max-w-5xl'} py-4`}>
-          {filteredMessages.length === 0 && !isWaitingForResponse ? (
+          {filteredMessages.length === 0 && !isWaitingForResponse && transcriptEndSlot == null ? (
             <div className="text-center text-text-tertiary py-8">
               No messages to display
             </div>
           ) : (
             <div className="space-y-4 px-4">
               {renderedMessages}
+              {transcriptEndSlot}
               {isWaitingForResponse && (
                 liveTail ?? (
                   filteredMessages.length === 0 ||
                   (filteredMessages.length > 0 && filteredMessages[filteredMessages.length - 1].role === 'user') ? (
-                    <ThinkingPlaceholder />
+                    <ThinkingPlaceholder agentName={agentName} />
                   ) : (
                     <InlineWorkingIndicator />
                   )
@@ -1306,6 +1315,7 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
         {showScrollButton && (
           <div className="sticky bottom-4 flex justify-center pointer-events-none">
             <button
+              type="button"
               onClick={onScrollToBottom}
               className="pointer-events-auto p-3 bg-interactive hover:bg-interactive-hover text-white rounded-full shadow-lg transition-all hover:scale-110 flex items-center gap-2"
               title="Scroll to bottom"

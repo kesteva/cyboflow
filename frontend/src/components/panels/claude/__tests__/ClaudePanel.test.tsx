@@ -1,8 +1,8 @@
 /**
  * ClaudePanel component tests — the interactive-PTY render swap.
  *
- * For PTY-backed quick sessions, ClaudePanel branches on the session's CLI
- * substrate (mirroring RunChatView's swap for workflow runs):
+ * For PTY-backed quick sessions, ClaudePanel branches on the session's default
+ * runtime / CLI substrate (mirroring RunChatView's swap for workflow runs):
  *   - substrate 'interactive' + non-null runId → the live PTY xterm
  *     (InteractiveTerminalView, keyed by the sentinel __quick__ run id, with
  *     guardFirstInteraction={false}) REPLACES the SDK structured surface;
@@ -132,15 +132,27 @@ vi.mock('../../../cyboflow/ResumeSessionPrompt', () => ({
 // terminal + resume overlay) and bottomSlot (approvals + composer + toast).
 vi.mock('../../../cyboflow/unified/UnifiedChatView', () => ({
   UnifiedChatView: ({
+    name,
     transport,
+    running,
+    isWaitingForResponse,
     interactiveBody,
     bottomSlot,
   }: {
+    name: string;
     transport: string;
+    running?: boolean;
+    isWaitingForResponse?: boolean;
     interactiveBody?: ReactNode;
     bottomSlot?: ReactNode;
   }) => (
-    <div data-testid="unified-chat-view" data-transport={transport}>
+    <div
+      data-testid="unified-chat-view"
+      data-name={name}
+      data-transport={transport}
+      data-running={String(running)}
+      data-waiting={String(isWaitingForResponse)}
+    >
       {interactiveBody}
       {bottomSlot}
     </div>
@@ -191,6 +203,7 @@ vi.mock('../../../ReviewQueue/PendingApprovalsForRun', () => ({
 import { ClaudePanel, __resetDeclinedResumeForTests } from '../ClaudePanel';
 import { SessionProvider } from '../../../../contexts/SessionContext';
 import { useSessionStore } from '../../../../stores/sessionStore';
+import { usePendingSendStore } from '../../../../stores/pendingSendStore';
 import type { Session } from '../../../../types/session';
 import type { ToolPanel } from '../../../../../../shared/types/panels';
 
@@ -245,6 +258,7 @@ function renderWithProvider(session: Session) {
 beforeEach(() => {
   mocks.holder.activeSession = undefined;
   useSessionStore.setState({ sessions: [], activeSessionId: null, activeMainRepoSession: null });
+  usePendingSendStore.setState({ byHost: {} });
   mockSendInput.mockReset();
   // Default: sendInput succeeds.
   mockSendInput.mockResolvedValue({ success: true });
@@ -293,6 +307,58 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
 
     fireEvent.keyDown(window, { key: 'g', ctrlKey: true });
     expect(get()).toHaveAttribute('data-pty-open', 'false');
+  });
+
+  it('agentRuntime codex-pty renders the terminal and skips Claude resume probing', () => {
+    renderWithProvider(
+      makeSession({
+        substrate: 'interactive',
+        agentProvider: 'codex',
+        agentRuntime: 'codex-pty',
+        runId: 'run-codex',
+      }),
+    );
+
+    expect(screen.getByTestId('interactive-terminal-view')).toHaveTextContent(
+      'InteractiveTerminalView:run-codex',
+    );
+    expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-transport', 'interactive');
+    expect(screen.getByTestId('quick-session-composer')).toHaveAttribute('data-interactive', 'true');
+    expect(mockGetResumeState).not.toHaveBeenCalled();
+  });
+
+  it('labels a Codex SDK quick session as Codex', () => {
+    renderWithProvider(makeSession({
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      runId: 'run-codex-sdk',
+    }));
+
+    expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-name', 'Codex');
+    expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-transport', 'sdk');
+  });
+
+  it('shows a Codex SDK session as working as soon as its optimistic send exists', () => {
+    usePendingSendStore.setState({
+      byHost: {
+        'panel-1': [{
+          id: 'pending-1',
+          text: 'hello',
+          createdAt: Date.now(),
+          status: 'sending',
+        }],
+      },
+    });
+
+    renderWithProvider(makeSession({
+      status: 'stopped',
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      runId: 'run-codex-sdk',
+    }));
+
+    expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-running', 'true');
+    expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-waiting', 'true');
   });
 
   it('substrate undefined: renders the SDK surface + the SDK (non-interactive) composer', () => {

@@ -306,17 +306,23 @@ export function useIPCEvents() {
     });
     unsubscribeFunctions.push(unsubscribeTerminalOutput);
     
-    const unsubscribeOutputAvailable = window.electronAPI.events.onSessionOutputAvailable((info: { sessionId: string }) => {
+    const unsubscribeOutputAvailable = window.electronAPI.events.onSessionOutputAvailable((info) => {
       // Validate event has required session context
       if (!validateEventSession(info)) {
         return; // Ignore invalid events
       }
 
-      console.log(`[useIPCEvents] Output available notification for session ${info.sessionId}`);
+      console.log(
+        `[useIPCEvents] Output available notification for session ${info.sessionId}` +
+          (info.panelId ? `, panel ${info.panelId}` : ''),
+      );
       
       // Emit custom event to notify that output is available
       window.dispatchEvent(new CustomEvent('session-output-available', {
-        detail: { sessionId: info.sessionId }
+        detail: {
+          sessionId: info.sessionId,
+          ...(info.panelId ? { panelId: info.panelId } : {}),
+        }
       }));
     });
     unsubscribeFunctions.push(unsubscribeOutputAvailable);

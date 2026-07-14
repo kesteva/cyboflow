@@ -79,6 +79,9 @@ function sessionHostedDb(): Database.Database {
       base_branch TEXT,
       run_id TEXT,
       substrate TEXT,
+      agent_provider TEXT DEFAULT 'claude',
+      agent_runtime TEXT DEFAULT 'claude-sdk',
+      agent_model TEXT,
       in_place BOOLEAN DEFAULT 0,
       is_main_repo BOOLEAN DEFAULT 0
     )
@@ -376,6 +379,72 @@ describe('RunLauncher.launch', () => {
       // is undefined on this no-permission-override launch; the 5th (the launch
       // projectId opts) is undefined when no projectId is threaded.
       expect(createRunSpy).toHaveBeenCalledWith(workflowId, 'interactive', 'sess-1', undefined, undefined);
+    });
+  });
+
+  it('threads the per-run agent provider/runtime into WorkflowRegistry.createRun opts', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = sessionHostedDb();
+      const adapter = dbAdapter(db);
+      const logger = makeSpyLogger();
+
+      const seedWorkflowId = randomUUID();
+      db.prepare(
+        "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'sprint', '/fake/path.md', 'default')",
+      ).run(seedWorkflowId);
+      interface IdRow { id: string }
+      const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+      seedSession(db, 'sess-1', join(tmpDir, 'wt'));
+
+      const cannedRunId = randomUUID().replace(/-/g, '');
+      const createRunSpy = vi.fn((_id: string, substrate?: CliSubstrate, sessionId?: string) => {
+        db.prepare(
+          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+        ).run(cannedRunId, workflowId, 1, sessionId ?? null);
+        return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
+      });
+      const realRegistry = {
+        getById: (id: string) =>
+          db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
+        createRun: createRunSpy,
+      } as unknown as WorkflowRegistry;
+
+      const { worktree: fakeWorktree } = sessionWorktreeStub('cyboflow/sprint/x');
+
+      const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+
+      await launcher.launch(
+        workflowId,
+        tmpDir,
+        'sdk',
+        undefined,
+        undefined,
+        'sess-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'codex',
+        'codex-sdk',
+      );
+
+      expect(createRunSpy).toHaveBeenCalledWith(
+        workflowId,
+        'sdk',
+        'sess-1',
+        undefined,
+        {
+          requestedAgentProvider: 'codex',
+          requestedAgentRuntime: 'codex-sdk',
+        },
+      );
     });
   });
 
@@ -1769,6 +1838,9 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
         base_branch TEXT,
         run_id TEXT,
         substrate TEXT,
+        agent_provider TEXT DEFAULT 'claude',
+        agent_runtime TEXT DEFAULT 'claude-sdk',
+        agent_model TEXT,
         in_place BOOLEAN DEFAULT 0,
         is_main_repo BOOLEAN DEFAULT 0
       )
@@ -1797,7 +1869,7 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
         "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
       ).run(cannedRunId, workflowId, 1, sessionId ?? null);
       // Mirror the real registry: return the RESOLVED substrate (request → ladder
-      // → 'sdk' floor) so the launcher's sessions.substrate stamp keys off it.
+      // → 'sdk' floor) for downstream launch behavior.
       return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
     });
     const registry = {
@@ -1852,7 +1924,7 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
     });
   });
 
-  it('reuses the session worktree, stamps session_id + base_sha, dual-writes sessions.run_id, and does NOT create a worktree', async () => {
+  it('reuses the session worktree, stamps session_id + base_sha, dual-writes only sessions.run_id, and does NOT create a worktree', async () => {
     await withTempDir('runlauncher-session-', async (tmpDir) => {
       const db = makeSessionDb();
       const adapter = dbAdapter(db);
@@ -1861,7 +1933,9 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
       const cannedRunId = randomUUID().replace(/-/g, '');
       const sessionWorktree = join(tmpDir, 'session-tree');
       db.prepare(
-        "INSERT INTO sessions (id, worktree_path, base_branch, run_id) VALUES ('sess-1', ?, 'main', NULL)",
+        `INSERT INTO sessions
+           (id, worktree_path, base_branch, run_id, substrate, agent_provider, agent_runtime, agent_model)
+         VALUES ('sess-1', ?, 'main', NULL, 'interactive', 'claude', 'claude-interactive', 'opus')`,
       ).run(sessionWorktree);
 
       const { registry, workflowId, createRunSpy } = makeSessionRegistry(db, 'sprint', cannedRunId);
@@ -1905,18 +1979,28 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
       expect(row.session_id).toBe('sess-1');
       expect(row.status).toBe('starting');
 
-      // Legacy back-link dual-write: sessions.run_id now points at this run, and
-      // the session's substrate is kept in lockstep with the run it hosts (the
-      // resolved 'sdk' floor here, since this launch passed no substrate).
+      // Legacy back-link dual-write: sessions.run_id now points at this run, while
+      // the session-owned default agent configuration remains unchanged.
       const sessRow = db
-        .prepare("SELECT run_id, substrate FROM sessions WHERE id = 'sess-1'")
-        .get() as { run_id: string | null; substrate: string | null };
+        .prepare(
+          "SELECT run_id, substrate, agent_provider, agent_runtime, agent_model FROM sessions WHERE id = 'sess-1'",
+        )
+        .get() as {
+          run_id: string | null;
+          substrate: string | null;
+          agent_provider: string;
+          agent_runtime: string;
+          agent_model: string | null;
+        };
       expect(sessRow.run_id).toBe(cannedRunId);
-      expect(sessRow.substrate).toBe('sdk');
+      expect(sessRow.substrate).toBe('interactive');
+      expect(sessRow.agent_provider).toBe('claude');
+      expect(sessRow.agent_runtime).toBe('claude-interactive');
+      expect(sessRow.agent_model).toBe('opus');
     });
   });
 
-  it('stamps sessions.substrate to the run substrate so the resting view stays PTY after cancel', async () => {
+  it('preserves session-owned agent defaults while an interactive workflow temporarily takes over', async () => {
     await withTempDir('runlauncher-session-sub-', async (tmpDir) => {
       const db = makeSessionDb();
       const adapter = dbAdapter(db);
@@ -1924,11 +2008,10 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
 
       const cannedRunId = randomUUID().replace(/-/g, '');
       const sessionWorktree = join(tmpDir, 'session-tree');
-      // Session was created on the SDK default (e.g. ensureSessionForLaunch),
-      // then hosts an INTERACTIVE run — the mismatch that made cancel fall back
-      // to the SDK resting view.
       db.prepare(
-        "INSERT INTO sessions (id, worktree_path, base_branch, run_id, substrate) VALUES ('sess-pty', ?, 'main', NULL, 'sdk')",
+        `INSERT INTO sessions
+           (id, worktree_path, base_branch, run_id, substrate, agent_provider, agent_runtime, agent_model)
+         VALUES ('sess-owned', ?, 'main', NULL, 'sdk', 'codex', 'codex-sdk', 'gpt-5.1-codex')`,
       ).run(sessionWorktree);
 
       const { registry, workflowId } = makeSessionRegistry(db, 'sprint', cannedRunId);
@@ -1945,15 +2028,24 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
       );
 
       // 3rd positional arg is the explicit per-run substrate.
-      await launcher.launch(workflowId, tmpDir, 'interactive', undefined, undefined, 'sess-pty');
+      await launcher.launch(workflowId, tmpDir, 'interactive', undefined, undefined, 'sess-owned');
 
       const sessRow = db
-        .prepare("SELECT run_id, substrate FROM sessions WHERE id = 'sess-pty'")
-        .get() as { run_id: string | null; substrate: string | null };
+        .prepare(
+          "SELECT run_id, substrate, agent_provider, agent_runtime, agent_model FROM sessions WHERE id = 'sess-owned'",
+        )
+        .get() as {
+          run_id: string | null;
+          substrate: string | null;
+          agent_provider: string;
+          agent_runtime: string;
+          agent_model: string | null;
+        };
       expect(sessRow.run_id).toBe(cannedRunId);
-      // The session now reflects the interactive substrate the run actually used,
-      // so the post-cancel resting ClaudePanel renders the PTY surface (not SDK).
-      expect(sessRow.substrate).toBe('interactive');
+      expect(sessRow.substrate).toBe('sdk');
+      expect(sessRow.agent_provider).toBe('codex');
+      expect(sessRow.agent_runtime).toBe('codex-sdk');
+      expect(sessRow.agent_model).toBe('gpt-5.1-codex');
     });
   });
 

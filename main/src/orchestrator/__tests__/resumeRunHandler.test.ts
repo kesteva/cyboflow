@@ -215,10 +215,10 @@ describe('resumeRunHandler — delivery', () => {
     const adapter: DatabaseLike = {
       prepare: (sql: string): PreparedStatement => {
         const stmt = real.prepare(sql);
-        if (sql.includes('SELECT status, substrate, claude_session_id')) {
+        if (sql.includes('SELECT status, substrate, execution_model')) {
           return {
             run: (...params: unknown[]) => stmt.run(...params),
-            get: () => ({ status: 'paused', substrate: 'sdk', claude_session_id: 'sess-1' }),
+            get: () => ({ status: 'paused', substrate: 'sdk', execution_model: 'orchestrated', current_step_id: null }),
             all: (...params: unknown[]) => stmt.all(...params),
           };
         }

@@ -12,6 +12,7 @@ import type { ToolPanel } from '../../../shared/types/panels';
 import type { DatabaseService } from '../database/database';
 import type { Project } from '../database/models';
 import { getCurrentBranch } from './gitPlumbingCommands';
+import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
 
 /**
  * Generate a deterministic session name from a prompt string.
@@ -72,6 +73,9 @@ interface CreateSessionJob {
   toolType?: 'claude' | 'none';
   commitMode?: 'structured' | 'checkpoint' | 'disabled';
   commitModeSettings?: string; // JSON string of CommitModeSettings
+  agentProvider?: AgentProvider;
+  agentRuntime?: SessionAgentRuntime;
+  agentModel?: string | null;
   /**
    * In-place session (migration 047): skip worktree provisioning and run the
    * session DIRECTLY in the project checkout (sessions.in_place = 1). When set the
@@ -250,7 +254,10 @@ export class TaskQueue {
           actualBaseBranch,
           job.data.commitMode,
           job.data.commitModeSettings,
-          inPlace
+          inPlace,
+          job.data.agentProvider,
+          job.data.agentRuntime,
+          job.data.agentModel
         );
 
         // Attach claudeConfig to the session object for the panel creation in events.ts
@@ -463,7 +470,10 @@ export class TaskQueue {
       permissionMode?: 'approve' | 'ignore';
       ultrathink?: boolean;
     },
-    providedFolderId?: string
+    providedFolderId?: string,
+    agentProvider?: AgentProvider,
+    agentRuntime?: SessionAgentRuntime,
+    agentModel?: string | null
   ): Promise<{ id: string; data: CreateSessionJob; status: string }[]> {
     let folderId: string | undefined = providedFolderId;
     let generatedBaseName: string | undefined;
@@ -510,7 +520,23 @@ export class TaskQueue {
     for (let i = 0; i < count; i++) {
       // Use the generated base name if no template was provided
       const templateToUse = worktreeTemplate || generatedBaseName || '';
-      jobs.push(this.sessionQueue.add({ prompt, worktreeTemplate: templateToUse, index: i, permissionMode, projectId, folderId, baseBranch, autoCommit, toolType, commitMode, commitModeSettings, claudeConfig }));
+      jobs.push(this.sessionQueue.add({
+        prompt,
+        worktreeTemplate: templateToUse,
+        index: i,
+        permissionMode,
+        projectId,
+        folderId,
+        baseBranch,
+        autoCommit,
+        toolType,
+        commitMode,
+        commitModeSettings,
+        claudeConfig,
+        agentProvider,
+        agentRuntime,
+        agentModel,
+      }));
     }
     return Promise.all(jobs);
   }

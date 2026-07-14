@@ -51,3 +51,25 @@ export interface ClaudeDetectionResult {
  * IPC type-parity rules in docs/CODE-PATTERNS.md).
  */
 export const CLAUDE_DETECT_CHANNEL = 'claude:detect';
+
+/** Codex onboarding probe states for the bundled app-server runtime. */
+export type CodexDetectionState = 'detected' | 'loggedOut' | 'unavailable';
+
+export interface CodexDetectionResult {
+  /** Bundled runtime metadata. No auth material is exposed to the renderer. */
+  runtime: {
+    found: boolean;
+    path: string | null;
+    version: string | null;
+  };
+  /** ChatGPT account metadata returned by account/read when authenticated. */
+  account: {
+    found: boolean;
+    email: string | null;
+    planType: string | null;
+  };
+  state: CodexDetectionState;
+}
+
+/** Idempotent, short-lived Codex app-server account probe. */
+export const CODEX_DETECT_CHANNEL = 'codex:detect';

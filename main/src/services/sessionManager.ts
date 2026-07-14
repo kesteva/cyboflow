@@ -8,6 +8,7 @@ import type { Session as DbSession, CreateSessionData, UpdateSessionData, Conver
 import { getShellPath } from '../utils/shellPath';
 import { TerminalSessionManager } from './terminalSessionManager';
 import type { BaseAIPanelState, ToolPanelState, ToolPanel } from '../../../shared/types/panels';
+import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
 import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
 import { formatForDisplay } from '../utils/timestampUtils';
 import { scriptExecutionTracker } from './scriptExecutionTracker';
@@ -239,6 +240,9 @@ export class SessionManager extends EventEmitter {
       // __quick__ sentinel chat turns gate on (Role-G). NULL until minted on read.
       chatRunId: dbSession.chat_run_id ?? null,
       substrate: dbSession.substrate,
+      agentProvider: dbSession.agent_provider,
+      agentRuntime: dbSession.agent_runtime,
+      agentModel: dbSession.agent_model ?? null,
       effort: dbSession.effort,
       agentPermissionMode: dbSession.agent_permission_mode,
       // Per-session MCP/plugin toggles (migration 037). Parse the JSON columns
@@ -317,7 +321,10 @@ export class SessionManager extends EventEmitter {
     baseBranch?: string,
     commitMode?: 'structured' | 'checkpoint' | 'disabled',
     commitModeSettings?: string,
-    inPlace?: boolean
+    inPlace?: boolean,
+    agentProvider?: AgentProvider,
+    agentRuntime?: SessionAgentRuntime,
+    agentModel?: string | null
   ): Promise<Session> {
     return await withLock(`session-creation`, async () => {
       return this.createSessionWithId(
@@ -336,7 +343,10 @@ export class SessionManager extends EventEmitter {
         baseBranch,
         commitMode,
         commitModeSettings,
-        inPlace
+        inPlace,
+        agentProvider,
+        agentRuntime,
+        agentModel
       );
     });
   }
@@ -357,7 +367,10 @@ export class SessionManager extends EventEmitter {
     baseBranch?: string,
     commitMode?: 'structured' | 'checkpoint' | 'disabled',
     commitModeSettings?: string,
-    inPlace?: boolean
+    inPlace?: boolean,
+    agentProvider?: AgentProvider,
+    agentRuntime?: SessionAgentRuntime,
+    agentModel?: string | null
   ): Session {
     // Ensure this session ID isn't already being created
     if (this.activeSessions.has(id) || this.db.getSession(id)) {
@@ -397,6 +410,9 @@ export class SessionManager extends EventEmitter {
       permission_mode: permissionMode,
       is_main_repo: isMainRepo,
       in_place: inPlace,
+      agent_provider: agentProvider,
+      agent_runtime: agentRuntime,
+      agent_model: agentModel,
       auto_commit: autoCommit,
       // Model is now managed at panel level
       base_commit: baseCommit,
@@ -467,6 +483,18 @@ export class SessionManager extends EventEmitter {
 
   emitSessionCreated(session: Session): void {
     this.emit('session-created', session);
+  }
+
+  refreshSessionFromDatabase(id: string): Session | undefined {
+    const dbSession = this.db.getSession(id);
+    if (!dbSession) {
+      return undefined;
+    }
+
+    const session = this.convertDbSessionToSession(dbSession);
+    this.activeSessions.set(id, session);
+    this.emit('session-updated', session);
+    return session;
   }
 
   updateSession(id: string, update: SessionUpdate): void {
@@ -762,6 +790,19 @@ export class SessionManager extends EventEmitter {
     
     this.db.addPanelOutput(panelId, output.type, dataToStore);
 
+    // Codex SDK quick sessions project app-server events directly into panel
+    // output and need a persisted-transcript refresh. Other panel runtimes
+    // already have their live output channel; broadcasting every PTY/Claude
+    // write here caused an app-wide refresh fanout on high-churn sessions.
+    const panelSessionId = panel?.sessionId;
+    const panelSession = panelSessionId ? this.db.getSession(panelSessionId) : undefined;
+    if (panelSession?.agent_runtime === 'codex-sdk') {
+      this.emit('session-output-available', {
+        sessionId: panelSessionId,
+        panelId,
+      });
+    }
+
     // Capture Claude's session ID from init/system messages for proper --resume handling
     try {
       if (output.type === 'json' && output.data && typeof output.data === 'object') {
@@ -838,15 +879,16 @@ export class SessionManager extends EventEmitter {
       }
       
       if (promptText) {
-        // Get current output count to use as index for prompt markers
-        const outputs = this.db.getPanelOutputs(panelId);
-        // Note: Panel-based prompt markers would need addPanelPromptMarker method
-        // For now, we rely on the explicit addPanelConversationMessage calls in IPC handlers
-        // this.db.addPanelPromptMarker(panelId, promptText, outputs.length - 1);
-        
-        // Add to panel conversation messages for continuation support
-        // Use the sessionManager method instead of db method directly to ensure event emission
-        this.addPanelConversationMessage(panelId, 'user', promptText);
+        // SDKs echo the submitted top-level user turn. IPC already persists the
+        // turn before dispatch so the transcript can update during provider
+        // startup; do not insert the provider echo a second time. A genuinely
+        // repeated prompt still persists because the completed assistant turn
+        // sits between the two user rows.
+        const conversation = this.db.getPanelConversationMessages(panelId);
+        const latest = conversation[conversation.length - 1];
+        if (latest?.message_type !== 'user' || latest.content !== promptText) {
+          this.addPanelConversationMessage(panelId, 'user', promptText);
+        }
       }
     }
 

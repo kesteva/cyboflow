@@ -6,20 +6,23 @@
  *   1. PERMISSION    (amber swatch)   — real-time PreToolUse/approval gates. These
  *      come from the APPROVAL path (useReviewQueueView blocking+normal), rendered
  *      via the existing PendingApprovalCard. All approvals are permission-kind.
- *   2. DECISION      (rust swatch)    — approve-idea / approve-plan gates from the
- *      review_items inbox (kind === 'decision'), rendered via ReviewItemCard.
+ *   2. DECISION      (rust swatch)    — approve-idea / approve-design /
+ *      approve-plan gates from the review_items inbox (kind === 'decision'),
+ *      rendered via ReviewItemCard.
  *   3. HUMAN TASK    (blue swatch)    — free-form action items (kind === 'human_task'),
  *      EXCLUDING idle-session items, rendered via ReviewItemCard.
  *   4. IDLE SESSIONS (rust swatch)    — idle-quick-session items (kind === 'human_task'
  *      with source `idle-session:*`), split out of Human task and sorted oldest-idle
  *      first so the longest-quiet sessions sit at the top.
- *   5. READY TO REVIEW (green swatch) — runs drained to awaiting_review.
- *   6. NOTIFICATION  (neutral swatch) — informational FYIs (kind === 'notification');
+ *   5. BLOCKING FINDING (red swatch)  — defects that parked a programmatic run;
+ *      rendered with the existing resolve-and-resume controls.
+ *   6. READY TO REVIEW (green swatch) — clean-drained runs awaiting_review with
+ *      no blocking gate.
+ *   7. NOTIFICATION  (neutral swatch) — informational FYIs (kind === 'notification');
  *      nothing is blocked, so this group renders LAST.
  *
- * Findings are intentionally DROPPED here — the landing aggregation
- * (useAggregatedReviewItems) only surfaces decision + human_task + notification,
- * and findings never count toward any group.
+ * Non-blocking findings remain in Insights. Blocking findings must be actionable
+ * here because resolving or dismissing them is what resumes the parked run.
  *
  * Cards are REUSED verbatim — this component owns only the grouping chrome and a
  * per-row "Open session →" affordance that switches the session workspace to the
@@ -35,6 +38,8 @@ import { IDLE_REVIEW_SOURCE_PREFIX, type ReviewItem } from '../../../../shared/t
 import type { WorkflowRunStatus } from '../../../../shared/types/cyboflow';
 import type { ActiveRunRow } from '../../stores/activeRunsStore';
 import {
+  useAggregatedBlockingFindings,
+  useAggregatedBlockingRunIds,
   useAggregatedReviewItems,
   useAggregatedRuns,
   useRunProjectMap,
@@ -53,6 +58,31 @@ function itemId(item: QueueItem): string {
 
 function itemRunId(item: QueueItem): string {
   return item.kind === 'single' ? item.approval.runId : item.runId;
+}
+
+/**
+ * Select runs that are genuinely ready for post-workflow review.
+ *
+ * `awaiting_review` is also used while a programmatic workflow is parked at an
+ * intermediate human gate. Those runs already have a blocking decision (or
+ * permission) in the queue and must not be duplicated as finished work.
+ */
+export function selectReadyToReviewRuns(
+  runs: ActiveRunRow[],
+  reviewItems: ReviewItem[],
+  permissionItems: QueueItem[],
+  landingBlockingRunIds: ReadonlySet<string> = new Set(),
+): ActiveRunRow[] {
+  const blockedRunIds = new Set(landingBlockingRunIds);
+
+  for (const item of permissionItems) blockedRunIds.add(itemRunId(item));
+  for (const item of reviewItems) {
+    if (item.blocking && item.run_id !== null) blockedRunIds.add(item.run_id);
+  }
+
+  return runs.filter(
+    (run) => run.status === 'awaiting_review' && !blockedRunIds.has(run.id),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -189,12 +219,12 @@ function ReviewItemRow({ item }: { item: ReviewItem }): React.JSX.Element {
 const ELAPSED_TICK_MS = 30_000;
 
 /**
- * A single run that has drained to `awaiting_review` — finished work waiting for
- * the user to merge or dismiss. Unlike the permission/decision/human_task rows no
- * agent is halted, so the card is a calm "ready" state (steady green dot, no
- * pulse) rather than a blocked one. Elapsed is measured from `updated_at` (when
- * the run transitioned to awaiting_review) via a per-row ~30s clock, matching the
- * ActiveAgentCard pattern so the count stays deterministic/testable.
+ * A single clean-drained run — finished work waiting for the user to merge or
+ * dismiss. Unlike the permission/decision/human_task rows no agent is halted, so
+ * the card is a calm "ready" state (steady green dot, no pulse) rather than a
+ * blocked one. Elapsed is measured from `updated_at` (when the run transitioned
+ * to awaiting_review) via a per-row ~30s clock, matching the ActiveAgentCard
+ * pattern so the count stays deterministic/testable.
  */
 function ReadyToReviewRow({ run }: { run: ActiveRunRow }): React.JSX.Element {
   const [nowMs, setNowMs] = React.useState<number>(() => Date.now());
@@ -250,6 +280,8 @@ function ReadyToReviewRow({ run }: { run: ActiveRunRow }): React.JSX.Element {
  *   - useReviewQueueView()      (approval/permission path) + useReviewQueueSlice
  *     (per-run status map) from the approval stores.
  *   - useAggregatedReviewItems() + useRunProjectMap() from the landingStore.
+ *     useAggregatedBlockingRunIds() supplies hidden blocking findings for the
+ *     Ready-to-review classification without rendering them as queue items.
  *   - useCyboflowStore / useNavigationStore (imperatively, on click) to open a
  *     run as the session workspace.
  */
@@ -264,6 +296,8 @@ export function TypeGroupedQueue(): React.JSX.Element {
 
   // Decision + human_task groups: the cross-project review_items inbox.
   const reviewItems = useAggregatedReviewItems();
+  const blockingFindingItems = useAggregatedBlockingFindings();
+  const landingBlockingRunIds = useAggregatedBlockingRunIds();
   const decisionItems = React.useMemo(
     () => reviewItems.filter((it) => it.kind === 'decision'),
     [reviewItems],
@@ -289,13 +323,13 @@ export function TypeGroupedQueue(): React.JSX.Element {
     [reviewItems],
   );
 
-  // Ready-to-review group: runs that have drained to `awaiting_review` — finished
-  // work waiting for the user to merge or dismiss. A clean drain mints no
-  // review_item, so this is the ONLY landing surface that catches such runs.
+  // Ready-to-review group: clean drains to `awaiting_review` — finished work
+  // waiting for the user to merge or dismiss. Intermediate human gates use the
+  // same status but are kept in their blocking decision/permission group.
   const runs = useAggregatedRuns();
   const readyToReviewRuns = React.useMemo(
-    () => runs.filter((run) => run.status === 'awaiting_review'),
-    [runs],
+    () => selectReadyToReviewRuns(runs, reviewItems, permissionItems, landingBlockingRunIds),
+    [runs, reviewItems, permissionItems, landingBlockingRunIds],
   );
 
   const hasAny =
@@ -303,6 +337,7 @@ export function TypeGroupedQueue(): React.JSX.Element {
     decisionItems.length > 0 ||
     humanTaskItems.length > 0 ||
     idleItems.length > 0 ||
+    blockingFindingItems.length > 0 ||
     readyToReviewRuns.length > 0 ||
     notificationItems.length > 0;
 
@@ -374,6 +409,20 @@ export function TypeGroupedQueue(): React.JSX.Element {
             descriptor="Quick sessions gone quiet — reopen or wrap up (oldest first)"
           />
           {idleItems.map((it) => (
+            <ReviewItemRow key={it.id} item={it} />
+          ))}
+        </section>
+      )}
+
+      {blockingFindingItems.length > 0 && (
+        <section data-testid="queue-group-blocking-finding">
+          <GroupHeader
+            swatchClass="bg-status-error"
+            name="Blocking finding"
+            count={blockingFindingItems.length}
+            descriptor="Resolve or dismiss to resume the workflow"
+          />
+          {blockingFindingItems.map((it) => (
             <ReviewItemRow key={it.id} item={it} />
           ))}
         </section>

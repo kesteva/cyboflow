@@ -101,7 +101,9 @@ import { runStatusEvents } from '../trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../../../shared/types/cyboflow';
 import type { BacklogTaskItem, EntityCategory, IdeaAttachment, IdeaScope, Priority, TaskType } from '../../../../shared/types/tasks';
 import type { ExperimentArm, WorkflowVariantRow, WorkflowVariantStatus } from '../../../../shared/types/experiments';
+import type { QuestionPayload } from '../../../../shared/types/questions';
 import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
+import { QuestionRouter } from '../questionRouter';
 import type {
   FindingPayload,
   FindingProposedTarget,
@@ -125,6 +127,12 @@ export type McpQueryMessage =
   | { type: 'mcp-get-run'; requestId: string; runId: string; targetRunId: string }
   | { type: 'mcp-submit-checkpoint'; requestId: string; runId: string; label: string; note?: string }
   | { type: 'mcp-report-step'; requestId: string; runId: string; stepId: string; status?: 'running' | 'done' }
+  | {
+      type: 'mcp-request-user-input';
+      requestId: string;
+      runId: string;
+      questions: QuestionPayload[];
+    }
   | {
       type: 'mcp-create-task';
       requestId: string;
@@ -721,6 +729,9 @@ export class McpQueryHandler {
         case 'mcp-report-step':
           await this.handleReportStep(msg, client);
           break;
+        case 'mcp-request-user-input':
+          await this.handleRequestUserInput(msg, client);
+          break;
         case 'mcp-create-task':
           await this.handleCreateTask(msg, client);
           break;
@@ -886,6 +897,24 @@ export class McpQueryHandler {
       requestId: msg.requestId,
       ok: true,
       data: { approvals },
+    });
+  }
+
+  private async handleRequestUserInput(
+    msg: Extract<McpQueryMessage, { type: 'mcp-request-user-input' }>,
+    client: net.Socket,
+  ): Promise<void> {
+    const answer = await QuestionRouter.getInstance().requestQuestion(
+      msg.runId,
+      msg.requestId,
+      msg.questions,
+      () => undefined,
+    );
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: answer,
     });
   }
 

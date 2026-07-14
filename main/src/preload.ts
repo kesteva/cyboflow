@@ -7,7 +7,13 @@ import type { CreateProjectRequest, UpdateProjectRequest, Project } from '../../
 import type { ToolPanel, FastModeStateNotice, QueuedPanelInput } from '../../shared/types/panels';
 import type { UpdaterEvent, UpdateCheckResult } from '../../shared/types/updater';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../shared/types/modelAvailability';
-import { CLAUDE_DETECT_CHANNEL, type ClaudeDetectionResult } from '../../shared/types/onboarding';
+import type { CodexModelCatalog } from '../../shared/types/agentModels';
+import {
+  CLAUDE_DETECT_CHANNEL,
+  CODEX_DETECT_CHANNEL,
+  type ClaudeDetectionResult,
+  type CodexDetectionResult,
+} from '../../shared/types/onboarding';
 
 interface LogEntry {
   timestamp: string;
@@ -49,6 +55,12 @@ interface SessionOutputData {
   data: unknown;
   timestamp: string;
   panelId?: string;
+}
+
+interface SessionOutputAvailableData {
+  sessionId: string;
+  panelId?: string;
+  hasNewOutput?: boolean;
 }
 
 interface Folder {
@@ -406,11 +418,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   claude: {
     detect: (): Promise<IPCResponse<ClaudeDetectionResult>> => ipcRenderer.invoke(CLAUDE_DETECT_CHANNEL),
   },
+  codex: {
+    detect: (): Promise<IPCResponse<CodexDetectionResult>> => ipcRenderer.invoke(CODEX_DETECT_CHANNEL),
+  },
 
   // Model availability (guarded models, e.g. Fable 5)
   models: {
     getAvailability: (): Promise<IPCResponse<ModelAvailabilityMap>> =>
       ipcRenderer.invoke('models:get-availability'),
+    getCodexCatalog: (): Promise<IPCResponse<CodexModelCatalog>> =>
+      ipcRenderer.invoke('models:get-codex-catalog'),
     onAvailabilityChanged: (callback: (map: ModelAvailabilityMap) => void) => {
       const subscription = (_event: Electron.IpcRendererEvent, map: ModelAvailabilityMap) => callback(map);
       ipcRenderer.on('model-availability-changed', subscription);
@@ -479,8 +496,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.on('session-logs-cleared', wrappedCallback);
       return () => ipcRenderer.removeListener('session-logs-cleared', wrappedCallback);
     },
-    onSessionOutputAvailable: (callback: (info: { sessionId: string; hasNewOutput: boolean }) => void) => {
-      const wrappedCallback = (_event: Electron.IpcRendererEvent, info: { sessionId: string; hasNewOutput: boolean }) => callback(info);
+    onSessionOutputAvailable: (callback: (info: SessionOutputAvailableData) => void) => {
+      const wrappedCallback = (_event: Electron.IpcRendererEvent, info: SessionOutputAvailableData) => callback(info);
       ipcRenderer.on('session:output-available', wrappedCallback);
       return () => ipcRenderer.removeListener('session:output-available', wrappedCallback);
     },

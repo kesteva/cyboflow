@@ -18,7 +18,11 @@ import {
   createValidationError
 } from '../utils/sessionValidation';
 import type { SerializedArchiveTask } from '../services/archiveProgressManager';
-import { MessageProjection, TypedEventNarrowing } from '../services/streamParser';
+import {
+  agentStreamEventToClaudeStreamEvent,
+  MessageProjection,
+  TypedEventNarrowing,
+} from '../services/streamParser';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import type { SessionOutput } from '../types/session';
 import type { Logger } from '../utils/logger';
@@ -31,8 +35,13 @@ import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
 import { selectSessionRunTokenTotals } from '../orchestrator/insightsQueries';
 import { pruneSessionOnlyArtifacts } from '../orchestrator/artifactLifecycle';
 import { isCliSubstrate } from '../../../shared/types/substrate';
+import { claudeRuntimeFromSubstrate, isAgentProvider, isSessionAgentRuntime } from '../../../shared/types/agentRuntime';
+import type { AgentProvider } from '../../../shared/types/agentRuntime';
+import { normalizeAgentModelSelection } from '../../../shared/types/agentModels';
+import { isAgentStreamEvent } from '../../../shared/types/agentStream';
 import { isQuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
+import { AgentInvocationStore } from '../orchestrator/agentInvocationStore';
 import { encodeCwd } from '../services/panels/claude/transcript/encodeCwd';
 import { ClaudeCodeManager } from '../services/panels/claude/claudeCodeManager';
 import { updateSessionAgentPermissionMode } from '../orchestrator/sessionPermissionMode';
@@ -57,6 +66,29 @@ function interactiveTranscriptExists(
     `${claudeSessionId}.jsonl`,
   );
   return existsSync(file);
+}
+
+type ClaudeConfig = NonNullable<CreateSessionRequest['claudeConfig']>;
+
+function normalizeClaudeConfig(config: ClaudeConfig | undefined): ClaudeConfig | undefined {
+  if (!config) return undefined;
+  const { model: rawModel, ...rest } = config;
+  const model = normalizeAgentModelSelection('claude', rawModel);
+  return {
+    ...rest,
+    ...(model !== undefined ? { model } : {}),
+  };
+}
+
+function firstProviderModel(
+  provider: AgentProvider,
+  ...models: Array<string | null | undefined>
+): string | undefined {
+  for (const model of models) {
+    const normalized = normalizeAgentModelSelection(provider, model);
+    if (normalized !== undefined) return normalized;
+  }
+  return undefined;
 }
 
 /**
@@ -110,7 +142,9 @@ export function projectStoredOutputs(
       continue;
     }
 
-    const event = narrower.narrow(raw);
+    const event = isAgentStreamEvent(raw)
+      ? agentStreamEventToClaudeStreamEvent(raw)
+      : narrower.narrow(raw);
     const projected = projection.project(event);
     if (projected !== null) {
       // Overwrite the MessageProjection-generated timestamp with the persisted one.
@@ -193,6 +227,21 @@ Session context:
 
 Acknowledge briefly and wait for the user's instructions.`;
 
+const QUICK_CODEX_PTY_BRIEFING = `You are running inside cyboflow, a desktop app that manages parallel AI coding sessions in isolated git worktrees.
+
+Session context:
+- This is a user-driven quick session: no predefined workflow, no step ceremony — just you and the user.
+- Your working directory is a dedicated git worktree for this session. Commits stay local to its branch; the user merges or dismisses the session's work from the cyboflow UI when done.
+
+Acknowledge briefly and wait for the user's instructions.`;
+
+const QUICK_CODEX_SDK_BRIEFING = `You are running inside cyboflow, a desktop app that manages parallel AI coding sessions in isolated git worktrees.
+
+Session context:
+- This is a user-driven quick session: no predefined workflow and no step ceremony.
+- Your working directory is dedicated to this session. Commits stay local to its branch; the user merges or dismisses the session's work from the cyboflow UI when done.
+- A "cyboflow" MCP server may be connected; its tools write to cyboflow's project database. Use those tools only when the user asks you to interact with the cyboflow backlog.`;
+
 export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices): void {
   const {
     sessionManager,
@@ -202,8 +251,11 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     cliManagerFactory,
     claudeCodeManager, // For backward compatibility
     interactiveCliManager, // PTY substrate sibling (quick-session relay/spawn)
+    codexSdkManager, // Structured Codex app-server quick-session runtime
+    codexPtyManager, // Codex PTY quick-session runtime
     killLiveSession, // hard-kill seam for a dismissed PTY quick session's REPL
     registerLivePanel, // at-spawn runId→panelId seed for the facade's relay translation
+    registerCodexPtyPanel, // at-spawn runId→panelId seed for Codex PTY quick sessions
     gitStatusManager,
     archiveProgressManager,
     configManager, // demo-mode probe — gates the real interactive PTY spawn/relay
@@ -214,6 +266,111 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   // owns (created by sessions:create-quick). Undefined if none exists yet.
   const resolveClaudePanelId = (sessionId: string): string | undefined =>
     panelManager.getPanelsForSession(sessionId).find((p) => p.type === 'claude')?.id;
+
+  interface QueuedCodexPanelInput {
+    id: string;
+    text: string;
+  }
+  const codexPanelInputQueues = new Map<string, QueuedCodexPanelInput[]>();
+
+  const startCodexSdkTurn = async (panelId: string, text: string): Promise<void> => {
+    if (!codexSdkManager) throw new Error('Codex SDK manager is not available');
+    const panel = panelManager.getPanel(panelId);
+    if (!panel || panel.type !== 'claude') throw new Error(`Codex panel ${panelId} not found`);
+    const dbSession = databaseService.getSession(panel.sessionId);
+    if (!dbSession || dbSession.agent_runtime !== 'codex-sdk') {
+      throw new Error(`Panel ${panelId} is not owned by a Codex SDK session`);
+    }
+    const session = await sessionManager.getSession(panel.sessionId);
+    if (!session) throw new Error(`Session ${panel.sessionId} not found`);
+    const runId = dbSession.chat_run_id ?? dbSession.run_id;
+    if (!runId) throw new Error('Session is missing its chat run');
+
+    const settings = databaseService.getPanelSettings(panelId);
+    const model = typeof settings?.model === 'string' ? settings.model : undefined;
+    const resumeTarget = new AgentInvocationStore(databaseService.getDb())
+      .getLatestTopLevelResumeTarget(runId);
+    const resumeSessionId =
+      resumeTarget?.provider === 'codex' && resumeTarget.runtime === 'codex-sdk'
+        ? resumeTarget.externalSessionId
+        : undefined;
+    const agentPermissionMode = isPermissionMode(dbSession.agent_permission_mode)
+      ? dbSession.agent_permission_mode
+      : undefined;
+
+    sessionManager.addPanelConversationMessage(panelId, 'user', text);
+    await sessionManager.updateSession(panel.sessionId, { status: 'running' });
+    await codexSdkManager.spawnCliProcess({
+      panelId,
+      sessionId: panel.sessionId,
+      runId,
+      worktreePath: session.worktreePath,
+      prompt: text,
+      systemPromptAppend: QUICK_CODEX_SDK_BRIEFING,
+      ...(agentPermissionMode !== undefined ? { agentPermissionMode } : {}),
+      ...(model !== undefined ? { model } : {}),
+      ...(resumeSessionId !== undefined ? { resumeSessionId } : {}),
+    });
+  };
+
+  const flushCodexPanelInputQueueIfIdle = (panelId: string): void => {
+    if (!codexSdkManager || codexSdkManager.isPanelRunning(panelId)) return;
+    const queued = codexPanelInputQueues.get(panelId);
+    if (!queued?.length) return;
+    codexPanelInputQueues.delete(panelId);
+    const combined = queued.map((entry) => entry.text).join('\n\n');
+    void startCodexSdkTurn(panelId, combined).catch((error: unknown) => {
+      console.error(`[IPC] Codex panel-input queue delivery failed for ${panelId}:`, error);
+    });
+  };
+
+  codexSdkManager?.on('output', (payload: {
+    panelId?: string;
+    sessionId?: string;
+    type?: string;
+    data?: unknown;
+    timestamp?: Date;
+  }) => {
+    if (typeof payload.panelId !== 'string' || typeof payload.sessionId !== 'string') return;
+    const panel = panelManager.getPanel(payload.panelId);
+    if (!panel || panel.sessionId !== payload.sessionId || panel.type !== 'claude') return;
+    try {
+      sessionManager.addPanelOutput(payload.panelId, {
+        type: payload.type === 'json' || payload.type === 'stderr' || payload.type === 'error'
+          ? payload.type
+          : 'stdout',
+        data: payload.data ?? '',
+        timestamp: payload.timestamp ?? new Date(),
+      });
+    } catch (error) {
+      console.error(`[IPC] Failed to store Codex SDK panel output for ${payload.panelId}:`, error);
+    }
+  });
+
+  codexSdkManager?.on('exit', (payload: { panelId?: string; sessionId?: string; exitCode?: number }) => {
+    if (typeof payload.sessionId !== 'string') return;
+    const dbSession = databaseService.getSession(payload.sessionId);
+    if (dbSession?.agent_runtime !== 'codex-sdk') return;
+    try {
+      sessionManager.updateSession(payload.sessionId, { status: payload.exitCode === 0 ? 'stopped' : 'error' });
+    } catch (error) {
+      console.error(`[IPC] Failed to update Codex SDK session status for ${payload.sessionId}:`, error);
+    }
+    if (typeof payload.panelId === 'string') {
+      flushCodexPanelInputQueueIfIdle(payload.panelId);
+    }
+  });
+
+  codexPtyManager?.on?.('exit', (payload: { panelId?: string; sessionId?: string; exitCode?: number }) => {
+    if (typeof payload.sessionId !== 'string') return;
+    const dbSession = databaseService.getSession(payload.sessionId);
+    if (dbSession?.agent_runtime !== 'codex-pty') return;
+    try {
+      sessionManager.updateSession(payload.sessionId, { status: payload.exitCode === 0 ? 'stopped' : 'error' });
+    } catch (error) {
+      console.error(`[IPC] Failed to update Codex PTY session status for ${payload.sessionId}:`, error);
+    }
+  });
 
   // Wire the panel-input-queue re-drive collaborator ("always allow messaging a
   // running quick session"). At a turn's rest boundary ClaudeCodeManager hands us
@@ -340,6 +497,29 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         return { success: false, error: 'Task queue not initialized' };
       }
 
+      const requestedAgentProvider = isAgentProvider(request.agentProvider)
+        ? request.agentProvider
+        : undefined;
+      const requestedAgentRuntime = isSessionAgentRuntime(request.agentRuntime)
+        ? request.agentRuntime
+        : undefined;
+      if (
+        requestedAgentProvider === 'codex' ||
+        requestedAgentRuntime === 'codex-sdk' ||
+        requestedAgentRuntime === 'codex-pty'
+      ) {
+        return {
+          success: false,
+          error: 'Codex runtimes are not wired yet. Use Claude for this build.',
+        };
+      }
+      const projectedAgentRuntime =
+        requestedAgentRuntime ??
+        (isCliSubstrate(request.substrate) ? claudeRuntimeFromSubstrate(request.substrate) : undefined);
+      const normalizedClaudeConfig = normalizeClaudeConfig(request.claudeConfig);
+      const normalizedAgentModel =
+        firstProviderModel(requestedAgentProvider ?? 'claude', request.agentModel, normalizedClaudeConfig?.model) ?? null;
+
       const count = request.count || 1;
 
       if (count > 1) {
@@ -354,8 +534,11 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           request.toolType,
           request.commitMode,
           request.commitModeSettings,
-          request.claudeConfig,
-          request.folderId
+          normalizedClaudeConfig,
+          request.folderId,
+          requestedAgentProvider,
+          projectedAgentRuntime,
+          normalizedAgentModel
         );
 
         // Note: Model is now stored at panel level, not session level
@@ -373,7 +556,10 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           toolType: request.toolType,
           commitMode: request.commitMode,
           commitModeSettings: request.commitModeSettings,
-          claudeConfig: request.claudeConfig
+          claudeConfig: normalizedClaudeConfig,
+          agentProvider: requestedAgentProvider,
+          agentRuntime: projectedAgentRuntime,
+          agentModel: normalizedAgentModel,
         });
 
         // Note: Model is now stored at panel level, not session level
@@ -464,10 +650,58 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         ? request.agentPermissionMode
         : undefined;
 
+      const requestedAgentProvider = isAgentProvider(request.agentProvider)
+        ? request.agentProvider
+        : undefined;
+      const requestedAgentRuntime = isSessionAgentRuntime(request.agentRuntime)
+        ? request.agentRuntime
+        : undefined;
+
+      if (
+        requestedAgentProvider === 'codex' &&
+        requestedAgentRuntime !== undefined &&
+        requestedAgentRuntime !== 'codex-sdk' &&
+        requestedAgentRuntime !== 'codex-pty'
+      ) {
+        return {
+          success: false,
+          error: `agentProvider codex conflicts with agentRuntime ${requestedAgentRuntime}`,
+        };
+      }
+      if (
+        requestedAgentProvider === 'claude' &&
+        (requestedAgentRuntime === 'codex-sdk' || requestedAgentRuntime === 'codex-pty')
+      ) {
+        return {
+          success: false,
+          error: `agentProvider claude conflicts with agentRuntime ${requestedAgentRuntime}`,
+        };
+      }
+
+      const useCodexSdk =
+        requestedAgentRuntime === 'codex-sdk' ||
+        (requestedAgentProvider === 'codex' && requestedAgentRuntime === undefined);
+      const useCodexPty =
+        requestedAgentRuntime === 'codex-pty';
+
+      const substrateFromAgentRuntime =
+        requestedAgentRuntime === 'claude-interactive'
+          ? 'interactive'
+          : requestedAgentRuntime === 'claude-sdk'
+            ? 'sdk'
+            : undefined;
+
       // Opt-in CLI substrate for the quick session (migration 027). Validate the
       // untyped IPC value; an absent/invalid value leaves the run + session on
-      // the SDK default (byte-identical to before).
-      const requestedSubstrate = isCliSubstrate(request.substrate) ? request.substrate : undefined;
+      // the SDK default (byte-identical to before). During provider/runtime
+      // migration, a Claude agentRuntime request projects back to substrate.
+      const requestedSubstrate = useCodexSdk
+        ? 'sdk'
+        : useCodexPty
+          ? 'interactive'
+        : isCliSubstrate(request.substrate)
+          ? request.substrate
+          : substrateFromAgentRuntime;
 
       // Opt-in agent effort (the "Ultracode" wizard card). 'ultracode' launches
       // the interactive REPL with the ultracode setting; any other value is
@@ -475,15 +709,16 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // workflow instead (below) — so the setting only reaches the live spawn.
       const requestedEffort = request.effort === 'ultracode' ? 'ultracode' : undefined;
 
-      // Per-launch Claude config for the quick session (Configure model dropdown +
-      // fast-mode toggle). `claudeConfig.model` is the bare alias (pinned to a
-      // concrete snapshot at the spawn seam); `fastMode` opts THIS session into the
-      // premium Opus fast-mode preview (default off). For the interactive substrate
-      // both are passed to the eager spawn AND persisted on the panel below; for
-      // SDK the frontend persists them on the panel it creates. Either way the
-      // sessions:input respawn re-reads them from panel settings.
-      const requestedModel = typeof request.claudeConfig?.model === 'string' ? request.claudeConfig.model : undefined;
-      const requestedFastMode = request.claudeConfig?.fastMode === true;
+      // Per-launch model config for the quick session. Picker values are
+      // provider-scoped so a stale Claude alias cannot be stamped onto Codex.
+      const quickAgentProvider: AgentProvider = useCodexSdk || useCodexPty ? 'codex' : 'claude';
+      const normalizedClaudeConfig = normalizeClaudeConfig(request.claudeConfig);
+      const requestedModel = firstProviderModel(
+        quickAgentProvider,
+        request.agentModel,
+        normalizedClaudeConfig?.model,
+      );
+      const requestedFastMode = normalizedClaudeConfig?.fastMode === true;
 
       // Resolve where this quick session works (migration 047): the per-launch
       // request wins when valid, otherwise the global Settings default (which
@@ -524,9 +759,16 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           toolType,
           commitMode: request.commitMode,
           commitModeSettings: request.commitModeSettings,
-          claudeConfig: request.claudeConfig,
+          claudeConfig: quickAgentProvider === 'claude' ? normalizedClaudeConfig : undefined,
           requestedSubstrate,
           requestedAgentMode,
+          agentProvider: quickAgentProvider,
+          agentRuntime: useCodexSdk
+            ? 'codex-sdk'
+            : useCodexPty
+              ? 'codex-pty'
+              : requestedAgentRuntime,
+          agentModel: requestedModel ?? null,
           // In-place quick session (migration 047): the core forces auto-commit off
           // + commitMode disabled and switches session matching to the NAME fallback.
           inPlace,
@@ -565,11 +807,18 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // session behaved SDK. NULL remains the legacy/SDK meaning for
       // pre-migration rows only; new quick sessions always carry the resolved
       // value.
-      db.prepare(`UPDATE sessions SET substrate = ? WHERE id = ?`).run(
-        resolvedSubstrate,
-        session.id,
-      );
-
+      const resolvedSessionAgentRuntime = useCodexSdk
+        ? 'codex-sdk'
+        : useCodexPty
+          ? 'codex-pty'
+          : claudeRuntimeFromSubstrate(resolvedSubstrate);
+      const resolvedSessionSubstrate = useCodexPty ? 'interactive' : resolvedSubstrate;
+      db.prepare(
+        `UPDATE sessions
+            SET substrate = ?,
+                agent_runtime = ?
+          WHERE id = ?`,
+      ).run(resolvedSessionSubstrate, resolvedSessionAgentRuntime, session.id);
       // Persist the per-session agent effort (migration 029) so the unified
       // chat composer can surface it as a read-only pill (set at session start;
       // mid-session change deferred). The only value is 'ultracode' (the
@@ -612,6 +861,12 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         );
       }
 
+      // The session-created event fired before the sentinel/default-agent stamps
+      // above. Refresh the active cache and emit a normal session-updated event
+      // so provider/runtime/model do not silently stay at their INSERT defaults
+      // until a later read or status transition.
+      sessionManager.refreshSessionFromDatabase(session.id);
+
       // EAGER PTY SPAWN (interactive substrate only): create the claude panel
       // server-side (same pattern sessions:input uses) and boot the persistent
       // REPL now, with the cyboflow context briefing as its first prompt, so the
@@ -620,7 +875,36 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // only when the REPL EXITS (persistent-session contract) — awaiting would
       // deadlock create-quick until the session ends.
       let claudePanelId: string | undefined;
-      if (resolvedSubstrate === 'interactive' && configManager.isDemoMode()) {
+      if (useCodexPty) {
+        try {
+          const panel = await panelManager.createPanel({
+            sessionId: session.id,
+            type: 'claude',
+            title: 'Chat',
+          });
+          claudePanelId = panel.id;
+          if (requestedModel !== undefined) {
+            databaseService.updatePanelSettings(panel.id, { model: requestedModel });
+          }
+          registerCodexPtyPanel(runId, panel.id);
+          void codexPtyManager
+            .startPanel(
+              panel.id,
+              session.id,
+              session.worktreePath,
+              QUICK_CODEX_PTY_BRIEFING,
+              session.permissionMode,
+              requestedModel,
+              runId,
+            )
+            .catch((err: unknown) => {
+              console.error(`[IPC] Eager Codex PTY spawn failed for session ${session.id}:`, err);
+            });
+          await sessionManager.updateSession(session.id, { status: 'running' });
+        } catch (error) {
+          console.error(`[IPC] Failed to create Codex panel for quick session ${session.id}:`, error);
+        }
+      } else if (resolvedSubstrate === 'interactive' && configManager.isDemoMode()) {
         // Demo mode: the session is stamped 'interactive' (so ClaudePanel swaps
         // in the terminal surface), but the real persistent REPL is NEVER
         // spawned — DemoTerminalView paints a canned, client-side Claude Code
@@ -631,7 +915,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           const panel = await panelManager.createPanel({
             sessionId: session.id,
             type: 'claude',
-            title: 'Claude',
+            title: 'Chat',
           });
           claudePanelId = panel.id;
           await sessionManager.updateSession(session.id, { status: 'running' });
@@ -664,7 +948,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           const panel = await panelManager.createPanel({
             sessionId: session.id,
             type: 'claude',
-            title: 'Claude'
+            title: 'Chat'
           });
           claudePanelId = panel.id;
           // Persist the launch model + fast-mode on the panel so a later
@@ -802,7 +1086,25 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // runId to the live panelId and NO-OPs for the SDK substrate. Fail-soft:
       // a kill failure must never block the dismiss. Role-G: the live REPL gates on
       // the chat_run_id sentinel (the gate vehicle), not sessions.run_id.
-      if (dbSession.substrate === 'interactive' && dbSession.chat_run_id) {
+      if (dbSession.agent_runtime === 'codex-sdk') {
+        try {
+          const panelId = resolveClaudePanelId(sessionId);
+          if (panelId) {
+            await codexSdkManager.stopPanel(panelId);
+          }
+        } catch (err) {
+          console.warn(`[IPC:session] Failed to cancel live Codex SDK turn for dismissed session ${sessionId}:`, err);
+        }
+      } else if (dbSession.agent_runtime === 'codex-pty') {
+        try {
+          const panelId = resolveClaudePanelId(sessionId);
+          if (panelId) {
+            await codexPtyManager.stopPanel(panelId);
+          }
+        } catch (err) {
+          console.warn(`[IPC:session] Failed to kill live Codex PTY for dismissed session ${sessionId}:`, err);
+        }
+      } else if (dbSession.substrate === 'interactive' && dbSession.chat_run_id) {
         try {
           await killLiveSession(dbSession.chat_run_id);
         } catch (err) {
@@ -1026,7 +1328,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           await panelManager.createPanel({
             sessionId: sessionId,
             type: 'claude',
-            title: 'Claude'
+            title: 'Chat'
           });
           console.log(`[IPC] Created Claude panel for session ${sessionId}`);
         } catch (error) {
@@ -1063,6 +1365,47 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const panelLaunchSettings = databaseService.getPanelSettings(claudePanel.id);
       const panelModel = typeof panelLaunchSettings?.model === 'string' ? panelLaunchSettings.model : undefined;
       const panelFastMode = panelLaunchSettings?.fastMode === true;
+
+      if (dbSession?.agent_runtime === 'codex-pty') {
+        if (codexPtyManager.isPanelRunning(claudePanel.id)) {
+          console.log(`[IPC] Relaying input into live Codex PTY for panel ${claudePanel.id}`);
+          codexPtyManager.relayUserTurn(claudePanel.id, finalInput);
+          await sessionManager.updateSession(sessionId, { status: 'running' });
+        } else {
+          console.log(`[IPC] Codex PTY not running for panel ${claudePanel.id}, re-spawning fresh...`);
+          if (dbSession?.chat_run_id) {
+            registerCodexPtyPanel(dbSession.chat_run_id, claudePanel.id);
+          }
+          void codexPtyManager
+            .startPanel(
+              claudePanel.id,
+              sessionId,
+              session.worktreePath,
+              finalInput,
+              session.permissionMode,
+              panelModel,
+              dbSession?.chat_run_id ?? dbSession?.run_id ?? undefined,
+            )
+            .catch((err: unknown) => {
+              console.error(`[IPC] Codex PTY re-spawn failed for session ${sessionId}:`, err);
+            });
+          await sessionManager.updateSession(sessionId, { status: 'running' });
+        }
+        return { success: true };
+      }
+
+      if (dbSession?.agent_runtime === 'codex-sdk') {
+        if (!codexSdkManager) return { success: false, error: 'Codex SDK manager is not available' };
+        if (codexSdkManager.isPanelRunning(claudePanel.id)) {
+          return {
+            success: false,
+            error: 'Codex is still processing the previous message.',
+          };
+        }
+
+        await startCodexSdkTurn(claudePanel.id, finalInput);
+        return { success: true };
+      }
 
       // INTERACTIVE substrate branch (sessions.substrate, migration 027): the
       // session's claude lives in a persistent PTY REPL, so a composer turn is
@@ -1321,7 +1664,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             await panelManager.createPanel({
               sessionId: sessionId,
               type: 'claude',
-              title: 'Claude'
+              title: 'Chat'
             });
             console.log(`[IPC] Created Claude panel for session ${sessionId}`);
           } catch (error) {
@@ -1508,7 +1851,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               await panelManager.createPanel({
                 sessionId: sessionId,
                 type: 'claude',
-                title: 'Claude'
+                title: 'Chat'
               });
               console.log(`[IPC] Migrated session ${sessionId} to use Claude panel`);
             } catch (error) {
@@ -1910,11 +2253,20 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         logValidationFailure('panels:queue-input', panelValidation);
         return createValidationError(panelValidation);
       }
-      if (!(claudeCodeManager instanceof ClaudeCodeManager)) {
-        return { success: false, error: 'Queue not supported on this CLI manager' };
-      }
       if (typeof text !== 'string' || text.trim() === '') {
         return { success: false, error: 'Nothing to queue' };
+      }
+      const panel = panelManager.getPanel(panelId);
+      const dbSession = panel ? databaseService.getSession(panel.sessionId) : undefined;
+      if (dbSession?.agent_runtime === 'codex-sdk') {
+        const queue = codexPanelInputQueues.get(panelId) ?? [];
+        queue.push({ id, text: text.trim() });
+        codexPanelInputQueues.set(panelId, queue);
+        flushCodexPanelInputQueueIfIdle(panelId);
+        return { success: true, data: { queued: true } };
+      }
+      if (!(claudeCodeManager instanceof ClaudeCodeManager)) {
+        return { success: false, error: 'Queue not supported on this CLI manager' };
       }
       claudeCodeManager.enqueuePanelInput(panelId, id, text);
       // Race guard: if the turn already ended before this landed, deliver now
@@ -1929,6 +2281,11 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
 
   ipcMain.handle('panels:list-queued-input', async (_event, panelId: string) => {
     try {
+      const panel = panelManager.getPanel(panelId);
+      const dbSession = panel ? databaseService.getSession(panel.sessionId) : undefined;
+      if (dbSession?.agent_runtime === 'codex-sdk') {
+        return { success: true, data: [...(codexPanelInputQueues.get(panelId) ?? [])] };
+      }
       if (!(claudeCodeManager instanceof ClaudeCodeManager)) {
         return { success: true, data: [] };
       }
@@ -1941,6 +2298,15 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
 
   ipcMain.handle('panels:dequeue-input', async (_event, panelId: string, id: string) => {
     try {
+      const panel = panelManager.getPanel(panelId);
+      const dbSession = panel ? databaseService.getSession(panel.sessionId) : undefined;
+      if (dbSession?.agent_runtime === 'codex-sdk') {
+        const queue = codexPanelInputQueues.get(panelId) ?? [];
+        const next = queue.filter((entry) => entry.id !== id);
+        if (next.length === 0) codexPanelInputQueues.delete(panelId);
+        else codexPanelInputQueues.set(panelId, next);
+        return { success: true, data: { dequeued: next.length !== queue.length } };
+      }
       if (!(claudeCodeManager instanceof ClaudeCodeManager)) {
         return { success: false, error: 'Queue not supported on this CLI manager' };
       }
@@ -2062,15 +2428,27 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
 
   ipcMain.handle('sessions:stop', async (_event, sessionId: string) => {
     try {
-      // Get Claude panels for this session and stop them
+      const dbSession = databaseService.getSession(sessionId);
+      if (!dbSession) {
+        return { success: false, error: 'Session not found' };
+      }
+
+      // Agent panels retain the legacy `claude` panel type. Dispatch by the
+      // session runtime so Stop reaches the process that actually owns them.
       const stopPanels = panelManager.getPanelsForSession(sessionId);
       const stopClaudePanels = stopPanels.filter(p => p.type === 'claude');
       
       if (stopClaudePanels.length > 0) {
         // Stop all Claude panels for this session
-        console.log(`[IPC] Stopping ${stopClaudePanels.length} Claude panel(s) for session ${sessionId}`);
+        console.log(`[IPC] Stopping ${stopClaudePanels.length} agent panel(s) for session ${sessionId}`);
         for (const claudePanel of stopClaudePanels) {
-          await claudeCodeManager.stopPanel(claudePanel.id);
+          if (dbSession.agent_runtime === 'codex-sdk') {
+            await codexSdkManager.stopPanel(claudePanel.id);
+          } else if (dbSession.agent_runtime === 'codex-pty') {
+            await codexPtyManager.stopPanel(claudePanel.id);
+          } else {
+            await claudeCodeManager.stopPanel(claudePanel.id);
+          }
         }
       } else {
         // Fallback to session-based stop
@@ -2106,7 +2484,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             };
 
             sessionManager.emit('session-output', payload);
-            sessionManager.emit('session-output-available', { sessionId, panelId: claudePanel.id });
           }
         } else {
           sessionManager.addSessionOutput(sessionId, {

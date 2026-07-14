@@ -10,6 +10,8 @@ import type { DatabaseService } from '../database/database';
 import type { RunCommandManager } from '../services/runCommandManager';
 import type { ClaudeCodeManager } from '../services/panels/claude/claudeCodeManager';
 import type { InteractiveClaudeManager } from '../services/panels/claude/interactiveClaudeManager';
+import type { CodexSdkManager } from '../services/panels/codex/codexSdkManager';
+import type { CodexPtyManager } from '../services/panels/codex/codexPtyManager';
 import type { CliManagerFactory } from '../services/cliManagerFactory';
 import type { AbstractCliManager } from '../services/panels/cli/AbstractCliManager';
 import type { Logger } from '../utils/logger';
@@ -33,6 +35,10 @@ export interface AppServices {
    * interactiveClaudeManager.ts imports nothing from ipc/ (no cycle).
    */
   interactiveCliManager: InteractiveClaudeManager;
+  /** Structured Codex app-server runtime for quick-session chat and future workflows. */
+  codexSdkManager: CodexSdkManager;
+  /** Interactive Codex PTY runtime for quick sessions only. */
+  codexPtyManager: CodexPtyManager;
   /**
    * Live-session close-out seams for QUICK sessions (mirrors the RelayDeps
    * closures wired in index.ts). Both take the session's sentinel `__quick__`
@@ -56,6 +62,8 @@ export interface AppServices {
    * sentinel runId and throws "No claude process found". Idempotent.
    */
   registerLivePanel: (runId: string, panelId: string) => void;
+  /** Deterministic at-spawn registration for Codex PTY quick-session panels. */
+  registerCodexPtyPanel: (runId: string, panelId: string) => void;
   gitDiffManager: GitDiffManager;
   gitStatusManager: GitStatusManager;
   executionTracker: ExecutionTracker;
@@ -76,4 +84,4 @@ export interface AppServices {
      */
     cancelHostedRuns: (sessionId: string) => Promise<void>;
   };
-} 
+}

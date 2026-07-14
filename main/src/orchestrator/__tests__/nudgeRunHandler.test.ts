@@ -41,6 +41,7 @@ function makeFakeExecutor(opts?: { executeRejects?: boolean }): NudgeRunExecutor
 function makeDb(): Database.Database {
   const db = createTestDb({ disableForeignKeys: true });
   db.exec('ALTER TABLE workflow_runs ADD COLUMN claude_session_id TEXT');
+  db.exec("ALTER TABLE workflow_runs ADD COLUMN execution_model TEXT NOT NULL DEFAULT 'orchestrated'");
   return db;
 }
 
@@ -150,6 +151,24 @@ describe('nudgeRunHandler — guard matrix', () => {
     db.close();
   });
 
+  it('programmatic run does not require a top-level provider session', async () => {
+    const db = makeDb();
+    const { runId } = seedRun(db, { status: 'awaiting_review' });
+    db.prepare("UPDATE workflow_runs SET execution_model = 'programmatic' WHERE id = ?").run(runId);
+    const executor = makeFakeExecutor();
+
+    const result = await nudgeRunHandler(runId, 'continue the workflow', {
+      db: dbAdapter(db),
+      runQueues: new RunQueueRegistry(),
+      runExecutor: executor,
+    });
+
+    expect(result).toEqual({ delivered: true });
+    expect(executor.setPendingNudge).toHaveBeenCalledWith(runId, 'continue the workflow');
+    expect(executor.execute).toHaveBeenCalledWith(runId);
+    db.close();
+  });
+
   it('ignoreBlockingReviewItemId excludes that gate so it does not block its own resume', async () => {
     const db = makeDb();
     const { runId } = seedRun(db, { status: 'awaiting_review' });
@@ -230,12 +249,12 @@ describe('nudgeRunHandler — delivery', () => {
     const adapter: DatabaseLike = {
       prepare: (sql: string): PreparedStatement => {
         const stmt = real.prepare(sql);
-        if (sql.includes('SELECT id, status, claude_session_id')) {
+        if (sql.includes('SELECT id, status, execution_model FROM workflow_runs')) {
           // Override only .get() to report awaiting_review; .run()/.all() delegate
           // to the real statement so the guarded UPDATE still hits the actual row.
           return {
             run: (...params: unknown[]) => stmt.run(...params),
-            get: () => ({ id: runId, status: 'awaiting_review', claude_session_id: 'sess-1' }),
+            get: () => ({ id: runId, status: 'awaiting_review', execution_model: 'orchestrated' }),
             all: (...params: unknown[]) => stmt.all(...params),
           };
         }

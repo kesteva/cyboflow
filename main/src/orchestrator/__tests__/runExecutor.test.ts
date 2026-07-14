@@ -696,6 +696,32 @@ describe('RunExecutor.execute — happy path (panelId/sessionId alignment)', () 
     expect(opts.prompt).toBe('test prompt');
   });
 
+  it('(e1) logs a provider-neutral launch message with the Codex runtime identity', async () => {
+    const run = makeWorkflowRunRow({
+      worktree_path: '/my/worktree',
+      agent_provider: 'codex',
+      agent_runtime: 'codex-sdk',
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const logger = makeSpyLogger();
+    const executor = new TestableRunExecutor(makeSpawner(), registry, logger);
+
+    await executor.execute(run.id);
+
+    expect(logger.info).toHaveBeenCalledWith('[RunExecutor] spawning agent process', {
+      runId: run.id,
+      panelId: run.id,
+      worktreePath: '/my/worktree',
+      provider: 'codex',
+      runtime: 'codex-sdk',
+    });
+    expect(logger.calls.some((call) => call.message.includes('Claude CLI'))).toBe(false);
+  });
+
   /**
    * Regression test: bridgeEvents must be called BEFORE spawnCliProcess so that
    * no SDK-initialization events are lost when the iterator starts.
@@ -1158,6 +1184,59 @@ describe('RunExecutor — getPrompt reads workflow file via injected reader', ()
     expect(spawner.spawnCliProcess).toHaveBeenCalledOnce();
     const opts = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
     expect(opts.systemPromptAppend).toBe('always use TypeScript');
+  });
+
+  it('wraps Codex launch prompts at the spawn boundary', async () => {
+    const run = makeWorkflowRunRow({
+      worktree_path: '/my/worktree',
+      agent_provider: 'codex',
+      agent_runtime: 'codex-sdk',
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/sprint.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({
+      '/fake/sprint.md': { prompt: 'do the sprint', systemPromptAppend: 'append me' },
+    });
+    const executor = new RunExecutor(spawner, registry, makeSpyLogger(), reader);
+
+    await executor.execute(run.id);
+
+    const opts = spawnedOpts(spawner);
+    expect(opts.prompt).toContain('# Runtime adapter: Codex');
+    expect(opts.prompt.endsWith('do the sprint')).toBe(true);
+    expect(opts.systemPromptAppend).toBe('append me');
+    expect(opts.hidePromptFromTranscript).toBe(true);
+  });
+
+  it('does not wrap Codex nudge prompts because the resumed thread already has the launch envelope', async () => {
+    const run = makeWorkflowRunRow({
+      worktree_path: '/my/worktree',
+      claude_session_id: 'codex-thread-1',
+      agent_provider: 'codex',
+      agent_runtime: 'codex-sdk',
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/sprint.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({
+      '/fake/sprint.md': { prompt: 'do the sprint', systemPromptAppend: '' },
+    });
+    const executor = new RunExecutor(spawner, registry, makeSpyLogger(), reader);
+    executor.setPendingNudge(run.id, '  follow up  ');
+
+    await executor.execute(run.id);
+
+    const opts = spawnedOpts(spawner);
+    expect(opts.prompt).toBe('follow up');
+    expect(opts.prompt).not.toContain('# Runtime adapter: Codex');
+    expect(opts.hidePromptFromTranscript).toBe(false);
   });
 
   // Custom-flow routing (workflow_path === null): getPrompt no longer throws on a
@@ -2432,6 +2511,9 @@ function enqueueIntegrationDb(): ReturnType<typeof createTestDb> {
       base_branch TEXT,
       run_id TEXT,
       substrate TEXT,
+      agent_provider TEXT DEFAULT 'claude',
+      agent_runtime TEXT DEFAULT 'claude-sdk',
+      agent_model TEXT,
       in_place BOOLEAN DEFAULT 0,
       is_main_repo BOOLEAN DEFAULT 0
     )
@@ -2877,7 +2959,7 @@ function makeStepEmitter(): StepTransitionEmitterLike & { calls: Array<{ runId: 
 }
 
 describe('RunExecutor.execute — stepEmitter lifecycle hook (TASK-765)', () => {
-  it('(step-1) stepEmitter.emit is called with running at run start and done at run end (happy path)', async () => {
+  it('(step-1) emits only the initial running marker and preserves agent-reported completion state', async () => {
     const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
     const workflow = makeWorkflowRow({ id: run.workflow_id });
     const registry: WorkflowRegistryLike = {
@@ -2896,13 +2978,11 @@ describe('RunExecutor.execute — stepEmitter lifecycle hook (TASK-765)', () => 
 
     await executor.execute(run.id);
 
-    // Should emit 'running' then 'done'
-    expect(stepEmitter.emit).toHaveBeenCalledTimes(2);
+    expect(stepEmitter.emit).toHaveBeenCalledTimes(1);
     expect(stepEmitter.calls[0]).toEqual({ runId: run.id, status: 'running' });
-    expect(stepEmitter.calls[1]).toEqual({ runId: run.id, status: 'done' });
   });
 
-  it('(step-2) stepEmitter.emit fires done on spawner failure path', async () => {
+  it('(step-2) does not synthesize done on the spawner failure path', async () => {
     const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
     const workflow = makeWorkflowRow({ id: run.workflow_id });
     const registry: WorkflowRegistryLike = {
@@ -2921,10 +3001,8 @@ describe('RunExecutor.execute — stepEmitter lifecycle hook (TASK-765)', () => 
 
     await expect(executor.execute(run.id)).rejects.toThrow('sdk spawn failed');
 
-    // Should still emit 'running' then 'done' even on failure
-    expect(stepEmitter.emit).toHaveBeenCalledTimes(2);
+    expect(stepEmitter.emit).toHaveBeenCalledTimes(1);
     expect(stepEmitter.calls[0]).toEqual({ runId: run.id, status: 'running' });
-    expect(stepEmitter.calls[1]).toEqual({ runId: run.id, status: 'done' });
   });
 
   it('(step-3) a throwing stepEmitter does not crash execute() — fail-soft, warn logged', async () => {
@@ -2957,6 +3035,26 @@ describe('RunExecutor.execute — stepEmitter lifecycle hook (TASK-765)', () => 
       (call: unknown[]) => typeof call[0] === 'string' && call[0].includes('stepEmitter.emit threw'),
     );
     expect(stepEmitterWarn).toBeDefined();
+  });
+
+  it('does not reset workflow step state when executing a nudge turn', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', claude_session_id: 'thread-1' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const stepEmitter = makeStepEmitter();
+    const executor = new TestableRunExecutor(
+      makeSpawner(), registry, makeSpyLogger(),
+      undefined, undefined, undefined, undefined, undefined,
+      stepEmitter,
+    );
+    executor.setPendingNudge(run.id, 'continue after approval');
+
+    await executor.execute(run.id);
+
+    expect(stepEmitter.emit).not.toHaveBeenCalled();
   });
 });
 

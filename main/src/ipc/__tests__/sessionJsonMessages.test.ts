@@ -29,6 +29,12 @@ vi.mock('../../services/panelManager', () => ({
   },
 }));
 
+vi.mock('../../services/database', () => ({
+  databaseService: {
+    getSession: vi.fn(),
+  },
+}));
+
 import { projectStoredOutputs } from '../session';
 import type { SessionOutput } from '../../types/session';
 
@@ -72,6 +78,17 @@ const ASSISTANT_RAW = {
     ],
     usage: { input_tokens: 100, output_tokens: 20 },
   },
+};
+
+const AGENT_ASSISTANT_RAW = {
+  type: 'agent_message',
+  role: 'assistant',
+  id: 'agent-msg-001',
+  model: 'gpt-5.5',
+  external_session_id: 'codex-thread-1',
+  content: [
+    { type: 'text', text: 'Hello from Codex.' },
+  ],
 };
 
 /** A user event carrying only tool_result blocks — projects to null. */
@@ -142,6 +159,21 @@ describe('projectStoredOutputs', () => {
     const result = projectStoredOutputs(outputs, 'panel-3');
 
     expect(result.length).toBe(1);
+    expect(result[0].timestamp).toBe(persistedTs.toISOString());
+  });
+
+  it('projects provider-neutral agent events through the compatibility adapter', () => {
+    const persistedTs = new Date('2024-03-20T15:30:45.123Z');
+    const outputs: SessionOutput[] = [
+      makeOutput(AGENT_ASSISTANT_RAW, persistedTs),
+    ];
+
+    const result = projectStoredOutputs(outputs, 'panel-agent');
+
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('agent-msg-001');
+    expect(result[0].role).toBe('assistant');
+    expect(result[0].segments[0]).toEqual({ type: 'text', content: 'Hello from Codex.' });
     expect(result[0].timestamp).toBe(persistedTs.toISOString());
   });
 

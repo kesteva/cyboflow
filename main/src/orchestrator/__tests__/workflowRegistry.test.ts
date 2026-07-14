@@ -829,6 +829,75 @@ describe('WorkflowRegistry', () => {
       });
     });
 
+    it('creates codex-sdk workflow runs through the sdk substrate', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'codex-sdk-workflow.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+          requestedAgentProvider: 'codex',
+        });
+
+        interface AgentRow { substrate: string; agent_provider: string; agent_runtime: string }
+        const row = db.prepare(
+          'SELECT substrate, agent_provider, agent_runtime FROM workflow_runs WHERE id = ?',
+        ).get(result.runId) as AgentRow;
+        expect(result.substrate).toBe('sdk');
+        expect(row).toEqual({
+          substrate: 'sdk',
+          agent_provider: 'codex',
+          agent_runtime: 'codex-sdk',
+        });
+      });
+    });
+
+    it('forces demo workflow requests onto the Claude SDK provider/runtime', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'demo-safe-workflow.md', '---\n---\n');
+        const demoRegistry = new WorkflowRegistry(dbAdapter(db), logger, {
+          ...makeConfig('default'),
+          getForcedSubstrate: () => 'sdk',
+          isDemoMode: () => true,
+        });
+        demoRegistry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        const result = demoRegistry.createRun(workflowId, 'interactive', TEST_SESSION_ID, undefined, {
+          requestedAgentProvider: 'codex',
+          requestedAgentRuntime: 'codex-sdk',
+          requestedModel: 'gpt-5.5',
+        });
+
+        const run = demoRegistry.getRunById(result.runId);
+        expect(result.substrate).toBe('sdk');
+        expect(run).not.toBeNull();
+        expect(run!.substrate).toBe('sdk');
+        expect(run!.agent_provider).toBe('claude');
+        expect(run!.agent_runtime).toBe('claude-sdk');
+        expect(run!.model).toBeNull();
+      });
+    });
+
+    it('rejects codex-sdk workflows when paired with the interactive substrate', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'codex-sdk-interactive-conflict.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        expect(() =>
+          registry.createRun(workflowId, 'interactive', TEST_SESSION_ID, undefined, {
+            requestedAgentProvider: 'codex',
+            requestedAgentRuntime: 'codex-sdk',
+          }),
+        ).toThrow(/substrate interactive conflicts with agentRuntime codex-sdk/);
+      });
+    });
+
     // ───── execution_model stamping (migration 032) ─────
 
     it("stamps the default execution model 'orchestrated' when no override is set (zero-behavior-change)", async () => {
@@ -885,6 +954,56 @@ describe('WorkflowRegistry', () => {
         const row = db.prepare('SELECT model FROM workflow_runs WHERE id = ?').get(result.runId) as ModelRow;
         expect(row.model).toBe('opus');
         expect(registry.getRunById(result.runId)?.model).toBe('opus');
+      });
+    });
+
+    it('stamps a Codex model selection for a Codex workflow run', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'model-codex.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        const result = registry.createRun(workflowId, undefined, 'sess-model', undefined, {
+          requestedAgentProvider: 'codex',
+          requestedAgentRuntime: 'codex-sdk',
+          requestedModel: 'gpt-5.5',
+        });
+
+        interface ModelRow { model: string | null; agent_provider: string; agent_runtime: string }
+        const row = db.prepare(
+          'SELECT model, agent_provider, agent_runtime FROM workflow_runs WHERE id = ?',
+        ).get(result.runId) as ModelRow;
+        expect(row).toEqual({
+          model: 'gpt-5.5',
+          agent_provider: 'codex',
+          agent_runtime: 'codex-sdk',
+        });
+      });
+    });
+
+    it('clears a stale Claude model for a Codex workflow run', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'model-codex-stale-claude.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        const result = registry.createRun(workflowId, undefined, 'sess-model', undefined, {
+          requestedAgentProvider: 'codex',
+          requestedAgentRuntime: 'codex-sdk',
+          requestedModel: 'opus',
+        });
+
+        interface ModelRow { model: string | null; agent_provider: string; agent_runtime: string }
+        const row = db.prepare(
+          'SELECT model, agent_provider, agent_runtime FROM workflow_runs WHERE id = ?',
+        ).get(result.runId) as ModelRow;
+        expect(row).toEqual({
+          model: null,
+          agent_provider: 'codex',
+          agent_runtime: 'codex-sdk',
+        });
       });
     });
 
@@ -1444,6 +1563,8 @@ describe('WorkflowRegistry', () => {
         expect(run).not.toBeNull();
         expect(run!.substrate).toBe(substrate);
         expect(run!.substrate).toBe('sdk');
+        expect(run!.agent_provider).toBe('claude');
+        expect(run!.agent_runtime).toBe('claude-sdk');
       });
     });
 
@@ -1461,6 +1582,8 @@ describe('WorkflowRegistry', () => {
         expect(substrate).toBe('interactive');
         const run = registry.getRunById(runId);
         expect(run!.substrate).toBe('interactive');
+        expect(run!.agent_provider).toBe('claude');
+        expect(run!.agent_runtime).toBe('claude-interactive');
       });
     });
 

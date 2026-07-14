@@ -75,7 +75,7 @@ describe('isTerminalStepReached', () => {
     expect(isTerminalStepReached(ps)).toBe(true);
   });
 
-  it('is true when every known step state is done, regardless of currentStepId', () => {
+  it('is false when a non-final current step is synthetically marked done', () => {
     const ps = phaseState({
       currentStepId: 'execute-tasks',
       stepStates: [
@@ -85,10 +85,10 @@ describe('isTerminalStepReached', () => {
         { stepId: 'human-review', status: 'done' },
       ],
     });
-    expect(isTerminalStepReached(ps)).toBe(true);
+    expect(isTerminalStepReached(ps)).toBe(false);
   });
 
-  it("is true when steps are settled as a mix of 'done' and 'skipped' (a surviving skip marker must not withhold 'complete')", () => {
+  it("is false when settled states do not agree with the non-final current step", () => {
     const ps = phaseState({
       currentStepId: 'sprint-verify',
       stepStates: [
@@ -98,7 +98,7 @@ describe('isTerminalStepReached', () => {
         { stepId: 'human-review', status: 'done' },
       ],
     });
-    expect(isTerminalStepReached(ps)).toBe(true);
+    expect(isTerminalStepReached(ps)).toBe(false);
   });
 
   it('is false at a mid-flow step with concrete non-done step state (the interactive turn-end-rest regression, 2026-07-06)', () => {
@@ -114,8 +114,8 @@ describe('isTerminalStepReached', () => {
     expect(isTerminalStepReached(ps)).toBe(false);
   });
 
-  it('is true with no step-transition data at all (no evidence of an open step)', () => {
-    expect(isTerminalStepReached(phaseState())).toBe(true);
+  it('is false with no step-transition data because completion is not yet confirmed', () => {
+    expect(isTerminalStepReached(phaseState())).toBe(false);
   });
 });
 
@@ -129,7 +129,7 @@ describe('resolveRunSummaryVariant', () => {
 
   it("→ 'complete' when end-eligible and not failed", () => {
     expect(resolveRunSummaryVariant('completed', true, idle)).toBe('complete');
-    expect(resolveRunSummaryVariant('awaiting_review', true, idle)).toBe('complete');
+    expect(resolveRunSummaryVariant('awaiting_review', true, idle)).toBeNull();
   });
 
   it("→ 'review' when running at the final human gate (not end-eligible)", () => {
@@ -169,7 +169,7 @@ describe('resolveRunSummaryVariant', () => {
     expect(resolveRunSummaryVariant('awaiting_review', true, atLastStep)).toBe('complete');
   });
 
-  it("→ 'complete' when awaiting_review + endEligible and every step state is done", () => {
+  it("→ NOT 'complete' when synthetic done states disagree with a non-final current step", () => {
     const allDone = phaseState({
       currentStepId: 'execute-tasks',
       stepStates: [
@@ -179,7 +179,7 @@ describe('resolveRunSummaryVariant', () => {
         { stepId: 'human-review', status: 'done' },
       ],
     });
-    expect(resolveRunSummaryVariant('awaiting_review', true, allDone)).toBe('complete');
+    expect(resolveRunSummaryVariant('awaiting_review', true, allDone)).toBeNull();
   });
 
   it("→ 'complete' unconditionally for status 'completed' even when phase state is still loading (definition null)", () => {

@@ -117,6 +117,24 @@ function shipShapedDef(): WorkflowDefinition {
   };
 }
 
+/** A raw-prompt Ship shape: context creates an idea before an optional design step. */
+function rawPromptShipDef(): WorkflowDefinition {
+  return {
+    id: 'd',
+    phases: [
+      {
+        id: 'p',
+        label: 'P',
+        color: '#3b6dd6',
+        steps: [
+          { id: 'context', name: 'Context', agent: 'context', mcps: [], retries: 0 },
+          { id: 'ui-prototype', name: 'UI prototype', agent: 'ui-prototype', mcps: [], retries: 0 },
+        ],
+      },
+    ],
+  };
+}
+
 describe('DefaultProgrammaticRunner', () => {
   afterEach(() => {
     MonitorRegistry._resetForTesting();
@@ -125,6 +143,30 @@ describe('DefaultProgrammaticRunner', () => {
   it('resolves (rests the run) when the controller completes', async () => {
     const runner = new DefaultProgrammaticRunner({ spawner: makeSpawner(), reporter, gate: gateOf('approve') });
     await expect(runner.run(ctxFor(oneStepDef()))).resolves.toBeUndefined();
+  });
+
+  it('live-resolves the run-owned idea scope after raw-prompt Ship context creates its idea', async () => {
+    let ownedIdeaIds: readonly string[] = [];
+    let spawnCount = 0;
+    const spawner = makeSpawner(async () => {
+      if (spawnCount++ === 0) ownedIdeaIds = ['IDEA-created-during-context'];
+    });
+    const runOwnedIdeaIdsProvider = vi.fn<(runId: string) => readonly string[]>(() => ownedIdeaIds);
+    const runner = new DefaultProgrammaticRunner({
+      spawner,
+      reporter,
+      gate: gateOf('approve'),
+      runOwnedIdeaIdsProvider,
+    });
+
+    await expect(runner.run(ctxFor(rawPromptShipDef()))).resolves.toBeUndefined();
+
+    expect(runOwnedIdeaIdsProvider).toHaveBeenCalledTimes(2);
+    expect(runOwnedIdeaIdsProvider).toHaveBeenCalledWith('run-1');
+    const prompts = vi.mocked(spawner.spawnCliProcess).mock.calls.map(([o]) => (o as ClaudeSpawnerOptions).prompt);
+    expect(prompts[0]).not.toContain('## Run-owned idea scope');
+    expect(prompts[1]).toContain('`IDEA-created-during-context`');
+    expect(prompts[1]).not.toContain('cyboflow_list_tasks');
   });
 
   it('throws when a required step fails and the escalation is rejected (so RunExecutor marks the run failed)', async () => {

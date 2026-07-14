@@ -8,10 +8,11 @@
  * framework-free implementation.
  *
  * Source of truth: the raw_events table (same table `selectRunMessages` reads).
- * Where `selectRunMessages` is a TEXT-ONLY reducer, this helper runs every
- * stored event through the SAME projection pipeline the live stream uses —
- * `TypedEventNarrowing` + `MessageProjection` — producing the rich, correlated
- * shape the renderer's RichOutputView consumes.
+ * Where `selectRunMessages` is a TEXT-ONLY reducer, this helper normalizes every
+ * stored event into the Claude-compatible projection shape, then runs it through
+ * the SAME projection pipeline the live stream uses — `TypedEventNarrowing` +
+ * `MessageProjection` — producing the rich, correlated shape the renderer's
+ * RichOutputView consumes.
  *
  * Pattern note: this mirrors `projectStoredOutputs` in main/src/ipc/session.ts
  * (the quick-session path) but reads from raw_events keyed by runId instead of
@@ -35,8 +36,13 @@
  *
  * Ordering: created_at ASC, id ASC (tiebreaker) — same as `selectRunMessages`.
  */
-import { MessageProjection, TypedEventNarrowing } from '../services/streamParser';
+import {
+  agentStreamEventToClaudeStreamEvent,
+  MessageProjection,
+  TypedEventNarrowing,
+} from '../services/streamParser';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
+import { isAgentStreamEvent } from '../../../shared/types/agentStream';
 import type { DatabaseLike, LoggerLike } from './types';
 
 // ---------------------------------------------------------------------------
@@ -114,7 +120,9 @@ export function selectRunUnifiedMessages(
       continue;
     }
 
-    const event = narrower.narrow(raw);
+    const event = isAgentStreamEvent(raw)
+      ? agentStreamEventToClaudeStreamEvent(raw)
+      : narrower.narrow(raw);
     const projected = projection.project(event);
     if (projected !== null) {
       // Overwrite the MessageProjection-generated timestamp with the persisted one.

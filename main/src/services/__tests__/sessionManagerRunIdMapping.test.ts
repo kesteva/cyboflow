@@ -85,6 +85,8 @@ function makeDbMock(dbSession: DbSession) {
     getAllSessions: vi.fn().mockReturnValue([dbSession]),
     getActiveSessions: vi.fn().mockReturnValue([]),
     getPanel: vi.fn().mockReturnValue(null),
+    getPanelOutputs: vi.fn().mockReturnValue([]),
+    addPanelOutput: vi.fn(),
   };
 }
 
@@ -102,6 +104,42 @@ interface SessionManagerWithPrivate {
 // ------------------------------------------------------------------
 
 describe('convertDbSessionToSession — run_id → runId mapping', () => {
+  it('notifies panel transcript consumers after persisted panel output changes', () => {
+    const dbSession = makeDbSession({ agent_runtime: 'codex-sdk' });
+    const db = makeDbMock(dbSession);
+    db.getPanel.mockReturnValue({ id: 'panel-1', sessionId: dbSession.id, type: 'claude' });
+    const mgr = new SessionManager(db as unknown as ConstructorParameters<typeof SessionManager>[0]);
+    const notices: Array<{ sessionId: string; panelId: string }> = [];
+    mgr.on('session-output-available', (notice) => notices.push(notice));
+
+    mgr.addPanelOutput('panel-1', {
+      type: 'stdout',
+      data: 'persisted Codex output',
+      timestamp: new Date('2026-07-10T12:00:00.000Z'),
+    });
+
+    expect(db.addPanelOutput).toHaveBeenCalledOnce();
+    expect(notices).toEqual([{ sessionId: dbSession.id, panelId: 'panel-1' }]);
+  });
+
+  it('does not broadcast transcript refreshes for non-Codex panel output', () => {
+    const dbSession = makeDbSession({ agent_runtime: 'claude-sdk' });
+    const db = makeDbMock(dbSession);
+    db.getPanel.mockReturnValue({ id: 'panel-1', sessionId: dbSession.id, type: 'claude' });
+    const mgr = new SessionManager(db as unknown as ConstructorParameters<typeof SessionManager>[0]);
+    const notice = vi.fn();
+    mgr.on('session-output-available', notice);
+
+    mgr.addPanelOutput('panel-1', {
+      type: 'stdout',
+      data: 'live Claude output',
+      timestamp: new Date('2026-07-10T12:00:00.000Z'),
+    });
+
+    expect(db.addPanelOutput).toHaveBeenCalledOnce();
+    expect(notice).not.toHaveBeenCalled();
+  });
+
   it('copies run_id="flow-001" to runId="flow-001" (flow-owned session)', () => {
     const dbSession = makeDbSession({ run_id: 'flow-001' });
     const db = makeDbMock(dbSession);
@@ -147,6 +185,48 @@ describe('convertDbSessionToSession — run_id → runId mapping', () => {
     const legacy = makeDbSession();
     const legacySession = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(legacy);
     expect(legacySession.substrate).toBeUndefined();
+  });
+
+  it('copies session default agent provider/runtime/model to the runtime session shape', () => {
+    const stamped = makeDbSession({
+      agent_provider: 'codex',
+      agent_runtime: 'codex-pty',
+      agent_model: 'gpt-5.5',
+    });
+    const mgr = new SessionManager(
+      makeDbMock(stamped) as unknown as ConstructorParameters<typeof SessionManager>[0]
+    );
+    const session = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(stamped);
+    expect(session.agentProvider).toBe('codex');
+    expect(session.agentRuntime).toBe('codex-pty');
+    expect(session.agentModel).toBe('gpt-5.5');
+
+    const legacy = makeDbSession();
+    const legacySession = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(legacy);
+    expect(legacySession.agentProvider).toBeUndefined();
+    expect(legacySession.agentRuntime).toBeUndefined();
+    expect(legacySession.agentModel).toBeNull();
+  });
+
+  it('refreshSessionFromDatabase emits the refreshed default agent fields', () => {
+    const stamped = makeDbSession({
+      agent_provider: 'codex',
+      agent_runtime: 'codex-pty',
+      agent_model: 'gpt-5.5',
+    });
+    const mgr = new SessionManager(
+      makeDbMock(stamped) as unknown as ConstructorParameters<typeof SessionManager>[0]
+    );
+    const updates: Session[] = [];
+    mgr.on('session-updated', (session: Session) => updates.push(session));
+
+    const refreshed = mgr.refreshSessionFromDatabase('test-session-id');
+
+    expect(refreshed?.agentProvider).toBe('codex');
+    expect(refreshed?.agentRuntime).toBe('codex-pty');
+    expect(refreshed?.agentModel).toBe('gpt-5.5');
+    expect(updates).toHaveLength(1);
+    expect(updates[0].agentRuntime).toBe('codex-pty');
   });
 
   it("copies effort='ultracode' to effort; a row without it maps to undefined (migration 029)", () => {
@@ -334,5 +414,46 @@ describe('DB round-trip — run_id INSERT persistence', () => {
     const mgr = new SessionManager(dbMock as unknown as ConstructorParameters<typeof SessionManager>[0]);
     const session = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(readBack!);
     expect(session.chatRunId).toBe('chat-sentinel-1');
+  });
+
+  it('Case D: session default agent provider/runtime/model round-trips to SessionAgentConfig fields', () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'cyboflow-agent-default-d-'));
+    const dbPath = join(tmpDir, 'test.db');
+    const realMigrationsDir = join(__dirname, '../../database/migrations');
+
+    const svc = new DatabaseService(dbPath);
+    svc.setMigrationsDirForTesting(realMigrationsDir);
+    svc.initialize();
+
+    const project = seedProject(dbPath);
+
+    const dbSession = svc.createSession({
+      id: 'sess-codex-pty-1',
+      name: 'Codex PTY Session',
+      initial_prompt: '',
+      worktree_name: 'codex-pty-1',
+      worktree_path: '/tmp/codex-pty-1',
+      project_id: project.id,
+      agent_provider: 'codex',
+      agent_runtime: 'codex-pty',
+      agent_model: 'gpt-5.5',
+    });
+
+    expect(dbSession.agent_provider).toBe('codex');
+    expect(dbSession.agent_runtime).toBe('codex-pty');
+    expect(dbSession.agent_model).toBe('gpt-5.5');
+
+    const readBack = svc.getSession('sess-codex-pty-1');
+    expect(readBack).toBeDefined();
+    expect(readBack!.agent_provider).toBe('codex');
+    expect(readBack!.agent_runtime).toBe('codex-pty');
+    expect(readBack!.agent_model).toBe('gpt-5.5');
+
+    const dbMock = makeDbMock(readBack!);
+    const mgr = new SessionManager(dbMock as unknown as ConstructorParameters<typeof SessionManager>[0]);
+    const session = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(readBack!);
+    expect(session.agentProvider).toBe('codex');
+    expect(session.agentRuntime).toBe('codex-pty');
+    expect(session.agentModel).toBe('gpt-5.5');
   });
 });

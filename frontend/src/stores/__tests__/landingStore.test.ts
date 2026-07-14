@@ -5,6 +5,8 @@
  *   - upsertReviewItem: replace by id / append / remove-on-resolve.
  *   - flattenPendingReviewItems: keeps pending decision + human_task + notification across
  *     multiple projects; drops findings, permission, and non-pending items.
+ *   - collectPendingBlockingRunIds: keeps hidden blocking findings available to
+ *     Ready-to-review classification without surfacing them as queue items.
  *
  * The tRPC client is mocked at module level so importing landingStore.ts does
  * not require a live Electron IPC bridge. Path is relative to this test file:
@@ -12,6 +14,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import type { ReviewItem, ReviewItemKind, ReviewItemStatus } from '../../../../shared/types/reviews';
+import type { ActiveRunRow } from '../activeRunsStore';
 
 vi.mock('../../trpc/client', () => ({
   trpc: {
@@ -34,7 +37,27 @@ vi.mock('../../utils/api', () => ({
   API: { projects: { getAll: vi.fn() } },
 }));
 
-import { upsertReviewItem, flattenPendingReviewItems } from '../landingStore';
+import {
+  collectPendingBlockingRunIds,
+  flattenActiveRunRows,
+  flattenPendingBlockingFindings,
+  flattenPendingReviewItems,
+  upsertReviewItem,
+} from '../landingStore';
+
+describe('flattenActiveRunRows', () => {
+  it('excludes terminal rows retained by the sidebar store', () => {
+    const row = (id: string, status: ActiveRunRow['status']): ActiveRunRow =>
+      ({ id, status } as ActiveRunRow);
+
+    const result = flattenActiveRunRows({
+      1: [row('running', 'running'), row('completed', 'completed')],
+      2: [row('awaiting', 'awaiting_review'), row('failed', 'failed'), row('canceled', 'canceled')],
+    });
+
+    expect(result.map((run) => run.id)).toEqual(['running', 'awaiting']);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Fixture builder
@@ -163,5 +186,54 @@ describe('flattenPendingReviewItems', () => {
 
   it('returns an empty array for an empty map', () => {
     expect(flattenPendingReviewItems({})).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// collectPendingBlockingRunIds
+// ---------------------------------------------------------------------------
+
+describe('collectPendingBlockingRunIds', () => {
+  it('collects blocking findings and visible blocking items by run', () => {
+    const byProject: Record<number, ReviewItem[]> = {
+      1: [
+        makeItem({ id: 'finding-blocking', kind: 'finding', blocking: true, run_id: 'run-finding' }),
+        makeItem({ id: 'decision-blocking', kind: 'decision', blocking: true, run_id: 'run-decision' }),
+        makeItem({ id: 'finding-nonblocking', kind: 'finding', blocking: false, run_id: 'run-clean' }),
+      ],
+    };
+
+    expect([...collectPendingBlockingRunIds(byProject)].sort()).toEqual([
+      'run-decision',
+      'run-finding',
+    ]);
+  });
+
+  it('ignores non-pending items and items without a run', () => {
+    const byProject: Record<number, ReviewItem[]> = {
+      1: [
+        makeItem({ id: 'resolved', kind: 'finding', blocking: true, run_id: 'run-resolved', status: 'resolved' }),
+        makeItem({ id: 'dismissed', kind: 'finding', blocking: true, run_id: 'run-dismissed', status: 'dismissed' }),
+        makeItem({ id: 'manual', kind: 'finding', blocking: true, run_id: null }),
+        makeItem({ id: 'clean', kind: 'finding', blocking: false, run_id: 'run-clean' }),
+      ],
+    };
+
+    expect(collectPendingBlockingRunIds(byProject)).toEqual(new Set());
+  });
+});
+
+describe('flattenPendingBlockingFindings', () => {
+  it('returns only pending blocking findings across projects', () => {
+    const byProject: Record<number, ReviewItem[]> = {
+      1: [
+        makeItem({ id: 'blocking', kind: 'finding', blocking: true }),
+        makeItem({ id: 'advisory', kind: 'finding', blocking: false }),
+        makeItem({ id: 'decision', kind: 'decision', blocking: true }),
+      ],
+      2: [makeItem({ id: 'resolved', kind: 'finding', blocking: true, status: 'resolved' })],
+    };
+
+    expect(flattenPendingBlockingFindings(byProject).map((item) => item.id)).toEqual(['blocking']);
   });
 });

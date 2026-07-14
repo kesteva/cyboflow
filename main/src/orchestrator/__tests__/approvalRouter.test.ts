@@ -709,6 +709,27 @@ describe('ApprovalRouter', () => {
     }
   });
 
+  it('clearPendingForSource settles one invocation without canceling a sibling lane', async () => {
+    const db = createTestDb();
+    const router = ApprovalRouter.initialize(dbAdapter(db));
+    const runId = 'run-source-scoped';
+    seedRun(db, { id: runId, status: 'running' });
+
+    const first = router.requestApproval(runId, 'tool_a', {}, vi.fn(), 'codex:invocation-a');
+    await router['getApprovalQueue'](runId).onIdle();
+    db.prepare("UPDATE workflow_runs SET status = 'running' WHERE id = ?").run(runId);
+    const second = router.requestApproval(runId, 'tool_b', {}, vi.fn(), 'codex:invocation-b');
+    await router['getApprovalQueue'](runId).onIdle();
+
+    router.clearPendingForSource(runId, 'codex:invocation-a');
+    expect(router.getPending()).toHaveLength(1);
+    await expect(first).resolves.toMatchObject({ behavior: 'deny' });
+
+    router.clearPendingForSource(runId, 'codex:invocation-b');
+    await expect(second).resolves.toMatchObject({ behavior: 'deny' });
+    expect(router.getPending()).toHaveLength(0);
+  });
+
   // -------------------------------------------------------------------------
   // Case G (TASK-305, revised): recoverStaleAwaitingReview fails ONLY
   //   gate-blocked awaiting_review runs (those with a pending approval whose

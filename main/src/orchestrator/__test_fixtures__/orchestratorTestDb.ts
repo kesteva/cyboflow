@@ -178,6 +178,21 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN rotation_experiment_id TEXT');
     variantColumnsAdded = true;
   };
+  // Migrations 059-064 (agent provider/runtime): getRunById projects these
+  // columns and createRun stamps them from the legacy substrate projection while
+  // Codex support is phased in. Folded in idempotently like the sibling runtime
+  // columns so includeSubstrate and includeWorkflowRunTaskColumns compose.
+  let agentProviderRuntimeAdded = false;
+  const addAgentProviderRuntimeColumnsOnce = (): void => {
+    if (agentProviderRuntimeAdded) return;
+    db.exec(
+      "ALTER TABLE workflow_runs ADD COLUMN agent_provider TEXT NOT NULL DEFAULT 'claude' CHECK (agent_provider IN ('claude','codex'))",
+    );
+    db.exec(
+      "ALTER TABLE workflow_runs ADD COLUMN agent_runtime TEXT NOT NULL DEFAULT 'claude-sdk' CHECK (agent_runtime IN ('claude-sdk','claude-interactive','codex-sdk'))",
+    );
+    agentProviderRuntimeAdded = true;
+  };
   if (options?.includeStuckDetectedAt) {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN stuck_detected_at INTEGER');
   }
@@ -211,6 +226,8 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     addVerifyColumnsOnce();
     // Migration 048: getRunById projects the four A/B tagging columns.
     addVariantColumnsOnce();
+    // Migrations 059-064: provider/runtime supersede substrate for new integrations.
+    addAgentProviderRuntimeColumnsOnce();
   }
   if (options?.includeQuestionsTable) {
     // Migration 010 references stuck_detected_at (added in migration 007) in the
@@ -256,6 +273,8 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     addVerifyColumnsOnce();
     // Migration 048: getRunById projects the four A/B tagging columns.
     addVariantColumnsOnce();
+    // Migrations 059-064: getRunById projects agent_provider/agent_runtime.
+    addAgentProviderRuntimeColumnsOnce();
   }
   return db;
 }

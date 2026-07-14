@@ -42,6 +42,7 @@ import {
   type ShellHookLogger,
   type ShellHookResult,
 } from '../../shellHooks/preToolUseShellHook';
+import { codexHookResultFromShellResult } from '../../shellHooks/codexPreToolUseHook';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -855,6 +856,46 @@ describe('preToolUseShellHook runShellHook', () => {
     expect(result.exitCode).toBe(2);
     expect(result.output.hookSpecificOutput.permissionDecision).toBe('deny');
     expect(result.output.hookSpecificOutput.permissionDecisionReason).toBe('blocked by human');
+  });
+
+  it('Codex hook wrapper maps allow to the supported PreToolUse allow response', async () => {
+    const shellResult: ShellHookResult = {
+      exitCode: 0,
+      output: {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'allow',
+        },
+      },
+    };
+
+    expect(codexHookResultFromShellResult(shellResult)).toEqual({
+      exitCode: 0,
+      output: {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'allow',
+        },
+      },
+    });
+  });
+
+  it('Codex hook wrapper maps deny to top-level decision:"block" with a reason', async () => {
+    const shellResult: ShellHookResult = {
+      exitCode: 2,
+      output: {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason: 'blocked by human',
+        },
+      },
+    };
+
+    expect(codexHookResultFromShellResult(shellResult)).toEqual({
+      exitCode: 0,
+      output: { decision: 'block', reason: 'blocked by human' },
+    });
   });
 
   it('socket close before a verdict → fail-closed deny (exit 2), distinguished by liveness not a timer', async () => {

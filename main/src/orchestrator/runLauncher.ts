@@ -23,6 +23,7 @@ import type { WorktreeManager } from '../services/worktreeManager';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
+import type { AgentProvider, WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import { resolveWorkflowDefinition } from '../../../shared/types/workflows';
 import type { StreamEnvelope } from '../../../shared/types/claudeStream';
@@ -276,13 +277,11 @@ export class RunLauncher {
     // block. OPTIONAL — when omitted the run is not finding-seeded.
     findingIds?: string[],
     // The user's explicit per-run MODEL choice (Configure surface →
-    // runs.start → here), a user-facing alias ('opus' | 'sonnet' | 'haiku' | 'auto';
-    // legacy 'opus-250k' still resolves for back-compat but is no longer offered
-    // in the picker) threaded into WorkflowRegistry.createRun, which stamps it
-    // onto workflow_runs.model (migration 037). OPTIONAL — when omitted the run
-    // pins no model and RunExecutor falls through to the SDK default. There is no
-    // resolver ladder; the value is resolved to a concrete snapshot at the spawn
-    // seam (modelContext.resolveModelAlias).
+    // runs.start → here), a provider-scoped user-facing alias threaded into
+    // WorkflowRegistry.createRun, which drops cross-provider stale values and
+    // stamps the surviving selection onto workflow_runs.model (migration 037).
+    // OPTIONAL — when omitted the run pins no model and the runtime falls through
+    // to its default. Concrete provider translation happens at the spawn seam.
     requestedModel?: string,
     // The user's explicit per-run CODE-REVIEW-EVAL choice (Configure surface →
     // runs.start → here). true = force the eval ON for this run, false = force it
@@ -328,6 +327,12 @@ export class RunLauncher {
       // stays valid for planner AND ship, unchanged, and leaves seed_idea_ids NULL.
       ideaIds?: string[];
     },
+    // The user's explicit per-run AGENT PROVIDER/RUNTIME choice. Omitted means
+    // createRun keeps the Claude defaults; codex-sdk is stored as provider/runtime
+    // while retaining substrate='sdk' for compatibility with legacy substrate-only
+    // seams until the provider-neutral dispatch manager lands.
+    requestedAgentProvider?: AgentProvider,
+    requestedAgentRuntime?: WorkflowAgentRuntime,
   ): Promise<{ runId: string; worktreePath: string; branchName: string; permissionMode: PermissionMode }> {
     await this.ensureGitignoreEntry(projectPath);
 
@@ -480,7 +485,9 @@ export class RunLauncher {
       rv !== null ||
       rotationExperimentId !== null ||
       experiment !== undefined ||
-      projectVerifyConfig !== null
+      projectVerifyConfig !== null ||
+      requestedAgentProvider !== undefined ||
+      requestedAgentRuntime !== undefined
         ? {
             ...(projectId !== undefined ? { projectId } : {}),
             ...(requestedExecutionModel !== undefined ? { requestedExecutionModel } : {}),
@@ -501,6 +508,8 @@ export class RunLauncher {
               ? { experimentId: experiment.experimentId, experimentArm: experiment.arm }
               : {}),
             ...(projectVerifyConfig !== null ? { projectVerifyConfig } : {}),
+            ...(requestedAgentProvider !== undefined ? { requestedAgentProvider } : {}),
+            ...(requestedAgentRuntime !== undefined ? { requestedAgentRuntime } : {}),
           }
         : undefined;
     const { runId, permissionMode, substrate: resolvedSubstrate } = this.workflowRegistry.createRun(
@@ -549,17 +558,10 @@ export class RunLauncher {
       this.db
         .prepare('UPDATE workflow_runs SET base_sha = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
         .run(baseSha, runId);
-      // Dual-write the legacy back-link AND keep the session's substrate in
-      // lockstep with the run it hosts. Without the substrate stamp a session
-      // created on the SDK default (ensureSessionForLaunch) that hosts an
-      // INTERACTIVE run would, on cancel/end, return to its resting view as
-      // SDK — the session never reflected the PTY substrate the run actually
-      // used. The frontend resting view (ClaudePanel) reads sessions.substrate,
-      // and the live REPL re-spawn (sessions:input) re-registers the PTY channel
-      // under sessions.run_id, so this keeps the resting view a PTY surface.
-      this.db
-        .prepare('UPDATE sessions SET run_id = ?, substrate = ? WHERE id = ?')
-        .run(runId, resolvedSubstrate, sessionId);
+      // Dual-write only the legacy back-link. The session's substrate and
+      // agent_* columns own its default chat runtime; the workflow run owns the
+      // temporary takeover runtime and must not overwrite those defaults.
+      this.db.prepare('UPDATE sessions SET run_id = ? WHERE id = ?').run(runId, sessionId);
 
       // Planner pre-launch seed idea(s) (migrations 017 + 060). A direct
       // workflow_runs write — NOT a tasks write, and NOT routed through the stage

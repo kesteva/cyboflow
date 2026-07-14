@@ -256,6 +256,38 @@ describe('SubstrateDispatchFacade — substrate-aware dispatch', () => {
     expect(sdk.spawnCliProcess).toHaveBeenCalledOnce();
     expect(interactive.spawnCliProcess).not.toHaveBeenCalled();
   });
+
+  it("routes spawnCliProcess to the Codex SDK manager when run.agent_runtime === 'codex-sdk'", async () => {
+    const run = makeWorkflowRunRow({
+      substrate: 'sdk',
+      agent_provider: 'codex',
+      agent_runtime: 'codex-sdk',
+    });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const codexSdk = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(
+      asManager(sdk),
+      asManager(interactive),
+      registry,
+      makeSpyLogger(),
+      [],
+      asManager(codexSdk),
+    );
+
+    await facade.spawnCliProcess({
+      panelId: run.id,
+      sessionId: run.id,
+      runId: run.id,
+      worktreePath: '/fake/worktree',
+      prompt: 'go',
+    });
+
+    expect(codexSdk.spawnCliProcess).toHaveBeenCalledOnce();
+    expect(sdk.spawnCliProcess).not.toHaveBeenCalled();
+    expect(interactive.spawnCliProcess).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -767,6 +799,39 @@ describe('SubstrateDispatchFacade — fan-in re-emits both managers events', () 
     expect(received).toEqual([sdkSpawned, interactiveSpawned]);
     expect(received[0]).toBe(sdkSpawned);
     expect(received[1]).toBe(interactiveSpawned);
+  });
+
+  it("re-emits an additional PTY manager's exit and retains failed output for replay", () => {
+    const run = makeWorkflowRunRow({ substrate: 'interactive' });
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const codexPty = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(
+      asManager(sdk),
+      asManager(interactive),
+      makeRegistry(run),
+      makeSpyLogger(),
+      [asManager(codexPty)],
+    );
+    const received: unknown[] = [];
+    facade.on('exit', (payload) => received.push(payload));
+
+    codexPty.emit('pty-output', {
+      panelId: 'panel-codex',
+      sessionId: 'session-codex',
+      runId: run.id,
+      data: 'Codex failed to start',
+    });
+    const failedExit = {
+      panelId: 'panel-codex',
+      sessionId: 'session-codex',
+      exitCode: 1,
+      signal: null,
+    };
+    codexPty.emit('exit', failedExit);
+
+    expect(received).toEqual([failedExit]);
+    expect(facade.getPtyBacklog(run.id)).toContain('Codex failed to start');
   });
 
   it('dispose() unsubscribes from both managers so no further events are re-emitted', () => {

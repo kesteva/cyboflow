@@ -47,10 +47,12 @@ interface SystemicPattern {
 const SYSTEMIC_PATTERNS: SystemicPattern[] = [
   {
     // "Claude AI usage limit reached|1751234567" (epoch-suffixed subscription
-    // limit) and the bare "usage limit reached" / "reached your usage limit"
-    // phrasing without an epoch suffix.
+    // limit), "reached/hit your usage limit" phrasing, and Codex's
+    // `usageLimitExceeded` provider code. The terminal condition is required:
+    // incidental configuration prose such as "no usage limit configured" must
+    // not park a run.
     name: 'usage-limit-reached',
-    pattern: /usage limit reached|reached your usage limit|reached the usage limit/i,
+    pattern: /usage[\s_-]*limit[\s_-]*(?:reached|hit|exceeded|exhausted)|(?:reached|hit)(?: (?:your|the))? usage[\s_-]*limit/i,
   },
   {
     // "5-hour limit reached ∙ resets 2:20pm", 7-day/weekly/session variants,
@@ -59,8 +61,9 @@ const SYSTEMIC_PATTERNS: SystemicPattern[] = [
     pattern: /\blimit\s+(reached|hit)\b/i,
   },
   {
+    // Also covers Codex's `rateLimitExceeded` provider code.
     name: 'rate-limit',
-    pattern: /rate[\s_-]*limit/i,
+    pattern: /rate[\s_-]*limit(?:[\s_-]*(?:reached|hit|exceeded|exhausted))?/i,
   },
   {
     name: 'http-429',
@@ -84,11 +87,13 @@ const SYSTEMIC_PATTERNS: SystemicPattern[] = [
   },
   {
     name: 'auth-failed',
-    pattern: /authentication[\s_-]*failed/i,
+    // Includes provider codes such as `authenticationRequired` and
+    // `authTokenExpired`, whether camelCase, snake_case, or kebab-case.
+    pattern: /auth(?:entication)?[\s_-]*(?:failed|required|expired|invalid)|auth[\s_-]*token[\s_-]*expired/i,
   },
   {
     name: 'auth-invalid-api-key',
-    pattern: /invalid api key/i,
+    pattern: /invalid[\s_-]*api[\s_-]*key/i,
   },
   {
     name: 'auth-401',
@@ -96,7 +101,7 @@ const SYSTEMIC_PATTERNS: SystemicPattern[] = [
   },
   {
     name: 'auth-oauth-expired',
-    pattern: /oauth token has expired/i,
+    pattern: /oauth[\s_-]*token(?:[\s_-]*has)?[\s_-]*expired/i,
   },
   {
     // The real mid-run Anthropic shape: `API Error: 401
@@ -108,7 +113,7 @@ const SYSTEMIC_PATTERNS: SystemicPattern[] = [
   },
   {
     name: 'auth-invalid-x-api-key',
-    pattern: /invalid x-api-key/i,
+    pattern: /invalid[\s_-]*x[\s_-]*api[\s_-]*key/i,
   },
   // Transport-level failures below: a dropped/reset/timed-out connection is an
   // environment-level condition exactly like overload or a rate limit — the

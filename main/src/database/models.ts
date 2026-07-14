@@ -1,5 +1,6 @@
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
+import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
 
 export interface Project {
   id: number;
@@ -106,6 +107,15 @@ export interface Session {
    */
   substrate?: CliSubstrate;
   /**
+   * Provider/runtime backing the session's default chat agent (migrations 059-061).
+   * Existing `substrate` stays as a Claude compatibility projection while callers
+   * move to provider/runtime.
+   */
+  agent_provider?: AgentProvider;
+  agent_runtime?: SessionAgentRuntime;
+  /** Provider-scoped session default model. NULL → selected runtime default. */
+  agent_model?: string | null;
+  /**
    * Agent effort the session was launched with ('ultracode' | undefined).
    * Written by sessions:create-quick (migration 029); NULL → no effort.
    */
@@ -155,6 +165,9 @@ export interface CreateSessionData {
   is_main_repo?: boolean;
   /** In-place session (migration 047) — see Session.in_place. */
   in_place?: boolean;
+  agent_provider?: AgentProvider;
+  agent_runtime?: SessionAgentRuntime;
+  agent_model?: string | null;
   display_order?: number;
   auto_commit?: boolean;
   tool_type?: 'claude' | 'none';
@@ -182,6 +195,9 @@ export interface UpdateSessionData {
   commit_mode?: 'structured' | 'checkpoint' | 'disabled';
   commit_mode_settings?: string; // JSON string of CommitModeSettings
   agent_permission_mode?: PermissionMode;
+  agent_provider?: AgentProvider;
+  agent_runtime?: SessionAgentRuntime;
+  agent_model?: string | null;
   disabled_mcp_servers_json?: string; // JSON string[] of disabled MCP server names (migration 037)
   enabled_plugins_json?: string; // JSON string[] of force-enabled plugin ids (migration 037)
   skip_continue_next?: boolean;

@@ -121,7 +121,7 @@ describe('onboardingTelemetry — lifecycle', () => {
       slice({ status: 'active', step: 6, maxVisitedStep: 6 }),
       slice({ status: 'skipped', step: 6, maxVisitedStep: 6 }),
     );
-    expect(events).toEqual([{ name: 'onboarding_skipped', props: { step: 6, name: 'model' } }]);
+    expect(events).toEqual([{ name: 'onboarding_skipped', props: { step: 6, name: 'session_permission' } }]);
   });
 
   it('parking (active → pending) is silent', () => {
@@ -145,7 +145,7 @@ describe('onboardingTelemetry — lifecycle', () => {
       slice({ status: 'skipped', step: 6, maxVisitedStep: 6 }),
       slice({ status: 'completed', step: 6, maxVisitedStep: 6 }),
     );
-    expect(events).toEqual([{ name: 'onboarding_dismissed', props: { step: 6, name: 'model' } }]);
+    expect(events).toEqual([{ name: 'onboarding_dismissed', props: { step: 6, name: 'session_permission' } }]);
   });
 
   it('a dismiss from a parked coach step (pending → completed) reads as a dismiss too', () => {

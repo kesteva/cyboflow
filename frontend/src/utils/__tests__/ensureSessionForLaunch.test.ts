@@ -57,15 +57,18 @@ vi.mock('../../stores/sessionStore', () => ({
 import { ensureSessionForLaunch } from '../ensureSessionForLaunch';
 
 /**
- * Minimal ActiveRunRow factory — only the `session_id` field is read by the
+ * Minimal ActiveRunRow factory — only session_id + status are read by the
  * busy-session guard; the rest are filled with inert placeholders.
  */
-function activeRunRow(sessionId: string): ActiveRunRow {
+function activeRunRow(
+  sessionId: string,
+  status: ActiveRunRow['status'] = 'running',
+): ActiveRunRow {
   return {
     id: `run-${sessionId}`,
     workflow_id: 'wf-7-planner',
     project_id: 7,
-    status: 'running',
+    status,
     session_id: sessionId,
     workflowName: 'planner',
   } as ActiveRunRow;
@@ -118,6 +121,36 @@ describe('ensureSessionForLaunch', () => {
     expect(mockCreatePanel).toHaveBeenCalled();
   });
 
+  it('stamps a freshly-created flow host with its configured default agent', async () => {
+    await ensureSessionForLaunch(7, {
+      forceNew: true,
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      agentModel: 'gpt-5.5',
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith({
+      prompt: '',
+      projectId: 7,
+      worktreeMode: 'worktree',
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      agentModel: 'gpt-5.5',
+    });
+  });
+
+  it('does not overwrite the default agent when reusing an existing session', async () => {
+    mockGetState.mockReturnValue({ selectedSessionId: 'sess-existing' });
+
+    await ensureSessionForLaunch(7, {
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      agentModel: 'gpt-5.5',
+    });
+
+    expect(mockCreateQuick).not.toHaveBeenCalled();
+  });
+
   it('does NOT reuse a BUSY selected session — creates a fresh session instead', async () => {
     mockGetState.mockReturnValue({ selectedSessionId: 'sess-busy' });
     // An active run already executes in the selected session → it is busy.
@@ -129,6 +162,19 @@ describe('ensureSessionForLaunch', () => {
     expect(id).toBe('sess-new');
     expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 7, worktreeMode: 'worktree' });
     expect(mockCreatePanel).toHaveBeenCalled();
+  });
+
+  it('reuses a selected session whose retained workflow row is terminal', async () => {
+    mockGetState.mockReturnValue({ selectedSessionId: 'sess-resting' });
+    useActiveRunsStore.setState({
+      runsByProject: { 7: [activeRunRow('sess-resting', 'completed')] },
+    });
+
+    const id = await ensureSessionForLaunch(7);
+
+    expect(id).toBe('sess-resting');
+    expect(mockCreateQuick).not.toHaveBeenCalled();
+    expect(mockCreatePanel).not.toHaveBeenCalled();
   });
 
   it('does NOT reuse an IN-PLACE selected session — creates a fresh worktree-backed session', async () => {

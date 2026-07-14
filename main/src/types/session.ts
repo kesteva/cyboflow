@@ -1,5 +1,6 @@
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
+import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 
 export interface Session {
@@ -59,6 +60,15 @@ export interface Session {
    * undefined/NULL → sdk (legacy).
    */
   substrate?: CliSubstrate;
+  /**
+   * Provider/runtime backing the session's default chat agent (migrations 059-061).
+   * `substrate` remains as a Claude compatibility projection while the app moves
+   * to provider/runtime.
+   */
+  agentProvider?: AgentProvider;
+  agentRuntime?: SessionAgentRuntime;
+  /** Provider-scoped model selection. undefined/NULL → selected runtime default. */
+  agentModel?: string | null;
   /**
    * Agent effort the session was launched with ('ultracode' | undefined).
    * Stamped by sessions:create-quick (sessions.effort, migration 029) and
@@ -141,6 +151,11 @@ export interface CreateSessionRequest {
    * (request-parity rule, FIND-SPRINT-037-5).
    */
   substrate?: CliSubstrate;
+  /** Provider/runtime for the quick session's default chat agent. */
+  agentProvider?: AgentProvider;
+  agentRuntime?: SessionAgentRuntime;
+  /** Provider-scoped model selection. Omitted → selected runtime default. */
+  agentModel?: string | null;
   /**
    * Opt-in agent effort level for the quick session. The only value today is
    * 'ultracode' (the "Ultracode" wizard card), which launches the interactive

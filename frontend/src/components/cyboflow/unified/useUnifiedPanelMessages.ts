@@ -34,6 +34,45 @@ interface ConversationMessage {
 /** Debounce window for the live re-fetch after a session-output delta lands. */
 const LIVE_REFETCH_DEBOUNCE_MS = 500;
 
+function userText(message: UnifiedMessage): string | null {
+  if (message.role !== 'user') return null;
+  const text = message.segments
+    .filter((segment) => segment.type === 'text')
+    .map((segment) => segment.type === 'text' ? segment.content : '')
+    .join('\n')
+    .trim();
+  return text.length > 0 ? text : null;
+}
+
+/**
+ * Merge panel conversation rows with projected provider output.
+ *
+ * SDK providers echo the submitted user turn in their structured stream. The
+ * same turn is also persisted immediately in conversation_messages so it can
+ * render before provider startup completes. Once the projected echo exists it
+ * is canonical; drop matching conversation copies while preserving repeated
+ * projected turns with identical text.
+ */
+export function mergePanelMessageSources(
+  conversationUserMessages: UnifiedMessage[],
+  projectedMessages: UnifiedMessage[],
+): UnifiedMessage[] {
+  const projectedUserTexts = new Set(
+    projectedMessages
+      .map(userText)
+      .filter((text): text is string => text !== null),
+  );
+  const merged: UnifiedMessage[] = [
+    ...conversationUserMessages.filter((message) => {
+      const text = userText(message);
+      return text === null || !projectedUserTexts.has(text);
+    }),
+    ...projectedMessages,
+  ];
+  merged.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  return merged;
+}
+
 export function useUnifiedPanelMessages(
   panelId: string | null,
   enabled = true,
@@ -79,19 +118,11 @@ export function useUnifiedPanelMessages(
         });
       }
 
-      const allMessages: unknown[] = [...userPrompts];
+      let projectedMessages: UnifiedMessage[] = [];
       if (outputResponse.success && Array.isArray(outputResponse.data)) {
-        allMessages.push(...outputResponse.data);
+        projectedMessages = transformer.transform(outputResponse.data);
       }
-
-      // Order by timestamp so user prompts interleave with their responses.
-      allMessages.sort((a, b) => {
-        const timeA = new Date((a as { timestamp?: string }).timestamp ?? '').getTime();
-        const timeB = new Date((b as { timestamp?: string }).timestamp ?? '').getTime();
-        return timeA - timeB;
-      });
-
-      setMessages(transformer.transform(allMessages));
+      setMessages(mergePanelMessageSources(userPrompts, projectedMessages));
     } catch (err: unknown) {
       console.error('[useUnifiedPanelMessages] Failed to load messages:', err);
       setLoadError('Failed to load conversation history');

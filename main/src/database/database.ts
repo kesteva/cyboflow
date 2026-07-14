@@ -2201,8 +2201,8 @@ export class DatabaseService {
       const displayOrder = maxOrder + 1;
       
       this.db.prepare(`
-        INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id, folder_id, permission_mode, is_main_repo, in_place, display_order, auto_commit, tool_type, base_commit, base_branch, commit_mode, commit_mode_settings, run_id)
-        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id, folder_id, permission_mode, is_main_repo, in_place, agent_provider, agent_runtime, agent_model, display_order, auto_commit, tool_type, base_commit, base_branch, commit_mode, commit_mode_settings, run_id)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         data.id,
         data.name,
@@ -2214,6 +2214,9 @@ export class DatabaseService {
         data.permission_mode || DEFAULT_PERMISSION_MODE,
         data.is_main_repo ? 1 : 0,
         data.in_place ? 1 : 0,
+        data.agent_provider || 'claude',
+        data.agent_runtime || 'claude-sdk',
+        data.agent_model ?? null,
         displayOrder,
         data.auto_commit !== undefined ? (data.auto_commit ? 1 : 0) : 1,
         data.tool_type || 'claude',
@@ -2379,6 +2382,18 @@ export class DatabaseService {
       updates.push('agent_permission_mode = ?');
       values.push(data.agent_permission_mode);
     }
+    if (data.agent_provider !== undefined) {
+      updates.push('agent_provider = ?');
+      values.push(data.agent_provider);
+    }
+    if (data.agent_runtime !== undefined) {
+      updates.push('agent_runtime = ?');
+      values.push(data.agent_runtime);
+    }
+    if (data.agent_model !== undefined) {
+      updates.push('agent_model = ?');
+      values.push(data.agent_model);
+    }
     if (data.disabled_mcp_servers_json !== undefined) {
       updates.push('disabled_mcp_servers_json = ?');
       values.push(data.disabled_mcp_servers_json);
@@ -2394,7 +2409,7 @@ export class DatabaseService {
 
     // Only update the updated_at timestamp if we're changing something other than is_favorite, auto_commit, skip_continue_next, commit_mode, or commit_mode_settings
     // This prevents the session from showing as "unviewed" when just toggling these settings
-    const isOnlyToggleUpdate = updates.length === 1 && (updates[0] === 'is_favorite = ?' || updates[0] === 'auto_commit = ?' || updates[0] === 'skip_continue_next = ?' || updates[0] === 'commit_mode = ?' || updates[0] === 'commit_mode_settings = ?' || updates[0] === 'agent_permission_mode = ?' || updates[0] === 'disabled_mcp_servers_json = ?' || updates[0] === 'enabled_plugins_json = ?');
+    const isOnlyToggleUpdate = updates.length === 1 && (updates[0] === 'is_favorite = ?' || updates[0] === 'auto_commit = ?' || updates[0] === 'skip_continue_next = ?' || updates[0] === 'commit_mode = ?' || updates[0] === 'commit_mode_settings = ?' || updates[0] === 'agent_permission_mode = ?' || updates[0] === 'agent_provider = ?' || updates[0] === 'agent_runtime = ?' || updates[0] === 'agent_model = ?' || updates[0] === 'disabled_mcp_servers_json = ?' || updates[0] === 'enabled_plugins_json = ?');
     if (!isOnlyToggleUpdate) {
       updates.push('updated_at = CURRENT_TIMESTAMP');
     }

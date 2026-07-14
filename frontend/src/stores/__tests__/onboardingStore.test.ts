@@ -7,12 +7,18 @@
  * effects live in OnboardingGate and are not exercised here.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
-import type { ClaudeDetectionResult } from '../../../../shared/types/onboarding';
+import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../../shared/types/onboarding';
 import { useOnboardingStore, isNextGateBlocked } from '../onboardingStore';
 
 const DETECTED: ClaudeDetectionResult = {
   credentials: { found: true, source: 'keychain', account: 'a@b.co' },
   binary: { found: true, path: '/usr/bin/claude', version: 'v1.4.2' },
+  state: 'detected',
+};
+
+const CODEX_DETECTED: CodexDetectionResult = {
+  runtime: { found: true, path: '/app/codex', version: '0.144.3' },
+  account: { found: true, email: 'codex@example.com', planType: 'plus' },
   state: 'detected',
 };
 
@@ -24,6 +30,8 @@ function reset(): void {
     replay: false,
     detection: null,
     connected: false,
+    codexDetection: null,
+    codexConnected: false,
     permMode: 'auto',
     hydrated: false,
   });
@@ -79,12 +87,43 @@ describe('onboardingStore — hydrate', () => {
 describe('onboardingStore — step-1 gate', () => {
   beforeEach(reset);
 
-  it('isNextGateBlocked blocks step 1 until detected AND connected', () => {
-    expect(isNextGateBlocked({ step: 1, detection: null, connected: false })).toBe(true);
-    expect(isNextGateBlocked({ step: 1, detection: DETECTED, connected: false })).toBe(true);
-    expect(isNextGateBlocked({ step: 1, detection: DETECTED, connected: true })).toBe(false);
+  it('isNextGateBlocked accepts either detected and enabled provider', () => {
+    expect(isNextGateBlocked({
+      step: 1,
+      detection: null,
+      connected: false,
+      codexDetection: null,
+      codexConnected: false,
+    })).toBe(true);
+    expect(isNextGateBlocked({
+      step: 1,
+      detection: DETECTED,
+      connected: false,
+      codexDetection: CODEX_DETECTED,
+      codexConnected: false,
+    })).toBe(true);
+    expect(isNextGateBlocked({
+      step: 1,
+      detection: DETECTED,
+      connected: true,
+      codexDetection: null,
+      codexConnected: false,
+    })).toBe(false);
+    expect(isNextGateBlocked({
+      step: 1,
+      detection: null,
+      connected: false,
+      codexDetection: CODEX_DETECTED,
+      codexConnected: true,
+    })).toBe(false);
     // Non-step-1 is never gated.
-    expect(isNextGateBlocked({ step: 0, detection: null, connected: false })).toBe(false);
+    expect(isNextGateBlocked({
+      step: 0,
+      detection: null,
+      connected: false,
+      codexDetection: null,
+      codexConnected: false,
+    })).toBe(false);
   });
 
   it('next() is a no-op on step 1 while the gate is closed, and advances once open', () => {
@@ -95,6 +134,20 @@ describe('onboardingStore — step-1 gate', () => {
     s().next();
     expect(s().step).toBe(2);
     expect(s().maxVisitedStep).toBe(2);
+  });
+
+  it('next() advances with Codex enabled even when Claude is unavailable', () => {
+    useOnboardingStore.setState({
+      status: 'active',
+      step: 1,
+      maxVisitedStep: 1,
+      detection: null,
+      connected: false,
+      codexDetection: CODEX_DETECTED,
+      codexConnected: true,
+    });
+    s().next();
+    expect(s().step).toBe(2);
   });
 });
 
@@ -307,14 +360,24 @@ describe('onboardingStore — goTo / skip / resume', () => {
     }
   });
 
-  it('begin resets detection + consent for a clean replay', () => {
-    useOnboardingStore.setState({ status: 'skipped', step: 9, detection: DETECTED, connected: true, permMode: 'dontAsk' });
+  it('begin resets provider detection + consent for a clean replay', () => {
+    useOnboardingStore.setState({
+      status: 'skipped',
+      step: 9,
+      detection: DETECTED,
+      connected: true,
+      codexDetection: CODEX_DETECTED,
+      codexConnected: true,
+      permMode: 'dontAsk',
+    });
     s().begin(true);
     expect(s().status).toBe('active');
     expect(s().step).toBe(0);
     expect(s().replay).toBe(true);
     expect(s().detection).toBeNull();
     expect(s().connected).toBe(false);
+    expect(s().codexDetection).toBeNull();
+    expect(s().codexConnected).toBe(false);
     expect(s().permMode).toBe('auto');
   });
 });

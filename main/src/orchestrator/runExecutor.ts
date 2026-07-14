@@ -19,6 +19,7 @@ import { EventEmitter } from 'node:events';
 import type { LoggerLike } from './types';
 import type { WorkflowRow, WorkflowRunRow } from '../../../shared/types/workflows';
 import type { PermissionMode } from '../../../shared/types/workflows';
+import { AgentInvocationStore } from './agentInvocationStore';
 import type { ClaudeStreamEvent } from '../../../shared/types/claudeStream';
 import type { RunEventBridge, BridgeEventsOptions } from './runEventBridge';
 import { bridgeEvents as bridgeEventsImpl } from './runEventBridge';
@@ -31,6 +32,11 @@ import type { FindingTagBucket } from '../../../shared/types/reviews';
 import { findingBucket } from '../../../shared/types/reviews';
 import { ReviewItemRouter } from './reviewItemRouter';
 import { createRunDirectives, type RunDirectives } from './programmatic/runDirectives';
+import {
+  renderWorkflowPromptForRuntime,
+  type WorkflowPromptRenderContext,
+  type WorkflowPromptTurnKind,
+} from './workflowPromptRenderer';
 
 // ---------------------------------------------------------------------------
 // Narrow interfaces (no concrete imports)
@@ -141,6 +147,13 @@ export interface ClaudeSpawnerOptions {
   worktreePath: string;
   prompt: string;
   /**
+   * The prompt is orchestration plumbing, not a user-authored chat turn. Codex
+   * app-server echoes every turn input as a userMessage; its manager uses this
+   * flag to keep that echo out of the chat projection while retaining the raw
+   * provider notification for diagnostics. Quick-chat and nudge inputs omit it.
+   */
+  hidePromptFromTranscript?: boolean;
+  /**
    * Workflow 4-mode agent permission value resolved from the run snapshot
    * (`workflow_runs.permission_mode_snapshot`). Threaded to the spawning
    * manager so each substrate can apply native auto / accept-edits / ask /
@@ -181,6 +194,8 @@ export interface ClaudeSpawnerOptions {
    * SDK uses its own default (byte-identical to before migration 037).
    */
   model?: string;
+  /** Workflow step owning this concrete invocation; absent for run-level turns. */
+  agentInvocationStepId?: string;
 }
 
 /**
@@ -701,8 +716,22 @@ export class RunExecutor {
     }
 
     try {
-      const prompt = await this.getPrompt(runId, workflow);
+      const turnKind = this.getWorkflowPromptTurnKind(runId);
+      let prompt = await this.getPrompt(runId, workflow);
       const overrides = await this.buildOptionsOverrides(runId, run, workflow);
+      const renderedPrompt = this.renderPromptForRun(
+        run,
+        prompt,
+        overrides.systemPromptAppend,
+        turnKind,
+      );
+      prompt = renderedPrompt.prompt;
+      const renderedOverrides: Partial<ClaudeSpawnerOptions> = { ...overrides };
+      if (renderedPrompt.systemPromptAppend.length > 0) {
+        renderedOverrides.systemPromptAppend = renderedPrompt.systemPromptAppend;
+      } else {
+        delete renderedOverrides.systemPromptAppend;
+      }
 
       // Wire event forwarding BEFORE spawning so no SDK-initialization events
       // are lost — bridgeEvents registers listeners, spawnCliProcess starts the
@@ -726,12 +755,14 @@ export class RunExecutor {
       await this.onLifecycleTransition(runId, 'pre_spawn');
       // Emit step 'running' after the run transitions to running status (write-then-emit
       // ordering mirrors stepTransitionBridge: lifecycle transition fires first, then step emit).
-      this.emitStep(runId, 'running');
+      if (turnKind === 'launch') this.emitStep(runId, 'running');
 
-      this.logger.info('[RunExecutor] spawning Claude CLI process', {
+      this.logger.info('[RunExecutor] spawning agent process', {
         runId,
         panelId,
         worktreePath: run.worktree_path,
+        provider: run.agent_provider ?? 'claude',
+        runtime: run.agent_runtime ?? (run.substrate === 'interactive' ? 'claude-interactive' : 'claude-sdk'),
       });
 
       // Resume the SAME SDK conversation when EITHER a Piece-C nudge OR a Phase-4b
@@ -741,9 +772,9 @@ export class RunExecutor {
       // run (neither pending) this is undefined and the spawn options stay
       // byte-identical (zero-behavior-change floor).
       const resumeSessionId =
-        ((this.pendingNudge.has(runId) || this.pendingResume.has(runId)) &&
-          run.claude_session_id) ||
-        undefined;
+        this.pendingNudge.has(runId) || this.pendingResume.has(runId)
+          ? this.resolveResumeSessionId(runId, run.claude_session_id)
+          : undefined;
 
       try {
         await this.spawner.spawnCliProcess({
@@ -752,7 +783,8 @@ export class RunExecutor {
           runId,
           worktreePath: run.worktree_path,
           prompt,
-          ...overrides,
+          hidePromptFromTranscript: turnKind === 'launch',
+          ...renderedOverrides,
           ...(resumeSessionId ? { resumeSessionId } : {}),
         });
 
@@ -760,8 +792,10 @@ export class RunExecutor {
         // RESTS in awaiting_review awaiting the user's Merge / PR / Dismiss
         // decision. The executor NEVER auto-completes a run.
         await this.onLifecycleTransition(runId, 'drained');
-        // Emit step 'done' after the rest transition fires.
-        this.emitStep(runId, 'done');
+        // Do not synthesize a run-level `done` transition here. Workflow agents
+        // report concrete step boundaries through cyboflow_report_step; emitting
+        // `done` for the initial step would overwrite the final MCP-reported
+        // current_step_id and make a finished Sprint appear to rewind to planning.
         // "Always allow messaging a running flow": if the user typed while this
         // turn was executing, deliver that buffered input as the NEXT turn instead
         // of leaving it parked. drainQueuedInputAtRest re-drives the run through
@@ -775,14 +809,18 @@ export class RunExecutor {
         const message = err instanceof Error ? err.message : String(err);
         this.pendingFailedMessage.set(runId, message);
         await this.onLifecycleTransition(runId, 'failed');
-        // Emit step 'done' on failure path as well — the step ended, regardless of outcome.
-        this.emitStep(runId, 'done');
         // Re-throw so the caller's catch (in runLauncher.ts) can log it.
         throw err;
       }
     } finally {
       this.teardownRun(runId);
     }
+  }
+
+  private resolveResumeSessionId(runId: string, legacyClaudeSessionId?: string | null): string | undefined {
+    if (!this.db) return legacyClaudeSessionId ?? undefined;
+    return new AgentInvocationStore(this.db).getLatestTopLevelResumeTarget(runId)
+      ?.externalSessionId ?? legacyClaudeSessionId ?? undefined;
   }
 
   /**
@@ -1547,6 +1585,39 @@ export class RunExecutor {
     }
 
     return parts.join('\n\n');
+  }
+
+  private renderPromptForRun(
+    run: WorkflowRunRow,
+    prompt: string,
+    systemPromptAppend: string | undefined,
+    turnKind: WorkflowPromptTurnKind,
+  ): { prompt: string; systemPromptAppend: string } {
+    return renderWorkflowPromptForRuntime(
+      {
+        prompt,
+        systemPromptAppend: systemPromptAppend ?? '',
+      },
+      this.getWorkflowPromptRenderContext(run, turnKind),
+    );
+  }
+
+  private getWorkflowPromptRenderContext(
+    run: WorkflowRunRow,
+    turnKind: WorkflowPromptTurnKind,
+  ): WorkflowPromptRenderContext {
+    return {
+      provider: run.agent_provider ?? 'claude',
+      runtime: run.agent_runtime ?? 'claude-sdk',
+      executionModel: run.execution_model ?? 'orchestrated',
+      turnKind,
+    };
+  }
+
+  private getWorkflowPromptTurnKind(runId: string): WorkflowPromptTurnKind {
+    if (this.pendingNudge.has(runId)) return 'nudge';
+    if (this.pendingResume.has(runId)) return 'resume';
+    return 'launch';
   }
 
   /**

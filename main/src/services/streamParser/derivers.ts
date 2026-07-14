@@ -8,6 +8,9 @@
  */
 
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
+import type { AgentStreamEvent } from '../../../../shared/types/agentStream';
+
+export type PersistableStreamEvent = ClaudeStreamEvent | AgentStreamEvent;
 
 /**
  * Derives the event_type string for storage / envelope dispatch.
@@ -17,9 +20,45 @@ import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
  * `__unknown__` and any future `unknown` variant normalize to the string
  * 'unknown' so queries can filter on a stable value.
  */
-export function deriveEventType(event: ClaudeStreamEvent): string {
-  if ('kind' in event && event.kind === '__unknown__') {
+export function deriveEventType(event: PersistableStreamEvent): string {
+  if (!('type' in event)) {
     return 'unknown';
   }
-  return (event as { type: string }).type;
+  switch (event.type) {
+    case 'agent_session_info':
+      return 'session_info';
+    case 'agent_init':
+      return 'system';
+    case 'agent_message':
+      return event.role === 'assistant' ? 'assistant' : 'user';
+    case 'agent_result':
+      return 'result';
+    case 'agent_unknown':
+      return 'unknown';
+    default:
+      return event.type;
+  }
+}
+
+/**
+ * Derive the durable raw_events identity. Provider-neutral events use their
+ * own agent_* namespace so storage never implies that a Codex event came from
+ * Claude. Legacy Claude wire events retain their historical names.
+ */
+export function derivePersistedEventType(event: PersistableStreamEvent): string {
+  if (!('type' in event)) return 'unknown';
+  switch (event.type) {
+    case 'agent_session_info':
+      return 'agent_session_info';
+    case 'agent_init':
+      return 'agent_system';
+    case 'agent_message':
+      return event.role === 'assistant' ? 'agent_assistant' : 'agent_user';
+    case 'agent_result':
+      return 'agent_result';
+    case 'agent_unknown':
+      return 'agent_unknown';
+    default:
+      return deriveEventType(event);
+  }
 }

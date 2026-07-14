@@ -27,6 +27,7 @@
 import { emitUsage } from './telemetrySink';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
+import { AgentInvocationStore } from './agentInvocationStore';
 
 // ---------------------------------------------------------------------------
 // Collaborator interfaces
@@ -82,7 +83,7 @@ export type ReopenRunResult =
 interface ReopenRunRow {
   status: string;
   substrate: string | null;
-  claude_session_id: string | null;
+  execution_model: 'orchestrated' | 'programmatic' | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,7 +126,7 @@ export async function reopenRunHandler(
   // Phase 1: guards + the failed -> running flip, serialized inside the per-run PQueue.
   const guardResult = await runQueues.getOrCreate(runId).add(async () => {
     const row = db
-      .prepare('SELECT status, substrate, claude_session_id FROM workflow_runs WHERE id = ?')
+      .prepare('SELECT status, substrate, execution_model FROM workflow_runs WHERE id = ?')
       .get(runId) as ReopenRunRow | undefined;
 
     if (!row) {
@@ -141,7 +142,10 @@ export async function reopenRunHandler(
       return { ok: false as const, reason: 'not_failed' as const };
     }
     // No captured SDK conversation id → nothing to --resume.
-    if (!row.claude_session_id) {
+    if (
+      row.execution_model !== 'programmatic'
+      && !new AgentInvocationStore(db).getLatestTopLevelResumeTarget(runId)
+    ) {
       return { ok: false as const, reason: 'no_session' as const };
     }
 

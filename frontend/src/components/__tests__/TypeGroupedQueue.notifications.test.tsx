@@ -27,6 +27,8 @@ vi.mock('../../stores/reviewQueueSlice', () => ({
 }));
 
 vi.mock('../../stores/landingStore', () => ({
+  useAggregatedBlockingFindings: () => [],
+  useAggregatedBlockingRunIds: () => new Set<string>(),
   useAggregatedReviewItems: () => mockReviewItems,
   useAggregatedRuns: () => [],
   useRunProjectMap: () => ({}),

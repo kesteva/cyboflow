@@ -89,6 +89,28 @@ function assistantTextPayload(messageId: string, text: string): string {
   });
 }
 
+function agentAssistantToolCallPayload(messageId: string, toolUseId: string): string {
+  return JSON.stringify({
+    type: 'agent_message',
+    role: 'assistant',
+    id: messageId,
+    model: 'gpt-5.5',
+    external_session_id: 'codex-thread-1',
+    content: [{ type: 'tool_call', id: toolUseId, name: 'cyboflow_report_step', input: { step_id: 'execute' } }],
+  });
+}
+
+function agentUserToolResultPayload(toolUseId: string, output: string): string {
+  return JSON.stringify({
+    type: 'agent_message',
+    role: 'user',
+    external_session_id: 'codex-thread-1',
+    content: [
+      { type: 'tool_result', tool_call_id: toolUseId, content: output, is_error: false },
+    ],
+  });
+}
+
 /** A single-content-block assistant event — mirrors partial-message streaming. */
 function assistantBlockPayload(
   messageId: string,
@@ -170,6 +192,37 @@ describe('selectRunUnifiedMessages', () => {
     expect(result[0].role).toBe('assistant');
     expect(result[0].segments[0]).toEqual({ type: 'text', content: 'All done.' });
     expect(result[0].timestamp).toBe(new Date('2026-01-01T00:00:05Z').toISOString());
+  });
+
+  it('accepts provider-neutral agent events and projects them through the compatibility adapter', () => {
+    const runId = 'run-agent-events';
+    const toolUseId = 'toolu_codex_step';
+    const rows: MockRawRow[] = [
+      {
+        id: 1,
+        runId,
+        payloadJson: agentAssistantToolCallPayload('agent-msg-1', toolUseId),
+        createdAt: '2026-01-01T00:00:01Z',
+      },
+      {
+        id: 2,
+        runId,
+        payloadJson: agentUserToolResultPayload(toolUseId, 'reported'),
+        createdAt: '2026-01-01T00:00:02Z',
+      },
+    ];
+
+    const result = selectRunUnifiedMessages(makeMockDb(rows), runId);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe('agent-msg-1');
+    expect(result[0].role).toBe('assistant');
+    const seg = result[0].segments[0];
+    expect(seg.type).toBe('tool_call');
+    if (seg.type !== 'tool_call') throw new Error('expected tool_call segment');
+    expect(seg.tool.name).toBe('cyboflow_report_step');
+    expect(seg.tool.status).toBe('success');
+    expect(seg.tool.result).toEqual({ content: 'reported', isError: false });
   });
 
   it('only projects events for the requested runId (isolation)', () => {
