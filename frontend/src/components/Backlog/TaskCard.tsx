@@ -38,7 +38,7 @@ import {
   ReviewMarker,
   DoneFlag,
 } from './markers';
-import { compactAgo, isArchived } from './backlogSelectors';
+import { compactAgo, isArchived, hasRunningFlow } from './backlogSelectors';
 import { CardActionsMenu, type ReorderDirection } from './CardActionsMenu';
 import { IdeaDetailEditor } from '../IdeaDetailEditor';
 import { EpicDetailEditor } from '../EpicDetailEditor';
@@ -356,7 +356,9 @@ export function BoardCard({
   canMoveUp,
   canMoveDown,
 }: TaskBodyProps): React.JSX.Element {
-  const breathing = task.inFlow.length > 0;
+  // Breathing is an ACTIVE-RUN visual — a live-but-idle association (queued,
+  // awaiting_review, a batch-pulled task not yet picked up) must not pulse.
+  const breathing = hasRunningFlow(task);
   return (
     <div
       data-testid="board-card"

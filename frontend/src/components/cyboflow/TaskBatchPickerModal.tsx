@@ -27,8 +27,11 @@
  * Backlog renders columns from), keyed by the task's stage_id.
  *   - readyToWork===false tasks are STILL selectable (the dependency analyzer +
  *     DAG order them) but carry a 'blocked' indicator + their blockedBy refs.
- * In-flight tasks (inFlow.length>0) are rendered DISABLED — a task already
- * executing in another run cannot also join a batch.
+ * In-flight tasks (inFlow.length>0 — ANY live run association, direct or a
+ * sprint-batch lane, not just an actively 'running' one) are rendered DISABLED
+ * with an "in development · <session>" chip (falls back to the run id's short
+ * form when the hosting session is unresolved) — a task already associated
+ * with another run cannot also join a batch.
  *
  * The cap is enforced client-side here (the launch button disables past N, and
  * over-cap checkboxes disable) AND server-side in runs.start (defense in
@@ -269,6 +272,12 @@ export function TaskBatchPickerModal({
                 // Disabled if in-flight OR (not yet checked AND already at cap).
                 const disabled = inFlight || (!checked && atCap);
                 const blockedRefs = (t.blockedBy ?? []).map((d) => d.ref).join(', ');
+                // The hosting session's name when known, else the short run id —
+                // mirrors FlowMarker's label so the picker reads consistently
+                // with the board card.
+                const inFlightLabel = inFlight
+                  ? `in development · ${t.inFlow[0].sessionName ?? t.inFlow[0].runId.slice(0, 8)}`
+                  : null;
                 return (
                   <li key={t.id}>
                     <label
@@ -295,12 +304,12 @@ export function TaskBatchPickerModal({
                           <span className="truncate text-text-secondary">{t.title}</span>
                         </span>
                         <span className="flex flex-wrap items-center gap-1.5">
-                          {inFlight && (
+                          {inFlightLabel !== null && (
                             <span
                               data-testid={`task-batch-picker-inflight-${t.id}`}
                               className="rounded-full bg-bg-tertiary px-1.5 py-0.5 text-[10px] font-medium text-text-tertiary"
                             >
-                              in flight
+                              {inFlightLabel}
                             </span>
                           )}
                           {blocked && (

@@ -171,7 +171,7 @@ describe('CardActionsMenu', () => {
 
   it('disables Change stage, Archive and Delete (with a hint) while the card has an active run', () => {
     render(
-      <CardActionsMenu task={makeTask({ inFlow: [{ agent: 'planner', runId: 'r1', stepId: null }] })} />,
+      <CardActionsMenu task={makeTask({ inFlow: [{ agent: 'planner', runId: 'r1', stepId: null, runStatus: 'running', sessionId: null, sessionName: null }] })} />,
     );
     fireEvent.click(screen.getByTestId('task-actions-trigger'));
     expect(screen.getByText('Change stage…').closest('button')).toBeDisabled();
@@ -272,7 +272,7 @@ describe('CardActionsMenu', () => {
     it('keeps the Move items enabled while the card has an active run (rank-only write)', () => {
       render(
         <CardActionsMenu
-          task={makeTask({ inFlow: [{ agent: 'planner', runId: 'r1', stepId: null }] })}
+          task={makeTask({ inFlow: [{ agent: 'planner', runId: 'r1', stepId: null, runStatus: 'running', sessionId: null, sessionName: null }] })}
           onReorder={vi.fn()}
           canMoveUp
           canMoveDown

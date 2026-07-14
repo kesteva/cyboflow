@@ -9,7 +9,9 @@
  *      won't-do (terminal), Idea-column (pos 1), and pending drafts
  *      (approved_at NULL) are all excluded so no offered task can abort the
  *      launch; readyToWork===false tasks carry a 'blocked' indicator (still
- *      selectable); in-flight tasks (inFlow.length>0) render disabled.
+ *      selectable); in-flight tasks (inFlow.length>0) render disabled with an
+ *      "in development · <session name>" chip (falls back to the run id's
+ *      short form when the session is unresolved).
  *   2. Multi-select accumulation: toggling several checkboxes accumulates ids;
  *      onPicked receives every selected id.
  *   3. Cap enforcement: caps at 10 for interactive and 15 for sdk, keyed by the
@@ -165,7 +167,7 @@ describe('TaskBatchPickerModal — filter correctness', () => {
       makeItem({
         id: 'TASK-INFLIGHT',
         ref: 'TASK-INFLIGHT',
-        inFlow: [{ agent: 'executor', runId: 'r1', stepId: 'implement' }],
+        inFlow: [{ agent: 'executor', runId: 'r1', stepId: 'implement', runStatus: 'running', sessionId: null, sessionName: null }],
       }),
     ]);
 
@@ -187,6 +189,43 @@ describe('TaskBatchPickerModal — filter correctness', () => {
     // In-flight task's checkbox is disabled; blocked task's is NOT.
     expect(screen.getByLabelText('Select TASK-INFLIGHT')).toBeDisabled();
     expect(screen.getByLabelText('Select TASK-BLOCKED')).not.toBeDisabled();
+  });
+
+  it("labels an in-flight row 'in development · <session name>' when the hosting session is known", async () => {
+    await renderOpen([
+      makeItem({
+        id: 'TASK-INFLIGHT',
+        ref: 'TASK-INFLIGHT',
+        inFlow: [
+          {
+            agent: 'executor',
+            runId: 'r1',
+            stepId: 'implement',
+            runStatus: 'running',
+            sessionId: 'sess-1',
+            sessionName: 'quick-20260714-100000',
+          },
+        ],
+      }),
+    ]);
+    expect(screen.getByTestId('task-batch-picker-inflight-TASK-INFLIGHT')).toHaveTextContent(
+      'in development · quick-20260714-100000',
+    );
+  });
+
+  it("falls back to the short run id when the hosting session name is unresolved", async () => {
+    await renderOpen([
+      makeItem({
+        id: 'TASK-INFLIGHT',
+        ref: 'TASK-INFLIGHT',
+        inFlow: [
+          { agent: 'executor', runId: 'run-abcdefgh', stepId: 'implement', runStatus: 'running', sessionId: null, sessionName: null },
+        ],
+      }),
+    ]);
+    expect(screen.getByTestId('task-batch-picker-inflight-TASK-INFLIGHT')).toHaveTextContent(
+      'in development · run-abcd',
+    );
   });
 
   it('includes tasks nested under an epic (backlog returns epic-children NESTED, not top-level)', async () => {
@@ -302,7 +341,7 @@ describe('TaskBatchPickerModal — multi-select + onPicked payload', () => {
       makeItem({
         id: 'TASK-INFLIGHT',
         ref: 'TASK-INFLIGHT',
-        inFlow: [{ agent: 'executor', runId: 'r1', stepId: 'implement' }],
+        inFlow: [{ agent: 'executor', runId: 'r1', stepId: 'implement', runStatus: 'running', sessionId: null, sessionName: null }],
       }),
     ]);
 
@@ -331,7 +370,11 @@ describe('TaskBatchPickerModal — pre-selection', () => {
         makeItem({ id: 'TASK-1', ref: 'TASK-1' }),
         makeItem({ id: 'TASK-2', ref: 'TASK-2' }),
         // In-flight: rendered disabled and NOT pre-checked even though preselected.
-        makeItem({ id: 'TASK-3', ref: 'TASK-3', inFlow: [{ agent: 'sprint', runId: 'r1', stepId: null }] }),
+        makeItem({
+          id: 'TASK-3',
+          ref: 'TASK-3',
+          inFlow: [{ agent: 'sprint', runId: 'r1', stepId: null, runStatus: 'running', sessionId: null, sessionName: null }],
+        }),
       ]),
     );
     render(

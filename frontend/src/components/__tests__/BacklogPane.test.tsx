@@ -373,8 +373,8 @@ describe('BacklogPane', () => {
         id: 't1',
         stage_id: 's-ready',
         inFlow: [
-          { agent: 'executor', runId: 'run-aaaaaaaa', stepId: null },
-          { agent: 'verifier', runId: 'run-bbbbbbbb', stepId: null },
+          { agent: 'executor', runId: 'run-aaaaaaaa', stepId: null, runStatus: 'running', sessionId: null, sessionName: null },
+          { agent: 'verifier', runId: 'run-bbbbbbbb', stepId: null, runStatus: 'running', sessionId: null, sessionName: null },
         ],
       }),
     ];
@@ -473,7 +473,11 @@ describe('BacklogPane', () => {
 
   it('shows the in-flow and awaiting-review chips when present', () => {
     mockTasks = [
-      task({ id: 't1', stage_id: 's-ready', inFlow: [{ agent: 'executor', runId: 'run-xxxxxxxx', stepId: null }] }),
+      task({
+        id: 't1',
+        stage_id: 's-ready',
+        inFlow: [{ agent: 'executor', runId: 'run-xxxxxxxx', stepId: null, runStatus: 'running', sessionId: null, sessionName: null }],
+      }),
       task({ id: 't2', stage_id: 's-ready', awaitingReview: true }),
     ];
     render(<BacklogPane projectId={1} />);

@@ -2095,6 +2095,125 @@ describe('TaskChangeRouter (3-table entity model)', () => {
   });
 
   // -------------------------------------------------------------------------
+  // buildBacklogTaskItem — inFlow overlay (direct + sprint-batch, session
+  // identity, migration 061's session-attribution seam)
+  // -------------------------------------------------------------------------
+
+  describe('buildBacklogTaskItem — inFlow overlay (direct + sprint-batch, session identity)', () => {
+    /**
+     * Adds a minimal `sessions` table + `workflow_runs.session_id` column
+     * (mirrors migration 019 without pulling in its full history) so the
+     * session LEFT JOIN arm of gatherTaskRunOverlayRows has a real
+     * table/column to hit. buildDb() alone lacks both.
+     */
+    function addSessionSchema(db: Database.Database): void {
+      db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+      db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT NOT NULL)');
+    }
+
+    function seedSession(db: Database.Database, id: string, name: string): void {
+      db.prepare('INSERT INTO sessions (id, name) VALUES (?, ?)').run(id, name);
+    }
+
+    /** Force an emit without touching the stage (avoids the stage active-run guard). */
+    async function emitNoopUpdate(router: TaskChangeRouter, taskId: string): Promise<TaskChangedEvent> {
+      const events: TaskChangedEvent[] = [];
+      const off = (e: TaskChangedEvent): number => events.push(e);
+      taskChangeEvents.on(taskProjectChannel(1), off);
+      await router.applyChange(1, { actor: 'user', taskId, fields: { summary: 'noop' } });
+      taskChangeEvents.removeListener(taskProjectChannel(1), off);
+      return events[events.length - 1];
+    }
+
+    it('a direct RUNNING run projects an inFlow entry with runStatus + resolved session identity', async () => {
+      const db = buildDb();
+      addSessionSchema(db);
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+      seedSession(db, 'sess-1', 'quick-20260714-100000');
+      seedRunForTask(db, { taskId, runId: 'r1', status: 'running' });
+      db.prepare('UPDATE workflow_runs SET session_id = ? WHERE id = ?').run('sess-1', 'r1');
+
+      const event = await emitNoopUpdate(router, taskId);
+      expect(event.task.inFlow).toEqual([
+        {
+          agent: 'agent',
+          runId: 'r1',
+          stepId: null,
+          runStatus: 'running',
+          sessionId: 'sess-1',
+          sessionName: 'quick-20260714-100000',
+        },
+      ]);
+    });
+
+    it('a TERMINAL run (completed) projects NO inFlow entry', async () => {
+      const db = buildDb();
+      addSessionSchema(db);
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+      seedRunForTask(db, { taskId, runId: 'r1', status: 'completed', outcome: 'merged' });
+
+      const event = await emitNoopUpdate(router, taskId);
+      expect(event.task.inFlow).toEqual([]);
+    });
+
+    it('a batch-pulled task (no task_id, non-terminal batch run) projects an inFlow entry carrying the session name', async () => {
+      const db = buildDb();
+      addSessionSchema(db);
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+      seedSession(db, 'sess-2', 'quick-20260714-110000');
+      seedBatchLaneForTask(db, { taskId, batchId: 'bat-1', runId: 'r1', runStatus: 'running' });
+      db.prepare('UPDATE workflow_runs SET session_id = ? WHERE id = ?').run('sess-2', 'r1');
+
+      const event = await emitNoopUpdate(router, taskId);
+      expect(event.task.inFlow).toEqual([
+        {
+          agent: 'agent',
+          runId: 'r1',
+          stepId: null,
+          runStatus: 'running',
+          sessionId: 'sess-2',
+          sessionName: 'quick-20260714-110000',
+        },
+      ]);
+    });
+
+    it('a run matching BOTH arms (its own task_id AND a batch lane naming the same task) appears only once', async () => {
+      const db = buildDb();
+      addSessionSchema(db);
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+      seedRunForTask(db, { taskId, runId: 'r1', status: 'running' });
+      db.prepare(
+        `INSERT OR IGNORE INTO sprint_batches (id, project_id, substrate, status) VALUES ('bat-2', 1, 'sdk', 'running')`,
+      ).run();
+      db.prepare('UPDATE workflow_runs SET batch_id = ? WHERE id = ?').run('bat-2', 'r1');
+      db.prepare(`INSERT INTO sprint_batch_tasks (batch_id, task_id, status) VALUES ('bat-2', ?, 'running')`).run(
+        taskId,
+      );
+
+      const event = await emitNoopUpdate(router, taskId);
+      expect(event.task.inFlow).toHaveLength(1);
+      expect(event.task.inFlow[0].runId).toBe('r1');
+    });
+
+    it('direct runs still resolve (session fields null) against a pre-session schema (no sessions table/column)', async () => {
+      // No addSessionSchema — the columnExists guard must degrade gracefully.
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+      seedRunForTask(db, { taskId, runId: 'r1', status: 'running' });
+
+      const event = await emitNoopUpdate(router, taskId);
+      expect(event.task.inFlow).toEqual([
+        { agent: 'agent', runId: 'r1', stepId: null, runStatus: 'running', sessionId: null, sessionName: null },
+      ]);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // recomputeEpicStage — the ROLLUP over an epic's child tasks
   // -------------------------------------------------------------------------
 

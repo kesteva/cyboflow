@@ -10,6 +10,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   isArchived,
+  hasRunningFlow,
   isDecomposed,
   isPending,
   isExperimentSandboxed,
@@ -107,6 +108,32 @@ describe('isArchived', () => {
   it('is true only when archived_at is stamped', () => {
     expect(isArchived(item())).toBe(false);
     expect(isArchived(item({ archived_at: '2026-06-10T00:00:00Z' }))).toBe(true);
+  });
+});
+
+describe('hasRunningFlow', () => {
+  it('is false with no inFlow entries', () => {
+    expect(hasRunningFlow(item({ inFlow: [] }))).toBe(false);
+  });
+
+  it('is false when every inFlow entry is live but NOT running (e.g. queued/awaiting_review)', () => {
+    const task = item({
+      inFlow: [
+        { agent: 'sprint', runId: 'r1', stepId: null, runStatus: 'queued', sessionId: null, sessionName: null },
+        { agent: 'sprint', runId: 'r2', stepId: null, runStatus: 'awaiting_review', sessionId: null, sessionName: null },
+      ],
+    });
+    expect(hasRunningFlow(task)).toBe(false);
+  });
+
+  it('is true when ANY inFlow entry has runStatus === running', () => {
+    const task = item({
+      inFlow: [
+        { agent: 'sprint', runId: 'r1', stepId: null, runStatus: 'queued', sessionId: null, sessionName: null },
+        { agent: 'sprint', runId: 'r2', stepId: null, runStatus: 'running', sessionId: 'sess-1', sessionName: 'quick-1' },
+      ],
+    });
+    expect(hasRunningFlow(task)).toBe(true);
   });
 });
 
@@ -504,7 +531,7 @@ describe('deriveCounts', () => {
       item({
         id: 'TASK-2',
         awaitingReview: true,
-        inFlow: [{ agent: 'sprint', runId: 'r1', stepId: null }],
+        inFlow: [{ agent: 'sprint', runId: 'r1', stepId: null, runStatus: 'running', sessionId: null, sessionName: null }],
       }),
     ];
     expect(deriveCounts(tasks)).toEqual({
@@ -530,11 +557,25 @@ describe('findStageById', () => {
 });
 
 describe('selectableStages', () => {
-  it("offers the four board positions minus the current one; Won't do (10) stays a manual target", () => {
+  it("offers the four asserted board positions minus the current one; Won't do (10) stays a manual target", () => {
     // From Done (9): may move to Idea (1), Ready for development (6), or Won't do (10).
     expect(selectableStages(defaultBoard(), 'board-1-s9').map((s) => s.position)).toEqual([1, 6, 10]);
     // From Ready for development (6): the current stage is excluded.
     expect(selectableStages(defaultBoard(), 'board-1-s6').map((s) => s.position)).toEqual([1, 9, 10]);
+  });
+
+  it("excludes the DERIVED 'In development' stage (position 7, migration 061) as a manual target — the client-side half of preventing a hand move onto it", () => {
+    const board = defaultBoard({
+      stages: [
+        ...defaultBoard().stages,
+        stage(7, 'In development', { id: 'board-1-s7', write_policy: 'derived' }),
+      ],
+    });
+    // From Ready for development (6): position 7 never appears, even though
+    // it's a real board column now — only 'asserted' stages are offered.
+    expect(selectableStages(board, 'board-1-s6').map((s) => s.position)).toEqual([1, 9, 10]);
+    // The derived stage is excluded even when IT is the item's current stage.
+    expect(selectableStages(board, 'board-1-s7').map((s) => s.position)).toEqual([1, 6, 9, 10]);
   });
 });
 
@@ -588,7 +629,11 @@ describe('readyForDevChildTaskIds', () => {
         item({ id: 'TASK-c', stage_position: 1 }), // ✗ still in planning
         item({ id: 'TASK-d', stage_position: 6, isDone: true }), // ✗ done
         item({ id: 'TASK-e', stage_position: 6, archived_at: '2026-06-10T00:00:00Z' }), // ✗ archived
-        item({ id: 'TASK-f', stage_position: 6, inFlow: [{ agent: 'sprint', runId: 'r1', stepId: null }] }), // ✗ in flight
+        item({
+          id: 'TASK-f',
+          stage_position: 6,
+          inFlow: [{ agent: 'sprint', runId: 'r1', stepId: null, runStatus: 'running', sessionId: null, sessionName: null }],
+        }), // ✗ in flight
       ],
     });
     expect(readyForDevChildTaskIds(epic)).toEqual(['TASK-a', 'TASK-b']);

@@ -7,6 +7,7 @@
  */
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
 import type { StageBucket } from './backlogSelectors';
+import { hasRunningFlow } from './backlogSelectors';
 import { TaskBody } from './TaskCard';
 
 interface ListViewProps {
@@ -35,7 +36,10 @@ export function ListView({ buckets, onRun, launchingTaskId, now }: ListViewProps
           </div>
           <ul className="flex flex-col gap-2">
             {tasks.map((task) => {
-              const breathing = task.inFlow.length > 0;
+              // Breathing is an ACTIVE-RUN visual — a live-but-idle association
+              // (queued, awaiting_review, a batch-pulled task not yet picked up)
+              // must not pulse.
+              const breathing = hasRunningFlow(task);
               return (
                 <li
                   key={task.id}

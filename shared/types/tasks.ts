@@ -88,13 +88,24 @@ export interface Board {
 // ---------------------------------------------------------------------------
 
 /**
- * One overlay per active (running) run on a task. Multiple entries means
- * parallel runs / competing approaches against the same task.
+ * One overlay per NON-TERMINAL run associated with a task — either a direct
+ * task-link run OR a sprint-batch lane naming the task (migration 061: the
+ * derived 'In development' board stage tracks the same association). Multiple
+ * entries means parallel runs / competing approaches against the same task.
+ * `inFlow.length > 0` now means "has a live run association", NOT "is actively
+ * running" — check `runStatus === 'running'` for the latter (e.g. to drive a
+ * breathing/pulsing visual).
  */
 export interface FlowOverlay {
   agent: string;
   runId: string;
   stepId: string | null;
+  /** The run's own status (non-terminal, since only those project into inFlow). */
+  runStatus: string;
+  /** `workflow_runs.session_id` — soft link, nullable (session rows can be deleted). */
+  sessionId: string | null;
+  /** The hosting session's display name (`sessions.name`), or null if unresolved. */
+  sessionName: string | null;
 }
 
 /**
@@ -176,7 +187,7 @@ export interface BacklogTaskItem {
   // derived overlays (computed on read):
   /** The position of the item's current stage on its board (cross-project bucketing key). */
   stage_position: number;
-  inFlow: FlowOverlay[]; // MULTIPLE — parallel runs supported
+  inFlow: FlowOverlay[]; // MULTIPLE — parallel runs / batch lanes supported
   awaitingReview: boolean;
   isDone: boolean;
   /**

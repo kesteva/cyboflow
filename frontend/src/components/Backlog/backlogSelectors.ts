@@ -28,16 +28,37 @@ export function pickDefaultBoard(boards: Board[]): Board | null {
 }
 
 /**
- * Stages visible in the board, sorted by position. The board carries four
- * stages — 1 Idea, 6 Ready for development, 9 Done, 10 Won't do. The terminal
- * "Won't do" stage is hidden by default (archiving stamps `archived_at` in
- * place rather than moving an item) and excluded unless `showArchived` is on.
+ * Stages visible in the board, sorted by position. The board carries five
+ * stages — 1 Idea, 6 Ready for development, 7 In development (DERIVED,
+ * migration 061 — orchestrator-only, never a manual target), 9 Done, 10 Won't
+ * do. The terminal "Won't do" stage is hidden by default (archiving stamps
+ * `archived_at` in place rather than moving an item) and excluded unless
+ * `showArchived` is on.
  */
 export function visibleStages(board: Board, showArchived: boolean): BoardStage[] {
   return board.stages
     .filter((s) => showArchived || !s.hidden_by_default)
     .slice()
     .sort((a, b) => a.position - b.position);
+}
+
+// ---------------------------------------------------------------------------
+// Run/flow status
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether a task has an ACTIVELY RUNNING association, not just a live one.
+ * `inFlow.length > 0` means "has a live run association" (direct OR sprint-
+ * batch lane) — it now includes queued/awaiting_review/etc. runs too, so the
+ * breathing/pulsing "in progress" visuals (BoardCard, ListView row) must key
+ * on this narrower check instead of the raw length. Double-pull-prevention
+ * sites (readyForDevChildTaskIds, the batch/A-B pickers, CardActionsMenu's
+ * active-run gate) intentionally keep `inFlow.length > 0` — ANY live
+ * association, not just a running one, should block a second pull or a hand
+ * edit.
+ */
+export function hasRunningFlow(t: BacklogTaskItem): boolean {
+  return t.inFlow.some((f) => f.runStatus === 'running');
 }
 
 // ---------------------------------------------------------------------------
@@ -176,19 +197,24 @@ export function unifiedStages(
 // Stage helpers for the per-card actions menu (manual stage move)
 // ---------------------------------------------------------------------------
 
-// Board stage positions (seedDefaultBoard). The board carries four stages —
-// 1 Idea, 6 Ready for development, 9 Done, 10 Won't do. Position 6 ("Ready for
-// development") is the single non-terminal execution stage and the
-// planning→execution boundary; an entity at position 1 is still in planning,
-// 9/10 are terminal.
+// Board stage positions (seedDefaultBoard). The board carries five stages —
+// 1 Idea, 6 Ready for development, 7 In development, 9 Done, 10 Won't do.
+// Position 6 ("Ready for development") is the single non-terminal ASSERTED
+// execution stage and the planning→execution boundary; an entity at position 1
+// is still in planning, 9/10 are terminal. Position 7 ("In development",
+// migration 061) is DERIVED (write_policy='derived', orchestrator-only — see
+// selectableStages) and TASK-ONLY: recomputeTaskExecutionStage never moves an
+// epic/idea there, so isExecutionStage's epic-scoped Run-button routing below
+// never needs to consider it.
 export const READY_FOR_DEV_POSITION = 6;
 export const LAST_EXECUTION_POSITION = 6;
 
 /**
- * True when a stage position is a non-terminal EXECUTION stage — only position 6
- * ("Ready for development"). The backlog "Run" action routes an epic at an
- * execution stage to Sprint (execute its ready tasks) rather than Planner
- * (re-plan it).
+ * True when a stage position is a non-terminal ASSERTED EXECUTION stage — only
+ * position 6 ("Ready for development"). The backlog "Run" action routes an
+ * epic at an execution stage to Sprint (execute its ready tasks) rather than
+ * Planner (re-plan it). Position 7 ("In development") is deliberately EXCLUDED:
+ * it is task-only and orchestrator-derived, so an epic can never sit there.
  */
 export function isExecutionStage(position: number): boolean {
   return position >= READY_FOR_DEV_POSITION && position <= LAST_EXECUTION_POSITION;
@@ -200,6 +226,11 @@ export function isExecutionStage(position: number): boolean {
  * already in flight. Used to PRE-SELECT the sprint batch picker when Run is
  * clicked on a ready epic; returns [] for a non-epic or an epic with no loaded /
  * no ready children (the picker then opens with nothing pre-checked).
+ *
+ * The `stage_position === READY_FOR_DEV_POSITION` check alone already excludes
+ * a child the orchestrator has pulled into a live run (it would have moved to
+ * position 7, "In development"); the `inFlow.length === 0` check is kept as a
+ * belt-and-braces guard against the read-side lagging the stage move.
  */
 export function readyForDevChildTaskIds(epic: BacklogTaskItem): string[] {
   return (epic.children ?? [])
@@ -222,12 +253,16 @@ export function findStageById(board: Board, stageId: string): BoardStage | null 
 /**
  * The stages a USER may manually move an item to, sorted by position. Excludes:
  *  - DERIVED stages (write_policy === 'derived') — the chokepoint rejects user
- *    asserts on those (code 'forbidden_stage').
+ *    asserts on those (code 'forbidden_stage'). This is what keeps the derived
+ *    "In development" stage (position 7, migration 061) OFF the "Change
+ *    stage…" picker's option list — StageChangeDialog renders exactly this
+ *    list, so a user can never drop/move a card onto it from the UI.
  *  - the item's CURRENT stage (a no-op move).
- * Across the four-stage board this offers positions 1 / 6 / 9 / 10 (minus the
- * current one): the terminal "Won't do" (10) stays a valid manual target so the
- * user can park an item by hand. Archiving is no longer a stage move — it stamps
- * `archived_at` in place via the dedicated Archive action.
+ * Across the five-stage board this offers positions 1 / 6 / 9 / 10 (minus the
+ * current one, and always minus 7): the terminal "Won't do" (10) stays a valid
+ * manual target so the user can park an item by hand. Archiving is no longer a
+ * stage move — it stamps `archived_at` in place via the dedicated Archive
+ * action.
  */
 export function selectableStages(board: Board, currentStageId: string): BoardStage[] {
   return board.stages
@@ -281,9 +316,10 @@ export function topLevelTasks(tasks: BacklogTaskItem[]): BacklogTaskItem[] {
  * cross-project view each project has its own stage rows, but every board
  * seeds identical positions, so position is the shared bucketing key.
  *
- * The board carries four stages:
- *   1 Idea · 6 Ready for development · 9 Done · 10 Won't do
- *   (terminal, hidden by default).
+ * The board carries five stages:
+ *   1 Idea · 6 Ready for development · 7 In development (derived — appears
+ *   automatically once the orchestrator moves a task there; never hidden) ·
+ *   9 Done · 10 Won't do (terminal, hidden by default).
  *
  * All three entity types funnel into the same bucket map. An item whose position
  * is not in the visible set (e.g. a Won't-do item while showArchived is off,

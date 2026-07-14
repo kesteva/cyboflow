@@ -1,16 +1,13 @@
 /**
- * CategoryTag unit tests (migration 059).
- *
- * markers.tsx has no other direct test coverage — TaskCard/BacklogPane
- * exercise the markers indirectly. This file covers just the NEW CategoryTag
- * component: label + title + a stable per-category error-tone class so bug
- * items stay visually distinct from chore/feature.
+ * CategoryTag (migration 059) + FlowMarker (session-attribution seam) unit
+ * tests. markers.tsx otherwise has no direct test coverage — TaskCard/
+ * BacklogPane exercise the other markers indirectly.
  */
 import '@testing-library/jest-dom';
 import { render, screen } from '@testing-library/react';
 import { describe, it, expect } from 'vitest';
-import { CategoryTag } from '../markers';
-import type { EntityCategory } from '../../../../../shared/types/tasks';
+import { CategoryTag, FlowMarker } from '../markers';
+import type { EntityCategory, FlowOverlay } from '../../../../../shared/types/tasks';
 
 describe('CategoryTag', () => {
   it.each<[EntityCategory, string]>([
@@ -35,5 +32,38 @@ describe('CategoryTag', () => {
 
     render(<CategoryTag category="feature" />);
     expect(screen.getByTestId('category-tag').className).not.toContain('status-error');
+  });
+});
+
+describe('FlowMarker', () => {
+  function flow(over: Partial<FlowOverlay> = {}): FlowOverlay {
+    return {
+      agent: 'sprint',
+      runId: 'run-abcdefgh',
+      stepId: null,
+      runStatus: 'running',
+      sessionId: null,
+      sessionName: null,
+      ...over,
+    };
+  }
+
+  it('prefers the session name over the run id slice when known', () => {
+    render(<FlowMarker flow={flow({ sessionId: 'sess-1', sessionName: 'quick-20260714-100000' })} />);
+    expect(screen.getByTestId('flow-marker')).toHaveTextContent('sprint · quick-20260714-100000');
+  });
+
+  it('falls back to the short run id when the session name is unresolved', () => {
+    render(<FlowMarker flow={flow({ sessionName: null })} />);
+    expect(screen.getByTestId('flow-marker')).toHaveTextContent('sprint · run-abcd');
+  });
+
+  it('pulses the dot only while runStatus === running', () => {
+    const { container, unmount } = render(<FlowMarker flow={flow({ runStatus: 'running' })} />);
+    expect(container.querySelector('.animate-ping')).not.toBeNull();
+    unmount();
+
+    render(<FlowMarker flow={flow({ runStatus: 'queued' })} />);
+    expect(document.querySelector('.animate-ping')).toBeNull();
   });
 });

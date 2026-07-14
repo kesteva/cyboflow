@@ -364,6 +364,10 @@ interface RunOverlayRow {
   current_step_id: string | null;
   steps_snapshot_json: string | null;
   workflow_id: string;
+  /** `workflow_runs.session_id`; null when the column is absent (old schema) or unset. */
+  session_id: string | null;
+  /** `sessions.name` via LEFT JOIN; null when the sessions table/join is unavailable or the row is gone. */
+  session_name: string | null;
 }
 
 interface FieldDelta {
@@ -2772,6 +2776,50 @@ export class TaskChangeRouter {
   }
 
   /**
+   * Gather the overlay rows for a task's OWN direct runs AND any sprint-batch
+   * runs whose lane names it — the SAME "live association" set
+   * hasNonTerminalRun / recomputeTaskExecutionStage aggregate over, so a
+   * batch-pulled task's inFlow entry stays consistent with its derived stage.
+   * LEFT JOINs `sessions` to project the hosting session's name. DISTINCT on
+   * the row dedupes a run that happens to match both arms (every non-id column
+   * is functionally dependent on wr.id, so DISTINCT-the-row == DISTINCT-by-id).
+   *
+   * Both the batch arm and the session join are gated behind columnExists so a
+   * pre-022 (no sprint_batch_tasks/batch_id) or pre-019 (no session_id) schema
+   * degrades gracefully — batch runs are simply excluded / session fields read
+   * back null — instead of throwing 'no such column/table'.
+   */
+  private gatherTaskRunOverlayRows(taskId: string): RunOverlayRow[] {
+    const hasBatch = this.columnExists('workflow_runs', 'batch_id');
+    // The `sessions` table is legacy (schema.sql, not a numbered migration) —
+    // some partial-migration test DBs add workflow_runs.session_id (migration
+    // 019) WITHOUT ever creating it, so the column check alone is not enough;
+    // PRAGMA table_info on a MISSING table returns zero rows (no error), so
+    // this doubles as a table-existence probe.
+    const hasSession =
+      this.columnExists('workflow_runs', 'session_id') && this.columnExists('sessions', 'name');
+
+    const whereClause = hasBatch
+      ? 'wr.task_id = ? OR wr.batch_id IN (SELECT batch_id FROM sprint_batch_tasks WHERE task_id = ?)'
+      : 'wr.task_id = ?';
+    const params = hasBatch ? [taskId, taskId] : [taskId];
+
+    const sessionSelect = hasSession
+      ? 'wr.session_id AS session_id, s.name AS session_name'
+      : 'NULL AS session_id, NULL AS session_name';
+    const sessionJoin = hasSession ? 'LEFT JOIN sessions s ON s.id = wr.session_id' : '';
+
+    return this.db
+      .prepare(
+        `SELECT DISTINCT wr.id, wr.status, wr.outcome, wr.current_step_id, wr.steps_snapshot_json, wr.workflow_id, ${sessionSelect}
+           FROM workflow_runs wr
+           ${sessionJoin}
+          WHERE ${whereClause}`,
+      )
+      .all(...params) as RunOverlayRow[];
+  }
+
+  /**
    * Build the single-entity read-model item carried by the emitted event,
    * including derived overlays. This is a SELF-CONTAINED projection (it does
    * NOT nest children) so the router has no dependency on the consumer's
@@ -2779,7 +2827,8 @@ export class TaskChangeRouter {
    *
    * Reads from the table matching `type` (incl body); execution overlays only
    * ever attach to tasks (ideas/epics have no workflow_runs link), but the
-   * derivation is type-agnostic — a non-task simply has zero matching runs.
+   * derivation is type-agnostic — a non-task simply has zero matching direct OR
+   * batch-lane runs.
    */
   private buildBacklogTaskItem(type: TaskType, taskId: string): BacklogTaskItem | null {
     const row = this.readEntity(type, this.projectIdOf(type, taskId) ?? -1, taskId);
@@ -2789,19 +2838,17 @@ export class TaskChangeRouter {
     const isTerminal = stage ? stage.is_terminal === 1 : false;
     const isDonePosition = stage ? stage.position === DONE_POSITION : false;
 
-    const runs = this.db
-      .prepare(
-        `SELECT id, status, outcome, current_step_id, steps_snapshot_json, workflow_id
-           FROM workflow_runs WHERE task_id = ?`,
-      )
-      .all(taskId) as RunOverlayRow[];
+    const runs = this.gatherTaskRunOverlayRows(taskId);
 
     const inFlow: FlowOverlay[] = runs
-      .filter((r) => r.status === 'running')
+      .filter((r) => !TERMINAL_RUN_STATUS_SET.has(r.status))
       .map((r) => ({
         agent: this.resolveAgentLabel(r),
         runId: r.id,
         stepId: r.current_step_id ?? null,
+        runStatus: r.status,
+        sessionId: r.session_id,
+        sessionName: r.session_name,
       }));
 
     const runIds = runs.map((r) => r.id);

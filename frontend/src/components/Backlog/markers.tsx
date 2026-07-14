@@ -7,8 +7,11 @@
  *   - ArchivedChip (neutral "Archived" — archive-in-place items, only visible
  *                  while the header Archived toggle is on)
  *   - ProjectChip  (project name — cross-project "All projects" view only)
- *   - FlowMarker   (terracotta pulsing dot + "agent · session") — MULTIPLE per
- *                  card when a task has parallel runs (inFlow.length > 1)
+ *   - FlowMarker   (terracotta dot + "agent · session") — MULTIPLE per card
+ *                  when a task has parallel runs / batch lanes (inFlow.length
+ *                  > 1). The dot only PULSES while the run is actually
+ *                  'running' — a live but non-running association (queued,
+ *                  awaiting_review, …) renders it static.
  *   - ReviewMarker (gold person glyph "Awaiting review")
  *   - DoneFlag     (green "Merged")
  *
@@ -145,11 +148,14 @@ export function ProjectChip({ name }: { name: string }): React.JSX.Element {
 }
 
 /**
- * One FlowMarker per active run. Renders a pulsing terracotta dot and the
- * resolved "agent · session" label. The session label is the short run id.
+ * One FlowMarker per associated run. Renders the resolved "agent · session"
+ * label — the hosting session's name when known, else the short run id — and
+ * a dot that only PULSES while `runStatus === 'running'` (a live but idle
+ * association, e.g. queued/awaiting_review, renders it static).
  */
 export function FlowMarker({ flow }: { flow: FlowOverlay }): React.JSX.Element {
-  const session = flow.runId.slice(0, 8);
+  const session = flow.sessionName ?? flow.runId.slice(0, 8);
+  const running = flow.runStatus === 'running';
   return (
     <span
       className="inline-flex items-center gap-1.5 rounded-full border border-interactive/40 bg-interactive-surface px-2 py-0.5 text-[10px] font-semibold text-interactive"
@@ -157,7 +163,9 @@ export function FlowMarker({ flow }: { flow: FlowOverlay }): React.JSX.Element {
       data-testid="flow-marker"
     >
       <span className="relative flex h-2 w-2">
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-interactive opacity-60 motion-reduce:hidden" />
+        {running && (
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-interactive opacity-60 motion-reduce:hidden" />
+        )}
         <span className="relative inline-flex h-2 w-2 rounded-full bg-interactive" />
       </span>
       <span className="truncate">

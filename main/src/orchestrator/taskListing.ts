@@ -30,9 +30,16 @@
  *
  * On-read overlay derivation (kept CONSISTENT with the chokepoint's private
  * buildBacklogTaskItem in taskChangeRouter.ts — foundation note #4):
- *   inFlow         = workflow_runs WHERE task_id=? AND status='running'; agent
- *                    resolved from steps_snapshot_json[current_step_id], else
- *                    current_step_id, else 'agent'.
+ *   inFlow         = one entry per NON-TERMINAL run (status NOT IN completed/
+ *                    failed/canceled) associated with the task either DIRECTLY
+ *                    (workflow_runs.task_id) or via a sprint-BATCH lane
+ *                    (workflow_runs.batch_id joined through sprint_batch_tasks —
+ *                    migration 061's derived 'In development' stage tracks the
+ *                    same association); agent resolved from
+ *                    steps_snapshot_json[current_step_id], else current_step_id,
+ *                    else 'agent'; sessionId/sessionName LEFT JOINed from the
+ *                    run's `sessions` row. Both the batch arm and the session
+ *                    join degrade gracefully on an old schema (columnExists).
  *   awaitingReview = any run status='awaiting_review' OR outcome='pr_open' OR a
  *                    pending approval exists for any of the task's runs.
  *   isDone         = the task's stage is_terminal && position === 9 ('done').
@@ -51,10 +58,43 @@ import type {
 } from '../../../shared/types/tasks';
 import { resolveStepAgentKey } from '../../../shared/types/agentIdentity';
 import { listRunOwnedOrBatchIdeaIds } from './runEntityOwnership';
+import { TERMINAL_RUN_STATUSES } from '../../../shared/types/cyboflow';
 import type { DatabaseLike } from './types';
 
 /** The board stage position considered "done" — a blocking prereq is satisfied here. */
 const DONE_POSITION = 9;
+
+/** Run statuses with no live association — mirrors TaskChangeRouter's TERMINAL_RUN_STATUS_SET. */
+const TERMINAL_RUN_STATUS_SET = new Set<string>(TERMINAL_RUN_STATUSES);
+
+/**
+ * WeakMap-cached `PRAGMA table_info` probe, keyed per db instance (this file
+ * has no class to hold instance state, unlike TaskChangeRouter.columnExists,
+ * which this mirrors). Lets computeTaskOverlay run once-per-row without
+ * re-querying the schema every time. Fail-soft: a PRAGMA error reads back
+ * absent, degrading to the pre-migration behaviour.
+ */
+const columnExistsCache = new WeakMap<DatabaseLike, Map<string, boolean>>();
+
+function columnExists(db: DatabaseLike, table: string, column: string): boolean {
+  let cache = columnExistsCache.get(db);
+  if (!cache) {
+    cache = new Map();
+    columnExistsCache.set(db, cache);
+  }
+  const key = `${table}.${column}`;
+  const cached = cache.get(key);
+  if (cached !== undefined) return cached;
+  let present = false;
+  try {
+    const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: unknown }>;
+    present = rows.some((r) => r.name === column);
+  } catch {
+    present = false;
+  }
+  cache.set(key, present);
+  return present;
+}
 
 /**
  * Read the image attachments (migration 028) for a single idea. Attachments are
@@ -198,6 +238,10 @@ interface RunOverlayRow {
   outcome: string | null;
   current_step_id: string | null;
   steps_snapshot_json: string | null;
+  /** `workflow_runs.session_id`; null when the column is absent (old schema) or unset. */
+  session_id: string | null;
+  /** `sessions.name` via LEFT JOIN; null when the sessions table/join is unavailable or the row is gone. */
+  session_name: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -295,10 +339,55 @@ function resolveAgentLabel(run: RunOverlayRow): string {
 }
 
 /**
+ * Gather the overlay rows for a task's OWN direct runs AND any sprint-batch
+ * runs whose lane names it (migration 061's derived 'In development' stage
+ * tracks the SAME association — see TaskChangeRouter.gatherTaskRuns). LEFT
+ * JOINs `sessions` to project the hosting session's name. DISTINCT on the row
+ * dedupes a run that happens to match both arms (every non-id column is
+ * functionally dependent on wr.id, so DISTINCT-the-row == DISTINCT-by-id).
+ *
+ * Both the batch arm and the session join are gated behind columnExists so a
+ * pre-022 (no sprint_batch_tasks/batch_id) or pre-019 (no session_id) schema
+ * degrades gracefully — batch runs are simply excluded / session fields read
+ * back null — instead of throwing 'no such column/table'.
+ */
+function gatherTaskRunOverlayRows(db: DatabaseLike, taskId: string): RunOverlayRow[] {
+  const hasBatch = columnExists(db, 'workflow_runs', 'batch_id');
+  // The `sessions` table is legacy (schema.sql, not a numbered migration) —
+  // some partial-migration test DBs add workflow_runs.session_id (migration
+  // 019) WITHOUT ever creating it, so the column check alone is not enough;
+  // PRAGMA table_info on a MISSING table returns zero rows (no error), so this
+  // doubles as a table-existence probe.
+  const hasSession =
+    columnExists(db, 'workflow_runs', 'session_id') && columnExists(db, 'sessions', 'name');
+
+  const whereClause = hasBatch
+    ? 'wr.task_id = ? OR wr.batch_id IN (SELECT batch_id FROM sprint_batch_tasks WHERE task_id = ?)'
+    : 'wr.task_id = ?';
+  const params = hasBatch ? [taskId, taskId] : [taskId];
+
+  const sessionSelect = hasSession
+    ? 'wr.session_id AS session_id, s.name AS session_name'
+    : 'NULL AS session_id, NULL AS session_name';
+  const sessionJoin = hasSession ? 'LEFT JOIN sessions s ON s.id = wr.session_id' : '';
+
+  return db
+    .prepare(
+      `SELECT DISTINCT wr.id, wr.status, wr.outcome, wr.current_step_id, wr.steps_snapshot_json, ${sessionSelect}
+         FROM workflow_runs wr
+         ${sessionJoin}
+        WHERE ${whereClause}`,
+    )
+    .all(...params) as RunOverlayRow[];
+}
+
+/**
  * The derived overlay fields for a single task, computed on read.
  *
- *   inFlow         — one FlowOverlay per RUNNING run on the task (parallel runs
- *                    supported). Agent resolved via resolveAgentLabel.
+ *   inFlow         — one FlowOverlay per NON-TERMINAL run associated with the
+ *                    task (direct task-link OR sprint-batch lane; parallel runs
+ *                    supported). Agent resolved via resolveAgentLabel; session
+ *                    identity via gatherTaskRunOverlayRows' LEFT JOIN.
  *   awaitingReview — any run is awaiting_review OR has outcome='pr_open', OR a
  *                    pending approval exists for any of the task's runs.
  *   isDone         — the task's current stage is terminal AND at position 9
@@ -317,19 +406,17 @@ export function computeTaskOverlay(
     .get(task.stage_id) as StageOverlayRow | undefined;
   const isDone = stage ? stage.is_terminal === 1 && stage.position === 9 : false;
 
-  const runs = db
-    .prepare(
-      `SELECT id, status, outcome, current_step_id, steps_snapshot_json
-         FROM workflow_runs WHERE task_id = ?`,
-    )
-    .all(task.id) as RunOverlayRow[];
+  const runs = gatherTaskRunOverlayRows(db, task.id);
 
   const inFlow: FlowOverlay[] = runs
-    .filter((r) => r.status === 'running')
+    .filter((r) => !TERMINAL_RUN_STATUS_SET.has(r.status))
     .map((r) => ({
       agent: resolveAgentLabel(r),
       runId: r.id,
       stepId: r.current_step_id ?? null,
+      runStatus: r.status,
+      sessionId: r.session_id,
+      sessionName: r.session_name,
     }));
 
   const runIds = runs.map((r) => r.id);

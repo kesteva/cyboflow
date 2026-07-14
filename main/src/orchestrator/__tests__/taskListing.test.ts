@@ -20,6 +20,7 @@ import {
   selectRunDecomposition,
   boardsForProject,
   resolveBacklogRef,
+  computeTaskOverlay,
 } from '../taskListing';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 
@@ -798,5 +799,166 @@ describe('taskListing — resolveBacklogRef', () => {
     // The ref exists, but scoped to project 1 it must not resolve project 2's row.
     expect(resolveBacklogRef(dbAdapter(db), 1, 'IDEA-101')).toBeNull();
     expect(resolveBacklogRef(dbAdapter(db), 2, 'IDEA-101')).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// computeTaskOverlay — inFlow (direct + sprint-batch, migration 061)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extends buildDb() with the sprint-batch schema (migration 022) plus a
+ * minimal `sessions` table + `workflow_runs.session_id` column (mirrors
+ * migration 019 without pulling in its full history) so the batch + session
+ * LEFT JOIN arms of computeTaskOverlay have real tables/columns to hit.
+ */
+function buildOverlayDb(): Database.Database {
+  const db = buildDb();
+  const migDir = join(__dirname, '..', '..', 'database', 'migrations');
+  db.exec(readFileSync(join(migDir, '022_sprint_batches.sql'), 'utf-8'));
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+  db.exec(`
+    CREATE TABLE sessions (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL
+    )
+  `);
+  return db;
+}
+
+function seedWorkflow(db: Database.Database): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`,
+  ).run();
+}
+
+function seedSession(db: Database.Database, id: string, name: string): void {
+  db.prepare('INSERT INTO sessions (id, name) VALUES (?, ?)').run(id, name);
+}
+
+/** Seed a DIRECT run (workflow_runs.task_id) — optionally session-hosted. */
+function seedDirectRun(
+  db: Database.Database,
+  opts: { runId: string; taskId: string; status: string; sessionId?: string | null },
+): void {
+  seedWorkflow(db);
+  db.prepare(
+    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, task_id, session_id)
+     VALUES (?, 'wf-1', 1, ?, 'default', ?, ?)`,
+  ).run(opts.runId, opts.status, opts.taskId, opts.sessionId ?? null);
+}
+
+/** Seed a sprint-BATCH run (workflow_runs.batch_id, NO task_id) + its lane row for `taskId`. */
+function seedBatchRun(
+  db: Database.Database,
+  opts: { runId: string; taskId: string; batchId: string; status: string; sessionId?: string | null },
+): void {
+  seedWorkflow(db);
+  db.prepare(
+    `INSERT OR IGNORE INTO sprint_batches (id, project_id, substrate, status) VALUES (?, 1, 'sdk', 'running')`,
+  ).run(opts.batchId);
+  db.prepare(
+    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, batch_id, session_id)
+     VALUES (?, 'wf-1', 1, ?, 'default', ?, ?)`,
+  ).run(opts.runId, opts.status, opts.batchId, opts.sessionId ?? null);
+  db.prepare(`INSERT INTO sprint_batch_tasks (batch_id, task_id, status) VALUES (?, ?, 'queued')`).run(
+    opts.batchId,
+    opts.taskId,
+  );
+}
+
+describe('computeTaskOverlay — inFlow (direct + sprint-batch runs)', () => {
+  it('a direct RUNNING run projects an inFlow entry with runStatus + resolved session identity', () => {
+    const db = buildOverlayDb();
+    seedTask(db, 'tsk_a', 'TASK-001', 6);
+    seedSession(db, 'sess-1', 'quick-20260714-100000');
+    seedDirectRun(db, { runId: 'run-1', taskId: 'tsk_a', status: 'running', sessionId: 'sess-1' });
+
+    const overlay = computeTaskOverlay(dbAdapter(db), { id: 'tsk_a', stage_id: stageId(6) });
+    expect(overlay.inFlow).toEqual([
+      {
+        agent: 'agent',
+        runId: 'run-1',
+        stepId: null,
+        runStatus: 'running',
+        sessionId: 'sess-1',
+        sessionName: 'quick-20260714-100000',
+      },
+    ]);
+  });
+
+  it('a TERMINAL run (completed) projects NO inFlow entry', () => {
+    const db = buildOverlayDb();
+    seedTask(db, 'tsk_a', 'TASK-001', 9);
+    seedDirectRun(db, { runId: 'run-1', taskId: 'tsk_a', status: 'completed' });
+
+    const overlay = computeTaskOverlay(dbAdapter(db), { id: 'tsk_a', stage_id: stageId(9) });
+    expect(overlay.inFlow).toEqual([]);
+  });
+
+  it('a batch-pulled task (no task_id, non-terminal batch run) projects an inFlow entry carrying the session name', () => {
+    const db = buildOverlayDb();
+    seedTask(db, 'tsk_b', 'TASK-002', 7); // parked at the derived In-development stage
+    seedSession(db, 'sess-2', 'quick-20260714-110000');
+    seedBatchRun(db, { runId: 'run-2', taskId: 'tsk_b', batchId: 'bat-1', status: 'running', sessionId: 'sess-2' });
+
+    const overlay = computeTaskOverlay(dbAdapter(db), { id: 'tsk_b', stage_id: stageId(7) });
+    expect(overlay.inFlow).toEqual([
+      {
+        agent: 'agent',
+        runId: 'run-2',
+        stepId: null,
+        runStatus: 'running',
+        sessionId: 'sess-2',
+        sessionName: 'quick-20260714-110000',
+      },
+    ]);
+  });
+
+  it('a batch run that has already gone terminal projects NO inFlow entry for its lane task', () => {
+    const db = buildOverlayDb();
+    seedTask(db, 'tsk_b', 'TASK-002', 6);
+    seedBatchRun(db, { runId: 'run-2', taskId: 'tsk_b', batchId: 'bat-1', status: 'completed' });
+
+    const overlay = computeTaskOverlay(dbAdapter(db), { id: 'tsk_b', stage_id: stageId(6) });
+    expect(overlay.inFlow).toEqual([]);
+  });
+
+  it('a run matching BOTH arms (its own task_id AND a batch lane naming the same task) appears only once', () => {
+    const db = buildOverlayDb();
+    seedTask(db, 'tsk_c', 'TASK-003', 7);
+    seedWorkflow(db);
+    db.prepare(
+      `INSERT OR IGNORE INTO sprint_batches (id, project_id, substrate, status) VALUES ('bat-2', 1, 'sdk', 'running')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, task_id, batch_id)
+       VALUES ('run-3', 'wf-1', 1, 'running', 'default', 'tsk_c', 'bat-2')`,
+    ).run();
+    db.prepare(`INSERT INTO sprint_batch_tasks (batch_id, task_id, status) VALUES ('bat-2', 'tsk_c', 'running')`).run();
+
+    const overlay = computeTaskOverlay(dbAdapter(db), { id: 'tsk_c', stage_id: stageId(7) });
+    expect(overlay.inFlow).toHaveLength(1);
+    expect(overlay.inFlow[0].runId).toBe('run-3');
+  });
+
+  it('direct runs still resolve (session fields null) against a pre-batch/pre-session schema', () => {
+    // The base buildDb() has neither workflow_runs.batch_id (migration 022) nor
+    // workflow_runs.session_id (migration 019) nor a sessions table — the
+    // columnExists guards must degrade gracefully instead of throwing.
+    const db = buildDb();
+    seedTask(db, 'tsk_d', 'TASK-004', 6);
+    db.prepare(
+      `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, task_id)
+       VALUES ('run-4', 'wf-1', 1, 'running', 'default', 'tsk_d')`,
+    ).run();
+
+    const overlay = computeTaskOverlay(dbAdapter(db), { id: 'tsk_d', stage_id: stageId(6) });
+    expect(overlay.inFlow).toEqual([
+      { agent: 'agent', runId: 'run-4', stepId: null, runStatus: 'running', sessionId: null, sessionName: null },
+    ]);
   });
 });
