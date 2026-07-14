@@ -1484,6 +1484,53 @@ describe('RunExecutor.getPrompt — multi-idea seed injection (migration 060)', 
     expect(prompt.indexOf('<ideas>')).toBeLessThan(prompt.indexOf('PLAN BODY'));
   });
 
+  it('renders each idea\'s image attachments inside its <idea> element (parity with the single block)', async () => {
+    const run = makeWorkflowRunRow({
+      worktree_path: '/w',
+      seed_idea_id: 'IDEA-1',
+      seed_idea_ids: JSON.stringify(['IDEA-1', 'IDEA-2']),
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const ideaReader = makeIdeaReader({
+      'IDEA-1': { type: 'idea', title: 'Plain idea', summary: null, body: 'Body one.', scope: null, ref: 'IDEA-1' },
+      'IDEA-2': {
+        type: 'idea',
+        title: 'Idea with mockup',
+        summary: null,
+        body: 'Body two.',
+        scope: null,
+        ref: 'IDEA-2',
+        attachments: [
+          { name: 'mockup.png', path: '/abs/mockup.png' },
+          { name: '', path: '  ' }, // path blank → skipped, like the single block
+        ],
+      },
+    });
+    const executor = makeSeedExecutor(spawner, registry, reader, ideaReader);
+
+    await executor.execute(run.id);
+
+    const prompt = spawnedPrompt(spawner);
+    expect(prompt).toContain('<ideas>');
+    // Batching a second idea must NOT drop image context (the pre-fix regression).
+    expect(prompt).toContain('### Attached images');
+    expect(prompt).toContain('- mockup.png: /abs/mockup.png');
+    // The section lives INSIDE the owning idea's element, after its body and
+    // before the element closes, so the planner knows which idea it belongs to.
+    const start2 = prompt.indexOf('id="IDEA-2"');
+    const close2 = prompt.indexOf('</idea>', start2);
+    const attachAt = prompt.indexOf('### Attached images');
+    expect(attachAt).toBeGreaterThan(prompt.indexOf('Body two.'));
+    expect(attachAt).toBeGreaterThan(start2);
+    expect(attachAt).toBeLessThan(close2);
+  });
+
   it('falls back to the single-idea block when seed_idea_ids is corrupt JSON', async () => {
     const run = makeWorkflowRunRow({
       worktree_path: '/w',

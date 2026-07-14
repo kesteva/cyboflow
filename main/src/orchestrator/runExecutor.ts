@@ -1577,6 +1577,20 @@ export class RunExecutor {
       if (summary !== '') inner.push(summary);
       if (body !== '') inner.push(body);
 
+      // Attachments (ideas only, migration 028) — same rendering as the
+      // single-idea block, scoped inside this idea's element so the planner
+      // knows which idea each image belongs to. Without this, batching a
+      // second idea would silently drop every seed's image context.
+      const attachments = (idea.attachments ?? []).filter((a) => a.path?.trim());
+      if (attachments.length > 0) {
+        const lines = attachments.map(
+          (a) => `- ${a.name?.trim() || 'image'}: ${a.path.trim()}`,
+        );
+        inner.push(
+          ['### Attached images', 'The user attached these images — read them with the Read tool:', ...lines].join('\n'),
+        );
+      }
+
       return `${openTag}\n${inner.join('\n\n')}\n</idea>`;
     });
 
