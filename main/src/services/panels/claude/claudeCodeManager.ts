@@ -23,7 +23,7 @@ import {
   isModelUnavailableError,
 } from '../../modelAvailabilityService';
 import { guardedModelByConcreteId, type GuardedModelSpec } from '../../../../../shared/types/modelAvailability';
-import type { Options, HookCallback, PreToolUseHookInput, McpServerConfig, CanUseTool, PermissionResult, SdkBeta } from '@anthropic-ai/claude-agent-sdk';
+import type { Options, HookCallback, HookJSONOutput, PreToolUseHookInput, PreToolUseHookSpecificOutput, McpServerConfig, CanUseTool, PermissionResult, SdkBeta } from '@anthropic-ai/claude-agent-sdk';
 import { makeLoggerLike } from '../../../orchestrator/loggerAdapter';
 import type Database from 'better-sqlite3';
 import type { Logger } from '../../../utils/logger';
@@ -266,6 +266,97 @@ export function shouldHoldFlowTurnOpen(params: {
     params.terminalError === null &&
     !params.aborted
   );
+}
+
+/**
+ * The spawn identity the run_in_background pin keys on (fix B, 2026-07-14):
+ *   - 'flow' — the flow ORCHESTRATOR process (RunExecutor spawn, panelId ===
+ *     sessionId === runId, non-composite spawnKey);
+ *   - 'lane' — a programmatic fan-out lane (composite spawnKey `runId:itemId`);
+ *   - 'chat' — a quick-chat turn (gate run = the `__quick__` sentinel ≠ panelId).
+ */
+export type AgentDispatchSpawnKind = 'flow' | 'lane' | 'chat';
+
+/**
+ * The Agent-dispatch tool's name at the PreToolUse hook. CLI ≥~2.1.2xx presents
+ * it as 'Agent' (empirically verified against 2.1.209); older CLIs used 'Task'.
+ * Match BOTH — the runtime CLI version is whatever `claude` resolves on the
+ * user's PATH, not something this codebase pins.
+ */
+export function isAgentDispatchTool(toolName: string): boolean {
+  return toolName === 'Agent' || toolName === 'Task';
+}
+
+/**
+ * Resolve the `run_in_background` pin for an Agent-tool dispatch (fix B — the
+ * depth-aware companion to fix A's hold-open, 2026-07-14). SDK ≥0.3.201 defaults
+ * Agent dispatches to the BACKGROUND; whether that default is right depends on
+ * WHO is dispatching:
+ *
+ *   - flow ORCHESTRATOR's own dispatches (hook fires with NO agent_id) → true:
+ *     background keeps the orchestrator's CLI loop free mid-stage (steerable /
+ *     chattable) while fix A (shouldHoldFlowTurnOpen) keeps the LOGICAL turn
+ *     open so the run cannot false-complete;
+ *   - dispatches from WITHIN a subagent (hook agent_id present) → false: a stage
+ *     agent has no interactive surface, and sync keeps its results in-turn;
+ *   - fan-out LANE dispatches → false: a lane's turn boundary IS its completion
+ *     signal to the orchestrator, and fix A deliberately never holds lanes open —
+ *     a background dispatch would end the lane turn while its work is still live;
+ *   - quick CHAT → undefined (no pin): the SDK default background keeps the
+ *     composer responsive, exactly the interactive-session behavior users expect.
+ *
+ * Returns the pin value, or undefined for "leave the model's input alone".
+ * Exported for unit tests.
+ */
+export function resolveAgentDispatchBackgroundPin(params: {
+  toolName: string;
+  spawnKind: AgentDispatchSpawnKind;
+  hookAgentId: string | undefined;
+}): boolean | undefined {
+  if (!isAgentDispatchTool(params.toolName)) return undefined;
+  if (params.spawnKind === 'chat') return undefined;
+  if (params.spawnKind === 'lane') return false;
+  return params.hookAgentId === undefined;
+}
+
+/**
+ * Merge a resolved background pin into a PreToolUse hook output's updatedInput.
+ *
+ * Applied to EVERY decision branch of the dynamic hook, including the auto-defer
+ * "no opinion" output: empirically verified (CLI 2.1.209) that a decision-less
+ * updatedInput IS applied to the executed call while the allow/deny verdict still
+ * falls through to the native classifier. NOTE the published hooks doc claims the
+ * opposite ("with defer, updatedInput is ignored") — trust the probe, and re-probe
+ * on CLI bumps. Deny/ask outputs pass through untouched (nothing will execute /
+ * the reviewer sees the model's original input).
+ *
+ * The merge always spreads the FULL base input (the reviewer's updatedInput when
+ * present, else the original tool_input): the CLI REPLACES tool input with
+ * updatedInput rather than shallow-merging (anthropics/claude-code#30770), so a
+ * bare `{ run_in_background }` would strip the dispatch's prompt. Exported for
+ * unit tests.
+ */
+export function applyAgentDispatchBackgroundPin(
+  output: HookJSONOutput,
+  toolInput: Record<string, unknown>,
+  pin: boolean | undefined,
+): HookJSONOutput {
+  if (pin === undefined) return output;
+  if ('async' in output) return output;
+  const hso = output.hookSpecificOutput;
+  if (hso !== undefined && hso.hookEventName !== 'PreToolUse') return output;
+  const pretoolOut = hso as PreToolUseHookSpecificOutput | undefined;
+  const decision = pretoolOut?.permissionDecision;
+  if (decision === 'deny' || decision === 'ask') return output;
+  const base = pretoolOut?.updatedInput ?? toolInput;
+  return {
+    ...output,
+    hookSpecificOutput: {
+      ...(pretoolOut ?? {}),
+      hookEventName: 'PreToolUse' as const,
+      updatedInput: { ...base, run_in_background: pin },
+    },
+  };
 }
 
 /**
@@ -2466,18 +2557,32 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * MUTUAL EXCLUSION: canUseTool ⊥ permissionPromptToolName — the SDK throws at
    * runtime if BOTH are set. cyboflow sets permissionPromptToolName NOWHERE
    * (grep = 0); do NOT introduce it while canUseTool is installed.
+   *
+   * The spawn kind (fix B — resolveAgentDispatchBackgroundPin) is classified ONCE
+   * here from the spawn options and captured by both callbacks: a composite
+   * spawnKey (≠ panelId) is a fan-out LANE; a gate run that IS the panel is the
+   * FLOW orchestrator (RunExecutor spawns with panelId === sessionId === runId);
+   * anything else is a quick CHAT turn (its gate run resolved to the `__quick__`
+   * sentinel, never the panel). Immutable for the process lifetime — the same
+   * invariant fix A's spawnKey === runId identity relies on.
    */
   private composeHookOptions(options: ClaudeSpawnOptions): Pick<Options, 'hooks' | 'canUseTool'> {
     const gateRunId = options.runId ?? options.panelId;
     const ownerSessionId = this.resolveOwnerSessionId(gateRunId);
     const allowRules = loadMergedPermissionRules(options.worktreePath);
-    const hook = this.makeDynamicPreToolUseHook(gateRunId, ownerSessionId, allowRules, options.model);
+    const isLaneSpawn = options.spawnKey !== undefined && options.spawnKey !== options.panelId;
+    const spawnKind: AgentDispatchSpawnKind = isLaneSpawn
+      ? 'lane'
+      : gateRunId === options.panelId
+        ? 'flow'
+        : 'chat';
+    const hook = this.makeDynamicPreToolUseHook(gateRunId, ownerSessionId, allowRules, options.model, spawnKind);
 
     return {
       hooks: {
         PreToolUse: [{ hooks: [hook], timeout: PRE_TOOL_USE_HOOK_TIMEOUT_SECONDS }],
       },
-      canUseTool: this.makeCanUseTool(gateRunId, allowRules),
+      canUseTool: this.makeCanUseTool(gateRunId, allowRules, spawnKind),
     };
   }
 
@@ -2553,6 +2658,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     ownerSessionId: string | undefined,
     allowRules: MergedPermissionRules,
     model: string | undefined,
+    spawnKind: AgentDispatchSpawnKind,
   ): HookCallback {
     const loggerLike = makeLoggerLike(this.logger);
     // Per-mode delegate hooks, built once (each captures gateRunId + allowRules).
@@ -2562,6 +2668,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
     return async (input, toolUseId, ctx) => {
       const pretool = input as PreToolUseHookInput;
+      const toolInput = (pretool.tool_input ?? {}) as Record<string, unknown>;
 
       // (0) Observe-only sprint-lane auto-derive — BEFORE the mode branch so it
       // fires even on the auto-defer / dontAsk paths that never reach the router.
@@ -2572,7 +2679,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
         SprintLaneStore.getInstance().deriveLaneFromTaskDispatch({
           runId: gateRunId,
           toolName: pretool.tool_name,
-          toolInput: (pretool.tool_input ?? {}) as Record<string, unknown>,
+          toolInput,
         });
       } catch {
         // SprintLaneStore not initialized / read failure — auto-derive is best-effort.
@@ -2587,29 +2694,44 @@ export class ClaudeCodeManager extends AbstractCliManager {
         return this.routeAskUserQuestion(pretool, gateRunId, loggerLike);
       }
 
+      // (fix B) Depth-aware run_in_background pin for Agent dispatches, resolved
+      // per call from the hook's agent_id (present ⇔ the dispatch comes from
+      // WITHIN a subagent) and the immutable spawn kind. Applied to the branch
+      // output below — one chokepoint for every mode, including the auto-defer
+      // no-decision output (the CLI applies a decision-less updatedInput while
+      // the verdict still falls through to the classifier).
+      const backgroundPin = resolveAgentDispatchBackgroundPin({
+        toolName: pretool.tool_name,
+        spawnKind,
+        hookAgentId: pretool.agent_id,
+      });
+
       // (3) Branch on the freshly-read mode.
-      switch (mode) {
-        case 'dontAsk':
-          return {
-            hookSpecificOutput: {
-              hookEventName: 'PreToolUse' as const,
-              permissionDecision: 'allow' as const,
-            },
-          };
-        case 'acceptEdits':
-          return routerAcceptEditsHook(input, toolUseId, ctx);
-        case 'auto':
-          // Model-eligibility is evaluated PER CALL: defer to the native
-          // classifier only on a classifier-capable model; otherwise route
-          // through the ApprovalRouter (treat like 'default') since no classifier
-          // exists to defer to.
-          return modelSupportsAutoMode(model)
-            ? autoDeferHook(input, toolUseId, ctx)
-            : routerDefaultHook(input, toolUseId, ctx);
-        case 'default':
-        default:
-          return routerDefaultHook(input, toolUseId, ctx);
-      }
+      const decide = (): Promise<HookJSONOutput> | HookJSONOutput => {
+        switch (mode) {
+          case 'dontAsk':
+            return {
+              hookSpecificOutput: {
+                hookEventName: 'PreToolUse' as const,
+                permissionDecision: 'allow' as const,
+              },
+            };
+          case 'acceptEdits':
+            return routerAcceptEditsHook(input, toolUseId, ctx);
+          case 'auto':
+            // Model-eligibility is evaluated PER CALL: defer to the native
+            // classifier only on a classifier-capable model; otherwise route
+            // through the ApprovalRouter (treat like 'default') since no classifier
+            // exists to defer to.
+            return modelSupportsAutoMode(model)
+              ? autoDeferHook(input, toolUseId, ctx)
+              : routerDefaultHook(input, toolUseId, ctx);
+          case 'default':
+          default:
+            return routerDefaultHook(input, toolUseId, ctx);
+        }
+      };
+      return applyAgentDispatchBackgroundPin(await decide(), toolInput, backgroundPin);
     };
   }
 
@@ -2720,9 +2842,27 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * MUTUAL EXCLUSION: canUseTool ⊥ permissionPromptToolName (the SDK throws at
    * runtime if both are set). cyboflow sets permissionPromptToolName NOWHERE.
    */
-  private makeCanUseTool(gateRunId: string, allowRules: MergedPermissionRules): CanUseTool {
+  private makeCanUseTool(
+    gateRunId: string,
+    allowRules: MergedPermissionRules,
+    spawnKind: AgentDispatchSpawnKind,
+  ): CanUseTool {
     const loggerLike = makeLoggerLike(this.logger);
-    return async (toolName, input, _opts): Promise<PermissionResult> => {
+    return async (toolName, input, opts): Promise<PermissionResult> => {
+      // (fix B) Mirror of the dynamic hook's depth-aware run_in_background pin
+      // for the classifier-'ask' path: an Agent dispatch that reaches this sink
+      // and is allowed must carry the same pin the hook would have applied (the
+      // sub-agent discriminator here is opts.agentID, the callback's analog of
+      // the hook's agent_id). Non-dispatch tools and chat spawns pass through
+      // unchanged (pin === undefined).
+      const pinDispatchInput = (base: Record<string, unknown>): Record<string, unknown> => {
+        const pin = resolveAgentDispatchBackgroundPin({
+          toolName,
+          spawnKind,
+          hookAgentId: opts.agentID,
+        });
+        return pin === undefined ? base : { ...base, run_in_background: pin };
+      };
       // AskUserQuestion is a content question, not a permission request — route it
       // through QuestionRouter BEFORE the allowlist/ApprovalRouter path (see the
       // AskUserQuestion FALL-THROUGH FIX note above). CanUseTool's options carry no
@@ -2758,7 +2898,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // on the allow branch (the CLI's can_use_tool response schema requires a
       // record; a bare `{ behavior: 'allow' }` ZodErrors → see makeCanUseTool doc).
       if (isToolAllowed(toolName, input, allowRules)) {
-        return { behavior: 'allow', updatedInput: input };
+        return { behavior: 'allow', updatedInput: pinDispatchInput(input) };
       }
       try {
         const decision = await ApprovalRouter.getInstance().requestApproval(
@@ -2768,7 +2908,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
           () => {}, // socketReply is a no-op on the SDK path (the decision arrives via the gate)
         );
         return decision.behavior === 'allow'
-          ? { behavior: 'allow', updatedInput: decision.updatedInput ?? input }
+          ? { behavior: 'allow', updatedInput: pinDispatchInput(decision.updatedInput ?? input) }
           : { behavior: 'deny', message: decision.message ?? 'Denied by reviewer' };
       } catch (err) {
         if (err instanceof RunNotRunningError) {
