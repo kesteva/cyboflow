@@ -74,6 +74,10 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+  // 022 (sprint_batches + sprint_batch_tasks + workflow_runs.batch_id) — so the
+  // deriver's batch-run aggregation + the active-run guard resolve against real
+  // lane rows instead of degrading to the direct-only fallback (migration 061).
+  db.exec(readFileSync(join(migDir, '022_sprint_batches.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
   // Migration 042 replaces the position-12 'Decomposed' stage with the
@@ -110,6 +114,37 @@ function seedRunForTask(
     `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, task_id, outcome)
      VALUES (?, 'wf-1', 1, ?, 'default', ?, ?)`,
   ).run(opts.runId, opts.status, opts.taskId, opts.outcome ?? null);
+}
+
+/**
+ * Seed a sprint-batch run (workflow_runs.batch_id, NO task_id) + a lane row for
+ * `taskId` in that batch. Models a task pulled into a sprint batch (migration
+ * 061). Reuses an existing batch when `batchId` is supplied.
+ */
+function seedBatchLaneForTask(
+  db: Database.Database,
+  opts: {
+    taskId: string;
+    batchId: string;
+    runId: string;
+    runStatus: string;
+    runOutcome?: string | null;
+    laneStatus?: 'queued' | 'running' | 'integrated' | 'failed' | 'blocked';
+  },
+): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`,
+  ).run();
+  db.prepare(
+    `INSERT OR IGNORE INTO sprint_batches (id, project_id, substrate, status) VALUES (?, 1, 'sdk', 'running')`,
+  ).run(opts.batchId);
+  db.prepare(
+    `INSERT OR IGNORE INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, batch_id, outcome)
+     VALUES (?, 'wf-1', 1, ?, 'default', ?, ?)`,
+  ).run(opts.runId, opts.runStatus, opts.batchId, opts.runOutcome ?? null);
+  db.prepare(
+    `INSERT INTO sprint_batch_tasks (batch_id, task_id, status) VALUES (?, ?, ?)`,
+  ).run(opts.batchId, opts.taskId, opts.laneStatus ?? 'queued');
 }
 
 /** Count the entity_events rows for a (type, id). */
@@ -331,6 +366,28 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       code: 'active_runs',
     });
 
+    db.prepare("UPDATE workflow_runs SET status = 'completed' WHERE id = 'run-1'").run();
+    await router.applyChange(1, { actor: 'user', taskId, stageId: stageId(1) });
+    const task = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string };
+    expect(task.stage_id).toBe(stageId(1));
+  });
+
+  it('active-run guard (BATCH): a user stage-move/archive on a batch-pulled task is rejected', async () => {
+    const db = buildDb();
+    const router = TaskChangeRouter.initialize(dbAdapter(db));
+    const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+    // No DIRECT task_id link — only a live sprint-batch lane. The widened guard
+    // (migration 061) must protect it just the same.
+    seedBatchLaneForTask(db, { taskId, batchId: 'bat-1', runId: 'run-1', runStatus: 'running' });
+
+    await expect(router.applyChange(1, { actor: 'user', taskId, stageId: stageId(1) })).rejects.toMatchObject({
+      code: 'active_runs',
+    });
+    await expect(
+      router.applyChange(1, { actor: 'user', taskId, archived: true }),
+    ).rejects.toMatchObject({ code: 'active_runs' });
+
+    // Once the batch run reaches a terminal status the task is pullable/movable again.
     db.prepare("UPDATE workflow_runs SET status = 'completed' WHERE id = 'run-1'").run();
     await router.applyChange(1, { actor: 'user', taskId, stageId: stageId(1) });
     const task = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string };
@@ -1794,24 +1851,24 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect(task.stage_id).toBe(stageId(6));
     });
 
-    it('any running run -> entry stage (no in-development stage; position 6)', async () => {
+    it('any running direct run -> In development (position 7)', async () => {
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));
       const taskId = await makeTaskWithEntry(db, router);
       seedRunForTask(db, { taskId, runId: 'r1', status: 'running' });
       await router.recomputeTaskExecutionStage(taskId);
       const task = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string };
-      expect(task.stage_id).toBe(stageId(6)); // entry_stage_id
+      expect(task.stage_id).toBe(stageId(7)); // In development (migration 061)
     });
 
-    it('awaiting_review run -> entry stage (no ready-to-merge stage; position 6)', async () => {
+    it('awaiting_review direct run -> In development (position 7)', async () => {
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));
       const taskId = await makeTaskWithEntry(db, router);
       seedRunForTask(db, { taskId, runId: 'r1', status: 'awaiting_review' });
       await router.recomputeTaskExecutionStage(taskId);
       const task = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string };
-      expect(task.stage_id).toBe(stageId(6)); // entry_stage_id
+      expect(task.stage_id).toBe(stageId(7)); // still a live association -> In development
     });
 
     it('merged outcome -> done (position 9)', async () => {
@@ -1824,12 +1881,11 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect(task.stage_id).toBe(stageId(9));
     });
 
-    it("integrated outcome on a completed run -> entry stage (collapsed, no ready-to-merge stage)", async () => {
-      // Parallel-sprint per-task close-out: the run is terminal ('completed') but
-      // its outcome='integrated' (merged into the integration branch, not main).
-      // With the board collapsed there is no ready-to-merge stage, so — like every
-      // other non-merged run-state — it holds the task at its entry stage until a
-      // run actually merges into main.
+    it("integrated outcome on a completed DIRECT run -> revert to entry stage", async () => {
+      // A DIRECT task-link run that is terminal ('completed') with outcome
+      // ='integrated' (merged into the integration branch, not main) does NOT
+      // satisfy arm 1 (which needs outcome='merged'), so arm 3 fires: the run is
+      // terminal and no live association remains -> revert to the entry stage.
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));
       const taskId = await makeTaskWithEntry(db, router);
@@ -1847,6 +1903,194 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       await router.recomputeTaskExecutionStage(taskId);
       const task = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string };
       expect(task.stage_id).toBe(stageId(6)); // entry_stage_id
+    });
+
+    it('all runs terminal with NO entry captured -> revert to Ready-for-dev (position 6)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      // No makeTaskWithEntry: entry_stage_id stays NULL, so the revert falls back
+      // to the Ready-for-development floor.
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+      seedRunForTask(db, { taskId, runId: 'r1', status: 'failed', outcome: 'failed' });
+      await router.recomputeTaskExecutionStage(taskId);
+      const task = db.prepare('SELECT stage_id, entry_stage_id FROM tasks WHERE id = ?').get(taskId) as {
+        stage_id: string;
+        entry_stage_id: string | null;
+      };
+      expect(task.entry_stage_id).toBeNull();
+      expect(task.stage_id).toBe(stageId(6));
+    });
+
+    // --- sprint-batch pull (migration 061) ------------------------------------
+
+    it('batch pull with a running batch run -> In development (position 7)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const taskId = await makeTaskWithEntry(db, router);
+      seedBatchLaneForTask(db, { taskId, batchId: 'bat-1', runId: 'r1', runStatus: 'running' });
+      await router.recomputeTaskExecutionStage(taskId);
+      const task = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string };
+      expect(task.stage_id).toBe(stageId(7));
+    });
+
+    it('batch run merged + lane integrated -> Done (position 9)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const taskId = await makeTaskWithEntry(db, router);
+      seedBatchLaneForTask(db, {
+        taskId,
+        batchId: 'bat-1',
+        runId: 'r1',
+        runStatus: 'completed',
+        runOutcome: 'merged',
+        laneStatus: 'integrated',
+      });
+      await router.recomputeTaskExecutionStage(taskId);
+      const task = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string };
+      expect(task.stage_id).toBe(stageId(9));
+    });
+
+    it('batch run merged but lane NOT integrated -> revert to entry stage (position 6)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const taskId = await makeTaskWithEntry(db, router);
+      // A merged batch run whose lane never integrated does NOT satisfy arm 1; the
+      // run is terminal so arm 3 reverts the task to its entry stage.
+      seedBatchLaneForTask(db, {
+        taskId,
+        batchId: 'bat-1',
+        runId: 'r1',
+        runStatus: 'completed',
+        runOutcome: 'merged',
+        laneStatus: 'failed',
+      });
+      await router.recomputeTaskExecutionStage(taskId);
+      const task = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string };
+      expect(task.stage_id).toBe(stageId(6));
+    });
+
+    it('TERMINAL-STAGE GUARD: a task at Done stays Done through a revert-shaped recompute', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const taskId = await makeTaskWithEntry(db, router);
+      // Park the task at Done (position 9) as the orchestrator, then feed it a
+      // terminal, non-merged run: arm 3 would revert, but the terminal-stage guard
+      // must leave the just-Done task at Done.
+      await router.applyChange(1, {
+        actor: 'orchestrator',
+        entityType: 'task',
+        taskId,
+        stageId: stageId(9),
+        kind: 'execution-stage',
+      });
+      seedBatchLaneForTask(db, {
+        taskId,
+        batchId: 'bat-1',
+        runId: 'r1',
+        runStatus: 'completed',
+        runOutcome: null,
+        laneStatus: 'integrated',
+      });
+      await router.recomputeTaskExecutionStage(taskId);
+      const task = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string };
+      expect(task.stage_id).toBe(stageId(9));
+    });
+
+    it('recomputeTasksForBatch captures entry + moves every lane task to In development', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      // Two Ready-for-dev tasks (position 6), enrolled as lanes in a running batch.
+      const { taskId: t1 } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'A' });
+      const { taskId: t2 } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'B' });
+      db.prepare(
+        `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO sprint_batches (id, project_id, substrate, status) VALUES ('bat-1', 1, 'sdk', 'running')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, batch_id)
+         VALUES ('r1', 'wf-1', 1, 'running', 'default', 'bat-1')`,
+      ).run();
+      db.prepare(`INSERT INTO sprint_batch_tasks (batch_id, task_id, status) VALUES ('bat-1', ?, 'queued')`).run(t1);
+      db.prepare(`INSERT INTO sprint_batch_tasks (batch_id, task_id, status) VALUES ('bat-1', ?, 'queued')`).run(t2);
+
+      await router.recomputeTasksForBatch('bat-1');
+
+      for (const id of [t1, t2]) {
+        const task = db
+          .prepare('SELECT stage_id, entry_stage_id FROM tasks WHERE id = ?')
+          .get(id) as { stage_id: string; entry_stage_id: string | null };
+        expect(task.stage_id).toBe(stageId(7)); // In development
+        expect(task.entry_stage_id).toBe(stageId(6)); // captured entry (Ready-for-dev)
+      }
+    });
+
+    it('ZERO runs at the derived stage -> stale projection reverts to entry stage', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const taskId = await makeTaskWithEntry(db, router);
+      // Strand the task at In development with no run rows at all (e.g. its runs
+      // were deleted) — the no-runs arm must revert a DERIVED stage, not no-op.
+      await router.applyChange(1, {
+        actor: 'orchestrator',
+        entityType: 'task',
+        taskId,
+        stageId: stageId(7),
+        kind: 'execution-stage',
+      });
+      await router.recomputeTaskExecutionStage(taskId);
+      const task = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string };
+      expect(task.stage_id).toBe(stageId(6)); // entry_stage_id
+    });
+
+    it('sweepStaleDerivedStageTasks: reverts dead-run tasks, keeps live ones at In development', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const liveId = await makeTaskWithEntry(db, router);
+      const staleId = await makeTaskWithEntry(db, router);
+      seedRunForTask(db, { taskId: liveId, runId: 'r-live', status: 'running' });
+      // Models boot recovery force-failing a run with a raw UPDATE (no recompute).
+      seedRunForTask(db, { taskId: staleId, runId: 'r-dead', status: 'failed', outcome: 'failed' });
+      for (const id of [liveId, staleId]) {
+        await router.applyChange(1, {
+          actor: 'orchestrator',
+          entityType: 'task',
+          taskId: id,
+          stageId: stageId(7),
+          kind: 'execution-stage',
+        });
+      }
+
+      await router.sweepStaleDerivedStageTasks();
+
+      const live = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(liveId) as { stage_id: string };
+      const stale = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(staleId) as { stage_id: string };
+      expect(live.stage_id).toBe(stageId(7)); // live association re-asserted
+      expect(stale.stage_id).toBe(stageId(6)); // dead association reverted to entry
+    });
+
+    // --- entity-type scoping: epics keep the old hold behaviour ----------------
+
+    it('an EPIC linked via a running run stays put (no In-development arm)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId: epicId } = await router.applyChange(1, { actor: 'user', entityType: 'epic', title: 'E' });
+      // Epic create lands at Ready for development (position 6).
+      seedRunForTask(db, { taskId: epicId, runId: 'r1', status: 'running' });
+      await router.recomputeTaskExecutionStage(epicId);
+      const epic = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epicId) as { stage_id: string };
+      expect(epic.stage_id).toBe(stageId(6)); // held — never enters position 7
+    });
+
+    it('an EPIC linked via a merged run -> Done (position 9), old behaviour', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId: epicId } = await router.applyChange(1, { actor: 'user', entityType: 'epic', title: 'E' });
+      seedRunForTask(db, { taskId: epicId, runId: 'r1', status: 'completed', outcome: 'merged' });
+      await router.recomputeTaskExecutionStage(epicId);
+      const epic = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epicId) as { stage_id: string };
+      expect(epic.stage_id).toBe(stageId(9));
     });
   });
 

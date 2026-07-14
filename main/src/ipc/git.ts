@@ -195,6 +195,20 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
             batchError
           );
         }
+        // Recompute the batch's tasks (migration 061) so NON-integrated lanes
+        // (queued/failed/blocked) revert off 'In development' to their entry stage.
+        // The terminal-stage guard in recomputeTaskExecutionStage protects the
+        // just-Done tasks moved above (this runs BEFORE stampSessionRunsOutcome
+        // stamps outcome='merged', so a Done task must not be yanked back). Fail-
+        // soft — the merge already succeeded.
+        try {
+          await taskRouter.recomputeTasksForBatch(run.batch_id);
+        } catch (recomputeError) {
+          console.error(
+            `[IPC:git] sprint close-out: failed to recompute batch ${run.batch_id} task stages (continuing):`,
+            recomputeError
+          );
+        }
       }
     } catch (error) {
       console.error(

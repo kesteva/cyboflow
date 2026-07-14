@@ -1061,6 +1061,7 @@ export const runsRouter = router({
         // remains the authoritative gate.
         let eligibleIds: string[] | null = null;
         let taggedIds: string[] = [];
+        let activeRunIds: string[] = [];
         try {
           const store = SprintLaneStore.getInstance();
           // Reject a NORMAL sprint selection that names a hidden experiment-arm
@@ -1072,9 +1073,14 @@ export const runsRouter = router({
           // and arm materialize bypass this pre-check entirely.)
           taggedIds = store.findExperimentTaggedTaskIds(input.projectId, input.taskIds);
           eligibleIds = store.filterEligibleTaskIds(input.projectId, input.taskIds);
+          // Tasks dropped for the double-pull guard (already in a live run) — used
+          // only to make the ineligibility message say "already in development"
+          // rather than the generic approval/stage reason (migration 061).
+          activeRunIds = store.findActiveRunTaskIds(input.projectId, input.taskIds);
         } catch {
           eligibleIds = null;
           taggedIds = [];
+          activeRunIds = [];
         }
         if (taggedIds.length > 0) {
           throw new TRPCError({
@@ -1094,9 +1100,26 @@ export const runsRouter = router({
           if (eligibleIds.length < uniqueSelection.length) {
             const eligibleSet = new Set(eligibleIds);
             const ineligible = uniqueSelection.filter((id) => !eligibleSet.has(id));
+            // Partition the ineligible ids: those dropped for the double-pull guard
+            // (an active run) get an "already in development" reason; the rest keep
+            // the generic approval/stage message. Same TRPCError shape either way.
+            const activeSet = new Set(activeRunIds);
+            const inDev = ineligible.filter((id) => activeSet.has(id));
+            const other = ineligible.filter((id) => !activeSet.has(id));
+            const parts: string[] = [];
+            if (inDev.length > 0) {
+              parts.push(
+                `${inDev.length} already in development (${inDev.join(', ')}) — each is in a live run; cancel or finish it first`,
+              );
+            }
+            if (other.length > 0) {
+              parts.push(
+                `${other.length} sprint-ineligible (${other.join(', ')}) — each must be approved + at "Ready for development" or later, not archived/done/won't-do`,
+              );
+            }
             throw new TRPCError({
               code: 'BAD_REQUEST',
-              message: `selection includes ${ineligible.length} sprint-ineligible task(s): ${ineligible.join(', ')} — each must be approved + at "Ready for development" or later, not archived/done/won't-do. Remove them or fix their state, then relaunch.`,
+              message: `selection includes ${parts.join('; ')}. Remove them or fix their state, then relaunch.`,
             });
           }
         }
@@ -1719,8 +1742,8 @@ export const runsRouter = router({
       }
       const db = ctx.db;
       const run = db
-        .prepare('SELECT status, batch_id AS batchId FROM workflow_runs WHERE id = ?')
-        .get(input.runId) as { status?: string; batchId?: string | null } | undefined;
+        .prepare('SELECT status, batch_id AS batchId, task_id AS taskId FROM workflow_runs WHERE id = ?')
+        .get(input.runId) as { status?: string; batchId?: string | null; taskId?: string | null } | undefined;
       if (!run?.status) return { noOp: true, reason: 'not_found' };
       if (['completed', 'failed', 'canceled'].includes(run.status)) {
         return { noOp: true, reason: 'already_terminal' };
@@ -1770,6 +1793,17 @@ export const runsRouter = router({
         } catch {
           // Store not initialized (tests) — lane substrate absent.
         }
+      }
+      // The run just went terminal without an outcome stamp — recompute so tasks
+      // whose only live association was this run revert off 'In development'
+      // (migration 061). AFTER the status UPDATE so the deriver reads 'completed'.
+      // Fail-soft: end already succeeded.
+      try {
+        const taskRouter = TaskChangeRouter.getInstance();
+        if (run.batchId) await taskRouter.recomputeTasksForBatch(run.batchId);
+        if (run.taskId) await taskRouter.recomputeTaskExecutionStage(run.taskId);
+      } catch {
+        // Router not initialized (tests) — stage self-heals via the boot sweep.
       }
       runStatusEvents.emit('changed', { runId: input.runId, status: 'completed' });
       return { ended: true };

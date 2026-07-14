@@ -1344,8 +1344,13 @@ describe('RunLauncher.launch ideaId seed', () => {
     const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
 
     const recomputeSpy = vi.fn().mockResolvedValue(undefined);
+    const recomputeBatchSpy = vi.fn().mockResolvedValue(undefined);
     const applyChangeSpy = vi.fn();
-    const deriver = { applyChange: applyChangeSpy, recomputeTaskExecutionStage: recomputeSpy };
+    const deriver = {
+      applyChange: applyChangeSpy,
+      recomputeTaskExecutionStage: recomputeSpy,
+      recomputeTasksForBatch: recomputeBatchSpy,
+    };
 
     const launcher = new RunLauncher(
       adapter,

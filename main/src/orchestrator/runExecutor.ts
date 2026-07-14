@@ -332,6 +332,12 @@ export interface LifecycleTransitionsLike {
  */
 export interface TaskStageRecomputeLike {
   recomputeTaskExecutionStage(taskId: string): Promise<void>;
+  /**
+   * Recompute the execution stage for every task in a sprint batch (migration
+   * 061). A sprint run carries a batch_id but usually no task_id, so terminal
+   * phases must recompute the batch's lanes to revert non-integrated tasks.
+   */
+  recomputeTasksForBatch(batchId: string): Promise<void>;
 }
 
 /**
@@ -2064,11 +2070,16 @@ export class RunExecutor {
    * so the chokepoint aggregate sees it:
    *   'failed'   → outcome='failed'
    *   'canceled' → outcome='canceled'
-   * Then recomputeTaskExecutionStage drives the task to its derived stage:
-   *   running phases (pre_spawn / sdk_initialized) → In development
-   *   'drained' (rests awaiting_review)            → Ready to merge
-   *   'failed' / 'canceled' (all runs terminal)    → revert to entry stage
+   * Then recomputeTaskExecutionStage drives the task to its derived stage
+   * (migration 061 re-added the 'In development' stage, position 7):
+   *   running / awaiting_review phases (a live run association) → In development (7)
+   *   'failed' / 'canceled' (all runs terminal, no merge)       → revert to entry stage
    * 'post_spawn' is a no-op for tasks (status is unchanged).
+   *
+   * A sprint run carries a batch_id but usually no task_id, so when the run has a
+   * batch_id we ALSO recompute every lane's task — this reverts non-integrated
+   * (queued/failed/blocked) tasks to their entry stage on a terminal phase and, on
+   * a running phase, is a harmless idempotent re-assertion of In development.
    *
    * NOTE: merged / pr_open / dismissed outcomes are owned by the run close-out
    * mutations in trpc/routers/runs.ts, NOT here.
@@ -2078,6 +2089,22 @@ export class RunExecutor {
 
     try {
       const run = this.registry.getRunById(runId);
+
+      // Sprint-batch lane recompute (migration 061): a sprint run usually carries
+      // batch_id but no task_id, so its lanes' tasks are only reachable this way.
+      // Fail-soft + BEFORE the task_id early-return.
+      if (run?.batch_id) {
+        try {
+          await this.taskStageDeriver.recomputeTasksForBatch(run.batch_id);
+        } catch (batchStageErr) {
+          this.logger.warn('[RunExecutor] batch task-stage derivation failed (fail-soft)', {
+            runId,
+            batchId: run.batch_id,
+            phase,
+            error: batchStageErr instanceof Error ? batchStageErr.message : String(batchStageErr),
+          });
+        }
+      }
 
       // Sprint batch close-out (feat/parallel-sprint, single-run lane model):
       // a sprint run that dies terminally (failed/canceled) must not strand its

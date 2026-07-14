@@ -332,6 +332,11 @@ export class SprintLaneStore {
     if (unique.length === 0) return [];
     try {
       const placeholders = unique.map(() => '?').join(', ');
+      // DOUBLE-PULL GUARD (migration 061): exclude any task with an ACTIVE run
+      // association — a non-terminal workflow_runs row linked DIRECTLY (task_id) or
+      // via a sprint BATCH the task belongs to. The run-association (not stage
+      // position 7) is the source of truth, so a stale stage-7 task with no live
+      // run stays pullable and self-heals on the next recompute.
       const rows = this.db
         .prepare(
           `SELECT t.id AS id
@@ -342,17 +347,69 @@ export class SprintLaneStore {
               AND t.approved_at IS NOT NULL
               AND t.archived_at IS NULL
               AND bs.position >= 6
-              AND bs.is_terminal = 0`,
+              AND bs.is_terminal = 0
+              AND NOT EXISTS (
+                SELECT 1 FROM workflow_runs wr
+                 WHERE wr.status NOT IN ('completed', 'failed', 'canceled')
+                   AND (
+                     wr.task_id = t.id
+                     OR wr.batch_id IN (
+                          SELECT sbt.batch_id FROM sprint_batch_tasks sbt WHERE sbt.task_id = t.id
+                        )
+                   )
+              )`,
         )
         .all(projectId, ...unique) as Array<{ id: string }>;
       const eligible = new Set(rows.map((r) => r.id));
       return unique.filter((id) => eligible.has(id));
     } catch (err) {
-      if (err instanceof Error && /no such column/i.test(err.message)) {
-        this.logger?.debug('[SprintLaneStore] eligibility filter skipped (pre-042 schema)', {
+      if (err instanceof Error && /no such (column|table)/i.test(err.message)) {
+        this.logger?.debug('[SprintLaneStore] eligibility filter skipped (pre-042/pre-022 schema)', {
           error: err.message,
         });
         return unique;
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Return the subset of `taskIds` that currently hold an ACTIVE run association —
+   * a non-terminal workflow_runs row linked DIRECTLY (task_id) or via a sprint
+   * BATCH the task belongs to. Used ONLY by the runs.start launch boundary to give
+   * a task rejected by filterEligibleTaskIds a precise "already in development"
+   * reason instead of the generic ineligibility message (mirrors the separate-query
+   * pattern of findExperimentTaggedTaskIds). Degrades to EMPTY on a schema lacking
+   * workflow_runs/sprint_batch_tasks.
+   */
+  findActiveRunTaskIds(projectId: number, taskIds: string[]): string[] {
+    const unique = [...new Set(taskIds)];
+    if (unique.length === 0) return [];
+    try {
+      const placeholders = unique.map(() => '?').join(', ');
+      const rows = this.db
+        .prepare(
+          `SELECT t.id AS id
+             FROM tasks t
+            WHERE t.project_id = ?
+              AND t.id IN (${placeholders})
+              AND EXISTS (
+                SELECT 1 FROM workflow_runs wr
+                 WHERE wr.status NOT IN ('completed', 'failed', 'canceled')
+                   AND (
+                     wr.task_id = t.id
+                     OR wr.batch_id IN (
+                          SELECT sbt.batch_id FROM sprint_batch_tasks sbt WHERE sbt.task_id = t.id
+                        )
+                   )
+              )`,
+        )
+        .all(projectId, ...unique) as Array<{ id: string }>;
+      const active = new Set(rows.map((r) => r.id));
+      return unique.filter((id) => active.has(id));
+    } catch (err) {
+      if (err instanceof Error && /no such (column|table)/i.test(err.message)) {
+        return [];
       }
       throw err;
     }

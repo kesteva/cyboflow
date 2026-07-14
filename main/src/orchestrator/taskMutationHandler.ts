@@ -87,6 +87,13 @@ export interface TaskMutationDeps {
     opts: { actor: 'orchestrator'; taskId: string; entityType: 'task'; runId?: string },
   ) => Promise<{ taskId: string; deletedIds: string[] }>;
   laneStore: TaskMutationLaneStore;
+  /**
+   * TaskChangeRouter.getInstance().recomputeTaskExecutionStage (bound at the
+   * composition root). Called AFTER a lane is enrolled (moves the task to 'In
+   * development', migration 061) or removed (reverts it to its entry stage).
+   * Optional + fail-soft: a missing dep or a throw never fails the mutation.
+   */
+  recomputeTask?: (taskId: string) => Promise<void>;
   logger?: LoggerLike;
 }
 
@@ -277,6 +284,21 @@ export async function addTaskToRun(
       if (code === 'bad_request') return { ok: false, reason: 'duplicate', detail: input.title };
       return { ok: false, reason: 'lane_error', detail: err instanceof Error ? err.message : undefined };
     }
+
+    // 5. Lane enrolled — move the task to 'In development' (migration 061). Its
+    // OWN try/catch so a derive failure never trips the outer compensating delete:
+    // the enrollment succeeded and must stand.
+    if (deps.recomputeTask) {
+      try {
+        await deps.recomputeTask(taskId);
+      } catch (recomputeErr) {
+        deps.logger?.warn('[taskMutation] recomputeTask after add failed (best-effort)', {
+          runId,
+          taskId,
+          error: recomputeErr instanceof Error ? recomputeErr.message : String(recomputeErr),
+        });
+      }
+    }
   } catch (err) {
     // A stage-promotion or approval-stamp failure (steps 2-3): compensate the
     // orphan too, then surface a generic lane_error (addLane's own failures are
@@ -331,6 +353,20 @@ export async function removeTaskFromRun(
     if (code === 'lane_not_found') return { ok: false, reason: 'task_not_found', detail: input.taskRef };
     if (code === 'bad_request') return { ok: false, reason: 'already_started', detail: input.taskRef };
     return { ok: false, reason: 'lane_error', detail: err instanceof Error ? err.message : undefined };
+  }
+
+  // Lane removed — revert the task off 'In development' back to its entry stage
+  // (migration 061). Best-effort: a derive failure never fails the removal.
+  if (taskId && deps.recomputeTask) {
+    try {
+      await deps.recomputeTask(taskId);
+    } catch (recomputeErr) {
+      deps.logger?.warn('[taskMutation] recomputeTask after remove failed (best-effort)', {
+        runId,
+        taskRef: input.taskRef,
+        error: recomputeErr instanceof Error ? recomputeErr.message : String(recomputeErr),
+      });
+    }
   }
 
   return {

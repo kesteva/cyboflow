@@ -376,8 +376,17 @@ interface FieldDelta {
 const DONE_POSITION = 9;
 /** The board stage entities enter development at — the LOW half of the derived pair. */
 const READY_FOR_DEV_POSITION = 6;
+/**
+ * Orchestrator-DERIVED 'In development' stage (migration 061): a task moves here
+ * while any of its runs (direct task-link OR sprint-batch lane) is non-terminal,
+ * and reverts to its entry stage when all of them end without merging.
+ */
+const IN_DEVELOPMENT_POSITION = 7;
 /** Terminal hidden 'Won't do' stage — an explicit human parking, never derived. */
 const WONT_DO_POSITION = 10;
+
+/** Run statuses treated as terminal for stage derivation (no live association). */
+const TERMINAL_RUN_STATUS_SET = new Set<string>(['completed', 'failed', 'canceled']);
 
 /**
  * CREATE TYPE-DEFAULT (hybrid model, FIX-STAGE-MODEL A): when a create carries
@@ -2167,16 +2176,29 @@ export class TaskChangeRouter {
    * entity, so this reads the `tasks` table directly. Writes via applyChange
    * with actor='orchestrator' + entityType='task'.
    *
-   * Aggregation (first match wins):
-   *   any outcome='merged'             -> done (position 9)
-   *   else (runs nonempty, no merge)   -> entry_stage_id (fallback Ready-for-dev, position 6)
-   *   else (no runs)                   -> no-op
+   * ENTITY-TYPE SCOPING: workflow_runs.task_id can also reference an EPIC (a
+   * planning-stage epic run), so the deriver may be invoked with an epic/idea id.
+   * Only a `tasks`-table row takes the In-development arm; an epic/idea keeps the
+   * old hold-behaviour (merged -> Done, everything else holds at its current
+   * asserted stage — they have no entry_stage_id and never enter position 7).
    *
-   * The board collapsed to four kept stages (Idea / Ready for development / Done /
-   * Won't do), so there is no longer an in-development or ready-to-merge stage to
-   * derive: EVERY non-merged run-state (running, awaiting_review, pr_open,
-   * integrated, pending approval, or all-terminal-without-merge) holds the task at
-   * its entry stage until a run actually merges into main.
+   * TASK aggregation over BOTH direct runs (workflow_runs.task_id) AND sprint-batch
+   * runs (workflow_runs.batch_id whose sprint_batch_tasks lane names this task),
+   * first match wins:
+   *   1. any direct run outcome='merged', OR any batch run outcome='merged' whose
+   *      lane status for this task is 'integrated'  -> Done (position 9)
+   *   2. any run (direct or batch) NOT terminal (status NOT IN completed/failed/
+   *      canceled)                                  -> In development (position 7)
+   *   3. runs exist but none of the above           -> revert to entry_stage_id
+   *      (fallback Ready for development, position 6)
+   *   4. no runs                                    -> no-op
+   *
+   * TERMINAL-STAGE GUARD: arms 2 and 3 NEVER move a task whose CURRENT stage is
+   * terminal (Done / Won't do). Only arm 1 may land on a terminal stage. This
+   * closes the session-merge race where finalizeSprintLanesOnSessionMerge moves an
+   * integrated lane to Done BEFORE stampSessionRunsOutcome stamps 'merged': a
+   * recompute in that window sees no merge yet and arm 3 would otherwise yank the
+   * just-Done task back to Ready.
    */
   async recomputeTaskExecutionStage(taskId: string): Promise<void> {
     const task = this.db
@@ -2184,30 +2206,62 @@ export class TaskChangeRouter {
       .get(taskId) as
       | { id: string; project_id: number; board_id: string; stage_id: string; entry_stage_id: string | null }
       | undefined;
+
     if (!task) {
-      throw new TaskChangeError('not_found', `task ${taskId} not found`);
+      // Not a tasks-table row: an epic (or idea) linked via workflow_runs.task_id.
+      // Preserve the pre-In-development behaviour and never enter position 7.
+      await this.recomputeNonTaskEntityStage(taskId);
+      return;
     }
 
-    const runs = this.db
-      .prepare('SELECT id, status, outcome FROM workflow_runs WHERE task_id = ?')
-      .all(taskId) as Array<{ id: string; status: string; outcome: string | null }>;
-
+    const runs = this.gatherTaskRuns(taskId);
     if (runs.length === 0) {
-      // No runs: leave the asserted planning stage untouched.
+      // No runs: leave an asserted planning stage untouched. A DERIVED stage with
+      // zero runs is a stale projection (e.g. the runs were deleted) — revert it
+      // to the entry stage so the task doesn't read as in-development forever.
+      const currentStage = this.lookupStage(task.stage_id);
+      if (currentStage?.write_policy === 'derived') {
+        const revertStageId =
+          task.entry_stage_id ?? this.stageIdForPosition(task.board_id, READY_FOR_DEV_POSITION);
+        if (revertStageId && revertStageId !== task.stage_id) {
+          await this.applyChange(task.project_id, {
+            actor: 'orchestrator',
+            entityType: 'task',
+            taskId: task.id,
+            stageId: revertStageId,
+            kind: 'execution-stage',
+          });
+        }
+      }
       return;
     }
 
     let targetStageId: string | null = null;
 
-    const anyMerged = runs.some((r) => r.outcome === 'merged');
+    // Arm 1 — a real merge (direct run merged, or a batch run merged with this
+    // task's lane integrated) lands on Done regardless of the current stage.
+    const anyMerged = runs.some(
+      (r) => r.outcome === 'merged' && (r.source === 'direct' || r.laneStatus === 'integrated'),
+    );
 
     if (anyMerged) {
-      targetStageId = this.stageIdForPosition(task.board_id, DONE_POSITION); // done
+      targetStageId = this.stageIdForPosition(task.board_id, DONE_POSITION);
     } else {
-      // Every non-merged aggregate (running, awaiting_review, pr_open, integrated,
-      // pending approval, or all-terminal-without-merge) holds the task at its
-      // entry stage (fallback Ready for development, position 6).
-      targetStageId = task.entry_stage_id ?? this.stageIdForPosition(task.board_id, READY_FOR_DEV_POSITION);
+      // Terminal-stage guard: a task already at a terminal stage (Done / Won't do)
+      // is never pulled back by arms 2/3.
+      const currentStage = this.lookupStage(task.stage_id);
+      if (currentStage?.is_terminal === 1) {
+        return;
+      }
+      const anyActive = runs.some((r) => !TERMINAL_RUN_STATUS_SET.has(r.status));
+      if (anyActive) {
+        // Arm 2 — a live run association holds the task in development.
+        targetStageId = this.stageIdForPosition(task.board_id, IN_DEVELOPMENT_POSITION);
+      } else {
+        // Arm 3 — runs exist but all ended without merging: revert to entry stage.
+        targetStageId =
+          task.entry_stage_id ?? this.stageIdForPosition(task.board_id, READY_FOR_DEV_POSITION);
+      }
     }
 
     if (!targetStageId || targetStageId === task.stage_id) {
@@ -2221,6 +2275,206 @@ export class TaskChangeRouter {
       stageId: targetStageId,
       kind: 'execution-stage',
     });
+  }
+
+  /**
+   * Gather the task's execution runs — BOTH the direct task-link runs and the
+   * sprint-batch runs whose lane names this task. The batch arm is gated behind
+   * columnExists('workflow_runs','batch_id') (added with sprint_batch_tasks in
+   * migration 022) so a pre-022 test schema degrades to the direct-only set
+   * instead of throwing 'no such table/column'.
+   */
+  private gatherTaskRuns(
+    taskId: string,
+  ): Array<{ status: string; outcome: string | null; source: 'direct' | 'batch'; laneStatus: string | null }> {
+    const direct = (
+      this.db
+        .prepare('SELECT status, outcome FROM workflow_runs WHERE task_id = ?')
+        .all(taskId) as Array<{ status: string; outcome: string | null }>
+    ).map((r) => ({ status: r.status, outcome: r.outcome, source: 'direct' as const, laneStatus: null }));
+
+    if (!this.columnExists('workflow_runs', 'batch_id')) {
+      return direct;
+    }
+
+    const batch = (
+      this.db
+        .prepare(
+          `SELECT wr.status AS status, wr.outcome AS outcome, sbt.status AS laneStatus
+             FROM workflow_runs wr
+             JOIN sprint_batch_tasks sbt ON sbt.batch_id = wr.batch_id AND sbt.task_id = ?
+            WHERE wr.batch_id IS NOT NULL`,
+        )
+        .all(taskId) as Array<{ status: string; outcome: string | null; laneStatus: string }>
+    ).map((r) => ({ status: r.status, outcome: r.outcome, source: 'batch' as const, laneStatus: r.laneStatus }));
+
+    return [...direct, ...batch];
+  }
+
+  /**
+   * Old hold-behaviour for a non-task entity (an epic/idea reached via
+   * workflow_runs.task_id): a merged run moves it to Done; every other run-state
+   * holds it at its current stage. Never enters the derived In-development stage.
+   * A genuinely unknown id (neither task/epic/idea) keeps the not_found contract.
+   */
+  private async recomputeNonTaskEntityStage(entityId: string): Promise<void> {
+    const entity = this.db
+      .prepare(
+        `SELECT id, project_id, board_id, stage_id FROM epics WHERE id = ?
+           UNION ALL
+         SELECT id, project_id, board_id, stage_id FROM ideas WHERE id = ?`,
+      )
+      .get(entityId, entityId) as
+      | { id: string; project_id: number; board_id: string; stage_id: string }
+      | undefined;
+    if (!entity) {
+      throw new TaskChangeError('not_found', `task ${entityId} not found`);
+    }
+
+    const anyMerged =
+      (
+        this.db
+          .prepare(
+            "SELECT 1 FROM workflow_runs WHERE task_id = ? AND outcome = 'merged' LIMIT 1",
+          )
+          .get(entityId) as { 1: number } | undefined
+      ) !== undefined;
+    if (!anyMerged) return; // hold at the current stage
+
+    const isEpic =
+      (this.db.prepare('SELECT 1 FROM epics WHERE id = ?').get(entityId) as { 1: number } | undefined) !==
+      undefined;
+    const targetStageId = this.stageIdForPosition(entity.board_id, DONE_POSITION);
+    if (!targetStageId || targetStageId === entity.stage_id) return;
+
+    await this.applyChange(entity.project_id, {
+      actor: 'orchestrator',
+      entityType: isEpic ? 'epic' : 'idea',
+      taskId: entityId,
+      stageId: targetStageId,
+      kind: 'execution-stage',
+    });
+  }
+
+  /**
+   * Recompute the execution stage for EVERY task in a sprint batch. For each lane:
+   * (a) capture entry_stage_id when still NULL and the task sits at an asserted,
+   *     non-terminal stage (mirrors runLauncher's entry-stage-capture semantics —
+   *     kind 'entry-stage-capture' — so the revert target is the pre-development
+   *     stage), then (b) recomputeTaskExecutionStage. Fail-soft PER TASK so one bad
+   *     lane never aborts the loop. The batch's owning run id (if any) is threaded
+   *     as the capture event's runId for lineage.
+   */
+  async recomputeTasksForBatch(batchId: string): Promise<void> {
+    let laneTaskIds: string[];
+    try {
+      laneTaskIds = (
+        this.db
+          .prepare('SELECT task_id FROM sprint_batch_tasks WHERE batch_id = ?')
+          .all(batchId) as Array<{ task_id: string }>
+      ).map((r) => r.task_id);
+    } catch {
+      return; // pre-022 schema (no sprint_batch_tasks) — nothing to recompute
+    }
+    if (laneTaskIds.length === 0) return;
+
+    const owningRunId =
+      (
+        this.db
+          .prepare('SELECT id FROM workflow_runs WHERE batch_id = ? ORDER BY created_at ASC LIMIT 1')
+          .get(batchId) as { id?: string } | undefined
+      )?.id ?? undefined;
+
+    for (const taskId of laneTaskIds) {
+      try {
+        await this.captureEntryStageIfUnset(taskId, owningRunId);
+        await this.recomputeTaskExecutionStage(taskId);
+      } catch (err) {
+        console.warn(
+          `[TaskChangeRouter] recomputeTasksForBatch: task ${taskId} (batch ${batchId}) failed (continuing):`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+  }
+
+  /**
+   * BOOT SELF-HEAL (migration 061): recompute every task currently parked at a
+   * DERIVED stage ('In development'). The derived stage is a projection of the
+   * task's live run associations, and several paths can strand it stale — boot
+   * recovery force-fails runs with raw UPDATEs (runRecovery.ts), or the app dies
+   * between a batch seed and its recompute. Sweeping at boot (after run recovery)
+   * makes the projection trustworthy again no matter which seam was interrupted:
+   * a task with a live association is idempotently re-asserted, one without
+   * reverts to its entry stage. Fail-soft per task.
+   */
+  async sweepStaleDerivedStageTasks(): Promise<void> {
+    let taskIds: string[];
+    try {
+      taskIds = (
+        this.db
+          .prepare(
+            `SELECT t.id FROM tasks t
+              JOIN board_stages bs ON bs.id = t.stage_id
+             WHERE bs.write_policy = 'derived'`,
+          )
+          .all() as Array<{ id: string }>
+      ).map((r) => r.id);
+    } catch {
+      return; // pre-014 schema — no derived stages to sweep
+    }
+    for (const taskId of taskIds) {
+      try {
+        await this.recomputeTaskExecutionStage(taskId);
+      } catch (err) {
+        console.warn(
+          `[TaskChangeRouter] sweepStaleDerivedStageTasks: task ${taskId} failed (continuing):`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+  }
+
+  /**
+   * Capture entry_stage_id for a task when it is still NULL AND the task sits at an
+   * asserted, non-terminal stage — the revert target the deriver falls back to.
+   * Mirrors runLauncher.linkRunToTaskAndDerive's entry-stage-capture (same guard,
+   * same kind 'entry-stage-capture'). A no-op once entry_stage_id is set or the
+   * task is already at a derived/terminal stage.
+   */
+  private async captureEntryStageIfUnset(taskId: string, runId?: string): Promise<void> {
+    const stageInfo = this.db
+      .prepare(
+        `SELECT t.project_id AS project_id, t.stage_id AS stage_id, t.entry_stage_id AS entry_stage_id,
+                s.write_policy AS write_policy, s.is_terminal AS is_terminal
+           FROM tasks t
+           JOIN board_stages s ON s.id = t.stage_id
+          WHERE t.id = ?`,
+      )
+      .get(taskId) as
+      | {
+          project_id: number;
+          stage_id: string;
+          entry_stage_id: string | null;
+          write_policy: 'asserted' | 'derived';
+          is_terminal: number;
+        }
+      | undefined;
+
+    if (
+      stageInfo &&
+      stageInfo.entry_stage_id === null &&
+      stageInfo.write_policy === 'asserted' &&
+      stageInfo.is_terminal !== 1
+    ) {
+      await this.applyChange(stageInfo.project_id, {
+        actor: 'orchestrator',
+        taskId,
+        runId,
+        kind: 'entry-stage-capture',
+        fields: { entryStageId: stageInfo.stage_id },
+      });
+    }
   }
 
   // --------------------------------------------------------------------------
@@ -2345,16 +2599,38 @@ export class TaskChangeRouter {
     }
   }
 
-  /** A non-terminal run exists for the task (used by the active-run guard). */
+  /**
+   * A non-terminal run is associated with the task — either a DIRECT task-link run
+   * (workflow_runs.task_id) OR a sprint-BATCH run whose lane names this task
+   * (workflow_runs.batch_id in the task's sprint_batch_tasks batches). Used by the
+   * active-run guard so a batch-pulled task is as protected as a directly-linked
+   * one. The batch arm is gated behind columnExists('workflow_runs','batch_id')
+   * (added with sprint_batch_tasks in migration 022) so a pre-022 schema degrades
+   * to the direct-only check.
+   */
   private hasNonTerminalRun(taskId: string): boolean {
+    if (!this.columnExists('workflow_runs', 'batch_id')) {
+      const direct = this.db
+        .prepare(
+          `SELECT 1 FROM workflow_runs
+            WHERE task_id = ?
+              AND status NOT IN ('completed', 'failed', 'canceled')
+            LIMIT 1`,
+        )
+        .get(taskId) as { 1: number } | undefined;
+      return direct !== undefined;
+    }
     const row = this.db
       .prepare(
-        `SELECT 1 FROM workflow_runs
-          WHERE task_id = ?
-            AND status NOT IN ('completed', 'failed', 'canceled')
+        `SELECT 1 FROM workflow_runs wr
+          WHERE wr.status NOT IN ('completed', 'failed', 'canceled')
+            AND (
+              wr.task_id = ?
+              OR wr.batch_id IN (SELECT sbt.batch_id FROM sprint_batch_tasks sbt WHERE sbt.task_id = ?)
+            )
           LIMIT 1`,
       )
-      .get(taskId) as { 1: number } | undefined;
+      .get(taskId, taskId) as { 1: number } | undefined;
     return row !== undefined;
   }
 

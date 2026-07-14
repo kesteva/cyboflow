@@ -325,6 +325,96 @@ describe('SprintLaneStore', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // filterEligibleTaskIds / findActiveRunTaskIds — double-pull guard (mig 061)
+  // ---------------------------------------------------------------------------
+
+  describe('double-pull guard (active run association)', () => {
+    let rdb: Database.Database;
+    let rstore: SprintLaneStore;
+
+    beforeEach(() => {
+      rdb = buildReadyLaneDb();
+      rstore = SprintLaneStore.initialize(dbAdapter(rdb));
+    });
+
+    afterEach(() => {
+      rdb.close();
+    });
+
+    /** Insert a direct task-link run. */
+    function seedDirectRun(runId: string, taskId: string, status: string): void {
+      rdb
+        .prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf', 1, 'sprint', '{}')`)
+        .run();
+      rdb
+        .prepare(
+          `INSERT INTO workflow_runs (id, workflow_id, project_id, status, task_id) VALUES (?, 'wf', 1, ?, ?)`,
+        )
+        .run(runId, status, taskId);
+    }
+
+    /** Insert a batch run + a lane linking `taskId` to that batch. */
+    function seedBatchRunWithLane(runId: string, batchId: string, taskId: string, status: string): void {
+      rdb
+        .prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf', 1, 'sprint', '{}')`)
+        .run();
+      rdb
+        .prepare(`INSERT OR IGNORE INTO sprint_batches (id, project_id, substrate, status) VALUES (?, 1, 'sdk', 'running')`)
+        .run(batchId);
+      rdb
+        .prepare(
+          `INSERT INTO workflow_runs (id, workflow_id, project_id, status, batch_id) VALUES (?, 'wf', 1, ?, ?)`,
+        )
+        .run(runId, status, batchId);
+      rdb
+        .prepare(`INSERT INTO sprint_batch_tasks (batch_id, task_id, status) VALUES (?, ?, 'running')`)
+        .run(batchId, taskId);
+    }
+
+    it('excludes a task with an active DIRECT run and re-allows it once the run is terminal', () => {
+      seedReadyTask(rdb, 'tsk_a', 'TASK-001', 'A');
+      seedDirectRun('run-1', 'tsk_a', 'running');
+
+      expect(rstore.filterEligibleTaskIds(1, ['tsk_a'])).toEqual([]);
+      expect(rstore.findActiveRunTaskIds(1, ['tsk_a'])).toEqual(['tsk_a']);
+
+      rdb.prepare("UPDATE workflow_runs SET status = 'completed' WHERE id = 'run-1'").run();
+      expect(rstore.filterEligibleTaskIds(1, ['tsk_a'])).toEqual(['tsk_a']);
+      expect(rstore.findActiveRunTaskIds(1, ['tsk_a'])).toEqual([]);
+    });
+
+    it('excludes a task with an active BATCH association and re-allows it once the batch run is terminal', () => {
+      seedReadyTask(rdb, 'tsk_a', 'TASK-001', 'A');
+      seedBatchRunWithLane('run-1', 'bat-1', 'tsk_a', 'running');
+
+      expect(rstore.filterEligibleTaskIds(1, ['tsk_a'])).toEqual([]);
+      expect(rstore.findActiveRunTaskIds(1, ['tsk_a'])).toEqual(['tsk_a']);
+
+      rdb.prepare("UPDATE workflow_runs SET status = 'canceled' WHERE id = 'run-1'").run();
+      expect(rstore.filterEligibleTaskIds(1, ['tsk_a'])).toEqual(['tsk_a']);
+      expect(rstore.findActiveRunTaskIds(1, ['tsk_a'])).toEqual([]);
+    });
+
+    it('does NOT key the guard on stage 7: a task at In-development with no live run stays pullable', () => {
+      // buildReadyLaneDb stops at 042 (no position-7 stage), so re-add it exactly
+      // as migration 061 does, then park the task there with a terminal run only.
+      rdb
+        .prepare(
+          `INSERT OR IGNORE INTO board_stages (id, board_id, label, color_oklch, hint, position, write_policy, is_terminal, hidden_by_default)
+           VALUES ('stage-board-1-default-7', 'board-1-default', 'In development', 'oklch(0.63 0.16 45)', 'Pulled into a live session', 7, 'derived', 0, 0)`,
+        )
+        .run();
+      seedReadyTask(rdb, 'tsk_a', 'TASK-001', 'A', { position: 7 });
+      seedDirectRun('run-1', 'tsk_a', 'completed'); // terminal — no live association
+
+      // Stage is 7 but the run is terminal: the run-association (not the stage) is
+      // the source of truth, so the task remains pullable and self-heals.
+      expect(rstore.filterEligibleTaskIds(1, ['tsk_a'])).toEqual(['tsk_a']);
+      expect(rstore.findActiveRunTaskIds(1, ['tsk_a'])).toEqual([]);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // findExperimentTaggedTaskIds — the runs.start launch-boundary scope
   // ---------------------------------------------------------------------------
 

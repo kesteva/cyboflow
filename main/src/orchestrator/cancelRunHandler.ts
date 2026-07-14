@@ -89,6 +89,14 @@ export interface CancelRunDeps {
    */
   markBatchTerminal?: (batchId: string, status: 'canceled') => void;
   /**
+   * Revert the canceled batch run's tasks off 'In development' (migration 061):
+   * a task whose only live association was this run reverts to its entry stage.
+   * Backed by TaskChangeRouter.recomputeTasksForBatch (idempotent, per-task
+   * fail-soft). Optional + fail-soft: a missing dep or a throw never blocks the
+   * cancel. Awaited so the revert lands before the handler returns.
+   */
+  recomputeTasksForBatch?: (batchId: string) => Promise<void>;
+  /**
    * Q1 GUARD (interrupt = no tasks): delete the canceled run's PENDING draft
    * entities (the epics + orphan tasks it created during planning) AFTER the
    * cancel write commits, so cancelling a plan-gated run BEFORE approval leaves
@@ -192,6 +200,7 @@ export async function cancelRunHandler(
     clearPendingHumanGatesForRun,
     emitRunStatusChanged,
     markBatchTerminal,
+    recomputeTasksForBatch,
     deletePendingDraftsForRun,
     cancelVerificationsForRun,
     reapPrototypeServers,
@@ -279,9 +288,10 @@ export async function cancelRunHandler(
   // per-run queue. With the abort done above, execute() is unblocked and will fire
   // its own drain transition (awaiting_review, non-terminal); this serialized
   // write lands AFTER that and overwrites it to 'canceled'. The guard (status NOT
-  // IN terminal) also makes the write order-independent + idempotent. NO task-stage
-  // derivation (cancel is git-neutral and does NOT revert a linked task — that is
-  // the Dismiss path's job).
+  // IN terminal) also makes the write order-independent + idempotent. A DIRECTLY
+  // task-linked run is NOT reverted here (cancel is git-neutral; the Dismiss path
+  // owns that). A canceled BATCH run's lanes, however, ARE recomputed below so a
+  // task whose only live association was this run reverts off 'In development'.
   const result = await runQueues.getOrCreate(runId).add(async (): Promise<CancelRunResult> => {
     const now = new Date().toISOString();
     const cancelTx = db.transaction(() => {
@@ -327,6 +337,17 @@ export async function cancelRunHandler(
       markBatchTerminal?.(row.batch_id, 'canceled');
     } catch (err: unknown) {
       logger?.error('[cancelRun] markBatchTerminal failed — batch row left as-is', {
+        runId,
+        batchId: row.batch_id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    // Revert the batch's lanes off 'In development' (migration 061) now the run is
+    // terminal — AFTER markBatchTerminal. Fail-soft: the run row is canonical.
+    try {
+      await recomputeTasksForBatch?.(row.batch_id);
+    } catch (err: unknown) {
+      logger?.error('[cancelRun] recomputeTasksForBatch failed — task stages left as-is', {
         runId,
         batchId: row.batch_id,
         error: err instanceof Error ? err.message : String(err),

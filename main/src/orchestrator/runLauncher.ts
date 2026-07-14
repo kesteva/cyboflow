@@ -101,6 +101,12 @@ export interface TaskStageDeriverLike {
     change: TaskChange,
   ): Promise<{ taskId: string; event: { id: number; seq: number } }>;
   recomputeTaskExecutionStage(taskId: string): Promise<void>;
+  /**
+   * Capture entry stage + derive the execution stage for every task in a sprint
+   * batch (migration 061). Called right after the batch is seeded so pulled tasks
+   * move to 'In development'.
+   */
+  recomputeTasksForBatch(batchId: string): Promise<void>;
 }
 
 /**
@@ -618,6 +624,21 @@ export class RunLauncher {
         this.db
           .prepare('UPDATE workflow_runs SET batch_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
           .run(batchId, runId);
+
+        // Move the pulled tasks to 'In development' (migration 061): capture each
+        // lane's entry stage, then derive its execution stage. Best-effort so a
+        // task-side failure never aborts the launch (mirrors linkRunToTaskAndDerive).
+        if (this.taskStageDeriver) {
+          try {
+            await this.taskStageDeriver.recomputeTasksForBatch(batchId);
+          } catch (err) {
+            this.logger.warn('RunLauncher: batch task-stage derivation failed (best-effort)', {
+              runId,
+              batchId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
       }
 
       // Compound seed findings (findings-triage redesign / migration 034). A direct

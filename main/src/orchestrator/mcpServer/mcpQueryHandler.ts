@@ -2059,6 +2059,29 @@ export class McpQueryHandler {
       return;
     }
 
+    // Move the materialized batch's tasks to 'In development' (migration 061):
+    // capture entry stage + derive execution stage per lane. Idempotent, so both
+    // the created:true and idempotent created:false paths recompute. Fire-and-
+    // forget + best-effort — a task-side failure (or an uninitialized router) must
+    // never invalidate the committed batch or block the synchronous response.
+    try {
+      void TaskChangeRouter.getInstance()
+        .recomputeTasksForBatch(outcome.batchId)
+        .catch((err: unknown) => {
+          this.logger?.warn('[Cyboflow MCP Query] create-sprint-batch task-stage derivation failed', {
+            runId: msg.runId,
+            batchId: outcome.batchId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+    } catch (err: unknown) {
+      this.logger?.warn('[Cyboflow MCP Query] create-sprint-batch task-stage derivation unavailable', {
+        runId: msg.runId,
+        batchId: outcome.batchId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     // 8. Emit a run-row-changed signal so activeRunsStore re-fetches runs.list
     // (now carrying batch_id) and the swimlane canvas mounts. The run stays
     // active; we re-assert its 'running' status. Best-effort — never let an
