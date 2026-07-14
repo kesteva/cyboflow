@@ -388,6 +388,7 @@ export function resolveRunIdFromOptions(options: FakeQueryOptions): string | und
 
 type ScenarioStep =
   | { readonly kind: 'emit'; readonly message: SDKMessage }
+  | { readonly kind: 'auto-continue' }
   | {
       readonly kind: 'permission';
       readonly toolName: string;
@@ -395,6 +396,57 @@ type ScenarioStep =
       readonly requested: Deferred<void>;
       readonly onResult?: (result: PermissionResult) => readonly SDKMessage[];
     };
+
+/**
+ * Background-subagent lifecycle `system` events (SDK ≥0.3.201 runs Agent-tool
+ * subagents in the background by default). Shapes mirror the real CLI stream
+ * (observed raw_events): `task_started` carries task_id + tool_use_id +
+ * description + subagent_type; `task_updated` a partial `patch`;
+ * `task_notification` a terminal status. They are NOT part of the SDK's
+ * published SDKMessage union, so the builders cast — exactly how the real
+ * stream reaches the manager (narrowed to `__unknown__` downstream).
+ */
+export function sdkSystemTaskStarted(
+  taskId: string,
+  opts: { toolUseId?: string; description?: string; subagentType?: string } = {},
+): SDKMessage {
+  return {
+    type: 'system',
+    subtype: 'task_started',
+    task_id: taskId,
+    tool_use_id: opts.toolUseId ?? `toolu_${randomUUID()}`,
+    description: opts.description ?? 'background subagent',
+    subagent_type: opts.subagentType ?? 'general-purpose',
+    uuid: randomUUID(),
+    session_id: DEFAULT_SESSION_ID,
+  } as unknown as SDKMessage;
+}
+
+export function sdkSystemTaskUpdated(taskId: string, patch: Record<string, unknown>): SDKMessage {
+  return {
+    type: 'system',
+    subtype: 'task_updated',
+    task_id: taskId,
+    patch,
+    uuid: randomUUID(),
+    session_id: DEFAULT_SESSION_ID,
+  } as unknown as SDKMessage;
+}
+
+export function sdkSystemTaskNotification(
+  taskId: string,
+  opts: { status?: string; toolUseId?: string } = {},
+): SDKMessage {
+  return {
+    type: 'system',
+    subtype: 'task_notification',
+    task_id: taskId,
+    status: opts.status ?? 'completed',
+    tool_use_id: opts.toolUseId ?? `toolu_${randomUUID()}`,
+    uuid: randomUUID(),
+    session_id: DEFAULT_SESSION_ID,
+  } as unknown as SDKMessage;
+}
 
 export class ScenarioBuilder {
   private readonly steps: ScenarioStep[] = [];
@@ -441,6 +493,30 @@ export class ScenarioBuilder {
 
   resultError(opts?: Parameters<typeof sdkResultError>[0]): this {
     return this.emit(sdkResultError(opts));
+  }
+
+  taskStarted(taskId: string, opts?: Parameters<typeof sdkSystemTaskStarted>[1]): this {
+    return this.emit(sdkSystemTaskStarted(taskId, opts));
+  }
+
+  taskUpdated(taskId: string, patch: Record<string, unknown>): this {
+    return this.emit(sdkSystemTaskUpdated(taskId, patch));
+  }
+
+  taskNotification(taskId: string, opts?: Parameters<typeof sdkSystemTaskNotification>[1]): this {
+    return this.emit(sdkSystemTaskNotification(taskId, opts));
+  }
+
+  /**
+   * Marker: the generator must NOT park on the preceding `result` waiting for a
+   * pushed continuation — it keeps yielding the following steps immediately.
+   * Models the CLI AUTO-CONTINUING the same conversation when a background
+   * subagent task finishes (task_notification), where no user/manager push
+   * ever happens.
+   */
+  autoContinue(): this {
+    this.steps.push({ kind: 'auto-continue' });
+    return this;
   }
 
   /**
@@ -516,11 +592,24 @@ export class ScenarioBuilder {
         }
         for (let i = 0; i < steps.length; i++) {
           const step = steps[i];
+          if (step.kind === 'auto-continue') {
+            // Marker only — its effect is consumed by the result-boundary check
+            // below (the preceding result does not park for a push).
+            continue;
+          }
           if (step.kind === 'emit') {
             yield step.message;
             // Turn boundary: after a terminal result with more turns to come, block
             // on the next pushed user message so the test can assert it, then run on.
-            if (multiTurn && promptIterator && step.message.type === 'result' && i < steps.length - 1) {
+            // An `auto-continue` marker right after the result suppresses the park —
+            // the CLI keeps streaming (background-task auto-continuation).
+            if (
+              multiTurn &&
+              promptIterator &&
+              step.message.type === 'result' &&
+              i < steps.length - 1 &&
+              steps[i + 1].kind !== 'auto-continue'
+            ) {
               const nextMsg = await promptIterator.next();
               // A closed stream (the manager parked → then closed the persistent
               // input on TTL / kill / fingerprint respawn) models the CLI exiting

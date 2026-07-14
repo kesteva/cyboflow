@@ -194,6 +194,81 @@ function terminalResultError(event: unknown): string | null {
 }
 
 /**
+ * Task-lifecycle statuses that still count as LIVE. A `task_updated` patch whose
+ * status is anything OUTSIDE this set (completed / failed / cancelled / killed /
+ * future terminal vocab) settles the task — defaulting unknown statuses to
+ * settled keeps a missed vocabulary word from wedging a turn open forever.
+ */
+const LIVE_TASK_STATUSES = new Set(['running', 'pending', 'queued', 'in_progress']);
+
+/**
+ * Track the CLI's background-subagent task lifecycle. SDK ≥0.3.201 runs
+ * Agent-tool subagents in the BACKGROUND by default, surfacing their lifecycle
+ * as `system` events on the parent stream: `task_started` registers a live
+ * task (it arrives BEFORE the spawn-ack tool_result, so tracking can never
+ * race the turn's result event), a settled `task_updated` patch or a
+ * `task_notification` retires it. The per-turn boundary consults the live set
+ * via {@link shouldHoldFlowTurnOpen}. Exported for unit tests.
+ */
+export function trackBackgroundTasks(event: unknown, live: Set<string>): void {
+  if (typeof event !== 'object' || event === null) return;
+  const e = event as { type?: unknown; subtype?: unknown; task_id?: unknown; patch?: unknown };
+  if (e.type !== 'system' || typeof e.task_id !== 'string') return;
+  if (e.subtype === 'task_started') {
+    live.add(e.task_id);
+  } else if (e.subtype === 'task_notification') {
+    live.delete(e.task_id);
+  } else if (e.subtype === 'task_updated') {
+    const status = (e.patch as { status?: unknown } | null | undefined)?.status;
+    if (typeof status === 'string' && !LIVE_TASK_STATUSES.has(status)) {
+      live.delete(e.task_id);
+    }
+  }
+}
+
+/**
+ * True when a `result` event must NOT be treated as the turn boundary because
+ * the run's backgrounded subagents are still running.
+ *
+ * SDK ≥0.3.201 backgrounds Agent-tool subagents by default, so a flow agent's
+ * turn can produce a result while its subagents are mid-flight — the CLI then
+ * AUTO-CONTINUES the same conversation when they finish. Ending the cyboflow
+ * turn at that intermediate result resolved spawnCliProcess, which made
+ * RunExecutor fire 'drained' (rest to awaiting_review + run-level step-'done')
+ * mid-flow — the false "Workflow complete". Holding the LOGICAL turn open
+ * (skip the boundary, keep consuming the same query()) defers the boundary to
+ * the first result with no live background task.
+ *
+ * Scope guards:
+ *  - flow runs only (`spawnKey === runId`; RunExecutor spawns with
+ *    panelId === sessionId === runId) — a quick CHAT turn SHOULD end while its
+ *    background work runs, and a fan-out lane never holds;
+ *  - warm parked process only — a single-shot / kill-switched process dies at
+ *    the result, taking its tasks with it, so there is nothing to wait for;
+ *  - never on a terminal error or an abort (the process is going away).
+ *
+ * Exported for unit tests.
+ */
+export function shouldHoldFlowTurnOpen(params: {
+  spawnKey: string;
+  runId: string;
+  liveBackgroundTaskCount: number;
+  hasWarmInput: boolean;
+  warmDisabled: boolean;
+  terminalError: string | null;
+  aborted: boolean;
+}): boolean {
+  return (
+    params.liveBackgroundTaskCount > 0 &&
+    params.spawnKey === params.runId &&
+    params.hasWarmInput &&
+    !params.warmDisabled &&
+    params.terminalError === null &&
+    !params.aborted
+  );
+}
+
+/**
  * Thrown by spawnCliProcess when a FLOW-RUN's driving SDK turn ends on a TERMINAL
  * error (a fatal is_error result per `terminalResultError`, or a thrown SDK/spawn
  * error) that the CLI surfaces WITHOUT rejecting the query() iterator. Rejecting
@@ -1309,10 +1384,16 @@ export class ClaudeCodeManager extends AbstractCliManager {
           })
         : null;
     let gateRecoveryDetector = makeGateDetector();
+    // Live background-subagent tasks for THIS subprocess (SDK ≥0.3.201 Agent-tool
+    // default). Scoped to the process: it spans warm turns (a task can outlive the
+    // turn that spawned it) and is cleared on a fallback retry (a new query() is a
+    // new subprocess — the old process's tasks died with it).
+    const liveBackgroundTasks = new Set<string>();
     try {
       retry: while (true) {
         attempt++;
         terminalError = null;
+        liveBackgroundTasks.clear();
         if (firstEventTimer) clearTimeout(firstEventTimer);
         firstEventTimer = setTimeout(() => {
           if (abortController.signal.aborted) return;
@@ -1355,6 +1436,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
               run.currentTurn.firstEventTs = Date.now();
             }
             if (abortController.signal.aborted) break;
+
+            // Background-subagent lifecycle (task_started / task_updated /
+            // task_notification system events) — feeds the per-turn boundary's
+            // hold-open decision below.
+            trackBackgroundTasks(event, liveBackgroundTasks);
 
             // Mid-call graceful fallback: the CLI reports an unusable `--model` as an
             // is_error RESULT event (never a throw), so it lands here, not in the
@@ -1459,7 +1545,30 @@ export class ClaudeCodeManager extends AbstractCliManager {
               });
             }
 
-            // PER-TURN BOUNDARY. The result event ends THIS cyboflow turn.
+            // PER-TURN BOUNDARY. The result event ends THIS cyboflow turn —
+            // UNLESS a flow run's backgrounded subagents are still running, in
+            // which case the result is an intermediate rest the CLI will
+            // auto-continue past when they finish. Hold the LOGICAL turn open:
+            // skip the boundary (no finishTurn, no 'exit', spawnCliProcess stays
+            // pending so RunExecutor never sees a mid-flow 'drained') and keep
+            // consuming this same query(). See shouldHoldFlowTurnOpen.
+            if (
+              isResultEvent(event) &&
+              shouldHoldFlowTurnOpen({
+                spawnKey,
+                runId,
+                liveBackgroundTaskCount: liveBackgroundTasks.size,
+                hasWarmInput: run.warm !== null,
+                warmDisabled: warmSdkDisabled(),
+                terminalError,
+                aborted: abortController.signal.aborted,
+              })
+            ) {
+              this.logger?.info(
+                `[ClaudeCodeManager] holding flow turn open past result: ${liveBackgroundTasks.size} background subagent task(s) still running (panel ${displayPanelId})`,
+              );
+              continue;
+            }
             if (isResultEvent(event)) {
               const aborted = abortController.signal.aborted;
               // A warm session PARKS between turns; everything else (lane / kill-
