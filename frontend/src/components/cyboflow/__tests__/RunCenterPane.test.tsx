@@ -233,11 +233,12 @@ describe('RunCenterPane', () => {
       <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
     );
     const session = useCenterPaneStore.getState().bySession['sess-1'];
-    // The artifact tab was registered…
-    expect(session.tabs.some((t) => t.id === 'art:idea-spec')).toBe(true);
+    // The artifact tab was registered… (idea-spec is per-entity → tab id keyed by
+    // artifact id, `art:idea-spec:<id>`, migration 062).
+    expect(session.tabs.some((t) => t.id === 'art:idea-spec:art-seed')).toBe(true);
     // …but focus stayed on Flow, and the tab carries no client "new" pulse.
     expect(session.activeTabId).toBe('flow');
-    expect(session.tabs.find((t) => t.id === 'art:idea-spec')?.isNew).toBe(false);
+    expect(session.tabs.find((t) => t.id === 'art:idea-spec:art-seed')?.isNew).toBe(false);
   });
 
   it('reopening a run whose artifacts seed in ASYNC lands on Flow, not the last artifact', () => {
@@ -266,8 +267,8 @@ describe('RunCenterPane', () => {
     );
 
     const session = useCenterPaneStore.getState().bySession['sess-1'];
-    // Both artifact tabs registered…
-    expect(session.tabs.some((t) => t.id === 'art:idea-spec')).toBe(true);
+    // Both artifact tabs registered… (idea-spec keyed by its artifact id 'a1')
+    expect(session.tabs.some((t) => t.id === 'art:idea-spec:a1')).toBe(true);
     expect(session.tabs.some((t) => t.id === 'art:screenshots')).toBe(true);
     // …but focus stayed on Flow (the bug landed on 'art:screenshots', the last one).
     expect(session.activeTabId).toBe('flow');
@@ -303,7 +304,7 @@ describe('RunCenterPane', () => {
       <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
     );
     expect(
-      useCenterPaneStore.getState().bySession['sess-1'].tabs.some((t) => t.id === 'art:idea-spec'),
+      useCenterPaneStore.getState().bySession['sess-1'].tabs.some((t) => t.id === 'art:idea-spec:art-x'),
     ).toBe(true);
 
     // The artifact is pruned/deleted from the live list.
@@ -314,7 +315,7 @@ describe('RunCenterPane', () => {
       <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
     );
     const session = useCenterPaneStore.getState().bySession['sess-1'];
-    expect(session.tabs.some((t) => t.id === 'art:idea-spec')).toBe(false);
+    expect(session.tabs.some((t) => t.id === 'art:idea-spec:art-x')).toBe(false);
     // Flow tab survives + becomes active.
     expect(session.tabs.some((t) => t.id === 'flow')).toBe(true);
     expect(session.activeTabId).toBe('flow');
@@ -348,7 +349,9 @@ describe('RunCenterPane', () => {
       useCenterPaneStore.getState().bySession['sess-1'].tabs.some((t) => t.id === 'art:idea-spec'),
     ).toBe(true);
 
-    // When ITS artifact mints, the same tab fills in with the real renderer.
+    // When ITS artifact mints, the eager plain placeholder tab is ADOPTED — re-keyed
+    // to the id-keyed `art:idea-spec:art-mint` and filled in with the real renderer
+    // (a single tab, not a duplicate).
     act(() => {
       mockArtifacts = [
         makeArtifact({ id: 'art-other', atype: 'screenshots' }),
@@ -359,7 +362,8 @@ describe('RunCenterPane', () => {
       <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
     );
     const session = useCenterPaneStore.getState().bySession['sess-1'];
-    expect(session.activeTabId).toBe('art:idea-spec');
+    expect(session.tabs.filter((t) => t.atype === 'idea-spec')).toHaveLength(1);
+    expect(session.activeTabId).toBe('art:idea-spec:art-mint');
     expect(screen.getByTestId('mock-artifact-tab-renderer')).toBeInTheDocument();
     expect(screen.queryByTestId('artifact-tab-not-created')).not.toBeInTheDocument();
   });

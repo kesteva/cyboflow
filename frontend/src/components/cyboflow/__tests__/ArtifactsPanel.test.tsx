@@ -158,7 +158,8 @@ describe('ArtifactsPanel', () => {
     const session = useCenterPaneStore.getState().bySession[SESSION_KEY];
     expect(session).toBeDefined();
     const tab = session.tabs.find((t) => t.kind === 'artifact');
-    expect(tab).toMatchObject({ id: 'art:idea-spec', atype: 'idea-spec', label: 'Idea spec' });
+    // idea-spec is per-entity → the card opens an artifact-id-keyed tab (mig 062).
+    expect(tab).toMatchObject({ id: 'art:idea-spec:a-idea', atype: 'idea-spec', label: 'Idea spec' });
   });
 
   it('shows "open · in tabs" when a matching artifact tab is already open', () => {

@@ -87,6 +87,26 @@ export function isCanvasArtifact(atype: ArtifactType): boolean {
   return ARTIFACT_RENDER_MODE[atype] === 'canvas';
 }
 
+/**
+ * Atypes that are NOT one-per-(run, atype): a single run may hold MULTIPLE
+ * artifacts of this kind, one per source entity (source_ref). The multi-idea
+ * planner batch (IDEA-009) mints one 'idea-spec' per seeded/owned idea, so
+ * idea-spec identity is (run_id, atype, source_ref) — see migration 062. Every
+ * OTHER atype keeps the strict one-per-(run, atype) rule.
+ *
+ * This is the SINGLE HOME for the "per-entity" decision — the ArtifactRouter
+ * create-identity (main-side) and the center-pane tab id (frontend) both key off
+ * it, so the split rule can never disagree across the two layers.
+ */
+export const PER_ENTITY_ARTIFACT_ATYPES: ReadonlySet<ArtifactType> = new Set<ArtifactType>([
+  'idea-spec',
+]);
+
+/** True when a run may hold several of this atype (identity keyed by source_ref). */
+export function isPerEntityArtifact(atype: ArtifactType): boolean {
+  return PER_ENTITY_ARTIFACT_ATYPES.has(atype);
+}
+
 // ===========================================================================
 // arch-design — the templated architecture-design section extractor.
 //

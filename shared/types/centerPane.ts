@@ -16,7 +16,7 @@
  * on app refresh. The durable source of truth for artifacts is the artifacts DB
  * table — closed artifact tabs are reopened from the right-rail Artifacts panel.
  */
-import type { ArtifactType } from './artifacts';
+import { isPerEntityArtifact, type ArtifactType } from './artifacts';
 
 /** Tab kind discriminant. */
 export type TabKind = 'flow' | 'file' | 'artifact';
@@ -86,7 +86,18 @@ export function fileTabId(filePath: string): string {
   return `file:${filePath}`;
 }
 
-/** Stable id for an artifact tab (one tab per atype within a session). */
-export function artifactTabId(atype: ArtifactType): string {
+/**
+ * Stable id for an artifact tab. Non-per-entity atypes are one tab per atype
+ * within a session (`art:<atype>`). PER-ENTITY atypes (idea-spec — a multi-idea
+ * planner batch mints one per idea) get one tab per artifact, keyed by the
+ * artifact id (`art:<atype>:<artifactId>`). A per-entity call with NO artifactId
+ * (the Workflow Progress "creates ⟨artifact⟩" chip's eager open on a single-idea
+ * run) returns the plain `art:<atype>` id — the store's openArtifactTab resolves
+ * that to the sole open per-entity tab of the atype when exactly one exists.
+ */
+export function artifactTabId(atype: ArtifactType, artifactId?: string): string {
+  if (isPerEntityArtifact(atype) && artifactId !== undefined && artifactId.length > 0) {
+    return `art:${atype}:${artifactId}`;
+  }
   return `art:${atype}`;
 }

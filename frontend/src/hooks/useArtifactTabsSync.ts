@@ -23,7 +23,7 @@
 import { useEffect, useRef } from 'react';
 import { useCenterPaneStore } from '../stores/centerPaneStore';
 import { FLOW_TAB_ID } from '../../../shared/types/centerPane';
-import type { Artifact } from '../../../shared/types/artifacts';
+import { isPerEntityArtifact, type Artifact } from '../../../shared/types/artifacts';
 
 export function useArtifactTabsSync(sessionKey: string, artifacts: Artifact[], loaded: boolean): void {
   // ── Auto-open artifact tabs ────────────────────────────────────────────────
@@ -82,15 +82,14 @@ export function useArtifactTabsSync(sessionKey: string, artifacts: Artifact[], l
       // produced a deliverable and the pane surfaces it. The seenArtifactIds guard
       // means each id flips at most once (no repeated yanking on later syncs).
       //
-      // Same-atype collapse (deliberate v1 semantics): the artifacts table is
-      // UNIQUE(run_id, atype), so a SESSION-scoped list can hold several rows
-      // sharing one atype (e.g. two planner runs in one session → two
-      // idea-specs). centerPaneStore keys artifact tabs by atype alone
-      // (`art:<atype>` — "one tab per atype within a session"), so the slot
-      // acts as one VIEWER per atype: the loop leaves the newest row
-      // (created_at order) in the slot, and clicking a specific card in the
-      // right-rail ArtifactsPanel swaps that row into it. Per-artifact tabs
-      // would need the store's tab-id scheme to change — out of scope here.
+      // Tab-id scheme (centerPaneStore.artifactTabId): PER-ENTITY atypes
+      // (idea-spec — the multi-idea planner batch, migration 062) key by artifact
+      // id (`art:idea-spec:<id>`), so passing artifactId below surfaces ONE tab
+      // per idea. Every OTHER atype keys by atype alone (`art:<atype>` — "one tab
+      // per atype within a session"), so that slot acts as one VIEWER per atype: a
+      // SESSION-scoped list holding several same-atype rows (e.g. two planner runs
+      // → two decomposed-stories) leaves the newest in the slot, and clicking a
+      // specific card in the right-rail ArtifactsPanel swaps that row into it.
       store.openArtifactTab(sessionKey, {
         atype: artifact.atype,
         label: artifact.label,
@@ -125,9 +124,15 @@ export function useArtifactTabsSync(sessionKey: string, artifacts: Artifact[], l
       // ("creates ⟨artifact⟩" opens eagerly) — it renders the not-created-yet
       // state and must NOT be pruned; auto-open stamps the id once it mints.
       if (!tab.artifactId) continue;
+      // The specific backing row still exists, OR — for a non-per-entity atype
+      // (the VIEWER-collapse slot) — some sibling of the same atype does. A
+      // per-entity tab (idea-spec, keyed by artifact id) gets NO atype fallback:
+      // when its own row vanishes it is pruned even if another idea-spec remains.
       const stillExists =
         artifacts.some((a) => a.id === tab.artifactId) ||
-        artifacts.some((a) => a.atype === tab.atype);
+        (tab.atype !== undefined &&
+          !isPerEntityArtifact(tab.atype) &&
+          artifacts.some((a) => a.atype === tab.atype));
       if (!stillExists) {
         // Drop our memory of the id too, so a re-mint re-opens (and focuses) it.
         if (tab.artifactId) seenArtifactIds.current.delete(tab.artifactId);

@@ -22,6 +22,7 @@ import {
   ARTIFACT_COLORS,
   ARTIFACT_GLYPHS,
   isCanvasArtifact,
+  isPerEntityArtifact,
   type Artifact,
 } from '../../../../shared/types/artifacts';
 
@@ -70,6 +71,14 @@ export function ArtifactsPanel({ runId, sessionId, projectId, sessionKey }: Arti
   const openAtypes = new Set(
     session.tabs.filter((t) => t.kind === 'artifact' && t.atype).map((t) => t.atype),
   );
+  // Per-entity atypes (idea-spec) can have several cards sharing one atype but
+  // distinct tabs, so "already open" must key on the specific artifact id, not the
+  // atype. Non-per-entity atypes stay atype-keyed (one tab per atype).
+  const openArtifactIds = new Set(
+    session.tabs.filter((t) => t.kind === 'artifact' && t.artifactId).map((t) => t.artifactId),
+  );
+  const isCardOpen = (a: Artifact): boolean =>
+    isPerEntityArtifact(a.atype) ? openArtifactIds.has(a.id) : openAtypes.has(a.atype);
 
   const templated = artifacts.filter((a) => !isCanvasArtifact(a.atype));
   const canvases = artifacts.filter((a) => isCanvasArtifact(a.atype));
@@ -127,13 +136,13 @@ export function ArtifactsPanel({ runId, sessionId, projectId, sessionKey }: Arti
           <ArtifactGroup
             heading="Templated deliverables"
             artifacts={templated}
-            openAtypes={openAtypes}
+            isOpen={isCardOpen}
             onOpen={handleOpen}
           />
           <ArtifactGroup
             heading="Live canvases"
             artifacts={canvases}
-            openAtypes={openAtypes}
+            isOpen={isCardOpen}
             onOpen={handleOpen}
           />
         </>
@@ -145,11 +154,11 @@ export function ArtifactsPanel({ runId, sessionId, projectId, sessionKey }: Arti
 interface ArtifactGroupProps {
   heading: string;
   artifacts: Artifact[];
-  openAtypes: Set<Artifact['atype'] | undefined>;
+  isOpen: (a: Artifact) => boolean;
   onOpen: (a: Artifact) => void;
 }
 
-function ArtifactGroup({ heading, artifacts, openAtypes, onOpen }: ArtifactGroupProps) {
+function ArtifactGroup({ heading, artifacts, isOpen, onOpen }: ArtifactGroupProps) {
   if (artifacts.length === 0) return null;
   return (
     <div data-testid={`artifacts-group-${heading.toLowerCase().replace(/\s+/g, '-')}`}>
@@ -172,7 +181,7 @@ function ArtifactGroup({ heading, artifacts, openAtypes, onOpen }: ArtifactGroup
         <ArtifactCard
           key={a.id}
           artifact={a}
-          open={openAtypes.has(a.atype)}
+          open={isOpen(a)}
           onOpen={onOpen}
         />
       ))}

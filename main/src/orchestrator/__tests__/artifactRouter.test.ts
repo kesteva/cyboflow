@@ -70,6 +70,7 @@ function buildDb(): Database.Database {
     '045_arch_design_atype.sql',
     '060_compound_recommendations_atype.sql',
     '062_approve_ideas_atype.sql',
+    '063_per_idea_spec_artifacts.sql',
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }
@@ -199,6 +200,52 @@ describe('ArtifactRouter', () => {
       op: 'create', runId: 'run-1', atype: 'decomposed-stories', label: '3 epics · re-derived', actor: 'orchestrator',
     });
     expect(countEvents(db, first.artifactId)).toBe(2);
+  });
+
+  it('idea-spec is per-source: same sourceRef enriches (one row), different sourceRef creates a second (IDEA-009)', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const router = ArtifactRouter.initialize(dbAdapter(db));
+
+    // Idea A → row 1.
+    const a1 = await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'idea-spec', label: 'Idea A', sourceRef: 'ide_A', actor: 'orchestrator',
+    });
+    // Re-derive Idea A with a fresh label → SAME row (enrich), no duplicate.
+    const a2 = await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'idea-spec', label: 'Idea A refreshed', sourceRef: 'ide_A', actor: 'orchestrator',
+    });
+    expect(a2.artifactId).toBe(a1.artifactId);
+
+    // Idea B → a SECOND idea-spec row in the same run.
+    const b1 = await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'idea-spec', label: 'Idea B', sourceRef: 'ide_B', actor: 'orchestrator',
+    });
+    expect(b1.artifactId).not.toBe(a1.artifactId);
+
+    const rows = db
+      .prepare("SELECT source_ref, label FROM artifacts WHERE run_id = 'run-1' AND atype = 'idea-spec' ORDER BY source_ref")
+      .all() as Array<{ source_ref: string; label: string }>;
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.source_ref)).toEqual(['ide_A', 'ide_B']);
+    expect(rows[0].label).toBe('Idea A refreshed');
+  });
+
+  it('a non-per-entity atype (ui-prototype) still enriches one-per-(run,atype) regardless of sourceRef', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const router = ArtifactRouter.initialize(dbAdapter(db));
+
+    const first = await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'ui-prototype', label: 'proto', sourceRef: 'ide_A', actor: 'agent:executor',
+    });
+    // A different sourceRef must NOT create a second ui-prototype — identity is (run,atype).
+    const second = await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'ui-prototype', label: 'proto v2', sourceRef: 'ide_B', actor: 'agent:executor',
+    });
+    expect(second.artifactId).toBe(first.artifactId);
+    const rows = db.prepare("SELECT * FROM artifacts WHERE run_id = 'run-1' AND atype = 'ui-prototype'").all();
+    expect(rows).toHaveLength(1);
   });
 
   it('update enriches an existing artifact', async () => {

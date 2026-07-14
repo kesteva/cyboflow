@@ -88,6 +88,12 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '042_collapse_board.sql'), 'utf-8'));
   // 045 widens the artifacts.atype CHECK to include 'arch-design'.
   db.exec(readFileSync(join(migDir, '045_arch_design_atype.sql'), 'utf-8'));
+  // 060 adds workflow_runs.seed_idea_ids (multi-idea planner batch); 061 widens the
+  // artifacts.atype CHECK to include 'approve-ideas'; 062 relaxes idea-spec identity
+  // to (run_id, atype, source_ref) so a run can hold one idea-spec per idea.
+  db.exec(readFileSync(join(migDir, '060_run_seed_idea_ids.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '061_approve_ideas_atype.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '062_per_idea_spec_artifacts.sql'), 'utf-8'));
   // workflow_runs.session_id (migration 019) — added directly here; migration 019
   // itself backfills from the Crystal-legacy `sessions` table, which this entity
   // test DB doesn't create. ArtifactRouter's emitChange resolves this column on
@@ -117,6 +123,18 @@ function seedPlannerRun(db: Database.Database, runId: string): void {
 /** Stamp seed_idea_id on an existing run (migration 017). */
 function setSeedIdea(db: Database.Database, runId: string, ideaId: string): void {
   db.prepare('UPDATE workflow_runs SET seed_idea_id = ? WHERE id = ?').run(ideaId, runId);
+}
+
+/**
+ * Stamp the multi-idea seed (migration 060): seed_idea_ids = JSON array, with
+ * seed_idea_id dual-written as ids[0] (the production dual-write invariant).
+ */
+function setSeedIdeaIds(db: Database.Database, runId: string, ideaIds: string[]): void {
+  db.prepare('UPDATE workflow_runs SET seed_idea_ids = ?, seed_idea_id = ? WHERE id = ?').run(
+    JSON.stringify(ideaIds),
+    ideaIds[0] ?? null,
+    runId,
+  );
 }
 
 /** Stamp a lifecycle status on an existing run (mirrors transitionToFailed/Canceled). */
@@ -1028,6 +1046,45 @@ describe('autoMintArtifacts.handleEntityWrite', () => {
     expect(spec).toBeDefined();
     expect(spec!.source_ref).toBe(ideaId);
     expect(spec!.step_origin).toBe('Plan · idea spec');
+  });
+
+  it('mints ONE idea-spec PER seeded idea for a multi-idea planner batch (IDEA-009)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+    const router = TaskChangeRouter.getInstance();
+
+    seedPlannerRun(db, 'run-batch');
+    // Two seeded ideas, each with spec content so the content gate passes.
+    const { taskId: ideaA } = await router.applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Idea Alpha',
+      summary: 'spec A',
+      runId: 'run-batch',
+    });
+    const { taskId: ideaB } = await router.applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Idea Beta',
+      summary: 'spec B',
+      runId: 'run-batch',
+    });
+    // seed_idea_ids drives the multi-mint (dual-writes seed_idea_id = ideaA).
+    setSeedIdeaIds(db, 'run-batch', [ideaA, ideaB]);
+
+    await handleEntityWrite(adapter, 'run-batch', 'idea');
+
+    const specs = db
+      .prepare(
+        `SELECT source_ref, label FROM artifacts
+          WHERE run_id = 'run-batch' AND atype = 'idea-spec' ORDER BY label`,
+      )
+      .all() as Array<{ source_ref: string; label: string }>;
+    expect(specs).toHaveLength(2);
+    expect(specs.map((s) => s.source_ref).sort()).toEqual([ideaA, ideaB].sort());
+    expect(specs.map((s) => s.label)).toEqual(['Idea Alpha', 'Idea Beta']);
   });
 
   it("mints decomposed-stories on a 'task' write (step_origin = Plan · decomposition)", async () => {

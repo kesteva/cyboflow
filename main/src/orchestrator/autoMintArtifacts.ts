@@ -344,8 +344,48 @@ async function mintIdeaSpecForIdea(
 }
 
 /**
- * idea-spec: resolve the run's originating idea, then mint via mintIdeaSpecForIdea.
- * No resolvable idea → fail-soft (logs + returns without minting).
+ * idea-spec mint for EVERY idea the run OWNS (the multi-idea planner batch,
+ * IDEA-009): one artifact per owned idea, each with sourceRef = that idea id and
+ * its own per-idea label (title ?? ref ?? labelFallback). Migration 062 makes
+ * idea-spec identity (run_id, atype, source_ref), so the per-idea rows coexist;
+ * every OTHER atype stays strictly one-per-(run, atype).
+ *
+ * Resolution EXPANDS resolveOriginatingIdeaId's owned-first-else-batch order to
+ * the FULL owned set: all of listRunOwnedIdeaIds (planner/ship seed/create the
+ * ideas), else the single sprint-batch idea (a standalone sprint owns none). No
+ * resolvable idea → fail-soft (logs + returns). Each per-idea mint is itself
+ * content-gated inside mintIdeaSpecForIdea (a bare idea with no body/summary is
+ * skipped), so a batch surfaces a tab only for the ideas that actually have spec
+ * content yet.
+ */
+async function mintIdeaSpecForOwnedIdeas(
+  db: DatabaseLike,
+  runId: string,
+  projectId: number,
+  stepOrigin: string | null,
+  labelFallback: string,
+  logger?: LoggerLike,
+): Promise<void> {
+  const ownedIds = listRunOwnedIdeaIds(db, runId);
+  const ideaIds = ownedIds.length > 0 ? ownedIds : [];
+  if (ideaIds.length === 0) {
+    // No owned ideas — fall back to the single sprint-batch idea (standalone
+    // sprint), preserving resolveOriginatingIdeaId's second resolution rung.
+    const batchIdeaId = resolveRunBatchIdeaId(db, runId);
+    if (batchIdeaId !== null) ideaIds.push(batchIdeaId);
+  }
+  if (ideaIds.length === 0) {
+    logger?.debug('[autoMintArtifacts] idea-spec skipped — run owns no resolvable idea', { runId });
+    return;
+  }
+  for (const ideaId of ideaIds) {
+    await mintIdeaSpecForIdea(db, runId, projectId, ideaId, stepOrigin, labelFallback, logger);
+  }
+}
+
+/**
+ * idea-spec: mint one per owned idea (multi-idea batch aware). No resolvable idea
+ * → fail-soft (logs + returns without minting).
  */
 async function mintIdeaSpec(
   db: DatabaseLike,
@@ -354,16 +394,10 @@ async function mintIdeaSpec(
   step: WorkflowStep,
   logger?: LoggerLike,
 ): Promise<void> {
-  const ideaId = resolveOriginatingIdeaId(db, runId);
-  if (ideaId === null) {
-    logger?.debug('[autoMintArtifacts] idea-spec skipped — run owns no resolvable idea', { runId });
-    return;
-  }
-  await mintIdeaSpecForIdea(
+  await mintIdeaSpecForOwnedIdeas(
     db,
     runId,
     projectId,
-    ideaId,
     STEP_ORIGIN[step.id] ?? null,
     step.outputArtifact!.label,
     logger,
@@ -725,7 +759,11 @@ export async function handleRunStart(
     // mints idea-spec (the idea has content) and SKIPS decomposed-stories (count
     // 0); a sprint mints both (its decomposition pre-exists). A raw-prompt planner
     // mints nothing here (no resolvable idea yet) and relies on handleEntityWrite.
-    await mintIdeaSpecForIdea(db, runId, projectId, ideaId, stepOrigin, 'Idea spec', logger);
+    //
+    // idea-spec iterates ALL owned ideas (the multi-idea planner batch surfaces
+    // one spec tab per idea); decomposed-stories + arch-design stay first-idea-
+    // only (`ideaId`) — batch decomposition/architecture are out of scope here.
+    await mintIdeaSpecForOwnedIdeas(db, runId, projectId, stepOrigin, 'Idea spec', logger);
     await mintDecomposedStoriesForIdea(db, runId, projectId, ideaId, stepOrigin, logger);
     // arch-design is content-gated inside its helper (no-op when the idea body
     // has no '## Architecture design' section) — a re-opened / sprint run over
@@ -804,11 +842,13 @@ export async function handleEntityWrite(
     }
 
     if (entityType === 'idea') {
-      await mintIdeaSpecForIdea(
+      // idea-spec iterates ALL owned ideas (the multi-idea planner batch surfaces
+      // one spec tab per idea, each content-gated); arch-design stays first-idea-
+      // only (`ideaId`) — out of scope for the batch.
+      await mintIdeaSpecForOwnedIdeas(
         db,
         runId,
         projectId,
-        ideaId,
         ENTITY_WRITE_STEP_ORIGIN.ideaSpec,
         'Idea spec',
         logger,

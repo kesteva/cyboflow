@@ -54,6 +54,48 @@ describe('centerPaneStore', () => {
     expect(s.tabs[1].isNew).toBe(false);
   });
 
+  it('opens TWO idea-spec artifacts as two DISTINCT tabs keyed by artifact id (multi-idea batch, IDEA-009)', () => {
+    get().ensureSession(KEY);
+    get().openArtifactTab(KEY, { atype: 'idea-spec', label: 'Idea Alpha', artifactId: 'art_a' });
+    get().openArtifactTab(KEY, { atype: 'idea-spec', label: 'Idea Beta', artifactId: 'art_b' });
+
+    const s = get().bySession[KEY];
+    const specTabs = s.tabs.filter((t) => t.kind === 'artifact' && t.atype === 'idea-spec');
+    expect(specTabs).toHaveLength(2);
+    expect(specTabs.map((t) => t.id).sort()).toEqual(['art:idea-spec:art_a', 'art:idea-spec:art_b']);
+    // Second open focused its own tab, not the first.
+    expect(s.activeTabId).toBe('art:idea-spec:art_b');
+  });
+
+  it('reopening the SAME idea-spec artifact focuses its tab without duplicating', () => {
+    get().ensureSession(KEY);
+    get().openArtifactTab(KEY, { atype: 'idea-spec', label: 'Idea Alpha', artifactId: 'art_a', isNew: true });
+    get().openArtifactTab(KEY, { atype: 'idea-spec', label: 'Idea Beta', artifactId: 'art_b' });
+    // Reopen Alpha by its id → focus the existing tab, no new one.
+    get().openArtifactTab(KEY, { atype: 'idea-spec', label: 'Idea Alpha', artifactId: 'art_a' });
+
+    const s = get().bySession[KEY];
+    expect(s.tabs.filter((t) => t.atype === 'idea-spec')).toHaveLength(2);
+    expect(s.activeTabId).toBe('art:idea-spec:art_a');
+    // The refocus cleared Alpha's new-dot.
+    expect(s.tabs.find((t) => t.id === 'art:idea-spec:art_a')?.isNew).toBe(false);
+  });
+
+  it('a no-artifactId idea-spec open (Workflow Progress chip) focuses the SOLE open idea-spec tab', () => {
+    get().ensureSession(KEY);
+    // A single idea-spec tab exists (opened with its artifact id by the tab-sync).
+    get().openArtifactTab(KEY, { atype: 'idea-spec', label: 'Idea Alpha', artifactId: 'art_a' });
+    get().focusTab(KEY, FLOW_TAB_ID); // user navigates away
+
+    // The chip opens idea-spec with NO artifactId — it must focus the existing tab,
+    // not create a stray plain `art:idea-spec` tab.
+    get().openArtifactTab(KEY, { atype: 'idea-spec', label: 'Idea spec' });
+
+    const s = get().bySession[KEY];
+    expect(s.tabs.filter((t) => t.atype === 'idea-spec')).toHaveLength(1);
+    expect(s.activeTabId).toBe('art:idea-spec:art_a');
+  });
+
   it('opens a NEW artifact tab WITHOUT stealing focus when focus:false (pulsing inactive tab)', () => {
     get().ensureSession(KEY);
     // The user is on the Flow tab; a mid-run artifact arrives focus:false.

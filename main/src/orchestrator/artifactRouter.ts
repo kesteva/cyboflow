@@ -57,6 +57,7 @@ export interface AcceptBaselineArgs {
 export type BaselineAcceptor = (args: AcceptBaselineArgs) => Promise<{ baselineKey: string }>;
 import {
   ARTIFACT_RENDER_MODE,
+  isPerEntityArtifact,
   type Artifact,
   type ArtifactChangeAction,
   type ArtifactRenderMode,
@@ -341,9 +342,18 @@ export class ArtifactRouter {
     }
     this.assertRun(change.runId);
 
-    const existing = this.db
-      .prepare('SELECT * FROM artifacts WHERE run_id = ? AND atype = ?')
-      .get(change.runId, change.atype) as ArtifactDbRow | undefined;
+    // Identity for the enrich-vs-insert decision. Non-per-entity atypes are
+    // one-per-(run, atype). PER-ENTITY atypes (idea-spec — a multi-idea planner
+    // batch mints one per idea, migration 062) are one-per-(run, atype,
+    // source_ref); `source_ref IS ?` is null-safe (binding null matches a NULL
+    // row), mirroring the partial unique index COALESCE(source_ref, '').
+    const existing = isPerEntityArtifact(change.atype)
+      ? (this.db
+          .prepare('SELECT * FROM artifacts WHERE run_id = ? AND atype = ? AND source_ref IS ?')
+          .get(change.runId, change.atype, change.sourceRef ?? null) as ArtifactDbRow | undefined)
+      : (this.db
+          .prepare('SELECT * FROM artifacts WHERE run_id = ? AND atype = ?')
+          .get(change.runId, change.atype) as ArtifactDbRow | undefined);
 
     const now = new Date().toISOString();
     const mode: ArtifactRenderMode = change.mode ?? ARTIFACT_RENDER_MODE[change.atype];

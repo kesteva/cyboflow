@@ -16,7 +16,7 @@
  * tabs); the M1 surface exercises only the Flow tab + dock/right-rail toggles.
  */
 import { create } from 'zustand';
-import type { ArtifactType } from '../../../shared/types/artifacts';
+import { isPerEntityArtifact, type ArtifactType } from '../../../shared/types/artifacts';
 import {
   type CenterPaneSessionState,
   type FileTabStatus,
@@ -166,20 +166,54 @@ export const useCenterPaneStore = create<CenterPaneStore>((set) => {
 
     openArtifactTab: (key, args) =>
       mutate(key, (cur) => {
-        const id = artifactTabId(args.atype);
         // focus defaults to true — only an explicit false suppresses the focus
         // steal (a mid-run artifact arrives as a pulsing inactive tab instead).
         const focus = args.focus !== false;
-        const existing = cur.tabs.find((t) => t.id === id);
-        if (existing) {
+
+        // The id this open should resolve TO. Per-entity atypes (idea-spec) key by
+        // artifact id so a multi-idea batch surfaces one tab per idea; every other
+        // atype keys by atype alone.
+        let targetId = artifactTabId(args.atype, args.artifactId);
+        // The id of an EXISTING tab to reuse (else null → create a new tab). An
+        // exact target match is the default reuse.
+        let matchId: string | null = cur.tabs.some((t) => t.id === targetId) ? targetId : null;
+
+        if (isPerEntityArtifact(args.atype)) {
+          const plainId = artifactTabId(args.atype); // `art:<atype>` placeholder id
+          if (args.artifactId === undefined) {
+            // No-artifactId open (the Workflow Progress chip on a single-idea run):
+            // focus the SOLE open per-entity tab of this atype if exactly one
+            // exists (placeholder or id-keyed), else fall back to the plain id.
+            const openOfType = cur.tabs.filter((t) => t.kind === 'artifact' && t.atype === args.atype);
+            if (openOfType.length === 1) {
+              matchId = openOfType[0].id;
+              targetId = openOfType[0].id;
+            }
+          } else if (matchId === null) {
+            // Id-keyed open with no matching tab yet: ADOPT the chip's eager plain
+            // placeholder (`art:<atype>`, no artifactId, opened before the artifact
+            // minted) if present — re-key it to targetId below so the eager tab
+            // fills in rather than spawning a duplicate. The FIRST artifact to mint
+            // adopts it; later ones (multi-idea batch) create their own tabs.
+            const placeholder = cur.tabs.find(
+              (t) => t.kind === 'artifact' && t.id === plainId && !t.artifactId,
+            );
+            if (placeholder) matchId = plainId;
+          }
+        }
+
+        if (matchId !== null) {
+          const reuseId = matchId;
           return {
             ...cur,
             // No-focus open keeps the user on their current tab.
-            activeTabId: focus ? id : cur.activeTabId,
+            activeTabId: focus ? targetId : cur.activeTabId,
             tabs: cur.tabs.map((t) =>
-              t.id === id
+              t.id === reuseId
                 ? {
                     ...t,
+                    // Re-key when adopting a placeholder (reuseId !== targetId).
+                    id: targetId,
                     label: args.label,
                     artifactId: args.artifactId ?? t.artifactId,
                     committed: args.committed ?? t.committed,
@@ -192,7 +226,7 @@ export const useCenterPaneStore = create<CenterPaneStore>((set) => {
           };
         }
         const tab: TabItem = {
-          id,
+          id: targetId,
           kind: 'artifact',
           label: args.label,
           atype: args.atype,
@@ -200,7 +234,7 @@ export const useCenterPaneStore = create<CenterPaneStore>((set) => {
           committed: args.committed ?? false,
           isNew: args.isNew ?? false,
         };
-        return { ...cur, tabs: [...cur.tabs, tab], activeTabId: focus ? id : cur.activeTabId };
+        return { ...cur, tabs: [...cur.tabs, tab], activeTabId: focus ? targetId : cur.activeTabId };
       }),
 
     toggleTerminal: (key) => mutate(key, (cur) => ({ ...cur, terminalOpen: !cur.terminalOpen })),

@@ -75,12 +75,13 @@ describe('useArtifactTabsSync', () => {
     renderHook(() => useArtifactTabsSync(SESSION_KEY, artifacts, true));
 
     const session = useCenterPaneStore.getState().bySession[SESSION_KEY];
-    // The artifact tab was registered…
-    expect(session.tabs.some((t) => t.id === 'art:idea-spec')).toBe(true);
+    // The artifact tab was registered… (idea-spec is per-entity, so its tab id is
+    // keyed by the artifact id — `art:idea-spec:<id>`, migration 062).
+    expect(session.tabs.some((t) => t.id === 'art:idea-spec:art-seed')).toBe(true);
     // …but focus stayed on the pre-existing file tab, not the flow tab and not
     // the freshly-registered artifact tab.
     expect(session.activeTabId).toBe('file:src/x.ts');
-    expect(session.tabs.find((t) => t.id === 'art:idea-spec')?.isNew).toBe(false);
+    expect(session.tabs.find((t) => t.id === 'art:idea-spec:art-seed')?.isNew).toBe(false);
   });
 
   it('focuses an artifact id that first appears in a LATER sync (genuinely fresh mint)', () => {
@@ -116,13 +117,13 @@ describe('useArtifactTabsSync', () => {
       },
     );
     expect(
-      useCenterPaneStore.getState().bySession[SESSION_KEY].tabs.some((t) => t.id === 'art:idea-spec'),
+      useCenterPaneStore.getState().bySession[SESSION_KEY].tabs.some((t) => t.id === 'art:idea-spec:art-x'),
     ).toBe(true);
 
     // The artifact is pruned/deleted from the live list.
     rerender({ artifacts: [], loaded: true });
     let session = useCenterPaneStore.getState().bySession[SESSION_KEY];
-    expect(session.tabs.some((t) => t.id === 'art:idea-spec')).toBe(false);
+    expect(session.tabs.some((t) => t.id === 'art:idea-spec:art-x')).toBe(false);
     // Flow tab survives + becomes active.
     expect(session.tabs.some((t) => t.id === FLOW_TAB_ID)).toBe(true);
     expect(session.activeTabId).toBe(FLOW_TAB_ID);
@@ -132,8 +133,8 @@ describe('useArtifactTabsSync', () => {
     // flips focus to it (rather than silently re-opening it in the background).
     rerender({ artifacts: [makeArtifact({ id: 'art-x', atype: 'idea-spec' })], loaded: true });
     session = useCenterPaneStore.getState().bySession[SESSION_KEY];
-    expect(session.tabs.some((t) => t.id === 'art:idea-spec')).toBe(true);
-    expect(session.activeTabId).toBe('art:idea-spec');
+    expect(session.tabs.some((t) => t.id === 'art:idea-spec:art-x')).toBe(true);
+    expect(session.activeTabId).toBe('art:idea-spec:art-x');
   });
 
   it('(F2 regression) a session-wide list spanning two different runIds keeps both tabs alive across a re-sync', () => {
@@ -154,7 +155,7 @@ describe('useArtifactTabsSync', () => {
     );
 
     let session = useCenterPaneStore.getState().bySession[SESSION_KEY];
-    expect(session.tabs.some((t) => t.id === 'art:idea-spec')).toBe(true);
+    expect(session.tabs.some((t) => t.id === 'art:idea-spec:art-sentinel')).toBe(true);
     expect(session.tabs.some((t) => t.id === 'art:decomposed-stories')).toBe(true);
 
     // Re-sync with the SAME session-wide list (e.g. the center-pane host
@@ -163,7 +164,7 @@ describe('useArtifactTabsSync', () => {
     rerender({ artifacts: [fromSentinel, fromPastRun], loaded: true });
 
     session = useCenterPaneStore.getState().bySession[SESSION_KEY];
-    expect(session.tabs.some((t) => t.id === 'art:idea-spec')).toBe(true);
+    expect(session.tabs.some((t) => t.id === 'art:idea-spec:art-sentinel')).toBe(true);
     expect(session.tabs.some((t) => t.id === 'art:decomposed-stories')).toBe(true);
   });
 
