@@ -35,11 +35,16 @@ import { useArtifactData } from '../../hooks/useArtifactData';
 import { useArtifactImages } from '../../hooks/useArtifactImages';
 import { useReviewItemActions } from '../../hooks/useReviewItemActions';
 import { useReviewItemsSlice } from '../../stores/reviewItemsSlice';
+import { useQuestionStore } from '../../stores/questionStore';
 import { ARTIFACT_COLORS, extractArchDesignSection } from '../../../../shared/types/artifacts';
 import type { Artifact, ApproveIdeasArtifactPayload } from '../../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
 import type { VerdictV1 } from '../../../../shared/types/visualVerification';
 import type { IdeaVerdict, IdeaVerdictMap, ReviewItem } from '../../../../shared/types/reviews';
+import type { Question, QuestionPayload } from '../../../../shared/types/questions';
+
+/** One presented option of a live AskUserQuestion (label + optional preview). */
+type QuestionOption = QuestionPayload['options'][number];
 
 const PAGE = 'var(--color-bg-primary)';
 const HAIRLINE = 'var(--color-border-primary)';
@@ -396,19 +401,182 @@ function EpicCard({
   );
 }
 
+// A run's approve-plan gate surfaces via TWO mint paths (mirrors the
+// approve-ideas dual-path recognition): the PROGRAMMATIC runner stamps a
+// 'gate:human-step:approve-plan' decision review item, while the ORCHESTRATED
+// planner asks a live AskUserQuestion whose first sub-question offers an
+// Approve/Reject option set. This template resolves whichever is pending.
+const GATE_SOURCE_APPROVE_PLAN = 'gate:human-step:approve-plan';
+
+/** True when any rendered epic/task is a hidden draft (approved_at === null). */
+function hasDraftDescendant(ideas: BacklogTaskItem[]): boolean {
+  for (const idea of ideas) {
+    for (const child of idea.children ?? []) {
+      // child = an epic OR a task decomposed directly under the idea.
+      if (child.approved_at === null) return true;
+      for (const task of child.children ?? []) {
+        if (task.approved_at === null) return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** First option on a live question's FIRST sub-question whose label starts with `prefix` (ci). */
+function optionByPrefix(question: Question | null, prefix: string): QuestionOption | null {
+  const opts = question?.questions[0]?.options ?? [];
+  return opts.find((o) => o.label.trim().toLowerCase().startsWith(prefix)) ?? null;
+}
+
+/**
+ * One idea section — a small header (idea ref + title, matching the epic-header
+ * idiom) above that idea's epic cards and any tasks decomposed directly under it
+ * (EpicCard + TaskGrid reused unchanged). Covers the multi-idea planner batch:
+ * the stories tab renders one section per idea the run owns.
+ */
+function IdeaSection({
+  idea,
+  onSelect,
+}: {
+  idea: BacklogTaskItem;
+  onSelect: (task: BacklogTaskItem) => void;
+}): ReactElement {
+  const children = idea.children ?? [];
+  const epics = children.filter((c) => c.type === 'epic');
+  const directTasks = children.filter((c) => c.type === 'task');
+  return (
+    <div data-testid="artifact-stories-idea-section" style={{ marginBottom: 22 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+        <span style={{ width: 7, height: 13, background: STORIES, flexShrink: 0 }} />
+        <span style={{ fontSize: '9px', fontWeight: 700, color: FAINT, letterSpacing: '.04em' }}>{idea.ref}</span>
+        <span style={{ fontSize: '13px', fontWeight: 700, color: INK }}>{idea.title}</span>
+      </div>
+      {epics.length === 0 && directTasks.length === 0 ? (
+        <div data-testid="artifact-stories-noepics" style={{ fontSize: '12px', color: FAINT, fontStyle: 'italic' }}>
+          This idea has not been decomposed yet.
+        </div>
+      ) : (
+        <>
+          {epics.map((epic) => (
+            <EpicCard key={epic.id} epic={epic} onSelect={onSelect} />
+          ))}
+          {directTasks.length > 0 && (
+            <div data-testid="artifact-direct-tasks" style={{ marginBottom: 14 }}>
+              <TaskGrid tasks={directTasks} onSelect={onSelect} />
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function DecomposedStoriesBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
   const accent = ARTIFACT_COLORS['decomposed-stories'];
   const { loading, error, data } = useArtifactData(artifact, projectId);
-  const idea = data?.kind === 'stories' ? data.idea : null;
+  // Stable identity while `data` is unchanged (the [] fallback would otherwise be
+  // a fresh array each render, churning the draftMode memo).
+  const ideas = useMemo(() => (data?.kind === 'stories' ? data.ideas : []), [data]);
   // The task selected for the detail modal; null = modal closed.
   const [selectedTask, setSelectedTask] = useState<BacklogTaskItem | null>(null);
-  // idea.children is epics FOLLOWED BY tasks decomposed directly under the idea
-  // (small-idea path). Split by type: epics get cards, direct tasks get a stack.
-  const children = idea?.children ?? [];
-  const epics = children.filter((c) => c.type === 'epic');
-  const directTasks = children.filter((c) => c.type === 'task');
-  const taskCount =
-    epics.reduce((sum, epic) => sum + taskChildren(epic).length, 0) + directTasks.length;
+
+  // Aggregate counts across every idea the run owns (multi-idea batch).
+  const allEpics = ideas.flatMap((idea) => (idea.children ?? []).filter((c) => c.type === 'epic'));
+  const directTaskCount = ideas.reduce(
+    (sum, idea) => sum + (idea.children ?? []).filter((c) => c.type === 'task').length,
+    0,
+  );
+  const taskCount = allEpics.reduce((sum, epic) => sum + taskChildren(epic).length, 0) + directTaskCount;
+
+  // DRAFT MODE: any rendered epic/task is a hidden draft (approved_at === null) —
+  // i.e. the plan gate has not been approved yet. Drives the badge + footer.
+  const draftMode = useMemo(() => hasDraftDescendant(ideas), [ideas]);
+
+  // -- approve-plan gate resolution (draft mode) ------------------------------
+  // Priority: (a) a live AskUserQuestion for this run (orchestrated planner),
+  // then (b) a programmatic 'gate:human-step:approve-plan' decision item.
+
+  // (a) Live question — reuse the app-lifetime questionStore singleton (init is
+  // idempotent; do NOT unsubscribe here — CyboflowRoot owns the app-wide feed).
+  useEffect(() => {
+    useQuestionStore.getState().init();
+  }, []);
+  const questionQueue = useQuestionStore((s) => s.queue);
+  const liveQuestion = useMemo(
+    () =>
+      questionQueue.find(
+        (q) =>
+          q.runId === artifact.runId &&
+          q.status === 'pending' &&
+          (q.questions[0]?.options.some((o) => o.label.trim().toLowerCase().startsWith('approve')) ?? false),
+      ) ?? null,
+    [questionQueue, artifact.runId],
+  );
+
+  // (b) Programmatic gate — reuse the already-wired review_items inbox (refcounted).
+  useEffect(() => {
+    const release = useReviewItemsSlice.getState().init(projectId);
+    return () => { release(); };
+  }, [projectId]);
+  const reviewItems = useReviewItemsSlice((s) => s.items);
+  const gateItem = useMemo(
+    () =>
+      reviewItems.find(
+        (it) =>
+          it.run_id === artifact.runId &&
+          it.kind === 'decision' &&
+          it.status === 'pending' &&
+          it.source === GATE_SOURCE_APPROVE_PLAN,
+      ) ?? null,
+    [reviewItems, artifact.runId],
+  );
+
+  // Live wins over the programmatic gate; neither ⇒ badge only (no buttons).
+  const variant: 'live' | 'gate' | null = liveQuestion ? 'live' : gateItem ? 'gate' : null;
+
+  // The live question's Approve / Reject option labels. The backend matches the
+  // EXACT presented label (questionRouter.isRejectAnswer), so Reject is HIDDEN for
+  // the live variant when no reject-prefixed option was presented. The
+  // programmatic gate always supports reject (outcome: 'reject').
+  const approveOption = optionByPrefix(liveQuestion, 'approve');
+  const rejectOption = optionByPrefix(liveQuestion, 'reject');
+  const showReject = variant === 'live' ? rejectOption !== null : variant === 'gate';
+
+  const { resolve, error: resolveError } = useReviewItemActions();
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  const submit = (kind: 'approve' | 'reject'): void => {
+    if (submitting) return;
+    setSubmitError(null);
+    if (variant === 'live') {
+      // Answer the live AskUserQuestion with the chosen option's EXACT label,
+      // keyed by the first sub-question's full text (QuestionAnswer shape).
+      const firstQuestion = liveQuestion?.questions[0];
+      const option = kind === 'approve' ? approveOption : rejectOption;
+      if (!liveQuestion || !firstQuestion || !option) return;
+      setSubmitting(true);
+      trpc.cyboflow.questions.answer
+        .mutate({ questionId: liveQuestion.id, answers: { [firstQuestion.question]: option.label } })
+        .then(
+          () => setSubmitting(false),
+          (err: unknown) => {
+            setSubmitting(false);
+            setSubmitError(err instanceof Error ? err.message : 'Failed to submit.');
+          },
+        );
+      return;
+    }
+    if (variant === 'gate' && gateItem) {
+      // Resolve the programmatic gate; the server reveals drafts + resumes on
+      // 'approve', tears the drafts down + ends the run on 'reject'.
+      setSubmitting(true);
+      resolve(projectId, gateItem.id, { outcome: kind }).then((result) => {
+        setSubmitting(false);
+        if (result === null) setSubmitError('Failed to submit.');
+      });
+    }
+  };
 
   return (
     <Shell testid="artifact-decomposed-stories">
@@ -423,27 +591,107 @@ function DecomposedStoriesBody({ artifact, projectId }: { artifact: Artifact; pr
         <StateRow testid="artifact-stories-loading" color={MUTED} text="Loading stories…" />
       ) : error ? (
         <StateRow testid="artifact-stories-error" color={RUST} text={error} />
-      ) : !idea ? (
+      ) : ideas.length === 0 ? (
         <StateRow testid="artifact-stories-empty" color={MUTED} text="No decomposition to display." />
       ) : (
-        <div style={{ padding: '16px 20px 28px' }}>
-          <div data-testid="artifact-stories-summary" style={{ fontSize: '11px', color: MUTED, marginBottom: 14 }}>
-            {epics.length} {epics.length === 1 ? 'epic' : 'epics'} · {taskCount} {taskCount === 1 ? 'task' : 'tasks'}
-            {artifact.stepOrigin ? ` · ${artifact.stepOrigin}` : ''}
-          </div>
-          {epics.length === 0 && directTasks.length === 0 ? (
-            <div data-testid="artifact-stories-noepics" style={{ fontSize: '12px', color: FAINT, fontStyle: 'italic' }}>
-              This idea has not been decomposed yet.
-            </div>
-          ) : (
-            <>
-              {epics.map((epic) => <EpicCard key={epic.id} epic={epic} onSelect={setSelectedTask} />)}
-              {directTasks.length > 0 && (
-                <div data-testid="artifact-direct-tasks" style={{ marginBottom: 14 }}>
-                  <TaskGrid tasks={directTasks} onSelect={setSelectedTask} />
-                </div>
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+          <div style={{ flex: 1, padding: '16px 20px 28px' }}>
+            <div
+              data-testid="artifact-stories-summary"
+              style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}
+            >
+              <span style={{ fontSize: '11px', color: MUTED }}>
+                {ideas.length} {ideas.length === 1 ? 'idea' : 'ideas'} · {allEpics.length}{' '}
+                {allEpics.length === 1 ? 'epic' : 'epics'} · {taskCount} {taskCount === 1 ? 'task' : 'tasks'}
+                {artifact.stepOrigin ? ` · ${artifact.stepOrigin}` : ''}
+              </span>
+              {draftMode && (
+                <span
+                  data-testid="artifact-stories-draft-badge"
+                  style={{
+                    fontSize: '9px',
+                    fontWeight: 700,
+                    letterSpacing: '.04em',
+                    textTransform: 'uppercase',
+                    color: VERDICT_LOW,
+                    border: `1px solid ${VERDICT_LOW}`,
+                    borderRadius: 2,
+                    padding: '1px 6px',
+                  }}
+                >
+                  Draft — pending plan approval
+                </span>
               )}
-            </>
+            </div>
+            {ideas.map((idea) => (
+              <IdeaSection key={idea.id} idea={idea} onSelect={setSelectedTask} />
+            ))}
+          </div>
+          {draftMode && variant && (
+            <div
+              data-testid="stories-plan-footer"
+              style={{
+                position: 'sticky',
+                bottom: 0,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                padding: '10px 20px',
+                borderTop: `1px solid ${HAIRLINE}`,
+                background: 'var(--color-bg-secondary)',
+              }}
+            >
+              <span style={{ fontSize: '11px', color: MUTED, fontWeight: 600 }}>
+                Approve this plan to reveal its tasks on the board.
+              </span>
+              <span style={{ flex: 1 }} />
+              {(resolveError ?? submitError) && (
+                <span data-testid="stories-plan-error" style={{ fontSize: '10px', color: VERDICT_FAIL }}>
+                  {resolveError ?? submitError}
+                </span>
+              )}
+              {showReject && (
+                <button
+                  type="button"
+                  data-testid="stories-reject-plan"
+                  disabled={submitting}
+                  onClick={() => submit('reject')}
+                  style={{
+                    fontSize: '10px',
+                    fontWeight: 700,
+                    padding: '5px 14px',
+                    border: `1px solid ${VERDICT_FAIL}`,
+                    borderRadius: 3,
+                    background: 'transparent',
+                    color: VERDICT_FAIL,
+                    cursor: submitting ? 'default' : 'pointer',
+                    opacity: submitting ? 0.5 : 1,
+                  }}
+                >
+                  Reject
+                </button>
+              )}
+              <button
+                type="button"
+                data-testid="stories-approve-plan"
+                disabled={submitting}
+                onClick={() => submit('approve')}
+                style={{
+                  fontSize: '10px',
+                  fontWeight: 700,
+                  letterSpacing: '.02em',
+                  color: 'var(--color-surface-primary)',
+                  background: INK,
+                  border: `1px solid ${INK}`,
+                  borderRadius: 3,
+                  padding: '5px 14px',
+                  cursor: submitting ? 'default' : 'pointer',
+                  opacity: submitting ? 0.5 : 1,
+                }}
+              >
+                {submitting ? 'Submitting…' : 'Approve plan'}
+              </button>
+            </div>
           )}
         </div>
       )}

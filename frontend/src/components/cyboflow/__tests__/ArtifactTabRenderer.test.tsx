@@ -20,6 +20,7 @@ import { useArtifactImages, type UseArtifactImages } from '../../../hooks/useArt
 import type { Artifact, ArtifactType } from '../../../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../../../shared/types/tasks';
 import type { ReviewItem } from '../../../../../shared/types/reviews';
+import type { Question } from '../../../../../shared/types/questions';
 
 // --- mocks -----------------------------------------------------------------
 
@@ -43,6 +44,9 @@ vi.mock('../../MarkdownPreview', () => ({
 const commitMutate = vi.fn().mockResolvedValue({ artifactId: 'art-1' });
 const acceptBaselineMutate = vi.fn().mockResolvedValue({ baselineKey: 'IDEA-018' });
 const reviewItemsResolveMutate = vi.fn().mockResolvedValue({ reviewItemId: 'rvw_gate', resumed: true });
+// approve-plan (decomposed-stories live variant) answers the run's live
+// AskUserQuestion via questions.answer.
+const questionsAnswerMutate = vi.fn().mockResolvedValue({ ok: true });
 // approve-ideas resolves a row's display ref to its full entity (incl. body)
 // via tasks.list — the artifact payload carries only ref/title/scope/summary.
 const tasksListQuery = vi.fn();
@@ -55,6 +59,9 @@ vi.mock('../../../trpc/client', () => ({
       },
       reviewItems: {
         resolve: { mutate: (...args: unknown[]) => reviewItemsResolveMutate(...args) },
+      },
+      questions: {
+        answer: { mutate: (...args: unknown[]) => questionsAnswerMutate(...args) },
       },
       tasks: {
         list: { query: (...args: unknown[]) => tasksListQuery(...args) },
@@ -79,6 +86,20 @@ vi.mock('../../../stores/reviewItemsSlice', () => ({
 }));
 function setReviewItems(items: ReviewItem[]): void {
   mockReviewItems = items;
+}
+
+// decomposed-stories reads the app-lifetime live-question queue from the
+// questionStore singleton — mock it the same selector+getState way.
+let mockQuestionQueue: Question[] = [];
+const mockQuestionInit = vi.fn(() => () => {});
+vi.mock('../../../stores/questionStore', () => ({
+  useQuestionStore: Object.assign(
+    (selector: (s: { queue: Question[] }) => unknown) => selector({ queue: mockQuestionQueue }),
+    { getState: () => ({ init: mockQuestionInit }) },
+  ),
+}));
+function setQuestions(queue: Question[]): void {
+  mockQuestionQueue = queue;
 }
 
 // --- fixtures --------------------------------------------------------------
@@ -150,9 +171,12 @@ describe('ArtifactTabRenderer', () => {
     commitMutate.mockClear();
     acceptBaselineMutate.mockClear();
     reviewItemsResolveMutate.mockClear();
+    questionsAnswerMutate.mockClear();
     tasksListQuery.mockReset();
     setReviewItems([]);
+    setQuestions([]);
     mockReviewInit.mockClear();
+    mockQuestionInit.mockClear();
   });
 
   // --- idea-spec -----------------------------------------------------------
@@ -271,7 +295,7 @@ describe('ArtifactTabRenderer', () => {
   }
 
   it('renders the decomposed-stories epic/task grid with the indigo eyebrow', () => {
-    setHook({ loading: false, error: null, data: { kind: 'stories', idea: makeStoriesIdea() } });
+    setHook({ loading: false, error: null, data: { kind: 'stories', ideas: [makeStoriesIdea()] } });
     render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'decomposed-stories' })} {...PROPS} />);
 
     expect(screen.getByTestId('artifact-decomposed-stories')).toBeInTheDocument();
@@ -286,7 +310,7 @@ describe('ArtifactTabRenderer', () => {
   });
 
   it('stacks tasks vertically (a single column, NOT a 2-col grid)', () => {
-    setHook({ loading: false, error: null, data: { kind: 'stories', idea: makeStoriesIdea() } });
+    setHook({ loading: false, error: null, data: { kind: 'stories', ideas: [makeStoriesIdea()] } });
     render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'decomposed-stories' })} {...PROPS} />);
 
     const cells = screen.getAllByTestId('artifact-task-cell');
@@ -305,7 +329,7 @@ describe('ArtifactTabRenderer', () => {
   });
 
   it('opens the task detail with the full markdown body on card click, then closes', () => {
-    setHook({ loading: false, error: null, data: { kind: 'stories', idea: makeStoriesIdea() } });
+    setHook({ loading: false, error: null, data: { kind: 'stories', ideas: [makeStoriesIdea()] } });
     render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'decomposed-stories' })} {...PROPS} />);
 
     // Modal is closed initially.
@@ -330,7 +354,7 @@ describe('ArtifactTabRenderer', () => {
   });
 
   it('shows the No-additional-detail state when a task body is null/empty', () => {
-    setHook({ loading: false, error: null, data: { kind: 'stories', idea: makeStoriesIdea() } });
+    setHook({ loading: false, error: null, data: { kind: 'stories', ideas: [makeStoriesIdea()] } });
     render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'decomposed-stories' })} {...PROPS} />);
 
     // The second task (TASK-042) has body: null.
@@ -341,9 +365,214 @@ describe('ArtifactTabRenderer', () => {
   });
 
   it('shows the decomposed-stories no-epics empty state', () => {
-    setHook({ loading: false, error: null, data: { kind: 'stories', idea: makeIdea({ children: [] }) } });
+    setHook({ loading: false, error: null, data: { kind: 'stories', ideas: [makeIdea({ children: [] })] } });
     render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'decomposed-stories' })} {...PROPS} />);
     expect(screen.getByTestId('artifact-stories-noepics')).toBeInTheDocument();
+  });
+
+  // --- decomposed-stories: multi-idea sections, DRAFT mode + approve-plan gate ----
+
+  // A multi-idea decomposition whose epics/tasks are hidden DRAFTS
+  // (approved_at === null) — the state a plan-gated planner run parks in before
+  // the plan gate is approved. Idea 1: EPIC-100 > TASK-100. Idea 2: direct TASK-101.
+  function makeDraftIdeas(): BacklogTaskItem[] {
+    return [
+      makeIdea({
+        id: 'IDEA-100',
+        ref: 'IDEA-100',
+        title: 'First idea',
+        children: [
+          {
+            ...makeIdea({ id: 'EPIC-100', type: 'epic', ref: 'EPIC-100', title: 'Epic one', approved_at: null }),
+            children: [
+              makeIdea({ id: 'TASK-100', type: 'task', ref: 'TASK-100', title: 'Task one', approved_at: null }),
+            ],
+          },
+        ],
+      }),
+      makeIdea({
+        id: 'IDEA-101',
+        ref: 'IDEA-101',
+        title: 'Second idea',
+        children: [
+          makeIdea({ id: 'TASK-101', type: 'task', ref: 'TASK-101', title: 'Direct task', approved_at: null }),
+        ],
+      }),
+    ];
+  }
+
+  // The same shape but every epic/task APPROVED (approved_at set, the makeIdea
+  // default) — the post-approval state where drafts are revealed.
+  function makeApprovedIdeas(): BacklogTaskItem[] {
+    return [
+      makeIdea({
+        id: 'IDEA-100',
+        ref: 'IDEA-100',
+        title: 'First idea',
+        children: [
+          {
+            ...makeIdea({ id: 'EPIC-100', type: 'epic', ref: 'EPIC-100', title: 'Epic one' }),
+            children: [makeIdea({ id: 'TASK-100', type: 'task', ref: 'TASK-100', title: 'Task one' })],
+          },
+        ],
+      }),
+    ];
+  }
+
+  // The PROGRAMMATIC approve-plan gate: a pending decision review item stamped
+  // 'gate:human-step:approve-plan' on this run.
+  function makePlanGateItem(overrides: Partial<ReviewItem> = {}): ReviewItem {
+    return {
+      ...makeGateItem(),
+      id: 'rvw_plan',
+      kind: 'decision',
+      source: 'gate:human-step:approve-plan',
+      payload: { kind: 'decision', gate: 'approve-plan' },
+      ...overrides,
+    };
+  }
+
+  // A live AskUserQuestion approve-plan gate for this run. Its first sub-question
+  // offers an 'Approve plan' option; a 'Reject plan' option is included unless
+  // withReject === false.
+  function makeApprovePlanQuestion({ withReject = true }: { withReject?: boolean } = {}): Question {
+    return {
+      id: 'q_plan',
+      runId: 'run-1',
+      workflowName: 'planner',
+      toolUseId: 'tu_plan',
+      questions: [
+        {
+          question: 'Approve this plan?',
+          header: 'Plan',
+          multiSelect: false,
+          options: [
+            { label: 'Approve plan' },
+            { label: 'Revise' },
+            ...(withReject ? [{ label: 'Reject plan' }] : []),
+          ],
+        },
+      ],
+      status: 'pending',
+      createdAt: '2026-07-01T00:00:00.000Z',
+      answeredAt: null,
+      answerJson: null,
+    };
+  }
+
+  function renderStories(ideas: BacklogTaskItem[]): void {
+    setHook({ loading: false, error: null, data: { kind: 'stories', ideas } });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'decomposed-stories' })} {...PROPS} />);
+  }
+
+  it('renders one section per idea the run owns (multi-idea batch)', () => {
+    renderStories(makeDraftIdeas());
+
+    expect(screen.getAllByTestId('artifact-stories-idea-section')).toHaveLength(2);
+    expect(screen.getByText('First idea')).toBeInTheDocument();
+    expect(screen.getByText('Second idea')).toBeInTheDocument();
+    // Section headers carry each idea's ref; the counts aggregate across ideas
+    // (1 epic; TASK-100 under the epic + direct TASK-101 = 2 tasks).
+    expect(screen.getByText('IDEA-100')).toBeInTheDocument();
+    expect(screen.getByText('IDEA-101')).toBeInTheDocument();
+    expect(screen.getByTestId('artifact-stories-summary')).toHaveTextContent('2 ideas · 1 epic · 2 tasks');
+  });
+
+  it('shows the draft badge when any epic/task is a hidden draft', () => {
+    renderStories(makeDraftIdeas());
+    expect(screen.getByTestId('artifact-stories-draft-badge')).toHaveTextContent('Draft — pending plan approval');
+  });
+
+  it('hides the draft badge and footer when every epic/task is approved', () => {
+    setReviewItems([makePlanGateItem()]); // gate present, but nothing is a draft
+    renderStories(makeApprovedIdeas());
+    expect(screen.queryByTestId('artifact-stories-draft-badge')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('stories-plan-footer')).not.toBeInTheDocument();
+  });
+
+  it('shows the draft badge but NO footer when draft mode has no resolvable gate', () => {
+    // Draft mode but NO gate / live question (both mocks empty in beforeEach) →
+    // the badge shows, but the Approve/Reject footer does not.
+    renderStories(makeDraftIdeas());
+    expect(screen.getByTestId('artifact-stories-draft-badge')).toBeInTheDocument();
+    expect(screen.queryByTestId('stories-plan-footer')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('stories-approve-plan')).not.toBeInTheDocument();
+  });
+
+  it('renders Approve + Reject in the footer for a pending programmatic gate', () => {
+    setReviewItems([makePlanGateItem()]);
+    renderStories(makeDraftIdeas());
+    expect(screen.getByTestId('stories-plan-footer')).toBeInTheDocument();
+    expect(screen.getByTestId('stories-approve-plan')).toBeInTheDocument();
+    expect(screen.getByTestId('stories-reject-plan')).toBeInTheDocument();
+  });
+
+  it('Approve resolves the programmatic approve-plan gate with outcome approve', async () => {
+    setReviewItems([makePlanGateItem()]);
+    renderStories(makeDraftIdeas());
+
+    fireEvent.click(screen.getByTestId('stories-approve-plan'));
+    await waitFor(() =>
+      expect(reviewItemsResolveMutate).toHaveBeenCalledWith({
+        projectId: 1,
+        reviewItemId: 'rvw_plan',
+        outcome: 'approve',
+      }),
+    );
+    // The programmatic variant does NOT take the live-question answer path.
+    expect(questionsAnswerMutate).not.toHaveBeenCalled();
+  });
+
+  it('Reject resolves the programmatic approve-plan gate with outcome reject', async () => {
+    setReviewItems([makePlanGateItem()]);
+    renderStories(makeDraftIdeas());
+
+    fireEvent.click(screen.getByTestId('stories-reject-plan'));
+    await waitFor(() =>
+      expect(reviewItemsResolveMutate).toHaveBeenCalledWith({
+        projectId: 1,
+        reviewItemId: 'rvw_plan',
+        outcome: 'reject',
+      }),
+    );
+  });
+
+  it('Approve answers a live AskUserQuestion with the approve option label (live wins over the gate)', async () => {
+    // Both a live question AND a programmatic gate are pending — the live
+    // question takes priority, so Approve answers it (never resolves the gate).
+    setReviewItems([makePlanGateItem()]);
+    setQuestions([makeApprovePlanQuestion()]);
+    renderStories(makeDraftIdeas());
+
+    fireEvent.click(screen.getByTestId('stories-approve-plan'));
+    await waitFor(() =>
+      expect(questionsAnswerMutate).toHaveBeenCalledWith({
+        questionId: 'q_plan',
+        answers: { 'Approve this plan?': 'Approve plan' },
+      }),
+    );
+    expect(reviewItemsResolveMutate).not.toHaveBeenCalled();
+  });
+
+  it('Reject answers a live AskUserQuestion with the reject option label', async () => {
+    setQuestions([makeApprovePlanQuestion()]);
+    renderStories(makeDraftIdeas());
+
+    fireEvent.click(screen.getByTestId('stories-reject-plan'));
+    await waitFor(() =>
+      expect(questionsAnswerMutate).toHaveBeenCalledWith({
+        questionId: 'q_plan',
+        answers: { 'Approve this plan?': 'Reject plan' },
+      }),
+    );
+  });
+
+  it('hides Reject for the live variant when the question presents no reject option', () => {
+    setQuestions([makeApprovePlanQuestion({ withReject: false })]);
+    renderStories(makeDraftIdeas());
+
+    expect(screen.getByTestId('stories-approve-plan')).toBeInTheDocument();
+    expect(screen.queryByTestId('stories-reject-plan')).not.toBeInTheDocument();
   });
 
   // --- screenshots ---------------------------------------------------------
@@ -728,7 +957,7 @@ describe('ArtifactTabRenderer', () => {
   it('dispatches every atype to a distinct body', () => {
     const cases: Array<{ atype: ArtifactType; mode: 'template' | 'canvas'; testid: string; data: ArtifactData }> = [
       { atype: 'idea-spec', mode: 'template', testid: 'artifact-idea-spec', data: { loading: false, error: null, data: { kind: 'idea', idea: makeIdea() } } },
-      { atype: 'decomposed-stories', mode: 'template', testid: 'artifact-decomposed-stories', data: { loading: false, error: null, data: { kind: 'stories', idea: makeIdea({ children: [] }) } } },
+      { atype: 'decomposed-stories', mode: 'template', testid: 'artifact-decomposed-stories', data: { loading: false, error: null, data: { kind: 'stories', ideas: [makeIdea({ children: [] })] } } },
       { atype: 'screenshots', mode: 'template', testid: 'artifact-screenshots', data: { loading: false, error: null, data: { kind: 'screenshots', payload: {} } } },
       { atype: 'ui-prototype', mode: 'canvas', testid: 'artifact-canvas', data: { loading: false, error: null, data: { kind: 'canvas', payload: {} } } },
       { atype: 'generic', mode: 'canvas', testid: 'artifact-canvas', data: { loading: false, error: null, data: { kind: 'canvas', payload: {} } } },

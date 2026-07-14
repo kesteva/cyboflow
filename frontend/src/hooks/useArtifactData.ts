@@ -8,15 +8,15 @@
  *
  *   - 'idea-spec'          -> the originating idea (its markdown `body`), fetched
  *                             via `trpc.cyboflow.tasks.get({ taskId: sourceRef })`.
- *   - 'decomposed-stories' -> the originating idea WITH its epic children and each
- *                             epic's task children, fetched via the DEDICATED
- *                             `trpc.cyboflow.tasks.ideaDecomposition({ ideaId })`
- *                             read (`selectIdeaDecomposition` nests epics under the
- *                             idea via originating_idea_id, then tasks under each
- *                             epic via parent_epic_id). `tasks.get`/`selectTaskById`
- *                             is NOT usable here — it only nests children for an
- *                             EPIC, so an idea id yields children===undefined and
- *                             the renderer would always show its empty state.
+ *   - 'decomposed-stories' -> the RUN's whole decomposition — ONE idea tree
+ *                             (idea root + nested epics + each epic's tasks) PER
+ *                             idea the run owns — fetched via the DEDICATED
+ *                             `trpc.cyboflow.tasks.runDecomposition({ runId })`
+ *                             read (covers the multi-idea planner batch). Keyed by
+ *                             `artifact.runId` (ALWAYS set), NOT sourceRef: a run
+ *                             can own several ideas, so a single idea id is
+ *                             insufficient. An EMPTY array (run owns no resolvable
+ *                             idea) is a valid result, not an error.
  *   - 'arch-design'        -> the originating idea (fetched exactly like
  *                             'idea-spec' via `tasks.get`); the renderer extracts
  *                             the '## Architecture design' section from its body
@@ -34,9 +34,11 @@
  * arch-design) re-derive from the live entity model, so a first fetch alone is
  * not enough — a task/epic created under this idea after the tab opened would
  * otherwise stay invisible until the tab is closed and reopened. The hook stays
- * reactive via the project-scoped `cyboflow.tasks.onTaskChanged` subscription,
- * re-fetching on any change to THIS idea or its descendants (epics + tasks carry
- * `originating_idea_id` = the root idea). Live re-fetches are SILENT: the current
+ * reactive via the project-scoped `cyboflow.tasks.onTaskChanged` subscription.
+ * idea-spec / arch-design re-fetch on any change to THIS idea or its descendants
+ * (epics + tasks carry `originating_idea_id` = the root idea); decomposed-stories
+ * re-fetches on ANY task change in the project, because the run's idea set is not
+ * known cheaply here. Live re-fetches are SILENT: the current
  * content stays on screen (no loading flash) and a failed refresh keeps the
  * last-good data rather than blanking the tab. `projectId` scopes the channel;
  * when it is null the hook still does its one-shot fetch but cannot stay live.
@@ -82,7 +84,7 @@ export type RecommendationsPayload = RecommendationsArtifactPayload;
  */
 export type ArtifactContent =
   | { kind: 'idea'; idea: BacklogTaskItem }
-  | { kind: 'stories'; idea: BacklogTaskItem }
+  | { kind: 'stories'; ideas: BacklogTaskItem[] }
   | { kind: 'arch'; idea: BacklogTaskItem }
   | { kind: 'screenshots'; payload: ScreenshotsPayload }
   | { kind: 'recommendations'; payload: RecommendationsPayload }
@@ -109,7 +111,7 @@ function parsePayload(payloadJson: string | null): Record<string, unknown> {
 export function useArtifactData(artifact: Artifact, projectId: number | null): ArtifactData {
   const [state, setState] = useState<ArtifactData>({ loading: true, error: null, data: null });
 
-  const { atype, sourceRef, payloadJson } = artifact;
+  const { atype, sourceRef, payloadJson, runId } = artifact;
 
   useEffect(() => {
     // Canvas + screenshots resolve synchronously from the payload — no fetch,
@@ -138,8 +140,71 @@ export function useArtifactData(artifact: Artifact, projectId: number | null): A
       return;
     }
 
-    // Templated entity-backed types (idea-spec / decomposed-stories / arch-design)
-    // re-derive from the live entity model via sourceRef (the originating idea id).
+    // decomposed-stories — RUN-scoped (one idea tree per idea the run owns), so it
+    // does NOT require sourceRef; it re-derives from the live entity model via
+    // artifact.runId (ALWAYS set). Handled here in its own block so the
+    // single-idea (sourceRef) path below stays untouched.
+    if (atype === 'decomposed-stories') {
+      let cancelled = false;
+      // Monotonic fetch id — a slow earlier (re-)fetch must never clobber a newer.
+      let latestFetchId = 0;
+
+      const resolveStories = (silent: boolean): void => {
+        if (!silent) setState({ loading: true, error: null, data: null });
+        const fetchId = ++latestFetchId;
+        trpc.cyboflow.tasks.runDecomposition.query({ runId }).then(
+          (ideas) => {
+            if (cancelled || fetchId !== latestFetchId) return;
+            // [] is valid (run owns no resolvable idea) — the renderer shows its
+            // own empty state, this is NOT a fetch error.
+            setState({ loading: false, error: null, data: { kind: 'stories', ideas } });
+          },
+          (err: unknown) => {
+            if (cancelled || fetchId !== latestFetchId) return;
+            const message = err instanceof Error ? err.message : 'Failed to load artifact content.';
+            if (silent) {
+              console.warn('[useArtifactData] live refresh failed:', err);
+              // Mirror the single-idea path: a silent refresh keeps last-good data,
+              // but surfaces the error if the initial load never committed.
+              setState((prev) => (prev.loading ? { loading: false, error: message, data: null } : prev));
+              return;
+            }
+            setState({ loading: false, error: message, data: null });
+          },
+        );
+      };
+
+      resolveStories(false);
+
+      // Without a projectId we cannot scope the live channel, so the tab is one-shot.
+      if (projectId === null) {
+        return () => {
+          cancelled = true;
+        };
+      }
+
+      // Stay live. Unlike the single-idea path we CANNOT cheaply know the run's
+      // idea set here (a multi-idea run's artifact carries no single idea id), so
+      // re-fetch on ANY task change in the project rather than filtering to one
+      // idea root. The read is a couple of indexed selects and refreshes are silent.
+      const storiesSub = trpc.cyboflow.tasks.onTaskChanged.subscribe(
+        { projectId },
+        {
+          onData: () => {
+            resolveStories(true);
+          },
+          onError: (err: unknown) => console.warn('[useArtifactData] onTaskChanged error:', err),
+        },
+      );
+
+      return () => {
+        cancelled = true;
+        storiesSub.unsubscribe();
+      };
+    }
+
+    // Templated entity-backed types (idea-spec / arch-design) re-derive from the
+    // live entity model via sourceRef (the originating idea id).
     if (!sourceRef) {
       setState({ loading: false, error: 'No source entity linked to this artifact.', data: null });
       return;
@@ -151,28 +216,19 @@ export function useArtifactData(artifact: Artifact, projectId: number | null): A
     let latestFetchId = 0;
 
     const toContent = (idea: BacklogTaskItem): ArtifactContent =>
-      atype === 'idea-spec'
-        ? { kind: 'idea', idea }
-        : atype === 'arch-design'
-          ? { kind: 'arch', idea }
-          : { kind: 'stories', idea };
+      atype === 'arch-design' ? { kind: 'arch', idea } : { kind: 'idea', idea };
 
     // Resolve the current content. `silent` = a live refresh triggered by an
     // entity change: keep the on-screen content (no loading flash) and, on
     // failure, keep the last-good data instead of blanking the tab. The initial
     // load (silent=false) shows the loading state and surfaces errors.
     //
-    // decomposed-stories uses the DEDICATED ideaDecomposition read so the idea
-    // arrives with its epic children + each epic's task children already nested
-    // (tasks.get would only nest children for an epic → an idea id there has
-    // children===undefined). idea-spec / arch-design fetch the bare idea body.
+    // idea-spec / arch-design fetch the bare idea body (decomposed-stories is
+    // handled in its own run-scoped block above).
     const resolve = (silent: boolean): void => {
       if (!silent) setState({ loading: true, error: null, data: null });
       const fetchId = ++latestFetchId;
-      const fetched =
-        atype === 'decomposed-stories'
-          ? trpc.cyboflow.tasks.ideaDecomposition.query({ ideaId: sourceRef })
-          : trpc.cyboflow.tasks.get.query({ taskId: sourceRef });
+      const fetched = trpc.cyboflow.tasks.get.query({ taskId: sourceRef });
 
       fetched.then(
         (idea) => {
@@ -234,7 +290,7 @@ export function useArtifactData(artifact: Artifact, projectId: number | null): A
       cancelled = true;
       sub.unsubscribe();
     };
-  }, [atype, sourceRef, payloadJson, projectId]);
+  }, [atype, sourceRef, payloadJson, projectId, runId]);
 
   return state;
 }
