@@ -417,6 +417,25 @@ if (isDevelopment) {
   // Devtron can be installed manually in DevTools console with: require('devtron').install()
 }
 
+// Chromium's network service can crash and restart during the initial dev-server
+// load (observed on macOS: "Network service crashed, restarting service" →
+// ERR_FAILED (-2) loading http://localhost:4521). The service comes back within a
+// second, so retry the load rather than leaving a blank window with a dead tRPC
+// transport. Only the initial in-flight load is the casualty; a short retry recovers.
+async function loadDevUrlWithRetry(win: BrowserWindow, url: string, attempts = 6): Promise<void> {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      await win.loadURL(url);
+      return;
+    } catch (err) {
+      const isLast = i === attempts - 1;
+      console.warn(`[Main] dev renderer load failed (attempt ${i + 1}/${attempts}): ${String(err)}`);
+      if (isLast) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 750));
+    }
+  }
+}
+
 async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -441,7 +460,7 @@ async function createWindow() {
   mainWindow.webContents.setMaxListeners(100);
 
   if (isDevelopment) {
-    await mainWindow.loadURL('http://localhost:4521');
+    await loadDevUrlWithRetry(mainWindow, 'http://localhost:4521');
     mainWindow.webContents.openDevTools();
     
     // Enable IPC debugging in development
