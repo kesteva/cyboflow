@@ -47,6 +47,8 @@ function makeVariant(overrides: Partial<WorkflowVariantRow> = {}): WorkflowVaria
     agent_overrides_json: null,
     model: null,
     execution_model: null,
+    agent_provider: null,
+    agent_runtime: null,
     weight: 1,
     status: 'draft',
     created_at: '',

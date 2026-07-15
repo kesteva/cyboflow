@@ -26,6 +26,7 @@ import type {
 import { SPRINT_BATCH_CAP } from '../../../../shared/types/sprintBatch';
 import { AGENT_MODEL_ALIASES, AGENT_MODEL_LABELS } from '../../../../shared/types/agents';
 import type { AgentEntry, AgentModelAlias } from '../../../../shared/types/agents';
+import type { AgentProvider } from '../../../../shared/types/agentRuntime';
 import { HUMAN_GATE_AGENT, resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import { CLI_TOOLS } from '../../../../shared/types/cliTools';
 import type { CliTool } from '../../../../shared/types/cliTools';
@@ -56,6 +57,14 @@ export interface WorkflowStepInspectorProps {
    * note for every bound key.
    */
   agentEntries?: AgentEntry[];
+  /**
+   * The agent PROVIDER this editor's runs resolve to (variant editor threads the
+   * variant's provider). Defaults to `'claude'` — the base workflow editor picks
+   * its provider at launch, so its per-agent pins stay Claude. When `'codex'` the
+   * per-agent model pin is replaced with a "single model per run" note, since a
+   * Codex run has no per-agent model overlay.
+   */
+  agentProvider?: AgentProvider;
 }
 
 /** Locate the selected step and its containing phase within the definition. */
@@ -114,6 +123,7 @@ export function WorkflowStepInspector({
   dispatch,
   customAgentKeys = [],
   agentEntries = [],
+  agentProvider = 'claude',
 }: WorkflowStepInspectorProps) {
   const [tab, setTab] = useState<InspectorTab>('step');
   const foundInner = findFanOutInner(definition, selectedFanOutInner);
@@ -142,6 +152,7 @@ export function WorkflowStepInspector({
           customAgentKeys={customAgentKeys}
           agentEntries={agentEntries}
           agentConfigs={agentConfigs}
+          agentProvider={agentProvider}
         />
       </div>
     );
@@ -210,6 +221,7 @@ export function WorkflowStepInspector({
             customAgentKeys={customAgentKeys}
             agentEntries={agentEntries}
             agentConfigs={agentConfigs}
+            agentProvider={agentProvider}
           />
         ) : (
           <McpTab phase={found.phase} step={found.step} dispatch={dispatch} />
@@ -247,6 +259,7 @@ function InnerFanOutInspector({
   customAgentKeys,
   agentEntries,
   agentConfigs,
+  agentProvider,
 }: {
   phase: WorkflowPhase;
   step: WorkflowStep;
@@ -256,6 +269,7 @@ function InnerFanOutInspector({
   customAgentKeys: readonly string[];
   agentEntries: readonly AgentEntry[];
   agentConfigs: Record<string, WorkflowAgentConfig> | undefined;
+  agentProvider: AgentProvider;
 }) {
   const { agentOptions, customKeySet, agentInList } = agentOptionsFor(inner.agent, customAgentKeys);
   const siblingTargets = step.fanOut?.inner
@@ -377,6 +391,7 @@ function InnerFanOutInspector({
             agentKey={resolveStepAgentKey(inner.id, inner.agent) ?? inner.agent}
             agentEntries={agentEntries}
             agentConfigs={agentConfigs}
+            agentProvider={agentProvider}
             dispatch={dispatch}
           />
 
@@ -851,10 +866,12 @@ function AgentTab({
   customAgentKeys,
   agentEntries,
   agentConfigs,
+  agentProvider,
 }: TabProps & {
   customAgentKeys: readonly string[];
   agentEntries: readonly AgentEntry[];
   agentConfigs: Record<string, WorkflowAgentConfig> | undefined;
+  agentProvider: AgentProvider;
 }) {
   // Merge the static suggestion list with the project's CUSTOM agent keys so a
   // custom-flow step can bind a project custom agent from the dropdown rather
@@ -904,6 +921,7 @@ function AgentTab({
         agentKey={resolveStepAgentKey(step.id, step.agent) ?? step.agent}
         agentEntries={agentEntries}
         agentConfigs={agentConfigs}
+        agentProvider={agentProvider}
         dispatch={dispatch}
       />
 
@@ -999,12 +1017,14 @@ function AgentConfigSection({
   agentKey,
   agentEntries,
   agentConfigs,
+  agentProvider,
   dispatch,
 }: {
   variant: 'agent' | 'inner';
   agentKey: string;
   agentEntries: readonly AgentEntry[];
   agentConfigs: Record<string, WorkflowAgentConfig> | undefined;
+  agentProvider: AgentProvider;
   dispatch: React.Dispatch<WorkflowEditorAction>;
 }) {
   // The human gate is not an agent (no model to pin, no body to edit).
@@ -1041,30 +1061,42 @@ function AgentConfigSection({
   return (
     <div style={sectionContainerStyle} data-testid={sectionTestId}>
       {/* ── Model pin ─────────────────────────────────────────────────────── */}
-      <div>
-        <label style={labelStyle} htmlFor={modelId}>model</label>
-        <select
-          id={modelId}
-          value={selectedModel}
-          onChange={(e) =>
-            dispatch({
-              type: 'SET_AGENT_MODEL',
-              agentKey,
-              model: e.target.value === '' ? null : (e.target.value as AgentModelAlias),
-            })
-          }
-          style={inputStyle}
-          data-testid={modelTestId}
-        >
-          <option value="">(inherit)</option>
-          {AGENT_MODEL_ALIASES.map((alias) => (
-            <option key={alias} value={alias}>{AGENT_MODEL_LABELS[alias]}</option>
-          ))}
-        </select>
-        <p style={hintStyle} data-testid={hintTestId}>
-          {inheriting ? `${inheritSentence} ` : ''}Applies to every step using <b>{agentKey}</b> in this flow.
-        </p>
-      </div>
+      {agentProvider === 'codex' ? (
+        // A Codex run is single-model (no per-agent model overlay), so a per-agent
+        // pin could never apply — show the run-level guidance instead of a picker.
+        <div>
+          <label style={labelStyle}>model</label>
+          <p style={hintStyle} data-testid={`${modelTestId}-codex-note`}>
+            Codex runs use a single model per run — set the run model above. Per-agent
+            model pins apply to Claude runtimes only.
+          </p>
+        </div>
+      ) : (
+        <div>
+          <label style={labelStyle} htmlFor={modelId}>model</label>
+          <select
+            id={modelId}
+            value={selectedModel}
+            onChange={(e) =>
+              dispatch({
+                type: 'SET_AGENT_MODEL',
+                agentKey,
+                model: e.target.value === '' ? null : (e.target.value as AgentModelAlias),
+              })
+            }
+            style={inputStyle}
+            data-testid={modelTestId}
+          >
+            <option value="">(inherit)</option>
+            {AGENT_MODEL_ALIASES.map((alias) => (
+              <option key={alias} value={alias}>{AGENT_MODEL_LABELS[alias]}</option>
+            ))}
+          </select>
+          <p style={hintStyle} data-testid={hintTestId}>
+            {inheriting ? `${inheritSentence} ` : ''}Applies to every step using <b>{agentKey}</b> in this flow.
+          </p>
+        </div>
+      )}
 
       {/* ── Agent definition (read-only view, or workflow-scoped custom copy) ─ */}
       {config?.custom === undefined ? (

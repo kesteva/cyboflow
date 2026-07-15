@@ -25,9 +25,13 @@ import { useWorkflowEditorState } from '../../hooks/useWorkflowEditorState';
 import { WorkflowEditorCanvas } from './WorkflowEditorCanvas';
 import { WorkflowStepInspector } from './WorkflowStepInspector';
 import { MODEL_OPTIONS } from './unified/ModelPill';
+import { providerForRuntime, type LaunchAgentRuntime } from './agentRuntimeUi';
+import { useCodexModelCatalog } from '../../stores/codexModelCatalogStore';
+import { isCodexModelFamily, isCodexModelSelection } from '../../../../shared/types/agentModels';
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { WorkflowVariantAgentOverrides } from '../../../../shared/types/experiments';
 import type { AgentEntry, AgentModelAlias } from '../../../../shared/types/agents';
+import type { AgentProvider, WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 
 export interface VariantEditorModalProps {
   isOpen: boolean;
@@ -86,6 +90,10 @@ export function VariantEditorModal({
   const [labelDraft, setLabelDraft] = useState<string>(variant.label);
   const [model, setModel] = useState<string>(variant.model ?? INHERIT);
   const [executionModel, setExecutionModel] = useState<string>(variant.execution_model ?? INHERIT);
+  // The per-variant agent runtime (migration 066). INHERIT ('') = no pin (fall
+  // through to the launch default). Provider is derived from the runtime — the
+  // pair is stored on the variant but a single runtime choice determines both.
+  const [agentRuntime, setAgentRuntime] = useState<string>(variant.agent_runtime ?? INHERIT);
   const [agentEntries, setAgentEntries] = useState<AgentEntry[]>([]);
   const [overrides, setOverrides] = useState<WorkflowVariantAgentOverrides>(() =>
     parseAgentOverrides(variant.agent_overrides_json),
@@ -104,6 +112,24 @@ export function VariantEditorModal({
     [agentEntries],
   );
 
+  // The variant's effective agent provider, derived from its runtime pin. When
+  // unpinned (INHERIT) the launch default (Claude) drives the pickers. A Codex
+  // variant swaps the Claude model list for the runtime-discovered catalog and
+  // hides the per-agent overrides (a Codex run is single-model, no overlays).
+  const variantProvider: AgentProvider =
+    agentRuntime === INHERIT ? 'claude' : providerForRuntime(agentRuntime as LaunchAgentRuntime);
+  const isCodexVariant = variantProvider === 'codex';
+  const { options: codexModelOptions } = useCodexModelCatalog(isCodexVariant);
+
+  // Drop a run-level model pin that no longer matches the variant's provider (a
+  // Claude alias under Codex, or a Codex id under Claude) — mirrors WorkflowPicker,
+  // resetting to INHERIT (the variant's no-pin) rather than a provider default.
+  useEffect(() => {
+    if (model === INHERIT) return;
+    if (isCodexVariant && !isCodexModelSelection(model)) setModel(INHERIT);
+    else if (!isCodexVariant && isCodexModelFamily(model)) setModel(INHERIT);
+  }, [isCodexVariant, model]);
+
   const actionInFlightRef = useRef(false);
 
   // Re-seed every time the modal opens (or targets a different variant).
@@ -115,6 +141,7 @@ export function VariantEditorModal({
     setRenaming(false);
     setModel(variant.model ?? INHERIT);
     setExecutionModel(variant.execution_model ?? INHERIT);
+    setAgentRuntime(variant.agent_runtime ?? INHERIT);
     setOverrides(parseAgentOverrides(variant.agent_overrides_json));
     setError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -174,6 +201,8 @@ export function VariantEditorModal({
         model: model === INHERIT ? null : model,
         executionModel:
           executionModel === INHERIT ? null : (executionModel as 'orchestrated' | 'programmatic'),
+        agentProvider: agentRuntime === INHERIT ? null : variantProvider,
+        agentRuntime: agentRuntime === INHERIT ? null : (agentRuntime as WorkflowAgentRuntime),
       });
       await useVariantsStore.getState().invalidate(workflowId);
       onSaved?.();
@@ -184,7 +213,7 @@ export function VariantEditorModal({
       setIsBusy(false);
       actionInFlightRef.current = false;
     }
-  }, [variant.id, state.definition, overrides, overrideCount, model, executionModel, workflowId, onSaved, onClose]);
+  }, [variant.id, state.definition, overrides, overrideCount, model, executionModel, agentRuntime, variantProvider, workflowId, onSaved, onClose]);
 
   // Inline header rename (IDEA-018 follow-up): label-only variants.update.
   // The UNIQUE(workflow_id, label) CONFLICT from the registry surfaces in the
@@ -308,11 +337,25 @@ export function VariantEditorModal({
           </div>
         )}
 
-        {/* Variant-level model / execution-model defaults. */}
+        {/* Variant-level runtime / model / execution-model defaults. */}
         <div
           className="flex items-center gap-4 px-4 py-2 border-b border-border-primary"
           style={{ flexShrink: 0 }}
         >
+          <label className="flex items-center gap-2 text-xs text-text-secondary">
+            Runtime
+            <select
+              value={agentRuntime}
+              onChange={(e) => setAgentRuntime(e.target.value)}
+              className="rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-xs text-text-primary"
+              data-testid="variant-editor-runtime-select"
+            >
+              <option value={INHERIT}>Inherit</option>
+              <option value="claude-sdk">Claude SDK</option>
+              <option value="claude-interactive">Claude interactive (PTY)</option>
+              <option value="codex-sdk">Codex SDK</option>
+            </select>
+          </label>
           <label className="flex items-center gap-2 text-xs text-text-secondary">
             Model default
             <select
@@ -322,7 +365,7 @@ export function VariantEditorModal({
               data-testid="variant-editor-model-select"
             >
               <option value={INHERIT}>Inherit (no pin)</option>
-              {MODEL_OPTIONS.map((o) => (
+              {(isCodexVariant ? codexModelOptions : MODEL_OPTIONS).map((o) => (
                 <option key={o.id} value={o.id}>
                   {o.label}
                 </option>
@@ -359,6 +402,7 @@ export function VariantEditorModal({
             dispatch={dispatch}
             customAgentKeys={customAgentKeys}
             agentEntries={agentEntries}
+            agentProvider={variantProvider}
           />
         </div>
 
@@ -369,10 +413,16 @@ export function VariantEditorModal({
           data-testid="variant-editor-agent-deltas"
         >
           <h3 className="text-xs font-semibold text-text-primary">Agent overrides</h3>
-          {agentKeys.length === 0 && (
+          {isCodexVariant && (
+            <p className="text-xs text-text-tertiary" data-testid="variant-editor-agent-deltas-codex-note">
+              Codex runs use a single model per run and don't apply per-agent model or
+              system-prompt overrides — set the run model above.
+            </p>
+          )}
+          {!isCodexVariant && agentKeys.length === 0 && (
             <p className="text-xs text-text-tertiary">No agents available for this project.</p>
           )}
-          {agentKeys.map((agentKey) => {
+          {!isCodexVariant && agentKeys.map((agentKey) => {
             const delta = overrides[agentKey];
             return (
               <div

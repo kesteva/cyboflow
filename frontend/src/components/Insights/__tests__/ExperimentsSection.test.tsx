@@ -42,8 +42,8 @@ vi.mock('../../../stores/insightsStore', () => ({
 vi.mock('../../../stores/variantsStore', () => ({
   useWorkflowVariants: () => ({
     variants: [
-      { id: 'wfv_a', workflow_id: 'wf-1', label: 'variant-a', spec_json: '{}', agent_overrides_json: null, model: null, execution_model: null, weight: 3, status: 'active', created_at: '', updated_at: '' },
-      { id: 'wfv_b', workflow_id: 'wf-1', label: 'variant-b', spec_json: '{}', agent_overrides_json: null, model: null, execution_model: null, weight: 1, status: 'paused', created_at: '', updated_at: '' },
+      { id: 'wfv_a', workflow_id: 'wf-1', label: 'variant-a', spec_json: '{}', agent_overrides_json: null, model: null, execution_model: null, agent_provider: null, agent_runtime: null, weight: 3, status: 'active', created_at: '', updated_at: '' },
+      { id: 'wfv_b', workflow_id: 'wf-1', label: 'variant-b', spec_json: '{}', agent_overrides_json: null, model: null, execution_model: null, agent_provider: null, agent_runtime: null, weight: 1, status: 'paused', created_at: '', updated_at: '' },
     ],
     loaded: true,
     loading: false,

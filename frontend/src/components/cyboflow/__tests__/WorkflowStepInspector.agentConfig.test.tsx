@@ -82,6 +82,7 @@ function renderInspector(opts: {
   selectedStepId: string | null;
   selectedFanOutInner?: { stepId: string; innerIndex: number } | null;
   agentEntries?: AgentEntry[];
+  agentProvider?: 'claude' | 'codex';
   dispatch?: ReturnType<typeof vi.fn>;
 }) {
   const dispatch = opts.dispatch ?? vi.fn();
@@ -92,6 +93,7 @@ function renderInspector(opts: {
       selectedFanOutInner={opts.selectedFanOutInner ?? null}
       dispatch={dispatch}
       agentEntries={opts.agentEntries ?? [makeEntry()]}
+      {...(opts.agentProvider ? { agentProvider: opts.agentProvider } : {})}
     />,
   );
   return { dispatch };
@@ -124,6 +126,20 @@ describe('AgentConfigSection — model pin', () => {
 
     fireEvent.change(select, { target: { value: 'haiku' } });
     expect(dispatch).toHaveBeenCalledWith({ type: 'SET_AGENT_MODEL', agentKey: 'implement', model: 'haiku' });
+  });
+
+  it('replaces the per-agent model pin with a single-model note when the provider is codex', () => {
+    renderInspector({
+      definition: makeDefinition({ implement: { model: 'sonnet' } }),
+      selectedStepId: 'impl',
+      agentProvider: 'codex',
+    });
+    openAgentTab();
+
+    // No Claude model <select> under codex — a run-level guidance note instead.
+    expect(screen.queryByTestId('inspector-model-select')).not.toBeInTheDocument();
+    const note = screen.getByTestId('inspector-model-select-codex-note');
+    expect(note).toHaveTextContent('Codex runs use a single model per run');
   });
 
   it('maps the "(inherit)" option back to a null model', () => {
