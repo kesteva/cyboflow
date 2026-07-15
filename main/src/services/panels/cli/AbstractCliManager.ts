@@ -628,16 +628,25 @@ export abstract class AbstractCliManager extends EventEmitter {
           this.logger?.verbose(`[${this.getCliToolName()}] Using Node.js: ${nodePath}`);
 
           // Spawn with Node.js directly
-          const nodeArgs = scriptPath === command 
+          const nodeArgs = scriptPath === command
             ? [command, ...args] // Command might be a direct script path
             : ['--no-warnings', '--enable-source-maps', scriptPath, ...args]; // Found script path
-            
+
+          // Fork-bomb guard: when findNodeExecutable falls back to process.execPath
+          // (the packaged Electron/app binary used as a Node runtime), it must be
+          // launched with ELECTRON_RUN_AS_NODE=1 so it runs as plain Node instead of
+          // re-booting the whole Electron app. Scope this to the execPath branch only;
+          // a real external `node` never needs (or wants) this flag.
+          const nodeEnv = nodePath === process.execPath
+            ? { ...env, ELECTRON_RUN_AS_NODE: '1' }
+            : env;
+
           ptyProcess = pty.spawn(nodePath, nodeArgs, {
             name: 'xterm-color',
             cols: 80,
             rows: 30,
             cwd,
-            env
+            env: nodeEnv
           });
         }
 
