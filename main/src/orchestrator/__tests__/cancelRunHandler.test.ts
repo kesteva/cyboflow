@@ -472,6 +472,69 @@ describe('cancelRunHandler — sprint-lane batch close-out', () => {
     expect(getRun(db, runId).status).toBe('canceled');
   });
 
+  // -------------------------------------------------------------------------
+  // reapPrototypeServers — the run's detached ui-prototype http.server (TASK-057).
+  // Mirrors the cancelVerificationsForRun wiring: optional, fail-soft, only fired
+  // on a real cancel (never on the already-terminal noOp).
+  // -------------------------------------------------------------------------
+
+  it('calls reapPrototypeServers(runId) exactly once after a successful cancel', async () => {
+    const { runId } = seedRun(db, { status: 'running' });
+    const reapPrototypeServers = vi.fn();
+
+    const result = await cancelRunHandler(runId, {
+      ...makeDeps(db, spy, runQueues),
+      reapPrototypeServers,
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(reapPrototypeServers).toHaveBeenCalledTimes(1);
+    expect(reapPrototypeServers).toHaveBeenCalledWith(runId);
+  });
+
+  it('does NOT call reapPrototypeServers on an already-terminal noOp (double-cancel)', async () => {
+    const { runId } = seedRun(db, { status: 'canceled' });
+    const reapPrototypeServers = vi.fn();
+
+    const result = await cancelRunHandler(runId, {
+      ...makeDeps(db, spy, runQueues),
+      reapPrototypeServers,
+    });
+
+    expect(result).toEqual({ noOp: true, reason: 'already_terminal' });
+    expect(reapPrototypeServers).not.toHaveBeenCalled();
+  });
+
+  it('is fail-soft: a throwing reapPrototypeServers never fails the cancel', async () => {
+    const { runId } = seedRun(db, { status: 'running' });
+    const reapPrototypeServers = vi.fn(() => {
+      throw new Error('reaper offline');
+    });
+
+    const result = await cancelRunHandler(runId, {
+      ...makeDeps(db, spy, runQueues),
+      reapPrototypeServers,
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(getRun(db, runId).status).toBe('canceled');
+  });
+
+  it('is fail-soft: a rejecting (async) reapPrototypeServers never fails the cancel', async () => {
+    const { runId } = seedRun(db, { status: 'running' });
+    const reapPrototypeServers = vi.fn(async () => {
+      throw new Error('reaper rejected');
+    });
+
+    const result = await cancelRunHandler(runId, {
+      ...makeDeps(db, spy, runQueues),
+      reapPrototypeServers,
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(getRun(db, runId).status).toBe('canceled');
+  });
+
   it('is fail-soft: an omitted dep cancels fine; a throwing dep never fails the cancel', async () => {
     // Omitted dep — batch run still cancels.
     const first = seedRun(db, { status: 'running', id: 'run-no-dep' });

@@ -1786,6 +1786,86 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
     expect(disposeMonitorResources).toHaveBeenCalledWith('run-mon-dispose');
   });
 
+  // -------------------------------------------------------------------------
+  // reapPrototypeServers — the run's detached ui-prototype http.server (TASK-057).
+  // The Planner/Ship ui-prototype subagent starts that server with `nohup ... &`
+  // so it outlives the run's review window; close-out (merge / createPr / dismiss)
+  // is where the main process finally reaps it. Optional + fail-soft (via
+  // reapPrototypeServersSafe), so a throw never blocks the close-out.
+  // -------------------------------------------------------------------------
+
+  it('merge reaps the run prototype server at close-out', async () => {
+    seedRun(db, { id: 'run-reap-merge', status: 'awaiting_review', worktreePath: '/tmp/wt/run-reap-merge' });
+    const reapPrototypeServers = vi.fn();
+    setRunCloseoutDeps({
+      worktreeManager: makeWmStub(),
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },
+      clearPendingApprovalsForRun: vi.fn(),
+      disposeMonitorResources: vi.fn(),
+      reapPrototypeServers,
+    });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.merge({ runId: 'run-reap-merge', strategy: 'preserve' });
+
+    expect(reapPrototypeServers).toHaveBeenCalledWith('run-reap-merge');
+  });
+
+  it('dismiss reaps the run prototype server at close-out', async () => {
+    seedRun(db, { id: 'run-reap-dismiss', status: 'stuck', worktreePath: '/tmp/wt/run-reap-dismiss' });
+    const reapPrototypeServers = vi.fn();
+    setRunCloseoutDeps({
+      worktreeManager: makeWmStub(),
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },
+      clearPendingApprovalsForRun: vi.fn(),
+      disposeMonitorResources: vi.fn(),
+      reapPrototypeServers,
+    });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.dismiss({ runId: 'run-reap-dismiss' });
+
+    expect(reapPrototypeServers).toHaveBeenCalledWith('run-reap-dismiss');
+  });
+
+  it('createPr reaps the run prototype server at close-out', async () => {
+    seedRun(db, { id: 'run-reap-pr', status: 'awaiting_review', worktreePath: '/tmp/wt/run-reap-pr' });
+    const reapPrototypeServers = vi.fn();
+    setRunCloseoutDeps({
+      worktreeManager: makeWmStub(),
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },
+      clearPendingApprovalsForRun: vi.fn(),
+      disposeMonitorResources: vi.fn(),
+      reapPrototypeServers,
+    });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.createPr({ runId: 'run-reap-pr' });
+
+    expect(reapPrototypeServers).toHaveBeenCalledWith('run-reap-pr');
+  });
+
+  it('close-out is fail-soft: a throwing reapPrototypeServers never fails the merge', async () => {
+    seedRun(db, { id: 'run-reap-throws', status: 'awaiting_review', worktreePath: '/tmp/wt/run-reap-throws' });
+    const reapPrototypeServers = vi.fn(() => {
+      throw new Error('reaper offline');
+    });
+    setRunCloseoutDeps({
+      worktreeManager: makeWmStub(),
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },
+      clearPendingApprovalsForRun: vi.fn(),
+      disposeMonitorResources: vi.fn(),
+      reapPrototypeServers,
+    });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.merge({ runId: 'run-reap-throws', strategy: 'preserve' });
+
+    // The throw is swallowed — the run still reaches its terminal completed state.
+    expect(result).toEqual({ success: true });
+    expect(getStatus('run-reap-throws')).toBe('completed');
+  });
+
   it('merge(preserve) from stuck replays commits without a squash message', async () => {
     seedRun(db, { id: 'run-merge-2', status: 'stuck', worktreePath: '/tmp/wt/run-merge-2' });
     const wm = makeWmStub();
