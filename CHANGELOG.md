@@ -37,6 +37,8 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
   configure variants from a quick session.
 - **Idea attachments accept any file type** (not just images), surfaced via the
   `cyboflow_get_task` read path, and rendered inside the multi-idea seed block.
+- **Task-level code-review loop-back.** A task's code-review step now loops back
+  on must-fix defects instead of passing them downstream.
 
 ### Changed
 
@@ -56,6 +58,19 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 - The single-writer agent guard exempts the sanctioned request-only tool, and
   built-in agents whose baseline description names a `cyboflow_` tool can be saved.
 - Per-run cyboflow env inherited from a hosting session is stripped at boot.
+- **Codex app-server no longer leaks its subprocess tree.** Teardown previously
+  signalled only the direct `codex app-server` child, orphaning its MCP-bridge
+  node grandchildren and unix sockets (leaks that survived for days); the
+  app-server is now spawned detached and group-killed by negative pid, and the
+  transient onboarding/model-discovery probe servers are tracked and reaped on
+  shutdown.
+- **Codex `isSecret` is honored end-to-end.** A question the model flags secret
+  now renders as a masked (password) field and is persisted as `[redacted]`
+  rather than stored cleartext — the real value is still delivered to Codex
+  in-memory for the turn.
+- **Fork-bomb guard on the PTY node-fallback.** When the CLI node-fallback
+  resolves to the packaged app binary (`process.execPath`), it is now spawned with
+  `ELECTRON_RUN_AS_NODE=1` so it runs as Node instead of re-launching the app.
 
 ## [0.1.23] — 2026-07-14
 
