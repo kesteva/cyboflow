@@ -6,6 +6,57 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.24] — 2026-07-15
+
+### Added
+
+- **Codex provider (second agent runtime).** Cyboflow can now run flows and quick
+  sessions on **OpenAI Codex** alongside Claude. A provider-neutral agent-stream
+  adapter sits underneath, with provider-aware model selection, workflow prompt
+  rendering, run/session labels, and permission copy throughout. Codex runs via a
+  **bundled app-server** — its own transport, turn sessions, event projection,
+  token-usage rollup, and approvals bridged into the review queue — gated on
+  ChatGPT auth, with PTY quick sessions + SDK workflows, dynamic model discovery,
+  a demo-mode launch guard, and foreign-arch Codex binaries excluded from the lean
+  mac builds. [migrations 059–065: agent provider / runtime / model columns +
+  agent invocations]
+- **Multi-idea planner batches.** The Planner can plan **several ideas in one run**:
+  a multi-select idea picker (cap 4, scope badges, plan-separately split), an
+  **approve-ideas artifact + per-idea verdict gate** with Approve-all / Deny-all
+  bulk buttons, `launchSeparatePlanner` for peeling an idea into its own session,
+  a decomposed-stories draft mode (per-idea sections, Approve/Reject plan gate),
+  one idea-spec artifact per idea, and an idea size selector on the New-backlog
+  dialog. [migrations 061 seed_idea_ids, 062 approve-ideas atype, 063 per-idea
+  spec artifacts]
+- **Monitor rewind + live-steer.** A programmatic run can be **rewound to an
+  earlier step** (`rewind_to_step`, crash-atomic mutation + durable settled marker
+  for kept fan-outs), and an operator can **live-steer** a running step agent by
+  pushing guidance into it mid-turn (SDK live-steer seam). Per-run step validation
+  now resolves the frozen run spec rather than the live workflow definition.
+- **Workflow/variant config over MCP.** Twelve MCP tools to edit workflows and
+  configure variants from a quick session.
+- **Idea attachments accept any file type** (not just images), surfaced via the
+  `cyboflow_get_task` read path, and rendered inside the multi-idea seed block.
+
+### Changed
+
+- **AI settings** split into their own Settings tab, with an **Integrations**
+  scaffold (agent providers surfaced there).
+- **Quick-session names** are now two friendly words (with a UTC-date suffix)
+  instead of timestamp branches.
+- Removed the **Opus 4.8 250K** picker option (the legacy alias still resolves),
+  and added a workflow-variant rename affordance (inline pencil in the editor
+  header).
+
+### Fixed
+
+- Programmatic→orchestrated handover preserves `current_step_id` (the flow
+  timeline no longer resets to stage 1) and exits monitor-chat mode.
+- Idle-session review items open via the quick-session host, not the flow-run host.
+- The single-writer agent guard exempts the sanctioned request-only tool, and
+  built-in agents whose baseline description names a `cyboflow_` tool can be saved.
+- Per-run cyboflow env inherited from a hosting session is stripped at boot.
+
 ## [0.1.23] — 2026-07-14
 
 ### Added
