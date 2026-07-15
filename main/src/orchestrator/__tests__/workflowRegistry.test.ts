@@ -853,6 +853,57 @@ describe('WorkflowRegistry', () => {
       });
     });
 
+    it('applies a variant agent_provider/agent_runtime default when the launch requests none (migration 066)', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'variant-codex-workflow.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        // No requestedAgentProvider/Runtime — the variant default supplies them.
+        const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+          variantAgentProvider: 'codex',
+          variantAgentRuntime: 'codex-sdk',
+          variantModel: 'gpt-5.2-codex',
+        });
+
+        interface AgentRow { substrate: string; agent_provider: string; agent_runtime: string; model: string | null }
+        const row = db.prepare(
+          'SELECT substrate, agent_provider, agent_runtime, model FROM workflow_runs WHERE id = ?',
+        ).get(result.runId) as AgentRow;
+        expect(row).toEqual({
+          substrate: 'sdk',
+          agent_provider: 'codex',
+          agent_runtime: 'codex-sdk',
+          // Normalized against the resolved codex provider — a codex model id survives.
+          model: 'gpt-5.2-codex',
+        });
+      });
+    });
+
+    it('lets an explicit launch provider request win over the variant default (migration 066)', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'variant-codex-override-workflow.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        // Launch explicitly requests Claude SDK; the variant's codex default is ignored.
+        const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+          requestedAgentProvider: 'claude',
+          requestedAgentRuntime: 'claude-sdk',
+          variantAgentProvider: 'codex',
+          variantAgentRuntime: 'codex-sdk',
+        });
+
+        interface AgentRow { agent_provider: string; agent_runtime: string }
+        const row = db.prepare(
+          'SELECT agent_provider, agent_runtime FROM workflow_runs WHERE id = ?',
+        ).get(result.runId) as AgentRow;
+        expect(row).toEqual({ agent_provider: 'claude', agent_runtime: 'claude-sdk' });
+      });
+    });
+
     it('forces demo workflow requests onto the Claude SDK provider/runtime', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const path = writeTempMd(tmpDir, 'demo-safe-workflow.md', '---\n---\n');

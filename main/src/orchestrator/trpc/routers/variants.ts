@@ -92,6 +92,8 @@ export const variantsRouter = router({
         agentOverrides: variantAgentOverridesSchema.nullable().optional(),
         model: z.string().min(1).nullable().optional(),
         executionModel: z.enum(['orchestrated', 'programmatic']).nullable().optional(),
+        agentProvider: z.enum(['claude', 'codex']).nullable().optional(),
+        agentRuntime: z.enum(['claude-sdk', 'claude-interactive', 'codex-sdk']).nullable().optional(),
         weight: z.number().int().min(0).optional(),
         label: z.string().min(1).optional(),
       }),
@@ -111,6 +113,8 @@ export const variantsRouter = router({
             : {}),
           ...(input.model !== undefined ? { model: input.model } : {}),
           ...(input.executionModel !== undefined ? { executionModel: input.executionModel } : {}),
+          ...(input.agentProvider !== undefined ? { agentProvider: input.agentProvider } : {}),
+          ...(input.agentRuntime !== undefined ? { agentRuntime: input.agentRuntime } : {}),
           ...(input.weight !== undefined ? { weight: input.weight } : {}),
           ...(input.label !== undefined ? { label: input.label } : {}),
         });

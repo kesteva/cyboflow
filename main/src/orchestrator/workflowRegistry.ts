@@ -508,6 +508,8 @@ export class WorkflowRegistry {
       agentOverridesJson?: string | null;
       model?: string | null;
       executionModel?: 'orchestrated' | 'programmatic' | null;
+      agentProvider?: AgentProvider | null;
+      agentRuntime?: WorkflowAgentRuntime | null;
       weight?: number;
       label?: string;
     },
@@ -532,6 +534,14 @@ export class WorkflowRegistry {
     if (patch.executionModel !== undefined) {
       sets.push('execution_model = ?');
       params.push(patch.executionModel);
+    }
+    if (patch.agentProvider !== undefined) {
+      sets.push('agent_provider = ?');
+      params.push(patch.agentProvider);
+    }
+    if (patch.agentRuntime !== undefined) {
+      sets.push('agent_runtime = ?');
+      params.push(patch.agentRuntime);
     }
     if (patch.weight !== undefined) {
       sets.push('weight = ?');
@@ -936,6 +946,8 @@ export class WorkflowRegistry {
       variantSpecJson?: string;
       variantModel?: string;
       variantExecutionModel?: ExecutionModel;
+      variantAgentProvider?: AgentProvider;
+      variantAgentRuntime?: WorkflowAgentRuntime;
       experimentId?: string;
       experimentArm?: ExperimentArm;
       /**
@@ -1037,9 +1049,19 @@ export class WorkflowRegistry {
     // Demo mode ignores every provider/runtime request: its scripted
     // manager consumes Claude-shaped events, and no persisted run may resolve to
     // a real Codex dispatch route.
+    // Provider/runtime ladder (A/B): explicit per-run launch request > variant
+    // default > undefined (Claude). Mirrors the model / execution-model ladders
+    // (opts.requestedModel ?? opts.variantModel) below — the launch picker sets
+    // provider + runtime together as a consistent pair, and so does the variant
+    // editor, so the independent `?? variant` fallbacks never cross a codex
+    // provider with a claude runtime in practice.
     const demoMode = this.config?.isDemoMode?.() === true;
-    const requestedAgentProvider = demoMode ? undefined : opts?.requestedAgentProvider;
-    const requestedAgentRuntime = demoMode ? undefined : opts?.requestedAgentRuntime;
+    const requestedAgentProvider = demoMode
+      ? undefined
+      : opts?.requestedAgentProvider ?? opts?.variantAgentProvider;
+    const requestedAgentRuntime = demoMode
+      ? undefined
+      : opts?.requestedAgentRuntime ?? opts?.variantAgentRuntime;
     if (
       requestedAgentProvider === 'codex' &&
       requestedAgentRuntime !== undefined &&

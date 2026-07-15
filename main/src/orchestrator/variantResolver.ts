@@ -20,6 +20,7 @@
 import type { DatabaseLike } from './types';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { WorkflowVariantRow } from '../../../shared/types/experiments';
+import type { AgentProvider, WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
 import { getRunningRotationExperiment } from './experimentStore';
 
 /** A random number generator in `[0, 1)`. Defaults to `Math.random`. */
@@ -33,6 +34,10 @@ export interface ResolvedVariant {
   model: string | null;
   executionModel: ExecutionModel | null;
   agentOverridesJson: string | null;
+  /** Per-variant agent-provider default (migration 066). null = inherit launch default. */
+  agentProvider: AgentProvider | null;
+  /** Per-variant agent-runtime default (migration 066). null = inherit launch default. */
+  agentRuntime: WorkflowAgentRuntime | null;
 }
 
 /**
@@ -187,6 +192,8 @@ export class VariantResolver {
       model: v.model,
       executionModel: v.execution_model,
       agentOverridesJson: v.agent_overrides_json,
+      agentProvider: v.agent_provider ?? null,
+      agentRuntime: v.agent_runtime ?? null,
     };
   }
 }

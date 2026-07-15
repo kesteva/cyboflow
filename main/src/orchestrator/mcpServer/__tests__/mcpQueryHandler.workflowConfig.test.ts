@@ -81,6 +81,8 @@ function variantRow(over: Partial<WorkflowVariantRow> = {}): WorkflowVariantRow 
     agent_overrides_json: null,
     model: null,
     execution_model: null,
+    agent_provider: null,
+    agent_runtime: null,
     weight: 1,
     status: 'draft',
     created_at: '2026-07-14T00:00:00.000Z',

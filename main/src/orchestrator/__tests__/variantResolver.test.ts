@@ -40,6 +40,8 @@ function makeDb(): Database.Database {
       agent_overrides_json TEXT,
       model TEXT,
       execution_model TEXT,
+      agent_provider TEXT,
+      agent_runtime TEXT,
       weight INTEGER NOT NULL DEFAULT 1,
       status TEXT NOT NULL DEFAULT 'draft',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -81,11 +83,13 @@ function seedVariant(
     model?: string | null;
     executionModel?: string | null;
     agentOverridesJson?: string | null;
+    agentProvider?: string | null;
+    agentRuntime?: string | null;
   } = {},
 ): void {
   db.prepare(
-    `INSERT INTO workflow_variants (id, workflow_id, label, spec_json, weight, status, model, execution_model, agent_overrides_json)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO workflow_variants (id, workflow_id, label, spec_json, weight, status, model, execution_model, agent_overrides_json, agent_provider, agent_runtime)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     opts.workflowId ?? WF,
@@ -96,6 +100,8 @@ function seedVariant(
     opts.model ?? null,
     opts.executionModel ?? null,
     opts.agentOverridesJson ?? null,
+    opts.agentProvider ?? null,
+    opts.agentRuntime ?? null,
   );
 }
 
@@ -299,6 +305,21 @@ describe('VariantResolver', () => {
       model: 'opus',
       executionModel: 'programmatic',
       agentOverridesJson: '{"planner":{"model":"sonnet"}}',
+      agentProvider: null,
+      agentRuntime: null,
     });
+  });
+
+  it('threads a variant agent_provider / agent_runtime pin (migration 066) from the row', () => {
+    seedVariant(db, 'v1', {
+      model: 'gpt-5.2-codex',
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+    });
+    const resolver = new VariantResolver(dbAdapter(db), () => 0);
+    const a = resolver.resolveForLaunch(WF);
+    expect(a.variant?.agentProvider).toBe('codex');
+    expect(a.variant?.agentRuntime).toBe('codex-sdk');
+    expect(a.variant?.model).toBe('gpt-5.2-codex');
   });
 });

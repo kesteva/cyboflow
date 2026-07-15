@@ -507,6 +507,8 @@ export class RunLauncher {
                   variantSpecJson: rv.specJson,
                   ...(rv.model !== null ? { variantModel: rv.model } : {}),
                   ...(rv.executionModel !== null ? { variantExecutionModel: rv.executionModel } : {}),
+                  ...(rv.agentProvider !== null ? { variantAgentProvider: rv.agentProvider } : {}),
+                  ...(rv.agentRuntime !== null ? { variantAgentRuntime: rv.agentRuntime } : {}),
                 }
               : {}),
             ...(rotationExperimentId !== null ? { rotationExperimentId } : {}),

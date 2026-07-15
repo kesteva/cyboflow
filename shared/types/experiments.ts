@@ -13,6 +13,7 @@
  */
 import type { WorkflowRunStatus } from './cyboflow';
 import type { RunUsageRollup, RunEval, QualityFinding } from './insights';
+import type { AgentProvider, WorkflowAgentRuntime } from './agentRuntime';
 
 /**
  * Lifecycle status of a workflow variant (migration 048).
@@ -64,6 +65,18 @@ export interface WorkflowVariantRow {
   model: string | null;
   /** Per-variant execution-model default (nullable). */
   execution_model: 'orchestrated' | 'programmatic' | null;
+  /**
+   * Per-variant agent-provider default (migration 066, nullable). NULL = inherit
+   * the launch default. A variant that pins `'codex'` runs the whole flow on the
+   * Codex runtime (see {@link agent_runtime}).
+   */
+  agent_provider: AgentProvider | null;
+  /**
+   * Per-variant agent-runtime default (migration 066, nullable). NULL = inherit
+   * the launch default. Restricted to {@link WorkflowAgentRuntime} (codex-pty is
+   * not workflow-eligible).
+   */
+  agent_runtime: WorkflowAgentRuntime | null;
   /** Rotation weight (>= 0). */
   weight: number;
   status: WorkflowVariantStatus;

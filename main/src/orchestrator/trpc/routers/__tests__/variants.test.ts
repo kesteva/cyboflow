@@ -31,6 +31,7 @@ function createVariantsTestDb(): Database.Database {
     CREATE TABLE workflow_variants (
       id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
       spec_json TEXT NOT NULL DEFAULT '{}', agent_overrides_json TEXT, model TEXT, execution_model TEXT,
+      agent_provider TEXT, agent_runtime TEXT,
       weight INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'draft',
       created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -93,6 +94,29 @@ describe('cyboflow.variants', () => {
 
     await caller.cyboflow.variants.delete({ variantId: created.id });
     expect(await caller.cyboflow.variants.list({ workflowId: WF })).toEqual([]);
+  });
+
+  it('update persists agentProvider / agentRuntime and clears them with null (migration 066)', async () => {
+    const caller = makeCaller(db);
+    const created = await caller.cyboflow.variants.create({ workflowId: WF, label: 'codex-arm' });
+
+    await caller.cyboflow.variants.update({
+      variantId: created.id,
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+    });
+    const afterPin = await caller.cyboflow.variants.list({ workflowId: WF });
+    expect(afterPin[0].agent_provider).toBe('codex');
+    expect(afterPin[0].agent_runtime).toBe('codex-sdk');
+
+    await caller.cyboflow.variants.update({
+      variantId: created.id,
+      agentProvider: null,
+      agentRuntime: null,
+    });
+    const afterClear = await caller.cyboflow.variants.list({ workflowId: WF });
+    expect(afterClear[0].agent_provider).toBeNull();
+    expect(afterClear[0].agent_runtime).toBeNull();
   });
 
   it('update serializes agentOverrides to JSON (and null clears it)', async () => {

@@ -131,7 +131,8 @@ function variant(id: string): WorkflowVariantRow {
   const workflowId = id.includes('sprint') ? 'wf-sprint' : 'wf';
   return {
     id, workflow_id: workflowId, label: id, spec_json: '{}', agent_overrides_json: null,
-    model: null, execution_model: null, weight: 1, status: 'draft', created_at: '', updated_at: '',
+    model: null, execution_model: null, agent_provider: null, agent_runtime: null,
+    weight: 1, status: 'draft', created_at: '', updated_at: '',
   };
 }
 
@@ -922,6 +923,8 @@ describe('experiments router orchestration (slice B)', () => {
       agent_overrides_json: null,
       model: null,
       execution_model: null,
+      agent_provider: null,
+      agent_runtime: null,
       weight: 1,
       status: 'draft',
       created_at: '',
