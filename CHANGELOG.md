@@ -71,6 +71,15 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 - **Fork-bomb guard on the PTY node-fallback.** When the CLI node-fallback
   resolves to the packaged app binary (`process.execPath`), it is now spawned with
   `ELECTRON_RUN_AS_NODE=1` so it runs as Node instead of re-launching the app.
+- **Messaging Codex no longer boots a second Cyboflow app.** The same fork-bomb
+  guard now covers every MCP-bridge spawn — the Codex app-server MCP config and
+  the interactive `.mcp.json` writer both fold in `ELECTRON_RUN_AS_NODE=1` when the
+  resolved node path is the packaged app binary (extracted into one shared helper
+  so no spawn site can silently miss it).
+- **Main process no longer crashes on a broken pipe.** Added top-level
+  `uncaughtException`/`unhandledRejection` guards plus `'error'` listeners on
+  `stdout`/`stderr` and the log write streams, so an async `EPIPE` (a closed pipe
+  from a sibling process) is swallowed instead of surfacing the native crash dialog.
 
 ## [0.1.23] — 2026-07-14
 
