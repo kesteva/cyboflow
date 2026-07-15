@@ -99,8 +99,24 @@ export class OrchSocketServer implements PermissionServerLike {
   async start(): Promise<void> {
     fs.mkdirSync(path.dirname(this.socketPath), { recursive: true });
 
-    // A unix socket fails to bind onto a leftover file from a prior run.
+    // A unix socket fails to bind onto a leftover file from a prior run, so a
+    // stale file must be unlinked first. But unlink-before-bind must NOT clobber
+    // a socket a LIVE peer is still listening on — that is exactly the
+    // two-instance orch.sock clobber that stranded every subsequent MCP
+    // subprocess (the file was replaced out from under a running server). The
+    // single-instance-per-kind lock (index.ts) should already prevent a second
+    // server here; this probe is defense-in-depth if that guard ever fails open.
     if (fs.existsSync(this.socketPath)) {
+      if (await this.isSocketAlive(this.socketPath)) {
+        this.server = null;
+        this.logger.error('[Cyboflow Orch IPC] live socket already in use — refusing to clobber', {
+          socketPath: this.socketPath,
+        });
+        throw new Error(
+          `[Cyboflow Orch IPC] refusing to bind ${this.socketPath}: another server is already listening on it`,
+        );
+      }
+      // No live listener answered — a stale leftover file. Safe to remove.
       fs.rmSync(this.socketPath, { force: true });
     }
 
@@ -178,6 +194,31 @@ export class OrchSocketServer implements PermissionServerLike {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  /**
+   * Probe whether a live server is currently accepting connections on
+   * `socketPath`. Resolves `true` iff a client connection succeeds; `false` when
+   * the path is absent (ENOENT), refuses (ECONNREFUSED — a stale socket file
+   * whose owning server is gone), errors otherwise, or does not connect within a
+   * short timeout. Never rejects, so start()'s reclaim path is deterministic.
+   */
+  private isSocketAlive(socketPath: string): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      const probe = net.createConnection(socketPath);
+      let settled = false;
+      const done = (alive: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        probe.destroy();
+        resolve(alive);
+      };
+      const timer = setTimeout(() => done(false), 500);
+      timer.unref?.();
+      probe.once('connect', () => done(true));
+      probe.once('error', () => done(false));
+    });
   }
 
   /** The socket path this server listens on (satisfies OrchSocketProvider). */

@@ -393,6 +393,33 @@ describe('OrchSocketServer', () => {
   });
 
   // -------------------------------------------------------------------------
+  // 7. start() refuses to clobber a LIVE peer's socket (two-instance guard)
+  // -------------------------------------------------------------------------
+
+  it('start() refuses to clobber a socket a LIVE server is already listening on', async () => {
+    // Server A owns the path and is actively listening.
+    server = new OrchSocketServer(socketPath, dbAdapter(db), logger);
+    await server.start();
+    expect(fs.existsSync(socketPath)).toBe(true);
+
+    // Server B targets the SAME path. Its start() must detect the live listener
+    // via the connect-probe and reject, rather than unlink A's socket out from
+    // under it (the two-instance orch.sock clobber that stranded MCP subprocesses).
+    const serverB = new OrchSocketServer(socketPath, dbAdapter(db), logger);
+    await expect(serverB.start()).rejects.toThrow(/already listening/i);
+
+    // A is untouched: still listening, still round-trips a real client.
+    const { client, waitForLines } = connectClient(socketPath);
+    openClients.push(client);
+    await waitForConnect(client);
+    client.write(
+      JSON.stringify({ type: 'mcp-list-pending-approvals', requestId: 'req-live', runId: 'run-a' }) + '\n',
+    );
+    const lines = await waitForLines(1);
+    expect(parse(lines[0]).ok).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
   // Structural interface conformance (compile-time assertions)
   // -------------------------------------------------------------------------
 
