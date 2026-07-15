@@ -837,8 +837,8 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                 </div>
                 <p className="text-xs text-text-tertiary mt-2">
                   When a built-in flow (Sprint / Ship) reaches its human-review step, Cyboflow can run a
-                  K=3 Opus jury pass over the run's diff and file any findings into the review queue. Each
-                  eval costs a real Opus jury call. Turn it off to skip it globally; a per-run "Quality
+                  Three-slot jury pass (two Opus + one Codex) over the run's diff and file any findings into the review queue. Each
+                  eval uses real model calls. Turn it off to skip it globally; a per-run "Quality
                   eval" override in the launch wizard's Advanced options can force it on or off for a single
                   run. Only affects runs started after you save.
                 </p>

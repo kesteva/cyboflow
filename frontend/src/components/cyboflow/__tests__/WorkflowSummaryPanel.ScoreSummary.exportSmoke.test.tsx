@@ -33,6 +33,7 @@ function makeEval(over: Partial<RunEval> = {}): RunEval {
       { key: 'correctness', name: 'Correctness', weight: 100, score: 82, active: true, passCount: 3, failCount: 1, unknownCount: 0 },
     ],
     perSample: null,
+    jury: null,
     judgeModel: 'claude-opus-4-8',
     sampleCount: 3,
     promptHash: null,

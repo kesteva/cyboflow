@@ -6,9 +6,10 @@
  * the shutdown pause.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { EvalWorker } from './evalWorker';
+import { EvalWorker, type JurySlot } from './evalWorker';
 import type { DatabaseLike } from '../types';
 import type { JudgeClient, JudgeGradeInput } from './evalJury';
+import { CodexJurorUnavailableError } from './codexJudge';
 import type { JudgeSample, JudgeFinding } from './scoring';
 import type { ReviewItemCreate } from '../reviewItemRouter';
 
@@ -56,13 +57,24 @@ function sampleAllPass(ids: string[], findings: JudgeFinding[] = []): JudgeSampl
 
 class FakeJudge implements JudgeClient {
   readonly name = 'fake';
-  readonly resolvedModel = 'claude-opus-4-8';
   calls = 0;
-  constructor(private readonly impl: (input: JudgeGradeInput, call: number) => Promise<JudgeSample>) {}
+  constructor(
+    private readonly impl: (input: JudgeGradeInput, call: number) => Promise<JudgeSample>,
+    readonly resolvedModel: string = 'claude-opus-4-8',
+  ) {}
   grade(input: JudgeGradeInput): Promise<JudgeSample> {
     const c = this.calls++;
     return this.impl(input, c);
   }
+}
+
+function makeClaudeJury(judge: JudgeClient, count: number = 3): JurySlot[] {
+  return Array.from({ length: count }, (_unused, index) => ({
+    slot: `claude-${index + 1}`,
+    provider: 'claude' as const,
+    model: 'claude-opus-4-8',
+    judge,
+  }));
 }
 
 // A broad set of PASS verdicts so at least two dimensions activate (>=2 applicable).
@@ -86,11 +98,10 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     const writer = vi.fn(async () => ({ reviewItemId: 'ri-1' }));
     const worker = EvalWorker.initialize(db, undefined, {
       gitDiff: vi.fn(),
-      judge,
+      jury: makeClaudeJury(judge),
       reviewItemWriter: writer,
       appVersion: '0.1.11',
       isEvalEnabled: () => true,
-      sampleCount: 3,
       sleep: async () => {},
     });
 
@@ -103,8 +114,73 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     expect(running).toBeTruthy();
     expect(running?.params[0]).toBe('claude-opus-4-8'); // judge_model stamped
     expect(complete).toBeTruthy();
-    // sample_count param present (9th positional in the complete UPDATE).
     expect(complete?.params).toContain(3);
+    expect(JSON.parse(complete?.params[10] as string)).toEqual([
+      { slot: 'claude-1', provider: 'claude', model: 'claude-opus-4-8', status: 'ok', sampleIndex: 0 },
+      { slot: 'claude-2', provider: 'claude', model: 'claude-opus-4-8', status: 'ok', sampleIndex: 1 },
+      { slot: 'claude-3', provider: 'claude', model: 'claude-opus-4-8', status: 'ok', sampleIndex: 2 },
+    ]);
+  });
+
+  it('scores two Claude samples when Codex is unavailable and does not retry Codex', async () => {
+    const db = noExistingFindings();
+    const claude = new FakeJudge(async () => sampleAllPass(BROAD_PASS));
+    const codex = new FakeJudge(async () => {
+      throw new CodexJurorUnavailableError('logged out', 'logged-out');
+    }, 'gpt-5.4');
+    const worker = EvalWorker.initialize(db, undefined, {
+      gitDiff: vi.fn(),
+      jury: [
+        ...makeClaudeJury(claude, 2),
+        { slot: 'codex-1', provider: 'codex', model: 'gpt-5.4', judge: codex },
+      ],
+      reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      sleep: async () => {},
+    });
+    worker.enqueue('run-1', '1.1');
+    await worker._queue().onIdle();
+
+    expect(codex.calls).toBe(1);
+    const complete = db.runs.find((run) => run.sql.includes("eval_status = 'complete'"));
+    expect(complete?.params[11]).toBe(2);
+    expect(JSON.parse(complete?.params[10] as string)).toEqual([
+      { slot: 'claude-1', provider: 'claude', model: 'claude-opus-4-8', status: 'ok', sampleIndex: 0 },
+      { slot: 'claude-2', provider: 'claude', model: 'claude-opus-4-8', status: 'ok', sampleIndex: 1 },
+      { slot: 'codex-1', provider: 'codex', model: 'gpt-5.4', status: 'unavailable', errorCode: 'logged-out' },
+    ]);
+  });
+
+  it('retries a transient Codex failure once then records the slot failed', async () => {
+    const db = noExistingFindings();
+    const claude = new FakeJudge(async () => sampleAllPass(BROAD_PASS));
+    const codex = new FakeJudge(async () => {
+      throw new Error('protocol crash');
+    }, 'gpt-5.4');
+    const worker = EvalWorker.initialize(db, undefined, {
+      gitDiff: vi.fn(),
+      jury: [
+        ...makeClaudeJury(claude, 2),
+        { slot: 'codex-1', provider: 'codex', model: 'gpt-5.4', judge: codex },
+      ],
+      reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      sleep: async () => {},
+    });
+    worker.enqueue('run-1', '1.1');
+    await worker._queue().onIdle();
+
+    expect(codex.calls).toBe(2);
+    const complete = db.runs.find((run) => run.sql.includes("eval_status = 'complete'"));
+    const jury = JSON.parse(complete?.params[10] as string) as Array<{ slot: string; status: string }>;
+    expect(jury.find((slot) => slot.slot === 'codex-1')).toEqual({
+      slot: 'codex-1',
+      provider: 'codex',
+      model: 'gpt-5.4',
+      status: 'failed',
+    });
   });
 
   it('retries a malformed sample once then drops it; >=1 valid still scores', async () => {
@@ -117,11 +193,10 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     });
     const worker = EvalWorker.initialize(db, undefined, {
       gitDiff: vi.fn(),
-      judge,
+      jury: makeClaudeJury(judge),
       reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
       appVersion: '0.1.11',
       isEvalEnabled: () => true,
-      sampleCount: 3,
       sleep: async () => {},
     });
     worker.enqueue('run-1', '1.1');
@@ -136,11 +211,10 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     });
     const worker = EvalWorker.initialize(db, undefined, {
       gitDiff: vi.fn(),
-      judge,
+      jury: makeClaudeJury(judge),
       reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
       appVersion: '0.1.11',
       isEvalEnabled: () => true,
-      sampleCount: 3,
       maxRetries: 1,
       sleep: async () => {},
     });
@@ -180,11 +254,10 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     });
     const worker = EvalWorker.initialize(db, undefined, {
       gitDiff: vi.fn(),
-      judge,
+      jury: makeClaudeJury(judge, 1),
       reviewItemWriter: writer,
       appVersion: '0.1.11',
       isEvalEnabled: () => true,
-      sampleCount: 1,
       sleep: async () => {},
     });
     worker.enqueue('run-1', '1.1');
@@ -229,14 +302,13 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     const writes: Array<{ change: ReviewItemCreate }> = [];
     const worker = EvalWorker.initialize(noExistingFindings(), undefined, {
       gitDiff: vi.fn(),
-      judge,
+      jury: makeClaudeJury(judge),
       reviewItemWriter: vi.fn(async (_projectId: number, change: ReviewItemCreate) => {
         writes.push({ change });
         return { reviewItemId: 'ri' };
       }),
       appVersion: '0.1.11',
       isEvalEnabled: () => true,
-      sampleCount: 3,
       sleep: async () => {},
     });
     worker.enqueue('run-1', '1.1');
@@ -254,15 +326,52 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     expect(writes).toHaveLength(4);
   });
 
+  it('requires a strict catastrophic majority with two surviving samples', async () => {
+    const runWithCatastrophicVotes = async (catastrophicVotes: number): Promise<ReviewItemCreate[]> => {
+      const writes: ReviewItemCreate[] = [];
+      const judge = new FakeJudge(async (_input, call) => sampleAllPass(BROAD_PASS, [{
+        subCheckId: 'COR-3',
+        dimension: 'correctness',
+        severity: 'error',
+        title: 'Shared catastrophic candidate',
+        body: '',
+        file: 'shared.ts',
+        netNew: true,
+        catastrophic: call < catastrophicVotes,
+      }]));
+      const worker = EvalWorker.initialize(noExistingFindings(), undefined, {
+        gitDiff: vi.fn(),
+        jury: makeClaudeJury(judge, 2),
+        reviewItemWriter: vi.fn(async (_projectId: number, change: ReviewItemCreate) => {
+          writes.push(change);
+          return { reviewItemId: 'ri' };
+        }),
+        appVersion: '0.1.11',
+        isEvalEnabled: () => true,
+        sleep: async () => {},
+      });
+      worker.enqueue('run-1', '1.1');
+      await worker._queue().onIdle();
+      return writes;
+    };
+
+    const oneVote = await runWithCatastrophicVotes(1);
+    expect(oneVote).toHaveLength(1);
+    expect(oneVote[0].blocking).toBe(false);
+
+    const twoVotes = await runWithCatastrophicVotes(2);
+    expect(twoVotes).toHaveLength(1);
+    expect(twoVotes[0].blocking).toBe(true);
+  });
+
   it('persists dimension name + weight in dimensions_json so panel labels render', async () => {
     const db = noExistingFindings();
     const worker = EvalWorker.initialize(db, undefined, {
       gitDiff: vi.fn(),
-      judge: new FakeJudge(async () => sampleAllPass(BROAD_PASS)),
+      jury: makeClaudeJury(new FakeJudge(async () => sampleAllPass(BROAD_PASS)), 1),
       reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
       appVersion: '0.1.11',
       isEvalEnabled: () => true,
-      sampleCount: 1,
       sleep: async () => {},
     });
     worker.enqueue('run-1', '1.1');
@@ -296,11 +405,10 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     });
     const worker = EvalWorker.initialize(db, undefined, {
       gitDiff: vi.fn(),
-      judge,
+      jury: makeClaudeJury(judge, 1),
       reviewItemWriter: writer,
       appVersion: '0.1.11',
       isEvalEnabled: () => true,
-      sampleCount: 1,
       sleep: async () => {},
     });
     worker.enqueue('run-1', '1.1');
@@ -324,7 +432,7 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     );
     const worker = EvalWorker.initialize(db, undefined, {
       gitDiff: vi.fn(),
-      judge: new FakeJudge(async () => sampleAllPass(BROAD_PASS)),
+      jury: makeClaudeJury(new FakeJudge(async () => sampleAllPass(BROAD_PASS))),
       reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
       appVersion: '0.1.11',
       isEvalEnabled: () => true,
@@ -340,7 +448,7 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
   it('stop() pauses the queue', async () => {
     const worker = EvalWorker.initialize(noExistingFindings(), undefined, {
       gitDiff: vi.fn(),
-      judge: new FakeJudge(async () => sampleAllPass(BROAD_PASS)),
+      jury: makeClaudeJury(new FakeJudge(async () => sampleAllPass(BROAD_PASS))),
       reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
       appVersion: '0.1.11',
       isEvalEnabled: () => true,

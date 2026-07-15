@@ -1,7 +1,7 @@
 /**
  * evalJury — the pluggable jury. `JudgeClient` is the seam the EvalWorker grades
- * through; `ClaudeJudge` is the ONE v1 implementation (Claude-only, per the rubric
- * "Grader (v1)"). A non-Claude juror is future config and is NOT required to ship.
+ * through; `ClaudeJudge` supplies the two Claude slots while the sibling
+ * `CodexJudge` adapter supplies the heterogeneous third slot.
  *
  * ClaudeJudge holds NO SDK import — it takes an injected `EvalStructuredQueryFn`
  * (real impl in evalJudgeQuery.ts, a fake in tests) so the prompt-build +
@@ -271,7 +271,7 @@ export function parseJudgeSample(raw: unknown): JudgeSample {
 }
 
 // ---------------------------------------------------------------------------
-// ClaudeJudge — the one v1 implementation
+// ClaudeJudge — Claude-backed jury slots
 // ---------------------------------------------------------------------------
 
 export interface ClaudeJudgeDeps {

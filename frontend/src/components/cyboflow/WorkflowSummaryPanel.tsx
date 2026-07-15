@@ -941,17 +941,49 @@ function ScoreLede({
 
 /** The 3-line provenance block (judge/samples, jury descriptor, security + caps). */
 function Provenance({ runEval }: { runEval: RunEval }): React.JSX.Element {
+  const jury = runEval.jury ?? [];
+  const hasJury = jury.length > 0;
+  const composition = hasJury
+    ? Array.from(
+        jury.reduce((counts, slot) => {
+          const label = slot.provider === 'claude' ? 'Opus' : 'Codex';
+          counts.set(label, (counts.get(label) ?? 0) + 1);
+          return counts;
+        }, new Map<string, number>()),
+      )
+        .map(([label, count]) => `${label}${count > 1 ? ` ×${count}` : ''}`)
+        .join(' + ')
+    : null;
+  const codexUnavailable = hasJury
+    && jury.some((slot) => slot.provider === 'codex' && slot.status !== 'ok');
+
   return (
     <div className="mt-3 space-y-0.5 text-[11px] leading-relaxed text-text-tertiary" data-testid="run-summary-eval-provenance">
-      <div>
-        graded by{' '}
-        <span className="font-medium text-text-secondary">
-          {runEval.judgeModel ?? 'unknown'}
-          {runEval.sampleCount != null && <> ×{runEval.sampleCount}</>}
-        </span>{' '}
-        samples
-      </div>
-      <div>pluggable jury · single-family v1</div>
+      {hasJury ? (
+        <>
+          <div>
+            graded by <span className="font-medium text-text-secondary">{composition}</span>
+          </div>
+          <div>heterogeneous jury · {jury.length} slots · {runEval.sampleCount ?? 0} scored</div>
+          {codexUnavailable && (
+            <div className="text-status-warning" data-testid="run-summary-eval-codex-unavailable">
+              ⚠ Codex juror unavailable — scored on Claude only
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          <div>
+            graded by{' '}
+            <span className="font-medium text-text-secondary">
+              {runEval.judgeModel ?? 'unknown'}
+              {runEval.sampleCount != null && <> ×{runEval.sampleCount}</>}
+            </span>{' '}
+            samples
+          </div>
+          <div>pluggable jury · single-family v1</div>
+        </>
+      )}
       <div>
         security_flag: <span className="font-medium text-text-secondary">{runEval.securityFlag ? 'high/critical' : 'none'}</span>
         {runEval.capTriggers !== null && (

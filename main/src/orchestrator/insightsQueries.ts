@@ -48,6 +48,7 @@ import type {
   RunEvalStatus,
   RunEvalBand,
   RunEvalDimension,
+  RunEvalJurySlot,
 } from '../../../shared/types/insights';
 import { parseSourceStep } from '../../../shared/types/insights';
 import type {
@@ -2257,6 +2258,7 @@ interface RunEvalRawRow {
   requirements_unmet: number;
   cap_triggers_json: string | null;
   dimensions_json: string | null;
+  jury_json: string | null;
   judge_model: string | null;
   sample_count: number | null;
   prompt_hash: string | null;
@@ -2351,6 +2353,40 @@ function parseCapTriggers(text: string | null): string[] | null {
   return out.length > 0 ? out : null;
 }
 
+function parseJury(text: string | null): RunEvalJurySlot[] | null {
+  if (text === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const slots: RunEvalJurySlot[] = [];
+  for (const entry of parsed) {
+    if (
+      !isRecord(entry)
+      || typeof entry.slot !== 'string'
+      || (entry.provider !== 'claude' && entry.provider !== 'codex')
+      || (entry.model !== null && typeof entry.model !== 'string')
+      || (entry.status !== 'ok' && entry.status !== 'unavailable' && entry.status !== 'failed')
+    ) {
+      continue;
+    }
+    slots.push({
+      slot: entry.slot,
+      provider: entry.provider,
+      model: entry.model,
+      status: entry.status,
+      ...(typeof entry.errorCode === 'string' ? { errorCode: entry.errorCode } : {}),
+      ...(typeof entry.sampleIndex === 'number' && Number.isSafeInteger(entry.sampleIndex)
+        ? { sampleIndex: entry.sampleIndex }
+        : {}),
+    });
+  }
+  return slots;
+}
+
 /** Map a raw `run_evals` row to the shared `RunEval`, parsing JSON defensively. */
 function mapRunEvalRow(row: RunEvalRawRow): RunEval {
   const evalStatus: RunEvalStatus = RUN_EVAL_STATUSES.includes(row.eval_status as RunEvalStatus)
@@ -2383,6 +2419,7 @@ function mapRunEvalRow(row: RunEvalRawRow): RunEval {
     capTriggers: parseCapTriggers(row.cap_triggers_json),
     dimensions: parseDimensions(row.dimensions_json),
     perSample: null,
+    jury: parseJury(row.jury_json),
     judgeModel: row.judge_model,
     sampleCount: asNullableNumber(row.sample_count),
     promptHash: row.prompt_hash,
@@ -2421,7 +2458,7 @@ export function getRunEval(db: DatabaseLike, runId: string): RunEval | null {
       `SELECT run_id, rubric_version, eval_status, base_sha, diff_stats_json,
               gate_results_json, human_influenced, snapshot_at, overall_score, band,
               ci_low, ci_high, gated, security_flag, requirements_unmet, cap_triggers_json,
-              dimensions_json, judge_model, sample_count, prompt_hash, judge_build_id,
+              dimensions_json, jury_json, judge_model, sample_count, prompt_hash, judge_build_id,
               workflow_id, workflow_name, spec_hash, run_model, subagent_models_json,
               difficulty_proxy_prerun, error, created_at, updated_at
        FROM run_evals

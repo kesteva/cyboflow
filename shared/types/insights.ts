@@ -318,6 +318,16 @@ export interface RunEvalDimension {
  */
 export type RunEvalSample = Record<string, unknown>;
 
+/** Per-slot provenance for the heterogeneous code-review jury. */
+export type RunEvalJurySlot = {
+  slot: string;
+  provider: 'claude' | 'codex';
+  model: string | null;
+  status: 'ok' | 'unavailable' | 'failed';
+  errorCode?: string;
+  sampleIndex?: number;
+};
+
 /**
  * The canonical evaluation for one workflow run, mirroring the migration-043
  * `run_evals` columns in camelCase. JSON columns are parsed defensively by the
@@ -376,6 +386,8 @@ export interface RunEval {
    * — always null there; kept in the type for a future drill-down read.
    */
   perSample: RunEvalSample[] | null;
+  /** Per-slot jury provenance; null identifies a legacy single-judge row. */
+  jury: RunEvalJurySlot[] | null;
   /** Concrete judge model id; null until running. */
   judgeModel: string | null;
   /** K actually completed; null until running. */

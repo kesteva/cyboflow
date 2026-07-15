@@ -113,7 +113,9 @@ import { OrchSocketServer } from './orchestrator/mcpServer/orchSocketServer';
 import { approvalEvents, experimentEvents, questionEvents, runStatusEvents, stepTransitionEvents } from './orchestrator/trpc/routers/events';
 import { EvalWorker } from './orchestrator/eval/evalWorker';
 import { ClaudeJudge } from './orchestrator/eval/evalJury';
+import { CodexJudge } from './orchestrator/eval/codexJudge';
 import { makeEvalJudgeQuery } from './orchestrator/eval/evalJudgeQuery';
+import { makeCodexEvalJudgeQuery } from './services/panels/codex/codexEvalJudgeQuery';
 import { PairwiseJudgeWorker } from './orchestrator/eval/pairwiseJudgeWorker';
 import { ClaudePairwiseJudge } from './orchestrator/eval/pairwiseJudge';
 import { makePairwiseJudgeQuery } from './orchestrator/eval/pairwiseJudgeQuery';
@@ -1281,7 +1283,7 @@ async function initializeServices() {
   DynamicWorkflowTracker.initialize(cyboflowDb, { logger: cyboflowLogger });
 
   // Code-review eval worker (migration 043). Grades a built-in run's frozen
-  // pre-human diff against the 7-dimension rubric with a K-sample Claude jury and
+  // pre-human diff against the 7-dimension rubric with a 2×Claude + 1×Codex jury and
   // writes net-new findings through ReviewItemRouter — so it MUST initialize after
   // the router (mirrors DynamicWorkflowTracker above). Electron-touching deps are
   // injected as closures (GitDiffManager, the SDK judge-query, the findings
@@ -1307,12 +1309,36 @@ async function initializeServices() {
       return null;
     }
   };
+  const claudeJudge = new ClaudeJudge({
+    structuredQuery: makeEvalJudgeQuery(cyboflowLogger),
+    logger: cyboflowLogger,
+  });
+  const codexJudge = new CodexJudge({
+    structuredQuery: makeCodexEvalJudgeQuery(cyboflowLogger),
+    logger: cyboflowLogger,
+  });
   EvalWorker.initialize(cyboflowDb, cyboflowLogger, {
     gitDiff: evalGitDiff,
-    judge: new ClaudeJudge({
-      structuredQuery: makeEvalJudgeQuery(cyboflowLogger),
-      logger: cyboflowLogger,
-    }),
+    jury: [
+      {
+        slot: 'claude-1',
+        provider: 'claude',
+        model: claudeJudge.resolvedModel ?? null,
+        judge: claudeJudge,
+      },
+      {
+        slot: 'claude-2',
+        provider: 'claude',
+        model: claudeJudge.resolvedModel ?? null,
+        judge: claudeJudge,
+      },
+      {
+        slot: 'codex-1',
+        provider: 'codex',
+        model: codexJudge.resolvedModel ?? null,
+        judge: codexJudge,
+      },
+    ],
     reviewItemWriter: (projectId, change) =>
       ReviewItemRouter.getInstance().applyReviewItem(projectId, change),
     appVersion: app.getVersion(),

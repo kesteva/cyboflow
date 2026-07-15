@@ -159,6 +159,7 @@ function createInsightsDb(): Database.Database {
       cap_triggers_json TEXT,
       dimensions_json TEXT,
       per_sample_json TEXT,
+      jury_json TEXT,
       judge_model TEXT,
       sample_count INTEGER,
       prompt_hash TEXT,
@@ -313,6 +314,7 @@ interface SeedRunEvalOpts {
   capTriggersJson?: string | null;
   dimensionsJson?: string | null;
   perSampleJson?: string | null;
+  juryJson?: string | null;
   diffStatsJson?: string | null;
   subagentModelsJson?: string | null;
   workflowId?: string;
@@ -326,9 +328,9 @@ function seedRunEval(db: Database.Database, opts: SeedRunEvalOpts): void {
     `INSERT INTO run_evals
        (run_id, rubric_version, eval_status, human_influenced, snapshot_at,
         overall_score, band, gated, security_flag, requirements_unmet, cap_triggers_json,
-        dimensions_json, per_sample_json,
+        dimensions_json, per_sample_json, jury_json,
         diff_stats_json, subagent_models_json, workflow_id, workflow_name, error)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     opts.runId,
     opts.rubricVersion ?? '1.1',
@@ -343,6 +345,7 @@ function seedRunEval(db: Database.Database, opts: SeedRunEvalOpts): void {
     opts.capTriggersJson === undefined ? null : opts.capTriggersJson,
     opts.dimensionsJson === undefined ? null : opts.dimensionsJson,
     opts.perSampleJson === undefined ? null : opts.perSampleJson,
+    opts.juryJson === undefined ? null : opts.juryJson,
     opts.diffStatsJson === undefined ? null : opts.diffStatsJson,
     opts.subagentModelsJson === undefined ? null : opts.subagentModelsJson,
     opts.workflowId ?? 'wf-1',
@@ -1884,6 +1887,25 @@ describe('getRunEval', () => {
         unknownCount: 0,
       },
     ]);
+  });
+
+  it('parses jury_json while preserving legacy NULL and rejecting malformed JSON', () => {
+    seedRunEval(db, {
+      runId: 'r1',
+      juryJson: JSON.stringify([
+        { slot: 'claude-1', provider: 'claude', model: 'opus', status: 'ok', sampleIndex: 0 },
+        { slot: 'codex-1', provider: 'codex', model: null, status: 'unavailable', errorCode: 'logged-out' },
+      ]),
+    });
+    seedRunEval(db, { runId: 'r2' });
+    seedRunEval(db, { runId: 'r3', juryJson: '{broken' });
+
+    expect(getRunEval(dbAdapter(db), 'r1')?.jury).toEqual([
+      { slot: 'claude-1', provider: 'claude', model: 'opus', status: 'ok', sampleIndex: 0 },
+      { slot: 'codex-1', provider: 'codex', model: null, status: 'unavailable', errorCode: 'logged-out' },
+    ]);
+    expect(getRunEval(dbAdapter(db), 'r2')?.jury).toBeNull();
+    expect(getRunEval(dbAdapter(db), 'r3')?.jury).toBeNull();
   });
 
   it('excludes the heavy diff_text / per_sample_json columns from the polled read', () => {

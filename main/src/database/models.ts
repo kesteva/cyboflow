@@ -523,6 +523,7 @@ export interface RunEvalRow {
   cap_triggers_json: string | null; // catastrophic-cap trigger tokens JSON; NULL when none
   dimensions_json: string | null;
   per_sample_json: string | null;
+  jury_json: string | null; // per-slot heterogeneous-jury provenance; NULL on legacy rows
   judge_model: string | null; // concrete id, e.g. 'claude-opus-4-8'
   sample_count: number | null; // K actually completed
   prompt_hash: string | null; // sha256 of judge prompt (computeSpecHash precedent)

@@ -36,14 +36,31 @@ import {
   type ScoringResult,
 } from './scoring';
 import type { JudgeClient } from './evalJury';
+import { CodexJurorUnavailableError } from './codexJudge';
 import { snapshotRunForEval } from './snapshotRunForEval';
 
-/** How many jury samples to draw (rubric "K=3-5"; v1 = 3). */
+/** Legacy fallback count when a required jury is accidentally configured empty. */
 export const DEFAULT_SAMPLE_COUNT = 3;
 /** Whole-eval retries (transient failure: all samples dropped, etc.). */
 export const DEFAULT_MAX_RETRIES = 2;
 /** Cap on net-new findings written per eval (rubric "~10"). */
 export const MAX_FINDINGS_PER_EVAL = 10;
+
+export interface JurySlot {
+  slot: string;
+  provider: 'claude' | 'codex';
+  model: string | null;
+  judge: JudgeClient;
+}
+
+export interface JurySlotProvenance {
+  slot: string;
+  provider: 'claude' | 'codex';
+  model: string | null;
+  status: 'ok' | 'unavailable' | 'failed';
+  errorCode?: string;
+  sampleIndex?: number;
+}
 
 /** Order for keeping the most severe paraphrase of a deduped finding. */
 const SEVERITY_RANK: Record<'info' | 'warning' | 'error', number> = {
@@ -55,8 +72,8 @@ const SEVERITY_RANK: Record<'info' | 'warning' | 'error', number> = {
 export interface EvalWorkerDeps {
   /** Diff capture closure (also handed to the snapshot). */
   gitDiff: (worktreePath: string, baseRef?: string) => Promise<RunGitDiff | null>;
-  /** The pluggable jury (ClaudeJudge in production). */
-  judge: JudgeClient;
+  /** Ordered heterogeneous jury slots. */
+  jury: JurySlot[];
   /** Findings chokepoint — closure over ReviewItemRouter.getInstance().applyReviewItem. */
   reviewItemWriter: (
     projectId: number,
@@ -79,8 +96,6 @@ export interface EvalWorkerDeps {
    * ON). Closure keeps the module free of a concrete-service import.
    */
   isVariantAutoGradeEnabled?: () => boolean;
-  /** K samples; defaults to DEFAULT_SAMPLE_COUNT. */
-  sampleCount?: number;
   /** Whole-eval retries; defaults to DEFAULT_MAX_RETRIES. */
   maxRetries?: number;
   /** Backoff sleeper (injectable so tests run instantly). */
@@ -104,13 +119,14 @@ export class EvalWorker {
   private readonly sampleCount: number;
   private readonly maxRetries: number;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly collectedSlots = new Map<string, JurySlotProvenance[]>();
 
   private constructor(
     private readonly db: DatabaseLike,
     private readonly logger: LoggerLike | undefined,
     private readonly deps: EvalWorkerDeps,
   ) {
-    this.sampleCount = deps.sampleCount ?? DEFAULT_SAMPLE_COUNT;
+    this.sampleCount = deps.jury.length > 0 ? deps.jury.length : DEFAULT_SAMPLE_COUNT;
     this.maxRetries = deps.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.sleep = deps.sleep ?? defaultSleep;
   }
@@ -213,10 +229,12 @@ export class EvalWorker {
   // -------------------------------------------------------------------------
 
   private async processWithRetries(runId: string, rubricVersion: string): Promise<void> {
+    const evalKey = this.evalKey(runId, rubricVersion);
     let lastError: unknown = null;
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       try {
         await this.process(runId, rubricVersion);
+        this.collectedSlots.delete(evalKey);
         return;
       } catch (err) {
         lastError = err;
@@ -231,6 +249,7 @@ export class EvalWorker {
       }
     }
     this.markFailed(runId, rubricVersion, lastError);
+    this.collectedSlots.delete(evalKey);
   }
 
   private async process(runId: string, rubricVersion: string): Promise<void> {
@@ -251,14 +270,15 @@ export class EvalWorker {
       return;
     }
 
-    const judgeModel = 'resolvedModel' in this.deps.judge
-      ? (this.deps.judge as { resolvedModel?: string }).resolvedModel ?? null
-      : null;
+    const primaryClaudeSlot = this.deps.jury.find((slot) => slot.provider === 'claude');
+    const judgeModel = primaryClaudeSlot ? this.resolveSlotModel(primaryClaudeSlot) : null;
+    const evalKey = this.evalKey(runId, rubricVersion);
+    this.collectedSlots.delete(evalKey);
 
-    // pending → running (stamp the judge model now).
+    // pending → running (stamp the legacy primary model and clear stale jury data).
     this.db
       .prepare(
-        `UPDATE run_evals SET eval_status = 'running', judge_model = ?, updated_at = ?
+        `UPDATE run_evals SET eval_status = 'running', judge_model = ?, jury_json = NULL, updated_at = ?
          WHERE run_id = ? AND rubric_version = ?`,
       )
       .run(judgeModel, new Date().toISOString(), runId, rubricVersion);
@@ -274,13 +294,19 @@ export class EvalWorker {
     const cwd =
       row.worktree_path && existsSync(row.worktree_path) ? row.worktree_path : undefined;
 
-    const samples = await this.collectSamples({ diff, gateResults, diffStatsSummary, cwd });
+    const { samples, slots } = await this.collectSamples({
+      diff,
+      gateResults,
+      diffStatsSummary,
+      cwd,
+    });
+    this.collectedSlots.set(evalKey, slots);
     if (samples.length === 0) {
       throw new Error('all jury samples were malformed/failed — no valid sample to score');
     }
 
     const result = scoreSamples(samples, { gateResults });
-    this.persistComplete(runId, rubricVersion, result, samples);
+    this.persistComplete(runId, rubricVersion, result, samples, slots);
     await this.writeFindings(runId, row.project_id, result, samples);
 
     this.logger?.info('[eval] complete', {
@@ -288,52 +314,85 @@ export class EvalWorker {
       overall: result.overallScore,
       band: result.band,
       samples: samples.length,
+      configuredSlots: this.sampleCount,
       gated: result.gated,
       capTriggered: result.capTriggered,
     });
   }
 
   /**
-   * Draw K samples. Per-sample: one grade attempt, one retry on a malformed/failed
-   * result, then drop. Returns whatever valid samples survived (possibly empty →
-   * the caller throws so processWithRetries can retry the whole eval).
+   * Grade each ordered jury slot. Deterministic Codex unavailability is recorded
+   * without retry; every other failure gets one retry before the slot is dropped.
    */
   private async collectSamples(input: {
     diff: string;
     gateResults: GateResults | null;
     diffStatsSummary?: string;
     cwd?: string;
-  }): Promise<JudgeSample[]> {
+  }): Promise<{ samples: JudgeSample[]; slots: JurySlotProvenance[] }> {
     const samples: JudgeSample[] = [];
-    for (let i = 0; i < this.sampleCount; i++) {
-      const sample = await this.gradeOnceWithRetry(input);
-      if (sample) samples.push(sample);
+    const slots: JurySlotProvenance[] = [];
+    for (const jurySlot of this.deps.jury) {
+      const outcome = await this.gradeOnceWithRetry(jurySlot, input);
+      if (outcome.status === 'ok') {
+        const sampleIndex = samples.length;
+        samples.push(outcome.sample);
+        slots.push({
+          slot: jurySlot.slot,
+          provider: jurySlot.provider,
+          model: this.resolveSlotModel(jurySlot),
+          status: 'ok',
+          sampleIndex,
+        });
+      } else {
+        slots.push({
+          slot: jurySlot.slot,
+          provider: jurySlot.provider,
+          model: this.resolveSlotModel(jurySlot),
+          status: outcome.status,
+          ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
+        });
+      }
     }
-    return samples;
+    return { samples, slots };
   }
 
-  private async gradeOnceWithRetry(input: {
+  private async gradeOnceWithRetry(jurySlot: JurySlot, input: {
     diff: string;
     gateResults: GateResults | null;
     diffStatsSummary?: string;
     cwd?: string;
-  }): Promise<JudgeSample | null> {
+  }): Promise<
+    | { status: 'ok'; sample: JudgeSample }
+    | { status: 'unavailable' | 'failed'; errorCode?: string }
+  > {
     for (let tries = 0; tries < 2; tries++) {
       try {
-        return await this.deps.judge.grade({
+        const sample = await jurySlot.judge.grade({
           diff: input.diff,
           gateResults: input.gateResults,
           ...(input.diffStatsSummary ? { diffStatsSummary: input.diffStatsSummary } : {}),
           ...(input.cwd ? { cwd: input.cwd } : {}),
         });
+        return { status: 'ok', sample };
       } catch (err) {
+        if (err instanceof CodexJurorUnavailableError) {
+          this.logger?.warn('[eval] jury slot unavailable', {
+            slot: jurySlot.slot,
+            provider: jurySlot.provider,
+            errorCode: err.code,
+          });
+          return { status: 'unavailable', errorCode: err.code };
+        }
         this.logger?.warn('[eval] jury sample failed', {
+          slot: jurySlot.slot,
+          provider: jurySlot.provider,
           try: tries,
           error: err instanceof Error ? err.message : String(err),
         });
       }
     }
-    return null;
+    return { status: 'failed' };
   }
 
   // -------------------------------------------------------------------------
@@ -345,6 +404,7 @@ export class EvalWorker {
     rubricVersion: string,
     result: ScoringResult,
     samples: JudgeSample[],
+    slots: JurySlotProvenance[],
   ): void {
     const dimensionsJson = JSON.stringify(
       result.dimensions.map((d) => ({
@@ -375,7 +435,7 @@ export class EvalWorker {
            eval_status = 'complete',
            overall_score = ?, band = ?, ci_low = ?, ci_high = ?,
            gated = ?, security_flag = ?, requirements_unmet = ?, cap_triggers_json = ?,
-           dimensions_json = ?, per_sample_json = ?,
+           dimensions_json = ?, per_sample_json = ?, jury_json = ?,
            sample_count = ?, error = NULL, updated_at = ?
          WHERE run_id = ? AND rubric_version = ?`,
       )
@@ -390,6 +450,7 @@ export class EvalWorker {
         capTriggersJson,
         dimensionsJson,
         perSampleJson,
+        JSON.stringify(slots),
         result.sampleCount,
         new Date().toISOString(),
         runId,
@@ -399,13 +460,20 @@ export class EvalWorker {
 
   private markFailed(runId: string, rubricVersion: string, err: unknown): void {
     const message = err instanceof Error ? err.message : String(err);
+    const slots = this.collectedSlots.get(this.evalKey(runId, rubricVersion));
     try {
       this.db
         .prepare(
-          `UPDATE run_evals SET eval_status = 'failed', error = ?, updated_at = ?
+          `UPDATE run_evals SET eval_status = 'failed', error = ?, jury_json = ?, updated_at = ?
            WHERE run_id = ? AND rubric_version = ?`,
         )
-        .run(message.slice(0, 2000), new Date().toISOString(), runId, rubricVersion);
+        .run(
+          message.slice(0, 2000),
+          slots ? JSON.stringify(slots) : null,
+          new Date().toISOString(),
+          runId,
+          rubricVersion,
+        );
     } catch (dbErr) {
       this.logger?.error('[eval] failed to persist failed status', {
         runId,
@@ -473,7 +541,8 @@ export class EvalWorker {
       }
     }
 
-    const confirmThreshold = Math.max(1, Math.ceil(result.sampleCount / 2));
+    // Strict majority: 2-of-2, 2-of-3, and 1-of-1.
+    const confirmThreshold = Math.floor(result.sampleCount / 2) + 1;
     const selectable = [...byKey.entries()]
       // A candidate dedups against an existing item under EITHER key form: the
       // sub-check key (eval-authored rows round-trip it) or the title key
@@ -636,6 +705,18 @@ export class EvalWorker {
   // -------------------------------------------------------------------------
   // Small parsers
   // -------------------------------------------------------------------------
+
+  private evalKey(runId: string, rubricVersion: string): string {
+    return `${runId}\u0000${rubricVersion}`;
+  }
+
+  private resolveSlotModel(slot: JurySlot): string | null {
+    if ('resolvedModel' in slot.judge) {
+      const resolvedModel = (slot.judge as { resolvedModel?: unknown }).resolvedModel;
+      if (typeof resolvedModel === 'string' && resolvedModel.length > 0) return resolvedModel;
+    }
+    return slot.model;
+  }
 
   private parseGate(json: string | null): GateResults | null {
     if (!json) return null;

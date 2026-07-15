@@ -72,6 +72,7 @@ function makeEval(over: Partial<RunEval> = {}): RunEval {
       { key: 'security', name: 'Security', weight: 20, score: null, active: false, passCount: 0, failCount: 0, unknownCount: 2 },
     ],
     perSample: null,
+    jury: null,
     judgeModel: 'claude-opus-4-8',
     sampleCount: 3,
     promptHash: null,
@@ -318,6 +319,24 @@ describe('WorkflowSummaryPanel', () => {
     expect(screen.getByTestId('run-summary-eval-gate-lint')).toHaveAttribute('data-gate-status', 'pass');
     // one active dimension of the two fixture dims.
     expect(screen.getByTestId('run-summary-eval-dims-active')).toHaveTextContent('1 / 7 dimensions active');
+  });
+
+  it('renders heterogeneous jury composition and warns when Codex was unavailable', async () => {
+    runEvalQuery.mockResolvedValue(makeEval({
+      sampleCount: 2,
+      jury: [
+        { slot: 'claude-1', provider: 'claude', model: 'claude-opus-4-8', status: 'ok', sampleIndex: 0 },
+        { slot: 'claude-2', provider: 'claude', model: 'claude-opus-4-8', status: 'ok', sampleIndex: 1 },
+        { slot: 'codex-1', provider: 'codex', model: null, status: 'unavailable', errorCode: 'logged-out' },
+      ],
+    }));
+    renderPanel();
+
+    expect(await screen.findByText(/Opus ×2 \+ Codex/)).toBeInTheDocument();
+    expect(screen.getByTestId('run-summary-eval-codex-unavailable')).toHaveTextContent(
+      'Codex juror unavailable — scored on Claude only',
+    );
+    expect(screen.queryByText(/single-family v1/)).not.toBeInTheDocument();
   });
 
   it('shows a PASSED deterministic-gate sentinel chip for a non-gated eval', async () => {
