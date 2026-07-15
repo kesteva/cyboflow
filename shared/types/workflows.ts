@@ -511,8 +511,9 @@ export interface WorkflowAgentCustomCopy {
  * this workflow's `agentConfigs` -> an A/B variant's agent delta. So this
  * layer beats the Agents-pane pin/body, but a variant delta still wins over it.
  *
- * An empty `{}` config (neither `model` nor `custom` set) carries no signal
- * and must NEVER be persisted — the workflow editor prunes it before write.
+ * An empty `{}` config (neither `model`, `custom`, `runtime`, nor `codexModel`
+ * set) carries no signal and must NEVER be persisted — the workflow editor
+ * prunes it before write.
  */
 export interface WorkflowAgentConfig {
   /**
@@ -525,6 +526,20 @@ export interface WorkflowAgentConfig {
    * When present it REPLACES the base body for runs of this workflow.
    */
   custom?: WorkflowAgentCustomCopy;
+  /**
+   * Per-workflow CLI runtime/provider override for this agent — which
+   * substrate this agent runs on. Absent -> inherit the run-level
+   * provider/runtime; `'codex-sdk'` runs this agent on Codex instead of Claude.
+   */
+  runtime?: WorkflowAgentRuntime;
+  /**
+   * Codex model id (e.g. `'gpt-5.2-codex'`) used when `runtime === 'codex-sdk'`.
+   * Free-form string rather than an enum: Codex model ids are discovered
+   * dynamically from the Codex catalogue, not a fixed union like
+   * {@link AgentModelAlias}. Ignored for Claude runtimes, which keep using
+   * `model`.
+   */
+  codexModel?: string;
 }
 
 /**

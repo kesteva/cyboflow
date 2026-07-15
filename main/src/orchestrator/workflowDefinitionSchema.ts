@@ -26,6 +26,7 @@ import type {
   WorkflowStep,
 } from '../../../shared/types/workflows';
 import { AGENT_MODEL_ALIASES } from '../../../shared/types/agents';
+import { WORKFLOW_AGENT_RUNTIMES } from '../../../shared/types/agentRuntime';
 import { CLI_TOOLS } from '../../../shared/types/cliTools';
 import { validateAgentDraft, AgentOverrideError } from './agents/agentValidation';
 
@@ -120,20 +121,27 @@ const workflowAgentCustomCopySchema = z.object({
 
 /**
  * Per-workflow-agent config overlay. Mirrors `WorkflowAgentConfig`. An empty
- * `{}` (neither `model` nor `custom` set) is rejected below — it carries no
- * signal and the editor must prune it before persisting.
+ * `{}` (none of `model`, `custom`, `runtime`, `codexModel` set) is rejected
+ * below — it carries no signal and the editor must prune it before persisting.
  */
 const workflowAgentConfigSchema = z
   .object({
     model: z.enum(AGENT_MODEL_ALIASES).optional(),
     custom: workflowAgentCustomCopySchema.optional(),
+    runtime: z.enum(WORKFLOW_AGENT_RUNTIMES).optional(),
+    codexModel: z.string().min(1).optional(),
   })
   .superRefine((config, ctx) => {
-    if (config.model === undefined && config.custom === undefined) {
+    if (
+      config.model === undefined &&
+      config.custom === undefined &&
+      config.runtime === undefined &&
+      config.codexModel === undefined
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message:
-          'agentConfigs entry must set "model" and/or "custom" — an empty {} config must be pruned before persisting',
+          'agentConfigs entry must set "model", "custom", "runtime", and/or "codexModel" — an empty {} config must be pruned before persisting',
       });
     }
   }) satisfies z.ZodType<WorkflowAgentConfig>;

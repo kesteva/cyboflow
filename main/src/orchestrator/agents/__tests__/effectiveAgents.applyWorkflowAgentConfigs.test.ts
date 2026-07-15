@@ -7,6 +7,8 @@
  * ungrantable MCP servers (single-writer invariant), and normalizes the applied
  * prompt via ensureResultSection; an unknown agentKey is ignored (configs never ADD
  * agents); an empty config map — or an empty per-agent config — is the identity.
+ * A `runtime`- and/or `codexModel`-only config is signal too (types + resolution
+ * only in this slice — nothing downstream reads these fields yet).
  */
 import { describe, it, expect } from 'vitest';
 import { applyWorkflowAgentConfigs, type EffectiveAgent } from '../effectiveAgents';
@@ -220,6 +222,66 @@ describe('applyWorkflowAgentConfigs', () => {
     expect(result.systemPrompt).toBe('BUILTIN PROMPT');
     // A valid array field still applies + source flips (a real custom object was present).
     expect(result.tools).toEqual(['Edit']);
+    expect(result.source).toBe('builtin-override');
+  });
+
+  // ── runtime / codexModel (types + resolution only — nothing reads these yet) ──
+
+  it('a runtime-only config is signal: sets runtime, drops rawContent, flips source', () => {
+    const [result] = applyWorkflowAgentConfigs([builtin('planner')], { planner: { runtime: 'codex-sdk' } });
+    expect(result.runtime).toBe('codex-sdk');
+    expect(result.source).toBe('builtin-override');
+    expect(result.rawContent).toBeUndefined();
+    expect(result.systemPrompt).toBe('BUILTIN PROMPT'); // no custom/model → body/model untouched
+    expect(result.model).toBeNull();
+  });
+
+  it('a codexModel-only config is signal: sets codexModel, drops rawContent, flips source', () => {
+    const [result] = applyWorkflowAgentConfigs([builtin('planner')], {
+      planner: { codexModel: 'gpt-5.2-codex' },
+    });
+    expect(result.codexModel).toBe('gpt-5.2-codex');
+    expect(result.source).toBe('builtin-override');
+    expect(result.rawContent).toBeUndefined();
+  });
+
+  it('runtime + codexModel together apply both alongside model/custom', () => {
+    const [result] = applyWorkflowAgentConfigs([builtin('planner')], {
+      planner: {
+        model: 'fable',
+        runtime: 'codex-sdk',
+        codexModel: 'gpt-5.2-codex',
+        custom: { description: 'D', systemPrompt: 'P', tools: ['Bash'], enabledMcps: [] },
+      },
+    });
+    expect(result.model).toBe('fable');
+    expect(result.runtime).toBe('codex-sdk');
+    expect(result.codexModel).toBe('gpt-5.2-codex');
+    expect(result.tools).toEqual(['Bash']);
+  });
+
+  it('an unrecognized runtime value leaves the existing runtime unchanged (no throw)', () => {
+    const [result] = applyWorkflowAgentConfigs(
+      [builtin('planner')],
+      { planner: { runtime: 'not-a-runtime' } } as unknown as Record<string, WorkflowAgentConfig>,
+    );
+    expect(result.runtime).toBeUndefined();
+    // No valid signal applied at all → fully untouched, exactly like an empty {} config.
+    expect(result.source).toBe('builtin');
+    expect(result.rawContent).toBe('RAW MD BODY');
+  });
+
+  it('an empty-string codexModel is ignored (no throw, leaves existing value unchanged)', () => {
+    const [result] = applyWorkflowAgentConfigs([builtin('planner')], { planner: { codexModel: '' } });
+    expect(result.codexModel).toBeUndefined();
+    expect(result.source).toBe('builtin'); // no valid signal → untouched
+  });
+
+  it('model-only behavior is unchanged when runtime/codexModel are absent', () => {
+    const [result] = applyWorkflowAgentConfigs([builtin('planner')], { planner: { model: 'opus' } });
+    expect(result.model).toBe('opus');
+    expect(result.runtime).toBeUndefined();
+    expect(result.codexModel).toBeUndefined();
     expect(result.source).toBe('builtin-override');
   });
 });

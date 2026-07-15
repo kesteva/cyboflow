@@ -22,6 +22,8 @@ import type {
   AgentUsage,
 } from '../../../../shared/types/agents';
 import { agentModelLabel, isAgentModelAlias } from '../../../../shared/types/agents';
+import type { WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
+import { isWorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 import type { WorkflowVariantAgentOverrides } from '../../../../shared/types/experiments';
 import type { WorkflowAgentConfig } from '../../../../shared/types/workflows';
 import { ensureResultSection, isGrantableMcpServer } from './agentValidation';
@@ -42,6 +44,13 @@ export interface EffectiveAgent {
   source: AgentSource;
   /** Present for unoverridden builtins so the overlay can write the `.md` verbatim. */
   rawContent?: string;
+  /**
+   * The CLI runtime/provider this agent runs on, when overridden. Absent ->
+   * inherit the run-level provider/runtime (no per-agent source sets this yet).
+   */
+  runtime?: WorkflowAgentRuntime;
+  /** Codex model id used when `runtime === 'codex-sdk'`. Absent -> inherit. */
+  codexModel?: string;
 }
 
 /** Parse an override row's `tools_json` into a filtered `CliTool[]`. */
@@ -213,7 +222,12 @@ export function applyVariantAgentDeltas(
  *     Agents-pane router's pre-persist normalization;
  *   - `model` (when a valid {@link isAgentModelAlias} alias) replaces the model; an
  *     unrecognized alias leaves the existing model unchanged;
- *   - in EITHER case `rawContent` is DROPPED and `source` flips `builtin →
+ *   - `runtime` (when a valid {@link isWorkflowAgentRuntime} value) replaces the
+ *     runtime; an unrecognized value leaves the existing runtime unchanged. This
+ *     slice is TYPES + RESOLUTION ONLY — nothing downstream reads `runtime` yet;
+ *   - `codexModel` (when a non-empty string) replaces the Codex model id; anything
+ *     else leaves the existing value unchanged;
+ *   - in ANY of these cases `rawContent` is DROPPED and `source` flips `builtin →
  *     builtin-override`, so the overlay renders the config via `renderAgentMarkdown`
  *     instead of writing the stale verbatim builtin `.md`. (A `builtin-override` /
  *     `custom` agent keeps its source; it already renders.)
@@ -224,8 +238,8 @@ export function applyVariantAgentDeltas(
  * (Agents-pane pin/body) but a VARIANT delta still wins over the workflow config for
  * the fields it touches. A config key with no matching effective agent is silently
  * ignored (configs never ADD agents — an unspawnable key is a no-op). An empty
- * config (neither `model` nor `custom`, which the editor never persists) leaves its
- * agent unchanged.
+ * config (none of `model`, `custom`, `runtime`, `codexModel`, which the editor
+ * never persists) leaves its agent unchanged.
  */
 export function applyWorkflowAgentConfigs(
   effective: EffectiveAgent[],
@@ -233,7 +247,15 @@ export function applyWorkflowAgentConfigs(
 ): EffectiveAgent[] {
   return effective.map((agent) => {
     const config = configs[agent.agentKey];
-    if (!config || (config.custom === undefined && config.model === undefined)) return agent;
+    if (
+      !config ||
+      (config.custom === undefined &&
+        config.model === undefined &&
+        config.runtime === undefined &&
+        config.codexModel === undefined)
+    ) {
+      return agent;
+    }
 
     let { description, systemPrompt, tools, enabledMcps } = agent;
     // The embedded copy is unvalidated (see the doc comment) — read it as unknown
@@ -262,11 +284,18 @@ export function applyWorkflowAgentConfigs(
         : [];
     }
     const model = isAgentModelAlias(config.model) ? config.model : agent.model;
+    const runtime = isWorkflowAgentRuntime(config.runtime) ? config.runtime : agent.runtime;
+    const codexModel =
+      typeof config.codexModel === 'string' && config.codexModel.length > 0
+        ? config.codexModel
+        : agent.codexModel;
 
     // Nothing valid applied (a malformed custom that degraded to absent AND no valid
-    // model) → leave the agent fully untouched, exactly like an empty `{}` config:
-    // no spurious source flip / rawContent drop.
-    if (!hasCustom && model === agent.model) return agent;
+    // model/runtime/codexModel) → leave the agent fully untouched, exactly like an
+    // empty `{}` config: no spurious source flip / rawContent drop.
+    if (!hasCustom && model === agent.model && runtime === agent.runtime && codexModel === agent.codexModel) {
+      return agent;
+    }
 
     const source = agent.source === 'builtin' ? 'builtin-override' : agent.source;
 
@@ -274,7 +303,7 @@ export function applyWorkflowAgentConfigs(
     // source guarantees a builtin no longer writes its stale verbatim body).
     const { rawContent: _dropped, ...rest } = agent;
     void _dropped;
-    return { ...rest, description, systemPrompt, tools, enabledMcps, model, source };
+    return { ...rest, description, systemPrompt, tools, enabledMcps, model, runtime, codexModel, source };
   });
 }
 

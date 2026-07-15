@@ -457,6 +457,51 @@ describe('workflowDefinitionSchema (agentConfigs)', () => {
     expect(def.agentConfigs).toBeUndefined();
     expect(() => validateWorkflowDefinition(def)).not.toThrow();
   });
+
+  // -------------------------------------------------------------------------
+  // Accept: a config with only "runtime" set, or "runtime" + "codexModel".
+  // Both count as signal — types + resolution only in this slice.
+  // -------------------------------------------------------------------------
+  it('accepts a config with only "runtime" set', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = { implement: { runtime: 'codex-sdk' } };
+    expect(() => validateWorkflowDefinition(def)).not.toThrow();
+  });
+
+  it('accepts a config with "runtime" and "codexModel" set together', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = { implement: { runtime: 'codex-sdk', codexModel: 'gpt-5.2-codex' } };
+    expect(() => validateWorkflowDefinition(def)).not.toThrow();
+  });
+
+  // -------------------------------------------------------------------------
+  // Reject: a runtime value outside WORKFLOW_AGENT_RUNTIMES.
+  // -------------------------------------------------------------------------
+  it('rejects an unknown runtime value', () => {
+    const def = makeValidDefinition();
+    const badConfig = { runtime: 'not-a-real-runtime' } as unknown as WorkflowAgentConfig;
+    def.agentConfigs = { implement: badConfig };
+    expect(() => validateWorkflowDefinition(def)).toThrow(ZodError);
+  });
+
+  // -------------------------------------------------------------------------
+  // Reject: an empty-string codexModel.
+  // -------------------------------------------------------------------------
+  it('rejects an empty-string codexModel', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = { implement: { codexModel: '' } };
+    expect(() => validateWorkflowDefinition(def)).toThrow(ZodError);
+  });
+
+  // -------------------------------------------------------------------------
+  // Reject: a truly-empty {} entry still carries no signal even with the new
+  // fields available — none of model/custom/runtime/codexModel are set.
+  // -------------------------------------------------------------------------
+  it('still rejects a truly-empty {} agentConfigs entry', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = { implement: {} };
+    expect(() => validateWorkflowDefinition(def)).toThrow(ZodError);
+  });
 });
 
 describe('workflowDefinitionSchema (agentConfigs — Agents-pane validation parity)', () => {
