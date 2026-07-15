@@ -27,6 +27,7 @@ import { WorkflowStepInspector } from './WorkflowStepInspector';
 import { MODEL_OPTIONS } from './unified/ModelPill';
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { WorkflowVariantAgentOverrides } from '../../../../shared/types/experiments';
+import type { AgentEntry, AgentModelAlias } from '../../../../shared/types/agents';
 
 export interface VariantEditorModalProps {
   isOpen: boolean;
@@ -85,9 +86,22 @@ export function VariantEditorModal({
   const [labelDraft, setLabelDraft] = useState<string>(variant.label);
   const [model, setModel] = useState<string>(variant.model ?? INHERIT);
   const [executionModel, setExecutionModel] = useState<string>(variant.execution_model ?? INHERIT);
-  const [agentKeys, setAgentKeys] = useState<string[]>([]);
+  const [agentEntries, setAgentEntries] = useState<AgentEntry[]>([]);
   const [overrides, setOverrides] = useState<WorkflowVariantAgentOverrides>(() =>
     parseAgentOverrides(variant.agent_overrides_json),
+  );
+
+  // Derived views of the effective agent catalogue (mirrors WorkflowEditorModal):
+  // the per-agent override rows need the keys, the embedded step inspector needs
+  // the FULL entries (to render the AGENT-tab model pin) + the custom keys.
+  const agentKeys = useMemo(() => agentEntries.map((e) => e.agentKey), [agentEntries]);
+  const customAgentKeys = useMemo(
+    () => agentEntries.filter((e) => e.isCustom).map((e) => e.agentKey),
+    [agentEntries],
+  );
+  const agentModelPins = useMemo<Record<string, AgentModelAlias | null>>(
+    () => Object.fromEntries(agentEntries.map((e) => [e.agentKey, e.model])),
+    [agentEntries],
   );
 
   const actionInFlightRef = useRef(false);
@@ -114,9 +128,9 @@ export function VariantEditorModal({
     void (async () => {
       try {
         const entries = await trpc.cyboflow.agents.list.query({ projectId });
-        if (!cancelled) setAgentKeys(entries.map((e) => e.agentKey));
+        if (!cancelled) setAgentEntries(entries);
       } catch {
-        if (!cancelled) setAgentKeys([]);
+        if (!cancelled) setAgentEntries([]);
       }
     })();
     return () => {
@@ -336,12 +350,15 @@ export function VariantEditorModal({
             selectedStepId={state.selectedStepId}
             selectedFanOutInner={state.selectedFanOutInner}
             dispatch={dispatch}
+            agentModelPins={agentModelPins}
           />
           <WorkflowStepInspector
             definition={state.definition}
             selectedStepId={state.selectedStepId}
             selectedFanOutInner={state.selectedFanOutInner}
             dispatch={dispatch}
+            customAgentKeys={customAgentKeys}
+            agentEntries={agentEntries}
           />
         </div>
 
