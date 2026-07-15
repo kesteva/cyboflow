@@ -152,25 +152,57 @@ export function ProjectChip({ name }: { name: string }): React.JSX.Element {
  * label — the hosting session's name when known, else the short run id — and
  * a dot that only PULSES while `runStatus === 'running'` (a live but idle
  * association, e.g. queued/awaiting_review, renders it static).
+ *
+ * When `onOpen` is provided (the run has a known hosting session) the pill is
+ * a button that opens that session; without it (a headless / session-less run)
+ * it stays a plain span. `max-w-full` + the truncating label keep a long
+ * session name inside the card instead of overflowing it.
  */
-export function FlowMarker({ flow }: { flow: FlowOverlay }): React.JSX.Element {
+export function FlowMarker({
+  flow,
+  onOpen,
+}: {
+  flow: FlowOverlay;
+  onOpen?: () => void;
+}): React.JSX.Element {
   const session = flow.sessionName ?? flow.runId.slice(0, 8);
   const running = flow.runStatus === 'running';
-  return (
-    <span
-      className="inline-flex items-center gap-1.5 rounded-full border border-interactive/40 bg-interactive-surface px-2 py-0.5 text-[10px] font-semibold text-interactive"
-      title={`In flow: ${flow.agent} · ${session}`}
-      data-testid="flow-marker"
-    >
-      <span className="relative flex h-2 w-2">
+  const pillClass =
+    'inline-flex max-w-full items-center gap-1.5 rounded-full border border-interactive/40 bg-interactive-surface px-2 py-0.5 text-[10px] font-semibold text-interactive';
+  const content = (
+    <>
+      <span className="relative flex h-2 w-2 flex-shrink-0">
         {running && (
           <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-interactive opacity-60 motion-reduce:hidden" />
         )}
         <span className="relative inline-flex h-2 w-2 rounded-full bg-interactive" />
       </span>
-      <span className="truncate">
+      <span className="min-w-0 truncate">
         {flow.agent} · {session}
       </span>
+    </>
+  );
+  if (onOpen) {
+    return (
+      <button
+        type="button"
+        // stopPropagation: cards live inside draggable/expandable wrappers — the
+        // click must open the session, not toggle the card.
+        onClick={(e) => {
+          e.stopPropagation();
+          onOpen();
+        }}
+        className={`${pillClass} transition-colors hover:bg-interactive hover:text-text-on-interactive`}
+        title={`Open session: ${flow.agent} · ${session}`}
+        data-testid="flow-marker"
+      >
+        {content}
+      </button>
+    );
+  }
+  return (
+    <span className={pillClass} title={`In flow: ${flow.agent} · ${session}`} data-testid="flow-marker">
+      {content}
     </span>
   );
 }

@@ -27,6 +27,8 @@ import { ChevronDown, ChevronRight, Play, Loader2, Pencil, Lightbulb } from 'luc
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
 import { trpc } from '../../trpc/client';
 import { useBacklogStore } from '../../stores/backlogStore';
+import { useSessionStore } from '../../stores/sessionStore';
+import { useNavigationStore } from '../../stores/navigationStore';
 import {
   TypeTag,
   PriorityTag,
@@ -65,17 +67,39 @@ interface TaskBodyProps {
   canMoveDown?: boolean;
 }
 
-/** The marker row (flow / review / done) — only renders when something applies. */
+/**
+ * The marker row (flow / review / done) — only renders when something applies.
+ * Each flow pill sits on its OWN line (a long "agent · session" label was
+ * overflowing the card when sharing a wrap row) and, when the run has a hosting
+ * session, clicking it opens that session (SessionListItem's activate gesture:
+ * setActiveSession + navigateToSessions, via getState() like ProjectDashboard
+ * so this presentational row subscribes to nothing).
+ */
 function MarkerRow({ task }: { task: BacklogTaskItem }): React.JSX.Element | null {
   const hasAny = task.inFlow.length > 0 || task.awaitingReview || task.isDone;
   if (!hasAny) return null;
+  const openSession = (sessionId: string): void => {
+    void useSessionStore.getState().setActiveSession(sessionId);
+    useNavigationStore.getState().navigateToSessions();
+  };
   return (
-    <div className="flex flex-wrap items-center gap-1.5">
-      {task.inFlow.map((flow) => (
-        <FlowMarker key={flow.runId} flow={flow} />
-      ))}
-      {task.awaitingReview && <ReviewMarker />}
-      {task.isDone && <DoneFlag />}
+    <div className="flex flex-col items-start gap-1.5">
+      {task.inFlow.map((flow) => {
+        const sessionId = flow.sessionId;
+        return (
+          <FlowMarker
+            key={flow.runId}
+            flow={flow}
+            onOpen={sessionId !== null ? () => openSession(sessionId) : undefined}
+          />
+        );
+      })}
+      {(task.awaitingReview || task.isDone) && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          {task.awaitingReview && <ReviewMarker />}
+          {task.isDone && <DoneFlag />}
+        </div>
+      )}
     </div>
   );
 }
@@ -100,6 +124,10 @@ function CardFooter({
   loadingRootIdea: boolean;
 }): React.JSX.Element {
   const isLaunching = launchingTaskId === task.id;
+  // A live run association = the task is In development — the backend rejects a
+  // second pull (double-pull guard), so don't offer one. The flow pill above
+  // carries the "why" (and opens the working session).
+  const inDevelopment = task.inFlow.length > 0;
   return (
     <div className="flex items-center justify-between gap-2 pt-1.5">
       <div className="flex min-w-0 items-center gap-2 text-[10.5px] text-text-tertiary">
@@ -143,9 +171,10 @@ function CardFooter({
         <button
           type="button"
           onClick={() => onRun(task)}
-          disabled={isLaunching}
+          disabled={isLaunching || inDevelopment}
+          title={inDevelopment ? 'Already in development — a live session is working on this' : undefined}
           data-testid="task-run-button"
-          className="inline-flex items-center gap-1 rounded-button border border-interactive/50 px-2 py-0.5 text-[10.5px] font-semibold text-interactive transition-colors hover:bg-interactive hover:text-text-on-interactive disabled:cursor-not-allowed disabled:opacity-50"
+          className="inline-flex items-center gap-1 rounded-button border border-interactive/50 px-2 py-0.5 text-[10.5px] font-semibold text-interactive transition-colors hover:bg-interactive hover:text-text-on-interactive disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-interactive"
         >
           {isLaunching ? (
             <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none" />

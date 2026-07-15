@@ -82,6 +82,18 @@ vi.mock('../../utils/ensureSessionForLaunch', () => ({
   ensureSessionForLaunch: vi.fn().mockResolvedValue('sess-backlog'),
 }));
 
+// Flow-pill session opening (migration 066): MarkerRow reaches these stores via
+// getState() on click — mock both so the click is observable without the real
+// setActiveSession API round-trip.
+const mockSetActiveSession = vi.fn().mockResolvedValue(undefined);
+const mockNavigateToSessions = vi.fn();
+vi.mock('../../stores/sessionStore', () => ({
+  useSessionStore: { getState: () => ({ setActiveSession: mockSetActiveSession }) },
+}));
+vi.mock('../../stores/navigationStore', () => ({
+  useNavigationStore: { getState: () => ({ navigateToSessions: mockNavigateToSessions }) },
+}));
+
 import { BacklogPane } from '../BacklogPane';
 
 // ---------------------------------------------------------------------------
@@ -189,6 +201,8 @@ beforeEach(() => {
   mockStart.mockClear();
   mockCreate.mockClear();
   mockWorkflowsList.mockClear();
+  mockSetActiveSession.mockClear();
+  mockNavigateToSessions.mockClear();
 });
 
 // ---------------------------------------------------------------------------
@@ -380,6 +394,50 @@ describe('BacklogPane', () => {
     ];
     render(<BacklogPane projectId={1} />);
     expect(screen.getAllByTestId('flow-marker')).toHaveLength(2);
+  });
+
+  it('disables the Run button while the task is in development (live run association)', () => {
+    mockTasks = [
+      task({
+        id: 't1',
+        stage_id: 's-ready',
+        inFlow: [
+          { agent: 'executor', runId: 'run-aaaaaaaa', stepId: null, runStatus: 'running', sessionId: null, sessionName: null },
+        ],
+      }),
+    ];
+    render(<BacklogPane projectId={1} />);
+    expect(screen.getByTestId('task-run-button')).toBeDisabled();
+  });
+
+  it('opens the hosting session when the flow pill is clicked (sessionId known)', () => {
+    mockTasks = [
+      task({
+        id: 't1',
+        stage_id: 's-ready',
+        inFlow: [
+          { agent: 'sprint', runId: 'run-aaaaaaaa', stepId: null, runStatus: 'running', sessionId: 'sess-42', sessionName: 'quick-x' },
+        ],
+      }),
+    ];
+    render(<BacklogPane projectId={1} />);
+    fireEvent.click(screen.getByTestId('flow-marker'));
+    expect(mockSetActiveSession).toHaveBeenCalledWith('sess-42');
+    expect(mockNavigateToSessions).toHaveBeenCalled();
+  });
+
+  it('renders a session-less flow pill as a non-interactive span', () => {
+    mockTasks = [
+      task({
+        id: 't1',
+        stage_id: 's-ready',
+        inFlow: [
+          { agent: 'executor', runId: 'run-aaaaaaaa', stepId: null, runStatus: 'running', sessionId: null, sessionName: null },
+        ],
+      }),
+    ];
+    render(<BacklogPane projectId={1} />);
+    expect(screen.getByTestId('flow-marker').tagName).toBe('SPAN');
   });
 
   it('renders the ReviewMarker and DoneFlag overlays', () => {
