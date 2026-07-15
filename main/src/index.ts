@@ -2314,10 +2314,14 @@ app.whenReady().then(async () => {
       console.error('[Main] prototype-server boot sweep failed:', err);
     });
 
-  // Schema-version gate: both packaged variants share ~/.cyboflow, so a newer
-  // build (e.g. Cyboflow Dev) may have forward-migrated the DB past what this
-  // binary understands. Warn before we build the UI on top of a schema this
-  // binary may not fully grasp. (Always allow "Open Anyway" per product choice.)
+  // Schema-version gate: each packaged kind now owns its own data dir
+  // (stable → ~/.cyboflow, Dev DMG → ~/.cyboflow_dev_dmg), so cross-variant
+  // forward-migration no longer happens by default. The gate still guards the
+  // remaining ways a newer build can reach an older binary's DB — a shared
+  // CYBOFLOW_DIR override, or downgrading the same kind — where a newer build
+  // may have forward-migrated the DB past what this binary understands. Warn
+  // before we build the UI on top of a schema this binary may not fully grasp.
+  // (Always allow "Open Anyway" per product choice.)
   const schemaStatus = databaseService.getSchemaVersionStatus();
   if (schemaStatus?.tooNew) {
     logger.warn(
