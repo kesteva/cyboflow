@@ -53,9 +53,12 @@ export class Logger {
         this.currentLogSize = stats.size;
       }
 
-      // Open write stream in append mode
+      // Open write stream in append mode. Attach an 'error' listener: an async
+      // stream error (e.g. EPIPE) with no listener is re-thrown as an
+      // uncaughtException and would crash the whole app.
       this.logStream = fs.createWriteStream(this.currentLogFile, { flags: 'a' });
-      
+      this.logStream.on('error', (err) => this.handleWriteError(err as NodeJS.ErrnoException));
+
       // Clean up old log files
       this.cleanupOldLogs();
       
@@ -91,7 +94,8 @@ export class Logger {
         // Reset and create new log file
         this.currentLogSize = 0;
         this.logStream = fs.createWriteStream(this.currentLogFile, { flags: 'a' });
-        
+        this.logStream.on('error', (err) => this.handleWriteError(err as NodeJS.ErrnoException));
+
         // Clean up old logs
         this.cleanupOldLogs();
       } catch (error) {

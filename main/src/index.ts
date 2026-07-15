@@ -341,6 +341,44 @@ if (isDevelopment) {
 // Set up console wrapper to reduce logging in production
 setupConsoleWrapper();
 
+// Global crash guards. Two independent failure modes were surfacing the native
+// Electron crash dialog:
+//   1. An async 'error' event on process.stdout/stderr (EPIPE when the pipe on
+//      the other end closes — e.g. a parent/sibling process that spawned us via
+//      piped stdio exits) has no default listener and is thrown as an
+//      uncaughtException.
+//   2. Any other uncaught error / unhandled rejection in the main process (there
+//      was previously NO top-level handler) tore the whole app down.
+// Neither should kill the app. Swallow EPIPE quietly; log everything else via the
+// ORIGINAL console (the logger may itself be mid-failure) and keep running.
+const swallowStreamError = (err: NodeJS.ErrnoException) => {
+  if (err?.code === 'EPIPE') return; // pipe closed on the other end — nothing to do
+  try {
+    originalError('[Main] stdout/stderr stream error:', err);
+  } catch {
+    // console itself is broken; nothing more we can safely do
+  }
+};
+process.stdout.on('error', swallowStreamError);
+process.stderr.on('error', swallowStreamError);
+
+process.on('uncaughtException', (err: NodeJS.ErrnoException) => {
+  if (err?.code === 'EPIPE') return; // broken pipe — non-fatal, do not crash
+  try {
+    originalError('[Main] Uncaught exception (kept alive):', err);
+  } catch {
+    // swallow — crashing here would defeat the purpose
+  }
+});
+
+process.on('unhandledRejection', (reason) => {
+  try {
+    originalError('[Main] Unhandled promise rejection (kept alive):', reason);
+  } catch {
+    // swallow
+  }
+});
+
 // Parse command-line arguments for custom Cyboflow directory
 const args = process.argv.slice(2);
 for (let i = 0; i < args.length; i++) {
