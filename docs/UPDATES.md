@@ -161,12 +161,73 @@ auto-update only upgrades an already-installed app:
 bump version + changelog → build:mac:dev:{arm64,x64} → gen-mac-latest-yml → publish (dev/)
             → test the Dev app → fix → repeat
             → on green: build:mac:{arm64,x64} → gen-mac-latest-yml → publish (stable/)
+            → push main → tag vX.Y.Z + GitHub release (installers + notes)
 ```
 
 Dev installs side-by-side with Stable (distinct `appId`/name), but **both read the
 same local production database** (`~/.cyboflow`) — Dev is a separate update channel,
 not a separate dataset. Bump the version for each Dev you want existing Dev installs
 to auto-update to (a `-dev.N` prerelease suffix is conventional, e.g. `0.1.3-dev.1`).
+
+---
+
+## Cut the GitHub release (tag + notes + installers)
+
+This is **separate from and independent of** the R2 auto-update path above — the
+in-app updater never touches GitHub. The GitHub release is the human-facing,
+archival record of a version: an annotated `vX.Y.Z` tag pinning the exact release
+commit, the changelog notes, and the signed installers mirrored as assets. Do it
+**after** the stable feed is published and `main` is pushed, so the tag points at
+a commit that is actually on `origin`.
+
+Prereqs: `gh` authenticated (`gh auth status`) and the release commit already on
+`origin/main`.
+
+1. **Tag the release commit** (annotated, at the exact `chore: release X.Y.Z`
+   commit — not necessarily `HEAD`, since sibling sessions may have advanced
+   `main`), then push the tag:
+   ```bash
+   git tag -a vX.Y.Z <release-commit> -m "Cyboflow X.Y.Z"
+   git push origin vX.Y.Z
+   ```
+2. **Build the notes** from the changelog section for this version, with an
+   install/update footer (throwaway file, not committed):
+   ```bash
+   {
+     awk '/^## \[X\.Y\.Z\]/{f=1; next} /^## \[/{if(f)f=0} f' CHANGELOG.md
+     printf '\n---\n\n### Install\n\n- **New install:** download the DMG for your Mac below.\n- **Existing install:** auto-updates via `updates.cyboflow.com/stable` (*Settings → Updates*).\n- **Dev channel:** the `Cyboflow-Dev-*` DMGs install side-by-side and track `updates.cyboflow.com/dev`.\n\nAll builds are signed (Developer ID), notarized, and stapled.\n'
+   } > /tmp/notes-X.Y.Z.md
+   ```
+3. **Create the release** with the four DMG installers (stable + dev, both arches)
+   attached, marked latest:
+   ```bash
+   gh release create vX.Y.Z \
+     --title "Cyboflow X.Y.Z" \
+     --notes-file /tmp/notes-X.Y.Z.md \
+     --latest \
+     dist-electron/Cyboflow-X.Y.Z-macOS-arm64.dmg \
+     dist-electron/Cyboflow-X.Y.Z-macOS-x64.dmg \
+     dist-electron/Cyboflow-Dev-X.Y.Z-macOS-arm64.dmg \
+     dist-electron/Cyboflow-Dev-X.Y.Z-macOS-x64.dmg
+   ```
+4. **Verify** the tag, assets, and latest flag:
+   ```bash
+   gh release view vX.Y.Z --json name,tagName,isDraft,assets \
+     --jq '{name,tagName,isDraft,assets:[.assets[].name]}'
+   gh api repos/kesteva/cyboflow/releases/latest --jq '.tag_name'   # → vX.Y.Z
+   ```
+
+> **Why DMGs, not zips.** The `.zip` + `.blockmap` are the auto-updater's delta
+> format and live only on R2; the GitHub release carries the `.dmg` **installers**
+> (the first-install artifact) for both variants.
+>
+> **Public but not the primary download path.** The repo is public, so the release
+> page and its DMG asset URLs are anonymously downloadable — a usable public mirror.
+> We still route the two production paths through R2 by design: the website's
+> Download buttons point at `updates.cyboflow.com/…dmg` and auto-update polls the R2
+> `latest-mac.yml` feed (zero egress fees, a stable on-brand URL, and delta updates
+> the GitHub assets can't provide). Treat the GitHub release as the durable archival
+> record + a fallback mirror, not the channel the app or website depends on.
 
 ---
 
