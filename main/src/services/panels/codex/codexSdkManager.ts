@@ -203,6 +203,10 @@ export class CodexSdkManager extends AbstractCliManager {
   private readonly spawnKeysByPanelId = new Map<string, Set<string>>();
   private readonly spawnKeysByRunId = new Map<string, Set<string>>();
   private readonly reservedSpawnKeys = new Set<string>();
+  // Short-lived probe app-servers (onboarding detection + model discovery) that
+  // are not tracked in `this.processes`. Tracked here so shutdown reaps any that
+  // are mid-flight; each self-removes in its own try/finally on resolve/reject.
+  private readonly probeClients = new Set<CodexAppServerClientLike>();
   private cyboflowMcpRuntimeConfig: CodexMcpRuntimeConfig | null = null;
   private approvalRouterProvider: (() => ApprovalRouterPort) | null = null;
   private questionRouterProvider: (() => QuestionRouterPort) | null = null;
@@ -271,6 +275,7 @@ export class CodexSdkManager extends AbstractCliManager {
       env: prependCodexPathToEnvironment(process.env, executable.pathDir),
       onStderr: (chunk) => this.logger?.warn(`[Codex app-server detection stderr] ${chunk.trimEnd()}`),
     });
+    this.probeClients.add(client);
 
     try {
       client.start();
@@ -314,6 +319,7 @@ export class CodexSdkManager extends AbstractCliManager {
         state: error instanceof CodexChatGptAuthRequiredError ? 'loggedOut' : 'unavailable',
       };
     } finally {
+      this.probeClients.delete(client);
       await client.stop().catch((error: unknown) => {
         this.logger?.warn(
           `[CodexSdkManager] onboarding detection teardown failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -722,6 +728,25 @@ export class CodexSdkManager extends AbstractCliManager {
     }));
   }
 
+  override async killAllProcesses(): Promise<void> {
+    // Reap tracked probe app-servers (onboarding detection + model discovery)
+    // alongside the run-scoped processes — they are not in `this.processes`, so
+    // the base sweep would otherwise orphan any probe that is mid-flight when the
+    // app quits.
+    const probes = [...this.probeClients];
+    this.probeClients.clear();
+    await Promise.all([
+      super.killAllProcesses(),
+      ...probes.map(async (client) => {
+        await client.stop().catch((error: unknown) => {
+          this.logger?.warn(
+            `[CodexSdkManager] probe app-server shutdown teardown failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+      }),
+    ]);
+  }
+
   private requireMcpRuntimeConfig(): CodexMcpRuntimeConfig {
     if (!this.cyboflowMcpRuntimeConfig) {
       throw new Error('Codex app-server manager missing Cyboflow MCP runtime config');
@@ -741,6 +766,7 @@ export class CodexSdkManager extends AbstractCliManager {
       env: prependCodexPathToEnvironment(process.env, executable.pathDir),
       onStderr: (chunk) => this.logger?.warn(`[Codex app-server model discovery stderr] ${chunk.trimEnd()}`),
     });
+    this.probeClients.add(client);
 
     try {
       client.start();
@@ -786,6 +812,7 @@ export class CodexSdkManager extends AbstractCliManager {
         defaultModel: visibleModels.find((model) => model.isDefault)?.id ?? null,
       };
     } finally {
+      this.probeClients.delete(client);
       await client.stop().catch((error: unknown) => {
         this.logger?.warn(
           `[CodexSdkManager] model discovery teardown failed: ${error instanceof Error ? error.message : String(error)}`,

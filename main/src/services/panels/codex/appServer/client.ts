@@ -32,6 +32,13 @@ export interface AppServerProcess extends EventEmitter {
   readonly stdin: Writable;
   readonly stdout: Readable;
   readonly stderr: Readable;
+  /**
+   * PID of the spawned app-server. When present (a real child), it leads its own
+   * process group (see `defaultSpawn` `detached: true`) so teardown can reap the
+   * whole tree — the app-server spawns the cyboflow MCP bridge + other MCP
+   * servers as its own children, which a bare `child.kill` would orphan.
+   */
+  readonly pid?: number;
   kill(signal?: NodeJS.Signals | number): boolean;
 }
 
@@ -156,6 +163,10 @@ const defaultSpawn: SpawnAppServerProcess = (command, args, options) => {
     cwd: options.cwd,
     env: options.env,
     stdio: ['pipe', 'pipe', 'pipe'],
+    // Lead a fresh process group so teardown can reap the whole tree
+    // (app-server + its MCP-bridge / MCP-server node children) via a
+    // negative-pid group signal instead of orphaning them.
+    detached: true,
   });
 };
 
@@ -656,7 +667,7 @@ export class CodexAppServerClient {
     }
     if (this.currentState === 'failed') {
       try {
-        this.child?.kill('SIGKILL');
+        this.killChild('SIGKILL');
       } catch (cause) {
         this.reportError(new AppServerTransportError(
           `Failed to force-kill failed Codex app-server: ${toError(cause).message}`,
@@ -674,7 +685,7 @@ export class CodexAppServerClient {
     this.pendingServerRequests.clear();
 
     try {
-      this.child?.kill(signal);
+      this.killChild(signal);
     } catch (cause) {
       this.currentState = 'failed';
       this.reportError(new AppServerTransportError(
@@ -686,7 +697,7 @@ export class CodexAppServerClient {
 
     if (await this.waitForExit(this.stopTimeoutMs)) return;
     try {
-      this.child?.kill('SIGKILL');
+      this.killChild('SIGKILL');
     } catch (cause) {
       this.currentState = 'failed';
       this.reportError(new AppServerTransportError(
@@ -1124,10 +1135,34 @@ export class CodexAppServerClient {
     this.pendingServerRequests.clear();
     this.reportError(error);
     try {
-      this.child?.kill('SIGTERM');
+      this.killChild('SIGTERM');
     } catch {
       // The transport is already failed; there is no recovery path for kill errors.
     }
+  }
+
+  /**
+   * Signal the app-server. When the child leads its own process group (real
+   * spawn, `detached: true`), target the whole group via a negative pid so the
+   * MCP-bridge / MCP-server node grandchildren are reaped instead of orphaned.
+   * Falls back to a direct child signal when no pid is available (e.g. tests) or
+   * the group signal fails (child already reaped, or not a group leader).
+   */
+  private killChild(signal: NodeJS.Signals): void {
+    const child = this.child;
+    if (!child) return;
+    const pid = child.pid;
+    if (typeof pid === 'number' && pid > 0) {
+      try {
+        process.kill(-pid, signal);
+        return;
+      } catch (error) {
+        // ESRCH: the group is already gone — nothing to reap.
+        if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
+        // Otherwise fall through to a direct child signal below.
+      }
+    }
+    child.kill(signal);
   }
 
   private rejectPendingClientRequests(error: Error): void {
