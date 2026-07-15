@@ -78,6 +78,18 @@ beforeEach(() => {
   };
 });
 
+describe('addSession — display order', () => {
+  it('appends a newly created highest-display-order session in memory', () => {
+    useSessionStore.setState({
+      sessions: [makeSession('s1', { displayOrder: 0 }), makeSession('s2', { displayOrder: 1 })],
+    });
+
+    useSessionStore.getState().addSession(makeSession('s3', { displayOrder: 2 }));
+
+    expect(useSessionStore.getState().sessions.map((session) => session.id)).toEqual(['s1', 's2', 's3']);
+  });
+});
+
 describe('addSessionOutput — caps + main-repo mirror', () => {
   it('caps stdout output at 300 lines (drops oldest)', () => {
     useSessionStore.setState({ sessions: [makeSession('s1')] });

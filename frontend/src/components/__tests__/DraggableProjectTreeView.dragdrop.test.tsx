@@ -11,15 +11,19 @@
  *   - dragCounter: an over-highlight clears only when the enter/leave count hits 0.
  */
 import '@testing-library/jest-dom';
-import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, act, fireEvent, createEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Session } from '../../types/session';
 import type { Folder } from '../../types/folder';
+import type { ExperimentRow } from '../../../../shared/types/experiments';
+import type { RailExperimentData } from '../../hooks/useRailExperiments';
 
-const { mockReorder, mockFoldersMove, mockShowError } = vi.hoisted(() => ({
+const { mockReorder, mockSessionsReorder, mockFoldersMove, mockShowError, mockSetSessions } = vi.hoisted(() => ({
   mockReorder: vi.fn(),
+  mockSessionsReorder: vi.fn(),
   mockFoldersMove: vi.fn(),
   mockShowError: vi.fn(),
+  mockSetSessions: vi.fn(),
 }));
 
 // The action layer (reorder / folders.move) lives on API.*; folder *loading*
@@ -46,6 +50,9 @@ vi.mock('../../utils/api', () => ({
       move: (...a: unknown[]) => mockFoldersMove(...a),
       moveSession: vi.fn(),
     },
+    sessions: {
+      reorder: (...a: unknown[]) => mockSessionsReorder(...a),
+    },
     dialog: { openDirectory: vi.fn() },
   },
 }));
@@ -53,9 +60,15 @@ vi.mock('../../utils/api', () => ({
 let mockSessions: Session[] = [];
 vi.mock('../../stores/sessionStore', () => ({
   useSessionStore: Object.assign(
-    (selector: (s: { sessions: Session[] }) => unknown) => selector({ sessions: mockSessions }),
-    { getState: () => ({ sessions: mockSessions }) },
+    (selector: (s: { sessions: Session[]; setSessions: (sessions: Session[]) => void }) => unknown) =>
+      selector({ sessions: mockSessions, setSessions: mockSetSessions }),
+    { getState: () => ({ sessions: mockSessions, setSessions: mockSetSessions }) },
   ),
+}));
+
+let mockRailByProject: Record<number, RailExperimentData> = {};
+vi.mock('../../hooks/useRailExperiments', () => ({
+  useRailExperiments: () => ({ byProject: mockRailByProject, refetch: vi.fn() }),
 }));
 
 vi.mock('../../stores/cyboflowStore', () => ({
@@ -134,9 +147,14 @@ function makeElectronAPI() {
 
 beforeEach(() => {
   mockReorder.mockReset().mockResolvedValue({ success: true });
+  mockSessionsReorder.mockReset().mockResolvedValue({ success: true });
   mockFoldersMove.mockReset().mockResolvedValue({ success: true });
   mockShowError.mockReset();
+  mockSetSessions.mockReset().mockImplementation((sessions: Session[]) => {
+    mockSessions = sessions;
+  });
   mockSessions = [];
+  mockRailByProject = {};
   mockRunsByProject = {};
   mockFoldersByProject = {
     1: [folder('f-a', 'Folder A', 1), folder('f-b', 'Folder B', 1), folder('f-c', 'Folder C', 1, 'f-b')],
@@ -165,6 +183,73 @@ async function renderTree() {
   await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
   // Folders load in a follow-on effect — wait for a root folder to appear.
   await waitFor(() => expect(screen.getByText('Folder A')).toBeInTheDocument());
+}
+
+function session(id: string, name: string, projectId: number, displayOrder: number): Session {
+  return {
+    id,
+    name,
+    projectId,
+    displayOrder,
+    worktreePath: `/tmp/${id}`,
+    prompt: '',
+    status: 'ready',
+    createdAt: '2026-01-01',
+    output: [],
+    jsonMessages: [],
+  };
+}
+
+function experiment(overrides: Partial<ExperimentRow> = {}): ExperimentRow {
+  return {
+    id: 'exp-1',
+    project_id: 1,
+    workflow_id: 'sprint',
+    kind: 'side_by_side',
+    base_branch: 'main',
+    base_sha: 'abc123',
+    variant_a_id: 'variant-a',
+    variant_b_id: 'variant-b',
+    run_a_id: null,
+    run_b_id: null,
+    session_a_id: 'arm-a',
+    session_b_id: 'arm-b',
+    seed_idea_id: null,
+    seed_idea_clone_a_id: null,
+    seed_idea_clone_b_id: null,
+    status: 'running',
+    winner_run_id: null,
+    winner_arm: null,
+    merge_sha: null,
+    decided_at: null,
+    rerun_of_experiment_id: null,
+    promoted_variant_id: null,
+    promoted_arm: null,
+    promoted_at: null,
+    created_at: '2026-01-01',
+    updated_at: '2026-01-01',
+    ...overrides,
+  };
+}
+
+function setRowRect(row: HTMLElement): void {
+  vi.spyOn(row, 'getBoundingClientRect').mockReturnValue({
+    top: 0,
+    height: 40,
+    bottom: 40,
+    left: 0,
+    right: 200,
+    width: 200,
+    x: 0,
+    y: 0,
+    toJSON: () => ({}),
+  });
+}
+
+function dragOverAt(row: HTMLElement, clientY: number, transfer: ReturnType<typeof dataTransfer>): void {
+  const event = createEvent.dragOver(row, { dataTransfer: transfer });
+  Object.defineProperty(event, 'clientY', { value: clientY });
+  fireEvent(row, event);
 }
 
 describe('DraggableProjectTreeView — project reorder drop', () => {
@@ -259,5 +344,122 @@ describe('DraggableProjectTreeView — dragCounter highlight', () => {
     // Second leave (counter → 0): highlight cleared.
     fireEvent.dragLeave(alpha);
     await waitFor(() => expect(draggableOf('Alpha Project').className).not.toContain('bg-interactive/20'));
+  });
+});
+
+describe('DraggableProjectTreeView — session reorder', () => {
+  it('persists the draggable rows by session id while excluding an interleaved experiment group', async () => {
+    mockSessions = [
+      session('one', 'Session One', 1, 0),
+      session('arm-a', 'Arm A session', 1, 1),
+      session('two', 'Session Two', 1, 2),
+      session('arm-b', 'Arm B session', 1, 3),
+      session('three', 'Session Three', 1, 4),
+    ];
+    mockRailByProject = {
+      1: { experiments: [experiment()], summariesById: {} },
+    };
+    await renderTree();
+
+    const source = draggableOf('Session Three');
+    const target = draggableOf('Session One');
+    setRowRect(target);
+    const transfer = dataTransfer();
+    fireEvent.dragStart(source, { dataTransfer: transfer });
+    expect(transfer.setData).toHaveBeenCalledWith('text/plain', 'three');
+    dragOverAt(target, 5, transfer);
+    await act(async () => {
+      fireEvent.drop(target, { clientY: 5, dataTransfer: transfer });
+    });
+
+    await waitFor(() => expect(mockSessionsReorder).toHaveBeenCalledTimes(1));
+    expect(mockSessionsReorder).toHaveBeenCalledWith([
+      { id: 'three', displayOrder: 0 },
+      { id: 'one', displayOrder: 1 },
+      { id: 'two', displayOrder: 2 },
+    ]);
+    expect(mockSessionsReorder.mock.calls[0][0]).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: 'arm-a' }), expect.objectContaining({ id: 'arm-b' })]),
+    );
+    await waitFor(() => {
+      const text = document.body.textContent ?? '';
+      expect(text.indexOf('Session Three')).toBeLessThan(text.indexOf('Session One'));
+    });
+  });
+
+  it('surfaces a reorder failure and leaves the rendered order unchanged', async () => {
+    mockSessionsReorder.mockResolvedValue({ success: false, error: 'db locked' });
+    mockSessions = [
+      session('one', 'Session One', 1, 0),
+      session('two', 'Session Two', 1, 1),
+      session('three', 'Session Three', 1, 2),
+    ];
+    await renderTree();
+
+    const source = draggableOf('Session Three');
+    const target = draggableOf('Session One');
+    setRowRect(target);
+    fireEvent.dragStart(source, { dataTransfer: dataTransfer() });
+    dragOverAt(target, 5, dataTransfer());
+    await act(async () => {
+      fireEvent.drop(target, { clientY: 5, dataTransfer: dataTransfer() });
+    });
+
+    await waitFor(() => expect(mockShowError).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Failed to reorder sessions', error: 'db locked' }),
+    ));
+    const text = document.body.textContent ?? '';
+    expect(text.indexOf('Session One')).toBeLessThan(text.indexOf('Session Three'));
+    expect(mockSetSessions).not.toHaveBeenCalled();
+  });
+
+  it('treats cross-project and experiment-group anchored drops as no-ops', async () => {
+    mockSessions = [
+      session('one', 'Session One', 1, 0),
+      session('arm-a', 'Arm A session', 1, 1),
+      session('arm-b', 'Arm B session', 1, 2),
+      session('other-project', 'Other Project Session', 2, 0),
+    ];
+    mockRailByProject = {
+      1: { experiments: [experiment()], summariesById: {} },
+    };
+    await renderTree();
+
+    const source = draggableOf('Session One');
+    const crossProjectTarget = draggableOf('Other Project Session');
+    setRowRect(crossProjectTarget);
+    fireEvent.dragStart(source, { dataTransfer: dataTransfer() });
+    dragOverAt(crossProjectTarget, 5, dataTransfer());
+    fireEvent.drop(crossProjectTarget, { clientY: 5, dataTransfer: dataTransfer() });
+
+    fireEvent.dragStart(source, { dataTransfer: dataTransfer() });
+    const groupRow = screen.getByTitle('Experiment running').closest('[role="button"]');
+    expect(groupRow).not.toBeNull();
+    fireEvent.drop(groupRow as HTMLElement, { dataTransfer: dataTransfer() });
+    await act(async () => { await Promise.resolve(); });
+
+    expect(mockSessionsReorder).not.toHaveBeenCalled();
+  });
+
+  it('renders a newly added highest-display-order session at the bottom', async () => {
+    mockSessions = [
+      session('one', 'Session One', 1, 0),
+      session('two', 'Session Two', 1, 1),
+    ];
+    const result = render(<DraggableProjectTreeView />);
+    await waitFor(() => expect(screen.getByText('Session Two')).toBeInTheDocument());
+
+    // Model the event-time array shape defensively: even if a caller supplied the
+    // new row first, display_order remains the rail's source of truth.
+    mockSessions = [
+      session('new', 'New Session', 1, 2),
+      session('one', 'Session One', 1, 0),
+      session('two', 'Session Two', 1, 1),
+    ];
+    result.rerender(<DraggableProjectTreeView />);
+
+    await waitFor(() => expect(screen.getByText('New Session')).toBeInTheDocument());
+    const text = document.body.textContent ?? '';
+    expect(text.indexOf('Session Two')).toBeLessThan(text.indexOf('New Session'));
   });
 });

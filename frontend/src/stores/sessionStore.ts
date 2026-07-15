@@ -82,7 +82,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     };
     
     return {
-      sessions: [sessionWithArrays, ...state.sessions],  // Add new sessions at the top
+      // The database assigns new sessions max(display_order) + 1, so retain the
+      // same append semantics in memory instead of briefly showing them at top.
+      sessions: [...state.sessions, sessionWithArrays],
       activeSessionId: session.id  // Automatically set as active
     };
   }),

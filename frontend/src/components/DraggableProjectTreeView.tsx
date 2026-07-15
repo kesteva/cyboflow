@@ -48,6 +48,13 @@ interface DragState {
   overFolderId: string | null;
 }
 
+interface SessionDragState {
+  sessionId: string | null;
+  projectId: number | null;
+  overSessionId: string | null;
+  dropPosition: 'before' | 'after' | null;
+}
+
 /** No props — sort order is always newest-first by created_at DESC. */
 export type DraggableProjectTreeViewProps = Record<string, never>;
 
@@ -130,7 +137,8 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
   const [editingFolderName, setEditingFolderName] = useState('');
 
-  // Drag state — session-based fields removed; project and folder DnD preserved.
+  // Project/folder drag state stays independent from session reorder state so
+  // those established interactions cannot affect one another.
   const [dragState, setDragState] = useState<DragState>({
     type: null,
     projectId: null,
@@ -139,6 +147,13 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
     overProjectId: null,
     overFolderId: null,
   });
+  const [sessionDragState, setSessionDragState] = useState<SessionDragState>({
+    sessionId: null,
+    projectId: null,
+    overSessionId: null,
+    dropPosition: null,
+  });
+  const [sessionOrderOverrides, setSessionOrderOverrides] = useState<Record<string, number>>({});
   const dragCounter = useRef(0);
 
   // Auto-expand bookkeeping. `restoredSavedExpansion` is true once load restores
@@ -757,7 +772,7 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   };
 
   // ---------------------------------------------------------------------------
-  // Drag and drop — projects and folders only; run rows are NOT draggable
+  // Drag and drop — projects, folders, and sessions; run rows are NOT draggable
   // ---------------------------------------------------------------------------
 
   const handleProjectDragStart = (e: React.DragEvent, project: Project) => {
@@ -895,6 +910,127 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   const handleDragEnter = (e: React.DragEvent) => {
     e.preventDefault();
     dragCounter.current++;
+  };
+
+  const handleSessionDragStart = (
+    e: React.DragEvent,
+    session: Session,
+    projectId: number,
+  ) => {
+    e.stopPropagation();
+    setSessionDragState({
+      sessionId: session.id,
+      projectId,
+      overSessionId: null,
+      dropPosition: null,
+    });
+    e.dataTransfer.effectAllowed = 'move';
+    // Firefox requires drag data to be populated before it will start a drag.
+    e.dataTransfer.setData('text/plain', String(session.id));
+  };
+
+  const handleSessionDragOver = (e: React.DragEvent, targetSession: Session) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const dropPosition = e.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
+    setSessionDragState((prev) => ({
+      ...prev,
+      overSessionId: targetSession.id,
+      dropPosition,
+    }));
+  };
+
+  const handleSessionDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleSessionDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleSessionDragEnd = () => {
+    setSessionDragState({
+      sessionId: null,
+      projectId: null,
+      overSessionId: null,
+      dropPosition: null,
+    });
+  };
+
+  const handleSessionDrop = async (
+    e: React.DragEvent,
+    targetSession: Session,
+    projectId: number,
+    draggableSessions: Session[],
+  ) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const { sessionId, projectId: sourceProjectId, dropPosition } = sessionDragState;
+    if (
+      !sessionId ||
+      sourceProjectId !== projectId ||
+      sessionId === targetSession.id ||
+      !dropPosition
+    ) {
+      handleSessionDragEnd();
+      return;
+    }
+
+    const sourceIndex = draggableSessions.findIndex((session) => session.id === sessionId);
+    if (sourceIndex === -1 || !draggableSessions.some((session) => session.id === targetSession.id)) {
+      handleSessionDragEnd();
+      return;
+    }
+
+    const reorderedSessions = [...draggableSessions];
+    const [movedSession] = reorderedSessions.splice(sourceIndex, 1);
+    const targetIndex = reorderedSessions.findIndex((session) => session.id === targetSession.id);
+    if (targetIndex === -1) {
+      handleSessionDragEnd();
+      return;
+    }
+    reorderedSessions.splice(targetIndex + (dropPosition === 'after' ? 1 : 0), 0, movedSession);
+
+    const sessionOrders = reorderedSessions.map((session, index) => ({
+      id: session.id,
+      displayOrder: index,
+    }));
+    if (sessionOrders.every((order, index) => order.id === draggableSessions[index]?.id)) {
+      handleSessionDragEnd();
+      return;
+    }
+
+    try {
+      const response = await API.sessions.reorder(sessionOrders);
+      if (response.success) {
+        const displayOrderById: Record<string, number> = Object.fromEntries(
+          sessionOrders.map(({ id, displayOrder }) => [id, displayOrder]),
+        );
+        setSessionOrderOverrides((prev) => ({ ...prev, ...displayOrderById }));
+        const sessionStore = useSessionStore.getState();
+        sessionStore.setSessions(
+          sessionStore.sessions.map((session) => {
+            const displayOrder = displayOrderById[session.id];
+            return displayOrder === undefined ? session : { ...session, displayOrder };
+          }),
+        );
+      } else {
+        showError({
+          title: 'Failed to reorder sessions',
+          error: response.error || 'Unknown error occurred',
+        });
+      }
+    } catch (error: unknown) {
+      showError({
+        title: 'Failed to reorder sessions',
+        error: error instanceof Error ? error.message : 'Unknown error occurred',
+      });
+    }
+    handleSessionDragEnd();
   };
 
   // ---------------------------------------------------------------------------
@@ -1151,9 +1287,13 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
               // (which includes archived rows) and a sessions-loaded reload re-adds them,
               // so a dismissed (archived) session would otherwise linger in the rail. The
               // left rail lists ACTIVE/open sessions only.
-              const projectSessions = allSessions.filter(
-                (s) => s.projectId === project.id && !s.isMainRepo && !s.archived,
-              );
+              const projectSessions = allSessions
+                .filter((s) => s.projectId === project.id && !s.isMainRepo && !s.archived)
+                .sort((a, b) => {
+                  const aOrder = sessionOrderOverrides[a.id] ?? a.displayOrder ?? Number.MAX_SAFE_INTEGER;
+                  const bOrder = sessionOrderOverrides[b.id] ?? b.displayOrder ?? Number.MAX_SAFE_INTEGER;
+                  return aOrder - bOrder;
+                });
               // Also drop run rows whose parent session was dismissed (archived):
               // the run's worktree is the session's, which is now gone, so the run
               // should not linger in the rail after a session dismiss. Runs with no
@@ -1462,6 +1602,10 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                         const lastActivityAt = session.lastActivity ?? session.createdAt;
                         const relativeTime = lastActivityAt ? formatDistanceToNow(lastActivityAt) : '';
                         const isActive = selectedSessionId === session.id;
+                        const sessionDropIndicator =
+                          sessionDragState.overSessionId === session.id
+                            ? sessionDragState.dropPosition
+                            : null;
 
                         return (
                           <div
@@ -1482,17 +1626,29 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                               />
                             </div>
 
-                            {/* Session row — NOT draggable */}
+                            {/* Session row — draggable within this project's flat session list. */}
                             <div
-                              className={`relative flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors ${
+                              className={`group/session relative flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors ${
                                 isActive ? 'bg-interactive/10' : 'hover:bg-surface-hover'
+                              } ${sessionDropIndicator === 'before' ? 'border-t-2 border-interactive' : ''} ${
+                                sessionDropIndicator === 'after' ? 'border-b-2 border-interactive' : ''
                               }`}
                               style={{ paddingLeft: '24px' }}
+                              draggable
+                              onDragStart={(e) => handleSessionDragStart(e, session, project.id)}
+                              onDragOver={(e) => handleSessionDragOver(e, session)}
+                              onDrop={(e) => handleSessionDrop(e, session, project.id, flatSessions)}
+                              onDragEnd={handleSessionDragEnd}
+                              onDragEnter={handleSessionDragEnter}
+                              onDragLeave={handleSessionDragLeave}
                               onClick={() => handleSessionClick(session)}
                               role="button"
                               tabIndex={0}
                               onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleSessionClick(session); }}
                             >
+                              <div className="opacity-0 group-hover/session:opacity-100 transition-opacity cursor-move">
+                                <GripVertical className="w-3 h-3 text-text-tertiary" />
+                              </div>
                               {/* Status indicator dot */}
                               <span
                                 className={`w-2 h-2 rounded-full flex-shrink-0 ${statusDotClass(session.status)}`}
