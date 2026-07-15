@@ -1,6 +1,6 @@
 -- Migration 062: per-task re-open window stamp for the development-cycle deriver.
 --
--- recomputeTaskExecutionStage (migration 061) aggregates over ALL of a task's
+-- recomputeTaskExecutionStage (migration 066) aggregates over ALL of a task's
 -- historical runs, and both sprint_batch_tasks lane rows and workflow_runs
 -- outcome='merged' persist FOREVER. A task merged in one sprint, then re-opened
 -- (Done -> Ready, legal once its runs are terminal) and pulled into a LATER

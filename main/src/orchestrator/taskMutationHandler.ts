@@ -90,7 +90,7 @@ export interface TaskMutationDeps {
   /**
    * TaskChangeRouter.getInstance().recomputeTaskExecutionStage (bound at the
    * composition root). Called AFTER a lane is enrolled (moves the task to 'In
-   * development', migration 061) or removed (reverts it to its entry stage).
+   * development', migration 066) or removed (reverts it to its entry stage).
    * Optional + fail-soft: a missing dep or a throw never fails the mutation.
    */
   recomputeTask?: (taskId: string) => Promise<void>;
@@ -285,7 +285,7 @@ export async function addTaskToRun(
       return { ok: false, reason: 'lane_error', detail: err instanceof Error ? err.message : undefined };
     }
 
-    // 5. Lane enrolled — move the task to 'In development' (migration 061). Its
+    // 5. Lane enrolled — move the task to 'In development' (migration 066). Its
     // OWN try/catch so a derive failure never trips the outer compensating delete:
     // the enrollment succeeded and must stand.
     if (deps.recomputeTask) {
@@ -356,7 +356,7 @@ export async function removeTaskFromRun(
   }
 
   // Lane removed — revert the task off 'In development' back to its entry stage
-  // (migration 061). Best-effort: a derive failure never fails the removal.
+  // (migration 066). Best-effort: a derive failure never fails the removal.
   if (taskId && deps.recomputeTask) {
     try {
       await deps.recomputeTask(taskId);

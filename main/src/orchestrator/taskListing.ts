@@ -34,7 +34,7 @@
  *                    failed/canceled) associated with the task either DIRECTLY
  *                    (workflow_runs.task_id) or via a sprint-BATCH lane
  *                    (workflow_runs.batch_id joined through sprint_batch_tasks —
- *                    migration 061's derived 'In development' stage tracks the
+ *                    migration 066's derived 'In development' stage tracks the
  *                    same association); agent resolved from
  *                    steps_snapshot_json[current_step_id], else current_step_id,
  *                    else 'agent'; sessionId/sessionName LEFT JOINed from the
@@ -340,7 +340,7 @@ function resolveAgentLabel(run: RunOverlayRow): string {
 
 /**
  * Gather the overlay rows for a task's OWN direct runs AND any sprint-batch
- * runs whose lane names it (migration 061's derived 'In development' stage
+ * runs whose lane names it (migration 066's derived 'In development' stage
  * tracks the SAME association — see TaskChangeRouter.gatherTaskRuns). LEFT
  * JOINs `sessions` to project the hosting session's name. DISTINCT on the row
  * dedupes a run that happens to match both arms (every non-id column is

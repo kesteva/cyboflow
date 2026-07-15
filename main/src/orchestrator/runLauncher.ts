@@ -103,7 +103,7 @@ export interface TaskStageDeriverLike {
   recomputeTaskExecutionStage(taskId: string): Promise<void>;
   /**
    * Capture entry stage + derive the execution stage for every task in a sprint
-   * batch (migration 061). Called right after the batch is seeded so pulled tasks
+   * batch (migration 066). Called right after the batch is seeded so pulled tasks
    * move to 'In development'.
    */
   recomputeTasksForBatch(batchId: string): Promise<void>;
@@ -632,7 +632,7 @@ export class RunLauncher {
         // Record the seed for the outer catch's fail-soft revert (Fix 3).
         seededBatchId = batchId;
 
-        // Move the pulled tasks to 'In development' (migration 061): capture each
+        // Move the pulled tasks to 'In development' (migration 066): capture each
         // lane's entry stage, then derive its execution stage. Best-effort so a
         // task-side failure never aborts the launch (mirrors linkRunToTaskAndDerive).
         if (this.taskStageDeriver) {

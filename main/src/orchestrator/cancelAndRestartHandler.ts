@@ -51,7 +51,7 @@ export interface CancelAndRestartDeps {
    */
   deletePendingDraftsForRun?: (runId: string) => Promise<void>;
   /**
-   * Revert the OLD run's tasks off 'In development' (migration 061) once it flips
+   * Revert the OLD run's tasks off 'In development' (migration 066) once it flips
    * 'canceled'. The replacement run is inserted WITHOUT a task_id/batch_id link
    * (restart semantics are out of scope — it re-plans from scratch), so nothing
    * else re-derives those tasks; a stuck sprint's lane tasks would otherwise stay
@@ -108,7 +108,7 @@ interface WorkflowRunRow {
   model: string | null;
   eval_enabled: number | null;
   /**
-   * Task/batch links (migration 061). Read so the OLD run's tasks can revert off
+   * Task/batch links (migration 066). Read so the OLD run's tasks can revert off
    * 'In development' after it flips 'canceled'. Deliberately NOT copied to the
    * replacement run's INSERT — a restart re-plans from scratch, so the tasks
    * legitimately fall back to their entry stage.
@@ -272,7 +272,7 @@ export async function cancelAndRestartHandler(
       }
     }
 
-    // Step 5c (migration 061): the replacement run inserted in step 5 carries NO
+    // Step 5c (migration 066): the replacement run inserted in step 5 carries NO
     // task_id/batch_id link (a restart re-plans from scratch), so nothing else
     // re-derives the OLD run's tasks. Now the old run is 'canceled', revert its
     // batch lanes + direct task off 'In development' to their entry stage. Both

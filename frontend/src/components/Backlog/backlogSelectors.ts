@@ -30,7 +30,7 @@ export function pickDefaultBoard(boards: Board[]): Board | null {
 /**
  * Stages visible in the board, sorted by position. The board carries five
  * stages — 1 Idea, 6 Ready for development, 7 In development (DERIVED,
- * migration 061 — orchestrator-only, never a manual target), 9 Done, 10 Won't
+ * migration 066 — orchestrator-only, never a manual target), 9 Done, 10 Won't
  * do. The terminal "Won't do" stage is hidden by default (archiving stamps
  * `archived_at` in place rather than moving an item) and excluded unless
  * `showArchived` is on.
@@ -202,7 +202,7 @@ export function unifiedStages(
 // Position 6 ("Ready for development") is the single non-terminal ASSERTED
 // execution stage and the planning→execution boundary; an entity at position 1
 // is still in planning, 9/10 are terminal. Position 7 ("In development",
-// migration 061) is DERIVED (write_policy='derived', orchestrator-only — see
+// migration 066) is DERIVED (write_policy='derived', orchestrator-only — see
 // selectableStages) and TASK-ONLY: recomputeTaskExecutionStage never moves an
 // epic/idea there, so isExecutionStage's epic-scoped Run-button routing below
 // never needs to consider it.
@@ -254,7 +254,7 @@ export function findStageById(board: Board, stageId: string): BoardStage | null 
  * The stages a USER may manually move an item to, sorted by position. Excludes:
  *  - DERIVED stages (write_policy === 'derived') — the chokepoint rejects user
  *    asserts on those (code 'forbidden_stage'). This is what keeps the derived
- *    "In development" stage (position 7, migration 061) OFF the "Change
+ *    "In development" stage (position 7, migration 066) OFF the "Change
  *    stage…" picker's option list — StageChangeDialog renders exactly this
  *    list, so a user can never drop/move a card onto it from the UI.
  *  - the item's CURRENT stage (a no-op move).

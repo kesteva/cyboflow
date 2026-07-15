@@ -639,7 +639,7 @@ describe('experiments router orchestration (slice B)', () => {
     expect(h.launches).toHaveLength(0);
   });
 
-  it('rejects a seed task already in development via a DIRECT active run (double-pull guard, migration 061)', async () => {
+  it('rejects a seed task already in development via a DIRECT active run (double-pull guard, migration 066)', async () => {
     const h = makeHarness();
     const good = await seedEligibleTask(h, 'good', 'b');
     const inDev = await seedEligibleTask(h, 'in-dev', 'b');
@@ -662,7 +662,7 @@ describe('experiments router orchestration (slice B)', () => {
     expect(h.launches).toHaveLength(0);
   });
 
-  it('rejects a seed task already in development via a BATCH lane (double-pull guard, migration 061)', async () => {
+  it('rejects a seed task already in development via a BATCH lane (double-pull guard, migration 066)', async () => {
     const h = makeHarness();
     const inDev = await seedEligibleTask(h, 'in-dev', 'b');
     // A non-terminal BATCH run + a lane naming `inDev`.

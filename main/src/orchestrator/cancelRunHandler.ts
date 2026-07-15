@@ -89,7 +89,7 @@ export interface CancelRunDeps {
    */
   markBatchTerminal?: (batchId: string, status: 'canceled') => void;
   /**
-   * Revert the canceled batch run's tasks off 'In development' (migration 061):
+   * Revert the canceled batch run's tasks off 'In development' (migration 066):
    * a task whose only live association was this run reverts to its entry stage.
    * Backed by TaskChangeRouter.recomputeTasksForBatch (idempotent, per-task
    * fail-soft). Optional + fail-soft: a missing dep or a throw never blocks the
@@ -97,7 +97,7 @@ export interface CancelRunDeps {
    */
   recomputeTasksForBatch?: (batchId: string) => Promise<void>;
   /**
-   * Revert a DIRECTLY task-linked run's task off 'In development' (migration 061):
+   * Revert a DIRECTLY task-linked run's task off 'In development' (migration 066):
    * a canceled run whose only live association was this direct task-link reverts
    * the task to its entry stage. Backed by
    * TaskChangeRouter.recomputeTaskExecutionStage (idempotent, per-task fail-soft).
@@ -167,7 +167,7 @@ export type CancelRunResult =
 interface CancelRunRow {
   status: string;
   batch_id: string | null;
-  /** Direct task-link (migration 061); non-null when the run drives one task's derived stage. */
+  /** Direct task-link (migration 066); non-null when the run drives one task's derived stage. */
   task_id: string | null;
 }
 
@@ -359,7 +359,7 @@ export async function cancelRunHandler(
         error: err instanceof Error ? err.message : String(err),
       });
     }
-    // Revert the batch's lanes off 'In development' (migration 061) now the run is
+    // Revert the batch's lanes off 'In development' (migration 066) now the run is
     // terminal — AFTER markBatchTerminal. Fail-soft: the run row is canonical.
     try {
       await recomputeTasksForBatch?.(row.batch_id);
@@ -372,7 +372,7 @@ export async function cancelRunHandler(
     }
   }
 
-  // Direct task-link revert (migration 061): a canceled run linked DIRECTLY to a
+  // Direct task-link revert (migration 066): a canceled run linked DIRECTLY to a
   // task (workflow_runs.task_id, no batch) reverts that task off 'In development'
   // to its entry stage. Load-bearing for session dismiss (cancelHostedRuns → this
   // handler), which otherwise never recomputes a direct task's stage. Fail-soft

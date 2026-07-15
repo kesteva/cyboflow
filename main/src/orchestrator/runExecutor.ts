@@ -334,7 +334,7 @@ export interface TaskStageRecomputeLike {
   recomputeTaskExecutionStage(taskId: string): Promise<void>;
   /**
    * Recompute the execution stage for every task in a sprint batch (migration
-   * 061). A sprint run carries a batch_id but usually no task_id, so terminal
+   * 066). A sprint run carries a batch_id but usually no task_id, so terminal
    * phases must recompute the batch's lanes to revert non-integrated tasks.
    */
   recomputeTasksForBatch(batchId: string): Promise<void>;
@@ -2071,7 +2071,7 @@ export class RunExecutor {
    *   'failed'   → outcome='failed'
    *   'canceled' → outcome='canceled'
    * Then recomputeTaskExecutionStage drives the task to its derived stage
-   * (migration 061 re-added the 'In development' stage, position 7):
+   * (migration 066 re-added the 'In development' stage, position 7):
    *   running / awaiting_review phases (a live run association) → In development (7)
    *   'failed' / 'canceled' (all runs terminal, no merge)       → revert to entry stage
    * 'post_spawn' is a no-op for tasks (status is unchanged).
@@ -2090,7 +2090,7 @@ export class RunExecutor {
     try {
       const run = this.registry.getRunById(runId);
 
-      // Sprint-batch lane recompute (migration 061): a sprint run usually carries
+      // Sprint-batch lane recompute (migration 066): a sprint run usually carries
       // batch_id but no task_id, so its lanes' tasks are only reachable this way.
       // Fail-soft + BEFORE the task_id early-return.
       if (run?.batch_id) {

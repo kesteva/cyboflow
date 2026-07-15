@@ -76,7 +76,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
   // 022 (sprint_batches + sprint_batch_tasks + workflow_runs.batch_id) — so the
   // deriver's batch-run aggregation + the active-run guard resolve against real
-  // lane rows instead of degrading to the direct-only fallback (migration 061).
+  // lane rows instead of degrading to the direct-only fallback (migration 066).
   db.exec(readFileSync(join(migDir, '022_sprint_batches.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
@@ -96,10 +96,10 @@ function buildDb(): Database.Database {
   // Migration 059: category (feature|bug|chore) — an unconditional column in
   // insertEntity/readEntity now (mirrors priority), so every create needs it.
   db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
-  // Migration 062: tasks.reopened_at — the re-open window stamp the deriver reads
+  // Migration 067: tasks.reopened_at — the re-open window stamp the deriver reads
   // (columnExists-gated) and the stage-move branch writes on a terminal->non-terminal
   // move. Present here so the window + stamp are exercised (absent -> full history).
-  db.exec(readFileSync(join(migDir, '062_task_reopened_at.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '067_task_reopened_at.sql'), 'utf-8'));
   return db;
 }
 
@@ -114,7 +114,7 @@ function seedRunForTask(
   db.prepare(
     `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`,
   ).run();
-  // createdAt (optional) exercises the re-open window (migration 062); COALESCE to
+  // createdAt (optional) exercises the re-open window (migration 067); COALESCE to
   // CURRENT_TIMESTAMP preserves the default for callers that don't set it.
   db.prepare(
     `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, task_id, outcome, created_at)
@@ -125,7 +125,7 @@ function seedRunForTask(
 /**
  * Seed a sprint-batch run (workflow_runs.batch_id, NO task_id) + a lane row for
  * `taskId` in that batch. Models a task pulled into a sprint batch (migration
- * 061). Reuses an existing batch when `batchId` is supplied.
+ * 066). Reuses an existing batch when `batchId` is supplied.
  */
 function seedBatchLaneForTask(
   db: Database.Database,
@@ -145,7 +145,7 @@ function seedBatchLaneForTask(
   db.prepare(
     `INSERT OR IGNORE INTO sprint_batches (id, project_id, substrate, status) VALUES (?, 1, 'sdk', 'running')`,
   ).run(opts.batchId);
-  // createdAt (optional) exercises the re-open window (migration 062).
+  // createdAt (optional) exercises the re-open window (migration 067).
   db.prepare(
     `INSERT OR IGNORE INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, batch_id, outcome, created_at)
      VALUES (?, 'wf-1', 1, ?, 'default', ?, ?, COALESCE(?, CURRENT_TIMESTAMP))`,
@@ -385,7 +385,7 @@ describe('TaskChangeRouter (3-table entity model)', () => {
     const router = TaskChangeRouter.initialize(dbAdapter(db));
     const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
     // No DIRECT task_id link — only a live sprint-batch lane. The widened guard
-    // (migration 061) must protect it just the same.
+    // (migration 066) must protect it just the same.
     seedBatchLaneForTask(db, { taskId, batchId: 'bat-1', runId: 'run-1', runStatus: 'running' });
 
     await expect(router.applyChange(1, { actor: 'user', taskId, stageId: stageId(1) })).rejects.toMatchObject({
@@ -1866,7 +1866,7 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       seedRunForTask(db, { taskId, runId: 'r1', status: 'running' });
       await router.recomputeTaskExecutionStage(taskId);
       const task = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string };
-      expect(task.stage_id).toBe(stageId(7)); // In development (migration 061)
+      expect(task.stage_id).toBe(stageId(7)); // In development (migration 066)
     });
 
     it('awaiting_review direct run -> In development (position 7)', async () => {
@@ -1949,7 +1949,7 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect(task.stage_id).toBe(stageId(6));
     });
 
-    // --- sprint-batch pull (migration 061) ------------------------------------
+    // --- sprint-batch pull (migration 066) ------------------------------------
 
     it('batch pull with a running batch run -> In development (position 7)', async () => {
       const db = buildDb();
@@ -2102,7 +2102,7 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));
       // A task at Ready for development (position 6, ASSERTED), entry NOT captured,
-      // that ALREADY holds a live sprint-batch association — the migration-061
+      // that ALREADY holds a live sprint-batch association — the migration-066
       // upgrade gap (the guard blocks re-pulling it, but the board never projected
       // it into stage 7). The bidirectional sweep must move it IN.
       const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
@@ -2180,12 +2180,12 @@ describe('TaskChangeRouter (3-table entity model)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // re-open window (migration 062): a task re-opened (terminal -> non-terminal)
+  // re-open window (migration 067): a task re-opened (terminal -> non-terminal)
   // stamps reopened_at, and gatherTaskRuns then excludes runs from the PRIOR
   // development cycle so a stale merged run can't snap a re-pulled task to Done.
   // -------------------------------------------------------------------------
 
-  describe('re-open window (migration 062)', () => {
+  describe('re-open window (migration 067)', () => {
     /** A task at Ready-for-dev (position 6) with entry_stage_id captured. */
     async function makeTaskAtReady(db: Database.Database, router: TaskChangeRouter): Promise<string> {
       const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
@@ -2384,7 +2384,7 @@ describe('TaskChangeRouter (3-table entity model)', () => {
 
   // -------------------------------------------------------------------------
   // buildBacklogTaskItem — inFlow overlay (direct + sprint-batch, session
-  // identity, migration 061's session-attribution seam)
+  // identity, migration 066's session-attribution seam)
   // -------------------------------------------------------------------------
 
   describe('buildBacklogTaskItem — inFlow overlay (direct + sprint-batch, session identity)', () => {

@@ -133,7 +133,7 @@ describe('cancelAndRestartHandler', () => {
     // workflow_runs (see orchestratorTestDb) so the handler's SELECT + INSERT
     // of session_id resolve. includeWorkflowRunTaskColumns adds task_id (mig 014)
     // — batch_id already rides includeSubstrate — so the handler's SELECT of both
-    // (migration 061 revert seam) resolves.
+    // (migration 066 revert seam) resolves.
     db = createTestDb({
       includeStuckDetectedAt: true,
       includeSubstrate: true,
@@ -641,12 +641,12 @@ describe('cancelAndRestartHandler', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Migration 061 revert seam: the OLD run flips 'canceled' but the replacement run
+// Migration 066 revert seam: the OLD run flips 'canceled' but the replacement run
 // carries NO task_id/batch_id link (restart re-plans from scratch), so the OLD
 // run's tasks must be reverted off 'In development' here — nothing else does it.
 // ---------------------------------------------------------------------------
 
-describe('cancelAndRestartHandler — task-stage revert (migration 061)', () => {
+describe('cancelAndRestartHandler — task-stage revert (migration 066)', () => {
   let db: Database.Database;
   let spy: OrderSpy;
   let runQueues: RunQueueRegistry;

@@ -344,7 +344,7 @@ interface EntityDbRow {
   caused_by_run_id: string | null;
   /** User-controlled manual rank (migration 057); NULL = unranked + on pre-057 DBs. */
   sort_order: number | null;
-  /** Development-cycle re-open stamp (tasks-only, migration 062); NULL = never re-opened + on ideas/epics + pre-062 DBs. */
+  /** Development-cycle re-open stamp (tasks-only, migration 067); NULL = never re-opened + on ideas/epics + pre-067 DBs. */
   reopened_at: string | null;
   version: number;
   created_at: string;
@@ -383,7 +383,7 @@ const DONE_POSITION = 9;
 /** The board stage entities enter development at — the LOW half of the derived pair. */
 const READY_FOR_DEV_POSITION = 6;
 /**
- * Orchestrator-DERIVED 'In development' stage (migration 061): a task moves here
+ * Orchestrator-DERIVED 'In development' stage (migration 066): a task moves here
  * while any of its runs (direct task-link OR sprint-batch lane) is non-terminal,
  * and reverts to its entry stage when all of them end without merging.
  */
@@ -1515,12 +1515,12 @@ export class TaskChangeRouter {
         deltas.push({ field: 'stage_id', from: current.stage_id, to: change.stageId });
         action = 'stageMoved';
 
-        // RE-OPEN WINDOW (migration 062): a TASK moving FROM a terminal stage
+        // RE-OPEN WINDOW (migration 067): a TASK moving FROM a terminal stage
         // (Done / Won't do) TO a non-terminal stage — by ANY actor — begins a new
         // development cycle. Stamp reopened_at so recomputeTaskExecutionStage's
         // gatherTaskRuns excludes the PRIOR cycle's runs (a stale merged run must
         // not snap the re-pulled task back to Done). Gated on the column existing
-        // for pre-062 schemas; a non-terminal-origin move never re-opens.
+        // for pre-067 schemas; a non-terminal-origin move never re-opens.
         if (type === 'task' && this.columnExists('tasks', 'reopened_at')) {
           const fromStage = this.lookupStage(current.stage_id);
           if (fromStage?.is_terminal === 1 && targetStage.is_terminal !== 1) {
@@ -2177,8 +2177,8 @@ export class TaskChangeRouter {
     const sortOrder = this.columnExists(desc.table, 'sort_order')
       ? 'sort_order'
       : 'NULL AS sort_order';
-    // Development-cycle re-open stamp (migration 062, tasks-only), fail-soft on
-    // pre-062 / non-task tables (ideas/epics never carry it).
+    // Development-cycle re-open stamp (migration 067, tasks-only), fail-soft on
+    // pre-067 / non-task tables (ideas/epics never carry it).
     const reopenedAt = this.columnExists(desc.table, 'reopened_at')
       ? 'reopened_at'
       : 'NULL AS reopened_at';
@@ -2227,9 +2227,9 @@ export class TaskChangeRouter {
    * just-Done task back to Ready.
    */
   async recomputeTaskExecutionStage(taskId: string): Promise<void> {
-    // Development-cycle re-open window (migration 062): read reopened_at ALONGSIDE
-    // the task row (columnExists-gated for pre-062 schemas) so gatherTaskRuns can
-    // exclude runs from a PRIOR cycle. NULL (pre-062 / never re-opened) -> full history.
+    // Development-cycle re-open window (migration 067): read reopened_at ALONGSIDE
+    // the task row (columnExists-gated for pre-067 schemas) so gatherTaskRuns can
+    // exclude runs from a PRIOR cycle. NULL (pre-067 / never re-opened) -> full history.
     const reopenedCol = this.columnExists('tasks', 'reopened_at') ? 'reopened_at' : 'NULL AS reopened_at';
     const task = this.db
       .prepare(`SELECT id, project_id, board_id, stage_id, entry_stage_id, ${reopenedCol} FROM tasks WHERE id = ?`)
@@ -2321,7 +2321,7 @@ export class TaskChangeRouter {
    * migration 022) so a pre-022 test schema degrades to the direct-only set
    * instead of throwing 'no such table/column'.
    *
-   * RE-OPEN WINDOW (migration 062): when the task carries a `reopenedAt` stamp
+   * RE-OPEN WINDOW (migration 067): when the task carries a `reopenedAt` stamp
    * (moved FROM a terminal stage TO a non-terminal one — a fresh development
    * cycle), exclude every run created BEFORE that instant so only the CURRENT
    * cycle's runs drive the derived stage. Only gatherTaskRuns is scoped this way —
@@ -2469,7 +2469,7 @@ export class TaskChangeRouter {
   }
 
   /**
-   * BOOT SELF-HEAL (migration 061) — a BIDIRECTIONAL projection reconciler for the
+   * BOOT SELF-HEAL (migration 066) — a BIDIRECTIONAL projection reconciler for the
    * derived 'In development' stage. Two directions, both healed here:
    *
    *  (OUT) a task parked AT a derived stage whose live run association has since
@@ -2478,7 +2478,7 @@ export class TaskChangeRouter {
    *        its entry stage.
    *  (IN)  the UPGRADE GAP: a task at a NON-terminal ASSERTED stage (e.g. Ready for
    *        development) that ALREADY had a live (paused/awaiting_review/running) run
-   *        association at migration-061 time never got projected INTO stage 7 — the
+   *        association at migration-066 time never got projected INTO stage 7 — the
    *        double-pull guard blocks re-pulling it, so guard and board disagree.
    *        These are captured here too (their entry stage snapshotted first) and
    *        moved to 'In development'.

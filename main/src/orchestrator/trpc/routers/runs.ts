@@ -1104,7 +1104,7 @@ export const runsRouter = router({
           eligibleIds = store.filterEligibleTaskIds(input.projectId, input.taskIds);
           // Tasks dropped for the double-pull guard (already in a live run) — used
           // only to make the ineligibility message say "already in development"
-          // rather than the generic approval/stage reason (migration 061).
+          // rather than the generic approval/stage reason (migration 066).
           activeRunIds = store.findActiveRunTaskIds(input.projectId, input.taskIds);
           // Tasks dropped because they are the ORIGINAL seed of a LIVE A/B
           // experiment (Fix 2) — the experiment reserves them even though they have
@@ -1873,7 +1873,7 @@ export const runsRouter = router({
       }
       // The run just went terminal without an outcome stamp — recompute so tasks
       // whose only live association was this run revert off 'In development'
-      // (migration 061). AFTER the status UPDATE so the deriver reads 'completed'.
+      // (migration 066). AFTER the status UPDATE so the deriver reads 'completed'.
       // Fail-soft: end already succeeded.
       try {
         const taskRouter = TaskChangeRouter.getInstance();

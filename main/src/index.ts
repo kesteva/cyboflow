@@ -2534,7 +2534,7 @@ app.whenReady().then(async () => {
       console.log(`[Main] Backfilled terminal outcomes (failed: ${outcomeBackfill.failedBackfilled}, canceled: ${outcomeBackfill.canceledBackfilled})`);
     }
 
-    // Boot self-heal (migration 061): the derived 'In development' stage projects
+    // Boot self-heal (migration 066): the derived 'In development' stage projects
     // a task's live run associations, and the recovery sweeps above force-fail
     // runs with raw UPDATEs (no per-task recompute). Recompute every task parked
     // at a derived stage AFTER those sweeps so a task whose runs died with the
@@ -2571,7 +2571,7 @@ app.whenReady().then(async () => {
       claudeManagerStop: (sessionId: string) => defaultCliManager.stopPanel(sessionId),
       // F5: sweep the OLD run's pending drafts after it flips 'canceled'.
       deletePendingDraftsForRun,
-      // Migration 061: the OLD run flips 'canceled' but the replacement run carries
+      // Migration 066: the OLD run flips 'canceled' but the replacement run carries
       // no task/batch link, so revert the old run's batch lanes + direct task off
       // 'In development' to their entry stage (fail-soft inside the handler).
       recomputeTasksForBatch: (batchId: string) =>
@@ -2620,11 +2620,11 @@ app.whenReady().then(async () => {
       // never strands non-terminal.
       markBatchTerminal: (batchId: string, status: 'canceled') =>
         SprintLaneStore.getInstance().markBatchTerminal(batchId, status),
-      // Migration 061: after the cancel + batch close-out, revert the batch's
+      // Migration 066: after the cancel + batch close-out, revert the batch's
       // non-integrated lanes off 'In development' to their entry stage.
       recomputeTasksForBatch: (batchId: string) =>
         TaskChangeRouter.getInstance().recomputeTasksForBatch(batchId),
-      // Migration 061: a DIRECTLY task-linked run (workflow_runs.task_id, no batch)
+      // Migration 066: a DIRECTLY task-linked run (workflow_runs.task_id, no batch)
       // reverts its task off 'In development' too. Load-bearing for session dismiss
       // (cancelHostedRuns → cancelRunHandler), which never recomputes otherwise.
       recomputeTask: (taskId: string) =>
@@ -2893,7 +2893,7 @@ app.whenReady().then(async () => {
         addLane: (laneArgs) => SprintLaneStore.getInstance().addLane(laneArgs),
         removeLane: (laneArgs) => SprintLaneStore.getInstance().removeLane(laneArgs),
       },
-      // Migration 061: recompute the mutated task's execution stage after a
+      // Migration 066: recompute the mutated task's execution stage after a
       // mid-sprint add (→ In development) or remove (→ entry stage).
       recomputeTask: (taskId) => TaskChangeRouter.getInstance().recomputeTaskExecutionStage(taskId),
       logger: loggerLike,

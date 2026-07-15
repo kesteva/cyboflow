@@ -564,7 +564,7 @@ describe('selectableStages', () => {
     expect(selectableStages(defaultBoard(), 'board-1-s6').map((s) => s.position)).toEqual([1, 9, 10]);
   });
 
-  it("excludes the DERIVED 'In development' stage (position 7, migration 061) as a manual target — the client-side half of preventing a hand move onto it", () => {
+  it("excludes the DERIVED 'In development' stage (position 7, migration 066) as a manual target — the client-side half of preventing a hand move onto it", () => {
     const board = defaultBoard({
       stages: [
         ...defaultBoard().stages,

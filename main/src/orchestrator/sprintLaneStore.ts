@@ -377,7 +377,7 @@ export class SprintLaneStore {
                    AND e.status NOT IN ('decided', 'abandoned', 'superseded')
               )`
         : '';
-      // DOUBLE-PULL GUARD (migration 061): exclude any task with an ACTIVE run
+      // DOUBLE-PULL GUARD (migration 066): exclude any task with an ACTIVE run
       // association — a non-terminal workflow_runs row linked DIRECTLY (task_id) or
       // via a sprint BATCH the task belongs to. The run-association (not stage
       // position 7) is the source of truth, so a stale stage-7 task with no live

@@ -302,7 +302,7 @@ interface SeedTaskFields {
  * True when `taskId` currently holds an ACTIVE run association — a non-terminal
  * workflow_runs row linked DIRECTLY (task_id) OR via a sprint BATCH lane the task
  * belongs to. Mirrors SprintLaneStore.filterEligibleTaskIds' double-pull NOT EXISTS
- * arm (migration 061), replicated here to preserve the router's injected-deps +
+ * arm (migration 066), replicated here to preserve the router's injected-deps +
  * standalone-typecheck invariant. Degrades PERMISSIVELY (returns false) on a schema
  * lacking workflow_runs/sprint_batch_tasks, exactly like that filter.
  */
@@ -364,7 +364,7 @@ function taskIsLiveExperimentSeed(db: DatabaseLike, taskId: string): boolean {
  * (SprintLaneStore.filterEligibleTaskIds): approved (approved_at NOT NULL), not
  * archived, at a ready-or-later, NON-terminal board stage (position >= 6 AND
  * is_terminal = 0), and NO non-terminal run linked directly or via a batch lane
- * (double-pull guard, migration 061). Replicated here (not imported from
+ * (double-pull guard, migration 066). Replicated here (not imported from
  * SprintLaneStore) to preserve the router's injected-deps + standalone-typecheck
  * invariant; kept in lockstep with that filter by the shared SQL shape.
  */
@@ -403,7 +403,7 @@ function readSeedTask(db: DatabaseLike, taskId: string, projectId: number): Seed
   if (row.archived_at !== null && row.archived_at !== undefined) return null;
   if (typeof row.stage_position !== 'number' || row.stage_position < 6) return null;
   if (row.is_terminal === 1) return null;
-  // DOUBLE-PULL GUARD (migration 061): lockstep with filterEligibleTaskIds' active-
+  // DOUBLE-PULL GUARD (migration 066): lockstep with filterEligibleTaskIds' active-
   // run NOT EXISTS arm — never seed a task that already has a live run association
   // (a task currently 'In development' would be double-pulled into the experiment).
   if (taskHasActiveRun(db, taskId)) return null;

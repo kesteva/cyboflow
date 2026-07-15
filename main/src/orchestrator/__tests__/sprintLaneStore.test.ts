@@ -325,7 +325,7 @@ describe('SprintLaneStore', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // filterEligibleTaskIds / findActiveRunTaskIds — double-pull guard (mig 061)
+  // filterEligibleTaskIds / findActiveRunTaskIds — double-pull guard (mig 066)
   // ---------------------------------------------------------------------------
 
   describe('double-pull guard (active run association)', () => {
@@ -397,7 +397,7 @@ describe('SprintLaneStore', () => {
 
     it('does NOT key the guard on stage 7: a task at In-development with no live run stays pullable', () => {
       // buildReadyLaneDb stops at 042 (no position-7 stage), so re-add it exactly
-      // as migration 061 does, then park the task there with a terminal run only.
+      // as migration 066 does, then park the task there with a terminal run only.
       rdb
         .prepare(
           `INSERT OR IGNORE INTO board_stages (id, board_id, label, color_oklch, hint, position, write_policy, is_terminal, hidden_by_default)

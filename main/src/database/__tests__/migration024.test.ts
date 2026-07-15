@@ -267,7 +267,7 @@ describe('Migration 024: archive-in-place + Archived stage removal', () => {
       }
 
       // The fresh DB runs through 042_collapse_board.sql (removes positions
-      // 2,3,4,5,7,8,12, keeps 1/6/9/10) and then 061_in_development_stage.sql,
+      // 2,3,4,5,7,8,12, keeps 1/6/9/10) and then 066_in_development_stage.sql,
       // which re-adds the derived position-7 'In development' stage.
       const positions = (
         db

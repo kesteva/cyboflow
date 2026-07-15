@@ -195,7 +195,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
             batchError
           );
         }
-        // Recompute the batch's tasks (migration 061) so NON-integrated lanes
+        // Recompute the batch's tasks (migration 066) so NON-integrated lanes
         // (queued/failed/blocked) revert off 'In development' to their entry stage.
         // The terminal-stage guard in recomputeTaskExecutionStage protects the
         // just-Done tasks moved above (this runs BEFORE stampSessionRunsOutcome
@@ -222,7 +222,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
   // stamped those runs terminal / merged. Needed because the run-status flips
   // happen OUTSIDE the TaskChangeRouter chokepoint (stampSessionRunsPrOpen /
   // stampSessionRunsOutcome raw-UPDATE workflow_runs), so nothing recomputes the
-  // derived 'In development' stage (migration 061) afterward:
+  // derived 'In development' stage (migration 066) afterward:
   //   • A DIRECT task-linked run (workflow_runs.task_id, no batch) is never touched
   //     by finalizeSprintLanesOnSessionMerge (batch-only) — arm 1 lands its task on
   //     Done on merge here, instead of waiting for the next boot sweep.
@@ -302,7 +302,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
     } catch (error) {
       console.error(`[IPC:git] Failed to stamp merged outcome for session ${sessionId}:`, error);
     }
-    // Migration 061: now outcome='merged' is stamped, re-derive the board stages
+    // Migration 066: now outcome='merged' is stamped, re-derive the board stages
     // the session's runs drove. finalizeSprintLanesOnSessionMerge (called just
     // before this) closes out BATCH lanes, but a DIRECT task-linked run is never
     // touched by it — arm 1 lands its task on Done immediately here instead of at
@@ -1501,7 +1501,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         if (closed > 0) {
           console.log(`[IPC:git] Create-PR close-out: marked ${closed} run(s) completed/pr_open for session ${sessionId}`);
         }
-        // Migration 061: finalizeSprintLanesOnSessionMerge ran its recompute while
+        // Migration 066: finalizeSprintLanesOnSessionMerge ran its recompute while
         // the runs were STILL non-terminal (arm 2 held tasks at 'In development');
         // stampSessionRunsPrOpen just flipped them terminal (status='completed',
         // outcome='pr_open'). Re-derive now they are terminal so non-integrated

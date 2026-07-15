@@ -89,7 +89,7 @@ export interface Board {
 
 /**
  * One overlay per NON-TERMINAL run associated with a task — either a direct
- * task-link run OR a sprint-batch lane naming the task (migration 061: the
+ * task-link run OR a sprint-batch lane naming the task (migration 066: the
  * derived 'In development' board stage tracks the same association). Multiple
  * entries means parallel runs / competing approaches against the same task.
  * `inFlow.length > 0` now means "has a live run association", NOT "is actively

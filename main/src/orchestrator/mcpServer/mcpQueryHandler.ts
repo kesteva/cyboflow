@@ -2059,7 +2059,7 @@ export class McpQueryHandler {
       return;
     }
 
-    // Move the materialized batch's tasks to 'In development' (migration 061):
+    // Move the materialized batch's tasks to 'In development' (migration 066):
     // capture entry stage + derive execution stage per lane. Idempotent, so both
     // the created:true and idempotent created:false paths recompute. Fire-and-
     // forget + best-effort — a task-side failure (or an uninitialized router) must

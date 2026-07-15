@@ -558,7 +558,7 @@ describe('cancelRunHandler — sprint-lane batch close-out', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Direct task-link revert (migration 061): a canceled run linked DIRECTLY to a
+// Direct task-link revert (migration 066): a canceled run linked DIRECTLY to a
 // task (workflow_runs.task_id, no batch) reverts that task off 'In development'.
 // Load-bearing for session dismiss (cancelHostedRuns → this handler), which never
 // recomputes a direct task's stage otherwise (runs.dismiss throws for hosted runs).
