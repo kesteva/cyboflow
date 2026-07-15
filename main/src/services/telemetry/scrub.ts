@@ -16,6 +16,54 @@ import type { Event, Breadcrumb } from '@sentry/electron/main';
  * keep this code total and side-effect-light.
  */
 
+/**
+ * Node function names that only appear on the stack of a *stream write* — the
+ * synchronous or dispatched path a `Socket`/`Writable` takes when flushing bytes.
+ * An `EPIPE` surfacing through one of these is a broken-pipe write: the reader
+ * closed the other end of the pipe.
+ */
+const STREAM_WRITE_FRAMES = new Set([
+  'Socket._write',
+  'Socket._writeGeneric',
+  'Writable.write',
+  '_write',
+  'writeOrBuffer',
+  'writeGeneric',
+  'afterWriteDispatched',
+]);
+
+/**
+ * True when `event` is a broken-pipe write (`write EPIPE` off a stream-write
+ * frame). This is an inherent, unpreventable condition of piped stdio: the
+ * reader can close the other end of stdout/stderr (or a child's pipe) between
+ * our open-check and our write. The app already swallows these at the process
+ * level (`index.ts` uncaughtException + stream 'error' handlers) and keeps
+ * running — but Sentry's default uncaught-exception integration still captures
+ * them as fatal *before* our handler swallows them, so `beforeSend` must drop
+ * them or they flood the inbox on every release (CYBOFLOW-APP-D / -E).
+ *
+ * SCOPED deliberately: we require BOTH an EPIPE mention AND a stream-write frame,
+ * so any *other* EPIPE — one we haven't already decided to handle — still reports.
+ */
+export function isBenignStreamWriteEpipe<T extends Event>(event: T): boolean {
+  const values = event.exception?.values;
+  if (!values) return false;
+  for (const value of values) {
+    const mentionsEpipe =
+      (typeof value.value === 'string' && value.value.includes('EPIPE')) ||
+      (typeof value.type === 'string' && value.type.includes('EPIPE'));
+    if (!mentionsEpipe) continue;
+    const frames = value.stacktrace?.frames;
+    if (!frames) continue;
+    for (const frame of frames) {
+      if (typeof frame.function === 'string' && STREAM_WRITE_FRAMES.has(frame.function)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 /** Return the final path segment, splitting on both POSIX and Windows separators. */
 function basename(p: string): string {
   // Split on '/' or '\' and take the last non-empty segment.

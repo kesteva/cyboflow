@@ -3,7 +3,7 @@ import { initialize as aptabaseInitialize, trackEvent as aptabaseTrack } from '@
 import { app } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
-import { scrubSentryEvent, scrubBreadcrumb } from './scrub';
+import { scrubSentryEvent, scrubBreadcrumb, isBenignStreamWriteEpipe } from './scrub';
 import { environmentFromBuildInfo } from './environment';
 import type { TelemetryEventMap, TelemetryEventName } from '../../../../shared/types/telemetry';
 
@@ -97,7 +97,10 @@ export function initTelemetry(cfg: {
         environment,
         // Scrub every outbound event/breadcrumb so user source code, file
         // paths, repo names and prompts never leave the machine.
-        beforeSend: (event) => scrubSentryEvent(event),
+        // Drop benign broken-pipe writes before scrubbing — the app already
+        // swallows EPIPE at the process level, so these are duplicate noise
+        // (see isBenignStreamWriteEpipe). Everything else is scrubbed + kept.
+        beforeSend: (event) => (isBenignStreamWriteEpipe(event) ? null : scrubSentryEvent(event)),
         beforeBreadcrumb: (breadcrumb) => scrubBreadcrumb(breadcrumb),
       });
       // Default integrations capture uncaught exceptions / unhandled

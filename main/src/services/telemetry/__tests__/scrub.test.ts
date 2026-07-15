@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { Event, Breadcrumb } from '@sentry/electron/main';
-import { scrubSentryEvent, scrubBreadcrumb } from '../scrub';
+import { scrubSentryEvent, scrubBreadcrumb, isBenignStreamWriteEpipe } from '../scrub';
 
 describe('scrubSentryEvent', () => {
   function makeEvent(): Event {
@@ -62,6 +62,49 @@ describe('scrubSentryEvent', () => {
     const event = makeEvent();
     const scrubbed = scrubSentryEvent(event);
     expect(scrubbed).toBe(event);
+  });
+});
+
+describe('isBenignStreamWriteEpipe', () => {
+  /** Build a `write EPIPE` event whose stack ends in the given frame functions. */
+  function epipeEvent(frameFns: string[], value = 'write EPIPE'): Event {
+    return {
+      exception: {
+        values: [
+          {
+            type: 'Error',
+            value,
+            stacktrace: { frames: frameFns.map((function_) => ({ function: function_ })) },
+          },
+        ],
+      },
+    };
+  }
+
+  it('drops the logger broken-pipe write (CYBOFLOW-APP-D)', () => {
+    // Logger.log -> console.log -> Writable.write -> Socket._write -> afterWriteDispatched
+    const event = epipeEvent(['Logger.log', 'Writable.write', 'Socket._write', 'afterWriteDispatched']);
+    expect(isBenignStreamWriteEpipe(event)).toBe(true);
+  });
+
+  it('drops the execSync broken-pipe write (CYBOFLOW-APP-E)', () => {
+    const event = epipeEvent(['CommandExecutor.execSync', 'Writable.write', 'Socket._write', 'writeGeneric']);
+    expect(isBenignStreamWriteEpipe(event)).toBe(true);
+  });
+
+  it('does NOT drop an EPIPE that never went through a stream-write frame', () => {
+    // A future EPIPE surfacing from unrelated code still reports — scoped, not blanket.
+    const event = epipeEvent(['SomeService.connect', 'process.processTicksAndRejections']);
+    expect(isBenignStreamWriteEpipe(event)).toBe(false);
+  });
+
+  it('does NOT drop a non-EPIPE error even off a stream-write frame', () => {
+    const event = epipeEvent(['Writable.write', 'Socket._write'], 'write ECONNRESET');
+    expect(isBenignStreamWriteEpipe(event)).toBe(false);
+  });
+
+  it('returns false when the event carries no exception values', () => {
+    expect(isBenignStreamWriteEpipe({ message: 'no exception here' })).toBe(false);
   });
 });
 
