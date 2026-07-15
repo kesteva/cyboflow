@@ -153,6 +153,57 @@ const SYSTEMIC_PATTERNS: SystemicPattern[] = [
 ];
 
 /**
+ * COARSE STRUCTURAL-SHAPE tier — consulted ONLY after both the systemic and the
+ * non-systemic cause buckets miss, to split what would otherwise all collapse
+ * into the opaque `'other'` label (the single biggest bucket in production error
+ * telemetry — CYBOFLOW-APP-C). Each pattern matches STRUCTURE — an HTTP status
+ * class, a JS error constructor, an SDK/API fixed-vocabulary marker — never user
+ * content, and (like every tier here) emits a FIXED label, so nothing
+ * user-derived ever rides in the tag even on a false match. Ordered so a more
+ * actionable shape (a status code) wins over a generic envelope. HTTP patterns
+ * anchor on an explicit status context ("API Error:" / "HTTP" / "status code")
+ * so a stray 3-digit number in prose never mislabels.
+ */
+const SHAPE_PATTERNS: SystemicPattern[] = [
+  {
+    // A recognized JS error constructor prefixing the message — an orchestrator-
+    // side programming fault surfacing as the run's failure text.
+    name: 'js-error-type',
+    pattern: /^\s*(?:Type|Range|Reference|Syntax|Eval|URI)Error\b/,
+  },
+  {
+    // 5xx server-side status not already claimed by the systemic 529 pattern
+    // ("API Error: 500", "status code 503", "HTTP 502").
+    name: 'http-5xx',
+    pattern: /(?:api error|http|status(?:\s*code)?)[:\s]+5\d\d\b/i,
+  },
+  {
+    // 4xx client-side status not already claimed by systemic 429 / 401
+    // (e.g. 400 bad request, 403 forbidden, 404 not found).
+    name: 'http-4xx',
+    pattern: /(?:api error|http|status(?:\s*code)?)[:\s]+4\d\d\b/i,
+  },
+  {
+    // Anthropic/undici API error envelope surfaced verbatim without a status
+    // code: `{"type":"invalid_request_error", ...}` — a fixed API vocabulary; the
+    // `_error` suffix keeps it off ordinary prose.
+    name: 'api-error-type',
+    pattern: /"type"\s*:\s*"[a-z]+(?:_[a-z]+)*_error"/i,
+  },
+  {
+    // SDK result subtypes surfaced verbatim (`error_during_execution`, …). The
+    // recoverable `error_max_turns` is already claimed by the non-systemic tier.
+    name: 'sdk-error-subtype',
+    pattern: /\berror_[a-z]+(?:_[a-z]+)*\b/,
+  },
+  {
+    // An explicit abort/cancel that reached the failure path.
+    name: 'aborted',
+    pattern: /\bAbortError\b|\baborted\b/i,
+  },
+];
+
+/**
  * Whether a step's error text represents a SYSTEMIC (environment-level)
  * condition — one that retrying the step itself cannot fix. Case-insensitive;
  * `undefined`/empty input is never systemic.
@@ -218,8 +269,10 @@ const NONSYSTEMIC_PATTERNS: SystemicPattern[] = [
  * Classify an error string into ONE low-cardinality, non-PII label for use as a
  * Sentry `errorClass` tag. Tries the systemic patterns first (usage/rate limit,
  * auth, billing, network — the environment-level causes), then the non-systemic
- * buckets above, then falls back to a fixed sentinel. The return value is always
- * one of a small fixed set of names (never free text), so it is safe as a tag.
+ * cause buckets, then a coarse structural-shape tier (HTTP status class, JS error
+ * constructor, API/SDK marker) to split the otherwise-opaque `'other'` bucket,
+ * then falls back to a fixed sentinel. The return value is always one of a small
+ * fixed set of names (never free text), so it is safe as a tag.
  *
  * Pure — no I/O, no clock — so it stays importable from anywhere under the
  * standalone-typecheck invariant, including the impure boot seam and services.
@@ -230,6 +283,8 @@ export function classifyErrorPattern(error: string | undefined): string {
   if (systemic) return systemic.name;
   const nonSystemic = NONSYSTEMIC_PATTERNS.find(({ pattern }) => pattern.test(error));
   if (nonSystemic) return nonSystemic.name;
+  const shape = SHAPE_PATTERNS.find(({ pattern }) => pattern.test(error));
+  if (shape) return shape.name;
   return 'other';
 }
 

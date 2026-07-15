@@ -105,9 +105,20 @@ describe('classifyErrorPattern', () => {
     ['failed to spawn', 'Failed to spawn claude: node-pty error', 'spawn-failed'],
     ['nonzero exit', 'Interactive Claude exited with code 1', 'nonzero-exit'],
     ['generic timeout last', 'request timed out', 'timed-out'],
-    // model-availability 404 must NOT be mislabeled as binary-missing.
-    ['model 404 is other, not binary-missing', 'Request failed with status code 404: model not available', 'other'],
+    // Structural-shape tier — splits what used to all be 'other'. Consulted only
+    // after systemic + non-systemic miss, so systemic 429/401/529 still win.
+    ['js TypeError', "TypeError: Cannot read properties of undefined (reading 'id')", 'js-error-type'],
+    ['http 5xx', 'API Error: 503 Service Unavailable', 'http-5xx'],
+    ['http 4xx via status code', 'Request failed with status code 400: bad request', 'http-4xx'],
+    // model-availability 404 now buckets by its status class — still NOT binary-missing.
+    ['model 404 is http-4xx, not binary-missing', 'Request failed with status code 404: model not available', 'http-4xx'],
+    ['api error envelope without a status code', 'Anthropic error {"type":"invalid_request_error"}', 'api-error-type'],
+    ['sdk error subtype', 'error_during_execution: the agent session ended', 'sdk-error-subtype'],
+    ['aborted', 'AbortError: The operation was aborted', 'aborted'],
+    // A genuine local build/lint failure has no recognizable shape — stays 'other'.
     ['generic build failure', 'Command failed: eslint . --max-warnings=0', 'other'],
+    // A stray 3-digit number in prose must NOT be mislabeled as an HTTP status.
+    ['stray number is not http', 'processed 512 files before failing', 'other'],
     ['undefined', undefined, 'unknown'],
     ['empty', '', 'unknown'],
   ];
@@ -124,9 +135,12 @@ describe('classifyErrorPattern', () => {
       'auth-failed', 'auth-invalid-api-key', 'auth-401', 'auth-oauth-expired',
       'auth-authentication-error-type', 'auth-invalid-x-api-key', 'net-connection-closed',
       'net-connection-failure', 'net-econn-codes', 'net-fetch-failed',
-      // non-systemic buckets + fallbacks
+      // non-systemic buckets
       'stream-closed', 'first-event-timeout', 'max-turns-or-execution-bound',
-      'binary-missing', 'spawn-failed', 'nonzero-exit', 'timed-out', 'other', 'unknown',
+      'binary-missing', 'spawn-failed', 'nonzero-exit', 'timed-out',
+      // structural-shape tier + fallbacks
+      'js-error-type', 'http-5xx', 'http-4xx', 'api-error-type', 'sdk-error-subtype',
+      'aborted', 'other', 'unknown',
     ]);
     const samples = [undefined, '', 'anything at all', 'ECONNREFUSED', 'Stream closed', 'weird 500'];
     for (const s of samples) {
