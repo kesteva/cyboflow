@@ -3,6 +3,7 @@ import type { PermissionMode } from '../../../../../../shared/types/workflows';
 import { resolveAgentModelAlias } from '../../agentModelContext';
 import { codexPermissionFlagsForMode } from '../codexPtyManager';
 import { electronRunAsNodeGuardEnv } from '../../../../utils/electronNodeGuard';
+import { getShellPath } from '../../../../utils/shellPath';
 import type {
   AppServerJsonValue,
   AppServerThreadResumeParams,
@@ -42,13 +43,42 @@ function buildMcpConfig(
   };
 }
 
+/**
+ * Union two PATH strings, `shellPath` first, dropping empties and duplicates.
+ * The app-server (and every command the Codex agent shells out to, including the
+ * project gate) inherits this PATH, so it MUST carry the user's login-shell PATH
+ * — a packaged app launched from Finder has only the restricted launchd PATH in
+ * `process.env`, which lacks pnpm/node(nvm)/homebrew and makes the gate fail to
+ * start. See `getShellPath` for the login-shell resolution.
+ */
+function mergePathValue(
+  shellPath: string,
+  existingPath: string | undefined,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const delimiter = platform === 'win32' ? ';' : ':';
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const part of `${shellPath}${delimiter}${existingPath ?? ''}`.split(delimiter)) {
+    const trimmed = part.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    merged.push(trimmed);
+  }
+  return merged.join(delimiter);
+}
+
 export function buildCodexAppServerEnvironment(
   runId: string,
   runtimeConfig: CodexAppServerMcpRuntimeConfig,
   inheritedEnvironment: NodeJS.ProcessEnv = process.env,
+  resolveShellPath: () => string = getShellPath,
 ): NodeJS.ProcessEnv {
+  const pathKey =
+    Object.keys(inheritedEnvironment).find((key) => key.toLowerCase() === 'path') ?? 'PATH';
   return {
     ...inheritedEnvironment,
+    [pathKey]: mergePathValue(resolveShellPath(), inheritedEnvironment[pathKey]),
     CYBOFLOW_RUN_ID: runId,
     CYBOFLOW_ORCH_SOCKET: runtimeConfig.orchSocketPath,
   };

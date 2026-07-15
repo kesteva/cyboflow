@@ -158,15 +158,39 @@ describe('Codex app-server run configuration', () => {
     expect(buildCodexAppServerTurnOptions(base)).toEqual({ model: 'gpt-5.5' });
   });
 
-  it('inherits the ChatGPT-authenticated CLI environment and adds run correlation', () => {
+  it('inherits the ChatGPT-authenticated CLI environment, enriches PATH with the login shell, and adds run correlation', () => {
     expect(buildCodexAppServerEnvironment('run-1', runtimeConfig, {
       CODEX_HOME: '/home/user/.codex',
       PATH: '/usr/local/bin',
-    })).toEqual({
+    }, () => '/opt/homebrew/bin:/Users/me/.nvm/versions/node/v22/bin')).toEqual({
       CODEX_HOME: '/home/user/.codex',
-      PATH: '/usr/local/bin',
+      // Login-shell PATH is prepended so pnpm/node resolve for the gate; the
+      // inherited entry is preserved after it.
+      PATH: '/opt/homebrew/bin:/Users/me/.nvm/versions/node/v22/bin:/usr/local/bin',
       CYBOFLOW_RUN_ID: 'run-1',
       CYBOFLOW_ORCH_SOCKET: '/tmp/cyboflow-orch.sock',
     });
+  });
+
+  it('recovers pnpm when the inherited PATH is the restricted launchd PATH (packaged-app symptom)', () => {
+    const env = buildCodexAppServerEnvironment(
+      'run-1',
+      runtimeConfig,
+      { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' },
+      () => '/opt/homebrew/bin:/usr/bin:/bin',
+    );
+    expect(env.PATH?.split(':')).toContain('/opt/homebrew/bin');
+    // No duplicate entries even though the shell PATH and inherited PATH overlap.
+    expect(env.PATH).toBe('/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin');
+  });
+
+  it('creates PATH from the login shell when the inherited environment has none', () => {
+    const env = buildCodexAppServerEnvironment(
+      'run-1',
+      runtimeConfig,
+      {},
+      () => '/opt/homebrew/bin',
+    );
+    expect(env.PATH).toBe('/opt/homebrew/bin');
   });
 });
