@@ -420,6 +420,34 @@ describe('OrchSocketServer', () => {
   });
 
   // -------------------------------------------------------------------------
+  // 8. EADDRINUSE recovery re-probes and refuses to clobber a LIVE socket
+  // -------------------------------------------------------------------------
+
+  it('EADDRINUSE against a LIVE socket rejects instead of unlinking it', async () => {
+    // Server A is live on the path.
+    server = new OrchSocketServer(socketPath, dbAdapter(db), logger);
+    await server.start();
+
+    // Server B skips its pre-bind probe (existsSync→false once) so it reaches
+    // listen() and hits EADDRINUSE against A's live socket — reproducing the
+    // probe→bind race. The EADDRINUSE handler must re-probe, see A alive, and
+    // reject rather than unlink A's live socket out from under it.
+    vi.mocked(fs.existsSync).mockReturnValueOnce(false);
+    const serverB = new OrchSocketServer(socketPath, dbAdapter(db), logger);
+    await expect(serverB.start()).rejects.toThrow(/already listening/i);
+
+    // A is untouched: still listening, still round-trips a real client.
+    const { client, waitForLines } = connectClient(socketPath);
+    openClients.push(client);
+    await waitForConnect(client);
+    client.write(
+      JSON.stringify({ type: 'mcp-list-pending-approvals', requestId: 'req-live-eaddr', runId: 'run-a' }) + '\n',
+    );
+    const lines = await waitForLines(1);
+    expect(parse(lines[0]).ok).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
   // Structural interface conformance (compile-time assertions)
   // -------------------------------------------------------------------------
 

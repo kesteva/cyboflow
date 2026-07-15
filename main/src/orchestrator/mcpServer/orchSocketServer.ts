@@ -123,14 +123,18 @@ export class OrchSocketServer implements PermissionServerLike {
     const server = net.createServer((socket) => this.onConnection(socket));
     this.server = server;
 
-    // Bind, recovering ONCE from EADDRINUSE. The pre-bind unlink above is a
+    // Bind, recovering ONCE from EADDRINUSE. The pre-bind probe above is a
     // synchronous check against an async listen(), so a socket file that
-    // (re)appears in that window — or a path an overlapping process still holds
-    // mid-teardown — throws EADDRINUSE at bind time. The previous log-only error
-    // handler left the server dead and this promise unresolved forever, so the
-    // MCP subprocess (a pure client) hit ECONNREFUSED and exhausted its restart
-    // budget: a permanent outbound-MCP outage until app restart. Now: unlink and
-    // retry once, then reject so the caller sees a real fatal instead of a hang.
+    // (re)appears in that window — or a peer that binds the path between our
+    // probe and this listen() — throws EADDRINUSE at bind time. The previous
+    // log-only error handler left the server dead and this promise unresolved
+    // forever, so the MCP subprocess (a pure client) hit ECONNREFUSED and
+    // exhausted its restart budget: a permanent outbound-MCP outage until app
+    // restart. Recovery must NOT blindly unlink, though — a live peer may own the
+    // path now (the clobber this class exists to prevent), so re-probe first:
+    // a LIVE listener rejects as an ownership conflict; only a stale/dead file is
+    // unlinked and retried once. Then reject so the caller sees a real fatal
+    // instead of a hang.
     await new Promise<void>((resolve, reject) => {
       let retriedAddrInUse = false;
       const onListening = (): void => {
@@ -142,18 +146,38 @@ export class OrchSocketServer implements PermissionServerLike {
         this.logger.info('[Cyboflow Orch IPC] listening', { socketPath: this.socketPath });
         resolve();
       };
+      const failOwnershipConflict = (): void => {
+        server.removeListener('listening', onListening);
+        this.server = null;
+        this.logger.error('[Cyboflow Orch IPC] EADDRINUSE on a LIVE socket — refusing to clobber', {
+          socketPath: this.socketPath,
+        });
+        reject(
+          new Error(
+            `[Cyboflow Orch IPC] refusing to bind ${this.socketPath}: another server is already listening on it`,
+          ),
+        );
+      };
       const onError = (err: NodeJS.ErrnoException): void => {
         if (err.code === 'EADDRINUSE' && !retriedAddrInUse) {
           retriedAddrInUse = true;
-          this.logger.warn('[Cyboflow Orch IPC] EADDRINUSE — unlinking stale socket and retrying once', {
-            socketPath: this.socketPath,
+          // A peer may have bound the path in the probe→listen window. Never
+          // unlink a live socket — reject; only reclaim a stale/dead file.
+          void this.isSocketAlive(this.socketPath).then((alive) => {
+            if (alive) {
+              failOwnershipConflict();
+              return;
+            }
+            this.logger.warn('[Cyboflow Orch IPC] EADDRINUSE — unlinking stale socket and retrying once', {
+              socketPath: this.socketPath,
+            });
+            try {
+              fs.rmSync(this.socketPath, { force: true });
+            } catch {
+              /* best-effort — the retry surfaces any genuine failure */
+            }
+            server.listen(this.socketPath);
           });
-          try {
-            fs.rmSync(this.socketPath, { force: true });
-          } catch {
-            /* best-effort — the retry surfaces any genuine failure */
-          }
-          server.listen(this.socketPath);
           return;
         }
         server.removeListener('listening', onListening);
