@@ -13,7 +13,8 @@ import { RunCommandManager } from './services/runCommandManager';
 import { Logger } from './utils/logger';
 import { ArchiveProgressManager } from './services/archiveProgressManager';
 import { initializeCommitManager } from './services/commitManager';
-import { setCyboflowDirectory, getCyboflowSubdirectory } from './utils/cyboflowDirectory';
+import { setCyboflowDirectory, getCyboflowSubdirectory, getCyboflowDirectory } from './utils/cyboflowDirectory';
+import { acquireInstanceLock } from './utils/singleInstanceLock';
 import { initTelemetry, trackUsage, captureSeamError } from './services/telemetry';
 import { setTelemetrySink, setSeamErrorSink } from './orchestrator/telemetrySink';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
@@ -2284,8 +2285,49 @@ async function initializeServices() {
 // credentials (SENTRY_DSN / APTABASE_APP_KEY) or config flags are absent.
 initTelemetry(readTelemetryConfigSync());
 
+// Released on quit (before-quit + a synchronous process-exit safety net) so a
+// clean shutdown frees the data-dir single-instance lock for the next launch.
+let instanceLockRelease: (() => void) | undefined;
+
+/** Human label for the running kind, used only in the already-running dialog. */
+function describeInstanceKind(dataDir: string): string {
+  if (dataDir.endsWith('.cyboflow_dev_dmg')) return 'Cyboflow Dev';
+  if (dataDir.endsWith('.cyboflow_dev')) return 'Cyboflow (dev server)';
+  return 'Cyboflow';
+}
+
 app.whenReady().then(async () => {
   console.log('[Main] App is ready, initializing services...');
+
+  // Single-instance-per-kind guard: each kind (stable / pnpm dev / Dev DMG) owns
+  // its own data dir, and this lock keeps at most ONE instance per dir. Acquire
+  // BEFORE initializeServices so a second same-kind instance never stands up a
+  // second orchestrator / orch.sock / set of background workers against the same
+  // sessions.db. (The module-load DB singleton has opened a read handle by now;
+  // SQLite serializes access, and this guard stops the second instance before it
+  // does any orchestration work.)
+  const dataDir = getCyboflowDirectory();
+  const lock = acquireInstanceLock(dataDir);
+  if (!lock.acquired) {
+    const kind = describeInstanceKind(dataDir);
+    const holder = lock.holderPid !== null ? ` (process ${lock.holderPid})` : '';
+    console.warn(`[Main] ${kind} is already running against ${dataDir}${holder} — exiting this instance`);
+    dialog.showMessageBoxSync({
+      type: 'warning',
+      buttons: ['OK'],
+      defaultId: 0,
+      title: 'Cyboflow',
+      message: `${kind} is already running`,
+      detail:
+        `Another ${kind} instance${holder} is already using its data directory:\n${dataDir}\n\n` +
+        'Only one instance of each kind can run at a time. Switch to the running ' +
+        'window, or quit it first if it is stuck.',
+    });
+    app.exit(0);
+    return;
+  }
+  instanceLockRelease = lock.release;
+
   await initializeServices();
 
   // Boot sweep (TASK-057): kill detached ui-prototype `http.server` processes
@@ -3792,9 +3834,27 @@ app.on('before-quit', async (event) => {
     await taskQueue.close();
   }
 
+  // Release the single-instance lock so the next launch of this kind acquires
+  // cleanly (release() no-ops if a successor already reclaimed it).
+  if (instanceLockRelease) {
+    instanceLockRelease();
+    instanceLockRelease = undefined;
+  }
+
   // Close logger to ensure all logs are flushed
   if (logger) {
     logger.close();
+  }
+});
+
+// Synchronous safety net for abnormal exits that skip `before-quit` (crashes,
+// app.exit, signals): drop the lock file so it does not linger as stale. The
+// stale-reclaim path already recovers if this never runs, but freeing it eagerly
+// avoids a needless "already running" false-positive window on the next launch.
+process.on('exit', () => {
+  if (instanceLockRelease) {
+    instanceLockRelease();
+    instanceLockRelease = undefined;
   }
 });
 
