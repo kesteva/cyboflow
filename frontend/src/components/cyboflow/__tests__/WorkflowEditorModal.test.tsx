@@ -423,8 +423,9 @@ describe('WorkflowEditorModal — edit mode', () => {
     // Phase 3: the run launches INSIDE a session. With none active, the helper
     // creates one (createQuick → 'session-quick-001') and threads its id. The
     // worktree mode is pinned — a flow-host session ignores the global in-place
-    // default (migration 047).
-    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1, worktreeMode: 'worktree' });
+    // default (migration 047) — and substrate:'sdk' is pinned too so the
+    // infrastructure host never inherits the quick-session PTY default.
+    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1, worktreeMode: 'worktree', substrate: 'sdk' });
     expect(mockRunStart).toHaveBeenCalledWith({
       workflowId: EDIT_WORKFLOW_ID,
       projectId: 1,

@@ -239,10 +239,14 @@ describe('WorkflowPicker — Quick Session button', () => {
     expect(quickIndex).toBeGreaterThan(startRunIndex);
   });
 
-  it('Quick Session click calls createQuick threading the seeded agent permission mode and substrate', async () => {
+  it('Quick Session click threads the seeded agent permission mode + the quick-session substrate default', async () => {
     // Config empty → the permission selector seeds to the 'default' floor, which
     // the quick button threads as agentPermissionMode (parity with the wizard).
-    // The substrate selector defaults to 'sdk' and is threaded alongside it.
+    // The Quick Session button honors the quick-session substrate preference,
+    // which floors to 'interactive' when the config is absent — it does NOT reuse
+    // the workflow-oriented substrate selector default ('sdk'). This is the
+    // adversarial-review fix: an untouched Quick Session must behave like the
+    // wizard + keyboard shortcut, not like a workflow launch.
     useConfigStore.setState({ config: null });
     render(<WorkflowPicker projectId={1} />);
 
@@ -256,13 +260,32 @@ describe('WorkflowPicker — Quick Session button', () => {
       prompt: '',
       projectId: 1,
       agentPermissionMode: 'default',
-      substrate: 'sdk',
+      // Config absent → the quick-session substrate pref floors to 'interactive',
+      // and an untouched Quick Session honors it (projected onto the Claude
+      // interactive runtime) rather than the workflow-oriented SDK default.
+      substrate: 'interactive',
       agentProvider: 'claude',
-      agentRuntime: 'claude-sdk',
+      agentRuntime: 'claude-interactive',
       // The Quick Session button now threads the picker model (default Opus), which
       // rides as claudeConfig for the interactive eager spawn.
       claudeConfig: { model: 'opus', fastMode: false },
     });
+  });
+
+  it('Quick Session honors a saved quickSessionDefaultSubstrate=sdk preference when the selector is untouched', async () => {
+    // The user's saved quick-session preference is SDK. An untouched Quick Session
+    // launch must respect it (not the 'interactive' floor).
+    useConfigStore.setState({
+      config: { quickSessionDefaultSubstrate: 'sdk' } as unknown as AppConfig,
+    });
+    render(<WorkflowPicker projectId={1} />);
+
+    await act(async () => {
+      fireEvent.click(await screen.findByTestId('quick-session-button'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledOnce();
+    expect(mockCreateQuick).toHaveBeenCalledWith(expect.objectContaining({ substrate: 'sdk' }));
   });
 
   it("threads the picked 'interactive' substrate into the Quick Session create", async () => {
@@ -314,6 +337,31 @@ describe('WorkflowPicker — Quick Session button', () => {
     );
     expect(mockCreateQuick.mock.calls[0]?.[0]).not.toHaveProperty('substrate');
     expect(mockCreateQuick.mock.calls[0]?.[0]).not.toHaveProperty('claudeConfig');
+  });
+
+  it("an EXPLICIT runtime pick outranks the quick-session default for the Quick Session button", async () => {
+    // Quick default floors to 'interactive' (config null), but the user explicitly
+    // settles on the SDK runtime in the shared selector. That real per-launch choice
+    // must win — the Quick Session button threads 'sdk', not the 'interactive'
+    // default. The selector already defaults to 'claude-sdk', so toggle away and
+    // back to make the change events (and thus the touched latch) fire genuinely.
+    useConfigStore.setState({ config: null });
+    render(<WorkflowPicker projectId={1} />);
+
+    const runtimeSelect = await screen.findByLabelText('Select agent runtime');
+    await act(async () => {
+      fireEvent.change(runtimeSelect, { target: { value: 'claude-interactive' } });
+    });
+    await act(async () => {
+      fireEvent.change(runtimeSelect, { target: { value: 'claude-sdk' } });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-session-button'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledOnce();
+    expect(mockCreateQuick).toHaveBeenCalledWith(expect.objectContaining({ substrate: 'sdk' }));
   });
 
   it('Quick Session success path creates both Claude and Terminal panels', async () => {
@@ -931,7 +979,10 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
     // while the chain was still settling).
     await waitFor(() => {
       // worktreeMode is pinned — a flow-host session ignores the global in-place
-      // default (migration 047).
+      // default (migration 047). This launch threads an explicit agentRuntime
+      // ('claude-sdk'), so ensureSessionForLaunch derives the host substrate from
+      // the runtime and does NOT pin substrate:'sdk' (that pin is only for the
+      // no-runtime infra callers, to keep them off the quick-PTY default).
       expect(mockCreateQuick).toHaveBeenCalledWith({
         prompt: '',
         projectId: 1,

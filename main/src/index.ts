@@ -3435,7 +3435,12 @@ app.whenReady().then(async () => {
             workflowRegistry,
             getDb: () => databaseService.getDb(),
           },
-          { projectId, baseCommittish, nameHint },
+          // Pin 'sdk' explicitly: an A/B arm session is an INFRASTRUCTURE host
+          // (its worktree hosts the arm's workflow runs), not a user quick
+          // session, so its sentinel must never inherit the quick-session PTY
+          // default (quickSessionDefaultSubstrate). This keeps the arm sentinel
+          // 'sdk' exactly as before that default existed.
+          { projectId, baseCommittish, nameHint, requestedSubstrate: 'sdk' },
         );
         return { sessionId: session.id, worktreePath: session.worktreePath };
       },

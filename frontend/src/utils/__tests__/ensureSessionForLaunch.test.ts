@@ -21,6 +21,9 @@
  *      created it) and creates ONLY the Terminal panel. This is the regression
  *      guard against the duplicate-Claude-panel bug the lock would otherwise
  *      activate for every workflow launch into a fresh session.
+ *   3b. Every CREATED flow-host session pins substrate:'sdk' — it is
+ *      infrastructure, so it must never inherit the quick-session PTY default
+ *      (quickSessionDefaultSubstrate) and eagerly spawn an orphan persistent REPL.
  *   4. Throws when createQuick fails.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -117,7 +120,7 @@ describe('ensureSessionForLaunch', () => {
     expect(id).toBe('sess-new');
     // A flow-host session always pins worktreeMode:'worktree' so it ignores the
     // global in-place default (a workflow run needs an isolated worktree).
-    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 7, worktreeMode: 'worktree' });
+    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 7, worktreeMode: 'worktree', substrate: 'sdk' });
     expect(mockCreatePanel).toHaveBeenCalled();
   });
 
@@ -160,7 +163,7 @@ describe('ensureSessionForLaunch', () => {
 
     // Fell through to the create-quick path rather than reusing the busy session.
     expect(id).toBe('sess-new');
-    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 7, worktreeMode: 'worktree' });
+    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 7, worktreeMode: 'worktree', substrate: 'sdk' });
     expect(mockCreatePanel).toHaveBeenCalled();
   });
 
@@ -188,7 +191,7 @@ describe('ensureSessionForLaunch', () => {
     const id = await ensureSessionForLaunch(7);
 
     expect(id).toBe('sess-new');
-    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 7, worktreeMode: 'worktree' });
+    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 7, worktreeMode: 'worktree', substrate: 'sdk' });
     expect(mockCreatePanel).toHaveBeenCalled();
   });
 
@@ -196,7 +199,7 @@ describe('ensureSessionForLaunch', () => {
     const id = await ensureSessionForLaunch(7);
 
     expect(id).toBe('sess-new');
-    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 7, worktreeMode: 'worktree' });
+    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 7, worktreeMode: 'worktree', substrate: 'sdk' });
     expect(mockCreatePanel).toHaveBeenCalledTimes(2);
     expect(mockCreatePanel).toHaveBeenNthCalledWith(1, { sessionId: 'sess-new', type: 'claude' });
     expect(mockCreatePanel).toHaveBeenNthCalledWith(2, {
@@ -225,6 +228,19 @@ describe('ensureSessionForLaunch', () => {
     });
     // No second Claude panel — would orphan a process-less Claude tab.
     expect(mockCreatePanel).not.toHaveBeenCalledWith({ sessionId: 'sess-int', type: 'claude' });
+  });
+
+  it('pins substrate:sdk on the created flow-host session (never inherits the quick-PTY default)', async () => {
+    // Regression guard: a flow-host session is INFRASTRUCTURE (it only holds the
+    // worktree the workflow run executes in), not a user quick session. If it
+    // omitted the substrate, create-quick would resolve the __quick__ sentinel
+    // through quickSessionDefaultSubstrate (floor 'interactive') and eagerly spawn
+    // an orphan persistent PTY REPL the workflow never uses and dismissal can't
+    // reap. Every create call here MUST pass substrate:'sdk'.
+    await ensureSessionForLaunch(7, { forceNew: true });
+
+    expect(mockCreateQuick).toHaveBeenCalledTimes(1);
+    expect(mockCreateQuick.mock.calls[0][0]).toMatchObject({ substrate: 'sdk' });
   });
 
   it('throws when createQuick fails', async () => {

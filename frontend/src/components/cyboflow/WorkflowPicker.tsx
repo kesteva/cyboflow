@@ -14,6 +14,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { trpc } from '../../trpc/client';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
+import { useConfigStore } from '../../stores/configStore';
 import { ensureSessionForLaunch } from '../../utils/ensureSessionForLaunch';
 import { useQuickSession } from '../../hooks/useQuickSession';
 import { useAgentPermissionMode } from '../../hooks/useAgentPermissionMode';
@@ -67,6 +68,21 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
    * Start Run.
    */
   const [agentRuntime, setAgentRuntime] = useState<LaunchAgentRuntime>(DEFAULT_SESSION_AGENT_RUNTIME);
+
+  /**
+   * The user's global quick-session substrate preference (floors to 'interactive',
+   * the PTY). This surface's substrate selector defaults to DEFAULT_SUBSTRATE
+   * ('sdk') because it primarily governs WORKFLOW launches — but the "Quick
+   * Session" escape hatch below is a real quick session and must honor the quick
+   * preference, exactly like the Session Start Wizard and keyboard shortcut. When
+   * the user hasn't touched the selector we launch the quick session on
+   * `quickDefaultSubstrate`; an explicit selector change (tracked by
+   * `substrateTouchedRef`) is a real per-launch choice and still wins.
+   */
+  const quickDefaultSubstrate = useConfigStore(
+    (s) => s.config?.quickSessionDefaultSubstrate ?? 'interactive',
+  );
+  const substrateTouchedRef = useRef(false);
 
   /**
    * The per-run Claude model choice (Configure model dropdown). Defaults to Opus
@@ -384,7 +400,17 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
   );
 
   const handleQuickSession = useCallback(() => {
-    const sessionRuntime = quickSessionRuntimeForLaunch(agentRuntime);
+    // The runtime selector primarily governs WORKFLOW launches and defaults to
+    // the SDK runtime. The "Quick Session" escape hatch is a real quick session,
+    // so when the user hasn't explicitly touched the selector it must honor the
+    // quick-session substrate preference (projected onto a Claude runtime), like
+    // the wizard + keyboard shortcut. An explicit runtime pick still wins.
+    const effectiveRuntime = substrateTouchedRef.current
+      ? agentRuntime
+      : quickDefaultSubstrate === 'interactive'
+        ? 'claude-interactive'
+        : 'claude-sdk';
+    const sessionRuntime = quickSessionRuntimeForLaunch(effectiveRuntime);
     void startQuickSession(
       permissionMode,
       substrateForRuntime(sessionRuntime),
@@ -397,7 +423,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       providerForRuntime(sessionRuntime),
       sessionRuntime,
     );
-  }, [agentRuntime, model, permissionMode, startQuickSession]);
+  }, [agentRuntime, model, permissionMode, startQuickSession, quickDefaultSubstrate]);
 
   const combinedError = error ?? quickError;
   const workflowRuntimeBlocked = workflowRuntimeForLaunch(agentRuntime) === null;
@@ -433,7 +459,12 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       {/* Agent runtime selector + interactive v1 caveats (IDEA-013 / TASK-812). */}
       <SubstrateSelector
         value={agentRuntime}
-        onChange={setAgentRuntime}
+        onChange={(next) => {
+          // A real per-launch choice — after this the Quick Session button uses
+          // the explicit runtime's substrate instead of the quick-session default.
+          substrateTouchedRef.current = true;
+          setAgentRuntime(next);
+        }}
         id="workflow-picker-substrate"
         caveatsTestId="workflow-picker-substrate-caveats"
         runtimeScope="mixed"

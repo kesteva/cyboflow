@@ -100,7 +100,15 @@ export async function ensureSessionForLaunch(
 
   // Otherwise create a fresh quick session for this launch. Pin the worktree mode
   // explicitly so a flow-host session ignores the global in-place default — a
-  // workflow run always needs an isolated worktree.
+  // workflow run always needs an isolated worktree. When the caller does NOT pin
+  // an explicit runtime, also pin the substrate to 'sdk': this is an
+  // INFRASTRUCTURE host session (it exists solely to hold the worktree the
+  // workflow run executes in), not a user quick session, so it must NEVER inherit
+  // the quick-session PTY default (quickSessionDefaultSubstrate) — otherwise
+  // create-quick would stamp it interactive and eagerly spawn an orphan persistent
+  // REPL that the workflow run never uses and dismissal can't reap. An explicit
+  // agentRuntime already resolves its OWN substrate, so we must NOT also pass
+  // substrate then (createQuick rejects a substrate/runtime conflict).
   const result = await API.sessions.createQuick({
     prompt: '',
     projectId,
@@ -108,6 +116,7 @@ export async function ensureSessionForLaunch(
     ...(opts.agentProvider ? { agentProvider: opts.agentProvider } : {}),
     ...(opts.agentRuntime ? { agentRuntime: opts.agentRuntime } : {}),
     ...(opts.agentModel ? { agentModel: opts.agentModel } : {}),
+    ...(opts.agentRuntime ? {} : { substrate: 'sdk' as const }),
   });
   if (!result.success || !result.data) {
     throw new Error(result.error ?? 'Failed to create session for launch');
