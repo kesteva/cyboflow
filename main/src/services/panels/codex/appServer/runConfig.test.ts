@@ -52,6 +52,35 @@ describe('Codex app-server run configuration', () => {
     expect(params).not.toHaveProperty('hooks');
   });
 
+  it('sets ELECTRON_RUN_AS_NODE on the MCP bridge env when node resolves to the Electron app binary', () => {
+    const params = buildCodexAppServerThreadStartParams('run-1', {
+      panelId: 'run-1',
+      sessionId: 'run-1',
+      worktreePath: '/tmp/worktree',
+      prompt: 'ship it',
+    }, { ...runtimeConfig, nodeExecutablePath: process.execPath });
+
+    const server = (params.config as {
+      mcp_servers: { cyboflow: { command: string; env: Record<string, string> } };
+    }).mcp_servers.cyboflow;
+    expect(server.command).toBe(process.execPath);
+    // Without this flag, messaging Codex would boot a whole new Cyboflow app.
+    expect(server.env.ELECTRON_RUN_AS_NODE).toBe('1');
+  });
+
+  it('omits ELECTRON_RUN_AS_NODE when a real node binary is resolved', () => {
+    const params = buildCodexAppServerThreadStartParams('run-1', {
+      panelId: 'run-1',
+      sessionId: 'run-1',
+      worktreePath: '/tmp/worktree',
+      prompt: 'ship it',
+    }, runtimeConfig);
+
+    const server = (params.config as { mcp_servers: { cyboflow: { env: Record<string, string> } } })
+      .mcp_servers.cyboflow;
+    expect(server.env).not.toHaveProperty('ELECTRON_RUN_AS_NODE');
+  });
+
   it('omits a stale Claude model and maps dontAsk to native unrestricted settings', () => {
     const params = buildCodexAppServerThreadStartParams('run-1', {
       panelId: 'run-1',

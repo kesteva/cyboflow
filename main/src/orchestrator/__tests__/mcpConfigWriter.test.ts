@@ -112,6 +112,39 @@ describe('McpConfigWriter.writeForRun', () => {
     });
   });
 
+  it('sets ELECTRON_RUN_AS_NODE when the node path is the Electron app binary', async () => {
+    await withTempDir('mcpconfig-test-', async (worktreePath) => {
+      const writer = new McpConfigWriter();
+      await writer.writeForRun({
+        runId: FIXTURE_RUN_ID,
+        worktreePath,
+        orchSocketPath: FIXTURE_ORCH_SOCKET,
+        bridgeScriptPath: FIXTURE_BRIDGE_SCRIPT,
+        nodeExecutablePath: process.execPath,
+      });
+
+      const env = readMcpJson(worktreePath).mcpServers['cyboflow-permissions'].env;
+      // Without this flag, the bridge spawn boots a new Cyboflow app instead of node.
+      expect(env.ELECTRON_RUN_AS_NODE).toBe('1');
+    });
+  });
+
+  it('omits ELECTRON_RUN_AS_NODE when a real node binary is resolved', async () => {
+    await withTempDir('mcpconfig-test-', async (worktreePath) => {
+      const writer = new McpConfigWriter();
+      await writer.writeForRun({
+        runId: FIXTURE_RUN_ID,
+        worktreePath,
+        orchSocketPath: FIXTURE_ORCH_SOCKET,
+        bridgeScriptPath: FIXTURE_BRIDGE_SCRIPT,
+        nodeExecutablePath: FIXTURE_NODE_PATH,
+      });
+
+      const env = readMcpJson(worktreePath).mcpServers['cyboflow-permissions'].env;
+      expect(env).not.toHaveProperty('ELECTRON_RUN_AS_NODE');
+    });
+  });
+
   it('creates the worktree directory if it does not yet exist', async () => {
     await withTempDir('mcpconfig-test-', async (base) => {
       // Use a path inside the temp dir that has not been created

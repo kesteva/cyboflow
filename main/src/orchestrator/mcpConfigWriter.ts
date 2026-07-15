@@ -14,6 +14,7 @@
  */
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import { electronRunAsNodeGuardEnv } from '../utils/electronNodeGuard';
 
 export interface McpConfigWriteOptions {
   /** The workflow run ID, written into args and env so the bridge can self-identify. */
@@ -54,6 +55,10 @@ export class McpConfigWriter {
           env: {
             CYBOFLOW_RUN_ID: opts.runId,
             CYBOFLOW_ORCH_SOCKET: opts.orchSocketPath,
+            // Guard: nodeExecutablePath may be the Electron app binary (packaged
+            // app, no node on PATH) — without this flag the bridge spawn boots a
+            // new Cyboflow app instead of running the script. See electronNodeGuard.
+            ...electronRunAsNodeGuardEnv(opts.nodeExecutablePath),
           },
         },
       },

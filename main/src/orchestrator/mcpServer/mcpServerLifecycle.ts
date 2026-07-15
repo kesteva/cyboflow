@@ -19,6 +19,7 @@
 import * as fs from 'fs';
 import { spawn, type ChildProcess } from 'child_process';
 import { findNodeExecutable } from '../../utils/nodeFinder';
+import { electronRunAsNodeGuardEnv } from '../../utils/electronNodeGuard';
 import { resolveMcpServerScriptPath } from './scriptPath';
 import type { LoggerLike } from '../types';
 
@@ -116,23 +117,15 @@ export class McpServerLifecycle {
       return;
     }
 
+    // CRITICAL fork-bomb guard: findNodeExecutable() may resolve to the Electron
+    // app binary (packaged app, no node on PATH) — spawning it plainly boots a
+    // whole new Cyboflow app in an unkillable loop. See electronNodeGuard.
     const env: Record<string, string> = {
       ...this.buildSafeEnv(),
       CYBOFLOW_RUN_ID: this.orchestratorRunIdProvider(),
       CYBOFLOW_ORCH_SOCKET: this.socketPath,
+      ...electronRunAsNodeGuardEnv(nodePath),
     };
-
-    // CRITICAL fork-bomb guard. In a packaged app with no standalone `node` on
-    // the GUI process's PATH, findNodeExecutable() falls back to
-    // `process.execPath` — which is the Cyboflow app binary, NOT a node binary.
-    // Spawning it plainly boots a whole NEW Cyboflow app instance, which boots
-    // its own MCP lifecycle, finds no node, spawns another app… an exponential,
-    // unkillable loop of app windows (observed on machines without node, e.g.
-    // some Intel installs). ELECTRON_RUN_AS_NODE=1 makes Electron run the script
-    // as Node instead of launching the app. A real node binary ignores the flag.
-    if (nodePath === process.execPath) {
-      env.ELECTRON_RUN_AS_NODE = '1';
-    }
 
     const child = spawn(nodePath, [scriptPath], {
       stdio: ['pipe', 'pipe', 'pipe'],

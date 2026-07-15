@@ -2,6 +2,7 @@ import type { ClaudeSpawnerOptions } from '../../../../orchestrator/runExecutor'
 import type { PermissionMode } from '../../../../../../shared/types/workflows';
 import { resolveAgentModelAlias } from '../../agentModelContext';
 import { codexPermissionFlagsForMode } from '../codexPtyManager';
+import { electronRunAsNodeGuardEnv } from '../../../../utils/electronNodeGuard';
 import type {
   AppServerJsonValue,
   AppServerThreadResumeParams,
@@ -29,6 +30,10 @@ function buildMcpConfig(
         env: {
           CYBOFLOW_RUN_ID: runId,
           CYBOFLOW_ORCH_SOCKET: runtimeConfig.orchSocketPath,
+          // Guard: nodeExecutablePath may resolve to the Electron app binary for a
+          // packaged app with no standalone node on PATH — without this flag,
+          // messaging Codex boots a whole new Cyboflow app. See electronNodeGuard.
+          ...electronRunAsNodeGuardEnv(runtimeConfig.nodeExecutablePath),
         },
         required: true,
         default_tools_approval_mode: 'approve',
