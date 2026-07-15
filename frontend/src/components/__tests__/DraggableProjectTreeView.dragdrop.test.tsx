@@ -246,10 +246,11 @@ function setRowRect(row: HTMLElement): void {
   });
 }
 
-function dragOverAt(row: HTMLElement, clientY: number, transfer: ReturnType<typeof dataTransfer>): void {
+function dragOverAt(row: HTMLElement, clientY: number, transfer: ReturnType<typeof dataTransfer>): Event {
   const event = createEvent.dragOver(row, { dataTransfer: transfer });
   Object.defineProperty(event, 'clientY', { value: clientY });
   fireEvent(row, event);
+  return event;
 }
 
 describe('DraggableProjectTreeView — project reorder drop', () => {
@@ -348,6 +349,37 @@ describe('DraggableProjectTreeView — dragCounter highlight', () => {
 });
 
 describe('DraggableProjectTreeView — session reorder', () => {
+  it('sets the drag-transfer contract, prevents dragover default, and uses the row midpoint for an after-drop', async () => {
+    mockSessions = [
+      session('one', 'Session One', 1, 0),
+      session('two', 'Session Two', 1, 1),
+      session('three', 'Session Three', 1, 2),
+    ];
+    await renderTree();
+
+    const source = draggableOf('Session Three');
+    const target = draggableOf('Session One');
+    setRowRect(target);
+    const transfer = dataTransfer();
+    fireEvent.dragStart(source, { dataTransfer: transfer });
+
+    expect(transfer.effectAllowed).toBe('move');
+    expect(transfer.setData).toHaveBeenCalledWith('text/plain', 'three');
+
+    // The row midpoint is y=20; y=35 must choose the "after" insertion point.
+    const dragOverEvent = dragOverAt(target, 35, transfer);
+    expect(dragOverEvent.defaultPrevented).toBe(true);
+    await act(async () => {
+      fireEvent.drop(target, { clientY: 35, dataTransfer: transfer });
+    });
+
+    await waitFor(() => expect(mockSessionsReorder).toHaveBeenCalledWith([
+      { id: 'one', displayOrder: 0 },
+      { id: 'three', displayOrder: 1 },
+      { id: 'two', displayOrder: 2 },
+    ]));
+  });
+
   it('persists the draggable rows by session id while excluding an interleaved experiment group', async () => {
     mockSessions = [
       session('one', 'Session One', 1, 0),
