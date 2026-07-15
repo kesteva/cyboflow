@@ -38,10 +38,12 @@ nohup python3 -m http.server PORT --directory "$CYBOFLOW_RUN_ARTIFACTS_DIR/proto
 curl -sf "http://localhost:PORT/" >/dev/null
 ```
 
-The detached server intentionally OUTLIVES this run so the human can keep the
-prototype tab open; it serves only static files from the run's artifacts dir and
-costs nothing meaningful. It is not cleaned up automatically — the user can kill
-it any time (`pkill -f "http.server.*prototype"`).
+The detached server intentionally OUTLIVES your subagent turn so the prototype
+tab keeps rendering for the whole human-review window; it serves only static
+files from the run's artifacts dir. You do NOT need to clean it up or warn the
+user about it: the main process reaps it automatically when the run is closed out
+(merged, dismissed, or cancelled) and sweeps any survivors at app quit and next
+boot. There is no manual cleanup step.
 
 You run in your own context window and do **not** write cyboflow state — never
 call the cyboflow MCP write tools and never call AskUserQuestion; the orchestrator

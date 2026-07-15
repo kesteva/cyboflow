@@ -76,6 +76,7 @@ import { PeekabooBackend } from './services/visualVerify/peekabooBackend';
 import { VlmJudgeImpl } from './services/visualVerify/vlmJudge';
 import { DevServerManager } from './services/visualVerify/devServerManager';
 import { StaticServerManager } from './services/visualVerify/staticServerManager';
+import { PrototypeServerReaper } from './services/prototypeServerReaper';
 import { FsBaselineStore } from './services/visualVerify/baselineStore';
 import { comparePngFiles } from './services/visualVerify/pixelDiff';
 import { resolveDeliverableContext, resolveStaticHtmlContext } from './orchestrator/verifyConfigLoader';
@@ -314,6 +315,13 @@ let archiveProgressManager: ArchiveProgressManager;
 // Run user-shells (worktree-terminal feature). Module-level so the before-quit
 // handler (outside the orchestrator-setup block) can destroyAll() on app quit.
 let runShellManager: RunShellManager | null = null;
+
+// Reaper for the detached `python3 -m http.server` prototype servers the
+// Planner/Ship ui-prototype subagent starts (TASK-057). Module-level so the
+// run close-out / cancel dep bags, the boot sweep, and the before-quit handler
+// all share ONE instance. Stateless (ps + process.kill) — safe to construct at
+// module load; the logger is optional, so no whenReady wiring is required.
+const prototypeServerReaper = new PrototypeServerReaper();
 
 // Store original console methods before overriding
 // These must be captured immediately when the module loads
@@ -2261,6 +2269,32 @@ app.whenReady().then(async () => {
   console.log('[Main] App is ready, initializing services...');
   await initializeServices();
 
+  // Boot sweep (TASK-057): kill detached ui-prototype `http.server` processes
+  // pointing under THIS instance's artifacts/runs root that a prior session or a
+  // crash left behind. LIVE-RUN-AWARE backstop: after an unclean shutdown a run
+  // left non-terminal (e.g. awaiting_review) still has its server up, and killing
+  // it would leave the prototype tab dead when the user reopens to review — so a
+  // server whose runId still has a NON-terminal workflow_runs row is spared. The
+  // clean-quit path is already fully covered by the before-quit sweep. DB error →
+  // treat as not-live (reap) so a crashed-DB boot never strands servers.
+  // Fire-and-forget — never block boot on `ps`.
+  void prototypeServerReaper
+    .sweepOrphans(getCyboflowSubdirectory('artifacts', 'runs'), (runId) => {
+      try {
+        return !!databaseService
+          .getDb()
+          .prepare(
+            `SELECT 1 FROM workflow_runs WHERE id = ? AND status NOT IN ${TERMINAL_RUN_STATUSES_SQL_IN}`,
+          )
+          .get(runId);
+      } catch {
+        return false;
+      }
+    })
+    .catch((err) => {
+      console.error('[Main] prototype-server boot sweep failed:', err);
+    });
+
   // Schema-version gate: both packaged variants share ~/.cyboflow, so a newer
   // build (e.g. Cyboflow Dev) may have forward-migrated the DB past what this
   // binary understands. Warn before we build the UI on top of a schema this
@@ -2577,6 +2611,10 @@ app.whenReady().then(async () => {
       // a no-op if the scheduler was never initialized; fail-soft inside the handler.
       cancelVerificationsForRun: (runId: string) =>
         VerificationScheduler.tryGetInstance()?.cancelForRun(runId),
+      // TASK-057: a cancelled run must reap its detached ui-prototype http.server
+      // too. Fail-soft is handled inside cancelRunHandler.
+      reapPrototypeServers: (runId: string) =>
+        prototypeServerReaper.reapForRun(getCyboflowSubdirectory('artifacts', 'runs', runId)),
       logger: loggerLike,
     };
     setCancelRunDeps(cancelRunDepsBag);
@@ -3544,6 +3582,10 @@ app.whenReady().then(async () => {
         runExecutor.disposeMonitorResources(runId);
         MonitorRegistry.getInstance().unregister(runId);
       },
+      // TASK-057: kill the run's detached ui-prototype http.server at close-out
+      // (merge / createPr / dismiss). Fail-soft is handled inside the router.
+      reapPrototypeServers: (runId) =>
+        prototypeServerReaper.reapForRun(getCyboflowSubdirectory('artifacts', 'runs', runId)),
       // Native task-tracking (migration 014): merge/createPr/dismiss stamp the
       // run's outcome and recompute the linked task's derived execution stage.
       // getInstance() resolves the singleton initialized during service construction.
@@ -3682,6 +3724,14 @@ app.on('before-quit', async (event) => {
     runShellManager.destroyAll();
     console.log('[Main] Run user-shells destroyed');
   }
+
+  // TASK-057: SIGTERM any detached ui-prototype http.server still serving under
+  // this instance's artifacts/runs root, so quitting leaves zero prototype
+  // servers. Awaited (the sweep only sends signals — it does not wait for exit)
+  // and internally fail-soft, so a `ps` failure never blocks quit.
+  console.log('[Main] Sweeping leaked ui-prototype servers...');
+  await prototypeServerReaper.sweepOrphans(getCyboflowSubdirectory('artifacts', 'runs'));
+  console.log('[Main] Prototype-server sweep complete');
 
   // Close task queue
   if (taskQueue) {

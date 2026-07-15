@@ -604,6 +604,16 @@ export interface RunCloseoutDeps {
    */
   disposeMonitorResources: (runId: string) => void;
   /**
+   * Reap the run's detached ui-prototype `http.server` process (TASK-057) at
+   * terminal close-out. The Planner/Ship ui-prototype subagent starts that server
+   * with `nohup ... &` so it outlives the run's review window; close-out (merge /
+   * createPr / dismiss) is where the main process finally kills it. Optional +
+   * fail-soft: a missing dep or a throw never blocks close-out. Backed by
+   * PrototypeServerReaper.reapForRun; a no-op for runs that never served a
+   * prototype. Injected as a function-ref so this router imports no services/*.
+   */
+  reapPrototypeServers?: (runId: string) => void | Promise<unknown>;
+  /**
    * Optional native-task stage deriver (migration 014). When wired, the merge /
    * createPr / dismiss mutations stamp workflow_runs.outcome and recompute the
    * linked task's derived execution stage through the chokepoint. The run's
@@ -623,6 +633,23 @@ let runCloseoutDeps: RunCloseoutDeps | null = null;
  */
 export function setRunCloseoutDeps(deps: RunCloseoutDeps): void {
   runCloseoutDeps = deps;
+}
+
+/**
+ * Fail-soft reap of a run's detached ui-prototype http.server at close-out
+ * (TASK-057). A missing dep (reaper unwired) or a throw is swallowed — reaping is
+ * strictly downstream of the run's terminal state and must never block merge /
+ * createPr / dismiss. Awaited so it settles before the handler returns.
+ */
+async function reapPrototypeServersSafe(deps: RunCloseoutDeps, runId: string): Promise<void> {
+  try {
+    await deps.reapPrototypeServers?.(runId);
+  } catch (err: unknown) {
+    console.error('[runs.closeout] reapPrototypeServers failed — proceeding', {
+      runId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
@@ -2461,6 +2488,8 @@ export const runsRouter = router({
       // outlived the walk so the user could chat with it at rest, and close-out
       // (worktree removed above) is where it finally goes away. No-op without a monitor.
       deps!.disposeMonitorResources(input.runId);
+      // Reap the run's detached ui-prototype http.server (TASK-057), fail-soft.
+      await reapPrototypeServersSafe(deps!, input.runId);
       ctx.db
         .prepare(
           `UPDATE workflow_runs
@@ -2528,6 +2557,8 @@ export const runsRouter = router({
       // outlived the walk so the user could chat with it at rest, and close-out
       // (worktree removed above) is where it finally goes away. No-op without a monitor.
       deps!.disposeMonitorResources(input.runId);
+      // Reap the run's detached ui-prototype http.server (TASK-057), fail-soft.
+      await reapPrototypeServersSafe(deps!, input.runId);
       ctx.db
         .prepare(
           `UPDATE workflow_runs
@@ -2586,6 +2617,8 @@ export const runsRouter = router({
       // outlived the walk so the user could chat with it at rest, and close-out
       // (worktree removed above) is where it finally goes away. No-op without a monitor.
       deps!.disposeMonitorResources(input.runId);
+      // Reap the run's detached ui-prototype http.server (TASK-057), fail-soft.
+      await reapPrototypeServersSafe(deps!, input.runId);
       ctx.db
         .prepare(
           `UPDATE workflow_runs

@@ -114,6 +114,16 @@ export interface CancelRunDeps {
    */
   cancelVerificationsForRun?: (runId: string) => void;
   /**
+   * Reap the run's detached ui-prototype `http.server` process (TASK-057): the
+   * Planner/Ship ui-prototype subagent starts it with `nohup ... &` so it outlives
+   * the run, and a cancelled run must not leave it burning on the host. Called
+   * AFTER the live agent is stopped. Optional + fail-soft: a missing dep (no
+   * reaper wired) or a throw never blocks the cancel — the run row is canonical,
+   * the prototype server is downstream. Injected as a function-ref so this handler
+   * imports no services/* (and no electron) code.
+   */
+  reapPrototypeServers?: (runId: string) => void | Promise<unknown>;
+  /**
    * Optional structured logger. When provided, a rejection from `stopLiveRun` is
    * logged as a `[cancelRun]` entry before the handler proceeds to the DB write
    * (the run is conceptually canceled regardless of kill success). When omitted,
@@ -184,6 +194,7 @@ export async function cancelRunHandler(
     markBatchTerminal,
     deletePendingDraftsForRun,
     cancelVerificationsForRun,
+    reapPrototypeServers,
     logger,
   } = deps;
 
@@ -246,6 +257,19 @@ export async function cancelRunHandler(
     cancelVerificationsForRun?.(runId);
   } catch (err: unknown) {
     logger?.error('[cancelRun] cancelVerificationsForRun failed — proceeding', {
+      runId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Reap the run's detached ui-prototype http.server (TASK-057) AFTER the kill: a
+  // cancelled run must not leave the `nohup python3 -m http.server` process
+  // burning on the host. Fail-soft: a missing dep or a throw never blocks the
+  // cancel — the prototype server is downstream of the run row.
+  try {
+    await reapPrototypeServers?.(runId);
+  } catch (err: unknown) {
+    logger?.error('[cancelRun] reapPrototypeServers failed — proceeding', {
       runId,
       error: err instanceof Error ? err.message : String(err),
     });
