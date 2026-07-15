@@ -66,17 +66,19 @@ describe('Full-chain migration continuity', () => {
     raw.close();
   });
 
-  it('materializes the latest migrations’ columns after the whole chain runs', () => {
+  it("materializes the latest migrations' columns after the whole chain runs", () => {
     const svc = new DatabaseService(dbPath);
     svc.initialize();
     const raw = svc.getDb();
 
-    // 044_workflow_run_eval_enabled + 043_run_evals + 037/032/013 stamp columns
-    // on workflow_runs — a representative sampling from the tail of the chain.
+    // The migrations 059-065 span parallel development stacks (note: duplicate
+    // numbers coexist; the runner applies by FILENAME, not number). The latest
+    // migrations stamp columns on workflow_runs - a representative sampling
+    // from the tail of the chain.
     const wrCols = columnNames(raw, 'workflow_runs');
-    expect(wrCols).toContain('eval_enabled'); // 044
-    expect(wrCols).toContain('agent_provider'); // 060
-    expect(wrCols).toContain('agent_runtime'); // 061
+    expect(wrCols).toContain('eval_enabled'); // legacy 044
+    expect(wrCols).toContain('agent_provider'); // 062_workflow_run_agent_provider
+    expect(wrCols).toContain('agent_runtime'); // 063_workflow_run_agent_runtime
     expect(wrCols).toContain('execution_model'); // 032
     expect(wrCols).toContain('substrate'); // 013
 
@@ -89,15 +91,16 @@ describe('Full-chain migration continuity', () => {
     // 029 + 038 build agent_overrides and its per-agent MCP column.
     expect(columnNames(raw, 'agent_overrides')).toContain('enabled_mcps_json'); // 038
 
-    // 039 adds the per-session plugin/MCP toggle columns.
+    // 039 adds the per-session plugin/MCP toggle columns; 059/060/061
+    // add session agent_provider/runtime/model.
     const sessCols = columnNames(raw, 'sessions');
     expect(sessCols).toContain('disabled_mcp_servers_json'); // 039
     expect(sessCols).toContain('enabled_plugins_json'); // 039
-    expect(sessCols).toContain('agent_provider'); // 057
-    expect(sessCols).toContain('agent_runtime'); // 058
-    expect(sessCols).toContain('agent_model'); // 059
+    expect(sessCols).toContain('agent_provider'); // 059_session_agent_provider
+    expect(sessCols).toContain('agent_runtime'); // 060_session_agent_runtime
+    expect(sessCols).toContain('agent_model'); // 061_session_agent_model
 
-    // 063 creates provider-neutral, append-only invocation persistence.
+    // 065 creates provider-neutral, append-only invocation persistence.
     expect(columnNames(raw, 'agent_invocations')).toEqual(
       expect.arrayContaining([
         'id',
