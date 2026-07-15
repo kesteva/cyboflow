@@ -41,6 +41,14 @@ export interface QuestionPayload {
   header: string;
   /** Whether the user may pick multiple options. */
   multiSelect: boolean;
+  /**
+   * When true, the answer is a secret value (e.g. a password or API key).
+   * The frontend renders the free-text "Other" input as type="password" (masked),
+   * and QuestionRouter stores a redacted placeholder in answer_json instead of
+   * the raw value. The raw value is still delivered to Codex in-memory.
+   * Sourced from ToolRequestUserInputQuestion.isSecret in the Codex protocol.
+   */
+  isSecret?: boolean;
   /** 2–4 options per the SDK constraint. */
   options: ReadonlyArray<{
     label: string;

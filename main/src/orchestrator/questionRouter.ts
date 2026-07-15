@@ -165,6 +165,39 @@ export function embedAttachmentsIntoAnswer(answer: QuestionAnswer): QuestionAnsw
   return { answers, ...(answer.annotations ? { annotations: answer.annotations } : {}) };
 }
 
+/**
+ * Build the answer that is safe to persist in the DB (answer_json).
+ *
+ * For each question whose `isSecret` flag is true, replace the stored answer
+ * value with the literal string "[redacted]" so secret values (passwords,
+ * tokens, API keys) are never written to disk in cleartext.
+ *
+ * The in-memory `effectiveAnswer` (with the real value) is still delivered to
+ * the Codex agent via resolve() + socketReply() — only the persisted copy is
+ * redacted. Non-secret questions are stored verbatim. When no questions are
+ * secret, returns the original reference unchanged (no allocation).
+ */
+export function redactSecretAnswers(
+  effectiveAnswer: QuestionAnswer,
+  questions: ReadonlyArray<QuestionPayload>,
+): QuestionAnswer {
+  // Collect the question text of every secret question.
+  const secretQuestions = new Set<string>();
+  for (const q of questions) {
+    if (q.isSecret === true) secretQuestions.add(q.question);
+  }
+  if (secretQuestions.size === 0) return effectiveAnswer;
+
+  const redacted: Record<string, string> = {};
+  for (const [key, value] of Object.entries(effectiveAnswer.answers)) {
+    redacted[key] = secretQuestions.has(key) ? '[redacted]' : value;
+  }
+  return {
+    answers: redacted,
+    ...(effectiveAnswer.annotations ? { annotations: effectiveAnswer.annotations } : {}),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
@@ -587,10 +620,14 @@ export class QuestionRouter extends EventEmitter {
       }
 
       // Commit the question answer row.
+      // Secret answers (isSecret: true) must NOT be stored cleartext — build a
+      // redacted copy for answer_json only. The raw effectiveAnswer is delivered
+      // in-memory to the Codex agent via resolve() + socketReply() below.
+      const persistedAnswer = redactSecretAnswers(effectiveAnswer, request.questions);
       this.db.prepare(
         `UPDATE questions SET status = 'answered', answered_at = ?, answer_json = ?
          WHERE id = ?`,
-      ).run(now, JSON.stringify(effectiveAnswer), questionId);
+      ).run(now, JSON.stringify(persistedAnswer), questionId);
       // Resolve the folded decision review_item (idempotent) — the human answered.
       if (reviewItemId !== null) {
         resolveReviewItemById(this.db, reviewItemId, 'user', 'answered', now, request.runId);

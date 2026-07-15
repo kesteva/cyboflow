@@ -12,7 +12,7 @@ type QuestionDispatch = Extract<
 
 type CodexQuestionPayload = QuestionPayload & Pick<
   ToolRequestUserInputQuestion,
-  'id' | 'isOther' | 'isSecret'
+  'id' | 'isOther'
 >;
 
 export interface QuestionRouterPort {

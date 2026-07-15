@@ -261,13 +261,14 @@ function QuestionFieldset({
               Other
             </label>
             <input
-              type="text"
+              type={qp.isSecret === true ? 'password' : 'text'}
               placeholder="Describe your answer…"
               disabled={!otherSelected}
               value={otherText}
               onChange={(e) => { onOtherText(e.target.value); }}
               className="mt-1 w-full text-sm px-2 py-1 border border-border-primary rounded bg-bg-primary text-text-primary placeholder:text-text-muted disabled:opacity-50 disabled:cursor-not-allowed"
               aria-label="Other free-text answer"
+              autoComplete={qp.isSecret === true ? 'new-password' : undefined}
             />
           </div>
         </div>
