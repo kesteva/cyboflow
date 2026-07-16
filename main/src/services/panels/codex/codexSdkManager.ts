@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3';
 import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { Logger } from '../../../utils/logger';
 import type { ConfigManager } from '../../configManager';
 import type { SessionManager } from '../../sessionManager';
@@ -40,12 +40,14 @@ import {
   requireCodexChatGptAccount,
 } from './appServer/account';
 import {
+  AppServerProtocolError,
   CodexAppServerClient,
   type CodexAppServerClientOptions,
 } from './appServer/client';
 import { projectTurnSessionEvent } from './appServer/eventProjector';
 import {
   buildCodexAppServerEnvironment,
+  buildCodexAppServerThreadConfiguration,
   buildCodexAppServerThreadResumeParams,
   buildCodexAppServerThreadStartParams,
   buildCodexAppServerTurnOptions,
@@ -96,6 +98,55 @@ interface ActiveCodexRun {
   worktreePath: string;
 }
 
+/**
+ * Per-LOGICAL-TURN mutable state. The client callbacks and the turnSession
+ * `onEvent` are baked once at cold spawn, so every one dispatches through the
+ * warm entry's `currentContext` (this object) — bound before `startTurn`, cleared
+ * after the terminal cleanup. Null while the entry is parked idle between turns.
+ */
+interface CodexTurnContext {
+  runId: string;
+  displayPanelId: string;
+  sessionId: string;
+  agentInvocationId: string;
+  abortController: AbortController;
+  terminal: Deferred<void>;
+  router: EventRouter<AgentStreamEvent>;
+  sink: RawEventsSink<AgentStreamEvent>;
+  rawNotificationSink: CodexRawNotificationSink;
+  usageAccumulator: CodexTurnUsageAccumulator;
+  approvalBridge: CodexAppServerApprovalBridge;
+  questionBridge: CodexAppServerQuestionBridge;
+  startedAt: number;
+  model: string | null | undefined;
+  hidePromptFromTranscript: boolean | undefined;
+  terminalResultEmitted: boolean;
+  completedCleanly: boolean;
+}
+
+/**
+ * A warm (persistent) Codex app-server kept alive across resume-continuation
+ * turns of ONE conversation. Cold-only transport/session/thread state lives here;
+ * `currentContext` holds the in-flight turn (null while parked). Keyed in
+ * `warmCodexRuns` by spawnKey; also reachable by panelId/runId for kill.
+ */
+interface WarmCodexEntry {
+  client: CodexAppServerClientLike;
+  turnSession: CodexAppServerTurnSession;
+  command: string;
+  threadId: string | null;
+  initializeResponse: AppServerInitializeResponse | null;
+  fingerprint: string;
+  runId: string;
+  panelId: string;
+  /** false for lane/disabled spawns — those always close, never park. */
+  warmEligible: boolean;
+  idleTimer: ReturnType<typeof setTimeout> | null;
+  closing: boolean;
+  teardownPromise: Promise<void> | null;
+  currentContext: CodexTurnContext | null;
+}
+
 interface Deferred<T> {
   promise: Promise<T>;
   resolve(value: T): void;
@@ -143,6 +194,49 @@ async function withTimeout<T>(
   } finally {
     if (timeout) clearTimeout(timeout);
   }
+}
+
+/**
+ * Idle time a WARM Codex app-server is kept alive between resume-continuation
+ * turns of one conversation before it is closed (mirrors the SDK warm TTL).
+ */
+const CODEX_WARM_SESSION_TTL_MS = 15 * 60_000;
+
+/**
+ * v1 rollback lever: when `CYBOFLOW_DISABLE_CODEX_WARM=1`, every Codex turn tears
+ * down its app-server instead of parking it warm. Read per turn so it can be
+ * flipped without a restart.
+ */
+function codexWarmDisabled(): boolean {
+  return process.env.CYBOFLOW_DISABLE_CODEX_WARM === '1';
+}
+
+/** SHA-1 hex of a string — a bounded, stable fingerprint digest (not for crypto). */
+function sha1(input: string): string {
+  return createHash('sha1').update(input).digest('hex');
+}
+
+/**
+ * Recursively sort object keys and drop functions so structurally-equal values
+ * serialize identically regardless of key insertion order — the warm-reuse
+ * fingerprint input.
+ */
+function canonicalize(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') {
+    return typeof value === 'function' ? null : value;
+  }
+  if (Array.isArray(value)) return value.map(canonicalize);
+  const record = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(record).sort()) {
+    if (typeof record[key] === 'function') continue;
+    out[key] = canonicalize(record[key]);
+  }
+  return out;
+}
+
+function stableSerialize(value: unknown): string {
+  return JSON.stringify(canonicalize(value)) ?? 'null';
 }
 
 function defaultCodexAppServerClientFactory(
@@ -204,6 +298,10 @@ export class CodexSdkManager extends AbstractCliManager {
   private readonly spawnKeysByPanelId = new Map<string, Set<string>>();
   private readonly spawnKeysByRunId = new Map<string, Set<string>>();
   private readonly reservedSpawnKeys = new Set<string>();
+  // Warm (persistent) app-servers parked between resume-continuation turns of one
+  // conversation, keyed by spawnKey. A parked entry is NOT in `this.processes`
+  // (deleted per logical turn); killAllProcesses/killProcess sweep this map too.
+  private readonly warmCodexRuns = new Map<string, WarmCodexEntry>();
   // Short-lived probe app-servers (onboarding detection + model discovery) that
   // are not tracked in `this.processes`. Tracked here so shutdown reaps any that
   // are mid-flight; each self-removes in its own try/finally on resolve/reject.
@@ -455,15 +553,183 @@ export class CodexSdkManager extends AbstractCliManager {
     options: ClaudeSpawnerOptions,
     spawnKey: string,
   ): Promise<void> {
-    const displayPanelId = options.panelId;
     const runId = options.runId ?? options.panelId;
+    // A lane spawn (fan-out step: spawnKey !== panelId) is a single-shot turn of a
+    // fresh conversation — it never parks warm. Same when the kill-switch is set.
+    const isLaneSpawn = options.spawnKey !== undefined && options.spawnKey !== options.panelId;
+    const warmEligible = !isLaneSpawn && !codexWarmDisabled();
 
     const runtimeConfig = this.requireMcpRuntimeConfig();
-    const approvalRouter = this.requireApprovalRouter();
-    const questionRouter = this.requireQuestionRouter();
     const executable = this.getResolvedExecutable();
+    const fingerprint = this.computeWarmFingerprint(runId, options, runtimeConfig, executable);
+
+    // Warm reuse: a parked entry for this key whose thread + fingerprint match the
+    // incoming resume-continuation absorbs the turn with NO cold app-server spawn.
+    if (warmEligible) {
+      const existing = this.warmCodexRuns.get(spawnKey);
+      if (existing) {
+        if (this.evaluateCodexWarmReuse(existing, options, fingerprint)) {
+          this.clearWarmIdleTimer(existing);
+          await this.runOneTurn(existing, options, spawnKey, false);
+          return;
+        }
+        // Ineligible (fresh conversation / changed config / closing): drop the
+        // parked process and cold-respawn below.
+        await this.closeWarmEntry(spawnKey, existing, false);
+      }
+    }
+
+    const entry = this.buildColdEntry(options, runId, runtimeConfig, executable, fingerprint, warmEligible);
+    if (warmEligible) this.warmCodexRuns.set(spawnKey, entry);
+    await this.runOneTurn(entry, options, spawnKey, true);
+  }
+
+  /**
+   * Fingerprint the spawn-baked inputs (serialized env + thread configuration —
+   * incl. `developerInstructions`, model, sandbox, and the runId-bearing MCP
+   * bridge env — plus executable path/version and client init version). A warm
+   * turn whose fingerprint changed forces a cold respawn instead of splicing a
+   * mismatched conversation onto the live thread. runId is baked into the env, so
+   * a cross-run reuse self-invalidates.
+   */
+  private computeWarmFingerprint(
+    runId: string,
+    options: ClaudeSpawnerOptions,
+    runtimeConfig: CodexMcpRuntimeConfig,
+    executable: ResolvedCodexExecutable,
+  ): string {
+    return sha1(stableSerialize({
+      env: buildCodexAppServerEnvironment(runId, runtimeConfig),
+      thread: buildCodexAppServerThreadConfiguration(runId, options, runtimeConfig),
+      executablePath: executable.executablePath,
+      executableVersion: executable.version,
+      clientVersion: this.clientVersion,
+    }));
+  }
+
+  /**
+   * A parked warm entry may absorb the incoming spawn only when it is a
+   * resume-continuation of the SAME conversation (resumeSessionId === the parked
+   * thread) AND every spawn-baked input is unchanged (fingerprint). `spawnKey ===
+   * panelId` alone is NOT conversation identity — unrelated sequential programmatic
+   * steps share the panel key, so an id gate is mandatory.
+   */
+  private evaluateCodexWarmReuse(
+    entry: WarmCodexEntry,
+    options: ClaudeSpawnerOptions,
+    fingerprint: string,
+  ): boolean {
+    if (entry.closing || codexWarmDisabled()) return false;
+    if (entry.currentContext !== null) return false;      // a turn is in flight — not idle
+    if (entry.threadId === null) return false;
+    if (typeof options.resumeSessionId !== 'string') return false;
+    if (options.resumeSessionId !== entry.threadId) return false;
+    return entry.fingerprint === fingerprint;
+  }
+
+  /**
+   * Build a cold entry: the app-server client + turnSession whose callbacks all
+   * dispatch through the entry's mutable `currentContext` (bound per turn in
+   * runOneTurn), so one live process serves N sequential turns. `perfBump` fires
+   * here only — warm reuse does none of this.
+   */
+  private buildColdEntry(
+    options: ClaudeSpawnerOptions,
+    runId: string,
+    runtimeConfig: CodexMcpRuntimeConfig,
+    executable: ResolvedCodexExecutable,
+    fingerprint: string,
+    warmEligible: boolean,
+  ): WarmCodexEntry {
+    const entry: WarmCodexEntry = {
+      client: undefined as unknown as CodexAppServerClientLike,
+      turnSession: undefined as unknown as CodexAppServerTurnSession,
+      command: executable.executablePath,
+      threadId: options.resumeSessionId ?? null,
+      initializeResponse: null,
+      fingerprint,
+      runId,
+      panelId: options.panelId,
+      warmEligible,
+      idleTimer: null,
+      closing: false,
+      teardownPromise: null,
+      currentContext: null,
+    };
+
+    perfBump('codex.appserver.spawn');
+    const client = this.createAppServerClient({
+      command: executable.executablePath,
+      cwd: options.worktreePath,
+      env: prependCodexPathToEnvironment(
+        buildCodexAppServerEnvironment(runId, runtimeConfig),
+        executable.pathDir,
+      ),
+      onServerRequest: (request) => {
+        const ctx = entry.currentContext;
+        if (!ctx) {
+          // A server request with no active turn cannot be routed to a bridge —
+          // reject so the app-server is not left hanging on it while parked.
+          return Promise.reject(
+            new AppServerProtocolError('Codex app-server request arrived with no active turn'),
+          );
+        }
+        return request.method === 'item/tool/requestUserInput'
+          ? ctx.questionBridge.handleServerRequest(request)
+          : ctx.approvalBridge.handleServerRequest(request);
+      },
+      onNotification: (notification) => {
+        const ctx = entry.currentContext;
+        if (ctx) ctx.rawNotificationSink.persist(ctx.runId, notification);
+        entry.turnSession.handleNotification(notification);
+      },
+      onStderr: (chunk) => this.logger?.warn(`[Codex app-server stderr] ${chunk.trimEnd()}`),
+      onError: (error) => {
+        const ctx = entry.currentContext;
+        if (ctx) {
+          if (!ctx.abortController.signal.aborted) ctx.terminal.reject(error);
+        } else {
+          // Parked-process death: evict so the next spawn cold-starts.
+          this.evictDeadWarmEntry(entry);
+        }
+      },
+      onExit: ({ code, signal }) => {
+        const ctx = entry.currentContext;
+        if (ctx) {
+          if (!ctx.abortController.signal.aborted && !ctx.terminal.settled) {
+            ctx.terminal.reject(new Error(
+              `Codex app-server exited before the turn completed (code=${String(code)}, signal=${String(signal)})`,
+            ));
+          }
+        } else {
+          this.evictDeadWarmEntry(entry);
+        }
+      },
+    });
+    entry.client = client;
+    entry.turnSession = new CodexAppServerTurnSession(client, {
+      onEvent: (event) => this.handleTurnEvent(entry, event),
+    });
+    return entry;
+  }
+
+  /**
+   * Run exactly ONE logical turn on an entry. Binds a fresh per-turn context
+   * (terminal/abort/router/sink/bridges/usage + a fresh agentInvocationId), does
+   * the cold handshake (initialize/account/thread) only when `cold`, mints the
+   * per-turn invocation + init records, starts the turn, and on the finally either
+   * PARKS the live process (clean completion) or closes it. Emits `spawned`/`exit`
+   * per logical turn so the events layer is unchanged.
+   */
+  private async runOneTurn(
+    entry: WarmCodexEntry,
+    options: ClaudeSpawnerOptions,
+    spawnKey: string,
+    cold: boolean,
+  ): Promise<void> {
+    const displayPanelId = options.panelId;
+    const runId = options.runId ?? options.panelId;
     const agentInvocationId = randomUUID();
-    const command = executable.executablePath;
     const abortController = new AbortController();
     const terminal = createDeferred<void>();
     // App-server callbacks can reject before startup reaches the terminal await.
@@ -473,126 +739,49 @@ export class CodexSdkManager extends AbstractCliManager {
     const sink = new RawEventsSink<AgentStreamEvent>(this.db, this.logger);
     const rawNotificationSink = new CodexRawNotificationSink(this.db, this.logger);
     sink.attachToRouter(router, runId);
-
-    let exitCode = 0;
-    let terminalResultEmitted = false;
-    let threadId = options.resumeSessionId ?? null;
-    let initializeResponse: AppServerInitializeResponse | null = null;
-    const startedAt = Date.now();
     const usageAccumulator = new CodexTurnUsageAccumulator();
-    const turnSessionRef: { current: CodexAppServerTurnSession | null } = { current: null };
 
     const approvalBridge = new CodexAppServerApprovalBridge({
       runId,
-      approvalRouter,
+      approvalRouter: this.requireApprovalRouter(),
       source: `${CODEX_APP_SERVER_APPROVAL_SOURCE}:${agentInvocationId}`,
       onError: (error) => this.logger?.error(`[CodexSdkManager] ${error.message}`),
     });
     const questionBridge = new CodexAppServerQuestionBridge({
       runId,
-      questionRouter,
+      questionRouter: this.requireQuestionRouter(),
       onError: (error) => this.logger?.error(`[CodexSdkManager] ${error.message}`),
     });
 
-    const handleTurnEvent = (event: TurnSessionEvent): void => {
-      if (event.type === 'thread.started') threadId = event.threadId;
-      if (event.type === 'thread.tokenUsage.updated') {
-        usageAccumulator.addLastUsage(event.tokenUsage.last);
-      }
-      if (event.type === 'item.started' || event.type === 'item.completed') {
-        approvalBridge.observeItem(event.item);
-      }
-      if (
-        abortController.signal.aborted
-        && event.type === 'turn.completed'
-        && event.status === 'interrupted'
-      ) {
-        terminal.resolve();
-        return;
-      }
-
-      const projectedEvents = projectTurnSessionEvent(event, {
-        model: this.displayModel(options.model),
-        durationMs: Date.now() - startedAt,
-        usage: usageAccumulator.snapshot(),
-        hideUserMessage: options.hidePromptFromTranscript,
-      });
-      for (const projected of projectedEvents) {
-        if (projected.type === 'agent_result') {
-          if (terminalResultEmitted) continue;
-          terminalResultEmitted = true;
-        }
-        this.emitProjected(router, runId, displayPanelId, options.sessionId, projected);
-        if (projected.type === 'agent_result') {
-          if (projected.is_error) {
-            terminal.reject(new Error(projected.result ?? 'Codex turn failed'));
-          } else {
-            terminal.resolve();
-          }
-        }
-      }
+    const ctx: CodexTurnContext = {
+      runId,
+      displayPanelId,
+      sessionId: options.sessionId,
+      agentInvocationId,
+      abortController,
+      terminal,
+      router,
+      sink,
+      rawNotificationSink,
+      usageAccumulator,
+      approvalBridge,
+      questionBridge,
+      startedAt: Date.now(),
+      model: options.model,
+      hidePromptFromTranscript: options.hidePromptFromTranscript,
+      terminalResultEmitted: false,
+      completedCleanly: false,
     };
+    entry.currentContext = ctx;
 
-    perfBump('codex.appserver.spawn');
-    const client = this.createAppServerClient({
-      command,
-      cwd: options.worktreePath,
-      env: prependCodexPathToEnvironment(
-        buildCodexAppServerEnvironment(runId, runtimeConfig),
-        executable.pathDir,
-      ),
-      onServerRequest: (request) => request.method === 'item/tool/requestUserInput'
-        ? questionBridge.handleServerRequest(request)
-        : approvalBridge.handleServerRequest(request),
-      onNotification: (notification) => {
-        rawNotificationSink.persist(runId, notification);
-        turnSessionRef.current?.handleNotification(notification);
-      },
-      onStderr: (chunk) => this.logger?.warn(`[Codex app-server stderr] ${chunk.trimEnd()}`),
-      onError: (error) => {
-        if (!abortController.signal.aborted) terminal.reject(error);
-      },
-      onExit: ({ code, signal }) => {
-        if (!abortController.signal.aborted && !terminal.settled) {
-          terminal.reject(new Error(
-            `Codex app-server exited before the turn completed (code=${String(code)}, signal=${String(signal)})`,
-          ));
-        }
-      },
-    });
-    const turnSession = new CodexAppServerTurnSession(client, { onEvent: handleTurnEvent });
-    turnSessionRef.current = turnSession;
-
-    let teardownPromise: Promise<void> | null = null;
-    const teardown = (interrupt: boolean): Promise<void> => {
-      if (teardownPromise) return teardownPromise;
-      teardownPromise = (async () => {
-        if (interrupt && turnSession.isInitialized && turnSession.activeTurnId) {
-          try {
-            await withTimeout(
-              turnSession.interruptTurn(),
-              APP_SERVER_INTERRUPT_TIMEOUT_MS,
-              'Codex app-server turn interruption',
-            );
-          } catch (error) {
-            this.logger?.warn(
-              `[CodexSdkManager] failed to interrupt run ${runId}: ${error instanceof Error ? error.message : String(error)}`,
-            );
-          }
-        }
-        questionBridge.teardown();
-        approvalBridge.teardown();
-        await client.stop();
-      })();
-      return teardownPromise;
-    };
+    let exitCode = 0;
 
     const activeRun: ActiveCodexRun = {
       abortController,
       cancel: async () => {
         abortController.abort();
         terminal.resolve();
-        await teardown(true);
+        await this.closeWarmEntry(spawnKey, entry, true);
       },
       panelId: displayPanelId,
       sessionId: options.sessionId,
@@ -615,47 +804,56 @@ export class CodexSdkManager extends AbstractCliManager {
         runId,
         displayPanelId,
         options.sessionId,
-        this.buildSessionInfo(options, command),
+        this.buildSessionInfo(options, entry.command),
       );
       this.emit('spawned', { panelId: displayPanelId, sessionId: options.sessionId });
 
-      client.start();
-      initializeResponse = await withTimeout(
-        turnSession.initialize(initializeParams(this.clientVersion)),
-        APP_SERVER_REQUEST_TIMEOUT_MS,
-        'Codex app-server initialization',
-      );
-      if (!initializeResponse.userAgent.includes(CODEX_EXECUTABLE_VERSION)) {
-        throw new Error(
-          `Codex app-server protocol mismatch: expected ${CODEX_EXECUTABLE_VERSION}, got ${initializeResponse.userAgent}`,
+      if (cold) {
+        entry.client.start();
+        const initializeResponse = await withTimeout(
+          entry.turnSession.initialize(initializeParams(this.clientVersion)),
+          APP_SERVER_REQUEST_TIMEOUT_MS,
+          'Codex app-server initialization',
         );
-      }
-      const accountResponse = await withTimeout(
-        client.sendRequest<unknown, { refreshToken: false }>(
-          'account/read',
-          { refreshToken: false },
-        ),
-        APP_SERVER_REQUEST_TIMEOUT_MS,
-        'Codex ChatGPT account check',
-      );
-      requireCodexChatGptAccount(accountResponse);
-      const thread = options.resumeSessionId
-        ? await withTimeout(
-            turnSession.resumeThread(buildCodexAppServerThreadResumeParams(
-              runId,
-              options.resumeSessionId,
-              options,
-              runtimeConfig,
-            )),
-            APP_SERVER_REQUEST_TIMEOUT_MS,
-            'Codex app-server thread resume',
-          )
-        : await withTimeout(
-            turnSession.startThread(buildCodexAppServerThreadStartParams(runId, options, runtimeConfig)),
-            APP_SERVER_REQUEST_TIMEOUT_MS,
-            'Codex app-server thread start',
+        if (!initializeResponse.userAgent.includes(CODEX_EXECUTABLE_VERSION)) {
+          throw new Error(
+            `Codex app-server protocol mismatch: expected ${CODEX_EXECUTABLE_VERSION}, got ${initializeResponse.userAgent}`,
           );
-      threadId = thread.threadId;
+        }
+        entry.initializeResponse = initializeResponse;
+        const accountResponse = await withTimeout(
+          entry.client.sendRequest<unknown, { refreshToken: false }>(
+            'account/read',
+            { refreshToken: false },
+          ),
+          APP_SERVER_REQUEST_TIMEOUT_MS,
+          'Codex ChatGPT account check',
+        );
+        requireCodexChatGptAccount(accountResponse);
+        const runtimeConfig = this.requireMcpRuntimeConfig();
+        const thread = options.resumeSessionId
+          ? await withTimeout(
+              entry.turnSession.resumeThread(buildCodexAppServerThreadResumeParams(
+                runId,
+                options.resumeSessionId,
+                options,
+                runtimeConfig,
+              )),
+              APP_SERVER_REQUEST_TIMEOUT_MS,
+              'Codex app-server thread resume',
+            )
+          : await withTimeout(
+              entry.turnSession.startThread(buildCodexAppServerThreadStartParams(runId, options, runtimeConfig)),
+              APP_SERVER_REQUEST_TIMEOUT_MS,
+              'Codex app-server thread start',
+            );
+        entry.threadId = thread.threadId;
+      }
+
+      if (entry.threadId === null || entry.initializeResponse === null) {
+        throw new Error('Codex warm entry missing thread/init state before turn start');
+      }
+
       new AgentInvocationStore(this.db).createInvocation({
         agentInvocationId,
         runId,
@@ -664,17 +862,17 @@ export class CodexSdkManager extends AbstractCliManager {
         runtime: 'codex-sdk',
         model: resolveAgentModelAlias('codex', options.model),
       });
-      this.captureInvocationCodexThreadId(runId, agentInvocationId, thread.threadId);
+      this.captureInvocationCodexThreadId(runId, agentInvocationId, entry.threadId);
       this.emitProjected(
         router,
         runId,
         displayPanelId,
         options.sessionId,
-        this.buildSystemInitEvent(options, thread.threadId, initializeResponse),
+        this.buildSystemInitEvent(options, entry.threadId, entry.initializeResponse),
       );
 
       await withTimeout(
-        turnSession.startTurn(options.prompt, buildCodexAppServerTurnOptions(options)),
+        entry.turnSession.startTurn(options.prompt, buildCodexAppServerTurnOptions(options)),
         APP_SERVER_REQUEST_TIMEOUT_MS,
         'Codex app-server turn start',
       );
@@ -687,8 +885,8 @@ export class CodexSdkManager extends AbstractCliManager {
         const message = error instanceof Error ? error.message : String(error);
         this.logger?.error(`[CodexSdkManager] Codex app-server run error for panel ${displayPanelId}: ${message}`);
         this.emit('error', { panelId: displayPanelId, sessionId: options.sessionId, error: message });
-        if (!terminalResultEmitted) {
-          terminalResultEmitted = true;
+        if (!ctx.terminalResultEmitted) {
+          ctx.terminalResultEmitted = true;
           this.emitProjected(
             router,
             runId,
@@ -696,8 +894,8 @@ export class CodexSdkManager extends AbstractCliManager {
             options.sessionId,
             this.buildFailureResult(
               message,
-              Date.now() - startedAt,
-              threadId,
+              Date.now() - ctx.startedAt,
+              entry.threadId,
               usageAccumulator.snapshot(),
             ),
           );
@@ -705,7 +903,27 @@ export class CodexSdkManager extends AbstractCliManager {
         throw error;
       }
     } finally {
-      await teardown(false);
+      entry.currentContext = null;
+      // Park ONLY on a clean turn.completed (activeTurnId cleared by finishTurn).
+      // Any error / interrupt / abort / kill-switch closes the process instead —
+      // a turn.error never clears the active turn, so a reused turnSession would
+      // reject the next startTurn.
+      const canPark =
+        entry.warmEligible
+        && ctx.completedCleanly
+        && !abortController.signal.aborted
+        && !entry.closing
+        && !codexWarmDisabled()
+        && entry.turnSession.activeTurnId === null;
+      // This turn's bridges are per-turn (a fresh approval `source` per invocation);
+      // tear them down regardless of park/close. The live client is retained on park.
+      questionBridge.teardown();
+      approvalBridge.teardown();
+      if (canPark) {
+        this.armWarmIdleTimer(entry, spawnKey);
+      } else {
+        await this.closeWarmEntry(spawnKey, entry, abortController.signal.aborted);
+      }
       sink.dispose(runId);
       this.processes.delete(spawnKey);
       this.activeRuns.delete(spawnKey);
@@ -720,6 +938,101 @@ export class CodexSdkManager extends AbstractCliManager {
     }
   }
 
+  /** Turn-event handler bound to a warm entry — dispatches through its current turn. */
+  private handleTurnEvent(entry: WarmCodexEntry, event: TurnSessionEvent): void {
+    const ctx = entry.currentContext;
+    if (!ctx) return; // stray event while parked — ignore
+    if (event.type === 'thread.started') entry.threadId = event.threadId;
+    if (event.type === 'thread.tokenUsage.updated') {
+      ctx.usageAccumulator.addLastUsage(event.tokenUsage.last);
+    }
+    if (event.type === 'item.started' || event.type === 'item.completed') {
+      ctx.approvalBridge.observeItem(event.item);
+    }
+    if (
+      ctx.abortController.signal.aborted
+      && event.type === 'turn.completed'
+      && event.status === 'interrupted'
+    ) {
+      ctx.terminal.resolve();
+      return;
+    }
+
+    const projectedEvents = projectTurnSessionEvent(event, {
+      model: this.displayModel(ctx.model),
+      durationMs: Date.now() - ctx.startedAt,
+      usage: ctx.usageAccumulator.snapshot(),
+      hideUserMessage: ctx.hidePromptFromTranscript,
+    });
+    for (const projected of projectedEvents) {
+      if (projected.type === 'agent_result') {
+        if (ctx.terminalResultEmitted) continue;
+        ctx.terminalResultEmitted = true;
+      }
+      this.emitProjected(ctx.router, ctx.runId, ctx.displayPanelId, ctx.sessionId, projected);
+      if (projected.type === 'agent_result') {
+        if (projected.is_error) {
+          ctx.terminal.reject(new Error(projected.result ?? 'Codex turn failed'));
+        } else {
+          ctx.completedCleanly = true;
+          ctx.terminal.resolve();
+        }
+      }
+    }
+  }
+
+  /** Close + evict a warm entry (idempotent via `teardownPromise`). */
+  private closeWarmEntry(spawnKey: string, entry: WarmCodexEntry, interrupt: boolean): Promise<void> {
+    if (entry.teardownPromise) return entry.teardownPromise;
+    entry.closing = true;
+    this.clearWarmIdleTimer(entry);
+    if (this.warmCodexRuns.get(spawnKey) === entry) this.warmCodexRuns.delete(spawnKey);
+    entry.teardownPromise = (async () => {
+      if (interrupt && entry.turnSession.isInitialized && entry.turnSession.activeTurnId) {
+        try {
+          await withTimeout(
+            entry.turnSession.interruptTurn(),
+            APP_SERVER_INTERRUPT_TIMEOUT_MS,
+            'Codex app-server turn interruption',
+          );
+        } catch (error) {
+          this.logger?.warn(
+            `[CodexSdkManager] failed to interrupt run ${entry.runId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      await entry.client.stop();
+    })();
+    return entry.teardownPromise;
+  }
+
+  /** A parked process died on its own (broker crash/exit) — drop it from the map. */
+  private evictDeadWarmEntry(entry: WarmCodexEntry): void {
+    entry.closing = true;
+    this.clearWarmIdleTimer(entry);
+    for (const [key, value] of this.warmCodexRuns) {
+      if (value === entry) this.warmCodexRuns.delete(key);
+    }
+  }
+
+  private clearWarmIdleTimer(entry: WarmCodexEntry): void {
+    if (entry.idleTimer) {
+      clearTimeout(entry.idleTimer);
+      entry.idleTimer = null;
+    }
+  }
+
+  /** Arm the warm-idle TTL: after CODEX_WARM_SESSION_TTL_MS idle, close the entry. */
+  private armWarmIdleTimer(entry: WarmCodexEntry, spawnKey: string): void {
+    this.clearWarmIdleTimer(entry);
+    entry.idleTimer = setTimeout(() => {
+      this.logger?.info(
+        `[CodexSdkManager] warm Codex app-server idle ${CODEX_WARM_SESSION_TTL_MS}ms — closing (spawn ${spawnKey})`,
+      );
+      void this.closeWarmEntry(spawnKey, entry, false);
+    }, CODEX_WARM_SESSION_TTL_MS);
+  }
+
   override async killProcess(identity: string): Promise<void> {
     const keys = new Set<string>([
       ...(this.spawnKeysByPanelId.get(identity) ?? []),
@@ -727,8 +1040,22 @@ export class CodexSdkManager extends AbstractCliManager {
     ]);
     if (keys.size === 0) keys.add(identity);
     await Promise.all([...keys].map(async (spawnKey) => {
-      await this.activeRuns.get(spawnKey)?.cancel();
+      const active = this.activeRuns.get(spawnKey);
+      if (active) {
+        await active.cancel();
+        return;
+      }
+      // A PARKED warm entry has no active run (no turn in flight) — close it directly.
+      const warm = this.warmCodexRuns.get(spawnKey);
+      if (warm) await this.closeWarmEntry(spawnKey, warm, false);
     }));
+    // Defensive: a parked entry whose spawnKey was already forgotten from the
+    // indexes but whose panelId/runId matches the requested identity.
+    for (const [spawnKey, entry] of [...this.warmCodexRuns]) {
+      if (entry.panelId === identity || entry.runId === identity || spawnKey === identity) {
+        await this.closeWarmEntry(spawnKey, entry, false);
+      }
+    }
   }
 
   override async killAllProcesses(): Promise<void> {
@@ -738,8 +1065,15 @@ export class CodexSdkManager extends AbstractCliManager {
     // app quits.
     const probes = [...this.probeClients];
     this.probeClients.clear();
+    // Warm parked app-servers are not in `this.processes` (deleted per logical
+    // turn), so the base sweep would orphan them — close them alongside probes.
+    const warm = [...this.warmCodexRuns];
+    this.warmCodexRuns.clear();
     await Promise.all([
       super.killAllProcesses(),
+      ...warm.map(async ([spawnKey, entry]) => {
+        await this.closeWarmEntry(spawnKey, entry, true);
+      }),
       ...probes.map(async (client) => {
         await client.stop().catch((error: unknown) => {
           this.logger?.warn(

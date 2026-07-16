@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SessionManager } from '../../../sessionManager';
 import { SpawnStepRunner } from '../../../../orchestrator/programmatic/spawnStepRunner';
 import { WorkflowController } from '../../../../orchestrator/programmatic/workflowController';
@@ -458,6 +458,10 @@ describe('CodexSdkManager app-server runtime', () => {
         },
       }));
       expect(client.start).toHaveBeenCalledOnce();
+      // A clean, non-lane, no-resume turn parks the app-server WARM (not stopped
+      // per turn now). Shutdown sweeps the parked entry — asserting it closes once.
+      expect(client.stop).not.toHaveBeenCalled();
+      await manager.killAllProcesses();
       expect(client.stop).toHaveBeenCalledOnce();
       expect(client.options).toMatchObject({
         command: '/app/codex/bin/codex',
@@ -768,6 +772,255 @@ describe('CodexSdkManager app-server runtime', () => {
         'SELECT agent_invocation_id AS id, external_session_id AS externalSessionId FROM agent_invocations',
       ).all() as Array<{ id: string; externalSessionId: string | null }>;
       expect(rows).toEqual([{ id: 'prior', externalSessionId: 'codex-thread-prior' }]);
+    } finally {
+      db.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Warm (persistent) app-server reuse
+// ---------------------------------------------------------------------------
+
+/** A handler that mints a fresh turn id per turn/start so a reused turnSession
+ *  accepts a second turn's notifications (lastTerminalTurnId gates repeats). */
+function warmTurnHandler(): RequestHandler {
+  let turnCounter = 0;
+  return (method, _params, client) => {
+    if (method === 'account/read') {
+      return {
+        account: { type: 'chatgpt', email: 'user@example.com', planType: 'pro' },
+        requiresOpenaiAuth: true,
+      };
+    }
+    if (method === 'thread/start') return { thread: { id: 'codex-thread-1' } };
+    if (method === 'thread/resume') return { thread: { id: 'codex-thread-1' } };
+    if (method === 'turn/interrupt') return {};
+    if (method === 'turn/start') {
+      turnCounter += 1;
+      const turnId = `turn-${turnCounter}`;
+      setTimeout(() => {
+        client.notify({
+          method: 'item/completed',
+          params: {
+            threadId: 'codex-thread-1',
+            turnId,
+            completedAtMs: 20,
+            item: { type: 'agentMessage', id: `message-${turnCounter}`, text: `Done ${turnCounter}.` },
+          },
+        });
+        client.notify({
+          method: 'turn/completed',
+          params: { threadId: 'codex-thread-1', turn: { id: turnId, status: 'completed' } },
+        });
+      }, 0);
+      return { turn: { id: turnId } };
+    }
+    throw new Error(`Unexpected request: ${method}`);
+  };
+}
+
+/** Like makeManager but COLLECTS every client the factory creates, so a test can
+ *  assert cold-spawn count (1 factory call per cold spawn; 0 on warm reuse). */
+function makeWarmManager(
+  db: Database.Database,
+  handler: RequestHandler = warmTurnHandler(),
+): { manager: CodexSdkManager; clients: FakeAppServerClient[] } {
+  const clients: FakeAppServerClient[] = [];
+  const factory: CodexAppServerClientFactory = (options) => {
+    const client = new FakeAppServerClient(options, handler);
+    clients.push(client);
+    return client;
+  };
+  const manager = new CodexSdkManager(
+    {} as SessionManager,
+    undefined,
+    undefined,
+    db,
+    factory,
+    () => ({
+      executablePath: '/app/codex/bin/codex',
+      pathDir: '/app/codex/codex-path',
+      version: '0.144.3',
+      target: 'aarch64-apple-darwin',
+    }),
+    '0.1.test',
+  );
+  manager.setCyboflowMcpRuntimeConfig({
+    orchSocketPath: '/tmp/cyboflow-orch.sock',
+    bridgeScriptPath: '/app/cyboflowMcpServer.js',
+    nodeExecutablePath: '/usr/local/bin/node',
+  });
+  manager.setApprovalRouterProvider(() => ({
+    requestApproval: vi.fn(async () => ({ behavior: 'allow' as const })),
+    clearPendingForSource: vi.fn(),
+  }));
+  manager.setQuestionRouterProvider(() => ({
+    requestQuestion: vi.fn(async () => ({ answers: {} })),
+    clearPendingForRun: vi.fn(),
+  }));
+  manager.on('error', () => undefined);
+  return { manager, clients };
+}
+
+function baseTurn(overrides: Record<string, unknown>): Parameters<CodexSdkManager['spawnCliProcess']>[0] {
+  return {
+    panelId: 'panel-1',
+    sessionId: 'session-1',
+    runId: 'run-1',
+    worktreePath: '/tmp/worktree',
+    prompt: 'go',
+    ...overrides,
+  } as Parameters<CodexSdkManager['spawnCliProcess']>[0];
+}
+
+describe('CodexSdkManager warm app-server reuse', () => {
+  const WARM_ENV = 'CYBOFLOW_DISABLE_CODEX_WARM';
+  afterEach(() => {
+    delete process.env[WARM_ENV];
+  });
+
+  it('reuses the parked app-server for a matching resume-continuation (no cold respawn, 2 invocation rows)', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+
+      await manager.spawnCliProcess(baseTurn({ prompt: 'first' }));
+      expect(clients).toHaveLength(1);
+
+      // Resume-continuation of the SAME conversation: reuses the live thread.
+      await manager.spawnCliProcess(baseTurn({ prompt: 'second', resumeSessionId: 'codex-thread-1' }));
+
+      expect(clients).toHaveLength(1);               // NO cold respawn
+      expect(clients[0].start).toHaveBeenCalledOnce(); // cold-only
+      expect(clients[0].initialize).toHaveBeenCalledOnce(); // cold-only handshake
+      // Handshake requests happen once; turn/start happens per turn.
+      const methods = clients[0].requests.map((r) => r.method);
+      expect(methods.filter((m) => m === 'account/read')).toHaveLength(1);
+      expect(methods.filter((m) => m === 'thread/start')).toHaveLength(1);
+      expect(methods.filter((m) => m === 'turn/start')).toHaveLength(2);
+      // C4: a fresh invocation row per logical turn.
+      const invCount = db.prepare('SELECT COUNT(*) AS c FROM agent_invocations WHERE run_id = ?').get('run-1') as { c: number };
+      expect(invCount.c).toBe(2);
+
+      await manager.killAllProcesses();
+      expect(clients[0].stop).toHaveBeenCalledOnce();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('cold-respawns a same-key turn that is NOT a resume (fresh conversation)', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      await manager.spawnCliProcess(baseTurn({ prompt: 'first' }));
+      await manager.spawnCliProcess(baseTurn({ prompt: 'second' })); // no resumeSessionId
+      expect(clients).toHaveLength(2);
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('cold-respawns when the spawn-baked config fingerprint changes (developerInstructions)', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      await manager.spawnCliProcess(baseTurn({ prompt: 'first', systemPromptAppend: 'Persona A' }));
+      await manager.spawnCliProcess(baseTurn({
+        prompt: 'second',
+        resumeSessionId: 'codex-thread-1',
+        systemPromptAppend: 'Persona B', // → different developerInstructions → different fingerprint
+      }));
+      expect(clients).toHaveLength(2);
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('closes (never parks) when the kill-switch is set — cold every turn', async () => {
+    process.env[WARM_ENV] = '1';
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      await manager.spawnCliProcess(baseTurn({ prompt: 'first' }));
+      expect(clients).toHaveLength(1);
+      expect(clients[0].stop).toHaveBeenCalledOnce(); // closed, not parked
+      await manager.spawnCliProcess(baseTurn({ prompt: 'second', resumeSessionId: 'codex-thread-1' }));
+      expect(clients).toHaveLength(2);
+      expect(clients[1].stop).toHaveBeenCalledOnce();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('never warms a fan-out lane spawn (spawnKey !== panelId)', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      await manager.spawnCliProcess(baseTurn({ prompt: 'lane', spawnKey: 'lane-key-1' }));
+      expect(clients[0].stop).toHaveBeenCalledOnce(); // closed, not parked
+      // A second lane turn cold-respawns (nothing was parked).
+      await manager.spawnCliProcess(baseTurn({ prompt: 'lane2', spawnKey: 'lane-key-2', resumeSessionId: 'codex-thread-1' }));
+      expect(clients).toHaveLength(2);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('closes (never parks) a failed turn', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db, (method, _params, client) => {
+        if (method === 'account/read') {
+          return { account: { type: 'chatgpt', email: null, planType: 'plus' }, requiresOpenaiAuth: true };
+        }
+        if (method === 'thread/start') return { thread: { id: 'codex-thread-1' } };
+        if (method === 'turn/start') {
+          setTimeout(() => client.notify({
+            method: 'turn/completed',
+            params: {
+              threadId: 'codex-thread-1',
+              turn: { id: 'turn-1', status: 'failed', error: { message: 'boom (usageLimitExceeded)', codexErrorInfo: null, additionalDetails: null } },
+            },
+          }), 0);
+          return { turn: { id: 'turn-1' } };
+        }
+        throw new Error(`Unexpected request: ${method}`);
+      });
+      await expect(manager.spawnCliProcess(baseTurn({ prompt: 'fail' }))).rejects.toThrow('usageLimitExceeded');
+      expect(clients[0].stop).toHaveBeenCalledOnce(); // closed, not parked
+      // Nothing parked → a follow-up resume cold-respawns.
+      await manager.spawnCliProcess(baseTurn({ prompt: 'retry', resumeSessionId: 'codex-thread-1' })).catch(() => undefined);
+      expect(clients.length).toBeGreaterThanOrEqual(2);
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('closes a parked entry when killed by run id (panel id != run id)', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      await manager.spawnCliProcess(baseTurn({ panelId: 'panel-x', sessionId: 'session-x', runId: 'run-x', prompt: 'x' }));
+      expect(clients[0].stop).not.toHaveBeenCalled(); // parked
+      await manager.killProcess('run-x'); // reachable by run id via the defensive sweep
+      expect(clients[0].stop).toHaveBeenCalledOnce();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('closes a parked entry when killed by panel id', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      await manager.spawnCliProcess(baseTurn({ panelId: 'panel-y', sessionId: 'session-y', runId: 'run-y', prompt: 'y' }));
+      await manager.killProcess('panel-y');
+      expect(clients[0].stop).toHaveBeenCalledOnce();
     } finally {
       db.close();
     }
