@@ -19,6 +19,8 @@
  *                    session close-out; it stops the agent without touching git.
  */
 import { useState, useCallback, useEffect } from 'react';
+import { perfProbeStart } from '../../utils/perfProbe';
+import { PerfProfiler } from './PerfProfiler';
 import { WorkflowPicker } from './WorkflowPicker';
 import { GRAPH_PAPER_BACKGROUND } from './WorkflowCanvas';
 import { WorkflowSummaryPanel } from './WorkflowSummaryPanel';
@@ -271,6 +273,10 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
 
   useEffect(() => useQuestionStore.getState().init(), []);
 
+  // Opt-in renderer perf probe (VITE_CYBOFLOW_PERF_TRACE=1 or the localStorage
+  // toggle). No-op otherwise; returns a disconnect fn for unmount.
+  useEffect(() => perfProbeStart(), []);
+
   // In-canvas completion banner: the SAME eligibility the RunActionBar End
   // button uses (shared hook), surfaced prominently in the flow window so a
   // finished run's exit is not hidden in the top bar.
@@ -363,6 +369,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
             296px right rail, an unfloored flex-1 column can collapse to ~0 on a
             narrow window (dead composer). Overflowing clips the rail instead —
             it has its own collapse affordance. */}
+        <PerfProfiler id="center">
         <div className="flex-1 flex flex-col overflow-hidden min-w-[280px]">
           {activeRunId !== null ? (
             // Tabbed center surface (pinned Flow tab hosting the WorkflowCanvas,
@@ -478,6 +485,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
             </div>
           )}
         </div>
+        </PerfProfiler>
 
         {/* Right rail — always rendered as layout shell (296px fixed, or a thin
             collapsed strip). Collapse state is lifted here + persisted.
@@ -489,14 +497,16 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
             reads the session id itself, from the synchronous selectedSessionId
             store value, rather than taking it as a prop here — see its own
             artifacts-scope comment.) */}
-        <RunRightRail
-          phaseState={phaseState}
-          collapsed={railCollapsed}
-          onToggleCollapse={handleToggleRail}
-          quickSessionProjectId={
-            effectiveSession && !effectiveSession.isMainRepo ? projectId : null
-          }
-        />
+        <PerfProfiler id="rail">
+          <RunRightRail
+            phaseState={phaseState}
+            collapsed={railCollapsed}
+            onToggleCollapse={handleToggleRail}
+            quickSessionProjectId={
+              effectiveSession && !effectiveSession.isMainRepo ? projectId : null
+            }
+          />
+        </PerfProfiler>
       </div>
 
       {/* WorkflowPicker modal — only rendered when projectId is a number */}
