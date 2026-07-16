@@ -28,6 +28,7 @@ import {
 } from '../../stores/landingStore';
 import { useReviewQueueStore, useReviewQueueView } from '../../stores/reviewQueueStore';
 import { useDynamicWorkflowStore, useActiveDynamicWorkflows } from '../../stores/dynamicWorkflowStore';
+import { useQuickSessionsStore, useQuickSessionRows, needsAttention } from '../../stores/quickSessionsStore';
 import { classifyRun, deriveHomeState } from '../../utils/homeClassify';
 import type { QueueItem } from '../../utils/reviewQueueSelectors';
 import { EmptyState } from './EmptyState';
@@ -88,6 +89,18 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
   }, []);
   const activeDynamicWorkflows = useActiveDynamicWorkflows();
 
+  // Live quick-session board feed. Init here (not only in QuickSessionsTable) so
+  // the attention count is available to decide whether the review queue mounts
+  // at all — otherwise a blocked/idle quick session could never surface the
+  // queue that would show it (chicken-and-egg). Ref-counted, so the table's own
+  // init just joins the same poll.
+  useEffect(() => useQuickSessionsStore.getState().init(), []);
+  const quickRows = useQuickSessionRows();
+  const attentionQuickCount = useMemo(
+    () => quickRows.filter(needsAttention).length,
+    [quickRows],
+  );
+
   // Run-activity splits. Sessions with a detected dynamic workflow in flight
   // count as activity too: the `__quick__` sentinel runs backing quick sessions
   // are filtered out of activeRunsStore, so without this the home would claim
@@ -118,10 +131,14 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
     [runs],
   );
 
-  const waitingCount = approvalsCount + reviewItems.length + readyToReviewCount;
+  const waitingCount =
+    approvalsCount + reviewItems.length + readyToReviewCount + attentionQuickCount;
   const blockingCount =
     countApprovals(blockingApprovalItems) +
-    reviewItems.filter((it) => it.blocking).length;
+    reviewItems.filter((it) => it.blocking).length +
+    // A blocked quick session (pending AskUserQuestion/permission) genuinely
+    // blocks you; an idle-unviewed one is a soft nag (waiting, not blocking).
+    quickRows.filter((r) => r.state === 'blocked').length;
 
   const reviewsExist = waitingCount > 0;
   const anyActive = activeCount > 0;

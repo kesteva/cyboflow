@@ -47,6 +47,8 @@ import {
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { formatElapsed } from '../../utils/homeClassify';
+import { QuickSessionsTable } from './QuickSessionsTable';
+import { useQuickSessionRows, needsAttention } from '../../stores/quickSessionsStore';
 
 // ---------------------------------------------------------------------------
 // QueueItem id/runId helpers (mirrors ReviewQueueView)
@@ -302,18 +304,12 @@ export function TypeGroupedQueue(): React.JSX.Element {
     () => reviewItems.filter((it) => it.kind === 'decision'),
     [reviewItems],
   );
-  // Idle-quick-session items (source `idle-session:<id>`) get their own section,
-  // sorted oldest-idle first (earliest created_at at the top) so the longest-quiet
-  // sessions surface at the top of the group. They are split OUT of the generic
-  // human-task bucket so a burst of idle sessions doesn't drown the real tasks.
+  // Idle quick sessions no longer mint review_items — the live QuickSessionsTable
+  // (below) is the source of truth for quick-session state. Any LEGACY
+  // `idle-session:<id>` human_task rows (from before the switch, pending until the
+  // one-time startup drain resolves them) are still filtered OUT of the generic
+  // human-task bucket here so they never render as a stray "Human task".
   const isIdleItem = (it: ReviewItem) => it.source?.startsWith(IDLE_REVIEW_SOURCE_PREFIX) ?? false;
-  const idleItems = React.useMemo(
-    () =>
-      reviewItems
-        .filter((it) => it.kind === 'human_task' && isIdleItem(it))
-        .sort((a, b) => a.created_at.localeCompare(b.created_at)),
-    [reviewItems],
-  );
   const humanTaskItems = React.useMemo(
     () => reviewItems.filter((it) => it.kind === 'human_task' && !isIdleItem(it)),
     [reviewItems],
@@ -332,11 +328,17 @@ export function TypeGroupedQueue(): React.JSX.Element {
     [runs, reviewItems, permissionItems, landingBlockingRunIds],
   );
 
+  // Quick sessions needing attention (blocked, or idle+unviewed) keep the queue
+  // mounted even when nothing else is pending — the live replacement for the old
+  // idle-session review items that used to hold this slot.
+  const quickRows = useQuickSessionRows();
+  const hasAttentionQuick = React.useMemo(() => quickRows.some(needsAttention), [quickRows]);
+
   const hasAny =
     permissionItems.length > 0 ||
     decisionItems.length > 0 ||
     humanTaskItems.length > 0 ||
-    idleItems.length > 0 ||
+    hasAttentionQuick ||
     blockingFindingItems.length > 0 ||
     readyToReviewRuns.length > 0 ||
     notificationItems.length > 0;
@@ -400,19 +402,8 @@ export function TypeGroupedQueue(): React.JSX.Element {
         </section>
       )}
 
-      {idleItems.length > 0 && (
-        <section data-testid="queue-group-idle">
-          <GroupHeader
-            swatchClass="bg-interactive"
-            name="Idle sessions"
-            count={idleItems.length}
-            descriptor="Quick sessions gone quiet — reopen or wrap up (oldest first)"
-          />
-          {idleItems.map((it) => (
-            <ReviewItemRow key={it.id} item={it} />
-          ))}
-        </section>
-      )}
+      {/* Live quick-session status board — replaces the old idle-session group. */}
+      <QuickSessionsTable />
 
       {blockingFindingItems.length > 0 && (
         <section data-testid="queue-group-blocking-finding">
