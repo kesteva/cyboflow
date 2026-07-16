@@ -19,7 +19,7 @@ import type { CaptureOrigin, VerdictV1 } from './visualVerification';
 /**
  * Artifact kinds. The bespoke (templated) types plus a `generic` fallback
  * that renders in the live canvas. Keep in sync with the `artifacts.atype`
- * CHECK constraint (currently widened by migration 062).
+ * CHECK constraint (currently widened by migration 070).
  */
 export type ArtifactType =
   | 'idea-spec'
@@ -29,7 +29,8 @@ export type ArtifactType =
   | 'generic'
   | 'arch-design'
   | 'compound-recommendations'
-  | 'approve-ideas';
+  | 'approve-ideas'
+  | 'approve-designs';
 
 /** How an artifact tab renders: a bespoke template vs. an embedded live canvas. */
 export type ArtifactRenderMode = 'template' | 'canvas';
@@ -47,6 +48,7 @@ export const ARTIFACT_RENDER_MODE: Record<ArtifactType, ArtifactRenderMode> = {
   'arch-design': 'template',
   'compound-recommendations': 'template',
   'approve-ideas': 'template',
+  'approve-designs': 'template',
 };
 
 /**
@@ -65,6 +67,10 @@ export const ARTIFACT_COLORS: Record<ArtifactType, string> = {
   // recommendations tab reads as part of the Compound flow.
   'compound-recommendations': '#8b5cf6',
   'approve-ideas': '#b8860b',
+  // The design-approval sibling of approve-ideas: an approval gold tilted toward
+  // arch-design's teal (#2d7a8a) so the joint design gate reads as "approve the
+  // architecture designs".
+  'approve-designs': '#8a7326',
 };
 
 /**
@@ -80,6 +86,7 @@ export const ARTIFACT_GLYPHS: Record<ArtifactType, string> = {
   'arch-design': '▣',
   'compound-recommendations': '▧',
   'approve-ideas': '☑',
+  'approve-designs': '⊡',
 };
 
 /** True when the artifact renders in an embedded live canvas (not a template). */
@@ -90,9 +97,10 @@ export function isCanvasArtifact(atype: ArtifactType): boolean {
 /**
  * Atypes that are NOT one-per-(run, atype): a single run may hold MULTIPLE
  * artifacts of this kind, one per source entity (source_ref). The multi-idea
- * planner batch (IDEA-009) mints one 'idea-spec' per seeded/owned idea, so
- * idea-spec identity is (run_id, atype, source_ref) — see migration 063. Every
- * OTHER atype keeps the strict one-per-(run, atype) rule.
+ * planner batch mints one 'idea-spec' AND one 'arch-design' per seeded/owned
+ * idea, so both have identity (run_id, atype, source_ref) — see migrations 063
+ * (idea-spec) and 070 (arch-design). Every OTHER atype keeps the strict
+ * one-per-(run, atype) rule.
  *
  * This is the SINGLE HOME for the "per-entity" decision — the ArtifactRouter
  * create-identity (main-side) and the center-pane tab id (frontend) both key off
@@ -100,6 +108,7 @@ export function isCanvasArtifact(atype: ArtifactType): boolean {
  */
 export const PER_ENTITY_ARTIFACT_ATYPES: ReadonlySet<ArtifactType> = new Set<ArtifactType>([
   'idea-spec',
+  'arch-design',
 ]);
 
 /** True when a run may hold several of this atype (identity keyed by source_ref). */
@@ -370,6 +379,27 @@ export interface RecommendationsArtifactPayload {
  */
 export interface ApproveIdeasArtifactPayload {
   ideas: Array<{
+    ref: string;
+    title: string;
+    scope?: string | null;
+    summary?: string | null;
+  }>;
+}
+
+/**
+ * Parsed `payload_json` shape of an `approve-designs` artifact — the human-facing
+ * half of the approve-designs BATCH gate, the design-approval sibling of
+ * {@link ApproveIdeasArtifactPayload}. When a multi-idea planner run runs
+ * architecture across more than one owned idea, ONE joint gate approves/denies
+ * each idea's architecture design; `designs` are the per-idea rows the template
+ * renders one Approve/Deny control per (each `ref` an idea whose body carries a
+ * '## Architecture design' section). The template validates the submitted verdict
+ * map against the gate's `DecisionPayload.designRefs` at submit time; the server
+ * (reviewItems.resolve) re-validates authoritatively, so this payload is a
+ * display/UX convenience only, never a trust boundary.
+ */
+export interface ApproveDesignsArtifactPayload {
+  designs: Array<{
     ref: string;
     title: string;
     scope?: string | null;

@@ -182,6 +182,7 @@ export interface DecisionPayload {
   gate:
     | 'approve-idea'
     | 'approve-ideas'
+    | 'approve-designs'
     | 'approve-plan'
     | 'idea-size-guard'
     | 'ask-user-question-recovery'
@@ -205,6 +206,15 @@ export interface DecisionPayload {
    * reference a ref outside this list. Omitted for the scalar approve-* gates.
    */
   ideaRefs?: string[];
+  /**
+   * Only for `gate: 'approve-designs'`: the batch's idea display refs whose
+   * architecture designs the ONE blocking gate covers (the design-approval
+   * sibling of {@link ideaRefs}). The submitted per-idea verdict map
+   * ({@link IdeaVerdictMap}) is validated against these refs when the gate
+   * resolves — every ref must be decided, and no verdict may reference a ref
+   * outside this list. Omitted for every non-approve-designs gate.
+   */
+  designRefs?: string[];
   /**
    * Only for `gate: 'ask-user-question-recovery'`: the original AskUserQuestion
    * payload the SDK gate failed to surface, so the review UI can re-offer the
@@ -405,6 +415,56 @@ export function parseIdeaVerdictMap(resolution: string | null | undefined): Idea
   let parsed: unknown;
   try {
     parsed = JSON.parse(resolution.slice(RESOLUTION_PREFIX_IDEA_VERDICTS.length));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+  const map: IdeaVerdictMap = {};
+  for (const [ref, verdict] of Object.entries(parsed as Record<string, unknown>)) {
+    if (isIdeaVerdict(verdict)) map[ref] = verdict;
+  }
+  return Object.keys(map).length > 0 ? map : null;
+}
+
+// ---------------------------------------------------------------------------
+// Approve-designs batch gate — per-idea design verdict map
+//
+// The design-approval sibling of the approve-ideas verdict machinery above. The
+// verdict VALUE type is the same approve/deny map keyed by idea display ref
+// ({@link IdeaVerdictMap}) — an architecture design belongs to exactly one idea,
+// so a design verdict is keyed by that idea's ref. Only the serialized
+// resolution-note PREFIX differs, so a resumed planner reads design decisions
+// separately from idea decisions (a run can carry both a resolved approve-ideas
+// gate and a resolved approve-designs gate).
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolution-note prefix carrying a serialized {@link IdeaVerdictMap} for an
+ * approve-designs gate. Like {@link RESOLUTION_PREFIX_IDEA_VERDICTS} it spells a
+ * denied design 'deny' (never 'reject') so the note can never trip a 'reject'
+ * substring sniff — the batch gate still resolves as approve-to-proceed while the
+ * map records the per-design decisions.
+ */
+export const RESOLUTION_PREFIX_DESIGN_VERDICTS = 'design-verdicts:';
+
+/** Serialize a design verdict map into the `resolution` note the resumed planner reads. */
+export function serializeDesignVerdictMap(map: IdeaVerdictMap): string {
+  return `${RESOLUTION_PREFIX_DESIGN_VERDICTS}${JSON.stringify(map)}`;
+}
+
+/**
+ * Parse a serialized design {@link IdeaVerdictMap} back out of a `resolution`
+ * note. Mirrors {@link parseIdeaVerdictMap}: returns null when the note carries
+ * no design-verdict prefix or the payload is not a JSON object; non-approve/deny
+ * entries are dropped defensively, and an all-garbage payload yields null.
+ */
+export function parseDesignVerdictMap(resolution: string | null | undefined): IdeaVerdictMap | null {
+  if (typeof resolution !== 'string' || !resolution.startsWith(RESOLUTION_PREFIX_DESIGN_VERDICTS)) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(resolution.slice(RESOLUTION_PREFIX_DESIGN_VERDICTS.length));
   } catch {
     return null;
   }
