@@ -37,7 +37,7 @@ import { isCliSubstrate } from '../../../shared/types/substrate';
 import { claudeRuntimeFromSubstrate, isAgentProvider, isSessionAgentRuntime } from '../../../shared/types/agentRuntime';
 import type { AgentProvider } from '../../../shared/types/agentRuntime';
 import { normalizeAgentModelSelection } from '../../../shared/types/agentModels';
-import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
+import { isAnyEffortLevel } from '../../../shared/types/reasoningEffort';
 import { isAgentStreamEvent } from '../../../shared/types/agentStream';
 import { isQuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
@@ -396,8 +396,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           const settings = databaseService.getPanelSettings(panelId);
           const model = typeof settings?.model === 'string' ? settings.model : undefined;
           const fastMode = settings?.fastMode === true;
-          const reasoningEffort =
-            typeof settings?.reasoningEffort === 'string' ? (settings.reasoningEffort as ReasoningEffort) : undefined;
+          const rawEffort = settings?.reasoningEffort;
+          const reasoningEffort = isAnyEffortLevel(rawEffort) ? rawEffort : undefined;
           const conversationHistory = sessionManager.getPanelConversationMessages
             ? await sessionManager.getPanelConversationMessages(panelId)
             : await sessionManager.getConversationMessages(panel.sessionId);
@@ -1374,10 +1374,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const panelLaunchSettings = databaseService.getPanelSettings(claudePanel.id);
       const panelModel = typeof panelLaunchSettings?.model === 'string' ? panelLaunchSettings.model : undefined;
       const panelFastMode = panelLaunchSettings?.fastMode === true;
-      const panelReasoningEffort =
-        typeof panelLaunchSettings?.reasoningEffort === 'string'
-          ? (panelLaunchSettings.reasoningEffort as ReasoningEffort)
-          : undefined;
+      const rawPanelEffort = panelLaunchSettings?.reasoningEffort;
+      const panelReasoningEffort = isAnyEffortLevel(rawPanelEffort) ? rawPanelEffort : undefined;
 
       if (dbSession?.agent_runtime === 'codex-pty') {
         if (codexPtyManager.isPanelRunning(claudePanel.id)) {
@@ -1571,10 +1569,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const panelLaunchSettings = databaseService.getPanelSettings(claudePanelId);
       const panelModel = typeof panelLaunchSettings?.model === 'string' ? panelLaunchSettings.model : undefined;
       const panelFastMode = panelLaunchSettings?.fastMode === true;
-      const panelReasoningEffort =
-        typeof panelLaunchSettings?.reasoningEffort === 'string'
-          ? (panelLaunchSettings.reasoningEffort as ReasoningEffort)
-          : undefined;
+      const rawResumeEffort = panelLaunchSettings?.reasoningEffort;
+      const panelReasoningEffort = isAnyEffortLevel(rawResumeEffort) ? rawResumeEffort : undefined;
       // Seed the facade's runId→panelId translation BEFORE the PTY spawn (mirrors
       // the create-quick eager spawn) so a relay/close-out racing the first PTY byte
       // never falls back to the sentinel runId.
@@ -2215,10 +2211,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             // select) or by the in-composer EffortPill — mirrors panelFastMode
             // above: panels:continue respawns per turn, so re-thread the persisted
             // choice on every respawn or it silently reverts to the provider default.
-            const panelReasoningEffort =
-              typeof panelSettings?.reasoningEffort === 'string'
-                ? (panelSettings.reasoningEffort as ReasoningEffort)
-                : undefined;
+            const rawContinueEffort = panelSettings?.reasoningEffort;
+            const panelReasoningEffort = isAnyEffortLevel(rawContinueEffort) ? rawContinueEffort : undefined;
 
             // If there's no running process and no Claude session id yet, this is likely the first message.
             // Start fresh (no --resume) so the user can begin a new conversation.
