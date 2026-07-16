@@ -21,6 +21,7 @@ import type { Project } from './database/models';
 import { DEFAULT_PERMISSION_MODE } from '../../shared/types/permissionMode';
 import type { GitStatus } from './types/session';
 import { deriveLiveContextUsage } from './utils/liveContextUsage';
+import { isAnyEffortLevel } from '../../shared/types/reasoningEffort';
 
 /**
  * Crystal session IDs are 36-char dashed UUIDs (e.g. `91e56989-0674-...`).
@@ -482,6 +483,17 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
       modelOverride = currentState.model;
     }
 
+    // Forward the per-panel fast-mode + reasoning-effort launch settings on the
+    // automatic /context turn. Both are part of the SDK options fingerprint
+    // (claudeCodeManager.computeOptionsFingerprint), so omitting them here spawns
+    // /context with a DIFFERENT fingerprint than the user's turns — closing the
+    // warm process and re-cold-spawning on both this turn and the next user turn.
+    // Read the same persisted settings sessions:input threads on every respawn.
+    const launchSettings = databaseService.getPanelSettings(panelId);
+    const fastModeOverride = launchSettings?.fastMode === true;
+    const rawLaunchEffort = launchSettings?.reasoningEffort;
+    const reasoningEffortOverride = isAnyEffortLevel(rawLaunchEffort) ? rawLaunchEffort : undefined;
+
     const conversationHistory = sessionManager.getPanelConversationMessages
       ? sessionManager.getPanelConversationMessages(panelId)
       : [];
@@ -500,7 +512,9 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
         session.worktreePath,
         '/context',
         conversationHistory,
-        modelOverride
+        modelOverride,
+        fastModeOverride,
+        reasoningEffortOverride
       );
       console.log(`[auto-context-debug] claudeManager.continuePanel completed successfully`);
     } catch (error) {
