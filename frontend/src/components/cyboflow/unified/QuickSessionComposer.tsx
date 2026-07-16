@@ -5,12 +5,14 @@ import { usePendingSendStore } from '../../../stores/pendingSendStore';
 import { CommitModePill } from '../../CommitModeToggle';
 import { ModelPill, isOpusModel, modelDisplayLabel, MODEL_OPTIONS } from './ModelPill';
 import { FastModePill } from './FastModePill';
+import { EffortPill } from './EffortPill';
 import { PermissionModePill } from './PermissionModePill';
 import { useSessionStore } from '../../../stores/sessionStore';
 import { UnifiedComposer } from './UnifiedComposer';
 import { resolveChatVisibility } from './useChatVisibility';
 import type { AttachedImage, AttachedText, ComposerAttachments } from './attachments';
 import type { FastModeStateNotice } from '../../../../../shared/types/panels';
+import type { ReasoningEffort } from '../../../../../shared/types/reasoningEffort';
 
 /**
  * QuickSessionComposer — the panel-host adapter for the unified composer.
@@ -123,6 +125,10 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
   // so the composer toggle reflects the launch choice.
   const [modelId, setModelId] = useState<string | null>(null);
   const [fastMode, setFastMode] = useState(false);
+  // Per-agent reasoning-effort selection (IDEA-029), persisted on the panel like
+  // model/fastMode — hydrated on mount so the EffortPill reflects the launch
+  // choice (wizard select) or a prior in-composer change.
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | null>(null);
   // Latest CLI-reported fast-mode state (ground truth vs the request toggle) —
   // snapshot on mount, then live per-turn pushes. Lets the Fast pill warn when
   // the opt-in was declined (entitlement / cooldown) instead of lying.
@@ -132,6 +138,7 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       setModelId(null);
       setFastMode(false);
       setFastModeReport(null);
+      setReasoningEffort(null);
       return;
     }
     let cancelled = false;
@@ -158,6 +165,14 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       })
       .catch(() => {
         /* non-fatal: pill just can't warn */
+      });
+    API.claudePanels
+      .getEffort(panelId)
+      .then((res) => {
+        if (!cancelled && res.success) setReasoningEffort((res.data as ReasoningEffort | null) ?? null);
+      })
+      .catch(() => {
+        /* non-fatal: effort pill falls back to 'Default' */
       });
     return () => {
       cancelled = true;
@@ -334,6 +349,20 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       <FastModePill panelId={panelId} fastMode={fastMode} onChange={setFastMode} report={fastModeReport} />
     ) : undefined;
 
+  // Reasoning-effort selector (IDEA-029), next to the model pill. Mirrors the
+  // model pill's mounting (idle quick session only) — a running turn's effort
+  // choice is already baked into the in-flight spawn and a mid-turn change would
+  // be discarded.
+  const effortSlot =
+    !interactive && !running && panelId ? (
+      <EffortPill
+        panelId={panelId}
+        agentProvider={agentProvider}
+        currentEffort={reasoningEffort}
+        onEffortChange={setReasoningEffort}
+      />
+    ) : undefined;
+
   // Agent-permission selector, next to the model pill. Persists to
   // sessions.agent_permission_mode and mirrors the change into the session store
   // for an instant label refresh. It renders for BOTH substrates and regardless
@@ -436,6 +465,7 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       effortLabel={effortLabel}
       checkpointSlot={checkpointSlot}
       fastSlot={fastModeSlot}
+      effortSlot={effortSlot}
       compactSlot={compactSlot}
     />
   );

@@ -86,6 +86,9 @@ export interface UnifiedComposerProps {
   /** Opus-only fast-mode toggle (quick SDK) — host supplies the node, rendered
    *  next to the checkpoint pill. */
   fastSlot?: React.ReactNode;
+  /** interactive reasoning-effort selector (IDEA-029, quick SDK, idle) — host
+   *  supplies the node, rendered next to the fast-mode toggle. */
+  effortSlot?: React.ReactNode;
   /** compact-context control (SDK quick) — host supplies the node. */
   compactSlot?: React.ReactNode;
 }
@@ -117,6 +120,7 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
     effortLabel,
     checkpointSlot,
     fastSlot,
+    effortSlot,
     compactSlot,
   } = props;
 
@@ -366,9 +370,11 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
         {permissionSlot}
         {effortLabel && <ReadonlyPill label={`effort: ${effortLabel}`} />}
 
-        {/* Opus-only fast-mode toggle (speed), then checkpoint / commit-mode —
-            order: model → permission → speed → checkpoint. */}
+        {/* Opus-only fast-mode toggle (speed), reasoning-effort selector, then
+            checkpoint / commit-mode — order: model → permission → speed →
+            effort → checkpoint. */}
         {visibility.showCheckpoint && fastSlot}
+        {visibility.showCheckpoint && effortSlot}
         {visibility.showCheckpoint && checkpointSlot}
 
         {/* compact-context (SDK) */}
