@@ -21,6 +21,9 @@ import { ReviewItemError } from '../reviewItemRouter';
 import {
   resolveReviewItem,
   parseApproveIdeasRefs,
+  parseApproveDesignsRefs,
+  renderApproveDesignsDecisions,
+  APPROVE_DESIGNS_DECISIONS_HEADING,
   type ResolveReviewItemDeps,
   type ResolveReviewItemInput,
 } from '../resolveReviewItemHandler';
@@ -28,6 +31,9 @@ import {
   parseIdeaVerdictMap,
   serializeIdeaVerdictMap,
   RESOLUTION_PREFIX_IDEA_VERDICTS,
+  parseDesignVerdictMap,
+  serializeDesignVerdictMap,
+  RESOLUTION_PREFIX_DESIGN_VERDICTS,
   type IdeaVerdictMap,
 } from '../../../../shared/types/reviews';
 
@@ -609,6 +615,137 @@ describe('IdeaVerdictMap serialize/parse + parseApproveIdeasRefs', () => {
     expect(parseApproveIdeasRefs(null)).toEqual([]);
     expect(parseApproveIdeasRefs('not-json')).toEqual([]);
     expect(parseApproveIdeasRefs(JSON.stringify({ gate: 'approve-ideas' }))).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Approve-designs batch gate — the design-approval sibling of approve-ideas
+// ---------------------------------------------------------------------------
+
+/** Seed an approve-designs BATCH gate (design sibling of seedApproveIdeasGate). */
+function seedApproveDesignsGate(
+  db: Database.Database,
+  opts: { id: string; runId: string; designRefs: string[]; source?: string },
+): void {
+  seedItem(db, {
+    id: opts.id,
+    kind: 'decision',
+    source: opts.source ?? 'gate:human-step:approve-designs',
+    blocking: true,
+    runId: opts.runId,
+    payloadJson: JSON.stringify({ kind: 'decision', gate: 'approve-designs', designRefs: opts.designRefs }),
+  });
+}
+
+describe('resolveReviewItem — approve-designs verdict fold', () => {
+  it('folds a mixed map into the resolution under the DESIGN prefix, resolves once, resumes', async () => {
+    const db = buildDb();
+    seedApproveDesignsGate(db, { id: 'rvw_ad', runId: 'run-ad', designRefs: ['IDEA-1', 'IDEA-2', 'IDEA-3'] });
+    const deps = makeDeps(db);
+    const verdicts: IdeaVerdictMap = { 'IDEA-1': 'approve', 'IDEA-2': 'deny', 'IDEA-3': 'approve' };
+
+    const result = await resolveReviewItem(baseInput({ reviewItemId: 'rvw_ad', verdicts }), deps);
+
+    expect(deps.applyReviewItemResolve).toHaveBeenCalledTimes(1);
+    const resolution = resolvedWith(deps);
+    // Serialized under the DESIGN prefix (NOT the idea prefix), so a resumed
+    // planner reads design decisions separately from idea decisions.
+    expect(resolution).toEqual(expect.stringContaining(RESOLUTION_PREFIX_DESIGN_VERDICTS));
+    expect(parseDesignVerdictMap(resolution)).toEqual(verdicts);
+    expect(parseIdeaVerdictMap(resolution)).toBeNull(); // not readable as an idea verdict map
+    expect(result).toMatchObject({ ok: true, resumed: true, gateStepId: 'approve-designs' });
+    expect(itemStatus(db, 'rvw_ad')).toBe('resolved');
+  });
+
+  const malformed: Array<[string, Record<string, string>]> = [
+    ['unknown ref', { 'IDEA-1': 'approve', 'IDEA-9': 'deny' }],
+    ['bad value', { 'IDEA-1': 'approve', 'IDEA-2': 'maybe' }],
+    ['empty map', {}],
+    ['incomplete coverage', { 'IDEA-1': 'approve' }],
+  ];
+  it.each(malformed)('rejects a malformed map (%s) → invalid_payload, gate stays pending', async (_l, bad) => {
+    const db = buildDb();
+    seedApproveDesignsGate(db, { id: 'rvw_bad', runId: 'run-bad', designRefs: ['IDEA-1', 'IDEA-2'] });
+    const deps = makeDeps(db);
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_bad', verdicts: bad as IdeaVerdictMap }),
+      deps,
+    );
+
+    expect(result).toMatchObject({ ok: false, reason: 'invalid_payload' });
+    expect(deps.applyReviewItemResolve).not.toHaveBeenCalled();
+    expect(itemStatus(db, 'rvw_bad')).toBe('pending');
+  });
+
+  it('REFUSES a scalar outcome on a pending approve-designs gate', async () => {
+    const db = buildDb();
+    seedApproveDesignsGate(db, { id: 'rvw_scalar', runId: 'run-scalar', designRefs: ['IDEA-1', 'IDEA-2'] });
+    const deps = makeDeps(db);
+
+    const result = await resolveReviewItem(baseInput({ reviewItemId: 'rvw_scalar', outcome: 'approve' }), deps);
+
+    expect(result).toMatchObject({ ok: false, reason: 'invalid_payload' });
+    expect(deps.applyReviewItemResolve).not.toHaveBeenCalled();
+    expect(itemStatus(db, 'rvw_scalar')).toBe('pending');
+  });
+
+  it('folds an AGENT-minted approve-designs gate (payload-keyed, source agent:planner)', async () => {
+    const db = buildDb();
+    seedApproveDesignsGate(db, {
+      id: 'rvw_agent',
+      runId: 'run-agent',
+      designRefs: ['IDEA-1', 'IDEA-2'],
+      source: 'agent:planner',
+    });
+    const deps = makeDeps(db);
+    const verdicts: IdeaVerdictMap = { 'IDEA-1': 'approve', 'IDEA-2': 'deny' };
+
+    const result = await resolveReviewItem(baseInput({ reviewItemId: 'rvw_agent', verdicts }), deps);
+
+    expect(parseDesignVerdictMap(resolvedWith(deps))).toEqual(verdicts);
+    expect(result).toMatchObject({ ok: true, resumed: true, gateStepId: null });
+  });
+
+  it('does NOT confuse a design gate for an idea gate (distinct fold prefixes)', async () => {
+    const db = buildDb();
+    seedApproveDesignsGate(db, { id: 'rvw_d', runId: 'run-d', designRefs: ['IDEA-1'] });
+    const deps = makeDeps(db);
+
+    await resolveReviewItem(baseInput({ reviewItemId: 'rvw_d', verdicts: { 'IDEA-1': 'approve' } }), deps);
+
+    // The design gate serialized with the DESIGN prefix — an idea-verdict parse misses it.
+    expect(resolvedWith(deps)?.startsWith(RESOLUTION_PREFIX_DESIGN_VERDICTS)).toBe(true);
+  });
+});
+
+describe('DesignVerdictMap serialize/parse + parseApproveDesignsRefs + render', () => {
+  it('serialize → parse round-trips a design verdict map', () => {
+    const map: IdeaVerdictMap = { 'IDEA-1': 'approve', 'IDEA-2': 'deny' };
+    expect(parseDesignVerdictMap(serializeDesignVerdictMap(map))).toEqual(map);
+    // An idea-prefixed note is NOT readable as a design map, and vice-versa.
+    expect(parseDesignVerdictMap(serializeIdeaVerdictMap(map))).toBeNull();
+  });
+
+  it('parseApproveDesignsRefs lifts a clean string ref list off designRefs, else empty', () => {
+    expect(parseApproveDesignsRefs(JSON.stringify({ designRefs: ['IDEA-1', 'IDEA-2'] }))).toEqual([
+      'IDEA-1',
+      'IDEA-2',
+    ]);
+    expect(parseApproveDesignsRefs(JSON.stringify({ designRefs: ['IDEA-1', 3, '', 'IDEA-2'] }))).toEqual([
+      'IDEA-1',
+      'IDEA-2',
+    ]);
+    // The idea gate's ref key is ignored — a design gate reads designRefs only.
+    expect(parseApproveDesignsRefs(JSON.stringify({ ideaRefs: ['IDEA-1'] }))).toEqual([]);
+    expect(parseApproveDesignsRefs(null)).toEqual([]);
+  });
+
+  it('renderApproveDesignsDecisions leads with the heading contract + one line per ref in batch order', () => {
+    const text = renderApproveDesignsDecisions(['IDEA-2', 'IDEA-1'], { 'IDEA-1': 'deny', 'IDEA-2': 'approve' });
+    expect(text.startsWith(APPROVE_DESIGNS_DECISIONS_HEADING)).toBe(true);
+    expect(text).toContain('- IDEA-2: approve');
+    expect(text).toContain('- IDEA-1: deny');
   });
 });
 

@@ -56,6 +56,7 @@ import { ReviewItemError, type ReviewItemErrorCode } from './reviewItemRouter';
 import {
   isIdeaVerdict,
   serializeIdeaVerdictMap,
+  serializeDesignVerdictMap,
   type IdeaVerdictMap,
 } from '../../../shared/types/reviews';
 
@@ -71,6 +72,8 @@ const HUMAN_GATE_SOURCE_PREFIX = 'gate:human-step:';
 const APPROVE_PLAN_STEP_ID = 'approve-plan';
 /** The multi-idea BATCH gate resolved by a per-idea verdict map (IDEA-009). */
 const APPROVE_IDEAS_STEP_ID = 'approve-ideas';
+/** The multi-idea BATCH design gate resolved by a per-idea design verdict map. */
+const APPROVE_DESIGNS_STEP_ID = 'approve-designs';
 
 /**
  * The step id encoded in a `gate:human-step:<stepId>` source, or null when the source
@@ -125,6 +128,24 @@ export function isApproveIdeasGate(
   if (kind !== 'decision') return false;
   if (humanGateStepId(kind, source) === APPROVE_IDEAS_STEP_ID) return true;
   return parseDecisionGate(payloadJson) === APPROVE_IDEAS_STEP_ID;
+}
+
+/**
+ * True when a review item is an approve-designs BATCH gate — the design-approval
+ * sibling of {@link isApproveIdeasGate}, recognized by EITHER mint path (the
+ * programmatic runner's 'gate:human-step:approve-designs' source, OR the default
+ * ORCHESTRATED planner's 'agent:<label>' source whose gate lives only in the
+ * payload `{ kind:'decision', gate:'approve-designs' }`) so both fold an identical
+ * per-idea design verdict map.
+ */
+export function isApproveDesignsGate(
+  kind: string | undefined,
+  source: string | null | undefined,
+  payloadJson: string | null | undefined,
+): boolean {
+  if (kind !== 'decision') return false;
+  if (humanGateStepId(kind, source) === APPROVE_DESIGNS_STEP_ID) return true;
+  return parseDecisionGate(payloadJson) === APPROVE_DESIGNS_STEP_ID;
 }
 
 // ---------------------------------------------------------------------------
@@ -232,6 +253,108 @@ export function renderApproveIdeasDecisions(ideaRefs: string[], verdicts: Record
 }
 
 // ---------------------------------------------------------------------------
+// Approve-designs batch gate — per-idea design verdict fold
+//
+// The design-approval sibling of the approve-ideas fold above. The verdict VALUE
+// type is the same approve/deny map keyed by idea display ref; only the batch-ref
+// key on the payload (`designRefs`), the serialized resolution prefix (via
+// serializeDesignVerdictMap), and the human-facing strings differ.
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse the batch idea refs off an approve-designs gate's `payload_json` (the
+ * DecisionPayload.designRefs the planner stashes when it mints the gate). Returns
+ * an empty array when the payload is absent/unparseable or carries no ref list —
+ * the fold then refuses the resolve. Mirrors {@link parseApproveIdeasRefs}.
+ */
+export function parseApproveDesignsRefs(payloadJson: string | null | undefined): string[] {
+  if (typeof payloadJson !== 'string' || payloadJson.length === 0) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payloadJson);
+  } catch {
+    return [];
+  }
+  if (typeof parsed !== 'object' || parsed === null) return [];
+  const refs = (parsed as { designRefs?: unknown }).designRefs;
+  if (!Array.isArray(refs)) return [];
+  return refs.filter((r): r is string => typeof r === 'string' && r.length > 0);
+}
+
+/**
+ * Fold an approve-designs gate's per-idea design verdict map into the stored
+ * `resolution` the resumed planner reads. Same all-or-nothing validation as
+ * {@link foldIdeaVerdicts} (non-empty batch, non-empty map, valid values, no
+ * stray refs, full coverage), throwing ReviewItemError('invalid_payload') on any
+ * violation BEFORE the atomic resolve, but serialized under the design-verdict
+ * prefix so a resumed planner reads design decisions separately from idea ones.
+ */
+export function foldDesignVerdicts(designRefs: string[], verdicts: Record<string, string>): string {
+  if (designRefs.length === 0) {
+    throw new ReviewItemError(
+      'invalid_payload',
+      'approve-designs gate carries no batch design refs to validate the verdict map against',
+    );
+  }
+  const submittedRefs = Object.keys(verdicts);
+  if (submittedRefs.length === 0) {
+    throw new ReviewItemError('invalid_payload', 'approve-designs verdict map is empty');
+  }
+  const batch = new Set(designRefs);
+  const validated: IdeaVerdictMap = {};
+  for (const [ref, verdict] of Object.entries(verdicts)) {
+    if (!batch.has(ref)) {
+      throw new ReviewItemError(
+        'invalid_payload',
+        `approve-designs verdict references idea '${ref}' which is not in this batch gate`,
+      );
+    }
+    if (!isIdeaVerdict(verdict)) {
+      throw new ReviewItemError(
+        'invalid_payload',
+        `approve-designs verdict for '${ref}' must be 'approve' or 'deny' (got '${verdict}')`,
+      );
+    }
+    validated[ref] = verdict;
+  }
+  for (const ref of designRefs) {
+    if (!(ref in validated)) {
+      throw new ReviewItemError(
+        'invalid_payload',
+        `approve-designs verdict map is missing a decision for batch idea '${ref}'`,
+      );
+    }
+  }
+  return serializeDesignVerdictMap(validated);
+}
+
+/**
+ * The heading the delivered design-decisions block MUST lead with — a CONTRACT
+ * with planner.md (the resumed agent acts on a '# Approve-designs decisions'
+ * block). Keep byte-identical on both sides.
+ */
+export const APPROVE_DESIGNS_DECISIONS_HEADING = '# Approve-designs decisions';
+
+/**
+ * Render the human's per-idea design verdicts into the turn text delivered to the
+ * parked ORCHESTRATED planner (its SDK conversation cannot read review items). One
+ * line per batch ref in BATCH ORDER under the heading contract, then the
+ * proceed-instruction. Mirrors {@link renderApproveIdeasDecisions}.
+ */
+export function renderApproveDesignsDecisions(
+  designRefs: string[],
+  verdicts: Record<string, string>,
+): string {
+  const lines = designRefs.map((ref) => `- ${ref}: ${verdicts[ref]}`);
+  return [
+    APPROVE_DESIGNS_DECISIONS_HEADING,
+    ...lines,
+    '',
+    'Proceed with the APPROVED designs only; a denied design goes back to its design step for revision.',
+  ].join('\n');
+}
+
+// ---------------------------------------------------------------------------
 // Collaborator deps (injected — standalone-typecheck invariant)
 // ---------------------------------------------------------------------------
 
@@ -281,11 +404,12 @@ export interface ResolveReviewItemInput {
   /** Explicit gate verdict for a `gate:human-step:*` decision item (drives verdict + approve-plan reveal/decline). */
   outcome?: 'approve' | 'reject';
   /**
-   * Per-idea verdict map for an approve-ideas BATCH gate (the "Submit decisions"
-   * payload). ONLY consumed when the item is a `gate:human-step:approve-ideas`
-   * decision — it is validated against the gate's batch payload and folded into
-   * the stored resolution (overriding `outcome`/`resolution`). Ignored for every
-   * other gate/item, so scalar resolutions stay byte-for-byte unaffected.
+   * Per-idea verdict map for an approve-ideas OR approve-designs BATCH gate (the
+   * "Submit decisions" payload). ONLY consumed when the item is one of those batch
+   * decision gates — it is validated against the gate's batch payload (`ideaRefs`
+   * or `designRefs`) and folded into the stored resolution (overriding
+   * `outcome`/`resolution`). Ignored for every other gate/item, so scalar
+   * resolutions stay byte-for-byte unaffected.
    */
   verdicts?: IdeaVerdictMap;
 }
@@ -371,31 +495,40 @@ export async function resolveReviewItem(
     // honest surface is the run's Approve-ideas artifact tab, which submits
     // `verdicts`. Pending-only so an already-terminal item still surfaces the
     // chokepoint's own 'invalid_status' below.
+    const isIdeasBatchGate = isApproveIdeasGate(before?.kind, before?.source, before?.payloadJson);
+    const isDesignsBatchGate = isApproveDesignsGate(before?.kind, before?.source, before?.payloadJson);
     if (
       input.verdicts === undefined &&
       before?.status === 'pending' &&
-      isApproveIdeasGate(before?.kind, before?.source, before?.payloadJson)
+      (isIdeasBatchGate || isDesignsBatchGate)
     ) {
       throw new ReviewItemError(
         'invalid_payload',
-        "an approve-ideas batch gate needs per-idea verdicts — submit decisions from the run's Approve ideas tab",
+        isIdeasBatchGate
+          ? "an approve-ideas batch gate needs per-idea verdicts — submit decisions from the run's Approve ideas tab"
+          : "an approve-designs batch gate needs per-design verdicts — submit decisions from the run's Approve designs tab",
       );
     }
 
-    // Approve-ideas BATCH gate: a submitted per-idea verdict map is validated
-    // against the gate's batch payload and folded into the stored resolution the
-    // resumed planner reads. Recognized via isApproveIdeasGate (source OR payload)
-    // so BOTH mint paths fold identically — the programmatic runner's
-    // 'gate:human-step:approve-ideas' source AND the default ORCHESTRATED planner's
+    // Approve-ideas / approve-designs BATCH gate: a submitted per-idea verdict map
+    // is validated against the gate's batch payload and folded into the stored
+    // resolution the resumed planner reads. Recognized via isApprove*Gate (source
+    // OR payload) so BOTH mint paths fold identically — the programmatic runner's
+    // 'gate:human-step:approve-*' source AND the default ORCHESTRATED planner's
     // 'agent:<label>' source (whose gate lives only in the payload). All-or-nothing —
-    // foldIdeaVerdicts throws ReviewItemError('invalid_payload') on a malformed map
-    // (empty / unknown ref / bad value / incomplete coverage), which the catch below
-    // maps to a refusal BEFORE the single atomic resolve runs, so the gate stays
-    // pending and nothing is recorded. Only the "Submit decisions" surface passes
-    // `verdicts`; a scalar resolve on THIS gate was already refused above, and every
-    // OTHER gate leaves `verdicts` undefined and is byte-for-byte unaffected.
-    if (input.verdicts !== undefined && isApproveIdeasGate(before?.kind, before?.source, before?.payloadJson)) {
-      resolution = foldIdeaVerdicts(parseApproveIdeasRefs(before?.payloadJson), input.verdicts);
+    // foldIdeaVerdicts / foldDesignVerdicts throws ReviewItemError('invalid_payload')
+    // on a malformed map (empty / unknown ref / bad value / incomplete coverage),
+    // which the catch below maps to a refusal BEFORE the single atomic resolve runs,
+    // so the gate stays pending and nothing is recorded. Only the "Submit decisions"
+    // surface passes `verdicts`; a scalar resolve on THESE gates was already refused
+    // above, and every OTHER gate leaves `verdicts` undefined and is byte-for-byte
+    // unaffected.
+    if (input.verdicts !== undefined) {
+      if (isIdeasBatchGate) {
+        resolution = foldIdeaVerdicts(parseApproveIdeasRefs(before?.payloadJson), input.verdicts);
+      } else if (isDesignsBatchGate) {
+        resolution = foldDesignVerdicts(parseApproveDesignsRefs(before?.payloadJson), input.verdicts);
+      }
     }
 
     // Approve-plan side effects run BEFORE the resolve so they beat the controller

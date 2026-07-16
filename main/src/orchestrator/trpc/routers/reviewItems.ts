@@ -45,10 +45,14 @@ import { QuestionRouter } from '../../questionRouter';
 import {
   resolveReviewItem,
   isApproveIdeasGate,
+  isApproveDesignsGate,
   humanGateStepId,
   parseApproveIdeasRefs,
+  parseApproveDesignsRefs,
   foldIdeaVerdicts,
+  foldDesignVerdicts,
   renderApproveIdeasDecisions,
+  renderApproveDesignsDecisions,
   type ResolveReviewItemDeps,
   type ResolveReviewItemInput,
 } from '../../resolveReviewItemHandler';
@@ -474,6 +478,114 @@ async function deliverApproveIdeasVerdicts(
   }
 }
 
+/**
+ * AGENT-minted approve-designs gate resolved by a per-idea design verdict map —
+ * the design-approval sibling of {@link deliverApproveIdeasVerdicts}. Identical
+ * nudge-first / resolve-on-delivered flow (eager fold-validate, deliver the
+ * rendered decisions as the run's next turn, resolve only on confirmed
+ * `delivered`), swapping the design fold/parse/render helpers and the batch-ref
+ * key (`designRefs`). The idea-size guards co-pending on the run (a batch's large
+ * seeds were guarded out during sizing and may still be pending at design time)
+ * are ignored alongside the gate's own row, exactly as the ideas delivery does.
+ */
+async function deliverApproveDesignsVerdicts(
+  db: DatabaseLike,
+  input: ResolveReviewItemInput,
+  runId: string | null,
+  payloadJson: string | null,
+): Promise<{ reviewItemId: string; resumed: boolean; runStatus?: string }> {
+  if (!resolveVerdictNudgeDeps) {
+    throw new TRPCError({
+      code: 'METHOD_NOT_SUPPORTED',
+      message: 'approve-designs verdict-delivery deps not wired yet. Call setResolveVerdictNudgeDeps() at boot.',
+    });
+  }
+  if (!runId) {
+    throw new TRPCError({
+      code: 'PRECONDITION_FAILED',
+      message: 'invalid_status: this approve-designs gate has no run to deliver the decisions to',
+    });
+  }
+  const verdicts = input.verdicts ?? {};
+
+  // EAGER validate: foldDesignVerdicts throws ReviewItemError('invalid_payload')
+  // on any violation. Reject BEFORE the nudge so the gate is untouched and no bad
+  // block reaches the planner.
+  const refs = parseApproveDesignsRefs(payloadJson);
+  try {
+    foldDesignVerdicts(refs, verdicts);
+  } catch (err) {
+    rethrowAsTRPCError(err);
+  }
+  const delivered = renderApproveDesignsDecisions(refs, verdicts);
+
+  // Ignore this gate's own blocking row PLUS any co-pending idea-size guards (they
+  // are resolved out-of-session and gate run COMPLETION, not this resume). Fail-soft
+  // parse: a malformed payload just doesn't qualify as a guard.
+  const ignoreIds = [input.reviewItemId];
+  try {
+    const rows = db
+      .prepare(
+        `SELECT id, payload_json AS payloadJson FROM review_items
+          WHERE run_id = ? AND kind = 'decision' AND blocking = 1 AND status = 'pending' AND id != ?`,
+      )
+      .all(runId, input.reviewItemId) as Array<{ id: string; payloadJson: string | null }>;
+    for (const row of rows) {
+      if (typeof row.payloadJson !== 'string') continue;
+      try {
+        const parsed: unknown = JSON.parse(row.payloadJson);
+        if (
+          typeof parsed === 'object' &&
+          parsed !== null &&
+          (parsed as { gate?: unknown }).gate === 'idea-size-guard'
+        ) {
+          ignoreIds.push(row.id);
+        }
+      } catch {
+        // Corrupt payload — not a guard; keep it blocking.
+      }
+    }
+  } catch {
+    // Table/read failure — fall back to ignoring only the gate's own row.
+  }
+
+  const nudge = await resolveVerdictNudgeDeps.nudge(runId, delivered, {
+    ignoreBlockingReviewItemId: ignoreIds,
+    deliveredAt: 'turn-start',
+  });
+  if (!('delivered' in nudge && nudge.delivered)) {
+    const reason = 'noOp' in nudge ? nudge.reason : 'unknown';
+    const hint =
+      reason === 'blocked'
+        ? 'other blocking review items are pending on this run — resolve or dismiss them first'
+        : reason === 'not_idle'
+          ? 'the run is busy mid-turn — retry once it goes idle'
+          : reason === 'terminal'
+            ? 'the run already ended'
+            : 'the run could not be resumed';
+    throw new TRPCError({
+      code: 'CONFLICT',
+      message: `invalid_status: the approve-designs decisions were NOT recorded (${reason}): ${hint}`,
+    });
+  }
+
+  // Delivered → resolve through the SHARED core (verdicts still passed; it
+  // re-validates + folds deterministically into the stored resolution).
+  try {
+    const result = await resolveReviewItem(input, buildResolveDeps(db));
+    if (!result.ok) {
+      rethrowAsTRPCError(new ReviewItemError(result.reason, result.message));
+    }
+    return {
+      reviewItemId: result.reviewItemId,
+      resumed: result.resumed,
+      ...(result.runStatus !== undefined ? { runStatus: result.runStatus } : {}),
+    };
+  } catch (err) {
+    rethrowAsTRPCError(err);
+  }
+}
+
 export const reviewItemsRouter = router({
   /**
    * List the review inbox for a project, newest-first, with optional filters on
@@ -674,11 +786,12 @@ export const reviewItemsRouter = router({
          */
         outcome: z.enum(['approve', 'reject']).optional(),
         /**
-         * Per-idea verdict map for an approve-ideas BATCH gate — the "Submit
-         * decisions" payload, keyed by idea display ref. ONLY consumed for a
-         * `gate:human-step:approve-ideas` decision item: the shared handler
-         * validates it against the gate's batch payload and folds it atomically
-         * into the stored resolution. Ignored (harmless) for every other item.
+         * Per-idea verdict map for an approve-ideas OR approve-designs BATCH gate —
+         * the "Submit decisions" payload, keyed by idea display ref. ONLY consumed
+         * for those batch decision gates: the shared handler validates it against
+         * the gate's batch payload (`ideaRefs` / `designRefs`) and folds it
+         * atomically into the stored resolution. Ignored (harmless) for every other
+         * item.
          */
         verdicts: z.record(z.string().min(1), z.enum(['approve', 'deny'])).optional(),
       }),
@@ -719,6 +832,16 @@ export const reviewItemsRouter = router({
             humanGateStepId(gateRow.kind, gateRow.source) === null
           ) {
             return deliverApproveIdeasVerdicts(db, input, gateRow.runId ?? null, gateRow.payloadJson ?? null);
+          }
+          // The design-approval sibling: an AGENT-minted approve-designs gate
+          // delivers its rendered decisions the same way. The programmatic
+          // 'gate:human-step:approve-designs' path falls through to the shared core.
+          if (
+            gateRow &&
+            isApproveDesignsGate(gateRow.kind, gateRow.source, gateRow.payloadJson) &&
+            humanGateStepId(gateRow.kind, gateRow.source) === null
+          ) {
+            return deliverApproveDesignsVerdicts(db, input, gateRow.runId ?? null, gateRow.payloadJson ?? null);
           }
         }
 
