@@ -18,6 +18,8 @@ const mockGetFastModeState = vi.fn();
 const mockOnFastModeState = vi.fn((_cb: (notice: unknown) => void) => () => {});
 const mockQueueInput = vi.fn();
 const mockGetCodexCatalog = vi.fn();
+const mockGetEffort = vi.fn();
+const mockSetEffort = vi.fn();
 vi.mock('../../../../utils/api', () => ({
   API: {
     sessions: {
@@ -36,6 +38,8 @@ vi.mock('../../../../utils/api', () => ({
       onFastModeState: (cb: (notice: unknown) => void) => mockOnFastModeState(cb),
       setFastMode: (id: string, v: boolean) => mockSetFastMode(id, v),
       setModel: (id: string, model: string) => mockSetModel(id, model),
+      getEffort: (id: string) => mockGetEffort(id),
+      setEffort: (id: string, effort: string | null) => mockSetEffort(id, effort),
     },
     models: {
       onModelFallback: (cb: (notice: unknown) => void) => mockOnModelFallback(cb),
@@ -151,6 +155,8 @@ beforeEach(() => {
   mockSetModel.mockReset().mockResolvedValue({ success: true });
   mockOnModelFallback.mockReset().mockReturnValue(() => {});
   mockQueueInput.mockReset().mockResolvedValue({ success: true, data: { queued: true } });
+  mockGetEffort.mockReset().mockResolvedValue({ success: true, data: null });
+  mockSetEffort.mockReset().mockResolvedValue({ success: true });
   usePendingSendStore.setState({ byHost: {}, draftRequest: {} });
 });
 
