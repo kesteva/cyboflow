@@ -29,6 +29,7 @@ import type {
 } from '../../../shared/types/workflows';
 import type { AgentModelAlias } from '../../../shared/types/agents';
 import type { WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
+import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import { PHASE_COLORS } from '../components/cyboflow/workflowEditorOptions';
 
 // ---------------------------------------------------------------------------
@@ -115,6 +116,7 @@ export type WorkflowEditorAction =
   | { type: 'SET_AGENT_CUSTOM'; agentKey: string; custom: WorkflowAgentCustomCopy | null }
   | { type: 'SET_AGENT_RUNTIME'; agentKey: string; runtime: WorkflowAgentRuntime | null }
   | { type: 'SET_AGENT_CODEX_MODEL'; agentKey: string; codexModel: string | null }
+  | { type: 'SET_AGENT_EFFORT'; agentKey: string; effort: ReasoningEffort | null }
   | SetAgentCustomFieldAction;
 
 // ---------------------------------------------------------------------------
@@ -237,7 +239,8 @@ function mapAgentConfig(
     next.model === undefined &&
     next.custom === undefined &&
     next.runtime === undefined &&
-    next.codexModel === undefined;
+    next.codexModel === undefined &&
+    next.effort === undefined;
   if (isEmpty) {
     delete configs[agentKey];
   } else {
@@ -726,6 +729,19 @@ export function workflowEditorReducer(
           return rest;
         }
         return { ...config, codexModel: action.codexModel };
+      });
+      return { ...state, definition };
+    }
+
+    case 'SET_AGENT_EFFORT': {
+      const definition = mapAgentConfig(state.definition, action.agentKey, (config) => {
+        if (action.effort === null) {
+          if (config.effort === undefined) return config;
+          const rest = { ...config };
+          delete rest.effort;
+          return rest;
+        }
+        return { ...config, effort: action.effort };
       });
       return { ...state, definition };
     }

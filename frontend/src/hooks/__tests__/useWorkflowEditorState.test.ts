@@ -1194,6 +1194,54 @@ describe('workflowEditorReducer — SET_AGENT_CODEX_MODEL', () => {
   });
 });
 
+describe('workflowEditorReducer — SET_AGENT_EFFORT (IDEA-029)', () => {
+  it('sets an effort for an agent with no prior config', () => {
+    const next = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_EFFORT',
+      agentKey: 'executor',
+      effort: 'xhigh',
+    });
+    expect(next.definition.agentConfigs).toEqual({ executor: { effort: 'xhigh' } });
+  });
+
+  it('clearing the only field prunes the agent entry and the whole map', () => {
+    const withEffort = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_EFFORT',
+      agentKey: 'executor',
+      effort: 'high',
+    });
+    const cleared = workflowEditorReducer(withEffort, {
+      type: 'SET_AGENT_EFFORT',
+      agentKey: 'executor',
+      effort: null,
+    });
+    expect(cleared.definition.agentConfigs).toBeUndefined();
+    expect('agentConfigs' in cleared.definition).toBe(false);
+  });
+
+  it('composes with a codex-model pin and clears independently (no empty {})', () => {
+    const withCodex = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_CODEX_MODEL',
+      agentKey: 'executor',
+      codexModel: 'gpt-5.6-sol',
+    });
+    const withBoth = workflowEditorReducer(withCodex, {
+      type: 'SET_AGENT_EFFORT',
+      agentKey: 'executor',
+      effort: 'xhigh',
+    });
+    expect(withBoth.definition.agentConfigs).toEqual({
+      executor: { codexModel: 'gpt-5.6-sol', effort: 'xhigh' },
+    });
+    const effortCleared = workflowEditorReducer(withBoth, {
+      type: 'SET_AGENT_EFFORT',
+      agentKey: 'executor',
+      effort: null,
+    });
+    expect(effortCleared.definition.agentConfigs).toEqual({ executor: { codexModel: 'gpt-5.6-sol' } });
+  });
+});
+
 describe('workflowEditorReducer — SET_AGENT_CUSTOM', () => {
   it('installs a custom copy for an agent with no prior config', () => {
     const custom = makeCustomCopy();

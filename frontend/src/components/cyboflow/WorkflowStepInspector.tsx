@@ -28,6 +28,7 @@ import { AGENT_MODEL_ALIASES, AGENT_MODEL_LABELS } from '../../../../shared/type
 import type { AgentEntry, AgentModelAlias } from '../../../../shared/types/agents';
 import type { AgentProvider, WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 import { WORKFLOW_AGENT_RUNTIMES, WORKFLOW_AGENT_RUNTIME_LABELS } from '../../../../shared/types/agentRuntime';
+import { effortLevelsForProvider, type ReasoningEffort } from '../../../../shared/types/reasoningEffort';
 import { HUMAN_GATE_AGENT, resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import { CLI_TOOLS } from '../../../../shared/types/cliTools';
 import type { CliTool } from '../../../../shared/types/cliTools';
@@ -1056,6 +1057,9 @@ function AgentConfigSection({
   const runtimeId = isInner ? 'insp-inner-agent-runtime' : 'insp-agent-runtime';
   const runtimeTestId = isInner ? 'inspector-inner-agent-runtime-select' : 'inspector-agent-runtime-select';
   const runtimeHintTestId = isInner ? 'inspector-inner-agent-runtime-hint' : 'inspector-agent-runtime-hint';
+  const effortId = isInner ? 'insp-inner-agent-effort' : 'insp-agent-effort';
+  const effortTestId = isInner ? 'inspector-inner-agent-effort-select' : 'inspector-agent-effort-select';
+  const effortHintTestId = isInner ? 'inspector-inner-agent-effort-hint' : 'inspector-agent-effort-hint';
 
   const selectedModel: AgentModelAlias | '' = config?.model ?? '';
   const inheriting = config?.model === undefined;
@@ -1063,6 +1067,11 @@ function AgentConfigSection({
   const inheritSentence =
     pinLabel !== null ? `Inherits ${pinLabel} (agent setting).` : 'Inherits the run model.';
   const selectedRuntime: WorkflowAgentRuntime | '' = config?.runtime ?? '';
+  // The effort scale is provider-specific: Codex when the base agent is a Codex
+  // agent OR a per-agent `codex-sdk` runtime is pinned (Codex's none..xhigh),
+  // else Claude's low..max. A stale cross-provider value is dropped at spawn.
+  const effortProvider: AgentProvider =
+    agentProvider === 'codex' || selectedRuntime === 'codex-sdk' ? 'codex' : 'claude';
 
   return (
     <div style={sectionContainerStyle} data-testid={sectionTestId}>
@@ -1139,6 +1148,33 @@ function AgentConfigSection({
           )}
         </>
       )}
+
+      {/* ── Reasoning effort (per-agent, provider-scoped) ───────────────────── */}
+      <div>
+        <label style={labelStyle} htmlFor={effortId}>reasoning effort</label>
+        <select
+          id={effortId}
+          value={config?.effort ?? ''}
+          onChange={(e) =>
+            dispatch({
+              type: 'SET_AGENT_EFFORT',
+              agentKey,
+              effort: e.target.value === '' ? null : (e.target.value as ReasoningEffort),
+            })
+          }
+          style={inputStyle}
+          data-testid={effortTestId}
+        >
+          <option value="">(inherit)</option>
+          {effortLevelsForProvider(effortProvider).map((level) => (
+            <option key={level} value={level}>{level}</option>
+          ))}
+        </select>
+        <p style={hintStyle} data-testid={effortHintTestId}>
+          Reasoning depth for every step using <b>{agentKey}</b>
+          {effortProvider === 'codex' ? ' on Codex' : ''}. Applies to programmatic runs.
+        </p>
+      </div>
 
       {/* ── Agent definition (read-only view, or workflow-scoped custom copy) ─ */}
       {config?.custom === undefined ? (
