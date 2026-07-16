@@ -58,6 +58,7 @@ import type { TransitionToAwaitingReviewParams } from '../../cyboflow/transition
 import { resolveGateRunId } from '../../../orchestrator/chatSentinelProvider';
 import type { ChatSentinelProvider } from '../../../orchestrator/chatSentinelProvider';
 import { DEFAULT_PERMISSION_MODE } from '../../../../../shared/types/permissionMode';
+import { isClaudeEffortLevel, type ReasoningEffort } from '../../../../../shared/types/reasoningEffort';
 import type { FastModeState, FastModeStateNotice, QueuedPanelInput } from '../../../../../shared/types/panels';
 import { isPermissionMode, type PermissionMode } from '../../../../../shared/types/workflows';
 import { isAgentDispatchToolName } from '../../../../../shared/types/agentIdentity';
@@ -513,6 +514,14 @@ interface ClaudeSpawnOptions {
    */
   agentPermissionMode?: PermissionMode;
   model?: string;
+  /**
+   * Per-agent reasoning-effort override (IDEA-029), threaded from the wire
+   * `ClaudeSpawnerOptions.reasoningEffort`. buildSdkOptions maps a Claude-scale
+   * value (low..max) onto the Agent SDK `Options.effort`; a Codex-only value is
+   * dropped. Folded into the warm-session options fingerprint, so a mid-warm
+   * change cold-respawns. Absent -> the CLI default effort.
+   */
+  reasoningEffort?: ReasoningEffort;
   /**
    * Per-launch opt-in for Anthropic "fast mode" (premium, Opus-only research
    * preview). Threaded from the quick-session launch toggle. When absent/false,
@@ -2014,6 +2023,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     const material: Record<string, unknown> = {
       model: sdkOptions.model ?? null,
       betas: sdkOptions.betas ?? null,
+      effort: sdkOptions.effort ?? null,
       settings: sdkOptions.settings ?? null,
       mcpServers: sdkOptions.mcpServers ?? null,
       disallowedTools: sdkOptions.disallowedTools ?? null,
@@ -2441,6 +2451,14 @@ export class ClaudeCodeManager extends AbstractCliManager {
     }
     if (betas.length > 0) {
       sdkOptions.betas = betas;
+    }
+    // Per-agent reasoning effort (IDEA-029). The Agent SDK `Options.effort`
+    // accepts Claude's low..max scale; the predicate drops any Codex-only value
+    // (none/minimal) that a mis-routed config might carry. Because effort is
+    // folded into computeOptionsFingerprint below, a mid-warm-session effort
+    // change re-fingerprints and cold-respawns — exactly like a model change.
+    if (isClaudeEffortLevel(options.reasoningEffort)) {
+      sdkOptions.effort = options.reasoningEffort;
     }
 
     // Classifier-availability guard for native auto-mode. With no explicit model

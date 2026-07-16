@@ -192,7 +192,7 @@ export class SpawnStepRunner implements StepRunner {
         ...(spawnModel ? { model: spawnModel } : {}),
         ...(stepProvider ? { agentProvider: stepProvider } : {}),
         ...(stepRuntime ? { agentRuntime: stepRuntime } : {}),
-        ...(stepEffort ? { effort: stepEffort } : {}),
+        ...(stepEffort ? { reasoningEffort: stepEffort } : {}),
         ...(agentPermissionMode ? { agentPermissionMode } : {}),
         // Additive per-lane spawn identity — forwarded ONLY when present so the
         // non-fan-out (no-item) case stays byte-identical; the spawner defaults

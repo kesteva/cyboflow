@@ -215,8 +215,12 @@ export interface ClaudeSpawnerOptions {
    * values via normalizeEffortSelection). Absent -> the run/CLI default effort.
    * Each provider's spawn seam reads this: Codex -> `reasoning_effort` on the
    * turn; Claude SDK -> `Options.effort`; Claude interactive -> `--effort`.
+   *
+   * Named `reasoningEffort`, NOT `effort`, on purpose: the interactive manager's
+   * spawn-options parity type already carries a DIFFERENT `effort?: 'ultracode'`
+   * (the Ultracode wizard mode), and this bag is passed to it structurally.
    */
-  effort?: ReasoningEffort;
+  reasoningEffort?: ReasoningEffort;
 }
 
 /**

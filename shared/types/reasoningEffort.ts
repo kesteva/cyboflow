@@ -41,6 +41,15 @@ export function isAnyEffortLevel(value: unknown): value is ReasoningEffort {
   return typeof value === 'string' && ALL_EFFORT_SET.has(value);
 }
 
+/**
+ * Type predicate for Claude's effort scale — narrows to {@link ClaudeEffortLevel}
+ * so a value can be assigned to the Agent SDK's `Options.effort` / the `--effort`
+ * flag (which reject Codex-only `none`/`minimal`).
+ */
+export function isClaudeEffortLevel(value: unknown): value is ClaudeEffortLevel {
+  return typeof value === 'string' && CLAUDE_EFFORT_SET.has(value);
+}
+
 /** The ordered effort options valid for `provider`, for UI pickers. */
 export function effortLevelsForProvider(provider: AgentProvider): readonly ReasoningEffort[] {
   return provider === 'codex' ? CODEX_EFFORT_LEVELS : CLAUDE_EFFORT_LEVELS;

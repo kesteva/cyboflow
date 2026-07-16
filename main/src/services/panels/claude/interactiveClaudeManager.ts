@@ -35,6 +35,7 @@ import { isPermissionMode, resolveWorkflowDefinition } from '../../../../../shar
 import { WorkflowBundleWriter } from './workflowBundleWriter';
 import { installWorkflowBundle } from './workflowBundleInstall';
 import type { PermissionMode, WorkflowDefinition } from '../../../../../shared/types/workflows';
+import { isClaudeEffortLevel, type ReasoningEffort } from '../../../../../shared/types/reasoningEffort';
 
 /**
  * InteractiveClaudeManager — the interactive (subscription-billed) Claude
@@ -170,6 +171,13 @@ interface InteractiveClaudeSpawnOptions {
    * is NOT an `--effort` value. Omitted → no effort setting.
    */
   effort?: 'ultracode';
+  /**
+   * Per-agent reasoning-effort override (IDEA-029), emitted as `--effort <level>`
+   * (the CLI's real low..max flag) — DISTINCT from `effort: 'ultracode'` above.
+   * Suppressed when `effort === 'ultracode'` (Ultracode already pins xhigh via
+   * its setting). Omitted → the CLI default effort.
+   */
+  reasoningEffort?: ReasoningEffort;
   /**
    * Per-launch opt-in for Anthropic "fast mode" (premium, Opus-only research
    * preview). Threaded from the quick-session launch toggle. buildCommandArgs
@@ -575,6 +583,15 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // end-of-options `--` separator that precedes the positional prompt.
     if (options.agentPermissionMode === 'auto') {
       args.push('--permission-mode', 'auto');
+    }
+
+    // Per-agent reasoning effort (IDEA-029) → the CLI's real `--effort` flag
+    // (low|medium|high|xhigh|max). Distinct from the `effort: 'ultracode'` mode
+    // below; suppressed under Ultracode, which already pins xhigh via its
+    // setting (a second --effort would fight it). The predicate keeps a
+    // Codex-only value (none/minimal) from reaching the flag.
+    if (options.effort !== 'ultracode' && isClaudeEffortLevel(options.reasoningEffort)) {
+      args.push('--effort', options.reasoningEffort);
     }
 
     // Session-only settings delivered via `--settings '<json>'`: an ADDITIVE,

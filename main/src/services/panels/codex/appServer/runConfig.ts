@@ -142,7 +142,9 @@ export function buildCodexAppServerTurnOptions(
   // turn. `turnSession.startTurn` spreads this straight into the turn/start
   // params, so `effort` reaches Codex without any further plumbing.
   const effort =
-    options.effort && isValidEffortForProvider('codex', options.effort) ? options.effort : undefined;
+    options.reasoningEffort && isValidEffortForProvider('codex', options.reasoningEffort)
+      ? options.reasoningEffort
+      : undefined;
   return {
     ...(model ? { model } : {}),
     ...(effort ? { effort } : {}),
