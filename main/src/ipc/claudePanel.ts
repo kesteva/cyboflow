@@ -6,6 +6,7 @@ import { ClaudeCodeManager } from '../services/panels/claude/claudeCodeManager';
 import { panelManager } from '../services/panelManager';
 import { ClaudePanelState } from '../../../shared/types/panels';
 import type { SessionOutput } from '../database/models';
+import { isAnyEffortLevel, type ReasoningEffort } from '../../../shared/types/reasoningEffort';
 
 let claudePanelManager: ClaudePanelManager;
 
@@ -202,6 +203,42 @@ class ClaudePanelHandler extends BaseAIPanelHandler {
       } catch (error) {
         console.error('Failed to get Claude panel fast-mode state:', error);
         return { success: false, error: 'Failed to get Claude panel fast-mode state' };
+      }
+    });
+
+    // Set the per-panel reasoning-effort selection (IDEA-029; wizard select / the
+    // in-composer EffortPill). Persisted in tool_panels.settings and read by
+    // sessions:input / panels:continue on every respawn, where it threads into
+    // ClaudeSpawnOptions.reasoningEffort (→ buildSdkOptions' `sdkOptions.effort`,
+    // or the Codex turn options). Mirrors claude-panels:set-fast-mode. `null`
+    // clears the persisted selection back to the provider default.
+    this.ipcMain.handle('claude-panels:set-effort', async (_event, panelId: string, effort: ReasoningEffort | null) => {
+      try {
+        console.log('[IPC] claude-panels:set-effort called for panelId:', panelId, 'effort:', effort);
+
+        if (effort !== null && !isAnyEffortLevel(effort)) {
+          return { success: false, error: `Invalid reasoning effort: ${String(effort)}` };
+        }
+
+        databaseService.updatePanelSettings(panelId, { reasoningEffort: effort ?? undefined });
+
+        return { success: true };
+      } catch (error) {
+        console.error('Failed to set Claude panel reasoning effort:', error);
+        return { success: false, error: 'Failed to set Claude panel reasoning effort' };
+      }
+    });
+
+    // Read the per-panel reasoning-effort selection so the composer pill can
+    // reflect the launch/last-set choice. Mirrors get-fast-mode; null when never set.
+    this.ipcMain.handle('claude-panels:get-effort', async (_event, panelId: string) => {
+      try {
+        const settings = databaseService.getPanelSettings(panelId);
+        const stored = settings?.reasoningEffort;
+        return { success: true, data: isAnyEffortLevel(stored) ? stored : null };
+      } catch (error) {
+        console.error('Failed to get Claude panel reasoning effort:', error);
+        return { success: false, error: 'Failed to get Claude panel reasoning effort' };
       }
     });
 

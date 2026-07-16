@@ -9,6 +9,7 @@ import type { UpdaterEvent, UpdateCheckResult } from '../../shared/types/updater
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../shared/types/modelAvailability';
 import type { CodexModelCatalog } from '../../shared/types/agentModels';
 import type { LoadArtifactHtmlRequest, LoadArtifactHtmlResult } from '../../shared/types/artifacts';
+import type { ReasoningEffort } from '../../shared/types/reasoningEffort';
 import {
   CLAUDE_DETECT_CHANNEL,
   CODEX_DETECT_CHANNEL,
@@ -627,6 +628,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     setFastMode: (panelId: string, fastMode: boolean): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:set-fast-mode', panelId, fastMode),
     getFastMode: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:get-fast-mode', panelId),
     getFastModeState: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:get-fast-mode-state', panelId),
+    setEffort: (panelId: string, effort: ReasoningEffort | null): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:set-effort', panelId, effort),
+    getEffort: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:get-effort', panelId),
     onFastModeState: (callback: (notice: FastModeStateNotice) => void) => {
       const subscription = (_event: Electron.IpcRendererEvent, notice: FastModeStateNotice) => callback(notice);
       ipcRenderer.on('fast-mode-state', subscription);

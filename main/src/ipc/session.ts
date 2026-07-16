@@ -37,6 +37,7 @@ import { isCliSubstrate } from '../../../shared/types/substrate';
 import { claudeRuntimeFromSubstrate, isAgentProvider, isSessionAgentRuntime } from '../../../shared/types/agentRuntime';
 import type { AgentProvider } from '../../../shared/types/agentRuntime';
 import { normalizeAgentModelSelection } from '../../../shared/types/agentModels';
+import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import { isAgentStreamEvent } from '../../../shared/types/agentStream';
 import { isQuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
@@ -395,6 +396,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           const settings = databaseService.getPanelSettings(panelId);
           const model = typeof settings?.model === 'string' ? settings.model : undefined;
           const fastMode = settings?.fastMode === true;
+          const reasoningEffort =
+            typeof settings?.reasoningEffort === 'string' ? (settings.reasoningEffort as ReasoningEffort) : undefined;
           const conversationHistory = sessionManager.getPanelConversationMessages
             ? await sessionManager.getPanelConversationMessages(panelId)
             : await sessionManager.getConversationMessages(panel.sessionId);
@@ -405,6 +408,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             conversationHistory,
             model,
             fastMode,
+            reasoningEffort,
           );
         } catch (err) {
           console.error('[IPC] panel-input queue delivery failed:', err);
@@ -721,6 +725,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         normalizedClaudeConfig?.model,
       );
       const requestedFastMode = normalizedClaudeConfig?.fastMode === true;
+      const requestedReasoningEffort = normalizedClaudeConfig?.reasoningEffort;
 
       // Resolve where this quick session works (migration 047): the per-launch
       // request wins when valid, otherwise the global Settings default (which
@@ -888,6 +893,9 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           if (requestedModel !== undefined) {
             databaseService.updatePanelSettings(panel.id, { model: requestedModel });
           }
+          if (requestedReasoningEffort !== undefined) {
+            databaseService.updatePanelSettings(panel.id, { reasoningEffort: requestedReasoningEffort });
+          }
           registerCodexPtyPanel(runId, panel.id);
           void codexPtyManager
             .startPanel(
@@ -898,6 +906,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               session.permissionMode,
               requestedModel,
               runId,
+              requestedReasoningEffort,
             )
             .catch((err: unknown) => {
               console.error(`[IPC] Eager Codex PTY spawn failed for session ${session.id}:`, err);
@@ -956,10 +965,11 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           // Persist the launch model + fast-mode on the panel so a later
           // sessions:input respawn re-applies them (the eager spawn below already
           // receives them directly).
-          if (requestedModel !== undefined || requestedFastMode) {
+          if (requestedModel !== undefined || requestedFastMode || requestedReasoningEffort !== undefined) {
             databaseService.updatePanelSettings(panel.id, {
               ...(requestedModel !== undefined ? { model: requestedModel } : {}),
               fastMode: requestedFastMode,
+              ...(requestedReasoningEffort !== undefined ? { reasoningEffort: requestedReasoningEffort } : {}),
             });
           }
           // Deterministic at-spawn registration (facade.registerInteractivePanel):
@@ -977,6 +987,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               requestedModel, // pinned to a concrete snapshot at the spawn seam
               requestedEffort, // 'ultracode' → `--settings {ultracode:true}` (Ultracode card)
               requestedFastMode, // default off; opts this session into fast mode
+              undefined, // resumeSessionId — not applicable to a fresh eager spawn
+              requestedReasoningEffort,
             )
             .catch((err: unknown) => {
               // Fail-soft: a spawn failure leaves the session usable — the next
@@ -1362,6 +1374,10 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const panelLaunchSettings = databaseService.getPanelSettings(claudePanel.id);
       const panelModel = typeof panelLaunchSettings?.model === 'string' ? panelLaunchSettings.model : undefined;
       const panelFastMode = panelLaunchSettings?.fastMode === true;
+      const panelReasoningEffort =
+        typeof panelLaunchSettings?.reasoningEffort === 'string'
+          ? (panelLaunchSettings.reasoningEffort as ReasoningEffort)
+          : undefined;
 
       if (dbSession?.agent_runtime === 'codex-pty') {
         if (codexPtyManager.isPanelRunning(claudePanel.id)) {
@@ -1382,6 +1398,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               session.permissionMode,
               panelModel,
               dbSession?.chat_run_id ?? dbSession?.run_id ?? undefined,
+              panelReasoningEffort,
             )
             .catch((err: unknown) => {
               console.error(`[IPC] Codex PTY re-spawn failed for session ${sessionId}:`, err);
@@ -1454,6 +1471,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               panelModel,
               undefined, // effort — re-spawn does not carry the ultracode card setting
               panelFastMode,
+              undefined, // resumeSessionId — a fresh-fallback respawn, not an explicit resume
+              panelReasoningEffort,
             )
             .catch((err: unknown) => {
               console.error(`[IPC] Interactive REPL re-spawn failed for session ${sessionId}:`, err);
@@ -1473,7 +1492,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         // Session already fetched above, no need to fetch again
         
         // Start Claude Code via the panel with the input as the initial prompt
-        await claudeCodeManager.startPanel(claudePanel.id, sessionId, session.worktreePath, finalInput, session.permissionMode, panelModel, panelFastMode);
+        await claudeCodeManager.startPanel(claudePanel.id, sessionId, session.worktreePath, finalInput, session.permissionMode, panelModel, panelFastMode, panelReasoningEffort);
         
         // Update session status to running
         await sessionManager.updateSession(sessionId, { status: 'running' });
@@ -1552,6 +1571,10 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const panelLaunchSettings = databaseService.getPanelSettings(claudePanelId);
       const panelModel = typeof panelLaunchSettings?.model === 'string' ? panelLaunchSettings.model : undefined;
       const panelFastMode = panelLaunchSettings?.fastMode === true;
+      const panelReasoningEffort =
+        typeof panelLaunchSettings?.reasoningEffort === 'string'
+          ? (panelLaunchSettings.reasoningEffort as ReasoningEffort)
+          : undefined;
       // Seed the facade's runId→panelId translation BEFORE the PTY spawn (mirrors
       // the create-quick eager spawn) so a relay/close-out racing the first PTY byte
       // never falls back to the sentinel runId.
@@ -1575,6 +1598,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           undefined, // effort — resume does not carry the ultracode card setting
           panelFastMode,
           claudeSessionId, // → `--resume <uuid>` (no fork)
+          panelReasoningEffort,
         )
         .catch((err: unknown) => {
           console.error(`[IPC] Interactive resume spawn failed for session ${sessionId}:`, err);
@@ -2185,7 +2209,16 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             // process per turn, so read the persisted choice and thread it on every
             // respawn exactly like sessions:input does; otherwise fast mode silently
             // reverts to standard speed the moment a turn routes through this path.
-            const panelFastMode = databaseService.getPanelSettings(panelId)?.fastMode === true;
+            const panelSettings = databaseService.getPanelSettings(panelId);
+            const panelFastMode = panelSettings?.fastMode === true;
+            // Per-panel reasoning-effort persisted at quick-session launch (wizard
+            // select) or by the in-composer EffortPill — mirrors panelFastMode
+            // above: panels:continue respawns per turn, so re-thread the persisted
+            // choice on every respawn or it silently reverts to the provider default.
+            const panelReasoningEffort =
+              typeof panelSettings?.reasoningEffort === 'string'
+                ? (panelSettings.reasoningEffort as ReasoningEffort)
+                : undefined;
 
             // If there's no running process and no Claude session id yet, this is likely the first message.
             // Start fresh (no --resume) so the user can begin a new conversation.
@@ -2202,7 +2235,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
                 input || '',
                 dbSession?.permission_mode,
                 model,
-                panelFastMode
+                panelFastMode,
+                panelReasoningEffort
               );
               return { success: true };
             }
@@ -2219,7 +2253,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               input || '',
               conversationHistory,
               model,
-              panelFastMode
+              panelFastMode,
+              panelReasoningEffort
             );
             return { success: true };
           } catch (err) {
