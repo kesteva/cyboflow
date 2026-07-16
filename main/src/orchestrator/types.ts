@@ -8,7 +8,6 @@
 import type { RunQueueRegistry } from './RunQueueRegistry';
 import type { ClaudeManagerLike, PermissionServerLike } from './stuckDetector';
 import type { ReviewItemCreate, ReviewItemTriage } from './reviewItemRouter';
-import type { IdleSessionReviewSettings } from './idleSessionDetector';
 
 // ---------------------------------------------------------------------------
 // DatabaseLike
@@ -73,21 +72,15 @@ export interface OrchestratorDeps {
    */
   permissionServer?: PermissionServerLike;
   /**
-   * Optional: the review-item write chokepoint (ReviewItemRouter.applyReviewItem),
-   * injected so IdleSessionDetector can surface idle PTY quick sessions into the
-   * human review queue. When omitted (with getIdleSessionReviewConfig), the idle
-   * detector is not started.
+   * Optional: the review-item write chokepoint (ReviewItemRouter.applyReviewItem).
+   * Used at orchestrator start to drain LEGACY idle-session review items (the mint
+   * was retired for the live QuickSessionsTable — see drainLegacyIdleReviewItems).
+   * When omitted, the one-time drain is skipped.
    */
   applyReviewItem?: (
     projectId: number,
     change: ReviewItemCreate | ReviewItemTriage,
   ) => Promise<{ reviewItemId: string; event: { id: number; seq: number } }>;
-  /**
-   * Optional: reads the resolved idle-session-review config each scan
-   * (ConfigManager.getIdleSessionReviewConfig). Paired with applyReviewItem to
-   * enable IdleSessionDetector.
-   */
-  getIdleSessionReviewConfig?: () => IdleSessionReviewSettings;
 }
 
 // Re-export narrow interfaces so callers that only need the interface shapes

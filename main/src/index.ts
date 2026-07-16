@@ -2479,11 +2479,11 @@ app.whenReady().then(async () => {
       db,
       logger: loggerLike,
       runQueues,
-      // Idle-quick-session review: the write chokepoint + the live config reader.
-      // Together they enable IdleSessionDetector (see Orchestrator.start).
+      // Review-item write chokepoint. Used at start to drain any LEGACY
+      // idle-session review items (the mint was retired for the live
+      // QuickSessionsTable — see Orchestrator.start / drainLegacyIdleReviewItems).
       applyReviewItem: (projectId, change) =>
         ReviewItemRouter.getInstance().applyReviewItem(projectId, change),
-      getIdleSessionReviewConfig: () => configManager.getIdleSessionReviewConfig(),
     });
     await orchestrator.start();
     if (!mainWindow) {
