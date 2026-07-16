@@ -5,6 +5,7 @@ import type { ConfigManager } from '../../configManager';
 import type { ConversationMessage } from '../../../database/models';
 import { AIPanelConfig, StartPanelConfig, ContinuePanelConfig } from '../../../../../shared/types/aiPanelConfig';
 import { ClaudePanelState } from '../../../../../shared/types/panels';
+import type { ReasoningEffort } from '../../../../../shared/types/reasoningEffort';
 
 /**
  * Manager for Claude Code panels
@@ -30,13 +31,14 @@ export class ClaudePanelManager extends AbstractAIPanelManager {
 
   /**
    * Extract Claude-specific configuration parameters
-   * Claude uses: permissionMode, model, fastMode
+   * Claude uses: permissionMode, model, fastMode, reasoningEffort
    */
-  protected extractAgentConfig(config: AIPanelConfig): [string | undefined, string | undefined, boolean | undefined] {
+  protected extractAgentConfig(config: AIPanelConfig): [string | undefined, string | undefined, boolean | undefined, ReasoningEffort | undefined] {
     return [
       config.permissionMode, // 'approve' | 'ignore' | undefined
       config.model,          // model string
-      config.fastMode        // Opus fast-mode opt-in (persisted per-panel)
+      config.fastMode,       // Opus fast-mode opt-in (persisted per-panel)
+      config.reasoningEffort // per-agent reasoning-effort selection (IDEA-029)
     ];
   }
 
@@ -44,7 +46,7 @@ export class ClaudePanelManager extends AbstractAIPanelManager {
    * Claude-specific panel start method for backward compatibility
    * Delegates to the base class startPanel with unified config
    */
-  async startPanel(panelId: string, worktreePath: string, prompt: string, permissionMode?: 'approve' | 'ignore', model?: string, fastMode?: boolean): Promise<void>;
+  async startPanel(panelId: string, worktreePath: string, prompt: string, permissionMode?: 'approve' | 'ignore', model?: string, fastMode?: boolean, reasoningEffort?: ReasoningEffort): Promise<void>;
   async startPanel(config: StartPanelConfig): Promise<void>;
   async startPanel(
     panelIdOrConfig: string | StartPanelConfig,
@@ -52,7 +54,8 @@ export class ClaudePanelManager extends AbstractAIPanelManager {
     prompt?: string,
     permissionMode?: 'approve' | 'ignore',
     model?: string,
-    fastMode?: boolean
+    fastMode?: boolean,
+    reasoningEffort?: ReasoningEffort
   ): Promise<void> {
     // Handle both signatures for backward compatibility
     if (typeof panelIdOrConfig === 'string') {
@@ -62,7 +65,8 @@ export class ClaudePanelManager extends AbstractAIPanelManager {
         prompt: prompt!,
         permissionMode,
         model,
-        fastMode
+        fastMode,
+        reasoningEffort
       };
       return super.startPanel(config);
     } else {
@@ -74,7 +78,7 @@ export class ClaudePanelManager extends AbstractAIPanelManager {
    * Claude-specific panel continue method for backward compatibility
    * Delegates to the base class continuePanel with unified config
    */
-  async continuePanel(panelId: string, worktreePath: string, prompt: string, conversationHistory: ConversationMessage[], model?: string, fastMode?: boolean): Promise<void>;
+  async continuePanel(panelId: string, worktreePath: string, prompt: string, conversationHistory: ConversationMessage[], model?: string, fastMode?: boolean, reasoningEffort?: ReasoningEffort): Promise<void>;
   async continuePanel(config: ContinuePanelConfig): Promise<void>;
   async continuePanel(
     panelIdOrConfig: string | ContinuePanelConfig,
@@ -82,7 +86,8 @@ export class ClaudePanelManager extends AbstractAIPanelManager {
     prompt?: string,
     conversationHistory?: ConversationMessage[],
     model?: string,
-    fastMode?: boolean
+    fastMode?: boolean,
+    reasoningEffort?: ReasoningEffort
   ): Promise<void> {
     // Handle both signatures for backward compatibility
     if (typeof panelIdOrConfig === 'string') {
@@ -92,7 +97,8 @@ export class ClaudePanelManager extends AbstractAIPanelManager {
         prompt: prompt!,
         conversationHistory: conversationHistory!,
         model,
-        fastMode
+        fastMode,
+        reasoningEffort
       };
       return super.continuePanel(config);
     } else {

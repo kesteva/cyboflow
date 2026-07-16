@@ -3334,7 +3334,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
     prompt: string,
     permissionMode?: 'approve' | 'ignore',
     model?: string,
-    fastMode?: boolean
+    fastMode?: boolean,
+    reasoningEffort?: ReasoningEffort
   ): Promise<void> {
     const { validatePanelSessionOwnership, logValidationFailure } = require('../../../utils/sessionValidation');
     const validation = validatePanelSessionOwnership(panelId, sessionId);
@@ -3343,7 +3344,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       throw new Error(`Panel validation failed: ${validation.error}`);
     }
     console.log(`[ClaudeCodeManager] Validated panel ${panelId} belongs to session ${sessionId}`);
-    return this.spawnClaudeCode(panelId, sessionId, worktreePath, prompt, undefined, false, permissionMode, model, fastMode);
+    return this.spawnClaudeCode(panelId, sessionId, worktreePath, prompt, undefined, false, permissionMode, model, fastMode, reasoningEffort);
   }
 
   async continuePanel(
@@ -3354,7 +3355,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
     conversationHistory: ConversationMessage[],
     permissionModeOverride?: 'approve' | 'ignore',
     model?: string,
-    fastMode?: boolean
+    fastMode?: boolean,
+    reasoningEffort?: ReasoningEffort
   ): Promise<void> {
     return await withLock(`claude-continue-${panelId}`, async () => {
       const { validatePanelSessionOwnership, logValidationFailure } = require('../../../utils/sessionValidation');
@@ -3402,10 +3404,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
         console.log(`[ClaudeCodeManager] Clearing skip_continue_next flag for session ${sessionId}`);
         this.sessionManager.updateSession(sessionId, { skip_continue_next: false });
         console.log(`[ClaudeCodeManager] Skipping resume for panel ${panelId} due to prompt compaction`);
-        return this.spawnClaudeCode(panelId, sessionId, worktreePath, prompt, [], false, permissionMode, model, fastMode);
+        return this.spawnClaudeCode(panelId, sessionId, worktreePath, prompt, [], false, permissionMode, model, fastMode, reasoningEffort);
       } else {
         console.log(`[ClaudeCodeManager] Using resume for panel ${panelId}`);
-        return this.spawnClaudeCode(panelId, sessionId, worktreePath, prompt, [], true, permissionMode, model, fastMode);
+        return this.spawnClaudeCode(panelId, sessionId, worktreePath, prompt, [], true, permissionMode, model, fastMode, reasoningEffort);
       }
     });
   }
@@ -3543,7 +3545,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
     isResume = false,
     permissionMode?: 'approve' | 'ignore',
     model?: string,
-    fastMode?: boolean
+    fastMode?: boolean,
+    reasoningEffort?: ReasoningEffort
   ): Promise<void> {
     const options: ClaudeSpawnOptions = {
       panelId,
@@ -3554,6 +3557,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       isResume,
       permissionMode,
       fastMode,
+      reasoningEffort,
       // Quick/legacy SDK sessions resolve their 4-mode agent permission from the
       // per-session override (sessions.agent_permission_mode, migration 021) when
       // set, else the GLOBAL default — so both the Settings control AND the

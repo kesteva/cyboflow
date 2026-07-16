@@ -6,6 +6,7 @@ import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { isPermissionMode, type PermissionMode } from '../../../../../shared/types/workflows';
 import { resolveAgentModelAlias } from '../agentModelContext';
+import type { ReasoningEffort } from '../../../../../shared/types/reasoningEffort';
 
 interface CodexPtySpawnOptions {
   panelId: string;
@@ -16,6 +17,13 @@ interface CodexPtySpawnOptions {
   agentPermissionMode?: PermissionMode;
   model?: string;
   runId?: string;
+  /**
+   * Per-agent reasoning-effort selection (IDEA-029). Stored for parity with the
+   * Codex app-server (SDK) manager and the Claude managers; buildCommandArgs
+   * does not yet emit an interactive-CLI flag for it — the PTY path has no
+   * turn-options object that reaches runConfig's buildCodexAppServerTurnOptions.
+   */
+  reasoningEffort?: ReasoningEffort;
   [key: string]: unknown;
 }
 
@@ -202,6 +210,7 @@ export class CodexPtyManager extends AbstractCliManager {
     permissionMode?: 'approve' | 'ignore',
     model?: string,
     runId?: string,
+    reasoningEffort?: ReasoningEffort,
   ): Promise<void> {
     await this.spawnCliProcess({
       panelId,
@@ -212,6 +221,7 @@ export class CodexPtyManager extends AbstractCliManager {
       agentPermissionMode: this.resolveSessionAgentPermissionMode(sessionId, permissionMode),
       model,
       runId,
+      reasoningEffort,
     });
   }
 

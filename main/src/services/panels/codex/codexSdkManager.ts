@@ -16,6 +16,7 @@ import type {
 } from '../../../../../shared/types/agentStream';
 import type { CodexDetectionResult } from '../../../../../shared/types/onboarding';
 import type { CodexModelCatalog } from '../../../../../shared/types/agentModels';
+import type { ReasoningEffort } from '../../../../../shared/types/reasoningEffort';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { resolveAgentModelAlias } from '../agentModelContext';
 import { perfBump } from '../../perfTracer';
@@ -505,6 +506,8 @@ export class CodexSdkManager extends AbstractCliManager {
     prompt: string,
     _permissionMode?: unknown,
     model?: unknown,
+    _fastMode?: unknown,
+    reasoningEffort?: ReasoningEffort,
   ): Promise<void> {
     await this.spawnCliProcess({
       panelId,
@@ -512,6 +515,7 @@ export class CodexSdkManager extends AbstractCliManager {
       worktreePath,
       prompt,
       ...(typeof model === 'string' ? { model } : {}),
+      reasoningEffort,
     });
   }
 

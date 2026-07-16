@@ -1846,6 +1846,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     effort?: 'ultracode',
     fastMode?: boolean,
     resumeSessionId?: string,
+    reasoningEffort?: ReasoningEffort,
   ): Promise<void> {
     await this.spawnCliProcess({
       panelId,
@@ -1855,6 +1856,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       permissionMode,
       effort,
       fastMode,
+      reasoningEffort,
       // When set, buildCommandArgs emits a plain `--resume <uuid>` (no fork) so the
       // prior conversation reopens live — eager resume passes an empty prompt.
       ...(resumeSessionId ? { resumeSessionId } : {}),
