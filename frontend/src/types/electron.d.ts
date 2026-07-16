@@ -9,6 +9,7 @@ import type { AppConfig } from './config';
 import type { ExecutionDiff, GitDiffResult } from './diff';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
+import type { QuickSessionRow } from '../../../shared/types/quickSessions';
 import type { UpdaterEvent, UpdateCheckResult } from '../../../shared/types/updater';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/types/modelAvailability';
 import type { CodexModelCatalog } from '../../../shared/types/agentModels';
@@ -122,6 +123,7 @@ interface ElectronAPI {
     getConversationMessages: (sessionId: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
     generateCompactedContext: (sessionId: string) => Promise<IPCDataResponse<{ summary: string }>>;
     markViewed: (sessionId: string) => Promise<IPCResponse<void>>;
+    listQuick: (projectId?: number) => Promise<IPCResponse<QuickSessionRow[]>>;
     stop: (sessionId: string) => Promise<IPCResponse<void>>;
 
     // Execution and Git operations

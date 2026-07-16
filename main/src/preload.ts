@@ -234,6 +234,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getConversationMessages: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-conversation-messages', sessionId),
     generateCompactedContext: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:generate-compacted-context', sessionId),
     markViewed: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:mark-viewed', sessionId),
+    listQuick: (projectId?: number): Promise<IPCResponse> => ipcRenderer.invoke('sessions:list-quick', projectId),
     stop: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:stop', sessionId),
     
     // Execution and Git operations

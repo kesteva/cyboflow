@@ -7,6 +7,7 @@ import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/
 import type { FastModeStateNotice } from '../../../shared/types/panels';
 import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../shared/types/onboarding';
 import type { CodexModelCatalog } from '../../../shared/types/agentModels';
+import type { QuickSessionRow } from '../../../shared/types/quickSessions';
 
 // Type for IPC response.
 // T defaults to `unknown` (not `any`) so callers must narrow before reading .data.
@@ -129,6 +130,11 @@ export class API {
     async markViewed(sessionId: string) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.sessions.markViewed(sessionId);
+    },
+
+    async listQuick(projectId?: number): Promise<IPCResponse<QuickSessionRow[]>> {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.sessions.listQuick(projectId) as Promise<IPCResponse<QuickSessionRow[]>>;
     },
 
     async stop(sessionId: string) {

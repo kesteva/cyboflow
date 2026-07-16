@@ -45,6 +45,9 @@ import { AgentInvocationStore } from '../orchestrator/agentInvocationStore';
 import { encodeCwd } from '../services/panels/claude/transcript/encodeCwd';
 import { ClaudeCodeManager } from '../services/panels/claude/claudeCodeManager';
 import { updateSessionAgentPermissionMode } from '../orchestrator/sessionPermissionMode';
+import { listQuickSessions } from '../orchestrator/quickSessionListing';
+import { QuestionRouter } from '../orchestrator/questionRouter';
+import { ApprovalRouter } from '../orchestrator/approvalRouter';
 
 /**
  * Whether claude's own on-disk transcript for a resumable session still exists at
@@ -2423,6 +2426,31 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     } catch (error) {
       console.error('Failed to mark session as viewed:', error);
       return { success: false, error: 'Failed to mark session as viewed' };
+    }
+  });
+
+  // Live quick-session status board (replaces the old idle-session review_item
+  // mint). Derives each quick session's state on read: `blocked` when its chat
+  // run has a pending AskUserQuestion / permission gate (SDK gates via the
+  // Question/Approval routers; PTY gates via the interactive manager's
+  // awaiting-input flag), else `running`/`idle` from the DB status. `projectId`
+  // scopes to one project; omit for the cross-project review home.
+  ipcMain.handle('sessions:list-quick', async (_event, projectId?: number) => {
+    try {
+      const blockedRunIds = new Set<string>();
+      for (const q of QuestionRouter.getInstance().getPending()) blockedRunIds.add(q.runId);
+      for (const a of ApprovalRouter.getInstance().getPending()) blockedRunIds.add(a.runId);
+      for (const runId of interactiveCliManager.getAwaitingInputRunIds()) blockedRunIds.add(runId);
+
+      const rows = listQuickSessions(
+        makeDatabaseLike(databaseService),
+        blockedRunIds,
+        typeof projectId === 'number' ? projectId : undefined,
+      );
+      return { success: true, data: rows };
+    } catch (error) {
+      console.error('Failed to list quick sessions:', error);
+      return { success: false, error: 'Failed to list quick sessions' };
     }
   });
 
