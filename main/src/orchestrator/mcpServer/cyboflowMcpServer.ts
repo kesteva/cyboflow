@@ -549,7 +549,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_get_workflow',
         description:
-          "Fetch ONE workflow's EFFECTIVE definition (the phase/step graph the editor seeds from — a saved spec_json wins, else the built-in fallback), plus its metadata and baseline rotation participation, by workflow id. Read-only. The returned `definition` is the exact shape cyboflow_update_workflow expects back (round-trippable): edit it and pass it as definition_json. Per-agent config lives in an optional `agentConfigs` overlay on the definition — `{ [agentKey]: { model?, runtime?, codexModel? } }`, keyed by a step's `agent` value — which pins a per-agent model or routes an agent onto Codex (`runtime: 'codex-sdk'` + `codexModel`); it is absent on unedited built-ins. NOT_FOUND (error 'not_found') when the id is unknown.",
+          "Fetch ONE workflow's EFFECTIVE definition (the phase/step graph the editor seeds from — a saved spec_json wins, else the built-in fallback), plus its metadata and baseline rotation participation, by workflow id. Read-only. The returned `definition` is the exact shape cyboflow_update_workflow expects back (round-trippable): edit it and pass it as definition_json. Per-agent config lives in an optional `agentConfigs` overlay on the definition — `{ [agentKey]: { model?, runtime?, codexModel?, effort? } }`, keyed by a step's `agent` value — which pins a per-agent model, routes an agent onto Codex (`runtime: 'codex-sdk'` + `codexModel`), or sets a per-agent reasoning `effort` (Claude `low..max` / Codex `none..xhigh`; a value outside the resolved provider's scale is dropped at spawn); it is absent on unedited built-ins. NOT_FOUND (error 'not_found') when the id is unknown.",
         inputSchema: {
           type: 'object',
           properties: {
@@ -561,7 +561,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_update_workflow',
         description:
-          "Save an edited workflow definition onto a workflow's spec_json (the editor's \"Save\"). `definition_json` is a JSON-encoded WorkflowDefinition (get the current one from cyboflow_get_workflow, edit, pass it back) — it is re-validated by the same strict schema the UI uses (malformed → error 'invalid_definition'; bad JSON → 'invalid_json'). Per-agent model pins and Codex routing live in the definition's optional `agentConfigs` overlay (`{ [agentKey]: { model?, runtime?, codexModel? } }`). WARNING: editing a global built-in changes it for EVERY project. Unknown id → error 'not_found'.",
+          "Save an edited workflow definition onto a workflow's spec_json (the editor's \"Save\"). `definition_json` is a JSON-encoded WorkflowDefinition (get the current one from cyboflow_get_workflow, edit, pass it back) — it is re-validated by the same strict schema the UI uses (malformed → error 'invalid_definition'; bad JSON → 'invalid_json'). Per-agent model pins and Codex routing live in the definition's optional `agentConfigs` overlay (`{ [agentKey]: { model?, runtime?, codexModel?, effort? } }`). WARNING: editing a global built-in changes it for EVERY project. Unknown id → error 'not_found'.",
         inputSchema: {
           type: 'object',
           properties: {
@@ -660,7 +660,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             definition_json: {
               type: 'string',
               description:
-                "Optional JSON-encoded WorkflowDefinition to re-snapshot. This is where per-agent config lives: an `agentConfigs` overlay `{ [agentKey]: { model?, runtime?, codexModel? } }` pins a Claude model per agent OR routes an agent onto Codex (`runtime: 'codex-sdk'` + `codexModel`). Get the current definition from cyboflow_get_workflow, add/edit `agentConfigs`, pass it back.",
+                "Optional JSON-encoded WorkflowDefinition to re-snapshot. This is where per-agent config lives: an `agentConfigs` overlay `{ [agentKey]: { model?, runtime?, codexModel?, effort? } }` pins a Claude model per agent OR routes an agent onto Codex (`runtime: 'codex-sdk'` + `codexModel`). Get the current definition from cyboflow_get_workflow, add/edit `agentConfigs`, pass it back.",
             },
             agent_overrides_json: {
               type: ['string', 'null'],
