@@ -8,6 +8,7 @@ import type { SessionManager } from './sessionManager';
 import type { WorktreeManager } from './worktreeManager';
 import type { GitDiffManager } from './gitDiffManager';
 import { GitStatusLogger } from './gitStatusLogger';
+import { perfBump } from './perfTracer';
 import { GitFileWatcher } from './gitFileWatcher';
 import { fastCheckWorkingDirectory, fastGetAheadBehind, fastGetDiffStats } from './gitPlumbingCommands';
 
@@ -364,6 +365,7 @@ export class GitStatusManager extends EventEmitter {
    * @param isUserInitiated - Whether this refresh was triggered by user action (shows loading spinner)
    */
   async refreshSessionGitStatus(sessionId: string, isUserInitiated = false): Promise<GitStatus | null> {
+    perfBump('git.status.refresh');
     // Immediately emit loading state so user sees refresh is happening
     // This provides immediate visual feedback
     this.emitThrottled(sessionId, 'loading');

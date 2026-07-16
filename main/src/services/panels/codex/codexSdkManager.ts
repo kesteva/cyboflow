@@ -18,6 +18,7 @@ import type { CodexDetectionResult } from '../../../../../shared/types/onboardin
 import type { CodexModelCatalog } from '../../../../../shared/types/agentModels';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { resolveAgentModelAlias } from '../agentModelContext';
+import { perfBump } from '../../perfTracer';
 import {
   CODEX_EXECUTABLE_VERSION,
   prependCodexPathToEnvironment,
@@ -270,6 +271,7 @@ export class CodexSdkManager extends AbstractCliManager {
       path: executable.executablePath,
       version: executable.version,
     };
+    perfBump('codex.probe.spawn');
     const client = this.createAppServerClient({
       command: executable.executablePath,
       env: prependCodexPathToEnvironment(process.env, executable.pathDir),
@@ -531,6 +533,7 @@ export class CodexSdkManager extends AbstractCliManager {
       }
     };
 
+    perfBump('codex.appserver.spawn');
     const client = this.createAppServerClient({
       command,
       cwd: options.worktreePath,
@@ -761,6 +764,7 @@ export class CodexSdkManager extends AbstractCliManager {
 
   private async fetchCodexModelCatalog(): Promise<CodexModelCatalog> {
     const executable = this.getResolvedExecutable();
+    perfBump('codex.probe.spawn');
     const client = this.createAppServerClient({
       command: executable.executablePath,
       env: prependCodexPathToEnvironment(process.env, executable.pathDir),

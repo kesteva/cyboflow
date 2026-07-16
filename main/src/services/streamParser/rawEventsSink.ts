@@ -29,6 +29,7 @@ import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 
 import { derivePersistedEventType } from './derivers';
 import type { PersistableStreamEvent } from './derivers';
+import { perfBump } from '../perfTracer';
 
 export class RawEventsSink<TEvent extends PersistableStreamEvent = ClaudeStreamEvent> {
   private readonly db: Database.Database;
@@ -105,6 +106,7 @@ export class RawEventsSink<TEvent extends PersistableStreamEvent = ClaudeStreamE
    * Fail-soft: catches all errors, logs at WARN, and returns — never re-throws.
    */
   private handleEvent(runId: string, event: TEvent): void {
+    perfBump('raw.claude');
     try {
       const eventType = derivePersistedEventType(event);
       const payloadJson = JSON.stringify(event);

@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import type { Logger } from '../../../../utils/logger';
+import { perfBump } from '../../../perfTracer';
 import type { AppServerNotification } from './client';
 
 export const CODEX_RAW_NOTIFICATION_EVENT_TYPE = 'codex_app_server_notification';
@@ -22,6 +23,7 @@ export class CodexRawNotificationSink {
   }
 
   persist(runId: string, notification: AppServerNotification): void {
+    perfBump('raw.codex');
     try {
       this.insertStmt.run(
         runId,

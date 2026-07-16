@@ -11,6 +11,7 @@ import { ModelAvailabilityService } from './services/modelAvailabilityService';
 import { DatabaseService } from './database/database';
 import { RunCommandManager } from './services/runCommandManager';
 import { Logger } from './utils/logger';
+import { startPerfTracer } from './services/perfTracer';
 import { ArchiveProgressManager } from './services/archiveProgressManager';
 import { initializeCommitManager } from './services/commitManager';
 import { setCyboflowDirectory, getCyboflowSubdirectory, getCyboflowDirectory } from './utils/cyboflowDirectory';
@@ -776,6 +777,10 @@ async function initializeServices() {
   // Initialize logger early so it can capture all logs
   logger = new Logger(configManager);
   console.log('[Main] Logger initialized with file logging to ~/.cyboflow/logs');
+
+  // Opt-in main-process CPU tracer (CYBOFLOW_PERF_TRACE=1). No-op otherwise; the
+  // interval is unref'd, so no explicit stop is needed on quit.
+  startPerfTracer(logger);
   
   // Initialize commitManager with configManager
   initializeCommitManager(configManager, logger);
