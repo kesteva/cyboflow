@@ -1,6 +1,7 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   DefaultMonitorSession,
+  DefaultHistoryReader,
   MonitorRegistry,
   buildTriagePrompt,
   buildAnswerPrompt,
@@ -18,7 +19,9 @@ import {
 import type { StructuredQueryFn, TextQueryFn } from '../monitorQuery';
 import type { WorkflowStep } from '../../../../../shared/types/workflows';
 import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
-import type { StepResultRow } from '../../stepResultStore';
+import { StepResultStore, type StepResultRow } from '../../stepResultStore';
+import { SprintLaneStore } from '../../sprintLaneStore';
+import type { DatabaseLike, PreparedStatement } from '../../types';
 import type { SprintLaneRow } from '../../../../../shared/types/sprintBatch';
 
 function step(p: Partial<WorkflowStep> & { id: string }): WorkflowStep {
@@ -149,7 +152,24 @@ describe('laneSection (per-task fan-out lanes in the prompt)', () => {
       expect(p).toContain('TASK-066: queued');
       // The anti-trap instruction: trust the lanes, not the step timeline.
       expect(p).toContain('trust these lanes, not the step timeline');
+      // Conservative `integrated` wording (Codex finding 1): describe the configured
+      // chain, never assert specific checks ran — optional steps can be skipped and
+      // the chain is user-editable, so integrated ≠ "reviewed, verified".
+      expect(p).toContain('configured task chain');
+      expect(p).toContain('do NOT');
+      expect(p).not.toContain('implemented, reviewed, verified');
     }
+  });
+
+  it('warns (not silently omits) when the lane read was unavailable', () => {
+    // A read FAILURE leaves lanes empty but sets lanesUnavailable — the prompt must
+    // tell the monitor NOT to fall back to the collapsed timeline (Codex finding 2).
+    const history: MonitorHistory = { conversation: [], steps: [], lanes: [], lanesUnavailable: true };
+    const p = buildAnswerPrompt(sprintCtx, 'is task 65 done?', history);
+    expect(p).toContain('per-task progress could NOT be read');
+    expect(p).toContain('temporarily unavailable');
+    // It must NOT render the authoritative-lanes header (there are no lanes to show).
+    expect(p).not.toContain('AUTHORITATIVE for per-task state');
   });
 
   it('renders attempts (re-delegation) and in-batch blockers', () => {
@@ -175,6 +195,75 @@ describe('laneSection (per-task fan-out lanes in the prompt)', () => {
     }
     // The undefined-lanes prompt must equal the pre-fix output (no added whitespace).
     expect(buildAnswerPrompt(ctx, 'q', withUndefined)).toEqual(buildAnswerPrompt(ctx, 'q', withEmpty));
+  });
+});
+
+describe('DefaultHistoryReader lane read (failure vs. genuine no-lanes)', () => {
+  beforeEach(() => {
+    SprintLaneStore._resetForTesting();
+    StepResultStore._resetForTesting();
+  });
+  afterEach(() => {
+    SprintLaneStore._resetForTesting();
+    StepResultStore._resetForTesting();
+  });
+
+  /** A stmt whose reads return canned values — serves raw_events (.all) + the batch lookup (.get). */
+  function okStmt(batchId: string | null): PreparedStatement {
+    return {
+      run: () => ({ changes: 0, lastInsertRowid: 0 }),
+      get: () => (batchId === null ? {} : { batchId }),
+      all: () => [],
+    };
+  }
+  /** A stmt whose reads THROW — simulates a schema/corruption/query error in listLanes. */
+  const throwingStmt: PreparedStatement = {
+    run: () => ({ changes: 0, lastInsertRowid: 0 }),
+    get: () => {
+      throw new Error('db corrupt');
+    },
+    all: () => {
+      throw new Error('db corrupt');
+    },
+  };
+  function fakeDb(stmt: PreparedStatement): DatabaseLike {
+    return { prepare: () => stmt, transaction: (fn: () => unknown) => fn } as unknown as DatabaseLike;
+  }
+
+  it('marks lanes UNAVAILABLE (not empty) when the lane read throws', async () => {
+    // Reader db resolves a batch id (so we are past the non-sprint short-circuit); the
+    // store's own db throws, so listLanes fails — the exact silent-fallback hole.
+    SprintLaneStore.initialize(fakeDb(throwingStmt));
+    const reader = new DefaultHistoryReader(fakeDb(okStmt('batch-1')));
+
+    const history = await reader.read('run-1');
+
+    expect(history.lanes).toEqual([]);
+    expect(history.lanesUnavailable).toBe(true);
+    // And it renders as a warning, not a silently-dropped section.
+    const p = buildAnswerPrompt({ ...ctx, workflowName: 'sprint' }, 'is task 65 done?', history);
+    expect(p).toContain('per-task progress could NOT be read');
+  });
+
+  it('reports a genuine non-sprint run as available with no lanes (no warning)', async () => {
+    SprintLaneStore.initialize(fakeDb(okStmt(null)));
+    const reader = new DefaultHistoryReader(fakeDb(okStmt(null)));
+
+    const history = await reader.read('run-1');
+
+    expect(history.lanes).toEqual([]);
+    expect(history.lanesUnavailable).toBeUndefined();
+    expect(buildAnswerPrompt(ctx, 'q', history)).not.toContain('Sprint task lanes');
+  });
+
+  it('does not flag unavailable when the store is uninitialized (early boot / tests)', async () => {
+    // No SprintLaneStore.initialize — tryGetInstance() is null. That is NOT a failure.
+    const reader = new DefaultHistoryReader(fakeDb(okStmt('batch-1')));
+
+    const history = await reader.read('run-1');
+
+    expect(history.lanes).toEqual([]);
+    expect(history.lanesUnavailable).toBeUndefined();
   });
 });
 

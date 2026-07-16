@@ -63,6 +63,16 @@ export interface MonitorHistory {
    * lanes are the source of truth for how far any individual task has gotten.
    */
   lanes?: SprintLaneRow[];
+  /**
+   * True when the lane read FAILED (an internal DB/read error), as distinct from a
+   * legitimate non-sprint run that simply has no lanes. Both leave `lanes` empty,
+   * but they must render differently: a genuine non-sprint run omits the lane
+   * section entirely, whereas a failed read emits an explicit "per-task status
+   * unavailable — do NOT infer it from the step timeline" warning. Without this,
+   * a query/schema/corruption failure would silently fall back to the exact
+   * collapsed-timeline reasoning this whole change exists to prevent.
+   */
+  lanesUnavailable?: boolean;
 }
 
 /**
@@ -89,34 +99,44 @@ export class DefaultHistoryReader implements HistoryReader {
   async read(runId: string): Promise<MonitorHistory> {
     const conversation = selectRunUnifiedMessages(this.db, runId, this.logger);
     const steps = StepResultStore.tryGetInstance()?.listForRun(runId) ?? [];
-    const lanes = this.readLanes(runId);
-    return { conversation, steps, lanes };
+    const { lanes, unavailable } = this.readLanes(runId);
+    return { conversation, steps, lanes, ...(unavailable ? { lanesUnavailable: true } : {}) };
   }
 
   /**
-   * Read the run's sprint fan-out lanes, fail-soft. Returns [] for a non-sprint
-   * run (no batch_id), when the SprintLaneStore is not initialized (early boot /
-   * tests), or on any read error — a lane-read problem must never break the
-   * monitor's history read. The batch is resolved the same way the lane store's
-   * own owners do (workflow_runs.batch_id, 1:1).
+   * Read the run's sprint fan-out lanes, fail-soft. Distinguishes a genuine
+   * NO-LANES result (`unavailable: false`) — a non-sprint run with no batch, or
+   * the store not yet initialized (early boot / tests) — from a READ FAILURE
+   * (`unavailable: true`) — any throw from the batch lookup or `listLanes` (a
+   * schema/corruption/query error). The two look identical (`lanes: []`) but must
+   * render differently (see `MonitorHistory.lanesUnavailable`): only a failure
+   * warns the monitor NOT to fall back to the collapsed step timeline. A lane-read
+   * problem must never break the monitor's history read, so neither path throws.
+   * The batch is resolved the same way the lane store's own owners do
+   * (workflow_runs.batch_id, 1:1).
    */
-  private readLanes(runId: string): SprintLaneRow[] {
+  private readLanes(runId: string): { lanes: SprintLaneRow[]; unavailable: boolean } {
     try {
       const store = SprintLaneStore.tryGetInstance();
-      if (store === null) return [];
+      // Store absent (early boot / tests) is NOT a failure — treat as no lanes so
+      // non-sprint prompts stay byte-identical (no spurious "unavailable" warning).
+      if (store === null) return { lanes: [], unavailable: false };
       const row = this.db
         .prepare('SELECT batch_id AS batchId FROM workflow_runs WHERE id = ?')
         .get(runId) as { batchId?: unknown } | undefined;
       const batchId =
         typeof row?.batchId === 'string' && row.batchId.length > 0 ? row.batchId : null;
-      if (batchId === null) return [];
-      return store.listLanes(batchId);
+      // Genuine non-sprint run (no batch) — no lanes, and NOT a failure.
+      if (batchId === null) return { lanes: [], unavailable: false };
+      return { lanes: store.listLanes(batchId), unavailable: false };
     } catch (err) {
-      this.logger?.debug('[Monitor] lane read skipped (fail-soft)', {
+      // A real read error: report it as UNAVAILABLE (not empty) so the prompt warns
+      // the monitor off the misleading timeline instead of silently reasoning from it.
+      this.logger?.warn('[Monitor] lane read failed — per-task status marked unavailable', {
         runId,
         error: err instanceof Error ? err.message : String(err),
       });
-      return [];
+      return { lanes: [], unavailable: true };
     }
   }
 }
@@ -212,25 +232,54 @@ function digestLane(lane: SprintLaneRow): string {
 }
 
 /**
- * The per-task fan-out lane section, or '' when the run has no lanes (non-sprint —
- * so those prompts stay byte-identical). Surfaces the sprint's per-task progress
- * AND explicitly tells the monitor to trust it over the step timeline for anything
- * task-level: the step timeline collapses the entire task fan-out into ONE opaque
- * container step (`execute-tasks`), so on its own it reads as "nothing past the
- * container has run" even when tasks have fully integrated — the exact trap that
- * made a monitor confidently report "verification not reached" for an
- * already-integrated task.
+ * Warning emitted when the lane read FAILED (`lanesUnavailable`) — as distinct from
+ * a non-sprint run with genuinely no lanes. It tells the monitor per-task status is
+ * unavailable and must NOT be inferred from the collapsed step timeline, closing the
+ * silent-fallback hole (a read error otherwise looks like "no lanes" and the monitor
+ * would reason from the misleading timeline — the exact bug this change fixes).
+ */
+const LANES_UNAVAILABLE_SECTION =
+  '\n\nSprint task lanes: per-task progress could NOT be read for this run right now ' +
+  '(an internal read error). Do NOT infer how far individual tasks have gotten from the step ' +
+  'timeline above — for a fan-out sprint it collapses all per-task work into ONE container step ' +
+  'and is not a reliable per-task signal. If asked about a specific task’s status, say the ' +
+  'per-task state is temporarily unavailable rather than guessing.';
+
+/**
+ * The per-task fan-out lane section. Three cases:
+ *   - lanes present            → render them + the "trust lanes over the timeline" note.
+ *   - lanes empty + UNAVAILABLE → the read-failure warning (do not fall back to the timeline).
+ *   - lanes empty + available   → '' (a genuine non-sprint run — prompts stay byte-identical).
+ *
+ * The step timeline collapses the entire task fan-out into ONE opaque container step
+ * (`execute-tasks`), so on its own it reads as "nothing past the container has run"
+ * even when tasks have fully integrated — the exact trap that made a monitor
+ * confidently report "verification not reached" for an already-integrated task.
+ *
+ * `integrated` wording is deliberately conservative: `driveLane`
+ * (programmatic/workflowController.ts) marks a lane integrated once its CONFIGURED
+ * inner chain completes, and OPTIONAL inner steps that fail are SKIPPED, so an
+ * integrated lane does NOT prove any specific stage (code review, tests, visual
+ * verify) actually ran — that depends on the run's configured chain. The prompt
+ * therefore claims only "completed its configured chain + committed", never a
+ * specific check, and tells the monitor to confirm a stage before asserting it.
  */
 function laneSection(history: MonitorHistory): string {
   const lanes = history.lanes ?? [];
-  if (lanes.length === 0) return '';
+  if (lanes.length === 0) {
+    return history.lanesUnavailable === true ? LANES_UNAVAILABLE_SECTION : '';
+  }
   const rows = lanes.map(digestLane).join('\n');
   return (
     '\n\nSprint task lanes (per-task fan-out progress — AUTHORITATIVE for per-task state):\n' +
     'Note: the step timeline above shows the whole task fan-out as ONE container step, so it does ' +
     'NOT reflect per-task progress — trust these lanes, not the step timeline, for how far any ' +
-    'individual task has gotten. A lane status of `integrated` means that task is fully done ' +
-    '(implemented, reviewed, verified) and its work is committed.\n' +
+    'individual task has gotten. A lane status of `integrated` means that task finished its ' +
+    'configured task chain (all required steps passed; optional steps may have been skipped) and ' +
+    'its work is committed in the shared worktree. Exactly which checks ran — code review, tests, ' +
+    'verification — depends on this run’s configured chain and its optional steps, so do NOT ' +
+    'claim a specific check passed unless you can confirm it (from the lane’s current step or ' +
+    'the run’s workflow definition).\n' +
     rows
   );
 }
