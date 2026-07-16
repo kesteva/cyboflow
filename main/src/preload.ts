@@ -173,6 +173,14 @@ interface IPCResponse<T = unknown> {
   error?: string;
 }
 
+// Forward the main-process perf-trace flag so a single `CYBOFLOW_PERF_TRACE=1`
+// at launch enables BOTH the main-process tracer and the renderer probe (which
+// reads this global in utils/perfProbe.ts). Preload runs in the Node context,
+// so process.env is available; the value is a plain boolean, safe to expose.
+contextBridge.exposeInMainWorld('__cyboflowPerf', {
+  traceEnabled: process.env.CYBOFLOW_PERF_TRACE === '1',
+});
+
 contextBridge.exposeInMainWorld('electronAPI', {
   // Generic invoke method for direct IPC calls
   invoke: (channel: string, ...args: unknown[]) => ipcRenderer.invoke(channel, ...args),

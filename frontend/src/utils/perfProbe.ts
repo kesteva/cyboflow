@@ -22,13 +22,21 @@ import type { ProfilerOnRenderCallback } from 'react';
 
 function resolveEnabled(): boolean {
   try {
+    // (1) Forwarded from the main process by preload — a single
+    // `CYBOFLOW_PERF_TRACE=1` at launch enables both the main tracer and this.
+    const mainFlag =
+      typeof window !== 'undefined' &&
+      (window as unknown as { __cyboflowPerf?: { traceEnabled?: boolean } })
+        .__cyboflowPerf?.traceEnabled === true;
+    // (2) Vite build/serve env — `VITE_CYBOFLOW_PERF_TRACE=1 pnpm dev`.
     const viteFlag =
       (import.meta as unknown as { env?: Record<string, string | undefined> }).env
         ?.VITE_CYBOFLOW_PERF_TRACE === '1';
+    // (3) Runtime toggle — flip in devtools + reload, no restart.
     const lsFlag =
       typeof localStorage !== 'undefined' &&
       localStorage.getItem('cyboflow.perfTrace') === '1';
-    return viteFlag || lsFlag;
+    return mainFlag || viteFlag || lsFlag;
   } catch {
     return false;
   }

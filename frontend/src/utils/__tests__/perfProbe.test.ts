@@ -8,6 +8,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 
 afterEach(() => {
   localStorage.clear();
+  delete (window as unknown as { __cyboflowPerf?: unknown }).__cyboflowPerf;
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.resetModules();
@@ -24,6 +25,17 @@ describe('perfProbe (disabled)', () => {
     expect(typeof stop).toBe('function');
     stop();
     expect(info).not.toHaveBeenCalled();
+  });
+});
+
+describe('perfProbe (main-forwarded flag)', () => {
+  it('is enabled when preload forwards __cyboflowPerf.traceEnabled', async () => {
+    (window as unknown as { __cyboflowPerf?: { traceEnabled: boolean } }).__cyboflowPerf = {
+      traceEnabled: true,
+    };
+    vi.resetModules();
+    const mod = await import('../perfProbe');
+    expect(mod.PERF_PROBE_ENABLED).toBe(true);
   });
 });
 
