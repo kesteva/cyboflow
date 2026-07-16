@@ -149,17 +149,14 @@ even when the batch collapsed to one surviving idea.
      its scope/design flags in the option markdown preview). Do **not** proceed to
      expansion until the user answers Approve.
    - **Batch (>1 surviving) — the `approve-ideas` gate:** you cannot AskUserQuestion
-     per idea, so gate the batch once:
-     1. Report the batch artifact: `cyboflow_report_artifact(atype: 'approve-ideas',
-        label: 'Approve ideas', payload_json:
-        {"ideas":[{"ref":"IDEA-XXX","title":"…","scope":"small","summary":"…",
-        "stub":"<full ## Idea stub + flags>"}, …]})` — one entry per surviving
-        idea, so the gate presents every stub rather than only its caption.
-     2. Emit the blocking gate decision: `cyboflow_report_finding(kind: 'decision',
-        blocking: true, payload_json: {"kind":"decision","gate":"approve-ideas",
-        "ideaRefs":["IDEA-XXX","IDEA-YYY", …]})` (with a clear title + body). NO
-        entity link — the gate spans the batch. `ideaRefs` MUST list exactly the
-        surviving ideas' display refs, matching the artifact's refs.
+     per idea, so gate the batch once. The **`approve-ideas` artifact tab is
+     auto-created** by the orchestrator from the run's owned ideas (one Approve/Deny
+     row per idea) — do NOT report it yourself. You only OPEN the gate:
+     · Emit the blocking gate decision: `cyboflow_report_finding(kind: 'decision',
+       blocking: true, payload_json: {"kind":"decision","gate":"approve-ideas",
+       "ideaRefs":["IDEA-XXX","IDEA-YYY", …]})` (with a clear title + body). NO
+       entity link — the gate spans the batch. `ideaRefs` MUST list exactly the
+       surviving ideas' display refs (the auto-created tab renders the same refs).
      Then STOP and end the turn — the human decides in the review queue. On the run's
      next turn you receive a `# Approve-ideas decisions` block, one
      `- IDEA-XXX: approve|deny` line per idea. **Proceed with the approved refs
@@ -219,9 +216,14 @@ a summary held only in your context.
    idea body via `cyboflow_update_task` — when the body already has an
    `## Architecture design` section, REPLACE that section (never stack a second copy);
    otherwise append it. The arch-design deliverable tab derives from the body
-   automatically, so you do **not** report an artifact for this step. **Batch branch:**
-   skipped — every batched idea is `small` (a `large` one was guarded out), so the batch
-   never runs it.
+   automatically, so you do **not** report an artifact for this step (one
+   `arch-design` tab is auto-created per idea whose body carries the section).
+   **Batch branch:** a small batch normally SKIPS this step (every batched idea is
+   `small` — a `large` one was guarded out). But when a multi-idea run DOES run
+   architecture for more than one owned idea (the user asked, or a surviving idea
+   warranted it), each idea's `## Architecture design` fold auto-creates its own
+   arch-design tab, and the design gate at step 7 becomes the joint
+   `approve-designs` batch gate rather than the inline one.
 6. **adversarial-review** (optional) → run ONLY when `ui-prototype` OR
    `architecture` ran — the exact same condition as `approve-design`. Delegate to
    `cyboflow-adversarial-review` with the full spec, prototype URL/notes when
@@ -236,24 +238,42 @@ a summary held only in your context.
      its one revision — with `cyboflow_report_finding` and **`blocking: false`**.
      Never emit a blocking review item from this phase. Carry these non-blocking
      findings into the design-gate preview.
-7. **approve-design** → **human gate, inline — ONLY when `ui-prototype` or `architecture` ran.** When
-   neither ran, do **not** ask — continue straight to epics. Use **AskUserQuestion**
-   (header `Approve design`, options Approve / Revise ONLY; point the user at the
-   `ui-prototype` artifact tab for the mockup and/or put the architecture section,
-   all adversarial findings, and a short note of what was auto-fixed in the option
-   markdown preview). **Batch branch:** the batch never runs `architecture`, so
-   this gate runs only when `ui-prototype` built the combined mockup — one gate over
-   that single prototype (there is no per-idea design gate); point the user at its
-   artifact tab. When no batch prototype was built, skip straight to tasks.
-   - **Approve** → continue to epics.
-   - **Revise** → re-delegate the relevant subagent(s) with the feedback, refresh
-     the artifact (a repeat `cyboflow_report_artifact` call with the same atype
-     enriches the same tab) / re-fold the body (REPLACING the existing
-     `## Architecture design` section), and re-ask. When the feedback changes the
-     idea's **intent or scope** — not just the design surface — also update the
-     idea spec in the body via `cyboflow_update_task`, so the spec, prototype, and
-     architecture stay in agreement. Do **not** proceed to
-     epics until the user answers Approve.
+7. **approve-design** → **human gate — ONLY when `ui-prototype` or `architecture` ran.** When
+   neither ran, do **not** ask — continue straight to epics.
+   - **Single idea (≤1 design surface):** inline **AskUserQuestion** (header
+     `Approve design`, options Approve / Revise ONLY; point the user at the
+     `ui-prototype` artifact tab for the mockup and/or put the architecture
+     section, all adversarial findings, and a short note of what was auto-fixed in
+     the option markdown preview).
+     - **Approve** → continue to epics.
+     - **Revise** → re-delegate the relevant subagent(s) with the feedback,
+       re-fold the body (REPLACING the existing `## Architecture design` section)
+       and/or refresh the prototype artifact (a repeat `cyboflow_report_artifact`
+       call with the same atype enriches the same tab), and re-ask. The
+       `arch-design` deliverable tab re-derives from the body automatically — you
+       do NOT report it. When the feedback changes the idea's **intent or scope** —
+       not just the design surface — also update the idea spec via
+       `cyboflow_update_task`. Do **not** proceed to epics until the user answers
+       Approve.
+   - **Batch (>1 owned idea with a design surface):** you cannot AskUserQuestion
+     per idea, so gate the whole batch once — the design tabs are all auto-created
+     (the combined `ui-prototype`, one `arch-design` tab per idea, and the joint
+     `approve-designs` tab), so you only OPEN the gate:
+     - **>1 idea has a `## Architecture design`** → open the **`approve-designs`
+       batch gate**, exactly parallel to `approve-ideas`:
+       `cyboflow_report_finding(kind: 'decision', blocking: true, payload_json:
+       {"kind":"decision","gate":"approve-designs","designRefs":["IDEA-XXX",
+       "IDEA-YYY", …]})` (clear title + body; NO entity link — the gate spans the
+       batch; `designRefs` = every idea whose architecture is up for approval; do
+       NOT report the `approve-designs` artifact, it is auto-created). Then STOP and
+       end the turn. You resume on a `# Approve-designs decisions` block, one
+       `- IDEA-XXX: approve|deny` line per design: re-run the design step for each
+       DENIED idea's architecture (refresh its body), leave approved ones
+       untouched, then continue to tasks.
+     - **only the combined `ui-prototype` ran** (no idea, or just one, has an
+       architecture design) → one inline **AskUserQuestion** over that single
+       prototype (as the single-idea path), pointing the user at its artifact tab.
+     - **neither ran** → skip straight to tasks.
 8. **epics** (large ideas only) → delegate to `cyboflow-epics`; create each
    returned epic via `cyboflow_create_task` **as its proposal arrives**, linked to
    the originating idea. A `small` idea skips straight to tasks. **Batch branch:**
@@ -311,10 +331,13 @@ a summary held only in your context.
   tools; subagents return results and you persist them. Never write planning state
   to disk — no per-idea or per-task markdown files and no plugin state directory.
 - Use **AskUserQuestion** for every inline human gate (`approve-idea` on the
-  single-idea path, `approve-design`, `approve-plan`, `decompose`) and any clarifying
-  question; never silently proceed past a gate. The **batch `approve-ideas` gate** is
-  the exception — it is a blocking `decision` review item (there is no per-idea
-  AskUserQuestion), and you resume on its `# Approve-ideas decisions` block.
+  single-idea path, `approve-design` on the single-design path, `approve-plan`,
+  `decompose`) and any clarifying question; never silently proceed past a gate. The
+  **batch `approve-ideas` and `approve-designs` gates** are the exceptions — each is
+  a blocking `decision` review item (there is no per-idea AskUserQuestion), whose
+  Approve/Deny surface is an auto-created tab (you open it via
+  `cyboflow_report_finding`, never `cyboflow_report_artifact`), and you resume on its
+  `# Approve-ideas decisions` / `# Approve-designs decisions` block.
   `cyboflow_report_step` is observational only and never substitutes for a gate.
 - **Expansion is ungated and additive.** `expand-spec` must preserve the approved
   stub's problem, solution, scope, and design flags. A required material change
