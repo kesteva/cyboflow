@@ -1,5 +1,4 @@
 import { EventEmitter } from 'events';
-import { execSync } from '../utils/commandExecutor';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import type { Logger } from '../utils/logger';
@@ -11,6 +10,7 @@ import { GitStatusLogger } from './gitStatusLogger';
 import { perfBump } from './perfTracer';
 import { GitFileWatcher } from './gitFileWatcher';
 import { fastCheckWorkingDirectory, fastGetAheadBehind, fastGetDiffStats } from './gitPlumbingCommands';
+import { runGitAsync } from '../utils/runGit';
 
 interface GitStatusCache {
   [sessionId: string]: {
@@ -41,7 +41,20 @@ export class GitStatusManager extends EventEmitter {
   
   // Cancellation support
   private abortControllers: Map<string, AbortController> = new Map();
-  
+
+  // Per-session async git spawn bounding (mandatory alongside the execSync -> async
+  // conversion below — see class doc comment above fetchGitStatus for the full rationale).
+  // (a) In-flight fetch coalescing: a session with a fetch already running reuses it
+  // instead of launching a second concurrent fetch of the same worktree.
+  private inFlightFetches: Map<string, Promise<{ status: GitStatus | null; generation: number }>> = new Map();
+  // (d) Per-session monotonic generation counter: stamped at the START of every
+  // cache-bound fetch/update; updateCache() drops a completion whose generation
+  // is older than the latest one that has since started, preventing an
+  // out-of-order last-write-wins stale cache.
+  private sessionGenerations: Map<string, number> = new Map();
+  // (c) Bound how long any single git child process may run before it's killed.
+  private readonly GIT_COMMAND_TIMEOUT_MS = 10000;
+
   // Initial load management
   private isInitialLoadInProgress = false;
   private initialLoadQueue: string[] = [];
@@ -68,6 +81,8 @@ export class GitStatusManager extends EventEmitter {
     this.fileWatcher.on('needs-refresh', (sessionId: string) => {
       // File watcher detected changes, refresh git status
       this.logger?.info(`[GitStatus] File watcher triggered refresh for session ${sessionId}`);
+      // NOT wrapped in executeWithLimit — see the comment on fetchGitStatusCoalesced
+      // for why bounding belongs at the git-spawn level, not the debounced-refresh level.
       this.refreshSessionGitStatus(sessionId, false).catch(error => {
         this.logger?.error(`[GitStatus] Failed to refresh after file change for session ${sessionId}:`, error);
       });
@@ -90,6 +105,7 @@ export class GitStatusManager extends EventEmitter {
         this.startWatchingSession(sessionId);
         
         // If window is visible, also refresh immediately
+        // NOT wrapped in executeWithLimit — see fetchGitStatusCoalesced's comment.
         if (this.isWindowVisible) {
           this.refreshSessionGitStatus(sessionId, false).catch(error => {
             console.warn(`[GitStatus] Failed to refresh active session ${sessionId}:`, error);
@@ -167,8 +183,10 @@ export class GitStatusManager extends EventEmitter {
     this.gitLogger.logFocusChange(!isHidden);
     
     // If window becomes visible and we have an active session, refresh it
+    // NOT wrapped in executeWithLimit — see fetchGitStatusCoalesced's comment.
     if (!isHidden && this.activeSessionId) {
-      this.refreshSessionGitStatus(this.activeSessionId, false).catch(error => {
+      const sessionId = this.activeSessionId;
+      this.refreshSessionGitStatus(sessionId, false).catch(error => {
         console.warn(`[GitStatus] Failed to refresh active session on focus:`, error);
       });
     }
@@ -192,10 +210,10 @@ export class GitStatusManager extends EventEmitter {
       return cached.status;
     }
 
-    // Fetch fresh status
-    const status = await this.fetchGitStatus(sessionId);
+    // Fetch fresh status (coalesced with any in-flight fetch for this session)
+    const { status, generation } = await this.fetchGitStatusCoalesced(sessionId);
     if (status) {
-      this.updateCache(sessionId, status);
+      this.updateCache(sessionId, status, generation);
     }
     return status;
   }
@@ -209,8 +227,9 @@ export class GitStatusManager extends EventEmitter {
       const sessions = await this.sessionManager.getAllSessions();
       const projectSessions = sessions.filter(s => s.projectId === projectId && !s.archived && s.status !== 'error');
       
-      // Refresh all sessions in parallel
-      await Promise.all(projectSessions.map(session => 
+      // Refresh all sessions in parallel — bounded by fetchGitStatusCoalesced's internal
+      // executeWithLimit, NOT wrapped here (see its comment for why).
+      await Promise.all(projectSessions.map(session =>
         this.refreshSessionGitStatus(session.id, false).catch(() => {
           // Individual failures are logged by GitStatusManager
         })
@@ -243,15 +262,18 @@ export class GitStatusManager extends EventEmitter {
               // Quick check for new ahead/behind status
               const project = this.sessionManager.getProjectForSession(session.id);
               if (project?.path) {
+                const generation = this.beginFetch(session.id);
                 const mainBranch = await this.worktreeManager.getProjectMainBranch(project.path);
-                const { ahead, behind } = fastGetAheadBehind(session.worktreePath, mainBranch);
-                
+                const { ahead, behind } = await fastGetAheadBehind(session.worktreePath, mainBranch, {
+                  timeout: this.GIT_COMMAND_TIMEOUT_MS
+                });
+
                 const updatedStatus = { ...cached.status };
                 updatedStatus.ahead = ahead;
                 updatedStatus.behind = behind;
-                
+
                 // Update cache and emit
-                this.updateCache(session.id, updatedStatus);
+                this.updateCache(session.id, updatedStatus, generation);
                 this.emitThrottled(session.id, 'updated', updatedStatus);
               }
             } catch {
@@ -297,11 +319,13 @@ export class GitStatusManager extends EventEmitter {
         return;
       }
 
+      const generation = this.beginFetch(sessionId);
       const mainBranch = await this.worktreeManager.getProjectMainBranch(project.path);
-      
+      const gitOpts = { timeout: this.GIT_COMMAND_TIMEOUT_MS };
+
       // Create updated status based on rebase type
       const updatedStatus = { ...cached.status };
-      
+
       if (rebaseType === 'from_main') {
         // After rebasing from main, we're no longer behind
         updatedStatus.behind = 0;
@@ -309,17 +333,17 @@ export class GitStatusManager extends EventEmitter {
         // hasUncommittedChanges might be true if there were conflicts
         // We'll do a quick check for uncommitted changes
         try {
-          const quickStatus = fastCheckWorkingDirectory(session.worktreePath);
+          const quickStatus = await fastCheckWorkingDirectory(session.worktreePath, gitOpts);
           updatedStatus.hasUncommittedChanges = quickStatus.hasModified || quickStatus.hasStaged;
           updatedStatus.hasUntrackedFiles = quickStatus.hasUntracked;
           // Update state based on conflicts
           if (quickStatus.hasConflicts) {
             updatedStatus.state = 'conflict';
           }
-          
+
           if (updatedStatus.hasUncommittedChanges) {
             // Get updated diff stats
-            const quickStats = fastGetDiffStats(session.worktreePath);
+            const quickStats = await fastGetDiffStats(session.worktreePath, gitOpts);
             updatedStatus.additions = quickStats.additions;
             updatedStatus.deletions = quickStats.deletions;
             updatedStatus.filesChanged = quickStats.filesChanged;
@@ -348,9 +372,9 @@ export class GitStatusManager extends EventEmitter {
       }
 
       // Update cache and emit
-      this.updateCache(sessionId, updatedStatus);
+      this.updateCache(sessionId, updatedStatus, generation);
       this.emitThrottled(sessionId, 'updated', updatedStatus);
-      
+
       this.logger?.info(`[GitStatus] Updated status after ${rebaseType} rebase for session ${sessionId}`);
     } catch (error) {
       this.logger?.error(`[GitStatus] Error updating status after rebase for session ${sessionId}:`, error as Error);
@@ -401,9 +425,9 @@ export class GitStatusManager extends EventEmitter {
           }
         }
         
-        const status = await this.fetchGitStatus(sessionId);
+        const { status, generation } = await this.fetchGitStatusCoalesced(sessionId);
         if (status) {
-          this.updateCache(sessionId, status);
+          this.updateCache(sessionId, status, generation);
           this.emitThrottled(sessionId, 'updated', status);
         }
         resolve(status);
@@ -455,19 +479,23 @@ export class GitStatusManager extends EventEmitter {
       const batchSize = Math.min(this.MAX_CONCURRENT_OPERATIONS, this.initialLoadQueue.length);
       const batch = this.initialLoadQueue.splice(0, batchSize);
       
-      // Process batch concurrently
-      const promises = batch.map(sessionId => 
-        this.executeWithLimit(async () => {
+      // Process batch concurrently. The batch is already capped at MAX_CONCURRENT_OPERATIONS
+      // by the splice above, and fetchGitStatusCoalesced bounds the underlying git spawn
+      // itself — NOT double-wrapped in executeWithLimit here, since nesting two
+      // executeWithLimit levels against the same shared cap would deadlock (all outer
+      // slots held while each waits on an inner slot the outer holders are blocking).
+      const promises = batch.map(sessionId =>
+        (async () => {
           try {
-            const status = await this.fetchGitStatus(sessionId);
+            const { status, generation } = await this.fetchGitStatusCoalesced(sessionId);
             if (status) {
-              this.updateCache(sessionId, status);
+              this.updateCache(sessionId, status, generation);
               this.emitThrottled(sessionId, 'updated', status);
             }
           } catch (error) {
             this.logger?.error(`[GitStatus] Error fetching status for session ${sessionId}:`, error as Error);
           }
-        })
+        })()
       );
       
       await Promise.allSettled(promises);
@@ -498,13 +526,15 @@ export class GitStatusManager extends EventEmitter {
         this.emitThrottled(session.id, 'loading');
       });
 
-      // Process sessions with concurrent limiting
+      // Process sessions with concurrent limiting — bounded by fetchGitStatusCoalesced's
+      // internal executeWithLimit, NOT wrapped here (see its comment for why: this was a
+      // pre-existing instance of the same caller-side-wrap deadlock the fix 2 review caught).
       let successCount = 0;
       let errorCount = 0;
-      
+
       const results = await Promise.allSettled(
-        activeSessions.map(session => 
-          this.executeWithLimit(() => this.refreshSessionGitStatus(session.id, false)) // false = not user initiated
+        activeSessions.map(session =>
+          this.refreshSessionGitStatus(session.id, false) // false = not user initiated
         )
       );
       
@@ -571,35 +601,86 @@ export class GitStatusManager extends EventEmitter {
     
     try {
       // Quick check using plumbing commands
-      const quickStatus = fastCheckWorkingDirectory(worktreePath);
-      
+      const gitOpts = { timeout: this.GIT_COMMAND_TIMEOUT_MS };
+      const quickStatus = await fastCheckWorkingDirectory(worktreePath, gitOpts);
+
       // Compare with cached status
       const cachedHasChanges = cached.status.hasUncommittedChanges || cached.status.hasUntrackedFiles;
       const currentHasChanges = quickStatus.hasModified || quickStatus.hasStaged || quickStatus.hasUntracked;
-      
+
       // If the basic state differs, we need to refresh
       if (cachedHasChanges !== currentHasChanges) {
         return true;
       }
-      
+
       // If both have no changes, check if ahead/behind changed
       if (!currentHasChanges) {
         const project = this.sessionManager.getProjectForSession(sessionId);
         if (project?.path) {
           const mainBranch = await this.worktreeManager.getProjectMainBranch(project.path);
-          const { ahead, behind } = fastGetAheadBehind(worktreePath, mainBranch);
-          
+          const { ahead, behind } = await fastGetAheadBehind(worktreePath, mainBranch, gitOpts);
+
           if ((cached.status.ahead || 0) !== ahead || (cached.status.behind || 0) !== behind) {
             return true;
           }
         }
       }
-      
+
       return false;
     } catch {
       // On any error, assume we need to refresh
       return true;
     }
+  }
+
+  /**
+   * (d) Stamp a new monotonically increasing generation for a session's fetch/update,
+   * and record it as the latest one that has started. updateCache() compares an
+   * incoming write's generation against this to drop stale (superseded) completions.
+   */
+  private beginFetch(sessionId: string): number {
+    const generation = (this.sessionGenerations.get(sessionId) ?? 0) + 1;
+    this.sessionGenerations.set(sessionId, generation);
+    return generation;
+  }
+
+  /**
+   * (a) Coalesce concurrent fetchGitStatus calls for the same session: a session with
+   * a fetch already in flight reuses that promise instead of spawning a second
+   * concurrent set of git children against the same worktree (which — now that the
+   * spawns are async instead of blocking the whole process — could otherwise race
+   * on index.lock and produce spurious "modified" status / out-of-order cache writes).
+   *
+   * (b) This is also the ONE place the MAX_CONCURRENT_OPERATIONS cap (executeWithLimit)
+   * is applied — bounding the actual git spawn, not the caller. Do NOT wrap callers of
+   * this method (or refreshSessionGitStatus) in executeWithLimit themselves: doing so
+   * deadlocks the shared cap. refreshSessionGitStatus's debounce logic clearTimeout()s
+   * a same-session call's prior in-flight timer (L393-398), so THAT prior call's Promise
+   * — whose `resolve` lives inside the now-cleared setTimeout callback — never settles.
+   * A caller-side executeWithLimit(() => refreshSessionGitStatus(...)) would then hold
+   * its concurrency slot forever, and after MAX_CONCURRENT_OPERATIONS such orphans every
+   * future fetch across every session spins forever. Bounding only the fetch here avoids
+   * this: the debounce timers themselves stay unbounded (cheap, no git spawn) and only
+   * the actual git work — which always eventually settles — occupies a slot.
+   */
+  private fetchGitStatusCoalesced(sessionId: string): Promise<{ status: GitStatus | null; generation: number }> {
+    const existing = this.inFlightFetches.get(sessionId);
+    if (existing) {
+      return existing;
+    }
+
+    const generation = this.beginFetch(sessionId);
+    const promise = this.executeWithLimit(() => this.fetchGitStatus(sessionId))
+      .then(status => ({ status, generation }))
+      .finally(() => {
+        // Only clear our own entry — a newer coalesced fetch may have already
+        // replaced it in the map by the time this one settles.
+        if (this.inFlightFetches.get(sessionId) === promise) {
+          this.inFlightFetches.delete(sessionId);
+        }
+      });
+    this.inFlightFetches.set(sessionId, promise);
+    return promise;
   }
 
   /**
@@ -630,17 +711,21 @@ export class GitStatusManager extends EventEmitter {
         return null;
       }
 
+      // (c) Bound every git child spawned for this fetch: abortable via cancelSessionGitStatus
+      // (which aborts abortController above) and hard-killed after GIT_COMMAND_TIMEOUT_MS.
+      const gitOpts = { signal: abortController.signal, timeout: this.GIT_COMMAND_TIMEOUT_MS };
+
       // Use fast plumbing commands for initial checks
-      const quickStatus = fastCheckWorkingDirectory(session.worktreePath);
+      const quickStatus = await fastCheckWorkingDirectory(session.worktreePath, gitOpts);
       const hasUncommittedChanges = quickStatus.hasModified || quickStatus.hasStaged;
       const hasUntrackedFiles = quickStatus.hasUntracked;
       const hasMergeConflicts = quickStatus.hasConflicts;
-      
+
       // Get uncommitted changes details only if needed
       let uncommittedDiff = { stats: { filesChanged: 0, additions: 0, deletions: 0 } };
       if (hasUncommittedChanges) {
         // Use fast diff stats instead of full diff capture when possible
-        const quickStats = fastGetDiffStats(session.worktreePath);
+        const quickStats = await fastGetDiffStats(session.worktreePath, gitOpts);
         uncommittedDiff = {
           stats: {
             filesChanged: quickStats.filesChanged,
@@ -649,10 +734,10 @@ export class GitStatusManager extends EventEmitter {
           }
         };
       }
-      
+
       // Get ahead/behind status using fast plumbing command
       const mainBranch = await this.worktreeManager.getProjectMainBranch(project.path);
-      const { ahead, behind } = fastGetAheadBehind(session.worktreePath, mainBranch);
+      const { ahead, behind } = await fastGetAheadBehind(session.worktreePath, mainBranch, gitOpts);
 
       // Get total additions/deletions for all commits in the branch (compared to main)
       let totalCommitAdditions = 0;
@@ -661,8 +746,7 @@ export class GitStatusManager extends EventEmitter {
       if (ahead > 0) {
         // Use git diff --shortstat for commit statistics
         try {
-          // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
-          const statLine = execSync(`git diff --shortstat ${mainBranch}...HEAD`, { cwd: session.worktreePath }).toString().trim();
+          const statLine = (await runGitAsync(session.worktreePath, ['diff', '--shortstat', `${mainBranch}...HEAD`], gitOpts)).trim();
           if (statLine) {
             const filesMatch = statLine.match(/(\d+) files? changed/);
             const additionsMatch = statLine.match(/(\d+) insertions?\(\+\)/);
@@ -718,8 +802,7 @@ export class GitStatusManager extends EventEmitter {
       // Get total number of commits in the branch
       let totalCommits = ahead;
       try {
-        // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
-        const countStr = execSync(`git rev-list --count ${mainBranch}..HEAD`, { cwd: session.worktreePath }).toString().trim();
+        const countStr = (await runGitAsync(session.worktreePath, ['rev-list', '--count', `${mainBranch}..HEAD`], gitOpts)).trim();
         totalCommits = parseInt(countStr, 10) || ahead;
       } catch {
         // Keep default of ahead if command fails
@@ -767,11 +850,24 @@ export class GitStatusManager extends EventEmitter {
 
   /**
    * Update cache with new status
+   * @param generation (d) If provided, the generation the write's fetch/update began at —
+   *   dropped as stale if a newer fetch has since started for this session, preventing an
+   *   out-of-order last-write-wins cache write when async fetches interleave.
    */
-  private updateCache(sessionId: string, status: GitStatus): void {
+  private updateCache(sessionId: string, status: GitStatus, generation?: number): void {
+    if (generation !== undefined) {
+      const latestGeneration = this.sessionGenerations.get(sessionId);
+      if (latestGeneration !== undefined && generation < latestGeneration) {
+        this.logger?.info(
+          `[GitStatus] Dropping stale generation ${generation} for session ${sessionId} (latest started: ${latestGeneration})`
+        );
+        return;
+      }
+    }
+
     const previousStatus = this.cache[sessionId]?.status;
     const hasChanged = !previousStatus || JSON.stringify(previousStatus) !== JSON.stringify(status);
-    
+
     this.cache[sessionId] = {
       status,
       lastChecked: Date.now()
@@ -788,6 +884,8 @@ export class GitStatusManager extends EventEmitter {
    */
   clearSessionCache(sessionId: string): void {
     delete this.cache[sessionId];
+    this.sessionGenerations.delete(sessionId);
+    this.inFlightFetches.delete(sessionId);
   }
 
   /**
@@ -795,6 +893,8 @@ export class GitStatusManager extends EventEmitter {
    */
   clearAllCache(): void {
     this.cache = {};
+    this.sessionGenerations.clear();
+    this.inFlightFetches.clear();
   }
 
   /**

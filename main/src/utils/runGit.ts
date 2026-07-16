@@ -24,6 +24,10 @@ const execFileAsyncPromise = promisify(execFile);
 export interface RunGitOptions {
   maxBuffer?: number;
   env?: NodeJS.ProcessEnv;
+  /** Abort the child process (rejects with an AbortError) when the signal fires. runGitAsync only. */
+  signal?: AbortSignal;
+  /** Kill the child process if it runs longer than this many ms. runGitAsync only. */
+  timeout?: number;
 }
 
 export function runGit(cwd: string, args: string[], options: RunGitOptions = {}): string {
@@ -42,6 +46,8 @@ export async function runGitAsync(cwd: string, args: string[], options: RunGitOp
     encoding: 'utf8',
     maxBuffer: options.maxBuffer ?? 10 * 1024 * 1024,
     env: options.env,
+    signal: options.signal,
+    timeout: options.timeout,
   });
   return stdout;
 }

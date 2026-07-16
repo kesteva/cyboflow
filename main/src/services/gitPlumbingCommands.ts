@@ -1,4 +1,5 @@
 import { execSync, ExtendedExecSyncOptions } from '../utils/commandExecutor';
+import { runGitAsync, RunGitOptions } from '../utils/runGit';
 import * as fs from 'fs';
 
 /**
@@ -13,11 +14,24 @@ export interface GitIndexStatus {
   hasConflicts: boolean;
 }
 
+/** Options threaded through to runGitAsync for the async status helpers below. */
+export type FastGitOptions = Pick<RunGitOptions, 'signal' | 'timeout'>;
+
+/**
+ * An AbortError means WE cancelled the git child (superseded/torn-down fetch),
+ * not that git reported something meaningful — it must never be swallowed into
+ * a boolean dirty/clean signal like a real git failure is. Rethrow it so it
+ * propagates to the caller instead.
+ */
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === 'AbortError';
+}
+
 /**
  * Fast check if working directory has any changes using git plumbing commands
  * Much faster than running full `git status --porcelain`
  */
-export function fastCheckWorkingDirectory(cwd: string): GitIndexStatus {
+export async function fastCheckWorkingDirectory(cwd: string, options: FastGitOptions = {}): Promise<GitIndexStatus> {
   const result: GitIndexStatus = {
     hasModified: false,
     hasStaged: false,
@@ -43,45 +57,50 @@ export function fastCheckWorkingDirectory(cwd: string): GitIndexStatus {
   try {
     // 1. Refresh the index first (very fast, updates git's cache)
     try {
-      execSync('git update-index --refresh --ignore-submodules', { cwd, encoding: 'utf8', silent: true });
-    } catch {
+      await runGitAsync(cwd, ['update-index', '--refresh', '--ignore-submodules'], options);
+    } catch (err) {
+      if (isAbortError(err)) throw err;
       // Some files may have been modified, that's ok
     }
 
     // 2. Check for unstaged changes (modified files in working directory)
     try {
-      execSync('git diff-files --quiet --ignore-submodules', { cwd, encoding: 'utf8', silent: true });
-    } catch {
+      await runGitAsync(cwd, ['diff-files', '--quiet', '--ignore-submodules'], options);
+    } catch (err) {
+      if (isAbortError(err)) throw err;
       result.hasModified = true;
     }
 
     // 3. Check for staged changes (in index)
     try {
-      execSync('git diff-index --cached --quiet HEAD --ignore-submodules', { cwd, encoding: 'utf8', silent: true });
-    } catch {
+      await runGitAsync(cwd, ['diff-index', '--cached', '--quiet', 'HEAD', '--ignore-submodules'], options);
+    } catch (err) {
+      if (isAbortError(err)) throw err;
       result.hasStaged = true;
     }
 
     // 4. Check for untracked files (more efficient than ls-files for just checking existence)
-    const untrackedCheck = execSync(
-      'git ls-files --others --exclude-standard --directory --no-empty-directory', 
-      { cwd }
-    ).toString().trim();
-    
+    const untrackedCheck = (await runGitAsync(
+      cwd,
+      ['ls-files', '--others', '--exclude-standard', '--directory', '--no-empty-directory'],
+      options
+    )).trim();
+
     if (untrackedCheck) {
       result.hasUntracked = true;
     }
 
     // 5. Check for merge conflicts
-    const conflictCheck = execSync('git diff --name-only --diff-filter=U', { cwd })
-      .toString().trim();
-    
+    const conflictCheck = (await runGitAsync(cwd, ['diff', '--name-only', '--diff-filter=U'], options)).trim();
+
     if (conflictCheck) {
       result.hasConflicts = true;
     }
 
     return result;
   } catch (error) {
+    // A deliberate cancellation must propagate, not be reported as "dirty".
+    if (isAbortError(error)) throw error;
     // If any unexpected error, return safe defaults
     return {
       hasModified: true,
@@ -95,7 +114,11 @@ export function fastCheckWorkingDirectory(cwd: string): GitIndexStatus {
 /**
  * Get count of commits ahead/behind using rev-list (faster than rev-parse)
  */
-export function fastGetAheadBehind(cwd: string, baseBranch: string): { ahead: number; behind: number } {
+export async function fastGetAheadBehind(
+  cwd: string,
+  baseBranch: string,
+  options: FastGitOptions = {}
+): Promise<{ ahead: number; behind: number }> {
   // Check if the directory exists before attempting git operations
   try {
     fs.accessSync(cwd, fs.constants.F_OK);
@@ -105,16 +128,16 @@ export function fastGetAheadBehind(cwd: string, baseBranch: string): { ahead: nu
   }
 
   try {
-    // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
-    const result = execSync(`git rev-list --left-right --count ${baseBranch}...HEAD`, { cwd })
-      .toString().trim();
+    // Arg-array form also kills the shell-injection/quoting risk baseBranch used to carry.
+    const result = (await runGitAsync(cwd, ['rev-list', '--left-right', '--count', `${baseBranch}...HEAD`], options)).trim();
 
     const [behind, ahead] = result.split('\t').map(n => parseInt(n, 10));
     return {
       ahead: ahead || 0,
       behind: behind || 0
     };
-  } catch {
+  } catch (err) {
+    if (isAbortError(err)) throw err;
     return { ahead: 0, behind: 0 };
   }
 }
@@ -122,7 +145,10 @@ export function fastGetAheadBehind(cwd: string, baseBranch: string): { ahead: nu
 /**
  * Get statistics about changes (additions/deletions) efficiently
  */
-export function fastGetDiffStats(cwd: string): { additions: number; deletions: number; filesChanged: number } {
+export async function fastGetDiffStats(
+  cwd: string,
+  options: FastGitOptions = {}
+): Promise<{ additions: number; deletions: number; filesChanged: number }> {
   // Check if the directory exists before attempting git operations
   try {
     fs.accessSync(cwd, fs.constants.F_OK);
@@ -133,7 +159,7 @@ export function fastGetDiffStats(cwd: string): { additions: number; deletions: n
 
   try {
     // Use numstat for machine-readable output (faster to parse)
-    const result = execSync('git diff --numstat', { cwd }).toString().trim();
+    const result = (await runGitAsync(cwd, ['diff', '--numstat'], options)).trim();
 
     if (!result) {
       return { additions: 0, deletions: 0, filesChanged: 0 };
@@ -154,7 +180,8 @@ export function fastGetDiffStats(cwd: string): { additions: number; deletions: n
       deletions,
       filesChanged: lines.length
     };
-  } catch {
+  } catch (err) {
+    if (isAbortError(err)) throw err;
     return { additions: 0, deletions: 0, filesChanged: 0 };
   }
 }
