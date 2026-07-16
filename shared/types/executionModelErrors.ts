@@ -45,3 +45,16 @@ export class MixedProviderOrchestratedError extends Error {
     this.name = 'MixedProviderOrchestratedError';
   }
 }
+
+/**
+ * Matches an error that crossed the tRPC boundary as a
+ * {@link MixedProviderOrchestratedError} — see the doc comment above for why a
+ * message substring (rather than `instanceof` or `.code`) is the only
+ * mechanism reliable across the rewrap. A caller (e.g. the launch wizard) uses
+ * this to detect the specific "needs programmatic" failure and offer to retry
+ * the same launch with `executionModel: 'programmatic'`, instead of surfacing
+ * a raw error.
+ */
+export function isMixedProviderOrchestratedError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes(MIXED_PROVIDER_ORCHESTRATED_CODE);
+}

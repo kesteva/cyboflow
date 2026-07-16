@@ -101,6 +101,7 @@ import {
   workflowRuntimeForLaunch,
 } from '../agentRuntimeUi';
 import type { ExecutionModel } from '../../../../../shared/types/executionModel';
+import { isMixedProviderOrchestratedError } from '../../../../../shared/types/executionModelErrors';
 import type { QuickSessionWorktreeMode } from '../../../../../shared/types/worktreeMode';
 import { trackEvent } from '../../../utils/telemetry';
 import { CYBOFLOW_WORKFLOW_NAMES } from '../../../../../shared/types/workflows';
@@ -401,6 +402,13 @@ export default function SessionStartWizard(): React.JSX.Element {
   const [isLaunching, setIsLaunching] = useState(false);
   const startInFlightRef = useRef(false);
 
+  // Mixed-provider retry prompt (Phase 2 slice D2). launchRun / launchBatch
+  // detect isMixedProviderOrchestratedError in their catch and, instead of
+  // calling setLaunchError, stash a retry thunk here that re-invokes the exact
+  // same launch with executionModel forced to 'programmatic'. The CTA area
+  // renders a confirm/cancel prompt off this instead of the raw error.
+  const [mixedProviderPrompt, setMixedProviderPrompt] = useState<{ retry: () => void } | null>(null);
+
   // One-shot latch for the explicit `preselectWorkflowName` auto-advance. Set
   // the moment the preselect resolves and drives ② → ③ once, so later
   // loadWorkflows reruns (e.g. blueprint-editor saves) and user back-navigation
@@ -573,7 +581,14 @@ export default function SessionStartWizard(): React.JSX.Element {
 
   // ── Launch ───────────────────────────────────────────────────────────────
   const launchRun = useCallback(
-    async (workflowId: string, ideaSeed?: { ideaId?: string; ideaIds?: string[] }): Promise<void> => {
+    async (
+      workflowId: string,
+      ideaSeed?: { ideaId?: string; ideaIds?: string[] },
+      // Set on the mixed-provider retry (see mixedProviderPrompt above) to pin
+      // this exact launch to programmatic, overriding the Advanced Orchestration
+      // control. Absent on every ordinary launch.
+      forceExecutionModel?: ExecutionModel,
+    ): Promise<void> => {
       if (startInFlightRef.current) return;
       if (selectedProjectId === null) return;
       startInFlightRef.current = true;
@@ -623,8 +638,13 @@ export default function SessionStartWizard(): React.JSX.Element {
           ...(verifyOverride !== 'inherit' ? { verifyEnabled: verifyOverride === 'on' } : {}),
           // Per-run execution-model override — Advanced options. 'inherit' omits the
           // field (the resolver ladder decides); an explicit choice is the
-          // highest-precedence rung of resolveExecutionModel.
-          ...(executionModelOverride !== 'inherit' ? { executionModel: executionModelOverride } : {}),
+          // highest-precedence rung of resolveExecutionModel. A mixed-provider
+          // retry (forceExecutionModel) takes precedence over the Advanced control.
+          ...(forceExecutionModel !== undefined
+            ? { executionModel: forceExecutionModel }
+            : executionModelOverride !== 'inherit'
+              ? { executionModel: executionModelOverride }
+              : {}),
           ...(ideaSeed?.ideaIds !== undefined
             ? { ideaIds: ideaSeed.ideaIds }
             : ideaSeed?.ideaId !== undefined
@@ -655,6 +675,12 @@ export default function SessionStartWizard(): React.JSX.Element {
         notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'wizard' });
         useNavigationStore.getState().goToSession();
       } catch (err: unknown) {
+        if (isMixedProviderOrchestratedError(err)) {
+          // Do NOT surface a raw error — offer to retry as programmatic instead.
+          setMixedProviderPrompt({ retry: () => void launchRun(workflowId, ideaSeed, 'programmatic') });
+          startInFlightRef.current = false;
+          return;
+        }
         setLaunchError(err instanceof Error ? err.message : 'Failed to start run');
         startInFlightRef.current = false;
       } finally {
@@ -671,7 +697,13 @@ export default function SessionStartWizard(): React.JSX.Element {
   // workflow_runs.batch_id, and per-task progress renders as lanes in the run
   // progress rail. Mirrors WorkflowPicker.launchBatch.
   const launchBatch = useCallback(
-    async (workflowId: string, taskIds: string[]): Promise<void> => {
+    async (
+      workflowId: string,
+      taskIds: string[],
+      // Set on the mixed-provider retry (see mixedProviderPrompt above) — mirrors
+      // launchRun's forceExecutionModel.
+      forceExecutionModel?: ExecutionModel,
+    ): Promise<void> => {
       if (startInFlightRef.current) return;
       if (selectedProjectId === null) return;
       startInFlightRef.current = true;
@@ -704,7 +736,12 @@ export default function SessionStartWizard(): React.JSX.Element {
           ...(evalOverride !== 'inherit' ? { evalEnabled: evalOverride === 'on' } : {}),
           ...(verifyOverride !== 'inherit' ? { verifyEnabled: verifyOverride === 'on' } : {}),
           // Per-run execution-model override — Advanced options (see launchRun).
-          ...(executionModelOverride !== 'inherit' ? { executionModel: executionModelOverride } : {}),
+          // A mixed-provider retry (forceExecutionModel) takes precedence.
+          ...(forceExecutionModel !== undefined
+            ? { executionModel: forceExecutionModel }
+            : executionModelOverride !== 'inherit'
+              ? { executionModel: executionModelOverride }
+              : {}),
           taskIds,
           ...variantSelectionToStartInput(variantSelection),
         });
@@ -718,6 +755,12 @@ export default function SessionStartWizard(): React.JSX.Element {
         notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'wizard' });
         useNavigationStore.getState().goToSession();
       } catch (err: unknown) {
+        if (isMixedProviderOrchestratedError(err)) {
+          // Do NOT surface a raw error — offer to retry as programmatic instead.
+          setMixedProviderPrompt({ retry: () => void launchBatch(workflowId, taskIds, 'programmatic') });
+          startInFlightRef.current = false;
+          return;
+        }
         setLaunchError(err instanceof Error ? err.message : 'Failed to start sprint run');
         startInFlightRef.current = false;
       } finally {
@@ -841,6 +884,18 @@ export default function SessionStartWizard(): React.JSX.Element {
     },
     [selection, launchBatch],
   );
+
+  // Mixed-provider retry prompt — confirm re-invokes the stashed thunk (the
+  // exact same launch, forced to programmatic); cancel just dismisses.
+  const handleMixedProviderConfirm = useCallback(() => {
+    const pending = mixedProviderPrompt;
+    setMixedProviderPrompt(null);
+    pending?.retry();
+  }, [mixedProviderPrompt]);
+
+  const handleMixedProviderCancel = useCallback(() => {
+    setMixedProviderPrompt(null);
+  }, []);
 
   // ── CTA label / disabled ─────────────────────────────────────────────────
   const ctaBusy = isLaunching || isQuickStarting;
@@ -1428,6 +1483,39 @@ export default function SessionStartWizard(): React.JSX.Element {
 
             {/* Launch CTA — last element inside the card. */}
             <div className="flex flex-col gap-2 pt-1">
+              {/* Mixed-provider retry prompt (Phase 2 slice D2) — a launch failed
+                  because a step is pinned to Codex under orchestrated execution;
+                  offer to switch to programmatic and retry instead of a raw error. */}
+              {mixedProviderPrompt !== null && (
+                <div
+                  data-testid="mixed-provider-switch-prompt"
+                  role="alertdialog"
+                  aria-label="Switch to programmatic execution"
+                  className="flex flex-col gap-2 border border-status-warning/30 bg-status-warning/10 p-3"
+                >
+                  <p className="text-sm text-status-warning">
+                    This flow runs one or more steps on Codex, which requires programmatic execution. Switch this run to programmatic and launch?
+                  </p>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={handleMixedProviderConfirm}
+                      data-testid="mixed-provider-switch-confirm"
+                      className="flex-1 bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover"
+                    >
+                      Switch & launch
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleMixedProviderCancel}
+                      data-testid="mixed-provider-switch-cancel"
+                      className="flex-1 rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-hover"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
               {combinedError !== null && combinedError !== undefined && (
                 <p className="text-xs text-status-error" role="alert">
                   {combinedError}

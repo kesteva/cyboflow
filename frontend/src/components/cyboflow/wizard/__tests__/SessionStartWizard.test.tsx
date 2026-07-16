@@ -856,6 +856,90 @@ describe('SessionStartWizard — step ③ launch threading', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Mixed-provider retry prompt (Phase 2 slice D2) — a launch that fails with
+// MixedProviderOrchestratedError (a step pinned to Codex under orchestrated
+// execution) must NOT surface a raw launch error. Instead the wizard offers a
+// confirm prompt to retry the SAME launch with executionModel forced to
+// 'programmatic'. Any other error keeps the ordinary launch-error path.
+// ---------------------------------------------------------------------------
+describe('SessionStartWizard — mixed-provider retry prompt', () => {
+  beforeEach(() => {
+    mockWorkflowsList.mockResolvedValue([CUSTOM_WORKFLOW_ROW]);
+  });
+
+  it('shows the confirm prompt (no raw error) when the launch fails with the mixed-provider error', async () => {
+    mockRunStart.mockRejectedValueOnce(new Error('[MIXED_PROVIDER_REQUIRES_PROGRAMMATIC] This workflow runs one or more steps on Codex, which requires programmatic execution.'));
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(screen.getByTestId('mixed-provider-switch-confirm')).toBeInTheDocument();
+    expect(screen.getByTestId('mixed-provider-switch-cancel')).toBeInTheDocument();
+    // No raw launch error rendered.
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(mockRunStart).toHaveBeenCalledOnce();
+  });
+
+  it('retries the same launch with executionModel:"programmatic" on confirm', async () => {
+    mockRunStart.mockRejectedValueOnce(new Error('[MIXED_PROVIDER_REQUIRES_PROGRAMMATIC] needs programmatic'));
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    await screen.findByTestId('mixed-provider-switch-confirm');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('mixed-provider-switch-confirm'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledTimes(2);
+    expect(mockRunStart).toHaveBeenLastCalledWith(
+      expect.objectContaining({ workflowId: 'wf-1', executionModel: 'programmatic' }),
+    );
+    // The second launch succeeded — the prompt is gone and the session opened.
+    expect(screen.queryByTestId('mixed-provider-switch-confirm')).toBeNull();
+    expect(useNavigationStore.getState().view).toBe('session');
+  });
+
+  it('dismisses the prompt without relaunching on cancel', async () => {
+    mockRunStart.mockRejectedValueOnce(new Error('[MIXED_PROVIDER_REQUIRES_PROGRAMMATIC] needs programmatic'));
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    await screen.findByTestId('mixed-provider-switch-confirm');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('mixed-provider-switch-cancel'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledOnce();
+    expect(screen.queryByTestId('mixed-provider-switch-confirm')).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('keeps the normal launch-error path for a DIFFERENT error', async () => {
+    mockRunStart.mockRejectedValueOnce(new Error('boom'));
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(screen.queryByTestId('mixed-provider-switch-confirm')).toBeNull();
+    expect(screen.getByRole('alert')).toHaveTextContent('boom');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Ultracode configure + launch — the Ultracode card shares the quick session's
 // Configure controls (model picker + Advanced MCP/plugin disclosure) but pins
 // the interactive substrate (no selector) and defaults the model to Fable when
