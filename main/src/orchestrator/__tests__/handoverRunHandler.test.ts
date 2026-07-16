@@ -64,6 +64,19 @@ function setWorkflowSpec(db: Database.Database, workflowId: string, specJson: st
   db.prepare('UPDATE workflows SET spec_json = ? WHERE id = ?').run(specJson, workflowId);
 }
 
+function setAgentRuntime(
+  db: Database.Database,
+  runId: string,
+  runtime: 'claude-sdk' | 'claude-interactive' | 'codex-sdk',
+): void {
+  const provider = runtime === 'codex-sdk' ? 'codex' : 'claude';
+  db.prepare('UPDATE workflow_runs SET agent_runtime = ?, agent_provider = ? WHERE id = ?').run(
+    runtime,
+    provider,
+    runId,
+  );
+}
+
 function setErrorTerminalStamp(
   db: Database.Database,
   runId: string,
@@ -408,6 +421,52 @@ describe('handoverRunHandler — delivery mechanics', () => {
 
     await waitForRedrive(runQueues, runId);
     expect(executor.execute).toHaveBeenCalledWith(runId);
+    db.close();
+  });
+
+  it('a Codex run folds the Codex runtime adapter (gate → cyboflow_request_user_input) into the brief', async () => {
+    const db = makeDb();
+    const runQueues = new RunQueueRegistry();
+    const { runId } = seedProgrammaticRun(db, { status: 'awaiting_review' });
+    setAgentRuntime(db, runId, 'codex-sdk');
+    const executor = makeFakeExecutor();
+    const deps = makeDeps(dbAdapter(db), executor, {
+      runQueues,
+      readWorkflowPrompt: () => 'Use AskUserQuestion for every human gate.',
+    });
+
+    const result = await handoverRunHandler(runId, 'take over', deps);
+
+    expect(result).toEqual({ delivered: true });
+    const [, promptArg] = executor.setPendingNudge.mock.calls[0];
+    // The Codex adapter rides along so the handover agent rewrites gate asks to the
+    // blocking MCP tool instead of asking in plain chat (the approve-plan strand bug).
+    expect(promptArg).toContain('Runtime adapter: Codex');
+    expect(promptArg).toContain('cyboflow_request_user_input');
+    // The original workflow body is still present verbatim underneath the adapter.
+    expect(promptArg).toContain('Use AskUserQuestion for every human gate.');
+    await waitForRedrive(runQueues, runId);
+    db.close();
+  });
+
+  it('a Claude run does NOT inject the Codex adapter (default runtime, byte-for-byte body)', async () => {
+    const db = makeDb();
+    const runQueues = new RunQueueRegistry();
+    const { runId } = seedProgrammaticRun(db, { status: 'awaiting_review' });
+    // seedProgrammaticRun defaults agent_runtime='claude-sdk'; assert no adapter.
+    const executor = makeFakeExecutor();
+    const deps = makeDeps(dbAdapter(db), executor, {
+      runQueues,
+      readWorkflowPrompt: () => 'FULL WORKFLOW PROMPT',
+    });
+
+    const result = await handoverRunHandler(runId, 'take over', deps);
+
+    expect(result).toEqual({ delivered: true });
+    const [, promptArg] = executor.setPendingNudge.mock.calls[0];
+    expect(promptArg).not.toContain('Runtime adapter: Codex');
+    expect(promptArg).toContain('FULL WORKFLOW PROMPT');
+    await waitForRedrive(runQueues, runId);
     db.close();
   });
 

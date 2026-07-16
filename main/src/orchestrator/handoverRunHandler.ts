@@ -86,6 +86,13 @@
 import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
 import { resolveWorkflowDefinition } from '../../../shared/types/workflows';
+import {
+  DEFAULT_WORKFLOW_AGENT_RUNTIME,
+  isWorkflowAgentRuntime,
+  providerForRuntime,
+  type WorkflowAgentRuntime,
+} from '../../../shared/types/agentRuntime';
+import { renderWorkflowPromptForRuntime } from './workflowPromptRenderer';
 
 // ---------------------------------------------------------------------------
 // Collaborator interfaces
@@ -200,6 +207,7 @@ interface HandoverRunRow {
   workflow_id: string;
   workflow_name: string;
   spec_json: string | null;
+  agent_runtime: string | null;
 }
 
 /** Discriminated guard outcome threaded out of the per-run PQueue task. */
@@ -215,7 +223,8 @@ const SWITCHABLE_STATUSES = new Set<string>(['failed', 'awaiting_review', 'runni
 
 const RUN_SELECT_SQL = `SELECT r.status AS status, r.execution_model AS execution_model,
               r.current_step_id AS current_step_id, r.workflow_id AS workflow_id,
-              w.name AS workflow_name, w.spec_json AS spec_json
+              w.name AS workflow_name, w.spec_json AS spec_json,
+              r.agent_runtime AS agent_runtime
          FROM workflow_runs r
          JOIN workflows w ON w.id = r.workflow_id
         WHERE r.id = ?`;
@@ -268,6 +277,13 @@ export async function handoverRunHandler(
   const workflowId = preflightRow.workflow_id;
   const workflowName = preflightRow.workflow_name;
   const specJson = preflightRow.spec_json;
+  // The run's agent runtime decides whether the handover brief must carry the
+  // Codex runtime adapter (which rewrites "AskUserQuestion" gate instructions to
+  // `cyboflow_request_user_input`). Coerce defensively — a pre-runtime-column DB
+  // or a bad value degrades to the Claude default (no adapter injected).
+  const runtime: WorkflowAgentRuntime = isWorkflowAgentRuntime(preflightRow.agent_runtime)
+    ? preflightRow.agent_runtime
+    : DEFAULT_WORKFLOW_AGENT_RUNTIME;
 
   // ABORT the live walk (OUTSIDE the queue, BEFORE enqueueing Phase 1). Only when
   // a live executor actually holds the run — a resting failed/awaiting_review run
@@ -359,10 +375,32 @@ export async function handoverRunHandler(
   const steps = definition
     ? definition.phases.flatMap((phase) => phase.steps).map((step) => ({ id: step.id, name: step.name }))
     : [];
+  // Codex handover agents receive the workflow body folded into the brief, but do
+  // NOT pass through the launch-turn runtime renderer — so without this they get
+  // the raw Claude-worded "use AskUserQuestion" gate instructions for a tool Codex
+  // lacks, and silently ask in plain chat instead of opening a real host gate
+  // (stranding approve-plan: the run marches past the gate, tasks never promote).
+  // Adapt the body through the SAME renderer the launch path uses so the Codex
+  // runtime adapter (rewrite gates → `cyboflow_request_user_input`) rides along.
+  // A null body (custom flow / missing file) stays null → composeHandoverPrompt
+  // emits its "unavailable" note unchanged.
+  const rawPromptBody = readWorkflowPrompt(workflowId);
+  const adaptedPromptBody =
+    rawPromptBody === null
+      ? null
+      : renderWorkflowPromptForRuntime(
+          { prompt: rawPromptBody, systemPromptAppend: '' },
+          {
+            provider: providerForRuntime(runtime),
+            runtime,
+            executionModel: 'orchestrated',
+            turnKind: 'launch',
+          },
+        ).prompt;
   const prompt = composeHandoverPrompt({
     runId,
     workflowName,
-    promptBody: readWorkflowPrompt(workflowId),
+    promptBody: adaptedPromptBody,
     steps,
     stepResults: listStepResults(runId),
     reason,
