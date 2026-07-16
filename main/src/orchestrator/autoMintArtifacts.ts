@@ -32,7 +32,11 @@ import { resolveWorkflowDefinition, type WorkflowStep } from '../../../shared/ty
 import { resolveRunFrozenSpec } from './runFrozenSpec';
 import { extractArchDesignSection } from '../../../shared/types/artifacts';
 import { TERMINAL_RUN_STATUSES } from '../../../shared/types/cyboflow';
-import type { ScreenshotsArtifactPayload } from '../../../shared/types/artifacts';
+import type {
+  ScreenshotsArtifactPayload,
+  ApproveIdeasArtifactPayload,
+  ApproveDesignsArtifactPayload,
+} from '../../../shared/types/artifacts';
 import type { VerdictV1 } from '../../../shared/types/visualVerification';
 
 // ---------------------------------------------------------------------------
@@ -168,7 +172,17 @@ const ENTITY_WRITE_STEP_ORIGIN = {
   ideaSpec: 'Plan · idea spec',
   decomposition: 'Plan · decomposition',
   archDesign: 'Refine · architecture design',
+  approveIdeas: 'Plan · approve ideas',
+  approveDesigns: 'Refine · approve designs',
 } as const;
+
+/**
+ * Workflows whose runs auto-mint the JOINT batch-gate artifacts (approve-ideas /
+ * approve-designs). Only the multi-idea planner has those gates — sprint has no
+ * planning gate and ship is single-idea — so the batch surfaces are planner-only,
+ * mirroring TEMPLATED_ATYPE_WORKFLOWS being planner-only.
+ */
+const BATCH_GATE_WORKFLOWS = new Set<string>(['planner']);
 
 // ---------------------------------------------------------------------------
 // Step-origin labels (human-readable provenance shown on the artifact tab)
@@ -445,6 +459,168 @@ async function mintArchDesignForIdea(
 }
 
 /**
+ * arch-design mint for EVERY idea the run OWNS — the per-entity sibling of
+ * mintIdeaSpecForOwnedIdeas (migration 070 makes arch-design identity
+ * (run_id, atype, source_ref), so the per-idea rows coexist). A multi-idea planner
+ * run that runs architecture across several ideas surfaces one architecture tab
+ * per idea. Each per-idea mint is content-gated inside mintArchDesignForIdea (an
+ * idea whose body carries no '## Architecture design' section is skipped), so a
+ * batch surfaces a tab only for the ideas that actually have an architecture
+ * design yet. No resolvable idea → fail-soft (logs + returns).
+ */
+async function mintArchDesignForOwnedIdeas(
+  db: DatabaseLike,
+  runId: string,
+  projectId: number,
+  stepOrigin: string | null,
+  logger?: LoggerLike,
+): Promise<void> {
+  const ideaIds = listRunOwnedOrBatchIdeaIds(db, runId);
+  if (ideaIds.length === 0) {
+    logger?.debug('[autoMintArtifacts] arch-design skipped — run owns no resolvable idea', { runId });
+    return;
+  }
+  for (const ideaId of ideaIds) {
+    await mintArchDesignForIdea(db, runId, projectId, ideaId, stepOrigin, logger);
+  }
+}
+
+/** Narrow projection for a batch-gate payload row (one per owned idea). */
+interface IdeaBatchRow {
+  ref: unknown;
+  title: unknown;
+  scope: unknown;
+  summary: unknown;
+  body: unknown;
+}
+
+/** Read one owned idea's batch-gate row fields (ref/title/scope/summary/body). */
+function readIdeaBatchRow(db: DatabaseLike, ideaId: string): IdeaBatchRow | undefined {
+  return db
+    .prepare('SELECT ref AS ref, title AS title, scope AS scope, summary AS summary, body AS body FROM ideas WHERE id = ?')
+    .get(ideaId) as IdeaBatchRow | undefined;
+}
+
+/**
+ * Auto-mint the JOINT approve-ideas gate artifact (issue 1, deterministic): the
+ * human-facing surface that renders one Approve/Deny row per owned idea. Unlike
+ * the agent-reported legacy path, this mints from the run's OWNED idea rows so the
+ * combined tab appears reliably for every multi-idea planner batch — the gate
+ * DECISION (blocking review item) is still opened by the planner, but the surface
+ * it renders into is now orchestrator-guaranteed.
+ *
+ * BATCH-ONLY: minted only when MORE THAN ONE owned idea carries stub/spec content
+ * (a non-empty body OR summary AND a display ref). A single-idea run uses the
+ * inline approve-idea gate and gets no joint tab. Content is STORED in
+ * payload_json (the rows the template renders), refreshed on every re-mint
+ * (idempotent UPSERT) as the stubs fill in. No resolvable batch → fail-soft.
+ */
+async function mintApproveIdeasForBatch(
+  db: DatabaseLike,
+  runId: string,
+  projectId: number,
+  stepOrigin: string | null,
+  logger?: LoggerLike,
+): Promise<void> {
+  const ideaIds = listRunOwnedOrBatchIdeaIds(db, runId);
+  if (ideaIds.length <= 1) return; // joint gate is for a multi-idea batch only
+
+  const ideas: ApproveIdeasArtifactPayload['ideas'] = [];
+  for (const ideaId of ideaIds) {
+    const row = readIdeaBatchRow(db, ideaId);
+    if (!row) continue;
+    const ref = typeof row.ref === 'string' && row.ref.length > 0 ? row.ref : null;
+    if (ref === null) continue; // rows are keyed by display ref (the verdict-map key)
+    const body = typeof row.body === 'string' ? row.body : '';
+    const summary = typeof row.summary === 'string' ? row.summary : '';
+    if (body.length === 0 && summary.length === 0) continue; // no stub content yet
+    const title = typeof row.title === 'string' && row.title.length > 0 ? row.title : ref;
+    ideas.push({
+      ref,
+      title,
+      scope: typeof row.scope === 'string' && row.scope.length > 0 ? row.scope : null,
+      summary: summary.length > 0 ? summary : null,
+    });
+  }
+  if (ideas.length <= 1) {
+    logger?.debug('[autoMintArtifacts] approve-ideas skipped — fewer than 2 ideas with content', {
+      runId,
+      count: ideas.length,
+    });
+    return;
+  }
+
+  await ArtifactRouter.getInstance().apply(projectId, {
+    op: 'create',
+    runId,
+    atype: 'approve-ideas',
+    label: 'Approve ideas',
+    payloadJson: JSON.stringify({ ideas } satisfies ApproveIdeasArtifactPayload),
+    stepOrigin,
+    isNew: true,
+    actor: 'orchestrator',
+  });
+}
+
+/**
+ * Auto-mint the JOINT approve-designs gate artifact (issue 2, deterministic): the
+ * design-approval sibling of mintApproveIdeasForBatch, rendering one Approve/Deny
+ * row per owned idea whose body carries a '## Architecture design' section.
+ *
+ * BATCH-ONLY: minted only when MORE THAN ONE owned idea has an architecture design
+ * (extractArchDesignSection non-null) AND a display ref. When exactly one idea has
+ * a design the inline approve-design gate handles it and no joint tab appears.
+ * Content is STORED in payload_json, refreshed on every re-mint. No qualifying
+ * batch → fail-soft (no tab).
+ */
+async function mintApproveDesignsForBatch(
+  db: DatabaseLike,
+  runId: string,
+  projectId: number,
+  stepOrigin: string | null,
+  logger?: LoggerLike,
+): Promise<void> {
+  const ideaIds = listRunOwnedOrBatchIdeaIds(db, runId);
+  if (ideaIds.length <= 1) return; // joint design gate is for a multi-idea batch only
+
+  const designs: ApproveDesignsArtifactPayload['designs'] = [];
+  for (const ideaId of ideaIds) {
+    const row = readIdeaBatchRow(db, ideaId);
+    if (!row) continue;
+    const ref = typeof row.ref === 'string' && row.ref.length > 0 ? row.ref : null;
+    if (ref === null) continue; // rows are keyed by display ref (the verdict-map key)
+    const body = typeof row.body === 'string' ? row.body : null;
+    if (extractArchDesignSection(body) === null) continue; // no architecture design yet
+    const title = typeof row.title === 'string' && row.title.length > 0 ? row.title : ref;
+    const summary = typeof row.summary === 'string' && row.summary.length > 0 ? row.summary : null;
+    designs.push({
+      ref,
+      title,
+      scope: typeof row.scope === 'string' && row.scope.length > 0 ? row.scope : null,
+      summary,
+    });
+  }
+  if (designs.length <= 1) {
+    logger?.debug('[autoMintArtifacts] approve-designs skipped — fewer than 2 ideas with a design', {
+      runId,
+      count: designs.length,
+    });
+    return;
+  }
+
+  await ArtifactRouter.getInstance().apply(projectId, {
+    op: 'create',
+    runId,
+    atype: 'approve-designs',
+    label: 'Approve designs',
+    payloadJson: JSON.stringify({ designs } satisfies ApproveDesignsArtifactPayload),
+    stepOrigin,
+    isNew: true,
+    actor: 'orchestrator',
+  });
+}
+
+/**
  * Count an idea's epics + tasks. Mirrors TaskChangeRouter.collectDeleteCascade:
  * epics by originating_idea_id; tasks reachable directly (originating_idea_id)
  * UNION via a child epic (parent_epic_id IN epics), deduped.
@@ -683,12 +859,9 @@ export async function handleStepCompletion(
         return;
       }
 
-      const ideaId = resolveOriginatingIdeaId(db, runId);
-      if (ideaId === null) {
-        logger?.debug('[autoMintArtifacts] arch-design skipped — run owns no resolvable idea', { runId });
-        return;
-      }
-      await mintArchDesignForIdea(db, runId, projectId, ideaId, STEP_ORIGIN[step.id] ?? null, logger);
+      // Per OWNED idea (migration 070 made arch-design per-entity), so a
+      // multi-idea planner batch surfaces one architecture tab per idea.
+      await mintArchDesignForOwnedIdeas(db, runId, projectId, STEP_ORIGIN[step.id] ?? null, logger);
       return;
     }
 
@@ -777,18 +950,24 @@ export async function handleRunStart(
     // 0); a sprint mints both (its decomposition pre-exists). A raw-prompt planner
     // mints nothing here (no resolvable idea yet) and relies on handleEntityWrite.
     //
-    // idea-spec iterates ALL owned ideas (the multi-idea planner batch surfaces
-    // one spec tab per idea). decomposed-stories is RUN-SCOPED: its label
+    // idea-spec + arch-design iterate ALL owned ideas (both per-entity — the
+    // multi-idea planner batch surfaces one spec AND one architecture tab per
+    // idea, each content-gated). decomposed-stories is RUN-SCOPED: its label
     // combines the count across every owned idea, though it still mints as a
     // SINGLE artifact sourced off the first owned idea (`ideaId`) — identity is
-    // unchanged. arch-design stays first-idea-only (`ideaId`) — architecture is
-    // out of scope for the batch.
+    // unchanged.
     await mintIdeaSpecForOwnedIdeas(db, runId, projectId, stepOrigin, 'Idea spec', logger);
     await mintDecomposedStoriesForIdea(db, runId, projectId, ideaId, stepOrigin, logger);
-    // arch-design is content-gated inside its helper (no-op when the idea body
-    // has no '## Architecture design' section) — a re-opened / sprint run over
-    // an idea that already carries an architecture section surfaces the tab.
-    await mintArchDesignForIdea(db, runId, projectId, ideaId, stepOrigin, logger);
+    // arch-design is content-gated inside its helper (no-op for an idea whose body
+    // has no '## Architecture design' section).
+    await mintArchDesignForOwnedIdeas(db, runId, projectId, stepOrigin, logger);
+    // Joint batch-gate surfaces (multi-idea planner only) — deterministic, so the
+    // combined Approve-ideas / Approve-designs tabs never depend on the agent
+    // reporting them. Each is batch-gated (>1 qualifying idea) inside its helper.
+    if (BATCH_GATE_WORKFLOWS.has(meta.workflowName)) {
+      await mintApproveIdeasForBatch(db, runId, projectId, stepOrigin, logger);
+      await mintApproveDesignsForBatch(db, runId, projectId, stepOrigin, logger);
+    }
   } catch (err) {
     const msg = `[autoMintArtifacts] run-start baseline failed for runId=${runId} (fail-soft): ${
       err instanceof Error ? err.message : String(err)
@@ -864,9 +1043,9 @@ export async function handleEntityWrite(
     }
 
     if (entityType === 'idea') {
-      // idea-spec iterates ALL owned ideas (the multi-idea planner batch surfaces
-      // one spec tab per idea, each content-gated); arch-design stays first-idea-
-      // only (`ideaId`) — out of scope for the batch.
+      // idea-spec + arch-design both iterate ALL owned ideas (both per-entity —
+      // the multi-idea planner batch surfaces one spec AND one architecture tab
+      // per idea, each content-gated).
       await mintIdeaSpecForOwnedIdeas(
         db,
         runId,
@@ -875,17 +1054,35 @@ export async function handleEntityWrite(
         'Idea spec',
         logger,
       );
-      // The architecture step folds a '## Architecture design' section into
-      // the idea body — the write that lands it fires this hook, and the
-      // content gate no-ops every idea write until the section exists.
-      await mintArchDesignForIdea(
+      // The architecture step folds a '## Architecture design' section into an
+      // idea body — the write that lands it fires this hook, and the content gate
+      // no-ops every idea write until the section exists.
+      await mintArchDesignForOwnedIdeas(
         db,
         runId,
         projectId,
-        ideaId,
         ENTITY_WRITE_STEP_ORIGIN.archDesign,
         logger,
       );
+      // Joint batch-gate surfaces (multi-idea planner only): refresh the combined
+      // Approve-ideas / Approve-designs tabs as each idea's stub / architecture
+      // fills in. Batch-gated (>1 qualifying idea) inside each helper.
+      if (BATCH_GATE_WORKFLOWS.has(meta.workflowName)) {
+        await mintApproveIdeasForBatch(
+          db,
+          runId,
+          projectId,
+          ENTITY_WRITE_STEP_ORIGIN.approveIdeas,
+          logger,
+        );
+        await mintApproveDesignsForBatch(
+          db,
+          runId,
+          projectId,
+          ENTITY_WRITE_STEP_ORIGIN.approveDesigns,
+          logger,
+        );
+      }
     } else {
       await mintDecomposedStoriesForIdea(
         db,

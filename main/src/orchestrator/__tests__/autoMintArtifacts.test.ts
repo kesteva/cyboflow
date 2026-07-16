@@ -94,6 +94,9 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '061_run_seed_idea_ids.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '062_approve_ideas_atype.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '063_per_idea_spec_artifacts.sql'), 'utf-8'));
+  // 070 adds the 'approve-designs' atype to the CHECK and makes 'arch-design'
+  // per-entity (one-per-(run, atype, source_ref)) alongside idea-spec.
+  db.exec(readFileSync(join(migDir, '070_approve_designs_and_per_idea_arch.sql'), 'utf-8'));
   // workflow_runs.session_id (migration 019) — added directly here; migration 019
   // itself backfills from the Crystal-legacy `sessions` table, which this entity
   // test DB doesn't create. ArtifactRouter's emitChange resolves this column on
@@ -2028,5 +2031,182 @@ describe('autoMintArtifacts.handleVisualArtifactsScan', () => {
     // A second scan with the SAME sorted fileNames produces byte-identical payload
     // and is_new is unchanged → no delta → no 'updated' event spam.
     expect(events).toEqual(['created']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-idea arch-design + JOINT batch-gate artifacts (approve-ideas / approve-designs)
+// ---------------------------------------------------------------------------
+
+const mkArchBody = (n: string): string =>
+  `# ${n}\n\nsome intro\n\n## Architecture design\n\nThe ${n} architecture.\n`;
+
+describe('autoMintArtifacts — per-idea arch-design + joint batch gates', () => {
+  afterEach(() => {
+    ArtifactRouter._resetForTesting();
+    artifactChangeEvents.removeAllListeners();
+    TaskChangeRouter._resetForTesting();
+    taskChangeEvents.removeAllListeners();
+  });
+
+  async function seedTwoIdeaBatch(
+    db: Database.Database,
+    runId: string,
+    opts?: { bodyA?: string; bodyB?: string; summaryA?: string; summaryB?: string },
+  ): Promise<{ ideaA: string; ideaB: string; refA: string; refB: string }> {
+    seedPlannerRun(db, runId);
+    const router = TaskChangeRouter.getInstance();
+    const { taskId: ideaA } = await router.applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Idea Alpha',
+      summary: opts?.summaryA ?? 'spec A',
+      ...(opts?.bodyA !== undefined ? { body: opts.bodyA } : {}),
+      runId,
+    });
+    const { taskId: ideaB } = await router.applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Idea Beta',
+      summary: opts?.summaryB ?? 'spec B',
+      ...(opts?.bodyB !== undefined ? { body: opts.bodyB } : {}),
+      runId,
+    });
+    setSeedIdeaIds(db, runId, [ideaA, ideaB]);
+    const refOf = (id: string): string =>
+      (db.prepare('SELECT ref FROM ideas WHERE id = ?').get(id) as { ref: string }).ref;
+    return { ideaA, ideaB, refA: refOf(ideaA), refB: refOf(ideaB) };
+  }
+
+  it('mints ONE arch-design PER idea whose body carries a design section (per-entity)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    const { ideaA, ideaB } = await seedTwoIdeaBatch(db, 'run-arch', {
+      bodyA: mkArchBody('Alpha'),
+      bodyB: mkArchBody('Beta'),
+    });
+
+    await handleEntityWrite(adapter, 'run-arch', 'idea');
+
+    const archs = db
+      .prepare(`SELECT source_ref FROM artifacts WHERE run_id = 'run-arch' AND atype = 'arch-design' ORDER BY source_ref`)
+      .all() as Array<{ source_ref: string }>;
+    expect(archs).toHaveLength(2);
+    expect(archs.map((a) => a.source_ref).sort()).toEqual([ideaA, ideaB].sort());
+  });
+
+  it('skips arch-design for an idea with no design section (content gate, per idea)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    // Only Alpha has an architecture section; Beta has none.
+    const { ideaA } = await seedTwoIdeaBatch(db, 'run-arch1', {
+      bodyA: mkArchBody('Alpha'),
+      bodyB: '# Beta\n\njust prose, no design section\n',
+    });
+
+    await handleEntityWrite(adapter, 'run-arch1', 'idea');
+
+    const archs = db
+      .prepare(`SELECT source_ref FROM artifacts WHERE run_id = 'run-arch1' AND atype = 'arch-design'`)
+      .all() as Array<{ source_ref: string }>;
+    expect(archs).toHaveLength(1);
+    expect(archs[0].source_ref).toBe(ideaA);
+  });
+
+  it('mints the JOINT approve-ideas artifact for a multi-idea batch (one row per idea)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    const { refA, refB } = await seedTwoIdeaBatch(db, 'run-ai');
+
+    await handleEntityWrite(adapter, 'run-ai', 'idea');
+
+    const art = readArtifact(db, 'run-ai', 'approve-ideas');
+    expect(art).toBeDefined();
+    expect(art!.label).toBe('Approve ideas');
+    const payload = JSON.parse(art!.payload_json!) as { ideas: Array<{ ref: string; title: string }> };
+    expect(payload.ideas.map((i) => i.ref).sort()).toEqual([refA, refB].sort());
+    expect(payload.ideas.map((i) => i.title).sort()).toEqual(['Idea Alpha', 'Idea Beta']);
+  });
+
+  it('does NOT mint approve-ideas for a single-idea planner run', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedPlannerRun(db, 'run-solo');
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Solo',
+      summary: 'just one',
+      runId: 'run-solo',
+    });
+    setSeedIdea(db, 'run-solo', ideaId);
+
+    await handleEntityWrite(adapter, 'run-solo', 'idea');
+
+    expect(readArtifact(db, 'run-solo', 'approve-ideas')).toBeUndefined();
+  });
+
+  it('mints the JOINT approve-designs artifact when >1 idea has a design (one row per design)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    const { refA, refB } = await seedTwoIdeaBatch(db, 'run-ad', {
+      bodyA: mkArchBody('Alpha'),
+      bodyB: mkArchBody('Beta'),
+    });
+
+    await handleEntityWrite(adapter, 'run-ad', 'idea');
+
+    const art = readArtifact(db, 'run-ad', 'approve-designs');
+    expect(art).toBeDefined();
+    expect(art!.label).toBe('Approve designs');
+    const payload = JSON.parse(art!.payload_json!) as { designs: Array<{ ref: string }> };
+    expect(payload.designs.map((d) => d.ref).sort()).toEqual([refA, refB].sort());
+  });
+
+  it('does NOT mint approve-designs when only ONE idea has a design section', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    await seedTwoIdeaBatch(db, 'run-ad1', {
+      bodyA: mkArchBody('Alpha'),
+      bodyB: '# Beta\n\nno design yet\n',
+    });
+
+    await handleEntityWrite(adapter, 'run-ad1', 'idea');
+
+    expect(readArtifact(db, 'run-ad1', 'approve-designs')).toBeUndefined();
+  });
+
+  it('does NOT mint the joint batch gates for a non-planner (sprint) run', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    // A standalone sprint owns no ideas and is not a planning flow — the batch
+    // gates are planner-only. handleEntityWrite no-ops for sprint anyway
+    // (CONTENT_DRIVEN_WORKFLOWS excludes it), so assert nothing minted.
+    seedSprintRun(db, 'run-sp', 'batch-x');
+    await handleEntityWrite(adapter, 'run-sp', 'idea');
+
+    expect(readArtifact(db, 'run-sp', 'approve-ideas')).toBeUndefined();
+    expect(readArtifact(db, 'run-sp', 'approve-designs')).toBeUndefined();
   });
 });
