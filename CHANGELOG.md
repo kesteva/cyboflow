@@ -6,6 +6,61 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.25] — 2026-07-16
+
+### Added
+
+- **Codex juror in the code-review eval jury.** The code-review evaluation jury
+  now runs **2×Claude + 1×Codex**, with each juror's structured verdict persisted
+  for the score panel. [migration 069 `jury_json`]
+- **Per-agent Codex runtime (per-step provider pin).** An individual workflow
+  step can be routed to **Codex** via a per-agent Runtime + Codex model picker in
+  the step inspector; programmatic runs dispatch those steps to the Codex manager,
+  and agent-config resolution threads the per-agent runtime/model through.
+- **Codex-aware variant editor.** Workflow variants gain a per-variant agent
+  provider/runtime axis with a provider-aware per-agent model pin rendered in the
+  variant editor's step inspector. [migration 066]
+- **Planner/Ship idea-stub gate.** The Planner and Ship flows gain an
+  idea-stub → approve → expand → adversarial-review sequence, with research folded
+  into as-needed spec completion rather than a standalone research step.
+- **Derived "In development" board stage.** A position-7 derived stage surfaces
+  tasks with active run associations, with in-development session attribution on
+  task cards + the picker, guarded against double-pull. [migrations 066/067]
+- **Session drag reordering.** Sessions in the left rail can be reordered by drag.
+- **ui-prototype server reaping.** Leaked ui-prototype `http.server` processes are
+  reaped at cancel + close-out.
+
+### Changed
+
+- **Programmatic orchestration is now the default** for workflow runs.
+- **Quick sessions default to the interactive PTY substrate.**
+- **Per-kind data directory.** Each app kind (Dev vs. stable) gets its own data
+  directory instead of sharing `~/.cyboflow`, plus a single-instance-per-kind lock
+  on that directory.
+- **Mixed-provider workflow guards.** Orchestrated launches of mixed-provider
+  (Claude + Codex) workflows are guarded and prompt to switch to programmatic; on
+  `switch_to_orchestrated` the user is warned that separate-runtime steps fold
+  into the handover agent.
+- **Finer error classification.** The opaque `other` errorClass is split with a
+  structural-shape tier.
+
+### Fixed
+
+- The quick-PTY substrate default no longer leaks onto workflow-host sessions.
+- The Codex app-server environment is enriched with the login-shell `PATH`.
+- **Two-instance socket collision hardening.** The orchestrator socket server
+  probes before unlinking and never clobbers a live socket; EADDRINUSE recovery
+  re-probes; an Electron OS single-instance lock (per-kind userData) replaces the
+  PID lockfile.
+- Sentry `beforeSend` drops benign broken-pipe (EPIPE) writes.
+- The dev renderer retries its load on a network-service crash.
+- The flow pill wraps to its own line and opens the session; **Run** is disabled
+  while a task is in development.
+- **"In development" projection fixes.** Heals the upgrade gap + stale pulse;
+  applies the double-pull guard to experiment seed-task eligibility; the re-open
+  window stops stale merged runs from pinning re-pulled tasks at Done; task stages
+  recompute at Create-PR, merge, cancel, and restart close-outs.
+
 ## [0.1.24] — 2026-07-15
 
 ### Added
