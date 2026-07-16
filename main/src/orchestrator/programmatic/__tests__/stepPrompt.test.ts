@@ -130,7 +130,7 @@ describe('composeStepPrompt', () => {
   // or the artifact silently never gets minted. 2026-07-06.
   // -------------------------------------------------------------------------
 
-  it('instructs a ui-prototype step to extract the URL and call cyboflow_report_artifact', () => {
+  it('instructs a ui-prototype step to write the static file and call cyboflow_report_artifact with a fileName pointer', () => {
     const out = composeStepPrompt({
       step: step({
         id: 'ui-prototype',
@@ -145,7 +145,8 @@ describe('composeStepPrompt', () => {
     expect(out).toContain('cyboflow_report_artifact');
     expect(out).toContain("atype: 'ui-prototype'");
     expect(out).toContain('"UI prototype"');
-    expect(out).toContain('{"url": "<the url>"}');
+    expect(out).toContain('{"fileName": "prototype/index.html"}');
+    expect(out).not.toContain('{"url":');
   });
 
   it('instructs an architecture step to fold the section into the idea body via cyboflow_update_task, not report_artifact', () => {

@@ -45,6 +45,7 @@
  * resolves them via the host's human-gate path, not the runner).
  */
 import type { WorkflowStep } from '../../../../shared/types/workflows';
+import { PROTOTYPE_HTML_RELPATH } from '../../../../shared/types/artifacts';
 
 export interface ComposeStepPromptArgs {
   step: WorkflowStep;
@@ -105,7 +106,7 @@ export interface ComposeStepPromptArgs {
 function artifactFollowUp(outputArtifact: NonNullable<WorkflowStep['outputArtifact']>): string {
   switch (outputArtifact.atype) {
     case 'ui-prototype':
-      return `\n\n## Artifact to report\n\nWhen your \`cyboflow-ui-prototype\` subagent returns its \`## Prototype\` section, it includes a \`URL: http://localhost:<port>/\` line. Extract that URL and call \`cyboflow_report_artifact\` yourself with \`atype: 'ui-prototype'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"url": "<the url>"}\` — that call is the ONLY thing that mints this run's UI-prototype tab. Skipping it leaves the tab permanently empty.`;
+      return `\n\n## Artifact to report\n\nYour \`cyboflow-ui-prototype\` subagent writes ONE self-contained static HTML+CSS document — no \`<script>\`, no JS, no dev server — to \`$CYBOFLOW_RUN_ARTIFACTS_DIR/${PROTOTYPE_HTML_RELPATH}\`. When it returns its \`## Prototype\` section confirming that file, call \`cyboflow_report_artifact\` yourself with \`atype: 'ui-prototype'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"fileName": "${PROTOTYPE_HTML_RELPATH}"}\` — that call is the ONLY thing that mints this run's UI-prototype tab. Skipping it leaves the tab permanently empty.`;
     case 'arch-design':
       return `\n\n## Artifact to report\n\nWhen your \`cyboflow-architecture\` subagent returns its \`## Architecture design\` section, fold it into the IDEA's body yourself via \`cyboflow_update_task\`: if the body already has an \`## Architecture design\` section, REPLACE that section (never stack a second copy); otherwise append it. The arch-design deliverable tab derives from the body automatically, so you do not report an artifact for this step.`;
     case 'compound-recommendations':

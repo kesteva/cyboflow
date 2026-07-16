@@ -452,7 +452,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_report_artifact',
         description:
-          'Create or update a run deliverable ("artifact") for THIS run — e.g. a live UI-prototype preview, a captured screenshot gallery, a generated report, or a custom canvas. The artifact appears as its own tab in the center pane and in the right-rail Artifacts panel. The run is derived from CYBOFLOW_RUN_ID (no run argument). There is one artifact per atype per run: calling again with the same atype ENRICHES the existing one (and returns the same id). The templated deliverables idea-spec, decomposed-stories and arch-design are auto-created by the orchestrator (arch-design derives from the idea body’s "## Architecture design" section — update the idea body instead of reporting it); screenshots, ui-prototype, generic, and approve-ideas are reported BY YOU with this tool. For screenshots, first write the PNG bytes into the run artifacts dir ($CYBOFLOW_RUN_ARTIFACTS_DIR) and pass their BASENAMES in payload_json.fileNames. Returns { artifactId }.',
+          'Create or update a run deliverable ("artifact") for THIS run — e.g. a static UI-prototype mockup, a captured screenshot gallery, a generated report, or a custom canvas. The artifact appears as its own tab in the center pane and in the right-rail Artifacts panel. The run is derived from CYBOFLOW_RUN_ID (no run argument). There is one artifact per atype per run: calling again with the same atype ENRICHES the existing one (and returns the same id). The templated deliverables idea-spec, decomposed-stories and arch-design are auto-created by the orchestrator (arch-design derives from the idea body’s "## Architecture design" section — update the idea body instead of reporting it); screenshots, ui-prototype, generic, and approve-ideas are reported BY YOU with this tool. For ui-prototype, first write a self-contained static index.html (inline CSS only, no <script>/JS, no dev server) to $CYBOFLOW_RUN_ARTIFACTS_DIR/prototype/index.html and pass payload_json.fileName — an inline "html" key is rejected. For screenshots, first write the PNG bytes into the run artifacts dir ($CYBOFLOW_RUN_ARTIFACTS_DIR) and pass their BASENAMES in payload_json.fileNames. Returns { artifactId }.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -461,12 +461,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               // 'arch-design' is deliberately absent: auto-mint-only (see the
               // validAtypes comment in the CallTool handler below).
               enum: ['idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic', 'compound-recommendations', 'approve-ideas'],
-              description: 'Artifact type (required). ui-prototype / generic render an embedded live canvas; screenshots renders an on-disk PNG gallery (you write the files + report their basenames); compound-recommendations renders a markdown doc from payload_json.markdown (the Compound flow’s summary-of-recommendations); approve-ideas is the per-idea Approve/Deny decision surface; idea-spec / decomposed-stories / arch-design are the auto-created templates.',
+              description: 'Artifact type (required). ui-prototype renders a static HTML+CSS mockup in a sandboxed frame from a file you already wrote (no dev server, no JS; inline html is rejected); generic renders an embedded live canvas from a {url}; screenshots renders an on-disk PNG gallery (you write the files + report their basenames); compound-recommendations renders a markdown doc from payload_json.markdown (the Compound flow’s summary-of-recommendations); approve-ideas is the per-idea Approve/Deny decision surface; idea-spec / decomposed-stories / arch-design are the auto-created templates.',
             },
             label: { type: 'string', description: 'Short tab/card label for the artifact (required)' },
             payload_json: {
               type: 'string',
-              description: 'Optional JSON payload, e.g. {"url":"http://localhost:8081"} for a ui-prototype, or {"fileNames":["home.png","detail.png"]} for screenshots (BASENAMES of PNGs you wrote under $CYBOFLOW_RUN_ARTIFACTS_DIR)',
+              description: 'Optional JSON payload. For ui-prototype: {"fileName":"prototype/index.html"} pointing at the static HTML+CSS mockup you already wrote under $CYBOFLOW_RUN_ARTIFACTS_DIR (a top-level "html" key is rejected — write the file, don\'t inline it). For generic: {"url":"http://localhost:8081"}. For screenshots: {"fileNames":["home.png","detail.png"]} (BASENAMES of PNGs you wrote under $CYBOFLOW_RUN_ARTIFACTS_DIR).',
             },
           },
           required: ['atype', 'label'],

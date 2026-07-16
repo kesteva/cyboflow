@@ -100,10 +100,10 @@ creating a new idea, check the existing backlog with `cyboflow_list_tasks` /
 4. **ui-prototype** (optional) → run ONLY when context returned `UI_PROTOTYPE: yes`
    (or the user explicitly asked for a prototype). Report the step, then delegate
    to `cyboflow-ui-prototype` with the approved spec. When it returns `## Prototype`
-   with a URL, surface it: call `cyboflow_report_artifact` with
+   confirming the written file, surface it: call `cyboflow_report_artifact` with
    `atype: 'ui-prototype'`, a short label, and `payload_json`
-   `{"url": "<the url>"}` — the live prototype tab renders from that URL. Skip
-   this step entirely when the flag is `no`.
+   `{"fileName": "prototype/index.html"}` — the static mockup renders in a
+   sandboxed frame from that file. Skip this step entirely when the flag is `no`.
 5. **architecture** (optional) → run ONLY when context returned `ARCH_DESIGN: yes`
    (or the user explicitly asked for an architecture writeup). Report the step,
    then delegate to `cyboflow-architecture` with the spec (plus prototype notes
@@ -127,8 +127,9 @@ creating a new idea, check the existing backlog with `cyboflow_list_tasks` /
 7. **approve-design** → **human gate, inline — ONLY when `ui-prototype` or `architecture` ran.** When
    neither ran, do **not** ask — continue straight to epics. Use
    **AskUserQuestion** (header `Approve design`, options Approve / Revise ONLY;
-   put the prototype URL and/or the architecture section, all adversarial
-   findings, and a short note of what was auto-fixed in the option markdown preview).
+   point the user at the `ui-prototype` artifact tab for the mockup and/or put
+   the architecture section, all adversarial findings, and a short note of what
+   was auto-fixed in the option markdown preview).
    - **Approve** → continue to epics.
    - **Revise** → re-delegate the relevant subagent(s) with the feedback, refresh
      the artifact (a repeat `cyboflow_report_artifact` call with the same atype

@@ -113,8 +113,13 @@ something a human will want to *see*, report it as a run artifact via
 `cyboflow_report_artifact` so it gets its own center-pane tab (one artifact per
 `atype` per run; call again with the same `atype` to enrich it):
 
-- a runnable app / dev server → `atype: 'ui-prototype'`, `payload_json` with the
-  localhost URL, e.g. `{"url":"http://localhost:5173"}`.
+- a static UI mockup → `atype: 'ui-prototype'`. Write ONE self-contained
+  `index.html` (inline CSS only, no `<script>`/JS, no dev server) to
+  `$CYBOFLOW_RUN_ARTIFACTS_DIR/prototype/index.html`, then report it with
+  `payload_json: {"fileName":"prototype/index.html"}` — the mockup renders in a
+  sandboxed frame from that file. Live/running-app previews (a real dev server
+  reachable by URL) are **not yet supported** — that's a separate future stream;
+  don't report a `{"url":...}` payload for `ui-prototype`.
 - captured screenshots from the **visual-verify** merge-gate are produced and
   surfaced **centrally** — the main-process verifier captures the deliverable, writes
   the PNGs under the run artifacts dir, and enriches the `screenshots` artifact with

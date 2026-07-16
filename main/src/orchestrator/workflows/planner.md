@@ -201,15 +201,15 @@ a summary held only in your context.
 4. **ui-prototype** (optional) → run ONLY when context returned `UI_PROTOTYPE: yes`
    (or the user explicitly asked for a prototype). Report the step, then delegate to
    `cyboflow-ui-prototype` with the approved spec. When it returns `## Prototype`
-   with a URL, surface it: call `cyboflow_report_artifact` with
+   confirming the written file, surface it: call `cyboflow_report_artifact` with
    `atype: 'ui-prototype'`, a short label, and `payload_json`
-   `{"url": "<the url>"}` — the live prototype tab renders from that URL. Skip this
-   step entirely when the flag is `no`. **Batch branch:** when ANY surviving idea's
-   context returned `UI_PROTOTYPE: yes`, delegate **once** to `cyboflow-ui-prototype`
-   with ALL of those approved specs, instructing a **single combined prototype**
-   clearly sectioned per idea; report the ONE `ui-prototype` artifact exactly as
-   above (one tab for the whole batch). When no surviving idea wants a prototype, skip
-   the step.
+   `{"fileName": "prototype/index.html"}` — the static mockup renders in a
+   sandboxed frame from that file. Skip this step entirely when the flag is `no`.
+   **Batch branch:** when ANY surviving idea's context returned `UI_PROTOTYPE: yes`,
+   delegate **once** to `cyboflow-ui-prototype` with ALL of those approved specs,
+   instructing a **single combined mockup** (one `index.html`) clearly sectioned per
+   idea; report the ONE `ui-prototype` artifact exactly as above (one tab for the
+   whole batch). When no surviving idea wants a prototype, skip the step.
 5. **architecture** (optional, **`large` ideas only**) → run ONLY for a `large`-scoped
    idea whose context returned `ARCH_DESIGN: yes` (or when the user explicitly asked
    for an architecture writeup). A `small` idea **SKIPS** this step — architecture
@@ -238,13 +238,13 @@ a summary held only in your context.
      findings into the design-gate preview.
 7. **approve-design** → **human gate, inline — ONLY when `ui-prototype` or `architecture` ran.** When
    neither ran, do **not** ask — continue straight to epics. Use **AskUserQuestion**
-   (header `Approve design`, options Approve / Revise ONLY; put the prototype URL
-   and/or the architecture section, all adversarial findings, and a short note of
-   what was auto-fixed in the option markdown preview). **Batch branch:**
-   the batch never runs `architecture`, so this gate runs only when `ui-prototype` built the combined
-   prototype — one gate over that single prototype (there is no per-idea design gate);
-   put its URL in the preview. When no batch prototype was built, skip straight to
-   tasks.
+   (header `Approve design`, options Approve / Revise ONLY; point the user at the
+   `ui-prototype` artifact tab for the mockup and/or put the architecture section,
+   all adversarial findings, and a short note of what was auto-fixed in the option
+   markdown preview). **Batch branch:** the batch never runs `architecture`, so
+   this gate runs only when `ui-prototype` built the combined mockup — one gate over
+   that single prototype (there is no per-idea design gate); point the user at its
+   artifact tab. When no batch prototype was built, skip straight to tasks.
    - **Approve** → continue to epics.
    - **Revise** → re-delegate the relevant subagent(s) with the feedback, refresh
      the artifact (a repeat `cyboflow_report_artifact` call with the same atype
