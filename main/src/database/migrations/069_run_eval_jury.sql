@@ -1,4 +1,4 @@
--- Migration 068: run_evals.jury_json — per-slot eval-jury provenance (nullable).
+-- Migration 069: run_evals.jury_json — per-slot eval-jury provenance (nullable).
 --
 -- Stores per-slot jury provenance:
 --   [{slot, provider, model, status, errorCode?, sampleIndex?}]
@@ -12,8 +12,8 @@
 -- "duplicate column name" is caught as idempotent-ok in runFileBasedMigrations
 -- (same handling as migration 044 and the nullable ALTER migrations it cites).
 --
--- ⚠️ MIGRATION-NUMBER COLLISION: 068 is intentional because 066/067 are
--- claimed by a sibling branch. The ledger is filename-keyed, so the integrator
--- MUST verify no other 068_*.sql exists at merge time and renumber if needed.
+-- HISTORY: originally authored as 068, renumbered to 069 at rebase onto main
+-- because main's 068_workflow_variant_agent_provider_runtime.sql claimed 068.
+-- The ledger is filename-keyed, so verify no other 069_*.sql exists at merge time.
 
 ALTER TABLE run_evals ADD COLUMN jury_json TEXT;

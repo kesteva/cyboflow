@@ -63,7 +63,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '038_agent_mcp_access.sql'), 'utf-8'));
   // run_evals (LLM-judge rollup) — FK -> workflow_runs(id) from 006 (loaded above).
   db.exec(readFileSync(join(migDir, '043_run_evals.sql'), 'utf-8'));
-  db.exec(readFileSync(join(migDir, '068_run_eval_jury.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '069_run_eval_jury.sql'), 'utf-8'));
   // category classification (feature|bug|chore) on all three entity tables.
   db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
   return db;
@@ -217,7 +217,7 @@ describe('entity schema parity (migrations 015 + 024 + 028 + 034)', () => {
     db.close();
   });
 
-  it('RunEvalRow field names match the run_evals columns exactly (migrations 043 + 068)', () => {
+  it('RunEvalRow field names match the run_evals columns exactly (migrations 043 + 069)', () => {
     const db = buildDb();
     const runEvalRowKeys: Array<keyof RunEvalRow> = [
       'run_id',

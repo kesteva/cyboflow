@@ -35,10 +35,10 @@ function buildDbThrough043(): Database.Database {
   return db;
 }
 
-describe('Migration 068: run_evals jury provenance', () => {
+describe('Migration 069: run_evals jury provenance', () => {
   it('adds nullable jury_json and preserves legacy rows as NULL', () => {
     const db = buildDbThrough043();
-    apply(db, '068_run_eval_jury.sql');
+    apply(db, '069_run_eval_jury.sql');
     const column = (db.prepare('PRAGMA table_info(run_evals)').all() as Array<{
       name: string;
       type: string;
@@ -55,7 +55,7 @@ describe('Migration 068: run_evals jury provenance', () => {
 
   it('round-trips provenance JSON and exposes the runner idempotency signal', () => {
     const db = buildDbThrough043();
-    apply(db, '068_run_eval_jury.sql');
+    apply(db, '069_run_eval_jury.sql');
     const juryJson = JSON.stringify([
       { slot: 'claude-1', provider: 'claude', model: 'opus', status: 'ok', sampleIndex: 0 },
     ]);
@@ -65,7 +65,7 @@ describe('Migration 068: run_evals jury provenance', () => {
         jury_json: string;
       }).jury_json,
     ).toBe(juryJson);
-    expect(() => apply(db, '068_run_eval_jury.sql')).toThrow(/duplicate column name/i);
+    expect(() => apply(db, '069_run_eval_jury.sql')).toThrow(/duplicate column name/i);
     db.close();
   });
 });
