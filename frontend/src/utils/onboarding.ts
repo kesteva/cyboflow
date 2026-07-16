@@ -36,43 +36,49 @@ export const ONBOARDING_EVENTS = {
  */
 export const ONBOARDING_ANCHOR_ATTR = 'data-onboarding';
 export const ONBOARDING_ANCHORS = {
-  /** SessionStartWizard step-② Quick Session card (tour step 4). */
+  /** SessionStartWizard step-② Quick Session card (tour step 5). */
   quickSessionCard: 'quick-session-card',
-  /** Wizard Configure — Session permission selector (tour step 6). */
+  /** Wizard Configure — Session permission selector (tour step 7). */
   sessionPermission: 'session-permission',
-  /** Wizard Configure — Model picker (tour step 7). */
+  /** Wizard Configure — Model picker (tour step 8). */
   modelSelect: 'model-select',
-  /** Wizard Configure — agent runtime selector (tour step 5). */
+  /** Wizard Configure — agent runtime selector (tour step 6). */
   substrateSelect: 'substrate-select',
-  /** QuickSessionCanvas "/ship" workflow chip (tour step 8). */
+  /** QuickSessionCanvas "/ship" workflow chip (tour step 9). */
   shipChip: 'ship-chip',
-  /** Sidebar "Human review" rail item (tour step 9). */
+  /** Sidebar "Human review" rail item (tour step 10). */
   humanReview: 'human-review',
 } as const;
 
-export const ONBOARDING_STEP_COUNT = 11;
+export const ONBOARDING_STEP_COUNT = 12;
 
 /** Steps rendered as the centered modal card. */
-export const ONBOARDING_MODAL_STEPS: ReadonlyArray<number> = [0, 1, 2, 3, 10];
+export const ONBOARDING_MODAL_STEPS: ReadonlyArray<number> = [0, 1, 2, 3, 4, 11];
 /** Steps rendered as an anchored coachmark over the live UI. */
-export const ONBOARDING_COACH_STEPS: ReadonlyArray<number> = [4, 5, 6, 7, 8, 9];
+export const ONBOARDING_COACH_STEPS: ReadonlyArray<number> = [5, 6, 7, 8, 9, 10];
 /**
  * The coach steps that are informational POINTERS (the wizard-Configure trio:
- * runtime / permission / model). Unlike the advance-by-doing steps (4, 8, 9)
+ * runtime / permission / model). Unlike the advance-by-doing steps (5, 9, 10)
  * they carry a Next button on the popover and advance via store.next();
  * interacting with the anchored control never advances them.
  */
-export const ONBOARDING_POINTER_STEPS: ReadonlyArray<number> = [5, 6, 7];
+export const ONBOARDING_POINTER_STEPS: ReadonlyArray<number> = [6, 7, 8];
 
 /**
  * Stable analytics slug per step index (see telemetry `OnboardingStepName`),
  * index-aligned with the tour's step order and ONBOARDING_STEP_COUNT. Used only
  * for the `onboarding_*` usage events — never for control flow.
+ *
+ * `telemetry` was inserted at index 3 (after Permission, before Add project) —
+ * every step at or after the old index 3 shifted forward by one. Do NOT append
+ * new entries at the end without checking whether they belong earlier in the
+ * tour's actual order.
  */
 export const ONBOARDING_STEP_NAMES: readonly OnboardingStepName[] = [
   'welcome',
   'connect',
   'permission',
+  'telemetry',
   'add_project',
   'quick_session',
   'substrate',

@@ -19,6 +19,25 @@ describe('onboardingTelemetry — step-name table', () => {
     expect(ONBOARDING_STEP_NAMES).toHaveLength(ONBOARDING_STEP_COUNT);
     expect(new Set(ONBOARDING_STEP_NAMES).size).toBe(ONBOARDING_STEP_COUNT);
   });
+
+  it('has exactly 12 entries', () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(12);
+    expect(ONBOARDING_STEP_NAMES).toHaveLength(12);
+  });
+
+  it('carries the telemetry slug at index 3 (after Permission, before Add project)', () => {
+    expect(ONBOARDING_STEP_NAMES[2]).toBe('permission');
+    expect(ONBOARDING_STEP_NAMES[3]).toBe('telemetry');
+    expect(ONBOARDING_STEP_NAMES[4]).toBe('add_project');
+  });
+
+  it('has no duplicate slugs', () => {
+    const seen = new Set<string>();
+    for (const name of ONBOARDING_STEP_NAMES) {
+      expect(seen.has(name)).toBe(false);
+      seen.add(name);
+    }
+  });
 });
 
 describe('onboardingTelemetry — boot resolve', () => {
@@ -70,9 +89,9 @@ describe('onboardingTelemetry — per-step views', () => {
     }
   });
 
-  it('a realEvent jump that skips pointer steps (4 → 8) emits only the landed view', () => {
-    const events = onboardingTelemetryEvents(slice({ step: 4, maxVisitedStep: 4 }), slice({ step: 8, maxVisitedStep: 8 }));
-    expect(events).toEqual([{ name: 'onboarding_step_viewed', props: { step: 8, name: 'ship' } }]);
+  it('a realEvent jump that skips pointer steps (5 → 9) emits only the landed view', () => {
+    const events = onboardingTelemetryEvents(slice({ step: 5, maxVisitedStep: 5 }), slice({ step: 9, maxVisitedStep: 9 }));
+    expect(events).toEqual([{ name: 'onboarding_step_viewed', props: { step: 9, name: 'ship' } }]);
   });
 
   it('a no-op transition (same status, same step) emits nothing', () => {
@@ -83,7 +102,7 @@ describe('onboardingTelemetry — per-step views', () => {
 describe('onboardingTelemetry — lifecycle', () => {
   it('the Settings replay (→ active, step 0, maxVisited 0, replay) emits started:replay + view', () => {
     const events = onboardingTelemetryEvents(
-      { status: 'completed', step: 10, maxVisitedStep: 10, replay: false, hydrated: true },
+      { status: 'completed', step: 11, maxVisitedStep: 11, replay: false, hydrated: true },
       slice({ status: 'active', step: 0, maxVisitedStep: 0, replay: true }),
     );
     expect(events).toEqual([
@@ -100,60 +119,68 @@ describe('onboardingTelemetry — lifecycle', () => {
     expect(events).toEqual([{ name: 'onboarding_resumed', props: { step: 3 } }]);
   });
 
-  it('a clamping resume (skipped → active, 5 → 4) still emits resumed, not a step view', () => {
+  it('a clamping resume (skipped → active, 6 → 5) still emits resumed, not a step view', () => {
     const events = onboardingTelemetryEvents(
-      slice({ status: 'skipped', step: 5, maxVisitedStep: 7 }),
-      slice({ status: 'active', step: 4, maxVisitedStep: 4 }),
+      slice({ status: 'skipped', step: 6, maxVisitedStep: 8 }),
+      slice({ status: 'active', step: 5, maxVisitedStep: 5 }),
     );
-    expect(events).toEqual([{ name: 'onboarding_resumed', props: { step: 4 } }]);
+    expect(events).toEqual([{ name: 'onboarding_resumed', props: { step: 5 } }]);
   });
 
-  it('a realEvent out of pending (pending → active, 7 → 8) reads as a view, not a resume', () => {
+  it('a realEvent out of pending (pending → active, 8 → 9) reads as a view, not a resume', () => {
     const events = onboardingTelemetryEvents(
-      slice({ status: 'pending', step: 7, maxVisitedStep: 7 }),
-      slice({ status: 'active', step: 8, maxVisitedStep: 8 }),
+      slice({ status: 'pending', step: 8, maxVisitedStep: 8 }),
+      slice({ status: 'active', step: 9, maxVisitedStep: 9 }),
     );
-    expect(events).toEqual([{ name: 'onboarding_step_viewed', props: { step: 8, name: 'ship' } }]);
+    expect(events).toEqual([{ name: 'onboarding_step_viewed', props: { step: 9, name: 'ship' } }]);
   });
 
   it('a skip (active → skipped) records the step abandoned at', () => {
     const events = onboardingTelemetryEvents(
-      slice({ status: 'active', step: 6, maxVisitedStep: 6 }),
-      slice({ status: 'skipped', step: 6, maxVisitedStep: 6 }),
+      slice({ status: 'active', step: 7, maxVisitedStep: 7 }),
+      slice({ status: 'skipped', step: 7, maxVisitedStep: 7 }),
     );
-    expect(events).toEqual([{ name: 'onboarding_skipped', props: { step: 6, name: 'session_permission' } }]);
+    expect(events).toEqual([{ name: 'onboarding_skipped', props: { step: 7, name: 'session_permission' } }]);
+  });
+
+  it('a skip on the new Telemetry step (active → skipped, step 3) records it too', () => {
+    const events = onboardingTelemetryEvents(
+      slice({ status: 'active', step: 3, maxVisitedStep: 3 }),
+      slice({ status: 'skipped', step: 3, maxVisitedStep: 3 }),
+    );
+    expect(events).toEqual([{ name: 'onboarding_skipped', props: { step: 3, name: 'telemetry' } }]);
   });
 
   it('parking (active → pending) is silent', () => {
     const events = onboardingTelemetryEvents(
-      slice({ status: 'active', step: 8, maxVisitedStep: 8 }),
-      slice({ status: 'pending', step: 8, maxVisitedStep: 8 }),
+      slice({ status: 'active', step: 9, maxVisitedStep: 9 }),
+      slice({ status: 'pending', step: 9, maxVisitedStep: 9 }),
     );
     expect(events).toEqual([]);
   });
 
   it('completion (active → completed) records the furthest step reached', () => {
     const events = onboardingTelemetryEvents(
-      slice({ status: 'active', step: 10, maxVisitedStep: 10 }),
-      slice({ status: 'completed', step: 10, maxVisitedStep: 10 }),
+      slice({ status: 'active', step: 11, maxVisitedStep: 11 }),
+      slice({ status: 'completed', step: 11, maxVisitedStep: 11 }),
     );
-    expect(events).toEqual([{ name: 'onboarding_completed', props: { furthest_step: 10 } }]);
+    expect(events).toEqual([{ name: 'onboarding_completed', props: { furthest_step: 11 } }]);
   });
 
   it('a Sidebar dismiss (skipped → completed) is a dismiss, not a completion', () => {
     const events = onboardingTelemetryEvents(
-      slice({ status: 'skipped', step: 6, maxVisitedStep: 6 }),
-      slice({ status: 'completed', step: 6, maxVisitedStep: 6 }),
+      slice({ status: 'skipped', step: 7, maxVisitedStep: 7 }),
+      slice({ status: 'completed', step: 7, maxVisitedStep: 7 }),
     );
-    expect(events).toEqual([{ name: 'onboarding_dismissed', props: { step: 6, name: 'session_permission' } }]);
+    expect(events).toEqual([{ name: 'onboarding_dismissed', props: { step: 7, name: 'session_permission' } }]);
   });
 
   it('a dismiss from a parked coach step (pending → completed) reads as a dismiss too', () => {
     const events = onboardingTelemetryEvents(
-      slice({ status: 'pending', step: 8, maxVisitedStep: 8 }),
-      slice({ status: 'completed', step: 8, maxVisitedStep: 8 }),
+      slice({ status: 'pending', step: 9, maxVisitedStep: 9 }),
+      slice({ status: 'completed', step: 9, maxVisitedStep: 9 }),
     );
-    expect(events).toEqual([{ name: 'onboarding_dismissed', props: { step: 8, name: 'ship' } }]);
+    expect(events).toEqual([{ name: 'onboarding_dismissed', props: { step: 9, name: 'ship' } }]);
   });
 
   it('an idle target (never expected post-boot) emits nothing', () => {

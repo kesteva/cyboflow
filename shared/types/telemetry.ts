@@ -28,6 +28,7 @@ export type OnboardingStepName =
   | 'welcome'
   | 'connect'
   | 'permission'
+  | 'telemetry'
   | 'add_project'
   | 'quick_session'
   | 'session_permission'
