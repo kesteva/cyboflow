@@ -28,7 +28,7 @@ import { setCyboflowDirectory, getCyboflowSubdirectory } from '../../../utils/cy
 import { McpQueryHandler, type McpQueryMessage, type McpQueryResponse } from '../mcpQueryHandler';
 import type * as net from 'net';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
-import { createTestDb, seedApproval } from '../../__test_fixtures__/orchestratorTestDb';
+import { createTestDb, seedApproval, seedQuestion } from '../../__test_fixtures__/orchestratorTestDb';
 import { stepTransitionEvents } from '../../trpc/routers/events';
 import { TaskChangeRouter, taskChangeEvents } from '../../taskChangeRouter';
 import { ReviewItemRouter, reviewItemChangeEvents } from '../../reviewItemRouter';
@@ -621,7 +621,7 @@ describe('McpQueryHandler', () => {
     // approve-plan silent-pass guard: an orchestrated agent must not COMPLETE
     // the approve-plan human gate until a real gate stamped plan_approved_at.
     // -----------------------------------------------------------------------
-    describe('approve-plan gate guard', () => {
+    describe('human gate silent-pass guard', () => {
       /** Report DB with execution_model + plan_approved_at (guard reads both). */
       function createGuardDb(): Database.Database {
         const guardDb = createTestDb({
@@ -731,6 +731,105 @@ describe('McpQueryHandler', () => {
         const response = parseLastWrite(writes);
         expect(response.ok).toBe(true);
         expect(currentStepId(guardDb, runId)).toBe('approve-plan');
+      });
+
+      // --------------------------------------------------------------------
+      // Generic branch: human gates OTHER than approve-plan (approve-idea,
+      // approve-design, human-review) have no plan_approved_at signal, so the
+      // guard checks for a `questions` row created at/after the step's
+      // most-recent 'running' onset (from step_transition raw_events).
+      // human-review is a `human:true` ship step used as the representative.
+      // --------------------------------------------------------------------
+
+      /** Drive the step's 'running' report through the handler → writes the raw_events onset. */
+      async function reportRunning(runId: string, stepId: string): Promise<void> {
+        const { socket } = makeSocketDouble();
+        await guardHandler.handleMessage(
+          { type: 'mcp-report-step', requestId: `run-${stepId}`, runId, stepId, status: 'running' },
+          socket,
+        );
+      }
+
+      it('REJECTS human-review done on an orchestrated run when no gate was surfaced', async () => {
+        const runId = seedShipRun(guardDb, { executionModel: 'orchestrated', planApprovedAt: null });
+        await reportRunning(runId, 'human-review'); // records the onset; no question follows
+
+        const { socket, writes } = makeSocketDouble();
+        await guardHandler.handleMessage(
+          { type: 'mcp-report-step', requestId: 'h-1', runId, stepId: 'human-review', status: 'done' },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(false);
+        expect(response.error).toContain('human_gate_not_surfaced');
+        expect(response.error).toContain('human-review');
+        // 'running' persisted current_step_id, but the guarded 'done' did not advance it.
+        expect(currentStepId(guardDb, runId)).toBe('human-review');
+      });
+
+      it('ALLOWS human-review done when a gate question was surfaced since the step onset', async () => {
+        const runId = seedShipRun(guardDb, { executionModel: 'orchestrated', planApprovedAt: null });
+        await reportRunning(runId, 'human-review');
+        // A gate question surfaced during the step (created well after the onset).
+        seedQuestion(guardDb, { runId, status: 'answered', createdAt: '2099-01-01T00:00:00.000Z' });
+
+        const { socket, writes } = makeSocketDouble();
+        await guardHandler.handleMessage(
+          { type: 'mcp-report-step', requestId: 'h-2', runId, stepId: 'human-review', status: 'done' },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        expect(currentStepId(guardDb, runId)).toBe('human-review');
+      });
+
+      it('a question from an EARLIER step (before this onset) does NOT count as surfaced', async () => {
+        const runId = seedShipRun(guardDb, { executionModel: 'orchestrated', planApprovedAt: null });
+        // A stale gate from an earlier step, resolved long before human-review began.
+        seedQuestion(guardDb, { runId, status: 'answered', createdAt: '2000-01-01T00:00:00.000Z' });
+        await reportRunning(runId, 'human-review'); // onset is real-now, after the stale question
+
+        const { socket, writes } = makeSocketDouble();
+        await guardHandler.handleMessage(
+          { type: 'mcp-report-step', requestId: 'h-3', runId, stepId: 'human-review', status: 'done' },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(false);
+        expect(response.error).toContain('human_gate_not_surfaced');
+      });
+
+      it('does NOT guard human-review on programmatic runs (the deterministic driver owns it)', async () => {
+        const runId = seedShipRun(guardDb, { executionModel: 'programmatic', planApprovedAt: null });
+        await reportRunning(runId, 'human-review'); // no question — would trip the orchestrated guard
+
+        const { socket, writes } = makeSocketDouble();
+        await guardHandler.handleMessage(
+          { type: 'mcp-report-step', requestId: 'h-4', runId, stepId: 'human-review', status: 'done' },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        expect(currentStepId(guardDb, runId)).toBe('human-review');
+      });
+
+      it('fails open when no "running" onset was recorded (window unbounded)', async () => {
+        const runId = seedShipRun(guardDb, { executionModel: 'orchestrated', planApprovedAt: null });
+        // Report 'done' directly — no prior 'running', so the onset window can't be bounded.
+
+        const { socket, writes } = makeSocketDouble();
+        await guardHandler.handleMessage(
+          { type: 'mcp-report-step', requestId: 'h-5', runId, stepId: 'human-review', status: 'done' },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        expect(currentStepId(guardDb, runId)).toBe('human-review');
       });
     });
   });

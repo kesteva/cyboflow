@@ -1063,49 +1063,60 @@ export class McpQueryHandler {
 
     const status = msg.status ?? 'running';
 
-    // GATE GUARD (silent-pass safety net). An ORCHESTRATED agent — especially a
-    // Codex handover agent that lacks Claude's AskUserQuestion tool — can report
-    // the `approve-plan` HUMAN step 'done' WITHOUT ever surfacing a real gate,
-    // asking in plain chat instead. That silent pass never runs the approve-plan
-    // reveal (promoteTasksOnPlanApproval), so plan_approved_at stays NULL, the
-    // run's drafted tasks are never promoted, and materialize-batch then dies with
-    // `ship_no_tasks_to_materialize`. plan_approved_at is a bulletproof signal:
-    // the reveal stamps it SYNCHRONOUSLY (before the agent resumes) iff a gate was
-    // resolved through QuestionRouter with an Approve answer. Refuse to COMPLETE
-    // approve-plan until it is stamped, forcing the agent to open the gate via
-    // `cyboflow_request_user_input` (Codex/MCP) or AskUserQuestion (Claude).
-    // Scoped to orchestrated runs: the programmatic plane drives this gate via the
-    // deterministic HumanStepManager, which stamps plan_approved_at before its
-    // step worker reports done, so the guard is a pass there. Fail-soft: a missing
-    // run row / pre-042 DB lacking the column degrades to NO guard (never blocks).
-    if (step.human === true && msg.stepId === APPROVE_PLAN_STEP_ID && status === 'done') {
-      let planUnapprovedOrchestrated = false;
-      try {
-        const gateRow = this.db
-          .prepare(
-            'SELECT execution_model AS executionModel, plan_approved_at AS planApprovedAt FROM workflow_runs WHERE id = ?',
-          )
-          .get(msg.runId) as { executionModel?: unknown; planApprovedAt?: unknown } | undefined;
-        const isOrchestrated = gateRow?.executionModel === 'orchestrated';
-        const approved =
-          typeof gateRow?.planApprovedAt === 'string' && gateRow.planApprovedAt.length > 0;
-        planUnapprovedOrchestrated = isOrchestrated && !approved;
-      } catch {
-        // Pre-042 DB (no plan_approved_at column) or vanished run — fail open.
-        planUnapprovedOrchestrated = false;
-      }
-      if (planUnapprovedOrchestrated) {
-        this.writeResponse(client, {
-          type: 'mcp-query-response',
-          requestId: msg.requestId,
-          ok: false,
-          error:
-            'approve_plan_gate_not_resolved: no plan approval was recorded for this run. ' +
-            'Surface the approve-plan gate with cyboflow_request_user_input (or AskUserQuestion) ' +
-            'and wait for the human to answer "Approve" — do NOT ask in a plain chat message — ' +
-            'before reporting approve-plan done.',
-        });
-        return;
+    // GATE GUARD (silent-pass safety net) — ORCHESTRATED runs only. An
+    // orchestrated agent — especially a Codex handover agent that lacks Claude's
+    // AskUserQuestion tool — can report a HUMAN gate step 'done' WITHOUT ever
+    // surfacing a real gate, asking in plain chat instead. That silent pass
+    // skips the human decision entirely; for approve-plan it also skips the
+    // reveal (promoteTasksOnPlanApproval), leaving plan_approved_at NULL, the
+    // run's drafted tasks unpromoted, and materialize-batch dying with
+    // `ship_no_tasks_to_materialize`. Refuse to COMPLETE any human gate that
+    // shows no backend trace of having been surfaced-and-answered, forcing the
+    // agent to open the gate via `cyboflow_request_user_input` (Codex/MCP) or
+    // AskUserQuestion (Claude).
+    //
+    // Scoped to orchestrated runs: the programmatic plane drives human steps via
+    // the deterministic HumanStepManager/openHumanGate, which writes a decision
+    // review_item (NOT a `questions` row) and stamps plan_approved_at before its
+    // step worker reports done — so the questions-based check below would
+    // false-positive there. Two signals, strongest-first:
+    //   • approve-plan → plan_approved_at. Bulletproof: the reveal stamps it
+    //     SYNCHRONOUSLY (before the agent resumes) iff a gate resolved through
+    //     QuestionRouter with an Approve answer.
+    //   • every other human gate → a `questions` row created at/after the step's
+    //     most-recent 'running' onset (humanGateWasSurfaced). Fail-OPEN whenever
+    //     the window can't be bounded, so a legitimately-surfaced gate is never
+    //     false-rejected. Both branches fail open on a missing run / pre-schema
+    //     DB (never block).
+    if (step.human === true && status === 'done') {
+      const executionModel = this.readExecutionModel(msg.runId);
+      if (executionModel === 'orchestrated') {
+        if (msg.stepId === APPROVE_PLAN_STEP_ID) {
+          if (!this.isPlanApproved(msg.runId)) {
+            this.writeResponse(client, {
+              type: 'mcp-query-response',
+              requestId: msg.requestId,
+              ok: false,
+              error:
+                'approve_plan_gate_not_resolved: no plan approval was recorded for this run. ' +
+                'Surface the approve-plan gate with cyboflow_request_user_input (or AskUserQuestion) ' +
+                'and wait for the human to answer "Approve" — do NOT ask in a plain chat message — ' +
+                'before reporting approve-plan done.',
+            });
+            return;
+          }
+        } else if (!this.humanGateWasSurfaced(msg.runId, msg.stepId)) {
+          this.writeResponse(client, {
+            type: 'mcp-query-response',
+            requestId: msg.requestId,
+            ok: false,
+            error:
+              `human_gate_not_surfaced: no human gate was surfaced for the '${msg.stepId}' step. ` +
+              'Open the gate with cyboflow_request_user_input (or AskUserQuestion) and wait for the ' +
+              `human to answer — do NOT ask in a plain chat message — before reporting '${msg.stepId}' done.`,
+          });
+          return;
+        }
       }
     }
 
@@ -1139,6 +1150,83 @@ export class McpQueryHandler {
         status,
       },
     });
+  }
+
+  /**
+   * Fail-soft read of a run's execution_model ('orchestrated' | 'programmatic').
+   * Returns null on a missing run / vanished row (never throws) — callers treat
+   * a non-'orchestrated' result as "no gate guard".
+   */
+  private readExecutionModel(runId: string): string | null {
+    try {
+      const row = this.db
+        .prepare('SELECT execution_model AS m FROM workflow_runs WHERE id = ?')
+        .get(runId) as { m?: unknown } | undefined;
+      return typeof row?.m === 'string' ? row.m : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * True iff the run's approve-plan reveal stamped plan_approved_at (a real gate
+   * resolved through QuestionRouter with Approve). Fail-OPEN (returns true) on a
+   * pre-042 DB lacking the column or a vanished run, so the guard never blocks
+   * when it cannot judge.
+   */
+  private isPlanApproved(runId: string): boolean {
+    try {
+      const row = this.db
+        .prepare('SELECT plan_approved_at AS p FROM workflow_runs WHERE id = ?')
+        .get(runId) as { p?: unknown } | undefined;
+      return typeof row?.p === 'string' && row.p.length > 0;
+    } catch {
+      // Pre-042 DB (no plan_approved_at column) — cannot judge, so do not block.
+      return true;
+    }
+  }
+
+  /**
+   * True iff a gate question was surfaced for `stepId` on this run — i.e. a
+   * `questions` row exists created at/after the step's most-recent 'running'
+   * onset (from the step_transition raw_events log). This is the generic
+   * silent-pass signal for human gates OTHER than approve-plan (which has the
+   * stronger plan_approved_at check). It catches only the clear failure mode:
+   * an orchestrated agent that reported the step running→done without ever
+   * opening a gate. Fail-OPEN (returns true) whenever the window can't be
+   * bounded — no 'running' onset recorded, or the questions/raw_events tables
+   * (or JSON1) are unavailable — so a legitimately-surfaced gate, or a
+   * clarifying question the human engaged with, is never false-rejected.
+   */
+  private humanGateWasSurfaced(runId: string, stepId: string): boolean {
+    try {
+      const onsetRow = this.db
+        .prepare(
+          `SELECT created_at AS onset FROM raw_events
+             WHERE run_id = ? AND event_type = 'step_transition'
+               AND json_extract(payload_json, '$.step_id') = ?
+               AND json_extract(payload_json, '$.status') = 'running'
+             ORDER BY id DESC LIMIT 1`,
+        )
+        .get(runId, stepId) as { onset?: unknown } | undefined;
+      const onset = typeof onsetRow?.onset === 'string' ? onsetRow.onset : null;
+      if (onset === null) {
+        // No 'running' onset recorded for this step — the window is unbounded, so
+        // do not block (an agent that never reported running is out of scope).
+        return true;
+      }
+      const surfaced = this.db
+        .prepare(
+          `SELECT 1 FROM questions
+             WHERE run_id = ? AND datetime(created_at) >= datetime(?)
+             LIMIT 1`,
+        )
+        .get(runId, onset) as unknown;
+      return surfaced !== undefined;
+    } catch {
+      // questions / raw_events / JSON1 unavailable — fail open.
+      return true;
+    }
   }
 
   // --------------------------------------------------------------------------
