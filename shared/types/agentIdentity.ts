@@ -23,6 +23,7 @@ export const CANONICAL_AGENT_KEYS = [
   'research',
   'ui-prototype',
   'architecture',
+  'adversarial-review',
   'epics',
   'tasks',
   'dependency-analyzer',

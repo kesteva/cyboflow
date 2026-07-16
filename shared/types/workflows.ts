@@ -624,7 +624,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'context',
             mcps: ['filesystem', 'web-search'],
             retries: 0,
-            desc: "Parse the user's prompt, scan the codebase, capture the idea in the DB.",
+            desc: 'Produce a short idea stub (Problem definition ≤5 bullets + Proposed solution ≤5 bullets) plus SCOPE and design flags.',
             outputArtifact: { atype: 'idea-spec', label: 'Idea spec' },
           },
           {
@@ -638,12 +638,12 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
           },
           {
             id: 'approve-idea',
-            name: 'Approve idea spec',
+            name: 'Approve idea stub',
             agent: 'human',
             mcps: [],
             retries: 0,
             human: true,
-            desc: 'You approve, edit, or reject the idea spec.',
+            desc: 'You approve, revise, or reject the short idea stub before the full spec is expanded.',
           },
         ],
       },
@@ -652,6 +652,14 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
         label: 'Refine',
         color: '#5a4ad6',
         steps: [
+          {
+            id: 'expand-spec',
+            name: 'Expand idea spec',
+            agent: 'context',
+            mcps: ['filesystem'],
+            retries: 0,
+            desc: 'Expand the approved stub into the full idea spec (ungated); preserves the approved problem/solution/scope/flags.',
+          },
           {
             id: 'ui-prototype',
             name: 'UI prototype',
@@ -671,6 +679,15 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             optional: true,
             desc: 'Optional architecture proposal when the change is structurally complex.',
             outputArtifact: { atype: 'arch-design', label: 'Architecture design' },
+          },
+          {
+            id: 'adversarial-review',
+            name: 'Adversarial review',
+            agent: 'adversarial-review',
+            mcps: ['filesystem'],
+            retries: 0,
+            optional: true,
+            desc: 'Stress-test spec + prototype + architecture; must-fix auto-revised once, remaining critique surfaced (non-blocking) at the design gate. Runs only when a prototype or architecture exists.',
           },
           {
             id: 'approve-design',
@@ -916,7 +933,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'context',
             mcps: ['filesystem', 'web-search'],
             retries: 0,
-            desc: "Parse the user's prompt, scan the codebase, capture the idea in the DB.",
+            desc: 'Produce a short idea stub (Problem definition ≤5 bullets + Proposed solution ≤5 bullets) plus SCOPE and design flags.',
           },
           {
             id: 'research',
@@ -929,12 +946,12 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
           },
           {
             id: 'approve-idea',
-            name: 'Approve idea spec',
+            name: 'Approve idea stub',
             agent: 'human',
             mcps: [],
             retries: 0,
             human: true,
-            desc: 'You approve, edit, or reject the idea spec.',
+            desc: 'You approve, revise, or reject the short idea stub before the full spec is expanded.',
           },
         ],
       },
@@ -943,6 +960,14 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
         label: 'Refine',
         color: '#5a4ad6',
         steps: [
+          {
+            id: 'expand-spec',
+            name: 'Expand idea spec',
+            agent: 'context',
+            mcps: ['filesystem'],
+            retries: 0,
+            desc: 'Expand the approved stub into the full idea spec (ungated); preserves the approved problem/solution/scope/flags.',
+          },
           {
             id: 'ui-prototype',
             name: 'UI prototype',
@@ -962,6 +987,15 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             optional: true,
             desc: 'Optional architecture proposal when the change is structurally complex.',
             outputArtifact: { atype: 'arch-design', label: 'Architecture design' },
+          },
+          {
+            id: 'adversarial-review',
+            name: 'Adversarial review',
+            agent: 'adversarial-review',
+            mcps: ['filesystem'],
+            retries: 0,
+            optional: true,
+            desc: 'Stress-test spec + prototype + architecture; must-fix auto-revised once, remaining critique surfaced (non-blocking) at the design gate. Runs only when a prototype or architecture exists.',
           },
           {
             id: 'approve-design',

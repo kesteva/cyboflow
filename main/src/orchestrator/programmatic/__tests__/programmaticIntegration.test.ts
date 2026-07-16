@@ -13,8 +13,8 @@
  * blocking decision review_item as it is opened — so the full open→await→resolve
  * gate round-trip runs end to end. This is the headless stand-in for a live
  * `pnpm dev` programmatic run; it validates:
- *   - the planner's `context` step (agent + human:true) runs its AGENT then opens
- *     a gate (the agent-then-gate fix), and pure gates open without a spawn;
+ *   - the planner's agent steps run via the spawn seam while pure gates open
+ *     without a spawn;
  *   - the gate's free-text resolution round-trips into approve/reject/revise;
  *   - cancellation mid-gate settles the walk to 'canceled' and removes the
  *     reviewItemChangeEvents listener (no hang, no leak).
@@ -307,17 +307,19 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     await expect(runner.run(ctxFor('run-int'))).resolves.toBeUndefined();
 
     // Every AGENT step ran exactly once via the spawn surface (context, research,
-    // ui-prototype, architecture, epics, tasks) — pure gates (approve-idea/
-    // approve-design/approve-plan/decompose) did NOT spawn.
+    // expand-spec, ui-prototype, architecture, adversarial-review, epics, tasks)
+    // — pure gates (approve-idea/approve-design/approve-plan/decompose) did NOT
+    // spawn. The fake spawner cannot distinguish a prompt-directed optional skip.
     const stepPrompts = spawner.calls.map((c) => c.prompt);
-    expect(spawner.calls).toHaveLength(6);
+    expect(spawner.calls).toHaveLength(8);
     expect(stepPrompts.some((p) => p.includes('`context`'))).toBe(true);
+    expect(stepPrompts.some((p) => p.includes('`expand-spec`'))).toBe(true);
+    expect(stepPrompts.some((p) => p.includes('`adversarial-review`'))).toBe(true);
     expect(stepPrompts.some((p) => p.includes('`epics`'))).toBe(true);
     expect(stepPrompts.some((p) => p.includes('`tasks`'))).toBe(true);
 
     // All four human gates were opened AND resolved (approve-idea +
-    // approve-design + approve-plan + decompose). context no longer carries a
-    // bogus `human: true` (it soft-blocked runs at step 1 on both planes).
+    // approve-design + approve-plan + decompose).
     const rows = reviewRows(db, 'run-int');
     expect(rows).toHaveLength(4);
     expect(rows.every((r) => r.status === 'resolved')).toBe(true);
@@ -340,15 +342,12 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     const reporter: StepReporter = { report: (rid, sid, s) => void buildStepTransitionEvent(rid, sid, s, adapter) };
     const gate = new ReviewQueueHumanGate(mgr, reviewItemChangeEvents, reviewItemProjectChannel);
 
-    // The human approves the context gate but REJECTS the next (approve-idea).
-    let seen = 0;
+    // The human REJECTS the first gate (approve-idea).
     const responder = (payload: unknown): void => {
       const p = payload as { reviewItemId?: string; action?: string };
       if (p?.action === 'created' && p.reviewItemId) {
-        seen += 1;
-        const verdict = seen === 1 ? 'approve' : 'reject — out of scope';
         const id = p.reviewItemId;
-        setTimeout(() => void mgr.resolveHumanGate('run-rej', id, 'user', verdict), 0);
+        setTimeout(() => void mgr.resolveHumanGate('run-rej', id, 'user', 'reject — out of scope'), 0);
       }
     };
     reviewItemChangeEvents.on(reviewItemProjectChannel(1), responder);
@@ -509,12 +508,14 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     reviewItemChangeEvents.on(reviewItemProjectChannel(1), approver);
 
     const runner = new DefaultProgrammaticRunner({ spawner, reporter, gate });
-    // Resume at the refine phase 'epics' step → plan-phase agents (context/research)
+    // Resume at the refine phase 'epics' step → every earlier plan/refine agent
     // must NOT re-run; the walk completes from 'epics' onward.
     await expect(runner.run({ ...ctxFor('run-res'), resumeFromStepId: 'epics' })).resolves.toBeUndefined();
 
     expect(spawner.calls.some((c) => c.prompt.includes('`context`'))).toBe(false); // skipped
     expect(spawner.calls.some((c) => c.prompt.includes('`research`'))).toBe(false); // skipped
+    expect(spawner.calls.some((c) => c.prompt.includes('`expand-spec`'))).toBe(false); // skipped
+    expect(spawner.calls.some((c) => c.prompt.includes('`adversarial-review`'))).toBe(false); // skipped
     expect(spawner.calls.some((c) => c.prompt.includes('`epics`'))).toBe(true); // resumed here
     const finalStep = db.prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?').get('run-res') as {
       current_step_id: string | null;

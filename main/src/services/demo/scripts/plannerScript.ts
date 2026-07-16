@@ -1,6 +1,7 @@
 /**
  * Demo planner run — walks the built-in planner definition (context → research
- * → approve-idea → epics → tasks → approve-plan) with scripted output and REAL
+ * → approve-idea → expand-spec → architecture → adversarial-review →
+ * approve-design → epics → tasks → approve-plan) with scripted output and REAL
  * gates: an AskUserQuestion during context, and blocking decision review items
  * at approve-idea / approve-plan. The refine phase creates a real epic + tasks
  * through TaskChangeRouter, so the board fills in as the run progresses.
@@ -76,7 +77,34 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
   ]);
   const streakStyle = answer.answers['How should a streak be counted?'] ?? 'Calendar days';
   const graceChoice = answer.answers['Should a missed-day grace rule land in this iteration?'] ?? 'No grace for now';
-  ctx.say(`Got it — **${streakStyle}** it is. I've captured the idea spec with that decision baked in.`);
+  const stubBody = [
+    '## Idea stub',
+    '',
+    '### Problem definition',
+    '- Users check habits off but get no sense of momentum or reward for consistency.',
+    '',
+    '### Proposed solution',
+    `- Count streaks by ${streakStyle.toLowerCase()}.`,
+    '- Derive current and longest streaks from existing check-in timestamps.',
+    '- Surface streaks wherever habits are listed.',
+    '',
+    'SCOPE: large',
+    'UI_PROTOTYPE: no',
+    'ARCH_DESIGN: yes',
+  ].join('\n');
+  ctx.say(`Got it — **${streakStyle}** it is. I've captured a short idea stub with that decision baked in.`);
+  if (idea) {
+    await router.applyChange(projectId, {
+      actor: 'agent:demo',
+      entityType: 'idea',
+      taskId: idea.id,
+      fields: {
+        summary: `Streaks per habit — ${streakStyle.toLowerCase()}, ${graceChoice === 'One grace day' ? 'one grace day' : 'no grace rule'}.`,
+        body: stubBody,
+      },
+      runId: ctx.runId,
+    });
+  }
   await ctx.sleep(800);
 
   // ── Plan phase · research (optional step) ─────────────────────────────────
@@ -91,60 +119,125 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
   await ctx.sleep(800);
 
   // ── Plan phase · approve-idea (inline human gate) ─────────────────────────
-  // Production planner gates are agent-driven AskUserQuestion gates: the spec
+  // Production planner gates are agent-driven AskUserQuestion gates: the stub
   // renders inline in chat and the approval is the question card right below
   // it (QuestionRouter pauses the run + folds a blocking decision review item,
   // so the gate also shows in the Human review queue while pending).
   ctx.reportStep('approve-idea', 'running');
+  ctx.say(`Here is the idea stub — review the problem and proposed solution, then approve below to continue.\n\n---\n\n${stubBody}`);
+  const ideaApproval = await ctx.askQuestion([
+    {
+      question: 'Approve the idea stub?',
+      header: 'Approval',
+      multiSelect: false,
+      options: [
+        { label: 'Approve', description: 'Lock the problem and solution, then expand the implementation detail.' },
+        { label: 'Request changes', description: 'Have the agent revise the short stub before continuing.' },
+      ],
+    },
+  ]);
+  if ((ideaApproval.answers['Approve the idea stub?'] ?? 'Approve').startsWith('Request')) {
+    ctx.say('Tightening the stub — pulling the grace rule out into its own follow-up idea and keeping this solution focused on calculation + display.');
+    await ctx.sleep(1100);
+    ctx.say('Stub revised and approved — expanding the implementation detail now.');
+  } else {
+    ctx.say('Idea stub approved — expanding it without changing the locked intent.');
+  }
+  await ctx.sleep(800);
+
+  // ── Refine phase · expand-spec (ungated) ─────────────────────────────────
+  ctx.reportStep('expand-spec', 'running');
   const specBody = [
     '## Idea spec',
     '',
-    '### Problem',
-    'Users check habits off but get no sense of momentum — nothing rewards consistency.',
+    '### Problem definition',
+    '- Users check habits off but get no sense of momentum or reward for consistency.',
     '',
-    '### Approach',
-    `- **Streak counting:** ${streakStyle} (per the planning decision)`,
-    '- `computeStreak(completions, today)` derives the current streak from a habit\'s check-in timestamps',
-    '- Formatted output renders the streak so it shows up everywhere habits are listed',
-    `- **Missed-day grace:** ${graceChoice === 'One grace day' ? 'one grace day before the streak resets' : 'none — a missed day resets the streak (grace is a follow-up idea)'}`,
+    '### Proposed solution',
+    `- Count streaks by ${streakStyle.toLowerCase()}.`,
+    '- Derive current and longest streaks from existing check-in timestamps.',
+    '- Surface streaks wherever habits are listed.',
     '',
-    '### Out of scope',
-    '- Reminders / notifications',
-    '- Weekly or custom-cadence goals',
+    '### Assumptions',
+    '- Existing check-in timestamps are the source of truth; no scheduler is required.',
+    `- **Missed-day grace:** ${graceChoice === 'One grace day' ? 'one grace day before reset' : 'none — a missed day resets the streak'}.`,
+    '',
+    '### Touchpoints and acceptance criteria',
+    '- `computeStreak(completions, today)` counts distinct consecutive calendar days.',
+    '- `longestStreak(completions)` scans the full check-in history.',
+    '- Formatted habit output includes the active and personal-best streak values.',
+    '',
+    '### Risks and constraints',
+    '- Bucket timestamps in the user timezone so DST boundaries do not split a day.',
+    '- Reminders, notifications, and custom-cadence goals remain out of scope.',
+    '',
+    'SCOPE: large',
+    'UI_PROTOTYPE: no',
+    'ARCH_DESIGN: yes',
   ].join('\n');
-  // Also persist the spec onto the seeded idea so the board card matches what
-  // is approved here.
   if (idea) {
     await router.applyChange(projectId, {
       actor: 'agent:demo',
       entityType: 'idea',
       taskId: idea.id,
-      fields: {
-        summary: `Streaks per habit — ${streakStyle.toLowerCase()}, ${graceChoice === 'One grace day' ? 'one grace day' : 'no grace rule'}.`,
-        body: specBody,
-      },
+      fields: { body: specBody },
       runId: ctx.runId,
     });
   }
-  ctx.say(`Here is the idea spec — review it right here, then approve below to continue.\n\n---\n\n${specBody}`);
-  const ideaApproval = await ctx.askQuestion([
+  ctx.say(`Expanded the approved stub into the full spec — the problem, solution, scope, and flags are unchanged.\n\n---\n\n${specBody}`);
+  await ctx.sleep(900);
+
+  // ── Refine phase · architecture + adversarial review ────────────────────
+  ctx.reportStep('architecture', 'running');
+  const architectureBody = [
+    '## Architecture design',
+    '',
+    '- Keep streak calculation as pure functions in the habit domain module.',
+    '- Reuse the formatter boundary to expose derived values without persisting duplicate state.',
+    '- Add timezone-boundary fixtures around the calculation seam.',
+  ].join('\n');
+  if (idea) {
+    await router.applyChange(projectId, {
+      actor: 'agent:demo',
+      entityType: 'idea',
+      taskId: idea.id,
+      fields: { body: `${specBody}\n\n${architectureBody}` },
+      runId: ctx.runId,
+    });
+  }
+  ctx.say(`Architecture drafted.\n\n${architectureBody}`);
+  await ctx.sleep(700);
+
+  ctx.reportStep('adversarial-review', 'running');
+  await ctx.createReviewItem({
+    kind: 'finding',
+    title: 'Make streak timezone ownership explicit',
+    body: 'The design is sound, but the acceptance tests should name which user timezone owns each calendar-day boundary.',
+    severity: 'info',
+    source: 'agent:demo-adversarial-review',
+    blocking: false,
+    payload: {
+      kind: 'finding',
+      category: 'robustness',
+      suggestedFix: 'Add timezone-boundary fixtures with the owning user timezone stated explicitly.',
+    },
+  });
+  ctx.say('Adversarial review found no must-fix defects. Filed one advisory timezone finding with blocking: false.');
+  await ctx.sleep(700);
+
+  ctx.reportStep('approve-design', 'running');
+  await ctx.askQuestion([
     {
-      question: 'Approve the idea spec?',
-      header: 'Approval',
+      question: 'Approve the architecture design?',
+      header: 'Design',
       multiSelect: false,
       options: [
-        { label: 'Approve', description: 'Lock the spec and move on to decomposition.' },
-        { label: 'Request changes', description: 'Have the agent tighten the spec before continuing.' },
+        { label: 'Approve', description: 'Proceed; no auto-fixes were needed, and the non-blocking timezone finding remains visible.' },
+        { label: 'Request changes', description: 'Revise the design before decomposition.' },
       ],
     },
   ]);
-  if ((ideaApproval.answers['Approve the idea spec?'] ?? 'Approve').startsWith('Request')) {
-    ctx.say('Tightening the spec — pulling the grace rule out into its own follow-up idea and trimming the approach to the calculation + display.');
-    await ctx.sleep(1100);
-    ctx.say('Spec revised — proceeding to decomposition with the slimmer scope.');
-  } else {
-    ctx.say('Idea approved — moving on to decomposition.');
-  }
+  ctx.say('Design approved — moving on to decomposition.');
   await ctx.sleep(800);
 
   // ── Refine phase · epics ──────────────────────────────────────────────────

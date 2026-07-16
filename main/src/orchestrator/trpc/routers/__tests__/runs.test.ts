@@ -2581,7 +2581,7 @@ describe('cyboflow.runs.getPhaseState', () => {
   it('(d) middle-step currentStepId → preceding done, matching running, trailing pending', async () => {
     const runId = 'run-gps-middle-step';
     // 'approve-idea' is the 3rd step (index 2) in planner plan phase.
-    // Steps in order: context(0), research(1), approve-idea(2), epics(3), tasks(4), ...
+    // Steps in order: context(0), research(1), approve-idea(2), expand-spec(3), ...
     seedPhaseRun(db, runId, 'planner', 'approve-idea');
 
     const adapter = dbAdapter(db);

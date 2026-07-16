@@ -10,10 +10,12 @@ the concrete per-phase step ids are dynamic and are injected at run time by the
 
 The planner turns a raw user idea into an execution-ready plan WITHOUT writing any
 implementation code. It moves the work through two phases — a Plan phase (get
-context on the idea, an optional research pass, then a human idea approval) and a
-Refine phase (an optional UI prototype, an optional architecture design, a human
-design approval when either ran, then decompose into epics, fill out each task's
-details, and a human plan approval). The exact step ids for the active run come
+context as a short idea stub, an optional research pass, then human approval of
+that stub) and a Refine phase (ungated expansion of the approved stub into the
+full spec, an optional UI prototype, an optional architecture design, one
+read-only adversarial review when either design surface ran, a human design
+approval over those surfaces and findings, then decompose into epics, fill out
+each task's details, and a human plan approval). The exact step ids for the active run come
 from the run's resolved workflow definition and may have been edited by the user;
 do not assume a fixed list.
 
@@ -35,7 +37,7 @@ not hardcode step ids in this asset.
 The main orchestrating session is the single writer of cyboflow state. The
 Agent-tool subagents it delegates heavy phases to — `cyboflow-context`,
 `cyboflow-research`, `cyboflow-ui-prototype`, `cyboflow-architecture`,
-`cyboflow-epics`, `cyboflow-tasks` — are deliberately scoped WITHOUT the cyboflow
+`cyboflow-adversarial-review`, `cyboflow-epics`, `cyboflow-tasks` — are deliberately scoped WITHOUT the cyboflow
 tools (an explicit `tools:` allowlist that excludes them), so they never report
 steps or write entities; they return a compact result the orchestrator persists.
 The human idea/design/plan approval gates stay inline (subagents have no

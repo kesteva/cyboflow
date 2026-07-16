@@ -237,7 +237,26 @@ describe('buildBuiltInWorkflows', () => {
     expect(body.trim().length, 'ship prompt body non-empty').toBeGreaterThan(0);
   });
 
-  it('ship definition has 6 phases, 15 steps, unique ids, and canonical/human agents', () => {
+  it('planner and ship preserve stub expansion and adversarial-review ordering', () => {
+    const designOrder = [
+      'context',
+      'approve-idea',
+      'expand-spec',
+      'ui-prototype',
+      'architecture',
+      'adversarial-review',
+      'approve-design',
+    ];
+
+    for (const name of ['planner', 'ship'] as const) {
+      const stepIds = WORKFLOW_DEFINITIONS[name].phases.flatMap((phase) =>
+        phase.steps.map((step) => step.id),
+      );
+      expect(stepIds.filter((stepId) => designOrder.includes(stepId)), name).toEqual(designOrder);
+    }
+  });
+
+  it('ship definition has 6 phases, 17 steps, unique ids, and canonical/human agents', () => {
     const def = WORKFLOW_DEFINITIONS.ship;
     expect(def, 'WORKFLOW_DEFINITIONS.ship present').toBeDefined();
     expect(def.id).toBe('ship');
@@ -250,9 +269,9 @@ describe('buildBuiltInWorkflows', () => {
     // Phase ids are globally unique.
     expect(new Set(phaseIds).size, 'phase ids are unique').toBe(phaseIds.length);
 
-    // 15 steps total, with globally-unique step ids.
+    // 17 steps total, with globally-unique step ids.
     const steps = def.phases.flatMap((p) => p.steps);
-    expect(steps).toHaveLength(15);
+    expect(steps).toHaveLength(17);
     const stepIds = steps.map((s) => s.id);
     expect(new Set(stepIds).size, 'step ids are globally unique').toBe(stepIds.length);
 

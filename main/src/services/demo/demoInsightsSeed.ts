@@ -61,7 +61,20 @@ const MODELS: ModelProfile[] = [
 
 /** Step ids mirror the built-in flow definitions (planner.md / sprint.md). */
 const FLOW_STEPS: Record<'planner' | 'sprint', string[]> = {
-  planner: ['context', 'research', 'approve-idea', 'epics', 'tasks', 'approve-plan'],
+  planner: [
+    'context',
+    'research',
+    'approve-idea',
+    'expand-spec',
+    'ui-prototype',
+    'architecture',
+    'adversarial-review',
+    'approve-design',
+    'epics',
+    'tasks',
+    'approve-plan',
+    'decompose',
+  ],
   sprint: ['analyze-dependencies', 'execute-tasks', 'sprint-verify', 'sprint-review', 'human-review'],
 };
 
