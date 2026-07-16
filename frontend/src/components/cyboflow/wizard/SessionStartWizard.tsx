@@ -72,6 +72,7 @@ import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
 import { VariantSelector } from '../VariantSelector';
 import { variantSelectionToStartInput, type VariantSelection } from '../variantSelectorLogic';
 import { isOpusModel, modelDisplayLabel } from '../unified/ModelPill';
+import { effortLevelsForProvider, type ReasoningEffort } from '../../../../../shared/types/reasoningEffort';
 import { McpTogglePill } from '../unified/McpTogglePill';
 import { PluginTogglePill } from '../unified/PluginTogglePill';
 import { ChevronDown } from 'lucide-react';
@@ -251,6 +252,10 @@ export default function SessionStartWizard(): React.JSX.Element {
   // QUICK-only, surfaced only while Opus is selected.
   const [model, setModel] = useState<string>(DEFAULT_QUICK_MODEL);
   const [fastMode, setFastMode] = useState<boolean>(false);
+  // Per-agent reasoning-effort selection (IDEA-029), QUICK + ULTRACODE only — a
+  // workflow's per-agent effort is set in the step inspector, not here. `null`
+  // means "provider default" (no explicit selection sent).
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | null>(null);
   useEffect(() => {
     if (
       selection?.kind === 'workflow' &&
@@ -800,6 +805,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         worktreeModeOverride !== 'inherit' ? worktreeModeOverride : undefined,
         quickProvider,
         sessionRuntime,
+        reasoningEffort ?? undefined,
       );
       return;
     }
@@ -824,6 +830,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         undefined,
         'claude',
         'claude-interactive',
+        reasoningEffort ?? undefined,
       );
       return;
     }
@@ -849,7 +856,7 @@ export default function SessionStartWizard(): React.JSX.Element {
       return;
     }
     void launchRun(selection.workflowId);
-  }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode, agentRuntime, model, fastMode, disabledMcpServers, enabledPlugins, pluginBaseline, worktreeModeOverride]);
+  }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode, agentRuntime, model, fastMode, reasoningEffort, disabledMcpServers, enabledPlugins, pluginBaseline, worktreeModeOverride]);
 
   const handleIdeaPicked = useCallback(
     // `opts.separateIdeaIds` ("Plan separately", IDEA-009) is deliberately NOT
@@ -1126,6 +1133,34 @@ export default function SessionStartWizard(): React.JSX.Element {
                 agentRuntime={effectiveRuntime}
               />
             </div>
+            {/* Reasoning-effort picker (IDEA-029) — QUICK + ULTRACODE only; a
+                workflow's per-agent effort is a step-inspector concern, not a
+                launch-time one. 'Default' (empty value) omits an explicit
+                selection so the spawn falls back to the provider default. */}
+            {(selection.kind === 'quick' || selection.kind === 'ultracode') && (
+              <div className="flex flex-col gap-1">
+                <label htmlFor="wizard-effort" className="text-xs font-medium text-text-secondary">
+                  Reasoning effort
+                </label>
+                <select
+                  id="wizard-effort"
+                  value={reasoningEffort ?? ''}
+                  onChange={(e) =>
+                    setReasoningEffort(e.target.value === '' ? null : (e.target.value as ReasoningEffort))
+                  }
+                  className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-text-primary"
+                  aria-label="Select reasoning effort"
+                  data-testid="wizard-effort-select"
+                >
+                  <option value="">Default</option>
+                  {effortLevelsForProvider(effectiveProvider).map((level) => (
+                    <option key={level} value={level}>
+                      {level}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             {selection.kind === 'quick' && effectiveProvider === 'claude' && isOpusModel(model) && (
               <div
                 data-testid="wizard-fast-mode-row"

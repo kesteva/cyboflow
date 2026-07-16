@@ -29,6 +29,7 @@ import type { PermissionMode } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
+import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 
 interface UseQuickSessionOptions {
   projectId: number | null;
@@ -54,6 +55,13 @@ interface UseQuickSessionReturn {
    * into createQuick; omitted → the server floors to the global default. 'in-place'
    * skips worktree creation and works directly in the project checkout (both
    * substrates — the interactive gate needs no checkout writes).
+   *
+   * `reasoningEffort` (IDEA-029, the wizard's effort select / the in-composer
+   * EffortPill) rides claudeConfig alongside model/fastMode for the interactive
+   * eager spawn, and is persisted on the frontend-created SDK panel the same way
+   * model is. NOTE: only threaded for the Claude provider today — a Codex quick
+   * launch does not yet carry it (main's create-quick only reads claudeConfig for
+   * `quickAgentProvider === 'claude'`).
    */
   start: (
     agentPermissionMode?: PermissionMode,
@@ -66,6 +74,7 @@ interface UseQuickSessionReturn {
     worktreeMode?: QuickSessionWorktreeMode,
     agentProvider?: AgentProvider,
     agentRuntime?: SessionAgentRuntime,
+    reasoningEffort?: ReasoningEffort,
   ) => Promise<void>;
   isStarting: boolean;
   error: string | null;
@@ -87,6 +96,7 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
       worktreeMode?: QuickSessionWorktreeMode,
       agentProvider?: AgentProvider,
       agentRuntime?: SessionAgentRuntime,
+      reasoningEffort?: ReasoningEffort,
     ): Promise<void> => {
       if (opts.projectId === null || isStarting) return;
 
@@ -96,13 +106,18 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
       try {
         const isCodexRuntime =
           agentProvider === 'codex' || agentRuntime === 'codex-sdk' || agentRuntime === 'codex-pty';
-        // model + fastMode ride the request as claudeConfig so the INTERACTIVE
-        // eager spawn (server-side) receives them; the SDK panel is created on the
-        // frontend below and persisted there. Sending both ways is harmless — the
-        // SDK create-quick path ignores claudeConfig (no panel to start yet).
+        // model + fastMode + reasoningEffort ride the request as claudeConfig so the
+        // INTERACTIVE eager spawn (server-side) receives them; the SDK panel is
+        // created on the frontend below and persisted there. Sending both ways is
+        // harmless — the SDK create-quick path ignores claudeConfig (no panel to
+        // start yet).
         const claudeConfig =
-          !isCodexRuntime && (model !== undefined || fastMode === true)
-            ? { ...(model !== undefined ? { model } : {}), fastMode: fastMode === true }
+          !isCodexRuntime && (model !== undefined || fastMode === true || reasoningEffort !== undefined)
+            ? {
+                ...(model !== undefined ? { model } : {}),
+                fastMode: fastMode === true,
+                ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+              }
             : undefined;
 
         const result = await API.sessions.createQuick({
@@ -151,6 +166,7 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
           if (model !== undefined) await API.claudePanels.setModel(claudePanel.id, model);
           if (!isCodexRuntime) {
             await API.claudePanels.setFastMode(claudePanel.id, fastMode === true);
+            if (reasoningEffort !== undefined) await API.claudePanels.setEffort(claudePanel.id, reasoningEffort);
           }
         }
         await panelApi.createPanel({

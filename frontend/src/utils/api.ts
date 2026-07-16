@@ -8,6 +8,7 @@ import type { FastModeStateNotice } from '../../../shared/types/panels';
 import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../shared/types/onboarding';
 import type { CodexModelCatalog } from '../../../shared/types/agentModels';
 import type { QuickSessionRow } from '../../../shared/types/quickSessions';
+import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 
 // Type for IPC response.
 // T defaults to `unknown` (not `any`) so callers must narrow before reading .data.
@@ -584,6 +585,18 @@ export class API {
     onFastModeState(callback: (notice: FastModeStateNotice) => void): () => void {
       if (!isElectron()) return () => {};
       return window.electronAPI.claudePanels.onFastModeState(callback);
+    },
+
+    /** Persist the per-panel reasoning-effort selection (IDEA-029). `null` clears it. */
+    async setEffort(panelId: string, effort: ReasoningEffort | null) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.claudePanels.setEffort(panelId, effort);
+    },
+
+    /** Read the persisted per-panel reasoning-effort selection (IDEA-029), or null. */
+    async getEffort(panelId: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.claudePanels.getEffort(panelId);
     },
   };
 

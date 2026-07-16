@@ -15,6 +15,7 @@ import type { UpdaterEvent, UpdateCheckResult } from '../../../shared/types/upda
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/types/modelAvailability';
 import type { CodexModelCatalog } from '../../../shared/types/agentModels';
 import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../shared/types/onboarding';
+import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 
 interface LogEntry {
   timestamp: string;
@@ -383,6 +384,8 @@ interface ElectronAPI {
     /** Latest CLI-reported fast-mode state (null until a turn has reported). */
     getFastModeState: (panelId: string) => Promise<IPCResponse<FastModeStateNotice | null>>;
     onFastModeState: (callback: (notice: FastModeStateNotice) => void) => () => void;
+    setEffort: (panelId: string, effort: ReasoningEffort | null) => Promise<IPCResponse<void>>;
+    getEffort: (panelId: string) => Promise<IPCResponse<ReasoningEffort | null>>;
   };
 
   // First-run onboarding — Claude Code login/binary probe.
