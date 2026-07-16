@@ -28,13 +28,21 @@ import type { WorktreeManager } from '../worktreeManager';
 import type { GitDiffManager } from '../gitDiffManager';
 import type { GitIndexStatus } from '../gitPlumbingCommands';
 
-vi.mock('../gitPlumbingCommands', () => ({
-  fastCheckWorkingDirectory: vi.fn(),
-  fastGetAheadBehind: vi.fn(async () => ({ ahead: 0, behind: 0 })),
-  fastGetDiffStats: vi.fn(async () => ({ additions: 0, deletions: 0, filesChanged: 0 })),
-}));
+// Override the three spawn helpers but KEEP the real module's other exports —
+// crucially GitOperationalError, which gitStatusManager does `instanceof` against.
+// A bare factory that omits it would make that check `instanceof undefined` and
+// crash the operational-failure path at runtime.
+vi.mock('../gitPlumbingCommands', async () => {
+  const actual = await vi.importActual<typeof import('../gitPlumbingCommands')>('../gitPlumbingCommands');
+  return {
+    ...actual,
+    fastCheckWorkingDirectory: vi.fn(),
+    fastGetAheadBehind: vi.fn(async () => ({ ahead: 0, behind: 0 })),
+    fastGetDiffStats: vi.fn(async () => ({ additions: 0, deletions: 0, filesChanged: 0 })),
+  };
+});
 
-import { fastCheckWorkingDirectory } from '../gitPlumbingCommands';
+import { fastCheckWorkingDirectory, fastGetAheadBehind, GitOperationalError } from '../gitPlumbingCommands';
 import { GitStatusManager } from '../gitStatusManager';
 
 const FAKE_SESSION: Session = {
@@ -75,6 +83,8 @@ type GitStatusManagerInternals = {
 
 beforeEach(() => {
   vi.mocked(fastCheckWorkingDirectory).mockReset();
+  vi.mocked(fastGetAheadBehind).mockReset();
+  vi.mocked(fastGetAheadBehind).mockResolvedValue({ ahead: 0, behind: 0 });
 });
 
 describe('GitStatusManager — in-flight fetch coalescing', () => {
@@ -241,6 +251,72 @@ describe('GitStatusManager — quick-check burst bounding (Codex finding 1)', ()
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('GitStatusManager — preserve last-known status on operational git failure (Codex finding 2)', () => {
+  /** Exposes the private fetchGitStatus + cache for the preservation assertion, without `any`. */
+  type FetchInternals = {
+    fetchGitStatus: (sessionId: string) => Promise<GitStatus | null>;
+    cache: Record<string, { status: GitStatus; lastChecked: number }>;
+  };
+
+  it('an ahead/behind timeout returns null from fetchGitStatus so the caller preserves the cached ahead status', async () => {
+    const { sessionManager, worktreeManager, gitDiffManager } = makeFakeCollaborators();
+    const manager = new GitStatusManager(sessionManager, worktreeManager, gitDiffManager);
+    const internals = manager as unknown as FetchInternals;
+
+    // Seed a known-good cached status: 2 commits ahead of main, ready to merge.
+    const cachedAhead: GitStatus = {
+      state: 'ahead',
+      ahead: 2,
+      lastChecked: new Date().toISOString(),
+      isReadyToMerge: true,
+      hasUncommittedChanges: false,
+      hasUntrackedFiles: false,
+    };
+    internals.cache['s1'] = { status: cachedAhead, lastChecked: Date.now() };
+
+    // Working dir is clean, so the fetch reaches the state-critical ahead/behind
+    // call — which times out (operational failure), NOT a semantic zero result.
+    vi.mocked(fastCheckWorkingDirectory).mockResolvedValue({
+      hasModified: false,
+      hasStaged: false,
+      hasUntracked: false,
+      hasConflicts: false,
+    });
+    vi.mocked(fastGetAheadBehind).mockRejectedValue(
+      new GitOperationalError('git rev-list timed out', new Error('killed'))
+    );
+
+    const fetched = await internals.fetchGitStatus('s1');
+
+    // Contract: operational failure => null (caller's `if (status)` skips updateCache).
+    expect(fetched).toBeNull();
+    // The cache still holds the known-good ahead status — NOT flipped to clean/unknown.
+    expect(internals.cache['s1'].status.state).toBe('ahead');
+    expect(internals.cache['s1'].status.ahead).toBe(2);
+    expect(internals.cache['s1'].status.isReadyToMerge).toBe(true);
+  });
+
+  it('a non-operational (semantic) ahead/behind zero result is still cached normally', async () => {
+    const { sessionManager, worktreeManager, gitDiffManager } = makeFakeCollaborators();
+    const manager = new GitStatusManager(sessionManager, worktreeManager, gitDiffManager);
+    const internals = manager as unknown as FetchInternals;
+
+    vi.mocked(fastCheckWorkingDirectory).mockResolvedValue({
+      hasModified: false,
+      hasStaged: false,
+      hasUntracked: false,
+      hasConflicts: false,
+    });
+    // A genuine {0,0} (branch equals base) resolves normally — must produce a real
+    // 'clean' status, proving the preserve path is scoped to operational failures only.
+    vi.mocked(fastGetAheadBehind).mockResolvedValue({ ahead: 0, behind: 0 });
+
+    const fetched = await internals.fetchGitStatus('s2');
+    expect(fetched).not.toBeNull();
+    expect(fetched?.state).toBe('clean');
   });
 });
 

@@ -9,7 +9,7 @@ import type { GitDiffManager } from './gitDiffManager';
 import { GitStatusLogger } from './gitStatusLogger';
 import { perfBump } from './perfTracer';
 import { GitFileWatcher } from './gitFileWatcher';
-import { fastCheckWorkingDirectory, fastGetAheadBehind, fastGetDiffStats } from './gitPlumbingCommands';
+import { fastCheckWorkingDirectory, fastGetAheadBehind, fastGetDiffStats, GitOperationalError } from './gitPlumbingCommands';
 import { runGitAsync } from '../utils/runGit';
 
 interface GitStatusCache {
@@ -734,15 +734,25 @@ export class GitStatusManager extends EventEmitter {
       // Get uncommitted changes details only if needed
       let uncommittedDiff = { stats: { filesChanged: 0, additions: 0, deletions: 0 } };
       if (hasUncommittedChanges) {
-        // Use fast diff stats instead of full diff capture when possible
-        const quickStats = await fastGetDiffStats(session.worktreePath, gitOpts);
-        uncommittedDiff = {
-          stats: {
-            filesChanged: quickStats.filesChanged,
-            additions: quickStats.additions,
-            deletions: quickStats.deletions
-          }
-        };
+        // Use fast diff stats instead of full diff capture when possible.
+        // An operational failure here (timeout/kill) is tolerated: we already KNOW
+        // the tree is modified (from fastCheckWorkingDirectory), so we keep the
+        // 'modified' state with zero counts rather than discarding the whole status.
+        // Only ahead/behind (below) is state-critical enough to preserve last-known.
+        try {
+          const quickStats = await fastGetDiffStats(session.worktreePath, gitOpts);
+          uncommittedDiff = {
+            stats: {
+              filesChanged: quickStats.filesChanged,
+              additions: quickStats.additions,
+              deletions: quickStats.deletions
+            }
+          };
+        } catch (statsError) {
+          if (statsError instanceof Error && statsError.name === 'AbortError') throw statsError;
+          if (!(statsError instanceof GitOperationalError)) throw statsError;
+          this.logger?.info(`[GitStatus] Diff-stats timed out for session ${sessionId}; keeping modified state with zero counts`);
+        }
       }
 
       // Get ahead/behind status using fast plumbing command
@@ -843,13 +853,24 @@ export class GitStatusManager extends EventEmitter {
       return result;
     } catch (error) {
       this.abortControllers.delete(sessionId);
-      
+
       // Check if this was a cancellation
       if (error instanceof Error && error.name === 'AbortError') {
         this.gitLogger.logSessionFetch(sessionId, true); // cancelled
         return null;
       }
-      
+
+      // An operational git failure (timeout / killed / spawn failure) reached us
+      // from the state-critical ahead/behind computation. Do NOT flatten it into an
+      // authoritative status — returning a fake-clean or a lossy 'unknown' would
+      // overwrite a good cached 'ahead'/'diverged'. Return null so the caller skips
+      // updateCache and PRESERVES the last-known status; the next refresh retries.
+      if (error instanceof GitOperationalError) {
+        this.gitLogger.logSessionError(sessionId, error);
+        this.logger?.info(`[GitStatus] Preserving last-known status for session ${sessionId} after operational git failure`);
+        return null;
+      }
+
       this.gitLogger.logSessionError(sessionId, error as Error);
       return {
         state: 'unknown',

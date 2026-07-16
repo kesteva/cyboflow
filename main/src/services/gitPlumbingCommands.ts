@@ -28,6 +28,37 @@ function isAbortError(err: unknown): boolean {
 }
 
 /**
+ * An operational git failure — the child was killed by our `timeout` (Node
+ * execFile sends killSignal and sets `killed: true` / `signal: 'SIGTERM'`), was
+ * killed by some other signal, or failed to spawn (`ENOENT`) — as opposed to git
+ * running to completion and reporting a semantic non-zero exit (a NUMERIC exit
+ * code with `killed: false`, e.g. an empty diff or an expected status code).
+ *
+ * These must NOT be flattened into a valid-looking zero result: a 10s rev-list
+ * timeout on a large or degraded repo would otherwise be cached as an
+ * authoritative "0 ahead / 0 behind", silently recomputing an ahead/diverged
+ * worktree as clean and hiding merge readiness. Callers that need an accurate
+ * status propagate this and preserve the last-known status instead.
+ */
+export class GitOperationalError extends Error {
+  constructor(message: string, readonly cause: unknown) {
+    super(message);
+    this.name = 'GitOperationalError';
+  }
+}
+
+function isOperationalFailure(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const e = err as NodeJS.ErrnoException & { killed?: boolean; signal?: NodeJS.Signals | null };
+  // Timeout kill (killed=true, code typically null) or any signal-kill.
+  if (e.killed === true) return true;
+  if (typeof e.signal === 'string' && e.signal.length > 0) return true;
+  // Spawn failure — git binary or cwd not found (not a semantic git exit).
+  if (e.code === 'ENOENT') return true;
+  return false;
+}
+
+/**
  * Fast check if working directory has any changes using git plumbing commands
  * Much faster than running full `git status --porcelain`
  */
@@ -138,6 +169,13 @@ export async function fastGetAheadBehind(
     };
   } catch (err) {
     if (isAbortError(err)) throw err;
+    // A timeout/kill/spawn failure must NOT masquerade as "0 ahead / 0 behind"
+    // (that silently flips an ahead/diverged worktree to clean). Propagate it so
+    // the caller can preserve last-known status. A genuine git-semantic non-zero
+    // exit (e.g. an unrelated base ref) still degrades to zero as before.
+    if (isOperationalFailure(err)) {
+      throw new GitOperationalError(`git rev-list failed operationally in ${cwd}`, err);
+    }
     return { ahead: 0, behind: 0 };
   }
 }
@@ -182,6 +220,11 @@ export async function fastGetDiffStats(
     };
   } catch (err) {
     if (isAbortError(err)) throw err;
+    // Same rule as fastGetAheadBehind: propagate an operational (timeout/kill/
+    // spawn) failure rather than reporting fake-zero stats.
+    if (isOperationalFailure(err)) {
+      throw new GitOperationalError(`git diff --numstat failed operationally in ${cwd}`, err);
+    }
     return { additions: 0, deletions: 0, filesChanged: 0 };
   }
 }
