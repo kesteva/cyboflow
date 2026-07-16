@@ -16,7 +16,8 @@ import { parseMarkdownFrontmatter } from './markdownFrontmatter';
 import { randomUUID } from 'crypto';
 import type { LoggerLike, DatabaseLike } from './types';
 import type { PermissionMode, WorkflowRow, WorkflowRunRow, CyboflowWorkflowName, WorkflowDefinition } from '../../../shared/types/workflows';
-import { isCyboflowWorkflowName, resolveWorkflowDefinition } from '../../../shared/types/workflows';
+import { isCyboflowWorkflowName, resolveWorkflowDefinition, parseWorkflowDefinition } from '../../../shared/types/workflows';
+import { MixedProviderOrchestratedError } from '../../../shared/types/executionModelErrors';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import {
   claudeRuntimeFromSubstrate,
@@ -1184,6 +1185,43 @@ export class WorkflowRegistry {
           globalDefaultExecutionModel: this.config?.getDefaultExecutionModel?.(),
           env: process.env,
         });
+
+    // Mixed-provider / orchestrated guard (Phase 2 slice D1). A workflow agent
+    // config can pin a single agent onto Codex
+    // (`WorkflowAgentConfig.runtime === 'codex-sdk'`), but that per-agent
+    // override is only honored by the PROGRAMMATIC step runner, which spawns
+    // each step as its own CLI process. An ORCHESTRATED run is a single agent
+    // process for the whole DAG, so a per-step Codex override would be
+    // SILENTLY IGNORED there. Guard here, before any workflow_runs row exists,
+    // so a mixed flow never launches silently-degraded — a later slice's UI
+    // catches MixedProviderOrchestratedError to prompt "switch to
+    // programmatic?" instead.
+    //
+    // Scoped to the run's BASE provider being Claude: a whole-run Codex
+    // request (agentProvider === 'codex' — every step already targets Codex)
+    // is a single consistent provider, not a mix, and must NOT trip this.
+    if (executionModel === 'orchestrated' && agentProvider === 'claude') {
+      // Resolve the same effective definition the frozen spec below is
+      // derived from: a variant run's frozen opts.variantSpecJson when
+      // present, else the workflow's own resolved definition. For the variant
+      // case, parseWorkflowDefinition (not resolveWorkflowDefinition) is used
+      // deliberately — a frozen variant spec must stand on its own and should
+      // never fall back to a built-in default the variant didn't ask for.
+      // Fails soft to null on a missing/malformed definition (no throw): an
+      // unreadable spec has no codex agent config to detect, so it can't be
+      // "mixed" either — spec validation is a separate concern owned by the
+      // workflow/variant editors, not this guard.
+      const effectiveDefinitionForMixCheck: WorkflowDefinition | null =
+        opts?.variantSpecJson !== undefined
+          ? parseWorkflowDefinition(opts.variantSpecJson)
+          : resolveWorkflowDefinition(workflow.name, workflow.spec_json);
+      const hasCodexAgentConfig = Object.values(
+        effectiveDefinitionForMixCheck?.agentConfigs ?? {},
+      ).some((agentConfig) => agentConfig?.runtime === 'codex-sdk');
+      if (hasCodexAgentConfig) {
+        throw new MixedProviderOrchestratedError();
+      }
+    }
 
     // Per-run model pin (migration 037). The explicit launch choice
     // (opts.requestedModel, from the Configure surface → runs.start →

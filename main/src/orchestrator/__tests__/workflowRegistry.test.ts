@@ -1066,6 +1066,103 @@ describe('WorkflowRegistry', () => {
       expect(row.execution_model).toBe('orchestrated');
     });
 
+    // ───── mixed-provider / orchestrated guard (Phase 2 slice D1) ─────
+
+    it('throws MixedProviderOrchestratedError for an orchestrated run whose spec pins an agent onto Codex', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'mixed-provider-orchestrated.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        registry.updateSpec(workflowId, {
+          ...makeDefinition('sprint'),
+          agentConfigs: { someAgent: { runtime: 'codex-sdk' } },
+        });
+
+        interface CountRow { count: number }
+        const countBefore = (
+          db.prepare('SELECT COUNT(*) AS count FROM workflow_runs').get() as CountRow
+        ).count;
+
+        // No requestedExecutionModel → floors to 'orchestrated'; no
+        // requestedAgentProvider → floors to the Claude base provider — the
+        // guard's exact trip condition.
+        let thrown: unknown;
+        try {
+          registry.createRun(workflowId, undefined, TEST_SESSION_ID);
+        } catch (err) {
+          thrown = err;
+        }
+        expect(thrown).toBeInstanceOf(Error);
+        expect((thrown as Error).name).toBe('MixedProviderOrchestratedError');
+        expect((thrown as { code?: string }).code).toBe('MIXED_PROVIDER_REQUIRES_PROGRAMMATIC');
+
+        // No workflow_runs row was created for the rejected launch.
+        const countAfter = (
+          db.prepare('SELECT COUNT(*) AS count FROM workflow_runs').get() as CountRow
+        ).count;
+        expect(countAfter).toBe(countBefore);
+      });
+    });
+
+    it('does NOT throw for a programmatic run with the same Codex agent config', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'mixed-provider-programmatic.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        registry.updateSpec(workflowId, {
+          ...makeDefinition('sprint'),
+          agentConfigs: { someAgent: { runtime: 'codex-sdk' } },
+        });
+
+        const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+          requestedExecutionModel: 'programmatic',
+        });
+
+        expect(result.executionModel).toBe('programmatic');
+        expect(registry.getRunById(result.runId)).not.toBeNull();
+      });
+    });
+
+    it('does NOT throw for an orchestrated run with no Codex agent config', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'no-mixed-provider.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
+
+        expect(result.executionModel).toBe('orchestrated');
+        expect(registry.getRunById(result.runId)).not.toBeNull();
+      });
+    });
+
+    it('does NOT throw for an orchestrated WHOLE-RUN Codex request (not a mix)', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'whole-run-codex.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        // requestedAgentProvider: 'codex' resolves the run's BASE provider to
+        // 'codex' (and forces sdk-substrate compatibility) — every step already
+        // targets Codex, so this is a single consistent provider, not a mix.
+        const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+          requestedAgentProvider: 'codex',
+        });
+
+        expect(result.executionModel).toBe('orchestrated');
+        interface AgentRow { agent_provider: string }
+        const row = db.prepare('SELECT agent_provider FROM workflow_runs WHERE id = ?').get(result.runId) as AgentRow;
+        expect(row.agent_provider).toBe('codex');
+      });
+    });
+
     // ───── model stamping (migration 037) ─────
 
     it('stamps a NULL model when no per-run model is requested (no pin → SDK default)', async () => {
