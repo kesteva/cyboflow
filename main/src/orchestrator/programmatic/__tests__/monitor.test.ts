@@ -520,6 +520,8 @@ describe('buildActionAnswerPrompt', () => {
     expect(p).toContain('reason'); // attach a faithful summary
     // Existing framing stays intact: explicit-ask-only + never-claim-success.
     expect(p).toContain('you never claim it succeeded yourself');
+    // Warns that per-step separate-runtime (e.g. Codex-pinned) agents fold into the handover agent.
+    expect(p).toContain('switched to this one');
   });
 
   it('describes all 11 action kinds, grouped by task edits / step control / review queue', () => {
