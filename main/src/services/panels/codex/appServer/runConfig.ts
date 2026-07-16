@@ -1,6 +1,7 @@
 import type { ClaudeSpawnerOptions } from '../../../../orchestrator/runExecutor';
 import type { PermissionMode } from '../../../../../../shared/types/workflows';
 import { resolveAgentModelAlias } from '../../agentModelContext';
+import { isValidEffortForProvider } from '../../../../../../shared/types/reasoningEffort';
 import { codexPermissionFlagsForMode } from '../codexPtyManager';
 import { electronRunAsNodeGuardEnv } from '../../../../utils/electronNodeGuard';
 import { getShellPath } from '../../../../utils/shellPath';
@@ -133,7 +134,17 @@ export function buildCodexAppServerThreadResumeParams(
 
 export function buildCodexAppServerTurnOptions(
   options: ClaudeSpawnerOptions,
-): Pick<AppServerTurnStartParams, 'model'> {
+): Pick<AppServerTurnStartParams, 'model' | 'effort'> {
   const model = resolveAgentModelAlias('codex', options.model);
-  return model ? { model } : {};
+  // Per-turn reasoning effort (IDEA-029). The spawn caller normalizes against
+  // the provider, but re-guard here against Codex's scale (drops Claude-only
+  // `max`) so a non-normalizing caller can't push an unaccepted value onto the
+  // turn. `turnSession.startTurn` spreads this straight into the turn/start
+  // params, so `effort` reaches Codex without any further plumbing.
+  const effort =
+    options.effort && isValidEffortForProvider('codex', options.effort) ? options.effort : undefined;
+  return {
+    ...(model ? { model } : {}),
+    ...(effort ? { effort } : {}),
+  };
 }
