@@ -118,6 +118,15 @@ import {
   RESOLUTION_PREFIX_PROMOTED,
 } from '../../../../shared/types/reviews';
 
+/**
+ * The workflow step id whose Approve answer flips a plan-gated run's drafted
+ * epics/tasks visible + sprint-eligible (stamping plan_approved_at). Mirrors the
+ * same-named constant in questionRouter.ts — duplicated as a bare literal to keep
+ * this module free of a questionRouter import for one string. Used by the
+ * approve-plan silent-pass guard in handleReportStep.
+ */
+const APPROVE_PLAN_STEP_ID = 'approve-plan';
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -1053,6 +1062,53 @@ export class McpQueryHandler {
     }
 
     const status = msg.status ?? 'running';
+
+    // GATE GUARD (silent-pass safety net). An ORCHESTRATED agent — especially a
+    // Codex handover agent that lacks Claude's AskUserQuestion tool — can report
+    // the `approve-plan` HUMAN step 'done' WITHOUT ever surfacing a real gate,
+    // asking in plain chat instead. That silent pass never runs the approve-plan
+    // reveal (promoteTasksOnPlanApproval), so plan_approved_at stays NULL, the
+    // run's drafted tasks are never promoted, and materialize-batch then dies with
+    // `ship_no_tasks_to_materialize`. plan_approved_at is a bulletproof signal:
+    // the reveal stamps it SYNCHRONOUSLY (before the agent resumes) iff a gate was
+    // resolved through QuestionRouter with an Approve answer. Refuse to COMPLETE
+    // approve-plan until it is stamped, forcing the agent to open the gate via
+    // `cyboflow_request_user_input` (Codex/MCP) or AskUserQuestion (Claude).
+    // Scoped to orchestrated runs: the programmatic plane drives this gate via the
+    // deterministic HumanStepManager, which stamps plan_approved_at before its
+    // step worker reports done, so the guard is a pass there. Fail-soft: a missing
+    // run row / pre-042 DB lacking the column degrades to NO guard (never blocks).
+    if (step.human === true && msg.stepId === APPROVE_PLAN_STEP_ID && status === 'done') {
+      let planUnapprovedOrchestrated = false;
+      try {
+        const gateRow = this.db
+          .prepare(
+            'SELECT execution_model AS executionModel, plan_approved_at AS planApprovedAt FROM workflow_runs WHERE id = ?',
+          )
+          .get(msg.runId) as { executionModel?: unknown; planApprovedAt?: unknown } | undefined;
+        const isOrchestrated = gateRow?.executionModel === 'orchestrated';
+        const approved =
+          typeof gateRow?.planApprovedAt === 'string' && gateRow.planApprovedAt.length > 0;
+        planUnapprovedOrchestrated = isOrchestrated && !approved;
+      } catch {
+        // Pre-042 DB (no plan_approved_at column) or vanished run — fail open.
+        planUnapprovedOrchestrated = false;
+      }
+      if (planUnapprovedOrchestrated) {
+        this.writeResponse(client, {
+          type: 'mcp-query-response',
+          requestId: msg.requestId,
+          ok: false,
+          error:
+            'approve_plan_gate_not_resolved: no plan approval was recorded for this run. ' +
+            'Surface the approve-plan gate with cyboflow_request_user_input (or AskUserQuestion) ' +
+            'and wait for the human to answer "Approve" — do NOT ask in a plain chat message — ' +
+            'before reporting approve-plan done.',
+        });
+        return;
+      }
+    }
+
     const event = buildStepTransitionEvent(msg.runId, msg.stepId, status, this.db, undefined);
 
     if (event === null) {

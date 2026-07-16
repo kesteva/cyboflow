@@ -616,6 +616,123 @@ describe('McpQueryHandler', () => {
       expect(response.error).toBe('run_not_found');
       expect(emitted).toHaveLength(0);
     });
+
+    // -----------------------------------------------------------------------
+    // approve-plan silent-pass guard: an orchestrated agent must not COMPLETE
+    // the approve-plan human gate until a real gate stamped plan_approved_at.
+    // -----------------------------------------------------------------------
+    describe('approve-plan gate guard', () => {
+      /** Report DB with execution_model + plan_approved_at (guard reads both). */
+      function createGuardDb(): Database.Database {
+        const guardDb = createTestDb({
+          includeWorkflowRunTaskColumns: true,
+          includeQuestionsTable: true,
+        });
+        // plan_approved_at (migration 042) is not in the base fixture — layer it.
+        guardDb.exec('ALTER TABLE workflow_runs ADD COLUMN plan_approved_at TEXT');
+        return guardDb;
+      }
+
+      /** Seed a `ship` run (built-in def carries approve-plan human:true). */
+      function seedShipRun(
+        guardDb: Database.Database,
+        opts: { executionModel: 'orchestrated' | 'programmatic'; planApprovedAt: string | null },
+      ): string {
+        const workflowId = `wf-ship-${Math.random().toString(36).slice(2)}`;
+        const runId = `run-ship-${Math.random().toString(36).slice(2)}`;
+        guardDb
+          .prepare(`INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, 'ship', '{}')`)
+          .run(workflowId);
+        guardDb
+          .prepare(
+            `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, status, execution_model, plan_approved_at)
+             VALUES (?, ?, 1, '/tmp/test', 'running', ?, ?)`,
+          )
+          .run(runId, workflowId, opts.executionModel, opts.planApprovedAt);
+        return runId;
+      }
+
+      let guardDb: Database.Database;
+      let guardHandler: McpQueryHandler;
+      let guardEmitted: WorkflowStepTransitionEvent[];
+
+      beforeEach(() => {
+        guardDb = createGuardDb();
+        guardHandler = new McpQueryHandler(dbAdapter(guardDb));
+        guardEmitted = [];
+        stepTransitionEvents.on('transition', (ev: WorkflowStepTransitionEvent) => {
+          guardEmitted.push(ev);
+        });
+      });
+
+      afterEach(() => {
+        stepTransitionEvents.removeAllListeners('transition');
+        guardDb.close();
+      });
+
+      it('REJECTS approve-plan done for an orchestrated run with plan_approved_at NULL, writing no transition', async () => {
+        const runId = seedShipRun(guardDb, { executionModel: 'orchestrated', planApprovedAt: null });
+
+        const { socket, writes } = makeSocketDouble();
+        await guardHandler.handleMessage(
+          { type: 'mcp-report-step', requestId: 'g-1', runId, stepId: 'approve-plan', status: 'done' },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(false);
+        expect(response.error).toContain('approve_plan_gate_not_resolved');
+        // The transition never persisted — current_step_id untouched, no event.
+        expect(currentStepId(guardDb, runId)).toBeNull();
+        expect(guardEmitted).toHaveLength(0);
+      });
+
+      it('ALLOWS approve-plan done once plan_approved_at is stamped', async () => {
+        const runId = seedShipRun(guardDb, {
+          executionModel: 'orchestrated',
+          planApprovedAt: '2026-07-16T18:00:00.000Z',
+        });
+
+        const { socket, writes } = makeSocketDouble();
+        await guardHandler.handleMessage(
+          { type: 'mcp-report-step', requestId: 'g-2', runId, stepId: 'approve-plan', status: 'done' },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        expect(currentStepId(guardDb, runId)).toBe('approve-plan');
+        expect(guardEmitted).toHaveLength(1);
+      });
+
+      it('does NOT guard programmatic runs (the deterministic driver owns that gate)', async () => {
+        const runId = seedShipRun(guardDb, { executionModel: 'programmatic', planApprovedAt: null });
+
+        const { socket, writes } = makeSocketDouble();
+        await guardHandler.handleMessage(
+          { type: 'mcp-report-step', requestId: 'g-3', runId, stepId: 'approve-plan', status: 'done' },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        expect(currentStepId(guardDb, runId)).toBe('approve-plan');
+      });
+
+      it('only guards the "done" transition — reporting approve-plan running is allowed', async () => {
+        const runId = seedShipRun(guardDb, { executionModel: 'orchestrated', planApprovedAt: null });
+
+        const { socket, writes } = makeSocketDouble();
+        await guardHandler.handleMessage(
+          { type: 'mcp-report-step', requestId: 'g-4', runId, stepId: 'approve-plan', status: 'running' },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        expect(currentStepId(guardDb, runId)).toBe('approve-plan');
+      });
+    });
   });
 
   // -------------------------------------------------------------------------
