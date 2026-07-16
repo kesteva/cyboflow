@@ -853,6 +853,44 @@ describe('SessionStartWizard — step ③ launch threading', () => {
       expect.objectContaining({ projectId: 1, claudeConfig: { model: 'sonnet', fastMode: false } }),
     );
   });
+
+  it('shows the reasoning-effort select for a Claude quick session and threads the choice on launch', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    // IDEA-029: the effort select is Claude-quick-only (Codex quick + Ultracode
+    // emit no --effort flag, so the control is gated out there).
+    const effortSelect = screen.getByTestId('wizard-effort-select') as HTMLSelectElement;
+    expect(effortSelect.value).toBe(''); // 'Default' — no explicit selection
+
+    await act(async () => {
+      fireEvent.change(effortSelect, { target: { value: 'high' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: 1,
+        claudeConfig: { model: 'opus', fastMode: false, reasoningEffort: 'high' },
+      }),
+    );
+  });
+
+  it('hides the reasoning-effort select for a Codex quick session', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    // Present under the default Claude SDK runtime...
+    expect(screen.getByTestId('wizard-effort-select')).toBeInTheDocument();
+
+    // ...gone once the runtime flips to Codex (no effort flag on that path).
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-sdk' } });
+    });
+    expect(screen.queryByTestId('wizard-effort-select')).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------

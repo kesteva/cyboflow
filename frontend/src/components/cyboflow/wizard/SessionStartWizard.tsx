@@ -252,10 +252,14 @@ export default function SessionStartWizard(): React.JSX.Element {
   // QUICK-only, surfaced only while Opus is selected.
   const [model, setModel] = useState<string>(DEFAULT_QUICK_MODEL);
   const [fastMode, setFastMode] = useState<boolean>(false);
-  // Per-agent reasoning-effort selection (IDEA-029), QUICK + ULTRACODE only — a
-  // workflow's per-agent effort is set in the step inspector, not here. `null`
+  // Per-session reasoning-effort selection (IDEA-029), QUICK + Claude only — a
+  // workflow's per-agent effort is set in the step inspector, and Codex quick /
+  // Ultracode emit no --effort flag, so the control is gated out there. `null`
   // means "provider default" (no explicit selection sent).
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | null>(null);
+  // Tracks the previous effective runtime so the effect below clears a pending
+  // effort selection on a genuine runtime transition (never on mount).
+  const prevEffectiveRuntimeRef = useRef<LaunchAgentRuntime | null>(null);
   useEffect(() => {
     if (
       selection?.kind === 'workflow' &&
@@ -267,6 +271,21 @@ export default function SessionStartWizard(): React.JSX.Element {
   useEffect(() => {
     const effectiveRuntime: LaunchAgentRuntime =
       selection?.kind === 'ultracode' ? 'claude-interactive' : agentRuntime;
+    // A runtime flip changes the effective provider, and the effort scales
+    // differ (Claude low..max vs Codex none..xhigh). Clear any pending
+    // reasoning-effort selection ONLY on an actual runtime transition (not on a
+    // model-only change or the effort pick itself — reasoningEffort is
+    // deliberately NOT a dep), so a stale cross-provider value can never ride a
+    // launch: the spawn seam would silently drop it while the composer pill
+    // still displayed it as active. The ref gates the reset to a genuine change
+    // and skips the initial mount.
+    if (
+      prevEffectiveRuntimeRef.current !== null &&
+      prevEffectiveRuntimeRef.current !== effectiveRuntime
+    ) {
+      setReasoningEffort(null);
+    }
+    prevEffectiveRuntimeRef.current = effectiveRuntime;
     if (isCodexRuntime(effectiveRuntime)) {
       if (!isCodexModelSelection(model)) setModel(DEFAULT_CODEX_MODEL);
       return;
@@ -830,7 +849,9 @@ export default function SessionStartWizard(): React.JSX.Element {
         undefined,
         'claude',
         'claude-interactive',
-        reasoningEffort ?? undefined,
+        // No reasoningEffort: the Ultracode card pins xhigh and the interactive
+        // spawn suppresses --effort while effort==='ultracode' (a selection
+        // would be a no-op), so the wizard never offers the control here.
       );
       return;
     }
@@ -1137,7 +1158,14 @@ export default function SessionStartWizard(): React.JSX.Element {
                 workflow's per-agent effort is a step-inspector concern, not a
                 launch-time one. 'Default' (empty value) omits an explicit
                 selection so the spawn falls back to the provider default. */}
-            {(selection.kind === 'quick' || selection.kind === 'ultracode') && (
+            {/* Reasoning-effort select — QUICK + Claude only. Excluded for
+                Ultracode (the card pins xhigh; interactive buildCommandArgs
+                suppresses --effort while effort==='ultracode', so a selection
+                would be a silent no-op) and for Codex quick sessions (the
+                codex-sdk turn path + codex-pty CLI emit no effort flag today, so
+                the control would persist a setting no spawn reads). Per-agent
+                Codex effort lives in the workflow step inspector instead. */}
+            {selection.kind === 'quick' && effectiveProvider === 'claude' && (
               <div className="flex flex-col gap-1">
                 <label htmlFor="wizard-effort" className="text-xs font-medium text-text-secondary">
                   Reasoning effort
