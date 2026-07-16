@@ -69,6 +69,8 @@ type GitStatusManagerInternals = {
   beginFetch: (sessionId: string) => number;
   updateCache: (sessionId: string, status: GitStatus, generation?: number) => void;
   DEBOUNCE_MS: number;
+  MAX_CONCURRENT_OPERATIONS: number;
+  cache: Record<string, { status: GitStatus; lastChecked: number }>;
 };
 
 beforeEach(() => {
@@ -159,6 +161,86 @@ describe('GitStatusManager — stale-generation cache write suppression', () => 
     return manager.getGitStatus('s2').then((result) => {
       expect(result?.state).toBe('clean');
     });
+  });
+});
+
+describe('GitStatusManager — quick-check burst bounding (Codex finding 1)', () => {
+  it('refreshAllSessions with populated caches keeps concurrent quick-check git children within the cap', async () => {
+    vi.useFakeTimers();
+    try {
+      const SESSION_COUNT = 12; // > MAX_CONCURRENT_OPERATIONS (3), so the cap is exercised
+      const sessions: Session[] = Array.from({ length: SESSION_COUNT }, (_, i) => ({
+        ...FAKE_SESSION,
+        id: `s${i}`,
+        worktreePath: `/fake/worktree/${i}`,
+      }));
+
+      // Track concurrent in-flight fastCheckWorkingDirectory calls — the git spawns the
+      // quick check (hasGitStatusChanged) issues. Each call is held open until we release
+      // it, so overlapping acquisitions are directly observable; `peak` records the max.
+      let active = 0;
+      let peak = 0;
+      let resolvers: Array<() => void> = [];
+      vi.mocked(fastCheckWorkingDirectory).mockImplementation(async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise<void>((resolve) => resolvers.push(resolve));
+        active--;
+        return { hasModified: false, hasStaged: false, hasUntracked: false, hasConflicts: false };
+      });
+
+      const sessionManager = {
+        getSession: vi.fn(async (id: string) => sessions.find((s) => s.id === id) ?? null),
+        getProjectForSession: vi.fn(() => ({ id: 1, path: '/fake/project' })),
+        getAllSessions: vi.fn(async () => sessions),
+      } as unknown as SessionManager;
+      const worktreeManager = {
+        getProjectMainBranch: vi.fn(async () => 'main'),
+      } as unknown as WorktreeManager;
+      const gitDiffManager = {} as unknown as GitDiffManager;
+
+      const manager = new GitStatusManager(sessionManager, worktreeManager, gitDiffManager);
+      const internals = manager as unknown as GitStatusManagerInternals;
+      const cap = internals.MAX_CONCURRENT_OPERATIONS;
+
+      // Populate a cache for every session so hasGitStatusChanged runs its quick check —
+      // an EMPTY cache short-circuits to `return true` and spawns nothing, which would
+      // hide the very burst under test.
+      for (const s of sessions) {
+        internals.cache[s.id] = {
+          status: {
+            state: 'clean',
+            lastChecked: new Date().toISOString(),
+            hasUncommittedChanges: false,
+            hasUntrackedFiles: false,
+          },
+          lastChecked: Date.now(),
+        };
+      }
+
+      const done = manager.refreshAllSessions();
+
+      // Fire every session's debounce timer — all quick checks are now scheduled at once.
+      await vi.advanceTimersByTimeAsync(internals.DEBOUNCE_MS);
+
+      // Drain: release the in-flight batch, then advance the executeWithLimit spin-poll
+      // (50ms) so queued quick checks acquire the freed slots. Repeat until none remain.
+      // Without the cap, ALL 12 fastCheck calls would be in flight after the debounce
+      // advance above and `peak` would reach 12; the cap holds it at `cap`.
+      let guard = 0;
+      while (resolvers.length > 0 && guard++ < 100) {
+        const batch = resolvers;
+        resolvers = [];
+        batch.forEach((r) => r());
+        await vi.advanceTimersByTimeAsync(50);
+      }
+      await done;
+
+      expect(peak).toBeGreaterThan(0); // sanity: quick checks actually ran
+      expect(peak).toBeLessThanOrEqual(cap);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

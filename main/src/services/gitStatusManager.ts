@@ -598,35 +598,45 @@ export class GitStatusManager extends EventEmitter {
   private async hasGitStatusChanged(sessionId: string, worktreePath: string): Promise<boolean> {
     const cached = this.cache[sessionId];
     if (!cached) return true;
-    
+
     try {
-      // Quick check using plumbing commands
-      const gitOpts = { timeout: this.GIT_COMMAND_TIMEOUT_MS };
-      const quickStatus = await fastCheckWorkingDirectory(worktreePath, gitOpts);
+      // Bound the quick-check git spawns under the SAME shared cap (executeWithLimit) as the
+      // full fetch in fetchGitStatusCoalesced. Without this, refreshAllSessions fans out every
+      // session's quick check concurrently and each spawns its own update-index/diff-files/
+      // diff-index/ls-files/diff (+ rev-list) children OUTSIDE the cap — an N-wide git burst
+      // (the exact CPU/index.lock storm the cap exists to prevent, made truly concurrent by
+      // fix 2's execSync→async conversion). This acquisition runs to completion and releases
+      // its slot BEFORE the caller proceeds to fetchGitStatusCoalesced, so the quick check and
+      // the full fetch never hold the cap at the same time (sequential, not nested → no
+      // deadlock; hasGitStatusChanged never calls back into the coalesced/debounced path).
+      return await this.executeWithLimit(async () => {
+        const gitOpts = { timeout: this.GIT_COMMAND_TIMEOUT_MS };
+        const quickStatus = await fastCheckWorkingDirectory(worktreePath, gitOpts);
 
-      // Compare with cached status
-      const cachedHasChanges = cached.status.hasUncommittedChanges || cached.status.hasUntrackedFiles;
-      const currentHasChanges = quickStatus.hasModified || quickStatus.hasStaged || quickStatus.hasUntracked;
+        // Compare with cached status
+        const cachedHasChanges = cached.status.hasUncommittedChanges || cached.status.hasUntrackedFiles;
+        const currentHasChanges = quickStatus.hasModified || quickStatus.hasStaged || quickStatus.hasUntracked;
 
-      // If the basic state differs, we need to refresh
-      if (cachedHasChanges !== currentHasChanges) {
-        return true;
-      }
+        // If the basic state differs, we need to refresh
+        if (cachedHasChanges !== currentHasChanges) {
+          return true;
+        }
 
-      // If both have no changes, check if ahead/behind changed
-      if (!currentHasChanges) {
-        const project = this.sessionManager.getProjectForSession(sessionId);
-        if (project?.path) {
-          const mainBranch = await this.worktreeManager.getProjectMainBranch(project.path);
-          const { ahead, behind } = await fastGetAheadBehind(worktreePath, mainBranch, gitOpts);
+        // If both have no changes, check if ahead/behind changed
+        if (!currentHasChanges) {
+          const project = this.sessionManager.getProjectForSession(sessionId);
+          if (project?.path) {
+            const mainBranch = await this.worktreeManager.getProjectMainBranch(project.path);
+            const { ahead, behind } = await fastGetAheadBehind(worktreePath, mainBranch, gitOpts);
 
-          if ((cached.status.ahead || 0) !== ahead || (cached.status.behind || 0) !== behind) {
-            return true;
+            if ((cached.status.ahead || 0) !== ahead || (cached.status.behind || 0) !== behind) {
+              return true;
+            }
           }
         }
-      }
 
-      return false;
+        return false;
+      });
     } catch {
       // On any error, assume we need to refresh
       return true;
