@@ -549,7 +549,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_get_workflow',
         description:
-          "Fetch ONE workflow's EFFECTIVE definition (the phase/step graph the editor seeds from — a saved spec_json wins, else the built-in fallback), plus its metadata and baseline rotation participation, by workflow id. Read-only. The returned `definition` is the exact shape cyboflow_update_workflow expects back (round-trippable): edit it and pass it as definition_json. NOT_FOUND (error 'not_found') when the id is unknown.",
+          "Fetch ONE workflow's EFFECTIVE definition (the phase/step graph the editor seeds from — a saved spec_json wins, else the built-in fallback), plus its metadata and baseline rotation participation, by workflow id. Read-only. The returned `definition` is the exact shape cyboflow_update_workflow expects back (round-trippable): edit it and pass it as definition_json. Per-agent config lives in an optional `agentConfigs` overlay on the definition — `{ [agentKey]: { model?, runtime?, codexModel? } }`, keyed by a step's `agent` value — which pins a per-agent model or routes an agent onto Codex (`runtime: 'codex-sdk'` + `codexModel`); it is absent on unedited built-ins. NOT_FOUND (error 'not_found') when the id is unknown.",
         inputSchema: {
           type: 'object',
           properties: {
@@ -561,7 +561,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_update_workflow',
         description:
-          "Save an edited workflow definition onto a workflow's spec_json (the editor's \"Save\"). `definition_json` is a JSON-encoded WorkflowDefinition (get the current one from cyboflow_get_workflow, edit, pass it back) — it is re-validated by the same strict schema the UI uses (malformed → error 'invalid_definition'; bad JSON → 'invalid_json'). WARNING: editing a global built-in changes it for EVERY project. Unknown id → error 'not_found'.",
+          "Save an edited workflow definition onto a workflow's spec_json (the editor's \"Save\"). `definition_json` is a JSON-encoded WorkflowDefinition (get the current one from cyboflow_get_workflow, edit, pass it back) — it is re-validated by the same strict schema the UI uses (malformed → error 'invalid_definition'; bad JSON → 'invalid_json'). Per-agent model pins and Codex routing live in the definition's optional `agentConfigs` overlay (`{ [agentKey]: { model?, runtime?, codexModel? } }`). WARNING: editing a global built-in changes it for EVERY project. Unknown id → error 'not_found'.",
         inputSchema: {
           type: 'object',
           properties: {
@@ -627,7 +627,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_list_variants',
         description:
-          "List a workflow's A/B variants (newest-first). Read-only. Returns COMPACT rows (id, label, model, execution_model, weight, status draft|active|paused|retired, has_agent_overrides). Use before creating/editing variants to see what already exists.",
+          "List a workflow's A/B variants (newest-first). Read-only. Returns COMPACT rows (id, label, model, execution_model, weight, status draft|active|paused|retired, has_agent_overrides). NOTE: `has_agent_overrides` reflects only the `agent_overrides_json` blob (Claude prompt/model tweaks); a variant can still carry per-agent model pins or Codex routing via its `definition_json` `agentConfigs` and show `has_agent_overrides: false` — fetch the variant's definition to see those. Use before creating/editing variants to see what already exists.",
         inputSchema: {
           type: 'object',
           properties: {
@@ -652,15 +652,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_update_variant',
         description:
-          "Patch a variant in place. All fields optional: `definition_json` (JSON-encoded WorkflowDefinition, re-snapshots + validated like update_workflow), `agent_overrides_json` (a JSON string of `{ [agentKey]: { systemPrompt?, model? } }`, or null to clear), `model` (alias or null), `execution_model` ('orchestrated'|'programmatic'|null), `weight` (non-negative integer rotation share), `label`. Past runs are unaffected. Unknown id → 'not_found'.",
+          "Patch a variant in place. All fields optional: `definition_json` (JSON-encoded WorkflowDefinition, re-snapshots + validated like update_workflow), `agent_overrides_json` (a JSON string of `{ [agentKey]: { systemPrompt?, model? } }`, or null to clear), `model` (alias or null), `execution_model` ('orchestrated'|'programmatic'|null), `weight` (non-negative integer rotation share), `label`. Past runs are unaffected. Unknown id → 'not_found'. PER-AGENT CODEX ROUTING does NOT go in `agent_overrides_json` (that carries Claude prompt/model-alias tweaks only) — to run specific agents on Codex, put an `agentConfigs` overlay in `definition_json`: `{ ..., \"agentConfigs\": { \"<agentKey>\": { \"runtime\": \"codex-sdk\", \"codexModel\": \"<Codex model id>\" } } }`, where agentKey = the step's `agent` value (e.g. implement / write-tests / code-review). A mixed Claude+Codex flow only routes those Codex steps under `execution_model: 'programmatic'` — set it too. There is no per-agent reasoning-effort field; Codex agents inherit the Codex CLI default effort.",
         inputSchema: {
           type: 'object',
           properties: {
             variant_id: { type: 'string', description: 'The variant id to update (required)' },
-            definition_json: { type: 'string', description: 'Optional JSON-encoded WorkflowDefinition to re-snapshot.' },
+            definition_json: {
+              type: 'string',
+              description:
+                "Optional JSON-encoded WorkflowDefinition to re-snapshot. This is where per-agent config lives: an `agentConfigs` overlay `{ [agentKey]: { model?, runtime?, codexModel? } }` pins a Claude model per agent OR routes an agent onto Codex (`runtime: 'codex-sdk'` + `codexModel`). Get the current definition from cyboflow_get_workflow, add/edit `agentConfigs`, pass it back.",
+            },
             agent_overrides_json: {
               type: ['string', 'null'],
-              description: 'Optional JSON string of per-agent overrides `{ [agentKey]: { systemPrompt?, model? } }`; pass null to clear.',
+              description: 'Optional JSON string of per-agent CLAUDE overrides `{ [agentKey]: { systemPrompt?, model? } }` (custom prompt + Claude model alias only — NOT Codex runtime/model, which go in definition_json agentConfigs); pass null to clear.',
             },
             model: { type: ['string', 'null'], description: 'Optional per-variant model alias; null clears it.' },
             execution_model: {
