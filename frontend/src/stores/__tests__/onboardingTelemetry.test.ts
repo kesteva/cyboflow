@@ -7,7 +7,13 @@
  */
 import { describe, it, expect } from 'vitest';
 import { onboardingTelemetryEvents, type OnboardingTelemetrySlice } from '../onboardingTelemetry';
-import { ONBOARDING_STEP_COUNT, ONBOARDING_STEP_NAMES } from '../../utils/onboarding';
+import {
+  ONBOARDING_STEP_COUNT,
+  ONBOARDING_STEP_NAMES,
+  ONBOARDING_MODAL_STEPS,
+  ONBOARDING_COACH_STEPS,
+  ONBOARDING_POINTER_STEPS,
+} from '../../utils/onboarding';
 
 /** A hydrated 'active' slice at a given step, overridable per field. */
 function slice(over: Partial<OnboardingTelemetrySlice> = {}): OnboardingTelemetrySlice {
@@ -36,6 +42,46 @@ describe('onboardingTelemetry — step-name table', () => {
     for (const name of ONBOARDING_STEP_NAMES) {
       expect(seen.has(name)).toBe(false);
       seen.add(name);
+    }
+  });
+
+  it('matches the full stable 12-step order end to end', () => {
+    expect(ONBOARDING_STEP_NAMES).toEqual([
+      'welcome',           // 0
+      'connect',           // 1
+      'permission',        // 2
+      'telemetry',         // 3
+      'add_project',       // 4
+      'quick_session',     // 5
+      'substrate',         // 6
+      'session_permission',// 7
+      'model',             // 8
+      'ship',              // 9
+      'human_review',      // 10
+      'rail_map',          // 11
+    ]);
+  });
+});
+
+describe('onboardingTelemetry — step-group constants (modal/coach/pointer)', () => {
+  it('ONBOARDING_MODAL_STEPS is exactly the modal-card steps, including the new Telemetry step (3)', () => {
+    expect(ONBOARDING_MODAL_STEPS).toEqual([0, 1, 2, 3, 4, 11]);
+  });
+
+  it('ONBOARDING_COACH_STEPS is exactly the anchored-coachmark steps', () => {
+    expect(ONBOARDING_COACH_STEPS).toEqual([5, 6, 7, 8, 9, 10]);
+  });
+
+  it('ONBOARDING_POINTER_STEPS is exactly the Configure pointer trio', () => {
+    expect(ONBOARDING_POINTER_STEPS).toEqual([6, 7, 8]);
+  });
+
+  it('modal, coach, and pointer sets partition the 12 steps with no overlap and no gaps', () => {
+    const modalOrCoach = [...ONBOARDING_MODAL_STEPS, ...ONBOARDING_COACH_STEPS].sort((a, b) => a - b);
+    expect(modalOrCoach).toEqual(Array.from({ length: ONBOARDING_STEP_COUNT }, (_, i) => i));
+    // Pointer steps are a subset of the coach steps, not a disjoint third set.
+    for (const step of ONBOARDING_POINTER_STEPS) {
+      expect(ONBOARDING_COACH_STEPS).toContain(step);
     }
   });
 });

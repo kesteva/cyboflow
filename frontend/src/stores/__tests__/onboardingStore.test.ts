@@ -106,6 +106,13 @@ describe('onboardingStore — v1 → v2 snapshot migration', () => {
     expect(migrateV1StepIndex(10)).toBe(11); // old Rail map → new Rail map
   });
 
+  it('migrateV1StepIndex shifts a value past the valid v1 domain (10) the same way', () => {
+    // v1 only ever persisted 0-10; this documents that the shift rule has no
+    // special-cased upper bound of its own — anything ≥ 3 shifts by one, and
+    // out-of-range values are left for clampResumeStep to clamp downstream.
+    expect(migrateV1StepIndex(11)).toBe(12);
+  });
+
   it('migratePersistedOnboarding is a no-op for an already-v2 snapshot', () => {
     const v2 = { version: 2 as const, status: 'active' as const, step: 4 };
     expect(migratePersistedOnboarding(v2)).toEqual(v2);
@@ -114,6 +121,19 @@ describe('onboardingStore — v1 → v2 snapshot migration', () => {
   it('migratePersistedOnboarding leaves a v1 completed snapshot completed, step untouched', () => {
     const migrated = migratePersistedOnboarding({ version: 1, status: 'completed', step: 10 });
     expect(migrated).toEqual({ version: 2, status: 'completed', step: 10 });
+  });
+
+  it('migratePersistedOnboarding leaves a v1 completed snapshot untouched right at the shift boundary (step 3)', () => {
+    // A completed snapshot skips migrateV1StepIndex entirely — confirm that
+    // holds even when the raw step sits exactly on the old shift boundary,
+    // where a regression to "always remap" would be most likely to surface.
+    const migrated = migratePersistedOnboarding({ version: 1, status: 'completed', step: 3 });
+    expect(migrated).toEqual({ version: 2, status: 'completed', step: 3 });
+  });
+
+  it('migratePersistedOnboarding leaves a v1 completed snapshot untouched just below the shift boundary (step 2)', () => {
+    const migrated = migratePersistedOnboarding({ version: 1, status: 'completed', step: 2 });
+    expect(migrated).toEqual({ version: 2, status: 'completed', step: 2 });
   });
 
   it('migratePersistedOnboarding remaps a v1 active/pending/skipped snapshot at the 0-2 boundary unchanged', () => {
@@ -158,6 +178,18 @@ describe('onboardingStore — v1 → v2 snapshot migration', () => {
   it('clampResumeStep still clamps out-of-range values to the valid 0-11 window', () => {
     expect(clampResumeStep(-1)).toBe(0);
     expect(clampResumeStep(99)).toBe(11);
+  });
+
+  it('clampResumeStep passes through the valid-window edges (0 and 11) unchanged', () => {
+    expect(clampResumeStep(0)).toBe(0);
+    expect(clampResumeStep(11)).toBe(11);
+  });
+
+  it('clampResumeStep maps exactly the context-bound band (6-9) to 5, leaving its neighbors (5, 10) untouched', () => {
+    expect(clampResumeStep(5)).toBe(5); // just below the band
+    expect(clampResumeStep(6)).toBe(5); // band start
+    expect(clampResumeStep(9)).toBe(5); // band end
+    expect(clampResumeStep(10)).toBe(10); // just above the band
   });
 
   it('hydrate accepts a v2 snapshot directly, applying only the clamp (not the v1 shift)', () => {
