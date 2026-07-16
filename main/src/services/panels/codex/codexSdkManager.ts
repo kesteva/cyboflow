@@ -113,7 +113,6 @@ interface CodexTurnContext {
   terminal: Deferred<void>;
   router: EventRouter<AgentStreamEvent>;
   sink: RawEventsSink<AgentStreamEvent>;
-  rawNotificationSink: CodexRawNotificationSink;
   usageAccumulator: CodexTurnUsageAccumulator;
   approvalBridge: CodexAppServerApprovalBridge;
   questionBridge: CodexAppServerQuestionBridge;
@@ -133,6 +132,10 @@ interface CodexTurnContext {
 interface WarmCodexEntry {
   client: CodexAppServerClientLike;
   turnSession: CodexAppServerTurnSession;
+  // Process-lifetime raw-notification sink (stateless per call, keyed by the
+  // entry's stable runId) — persists every frame, including inter-turn frames
+  // that arrive while parked (currentContext is null).
+  rawNotificationSink: CodexRawNotificationSink;
   command: string;
   threadId: string | null;
   initializeResponse: AppServerInitializeResponse | null;
@@ -570,7 +573,7 @@ export class CodexSdkManager extends AbstractCliManager {
       if (existing) {
         if (this.evaluateCodexWarmReuse(existing, options, fingerprint)) {
           this.clearWarmIdleTimer(existing);
-          await this.runOneTurn(existing, options, spawnKey, false);
+          await this.runOneTurnGuarded(existing, options, spawnKey, false);
           return;
         }
         // Ineligible (fresh conversation / changed config / closing): drop the
@@ -581,7 +584,35 @@ export class CodexSdkManager extends AbstractCliManager {
 
     const entry = this.buildColdEntry(options, runId, runtimeConfig, executable, fingerprint, warmEligible);
     if (warmEligible) this.warmCodexRuns.set(spawnKey, entry);
-    await this.runOneTurn(entry, options, spawnKey, true);
+    await this.runOneTurnGuarded(entry, options, spawnKey, true);
+  }
+
+  /**
+   * runOneTurn's own try/finally parks-or-closes any failure that occurs AFTER the
+   * turn context is bound. A throw BEFORE that (e.g. a missing router provider on
+   * the warm-reuse path, after the idle timer was cleared) would otherwise strand a
+   * parked LIVE process in `warmCodexRuns` with no idle timer and no teardown — so
+   * close it here. The guard fires only on that narrow pre-bind window: an in-`try`
+   * failure already deleted the entry (or set teardownPromise) in the finally.
+   */
+  private async runOneTurnGuarded(
+    entry: WarmCodexEntry,
+    options: ClaudeSpawnerOptions,
+    spawnKey: string,
+    cold: boolean,
+  ): Promise<void> {
+    try {
+      await this.runOneTurn(entry, options, spawnKey, cold);
+    } catch (error) {
+      if (
+        this.warmCodexRuns.get(spawnKey) === entry
+        && entry.currentContext === null
+        && !entry.teardownPromise
+      ) {
+        await this.closeWarmEntry(spawnKey, entry, false);
+      }
+      throw error;
+    }
   }
 
   /**
@@ -644,6 +675,7 @@ export class CodexSdkManager extends AbstractCliManager {
     const entry: WarmCodexEntry = {
       client: undefined as unknown as CodexAppServerClientLike,
       turnSession: undefined as unknown as CodexAppServerTurnSession,
+      rawNotificationSink: new CodexRawNotificationSink(this.db, this.logger),
       command: executable.executablePath,
       threadId: options.resumeSessionId ?? null,
       initializeResponse: null,
@@ -679,8 +711,10 @@ export class CodexSdkManager extends AbstractCliManager {
           : ctx.approvalBridge.handleServerRequest(request);
       },
       onNotification: (notification) => {
-        const ctx = entry.currentContext;
-        if (ctx) ctx.rawNotificationSink.persist(ctx.runId, notification);
+        // Persist every notification for the process lifetime — including
+        // inter-turn frames that arrive while parked (currentContext null) —
+        // under the entry's stable runId, mirroring pre-warm behavior.
+        entry.rawNotificationSink.persist(entry.runId, notification);
         entry.turnSession.handleNotification(notification);
       },
       onStderr: (chunk) => this.logger?.warn(`[Codex app-server stderr] ${chunk.trimEnd()}`),
@@ -737,7 +771,6 @@ export class CodexSdkManager extends AbstractCliManager {
     void terminal.promise.catch(() => undefined);
     const router = new EventRouter<AgentStreamEvent>();
     const sink = new RawEventsSink<AgentStreamEvent>(this.db, this.logger);
-    const rawNotificationSink = new CodexRawNotificationSink(this.db, this.logger);
     sink.attachToRouter(router, runId);
     const usageAccumulator = new CodexTurnUsageAccumulator();
 
@@ -762,7 +795,6 @@ export class CodexSdkManager extends AbstractCliManager {
       terminal,
       router,
       sink,
-      rawNotificationSink,
       usageAccumulator,
       approvalBridge,
       questionBridge,
@@ -1006,12 +1038,30 @@ export class CodexSdkManager extends AbstractCliManager {
     return entry.teardownPromise;
   }
 
-  /** A parked process died on its own (broker crash/exit) — drop it from the map. */
+  /**
+   * A parked entry's client reported onError/onExit with no active turn. The
+   * trigger may be a genuine process exit OR a handler-level error (client
+   * `reportError`) where the app-server is STILL ALIVE and detached — so this
+   * MUST stop the client, not just drop the map entry, or the live process group
+   * would be orphaned (reachable by neither killProcess nor killAllProcesses).
+   * `client.stop()` is idempotent and no-ops on an already-exited client.
+   */
   private evictDeadWarmEntry(entry: WarmCodexEntry): void {
-    entry.closing = true;
-    this.clearWarmIdleTimer(entry);
     for (const [key, value] of this.warmCodexRuns) {
-      if (value === entry) this.warmCodexRuns.delete(key);
+      if (value === entry) {
+        void this.closeWarmEntry(key, entry, false);
+        return;
+      }
+    }
+    // Already unmapped (e.g. a concurrent close) — ensure the client is stopped.
+    if (!entry.teardownPromise) {
+      entry.closing = true;
+      this.clearWarmIdleTimer(entry);
+      entry.teardownPromise = entry.client.stop().catch((error: unknown) => {
+        this.logger?.warn(
+          `[CodexSdkManager] warm entry eviction teardown failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
     }
   }
 

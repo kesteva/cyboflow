@@ -1025,4 +1025,46 @@ describe('CodexSdkManager warm app-server reuse', () => {
       db.close();
     }
   });
+
+  it('cold-respawns a resume under a DIFFERENT run id (MCP bridge routes by CYBOFLOW_RUN_ID)', async () => {
+    const db = createDb();
+    db.prepare("INSERT INTO workflow_runs (id, updated_at) VALUES ('run-2', CURRENT_TIMESTAMP)").run();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      await manager.spawnCliProcess(baseTurn({ runId: 'run-1', prompt: 'first' }));
+      // Same thread + same panel key, but a DIFFERENT run id → different env
+      // fingerprint (CYBOFLOW_RUN_ID is baked into the app-server AND MCP-bridge
+      // env). Reusing the warm process would route run-2's tool calls onto run-1's
+      // bridge — so this MUST cold-respawn.
+      await manager.spawnCliProcess(baseTurn({ runId: 'run-2', prompt: 'second', resumeSessionId: 'codex-thread-1' }));
+      expect(clients).toHaveLength(2);
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('stops (not just evicts) a parked app-server whose client errors with no active turn', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      await manager.spawnCliProcess(baseTurn({ prompt: 'first' }));
+      expect(clients).toHaveLength(1);
+      expect(clients[0].stop).not.toHaveBeenCalled(); // parked, still alive
+
+      // A handler-level error while parked routes client.reportError -> onError with
+      // NO active turn. The app-server is still alive + detached, so eviction MUST
+      // stop it (or it orphans, reachable by neither killProcess nor killAllProcesses).
+      clients[0].options.onError?.(new Error('server request handler failed while parked'));
+      await Promise.resolve();
+      expect(clients[0].stop).toHaveBeenCalledOnce();
+
+      // Evicted → a matching resume now cold-respawns instead of reusing a dead entry.
+      await manager.spawnCliProcess(baseTurn({ prompt: 'second', resumeSessionId: 'codex-thread-1' }));
+      expect(clients).toHaveLength(2);
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
 });
