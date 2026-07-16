@@ -58,6 +58,7 @@ import { ConfirmDialog } from '../ConfirmDialog';
 import { useErrorStore } from '../../stores/errorStore';
 import { useRunEndEligibility } from '../../hooks/useRunEndEligibility';
 import { resolveRunSummaryVariant } from '../../hooks/useRunSummaryVariant';
+import { useRunSummaryDismissStore, useRunSummaryDismissed } from '../../stores/runSummaryDismissStore';
 import { trpc } from '../../trpc/client';
 import { SessionActionToast } from './SessionActionToast';
 
@@ -283,6 +284,40 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
   // subscription. null ⇒ keep the canvas.
   const summaryVariant = resolveRunSummaryVariant(activeRun?.status, runEndEligible, phaseState);
 
+  // Dismissable-summary (per-run, in-memory): the summary is derived purely from
+  // status, so re-selecting a finished run re-forces it onto the Flow tab, trapping
+  // the operator on the completion view even after they've moved on (e.g. to a
+  // follow-up chat in the same session). A dismissed run shows its canvas/chat
+  // instead. Only the self-contained variants are dismissable — 'review' is a LIVE
+  // decision gate and must never be hidden.
+  const summaryDismissed = useRunSummaryDismissed(activeRunId);
+  const summaryDismissable = summaryVariant === 'complete' || summaryVariant === 'failed';
+  // Show the summary unless it's a dismissable variant the operator has dismissed.
+  const showSummary = summaryVariant !== null && !(summaryDismissable && summaryDismissed);
+  // When dismissed, RunCenterPane overlays a "View completion summary" pill so the
+  // hidden summary is one click away (restore clears the per-run flag).
+  const summaryRestorable = summaryDismissable && summaryDismissed;
+
+  // The parent session's persistent chat sentinel (`__quick__`, migration 040) —
+  // the live follow-up chat the operator returns to after a run is done. Offered as
+  // a "Continue in chat" shortcut on the completion summary when it exists and is a
+  // DISTINCT run from the finished one (so a run that IS the chat isn't offered a
+  // link to itself). Routing mirrors handleSessionClick's resting-session path.
+  const parentSessionChatRunId = useSessionStore((s) =>
+    activeRunSessionId === null
+      ? null
+      : (s.sessions.find((sess) => sess.id === activeRunSessionId)?.chatRunId ?? null),
+  );
+  const continueInChat =
+    activeRunSessionId !== null &&
+    parentSessionChatRunId !== null &&
+    parentSessionChatRunId !== activeRunId
+      ? () =>
+          useCyboflowStore
+            .getState()
+            .setActiveQuickSession(activeRunSessionId, parentSessionChatRunId)
+      : undefined;
+
   return (
     <div className="flex h-full flex-col">
       {/* Thin top header row */}
@@ -346,8 +381,14 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
               activeRunId={activeRunId}
               phaseState={phaseState}
               activeRun={activeRun}
+              summaryRestorable={summaryRestorable}
+              onRestoreSummary={
+                activeRunId !== null
+                  ? () => useRunSummaryDismissStore.getState().restore(activeRunId)
+                  : undefined
+              }
               flowEndSummary={
-                summaryVariant !== null ? (
+                showSummary ? (
                   <div
                     style={{ background: GRAPH_PAPER_BACKGROUND }}
                     className="flex h-full items-start justify-center overflow-auto p-6"
@@ -367,6 +408,16 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                       experimentId={activeRun?.experiment_id ?? null}
                       experimentArm={activeRun?.experiment_arm ?? null}
                       onComplete={() => setIsEndOpen(true)}
+                      // Dismiss the summary (per-run) so the Flow tab reveals the
+                      // run's canvas/chat instead of re-forcing completion on return.
+                      onDismiss={
+                        summaryDismissable && activeRunId !== null
+                          ? () => useRunSummaryDismissStore.getState().dismiss(activeRunId)
+                          : undefined
+                      }
+                      // One-click route from the completion view to the session's
+                      // live follow-up chat (present only when a distinct chat run exists).
+                      onContinueInChat={continueInChat}
                       onRestarted={(newRunId) => {
                         // Same-session relaunch: swap the active run to the new one
                         // (mirrors useLaunchWorkflow); this panel unmounts as the new

@@ -9,6 +9,8 @@ import {
   ShieldAlert,
   RotateCcw,
   ClipboardCheck,
+  ArrowLeft,
+  MessagesSquare,
 } from 'lucide-react';
 import { trpc } from '../../trpc/client';
 import { useErrorStore } from '../../stores/errorStore';
@@ -161,6 +163,20 @@ interface WorkflowSummaryPanelProps {
   experimentId?: string | null;
   /** Which arm this run drives (paired with {@link experimentId}); null when absent. */
   experimentArm?: ExperimentArm | null;
+  /**
+   * Dismiss the completion summary so the Flow tab reveals the run's canvas/chat
+   * instead. Offered ONLY for the self-contained 'complete' / 'failed' variants
+   * (the caller passes undefined for 'review', a live decision gate that must not
+   * be hidden). Renders a subtle "Back to run" control.
+   */
+  onDismiss?: () => void;
+  /**
+   * Route to the parent session's live follow-up chat (the `__quick__` sentinel).
+   * Present only when a DISTINCT chat run exists for the session; renders a
+   * "Continue in chat" shortcut so the operator can leave the completion view for
+   * their ongoing work in one click.
+   */
+  onContinueInChat?: () => void;
 }
 
 /**
@@ -196,6 +212,8 @@ export function WorkflowSummaryPanel({
   onRestarted,
   experimentId = null,
   experimentArm = null,
+  onDismiss,
+  onContinueInChat,
 }: WorkflowSummaryPanelProps): React.JSX.Element {
   const [usage, setUsage] = useState<RunUsageRollup | null>(null);
   const [loading, setLoading] = useState(true);
@@ -686,6 +704,39 @@ export function WorkflowSummaryPanel({
               >
                 <MessageSquarePlus size={15} />
                 Request changes
+              </button>
+            )}
+          </div>
+        )}
+        {/* Secondary navigation — leave the completion view without closing out.
+            Suppressed for 'review' (a live gate). "Continue in chat" jumps to the
+            session's ongoing follow-up chat; "Back to run" dismisses the summary so
+            the Flow tab shows the run's canvas/chat (and stops re-forcing completion
+            when you return). Only rendered when the caller wires the handlers. */}
+        {!isReview && (onContinueInChat || onDismiss) && (
+          <div className="mt-3 flex items-center gap-3 border-t border-border-primary pt-3">
+            {onContinueInChat && (
+              <button
+                type="button"
+                data-testid="run-summary-continue-in-chat"
+                onClick={onContinueInChat}
+                className="inline-flex items-center gap-1.5 text-sm font-medium text-text-secondary hover:text-text-primary"
+                title="Return to this session's live follow-up chat"
+              >
+                <MessagesSquare size={15} />
+                Continue in chat
+              </button>
+            )}
+            {onDismiss && (
+              <button
+                type="button"
+                data-testid="run-summary-dismiss"
+                onClick={onDismiss}
+                className="inline-flex items-center gap-1.5 text-sm text-text-secondary hover:text-text-primary"
+                title="Hide this summary and show the run — you can re-open it any time"
+              >
+                <ArrowLeft size={15} />
+                Back to run
               </button>
             )}
           </div>

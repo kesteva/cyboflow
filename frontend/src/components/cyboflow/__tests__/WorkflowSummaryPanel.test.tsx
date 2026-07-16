@@ -452,3 +452,40 @@ describe('WorkflowSummaryPanel', () => {
     expect(findings[0]).toHaveTextContent('Robustness');
   });
 });
+
+describe('WorkflowSummaryPanel — dismiss / continue-in-chat controls', () => {
+  it('renders "Back to run" and fires onDismiss (complete variant)', async () => {
+    const onDismiss = vi.fn();
+    renderPanel({ variant: 'complete', onDismiss });
+    fireEvent.click(await screen.findByTestId('run-summary-dismiss'));
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders "Continue in chat" and fires onContinueInChat', async () => {
+    const onContinueInChat = vi.fn();
+    renderPanel({ variant: 'complete', onContinueInChat });
+    fireEvent.click(await screen.findByTestId('run-summary-continue-in-chat'));
+    expect(onContinueInChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers the controls in the failed variant too', async () => {
+    renderPanel({ variant: 'failed', onDismiss: vi.fn(), onContinueInChat: vi.fn() });
+    expect(await screen.findByTestId('run-summary-dismiss')).toBeInTheDocument();
+    expect(screen.getByTestId('run-summary-continue-in-chat')).toBeInTheDocument();
+  });
+
+  it('never offers dismiss in the review variant (a live decision gate)', async () => {
+    // Even if a caller wrongly wired onDismiss, the review state must not hide itself.
+    renderPanel({ variant: 'review', onDismiss: vi.fn(), onContinueInChat: vi.fn() });
+    await screen.findByTestId('run-summary-total');
+    expect(screen.queryByTestId('run-summary-dismiss')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('run-summary-continue-in-chat')).not.toBeInTheDocument();
+  });
+
+  it('omits the controls when the caller wires no handlers', async () => {
+    renderPanel({ variant: 'complete' });
+    await screen.findByTestId('run-summary-complete');
+    expect(screen.queryByTestId('run-summary-dismiss')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('run-summary-continue-in-chat')).not.toBeInTheDocument();
+  });
+});

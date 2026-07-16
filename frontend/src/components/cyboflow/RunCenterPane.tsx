@@ -41,6 +41,15 @@ interface RunCenterPaneProps {
    * and the terminal dock (chat) stay mounted, so completion never hides the chat.
    */
   flowEndSummary?: ReactElement;
+  /**
+   * True when a completion summary EXISTS for this run but the operator has
+   * dismissed it (so `flowEndSummary` is undefined and the Flow tab shows the
+   * canvas). Renders a "View completion summary" pill over the canvas so the
+   * hidden summary is one click away.
+   */
+  summaryRestorable?: boolean;
+  /** Re-show the dismissed completion summary (paired with `summaryRestorable`). */
+  onRestoreSummary?: () => void;
 }
 
 /** Basename of a worktree path for the dock header (e.g. "recipe-holder"). */
@@ -50,7 +59,14 @@ function folderBasename(worktreePath?: string | null): string | undefined {
   return parts[parts.length - 1] || undefined;
 }
 
-export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSummary }: RunCenterPaneProps): ReactElement {
+export function RunCenterPane({
+  activeRunId,
+  phaseState,
+  activeRun,
+  flowEndSummary,
+  summaryRestorable,
+  onRestoreSummary,
+}: RunCenterPaneProps): ReactElement {
   // The run's parent session, when known (null for legacy parentless runs).
   const parentSessionId = activeRun?.session_id ?? null;
   // Per-session key: the run's parent session when known, else the run id
@@ -101,11 +117,10 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSumma
   const chatSurfaceVisible = session.terminalOpen && bottomTabKind === 'chat';
   const dataStreamSurfaceVisible = session.terminalOpen && bottomTabKind === 'data-stream';
 
-  const renderFlow = (): ReactElement => {
-    // Run ended → the Flow tab shows the end-of-workflow summary instead of the
-    // phase canvas. The tab strip + terminal dock (chat) stay mounted below, so
-    // completion never hides the chat.
-    if (flowEndSummary) return flowEndSummary;
+  // The Flow-tab content when NOT showing the summary — loading state, the sprint
+  // swim lanes, or the phase canvas. Split out so renderFlow can overlay the
+  // "View completion summary" restore pill on top of it.
+  const renderFlowContent = (): ReactElement => {
     if (phaseState.definition === null) {
       // Distinguish a genuine in-flight fetch from a settled failure. Without this
       // an unresolvable definition (e.g. a __quick__ sentinel run or a broken
@@ -145,6 +160,30 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSumma
         status={activeRun?.status}
         sessionKey={sessionKey}
       />
+    );
+  };
+
+  const renderFlow = (): ReactElement => {
+    // Run ended → the Flow tab shows the end-of-workflow summary instead of the
+    // phase canvas. The tab strip + terminal dock (chat) stay mounted below, so
+    // completion never hides the chat.
+    if (flowEndSummary) return flowEndSummary;
+    const content = renderFlowContent();
+    // Summary dismissed → show the canvas, with a pill to bring the summary back.
+    if (!summaryRestorable || !onRestoreSummary) return content;
+    return (
+      <div className="relative h-full">
+        {content}
+        <button
+          type="button"
+          data-testid="run-summary-restore"
+          onClick={onRestoreSummary}
+          className="absolute right-3 top-3 z-10 inline-flex items-center gap-1.5 rounded-button border border-border-primary bg-surface-primary px-3 py-1.5 text-xs font-medium text-text-secondary shadow-sm hover:border-border-emphasized hover:text-text-primary"
+          title="Re-open the workflow completion summary"
+        >
+          View completion summary
+        </button>
+      </div>
     );
   };
 

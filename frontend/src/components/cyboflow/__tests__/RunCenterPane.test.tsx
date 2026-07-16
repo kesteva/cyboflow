@@ -244,6 +244,45 @@ describe('RunCenterPane', () => {
     expect(screen.getByTestId('mock-run-bottom-pane')).toBeInTheDocument();
   });
 
+  it('overlays a "View completion summary" pill on the canvas when the summary is dismissed', () => {
+    const onRestoreSummary = vi.fn();
+    render(
+      <RunCenterPane
+        activeRunId="run-1"
+        phaseState={makePhaseState(DEFINITION)}
+        activeRun={makeRun({ status: 'completed' })}
+        // Dismissed → no flowEndSummary; the pane shows the canvas + restore pill.
+        summaryRestorable
+        onRestoreSummary={onRestoreSummary}
+      />,
+    );
+    expect(screen.getByTestId('mock-workflow-canvas')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('run-summary-restore'));
+    expect(onRestoreSummary).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT show the restore pill while the summary itself is showing (flowEndSummary set)', () => {
+    render(
+      <RunCenterPane
+        activeRunId="run-1"
+        phaseState={makePhaseState(DEFINITION)}
+        activeRun={makeRun({ status: 'completed' })}
+        flowEndSummary={<div data-testid="end-summary">summary</div>}
+        summaryRestorable
+        onRestoreSummary={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId('end-summary')).toBeInTheDocument();
+    expect(screen.queryByTestId('run-summary-restore')).not.toBeInTheDocument();
+  });
+
+  it('shows no restore pill for a normal (non-dismissed) run', () => {
+    render(
+      <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
+    );
+    expect(screen.queryByTestId('run-summary-restore')).not.toBeInTheDocument();
+  });
+
   it('shows a loading state when the phase definition is null', () => {
     render(
       <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(null)} activeRun={makeRun()} />,
