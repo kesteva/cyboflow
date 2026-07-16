@@ -25,7 +25,7 @@
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
-import { readFileSync, mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -34,7 +34,13 @@ import {
   artifactChangeEvents,
   artifactProjectChannel,
 } from '../artifactRouter';
-import { snapshotPathFor, resolveArtifactCommitDir } from '../artifactSnapshot';
+import {
+  manifestPathFor,
+  snapshotDirFor,
+  resolveArtifactCommitDir,
+  loadCommittedSnapshot,
+} from '../artifactSnapshot';
+import { PROTOTYPE_HTML_RELPATH } from '../../../../shared/types/artifacts';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import type { ArtifactChangedEvent, ScreenshotsArtifactPayload, ArtifactType } from '../../../../shared/types/artifacts';
 import { ARTIFACT_RENDER_MODE } from '../../../../shared/types/artifacts';
@@ -108,6 +114,12 @@ function seedRunInProject(
     `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id)
      VALUES (?, ?, ?, 'running', 'default', ?)`,
   ).run(runId, wfId, projectId, sessionId);
+}
+
+/** Seed a run artifacts dir with a static prototype document (byte-copy source). */
+function seedRunArtifacts(root: string, html = '<!doctype html><html><head></head><body>hi</body></html>'): void {
+  mkdirSync(join(root, 'prototype'), { recursive: true });
+  writeFileSync(join(root, 'prototype', 'index.html'), html, 'utf-8');
 }
 
 function countEvents(db: Database.Database, artifactId: string): number {
@@ -459,64 +471,74 @@ describe('ArtifactRouter', () => {
     expect(lastDelta('payload_json')).toMatchObject({ from: 'present', to: 'cleared' });
   });
 
-  it('commit writes an on-disk durability snapshot in the resolved commit dir (FEATURE #3)', async () => {
+  it('commit snapshots (manifest + bytes) then DELETES the DB row (IDEA-039)', async () => {
     const db = buildDb();
-    // The resolver resolves a RELATIVE configured dir against a PROJECT ROOT (a
-    // tmp dir here) — NOT the run's worktree — so the manifest survives teardown.
+    // Resolve a commit STORE against a PROJECT ROOT (a tmp dir) — NOT the run's
+    // worktree — so the snapshot survives teardown. Wire a run-artifacts dir with
+    // a real prototype/index.html so the byte copy has a source.
     const projectRoot = mkdtempSync(join(tmpdir(), 'artifact-router-proj-'));
-    const commitDir = resolveArtifactCommitDir(projectRoot, '.cyboflow/artifacts');
+    const runArtifacts = mkdtempSync(join(tmpdir(), 'artifact-router-run-'));
+    const storeDir = resolveArtifactCommitDir(projectRoot, '.cyboflow/artifacts');
     try {
+      seedRunArtifacts(runArtifacts, '<html><head></head><body>proto</body></html>');
       seedRun(db, 'run-1');
-      const router = ArtifactRouter.initialize(dbAdapter(db), undefined, () => commitDir);
+      const router = ArtifactRouter.initialize(
+        dbAdapter(db),
+        undefined,
+        () => storeDir,
+        undefined,
+        () => runArtifacts,
+      );
       const { artifactId } = await router.apply(1, {
         op: 'create',
         runId: 'run-1',
         atype: 'ui-prototype',
         label: 'live preview',
-        payloadJson: '{"url":"http://localhost:8081"}',
+        payloadJson: JSON.stringify({ fileName: PROTOTYPE_HTML_RELPATH }),
         actor: 'agent:executor',
       });
 
+      const events: ArtifactChangedEvent[] = [];
+      artifactChangeEvents.on(artifactProjectChannel(1), (e: ArtifactChangedEvent) => events.push(e));
+
       await router.apply(1, { op: 'commit', artifactId, actor: 'user' });
 
-      // The DB row is committed.
-      const row = db.prepare('SELECT * FROM artifacts WHERE id = ?').get(artifactId) as Record<string, unknown>;
-      expect(row.committed).toBe(1);
+      // The DB row is GONE (snapshot succeeded → delete).
+      expect(db.prepare('SELECT * FROM artifacts WHERE id = ?').get(artifactId)).toBeUndefined();
 
-      // And a manifest exists on disk (under <projectRoot>/.cyboflow/artifacts).
-      const manifestPath = snapshotPathFor(commitDir, { id: artifactId, atype: 'ui-prototype' });
+      // Exactly one 'committed' event (same id, committed=true); NEVER 'deleted'.
+      const committedEvents = events.filter((e) => e.action === 'committed');
+      expect(committedEvents).toHaveLength(1);
+      expect(committedEvents[0].artifactId).toBe(artifactId);
+      expect(committedEvents[0].artifact?.committed).toBe(true);
+      expect(events.some((e) => e.action === 'deleted')).toBe(false);
+
+      // The v2 manifest + copied bytes exist under <projectRoot>/.cyboflow/artifacts.
+      const manifestPath = manifestPathFor(storeDir, 'run-1', 'ui-prototype');
       expect(existsSync(manifestPath)).toBe(true);
       const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as {
         schemaVersion: number;
         id: string;
-        runId: string;
-        atype: string;
-        label: string;
-        mode: string;
-        sourceRef: string | null;
-        payloadJson: unknown;
+        files: string[];
         committedAt: string | null;
       };
-      expect(manifest).toMatchObject({
-        schemaVersion: 1,
-        id: artifactId,
-        runId: 'run-1',
-        atype: 'ui-prototype',
-        label: 'live preview',
-        mode: 'canvas',
-        sourceRef: null,
-      });
-      expect(manifest.payloadJson).toEqual({ url: 'http://localhost:8081' });
+      expect(manifest.schemaVersion).toBe(2);
+      expect(manifest.id).toBe(artifactId);
+      expect(manifest.files).toEqual(['prototype/index.html']);
       expect(manifest.committedAt).not.toBeNull();
+      expect(
+        existsSync(join(snapshotDirFor(storeDir, 'run-1', 'ui-prototype'), 'files', 'prototype', 'index.html')),
+      ).toBe(true);
     } finally {
       rmSync(projectRoot, { recursive: true, force: true });
+      rmSync(runArtifacts, { recursive: true, force: true });
     }
   });
 
-  it('a snapshot write failure does NOT fail the commit (row stays committed=1, fail-soft)', async () => {
+  it('a snapshot write failure does NOT fail the commit and KEEPS committed=1 (fail-soft, no delete)', async () => {
     const db = buildDb();
     // Resolve a commit dir that cannot be created: a path *under* a regular FILE,
-    // so mkdir -p underneath fails.
+    // so mkdir -p underneath fails and the snapshot returns null.
     const base = mkdtempSync(join(tmpdir(), 'artifact-router-bad-'));
     const fileAsRoot = join(base, 'regular-file');
     writeFileSync(fileAsRoot, 'x', 'utf-8');
@@ -537,12 +559,12 @@ describe('ArtifactRouter', () => {
       await expect(router.apply(1, { op: 'commit', artifactId, actor: 'user' })).resolves.toMatchObject({
         artifactId,
       });
+      // Snapshot failed → the committed=1 row is KEPT (never lost), never deleted.
       const row = db.prepare('SELECT committed FROM artifacts WHERE id = ?').get(artifactId) as {
         committed: number;
       };
       expect(row.committed).toBe(1);
-      // No manifest was written.
-      expect(existsSync(snapshotPathFor(unwritableDir, { id: artifactId, atype: 'generic' }))).toBe(false);
+      expect(existsSync(manifestPathFor(unwritableDir, 'run-1', 'generic'))).toBe(false);
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
@@ -591,20 +613,20 @@ describe('ArtifactRouter', () => {
     // workflow_runs.worktree_path is NULL is exactly what guarantees the snapshot
     // survives the worktree being torn down on Dismiss — the bug this fixed.
     const db = buildDb();
-    const commitDir = mkdtempSync(join(tmpdir(), 'artifact-router-nowt-'));
+    const storeDir = mkdtempSync(join(tmpdir(), 'artifact-router-nowt-'));
     try {
       seedRun(db, 'run-1'); // seedRun leaves worktree_path NULL on purpose
-      const router = ArtifactRouter.initialize(dbAdapter(db), undefined, () => commitDir);
+      const router = ArtifactRouter.initialize(dbAdapter(db), undefined, () => storeDir);
       const { artifactId } = await router.apply(1, {
         op: 'create', runId: 'run-1', atype: 'generic', label: 'g', payloadJson: '{"url":"http://x"}', actor: 'user',
       });
       await expect(router.apply(1, { op: 'commit', artifactId, actor: 'user' })).resolves.toMatchObject({ artifactId });
-      const row = db.prepare('SELECT committed FROM artifacts WHERE id = ?').get(artifactId) as { committed: number };
-      expect(row.committed).toBe(1);
-      // Manifest written under the resolver's dir despite the NULL worktree_path.
-      expect(existsSync(snapshotPathFor(commitDir, { id: artifactId, atype: 'generic' }))).toBe(true);
+      // Snapshot succeeded (url-only generic → manifest, no bytes) → DB row deleted.
+      expect(db.prepare('SELECT * FROM artifacts WHERE id = ?').get(artifactId)).toBeUndefined();
+      // Manifest written under the store despite the NULL worktree_path.
+      expect(existsSync(manifestPathFor(storeDir, 'run-1', 'generic'))).toBe(true);
     } finally {
-      rmSync(commitDir, { recursive: true, force: true });
+      rmSync(storeDir, { recursive: true, force: true });
     }
   });
 
@@ -904,5 +926,203 @@ describe('ArtifactRouter', () => {
       }),
     ).rejects.toMatchObject({ code: 'not_verified' });
     expect(called).toBe(false);
+  });
+
+  // --- IDEA-039: read-model union, reap, supersede, accept-off-snapshot --------
+
+  /** Wire a router with a real on-disk commit store + run-artifacts dir. */
+  function wireLifecycleRouter(db: Database.Database): {
+    router: ArtifactRouter;
+    storeDir: string;
+    runArtifacts: string;
+    cleanup: () => void;
+  } {
+    const projectRoot = mkdtempSync(join(tmpdir(), 'artifact-life-proj-'));
+    const runArtifacts = mkdtempSync(join(tmpdir(), 'artifact-life-run-'));
+    const storeDir = resolveArtifactCommitDir(projectRoot, '.cyboflow/artifacts');
+    const router = ArtifactRouter.initialize(
+      dbAdapter(db),
+      undefined,
+      () => storeDir,
+      undefined,
+      () => runArtifacts,
+    );
+    return {
+      router,
+      storeDir,
+      runArtifacts,
+      cleanup: () => {
+        rmSync(projectRoot, { recursive: true, force: true });
+        rmSync(runArtifacts, { recursive: true, force: true });
+      },
+    };
+  }
+
+  it('listForRun unions DB rows + committed snapshots (DB wins); committed filter true/false/undefined', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const { router, cleanup } = wireLifecycleRouter(db);
+    try {
+      // Uncommitted DB row (idea-spec) + a committed-then-snapshotted generic.
+      await router.apply(1, { op: 'create', runId: 'run-1', atype: 'idea-spec', label: 'idea', actor: 'orchestrator' });
+      const gen = await router.apply(1, {
+        op: 'create', runId: 'run-1', atype: 'generic', label: 'g', payloadJson: '{"url":"http://x"}', actor: 'user',
+      });
+      await router.apply(1, { op: 'commit', artifactId: gen.artifactId, actor: 'user' });
+      // The generic DB row is gone; it now lives only as a snapshot.
+      expect(db.prepare('SELECT * FROM artifacts WHERE id = ?').get(gen.artifactId)).toBeUndefined();
+
+      const full = await router.listForRun(1, 'run-1');
+      expect(full.map((a) => a.atype).sort()).toEqual(['generic', 'idea-spec']);
+      expect(full.find((a) => a.atype === 'generic')?.committed).toBe(true);
+      expect(full.find((a) => a.atype === 'idea-spec')?.committed).toBe(false);
+
+      const committedOnly = await router.listForRun(1, 'run-1', true);
+      expect(committedOnly.map((a) => a.atype)).toEqual(['generic']);
+
+      const uncommittedOnly = await router.listForRun(1, 'run-1', false);
+      expect(uncommittedOnly.map((a) => a.atype)).toEqual(['idea-spec']);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('listForRun: a re-report after a committed snapshot supersedes it (DB row wins the identity dedup)', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const { router, cleanup } = wireLifecycleRouter(db);
+    try {
+      const gen = await router.apply(1, {
+        op: 'create', runId: 'run-1', atype: 'generic', label: 'v1', payloadJson: '{"url":"http://x"}', actor: 'user',
+      });
+      await router.apply(1, { op: 'commit', artifactId: gen.artifactId, actor: 'user' });
+      // A revise re-report mints a FRESH committed=0 DB row (same run,atype).
+      const revised = await router.apply(1, {
+        op: 'create', runId: 'run-1', atype: 'generic', label: 'v2', payloadJson: '{"url":"http://y"}', actor: 'user',
+      });
+      expect(revised.artifactId).not.toBe(gen.artifactId);
+
+      const list = await router.listForRun(1, 'run-1');
+      // One 'generic' entry — the live DB row wins over the committed snapshot.
+      expect(list.filter((a) => a.atype === 'generic')).toHaveLength(1);
+      const g = list.find((a) => a.atype === 'generic');
+      expect(g?.label).toBe('v2');
+      expect(g?.committed).toBe(false);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('listForSession unions across the session\'s runs (DB rows + snapshots)', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-a', 'sess-1');
+    seedRun(db, 'run-b', 'sess-1');
+    seedRun(db, 'run-other', 'sess-2');
+    const { router, cleanup } = wireLifecycleRouter(db);
+    try {
+      await router.apply(1, { op: 'create', runId: 'run-a', atype: 'idea-spec', label: 'a', actor: 'orchestrator' });
+      const g = await router.apply(1, {
+        op: 'create', runId: 'run-b', atype: 'generic', label: 'b', payloadJson: '{"url":"http://x"}', actor: 'user',
+      });
+      await router.apply(1, { op: 'commit', artifactId: g.artifactId, actor: 'user' });
+      await router.apply(1, { op: 'create', runId: 'run-other', atype: 'idea-spec', label: 'other', actor: 'orchestrator' });
+
+      const list = await router.listForSession(1, 'sess-1');
+      expect(list.map((a) => a.runId).sort()).toEqual(['run-a', 'run-b']);
+      expect(list.find((a) => a.runId === 'run-b')?.committed).toBe(true);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('getById resolves a committed artifact from its snapshot after the DB row is deleted', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const { router, cleanup } = wireLifecycleRouter(db);
+    try {
+      const gen = await router.apply(1, {
+        op: 'create', runId: 'run-1', atype: 'generic', label: 'g', payloadJson: '{"url":"http://x"}', actor: 'user',
+      });
+      await router.apply(1, { op: 'commit', artifactId: gen.artifactId, actor: 'user' });
+      expect(db.prepare('SELECT * FROM artifacts WHERE id = ?').get(gen.artifactId)).toBeUndefined();
+
+      // No runId/atype hints → cannot resolve the snapshot.
+      expect(await router.getById(gen.artifactId)).toBeNull();
+      // With hints → resolves from the snapshot manifest.
+      const a = await router.getById(gen.artifactId, 'run-1', 'generic');
+      expect(a?.id).toBe(gen.artifactId);
+      expect(a?.committed).toBe(true);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('reapForRun deletes committed=0 rows + fs-removes the run subtree; committed snapshots survive', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const { router, storeDir, runArtifacts, cleanup } = wireLifecycleRouter(db);
+    try {
+      seedRunArtifacts(runArtifacts);
+      // One uncommitted + one committed (snapshotted, DB row deleted).
+      const ephemeral = await router.apply(1, { op: 'create', runId: 'run-1', atype: 'idea-spec', label: 'idea', actor: 'orchestrator' });
+      const gen = await router.apply(1, {
+        op: 'create', runId: 'run-1', atype: 'generic', label: 'g', payloadJson: '{"url":"http://x"}', actor: 'user',
+      });
+      await router.apply(1, { op: 'commit', artifactId: gen.artifactId, actor: 'user' });
+
+      const events: ArtifactChangedEvent[] = [];
+      artifactChangeEvents.on(artifactProjectChannel(1), (e: ArtifactChangedEvent) => events.push(e));
+
+      const { deleted } = await router.reapForRun(1, 'run-1');
+      expect(deleted).toEqual([ephemeral.artifactId]);
+      expect(events.some((e) => e.action === 'deleted' && e.artifactId === ephemeral.artifactId)).toBe(true);
+      // The uncommitted DB row is gone; the run subtree was removed.
+      expect(db.prepare('SELECT COUNT(*) AS n FROM artifacts').get()).toMatchObject({ n: 0 });
+      expect(existsSync(runArtifacts)).toBe(false);
+      // The committed snapshot survives the reap (it lives in the project-root store).
+      expect(await loadCommittedSnapshot(storeDir, 'run-1', 'generic')).not.toBeNull();
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('accept-baseline resolves the verdict off the committed snapshot manifest (DB row deleted)', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const projectRoot = mkdtempSync(join(tmpdir(), 'artifact-accept-proj-'));
+    const runArtifacts = mkdtempSync(join(tmpdir(), 'artifact-accept-run-'));
+    const storeDir = resolveArtifactCommitDir(projectRoot, '.cyboflow/artifacts');
+    // The captured PNGs must exist under the run artifacts dir for the byte copy.
+    writeFileSync(join(runArtifacts, 'desktop.png'), 'PNG', 'utf-8');
+    const acceptCalls: Array<{ baselineKey: string; fileNames: string[] }> = [];
+    const router = ArtifactRouter.initialize(
+      dbAdapter(db),
+      undefined,
+      () => storeDir,
+      async ({ baselineKey, fileNames }) => { acceptCalls.push({ baselineKey, fileNames }); return { baselineKey }; },
+      () => runArtifacts,
+    );
+    try {
+      const payload: ScreenshotsArtifactPayload = {
+        fileNames: ['desktop.png'],
+        verdict: passVerdict({ judgedFileNames: ['desktop.png'], baselineKey: 'home' }),
+      };
+      const { artifactId } = await router.apply(1, {
+        op: 'create', runId: 'run-1', atype: 'screenshots', label: 's',
+        payloadJson: JSON.stringify(payload), actor: 'orchestrator',
+      });
+      // Commit → DB row deleted, only the snapshot manifest remains.
+      await router.apply(1, { op: 'commit', artifactId, actor: 'user' });
+      expect(db.prepare('SELECT * FROM artifacts WHERE id = ?').get(artifactId)).toBeUndefined();
+
+      const res = await router.acceptAsBaseline(1, {
+        op: 'accept-baseline', runId: 'run-1', baselineKey: 'home', fileNames: ['desktop.png'], actor: 'user',
+      });
+      expect(res).toEqual({ baselineKey: 'home' });
+      expect(acceptCalls).toEqual([{ baselineKey: 'home', fileNames: ['desktop.png'] }]);
+    } finally {
+      rmSync(projectRoot, { recursive: true, force: true });
+      rmSync(runArtifacts, { recursive: true, force: true });
+    }
   });
 });

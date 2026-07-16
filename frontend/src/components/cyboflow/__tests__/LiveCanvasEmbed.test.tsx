@@ -1,13 +1,20 @@
 /**
- * LiveCanvasEmbed tests — the ui-prototype live-canvas iframe.
+ * LiveCanvasEmbed tests — the ui-prototype / generic canvas embed (dual-path).
  *
- * Verifies: localhost URLs render a sandboxed iframe; non-localhost URLs are
- * refused; reload re-keys the iframe; and the isLocalhostUrl allowlist.
+ * Verifies:
+ *   - HTML branch (static mockup): srcDoc + a BARE `sandbox=""` (no allow-scripts,
+ *     no allow-same-origin) + the shared CSP `csp` attribute + `referrerPolicy`,
+ *     and NO toolbar/footer. jsdom cannot ENFORCE the sandbox/CSP — these assert
+ *     the attributes are present; real enforcement is an Electron-level check.
+ *   - URL branch (legacy live canvas): localhost URLs render an allow-scripts
+ *     iframe; non-localhost URLs are refused; reload re-keys the iframe.
+ *   - the isLocalhostUrl allowlist.
  */
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import { LiveCanvasEmbed, isLocalhostUrl } from '../LiveCanvasEmbed';
+import { ARTIFACT_PROTOTYPE_CSP } from '../../../../../shared/types/artifacts';
 
 describe('isLocalhostUrl', () => {
   it('accepts http(s) localhost hosts on a non-shell port', () => {
@@ -40,18 +47,45 @@ describe('isLocalhostUrl', () => {
   });
 });
 
-describe('LiveCanvasEmbed', () => {
-  it('renders a sandboxed iframe for a localhost URL', () => {
-    render(<LiveCanvasEmbed url="http://localhost:8081" />);
+describe('LiveCanvasEmbed — html branch (static mockup)', () => {
+  const DOC = '<html><head></head><body><h1>Mockup</h1></body></html>';
+
+  it('renders a bare-sandbox srcDoc iframe with the shared CSP + no-referrer', () => {
+    render(<LiveCanvasEmbed html={DOC} />);
+    const iframe = screen.getByTestId('live-canvas-iframe');
+    // srcDoc carries the document inline (NOT a cross-origin src).
+    expect(iframe).toHaveAttribute('srcdoc', DOC);
+    expect(iframe).not.toHaveAttribute('src');
+    // SECURITY: sandbox is BARE — the empty string, NOT "allow-scripts …".
+    expect(iframe.getAttribute('sandbox')).toBe('');
+    expect(iframe.getAttribute('sandbox')).not.toContain('allow-scripts');
+    expect(iframe.getAttribute('sandbox')).not.toContain('allow-same-origin');
+    // Belt-and-braces CSP + referrer policy.
+    expect(iframe).toHaveAttribute('csp', ARTIFACT_PROTOTYPE_CSP);
+    expect(iframe).toHaveAttribute('referrerpolicy', 'no-referrer');
+  });
+
+  it('renders NO reload/open toolbar and NO server-down footer for the html branch', () => {
+    render(<LiveCanvasEmbed html={DOC} />);
+    expect(screen.queryByTestId('live-canvas-reload')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('live-canvas-open')).not.toBeInTheDocument();
+    expect(screen.queryByText(/dev server may not be running/i)).not.toBeInTheDocument();
+  });
+});
+
+describe('LiveCanvasEmbed — url branch (legacy live canvas)', () => {
+  it('renders a sandboxed iframe for a localhost URL (allow-scripts unchanged)', () => {
+    render(<LiveCanvasEmbed url="http://localhost:8081" interactive />);
     const iframe = screen.getByTestId('live-canvas-iframe');
     expect(iframe).toHaveAttribute('src', 'http://localhost:8081');
-    // Cross-origin-safe sandbox: scripts run, but no top-nav/popups.
+    // Legacy cross-origin-safe sandbox is UNCHANGED.
     expect(iframe.getAttribute('sandbox')).toBe('allow-scripts allow-same-origin allow-forms');
+    expect(iframe).not.toHaveAttribute('srcdoc');
     expect(screen.getByTestId('live-canvas-open')).toHaveAttribute('href', 'http://localhost:8081');
   });
 
   it('refuses a non-localhost URL (no iframe)', () => {
-    render(<LiveCanvasEmbed url="https://evil.example.com" />);
+    render(<LiveCanvasEmbed url="https://evil.example.com" interactive />);
     expect(screen.getByTestId('live-canvas-blocked')).toBeInTheDocument();
     expect(screen.queryByTestId('live-canvas-iframe')).not.toBeInTheDocument();
   });
@@ -60,7 +94,7 @@ describe('LiveCanvasEmbed', () => {
     const hiddenSpy = vi.spyOn(document, 'hidden', 'get');
     hiddenSpy.mockReturnValue(false);
     try {
-      render(<LiveCanvasEmbed url="http://localhost:8081" />);
+      render(<LiveCanvasEmbed url="http://localhost:8081" interactive />);
       // Visible: the live URL is loaded.
       expect(screen.getByTestId('live-canvas-iframe')).toHaveAttribute('src', 'http://localhost:8081');
 
@@ -85,7 +119,7 @@ describe('LiveCanvasEmbed', () => {
   });
 
   it('reload re-keys the iframe (remounts to refetch)', () => {
-    render(<LiveCanvasEmbed url="http://localhost:8081" />);
+    render(<LiveCanvasEmbed url="http://localhost:8081" interactive />);
     const before = screen.getByTestId('live-canvas-iframe');
     fireEvent.click(screen.getByTestId('live-canvas-reload'));
     const after = screen.getByTestId('live-canvas-iframe');

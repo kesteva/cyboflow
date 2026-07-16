@@ -16,14 +16,27 @@
  * first / the actor is never 'linear'). Only not_found / invalid_atype /
  * already_committed are reachable, and are covered below.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, mkdtempSync, rmSync, symlinkSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import * as os from 'node:os';
 import type * as net from 'net';
+
+// The ui-prototype content-blesser (validatePrototypeFile) reads the run's on-disk
+// artifacts dir via getCyboflowSubdirectory; point it at a per-test tmp dir so the
+// prototype-file validation hits real bytes without Electron app paths. Only the
+// report/commit handlers are exercised here, none of which touch this util other
+// than validatePrototypeFile, so mocking it file-wide is safe.
+let cyboflowTmpRoot = '';
+vi.mock('../../../utils/cyboflowDirectory', () => ({
+  getCyboflowSubdirectory: (...sub: string[]) => join(cyboflowTmpRoot, ...sub),
+}));
+
 import { McpQueryHandler, type McpQueryMessage, type McpQueryResponse } from '../mcpQueryHandler';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { ArtifactRouter, artifactChangeEvents } from '../../artifactRouter';
+import { PROTOTYPE_HTML_RELPATH, MAX_PROTOTYPE_HTML_BYTES } from '../../../../../shared/types/artifacts';
 import type { ArtifactType } from '../../../../../shared/types/artifacts';
 
 function makeSocketDouble(): { socket: net.Socket; writes: string[] } {
@@ -100,6 +113,7 @@ describe('McpQueryHandler artifact handlers', () => {
   let handler: McpQueryHandler;
 
   beforeEach(() => {
+    cyboflowTmpRoot = mkdtempSync(join(os.tmpdir(), 'cyboflow-mcp-proto-'));
     db = buildDb();
     ArtifactRouter.initialize(dbAdapter(db));
     handler = new McpQueryHandler(dbAdapter(db));
@@ -109,7 +123,16 @@ describe('McpQueryHandler artifact handlers', () => {
     ArtifactRouter._resetForTesting();
     artifactChangeEvents.removeAllListeners();
     db.close();
+    if (cyboflowTmpRoot) rmSync(cyboflowTmpRoot, { recursive: true, force: true });
   });
+
+  /** Write the run's canonical prototype/index.html under the mocked artifacts dir. */
+  function writeRunPrototype(runId: string, contents: string): string {
+    const file = join(cyboflowTmpRoot, 'artifacts', 'runs', runId, ...PROTOTYPE_HTML_RELPATH.split('/'));
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, contents, 'utf-8');
+    return file;
+  }
 
   // -------------------------------------------------------------------------
   // report-artifact
@@ -230,6 +253,91 @@ describe('McpQueryHandler artifact handlers', () => {
       const res = parseLastWrite(writes);
       expect(res.ok).toBe(false);
       expect(res.error).toBe('run_not_active');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // report-artifact content-blesser (Approach C — static ui-prototype mockup)
+  // -------------------------------------------------------------------------
+
+  describe('mcp-report-artifact content-blesser (ui-prototype/generic)', () => {
+    /** Report a ui-prototype/generic artifact and return the parsed response. */
+    async function report(
+      runId: string,
+      atype: 'ui-prototype' | 'generic',
+      payloadJson?: string,
+    ): Promise<McpQueryResponse> {
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        { type: 'mcp-report-artifact', requestId: 'p-1', runId, atype, label: 'mockup', ...(payloadJson !== undefined ? { payloadJson } : {}) },
+        socket,
+      );
+      return parseLastWrite(writes);
+    }
+
+    it('valid ui-prototype: mints the canonical {fileName} payload, discarding the agent-sent payload', async () => {
+      seedRun(db, 'run-1');
+      writeRunPrototype('run-1', '<html><head></head><body>mock</body></html>');
+      const res = await report('run-1', 'ui-prototype', JSON.stringify({ fileName: 'whatever-agent-claimed.html', extra: 1 }));
+      expect(res.ok).toBe(true);
+      const { artifactId } = res.data as { artifactId: string };
+      const row = artifactRow(db, artifactId)!;
+      expect(row.payload_json).toBe(JSON.stringify({ fileName: PROTOTYPE_HTML_RELPATH }));
+    });
+
+    it('rejects a ui-prototype payload carrying inline html (invalid_payload)', async () => {
+      seedRun(db, 'run-1');
+      writeRunPrototype('run-1', '<html><head></head><body>mock</body></html>');
+      const res = await report('run-1', 'ui-prototype', JSON.stringify({ html: '<h1>inline</h1>' }));
+      expect(res.ok).toBe(false);
+      expect(res.error).toMatch(/^invalid_payload: /);
+      expect(res.error).toContain("inline 'html'");
+      expect((db.prepare('SELECT COUNT(*) AS n FROM artifacts').get() as { n: number }).n).toBe(0);
+    });
+
+    it('rejects a generic payload carrying inline html (invalid_payload)', async () => {
+      seedRun(db, 'run-1');
+      const res = await report('run-1', 'generic', JSON.stringify({ html: '<h1>x</h1>' }));
+      expect(res.ok).toBe(false);
+      expect(res.error).toMatch(/^invalid_payload: /);
+      expect((db.prepare('SELECT COUNT(*) AS n FROM artifacts').get() as { n: number }).n).toBe(0);
+    });
+
+    it('generic without html: passes through the {url} payload verbatim (no file validation)', async () => {
+      seedRun(db, 'run-1');
+      const url = 'http://localhost:5173';
+      const res = await report('run-1', 'generic', JSON.stringify({ url }));
+      expect(res.ok).toBe(true);
+      const { artifactId } = res.data as { artifactId: string };
+      expect(artifactRow(db, artifactId)!.payload_json).toBe(JSON.stringify({ url }));
+    });
+
+    it('ui-prototype with a missing file: rejects (prototype_missing)', async () => {
+      seedRun(db, 'run-1');
+      const res = await report('run-1', 'ui-prototype');
+      expect(res.ok).toBe(false);
+      expect(res.error).toMatch(/^invalid_payload: prototype_missing/);
+      expect((db.prepare('SELECT COUNT(*) AS n FROM artifacts').get() as { n: number }).n).toBe(0);
+    });
+
+    it('ui-prototype whose index.html is a symlink: rejects (prototype_invalid)', async () => {
+      seedRun(db, 'run-1');
+      const outside = join(cyboflowTmpRoot, 'evil.html');
+      writeFileSync(outside, '<html><body>evil</body></html>', 'utf-8');
+      const file = join(cyboflowTmpRoot, 'artifacts', 'runs', 'run-1', ...PROTOTYPE_HTML_RELPATH.split('/'));
+      mkdirSync(dirname(file), { recursive: true });
+      symlinkSync(outside, file);
+      const res = await report('run-1', 'ui-prototype');
+      expect(res.ok).toBe(false);
+      expect(res.error).toMatch(/^invalid_payload: prototype_invalid/);
+    });
+
+    it('ui-prototype over the size ceiling: rejects (prototype_too_large)', async () => {
+      seedRun(db, 'run-1');
+      writeRunPrototype('run-1', 'x'.repeat(MAX_PROTOTYPE_HTML_BYTES + 1));
+      const res = await report('run-1', 'ui-prototype');
+      expect(res.ok).toBe(false);
+      expect(res.error).toMatch(/^invalid_payload: prototype_too_large/);
     });
   });
 

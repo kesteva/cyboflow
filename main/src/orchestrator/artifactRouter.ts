@@ -18,9 +18,15 @@
  */
 import { EventEmitter } from 'node:events';
 import { randomBytes } from 'node:crypto';
+import * as fs from 'fs/promises';
 import PQueue from 'p-queue';
 import type { DatabaseLike, LoggerLike } from './types';
-import { snapshotCommittedArtifact } from './artifactSnapshot';
+import {
+  snapshotCommittedArtifact,
+  listCommittedSnapshots,
+  loadCommittedSnapshot,
+  snapshotManifestToArtifact,
+} from './artifactSnapshot';
 
 /**
  * Resolves the FINAL on-disk commit directory for a just-committed artifact,
@@ -32,6 +38,17 @@ import { snapshotCommittedArtifact } from './artifactSnapshot';
  * resolution failed, or — in unit tests — no resolver was wired).
  */
 export type ArtifactCommitDirResolver = (projectId: number) => string | null;
+
+/**
+ * Resolves the on-disk artifacts SUBTREE for a run (`CYBOFLOW_DIR/artifacts/
+ * runs/<runId>`) — the source of committed bytes on snapshot, and the tree
+ * `reapForRun` removes on merge / create-PR close-out. Injected at initialize()
+ * time from main/src/index.ts as a closure over `getCyboflowSubdirectory` — kept
+ * a plain callback so the router never imports the electron-backed cyboflow
+ * directory util (standalone-typecheck invariant). Returns null to SKIP (no
+ * resolver wired in unit tests, or the path can't be resolved).
+ */
+export type RunArtifactsDirResolver = (runId: string) => string | null;
 
 /**
  * S5 — the injected committer for the Accept-as-baseline op. The fs-copy (run
@@ -91,6 +108,14 @@ export type ArtifactErrorCode =
   | 'already_committed'
   | 'run_not_found'
   | 'wrong_project'
+  /**
+   * The report-handler content-blesser rejected a `ui-prototype`/`generic`
+   * payload: an inline `html` key was supplied (never stored — the mockup is an
+   * on-disk file), or a `ui-prototype`'s on-disk `prototype/index.html` was
+   * missing / not a regular file / a symlink escape / over the size ceiling.
+   * A BAD-REQUEST-domain code the MCP report tool surfaces to the producing agent.
+   */
+  | 'invalid_payload'
   /**
    * S5 server-side accept-baseline gate (trust-boundary fix): the screenshots
    * artifact exists but does NOT authorize accepting the requested fileNames as
@@ -232,6 +257,7 @@ export class ArtifactRouter {
     private readonly logger?: LoggerLike,
     private readonly resolveCommitDir?: ArtifactCommitDirResolver,
     private readonly acceptBaseline?: BaselineAcceptor,
+    private readonly resolveRunArtifactsDir?: RunArtifactsDirResolver,
   ) {}
 
   static initialize(
@@ -239,8 +265,15 @@ export class ArtifactRouter {
     logger?: LoggerLike,
     resolveCommitDir?: ArtifactCommitDirResolver,
     acceptBaseline?: BaselineAcceptor,
+    resolveRunArtifactsDir?: RunArtifactsDirResolver,
   ): ArtifactRouter {
-    ArtifactRouter.instance = new ArtifactRouter(db, logger, resolveCommitDir, acceptBaseline);
+    ArtifactRouter.instance = new ArtifactRouter(
+      db,
+      logger,
+      resolveCommitDir,
+      acceptBaseline,
+      resolveRunArtifactsDir,
+    );
     return ArtifactRouter.instance;
   }
 
@@ -327,6 +360,139 @@ export class ArtifactRouter {
       }
       return { deleted: rows.map((r) => r.id) };
     }) as Promise<{ deleted: string[] }>;
+  }
+
+  /**
+   * Reap a run's UNCOMMITTED artifacts on close-out (IDEA-039). Called on MERGE
+   * and create-PR ONLY (never plain dismiss — a dismiss-without-merge leaks by
+   * design). Two parts: (a) delete the run's committed=0 DB rows via
+   * pruneSessionOnly (emits 'deleted' per row); (b) `fs.rm` the run's on-disk
+   * artifacts subtree (`CYBOFLOW_DIR/artifacts/runs/<runId>`) via the injected
+   * `resolveRunArtifactsDir`. Committed snapshots live OUTSIDE that subtree (in
+   * the project-root commit store) and survive. Fail-soft on the fs step — a
+   * disk error never fails the close-out.
+   */
+  async reapForRun(projectId: number, runId: string): Promise<{ deleted: string[] }> {
+    const { deleted } = await this.pruneSessionOnly(projectId, [runId]);
+    const dir = this.resolveRunArtifactsDir?.(runId) ?? null;
+    if (dir) {
+      try {
+        await fs.rm(dir, { recursive: true, force: true });
+      } catch (err) {
+        const msg = `[artifactRouter] reapForRun fs cleanup for run ${runId} failed (fail-soft): ${
+          err instanceof Error ? err.message : String(err)
+        }`;
+        if (this.logger) this.logger.warn(msg, { runId, projectId });
+        else console.warn(msg);
+      }
+    }
+    return { deleted };
+  }
+
+  // ------------------------------------------------------------------------
+  // Read model — DB rows UNION committed snapshots (IDEA-039)
+  // ------------------------------------------------------------------------
+
+  /**
+   * Identity key for the read-union dedup. Non-per-entity atypes are
+   * one-per-(run, atype); per-entity atypes (idea-spec) additionally key on
+   * source_ref — mirroring the create-identity rule so the union never
+   * double-counts a re-report across the DB/snapshot halves.
+   */
+  private static identityKey(a: Pick<Artifact, 'runId' | 'atype' | 'sourceRef'>): string {
+    const perEntity = isPerEntityArtifact(a.atype) ? a.sourceRef ?? '' : '';
+    return `${a.runId} ${a.atype} ${perEntity}`;
+  }
+
+  /**
+   * The full read UNION for a set of runs: all live DB rows (committed=0 AND
+   * legacy committed=1) plus committed snapshots read back from the store,
+   * deduped by identity with the DB row WINNING. Snapshots are only read when
+   * `includeSnapshots` (skipped for the committed===false fast path). `storeDir`
+   * null (no resolver wired) degrades to DB-only.
+   */
+  private async readUnion(
+    storeDir: string | null,
+    runIds: string[],
+    includeSnapshots: boolean,
+  ): Promise<Artifact[]> {
+    if (runIds.length === 0) return [];
+    const placeholders = runIds.map(() => '?').join(', ');
+    const dbRows = this.db
+      .prepare(`SELECT * FROM artifacts WHERE run_id IN (${placeholders})`)
+      .all(...runIds) as ArtifactDbRow[];
+    const byIdentity = new Map<string, Artifact>();
+    const result: Artifact[] = [];
+    for (const row of dbRows) {
+      const a = ArtifactRouter.shapeRow(row);
+      byIdentity.set(ArtifactRouter.identityKey(a), a);
+      result.push(a);
+    }
+    if (includeSnapshots && storeDir) {
+      const runSet = new Set(runIds);
+      for (const runId of runIds) {
+        const manifests = await listCommittedSnapshots(storeDir, runId);
+        for (const m of manifests) {
+          if (!runSet.has(m.runId)) continue;
+          const a = snapshotManifestToArtifact(m);
+          const key = ArtifactRouter.identityKey(a);
+          if (byIdentity.has(key)) continue; // DB row wins
+          byIdentity.set(key, a);
+          result.push(a);
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
+   * List a run's artifacts as the DB-UNION-snapshot read model.
+   * `committed===undefined` → full union; `true` → committed things only
+   * (snapshots + legacy committed=1 DB rows); `false` → committed=0 DB rows only.
+   */
+  async listForRun(projectId: number, runId: string, committed?: boolean): Promise<Artifact[]> {
+    const storeDir = this.resolveCommitDir?.(projectId) ?? null;
+    const union = await this.readUnion(storeDir, [runId], committed !== false);
+    if (committed === undefined) return union;
+    return union.filter((a) => a.committed === committed);
+  }
+
+  /**
+   * List all runs of a session, unioned: every run's DB rows + committed
+   * snapshots, same identity dedup (DB wins). Returns the full union (both
+   * committed and uncommitted).
+   */
+  async listForSession(projectId: number, sessionId: string): Promise<Artifact[]> {
+    const runRows = this.db
+      .prepare('SELECT id FROM workflow_runs WHERE session_id = ?')
+      .all(sessionId) as Array<{ id: string }>;
+    const runIds = runRows.map((r) => r.id);
+    if (runIds.length === 0) return [];
+    const storeDir = this.resolveCommitDir?.(projectId) ?? null;
+    return this.readUnion(storeDir, runIds, true);
+  }
+
+  /**
+   * Resolve one artifact by id: the live DB row first, else the committed
+   * snapshot for `(runId, atype)` (both required to resolve a committed
+   * artifact whose DB row was deleted on commit). Returns null when neither
+   * resolves. `resolveCommitDir` null / run gone → DB-only.
+   */
+  async getById(artifactId: string, runId?: string, atype?: string): Promise<Artifact | null> {
+    const row = this.db.prepare('SELECT * FROM artifacts WHERE id = ?').get(artifactId) as
+      | ArtifactDbRow
+      | undefined;
+    if (row) return ArtifactRouter.shapeRow(row);
+    if (!runId || !atype) return null;
+    const run = this.db
+      .prepare('SELECT project_id AS projectId FROM workflow_runs WHERE id = ?')
+      .get(runId) as { projectId: number } | undefined;
+    if (!run) return null;
+    const storeDir = this.resolveCommitDir?.(run.projectId) ?? null;
+    if (!storeDir) return null;
+    const m = await loadCommittedSnapshot(storeDir, runId, atype);
+    if (!m || m.id !== artifactId) return null;
+    return snapshotManifestToArtifact(m);
   }
 
   // ------------------------------------------------------------------------
@@ -531,6 +697,17 @@ export class ArtifactRouter {
     return { artifactId: change.artifactId, event: { id: eventId, seq: eventSeq } };
   }
 
+  /**
+   * Commit an artifact (IDEA-039 lifecycle). Ordering, all inside this serialized
+   * queue slot: (1) flip committed=1 in a txn — persist-first, so a committed
+   * artifact is NEVER lost even if the snapshot then fails; (2) snapshot durable
+   * content (manifest + on-disk bytes) into the commit store; (3) emit exactly
+   * ONE 'committed' event (snapshot-shaped when the snapshot succeeded, DB-row-
+   * shaped otherwise), NEVER 'deleted'; (4) DELETE the DB row IFF the snapshot
+   * succeeded — a committed snapshot is now the durable source of truth and the
+   * read model reads it back. On snapshot failure the committed=1 row is KEPT
+   * (legacy back-compat: it still surfaces via the DB half of the read union).
+   */
   private async runCommit(
     projectId: number,
     change: ArtifactCommit,
@@ -542,6 +719,7 @@ export class ArtifactRouter {
     let atype: ArtifactType = 'generic';
     let trueProject = projectId;
 
+    // (1) Flip committed=1 (persist-first).
     const txn = this.db.transaction(() => {
       const row = this.db.prepare('SELECT * FROM artifacts WHERE id = ?').get(change.artifactId) as
         | ArtifactDbRow
@@ -575,14 +753,33 @@ export class ArtifactRouter {
     });
     (txn as () => void)();
 
-    this.emitChange(trueProject, runId, change.artifactId, atype, 'committed', this.readById(change.artifactId));
+    // (2) Snapshot durable content (manifest + bytes). FAIL-SOFT: returns false
+    // when the snapshot did not complete, in which case the committed=1 row is kept.
+    const committedRow = this.db
+      .prepare('SELECT * FROM artifacts WHERE id = ?')
+      .get(change.artifactId) as ArtifactDbRow | undefined;
+    const snapshotOk = committedRow ? await this.maybeSnapshot(trueProject, committedRow) : false;
 
-    // Durability snapshot (FEATURE #3): now that committed=1 is persisted, mirror
-    // the committed row to disk under the CONFIGURED commit directory (resolved
-    // against the owning project's ROOT, so it survives a later teardown of the
-    // run's worktree AND a DELETE of the originating entity). Strictly OUTSIDE the
-    // txn and FAIL-SOFT — a disk error must never undo or block the commit.
-    await this.maybeSnapshot(trueProject, change.artifactId);
+    // (3) Emit exactly one 'committed' event — snapshot-shaped when durable,
+    // else the DB committed=1 row shape. NEVER 'deleted'.
+    let emitted: Artifact | null = committedRow ? ArtifactRouter.shapeRow(committedRow) : null;
+    if (snapshotOk) {
+      const storeDir = this.resolveCommitDir?.(trueProject) ?? null;
+      if (storeDir) {
+        const m = await loadCommittedSnapshot(storeDir, runId, atype).catch(() => null);
+        if (m) emitted = snapshotManifestToArtifact(m);
+      }
+    }
+    this.emitChange(trueProject, runId, change.artifactId, atype, 'committed', emitted);
+
+    // (4) Delete the DB row IFF the snapshot succeeded (its content is now durable
+    // on disk and the read model reads it back). Otherwise keep committed=1.
+    if (snapshotOk) {
+      const del = this.db.transaction(() => {
+        this.db.prepare('DELETE FROM artifacts WHERE id = ?').run(change.artifactId);
+      });
+      (del as () => void)();
+    }
 
     return { artifactId: change.artifactId, event: { id: eventId, seq: eventSeq } };
   }
@@ -632,11 +829,27 @@ export class ArtifactRouter {
         `run ${change.runId} belongs to project ${run.projectId}, not ${projectId}`,
       );
     }
-    // You only accept what was verified: a 'screenshots' artifact must exist for the run.
-    const shots = this.db
+    // You only accept what was verified: a 'screenshots' artifact must exist for
+    // the run. DB-row-first, then the committed snapshot manifest fallback — a
+    // committed screenshots artifact has NO DB row (deleted on commit under the
+    // IDEA-039 lifecycle), only an on-disk snapshot.
+    let shotsId: string | null = null;
+    let shotsPayloadJson: string | null = null;
+    const shotsRow = this.db
       .prepare("SELECT id, payload_json AS payloadJson FROM artifacts WHERE run_id = ? AND atype = 'screenshots'")
       .get(change.runId) as { id: string; payloadJson: string | null } | undefined;
-    if (!shots) {
+    if (shotsRow) {
+      shotsId = shotsRow.id;
+      shotsPayloadJson = shotsRow.payloadJson;
+    } else {
+      const storeDir = this.resolveCommitDir?.(projectId) ?? null;
+      const m = storeDir ? await loadCommittedSnapshot(storeDir, change.runId, 'screenshots') : null;
+      if (m) {
+        shotsId = m.id;
+        shotsPayloadJson = m.payloadJson == null ? null : JSON.stringify(m.payloadJson);
+      }
+    }
+    if (!shotsId) {
       throw new ArtifactError('not_found', `no screenshots artifact for run ${change.runId}`);
     }
 
@@ -647,9 +860,9 @@ export class ArtifactRouter {
     // "no verdict" rather than throwing, since a corrupt payload must never be
     // mistaken for an authorizing one.
     let payload: ScreenshotsArtifactPayload = {};
-    if (shots.payloadJson) {
+    if (shotsPayloadJson) {
       try {
-        payload = JSON.parse(shots.payloadJson) as ScreenshotsArtifactPayload;
+        payload = JSON.parse(shotsPayloadJson) as ScreenshotsArtifactPayload;
       } catch {
         payload = {};
       }
@@ -700,50 +913,57 @@ export class ArtifactRouter {
     // accept is visible in the entity_events log like every other artifact write.
     const now = new Date().toISOString();
     this.insertEvent(
-      shots.id,
+      shotsId,
       'accepted-baseline',
       change.actor,
       change.runId,
       [{ field: 'baselineKey', from: null, to: result.baselineKey }],
       now,
     );
-    this.emitChange(
-      projectId,
-      change.runId,
-      shots.id,
-      'screenshots',
-      'updated',
-      this.readById(shots.id),
-    );
+    // The DB row may be gone (committed screenshots → snapshot-only); emit the
+    // snapshot-shaped artifact in that case so the event carries a non-null shape.
+    let emitted = this.readById(shotsId);
+    if (!emitted) {
+      const storeDir = this.resolveCommitDir?.(projectId) ?? null;
+      const m = storeDir ? await loadCommittedSnapshot(storeDir, change.runId, 'screenshots') : null;
+      if (m) emitted = snapshotManifestToArtifact(m);
+    }
+    this.emitChange(projectId, change.runId, shotsId, 'screenshots', 'updated', emitted);
     return { baselineKey: result.baselineKey };
   }
 
   /**
-   * Best-effort on-disk snapshot of a just-committed artifact. Re-reads the full
-   * committed row, resolves the configured commit directory for the artifact's
-   * owning project via the injected `resolveCommitDir` callback, and writes the
-   * manifest via the (fail-soft, never-throwing) artifactSnapshot module.
+   * Best-effort on-disk snapshot of a just-committed artifact — manifest PLUS
+   * the atype's durable bytes. Resolves the commit store for the artifact's
+   * owning project via `resolveCommitDir` and the run's artifacts subtree (the
+   * bytes source) via `resolveRunArtifactsDir`, then delegates to the
+   * (fail-soft) artifactSnapshot module.
    *
-   * Skipped silently when no resolver is wired (unit tests) or the resolver
-   * returns null (project gone / resolution failed). FAIL-SOFT end to end: the
-   * commit is already persisted, so any error here is caught and logged, never
-   * thrown — a snapshot problem must not surface to the commit caller.
+   * Returns TRUE only when the snapshot completed (manifest written) — the
+   * runCommit caller gates the DB-row delete on this. Returns FALSE (snapshot
+   * skipped/failed → row kept committed=1) when no commit-dir resolver is wired
+   * (unit tests), the resolver returns null (project gone), or the disk write
+   * fails. FAIL-SOFT end to end: any error is caught and logged, never thrown.
    */
-  private async maybeSnapshot(projectId: number, artifactId: string): Promise<void> {
+  private async maybeSnapshot(projectId: number, row: ArtifactDbRow): Promise<boolean> {
     try {
-      const row = this.db.prepare('SELECT * FROM artifacts WHERE id = ?').get(artifactId) as
-        | ArtifactDbRow
-        | undefined;
-      if (!row) return;
       const commitDir = this.resolveCommitDir?.(projectId) ?? null;
-      if (!commitDir) return;
-      await snapshotCommittedArtifact(commitDir, row, this.logger);
+      if (!commitDir) return false;
+      const runArtifactsDir = this.resolveRunArtifactsDir?.(row.run_id) ?? null;
+      const manifestPath = await snapshotCommittedArtifact(
+        commitDir,
+        runArtifactsDir,
+        row,
+        this.logger,
+      );
+      return manifestPath !== null;
     } catch (err) {
-      const msg = `[artifactRouter] commit-dir snapshot for ${artifactId} failed (fail-soft): ${
+      const msg = `[artifactRouter] commit-dir snapshot for ${row.id} failed (fail-soft): ${
         err instanceof Error ? err.message : String(err)
       }`;
-      if (this.logger) this.logger.warn(msg, { artifactId, projectId });
+      if (this.logger) this.logger.warn(msg, { artifactId: row.id, projectId });
       else console.warn(msg);
+      return false;
     }
   }
 

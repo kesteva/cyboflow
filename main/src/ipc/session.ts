@@ -33,7 +33,6 @@ import { isPermissionMode, type PermissionMode } from '../../../shared/types/wor
 import { stampSessionRunsOutcome } from '../orchestrator/runRecovery';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
 import { selectSessionRunTokenTotals } from '../orchestrator/insightsQueries';
-import { pruneSessionOnlyArtifacts } from '../orchestrator/artifactLifecycle';
 import { isCliSubstrate } from '../../../shared/types/substrate';
 import { claudeRuntimeFromSubstrate, isAgentProvider, isSessionAgentRuntime } from '../../../shared/types/agentRuntime';
 import type { AgentProvider } from '../../../shared/types/agentRuntime';
@@ -1063,18 +1062,13 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         console.error(`[Main] Failed to cancel hosted runs for session ${sessionId}:`, cancelError);
       }
 
-      // Drop this session's session-only (uncommitted) run artifacts — the tabbed
-      // center pane's "session-only artifacts clear on close unless committed"
-      // contract. Runs are canceled first (above); committed artifacts persist.
-      // Fail-soft: a prune failure must never block the dismiss.
-      try {
-        await pruneSessionOnlyArtifacts(makeDatabaseLike(databaseService), sessionId, {
-          warn: (m, meta) => console.warn(m, meta),
-          debug: (m) => console.log(m),
-        });
-      } catch (pruneError) {
-        console.error(`[Main] Failed to prune session-only artifacts for session ${sessionId}:`, pruneError);
-      }
+      // NOTE (IDEA-039): the session-dismiss reap of uncommitted run artifacts was
+      // REMOVED here. The reap now runs ONLY on MERGE / create-PR close-out
+      // (ArtifactRouter.reapForRun, wired at the git.ts session-merge + create-PR
+      // seams and the legacy runs.merge/createPr seams). A dismiss-without-merge
+      // intentionally LEAKS the run's uncommitted artifacts (accepted product
+      // decision — no GC sweep). The UNRELATED `artifacts/<sessionId>` image-dir
+      // cleanup in the background cleanupCallback below is untouched.
 
       // Add a message to session output about archiving
       const timestamp = new Date().toLocaleTimeString();

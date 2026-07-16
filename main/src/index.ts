@@ -20,6 +20,7 @@ import { setTelemetrySink, setSeamErrorSink } from './orchestrator/telemetrySink
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { registerIpcHandlers } from './ipc';
 import { registerArtifactImageHandlers } from './ipc/artifactImages';
+import { registerArtifactHtmlHandlers } from './ipc/artifactHtml';
 import { setupEventListeners } from './events';
 import { AppServices } from './ipc/types';
 import { CliManagerFactory } from './services/cliManagerFactory';
@@ -1011,6 +1012,12 @@ async function initializeServices() {
       }
       return { baselineKey };
     },
+    // 5th arg (IDEA-039) — the run's on-disk artifacts subtree resolver. Source of
+    // committed bytes on snapshot AND the tree reapForRun removes on merge /
+    // create-PR close-out. A closure over the electron-backed getCyboflowSubdirectory
+    // (the router is electron-free, so the path is injected). Mirrors the
+    // resolveCommitDir closure above.
+    (runId: string) => getCyboflowSubdirectory('artifacts', 'runs', runId),
   );
 
   // Inject the run-artifacts-dir resolver the screenshots auto-mint scan reads —
@@ -2350,6 +2357,10 @@ async function initializeServices() {
   // FU4 — screenshots artifact gallery: serve on-disk PNGs from the run's
   // artifact image root (additive; mirrors the ideaAttachments handler).
   registerArtifactImageHandlers(ipcMain, services);
+  // IDEA-039 (Approach C) — static-mockup HTML loader: serve the canonical
+  // prototype/index.html for a ui-prototype/generic artifact (run subtree, else
+  // the committed snapshot store) with a restrictive CSP <meta> injected.
+  registerArtifactHtmlHandlers(ipcMain, services);
   // Then set up event listeners that may rely on initialized managers
   setupEventListeners(services, () => mainWindow);
   

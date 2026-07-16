@@ -58,12 +58,11 @@ export function ArtifactHeader({
     if (committing || artifact.committed) return;
     setCommitting(true);
     setCommitError(null);
+    // Commit takes only identity — the server snapshots durable content (manifest
+    // + on-disk bytes) keyed by (runId, atype) from its own source of truth, so
+    // the frontend no longer echoes payloadJson (IDEA-039). Server keeps it optional.
     trpc.cyboflow.artifacts.commit
-      .mutate({
-        projectId,
-        artifactId: artifact.id,
-        ...(artifact.payloadJson !== null ? { payloadJson: artifact.payloadJson } : {}),
-      })
+      .mutate({ projectId, artifactId: artifact.id })
       .then(
         () => {
           // The ArtifactChanged subscription flips committed -> badge updates;

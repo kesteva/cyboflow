@@ -1,26 +1,45 @@
 /**
- * LiveCanvasEmbed — embeds an agent-supplied localhost dev-server URL (the
- * ui-prototype / generic live-canvas artifact) in a sandboxed iframe.
+ * LiveCanvasEmbed — embeds a `ui-prototype` / `generic` artifact's body. It is
+ * DUAL-PATH, keyed by which prop the caller passes:
  *
- * Security: only localhost hostnames are embedded (the agent runs the dev server
- * in the run's worktree and reports its URL via cyboflow_report_artifact; the app
- * does NOT orchestrate the server). A non-local URL is refused with a notice.
+ *   - `{ html }`  → a self-contained STATIC mockup (Approach C). Rendered via
+ *     `<iframe srcDoc={html}>` with a BARE `sandbox=""` (NO `allow-scripts`, NO
+ *     `allow-same-origin` → opaque origin, no script execution, no parent/preload
+ *     reach) plus the shared `ARTIFACT_PROTOTYPE_CSP` as the iframe `csp`
+ *     attribute and `referrerPolicy="no-referrer"`. The same CSP is spliced into
+ *     the document as a `<head>` `<meta>` by the main `artifacts:load-html`
+ *     handler — belt-and-braces so a stripped attribute alone can't loosen it.
+ *     No toolbar, no "server may be down" footer (there is no server).
  *
- * The iframe uses `sandbox="allow-scripts allow-same-origin"`: a live prototype is
- * a real app and needs its own scripts. This is safe ONLY because the dev server
- * (e.g. localhost:8081) is a DIFFERENT ORIGIN from the cyboflow shell (different
- * port in dev, file:// in prod), so the frame is cross-origin and cannot reach
- * `window.parent` or rewrite its own sandbox; top-navigation/popups are NOT
- * granted. To keep that guarantee true even for an attacker-supplied URL,
- * `isLocalhostUrl` explicitly REJECTS the shell's own origin (host + port) — see
- * its doc — so a payload of e.g. `http://localhost:4521` (the dev shell origin)
- * can never render same-origin.
- *
- * Cross-origin load failures (server down) cannot be detected reliably from the
- * parent, so we surface a manual Reload + "Open in browser" + a hint rather than
- * a synthetic error state. Reload re-keys the iframe to force a fresh fetch.
+ *   - `{ url; interactive }` → a LEGACY localhost dev-server live canvas.
+ *     Only localhost hostnames are embedded (the agent runs the dev server in the
+ *     run's worktree and reports its URL via cyboflow_report_artifact; the app
+ *     does NOT orchestrate the server). A non-local URL is refused with a notice.
+ *     The iframe uses `sandbox="allow-scripts allow-same-origin"`: a live
+ *     prototype is a real app and needs its own scripts. This is safe ONLY
+ *     because the dev server (e.g. localhost:8081) is a DIFFERENT ORIGIN from the
+ *     cyboflow shell (different port in dev, file:// in prod), so the frame is
+ *     cross-origin and cannot reach `window.parent` or rewrite its own sandbox;
+ *     top-navigation/popups are NOT granted. To keep that guarantee true even for
+ *     an attacker-supplied URL, `isLocalhostUrl` explicitly REJECTS the shell's
+ *     own origin (host + port) — see its doc — so a payload of e.g.
+ *     `http://localhost:4521` (the dev shell origin) can never render same-origin.
+ *     Cross-origin load failures (server down) cannot be detected reliably from
+ *     the parent, so we surface a manual Reload + "Open in browser" + a hint
+ *     rather than a synthetic error state. Reload re-keys the iframe.
  */
 import { useEffect, useState, type ReactElement } from 'react';
+import { ARTIFACT_PROTOTYPE_CSP } from '../../../../shared/types/artifacts';
+
+// The `csp` iframe attribute (Content Security Policy for an embedded document)
+// is not in React's built-in IframeHTMLAttributes; augment it in locally so the
+// html-branch iframe can set it without a cast / `any`.
+declare module 'react' {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- augments the built-in generic
+  interface IframeHTMLAttributes<T> {
+    csp?: string;
+  }
+}
 
 const HAIRLINE = 'var(--color-border-primary)';
 const RAIL = 'var(--color-bg-secondary)';
@@ -62,7 +81,39 @@ export function isLocalhostUrl(raw: string): boolean {
   }
 }
 
-export function LiveCanvasEmbed({ url }: { url: string }): ReactElement {
+/**
+ * Discriminated union: pass EITHER a static `html` document (srcDoc, bare
+ * sandbox) OR a legacy live-canvas `url` (cross-origin dev-server embed). The
+ * `interactive: true` tag on the url variant makes the two arms unambiguous.
+ */
+export type LiveCanvasEmbedProps = { html: string } | { url: string; interactive: true };
+
+export function LiveCanvasEmbed(props: LiveCanvasEmbedProps): ReactElement {
+  // Static-mockup branch — srcDoc + BARE sandbox (no scripts, no same-origin).
+  if ('html' in props) {
+    return (
+      <div data-testid="live-canvas-embed" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        <iframe
+          data-testid="live-canvas-iframe"
+          srcDoc={props.html}
+          title="UI prototype static mockup"
+          // SECURITY-CRITICAL: bare sandbox — NO allow-scripts, NO allow-same-origin.
+          // The document renders at an opaque origin with scripts disabled; it can
+          // neither run JS nor reach window.parent / preload IPC.
+          sandbox=""
+          csp={ARTIFACT_PROTOTYPE_CSP}
+          referrerPolicy="no-referrer"
+          style={{ flex: 1, width: '100%', border: 'none', background: 'var(--color-surface-primary)', minHeight: 0 }}
+        />
+      </div>
+    );
+  }
+
+  return <LiveCanvasUrlEmbed url={props.url} />;
+}
+
+/** Legacy live-canvas (localhost dev-server) embed — unchanged behavior. */
+function LiveCanvasUrlEmbed({ url }: { url: string }): ReactElement {
   const [reloadKey, setReloadKey] = useState(0);
 
   // Pause the embedded prototype while the window is hidden/minimized. Agent-built

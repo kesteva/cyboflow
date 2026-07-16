@@ -24,7 +24,9 @@
  *   - 'screenshots'        -> no entity source yet; the parsed `payload_json`
  *                             (`{ fileNames?: string[] }`) is surfaced as-is.
  *   - 'ui-prototype' / 'generic' (canvas) -> the parsed `payload_json`
- *                             (`{ url?: string }`) for the embed seam (M-later).
+ *                             (`{ fileName?: string; url?: string }`): a static
+ *                             mockup carries a `fileName` pointer (HTML fetched
+ *                             by useArtifactHtml), a legacy live canvas a `url`.
  *
  * `sourceRef` is the soft entity link (ideaId for the templated planner artifacts).
  * When it is absent for a templated atype the hook reports a graceful error rather
@@ -52,9 +54,20 @@ import type {
 } from '../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../shared/types/tasks';
 
-/** Parsed `payload_json` shape for the canvas (ui-prototype / generic) embed. */
+/**
+ * Parsed `payload_json` shape for the canvas (ui-prototype / generic) embed.
+ *
+ * A static `ui-prototype` mockup (Approach C) persists a `fileName` POINTER to
+ * its on-disk `prototype/index.html` — the HTML itself is NOT in the payload; it
+ * is fetched separately by {@link useArtifactHtml} through the `artifacts:load-html`
+ * IPC and embedded via `<iframe srcDoc>`. A legacy `generic` live canvas keeps
+ * the `url` passthrough (cross-origin dev-server iframe). Both members are
+ * optional and extra keys are tolerated (payload is per-atype).
+ */
 export interface CanvasPayload {
-  /** Live-embed URL (e.g. localhost preview) — drives the iframe seam later. */
+  /** On-disk relative path to the static mockup document (ui-prototype pointer). */
+  fileName?: string;
+  /** Legacy live-embed URL (e.g. localhost preview) — drives the cross-origin iframe. */
   url?: string;
   /** Free-form extra keys are tolerated (payload is per-atype). */
   [key: string]: unknown;

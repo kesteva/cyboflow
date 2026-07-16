@@ -211,6 +211,14 @@ interface ElectronAPI {
     loadImages: (
       req: { runId: string; fileNames: string[] },
     ) => Promise<IPCResponse<{ images: Array<{ fileName: string; dataUrl: string }> }>>;
+    // Reads the canonical `prototype/index.html` static mockup for a
+    // ui-prototype/generic artifact (run subtree first, else the committed
+    // project snapshot store) and returns it with a restrictive CSP <meta>
+    // already injected. `html: null` on a missing/unreadable file (fail-soft,
+    // not an error). KEEP IN SYNC with main/src/preload.ts `artifacts.loadHtml`.
+    loadHtml: (
+      req: { runId: string; atype: 'ui-prototype' | 'generic'; committed?: boolean },
+    ) => Promise<IPCResponse<{ html: string | null }>>;
   };
 
   // Project management

@@ -184,6 +184,25 @@ describe('useArtifactData', () => {
     expect(runDecompositionQuerySpy).not.toHaveBeenCalled();
   });
 
+  it("passes a static ui-prototype fileName pointer through synchronously (no fetch)", () => {
+    const { result } = renderHook(() =>
+      useArtifactData(
+        makeArtifact({ atype: 'ui-prototype', payloadJson: '{"fileName":"prototype/index.html"}' }),
+        null,
+      ),
+    );
+
+    expect(result.current.loading).toBe(false);
+    // The HTML is NOT in the payload — only the fileName pointer (useArtifactHtml
+    // fetches the document separately).
+    expect(result.current.data).toEqual({
+      kind: 'canvas',
+      payload: { fileName: 'prototype/index.html' },
+    });
+    expect(getQuerySpy).not.toHaveBeenCalled();
+    expect(runDecompositionQuerySpy).not.toHaveBeenCalled();
+  });
+
   it("resolves 'screenshots' synchronously from payload_json (no fetch)", () => {
     const { result } = renderHook(() =>
       useArtifactData(

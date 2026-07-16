@@ -1,10 +1,19 @@
 /**
  * useArtifactsList — live list of a run's artifacts (deliverables).
  *
- * Seeds from `trpc.cyboflow.artifacts.list({ runId })` and stays reactive via
- * the project-scoped `trpc.cyboflow.artifacts.onArtifactChanged` subscription:
+ * Seeds from `trpc.cyboflow.artifacts.list({ runId })` — now a CB-merged UNION
+ * of uncommitted DB rows and committed on-disk snapshots (deduped by identity,
+ * DB winning) — and stays reactive via the project-scoped
+ * `trpc.cyboflow.artifacts.onArtifactChanged` subscription:
  *   - created / updated / committed → upsert the carried `event.artifact`
  *   - deleted                       → remove `event.artifactId`
+ *
+ * INVARIANT (IDEA-039): a commit is a SAME-ID `'committed'` upsert, NEVER a
+ * `'deleted'` + re-create. `upsert`/`mergeSeed`/the deleted-removal all key on
+ * `id`, so the committed snapshot (same id, `committed=true`) simply replaces the
+ * uncommitted row in place — the tab/list never blinks. The ONLY `'deleted'`
+ * events are the merge/create-PR reap of still-uncommitted rows; committed
+ * snapshots survive close-out and keep reading back through the seed union.
  *
  * The subscription is project-scoped (every run in the project shares one
  * channel), so events are filtered to the current run on upsert. Returns `[]`

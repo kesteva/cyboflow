@@ -323,6 +323,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
       req: { runId: string; fileNames: string[] },
     ): Promise<IPCResponse<{ images: Array<{ fileName: string; dataUrl: string }> }>> =>
       ipcRenderer.invoke('artifacts:load-images', req),
+    // Static-mockup HTML load (Approach C) — reads the canonical
+    // prototype/index.html for a ui-prototype/generic artifact, CSP-injected
+    // by the main-process handler. KEEP IN SYNC with
+    // frontend/src/types/electron.d.ts `artifacts.loadHtml`.
+    loadHtml: (
+      req: { runId: string; atype: 'ui-prototype' | 'generic'; committed?: boolean },
+    ): Promise<IPCResponse<{ html: string | null }>> =>
+      ipcRenderer.invoke('artifacts:load-html', req),
   },
 
   // Project management

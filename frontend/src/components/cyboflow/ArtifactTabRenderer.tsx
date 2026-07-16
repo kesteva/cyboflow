@@ -33,6 +33,7 @@ import { TaskDetailModal } from './TaskDetailModal';
 import { LiveCanvasEmbed, isLocalhostUrl } from './LiveCanvasEmbed';
 import { useArtifactData } from '../../hooks/useArtifactData';
 import { useArtifactImages } from '../../hooks/useArtifactImages';
+import { useArtifactHtml } from '../../hooks/useArtifactHtml';
 import { useReviewItemActions } from '../../hooks/useReviewItemActions';
 import { useReviewItemsSlice } from '../../stores/reviewItemsSlice';
 import { useQuestionStore } from '../../stores/questionStore';
@@ -1154,15 +1155,35 @@ function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectI
 }
 
 // ---------------------------------------------------------------------------
-// ui-prototype / generic — LIVE CANVAS placeholder (iframe embed lands later).
+// ui-prototype / generic — LIVE CANVAS, dual-path (IDEA-039 / Approach C).
+//   - a static `ui-prototype` mockup (fileName pointer) OR any committed canvas
+//     resolves its on-disk HTML via useArtifactHtml and embeds it in a bare
+//     `sandbox=""` `srcDoc` iframe (no scripts, no same-origin);
+//   - a legacy `generic` `{ url }` live canvas keeps the cross-origin dev-server
+//     iframe (allow-scripts);
+//   - a pointer/committed artifact whose HTML is unreadable/absent shows an
+//     explicit empty state — NEVER a blank iframe.
 // ---------------------------------------------------------------------------
 function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
-  const accent = ARTIFACT_COLORS[artifact.atype === 'generic' ? 'generic' : 'ui-prototype'];
+  // CanvasBody only renders for the two canvas atypes (the dispatcher's default
+  // fallback coerces anything else to 'generic'); narrow to the load-html req union.
+  const canvasAtype: 'ui-prototype' | 'generic' = artifact.atype === 'generic' ? 'generic' : 'ui-prototype';
+  const accent = ARTIFACT_COLORS[canvasAtype];
   const { data } = useArtifactData(artifact, projectId);
-  // `url` comes verbatim from agent-supplied payload_json (laundered through
-  // parsePayload as Record<string, unknown>), so narrow to a string at runtime.
-  const url = data?.kind === 'canvas' && typeof data.payload.url === 'string' ? data.payload.url : undefined;
+  // `fileName`/`url` come verbatim from agent-supplied payload_json (laundered
+  // through parsePayload as Record<string, unknown>), so narrow to strings.
+  const payload = data?.kind === 'canvas' ? data.payload : undefined;
+  const fileName = typeof payload?.fileName === 'string' ? payload.fileName : undefined;
+  const url = typeof payload?.url === 'string' ? payload.url : undefined;
   const label = artifact.atype === 'generic' ? 'generic' : 'ui prototype';
+
+  // A static mockup (fileName pointer) or ANY committed canvas resolves its body
+  // from on-disk HTML; a legacy uncommitted {url} live canvas embeds the URL.
+  const wantsInline = typeof fileName === 'string' || artifact.committed || url === undefined;
+  // A pointer/committed artifact for which we EXPECTED on-disk HTML — drives the
+  // explicit "unavailable" empty state when the load fail-softs to null.
+  const expectsHtml = typeof fileName === 'string' || artifact.committed;
+  const { html, loading } = useArtifactHtml(artifact.runId, canvasAtype, artifact.committed);
 
   // Only a localhost http(s) URL gets a LIVE anchor — a javascript:/file://
   // /remote URL from the payload must NOT become a clickable link (same gate as
@@ -1196,6 +1217,66 @@ function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: nu
     </span>
   );
 
+  let body: ReactNode;
+  if (loading) {
+    body = <StateRow testid="artifact-canvas-loading" color={MUTED} text="Loading prototype…" />;
+  } else if (html !== null) {
+    // Static mockup / committed snapshot — bare-sandbox srcDoc embed.
+    body = <LiveCanvasEmbed html={html} />;
+  } else if (url && !wantsInline) {
+    // Legacy live canvas — cross-origin dev-server iframe (allow-scripts).
+    body = <LiveCanvasEmbed url={url} interactive />;
+  } else if (expectsHtml) {
+    // Pointer/committed artifact whose HTML did not resolve — explicit empty
+    // state, never a blank iframe.
+    body = (
+      <div
+        data-testid="artifact-canvas-unavailable"
+        style={{
+          flex: 1,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 10,
+          padding: 32,
+          background: 'repeating-linear-gradient(135deg,var(--color-bg-tertiary) 0 10px,var(--color-bg-primary) 10px 20px)',
+        }}
+      >
+        <span style={{ fontSize: '34px', color: accent }}>◳</span>
+        <span style={{ fontSize: '12px', fontWeight: 600, color: INK }}>Prototype unavailable</span>
+        <span style={{ fontSize: '10.5px', color: MUTED, textAlign: 'center', maxWidth: 360, lineHeight: 1.5 }}>
+          This prototype&apos;s mockup file could not be read. It may have been
+          removed, or its run&apos;s artifacts were cleared.
+        </span>
+      </div>
+    );
+  } else {
+    // No pointer, no url, not committed — nothing to preview yet.
+    body = (
+      <div
+        data-testid="artifact-canvas-placeholder"
+        style={{
+          flex: 1,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: 10,
+          padding: 32,
+          background: 'repeating-linear-gradient(135deg,var(--color-bg-tertiary) 0 10px,var(--color-bg-primary) 10px 20px)',
+        }}
+      >
+        <span style={{ fontSize: '34px', color: accent }}>◳</span>
+        <span style={{ fontSize: '12px', fontWeight: 600, color: INK }}>Live canvas — no preview yet</span>
+        <span style={{ fontSize: '10.5px', color: MUTED, textAlign: 'center', maxWidth: 360, lineHeight: 1.5 }}>
+          This artifact has no mockup yet. Its body embeds a static prototype once
+          the agent reports one (via cyboflow_report_artifact).
+        </span>
+      </div>
+    );
+  }
+
   return (
     <Shell testid="artifact-canvas">
       <ArtifactHeader
@@ -1206,32 +1287,7 @@ function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: nu
         meta={<span style={{ fontStyle: 'italic' }}>no template — embedded live</span>}
         actions={openInBrowser}
       />
-      {/* Live embed when the agent has reported a localhost dev-server URL;
-          otherwise a hatched placeholder explaining there is no preview yet. */}
-      {url ? (
-        <LiveCanvasEmbed url={url} />
-      ) : (
-        <div
-          data-testid="artifact-canvas-placeholder"
-          style={{
-            flex: 1,
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: 10,
-            padding: 32,
-            background: 'repeating-linear-gradient(135deg,var(--color-bg-tertiary) 0 10px,var(--color-bg-primary) 10px 20px)',
-          }}
-        >
-          <span style={{ fontSize: '34px', color: accent }}>◳</span>
-          <span style={{ fontSize: '12px', fontWeight: 600, color: INK }}>Live canvas — no preview yet</span>
-          <span style={{ fontSize: '10.5px', color: MUTED, textAlign: 'center', maxWidth: 360, lineHeight: 1.5 }}>
-            This artifact has no template. Its body embeds a live preview once the
-            agent reports a localhost dev-server URL (via cyboflow_report_artifact).
-          </span>
-        </div>
-      )}
+      {body}
     </Shell>
   );
 }

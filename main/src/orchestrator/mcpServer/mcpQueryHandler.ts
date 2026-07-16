@@ -59,7 +59,7 @@
  */
 import * as net from 'net';
 import * as path from 'path';
-import { existsSync } from 'fs';
+import { existsSync, lstatSync, statSync, realpathSync } from 'fs';
 import type { DatabaseLike, LoggerLike } from '../types';
 import { getCyboflowSubdirectory } from '../../utils/cyboflowDirectory';
 import { resolveWorkflowDefinition, isPermissionMode, isCyboflowWorkflowName } from '../../../../shared/types/workflows';
@@ -82,6 +82,7 @@ import { selectProjectBacklog, selectTaskById, resolveBacklogRef, selectIdeaAtta
 import { ArtifactRouter, ArtifactError } from '../artifactRouter';
 import type { ArtifactActor } from '../artifactRouter';
 import type { ArtifactType } from '../../../../shared/types/artifacts';
+import { PROTOTYPE_HTML_RELPATH, MAX_PROTOTYPE_HTML_BYTES } from '../../../../shared/types/artifacts';
 import { VerificationScheduler } from '../verify/verificationScheduler';
 import {
   FALLBACK_CHAINS,
@@ -2669,12 +2670,36 @@ export class McpQueryHandler {
     }
     const actor: ArtifactActor = ctx.actor === 'linear' ? 'agent:unknown' : ctx.actor;
     try {
+      // Content-blesser (IDEA-039 / Approach C). This handler is the SOLE
+      // authority on ui-prototype/generic payload content:
+      //   - both atypes REJECT any inline top-level `html` key (a static mockup is
+      //     an on-disk file, never inline bytes on the artifact row);
+      //   - `ui-prototype` additionally validates the on-disk static document and
+      //     MINTS the canonical `{ fileName: 'prototype/index.html' }` pointer,
+      //     discarding whatever path/payload the producing agent claimed.
+      // `generic` keeps its `{ url }` passthrough (html-reject only). The run
+      // artifacts dir is derived from the TRUSTED runId — CYBOFLOW_RUN_ARTIFACTS_DIR
+      // is never read here.
+      let payloadJson: string | null = msg.payloadJson ?? null;
+      if (msg.atype === 'ui-prototype' || msg.atype === 'generic') {
+        const parsed = this.parseArtifactPayload(msg.payloadJson);
+        if (parsed !== null && Object.prototype.hasOwnProperty.call(parsed, 'html')) {
+          throw new ArtifactError(
+            'invalid_payload',
+            `inline 'html' is not accepted for atype '${msg.atype}' — write a self-contained static document to ${PROTOTYPE_HTML_RELPATH} and report a fileName pointer`,
+          );
+        }
+        if (msg.atype === 'ui-prototype') {
+          this.validatePrototypeFile(msg.runId);
+          payloadJson = JSON.stringify({ fileName: PROTOTYPE_HTML_RELPATH });
+        }
+      }
       const { artifactId } = await ArtifactRouter.getInstance().apply(ctx.projectId, {
         op: 'create',
         runId: msg.runId,
         atype: msg.atype,
         label: msg.label,
-        payloadJson: msg.payloadJson ?? null,
+        payloadJson,
         isNew: true,
         actor,
       });
@@ -2686,6 +2711,64 @@ export class McpQueryHandler {
       });
     } catch (err) {
       this.writeArtifactError(client, msg.requestId, err);
+    }
+  }
+
+  /**
+   * Parse an artifact `payload_json` string into a plain object for the
+   * content-blesser's `html`-key check. Fail-soft: unparseable / non-object /
+   * absent JSON reads as `null` (no `html` key), so a malformed payload never
+   * throws here — only an EXPLICIT top-level `html` member is rejected upstream.
+   */
+  private parseArtifactPayload(payloadJson: string | undefined): Record<string, unknown> | null {
+    if (payloadJson === undefined) return null;
+    try {
+      const parsed = JSON.parse(payloadJson) as unknown;
+      return isRecord(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Validate the on-disk static `ui-prototype` document under the run's TRUSTED
+   * artifacts dir (`getCyboflowSubdirectory('artifacts','runs',runId)` — NEVER
+   * `process.env.CYBOFLOW_RUN_ARTIFACTS_DIR`): the canonical `prototype/index.html`
+   * must exist, be a regular file (no symlink), stay inside the run artifacts root
+   * (containment + realpath re-verify against an intermediate symlinked dir), and
+   * sit at or below the size ceiling. Throws `ArtifactError('invalid_payload',
+   * 'prototype_missing|prototype_invalid|prototype_too_large: …')` on any failure
+   * so the report tool surfaces a precise reason to the producing agent.
+   */
+  private validatePrototypeFile(runId: string): void {
+    const runRoot = path.resolve(getCyboflowSubdirectory('artifacts', 'runs', runId));
+    const target = path.resolve(runRoot, PROTOTYPE_HTML_RELPATH);
+    // Containment on the resolved (pre-realpath) path — defense in depth even
+    // though PROTOTYPE_HTML_RELPATH is a fixed constant.
+    if (target !== runRoot && !target.startsWith(runRoot + path.sep)) {
+      throw new ArtifactError('invalid_payload', `prototype_invalid: ${PROTOTYPE_HTML_RELPATH} escapes the run artifacts root`);
+    }
+    if (!existsSync(target)) {
+      throw new ArtifactError('invalid_payload', `prototype_missing: ${PROTOTYPE_HTML_RELPATH} not found for run ${runId}`);
+    }
+    const lst = lstatSync(target);
+    if (lst.isSymbolicLink() || !lst.isFile()) {
+      throw new ArtifactError('invalid_payload', `prototype_invalid: ${PROTOTYPE_HTML_RELPATH} is not a regular file`);
+    }
+    // Realpath re-verify: an intermediate symlinked dir must not let the file
+    // escape the run artifacts root (both sides realpath'd so a symlinked temp
+    // root — e.g. macOS /tmp → /private/tmp — is not a false escape).
+    const realRoot = realpathSync(runRoot);
+    const realTarget = realpathSync(target);
+    if (realTarget !== realRoot && !realTarget.startsWith(realRoot + path.sep)) {
+      throw new ArtifactError('invalid_payload', `prototype_invalid: ${PROTOTYPE_HTML_RELPATH} resolves outside the run artifacts root`);
+    }
+    const st = statSync(realTarget);
+    if (!st.isFile()) {
+      throw new ArtifactError('invalid_payload', `prototype_invalid: ${PROTOTYPE_HTML_RELPATH} is not a regular file`);
+    }
+    if (st.size > MAX_PROTOTYPE_HTML_BYTES) {
+      throw new ArtifactError('invalid_payload', `prototype_too_large: ${st.size} > ${MAX_PROTOTYPE_HTML_BYTES}`);
     }
   }
 

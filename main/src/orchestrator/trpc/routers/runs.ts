@@ -41,6 +41,7 @@ import { StepResultStore } from '../../stepResultStore';
 import { ApprovalRouter } from '../../approvalRouter';
 import { QuestionRouter } from '../../questionRouter';
 import { TaskChangeRouter } from '../../taskChangeRouter';
+import { ArtifactRouter } from '../../artifactRouter';
 import {
   cancelAndRestartHandler,
   type CancelAndRestartDeps,
@@ -659,7 +660,13 @@ async function reapPrototypeServersSafe(deps: RunCloseoutDeps, runId: string): P
 function resolveRunForCloseout(
   db: DatabaseLike,
   runId: string,
-): { worktreePath: string; branchName: string | null; projectPath: string; sessionId: string | null } {
+): {
+  worktreePath: string;
+  branchName: string | null;
+  projectPath: string;
+  projectId: number;
+  sessionId: string | null;
+} {
   if (!runCloseoutDeps) {
     throw new TRPCError({
       code: 'METHOD_NOT_SUPPORTED',
@@ -688,8 +695,31 @@ function resolveRunForCloseout(
     worktreePath: row.worktree_path,
     branchName: row.branch_name,
     projectPath: project.path,
+    projectId: row.project_id,
     sessionId: row.session_id,
   };
+}
+
+/**
+ * Reap a run's UNCOMMITTED artifacts (DB rows + the on-disk artifacts subtree) as
+ * part of a MERGE / create-PR close-out (IDEA-039). Delegates to
+ * ArtifactRouter.reapForRun — which deletes the run's committed=0 rows (emitting
+ * 'deleted' per row) and fs.rm's `CYBOFLOW_DIR/artifacts/runs/<runId>`. Committed
+ * snapshots live in the project-root commit store and survive. Fail-soft: a reap
+ * failure (e.g. router uninitialized in a stripped-down test) is logged and never
+ * blocks the close-out. Called ONLY on merge / createPr — NEVER on plain dismiss
+ * (a dismiss-without-merge intentionally leaks; accepted product decision).
+ */
+async function reapArtifactsForRunSafe(projectId: number, runId: string): Promise<void> {
+  try {
+    await ArtifactRouter.getInstance().reapForRun(projectId, runId);
+  } catch (err: unknown) {
+    console.error('[runs.closeout] reapForRun failed — proceeding', {
+      runId,
+      projectId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
@@ -2537,7 +2567,7 @@ export const runsRouter = router({
         throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
       }
       const deps = runCloseoutDeps;
-      const { worktreePath, branchName, projectPath, sessionId } = resolveRunForCloseout(ctx.db, input.runId);
+      const { worktreePath, branchName, projectPath, projectId, sessionId } = resolveRunForCloseout(ctx.db, input.runId);
       // Close-out safety guard (Phase 1): a session-hosted run must NEVER merge or
       // remove the shared session worktree — that is the session's job (Phase 3).
       assertNotSessionHosted(input.runId, sessionId);
@@ -2601,6 +2631,9 @@ export const runsRouter = router({
       deps!.disposeMonitorResources(input.runId);
       // Reap the run's detached ui-prototype http.server (TASK-057), fail-soft.
       await reapPrototypeServersSafe(deps!, input.runId);
+      // Reap the run's UNCOMMITTED artifacts (DB rows + on-disk subtree) on MERGE
+      // (IDEA-039); committed snapshots survive. Fail-soft.
+      await reapArtifactsForRunSafe(projectId, input.runId);
       ctx.db
         .prepare(
           `UPDATE workflow_runs
@@ -2639,7 +2672,7 @@ export const runsRouter = router({
         throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
       }
       const deps = runCloseoutDeps;
-      const { worktreePath, projectPath, sessionId } = resolveRunForCloseout(ctx.db, input.runId);
+      const { worktreePath, projectPath, projectId, sessionId } = resolveRunForCloseout(ctx.db, input.runId);
       // Close-out safety guard (Phase 1): a session-hosted run must NEVER push or
       // remove the shared session worktree — that is the session's job (Phase 3).
       assertNotSessionHosted(input.runId, sessionId);
@@ -2670,6 +2703,9 @@ export const runsRouter = router({
       deps!.disposeMonitorResources(input.runId);
       // Reap the run's detached ui-prototype http.server (TASK-057), fail-soft.
       await reapPrototypeServersSafe(deps!, input.runId);
+      // Reap the run's UNCOMMITTED artifacts (DB rows + on-disk subtree) on
+      // create-PR (IDEA-039); committed snapshots survive. Fail-soft.
+      await reapArtifactsForRunSafe(projectId, input.runId);
       ctx.db
         .prepare(
           `UPDATE workflow_runs

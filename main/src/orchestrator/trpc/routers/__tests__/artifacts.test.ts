@@ -20,8 +20,9 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { TRPCError } from '@trpc/server';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import * as os from 'node:os';
 import { appRouter } from '../../router';
 import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
@@ -30,6 +31,7 @@ import {
   artifactChangeEvents,
   artifactProjectChannel,
 } from '../../../artifactRouter';
+import { PROTOTYPE_HTML_RELPATH } from '../../../../../../shared/types/artifacts';
 import type { ArtifactChangedEvent } from '../../../../../../shared/types/artifacts';
 
 // ---------------------------------------------------------------------------
@@ -421,6 +423,69 @@ describe('cyboflow.artifacts.commit', () => {
         e.code === 'NOT_FOUND' &&
         e.message.startsWith('wrong_project: '),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// read union (committed snapshots — IDEA-039)
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.artifacts read union (committed snapshots)', () => {
+  it('list + get read a committed artifact back from the snapshot store after its DB row is deleted', async () => {
+    const storeDir = mkdtempSync(join(os.tmpdir(), 'cyboflow-art-store-'));
+    const runArtifactsDir = mkdtempSync(join(os.tmpdir(), 'cyboflow-art-run-'));
+    try {
+      const db = buildDb();
+      const adapter = dbAdapter(db);
+      // Wire commit-dir + run-artifacts-dir resolvers so commit snapshots to disk
+      // AND deletes the DB row (the full IDEA-039 lifecycle).
+      ArtifactRouter.initialize(adapter, undefined, () => storeDir, undefined, () => runArtifactsDir);
+      const caller = appRouter.createCaller(createContext({ db: adapter }));
+      seedRunInProject(db, 'run-1', 1);
+
+      // The static mockup the ui-prototype artifact points at.
+      const proto = join(runArtifactsDir, ...PROTOTYPE_HTML_RELPATH.split('/'));
+      mkdirSync(dirname(proto), { recursive: true });
+      writeFileSync(proto, '<html><head></head><body>mock</body></html>', 'utf-8');
+
+      const { artifactId } = await ArtifactRouter.getInstance().apply(1, {
+        op: 'create',
+        runId: 'run-1',
+        atype: 'ui-prototype',
+        label: 'mockup',
+        payloadJson: JSON.stringify({ fileName: PROTOTYPE_HTML_RELPATH }),
+        actor: 'agent:x',
+      });
+      await caller.cyboflow.artifacts.commit({ projectId: 1, artifactId });
+
+      // The DB row is GONE (snapshot succeeded → delete-on-commit).
+      expect(db.prepare('SELECT COUNT(*) AS n FROM artifacts WHERE id = ?').get(artifactId)).toEqual({ n: 0 });
+
+      // list still surfaces it (read back from the snapshot), committed=true.
+      const listed = await caller.cyboflow.artifacts.list({ runId: 'run-1' });
+      expect(listed.map((a) => a.id)).toEqual([artifactId]);
+      expect(listed[0].committed).toBe(true);
+      expect(listed[0].atype).toBe('ui-prototype');
+
+      // committed===false excludes it (no committed=0 DB rows).
+      expect(await caller.cyboflow.artifacts.list({ runId: 'run-1', committed: false })).toEqual([]);
+      // committed===true includes it.
+      expect((await caller.cyboflow.artifacts.list({ runId: 'run-1', committed: true })).map((a) => a.id)).toEqual([
+        artifactId,
+      ]);
+
+      // get resolves the committed snapshot via runId + atype (DB row deleted).
+      const got = await caller.cyboflow.artifacts.get({ artifactId, runId: 'run-1', atype: 'ui-prototype' });
+      expect(got?.id).toBe(artifactId);
+      expect(got?.committed).toBe(true);
+      // Without runId/atype the deleted DB row can't be resolved → null.
+      expect(await caller.cyboflow.artifacts.get({ artifactId })).toBeNull();
+
+      db.close();
+    } finally {
+      rmSync(storeDir, { recursive: true, force: true });
+      rmSync(runArtifactsDir, { recursive: true, force: true });
+    }
   });
 });
 

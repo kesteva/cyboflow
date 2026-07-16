@@ -234,6 +234,32 @@ describe('useArtifactsList', () => {
     expect(result.current.artifacts).toHaveLength(2);
   });
 
+  it("upserts a 'committed' event in place (same id, committed=true) — no blink", async () => {
+    // IDEA-039 invariant: a commit is a SAME-ID 'committed' upsert, never a
+    // 'deleted' + re-create. The uncommitted row is replaced in place.
+    const { result } = renderHook(() => useArtifactsList(RUN, PROJECT));
+    await act(async () => {
+      seedDeferred.resolve([makeArtifact({ id: 'art-1', committed: false })]);
+      await seedDeferred.promise;
+    });
+    expect(result.current.artifacts).toHaveLength(1);
+    expect(result.current.artifacts[0].committed).toBe(false);
+
+    act(() => {
+      lastOnData?.(
+        changedEvent({
+          action: 'committed',
+          artifact: makeArtifact({ id: 'art-1', committed: true }),
+        }),
+      );
+    });
+
+    // Same id → replaced in place; list length unchanged, now committed.
+    expect(result.current.artifacts).toHaveLength(1);
+    expect(result.current.artifacts[0].id).toBe('art-1');
+    expect(result.current.artifacts[0].committed).toBe(true);
+  });
+
   it("removes an artifact on a 'deleted' event", async () => {
     const { result } = renderHook(() => useArtifactsList(RUN, PROJECT));
     await act(async () => {

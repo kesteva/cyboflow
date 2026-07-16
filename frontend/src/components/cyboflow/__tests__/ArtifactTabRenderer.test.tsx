@@ -17,6 +17,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ArtifactTabRenderer } from '../ArtifactTabRenderer';
 import { useArtifactData, type ArtifactData } from '../../../hooks/useArtifactData';
 import { useArtifactImages, type UseArtifactImages } from '../../../hooks/useArtifactImages';
+import { useArtifactHtml, type UseArtifactHtml } from '../../../hooks/useArtifactHtml';
 import type { Artifact, ArtifactType } from '../../../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../../../shared/types/tasks';
 import type { ReviewItem } from '../../../../../shared/types/reviews';
@@ -34,6 +35,15 @@ vi.mock('../../../hooks/useArtifactImages', () => ({ useArtifactImages: vi.fn() 
 const mockImages = vi.mocked(useArtifactImages);
 function setImages(value: UseArtifactImages): void {
   mockImages.mockReturnValue(value);
+}
+
+// Static-mockup HTML loads through useArtifactHtml (artifacts:load-html IPC).
+// Mock it so the renderer test never touches window.electronAPI; default to a
+// resolved-null (no on-disk html) and override per-test for the srcDoc cases.
+vi.mock('../../../hooks/useArtifactHtml', () => ({ useArtifactHtml: vi.fn() }));
+const mockHtml = vi.mocked(useArtifactHtml);
+function setHtml(value: UseArtifactHtml): void {
+  mockHtml.mockReturnValue(value);
 }
 
 // Stub MarkdownPreview (avoids react-markdown ESM in jsdom); echo the content.
@@ -166,8 +176,11 @@ describe('ArtifactTabRenderer', () => {
   beforeEach(() => {
     mockHook.mockReset();
     mockImages.mockReset();
+    mockHtml.mockReset();
     // Default: no resolved screenshot bytes (per-card fallback path).
     setImages({ images: {}, loading: false, error: null });
+    // Default: no on-disk static mockup html (legacy url / placeholder paths).
+    setHtml({ html: null, loading: false, error: null });
     commitMutate.mockClear();
     acceptBaselineMutate.mockClear();
     reviewItemsResolveMutate.mockClear();
@@ -928,6 +941,50 @@ describe('ArtifactTabRenderer', () => {
     expect(screen.getByTestId('artifact-canvas-open-disabled')).toBeInTheDocument();
   });
 
+  // --- ui-prototype static mockup (Approach C: fileName pointer + srcDoc) ---
+
+  it('embeds a static ui-prototype mockup via srcDoc (bare sandbox) from a fileName pointer', () => {
+    // Pointer payload — the HTML itself comes from useArtifactHtml, not the payload.
+    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: { fileName: 'prototype/index.html' } } });
+    setHtml({ html: '<html><head></head><body><h1>Mockup</h1></body></html>', loading: false, error: null });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas' })} {...PROPS} />);
+
+    const iframe = screen.getByTestId('live-canvas-iframe');
+    // srcDoc, NOT a cross-origin src; bare sandbox (no allow-scripts).
+    expect(iframe).toHaveAttribute('srcdoc');
+    expect(iframe).not.toHaveAttribute('src');
+    expect(iframe.getAttribute('sandbox')).toBe('');
+    expect(screen.queryByTestId('artifact-canvas-placeholder')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('artifact-canvas-unavailable')).not.toBeInTheDocument();
+  });
+
+  it('shows the loading state while the mockup html is in flight', () => {
+    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: { fileName: 'prototype/index.html' } } });
+    setHtml({ html: null, loading: true, error: null });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas' })} {...PROPS} />);
+    expect(screen.getByTestId('artifact-canvas-loading')).toBeInTheDocument();
+    expect(screen.queryByTestId('live-canvas-iframe')).not.toBeInTheDocument();
+  });
+
+  it('shows the explicit "prototype unavailable" empty state (never a blank iframe) for a pointer whose html is absent', () => {
+    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: { fileName: 'prototype/index.html' } } });
+    setHtml({ html: null, loading: false, error: null }); // file missing / unreadable → fail-soft null
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas' })} {...PROPS} />);
+    expect(screen.getByTestId('artifact-canvas-unavailable')).toHaveTextContent('Prototype unavailable');
+    expect(screen.queryByTestId('live-canvas-iframe')).not.toBeInTheDocument();
+  });
+
+  it('embeds a COMMITTED canvas snapshot via srcDoc even with no fileName/url in the payload', () => {
+    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
+    setHtml({ html: '<html><body>committed snapshot</body></html>', loading: false, error: null });
+    render(
+      <ArtifactTabRenderer artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas', committed: true })} {...PROPS} />,
+    );
+    const iframe = screen.getByTestId('live-canvas-iframe');
+    expect(iframe).toHaveAttribute('srcdoc');
+    expect(iframe.getAttribute('sandbox')).toBe('');
+  });
+
   // --- commit-state badge + commit button (ArtifactHeader, shared) ---------
 
   it('shows the session-only badge + Commit button when not committed, and commits on click', async () => {
@@ -941,8 +998,10 @@ describe('ArtifactTabRenderer', () => {
     expect(btn).toHaveTextContent('Commit to repo');
     fireEvent.click(btn);
 
+    // IDEA-039: the commit call forwards ONLY identity — no payloadJson echo,
+    // even though the artifact carries one.
     await waitFor(() =>
-      expect(commitMutate).toHaveBeenCalledWith({ projectId: 1, artifactId: 'art-1', payloadJson: '{"x":1}' }),
+      expect(commitMutate).toHaveBeenCalledWith({ projectId: 1, artifactId: 'art-1' }),
     );
   });
 

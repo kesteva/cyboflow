@@ -12,6 +12,7 @@ import type { Session } from '../types/session';
 import type { GitCommit } from '../services/gitDiffManager';
 import type { ExecException } from 'child_process';
 import { TaskChangeRouter } from '../orchestrator/taskChangeRouter';
+import { ArtifactRouter } from '../orchestrator/artifactRouter';
 import { SprintLaneStore } from '../orchestrator/sprintLaneStore';
 import { stampSessionRunsOutcome, stampSessionRunsPrOpen } from '../orchestrator/runRecovery';
 import { trackUsage } from '../services/telemetry';
@@ -310,6 +311,41 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
     await recomputeSessionRunTaskStages(sessionId);
     // Merge close-out reached only after a successful squash/rebase merge.
     trackUsage('session_resolved', { action: 'merge', had_conflicts: false });
+  };
+
+  // Reap UNCOMMITTED run artifacts on a SESSION close-out that delivers work —
+  // squash/rebase merge + create-PR (git-push) — for every run the session hosted
+  // (IDEA-039). The run-scoped runs.merge/createPr close-out only fires for legacy
+  // non-session-hosted runs (they assertNotSessionHosted), so a session-hosted run's
+  // reap MUST happen here at the session seams instead. Delegates per run to
+  // ArtifactRouter.reapForRun (deletes committed=0 rows + fs.rm's the run's
+  // artifacts subtree); committed snapshots live in the project-root commit store
+  // and survive. Entirely fail-soft + per-run isolated — the git operation already
+  // succeeded, so this bookkeeping must never fail its response. Plain dismiss
+  // (sessions:delete) deliberately does NOT call this — a dismiss-without-merge
+  // intentionally leaks (accepted product decision, no GC sweep).
+  const reapArtifactsForSessionClose = async (sessionId: string): Promise<void> => {
+    try {
+      const db = databaseService.getDb();
+      const runs = db
+        .prepare('SELECT id, project_id FROM workflow_runs WHERE session_id = ?')
+        .all(sessionId) as Array<{ id: string; project_id: number }>;
+      for (const run of runs) {
+        try {
+          await ArtifactRouter.getInstance().reapForRun(run.project_id, run.id);
+        } catch (runError) {
+          console.error(
+            `[IPC:git] artifact reap failed for run ${run.id} (session ${sessionId}, continuing):`,
+            runError,
+          );
+        }
+      }
+    } catch (error) {
+      console.error(
+        `[IPC:git] artifact reap after session close failed for session ${sessionId} (git operation unaffected):`,
+        error,
+      );
+    }
   };
 
   // Helper function to refresh git status after operations that only affect one session
@@ -1202,6 +1238,11 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       // Stamp outcome='merged' on this session's runs (fail-soft, never blocks the merge response).
       await stampMergedOutcomeForSession(sessionId, project?.path);
 
+      // Reap UNCOMMITTED run artifacts for every run this session hosted (IDEA-039).
+      // Session-hosted runs can't close out via runs.merge (assertNotSessionHosted),
+      // so their reap happens at this session merge seam. Committed snapshots survive.
+      await reapArtifactsForSessionClose(sessionId);
+
       // Auto-resolve any open dynamic-workflow review items for this session —
       // the merge IS the human's close-out action. Fire-and-forget: a resolve
       // failure must never fail the merge itself.
@@ -1321,6 +1362,11 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
 
       // Stamp outcome='merged' on this session's runs (fail-soft, never blocks the merge response).
       await stampMergedOutcomeForSession(sessionId, project?.path);
+
+      // Reap UNCOMMITTED run artifacts for every run this session hosted (IDEA-039).
+      // Session-hosted runs can't close out via runs.merge (assertNotSessionHosted),
+      // so their reap happens at this session merge seam. Committed snapshots survive.
+      await reapArtifactsForSessionClose(sessionId);
 
       // Auto-resolve any open dynamic-workflow review items for this session —
       // the merge IS the human's close-out action. Fire-and-forget: a resolve
@@ -1511,6 +1557,10 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         // dismiss cannot heal them (cancelHostedRuns selects only non-terminal runs
         // → zero rows). Fail-soft.
         await recomputeSessionRunTaskStages(sessionId);
+        // Reap UNCOMMITTED run artifacts for every run this session hosted
+        // (IDEA-039) — create-PR is a delivering close-out, same as merge.
+        // Committed snapshots survive.
+        await reapArtifactsForSessionClose(sessionId);
         trackUsage('session_resolved', { action: 'pr' });
       } catch (closeoutError) {
         console.error(`[IPC:git] Create-PR close-out failed for session ${sessionId} (push unaffected):`, closeoutError);

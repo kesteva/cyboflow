@@ -191,6 +191,41 @@ export function extractArchDesignSection(body: string | null | undefined): strin
  */
 export const DEFAULT_ARTIFACT_COMMIT_DIR = '.cyboflow/artifacts';
 
+/**
+ * Restrictive CSP injected into every static `ui-prototype`/`generic` mockup
+ * document before it is embedded via `srcDoc` (bare `sandbox=""` iframe, no
+ * `allow-scripts`/`allow-same-origin`). Single source of truth — imported by
+ * BOTH the main-process `artifacts:load-html` handler (which splices it in as
+ * the first `<head>` child) and `LiveCanvasEmbed` (which sets it as the
+ * iframe's `csp` attribute) so the two can never drift apart.
+ */
+export const ARTIFACT_PROTOTYPE_CSP =
+  "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'";
+
+/**
+ * Canonical on-disk relative path (inside a run's artifacts dir, or a
+ * committed snapshot's `files/` dir) for a static `ui-prototype` mockup's
+ * single self-contained HTML document. The report-handler content-blesser
+ * MINTS the stored payload as exactly `{ fileName: PROTOTYPE_HTML_RELPATH }`,
+ * discarding whatever path the producing agent claims.
+ */
+export const PROTOTYPE_HTML_RELPATH = 'prototype/index.html';
+
+/**
+ * Hard ceiling (bytes) on the `prototype/index.html` document the
+ * `artifacts:load-html` handler will read and return. Guards against an
+ * agent (or a corrupted/malicious file) blowing up IPC payload size.
+ */
+export const MAX_PROTOTYPE_HTML_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Schema version stamped onto every on-disk committed-artifact manifest
+ * (`ArtifactSnapshotManifest.schemaVersion`). Bumped to 2 for the per-
+ * `(runId,atype)` directory layout (`S/<runId>/<atype>/{manifest.json,
+ * files/<relpath>}`) that replaced the flat `<atype>__<id>.json` v1 layout.
+ */
+export const ARTIFACT_SNAPSHOT_SCHEMA_VERSION = 2;
+
 // ===========================================================================
 // Data model — the run-scoped artifacts subsystem (migration 029).
 //
@@ -254,6 +289,24 @@ export interface ScreenshotsArtifactPayload {
    * never judge input, never a pass/fail signal.
    */
   diagnostics?: string[];
+  [key: string]: unknown;
+}
+
+/**
+ * The parsed `payload_json` shape of a `ui-prototype`|`generic` artifact
+ * (Approach C — static on-disk mockup, no dev server). The report-handler
+ * content-blesser is the SOLE writer of `fileName` for `ui-prototype`: it
+ * mints exactly `{ fileName: PROTOTYPE_HTML_RELPATH }` after validating the
+ * on-disk file, discarding whatever the producing agent sent — a top-level
+ * `html` key is REJECTED at report time (`ArtifactError('invalid_payload')`),
+ * never stored. `generic` keeps the legacy `{ url }` live-canvas passthrough
+ * (html-reject only, no file-pointer validation). Extra keys are tolerated.
+ */
+export interface UiPrototypeArtifactPayload {
+  /** On-disk relative path to the static mockup document (ui-prototype). */
+  fileName?: string;
+  /** Legacy/generic live-canvas URL (cross-origin iframe embed). */
+  url?: string;
   [key: string]: unknown;
 }
 

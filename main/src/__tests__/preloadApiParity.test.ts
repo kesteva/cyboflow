@@ -110,6 +110,14 @@ describe('preload ↔ api.ts contextBridge parity (B11 + C6)', () => {
     expect(consumedPaths.has('sessions.getAll')).toBe(true);
   });
 
+  it('exposes artifacts.loadHtml + loadImages (IDEA-039 static-mockup loader parity)', () => {
+    // Explicit guard: the ui-prototype srcDoc loader (artifacts:load-html) must be
+    // reachable on the bridge regardless of whether api.ts currently references it,
+    // so a preload/renderer drift on this method surfaces here.
+    expect(typeof resolvePath(electronAPI, 'artifacts.loadHtml')).toBe('function');
+    expect(typeof resolvePath(electronAPI, 'artifacts.loadImages')).toBe('function');
+  });
+
   it('every bridge path consumed by api.ts resolves on the exposed electronAPI', () => {
     const missing: string[] = [];
     for (const path of consumedPaths) {

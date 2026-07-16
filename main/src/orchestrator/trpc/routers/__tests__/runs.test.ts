@@ -72,6 +72,7 @@ import { ApprovalRouter } from '../../../approvalRouter';
 import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
 import { SprintLaneStore } from '../../../sprintLaneStore';
 import { TaskChangeRouter } from '../../../taskChangeRouter';
+import { ArtifactRouter } from '../../../artifactRouter';
 import { StepResultStore, type StepResultRow } from '../../../stepResultStore';
 import { stepTransitionEvents } from '../events';
 import type { WorkflowStepTransitionEvent, WorkflowDefinition } from '../../../../../../shared/types/workflows';
@@ -1741,6 +1742,7 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
 
   afterEach(() => {
     db.close();
+    ArtifactRouter._resetForTesting();
     // Reset module-level deps so a wired stub doesn't leak into other describe blocks.
     setRunCloseoutDeps({
       worktreeManager: makeWmStub(),
@@ -1846,6 +1848,63 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
     await caller.cyboflow.runs.createPr({ runId: 'run-reap-pr' });
 
     expect(reapPrototypeServers).toHaveBeenCalledWith('run-reap-pr');
+  });
+
+  // -------------------------------------------------------------------------
+  // reapForRun — the run's UNCOMMITTED artifacts (DB rows + on-disk subtree)
+  // are reaped on MERGE and create-PR ONLY (IDEA-039). Plain dismiss deliberately
+  // leaks (accepted product decision). The router reaches the ArtifactRouter
+  // singleton via getInstance(); we init it against the test db and spy on the
+  // instance method (mocked so it never touches the artifacts table).
+  // -------------------------------------------------------------------------
+
+  it('merge reaps the run artifacts at close-out (reapForRun with projectId + runId)', async () => {
+    seedRun(db, { id: 'run-art-merge', status: 'awaiting_review', worktreePath: '/tmp/wt/run-art-merge', projectId: 1 });
+    ArtifactRouter.initialize(dbAdapter(db));
+    const reapForRun = vi.spyOn(ArtifactRouter.getInstance(), 'reapForRun').mockResolvedValue({ deleted: [] });
+    wire(makeWmStub());
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.merge({ runId: 'run-art-merge', strategy: 'preserve' });
+
+    expect(reapForRun).toHaveBeenCalledWith(1, 'run-art-merge');
+  });
+
+  it('createPr reaps the run artifacts at close-out (reapForRun with projectId + runId)', async () => {
+    seedRun(db, { id: 'run-art-pr', status: 'awaiting_review', worktreePath: '/tmp/wt/run-art-pr', projectId: 1 });
+    ArtifactRouter.initialize(dbAdapter(db));
+    const reapForRun = vi.spyOn(ArtifactRouter.getInstance(), 'reapForRun').mockResolvedValue({ deleted: [] });
+    wire(makeWmStub());
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.createPr({ runId: 'run-art-pr' });
+
+    expect(reapForRun).toHaveBeenCalledWith(1, 'run-art-pr');
+  });
+
+  it('dismiss does NOT reap the run artifacts (a dismiss-without-merge intentionally leaks)', async () => {
+    seedRun(db, { id: 'run-art-dismiss', status: 'stuck', worktreePath: '/tmp/wt/run-art-dismiss', projectId: 1 });
+    ArtifactRouter.initialize(dbAdapter(db));
+    const reapForRun = vi.spyOn(ArtifactRouter.getInstance(), 'reapForRun').mockResolvedValue({ deleted: [] });
+    wire(makeWmStub());
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.dismiss({ runId: 'run-art-dismiss' });
+
+    expect(reapForRun).not.toHaveBeenCalled();
+  });
+
+  it('merge close-out is fail-soft: a throwing reapForRun never fails the merge', async () => {
+    seedRun(db, { id: 'run-art-throws', status: 'awaiting_review', worktreePath: '/tmp/wt/run-art-throws', projectId: 1 });
+    ArtifactRouter.initialize(dbAdapter(db));
+    vi.spyOn(ArtifactRouter.getInstance(), 'reapForRun').mockRejectedValue(new Error('reap offline'));
+    wire(makeWmStub());
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.merge({ runId: 'run-art-throws', strategy: 'preserve' });
+
+    expect(result).toEqual({ success: true });
+    expect(getStatus('run-art-throws')).toBe('completed');
   });
 
   it('close-out is fail-soft: a throwing reapPrototypeServers never fails the merge', async () => {
