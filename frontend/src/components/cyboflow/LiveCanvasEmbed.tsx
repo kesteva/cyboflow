@@ -5,10 +5,12 @@
  *   - `{ html }`  → a self-contained STATIC mockup (Approach C). Rendered via
  *     `<iframe srcDoc={html}>` with a BARE `sandbox=""` (NO `allow-scripts`, NO
  *     `allow-same-origin` → opaque origin, no script execution, no parent/preload
- *     reach) plus the shared `ARTIFACT_PROTOTYPE_CSP` as the iframe `csp`
- *     attribute and `referrerPolicy="no-referrer"`. The same CSP is spliced into
- *     the document as a `<head>` `<meta>` by the main `artifacts:load-html`
- *     handler — belt-and-braces so a stripped attribute alone can't loosen it.
+ *     reach) and `referrerPolicy="no-referrer"`. `sandbox=""` disables scripts but
+ *     does NOT block subresource fetches, so network egress is closed by the
+ *     `ARTIFACT_PROTOTYPE_CSP` `<meta>` the main `artifacts:load-html` handler
+ *     prepends to the document (see injectPrototypeCsp) — that meta is the sole
+ *     egress control. (The HTML `csp` iframe attribute was never shipped in
+ *     Chromium/Electron and is a no-op, so it is deliberately NOT used here.)
  *     No toolbar, no "server may be down" footer (there is no server).
  *
  *   - `{ url; interactive }` → a LEGACY localhost dev-server live canvas.
@@ -29,17 +31,6 @@
  *     rather than a synthetic error state. Reload re-keys the iframe.
  */
 import { useEffect, useState, type ReactElement } from 'react';
-import { ARTIFACT_PROTOTYPE_CSP } from '../../../../shared/types/artifacts';
-
-// The `csp` iframe attribute (Content Security Policy for an embedded document)
-// is not in React's built-in IframeHTMLAttributes; augment it in locally so the
-// html-branch iframe can set it without a cast / `any`.
-declare module 'react' {
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- augments the built-in generic
-  interface IframeHTMLAttributes<T> {
-    csp?: string;
-  }
-}
 
 const HAIRLINE = 'var(--color-border-primary)';
 const RAIL = 'var(--color-bg-secondary)';
@@ -101,7 +92,6 @@ export function LiveCanvasEmbed(props: LiveCanvasEmbedProps): ReactElement {
           // The document renders at an opaque origin with scripts disabled; it can
           // neither run JS nor reach window.parent / preload IPC.
           sandbox=""
-          csp={ARTIFACT_PROTOTYPE_CSP}
           referrerPolicy="no-referrer"
           style={{ flex: 1, width: '100%', border: 'none', background: 'var(--color-surface-primary)', minHeight: 0 }}
         />

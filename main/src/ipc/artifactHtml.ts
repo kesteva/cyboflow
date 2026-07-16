@@ -15,9 +15,9 @@ import { safeRunId, resolveArtifactCommitDir, loadCommittedHtml } from '../orche
  * IPC handler for the static-mockup `ui-prototype`/`generic` HTML loader
  * (Approach C — an on-disk self-contained HTML+CSS document, no dev server, no
  * JS). Reads the canonical `prototype/index.html` for the SELECTED artifact only
- * and returns it as a string with a restrictive CSP `<meta>` injected as the
- * first `<head>` child; the renderer embeds it via a bare `sandbox=""` `srcDoc`
- * iframe (`LiveCanvasEmbed`).
+ * and returns it as a string with a restrictive CSP `<meta>` prepended as the
+ * document's first token (see injectPrototypeCsp); the renderer embeds it via a
+ * bare `sandbox=""` `srcDoc` iframe (`LiveCanvasEmbed`).
  *
  *   artifacts:load-html  { runId, atype: 'ui-prototype'|'generic', committed? }
  *                          -> IPCResponse<{ html: string | null }>
@@ -41,24 +41,38 @@ import { safeRunId, resolveArtifactCommitDir, loadCommittedHtml } from '../orche
  */
 
 /**
- * Inject the restrictive artifact CSP as the FIRST `<head>` child (or synthesize
- * a `<head>` when absent) so the embedded document can never fetch external
- * resources / run inline script even before the iframe `sandbox`/`csp` attrs
- * apply. Single source of truth for the policy string is
- * `ARTIFACT_PROTOTYPE_CSP` (shared) — the same const LiveCanvasEmbed sets as the
- * iframe `csp` attribute, so the two can never drift.
+ * Inject the restrictive artifact CSP as the document's FIRST token so it governs
+ * every subsequent element and subresource fetch. With a bare `sandbox=""` iframe
+ * (no `allow-scripts`, no `allow-same-origin`) this injected `<meta>` is the SOLE
+ * network-egress control — scripts are already disabled by the sandbox, but
+ * `sandbox=""` does NOT block subresource GETs (`<img>`, CSS `url()`, `@font-face`),
+ * so the policy must hold against adversarial markup.
+ *
+ * We deliberately do NOT locate `<head>` by regex, and we do NOT preserve ANY
+ * untrusted prefix ahead of the meta — both are bypassable by a parser
+ * differential:
+ *   - `.replace(/<head\b[^>]*>/i)` matches the FIRST occurrence, so a leading
+ *     `<!-- <head> -->` comment captures the splice and leaves the doc unprotected;
+ *   - keeping a "leading `<!doctype>`" ahead of the meta via a `/^\s*<!doctype/`
+ *     probe is unsafe because JS `\s` matches characters HTML does NOT treat as
+ *     pre-doctype whitespace (U+FEFF BOM, U+00A0 NBSP, U+000B vertical tab). An
+ *     attacker prefixes one of those, the probe still "sees" the doctype and
+ *     splices AFTER it, but the HTML parser treats the char as text — opening
+ *     `<body>` early and pushing the CSP `<meta>` OUT of `<head>`, where a
+ *     `http-equiv` CSP is ignored → external subresource fetches escape.
+ *
+ * Instead we ALWAYS prepend the meta at absolute position 0. Nothing can precede
+ * it, so no prefix trick applies; the parser hoists a leading `<meta>` into a
+ * (synthesized) `<head>` as its first child and the CSP governs the whole
+ * document. This document is only ever rendered via an iframe `srcDoc` (see
+ * LiveCanvasEmbed) — a srcdoc document defaults to no-quirks parse mode even
+ * without a leading `<!doctype>`, so prepending ahead of any original doctype
+ * does NOT regress rendering fidelity. Single source of truth for the policy
+ * string is `ARTIFACT_PROTOTYPE_CSP` (shared).
  */
 export function injectPrototypeCsp(html: string): string {
   const meta = `<meta http-equiv="Content-Security-Policy" content="${ARTIFACT_PROTOTYPE_CSP}">`;
-  const headOpen = /<head\b[^>]*>/i;
-  if (headOpen.test(html)) {
-    return html.replace(headOpen, (m) => `${m}${meta}`);
-  }
-  const htmlOpen = /<html\b[^>]*>/i;
-  if (htmlOpen.test(html)) {
-    return html.replace(htmlOpen, (m) => `${m}<head>${meta}</head>`);
-  }
-  return `<head>${meta}</head>${html}`;
+  return `${meta}${html}`;
 }
 
 interface LoadHtmlRequest {

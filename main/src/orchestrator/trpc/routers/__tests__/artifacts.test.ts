@@ -347,7 +347,7 @@ describe('cyboflow.artifacts.commit', () => {
     expect(audit?.actor).toBe('user');
   });
 
-  it('forwards an optional payloadJson through the chokepoint', async () => {
+  it('is IDENTITY-ONLY: commit does not mutate the stored payload', async () => {
     const { caller, db } = buildCaller();
     seedRunInProject(db, 'run-1', 1);
     const { artifactId } = await ArtifactRouter.getInstance().apply(1, {
@@ -355,14 +355,12 @@ describe('cyboflow.artifacts.commit', () => {
       runId: 'run-1',
       atype: 'generic',
       label: 'draft',
+      payloadJson: '{"url":"http://x"}',
       actor: 'agent:x',
     });
 
-    await caller.cyboflow.artifacts.commit({
-      projectId: 1,
-      artifactId,
-      payloadJson: '{"url":"http://x"}',
-    });
+    // No payloadJson accepted on commit — the report-blessed payload is preserved.
+    await caller.cyboflow.artifacts.commit({ projectId: 1, artifactId });
 
     const row = db.prepare('SELECT payload_json FROM artifacts WHERE id = ?').get(artifactId) as {
       payload_json: string | null;

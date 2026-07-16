@@ -194,10 +194,12 @@ export const DEFAULT_ARTIFACT_COMMIT_DIR = '.cyboflow/artifacts';
 /**
  * Restrictive CSP injected into every static `ui-prototype`/`generic` mockup
  * document before it is embedded via `srcDoc` (bare `sandbox=""` iframe, no
- * `allow-scripts`/`allow-same-origin`). Single source of truth — imported by
- * BOTH the main-process `artifacts:load-html` handler (which splices it in as
- * the first `<head>` child) and `LiveCanvasEmbed` (which sets it as the
- * iframe's `csp` attribute) so the two can never drift apart.
+ * `allow-scripts`/`allow-same-origin`). The main-process `artifacts:load-html`
+ * handler PREPENDS it as the document's first token (see injectPrototypeCsp);
+ * with scripts disabled by the bare sandbox this `<meta>` is the sole
+ * subresource-egress control, so it must survive adversarial markup. (Note: the
+ * HTML `csp` iframe attribute was never shipped in Chromium/Electron and is NOT
+ * used — this meta is the real enforcement.)
  */
 export const ARTIFACT_PROTOTYPE_CSP =
   "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; base-uri 'none'; form-action 'none'";
@@ -217,6 +219,15 @@ export const PROTOTYPE_HTML_RELPATH = 'prototype/index.html';
  * agent (or a corrupted/malicious file) blowing up IPC payload size.
  */
 export const MAX_PROTOTYPE_HTML_BYTES = 5 * 1024 * 1024;
+
+/**
+ * Hard ceiling (bytes) for a single committed SCREENSHOT PNG copied into the
+ * durability snapshot. Screenshots are full-page captures and legitimately far
+ * exceed the HTML document cap, so they get their own (larger) limit — using the
+ * HTML cap for them would silently drop valid captures on commit and, once the
+ * run subtree is reaped, lose them permanently.
+ */
+export const MAX_SCREENSHOT_BYTES = 25 * 1024 * 1024;
 
 /**
  * Schema version stamped onto every on-disk committed-artifact manifest

@@ -27,14 +27,16 @@
  * pure/injectable so it can be unit-tested against an os.tmpdir() store.
  */
 import * as fs from 'fs/promises';
-import type { Dirent } from 'node:fs';
+import { constants as fsConstants, type Dirent } from 'node:fs';
 import * as path from 'node:path';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
 import {
   DEFAULT_ARTIFACT_COMMIT_DIR,
   ARTIFACT_SNAPSHOT_SCHEMA_VERSION,
   MAX_PROTOTYPE_HTML_BYTES,
+  MAX_SCREENSHOT_BYTES,
   PROTOTYPE_HTML_RELPATH,
+  isPerEntityArtifact,
   type Artifact,
   type ArtifactType,
   type ArtifactRenderMode,
@@ -73,15 +75,44 @@ export interface ArtifactSnapshotManifest {
   committedAt: string | null;
 }
 
+/** Short, path-safe, collision-free digest of an arbitrary string. */
+function shortHash(s: string): string {
+  return createHash('sha256').update(s).digest('hex').slice(0, 16);
+}
+
 /**
- * Sanitize a runId for use as a single on-disk path segment in the commit
- * store. Drops path separators / dots so a crafted runId can never traverse
- * out of the store (`..`, `/`, `\` all collapse to `_`). Read-back paths filter
- * on the manifest's real `runId` field, so a (rare) sanitization collision is
- * still disambiguated on read.
+ * Sanitize an identifier for use as a single on-disk path segment in the commit
+ * store. Drops path separators / dots so a crafted value can never traverse out
+ * of the store (`..`, `/`, `\` all collapse to `_`).
+ *
+ * Collision-safe: sanitization is LOSSY (`run.a` and `run/a` both → `run_a`), so
+ * when the raw value contains any char outside `[A-Za-z0-9_-]` we suffix a hash
+ * of the RAW value — distinct inputs then always map to distinct segments, and a
+ * value that is already path-safe (the common case: a UUID-hex runId) is returned
+ * verbatim for back-compat.
  */
+function safeSegment(raw: string): string {
+  if (/^[A-Za-z0-9_-]+$/.test(raw)) return raw;
+  return `${raw.replace(/[^A-Za-z0-9_-]/g, '_')}-${shortHash(raw)}`;
+}
+
+/** Sanitize a runId into a single collision-free on-disk path segment. */
 export function safeRunId(runId: string): string {
-  return runId.replace(/[^A-Za-z0-9_-]/g, '_');
+  return safeSegment(runId);
+}
+
+/**
+ * The per-atype directory segment under a run's snapshot dir. Non-per-entity
+ * atypes are one-per-(run, atype) → the segment is just `<atype>`. PER-ENTITY
+ * atypes (idea-spec) are one-per-(run, atype, sourceRef) — matching the DB read
+ * union's identity — so they get a `sourceRef` sub-segment; without it a second
+ * committed idea-spec in the same run would `rm -rf` the first's snapshot.
+ */
+function atypeSegment(atype: string, sourceRef: string | null | undefined): string {
+  if (isPerEntityArtifact(atype as ArtifactType) && sourceRef) {
+    return path.join(atype, safeSegment(sourceRef));
+  }
+  return atype;
 }
 
 /**
@@ -96,14 +127,25 @@ export function resolveArtifactCommitDir(projectRoot: string, configured: string
   return path.isAbsolute(dir) ? dir : path.join(projectRoot, dir);
 }
 
-/** The `(runId, atype)` snapshot directory inside an already-resolved store `S`. */
-export function snapshotDirFor(storeDir: string, runId: string, atype: string): string {
-  return path.join(storeDir, safeRunId(runId), atype);
+/** The snapshot directory for an artifact identity inside an already-resolved
+ *  store `S`. Keyed by `(runId, atype)`, plus `sourceRef` for per-entity atypes. */
+export function snapshotDirFor(
+  storeDir: string,
+  runId: string,
+  atype: string,
+  sourceRef?: string | null,
+): string {
+  return path.join(storeDir, safeRunId(runId), atypeSegment(atype, sourceRef));
 }
 
-/** The manifest path inside a `(runId, atype)` snapshot directory. */
-export function manifestPathFor(storeDir: string, runId: string, atype: string): string {
-  return path.join(snapshotDirFor(storeDir, runId, atype), 'manifest.json');
+/** The manifest path inside an artifact-identity snapshot directory. */
+export function manifestPathFor(
+  storeDir: string,
+  runId: string,
+  atype: string,
+  sourceRef?: string | null,
+): string {
+  return path.join(snapshotDirFor(storeDir, runId, atype, sourceRef), 'manifest.json');
 }
 
 /** Parse payload_json when it is valid JSON; fall back to the raw string; null when absent. */
@@ -172,13 +214,26 @@ export function snapshotManifestToArtifact(m: ArtifactSnapshotManifest): Artifac
 }
 
 /** The relpaths (relative to the run artifacts dir / the snapshot `files/` dir)
- *  whose bytes a given atype's snapshot carries. */
-function bytePathsForRow(row: ArtifactDbRow): string[] {
+ *  a given row's snapshot MUST carry to be durable. Empty for templated /
+ *  url-only artifacts. The router uses this to decide whether a committed row's
+ *  bytes are safely captured before reaping the run subtree. */
+export function requiredBytePaths(row: ArtifactDbRow): string[] {
   const payload = parsePayload(row.payload_json);
   const asObj = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : undefined;
-  if (row.atype === 'ui-prototype' || row.atype === 'generic') {
+  if (row.atype === 'ui-prototype') {
+    // A static ui-prototype ALWAYS carries its canonical HTML document — required
+    // regardless of payload. Keying the requirement off the payload would let a
+    // payload edit strip `fileName` and drop the requirement, so the row could be
+    // committed + deleted with nothing captured. The report handler mints the
+    // canonical fileName anyway, so this only hardens against later edits.
     const fileName = asObj && typeof asObj.fileName === 'string' ? asObj.fileName : PROTOTYPE_HTML_RELPATH;
     return [fileName];
+  }
+  if (row.atype === 'generic') {
+    // A generic canvas is dual: a declared `fileName` carries HTML bytes; a
+    // url-only generic (legacy dev-server pointer) declares none and wants none.
+    const fileName = asObj && typeof asObj.fileName === 'string' ? asObj.fileName : null;
+    return fileName ? [fileName] : [];
   }
   if (row.atype === 'screenshots') {
     const names = asObj && Array.isArray(asObj.fileNames) ? asObj.fileNames : [];
@@ -187,36 +242,52 @@ function bytePathsForRow(row: ArtifactDbRow): string[] {
   return [];
 }
 
+/** Per-atype byte ceiling for a snapshot copy (screenshots dwarf HTML docs). */
+function capForAtype(atype: string): number {
+  return atype === 'screenshots' ? MAX_SCREENSHOT_BYTES : MAX_PROTOTYPE_HTML_BYTES;
+}
+
 /**
  * Copy one byte file from the run artifacts dir into the snapshot `files/` dir,
  * with full containment hardening. Returns the stored relpath on success, or
  * null (fail-soft) on any guard failure — traversal escape, symlink, not a
  * regular file, over the per-file ceiling, or a plain read/copy error.
+ *
+ * TOCTOU-hardened: the final component is opened with `O_NOFOLLOW` (a symlinked
+ * file is rejected ATOMICALLY at open, no lstat→realpath→read window), and the
+ * `fstat` size check + the bytes copied both come off that SAME descriptor — so
+ * a producer swapping the file between validation and read cannot smuggle other
+ * bytes in. An intermediate symlinked directory is still caught by the
+ * realpath containment check on the parent dir.
  */
 async function copyGuardedByte(
   runArtifactsRoot: string,
   rel: string,
   destFilesDir: string,
+  maxBytes: number,
   logger?: LoggerLike,
 ): Promise<string | null> {
+  let fh: Awaited<ReturnType<typeof fs.open>> | null = null;
   try {
     const srcAbs = path.resolve(runArtifactsRoot, rel);
     // Containment: the resolved source must stay inside the run artifacts root.
     if (srcAbs !== runArtifactsRoot && !srcAbs.startsWith(runArtifactsRoot + path.sep)) {
       return null;
     }
-    // Reject a symlinked final component outright (no following out of the tree).
-    const lst = await fs.lstat(srcAbs);
-    if (lst.isSymbolicLink() || !lst.isFile()) return null;
-    if (lst.size > MAX_PROTOTYPE_HTML_BYTES) return null;
-    // Re-verify via realpath so an intermediate symlinked dir can't escape either.
-    const realSrc = await fs.realpath(srcAbs);
-    if (realSrc !== runArtifactsRoot && !realSrc.startsWith(runArtifactsRoot + path.sep)) {
-      return null;
-    }
+    // Re-verify the CONTAINING dir via realpath so an intermediate symlinked dir
+    // can't escape the run root (the final component is guarded by O_NOFOLLOW).
+    const realRoot = await fs.realpath(runArtifactsRoot);
+    const realDir = await fs.realpath(path.dirname(srcAbs));
+    if (realDir !== realRoot && !realDir.startsWith(realRoot + path.sep)) return null;
+    // Open with O_NOFOLLOW: a symlinked final component throws ELOOP (fail-soft).
+    fh = await fs.open(srcAbs, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const st = await fh.stat();
+    if (!st.isFile()) return null;
+    if (st.size > maxBytes) return null;
+    const buf = await fh.readFile();
     const dest = path.join(destFilesDir, rel);
     await fs.mkdir(path.dirname(dest), { recursive: true });
-    await fs.copyFile(realSrc, dest);
+    await fs.writeFile(dest, buf);
     return rel;
   } catch (err) {
     const msg = `[artifactSnapshot] byte copy skipped for '${rel}' (fail-soft): ${
@@ -225,6 +296,8 @@ async function copyGuardedByte(
     if (logger) logger.debug(msg);
     else console.debug(msg);
     return null;
+  } finally {
+    await fh?.close().catch(() => {});
   }
 }
 
@@ -233,18 +306,25 @@ async function copyGuardedByte(
  * store, replacing any prior snapshot for the same `(runId, atype)`.
  *
  * Atomic-ish: the new manifest + copied bytes are staged into a sibling temp
- * dir, the old `(runId, atype)` dir is removed, then the temp dir is renamed
- * into place (same parent → an atomic rename on POSIX). Byte copy is best-effort
- * per file (a missing/oversized/symlinked source is simply omitted from
- * `manifest.files`); the manifest is always written.
+ * dir, the old identity dir is removed, then the temp dir is renamed into place
+ * (same parent → an atomic rename on POSIX).
  *
  * `runArtifactsRoot` is the run's artifacts subtree (bytes source), or null when
- * unavailable (unit tests / url-only generic) — then no bytes are copied.
+ * unavailable (unit tests). The set of REQUIRED files is derived from the row's
+ * payload INDEPENDENTLY of the root, so a byte-bearing artifact whose root is
+ * missing fails the durability gate rather than silently snapshotting empty.
+ *
+ * DURABILITY GATE: when the atype declares required byte files (a static
+ * ui-prototype / generic pointer, or screenshots), EVERY required file must copy
+ * or the snapshot is abandoned (null returned) so the caller never deletes the
+ * still-live DB row — byte-copy is a prerequisite of the commit's row delete.
+ * Atypes with no required bytes (templated, url-only generic) finalize with
+ * `files: []`.
  *
  * FAIL-SOFT overall: any disk error is caught, logged, and swallowed — the DB
  * row already carries committed=1, so a snapshot problem must never surface to
- * the commit caller. Returns the manifest path on success, or null on failure
- * (the router keeps committed=1 and skips the delete when this returns null).
+ * the commit caller. Returns the manifest path on success, or null on failure /
+ * incomplete copy (the router keeps committed=1 and skips the delete then).
  */
 export async function snapshotCommittedArtifact(
   storeDir: string,
@@ -252,19 +332,20 @@ export async function snapshotCommittedArtifact(
   row: ArtifactDbRow,
   logger?: LoggerLike,
 ): Promise<string | null> {
-  const destDir = snapshotDirFor(storeDir, row.run_id, row.atype);
+  const destDir = snapshotDirFor(storeDir, row.run_id, row.atype, row.source_ref);
   const parent = path.dirname(destDir);
   const tmpDir = path.join(parent, `.tmp-${row.atype}-${randomBytes(8).toString('hex')}`);
   try {
     const filesDir = path.join(tmpDir, 'files');
     await fs.mkdir(filesDir, { recursive: true });
 
-    // Atype-driven byte copy (best-effort per file). Only when a run artifacts
-    // root is available AND its realpath resolves — url-only/templated atypes
-    // copy nothing and the manifest carries files: [].
+    // REQUIRED files come from the payload, NOT from root availability — a
+    // fileName-bearing artifact requires its byte regardless of whether the run
+    // root resolves, so it can never be deleted with an empty snapshot.
+    const required = requiredBytePaths(row);
+    const cap = capForAtype(row.atype);
     const copied: string[] = [];
-    const wanted = runArtifactsRoot ? bytePathsForRow(row) : [];
-    if (wanted.length > 0 && runArtifactsRoot) {
+    if (required.length > 0 && runArtifactsRoot) {
       let realRoot: string | null = null;
       try {
         realRoot = await fs.realpath(runArtifactsRoot);
@@ -272,11 +353,25 @@ export async function snapshotCommittedArtifact(
         realRoot = null;
       }
       if (realRoot) {
-        for (const rel of wanted) {
-          const stored = await copyGuardedByte(realRoot, rel, filesDir, logger);
+        for (const rel of required) {
+          const stored = await copyGuardedByte(realRoot, rel, filesDir, cap, logger);
           if (stored) copied.push(stored);
         }
       }
+    }
+
+    // DATA-LOSS GUARD: a byte-bearing atype's snapshot is only durable when EVERY
+    // required file copied. If any is missing (root absent/unresolvable, source
+    // reaped/gone, oversized, or symlinked), do NOT finalize — return null so
+    // runCommit keeps committed=1 and never deletes the still-live DB row.
+    const copiedSet = new Set(copied);
+    const missing = required.filter((rel) => !copiedSet.has(rel));
+    if (missing.length > 0) {
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+      const msg = `[artifactSnapshot] snapshot for ${row.id} incomplete — ${copied.length}/${required.length} bytes copied (missing: ${missing.join(', ')}); keeping committed=1`;
+      if (logger) logger.warn(msg, { artifactId: row.id, runId: row.run_id });
+      else console.warn(msg);
+      return null;
     }
 
     const manifest = buildSnapshotManifest(row, copied);
@@ -286,7 +381,7 @@ export async function snapshotCommittedArtifact(
     await fs.mkdir(parent, { recursive: true });
     await fs.rm(destDir, { recursive: true, force: true });
     await fs.rename(tmpDir, destDir);
-    return manifestPathFor(storeDir, row.run_id, row.atype);
+    return manifestPathFor(storeDir, row.run_id, row.atype, row.source_ref);
   } catch (err) {
     // Best-effort cleanup of the abandoned temp dir; never mask the real error.
     await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
@@ -345,23 +440,41 @@ export async function listCommittedSnapshots(
       continue;
     }
     for (const e of atypeEntries) {
-      if (!e.isDirectory()) continue;
-      const m = await readManifest(path.join(runDir, e.name, 'manifest.json'));
-      if (!m) continue;
-      if (runId !== undefined && m.runId !== runId) continue;
-      out.push(m);
+      if (!e.isDirectory() || e.name.startsWith('.tmp-')) continue;
+      // A non-per-entity atype dir holds manifest.json directly; a per-entity
+      // atype dir (idea-spec) instead holds one <sourceRef>/manifest.json subdir
+      // per entity. Read the direct manifest, else descend one level.
+      const direct = await readManifest(path.join(runDir, e.name, 'manifest.json'));
+      if (direct) {
+        if (runId === undefined || direct.runId === runId) out.push(direct);
+        continue;
+      }
+      let refEntries: Dirent[] = [];
+      try {
+        refEntries = await fs.readdir(path.join(runDir, e.name), { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const ref of refEntries) {
+        if (!ref.isDirectory() || ref.name.startsWith('.tmp-')) continue;
+        const m = await readManifest(path.join(runDir, e.name, ref.name, 'manifest.json'));
+        if (!m) continue;
+        if (runId !== undefined && m.runId !== runId) continue;
+        out.push(m);
+      }
     }
   }
   return out;
 }
 
-/** Load one committed snapshot manifest for `(runId, atype)`; null when absent. */
+/** Load one committed snapshot manifest for an artifact identity; null when absent. */
 export async function loadCommittedSnapshot(
   storeDir: string,
   runId: string,
   atype: string,
+  sourceRef?: string | null,
 ): Promise<ArtifactSnapshotManifest | null> {
-  const m = await readManifest(manifestPathFor(storeDir, runId, atype));
+  const m = await readManifest(manifestPathFor(storeDir, runId, atype, sourceRef));
   if (!m) return null;
   if (m.runId !== runId || m.atype !== atype) return null;
   return m;

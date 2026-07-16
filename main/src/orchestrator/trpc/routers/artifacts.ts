@@ -137,16 +137,15 @@ export const artifactsRouter = router({
    * project-root commit store and THEN deletes the DB row (iff the snapshot
    * succeeded), emitting exactly one 'committed' event (never 'deleted').
    * Forwards op='commit' as actor='user'. Re-committing surfaces
-   * code:'already_committed' (TRPCError 'CONFLICT'). `payloadJson` stays optional
-   * server-side (the frontend no longer sends it — the stored payload is already
-   * the report-blessed one).
+   * code:'already_committed' (TRPCError 'CONFLICT'). Commit is IDENTITY-ONLY — no
+   * payload override (a commit-time payload edit could strip a byte pointer right
+   * before the durability snapshot and lose content; payload edits use `update`).
    */
   commit: protectedProcedure
     .input(
       z.object({
         projectId: z.number().int().positive(),
         artifactId: z.string().min(1),
-        payloadJson: z.string().optional(),
       }),
     )
     .mutation(async ({ input }): Promise<{ artifactId: string }> => {
@@ -155,7 +154,6 @@ export const artifactsRouter = router({
           op: 'commit',
           artifactId: input.artifactId,
           actor: 'user',
-          ...(input.payloadJson !== undefined ? { payloadJson: input.payloadJson } : {}),
         });
         return { artifactId };
       } catch (err) {

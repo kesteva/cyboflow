@@ -19,7 +19,7 @@
  *  - FAIL-SOFT: an unwritable store resolves to null, never throws.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, rm, readFile, mkdir, writeFile, symlink, stat } from 'fs/promises';
+import { mkdtemp, rm, readFile, mkdir, writeFile, symlink } from 'fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
@@ -37,7 +37,7 @@ import {
   ARTIFACT_SNAPSHOT_SCHEMA_VERSION,
   type ArtifactSnapshotManifest,
 } from '../artifactSnapshot';
-import { DEFAULT_ARTIFACT_COMMIT_DIR, PROTOTYPE_HTML_RELPATH } from '../../../../shared/types/artifacts';
+import { DEFAULT_ARTIFACT_COMMIT_DIR, PROTOTYPE_HTML_RELPATH, MAX_PROTOTYPE_HTML_BYTES } from '../../../../shared/types/artifacts';
 import type { ArtifactDbRow } from '../artifactRouter';
 
 function makeRow(over: Partial<ArtifactDbRow> = {}): ArtifactDbRow {
@@ -95,17 +95,41 @@ describe('resolveArtifactCommitDir', () => {
 });
 
 describe('safeRunId + dir helpers', () => {
-  it('collapses path separators and dots so a runId cannot traverse', () => {
-    expect(safeRunId('../../etc')).toBe('______etc');
-    expect(safeRunId('run/../x')).toBe('run____x');
+  it('neutralizes traversal and is COLLISION-SAFE (distinct raw ids → distinct segments)', () => {
+    // A path-safe id (the common case: UUID hex) is returned verbatim.
     expect(safeRunId('run_ok-1')).toBe('run_ok-1');
-    expect(safeRunId('run/../x')).not.toContain('..');
+    expect(safeRunId('abc123def456')).toBe('abc123def456');
+    // A non-conforming id is sanitized AND suffixed with a hash of the raw value,
+    // so it can neither traverse nor collide with another lossy input.
+    for (const bad of ['../../etc', 'run/../x', 'run.a', 'run/a']) {
+      const s = safeRunId(bad);
+      expect(s).not.toContain('..');
+      expect(s).not.toContain('/');
+      expect(s).not.toContain('\\');
+    }
+    // The lossy pair `run.a` / `run/a` (both sanitize to `run_a`) map to DISTINCT
+    // segments — the collision the flat sanitizer would have caused.
+    expect(safeRunId('run.a')).not.toBe(safeRunId('run/a'));
   });
   it('snapshotDirFor / manifestPathFor compose S/<safeRunId>/<atype>/{…}', () => {
     expect(snapshotDirFor('/S', 'run-1', 'ui-prototype')).toBe(path.join('/S', 'run-1', 'ui-prototype'));
     expect(manifestPathFor('/S', 'run-1', 'ui-prototype')).toBe(
       path.join('/S', 'run-1', 'ui-prototype', 'manifest.json'),
     );
+  });
+  it('snapshotDirFor keys a PER-ENTITY atype by sourceRef (no cross-idea-spec collision)', () => {
+    const a = snapshotDirFor('/S', 'run-1', 'idea-spec', 'idea:7');
+    const b = snapshotDirFor('/S', 'run-1', 'idea-spec', 'idea:8');
+    // Distinct sourceRefs → distinct dirs, both nested under the atype segment.
+    expect(a).not.toBe(b);
+    expect(a.startsWith(path.join('/S', 'run-1', 'idea-spec') + path.sep)).toBe(true);
+    expect(b.startsWith(path.join('/S', 'run-1', 'idea-spec') + path.sep)).toBe(true);
+    // A conforming sourceRef is used verbatim as the sub-segment.
+    expect(snapshotDirFor('/S', 'run-1', 'idea-spec', 'IDEA-7')).toBe(
+      path.join('/S', 'run-1', 'idea-spec', 'IDEA-7'),
+    );
+    // A non-per-entity atype ignores sourceRef (one-per-(run, atype)).
+    expect(snapshotDirFor('/S', 'run-1', 'ui-prototype', 'x')).toBe(path.join('/S', 'run-1', 'ui-prototype'));
   });
 });
 
@@ -176,26 +200,48 @@ describe('snapshotCommittedArtifact — byte copy + layout', () => {
     expect(m.files).toEqual([]);
   });
 
-  it('writes the manifest (files empty) when runArtifactsRoot is null', async () => {
-    const manifestPath = await snapshotCommittedArtifact(store, null, makeRow());
+  it('writes the manifest (files empty) for a BYTE-FREE atype when runArtifactsRoot is null', async () => {
+    // A templated idea-spec requires no bytes, so a null root still snapshots.
+    const row = makeRow({ atype: 'idea-spec', mode: 'template', payload_json: null, source_ref: 'idea:9' });
+    const manifestPath = await snapshotCommittedArtifact(store, null, row);
     expect(manifestPath).not.toBeNull();
     const m = JSON.parse(await readFile(manifestPath as string, 'utf-8')) as ArtifactSnapshotManifest;
     expect(m.files).toEqual([]);
   });
 
-  it('omits a symlinked pointer source (fail-soft, no copy)', async () => {
+  it('ABANDONS the snapshot (null) for a BYTE-BEARING atype when runArtifactsRoot is null', async () => {
+    // A ui-prototype requires its canonical HTML doc regardless of root; a null
+    // root means it cannot be copied → the gate must NOT finalize an empty
+    // snapshot the caller would treat as durable (data-loss guard, root-independent).
+    const manifestPath = await snapshotCommittedArtifact(store, null, makeRow());
+    expect(manifestPath).toBeNull();
+  });
+
+  it('ABANDONS the snapshot (null) when the wanted pointer is a rejected symlink', async () => {
     // Point prototype/index.html at a file OUTSIDE the run root via a symlink.
+    // copyGuardedByte refuses to follow it, so the required byte never copies —
+    // the durability gate must return null (no safe content) so the caller keeps
+    // committed=1 rather than deleting a row whose bytes were never captured.
     const outside = path.join(runRoot, '..', 'secret.html');
     await writeFile(outside, 'SECRET', 'utf-8');
     await mkdir(path.join(runRoot, 'prototype'), { recursive: true });
     await symlink(outside, path.join(runRoot, 'prototype', 'index.html'));
     try {
       const manifestPath = await snapshotCommittedArtifact(store, runRoot, makeRow());
-      const m = JSON.parse(await readFile(manifestPath as string, 'utf-8')) as ArtifactSnapshotManifest;
-      expect(m.files).toEqual([]); // symlink rejected
+      expect(manifestPath).toBeNull();
     } finally {
       await rm(outside, { force: true });
     }
+  });
+
+  it('ABANDONS the snapshot (null) when a wanted pointer source is absent (data-loss guard)', async () => {
+    // ui-prototype declares prototype/index.html but nothing was seeded on disk.
+    // The gate must NOT finalize a bytes-less snapshot + let the caller delete the
+    // still-live DB row (regression: manifest was written with files:[] regardless).
+    const manifestPath = await snapshotCommittedArtifact(store, runRoot, makeRow());
+    expect(manifestPath).toBeNull();
+    // Nothing was swapped into place.
+    expect(existsSync(manifestPathFor(store, 'run-1', 'ui-prototype'))).toBe(false);
   });
 
   it('re-commit rm -rf\'s the (runId,atype) dir and rewrites the bytes', async () => {
@@ -280,5 +326,32 @@ describe('read-back — listCommittedSnapshots / loadCommittedSnapshot / loadCom
     expect(html).toContain('<body>loaded</body>');
     // Absent snapshot → null.
     expect(await loadCommittedHtml(store, 'run-999', 'ui-prototype')).toBeNull();
+  });
+
+  it('PER-ENTITY: two committed idea-specs in one run COEXIST (no cross-overwrite)', async () => {
+    const a = makeRow({ id: 'art_a', atype: 'idea-spec', mode: 'template', payload_json: null, source_ref: 'idea:7', label: 'spec A' });
+    const b = makeRow({ id: 'art_b', atype: 'idea-spec', mode: 'template', payload_json: null, source_ref: 'idea:8', label: 'spec B' });
+    expect(await snapshotCommittedArtifact(store, runRoot, a)).not.toBeNull();
+    expect(await snapshotCommittedArtifact(store, runRoot, b)).not.toBeNull();
+    // Both survive — B's snapshot did NOT rm A's (the old (runId,atype)-only key
+    // collided; the new key includes sourceRef).
+    const list = await listCommittedSnapshots(store, 'run-1');
+    const specs = list.filter((m) => m.atype === 'idea-spec').map((m) => m.label).sort();
+    expect(specs).toEqual(['spec A', 'spec B']);
+    // Point-lookup resolves each by its sourceRef.
+    expect((await loadCommittedSnapshot(store, 'run-1', 'idea-spec', 'idea:7'))?.id).toBe('art_a');
+    expect((await loadCommittedSnapshot(store, 'run-1', 'idea-spec', 'idea:8'))?.id).toBe('art_b');
+  });
+
+  it('SCREENSHOTS use the larger cap: a >HTML-cap PNG still copies', async () => {
+    // A capture larger than MAX_PROTOTYPE_HTML_BYTES but under MAX_SCREENSHOT_BYTES
+    // must be snapshotted — using the HTML cap silently dropped valid screenshots.
+    const big = Buffer.alloc(MAX_PROTOTYPE_HTML_BYTES + 1024, 0x41);
+    await writeFile(path.join(runRoot, 'wide.png'), big);
+    const row = makeRow({ atype: 'screenshots', mode: 'template', payload_json: JSON.stringify({ fileNames: ['wide.png'] }) });
+    const manifestPath = await snapshotCommittedArtifact(store, runRoot, row);
+    expect(manifestPath).not.toBeNull();
+    const m = JSON.parse(await readFile(manifestPath as string, 'utf-8')) as ArtifactSnapshotManifest;
+    expect(m.files).toEqual(['wide.png']);
   });
 });

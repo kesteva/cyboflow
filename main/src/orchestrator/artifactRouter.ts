@@ -26,6 +26,7 @@ import {
   listCommittedSnapshots,
   loadCommittedSnapshot,
   snapshotManifestToArtifact,
+  requiredBytePaths,
 } from './artifactSnapshot';
 
 /**
@@ -175,11 +176,15 @@ export interface ArtifactUpdate {
 
 /** Persist the artifact (flips committed; runCommit also writes a fail-soft
  *  on-disk durability snapshot under the configured commit directory, resolved
- *  against the owning project's root — see artifactSnapshot.ts). */
+ *  against the owning project's root — see artifactSnapshot.ts).
+ *
+ *  Commit is IDENTITY-ONLY: it does NOT mutate the payload. A commit-time payload
+ *  override could strip a byte pointer (e.g. drop `fileName`) right before the
+ *  snapshot, so the durability gate would see no required bytes and the row would
+ *  be deleted with nothing captured. Payload edits go through the `update` op. */
 export interface ArtifactCommit {
   op: 'commit';
   artifactId: string;
-  payloadJson?: string | null;
   actor: ArtifactActor;
 }
 
@@ -342,51 +347,134 @@ export class ArtifactRouter {
    */
   async pruneSessionOnly(projectId: number, runIds: string[]): Promise<{ deleted: string[] }> {
     if (runIds.length === 0) return { deleted: [] };
-    return this.getProjectQueue(projectId).add(() => {
-      const placeholders = runIds.map(() => '?').join(', ');
-      const rows = this.db
-        .prepare(
-          `SELECT * FROM artifacts WHERE committed = 0 AND run_id IN (${placeholders})`,
-        )
-        .all(...runIds) as ArtifactDbRow[];
-      const txn = this.db.transaction(() => {
-        this.db
-          .prepare(`DELETE FROM artifacts WHERE committed = 0 AND run_id IN (${placeholders})`)
-          .run(...runIds);
-      });
-      (txn as () => void)();
-      for (const row of rows) {
-        this.emitChange(projectId, row.run_id, row.id, row.atype, 'deleted', null);
-      }
-      return { deleted: rows.map((r) => r.id) };
-    }) as Promise<{ deleted: string[] }>;
+    return this.getProjectQueue(projectId).add(() =>
+      this.pruneSessionOnlyRaw(projectId, runIds),
+    ) as Promise<{ deleted: string[] }>;
   }
 
   /**
-   * Reap a run's UNCOMMITTED artifacts on close-out (IDEA-039). Called on MERGE
-   * and create-PR ONLY (never plain dismiss — a dismiss-without-merge leaks by
-   * design). Two parts: (a) delete the run's committed=0 DB rows via
-   * pruneSessionOnly (emits 'deleted' per row); (b) `fs.rm` the run's on-disk
-   * artifacts subtree (`CYBOFLOW_DIR/artifacts/runs/<runId>`) via the injected
-   * `resolveRunArtifactsDir`. Committed snapshots live OUTSIDE that subtree (in
-   * the project-root commit store) and survive. Fail-soft on the fs step — a
-   * disk error never fails the close-out.
+   * Raw (NON-queued) drop of committed=0 rows for the given runs. MUST be called
+   * from inside a project-queue task (pruneSessionOnly wraps it; reapForRun calls
+   * it directly within its own queued task — re-queuing from inside a queued task
+   * would deadlock the concurrency-1 queue).
+   */
+  private pruneSessionOnlyRaw(projectId: number, runIds: string[]): { deleted: string[] } {
+    const placeholders = runIds.map(() => '?').join(', ');
+    const rows = this.db
+      .prepare(`SELECT * FROM artifacts WHERE committed = 0 AND run_id IN (${placeholders})`)
+      .all(...runIds) as ArtifactDbRow[];
+    const txn = this.db.transaction(() => {
+      this.db
+        .prepare(`DELETE FROM artifacts WHERE committed = 0 AND run_id IN (${placeholders})`)
+        .run(...runIds);
+    });
+    (txn as () => void)();
+    for (const row of rows) {
+      this.emitChange(projectId, row.run_id, row.id, row.atype, 'deleted', null);
+    }
+    return { deleted: rows.map((r) => r.id) };
+  }
+
+  /**
+   * True when a committed row's snapshot manifest holds EVERY byte the row
+   * requires (a fileName-bearing prototype / each screenshot). A url-only or
+   * templated row requires nothing → trivially durable.
+   */
+  private static snapshotIsDurable(
+    row: ArtifactDbRow,
+    manifest: { files: string[] } | null,
+  ): boolean {
+    const required = requiredBytePaths(row);
+    if (required.length === 0) return true;
+    if (!manifest) return false;
+    const have = new Set(manifest.files);
+    return required.every((f) => have.has(f));
+  }
+
+  /**
+   * Reap a run's artifacts on close-out (IDEA-039). Called on MERGE and create-PR
+   * ONLY (never plain dismiss — a dismiss-without-merge leaks by design). Runs as
+   * ONE queued task on the per-project (concurrency-1) queue so it cannot
+   * interleave with a commit's byte-copy:
+   *   (a) delete the run's committed=0 (session-only) DB rows;
+   *   (b) FINALIZE durability: for each committed=1 row still in the DB, ensure a
+   *       durable snapshot exists — retrying the snapshot NOW while the run bytes
+   *       are still live — then delete the redundant DB row; and
+   *   (c) `fs.rm` the run's on-disk artifacts subtree ONLY when every committed
+   *       byte-bearing row is durably snapshotted, so reap can never delete the
+   *       last copy of committed content (a row whose bytes still can't be
+   *       captured keeps both its DB row AND its live subtree).
+   * Fail-soft on the fs step — a disk error never fails the close-out.
    */
   async reapForRun(projectId: number, runId: string): Promise<{ deleted: string[] }> {
-    const { deleted } = await this.pruneSessionOnly(projectId, [runId]);
     const dir = this.resolveRunArtifactsDir?.(runId) ?? null;
-    if (dir) {
-      try {
-        await fs.rm(dir, { recursive: true, force: true });
-      } catch (err) {
-        const msg = `[artifactRouter] reapForRun fs cleanup for run ${runId} failed (fail-soft): ${
-          err instanceof Error ? err.message : String(err)
-        }`;
-        if (this.logger) this.logger.warn(msg, { runId, projectId });
-        else console.warn(msg);
+    const storeDir = this.resolveCommitDir?.(projectId) ?? null;
+    return this.getProjectQueue(projectId).add(async () => {
+      const { deleted } = this.pruneSessionOnlyRaw(projectId, [runId]);
+
+      // (b) Finalize durability of any committed=1 rows left in the DB (their
+      // commit-time snapshot failed, e.g. a transient disk error). Retry now.
+      let allDurable = true;
+      if (storeDir) {
+        const committedRows = this.db
+          .prepare('SELECT * FROM artifacts WHERE committed = 1 AND run_id = ?')
+          .all(runId) as ArtifactDbRow[];
+        for (const row of committedRows) {
+          const existing = await loadCommittedSnapshot(
+            storeDir,
+            row.run_id,
+            row.atype,
+            row.source_ref,
+          ).catch(() => null);
+          const durable = ArtifactRouter.snapshotIsDurable(row, existing)
+            ? true
+            : await this.maybeSnapshot(projectId, row);
+          if (durable) {
+            // Snapshot holds the content → the DB row is redundant. Emit the
+            // snapshot-shaped 'committed' (so listeners drop the DB identity for
+            // the snapshot), then delete the row silently — mirrors runCommit.
+            const m = await loadCommittedSnapshot(
+              storeDir,
+              row.run_id,
+              row.atype,
+              row.source_ref,
+            ).catch(() => null);
+            this.emitChange(
+              projectId,
+              row.run_id,
+              row.id,
+              row.atype,
+              'committed',
+              m ? snapshotManifestToArtifact(m) : ArtifactRouter.shapeRow(row),
+            );
+            this.db.prepare('DELETE FROM artifacts WHERE id = ?').run(row.id);
+          } else if (requiredBytePaths(row).length > 0) {
+            // Bytes still uncaptured → the live subtree is the ONLY copy; keep it.
+            allDurable = false;
+          }
+        }
       }
-    }
-    return { deleted };
+
+      // (c) Remove the run subtree only when nothing committed still depends on it.
+      if (dir) {
+        if (allDurable) {
+          try {
+            await fs.rm(dir, { recursive: true, force: true });
+          } catch (err) {
+            const msg = `[artifactRouter] reapForRun fs cleanup for run ${runId} failed (fail-soft): ${
+              err instanceof Error ? err.message : String(err)
+            }`;
+            if (this.logger) this.logger.warn(msg, { runId, projectId });
+            else console.warn(msg);
+          }
+        } else {
+          const msg = `[artifactRouter] reapForRun preserved run ${runId} artifacts subtree — a committed artifact's bytes are not yet durably snapshotted`;
+          if (this.logger) this.logger.warn(msg, { runId, projectId });
+          else console.warn(msg);
+        }
+      }
+      return { deleted };
+    }) as Promise<{ deleted: string[] }>;
   }
 
   // ------------------------------------------------------------------------
@@ -401,7 +489,7 @@ export class ArtifactRouter {
    */
   private static identityKey(a: Pick<Artifact, 'runId' | 'atype' | 'sourceRef'>): string {
     const perEntity = isPerEntityArtifact(a.atype) ? a.sourceRef ?? '' : '';
-    return `${a.runId} ${a.atype} ${perEntity}`;
+    return `${a.runId}\u0000${a.atype}\u0000${perEntity}`;
   }
 
   /**
@@ -732,14 +820,11 @@ export class ArtifactRouter {
       runId = row.run_id;
       atype = row.atype;
 
-      const sets = ['committed = 1', 'session_only = 0', 'committed_at = ?'];
-      const params: unknown[] = [now];
-      if (change.payloadJson !== undefined) {
-        sets.push('payload_json = ?');
-        params.push(change.payloadJson);
-      }
-      params.push(change.artifactId);
-      this.db.prepare(`UPDATE artifacts SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+      // IDENTITY-ONLY: flip committed + stamp time; the payload is NEVER mutated
+      // here (see ArtifactCommit) so a byte pointer can't be stripped pre-snapshot.
+      this.db
+        .prepare('UPDATE artifacts SET committed = 1, session_only = 0, committed_at = ? WHERE id = ?')
+        .run(now, change.artifactId);
       const ev = this.insertEvent(
         change.artifactId,
         'committed',
@@ -766,7 +851,7 @@ export class ArtifactRouter {
     if (snapshotOk) {
       const storeDir = this.resolveCommitDir?.(trueProject) ?? null;
       if (storeDir) {
-        const m = await loadCommittedSnapshot(storeDir, runId, atype).catch(() => null);
+        const m = await loadCommittedSnapshot(storeDir, runId, atype, committedRow?.source_ref).catch(() => null);
         if (m) emitted = snapshotManifestToArtifact(m);
       }
     }

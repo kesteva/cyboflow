@@ -109,19 +109,49 @@ afterEach(() => {
 });
 
 describe('injectPrototypeCsp', () => {
-  it('inserts the CSP meta as the first <head> child', () => {
+  const META = `<meta http-equiv="Content-Security-Policy" content="${ARTIFACT_PROTOTYPE_CSP}">`;
+
+  it('prepends the CSP meta as the document first token (parser hoists it into <head>)', () => {
     const out = injectPrototypeCsp('<html><head><title>x</title></head><body>hi</body></html>');
-    expect(out).toContain(`<head><meta http-equiv="Content-Security-Policy" content="${ARTIFACT_PROTOTYPE_CSP}"><title>x</title>`);
+    expect(out).toBe(`${META}<html><head><title>x</title></head><body>hi</body></html>`);
   });
 
-  it('synthesizes a <head> after <html> when none exists', () => {
-    const out = injectPrototypeCsp('<html><body>hi</body></html>');
-    expect(out).toContain(`<html><head><meta http-equiv="Content-Security-Policy" content="${ARTIFACT_PROTOTYPE_CSP}"></head>`);
+  it('prepends the meta AHEAD of a leading <!doctype> (srcdoc keeps no-quirks mode)', () => {
+    // The meta must be byte 0 — nothing, not even the doctype, precedes it. The
+    // srcdoc render context defaults to no-quirks, so fidelity is preserved.
+    const out = injectPrototypeCsp('<!DOCTYPE html><html><head></head><body>hi</body></html>');
+    expect(out).toBe(`${META}<!DOCTYPE html><html><head></head><body>hi</body></html>`);
+    expect(out.startsWith(META)).toBe(true);
   });
 
-  it('prepends a synthesized <head> when there is no <html> either', () => {
+  it('is NOT bypassable by a comment-spoofed <head> (regex-splice regression)', () => {
+    // A `<!-- <head> -->` comment must not capture the injection: the meta has to
+    // land BEFORE the comment / real content so the CSP still governs the doc.
+    const spoof = '<!-- <head> --><head><img src="https://evil/beacon"></head><body>x</body>';
+    const out = injectPrototypeCsp(spoof);
+    expect(out.startsWith(META)).toBe(true);
+    // The meta was NOT spliced inside the comment.
+    expect(out).not.toContain('<!-- <head><meta');
+    expect(out).toBe(`${META}${spoof}`);
+  });
+
+  it('is NOT bypassable by a parser-differential prefix (BOM / NBSP / vertical tab)', () => {
+    // JS `\s` matches these but HTML does NOT treat them as pre-doctype whitespace,
+    // so a `/^\s*<!doctype/` probe would splice AFTER the doctype while the parser
+    // pushes the meta out of <head>. Absolute-prepend closes that: the meta is byte
+    // 0 regardless of what the document begins with.
+    for (const prefix of ['\uFEFF', '\u00A0', '\u000B']) {
+      const doc = `${prefix}<!doctype html><img src="https://evil/beacon">`;
+      const out = injectPrototypeCsp(doc);
+      // The meta is byte 0; the prefix (and everything else) follows it verbatim.
+      expect(out.startsWith(META)).toBe(true);
+      expect(out.slice(META.length)).toBe(doc);
+    }
+  });
+
+  it('prepends the meta when there is no <html>/<head> at all', () => {
     const out = injectPrototypeCsp('<body>hi</body>');
-    expect(out.startsWith(`<head><meta http-equiv="Content-Security-Policy"`)).toBe(true);
+    expect(out).toBe(`${META}<body>hi</body>`);
   });
 });
 
@@ -146,8 +176,8 @@ describe('registerArtifactHtmlHandlers — artifacts:load-html', () => {
     expect(res.success).toBe(true);
     expect(res.data?.html).toContain('<body>mock</body>');
     expect(res.data?.html).toContain(`content="${ARTIFACT_PROTOTYPE_CSP}"`);
-    // CSP meta is the FIRST head child.
-    expect(res.data?.html).toContain(`<head><meta http-equiv="Content-Security-Policy"`);
+    // CSP meta is prepended as the document's first token.
+    expect(res.data?.html?.startsWith(`<meta http-equiv="Content-Security-Policy"`)).toBe(true);
   });
 
   it('returns null (fail-soft) when the prototype file is absent', async () => {

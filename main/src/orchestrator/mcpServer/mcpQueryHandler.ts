@@ -2786,11 +2786,23 @@ export class McpQueryHandler {
     }
     const actor: ArtifactActor = ctx.actor === 'linear' ? 'agent:unknown' : ctx.actor;
     try {
+      // The tool's optional `payload_json` ("store a final payload alongside the
+      // commit") is applied as a SEPARATE `update` FIRST — commit itself is
+      // IDENTITY-ONLY so a byte pointer can't be stripped mid-commit right before
+      // the durability snapshot (see ArtifactCommit). ui-prototype's required byte
+      // is canonical regardless of payload, so this ordering can't lose content.
+      if (msg.payloadJson !== undefined) {
+        await ArtifactRouter.getInstance().apply(ctx.projectId, {
+          op: 'update',
+          artifactId: msg.artifactId,
+          payloadJson: msg.payloadJson,
+          actor,
+        });
+      }
       const { artifactId } = await ArtifactRouter.getInstance().apply(ctx.projectId, {
         op: 'commit',
         artifactId: msg.artifactId,
         actor,
-        ...(msg.payloadJson !== undefined ? { payloadJson: msg.payloadJson } : {}),
       });
       this.writeResponse(client, {
         type: 'mcp-query-response',

@@ -1086,6 +1086,57 @@ describe('ArtifactRouter', () => {
     }
   });
 
+  it('reapForRun PRESERVES the run subtree when a committed artifact is not durably snapshotted', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const { router, runArtifacts, cleanup } = wireLifecycleRouter(db);
+    try {
+      // A ui-prototype committed with NO prototype/index.html on disk → the
+      // snapshot fails at commit and the row is KEPT committed=1 (never lost).
+      const proto = await router.apply(1, {
+        op: 'create', runId: 'run-1', atype: 'ui-prototype', label: 'p',
+        payloadJson: JSON.stringify({ fileName: 'prototype/index.html' }), actor: 'user',
+      });
+      await router.apply(1, { op: 'commit', artifactId: proto.artifactId, actor: 'user' });
+      expect(
+        (db.prepare('SELECT committed FROM artifacts WHERE id = ?').get(proto.artifactId) as { committed: number }).committed,
+      ).toBe(1);
+
+      await router.reapForRun(1, 'run-1');
+      // The committed row is KEPT and the run subtree PRESERVED — reap must never
+      // nuke the last copy of content a committed artifact still depends on.
+      expect(db.prepare('SELECT COUNT(*) AS n FROM artifacts WHERE id = ?').get(proto.artifactId)).toMatchObject({ n: 1 });
+      expect(existsSync(runArtifacts)).toBe(true);
+    } finally {
+      cleanup();
+    }
+  });
+
+  it('reapForRun RETRIES a failed snapshot: once bytes are present it snapshots + deletes the row', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const { router, storeDir, runArtifacts, cleanup } = wireLifecycleRouter(db);
+    try {
+      const proto = await router.apply(1, {
+        op: 'create', runId: 'run-1', atype: 'ui-prototype', label: 'p',
+        payloadJson: JSON.stringify({ fileName: 'prototype/index.html' }), actor: 'user',
+      });
+      // Commit while the byte is missing → snapshot fails → committed=1 kept.
+      await router.apply(1, { op: 'commit', artifactId: proto.artifactId, actor: 'user' });
+      // The producer's bytes land on disk after the (failed) commit.
+      seedRunArtifacts(runArtifacts);
+
+      await router.reapForRun(1, 'run-1');
+      // Reap retried the snapshot against the now-present bytes → durable snapshot
+      // written, redundant DB row deleted, and the subtree safely removed.
+      expect(db.prepare('SELECT COUNT(*) AS n FROM artifacts').get()).toMatchObject({ n: 0 });
+      expect(await loadCommittedSnapshot(storeDir, 'run-1', 'ui-prototype')).not.toBeNull();
+      expect(existsSync(runArtifacts)).toBe(false);
+    } finally {
+      cleanup();
+    }
+  });
+
   it('accept-baseline resolves the verdict off the committed snapshot manifest (DB row deleted)', async () => {
     const db = buildDb();
     seedRun(db, 'run-1');

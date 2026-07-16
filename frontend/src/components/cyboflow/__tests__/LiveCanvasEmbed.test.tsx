@@ -3,8 +3,11 @@
  *
  * Verifies:
  *   - HTML branch (static mockup): srcDoc + a BARE `sandbox=""` (no allow-scripts,
- *     no allow-same-origin) + the shared CSP `csp` attribute + `referrerPolicy`,
- *     and NO toolbar/footer. jsdom cannot ENFORCE the sandbox/CSP — these assert
+ *     no allow-same-origin) + `referrerPolicy`, and NO toolbar/footer. Network
+ *     egress is closed by the CSP `<meta>` the main handler prepends to the
+ *     document (see injectPrototypeCsp / artifactHtml.test.ts), NOT by an iframe
+ *     `csp` attribute — that attribute was never shipped in Chromium/Electron and
+ *     is deliberately absent. jsdom cannot ENFORCE the sandbox/CSP — these assert
  *     the attributes are present; real enforcement is an Electron-level check.
  *   - URL branch (legacy live canvas): localhost URLs render an allow-scripts
  *     iframe; non-localhost URLs are refused; reload re-keys the iframe.
@@ -14,7 +17,6 @@ import '@testing-library/jest-dom';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import { LiveCanvasEmbed, isLocalhostUrl } from '../LiveCanvasEmbed';
-import { ARTIFACT_PROTOTYPE_CSP } from '../../../../../shared/types/artifacts';
 
 describe('isLocalhostUrl', () => {
   it('accepts http(s) localhost hosts on a non-shell port', () => {
@@ -50,7 +52,7 @@ describe('isLocalhostUrl', () => {
 describe('LiveCanvasEmbed — html branch (static mockup)', () => {
   const DOC = '<html><head></head><body><h1>Mockup</h1></body></html>';
 
-  it('renders a bare-sandbox srcDoc iframe with the shared CSP + no-referrer', () => {
+  it('renders a bare-sandbox srcDoc iframe with no-referrer (no inert csp attribute)', () => {
     render(<LiveCanvasEmbed html={DOC} />);
     const iframe = screen.getByTestId('live-canvas-iframe');
     // srcDoc carries the document inline (NOT a cross-origin src).
@@ -60,9 +62,10 @@ describe('LiveCanvasEmbed — html branch (static mockup)', () => {
     expect(iframe.getAttribute('sandbox')).toBe('');
     expect(iframe.getAttribute('sandbox')).not.toContain('allow-scripts');
     expect(iframe.getAttribute('sandbox')).not.toContain('allow-same-origin');
-    // Belt-and-braces CSP + referrer policy.
-    expect(iframe).toHaveAttribute('csp', ARTIFACT_PROTOTYPE_CSP);
     expect(iframe).toHaveAttribute('referrerpolicy', 'no-referrer');
+    // The `csp` iframe attribute is a no-op in Chromium/Electron and must NOT be
+    // emitted — the injected CSP <meta> is the real egress control.
+    expect(iframe).not.toHaveAttribute('csp');
   });
 
   it('renders NO reload/open toolbar and NO server-down footer for the html branch', () => {
