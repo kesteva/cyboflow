@@ -19,7 +19,6 @@
  *                    session close-out; it stops the agent without touching git.
  */
 import { useState, useCallback, useEffect } from 'react';
-import { perfProbeStart } from '../../utils/perfProbe';
 import { PerfProfiler } from './PerfProfiler';
 import { WorkflowPicker } from './WorkflowPicker';
 import { GRAPH_PAPER_BACKGROUND } from './WorkflowCanvas';
@@ -272,10 +271,6 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
   }, [projectId]);
 
   useEffect(() => useQuestionStore.getState().init(), []);
-
-  // Opt-in renderer perf probe (VITE_CYBOFLOW_PERF_TRACE=1 or the localStorage
-  // toggle). No-op otherwise; returns a disconnect fn for unmount.
-  useEffect(() => perfProbeStart(), []);
 
   // In-canvas completion banner: the SAME eligibility the RunActionBar End
   // button uses (shared hook), surfaced prominently in the flow window so a

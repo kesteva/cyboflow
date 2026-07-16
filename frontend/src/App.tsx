@@ -5,6 +5,7 @@ import { useStuckNotifications } from './hooks/useStuckNotifications';
 import { useResizable } from './hooks/useResizable';
 import { Sidebar } from './components/Sidebar';
 import { PerfProfiler } from './components/cyboflow/PerfProfiler';
+import { perfProbeStart } from './utils/perfProbe';
 import { TitleBar } from './components/TitleBar';
 import { CyboflowRoot } from './components/cyboflow/CyboflowRoot';
 import { PromptHistoryModal } from './components/PromptHistoryModal';
@@ -127,6 +128,11 @@ function App() {
   // (and the macOS dock badge) stays live even when the human-review pane is
   // not mounted (it now mounts only when the rail item is active).
   useEffect(() => useReviewQueueStore.getState().init(), []);
+
+  // Renderer perf probe — started at the App level (always mounted) so it runs
+  // on every view, not only the session view where CyboflowRoot lives. No-op
+  // unless enabled; returns a teardown for unmount.
+  useEffect(() => perfProbeStart(), []);
 
   // Init the active-runs store at the app-shell level so the landing home's
   // cross-project run aggregation stays live across center-surface switches
