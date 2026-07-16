@@ -25,11 +25,13 @@
 import type { WorkflowStep } from '../../../../shared/types/workflows';
 import type { UnifiedMessage } from '../../../../shared/types/unifiedMessage';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
+import type { SprintLaneRow } from '../../../../shared/types/sprintBatch';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type { TriageDecision } from './types';
 import type { StructuredQueryFn, TextQueryFn } from './monitorQuery';
 import { selectRunUnifiedMessages } from '../runUnifiedMessagesListing';
 import { StepResultStore, type StepResultRow } from '../stepResultStore';
+import { SprintLaneStore } from '../sprintLaneStore';
 import { buildUserTextEvent, buildAssistantTextEvent } from './syntheticEvents';
 
 // ---------------------------------------------------------------------------
@@ -51,6 +53,16 @@ export interface MonitorHistory {
   conversation: UnifiedMessage[];
   /** The per-step results timeline (in execution order). */
   steps: StepResultRow[];
+  /**
+   * The run's sprint fan-out lanes (per-task progress), when it is a sprint/ship
+   * run — else absent/empty. OPTIONAL so the many non-sprint callers (and every
+   * existing test literal) need not supply it; a run with no lanes produces no
+   * lane section, keeping non-sprint prompts byte-identical. This exists because
+   * the `steps` timeline collapses the whole task fan-out into ONE opaque
+   * container step (`execute-tasks`), so it carries NO per-task granularity — the
+   * lanes are the source of truth for how far any individual task has gotten.
+   */
+  lanes?: SprintLaneRow[];
 }
 
 /**
@@ -77,7 +89,35 @@ export class DefaultHistoryReader implements HistoryReader {
   async read(runId: string): Promise<MonitorHistory> {
     const conversation = selectRunUnifiedMessages(this.db, runId, this.logger);
     const steps = StepResultStore.tryGetInstance()?.listForRun(runId) ?? [];
-    return { conversation, steps };
+    const lanes = this.readLanes(runId);
+    return { conversation, steps, lanes };
+  }
+
+  /**
+   * Read the run's sprint fan-out lanes, fail-soft. Returns [] for a non-sprint
+   * run (no batch_id), when the SprintLaneStore is not initialized (early boot /
+   * tests), or on any read error — a lane-read problem must never break the
+   * monitor's history read. The batch is resolved the same way the lane store's
+   * own owners do (workflow_runs.batch_id, 1:1).
+   */
+  private readLanes(runId: string): SprintLaneRow[] {
+    try {
+      const store = SprintLaneStore.tryGetInstance();
+      if (store === null) return [];
+      const row = this.db
+        .prepare('SELECT batch_id AS batchId FROM workflow_runs WHERE id = ?')
+        .get(runId) as { batchId?: unknown } | undefined;
+      const batchId =
+        typeof row?.batchId === 'string' && row.batchId.length > 0 ? row.batchId : null;
+      if (batchId === null) return [];
+      return store.listLanes(batchId);
+    } catch (err) {
+      this.logger?.debug('[Monitor] lane read skipped (fail-soft)', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
   }
 }
 
@@ -160,6 +200,41 @@ function digestSteps(steps: StepResultRow[]): string {
     .join('\n');
 }
 
+/** Render one sprint lane to a compact one-line digest (ref, status, current step, attempt, blockers). */
+function digestLane(lane: SprintLaneRow): string {
+  const ref = lane.ref ?? lane.taskId;
+  const step = lane.currentStepId !== null ? ` @ ${lane.currentStepId}` : '';
+  // attempts is 1-based (0 = clean first pass); only surface a re-delegation.
+  const attempt = lane.attempts >= 2 ? `, attempt ${lane.attempts}` : '';
+  const blocked =
+    lane.blockedByRefs.length > 0 ? ` — blocked on ${lane.blockedByRefs.join(', ')}` : '';
+  return `- ${ref}: ${lane.status}${step}${attempt}${blocked}`;
+}
+
+/**
+ * The per-task fan-out lane section, or '' when the run has no lanes (non-sprint —
+ * so those prompts stay byte-identical). Surfaces the sprint's per-task progress
+ * AND explicitly tells the monitor to trust it over the step timeline for anything
+ * task-level: the step timeline collapses the entire task fan-out into ONE opaque
+ * container step (`execute-tasks`), so on its own it reads as "nothing past the
+ * container has run" even when tasks have fully integrated — the exact trap that
+ * made a monitor confidently report "verification not reached" for an
+ * already-integrated task.
+ */
+function laneSection(history: MonitorHistory): string {
+  const lanes = history.lanes ?? [];
+  if (lanes.length === 0) return '';
+  const rows = lanes.map(digestLane).join('\n');
+  return (
+    '\n\nSprint task lanes (per-task fan-out progress — AUTHORITATIVE for per-task state):\n' +
+    'Note: the step timeline above shows the whole task fan-out as ONE container step, so it does ' +
+    'NOT reflect per-task progress — trust these lanes, not the step timeline, for how far any ' +
+    'individual task has gotten. A lane status of `integrated` means that task is fully done ' +
+    '(implemented, reviewed, verified) and its work is committed.\n' +
+    rows
+  );
+}
+
 /** Build the compact recent-conversation digest (last MAX_DIGEST_TURNS turns). */
 function digestConversation(conversation: UnifiedMessage[]): string {
   if (conversation.length === 0) return '- (no conversation yet)';
@@ -189,7 +264,7 @@ Failed step: **${failedStep.name}** (id: \`${failedStep.id}\`, agent: \`${failed
 Error: ${error ?? '(no error message captured)'}
 
 Step timeline so far:
-${digestSteps(history.steps)}
+${digestSteps(history.steps)}${laneSection(history)}
 
 Recent conversation:
 ${digestConversation(history.conversation)}
@@ -215,7 +290,7 @@ export function buildAnswerPrompt(
   return `You are the SUPERVISOR of a "${ctx.workflowName}" workflow run executing in this git worktree. The workflow's steps are sequenced by HOST CODE, not by you — do NOT try to run, edit, or re-order steps. Your role is to MONITOR the run and answer the user's questions about it.
 
 Step timeline so far:
-${digestSteps(history.steps)}
+${digestSteps(history.steps)}${laneSection(history)}
 
 Recent conversation:
 ${digestConversation(history.conversation)}
@@ -254,7 +329,7 @@ export function buildActionAnswerPrompt(
   return `You are the SUPERVISOR of a "${ctx.workflowName}" workflow run executing in this git worktree. You still do not sequence steps yourself — host code does. Your role is to MONITOR the run, answer the user's questions about it, and — only when explicitly asked and explicitly confirmed — attach a validated action for the host to execute.
 
 Step timeline so far:
-${digestSteps(history.steps)}
+${digestSteps(history.steps)}${laneSection(history)}
 
 Recent conversation:
 ${digestConversation(history.conversation)}

@@ -19,6 +19,7 @@ import type { StructuredQueryFn, TextQueryFn } from '../monitorQuery';
 import type { WorkflowStep } from '../../../../../shared/types/workflows';
 import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
 import type { StepResultRow } from '../../stepResultStore';
+import type { SprintLaneRow } from '../../../../../shared/types/sprintBatch';
 
 function step(p: Partial<WorkflowStep> & { id: string }): WorkflowStep {
   return { name: p.id, agent: 'executor', mcps: [], retries: 0, ...p };
@@ -39,6 +40,18 @@ function assistantMsg(content: string): UnifiedMessage {
 }
 function stepRow(p: Partial<StepResultRow> & { stepId: string; outcome: StepResultRow['outcome'] }): StepResultRow {
   return { runId: 'run-1', phaseId: null, attempts: 1, summary: null, error: null, ...p };
+}
+function laneRow(p: Partial<SprintLaneRow> & { taskId: string; status: SprintLaneRow['status'] }): SprintLaneRow {
+  return {
+    batchId: 'batch-1',
+    currentStepId: null,
+    ref: p.taskId,
+    title: null,
+    attempts: 0,
+    blockedByRefs: [],
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    ...p,
+  };
 }
 
 /** A fake HistoryReader that records every read and returns a canned snapshot. */
@@ -106,6 +119,62 @@ describe('buildAnswerPrompt', () => {
     expect(p).toContain('why did it stop?');
     expect(p).toContain('finished analyze');
     expect(p).toContain('analyze');
+  });
+});
+
+describe('laneSection (per-task fan-out lanes in the prompt)', () => {
+  const sprintCtx: MonitorContext = { ...ctx, workflowName: 'sprint' };
+
+  it('surfaces per-task lane state and marks it authoritative over the step timeline', () => {
+    // The exact trap this fix targets: the step timeline only knows the opaque
+    // fan-out container step, while a task has actually integrated.
+    const history: MonitorHistory = {
+      conversation: [],
+      // Mirrors the real programmatic-sprint trap: step_results holds only the
+      // pre-fan-out step; the `execute-tasks` container has no settled row, so the
+      // timeline alone looks like "nothing past analyze-dependencies has run".
+      steps: [stepRow({ stepId: 'analyze-dependencies', outcome: 'done' })],
+      lanes: [
+        laneRow({ taskId: 'TASK-065', status: 'integrated', currentStepId: 'task-verify' }),
+        laneRow({ taskId: 'TASK-066', status: 'queued' }),
+      ],
+    };
+    for (const p of [
+      buildAnswerPrompt(sprintCtx, 'is task 65 done?', history),
+      buildTriagePrompt(sprintCtx, step({ id: 'execute-tasks' }), undefined, history),
+      buildActionAnswerPrompt(sprintCtx, 'is task 65 done?', history),
+    ]) {
+      expect(p).toContain('Sprint task lanes');
+      expect(p).toContain('TASK-065: integrated @ task-verify');
+      expect(p).toContain('TASK-066: queued');
+      // The anti-trap instruction: trust the lanes, not the step timeline.
+      expect(p).toContain('trust these lanes, not the step timeline');
+    }
+  });
+
+  it('renders attempts (re-delegation) and in-batch blockers', () => {
+    const history: MonitorHistory = {
+      conversation: [],
+      steps: [],
+      lanes: [
+        laneRow({ taskId: 'TASK-064', status: 'running', currentStepId: 'implement', attempts: 3 }),
+        laneRow({ taskId: 'TASK-066', status: 'queued', blockedByRefs: ['TASK-065'] }),
+      ],
+    };
+    const p = buildAnswerPrompt(sprintCtx, 'status?', history);
+    expect(p).toContain('TASK-064: running @ implement, attempt 3');
+    expect(p).toContain('TASK-066: queued — blocked on TASK-065');
+  });
+
+  it('omits the lane section entirely for a non-sprint run (byte-identical prompt)', () => {
+    const withUndefined: MonitorHistory = { conversation: [], steps: [] };
+    const withEmpty: MonitorHistory = { conversation: [], steps: [], lanes: [] };
+    for (const h of [withUndefined, withEmpty]) {
+      const p = buildAnswerPrompt(ctx, 'why did it stop?', h);
+      expect(p).not.toContain('Sprint task lanes');
+    }
+    // The undefined-lanes prompt must equal the pre-fix output (no added whitespace).
+    expect(buildAnswerPrompt(ctx, 'q', withUndefined)).toEqual(buildAnswerPrompt(ctx, 'q', withEmpty));
   });
 });
 

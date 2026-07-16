@@ -258,6 +258,11 @@ export class SprintLaneStore {
     return SprintLaneStore.instance;
   }
 
+  /** Returns the singleton, or null when not initialized (early boot / tests). Mirrors StepResultStore.tryGetInstance — for fail-soft readers (e.g. the monitor's lane digest) that must never throw when the store is absent. */
+  static tryGetInstance(): SprintLaneStore | null {
+    return SprintLaneStore.instance;
+  }
+
   /** Reset singleton — intended for tests only. */
   static _resetForTesting(): void {
     SprintLaneStore.instance = null;
