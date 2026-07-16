@@ -1515,6 +1515,7 @@ async function initializeServices() {
     cyboflowLogger,
     {
       onInteractiveTurnEnd: (runId) => interactiveCliManager.notifyTurnEnd(runId),
+      onInteractiveQuestionOpen: (runId) => interactiveCliManager.notifyQuestionOpen(runId),
       // Workflow/variant configuration tools (cyboflow_*_workflow / _variant):
       // forward the WorkflowRegistry as the narrow WorkflowConfigLike structural
       // surface so quick sessions can edit flows + variants over MCP without the

@@ -29,6 +29,7 @@ import {
   resolveInlineGatingHooks,
   resolveShellHookScriptPath,
   resolveStopHookScriptPath,
+  resolveQuestionHookScriptPath,
   resolveShellHookScriptPathForFilename,
 } from '../interactiveSettingsWriter';
 import { makeSpyLogger } from '../../../../orchestrator/__test_fixtures__/loggerLikeSpy';
@@ -92,6 +93,7 @@ function legacyCyboflowGroup(command: string): HookMatcherGroup {
 describe('resolveInlineGatingHooks', () => {
   const hookPath = resolveShellHookScriptPath(HOOK_DIR);
   const stopHookPath = resolveStopHookScriptPath(HOOK_DIR);
+  const questionHookPath = resolveQuestionHookScriptPath(HOOK_DIR);
 
   /** The Stop entry every fragment carries, regardless of permissionMode. */
   function expectStopEntry(fragment: ReturnType<typeof resolveInlineGatingHooks>): void {
@@ -101,30 +103,41 @@ describe('resolveInlineGatingHooks', () => {
     expect(group.hooks).toEqual([{ type: 'command', command: stopHookPath, timeout: 10 }]);
   }
 
+  /** The AskUserQuestion notify entry every fragment carries, regardless of permissionMode. */
+  function expectQuestionEntry(group: HookMatcherGroup | undefined): void {
+    expect(group?.matcher).toBe('AskUserQuestion');
+    expect(group?.hooks).toEqual([{ type: 'command', command: questionHookPath, timeout: 10 }]);
+  }
+
   it.each([undefined, 'approve', 'default', 'acceptEdits'] as const)(
-    'gating mode %s → a "*" PreToolUse fragment referencing the hook script with the high timeout, PLUS the Stop entry',
+    'gating mode %s → a "*" PreToolUse entry (high timeout) PLUS the AskUserQuestion notify entry PLUS the Stop entry',
     (permissionMode) => {
       const fragment = resolveInlineGatingHooks(
         { permissionMode, hookDirOverride: HOOK_DIR },
         makeSpyLogger(),
       );
 
-      expect(fragment.PreToolUse).toHaveLength(1);
-      const group = fragment.PreToolUse![0];
-      expect(group.matcher).toBe('*');
-      expect(group.hooks).toEqual([{ type: 'command', command: hookPath, timeout: 86_400 }]);
+      expect(fragment.PreToolUse).toHaveLength(2);
+      const gate = fragment.PreToolUse![0];
+      expect(gate.matcher).toBe('*');
+      expect(gate.hooks).toEqual([{ type: 'command', command: hookPath, timeout: 86_400 }]);
+      expectQuestionEntry(fragment.PreToolUse![1]);
       expectStopEntry(fragment);
     },
   );
 
   it.each(['ignore', 'dontAsk', 'auto'] as const)(
-    'opt-out mode %s → PreToolUse omitted (native/opted-out gating owns the decision), but Stop is STILL present',
+    'opt-out mode %s → the "*" gate is omitted, but the AskUserQuestion notify entry AND Stop are STILL present',
     (permissionMode) => {
       const fragment = resolveInlineGatingHooks(
         { permissionMode, hookDirOverride: HOOK_DIR },
         makeSpyLogger(),
       );
-      expect(fragment.PreToolUse).toBeUndefined();
+      // The wildcard gate is gone, but the question-notify entry remains so PTY
+      // "blocked" detection works in every mode.
+      expect(fragment.PreToolUse).toHaveLength(1);
+      expect(fragment.PreToolUse!.some((g) => g.matcher === '*')).toBe(false);
+      expectQuestionEntry(fragment.PreToolUse![0]);
       expectStopEntry(fragment);
     },
   );
@@ -144,7 +157,7 @@ describe('resolveInlineGatingHooks', () => {
     const logger = makeSpyLogger();
     resolveInlineGatingHooks({ permissionMode: 'auto', hookDirOverride: HOOK_DIR }, logger);
     expect(
-      logger.calls.some((c) => c.level === 'debug' && c.message.includes('opts out of PreToolUse gating')),
+      logger.calls.some((c) => c.level === 'debug' && c.message.includes('opts out of wildcard PreToolUse gating')),
     ).toBe(true);
   });
 });

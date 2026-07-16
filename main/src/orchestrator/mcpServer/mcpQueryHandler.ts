@@ -503,6 +503,18 @@ export type McpQueryMessage =
       type: 'interactive-turn-end';
       requestId: string;
       runId: string;
+    }
+  | {
+      /**
+       * "Parked on an AskUserQuestion gate" signal from the INTERACTIVE
+       * substrate's PreToolUse(AskUserQuestion) notify hook (questionShellHook.ts).
+       * Fire-and-ack — like interactive-turn-end, ALWAYS writeResponses
+       * synchronously; there is no verdict to defer (the hook never gates the
+       * question). Flips the run's quick-session board state to `blocked`.
+       */
+      type: 'interactive-question-open';
+      requestId: string;
+      runId: string;
     };
 
 export interface McpQueryResponse {
@@ -631,6 +643,15 @@ export interface McpQueryHandlerDeps {
    * to `interactiveCliManager.notifyTurnEnd`.
    */
   onInteractiveTurnEnd?: (runId: string) => boolean;
+
+  /**
+   * Deliver a "parked on an AskUserQuestion gate" notification from the
+   * interactive PreToolUse(AskUserQuestion) notify hook (questionShellHook.ts) to
+   * the live InteractiveClaudeManager. Wired in main/src/index.ts to
+   * `interactiveCliManager.notifyQuestionOpen`. Absent → the PTY session simply
+   * won't show `blocked` on the quick-session board (best-effort).
+   */
+  onInteractiveQuestionOpen?: (runId: string) => void;
 
   /**
    * WorkflowRegistry surface for the workflow/variant configuration tools
@@ -840,6 +861,10 @@ export class McpQueryHandler {
           // Fire-and-ack: unlike shell-approval-request, there is no verdict to
           // defer — writeResponse happens synchronously either way.
           this.handleInteractiveTurnEnd(msg, client);
+          break;
+        case 'interactive-question-open':
+          // Fire-and-ack: flip the run's board state to `blocked`; no verdict.
+          this.handleInteractiveQuestionOpen(msg, client);
           break;
         default: {
           // TypeScript exhaustiveness helper — cast so the switch compiles even
@@ -3193,6 +3218,28 @@ export class McpQueryHandler {
       requestId: msg.requestId,
       ok: notified,
       ...(notified ? {} : { error: 'turn_end_unavailable' }),
+    });
+  }
+
+  /**
+   * "Parked on an AskUserQuestion gate" signal from the interactive
+   * PreToolUse(AskUserQuestion) notify hook. Flips the run's quick-session board
+   * state to `blocked` via the injected dep (interactiveClaudeManager
+   * .notifyQuestionOpen). Fire-and-ack — the hook never gates the question, so we
+   * always reply `ok:true` (the notification is best-effort; a missing dep just
+   * means the board won't show `blocked` for this PTY session).
+   */
+  private handleInteractiveQuestionOpen(
+    msg: Extract<McpQueryMessage, { type: 'interactive-question-open' }>,
+    client: net.Socket,
+  ): void {
+    if (typeof msg.runId === 'string' && msg.runId.length > 0) {
+      this.deps.onInteractiveQuestionOpen?.(msg.runId);
+    }
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
     });
   }
 

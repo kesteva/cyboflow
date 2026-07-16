@@ -54,6 +54,9 @@ const HOOK_FILENAME = 'preToolUseShellHook.js';
 /** Name of the compiled Stop turn-end-hook script (IDEA-030). */
 const STOP_HOOK_FILENAME = 'stopShellHook.js';
 
+/** Name of the compiled AskUserQuestion "parked on a question" notify-hook script. */
+const QUESTION_HOOK_FILENAME = 'questionShellHook.js';
+
 /**
  * Relative path from process.resourcesPath to the unpacked hook script. Mirrors
  * the `build.asarUnpack` glob in package.json
@@ -102,6 +105,11 @@ export function resolveShellHookScriptPath(dirOverride?: string): string {
 /** Resolve the absolute path to the compiled Stop turn-end-hook script. */
 export function resolveStopHookScriptPath(dirOverride?: string): string {
   return resolveShellHookScriptPathForFilename(STOP_HOOK_FILENAME, dirOverride);
+}
+
+/** Resolve the absolute path to the compiled AskUserQuestion notify-hook script. */
+export function resolveQuestionHookScriptPath(dirOverride?: string): string {
+  return resolveShellHookScriptPathForFilename(QUESTION_HOOK_FILENAME, dirOverride);
 }
 
 // ---------------------------------------------------------------------------
@@ -217,15 +225,29 @@ export function resolveInlineGatingHooks(
     { hooks: [{ type: 'command', command: stopHookScriptPath, timeout: STOP_HOOK_TIMEOUT_SECONDS }] },
   ];
 
+  // The AskUserQuestion "parked on a question" notify hook — a PreToolUse entry
+  // scoped to `matcher: 'AskUserQuestion'`. Installed UNCONDITIONALLY (like Stop,
+  // outside the gating opt-out below): it is fire-and-forget and always exits 0
+  // with no verdict, so it can never gate the question nor degrade `auto`-mode
+  // classification. It supplies the "blocked" board signal in EVERY permission
+  // mode (the wildcard gate — which would otherwise carry AskUserQuestion as an
+  // approval — is absent in auto/dontAsk/ignore). See questionShellHook.ts.
+  const questionHookScriptPath = resolveQuestionHookScriptPath(opts.hookDirOverride);
+  ensureHookExecutable(questionHookScriptPath, logger);
+  const questionGroup: HookMatcherGroup = {
+    matcher: 'AskUserQuestion',
+    hooks: [{ type: 'command', command: questionHookScriptPath, timeout: STOP_HOOK_TIMEOUT_SECONDS }],
+  };
+
   if (
     opts.permissionMode === 'ignore' ||
     opts.permissionMode === 'dontAsk' ||
     opts.permissionMode === 'auto'
   ) {
-    logger?.debug('[Cyboflow InteractiveSettings] permissionMode opts out of PreToolUse gating — Stop hook only', {
+    logger?.debug('[Cyboflow InteractiveSettings] permissionMode opts out of wildcard PreToolUse gating — Stop + question-notify hooks only', {
       permissionMode: opts.permissionMode,
     });
-    return { Stop: stop };
+    return { PreToolUse: [questionGroup], Stop: stop };
   }
 
   const hookScriptPath = resolveShellHookScriptPath(opts.hookDirOverride);
@@ -233,6 +255,7 @@ export function resolveInlineGatingHooks(
   return {
     PreToolUse: [
       { matcher: '*', hooks: [{ type: 'command', command: hookScriptPath, timeout: HIGH_TIMEOUT_SECONDS }] },
+      questionGroup,
     ],
     Stop: stop,
   };

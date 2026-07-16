@@ -291,6 +291,17 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   private readonly interactiveRuns = new Map<string, InteractiveRun>();
 
   /**
+   * Chat runIds whose live PTY turn is parked on an AskUserQuestion gate — the
+   * "blocked" signal for the quick-session status board (quickSessionListing).
+   * Set by {@link notifyQuestionOpen} (driven by the PreToolUse(AskUserQuestion)
+   * shell hook via mcpQueryHandler) and cleared on the next turn-end
+   * ({@link handleTurnEnd}) or run teardown. In-memory only: a PTY question has
+   * no durable DB state, so a blocked session reads as `running` after an app
+   * restart (its DB status is still `running`) — acceptable for a live board.
+   */
+  private readonly awaitingInputRunIds = new Set<string>();
+
+  /**
    * Optional orchestrator IPC socket path. When set, initializeCliEnvironment
    * injects CYBOFLOW_RUN_ID / CYBOFLOW_ORCH_SOCKET so the interactive REPL's
    * cyboflow MCP server entry can reach the orchestrator socket. Set at boot via
@@ -1380,6 +1391,11 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     const run = this.interactiveRuns.get(panelId);
     if (!run) return;
 
+    // A turn ending clears any AskUserQuestion "blocked" flag for the run: the
+    // gate the flag tracked was answered (the agent could only reach turn-end by
+    // continuing past it). See notifyQuestionOpen / the status board.
+    this.awaitingInputRunIds.delete(run.runId);
+
     if (run.persistent) {
       // Re-armable: emit the turn-end event and keep the REPL alive. `turnEnded`
       // is flipped per-turn purely for observability — it is NOT a one-shot latch
@@ -1431,6 +1447,25 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     }
     this.logger?.verbose(`[InteractiveClaudeManager] notifyTurnEnd: no live interactive run for runId ${runId}`);
     return false;
+  }
+
+  /**
+   * Mark a run's PTY turn as parked on an AskUserQuestion gate (the "blocked"
+   * board signal). Driven by the PreToolUse(AskUserQuestion) shell hook →
+   * mcpQueryHandler's `interactive-question-open` dispatch → this seam. Unlike
+   * notifyTurnEnd this does NOT require a live interactiveRuns entry (it is a
+   * pure flag keyed by runId), so it succeeds even if the run map lookup would
+   * miss; the flag is cleared deterministically when the turn ends
+   * (handleTurnEnd) or the run is torn down. Idempotent.
+   */
+  notifyQuestionOpen(runId: string): void {
+    this.awaitingInputRunIds.add(runId);
+    this.logger?.verbose(`[InteractiveClaudeManager] notifyQuestionOpen: run ${runId} parked on a question`);
+  }
+
+  /** Snapshot of chat runIds currently blocked on a question (for the status board). */
+  getAwaitingInputRunIds(): ReadonlySet<string> {
+    return new Set(this.awaitingInputRunIds);
   }
 
   /**
@@ -1697,6 +1732,10 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       this.pipelines.delete(panelId);
     }
 
+    // Drop any lingering "blocked on a question" flag for the torn-down run so a
+    // dead run can never haunt the status board as permanently blocked. Use the
+    // runId resolved above (the run record may already be gone).
+    this.awaitingInputRunIds.delete(runId);
     this.interactiveRuns.delete(panelId);
   }
 
