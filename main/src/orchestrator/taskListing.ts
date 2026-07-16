@@ -400,7 +400,7 @@ function gatherTaskRunOverlayRows(db: DatabaseLike, taskId: string): RunOverlayR
 export function computeTaskOverlay(
   db: DatabaseLike,
   task: Pick<TaskDbRow, 'id' | 'stage_id'>,
-): { inFlow: FlowOverlay[]; awaitingReview: boolean; isDone: boolean } {
+): { inFlow: FlowOverlay[]; awaitingReview: boolean; isDone: boolean; experimentSeed: boolean } {
   const stage = db
     .prepare('SELECT is_terminal, position FROM board_stages WHERE id = ?')
     .get(task.stage_id) as StageOverlayRow | undefined;
@@ -424,7 +424,33 @@ export function computeTaskOverlay(
     runs.some((r) => r.status === 'awaiting_review' || r.outcome === 'pr_open') ||
     hasPendingApprovals(db, runIds);
 
-  return { inFlow, awaitingReview, isDone };
+  return { inFlow, awaitingReview, isDone, experimentSeed: isLiveExperimentSeed(db, task.id) };
+}
+
+/**
+ * True when `taskId` is the ORIGINAL seed of a LIVE (non-settled) A/B experiment —
+ * its per-arm clones carry the runs (and are hidden by their experiment tag), so
+ * the original itself has none, yet the deriver holds it at "In development"
+ * (position 7) while the experiment runs (C2). Drives the "In experiment" card
+ * badge. Mirrors the deriver's predicate in TaskChangeRouter.isLiveExperimentSeed;
+ * degrades PERMISSIVELY (false) on a pre-051/pre-049 schema lacking the tables.
+ */
+function isLiveExperimentSeed(db: DatabaseLike, taskId: string): boolean {
+  try {
+    const row = db
+      .prepare(
+        `SELECT 1 FROM experiment_seed_tasks est
+           JOIN experiments e ON e.id = est.experiment_id
+          WHERE est.original_task_id = ?
+            AND e.status NOT IN ('decided', 'abandoned', 'superseded')
+          LIMIT 1`,
+      )
+      .get(taskId);
+    return row !== undefined;
+  } catch (err) {
+    if (err instanceof Error && /no such (column|table)/i.test(err.message)) return false;
+    throw err;
+  }
 }
 
 /** True if any of the given runs has a pending approval row. */
@@ -565,7 +591,7 @@ function applyDependencyOverlay(item: BacklogTaskItem, overlay: DependencyOverla
  * filled in by selectProjectBacklog's nesting pass, not here).
  */
 function projectTaskItem(db: DatabaseLike, row: TaskDbRow): BacklogTaskItem {
-  const { inFlow, awaitingReview, isDone } = computeTaskOverlay(db, row);
+  const { inFlow, awaitingReview, isDone, experimentSeed } = computeTaskOverlay(db, row);
   return {
     id: row.id,
     project_id: row.project_id,
@@ -594,6 +620,8 @@ function projectTaskItem(db: DatabaseLike, row: TaskDbRow): BacklogTaskItem {
     inFlow,
     awaitingReview,
     isDone,
+    // Live A/B experiment seed (C2) — drives the "In experiment" card badge.
+    experimentSeed,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };

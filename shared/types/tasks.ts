@@ -191,6 +191,15 @@ export interface BacklogTaskItem {
   awaitingReview: boolean;
   isDone: boolean;
   /**
+   * True when this task is the ORIGINAL seed of a LIVE (non-settled) A/B
+   * experiment — its per-arm clones carry the runs, so it has no run of its own,
+   * yet the deriver holds it at "In development" (position 7) while the
+   * experiment runs (C2). A pure DISPLAY hint (drives the "In experiment" card
+   * badge); it is NOT a visibility/eligibility gate, so it is OPTIONAL for shape
+   * parity — an undefined from a partial emit path simply hides the badge.
+   */
+  experimentSeed?: boolean;
+  /**
    * Blocking prerequisites of this task (task_dependencies kind='blocking').
    * Optional for shape parity across processes; absent ⇒ not computed/empty.
    */

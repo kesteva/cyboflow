@@ -35,6 +35,7 @@ import {
   CategoryTag,
   ScopeTag,
   ArchivedChip,
+  ExperimentBadge,
   ProjectChip,
   FlowMarker,
   ReviewMarker,
@@ -294,6 +295,7 @@ export function TaskBody({
         <PriorityTag priority={task.priority} />
         <CategoryTag category={task.category} />
         {task.scope !== null && <ScopeTag scope={task.scope} />}
+        {task.experimentSeed && <ExperimentBadge />}
         <span className="ml-auto font-mono text-[10px] text-text-tertiary">{task.ref}</span>
       </div>
 

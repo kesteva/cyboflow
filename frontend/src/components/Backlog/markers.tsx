@@ -22,7 +22,7 @@
  * The breathing-glow on an in-flight card honours prefers-reduced-motion via
  * the `motion-reduce:` Tailwind variant (drops the pulse animation).
  */
-import { User, Bug, Sparkles, Wrench } from 'lucide-react';
+import { User, Bug, Sparkles, Wrench, FlaskConical } from 'lucide-react';
 import type { EntityCategory, FlowOverlay, IdeaScope, Priority, TaskType } from '../../../../shared/types/tasks';
 
 const TYPE_LABEL: Record<TaskType, string> = {
@@ -127,6 +127,27 @@ export function ArchivedChip(): React.JSX.Element {
       data-testid="archived-chip"
     >
       Archived
+    </span>
+  );
+}
+
+/**
+ * "In experiment" badge for an original seed task whose A/B experiment is still
+ * running (`experimentSeed` overlay, C2). Its per-arm clones carry the runs and
+ * are hidden by their experiment tag, so the deriver holds the original at "In
+ * development" — this badge explains WHY it is there (a live head-to-head) versus
+ * a normal sprint pull. Uses the interactive/terracotta accent to sit alongside
+ * the flow marker family without reading as an error/warning.
+ */
+export function ExperimentBadge(): React.JSX.Element {
+  return (
+    <span
+      className="eyebrow inline-flex items-center gap-1 rounded-[3px] border border-interactive/40 bg-interactive-surface px-1.5 py-px text-interactive"
+      title="In an A/B experiment — two variant arms are working on this in parallel"
+      data-testid="experiment-badge"
+    >
+      <FlaskConical className="h-2.5 w-2.5" strokeWidth={2.5} />
+      In experiment
     </span>
   );
 }

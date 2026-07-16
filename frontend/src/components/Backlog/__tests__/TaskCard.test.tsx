@@ -89,3 +89,24 @@ describe('TaskCard scope badge', () => {
     expect(screen.queryByTestId('scope-tag')).not.toBeInTheDocument();
   });
 });
+
+describe('TaskCard "In experiment" badge (C2)', () => {
+  it('renders the badge when the task is a live experiment seed', () => {
+    render(
+      <BoardCard
+        task={makeIdea({ type: 'task', ref: 'TASK-061', experimentSeed: true })}
+        onRun={onRun}
+        launchingTaskId={null}
+        now={Date.now()}
+      />,
+    );
+    expect(screen.getByTestId('experiment-badge')).toHaveTextContent('In experiment');
+  });
+
+  it('renders nothing when experimentSeed is false/undefined', () => {
+    render(
+      <BoardCard task={makeIdea({ type: 'task', ref: 'TASK-062' })} onRun={onRun} launchingTaskId={null} now={Date.now()} />,
+    );
+    expect(screen.queryByTestId('experiment-badge')).not.toBeInTheDocument();
+  });
+});
