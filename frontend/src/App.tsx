@@ -4,6 +4,7 @@ import { useNotifications } from './hooks/useNotifications';
 import { useStuckNotifications } from './hooks/useStuckNotifications';
 import { useResizable } from './hooks/useResizable';
 import { Sidebar } from './components/Sidebar';
+import { PerfProfiler } from './components/cyboflow/PerfProfiler';
 import { TitleBar } from './components/TitleBar';
 import { CyboflowRoot } from './components/cyboflow/CyboflowRoot';
 import { PromptHistoryModal } from './components/PromptHistoryModal';
@@ -235,25 +236,27 @@ function App() {
             rail as a primary item that swaps the center to a full-width review
             pane (see docs/SHELL-LAYOUT.md). */}
         <div className="flex flex-1 overflow-hidden">
-          <Sidebar
-            onAboutClick={() => setIsAboutOpen(true)}
-            onPromptHistoryClick={() => setIsPromptHistoryOpen(true)}
-            width={sidebarWidth}
-            onResize={startResize}
-            pendingReviewCount={reviewQueueCount}
-            humanReviewActive={showHumanReview}
-            onToggleHumanReview={toggleHumanReview}
-            backlogCount={backlogCount}
-            backlogActive={showBacklog}
-            onToggleBacklog={toggleBacklog}
-            insightsCount={insightsCount}
-            insightsActive={showInsights}
-            onToggleInsights={toggleInsights}
-            workflowsActive={showWorkflows}
-            onToggleWorkflows={toggleWorkflows}
-            verifyQueueActive={showVerifyQueue}
-            onToggleVerifyQueue={toggleVerifyQueue}
-          />
+          <PerfProfiler id="sidebar">
+            <Sidebar
+              onAboutClick={() => setIsAboutOpen(true)}
+              onPromptHistoryClick={() => setIsPromptHistoryOpen(true)}
+              width={sidebarWidth}
+              onResize={startResize}
+              pendingReviewCount={reviewQueueCount}
+              humanReviewActive={showHumanReview}
+              onToggleHumanReview={toggleHumanReview}
+              backlogCount={backlogCount}
+              backlogActive={showBacklog}
+              onToggleBacklog={toggleBacklog}
+              insightsCount={insightsCount}
+              insightsActive={showInsights}
+              onToggleInsights={toggleInsights}
+              workflowsActive={showWorkflows}
+              onToggleWorkflows={toggleWorkflows}
+              verifyQueueActive={showVerifyQueue}
+              onToggleVerifyQueue={toggleVerifyQueue}
+            />
+          </PerfProfiler>
           {/* Center-surface state machine, keyed off navigationStore.view:
                 • 'session' → CyboflowRoot (the active run/session workspace, the
                   only mount point for the run surface; legacy SessionView retired
