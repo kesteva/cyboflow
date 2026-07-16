@@ -76,6 +76,11 @@ build/electron-builder.generated.json
 packaged/
 release/
 
+# Keep project-scoped Claude skills tracked (the broad release/ ignore above
+# would otherwise swallow .claude/skills/release/ and any future skill dirs).
+!.claude/skills/
+!.claude/skills/**
+
 # Local development
 .ccc/
 *.sqlite
