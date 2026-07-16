@@ -628,15 +628,6 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             outputArtifact: { atype: 'idea-spec', label: 'Idea spec' },
           },
           {
-            id: 'research',
-            name: 'Research',
-            agent: 'research',
-            mcps: ['web-search', 'context7'],
-            retries: 1,
-            optional: true,
-            desc: 'Optional research pass before the idea is locked.',
-          },
-          {
             id: 'approve-idea',
             name: 'Approve idea stub',
             agent: 'human',
@@ -654,11 +645,11 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
         steps: [
           {
             id: 'expand-spec',
-            name: 'Expand idea spec',
+            name: 'Complete idea spec',
             agent: 'context',
-            mcps: ['filesystem'],
+            mcps: ['filesystem', 'web-search', 'context7'],
             retries: 0,
-            desc: 'Expand the approved stub into the full idea spec (ungated); preserves the approved problem/solution/scope/flags.',
+            desc: 'Expand the approved stub into the full idea spec (ungated), preserving the approved problem/solution/scope/flags; spin up the research subagent as needed for the idea\'s scope and complexity.',
           },
           {
             id: 'ui-prototype',
@@ -936,15 +927,6 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             desc: 'Produce a short idea stub (Problem definition ≤5 bullets + Proposed solution ≤5 bullets) plus SCOPE and design flags.',
           },
           {
-            id: 'research',
-            name: 'Research',
-            agent: 'research',
-            mcps: ['web-search', 'context7'],
-            retries: 1,
-            optional: true,
-            desc: 'Optional research pass before the idea is locked.',
-          },
-          {
             id: 'approve-idea',
             name: 'Approve idea stub',
             agent: 'human',
@@ -962,11 +944,11 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
         steps: [
           {
             id: 'expand-spec',
-            name: 'Expand idea spec',
+            name: 'Complete idea spec',
             agent: 'context',
-            mcps: ['filesystem'],
+            mcps: ['filesystem', 'web-search', 'context7'],
             retries: 0,
-            desc: 'Expand the approved stub into the full idea spec (ungated); preserves the approved problem/solution/scope/flags.',
+            desc: 'Expand the approved stub into the full idea spec (ungated), preserving the approved problem/solution/scope/flags; spin up the research subagent as needed for the idea\'s scope and complexity.',
           },
           {
             id: 'ui-prototype',

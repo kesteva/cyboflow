@@ -155,20 +155,28 @@ describe('cyboflow.agents.list', () => {
     }
   });
 
-  it('every canonical key is step-bound (workflowCount >= 1); the fan-out inner keys are also dispatchedBy sprint + ship', async () => {
+  it('every canonical key EXCEPT research is step-bound (workflowCount >= 1); research is spun up on demand; the fan-out inner keys are dispatchedBy sprint + ship', async () => {
     const caller = makeWiredCaller(createAgentsTestDb());
     const entries = await caller.cyboflow.agents.list({ projectId: PROJECT_ID });
     const byKey = new Map(entries.map((e) => [e.agentKey, e]));
 
-    // Both planes now honor step.fanOut as the single source of truth for
-    // stage parallelism, so computeAgentUsage's usedBy walk covers a fan-out
-    // inner-chain reference the same as an outer step.agent binding — no
-    // canonical key is step-unbound anymore.
+    // Both planes honor step.fanOut as the single source of truth for stage
+    // parallelism, so computeAgentUsage's usedBy walk covers a fan-out
+    // inner-chain reference the same as an outer step.agent binding. The lone
+    // step-unbound canonical key is `research`: planner/ship dropped the dedicated
+    // research step, and the agent is now spun up on demand inside the Complete
+    // idea spec (expand-spec) step — so its workflowCount is 0 while every other
+    // canonical key stays step-bound.
+    const STEP_UNBOUND_KEYS = ['research'];
+    const expectedBound = ALL_CANONICAL_KEYS.filter((k) => !STEP_UNBOUND_KEYS.includes(k));
     const bound = entries
       .filter((e) => e.usage.workflowCount >= 1)
       .map((e) => e.agentKey)
       .sort();
-    expect(bound).toEqual(ALL_CANONICAL_KEYS);
+    expect(bound).toEqual(expectedBound);
+
+    // `research` is still a canonical, discoverable agent — just step-unbound.
+    expect(byKey.get('research')?.usage.workflowCount).toBe(0);
 
     // The 5 fan-out inner ids are dispatched by BOTH sprint and ship (each
     // built-in's execute-tasks step carries the identical fanOut block).

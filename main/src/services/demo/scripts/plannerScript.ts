@@ -1,10 +1,11 @@
 /**
- * Demo planner run — walks the built-in planner definition (context → research
- * → approve-idea → expand-spec → architecture → adversarial-review →
+ * Demo planner run — walks the built-in planner definition (context →
+ * approve-idea → expand-spec → architecture → adversarial-review →
  * approve-design → epics → tasks → approve-plan) with scripted output and REAL
  * gates: an AskUserQuestion during context, and blocking decision review items
- * at approve-idea / approve-plan. The refine phase creates a real epic + tasks
- * through TaskChangeRouter, so the board fills in as the run progresses.
+ * at approve-idea / approve-plan. Spec completion spins up an as-needed research
+ * pass; the refine phase creates a real epic + tasks through TaskChangeRouter, so
+ * the board fills in as the run progresses.
  */
 
 import { TaskChangeRouter } from '../../../orchestrator/taskChangeRouter';
@@ -107,17 +108,6 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
   }
   await ctx.sleep(800);
 
-  // ── Plan phase · research (optional step) ─────────────────────────────────
-  ctx.reportStep('research', 'running');
-  ctx.tool(
-    'WebSearch',
-    { query: 'habit tracker streak calculation edge cases' },
-    'Common pitfalls: timezone boundaries and DST shifts; most trackers bucket check-ins by calendar day.',
-  );
-  await ctx.sleep(1400);
-  ctx.say('Research done — bucketing check-ins by calendar day sidesteps the DST traps; no scheduler needed.');
-  await ctx.sleep(800);
-
   // ── Plan phase · approve-idea (inline human gate) ─────────────────────────
   // Production planner gates are agent-driven AskUserQuestion gates: the stub
   // renders inline in chat and the approval is the question card right below
@@ -145,8 +135,17 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
   }
   await ctx.sleep(800);
 
-  // ── Refine phase · expand-spec (ungated) ─────────────────────────────────
+  // ── Refine phase · expand-spec / "Complete idea spec" (ungated) ───────────
   ctx.reportStep('expand-spec', 'running');
+  // Spec completion spins up a research pass as needed for the idea's complexity.
+  ctx.tool(
+    'WebSearch',
+    { query: 'habit tracker streak calculation edge cases' },
+    'Common pitfalls: timezone boundaries and DST shifts; most trackers bucket check-ins by calendar day.',
+  );
+  await ctx.sleep(1400);
+  ctx.say('Research pass done — bucketing check-ins by calendar day sidesteps the DST traps; no scheduler needed. Folding it into the full spec now.');
+  await ctx.sleep(800);
   const specBody = [
     '## Idea spec',
     '',

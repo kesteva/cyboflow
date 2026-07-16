@@ -95,7 +95,7 @@ After sizing every seed, your **working set** is the surviving `small` ideas:
 - **exactly 1 survives** → fall back to the single-idea flow from the `approve-idea`
   gate onward (inline **AskUserQuestion**), treating that idea as the selected idea;
   after approval, expand its stub before any design work.
-- **>1 survive** → run the **batch `approve-ideas` gate** (step 3 batch branch);
+- **>1 survive** → run the **batch `approve-ideas` gate** (step 2 batch branch);
   expand each approved stub, then, if any approved idea has a UI surface, build ONE
   combined `ui-prototype` across them and gate it at `approve-design`; then
   decompose each approved idea into tasks and gate them together at `approve-plan`.
@@ -143,11 +143,7 @@ even when the batch collapsed to one surviving idea.
      full stubs (then follow the batch flow above), and **park any beyond 4** as bare
      backlog ideas (title + one-line `summary`, no stub/body) for a later run; do not
      elaborate them now.
-2. **research** (optional) → when the idea needs external context, delegate to
-   `cyboflow-research` and fold its `## Research notes` into the idea body via
-   `cyboflow_*`. Skip when the idea is already well understood. **Batch branch:**
-   skip research for the batch — small ideas rarely need it.
-3. **approve-idea** → **human gate.**
+2. **approve-idea** → **human gate.**
    - **Single idea (≤1 surviving):** inline **AskUserQuestion** (header
      `Approve idea`, options Approve / Revise / Reject; put the full short stub and
      its scope/design flags in the option markdown preview). Do **not** proceed to
@@ -182,8 +178,8 @@ the human signs off. The decomposed-stories artifact fills in with the draft pla
 as you create it, so the human reviews the actual entities at the gate rather than
 a summary held only in your context.
 
-4. **expand-spec** → after the stub is approved, re-delegate to
-   `cyboflow-context` with `MODE: EXPAND` and the APPROVED stub. The approved
+3. **expand-spec** ("Complete idea spec") → after the stub is approved, re-delegate
+   to `cyboflow-context` with `MODE: EXPAND` and the APPROVED stub. The approved
    problem definition, proposed solution, scope, and design flags are immutable;
    expansion only adds evidence, risks, code touchpoints, constraints, and testable
    acceptance criteria. Replace the `## Idea stub` in the SAME idea body with the
@@ -192,11 +188,17 @@ a summary held only in your context.
    `cyboflow_update_task`, preserving any research notes already present. This step
    is ungated. **Batch branch:** expand every APPROVED idea separately and update
    its existing row; never expand denied or guarded ideas.
+   - **Research as needed — no standalone research step.** Judge the idea's scope and
+     complexity: when it needs external context (a novel domain, unfamiliar
+     libraries/APIs, external prior art) spin up `cyboflow-research` and fold its
+     `## Research notes` into the idea body as part of completing the spec. Skip it
+     for well-understood changes. **Batch branch:** skip research — small ideas
+     rarely need it.
    - If the agent emits `MATERIAL_CHANGE: yes`, do not continue to design. Reopen
      `approve-idea` with the proposed material change and its reason; only continue
      after the human approves the changed stub/spec. Never silently mutate approved
      intent, scope, or flags.
-5. **ui-prototype** (optional) → run ONLY when context returned `UI_PROTOTYPE: yes`
+4. **ui-prototype** (optional) → run ONLY when context returned `UI_PROTOTYPE: yes`
    (or the user explicitly asked for a prototype). Report the step, then delegate to
    `cyboflow-ui-prototype` with the approved spec. When it returns `## Prototype`
    with a URL, surface it: call `cyboflow_report_artifact` with
@@ -208,7 +210,7 @@ a summary held only in your context.
    clearly sectioned per idea; report the ONE `ui-prototype` artifact exactly as
    above (one tab for the whole batch). When no surviving idea wants a prototype, skip
    the step.
-6. **architecture** (optional, **`large` ideas only**) → run ONLY for a `large`-scoped
+5. **architecture** (optional, **`large` ideas only**) → run ONLY for a `large`-scoped
    idea whose context returned `ARCH_DESIGN: yes` (or when the user explicitly asked
    for an architecture writeup). A `small` idea **SKIPS** this step — architecture
    design is a large-idea concern, and context emits `ARCH_DESIGN: no` for small ideas.
@@ -220,7 +222,7 @@ a summary held only in your context.
    automatically, so you do **not** report an artifact for this step. **Batch branch:**
    skipped — every batched idea is `small` (a `large` one was guarded out), so the batch
    never runs it.
-7. **adversarial-review** (optional) → run ONLY when `ui-prototype` OR
+6. **adversarial-review** (optional) → run ONLY when `ui-prototype` OR
    `architecture` ran — the exact same condition as `approve-design`. Delegate to
    `cyboflow-adversarial-review` with the full spec, prototype URL/notes when
    present, and architecture section when present. **Batch branch:** when a
@@ -234,12 +236,12 @@ a summary held only in your context.
      its one revision — with `cyboflow_report_finding` and **`blocking: false`**.
      Never emit a blocking review item from this phase. Carry these non-blocking
      findings into the design-gate preview.
-8. **approve-design** → **human gate, inline — ONLY when step 5 or 6 ran.** When
+7. **approve-design** → **human gate, inline — ONLY when `ui-prototype` or `architecture` ran.** When
    neither ran, do **not** ask — continue straight to epics. Use **AskUserQuestion**
    (header `Approve design`, options Approve / Revise ONLY; put the prototype URL
    and/or the architecture section, all adversarial findings, and a short note of
    what was auto-fixed in the option markdown preview). **Batch branch:**
-   the batch never runs step 6, so this gate runs only when step 5 built the combined
+   the batch never runs `architecture`, so this gate runs only when `ui-prototype` built the combined
    prototype — one gate over that single prototype (there is no per-idea design gate);
    put its URL in the preview. When no batch prototype was built, skip straight to
    tasks.
@@ -252,17 +254,17 @@ a summary held only in your context.
      idea spec in the body via `cyboflow_update_task`, so the spec, prototype, and
      architecture stay in agreement. Do **not** proceed to
      epics until the user answers Approve.
-9. **epics** (large ideas only) → delegate to `cyboflow-epics`; create each
+8. **epics** (large ideas only) → delegate to `cyboflow-epics`; create each
    returned epic via `cyboflow_create_task` **as its proposal arrives**, linked to
    the originating idea. A `small` idea skips straight to tasks. **Batch branch:**
    skipped — every batched idea is `small` (a `large` one was guarded out).
-10. **tasks** → delegate to `cyboflow-tasks`; create each returned task via
+9. **tasks** → delegate to `cyboflow-tasks`; create each returned task via
    `cyboflow_create_task` **as its proposal arrives** (title, body, acceptance
    criteria, file/dependency hints, parent epic/idea linkage). **Batch branch:**
    delegate `cyboflow-tasks` once per approved idea and create each returned task as
    it arrives, passing `originating_idea_id` on EVERY create (mandatory — see
    **Multi-idea batches**) so it's attributed to the idea it decomposes.
-11. **approve-plan** → **human gate, inline.** Use **AskUserQuestion** (header
+10. **approve-plan** → **human gate, inline.** Use **AskUserQuestion** (header
    `Approve plan`, options **Approve** / **Revise** / **Reject** — labels exactly
    those words, since the backend matches an `'approve'` / `'reject'` prefix on the
    PRESENTED option labels; put scope, ordering, and acceptance criteria in the
@@ -289,7 +291,7 @@ a summary held only in your context.
      `decompose` gate; end the turn here, mirroring the zero-surviving-ideas ending
      above (**Multi-idea batches** → working set): nothing lands on the board and
      the run simply ends.
-12. **decompose** → **final human gate, inline — this is the run-completion gate.**
+11. **decompose** → **final human gate, inline — this is the run-completion gate.**
     After the plan is approved and the drafts revealed, report the `decompose` step,
     then present the gate with **AskUserQuestion** (header `Archive idea`, options
     `Archive & finish` / `Keep ideas & finish`; list the idea(s) you planned — by
@@ -347,9 +349,9 @@ a summary held only in your context.
 
 ## Step reporting
 
-Report each of these 12 step ids via `cyboflow_report_step` as that step begins,
+Report each of these 11 step ids via `cyboflow_report_step` as that step begins,
 in order (the runtime also appends an authoritative copy of this list below):
 
-`context`, `research`, `approve-idea`, `expand-spec`, `ui-prototype`,
+`context`, `approve-idea`, `expand-spec`, `ui-prototype`,
 `architecture`, `adversarial-review`, `approve-design`, `epics`, `tasks`,
 `approve-plan`, `decompose`.

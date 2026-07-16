@@ -690,9 +690,9 @@ describe('run-start baseline trigger', () => {
     expect(vi.mocked(handleRunStart).mock.calls[0][1]).toBe(runId);
   });
 
-  it("does NOT fire handleRunStart on a LATER planner step ('research') 'running'", () => {
+  it("does NOT fire handleRunStart on a LATER planner step ('expand-spec') 'running'", () => {
     const { db, runId } = seedForBridge('planner');
-    buildStepTransitionEvent(runId, 'research', 'running', dbAdapter(db));
+    buildStepTransitionEvent(runId, 'expand-spec', 'running', dbAdapter(db));
     expect(handleRunStart).not.toHaveBeenCalled();
   });
 

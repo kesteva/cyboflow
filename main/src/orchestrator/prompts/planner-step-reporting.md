@@ -10,9 +10,10 @@ the concrete per-phase step ids are dynamic and are injected at run time by the
 
 The planner turns a raw user idea into an execution-ready plan WITHOUT writing any
 implementation code. It moves the work through two phases — a Plan phase (get
-context as a short idea stub, an optional research pass, then human approval of
-that stub) and a Refine phase (ungated expansion of the approved stub into the
-full spec, an optional UI prototype, an optional architecture design, one
+context as a short idea stub, then human approval of that stub) and a Refine phase
+(ungated expansion of the approved stub into the full spec — spinning up a research
+pass as needed for the idea's scope and complexity — an optional UI prototype, an
+optional architecture design, one
 read-only adversarial review when either design surface ran, a human design
 approval over those surfaces and findings, then decompose into epics, fill out
 each task's details, and a human plan approval). The exact step ids for the active run come

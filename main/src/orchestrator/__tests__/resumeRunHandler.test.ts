@@ -272,7 +272,7 @@ describe('resumeRunHandler — programmatic arm', () => {
     const executor = makeFakeExecutor({ executeNeverResolves: true });
     const deps: ResumeRunDeps = {
       ...makeDeps(dbAdapter(db), executor, runQueues),
-      completedStepIds: () => ['context', 'research'],
+      completedStepIds: () => ['context', 'approve-idea'],
     };
 
     const result = await resumeRunHandler(runId, deps);
@@ -281,7 +281,7 @@ describe('resumeRunHandler — programmatic arm', () => {
     expect(result).toEqual({ delivered: true });
     // Both crash-safe pointers armed BEFORE the re-drive (synchronous, already called).
     expect(executor.setPendingResumeStep).toHaveBeenCalledWith(runId, 'tasks');
-    expect(executor.setPendingCompletedSteps).toHaveBeenCalledWith(runId, ['context', 'research']);
+    expect(executor.setPendingCompletedSteps).toHaveBeenCalledWith(runId, ['context', 'approve-idea']);
     // The orchestrated --resume path was NOT taken.
     expect(executor.setPendingResume).not.toHaveBeenCalled();
     // Status was flipped to running by the guarded UPDATE.

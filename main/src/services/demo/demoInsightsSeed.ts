@@ -63,7 +63,6 @@ const MODELS: ModelProfile[] = [
 const FLOW_STEPS: Record<'planner' | 'sprint', string[]> = {
   planner: [
     'context',
-    'research',
     'approve-idea',
     'expand-spec',
     'ui-prototype',

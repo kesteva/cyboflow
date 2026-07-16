@@ -72,18 +72,15 @@ creating a new idea, check the existing backlog with `cyboflow_list_tasks` /
    - If NO `# Selected idea` block is present: create the idea via
      `cyboflow_create_task(task_type='idea', body=<full stub>, summary=<one-line
      caption>)` (one row per distinct idea; a broad prompt may yield more than one).
-2. **research** (optional) → when the idea needs external context, delegate to
-   `cyboflow-research` and fold its `## Research notes` into the idea body via
-   `cyboflow_*`. Skip when the idea is already well understood.
-3. **approve-idea** → **human gate, inline.** Use **AskUserQuestion** (header
+2. **approve-idea** → **human gate, inline.** Use **AskUserQuestion** (header
    `Approve idea`, options Approve / Revise / Reject; put the full short stub and
    its scope/design flags in the option markdown preview). Do **not** proceed to
    expansion until the user answers Approve.
 
 ### Phase 2 — Refine
 
-4. **expand-spec** → after the stub is approved, re-delegate to
-   `cyboflow-context` with `MODE: EXPAND` and the APPROVED stub. The approved
+3. **expand-spec** ("Complete idea spec") → after the stub is approved, re-delegate
+   to `cyboflow-context` with `MODE: EXPAND` and the APPROVED stub. The approved
    problem definition, proposed solution, scope, and design flags are immutable;
    expansion only adds evidence, risks, code touchpoints, constraints, and testable
    acceptance criteria. Replace the `## Idea stub` in the SAME idea body with the
@@ -91,18 +88,23 @@ creating a new idea, check the existing backlog with `cyboflow_list_tasks` /
    scope/design flag lines via
    `cyboflow_update_task`, preserving any research notes already present. This step
    is ungated.
+   - **Research as needed — no standalone research step.** Judge the idea's scope and
+     complexity: when it needs external context (a novel domain, unfamiliar
+     libraries/APIs, external prior art) spin up `cyboflow-research` and fold its
+     `## Research notes` into the idea body as part of completing the spec. Skip it
+     for well-understood changes.
    - If the agent emits `MATERIAL_CHANGE: yes`, do not continue to design. Reopen
      `approve-idea` with the proposed material change and its reason; only continue
      after the human approves the changed stub/spec. Never silently mutate approved
      intent, scope, or flags.
-5. **ui-prototype** (optional) → run ONLY when context returned `UI_PROTOTYPE: yes`
+4. **ui-prototype** (optional) → run ONLY when context returned `UI_PROTOTYPE: yes`
    (or the user explicitly asked for a prototype). Report the step, then delegate
    to `cyboflow-ui-prototype` with the approved spec. When it returns `## Prototype`
    with a URL, surface it: call `cyboflow_report_artifact` with
    `atype: 'ui-prototype'`, a short label, and `payload_json`
    `{"url": "<the url>"}` — the live prototype tab renders from that URL. Skip
    this step entirely when the flag is `no`.
-6. **architecture** (optional) → run ONLY when context returned `ARCH_DESIGN: yes`
+5. **architecture** (optional) → run ONLY when context returned `ARCH_DESIGN: yes`
    (or the user explicitly asked for an architecture writeup). Report the step,
    then delegate to `cyboflow-architecture` with the spec (plus prototype notes
    when one exists). Fold its `## Architecture design` section into the idea body
@@ -110,7 +112,7 @@ creating a new idea, check the existing backlog with `cyboflow_list_tasks` /
    design` section, REPLACE that section (never stack a second copy); otherwise
    append it. The arch-design deliverable tab derives from the body automatically,
    so you do **not** report an artifact for this step. Skip when the flag is `no`.
-7. **adversarial-review** (optional) → run ONLY when `ui-prototype` OR
+6. **adversarial-review** (optional) → run ONLY when `ui-prototype` OR
    `architecture` ran — the exact same condition as `approve-design`. Delegate to
    `cyboflow-adversarial-review` with the full spec, prototype URL/notes when
    present, and architecture section when present.
@@ -122,7 +124,7 @@ creating a new idea, check the existing backlog with `cyboflow_list_tasks` /
      its one revision — with `cyboflow_report_finding` and **`blocking: false`**.
      Never emit a blocking review item from this phase. Carry these non-blocking
      findings into the design-gate preview.
-8. **approve-design** → **human gate, inline — ONLY when step 5 or 6 ran.** When
+7. **approve-design** → **human gate, inline — ONLY when `ui-prototype` or `architecture` ran.** When
    neither ran, do **not** ask — continue straight to epics. Use
    **AskUserQuestion** (header `Approve design`, options Approve / Revise ONLY;
    put the prototype URL and/or the architecture section, all adversarial
@@ -136,17 +138,17 @@ creating a new idea, check the existing backlog with `cyboflow_list_tasks` /
      idea spec in the body via `cyboflow_update_task`, so the spec, prototype, and
      architecture stay in agreement. Do **not** proceed to
      epics until the user answers Approve.
-9. **epics** (large ideas only) → delegate to `cyboflow-epics`; create each
+8. **epics** (large ideas only) → delegate to `cyboflow-epics`; create each
    returned epic and link it to the originating idea via `cyboflow_*`. A `small`
    idea skips straight to tasks.
-10. **tasks** → delegate to `cyboflow-tasks`; create each returned task with
+9. **tasks** → delegate to `cyboflow-tasks`; create each returned task with
    `cyboflow_create_task` (title, body, acceptance criteria, file/dependency
    hints, parent epic/idea linkage). **Remember every task id and title you
    create** — you will present the full list at the next gate and pass the
    approved subset to materialize. The idea is NOT retired here; the backend
    removes it from the board (stamps `decomposed_at`) the moment the plan is approved
-   at `approve-plan` (step 11) — see that step.
-11. **approve-plan** → **human gate, inline. This gate doubles as the
+   at `approve-plan` (step 10) — see that step.
+10. **approve-plan** → **human gate, inline. This gate doubles as the
    pre-execution gate.** Use **AskUserQuestion** (header `Approve plan`):
    - Present the **FULL list** of tasks the run created — by ref/title — in the
      option markdown preview, with scope, ordering, and acceptance criteria. You
@@ -177,7 +179,7 @@ creating a new idea, check the existing backlog with `cyboflow_list_tasks` /
 
 ### Phase 3 — Materialize
 
-12. **materialize-batch** → **the handoff seam from planning to execution.** Call
+11. **materialize-batch** → **the handoff seam from planning to execution.** Call
     the run-bound tool `cyboflow_create_sprint_batch` **EXACTLY ONCE**, passing
     `taskIds` = the **approved subset of task ids** you retained at `approve-plan`
     (omit `taskIds` only if the human approved literally every created task — then
@@ -199,7 +201,7 @@ alongside this run. You move lanes with `cyboflow_update_sprint_task` (status:
 `write-tests`, `code-review`, `task-verify`, `visual-verify`). `integrated` means
 the task is complete AND committed in this session's worktree.
 
-13. **analyze-dependencies** → report the step, then delegate to
+12. **analyze-dependencies** → report the step, then delegate to
     `cyboflow-dependency-analyzer`, passing it the materialized tasks — for each
     task: its id, title, body, acceptance criteria, and the files it is expected to
     touch. Ask it to return a `## Dependencies` section listing proposed
@@ -214,7 +216,7 @@ the task is complete AND committed in this session's worktree.
 
 ### Phase 5 — Execute
 
-14. **execute-tasks** → report the step **once** as the phase begins — it covers
+13. **execute-tasks** → report the step **once** as the phase begins — it covers
     the whole fan-out; per-task progress is tracked in the lanes, not in extra step
     reports. **The task set is the tasks Ship materialized** (the lanes you just
     created) — held in your context. There is no prepended task block.
@@ -260,16 +262,16 @@ window into per-task progress; never batch or backfill them.
 Enter this phase only after **every** lane is terminal (`integrated` or
 `failed`).
 
-15. **sprint-verify** → delegate to `cyboflow-sprint-verify` (runs the full suite
+14. **sprint-verify** → delegate to `cyboflow-sprint-verify` (runs the full suite
     ONCE over the whole sprint's combined state). On `VERDICT: FAIL`, identify the
     offending task(s) from the failures, set those lanes back to `running`, and
     loop them back through the appended per-task fan-out chain (Phase 5); then
     re-run sprint-verify. At most **2** such loops — after that, surface the failure
     at the human gate rather than merging silently.
-16. **sprint-review** → delegate to `cyboflow-sprint-review`; record each entry in
+15. **sprint-review** → delegate to `cyboflow-sprint-review`; record each entry in
     its `## Findings` via `cyboflow_report_finding`, passing `category` + code
     `locations` and a `severity` (this is a verify-phase step).
-17. **human-review** → **final human gate, inline.** Use **AskUserQuestion** for
+16. **human-review** → **final human gate, inline.** Use **AskUserQuestion** for
     the final taste-level sign-off on the whole sprint. Use the header
     `Approve sprint` with the options **Approve** / **Reject** (these exact
     labels). Do **not** self-approve and never silently proceed past a gate.
@@ -329,10 +331,10 @@ Enter this phase only after **every** lane is terminal (`integrated` or
 
 ## Step reporting
 
-Report each of these 17 step ids via `cyboflow_report_step` as that step begins,
+Report each of these 16 step ids via `cyboflow_report_step` as that step begins,
 in order (the runtime also appends an authoritative copy of this list below):
 
-`context`, `research`, `approve-idea`, `expand-spec`, `ui-prototype`,
+`context`, `approve-idea`, `expand-spec`, `ui-prototype`,
 `architecture`, `adversarial-review`, `approve-design`, `epics`, `tasks`,
 `approve-plan`, `materialize-batch`, `analyze-dependencies`, `execute-tasks`,
 `sprint-verify`, `sprint-review`, `human-review`.

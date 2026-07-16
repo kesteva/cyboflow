@@ -306,12 +306,12 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     const runner = new DefaultProgrammaticRunner({ spawner, reporter, gate });
     await expect(runner.run(ctxFor('run-int'))).resolves.toBeUndefined();
 
-    // Every AGENT step ran exactly once via the spawn surface (context, research,
+    // Every AGENT step ran exactly once via the spawn surface (context,
     // expand-spec, ui-prototype, architecture, adversarial-review, epics, tasks)
     // — pure gates (approve-idea/approve-design/approve-plan/decompose) did NOT
     // spawn. The fake spawner cannot distinguish a prompt-directed optional skip.
     const stepPrompts = spawner.calls.map((c) => c.prompt);
-    expect(spawner.calls).toHaveLength(8);
+    expect(spawner.calls).toHaveLength(7);
     expect(stepPrompts.some((p) => p.includes('`context`'))).toBe(true);
     expect(stepPrompts.some((p) => p.includes('`expand-spec`'))).toBe(true);
     expect(stepPrompts.some((p) => p.includes('`adversarial-review`'))).toBe(true);
@@ -513,7 +513,6 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     await expect(runner.run({ ...ctxFor('run-res'), resumeFromStepId: 'epics' })).resolves.toBeUndefined();
 
     expect(spawner.calls.some((c) => c.prompt.includes('`context`'))).toBe(false); // skipped
-    expect(spawner.calls.some((c) => c.prompt.includes('`research`'))).toBe(false); // skipped
     expect(spawner.calls.some((c) => c.prompt.includes('`expand-spec`'))).toBe(false); // skipped
     expect(spawner.calls.some((c) => c.prompt.includes('`adversarial-review`'))).toBe(false); // skipped
     expect(spawner.calls.some((c) => c.prompt.includes('`epics`'))).toBe(true); // resumed here

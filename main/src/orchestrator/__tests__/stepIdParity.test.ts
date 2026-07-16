@@ -115,10 +115,10 @@ describe('stepIdParity — resolved built-in (planner fallback)', () => {
 // ---------------------------------------------------------------------------
 
 describe('stepIdParity — edited built-in (renamed / added / removed steps)', () => {
-  // A user edit of the built-in `planner`: in the Plan phase the original
-  // `research` step is RENAMED to `deep-research`, a NEW `kickoff` step is
-  // ADDED before it, and the original `approve-idea` step is REMOVED. The
-  // Refine phase is left intact. Persisted as the row's `spec_json`.
+  // A user edit of the built-in `planner`: the Plan phase is rewritten to
+  // `context` → a NEW `kickoff` step → a NEW optional `deep-research` step (the
+  // built-in `approve-idea` is dropped), and the Refine phase is replaced with
+  // just `epics` + `tasks`. Persisted as the row's `spec_json`.
   const EDITED_PLANNER: WorkflowDefinition = {
     id: 'planner',
     phases: [
@@ -165,14 +165,14 @@ describe('stepIdParity — edited built-in (renamed / added / removed steps)', (
 
   it('emitted set OMITS the removed original ids', () => {
     const ids = emittedStepIds(buildStepReportingAppend(def));
-    // `research` was renamed away and `approve-idea` was removed entirely;
-    // both built-in originals must be absent from the edited run's prompt.
-    expect(ids).not.toContain('research');
+    // `expand-spec` and `approve-idea` are built-in originals the edit dropped;
+    // both must be absent from the edited run's prompt.
+    expect(ids).not.toContain('expand-spec');
     expect(ids).not.toContain('approve-idea');
     // Sanity: the removed originals DO exist in the built-in seed, proving the
     // omission is a real edit and not a typo.
     const builtinIds = definitionStepIds(WORKFLOW_DEFINITIONS.planner);
-    expect(builtinIds).toContain('research');
+    expect(builtinIds).toContain('expand-spec');
     expect(builtinIds).toContain('approve-idea');
   });
 

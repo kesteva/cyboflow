@@ -50,7 +50,6 @@ describe('buildStepReportingAppend', () => {
     expect(append).toContain('cyboflow_report_step');
     expectInOrder(append, [
       '`context`',
-      '`research`',
       '`approve-idea`',
       '`expand-spec`',
       '`ui-prototype`',
@@ -126,7 +125,7 @@ describe('buildStepReportingAppend', () => {
   });
 
   it('tracks an EDITED built-in def, not the static constant', () => {
-    // Edit the built-in planner: rename `context` → `kickoff`, drop `research`.
+    // Edit the built-in planner: rename `context` → `kickoff`, drop `approve-idea`.
     const base = resolveWorkflowDefinition('planner', '{}') as WorkflowDefinition;
     const edited: WorkflowDefinition = {
       ...base,
@@ -135,7 +134,7 @@ describe('buildStepReportingAppend', () => {
           ? {
               ...phase,
               steps: phase.steps
-                .filter((s) => s.id !== 'research')
+                .filter((s) => s.id !== 'approve-idea')
                 .map((s) => (s.id === 'context' ? { ...s, id: 'kickoff' } : s)),
             }
           : phase,
@@ -147,7 +146,7 @@ describe('buildStepReportingAppend', () => {
 
     // Tracks the edit: new id present, removed id absent, static id absent.
     expect(append).toContain('`kickoff`');
-    expect(append).not.toContain('`research`');
+    expect(append).not.toContain('`approve-idea`');
     expect(append).not.toContain('`context`');
     // Every emitted id ∈ the resolved (edited) def's flat steps.
     for (const id of flat) {
@@ -155,7 +154,6 @@ describe('buildStepReportingAppend', () => {
     }
     expect(flat).toEqual([
       'kickoff',
-      'approve-idea',
       'expand-spec',
       'ui-prototype',
       'architecture',

@@ -252,7 +252,7 @@ describe('recoverActiveStateOrphans', () => {
     seedRun(db, { id: 'run-P5', status: 'running' });
     markProgrammatic(db, 'run-P5', 'tasks');
     db.prepare(`INSERT INTO step_results (run_id, step_id, outcome, attempts) VALUES ('run-P5','context','done',1)`).run();
-    db.prepare(`INSERT INTO step_results (run_id, step_id, outcome, attempts) VALUES ('run-P5','research','skipped',1)`).run();
+    db.prepare(`INSERT INTO step_results (run_id, step_id, outcome, attempts) VALUES ('run-P5','ui-prototype','skipped',1)`).run();
     db.prepare(`INSERT INTO step_results (run_id, step_id, outcome, attempts) VALUES ('run-P5','epics','failed',1)`).run();
 
     const result = recoverActiveStateOrphans(adapter, runQueues);
@@ -261,7 +261,7 @@ describe('recoverActiveStateOrphans', () => {
     expect(result.programmaticToResume[0].id).toBe('run-P5');
     expect(result.programmaticToResume[0].currentStepId).toBe('tasks');
     // only done/skipped are "completed"; the failed epics is NOT skipped on resume.
-    expect(result.programmaticToResume[0].completedStepIds.sort()).toEqual(['context', 'research']);
+    expect(result.programmaticToResume[0].completedStepIds.sort()).toEqual(['context', 'ui-prototype']);
   });
 
   it('leaves a NON-programmatic awaiting_review run untouched (not failed, not resumed)', () => {

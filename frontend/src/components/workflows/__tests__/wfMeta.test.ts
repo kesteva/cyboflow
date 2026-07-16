@@ -11,10 +11,10 @@ import {
 } from '../../../../../shared/types/workflows';
 
 describe('wfMeta', () => {
-  it('planner: 2 phases, 12 steps, 4 human gates, 0 loops', () => {
+  it('planner: 2 phases, 11 steps, 4 human gates, 0 loops', () => {
     expect(wfMeta(WORKFLOW_DEFINITIONS.planner)).toEqual({
       phases: 2,
-      steps: 12,
+      steps: 11,
       human: 4,
       loops: 0,
     });
