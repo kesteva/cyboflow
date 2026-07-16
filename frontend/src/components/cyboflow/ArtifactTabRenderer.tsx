@@ -38,7 +38,7 @@ import { useReviewItemActions } from '../../hooks/useReviewItemActions';
 import { useReviewItemsSlice } from '../../stores/reviewItemsSlice';
 import { useQuestionStore } from '../../stores/questionStore';
 import { ARTIFACT_COLORS, extractArchDesignSection } from '../../../../shared/types/artifacts';
-import type { Artifact, ApproveIdeasArtifactPayload } from '../../../../shared/types/artifacts';
+import type { Artifact, ApproveIdeasArtifactPayload, ApproveDesignsArtifactPayload } from '../../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
 import type { VerdictV1 } from '../../../../shared/types/visualVerification';
 import type { IdeaVerdict, IdeaVerdictMap, ReviewItem } from '../../../../shared/types/reviews';
@@ -1692,6 +1692,411 @@ function ApproveIdeasBody({ artifact, projectId }: { artifact: Artifact; project
   );
 }
 
+// ---------------------------------------------------------------------------
+// approve-designs — the human-facing half of the approve-designs BATCH gate,
+// the design-approval sibling of approve-ideas (see block above). One row per
+// idea's architecture design in the batch (from the artifact's payload_json,
+// re-shaped fail-soft), a tri-state Approve/Deny control per row, and a sticky
+// footer with the live counts + a single atomic Submit. The pending
+// `gate:human-step:approve-designs` decision review item for this run is
+// looked up client-side from the ALREADY-WIRED reviewItemsSlice (no new
+// subscription). Submit posts the complete verdict map via reviewItems.resolve
+// — the server re-validates coverage against the gate's DecisionPayload.
+// designRefs authoritatively (this template's rows are a display convenience
+// only). When the batch has designs but no pending gate (already resolved / a
+// stale tab), the rows render read-only with an explanatory note instead of
+// the footer.
+// ---------------------------------------------------------------------------
+
+/**
+ * Tolerant parse of the `approve-designs` payload_json into row data. Mirrors
+ * parseApproveIdeasIdeas above: a malformed/missing payload yields an empty
+ * array rather than throwing, and a malformed individual design entry is
+ * dropped rather than poisoning the whole batch.
+ */
+function parseApproveDesignsDesigns(payloadJson: string | null): ApproveDesignsArtifactPayload['designs'] {
+  if (!payloadJson) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payloadJson);
+  } catch {
+    return [];
+  }
+  if (!parsed || typeof parsed !== 'object') return [];
+  const designs = (parsed as Record<string, unknown>).designs;
+  if (!Array.isArray(designs)) return [];
+  const rows: ApproveDesignsArtifactPayload['designs'] = [];
+  for (const entry of designs) {
+    if (!entry || typeof entry !== 'object') continue;
+    const e = entry as Record<string, unknown>;
+    if (typeof e.ref !== 'string' || typeof e.title !== 'string') continue;
+    rows.push({
+      ref: e.ref,
+      title: e.title,
+      scope: typeof e.scope === 'string' ? e.scope : null,
+      summary: typeof e.summary === 'string' ? e.summary : null,
+    });
+  }
+  return rows;
+}
+
+const GATE_SOURCE_APPROVE_DESIGNS = 'gate:human-step:approve-designs';
+
+/**
+ * The gate's authoritative batch ref list (`DecisionPayload.designRefs`), when
+ * the review item carries one. Mirrors gateIdeaRefs above — falls back to null
+ * so the caller can fall back to the artifact payload's own rows (a gate
+ * minted before `designRefs` was added, or one whose payload failed to parse,
+ * must not make the template unusable).
+ */
+function gateDesignRefs(payload: ReviewItem['payload']): string[] | null {
+  if (payload && payload.kind === 'decision' && Array.isArray(payload.designRefs)) {
+    return payload.designRefs;
+  }
+  return null;
+}
+
+/**
+ * One design row: ref/title/scope/summary + the segmented Approve/Deny
+ * control. Cloned from IdeaVerdictRow rather than reused — that component
+ * hardcodes 'approve-ideas' testids and the approve-ideas accent color, so it
+ * is not generic across gates. The text block is itself a button — clicking
+ * it opens the owning idea's full markdown spec (its '## Architecture design'
+ * section lives in the same idea body) in TaskDetailModal. The Approve/Deny
+ * control is a sibling, not a descendant, so its clicks never bubble into
+ * onOpenSpec.
+ */
+function DesignVerdictRow({
+  design,
+  verdict,
+  readOnly,
+  onSetVerdict,
+  onOpenSpec,
+}: {
+  design: ApproveDesignsArtifactPayload['designs'][number];
+  verdict: IdeaVerdict | null;
+  readOnly: boolean;
+  onSetVerdict: (verdict: IdeaVerdict) => void;
+  onOpenSpec: () => void;
+}): ReactElement {
+  const buttonStyle = (active: boolean, activeColor: string): CSSProperties => ({
+    fontSize: '10.5px',
+    fontWeight: 700,
+    padding: '4px 12px',
+    border: 'none',
+    background: active ? activeColor : 'var(--color-surface-primary)',
+    color: active ? 'var(--color-surface-primary)' : INK,
+    cursor: readOnly ? 'default' : 'pointer',
+    opacity: readOnly && !active ? 0.5 : 1,
+  });
+
+  return (
+    <div
+      data-testid="approve-designs-row"
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        border: `1px solid ${HAIRLINE}`,
+        background: 'var(--color-surface-primary)',
+        padding: '10px 14px',
+        marginBottom: 8,
+      }}
+    >
+      <button
+        type="button"
+        data-testid={`approve-designs-open-spec-${design.ref}`}
+        onClick={onOpenSpec}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          background: 'none',
+          border: 'none',
+          padding: 0,
+          textAlign: 'left',
+          font: 'inherit',
+          cursor: 'pointer',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+          <span style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '.04em', color: ARTIFACT_COLORS['approve-designs'] }}>
+            {design.ref}
+          </span>
+          {design.scope && (
+            <span style={{ fontSize: '8px', fontWeight: 700, color: FAINT, border: `1px solid ${SOFT}`, borderRadius: 2, padding: '0 4px' }}>
+              {design.scope}
+            </span>
+          )}
+          <span style={{ fontSize: '9px', color: FAINT }}>View spec →</span>
+        </div>
+        <div style={{ fontSize: '12px', fontWeight: 600, color: INK, marginTop: 2 }}>{design.title}</div>
+        {design.summary && <div style={{ fontSize: '10.5px', color: MUTED, marginTop: 3, lineHeight: 1.4 }}>{design.summary}</div>}
+      </button>
+      <div
+        data-testid={`approve-designs-verdict-${design.ref}`}
+        style={{ display: 'flex', border: `1px solid ${HAIRLINE}`, borderRadius: 3, overflow: 'hidden', flexShrink: 0 }}
+      >
+        <button
+          type="button"
+          data-testid={`approve-designs-approve-${design.ref}`}
+          aria-pressed={verdict === 'approve'}
+          disabled={readOnly}
+          onClick={() => onSetVerdict('approve')}
+          style={buttonStyle(verdict === 'approve', VERDICT_PASS)}
+        >
+          Approve
+        </button>
+        <button
+          type="button"
+          data-testid={`approve-designs-deny-${design.ref}`}
+          aria-pressed={verdict === 'deny'}
+          disabled={readOnly}
+          onClick={() => onSetVerdict('deny')}
+          style={{ ...buttonStyle(verdict === 'deny', VERDICT_FAIL), borderLeft: `1px solid ${HAIRLINE}` }}
+        >
+          Deny
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ApproveDesignsBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
+  const accent = ARTIFACT_COLORS['approve-designs'];
+  const designs = useMemo(() => parseApproveDesignsDesigns(artifact.payloadJson), [artifact.payloadJson]);
+
+  // Reuse the already-wired project-scoped review_items inbox (refcounted) —
+  // no new subscription. Filter client-side to THIS run's pending batch gate.
+  useEffect(() => {
+    const release = useReviewItemsSlice.getState().init(projectId);
+    return () => { release(); };
+  }, [projectId]);
+  const items = useReviewItemsSlice((s) => s.items);
+  const gateItem = useMemo(
+    () =>
+      items.find(
+        (it) =>
+          it.run_id === artifact.runId &&
+          it.kind === 'decision' &&
+          it.status === 'pending' &&
+          // Recognize BOTH mint paths: the programmatic runner stamps the
+          // 'gate:human-step:approve-designs' source, while the default
+          // ORCHESTRATED planner mints via cyboflow_report_finding (source
+          // 'agent:<label>'), so its gate is only discoverable via the parsed
+          // payload discriminant.
+          (it.source === GATE_SOURCE_APPROVE_DESIGNS ||
+            (it.payload !== null && it.payload.kind === 'decision' && it.payload.gate === 'approve-designs')),
+      ) ?? null,
+    [items, artifact.runId],
+  );
+  const readOnly = gateItem === null;
+
+  const [verdicts, setVerdicts] = useState<IdeaVerdictMap>({});
+  const { resolve, error: resolveError } = useReviewItemActions();
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
+  const setVerdict = (ref: string, verdict: IdeaVerdict): void => {
+    setVerdicts((prev) => ({ ...prev, [ref]: verdict }));
+  };
+
+  // Bulk verdict fill (Approve all / Deny all): overwrites every row's verdict
+  // in one click — Submit stays the single explicit confirmation step, so a
+  // stray bulk click is always reversible before anything is recorded.
+  const setAllVerdicts = (verdict: IdeaVerdict): void => {
+    const next: IdeaVerdictMap = {};
+    for (const design of designs) next[design.ref] = verdict;
+    setVerdicts(next);
+  };
+
+  // Spec viewing (orthogonal to verdicts — works read-only and gated). The
+  // artifact payload's rows carry only a display ref, not an opaque entity
+  // id, so a click resolves the ref against the live project backlog. An
+  // incrementing token guards against a slow first fetch clobbering a faster
+  // later one when the user clicks another row before the first resolves.
+  const [specIdea, setSpecIdea] = useState<BacklogTaskItem | null>(null);
+  const [specError, setSpecError] = useState<string | null>(null);
+  const specRequestToken = useRef(0);
+
+  const openSpec = (ref: string): void => {
+    setSpecError(null);
+    const token = ++specRequestToken.current;
+    trpc.cyboflow.tasks.list
+      .query({ projectId })
+      .then((rows) => {
+        if (specRequestToken.current !== token) return; // superseded by a later click
+        const idea = rows.find((t) => t.type === 'idea' && t.ref === ref) ?? null;
+        if (idea) {
+          setSpecIdea(idea);
+        } else {
+          setSpecError(`Couldn't load the spec for ${ref}.`);
+        }
+      })
+      .catch(() => {
+        if (specRequestToken.current !== token) return;
+        setSpecError(`Couldn't load the spec for ${ref}.`);
+      });
+  };
+
+  const approvedCount = designs.filter((design) => verdicts[design.ref] === 'approve').length;
+  const deniedCount = designs.filter((design) => verdicts[design.ref] === 'deny').length;
+  const undecidedCount = designs.length - approvedCount - deniedCount;
+
+  const onSubmit = (): void => {
+    if (submitting || undecidedCount > 0 || !gateItem) return;
+    // Cross-check the map against the gate's authoritative batch (defense in
+    // depth — the server re-validates this same coverage authoritatively on
+    // reviewItems.resolve). A mismatch here means the artifact's rows and the
+    // live gate have drifted (e.g. a stale tab); refuse to submit rather than
+    // let the server's rejection surface as an opaque error.
+    const requiredRefs = gateDesignRefs(gateItem.payload) ?? designs.map((design) => design.ref);
+    const covers =
+      requiredRefs.every((ref) => ref in verdicts) &&
+      Object.keys(verdicts).every((ref) => requiredRefs.includes(ref));
+    if (!covers) {
+      setSubmitError('This batch no longer matches the pending approval gate — reopen the tab.');
+      return;
+    }
+    setSubmitting(true);
+    setSubmitError(null);
+    resolve(projectId, gateItem.id, { verdicts }).then((result) => {
+      setSubmitting(false);
+      // The hook stores the server's real message (e.g. "blocked: resolve the
+      // pending size guards first") in its own error state; the alert below
+      // prefers it over this generic fallback.
+      if (result === null) setSubmitError('Failed to submit decisions.');
+    });
+  };
+
+  return (
+    <Shell testid="artifact-approve-designs">
+      <ArtifactHeader
+        artifact={artifact}
+        projectId={projectId}
+        accent={accent}
+        eyebrow="Artifact · approve designs"
+        meta={artifact.stepOrigin ?? undefined}
+      />
+      {designs.length === 0 ? (
+        <StateRow testid="artifact-approve-designs-empty" color={MUTED} text="No designs to review." />
+      ) : (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+          <div style={{ flex: 1, padding: '16px 20px 12px' }}>
+            {readOnly && (
+              <div
+                data-testid="approve-designs-no-gate-note"
+                style={{ fontSize: '11px', color: MUTED, marginBottom: 14, fontStyle: 'italic' }}
+              >
+                No pending approval gate for this run.
+              </div>
+            )}
+            {designs.map((design) => (
+              <DesignVerdictRow
+                key={design.ref}
+                design={design}
+                verdict={verdicts[design.ref] ?? null}
+                readOnly={readOnly}
+                onSetVerdict={(verdict) => setVerdict(design.ref, verdict)}
+                onOpenSpec={() => openSpec(design.ref)}
+              />
+            ))}
+            {specError && (
+              <span data-testid="approve-designs-spec-error" style={{ fontSize: '10px', color: VERDICT_FAIL }}>
+                {specError}
+              </span>
+            )}
+          </div>
+          {gateItem && (
+            <div
+              data-testid="approve-designs-footer"
+              style={{
+                position: 'sticky',
+                bottom: 0,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+                padding: '10px 20px',
+                borderTop: `1px solid ${HAIRLINE}`,
+                background: 'var(--color-bg-secondary)',
+              }}
+            >
+              <span data-testid="approve-designs-counts" style={{ fontSize: '11px', color: MUTED, fontWeight: 600 }}>
+                {`${approvedCount} approved · ${deniedCount} denied · ${undecidedCount} undecided`}
+              </span>
+              <div style={{ display: 'flex', border: `1px solid ${HAIRLINE}`, borderRadius: 3, overflow: 'hidden' }}>
+                <button
+                  type="button"
+                  data-testid="approve-designs-approve-all"
+                  disabled={submitting}
+                  onClick={() => setAllVerdicts('approve')}
+                  style={{
+                    fontSize: '10px',
+                    fontWeight: 700,
+                    padding: '4px 10px',
+                    border: 'none',
+                    background: 'var(--color-surface-primary)',
+                    color: VERDICT_PASS,
+                    cursor: submitting ? 'default' : 'pointer',
+                    opacity: submitting ? 0.5 : 1,
+                  }}
+                >
+                  Approve all
+                </button>
+                <button
+                  type="button"
+                  data-testid="approve-designs-deny-all"
+                  disabled={submitting}
+                  onClick={() => setAllVerdicts('deny')}
+                  style={{
+                    fontSize: '10px',
+                    fontWeight: 700,
+                    padding: '4px 10px',
+                    border: 'none',
+                    borderLeft: `1px solid ${HAIRLINE}`,
+                    background: 'var(--color-surface-primary)',
+                    color: VERDICT_FAIL,
+                    cursor: submitting ? 'default' : 'pointer',
+                    opacity: submitting ? 0.5 : 1,
+                  }}
+                >
+                  Deny all
+                </button>
+              </div>
+              <span style={{ flex: 1 }} />
+              {(resolveError ?? submitError) && (
+                <span data-testid="approve-designs-submit-error" style={{ fontSize: '10px', color: VERDICT_FAIL }}>
+                  {resolveError ?? submitError}
+                </span>
+              )}
+              <button
+                type="button"
+                data-testid="approve-designs-submit"
+                disabled={submitting || undecidedCount > 0}
+                onClick={onSubmit}
+                style={{
+                  fontSize: '10px',
+                  fontWeight: 700,
+                  letterSpacing: '.02em',
+                  color: 'var(--color-surface-primary)',
+                  background: INK,
+                  border: `1px solid ${INK}`,
+                  borderRadius: 3,
+                  padding: '5px 14px',
+                  cursor: submitting || undecidedCount > 0 ? 'default' : 'pointer',
+                  opacity: submitting || undecidedCount > 0 ? 0.5 : 1,
+                }}
+              >
+                {submitting ? 'Submitting…' : 'Submit'}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      <TaskDetailModal task={specIdea} onClose={() => setSpecIdea(null)} />
+    </Shell>
+  );
+}
+
 export function ArtifactTabRenderer({ artifact, projectId }: ArtifactTabRendererProps): ReactElement {
   switch (artifact.atype) {
     case 'idea-spec':
@@ -1709,6 +2114,8 @@ export function ArtifactTabRenderer({ artifact, projectId }: ArtifactTabRenderer
       return <CanvasBody artifact={artifact} projectId={projectId} />;
     case 'approve-ideas':
       return <ApproveIdeasBody artifact={artifact} projectId={projectId} />;
+    case 'approve-designs':
+      return <ApproveDesignsBody artifact={artifact} projectId={projectId} />;
     default: {
       // Exhaustive guard — ArtifactType is a closed union; this never executes.
       // Falls back to the canvas (generic) view if a new atype is ever added.

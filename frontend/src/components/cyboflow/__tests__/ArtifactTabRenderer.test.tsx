@@ -1373,4 +1373,253 @@ describe('ArtifactTabRenderer', () => {
     await Promise.resolve();
     expect(screen.getByTestId('task-detail-title')).toHaveTextContent('Rework the gadget');
   });
+
+  // --- approve-designs --------------------------------------------------------
+  // Structural clone of approve-ideas above: same gate machinery (dual mint-path
+  // recognition, shared IdeaVerdictMap + reviewItems.resolve), different payload
+  // shape ('designs' vs 'ideas') and gate discriminant ('approve-designs' /
+  // DecisionPayload.designRefs vs 'approve-ideas' / ideaRefs).
+
+  const APPROVE_DESIGNS_PAYLOAD = JSON.stringify({
+    designs: [
+      { ref: 'IDEA-014', title: 'Ship the widget', scope: 'small', summary: 'A small widget.' },
+      { ref: 'IDEA-015', title: 'Rework the gadget' },
+    ],
+  });
+
+  function makeDesignGateItem(overrides: Partial<ReviewItem> = {}): ReviewItem {
+    return {
+      id: 'rvw_gate',
+      project_id: 1,
+      run_id: 'run-1',
+      entity_type: null,
+      entity_id: null,
+      kind: 'decision',
+      status: 'pending',
+      blocking: true,
+      title: 'Approve designs',
+      body: null,
+      severity: null,
+      priority: null,
+      staged_at: null,
+      selected: false,
+      source: 'gate:human-step:approve-designs',
+      payload: { kind: 'decision', gate: 'approve-designs', designRefs: ['IDEA-014', 'IDEA-015'] },
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+      resolved_by: null,
+      resolution: null,
+      ...overrides,
+    };
+  }
+
+  function renderApproveDesigns(payloadJson: string | null = APPROVE_DESIGNS_PAYLOAD): void {
+    render(
+      <ArtifactTabRenderer
+        artifact={makeArtifact({ atype: 'approve-designs', mode: 'template', payloadJson })}
+        {...PROPS}
+      />,
+    );
+  }
+
+  it('renders the approve-designs rows with the amber eyebrow', () => {
+    setReviewItems([makeDesignGateItem()]);
+    renderApproveDesigns();
+
+    expect(screen.getByTestId('artifact-approve-designs')).toBeInTheDocument();
+    const eyebrow = screen.getByTestId('artifact-eyebrow');
+    expect(eyebrow).toHaveTextContent('Artifact · approve designs');
+    expect(eyebrow).toHaveStyle({ color: '#8a7326' });
+    expect(screen.getAllByTestId('approve-designs-row')).toHaveLength(2);
+    expect(screen.getByText('Ship the widget')).toBeInTheDocument();
+  });
+
+  it('toggles each design row independently and updates the footer counts', () => {
+    setReviewItems([makeDesignGateItem()]);
+    renderApproveDesigns();
+
+    expect(screen.getByTestId('approve-designs-counts')).toHaveTextContent('0 approved · 0 denied · 2 undecided');
+
+    fireEvent.click(screen.getByTestId('approve-designs-approve-IDEA-014'));
+    expect(screen.getByTestId('approve-designs-approve-IDEA-014')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('approve-designs-deny-IDEA-015')).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByTestId('approve-designs-counts')).toHaveTextContent('1 approved · 0 denied · 1 undecided');
+
+    fireEvent.click(screen.getByTestId('approve-designs-deny-IDEA-015'));
+    expect(screen.getByTestId('approve-designs-approve-IDEA-014')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('approve-designs-deny-IDEA-015')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('approve-designs-counts')).toHaveTextContent('1 approved · 1 denied · 0 undecided');
+  });
+
+  it('disables Submit while any design row is undecided, enables it once every row is decided', () => {
+    setReviewItems([makeDesignGateItem()]);
+    renderApproveDesigns();
+
+    const submit = screen.getByTestId('approve-designs-submit');
+    expect(submit).toBeDisabled();
+
+    fireEvent.click(screen.getByTestId('approve-designs-approve-IDEA-014'));
+    expect(submit).toBeDisabled();
+
+    fireEvent.click(screen.getByTestId('approve-designs-deny-IDEA-015'));
+    expect(submit).not.toBeDisabled();
+  });
+
+  it('Submit fires exactly one resolve call carrying the complete verdict map', async () => {
+    setReviewItems([makeDesignGateItem()]);
+    renderApproveDesigns();
+
+    fireEvent.click(screen.getByTestId('approve-designs-approve-IDEA-014'));
+    fireEvent.click(screen.getByTestId('approve-designs-deny-IDEA-015'));
+    fireEvent.click(screen.getByTestId('approve-designs-submit'));
+
+    await waitFor(() =>
+      expect(reviewItemsResolveMutate).toHaveBeenCalledWith({
+        projectId: 1,
+        reviewItemId: 'rvw_gate',
+        verdicts: { 'IDEA-014': 'approve', 'IDEA-015': 'deny' },
+      }),
+    );
+    expect(reviewItemsResolveMutate).toHaveBeenCalledTimes(1);
+  });
+
+  it('Approve all fills every design row with approve and enables Submit in one click', () => {
+    setReviewItems([makeDesignGateItem()]);
+    renderApproveDesigns();
+
+    fireEvent.click(screen.getByTestId('approve-designs-approve-all'));
+
+    expect(screen.getByTestId('approve-designs-approve-IDEA-014')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('approve-designs-approve-IDEA-015')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('approve-designs-counts')).toHaveTextContent('2 approved · 0 denied · 0 undecided');
+    expect(screen.getByTestId('approve-designs-submit')).not.toBeDisabled();
+  });
+
+  it('Deny all overwrites prior per-row picks with deny for every design row', () => {
+    setReviewItems([makeDesignGateItem()]);
+    renderApproveDesigns();
+
+    fireEvent.click(screen.getByTestId('approve-designs-approve-IDEA-014'));
+    fireEvent.click(screen.getByTestId('approve-designs-deny-all'));
+
+    expect(screen.getByTestId('approve-designs-approve-IDEA-014')).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByTestId('approve-designs-deny-IDEA-014')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('approve-designs-deny-IDEA-015')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('approve-designs-counts')).toHaveTextContent('0 approved · 2 denied · 0 undecided');
+  });
+
+  it('renders read-only design rows + a note when the batch has designs but no pending gate for this run', () => {
+    setReviewItems([]); // no gate item at all
+    renderApproveDesigns();
+
+    expect(screen.getByTestId('approve-designs-no-gate-note')).toHaveTextContent(
+      'No pending approval gate for this run.',
+    );
+    expect(screen.queryByTestId('approve-designs-footer')).not.toBeInTheDocument();
+
+    const approveBtn = screen.getByTestId('approve-designs-approve-IDEA-014');
+    expect(approveBtn).toBeDisabled();
+    fireEvent.click(approveBtn);
+    expect(approveBtn).toHaveAttribute('aria-pressed', 'false');
+    expect(reviewItemsResolveMutate).not.toHaveBeenCalled();
+  });
+
+  it('treats a design gate item for a DIFFERENT run as no pending gate (read-only)', () => {
+    setReviewItems([makeDesignGateItem({ run_id: 'run-other' })]);
+    renderApproveDesigns();
+    expect(screen.getByTestId('approve-designs-no-gate-note')).toBeInTheDocument();
+  });
+
+  it('finds the design gate via the payload discriminant when the source is agent-minted', async () => {
+    // Default ORCHESTRATED planner mints via cyboflow_report_finding, so the source
+    // is 'agent:architect' (NOT 'gate:human-step:approve-designs'); the gate is
+    // recognized only via payload.gate — the footer must still render + Submit works.
+    setReviewItems([makeDesignGateItem({ source: 'agent:architect' })]);
+    renderApproveDesigns();
+
+    expect(screen.queryByTestId('approve-designs-no-gate-note')).not.toBeInTheDocument();
+    expect(screen.getByTestId('approve-designs-footer')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('approve-designs-approve-IDEA-014'));
+    fireEvent.click(screen.getByTestId('approve-designs-deny-IDEA-015'));
+    fireEvent.click(screen.getByTestId('approve-designs-submit'));
+
+    await waitFor(() =>
+      expect(reviewItemsResolveMutate).toHaveBeenCalledWith({
+        projectId: 1,
+        reviewItemId: 'rvw_gate',
+        verdicts: { 'IDEA-014': 'approve', 'IDEA-015': 'deny' },
+      }),
+    );
+  });
+
+  it('shows the empty state for a malformed design payload, without throwing', () => {
+    setReviewItems([makeDesignGateItem()]);
+    expect(() => renderApproveDesigns('not json')).not.toThrow();
+    expect(screen.getByTestId('artifact-approve-designs-empty')).toHaveTextContent('No designs to review.');
+    expect(screen.queryByTestId('approve-designs-row')).not.toBeInTheDocument();
+  });
+
+  it('shows the empty state for a null design payload', () => {
+    setReviewItems([makeDesignGateItem()]);
+    renderApproveDesigns(null);
+    expect(screen.getByTestId('artifact-approve-designs-empty')).toHaveTextContent('No designs to review.');
+  });
+
+  // --- approve-designs: click-through to the full spec (TaskDetailModal) -----
+
+  function makeSpecDesignIdea(overrides: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
+    return makeIdea({
+      id: 'idea-014',
+      ref: 'IDEA-014',
+      title: 'Ship the widget',
+      body: '## Architecture design\n\nFull detail for IDEA-014.',
+      ...overrides,
+    });
+  }
+
+  it('clicking a design row resolves the ref via tasks.list and opens the modal with the full spec', async () => {
+    setReviewItems([makeDesignGateItem()]);
+    tasksListQuery.mockResolvedValue([makeSpecDesignIdea()]);
+    renderApproveDesigns();
+
+    expect(screen.queryByTestId('task-detail-modal')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('approve-designs-open-spec-IDEA-014'));
+
+    await waitFor(() => expect(screen.getByTestId('task-detail-modal')).toBeInTheDocument());
+    expect(tasksListQuery).toHaveBeenCalledWith({ projectId: 1 });
+    expect(screen.getByTestId('md-preview')).toHaveTextContent('Full detail for IDEA-014.');
+  });
+
+  it('names the ref in an inline error and does not open the modal when the ref is missing from the list', async () => {
+    setReviewItems([makeDesignGateItem()]);
+    tasksListQuery.mockResolvedValue([]); // IDEA-014 not present
+    renderApproveDesigns();
+
+    fireEvent.click(screen.getByTestId('approve-designs-open-spec-IDEA-014'));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('approve-designs-spec-error')).toHaveTextContent("Couldn't load the spec for IDEA-014."),
+    );
+    expect(screen.queryByTestId('task-detail-modal')).not.toBeInTheDocument();
+  });
+
+  it('clicking an Approve verdict button does not open the design spec modal', () => {
+    setReviewItems([makeDesignGateItem()]);
+    renderApproveDesigns();
+
+    fireEvent.click(screen.getByTestId('approve-designs-approve-IDEA-014'));
+    expect(screen.queryByTestId('task-detail-modal')).not.toBeInTheDocument();
+    expect(tasksListQuery).not.toHaveBeenCalled();
+  });
+
+  it('design spec viewing works read-only too (no pending gate for this run)', async () => {
+    setReviewItems([]); // no gate item -> readOnly rows
+    tasksListQuery.mockResolvedValue([makeSpecDesignIdea()]);
+    renderApproveDesigns();
+
+    expect(screen.getByTestId('approve-designs-no-gate-note')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('approve-designs-open-spec-IDEA-014'));
+    await waitFor(() => expect(screen.getByTestId('task-detail-modal')).toBeInTheDocument());
+  });
 });
