@@ -284,4 +284,24 @@ describe('applyWorkflowAgentConfigs', () => {
     expect(result.codexModel).toBeUndefined();
     expect(result.source).toBe('builtin-override');
   });
+
+  it('an effort-only config is signal — carries the effort through (IDEA-029)', () => {
+    const [result] = applyWorkflowAgentConfigs([builtin('planner')], { planner: { effort: 'xhigh' } });
+    expect(result.effort).toBe('xhigh');
+    expect(result.source).toBe('builtin-override'); // a lone effort is a real override
+    expect(result.rawContent).toBeUndefined();
+  });
+
+  it('a bogus effort value is ignored (leaves existing effort unchanged)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- exercise the isAnyEffortLevel guard against an off-scale value
+    const [result] = applyWorkflowAgentConfigs([builtin('planner')], { planner: { effort: 'ludicrous' as any } });
+    expect(result.effort).toBeUndefined();
+    expect(result.source).toBe('builtin'); // no valid signal → untouched
+  });
+
+  it('effort composes with a model pin on the same config', () => {
+    const [result] = applyWorkflowAgentConfigs([builtin('planner')], { planner: { model: 'opus', effort: 'high' } });
+    expect(result.model).toBe('opus');
+    expect(result.effort).toBe('high');
+  });
 });

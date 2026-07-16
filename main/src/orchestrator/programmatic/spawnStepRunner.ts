@@ -33,6 +33,7 @@ import { composeStepPrompt } from './stepPrompt';
 import { isSystemicStepError } from './systemicError';
 import type { WorkflowStep } from '../../../../shared/types/workflows';
 import { providerForRuntime, type WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
+import { normalizeEffortSelection, type ReasoningEffort } from '../../../../shared/types/reasoningEffort';
 import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import {
   renderWorkflowPromptForRuntime,
@@ -102,7 +103,9 @@ export interface SpawnStepRunnerOptions {
    * carrying no runtime override) ⇒ no per-spawn override, so the spawn falls back
    * to the run-level provider/runtime resolution (byte-identical to today).
    */
-  resolveStepAgent?: (agentKey: string) => { runtime?: WorkflowAgentRuntime; codexModel?: string } | undefined;
+  resolveStepAgent?: (
+    agentKey: string,
+  ) => { runtime?: WorkflowAgentRuntime; codexModel?: string; effort?: ReasoningEffort } | undefined;
 }
 
 export class SpawnStepRunner implements StepRunner {
@@ -138,6 +141,14 @@ export class SpawnStepRunner implements StepRunner {
     const stepRuntime = stepAgent?.runtime;
     const stepProvider = stepRuntime ? providerForRuntime(stepRuntime) : undefined;
     const spawnModel = stepProvider === 'codex' ? stepAgent?.codexModel : this.opts.model;
+    // Normalize the per-agent effort against the provider this step actually
+    // spawns under — the step-runtime override's provider when present, else the
+    // run-level provider. A value outside that provider's scale is dropped here
+    // (see normalizeEffortSelection), never forwarded to a spawn that rejects it.
+    const effortProvider = stepProvider ?? this.opts.promptRenderContext?.provider ?? 'claude';
+    const stepEffort = stepAgent?.effort
+      ? normalizeEffortSelection(effortProvider, stepAgent.effort)
+      : undefined;
     const basePrompt = composeStepPrompt({
       step,
       workflowName: this.opts.workflowName,
@@ -181,6 +192,7 @@ export class SpawnStepRunner implements StepRunner {
         ...(spawnModel ? { model: spawnModel } : {}),
         ...(stepProvider ? { agentProvider: stepProvider } : {}),
         ...(stepRuntime ? { agentRuntime: stepRuntime } : {}),
+        ...(stepEffort ? { effort: stepEffort } : {}),
         ...(agentPermissionMode ? { agentPermissionMode } : {}),
         // Additive per-lane spawn identity — forwarded ONLY when present so the
         // non-fan-out (no-item) case stays byte-identical; the spawner defaults

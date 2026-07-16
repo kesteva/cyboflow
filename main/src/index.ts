@@ -1777,13 +1777,19 @@ async function initializeServices() {
     // Per-step agent-runtime resolver (Codex-per-step mixing): resolves the run's
     // FULL effective agent set (project overrides + workflow agentConfigs + variant
     // deltas — the same layering the agent overlay writes to disk) and looks up the
-    // requested agentKey's runtime/codexModel. Absent runtime (unoverridden agent)
-    // -> undefined, so the step spawns under the run-level provider/runtime.
+    // requested agentKey's runtime/codexModel/effort. Absent runtime AND effort
+    // (unoverridden agent) -> undefined, so the step spawns under the run-level
+    // provider/runtime with no per-agent effort. Effort is returned even without a
+    // runtime override so a Claude agent can carry a reasoning-effort pin (IDEA-029).
     resolveStepAgent: (runId, agentKey) => {
       const eff = resolveRunEffectiveAgents(rawDb, runId);
       const a = eff.find((e) => e.agentKey === agentKey);
-      if (!a || !a.runtime) return undefined;
-      return { runtime: a.runtime, ...(a.codexModel ? { codexModel: a.codexModel } : {}) };
+      if (!a || (!a.runtime && !a.effort)) return undefined;
+      return {
+        ...(a.runtime ? { runtime: a.runtime } : {}),
+        ...(a.codexModel ? { codexModel: a.codexModel } : {}),
+        ...(a.effort ? { effort: a.effort } : {}),
+      };
     },
     // Blocking-review-items checkpoint: parks a programmatic run at each step
     // boundary while a PENDING BLOCKING review_item exists (e.g. a blocking finding

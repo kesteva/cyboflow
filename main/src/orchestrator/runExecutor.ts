@@ -20,6 +20,7 @@ import type { LoggerLike } from './types';
 import type { WorkflowRow, WorkflowRunRow } from '../../../shared/types/workflows';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { AgentProvider, WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
+import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import { AgentInvocationStore } from './agentInvocationStore';
 import type { ClaudeStreamEvent } from '../../../shared/types/claudeStream';
 import type { RunEventBridge, BridgeEventsOptions } from './runEventBridge';
@@ -208,6 +209,14 @@ export interface ClaudeSpawnerOptions {
   agentProvider?: AgentProvider;
   /** Paired with {@link agentProvider} — the concrete runtime for this spawn. */
   agentRuntime?: WorkflowAgentRuntime;
+  /**
+   * Per-spawn reasoning-effort override (IDEA-029), already normalized to this
+   * spawn's provider by the caller (the step runner drops cross-provider/stale
+   * values via normalizeEffortSelection). Absent -> the run/CLI default effort.
+   * Each provider's spawn seam reads this: Codex -> `reasoning_effort` on the
+   * turn; Claude SDK -> `Options.effort`; Claude interactive -> `--effort`.
+   */
+  effort?: ReasoningEffort;
 }
 
 /**

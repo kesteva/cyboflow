@@ -24,8 +24,22 @@ export type CodexEffortLevel = (typeof CODEX_EFFORT_LEVELS)[number];
 /** The union of every effort value either provider accepts. */
 export type ReasoningEffort = ClaudeEffortLevel | CodexEffortLevel;
 
+/**
+ * Every effort value across both providers, de-duplicated, for the wire schema.
+ * Persistence is provider-agnostic (the resolved provider isn't known when a
+ * `WorkflowAgentConfig` is validated), so the Zod enum accepts the whole union;
+ * provider-specific validity is enforced later by {@link normalizeEffortSelection}.
+ */
+export const ALL_EFFORT_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+
 const CLAUDE_EFFORT_SET = new Set<string>(CLAUDE_EFFORT_LEVELS);
 const CODEX_EFFORT_SET = new Set<string>(CODEX_EFFORT_LEVELS);
+const ALL_EFFORT_SET = new Set<string>(ALL_EFFORT_LEVELS);
+
+/** Narrow an arbitrary value to a known effort level (provider-agnostic). */
+export function isAnyEffortLevel(value: unknown): value is ReasoningEffort {
+  return typeof value === 'string' && ALL_EFFORT_SET.has(value);
+}
 
 /** The ordered effort options valid for `provider`, for UI pickers. */
 export function effortLevelsForProvider(provider: AgentProvider): readonly ReasoningEffort[] {

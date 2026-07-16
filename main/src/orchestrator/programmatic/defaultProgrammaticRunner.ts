@@ -27,6 +27,7 @@
 import { resolveWorkflowDefinition } from '../../../../shared/types/workflows';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
+import type { ReasoningEffort } from '../../../../shared/types/reasoningEffort';
 import type { ClaudeSpawnerLike, ProgrammaticRunner, ProgrammaticRunContext } from '../runExecutor';
 import type { LoggerLike } from '../types';
 import type { FanOutDriver, StepReport, VisualVerifyGate } from './types';
@@ -155,7 +156,7 @@ export interface DefaultProgrammaticRunnerDeps {
   resolveStepAgent?: (
     runId: string,
     agentKey: string,
-  ) => { runtime?: WorkflowAgentRuntime; codexModel?: string } | undefined;
+  ) => { runtime?: WorkflowAgentRuntime; codexModel?: string; effort?: ReasoningEffort } | undefined;
   logger?: LoggerLike;
 }
 

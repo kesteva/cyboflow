@@ -14,6 +14,7 @@ import type { WorkflowRunStatus } from './cyboflow';
 import type { ArtifactType } from './artifacts';
 import type { ExperimentArm } from './experiments';
 import type { AgentModelAlias } from './agents';
+import type { ReasoningEffort } from './reasoningEffort';
 import type { CliTool } from './cliTools';
 import { SPRINT_BATCH_CAP } from './sprintBatch';
 
@@ -511,9 +512,9 @@ export interface WorkflowAgentCustomCopy {
  * this workflow's `agentConfigs` -> an A/B variant's agent delta. So this
  * layer beats the Agents-pane pin/body, but a variant delta still wins over it.
  *
- * An empty `{}` config (neither `model`, `custom`, `runtime`, nor `codexModel`
- * set) carries no signal and must NEVER be persisted — the workflow editor
- * prunes it before write.
+ * An empty `{}` config (none of `model`, `custom`, `runtime`, `codexModel`, nor
+ * `effort` set) carries no signal and must NEVER be persisted — the workflow
+ * editor prunes it before write.
  */
 export interface WorkflowAgentConfig {
   /**
@@ -540,6 +541,14 @@ export interface WorkflowAgentConfig {
    * `model`.
    */
   codexModel?: string;
+  /**
+   * Per-workflow reasoning-effort override for this agent (IDEA-029). The valid
+   * scale depends on the resolved provider — Claude accepts `low..max`, Codex
+   * `none..xhigh` (see {@link ReasoningEffort}); a value outside the effective
+   * provider's scale is dropped at resolve/spawn time rather than forwarded.
+   * Absent -> inherit the run/CLI default effort.
+   */
+  effort?: ReasoningEffort;
 }
 
 /**

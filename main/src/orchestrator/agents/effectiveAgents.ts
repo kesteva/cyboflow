@@ -24,6 +24,8 @@ import type {
 import { agentModelLabel, isAgentModelAlias } from '../../../../shared/types/agents';
 import type { WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 import { isWorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
+import type { ReasoningEffort } from '../../../../shared/types/reasoningEffort';
+import { isAnyEffortLevel } from '../../../../shared/types/reasoningEffort';
 import type { WorkflowVariantAgentOverrides } from '../../../../shared/types/experiments';
 import type { WorkflowAgentConfig } from '../../../../shared/types/workflows';
 import { ensureResultSection, isGrantableMcpServer } from './agentValidation';
@@ -51,6 +53,12 @@ export interface EffectiveAgent {
   runtime?: WorkflowAgentRuntime;
   /** Codex model id used when `runtime === 'codex-sdk'`. Absent -> inherit. */
   codexModel?: string;
+  /**
+   * Reasoning-effort override carried verbatim from the config; the whole
+   * cross-provider union (see {@link ReasoningEffort}). Narrowed to the resolved
+   * provider's scale at the spawn seam. Absent -> inherit the run/CLI default.
+   */
+  effort?: ReasoningEffort;
 }
 
 /** Parse an override row's `tools_json` into a filtered `CliTool[]`. */
@@ -285,7 +293,8 @@ export function applyWorkflowAgentConfigs(
       (config.custom === undefined &&
         config.model === undefined &&
         config.runtime === undefined &&
-        config.codexModel === undefined)
+        config.codexModel === undefined &&
+        config.effort === undefined)
     ) {
       return agent;
     }
@@ -322,11 +331,18 @@ export function applyWorkflowAgentConfigs(
       typeof config.codexModel === 'string' && config.codexModel.length > 0
         ? config.codexModel
         : agent.codexModel;
+    const effort = isAnyEffortLevel(config.effort) ? config.effort : agent.effort;
 
     // Nothing valid applied (a malformed custom that degraded to absent AND no valid
-    // model/runtime/codexModel) → leave the agent fully untouched, exactly like an
-    // empty `{}` config: no spurious source flip / rawContent drop.
-    if (!hasCustom && model === agent.model && runtime === agent.runtime && codexModel === agent.codexModel) {
+    // model/runtime/codexModel/effort) → leave the agent fully untouched, exactly like
+    // an empty `{}` config: no spurious source flip / rawContent drop.
+    if (
+      !hasCustom &&
+      model === agent.model &&
+      runtime === agent.runtime &&
+      codexModel === agent.codexModel &&
+      effort === agent.effort
+    ) {
       return agent;
     }
 
@@ -336,7 +352,7 @@ export function applyWorkflowAgentConfigs(
     // source guarantees a builtin no longer writes its stale verbatim body).
     const { rawContent: _dropped, ...rest } = agent;
     void _dropped;
-    return { ...rest, description, systemPrompt, tools, enabledMcps, model, runtime, codexModel, source };
+    return { ...rest, description, systemPrompt, tools, enabledMcps, model, runtime, codexModel, effort, source };
   });
 }
 

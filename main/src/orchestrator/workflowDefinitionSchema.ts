@@ -27,6 +27,7 @@ import type {
 } from '../../../shared/types/workflows';
 import { AGENT_MODEL_ALIASES } from '../../../shared/types/agents';
 import { WORKFLOW_AGENT_RUNTIMES } from '../../../shared/types/agentRuntime';
+import { ALL_EFFORT_LEVELS } from '../../../shared/types/reasoningEffort';
 import { CLI_TOOLS } from '../../../shared/types/cliTools';
 import { validateAgentDraft, AgentOverrideError } from './agents/agentValidation';
 
@@ -121,8 +122,10 @@ const workflowAgentCustomCopySchema = z.object({
 
 /**
  * Per-workflow-agent config overlay. Mirrors `WorkflowAgentConfig`. An empty
- * `{}` (none of `model`, `custom`, `runtime`, `codexModel` set) is rejected
- * below — it carries no signal and the editor must prune it before persisting.
+ * `{}` (none of `model`, `custom`, `runtime`, `codexModel`, `effort` set) is
+ * rejected below — it carries no signal and the editor must prune it before
+ * persisting. `effort` accepts the whole cross-provider union here; the
+ * resolved provider narrows it at spawn time (see normalizeEffortSelection).
  */
 const workflowAgentConfigSchema = z
   .object({
@@ -130,18 +133,20 @@ const workflowAgentConfigSchema = z
     custom: workflowAgentCustomCopySchema.optional(),
     runtime: z.enum(WORKFLOW_AGENT_RUNTIMES).optional(),
     codexModel: z.string().min(1).optional(),
+    effort: z.enum(ALL_EFFORT_LEVELS).optional(),
   })
   .superRefine((config, ctx) => {
     if (
       config.model === undefined &&
       config.custom === undefined &&
       config.runtime === undefined &&
-      config.codexModel === undefined
+      config.codexModel === undefined &&
+      config.effort === undefined
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message:
-          'agentConfigs entry must set "model", "custom", "runtime", and/or "codexModel" — an empty {} config must be pruned before persisting',
+          'agentConfigs entry must set "model", "custom", "runtime", "codexModel", and/or "effort" — an empty {} config must be pruned before persisting',
       });
     }
   }) satisfies z.ZodType<WorkflowAgentConfig>;
