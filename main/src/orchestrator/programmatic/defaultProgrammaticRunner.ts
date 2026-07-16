@@ -26,6 +26,7 @@
  */
 import { resolveWorkflowDefinition } from '../../../../shared/types/workflows';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
+import type { WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 import type { ClaudeSpawnerLike, ProgrammaticRunner, ProgrammaticRunContext } from '../runExecutor';
 import type { LoggerLike } from '../types';
 import type { FanOutDriver, StepReport, VisualVerifyGate } from './types';
@@ -142,6 +143,19 @@ export interface DefaultProgrammaticRunnerDeps {
    * steps need to evaluate that idea's flags.
    */
   runOwnedIdeaIdsProvider?: (runId: string) => readonly string[];
+  /**
+   * Per-step agent RUNTIME resolver (Codex-per-step mixing). Threaded to the
+   * run's SpawnStepRunner as a run-bound thunk (`(agentKey) =>
+   * resolveStepAgent(runId, agentKey)`) so a workflow-scoped agent config that
+   * pins a step's canonical agent key to `runtime: 'codex-sdk'` routes that
+   * step's spawn to Codex without touching the run-level `workflow_runs`
+   * provider/runtime stamp. Absent ⇒ no resolver threaded, so every step spawns
+   * under the run-level resolution (byte-identical to today).
+   */
+  resolveStepAgent?: (
+    runId: string,
+    agentKey: string,
+  ) => { runtime?: WorkflowAgentRuntime; codexModel?: string } | undefined;
   logger?: LoggerLike;
 }
 
@@ -197,6 +211,14 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     // (steer) below — both re-read live, so a mutation lands on the next turn.
     const directives = ctx.directives ?? createRunDirectives();
 
+    // Run-bound per-step agent-runtime resolver (Codex-per-step mixing): binds
+    // this run's id so SpawnStepRunner only has to pass the agentKey each step.
+    // The non-null assertion is guarded by the outer ternary — deps.resolveStepAgent
+    // is checked truthy before the thunk that closes over it is ever built or called.
+    const resolveStepAgent = this.deps.resolveStepAgent
+      ? (agentKey: string) => this.deps.resolveStepAgent!(ctx.runId, agentKey)
+      : undefined;
+
     const runner = new SpawnStepRunner(
       this.deps.spawner,
       {
@@ -220,6 +242,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         stepGuidance: (stepId) => directives.stepGuidance.get(stepId),
         taskScope,
         runOwnedIdeaIds,
+        ...(resolveStepAgent ? { resolveStepAgent } : {}),
       },
       this.deps.logger,
     );

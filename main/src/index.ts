@@ -25,6 +25,7 @@ import { CliManagerFactory } from './services/cliManagerFactory';
 import { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './services/panels/claude/interactiveClaudeManager';
+import { resolveRunEffectiveAgents } from './services/panels/claude/agentOverlayWriter';
 import { CodexPtyManager } from './services/panels/codex/codexPtyManager';
 import { CodexSdkManager } from './services/panels/codex/codexSdkManager';
 import { SubstrateDispatchFacade } from './services/substrateDispatchFacade';
@@ -1710,6 +1711,17 @@ async function initializeServices() {
     // raw-prompt path picks up the idea its context step creates before optional
     // design steps evaluate UI_PROTOTYPE / ARCH_DESIGN.
     runOwnedIdeaIdsProvider: (runId) => listRunOwnedIdeaIds(cyboflowDb, runId),
+    // Per-step agent-runtime resolver (Codex-per-step mixing): resolves the run's
+    // FULL effective agent set (project overrides + workflow agentConfigs + variant
+    // deltas — the same layering the agent overlay writes to disk) and looks up the
+    // requested agentKey's runtime/codexModel. Absent runtime (unoverridden agent)
+    // -> undefined, so the step spawns under the run-level provider/runtime.
+    resolveStepAgent: (runId, agentKey) => {
+      const eff = resolveRunEffectiveAgents(rawDb, runId);
+      const a = eff.find((e) => e.agentKey === agentKey);
+      if (!a || !a.runtime) return undefined;
+      return { runtime: a.runtime, ...(a.codexModel ? { codexModel: a.codexModel } : {}) };
+    },
     // Blocking-review-items checkpoint: parks a programmatic run at each step
     // boundary while a PENDING BLOCKING review_item exists (e.g. a blocking finding
     // the agent recorded), awaits it clearing on reviewItemChangeEvents, then

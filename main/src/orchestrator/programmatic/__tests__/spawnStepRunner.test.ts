@@ -326,4 +326,73 @@ describe('SpawnStepRunner', () => {
     expect((calls[1][0] as ClaudeSpawnerOptions).prompt).toContain('`IDEA-raw-ship`');
     expect((calls[1][0] as ClaudeSpawnerOptions).prompt).not.toContain('cyboflow_list_tasks');
   });
+
+  // ── per-step agent runtime (Codex-per-step mixing) ─────────────────────────
+  describe('resolveStepAgent (per-step agent runtime override)', () => {
+    it('is byte-identical when NO resolveStepAgent thunk is bound: model === opts.model and NO agentProvider/agentRuntime keys', async () => {
+      const spawner = makeSpawner();
+      const runner = new SpawnStepRunner(spawner, { ...opts, model: 'claude-run-model' }); // opts has no resolveStepAgent
+
+      await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+      const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+      expect(passed.model).toBe('claude-run-model');
+      expect('agentProvider' in passed).toBe(false);
+      expect('agentRuntime' in passed).toBe(false);
+    });
+
+    it("routes to Codex when the resolver returns runtime: 'codex-sdk' + codexModel: spawns with agentProvider 'codex', agentRuntime 'codex-sdk', model = codexModel, and the render context adapts to Codex", async () => {
+      const spawner = makeSpawner();
+      const runner = new SpawnStepRunner(spawner, {
+        ...opts,
+        model: 'claude-run-model',
+        resolveStepAgent: (agentKey) =>
+          agentKey === 'implement' ? { runtime: 'codex-sdk', codexModel: 'gpt-5.2-codex' } : undefined,
+      });
+
+      const result = await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+      expect(result.status).toBe('ok');
+      const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+      expect(passed.agentProvider).toBe('codex');
+      expect(passed.agentRuntime).toBe('codex-sdk');
+      expect(passed.model).toBe('gpt-5.2-codex');
+      // The render context flipped to Codex for this step, so the compatibility
+      // adapter wraps the prompt even though the run's base context is Claude.
+      expect(passed.prompt).toContain('# Runtime adapter: Codex');
+    });
+
+    it("routes to Claude SDK when the resolver returns runtime: 'claude-sdk' (no codexModel): spawns with agentProvider 'claude', agentRuntime 'claude-sdk', model stays opts.model (NOT codex)", async () => {
+      const spawner = makeSpawner();
+      const runner = new SpawnStepRunner(spawner, {
+        ...opts,
+        model: 'claude-run-model',
+        resolveStepAgent: (agentKey) => (agentKey === 'implement' ? { runtime: 'claude-sdk' } : undefined),
+      });
+
+      await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+      const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+      expect(passed.agentProvider).toBe('claude');
+      expect(passed.agentRuntime).toBe('claude-sdk');
+      expect(passed.model).toBe('claude-run-model');
+      expect(passed.prompt).not.toContain('# Runtime adapter: Codex');
+    });
+
+    it('resolveStepAgent returning undefined for this step (agent unoverridden) omits agentProvider/agentRuntime and keeps opts.model', async () => {
+      const spawner = makeSpawner();
+      const runner = new SpawnStepRunner(spawner, {
+        ...opts,
+        model: 'claude-run-model',
+        resolveStepAgent: () => undefined,
+      });
+
+      await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+      const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+      expect(passed.model).toBe('claude-run-model');
+      expect('agentProvider' in passed).toBe(false);
+      expect('agentRuntime' in passed).toBe(false);
+    });
+  });
 });

@@ -287,13 +287,38 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
   }
 
   /**
+   * Resolve the manager for ONE spawn, honoring a per-call `agentProvider`/
+   * `agentRuntime` override (Codex-per-step mixing) before falling back to the
+   * run-level `resolveManager(panelId)` resolution. The override lets the
+   * programmatic step runner send a single step to Codex inside an otherwise-
+   * Claude run without mutating the run's `workflow_runs` stamp. Absent override
+   * ⇒ identical to the pre-existing run-level path.
+   */
+  private resolveManagerForSpawn(options: ClaudeSpawnerOptions): AbstractCliManager {
+    if (options.agentRuntime === 'codex-sdk' || options.agentProvider === 'codex') {
+      if (!this.codexSdkManager) {
+        throw new Error(`[SubstrateDispatchFacade] spawn for panel ${options.panelId} requested Codex SDK but no codex-sdk manager is wired`);
+      }
+      return this.codexSdkManager;
+    }
+    if (options.agentRuntime === 'claude-interactive') {
+      return this.interactiveManager;
+    }
+    if (options.agentRuntime === 'claude-sdk') {
+      return this.sdkManager;
+    }
+    return this.resolveManager(options.panelId);
+  }
+
+  /**
    * Dispatch a spawn to the substrate-matching manager. panelId === runId per the
-   * orchestrator invariant, so the substrate is resolved by panelId. Records the
-   * spawning manager in panelOwners so abort() finds the same manager later.
+   * orchestrator invariant, so the substrate is resolved by panelId (or by the
+   * per-call override — see resolveManagerForSpawn). Records the spawning manager
+   * in panelOwners so abort() finds the same manager later.
    */
   async spawnCliProcess(options: ClaudeSpawnerOptions): Promise<void> {
     const { panelId } = options;
-    const mgr = this.resolveManager(panelId);
+    const mgr = this.resolveManagerForSpawn(options);
     const substrate: CliSubstrate = mgr === this.interactiveManager ? 'interactive' : 'sdk';
     const runtime = mgr === this.codexSdkManager ? 'codex-sdk' : substrate;
     this.panelOwners.set(panelId, mgr);

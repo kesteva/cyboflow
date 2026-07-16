@@ -19,6 +19,7 @@ import { EventEmitter } from 'node:events';
 import type { LoggerLike } from './types';
 import type { WorkflowRow, WorkflowRunRow } from '../../../shared/types/workflows';
 import type { PermissionMode } from '../../../shared/types/workflows';
+import type { AgentProvider, WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
 import { AgentInvocationStore } from './agentInvocationStore';
 import type { ClaudeStreamEvent } from '../../../shared/types/claudeStream';
 import type { RunEventBridge, BridgeEventsOptions } from './runEventBridge';
@@ -196,6 +197,17 @@ export interface ClaudeSpawnerOptions {
   model?: string;
   /** Workflow step owning this concrete invocation; absent for run-level turns. */
   agentInvocationStepId?: string;
+  /**
+   * Per-spawn provider/runtime override (Codex-per-step mixing). When present the
+   * SubstrateDispatchFacade routes THIS spawn to the matching manager instead of
+   * resolving from the run-level `workflow_runs.agent_provider`/`agent_runtime`
+   * stamp; absent -> run-level resolution (byte-identical). Set by the programmatic
+   * step runner when a workflow-scoped agent config pins a step's agent to Codex
+   * inside an otherwise-Claude run.
+   */
+  agentProvider?: AgentProvider;
+  /** Paired with {@link agentProvider} — the concrete runtime for this spawn. */
+  agentRuntime?: WorkflowAgentRuntime;
 }
 
 /**

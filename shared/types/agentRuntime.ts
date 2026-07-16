@@ -61,3 +61,8 @@ export function claudeRuntimeFromSubstrate(
 ): Extract<WorkflowAgentRuntime, 'claude-sdk' | 'claude-interactive'> {
   return substrate === 'interactive' ? 'claude-interactive' : 'claude-sdk';
 }
+
+/** Derive the owning provider for a workflow-scoped agent runtime. */
+export function providerForRuntime(runtime: WorkflowAgentRuntime): AgentProvider {
+  return runtime === 'codex-sdk' ? 'codex' : 'claude';
+}

@@ -32,6 +32,8 @@ import type { StepRunner, StepRunResult, ControllerStepContext } from './types';
 import { composeStepPrompt } from './stepPrompt';
 import { isSystemicStepError } from './systemicError';
 import type { WorkflowStep } from '../../../../shared/types/workflows';
+import { providerForRuntime, type WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
+import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import {
   renderWorkflowPromptForRuntime,
   type WorkflowPromptRenderContext,
@@ -90,6 +92,17 @@ export interface SpawnStepRunnerOptions {
   promptRenderContext?: WorkflowPromptRenderContext;
   /** Provider-scoped model pinned on the owning workflow run. */
   model?: string;
+  /**
+   * Per-step agent RUNTIME resolver (Codex-per-step mixing). Invoked ONCE per
+   * `runStep` (NOT captured at construction), mirroring the `agentPermissionMode`/
+   * `stepGuidance` thunks above, so a workflow-scoped agent config edited mid-run
+   * is honored on the step's next spawn. Returns the step's canonical agent key's
+   * runtime/codexModel or `undefined` (the thunk absent, the step's `agent`
+   * resolving to no canonical key — e.g. the `human` gate — or the resolved agent
+   * carrying no runtime override) ⇒ no per-spawn override, so the spawn falls back
+   * to the run-level provider/runtime resolution (byte-identical to today).
+   */
+  resolveStepAgent?: (agentKey: string) => { runtime?: WorkflowAgentRuntime; codexModel?: string } | undefined;
 }
 
 export class SpawnStepRunner implements StepRunner {
@@ -115,6 +128,16 @@ export class SpawnStepRunner implements StepRunner {
     // steps from inspecting unrelated project ideas and picks up ideas context
     // creates mid-run.
     const runOwnedIdeaIds = this.opts.runOwnedIdeaIds?.();
+    // Re-resolve this step's agent RUNTIME per step (Codex-per-step mixing) —
+    // never captured at construction, mirroring the resolvers above — so a
+    // workflow-scoped agent config edited mid-run is honored on this step's next
+    // spawn. `resolveStepAgentKey` returns null for the `human` gate, which the
+    // resolver is never consulted for.
+    const agentKey = resolveStepAgentKey(step.id, step.agent);
+    const stepAgent = agentKey ? this.opts.resolveStepAgent?.(agentKey) : undefined;
+    const stepRuntime = stepAgent?.runtime;
+    const stepProvider = stepRuntime ? providerForRuntime(stepRuntime) : undefined;
+    const spawnModel = stepProvider === 'codex' ? stepAgent?.codexModel : this.opts.model;
     const basePrompt = composeStepPrompt({
       step,
       workflowName: this.opts.workflowName,
@@ -124,14 +147,21 @@ export class SpawnStepRunner implements StepRunner {
       ...(runOwnedIdeaIds && runOwnedIdeaIds.length > 0 ? { runOwnedIdeaIds } : {}),
       ...(userGuidance ? { userGuidance } : {}),
     });
+    // A step-level runtime override also overrides the render context's
+    // provider/runtime so a Codex step gets the compatibility adapter even inside
+    // an otherwise-Claude run's prompt envelope. No override ⇒ renderCtx is the
+    // SAME object as today's base (byte-identical).
+    const baseRenderCtx = this.opts.promptRenderContext ?? {
+      provider: 'claude' as const,
+      runtime: 'claude-sdk' as const,
+      executionModel: 'programmatic' as const,
+    };
+    const renderCtx =
+      stepRuntime && stepProvider ? { ...baseRenderCtx, provider: stepProvider, runtime: stepRuntime } : baseRenderCtx;
     const { prompt } = renderWorkflowPromptForRuntime(
       { prompt: basePrompt, systemPromptAppend: '' },
       {
-        ...(this.opts.promptRenderContext ?? {
-          provider: 'claude' as const,
-          runtime: 'claude-sdk' as const,
-          executionModel: 'programmatic' as const,
-        }),
+        ...renderCtx,
         turnKind: 'programmatic-step',
       },
     );
@@ -148,7 +178,9 @@ export class SpawnStepRunner implements StepRunner {
         prompt,
         hidePromptFromTranscript: true,
         agentInvocationStepId: step.id,
-        ...(this.opts.model ? { model: this.opts.model } : {}),
+        ...(spawnModel ? { model: spawnModel } : {}),
+        ...(stepProvider ? { agentProvider: stepProvider } : {}),
+        ...(stepRuntime ? { agentRuntime: stepRuntime } : {}),
         ...(agentPermissionMode ? { agentPermissionMode } : {}),
         // Additive per-lane spawn identity — forwarded ONLY when present so the
         // non-fan-out (no-item) case stays byte-identical; the spawner defaults

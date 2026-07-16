@@ -178,9 +178,11 @@ function readWorkflowAgentConfigs(
 }
 
 /**
- * Materialize the project's full effective agent set into `<worktreePath>/.claude/agents/`
- * as `cyboflow-<agentKey>.md` files. No-op (writes nothing) when the run row is missing.
- * Never removes anything; never throws — a failure here must not break a spawn.
+ * Resolve the run's FULL effective agent set — the same assembly
+ * `installAgentOverlay` writes to disk, exposed as a pure DB read for callers that
+ * need the resolved `EffectiveAgent[]` in memory (e.g. the programmatic per-step
+ * `resolveStepAgent` seam) rather than materialized `.md` files. Returns `[]` when
+ * the run resolves to no project (mirrors `installAgentOverlay`'s no-op).
  *
  * Precedence (low → high), applied left-to-right below:
  *   builtin → project `agent_overrides` → WORKFLOW `agentConfigs` → variant deltas.
@@ -190,6 +192,35 @@ function readWorkflowAgentConfigs(
  * 048) then apply LAST, so a variant delta still WINS over the workflow config for
  * the fields it touches.
  */
+export function resolveRunEffectiveAgents(
+  db: Database.Database,
+  runId: string,
+  logger?: LoggerLike,
+): EffectiveAgent[] {
+  const projectId = getRunProjectId(db, runId, logger);
+  if (projectId === null) {
+    logger?.debug(`[AgentOverlay] no project for runId=${runId} — nothing to overlay`);
+    return [];
+  }
+
+  const overrides = readOverrides(db, projectId, logger);
+  let effective: EffectiveAgent[] = computeEffectiveAgents(loadBuiltInAgents(), overrides);
+  const workflowConfigs = readWorkflowAgentConfigs(db, runId, logger);
+  if (workflowConfigs) {
+    effective = applyWorkflowAgentConfigs(effective, workflowConfigs);
+  }
+  const variantDeltas = readVariantAgentDeltas(db, runId, logger);
+  if (variantDeltas) {
+    effective = applyVariantAgentDeltas(effective, variantDeltas);
+  }
+  return effective;
+}
+
+/**
+ * Materialize the project's full effective agent set into `<worktreePath>/.claude/agents/`
+ * as `cyboflow-<agentKey>.md` files. No-op (writes nothing) when the run row is missing.
+ * Never removes anything; never throws — a failure here must not break a spawn.
+ */
 export function installAgentOverlay(
   db: Database.Database,
   runId: string,
@@ -197,22 +228,7 @@ export function installAgentOverlay(
   logger?: LoggerLike,
 ): void {
   try {
-    const projectId = getRunProjectId(db, runId, logger);
-    if (projectId === null) {
-      logger?.debug(`[AgentOverlay] no project for runId=${runId} — nothing to overlay`);
-      return;
-    }
-
-    const overrides = readOverrides(db, projectId, logger);
-    let effective: EffectiveAgent[] = computeEffectiveAgents(loadBuiltInAgents(), overrides);
-    const workflowConfigs = readWorkflowAgentConfigs(db, runId, logger);
-    if (workflowConfigs) {
-      effective = applyWorkflowAgentConfigs(effective, workflowConfigs);
-    }
-    const variantDeltas = readVariantAgentDeltas(db, runId, logger);
-    if (variantDeltas) {
-      effective = applyVariantAgentDeltas(effective, variantDeltas);
-    }
+    const effective = resolveRunEffectiveAgents(db, runId, logger);
     if (effective.length === 0) return;
 
     const dir = path.join(worktreePath, ...AGENTS_DIR);
@@ -236,9 +252,7 @@ export function installAgentOverlay(
 
     logger?.debug('[AgentOverlay] installed effective agent overlay', {
       worktreePath,
-      projectId,
       written,
-      overrides: overrides.length,
     });
   } catch (err) {
     logger?.warn(

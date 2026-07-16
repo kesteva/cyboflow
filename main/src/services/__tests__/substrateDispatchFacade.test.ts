@@ -291,6 +291,81 @@ describe('SubstrateDispatchFacade — substrate-aware dispatch', () => {
 });
 
 // ---------------------------------------------------------------------------
+// per-spawn provider/runtime override (Codex-per-step mixing) — resolveManagerForSpawn
+// ---------------------------------------------------------------------------
+
+describe('SubstrateDispatchFacade — per-spawn agentProvider/agentRuntime override', () => {
+  it("dispatches to the Codex SDK manager when options.agentRuntime === 'codex-sdk' EVEN when the run resolves to sdk", async () => {
+    const run = makeWorkflowRunRow({ substrate: 'sdk' }); // no agent_provider/agent_runtime — run-level resolution is Claude SDK
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const codexSdk = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(
+      asManager(sdk),
+      asManager(interactive),
+      registry,
+      makeSpyLogger(),
+      [],
+      asManager(codexSdk),
+    );
+
+    await facade.spawnCliProcess({
+      panelId: run.id,
+      sessionId: run.id,
+      runId: run.id,
+      worktreePath: '/fake/worktree',
+      prompt: 'go',
+      agentRuntime: 'codex-sdk',
+    });
+
+    expect(codexSdk.spawnCliProcess).toHaveBeenCalledOnce();
+    expect(sdk.spawnCliProcess).not.toHaveBeenCalled();
+    expect(interactive.spawnCliProcess).not.toHaveBeenCalled();
+  });
+
+  it("dispatches to the interactive manager when options.agentRuntime === 'claude-interactive' EVEN when the run resolves to sdk", async () => {
+    const run = makeWorkflowRunRow({ substrate: 'sdk' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    await facade.spawnCliProcess({
+      panelId: run.id,
+      sessionId: run.id,
+      runId: run.id,
+      worktreePath: '/fake/worktree',
+      prompt: 'go',
+      agentRuntime: 'claude-interactive',
+    });
+
+    expect(interactive.spawnCliProcess).toHaveBeenCalledOnce();
+    expect(sdk.spawnCliProcess).not.toHaveBeenCalled();
+  });
+
+  it('falls back to run-level resolveManager when NO override is present (existing behavior, byte-identical)', async () => {
+    const run = makeWorkflowRunRow({ substrate: 'interactive' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    await facade.spawnCliProcess({
+      panelId: run.id,
+      sessionId: run.id,
+      runId: run.id,
+      worktreePath: '/fake/worktree',
+      prompt: 'go',
+      // no agentProvider / agentRuntime keys at all
+    });
+
+    expect(interactive.spawnCliProcess).toHaveBeenCalledOnce();
+    expect(sdk.spawnCliProcess).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // abort by owner
 // ---------------------------------------------------------------------------
 
