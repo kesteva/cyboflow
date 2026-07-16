@@ -26,14 +26,23 @@ import type {
 import { SPRINT_BATCH_CAP } from '../../../../shared/types/sprintBatch';
 import { AGENT_MODEL_ALIASES, AGENT_MODEL_LABELS } from '../../../../shared/types/agents';
 import type { AgentEntry, AgentModelAlias } from '../../../../shared/types/agents';
-import type { AgentProvider } from '../../../../shared/types/agentRuntime';
+import type { AgentProvider, WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
+import { WORKFLOW_AGENT_RUNTIMES } from '../../../../shared/types/agentRuntime';
 import { HUMAN_GATE_AGENT, resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import { CLI_TOOLS } from '../../../../shared/types/cliTools';
 import type { CliTool } from '../../../../shared/types/cliTools';
 import type { McpEntry } from '../../../../shared/types/integrations';
 import { trpc } from '../../trpc/client';
 import type { WorkflowEditorAction, WorkflowEditorState } from '../../hooks/useWorkflowEditorState';
+import { useCodexModelCatalog } from '../../stores/codexModelCatalogStore';
 import { AGENT_OPTIONS, MCP_OPTIONS } from './workflowEditorOptions';
+
+/** Display labels for the per-agent runtime `<select>` (Runtime picker, Slice C). */
+const WORKFLOW_AGENT_RUNTIME_LABELS: Record<WorkflowAgentRuntime, string> = {
+  'claude-sdk': 'Claude SDK',
+  'claude-interactive': 'Claude interactive',
+  'codex-sdk': 'Codex SDK',
+};
 
 type InspectorTab = 'step' | 'agent' | 'mcp';
 
@@ -1051,12 +1060,16 @@ function AgentConfigSection({
   const modelId = isInner ? 'insp-inner-model' : 'insp-model';
   const modelTestId = isInner ? 'inspector-inner-model-select' : 'inspector-model-select';
   const hintTestId = isInner ? 'inspector-inner-model-hint' : 'inspector-model-hint';
+  const runtimeId = isInner ? 'insp-inner-agent-runtime' : 'insp-agent-runtime';
+  const runtimeTestId = isInner ? 'inspector-inner-agent-runtime-select' : 'inspector-agent-runtime-select';
+  const runtimeHintTestId = isInner ? 'inspector-inner-agent-runtime-hint' : 'inspector-agent-runtime-hint';
 
   const selectedModel: AgentModelAlias | '' = config?.model ?? '';
   const inheriting = config?.model === undefined;
   const pinLabel = entry.model != null ? AGENT_MODEL_LABELS[entry.model] : null;
   const inheritSentence =
     pinLabel !== null ? `Inherits ${pinLabel} (agent setting).` : 'Inherits the run model.';
+  const selectedRuntime: WorkflowAgentRuntime | '' = config?.runtime ?? '';
 
   return (
     <div style={sectionContainerStyle} data-testid={sectionTestId}>
@@ -1072,30 +1085,66 @@ function AgentConfigSection({
           </p>
         </div>
       ) : (
-        <div>
-          <label style={labelStyle} htmlFor={modelId}>model</label>
-          <select
-            id={modelId}
-            value={selectedModel}
-            onChange={(e) =>
-              dispatch({
-                type: 'SET_AGENT_MODEL',
-                agentKey,
-                model: e.target.value === '' ? null : (e.target.value as AgentModelAlias),
-              })
-            }
-            style={inputStyle}
-            data-testid={modelTestId}
-          >
-            <option value="">(inherit)</option>
-            {AGENT_MODEL_ALIASES.map((alias) => (
-              <option key={alias} value={alias}>{AGENT_MODEL_LABELS[alias]}</option>
-            ))}
-          </select>
-          <p style={hintStyle} data-testid={hintTestId}>
-            {inheriting ? `${inheritSentence} ` : ''}Applies to every step using <b>{agentKey}</b> in this flow.
-          </p>
-        </div>
+        <>
+          <div>
+            <label style={labelStyle} htmlFor={runtimeId}>runtime</label>
+            <select
+              id={runtimeId}
+              value={selectedRuntime}
+              onChange={(e) =>
+                dispatch({
+                  type: 'SET_AGENT_RUNTIME',
+                  agentKey,
+                  runtime: e.target.value === '' ? null : (e.target.value as WorkflowAgentRuntime),
+                })
+              }
+              style={inputStyle}
+              data-testid={runtimeTestId}
+            >
+              <option value="">(inherit)</option>
+              {WORKFLOW_AGENT_RUNTIMES.map((runtime) => (
+                <option key={runtime} value={runtime}>{WORKFLOW_AGENT_RUNTIME_LABELS[runtime]}</option>
+              ))}
+            </select>
+            <p style={hintStyle} data-testid={runtimeHintTestId}>
+              Runs every step using <b>{agentKey}</b> on this runtime. Per-step Codex applies to
+              programmatic runs.
+            </p>
+          </div>
+          {selectedRuntime === 'codex-sdk' ? (
+            <CodexAgentModelSelect
+              agentKey={agentKey}
+              codexModel={config?.codexModel}
+              isInner={isInner}
+              dispatch={dispatch}
+            />
+          ) : (
+            <div>
+              <label style={labelStyle} htmlFor={modelId}>model</label>
+              <select
+                id={modelId}
+                value={selectedModel}
+                onChange={(e) =>
+                  dispatch({
+                    type: 'SET_AGENT_MODEL',
+                    agentKey,
+                    model: e.target.value === '' ? null : (e.target.value as AgentModelAlias),
+                  })
+                }
+                style={inputStyle}
+                data-testid={modelTestId}
+              >
+                <option value="">(inherit)</option>
+                {AGENT_MODEL_ALIASES.map((alias) => (
+                  <option key={alias} value={alias}>{AGENT_MODEL_LABELS[alias]}</option>
+                ))}
+              </select>
+              <p style={hintStyle} data-testid={hintTestId}>
+                {inheriting ? `${inheritSentence} ` : ''}Applies to every step using <b>{agentKey}</b> in this flow.
+              </p>
+            </div>
+          )}
+        </>
       )}
 
       {/* ── Agent definition (read-only view, or workflow-scoped custom copy) ─ */}
@@ -1104,6 +1153,58 @@ function AgentConfigSection({
       ) : (
         <AgentDefinitionEditable agentKey={agentKey} custom={config.custom} dispatch={dispatch} />
       )}
+    </div>
+  );
+}
+
+/**
+ * The Codex model picker shown in place of the Claude model `<select>` once a
+ * per-agent runtime is pinned to `'codex-sdk'`. Split out from
+ * `AgentConfigSection` — which has early `return`s before this point — so the
+ * `useCodexModelCatalog` hook call stays unconditional per render (Rules of
+ * Hooks) rather than sitting after a possible early exit.
+ */
+function CodexAgentModelSelect({
+  agentKey,
+  codexModel,
+  isInner,
+  dispatch,
+}: {
+  agentKey: string;
+  codexModel: string | undefined;
+  isInner: boolean;
+  dispatch: React.Dispatch<WorkflowEditorAction>;
+}) {
+  const { options } = useCodexModelCatalog(true);
+  const id = isInner ? 'insp-inner-codex-model' : 'insp-codex-model';
+  const testId = isInner ? 'inspector-inner-codex-model-select' : 'inspector-codex-model-select';
+  const hintTestId = isInner ? 'inspector-inner-codex-model-hint' : 'inspector-codex-model-hint';
+
+  return (
+    <div>
+      <label style={labelStyle} htmlFor={id}>codex model</label>
+      <select
+        id={id}
+        value={codexModel ?? ''}
+        onChange={(e) =>
+          dispatch({
+            type: 'SET_AGENT_CODEX_MODEL',
+            agentKey,
+            codexModel: e.target.value === '' ? null : e.target.value,
+          })
+        }
+        style={inputStyle}
+        data-testid={testId}
+      >
+        <option value="">(inherit)</option>
+        {options.map((o) => (
+          <option key={o.id} value={o.id}>{o.label}</option>
+        ))}
+      </select>
+      <p style={hintStyle} data-testid={hintTestId}>
+        Applies to every step using <b>{agentKey}</b> on Codex. Requires a signed-in ChatGPT account
+        for real models.
+      </p>
     </div>
   );
 }

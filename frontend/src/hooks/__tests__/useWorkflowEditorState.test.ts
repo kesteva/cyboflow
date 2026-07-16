@@ -1059,6 +1059,141 @@ describe('workflowEditorReducer — SET_AGENT_MODEL', () => {
   });
 });
 
+describe('workflowEditorReducer — SET_AGENT_RUNTIME', () => {
+  it('sets a runtime for an agent with no prior config', () => {
+    const next = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_RUNTIME',
+      agentKey: 'executor',
+      runtime: 'codex-sdk',
+    });
+    expect(next.definition.agentConfigs).toEqual({ executor: { runtime: 'codex-sdk' } });
+  });
+
+  it('overwrites an existing runtime', () => {
+    const first = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_RUNTIME',
+      agentKey: 'executor',
+      runtime: 'codex-sdk',
+    });
+    const second = workflowEditorReducer(first, {
+      type: 'SET_AGENT_RUNTIME',
+      agentKey: 'executor',
+      runtime: 'claude-interactive',
+    });
+    expect(second.definition.agentConfigs).toEqual({ executor: { runtime: 'claude-interactive' } });
+  });
+
+  it('clearing the only field prunes the agent entry and the whole map', () => {
+    const withRuntime = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_RUNTIME',
+      agentKey: 'executor',
+      runtime: 'codex-sdk',
+    });
+    const cleared = workflowEditorReducer(withRuntime, {
+      type: 'SET_AGENT_RUNTIME',
+      agentKey: 'executor',
+      runtime: null,
+    });
+    expect(cleared.definition.agentConfigs).toBeUndefined();
+    expect('agentConfigs' in cleared.definition).toBe(false);
+  });
+
+  it('a config left with only runtime (no model/custom/codexModel) survives — not pruned', () => {
+    const withRuntime = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_RUNTIME',
+      agentKey: 'executor',
+      runtime: 'claude-sdk',
+    });
+    expect(withRuntime.definition.agentConfigs).toEqual({ executor: { runtime: 'claude-sdk' } });
+  });
+
+  it('clearing the runtime leaves a sibling model override on the same agent intact', () => {
+    const withModel = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_MODEL',
+      agentKey: 'executor',
+      model: 'opus',
+    });
+    const withBoth = workflowEditorReducer(withModel, {
+      type: 'SET_AGENT_RUNTIME',
+      agentKey: 'executor',
+      runtime: 'codex-sdk',
+    });
+    const runtimeCleared = workflowEditorReducer(withBoth, {
+      type: 'SET_AGENT_RUNTIME',
+      agentKey: 'executor',
+      runtime: null,
+    });
+    expect(runtimeCleared.definition.agentConfigs).toEqual({ executor: { model: 'opus' } });
+  });
+});
+
+describe('workflowEditorReducer — SET_AGENT_CODEX_MODEL', () => {
+  it('sets a codexModel for an agent with no prior config', () => {
+    const next = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_CODEX_MODEL',
+      agentKey: 'executor',
+      codexModel: 'gpt-5.2-codex',
+    });
+    expect(next.definition.agentConfigs).toEqual({ executor: { codexModel: 'gpt-5.2-codex' } });
+  });
+
+  it('overwrites an existing codexModel', () => {
+    const first = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_CODEX_MODEL',
+      agentKey: 'executor',
+      codexModel: 'gpt-5.2-codex',
+    });
+    const second = workflowEditorReducer(first, {
+      type: 'SET_AGENT_CODEX_MODEL',
+      agentKey: 'executor',
+      codexModel: 'auto',
+    });
+    expect(second.definition.agentConfigs).toEqual({ executor: { codexModel: 'auto' } });
+  });
+
+  it('clearing the only field prunes the agent entry and the whole map', () => {
+    const withCodexModel = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_CODEX_MODEL',
+      agentKey: 'executor',
+      codexModel: 'gpt-5.2-codex',
+    });
+    const cleared = workflowEditorReducer(withCodexModel, {
+      type: 'SET_AGENT_CODEX_MODEL',
+      agentKey: 'executor',
+      codexModel: null,
+    });
+    expect(cleared.definition.agentConfigs).toBeUndefined();
+    expect('agentConfigs' in cleared.definition).toBe(false);
+  });
+
+  it('clearing runtime AND codexModel together prunes the whole entry (no empty {})', () => {
+    const withRuntime = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_RUNTIME',
+      agentKey: 'executor',
+      runtime: 'codex-sdk',
+    });
+    const withBoth = workflowEditorReducer(withRuntime, {
+      type: 'SET_AGENT_CODEX_MODEL',
+      agentKey: 'executor',
+      codexModel: 'gpt-5.2-codex',
+    });
+    const runtimeCleared = workflowEditorReducer(withBoth, {
+      type: 'SET_AGENT_RUNTIME',
+      agentKey: 'executor',
+      runtime: null,
+    });
+    expect(runtimeCleared.definition.agentConfigs).toEqual({ executor: { codexModel: 'gpt-5.2-codex' } });
+
+    const bothCleared = workflowEditorReducer(runtimeCleared, {
+      type: 'SET_AGENT_CODEX_MODEL',
+      agentKey: 'executor',
+      codexModel: null,
+    });
+    expect(bothCleared.definition.agentConfigs).toBeUndefined();
+    expect(JSON.stringify(bothCleared.definition)).not.toContain('agentConfigs');
+  });
+});
+
 describe('workflowEditorReducer — SET_AGENT_CUSTOM', () => {
   it('installs a custom copy for an agent with no prior config', () => {
     const custom = makeCustomCopy();

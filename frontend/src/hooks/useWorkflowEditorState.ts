@@ -28,6 +28,7 @@ import type {
   WorkflowStep,
 } from '../../../shared/types/workflows';
 import type { AgentModelAlias } from '../../../shared/types/agents';
+import type { WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
 import { PHASE_COLORS } from '../components/cyboflow/workflowEditorOptions';
 
 // ---------------------------------------------------------------------------
@@ -112,6 +113,8 @@ export type WorkflowEditorAction =
   // see `WorkflowAgentConfig` doc comment for the per-workflow-agent scope).
   | { type: 'SET_AGENT_MODEL'; agentKey: string; model: AgentModelAlias | null }
   | { type: 'SET_AGENT_CUSTOM'; agentKey: string; custom: WorkflowAgentCustomCopy | null }
+  | { type: 'SET_AGENT_RUNTIME'; agentKey: string; runtime: WorkflowAgentRuntime | null }
+  | { type: 'SET_AGENT_CODEX_MODEL'; agentKey: string; codexModel: string | null }
   | SetAgentCustomFieldAction;
 
 // ---------------------------------------------------------------------------
@@ -216,7 +219,8 @@ function swap<T>(arr: readonly T[], i: number, j: number): T[] {
  *
  * Enforces the two prune invariants so the modal's structural (JSON) dirty
  * check never sees a no-op edit as a diff:
- *   - a config left with neither `model` nor `custom` is dropped from the map
+ *   - a config left with none of `model` / `custom` / `runtime` / `codexModel`
+ *     is dropped from the map
  *   - a map left empty is removed entirely (key absent, not `{}`)
  */
 function mapAgentConfig(
@@ -229,7 +233,12 @@ function mapAgentConfig(
   if (next === current) return def;
 
   const configs = { ...(def.agentConfigs ?? {}) };
-  if (next.model === undefined && next.custom === undefined) {
+  const isEmpty =
+    next.model === undefined &&
+    next.custom === undefined &&
+    next.runtime === undefined &&
+    next.codexModel === undefined;
+  if (isEmpty) {
     delete configs[agentKey];
   } else {
     configs[agentKey] = next;
@@ -691,6 +700,32 @@ export function workflowEditorReducer(
           return rest;
         }
         return { ...config, model: action.model };
+      });
+      return { ...state, definition };
+    }
+
+    case 'SET_AGENT_RUNTIME': {
+      const definition = mapAgentConfig(state.definition, action.agentKey, (config) => {
+        if (action.runtime === null) {
+          if (config.runtime === undefined) return config;
+          const rest = { ...config };
+          delete rest.runtime;
+          return rest;
+        }
+        return { ...config, runtime: action.runtime };
+      });
+      return { ...state, definition };
+    }
+
+    case 'SET_AGENT_CODEX_MODEL': {
+      const definition = mapAgentConfig(state.definition, action.agentKey, (config) => {
+        if (action.codexModel === null) {
+          if (config.codexModel === undefined) return config;
+          const rest = { ...config };
+          delete rest.codexModel;
+          return rest;
+        }
+        return { ...config, codexModel: action.codexModel };
       });
       return { ...state, definition };
     }

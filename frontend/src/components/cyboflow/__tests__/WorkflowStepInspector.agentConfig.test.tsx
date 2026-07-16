@@ -25,6 +25,20 @@ vi.mock('../../../trpc/client', () => ({
   },
 }));
 
+// Deterministic Codex catalog — avoids the real IPC probe, mirrors
+// VariantEditorModal.codex.test.tsx's mock of the same store.
+vi.mock('../../../stores/codexModelCatalogStore', () => ({
+  useCodexModelCatalog: () => ({
+    options: [
+      { id: 'auto', label: 'Auto/default', description: 'Use the Codex runtime default', isDefault: false },
+      { id: 'gpt-5.2-codex', label: 'gpt-5.2-codex', description: 'Codex', isDefault: true },
+    ],
+    defaultModel: 'gpt-5.2-codex',
+    loading: false,
+    error: null,
+  }),
+}));
+
 import { WorkflowStepInspector } from '../WorkflowStepInspector';
 
 // ---------------------------------------------------------------------------
@@ -175,6 +189,92 @@ describe('AgentConfigSection — model pin', () => {
     openAgentTab();
 
     expect(screen.getByTestId('inspector-model-hint')).toHaveTextContent('Inherits Opus 4.8 (agent setting).');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Runtime picker + Codex model picker (Slice C)
+// ---------------------------------------------------------------------------
+
+describe('AgentConfigSection — runtime picker', () => {
+  it('defaults the runtime select to (inherit) and dispatches SET_AGENT_RUNTIME on change', () => {
+    const { dispatch } = renderInspector({ definition: makeDefinition(), selectedStepId: 'impl' });
+    openAgentTab();
+
+    const select = screen.getByTestId('inspector-agent-runtime-select') as HTMLSelectElement;
+    expect(select.value).toBe('');
+
+    fireEvent.change(select, { target: { value: 'codex-sdk' } });
+    expect(dispatch).toHaveBeenCalledWith({ type: 'SET_AGENT_RUNTIME', agentKey: 'implement', runtime: 'codex-sdk' });
+  });
+
+  it('maps the "(inherit)" option back to a null runtime', () => {
+    const { dispatch } = renderInspector({
+      definition: makeDefinition({ implement: { runtime: 'claude-interactive' } }),
+      selectedStepId: 'impl',
+    });
+    openAgentTab();
+
+    const select = screen.getByTestId('inspector-agent-runtime-select') as HTMLSelectElement;
+    expect(select.value).toBe('claude-interactive');
+
+    fireEvent.change(select, { target: { value: '' } });
+    expect(dispatch).toHaveBeenCalledWith({ type: 'SET_AGENT_RUNTIME', agentKey: 'implement', runtime: null });
+  });
+
+  it('shows the Claude model select (not the Codex one) while runtime is (inherit) or claude-*', () => {
+    renderInspector({ definition: makeDefinition(), selectedStepId: 'impl' });
+    openAgentTab();
+
+    expect(screen.getByTestId('inspector-model-select')).toBeInTheDocument();
+    expect(screen.queryByTestId('inspector-codex-model-select')).not.toBeInTheDocument();
+  });
+
+  it('does not render a runtime select when the provider is codex (single-model-per-run note instead)', () => {
+    renderInspector({ definition: makeDefinition(), selectedStepId: 'impl', agentProvider: 'codex' });
+    openAgentTab();
+
+    expect(screen.queryByTestId('inspector-agent-runtime-select')).not.toBeInTheDocument();
+  });
+});
+
+describe('AgentConfigSection — Codex model picker', () => {
+  it('replaces the Claude model select with the Codex model select once runtime is codex-sdk', () => {
+    renderInspector({
+      definition: makeDefinition({ implement: { runtime: 'codex-sdk' } }),
+      selectedStepId: 'impl',
+    });
+    openAgentTab();
+
+    expect(screen.queryByTestId('inspector-model-select')).not.toBeInTheDocument();
+    const select = screen.getByTestId('inspector-codex-model-select') as HTMLSelectElement;
+    expect(select.value).toBe('');
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(['', 'auto', 'gpt-5.2-codex']);
+  });
+
+  it('reflects a pinned codexModel and dispatches SET_AGENT_CODEX_MODEL on change', () => {
+    const { dispatch } = renderInspector({
+      definition: makeDefinition({ implement: { runtime: 'codex-sdk', codexModel: 'gpt-5.2-codex' } }),
+      selectedStepId: 'impl',
+    });
+    openAgentTab();
+
+    const select = screen.getByTestId('inspector-codex-model-select') as HTMLSelectElement;
+    expect(select.value).toBe('gpt-5.2-codex');
+
+    fireEvent.change(select, { target: { value: 'auto' } });
+    expect(dispatch).toHaveBeenCalledWith({ type: 'SET_AGENT_CODEX_MODEL', agentKey: 'implement', codexModel: 'auto' });
+  });
+
+  it('maps the "(inherit)" option back to a null codexModel', () => {
+    const { dispatch } = renderInspector({
+      definition: makeDefinition({ implement: { runtime: 'codex-sdk', codexModel: 'gpt-5.2-codex' } }),
+      selectedStepId: 'impl',
+    });
+    openAgentTab();
+
+    fireEvent.change(screen.getByTestId('inspector-codex-model-select'), { target: { value: '' } });
+    expect(dispatch).toHaveBeenCalledWith({ type: 'SET_AGENT_CODEX_MODEL', agentKey: 'implement', codexModel: null });
   });
 });
 
@@ -405,4 +505,37 @@ describe('AgentConfigSection — fan-out inner variant', () => {
     fireEvent.change(select, { target: { value: 'sonnet' } });
     expect(dispatch).toHaveBeenCalledWith({ type: 'SET_AGENT_MODEL', agentKey: 'implement', model: 'sonnet' });
   });
+
+  it('renders the inner runtime select (distinct testid) and, once codex-sdk, the inner codex model select', () => {
+    const { dispatch } = renderInspector({
+      definition: fanOutDefinition(),
+      selectedStepId: 'impl',
+      selectedFanOutInner: { stepId: 'impl', innerIndex: 0 },
+    });
+
+    const runtimeSelect = screen.getByTestId('inspector-inner-agent-runtime-select');
+    expect(runtimeSelect).toBeInTheDocument();
+
+    fireEvent.change(runtimeSelect, { target: { value: 'codex-sdk' } });
+    expect(dispatch).toHaveBeenCalledWith({ type: 'SET_AGENT_RUNTIME', agentKey: 'implement', runtime: 'codex-sdk' });
+  });
+
+  it('shows the inner codex model select once the fan-out inner agent config pins codex-sdk', () => {
+    const { dispatch } = renderInspector({
+      definition: fanOutInnerCodexDefinition(),
+      selectedStepId: 'impl',
+      selectedFanOutInner: { stepId: 'impl', innerIndex: 0 },
+    });
+
+    expect(screen.queryByTestId('inspector-inner-model-select')).not.toBeInTheDocument();
+    const codexSelect = screen.getByTestId('inspector-inner-codex-model-select') as HTMLSelectElement;
+    expect(codexSelect.value).toBe('');
+
+    fireEvent.change(codexSelect, { target: { value: 'auto' } });
+    expect(dispatch).toHaveBeenCalledWith({ type: 'SET_AGENT_CODEX_MODEL', agentKey: 'implement', codexModel: 'auto' });
+  });
+
+  function fanOutInnerCodexDefinition(): WorkflowDefinition {
+    return { ...fanOutDefinition(), agentConfigs: { implement: { runtime: 'codex-sdk' } } };
+  }
 });
