@@ -7,7 +7,7 @@
  *     see shared/types/onboarding.ts).
  *   - the rail-map step adds the Verify Queue row (six rows, not the
  *     prototype's five).
- * The wizard-Configure pointer steps (5-7) are a post-design addition with no
+ * The wizard-Configure pointer steps (6-8) are a post-design addition with no
  * packet counterpart; their copy lives in Coachmark.tsx alongside the other
  * coach bodies.
  */
@@ -17,6 +17,7 @@ export const ONBOARDING_TITLES: ReadonlyArray<string> = [
   'Welcome to Cyboflow',
   'Connect an agent',
   'Set your permission mode',
+  'Choose what to share',
   'Add a project',
   'Start your first session',
   'Choose a runtime',

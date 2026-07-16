@@ -11,6 +11,7 @@ import {
   useOnboardingStore,
   type OnboardingRealEvent,
   type PersistedOnboarding,
+  type PersistedOnboardingV2,
 } from '../../stores/onboardingStore';
 import { onboardingTelemetryEvents } from '../../stores/onboardingTelemetry';
 import { ONBOARDING_EVENTS, ONBOARDING_MODAL_STEPS, ONBOARDING_PREF_KEY } from '../../utils/onboarding';
@@ -21,6 +22,7 @@ import { Coachmark } from './Coachmark';
 import { WelcomeStep } from './steps/WelcomeStep';
 import { ConnectStep } from './steps/ConnectStep';
 import { PermissionStep } from './steps/PermissionStep';
+import { TelemetryStep, type TelemetryDraft } from './steps/TelemetryStep';
 import { AddProjectStep } from './steps/AddProjectStep';
 import { RailMapStep } from './steps/RailMapStep';
 
@@ -28,9 +30,10 @@ import { RailMapStep } from './steps/RailMapStep';
  * OnboardingGate — the single side-effect host around the pure onboardingStore.
  * Owns boot hydration (pref snapshot + project count, gated so nothing renders
  * until resolved — the no-flash rule), snapshot persistence, real-action event
- * forwarding, arrow-key navigation, the step-1 credential probe, the step-4
- * wizard precondition, and the step-2/step-3 config/project side effects. The
- * store stays synchronously testable; every async lives here.
+ * forwarding, arrow-key navigation, the step-1 credential probe, the step-5
+ * wizard precondition, and the step-2/step-3/step-4 config/project side effects
+ * (permission mode, telemetry consent, add-project). The store stays
+ * synchronously testable; every async lives here.
  *
  * Mounted once, app-wide, from App.tsx. Renders the overlay only while the tour
  * is 'active' (skipped/pending/completed render nothing — the Sidebar owns the
@@ -85,6 +88,16 @@ export function OnboardingGate(): React.JSX.Element | null {
   const [checking, setChecking] = useState(false);
   const [pickedPath, setPickedPath] = useState<string | null>(null);
   const [busyCreate, setBusyCreate] = useState(false);
+  // Step-3 (telemetry) draft, resolved fresh from AppConfig.telemetry every
+  // time step 3 is (re-)entered — see the resolve effect below. null = not yet
+  // resolved (config not loaded, or step just entered before config's around).
+  const [telemetryDraft, setTelemetryDraft] = useState<TelemetryDraft | null>(null);
+  const [telemetrySubmitting, setTelemetrySubmitting] = useState(false);
+  const [telemetryError, setTelemetryError] = useState<string | null>(null);
+  // Snapshot of the resolved config at step-3 entry — the diff base for which
+  // channel(s) actually changed (telemetry_opt_out_changed fires per-changed-
+  // channel only, never for an unchanged one).
+  const telemetryBaselineRef = useRef<TelemetryDraft | null>(null);
 
   // Persist the snapshot on any (status, step) change once hydrated. Registered
   // before hydration resolves so the initial idle→active/completed write lands.
@@ -92,7 +105,7 @@ export function OnboardingGate(): React.JSX.Element | null {
     return useOnboardingStore.subscribe((state, prev) => {
       if (!state.hydrated || state.status === 'idle') return;
       if (state.status === prev.status && state.step === prev.step) return;
-      const snapshot: PersistedOnboarding = { version: 1, status: state.status, step: state.step };
+      const snapshot: PersistedOnboardingV2 = { version: 2, status: state.status, step: state.step };
       void window.electron?.invoke('preferences:set', ONBOARDING_PREF_KEY, JSON.stringify(snapshot));
     });
   }, []);
@@ -163,8 +176,8 @@ export function OnboardingGate(): React.JSX.Element | null {
   // Forward the three real-action window events into the store's coach machine.
   useEffect(() => {
     const forward = (kind: OnboardingRealEvent) => () => realEvent(kind);
-    // project-created also keeps the local projects list fresh (step-3 display,
-    // step-4 wizard lockProjectId) when the project was created via the normal
+    // project-created also keeps the local projects list fresh (step-4 display,
+    // step-5 wizard lockProjectId) when the project was created via the normal
     // CreateProjectDialog rather than the tour's own card.
     const onProject = (e: Event): void => {
       const detail = (e as CustomEvent<Project | undefined>).detail;
@@ -221,15 +234,45 @@ export function OnboardingGate(): React.JSX.Element | null {
     }
   }, [status, step, detection, codexDetection, checking, runDetect]);
 
-  // Step-4 precondition: the Quick Session card lives in the wizard, so ensure it
+  // Step-5 precondition: the Quick Session card lives in the wizard, so ensure it
   // is the center surface before the coachmark tries to anchor.
   useEffect(() => {
-    if (status !== 'active' || step !== 4) return;
+    if (status !== 'active' || step !== 5) return;
     const nav = useNavigationStore.getState();
     if (nav.view !== 'wizard') {
       nav.goToWizard({ lockProjectId: projects[0]?.id, allowQuick: true });
     }
   }, [status, step, projects]);
+
+  // Step-3 (telemetry) draft resolution. Resolved ONLY from the live
+  // AppConfig.telemetry (never a hardcoded true/true guess) every time step 3
+  // is (re-)entered — including replay (Settings → Replay walkthrough calls
+  // restart(), which re-enters at step 0 and walks back through step 3 fresh).
+  // If config hasn't loaded yet, the step stays in its loading state and a
+  // config-store subscription resolves the draft the moment it arrives.
+  useEffect(() => {
+    if (status !== 'active' || step !== 3) return;
+    setTelemetryError(null);
+    const resolveFromConfig = (): boolean => {
+      const cfgTelemetry = useConfigStore.getState().config?.telemetry;
+      if (!cfgTelemetry) return false;
+      const resolved: TelemetryDraft = {
+        errorReportingEnabled: cfgTelemetry.errorReportingEnabled,
+        usageMetricsEnabled: cfgTelemetry.usageMetricsEnabled,
+      };
+      setTelemetryDraft(resolved);
+      telemetryBaselineRef.current = resolved;
+      return true;
+    };
+    if (resolveFromConfig()) return;
+    setTelemetryDraft(null);
+    telemetryBaselineRef.current = null;
+    return useConfigStore.subscribe((state, prev) => {
+      if (state.config?.telemetry && state.config.telemetry !== prev.config?.telemetry) {
+        resolveFromConfig();
+      }
+    });
+  }, [status, step]);
 
   const handleInstall = useCallback(() => {
     if (window.electronAPI) void window.electronAPI.openExternal('https://claude.ai/code');
@@ -259,8 +302,8 @@ export function OnboardingGate(): React.JSX.Element | null {
         const created = res.data;
         setProjects((prev) => [...prev, created]);
         // Mirror CreateProjectDialog's broadcast (we bypass that dialog); the
-        // gate's own listener advances the tour to step 4. goToWizard matches the
-        // app's real post-create flow so the step-4 anchor exists.
+        // gate's own listener advances the tour to step 5. goToWizard matches the
+        // app's real post-create flow so the step-5 anchor exists.
         window.dispatchEvent(new CustomEvent(ONBOARDING_EVENTS.projectCreated, { detail: created }));
         useNavigationStore.getState().goToWizard({ lockProjectId: created.id, allowQuick: true });
       }
@@ -289,6 +332,55 @@ export function OnboardingGate(): React.JSX.Element | null {
     next();
   }, [permMode, next]);
 
+  // Re-entry guard mirrors handlePermNext: the config write is async, so a
+  // second activation while the first is in flight must not double-persist or
+  // double-advance.
+  const telemetryNextInFlight = useRef(false);
+  const handleTelemetryNext = useCallback(async () => {
+    if (telemetryNextInFlight.current || telemetryDraft === null) return;
+    telemetryNextInFlight.current = true;
+    setTelemetrySubmitting(true);
+    setTelemetryError(null);
+    try {
+      // Full telemetry object, never a partial patch — installId (and the
+      // sibling channel) must never be dropped by an update that only meant
+      // to change one flag.
+      const installId = useConfigStore.getState().config?.telemetry?.installId ?? '';
+      const ok = await useConfigStore.getState().updateConfig({
+        telemetry: {
+          installId,
+          errorReportingEnabled: telemetryDraft.errorReportingEnabled,
+          usageMetricsEnabled: telemetryDraft.usageMetricsEnabled,
+        },
+      });
+      if (!ok) {
+        setTelemetryError(
+          useConfigStore.getState().error || 'Could not save your telemetry preferences.',
+        );
+        return;
+      }
+      const baseline = telemetryBaselineRef.current;
+      if (baseline) {
+        if (baseline.errorReportingEnabled !== telemetryDraft.errorReportingEnabled) {
+          trackEvent('telemetry_opt_out_changed', {
+            channel: 'errors',
+            enabled: telemetryDraft.errorReportingEnabled,
+          });
+        }
+        if (baseline.usageMetricsEnabled !== telemetryDraft.usageMetricsEnabled) {
+          trackEvent('telemetry_opt_out_changed', {
+            channel: 'usage',
+            enabled: telemetryDraft.usageMetricsEnabled,
+          });
+        }
+      }
+      next();
+    } finally {
+      telemetryNextInFlight.current = false;
+      setTelemetrySubmitting(false);
+    }
+  }, [telemetryDraft, next]);
+
   const hasProject = projects.length > 0;
   const gateBlocked = isNextGateBlocked({
     step,
@@ -307,11 +399,18 @@ export function OnboardingGate(): React.JSX.Element | null {
       primary = { label: 'Next →', disabled: false, onClick: () => void handlePermNext() };
       break;
     case 3:
+      primary = {
+        label: 'Next →',
+        disabled: telemetryDraft === null || telemetrySubmitting,
+        onClick: () => void handleTelemetryNext(),
+      };
+      break;
+    case 4:
       primary = hasProject
         ? { label: 'Next →', disabled: false, onClick: next }
         : { label: 'Add project →', disabled: !pickedPath || busyCreate, onClick: () => void handleAddProject() };
       break;
-    case 10:
+    case 11:
       primary = { label: 'Finish →', disabled: false, onClick: next };
       break;
     default:
@@ -365,6 +464,15 @@ export function OnboardingGate(): React.JSX.Element | null {
         return <PermissionStep value={permMode} onChange={setPermMode} />;
       case 3:
         return (
+          <TelemetryStep
+            value={telemetryDraft}
+            onChange={setTelemetryDraft}
+            submitting={telemetrySubmitting}
+            error={telemetryError}
+          />
+        );
+      case 4:
+        return (
           <AddProjectStep
             hasExistingProject={hasProject}
             firstProjectName={projects[0]?.name ?? null}
@@ -373,7 +481,7 @@ export function OnboardingGate(): React.JSX.Element | null {
             onBrowse={() => void handleBrowse()}
           />
         );
-      case 10:
+      case 11:
         return <RailMapStep />;
       default:
         return null;

@@ -4,16 +4,16 @@ import { ONBOARDING_TITLES } from './copy';
 import { OnboardingDots } from './OnboardingDots';
 
 /**
- * Coachmark — the anchored popover for every coach step (4-9). Resolves its
+ * Coachmark — the anchored popover for every coach step (5-10). Resolves its
  * target exclusively by the `data-onboarding` attribute, tracks the target rect
  * on a rAF loop (robust to layout shifts / scroll), and draws a 4-rectangle
  * scrim that leaves a transparent hole over the target so the real element stays
  * clickable — no z-index mutation of the (cross-lane) target is required.
  *
  * Two flavors, per the spec's `pointer` flag:
- * - "try it" do-steps (4/8/9): a capture-phase document click listener detects
+ * - "try it" do-steps (5/9/10): a capture-phase document click listener detects
  *   the real action on the target and calls anchorActioned(); no Next button.
- * - pointer steps (5-7, the wizard-Configure trio): informational — a Next
+ * - pointer steps (6-8, the wizard-Configure trio): informational — a Next
  *   button advances via onNext(); interacting with the anchored control (e.g.
  *   picking a permission option through the hole) never advances.
  *
@@ -53,7 +53,7 @@ const POPOVER_WIDTH = 298;
 const HOLE_PAD = 6;
 
 const COACH: Record<number, CoachSpec> = {
-  4: {
+  5: {
     // The card sits near the wizard's right edge — popover goes to its LEFT.
     anchorId: ONBOARDING_ANCHORS.quickSessionCard,
     arrow: 'right',
@@ -64,7 +64,7 @@ const COACH: Record<number, CoachSpec> = {
       </>
     ),
   },
-  5: {
+  6: {
     anchorId: ONBOARDING_ANCHORS.substrateSelect,
     arrow: 'up',
     pointer: true,
@@ -75,7 +75,7 @@ const COACH: Record<number, CoachSpec> = {
       </>
     ),
   },
-  6: {
+  7: {
     anchorId: ONBOARDING_ANCHORS.sessionPermission,
     arrow: 'up',
     pointer: true,
@@ -86,7 +86,7 @@ const COACH: Record<number, CoachSpec> = {
       </>
     ),
   },
-  7: {
+  8: {
     anchorId: ONBOARDING_ANCHORS.modelSelect,
     arrow: 'up',
     pointer: true,
@@ -98,7 +98,7 @@ const COACH: Record<number, CoachSpec> = {
       </>
     ),
   },
-  8: {
+  9: {
     anchorId: ONBOARDING_ANCHORS.shipChip,
     arrow: 'up',
     body: (
@@ -108,7 +108,7 @@ const COACH: Record<number, CoachSpec> = {
       </>
     ),
   },
-  9: {
+  10: {
     anchorId: ONBOARDING_ANCHORS.humanReview,
     arrow: 'left',
     body: (

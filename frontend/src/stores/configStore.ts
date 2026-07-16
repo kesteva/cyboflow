@@ -7,7 +7,14 @@ interface ConfigStore {
   isLoading: boolean;
   error: string | null;
   fetchConfig: () => Promise<void>;
-  updateConfig: (updates: Partial<AppConfig>) => Promise<void>;
+  /**
+   * Persist + refetch. Returns `true` on success, `false` on failure — the
+   * store still swallows the error into `error` state (existing callers rely
+   * on that non-throwing contract), but callers that need a definitive
+   * success/fail signal for retry UX (e.g. the onboarding Telemetry step) can
+   * check the return value instead of racing the shared `error` field.
+   */
+  updateConfig: (updates: Partial<AppConfig>) => Promise<boolean>;
 }
 
 export const useConfigStore = create<ConfigStore>((set, get) => ({
@@ -35,11 +42,13 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
       if (response.success) {
         // Refetch to ensure we have the latest config
         await get().fetchConfig();
-      } else {
-        set({ error: response.error || 'Failed to update config' });
+        return true;
       }
+      set({ error: response.error || 'Failed to update config' });
+      return false;
     } catch (error) {
       set({ error: 'Failed to update config' });
+      return false;
     }
   },
 }));

@@ -235,6 +235,22 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         throw new Error(response.error || 'Failed to update configuration');
       }
 
+      // Diff the saved telemetry flags against the pre-save baseline (captured
+      // from `_config`, still holding the value loaded at fetch time — fetchConfig()
+      // below overwrites it) and emit telemetry_opt_out_changed ONLY for a channel
+      // that actually changed value. Firing on every checkbox click (the prior
+      // behavior) meant a canceled dialog or a failed save could still emit a
+      // false change event; post-success + diff keeps the event semantics
+      // identical to the onboarding Telemetry step.
+      const baselineErrorReporting = _config?.telemetry?.errorReportingEnabled ?? true;
+      const baselineUsageMetrics = _config?.telemetry?.usageMetricsEnabled ?? true;
+      if (baselineErrorReporting !== errorReportingEnabled) {
+        trackEvent('telemetry_opt_out_changed', { channel: 'errors', enabled: errorReportingEnabled });
+      }
+      if (baselineUsageMetrics !== usageMetricsEnabled) {
+        trackEvent('telemetry_opt_out_changed', { channel: 'usage', enabled: usageMetricsEnabled });
+      }
+
       // Update the useNotifications hook with new settings
       updateSettings(notificationSettings);
 
@@ -441,25 +457,13 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                 <Checkbox
                   label="Send anonymized crash & error reports"
                   checked={errorReportingEnabled}
-                  onChange={(e) => {
-                    setErrorReportingEnabled(e.target.checked);
-                    trackEvent('telemetry_opt_out_changed', {
-                      channel: 'errors',
-                      enabled: e.target.checked,
-                    });
-                  }}
+                  onChange={(e) => setErrorReportingEnabled(e.target.checked)}
                 />
                 <div className="mt-4">
                   <Checkbox
                     label="Send anonymized feature usage metrics"
                     checked={usageMetricsEnabled}
-                    onChange={(e) => {
-                      setUsageMetricsEnabled(e.target.checked);
-                      trackEvent('telemetry_opt_out_changed', {
-                        channel: 'usage',
-                        enabled: e.target.checked,
-                      });
-                    }}
+                    onChange={(e) => setUsageMetricsEnabled(e.target.checked)}
                   />
                 </div>
                 <p className="text-xs text-text-tertiary mt-3">
