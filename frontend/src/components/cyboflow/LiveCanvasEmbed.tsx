@@ -20,7 +20,7 @@
  * parent, so we surface a manual Reload + "Open in browser" + a hint rather than
  * a synthetic error state. Reload re-keys the iframe to force a fresh fetch.
  */
-import { useState, type ReactElement } from 'react';
+import { useEffect, useState, type ReactElement } from 'react';
 
 const HAIRLINE = 'var(--color-border-primary)';
 const RAIL = 'var(--color-bg-secondary)';
@@ -64,6 +64,24 @@ export function isLocalhostUrl(raw: string): boolean {
 
 export function LiveCanvasEmbed({ url }: { url: string }): ReactElement {
   const [reloadKey, setReloadKey] = useState(0);
+
+  // Pause the embedded prototype while the window is hidden/minimized. Agent-built
+  // prototypes commonly ship `animation: … infinite` CSS, and Electron ships with
+  // MacWebContentsOcclusion disabled — so a hidden Cyboflow window keeps painting
+  // the iframe at full speed, an invisible renderer/GPU CPU burn. Swapping the
+  // frame to about:blank unloads the page (stopping its timers/rAF/animations);
+  // the live URL is restored (a fresh fetch) on re-show. Cross-origin isolation
+  // means we cannot reach into the frame to pause it any other way. Visibility is
+  // the deliberately conservative signal: a visible-but-unfocused prototype in a
+  // side window keeps rendering (we do NOT pause on window blur).
+  const [documentHidden, setDocumentHidden] = useState<boolean>(
+    typeof document !== 'undefined' && document.hidden,
+  );
+  useEffect(() => {
+    const onVisibility = (): void => setDocumentHidden(document.hidden);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
 
   if (!isLocalhostUrl(url)) {
     return (
@@ -150,7 +168,7 @@ export function LiveCanvasEmbed({ url }: { url: string }): ReactElement {
       <iframe
         key={reloadKey}
         data-testid="live-canvas-iframe"
-        src={url}
+        src={documentHidden ? 'about:blank' : url}
         title="UI prototype live preview"
         sandbox="allow-scripts allow-same-origin allow-forms"
         style={{ flex: 1, width: '100%', border: 'none', background: 'var(--color-surface-primary)', minHeight: 0 }}

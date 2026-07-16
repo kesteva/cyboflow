@@ -5,8 +5,8 @@
  * refused; reload re-keys the iframe; and the isLocalhostUrl allowlist.
  */
 import '@testing-library/jest-dom';
-import { render, screen, fireEvent } from '@testing-library/react';
-import { describe, it, expect } from 'vitest';
+import { render, screen, fireEvent, act } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
 import { LiveCanvasEmbed, isLocalhostUrl } from '../LiveCanvasEmbed';
 
 describe('isLocalhostUrl', () => {
@@ -54,6 +54,34 @@ describe('LiveCanvasEmbed', () => {
     render(<LiveCanvasEmbed url="https://evil.example.com" />);
     expect(screen.getByTestId('live-canvas-blocked')).toBeInTheDocument();
     expect(screen.queryByTestId('live-canvas-iframe')).not.toBeInTheDocument();
+  });
+
+  it('pauses (about:blank) while the document is hidden, restores on re-show', () => {
+    const hiddenSpy = vi.spyOn(document, 'hidden', 'get');
+    hiddenSpy.mockReturnValue(false);
+    try {
+      render(<LiveCanvasEmbed url="http://localhost:8081" />);
+      // Visible: the live URL is loaded.
+      expect(screen.getByTestId('live-canvas-iframe')).toHaveAttribute('src', 'http://localhost:8081');
+
+      // Window hidden/minimized: the frame is unloaded so its animation loop stops.
+      hiddenSpy.mockReturnValue(true);
+      act(() => {
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      expect(screen.getByTestId('live-canvas-iframe')).toHaveAttribute('src', 'about:blank');
+      // The "Open in browser" affordance still points at the real URL while paused.
+      expect(screen.getByTestId('live-canvas-open')).toHaveAttribute('href', 'http://localhost:8081');
+
+      // Re-shown: the live URL is restored (a fresh fetch).
+      hiddenSpy.mockReturnValue(false);
+      act(() => {
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      expect(screen.getByTestId('live-canvas-iframe')).toHaveAttribute('src', 'http://localhost:8081');
+    } finally {
+      hiddenSpy.mockRestore();
+    }
   });
 
   it('reload re-keys the iframe (remounts to refetch)', () => {
