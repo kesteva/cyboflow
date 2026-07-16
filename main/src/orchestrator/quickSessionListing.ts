@@ -27,6 +27,13 @@ export interface QuickSessionCandidateRow {
   chat_run_id: string | null;
   /** sessions.updated_at normalized to UTC ISO (may be null for a malformed timestamp). */
   updated_at_iso: string | null;
+  /**
+   * 1 when NOT viewed since the last update (last_viewed_at null or < updated_at).
+   * Computed in SQL via datetime() so the ' ' vs 'T' timestamp-format mismatch
+   * (CURRENT_TIMESTAMP vs ISO) can't corrupt the comparison — mirrors
+   * IdleSessionDetector's IN_SCOPE_PREDICATE.
+   */
+  unviewed: number;
 }
 
 /**
@@ -45,7 +52,9 @@ const QUICK_SESSION_PREDICATE = `
 
 const SELECT_COLS = `
   s.id, s.project_id, s.name, s.status, s.chat_run_id,
-  strftime('%Y-%m-%dT%H:%M:%SZ', s.updated_at) AS updated_at_iso
+  strftime('%Y-%m-%dT%H:%M:%SZ', s.updated_at) AS updated_at_iso,
+  CASE WHEN s.last_viewed_at IS NULL OR datetime(s.last_viewed_at) < datetime(s.updated_at)
+       THEN 1 ELSE 0 END AS unviewed
 `;
 
 /**
@@ -76,6 +85,8 @@ export function toQuickSessionRow(
     runId: row.chat_run_id,
     state,
     idleSince: state === 'idle' ? row.updated_at_iso : null,
+    // A blocked row always needs you (a pending gate), independent of viewed-ness.
+    unviewed: state === 'blocked' ? false : row.unviewed === 1,
   };
 }
 

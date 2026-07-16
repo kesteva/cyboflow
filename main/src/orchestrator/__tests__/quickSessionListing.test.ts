@@ -15,6 +15,7 @@ function row(overrides: Partial<QuickSessionCandidateRow> = {}): QuickSessionCan
     status: 'completed',
     chat_run_id: 'run-1',
     updated_at_iso: '2026-07-16T10:00:00Z',
+    unviewed: 1,
     ...overrides,
   };
 }
@@ -64,6 +65,15 @@ describe('toQuickSessionRow', () => {
       projectId: 7,
       runId: 'run-1',
     });
+  });
+
+  it('carries unviewed through for idle rows but forces it false when blocked', () => {
+    expect(toQuickSessionRow(row({ status: 'completed', unviewed: 1 }), new Set()).unviewed).toBe(true);
+    expect(toQuickSessionRow(row({ status: 'completed', unviewed: 0 }), new Set()).unviewed).toBe(false);
+    // Blocked wins → unviewed forced false (a pending gate needs you regardless).
+    expect(toQuickSessionRow(row({ status: 'completed', unviewed: 1 }), new Set(['run-1'])).unviewed).toBe(
+      false,
+    );
   });
 });
 

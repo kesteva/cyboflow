@@ -38,4 +38,14 @@ export interface QuickSessionRow {
    * `idle` rows so the UI can show "idle for N min"; null for `running`/`blocked`.
    */
   idleSince: string | null;
+  /**
+   * True when the session has NOT been viewed since it last updated
+   * (`last_viewed_at` is null or older than `updated_at`) — the SQL twin of
+   * SessionManager's `completed_unviewed` badge. Drives the "waiting on you"
+   * attention weighting: an `idle` + `unviewed` session needs a look (reopen or
+   * wrap up), and opening it (which stamps `last_viewed_at`) clears that — the
+   * live fix for the old idle-nag that never self-cleared on open. Always false
+   * for a `blocked` row (a pending gate needs you regardless of viewed-ness).
+   */
+  unviewed: boolean;
 }
