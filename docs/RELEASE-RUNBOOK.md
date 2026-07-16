@@ -1,8 +1,11 @@
 # Release Runbook
 
-The end-to-end procedure for cutting a Cyboflow release: **gate → version bump →
-four signed builds → changelog → GitHub release**. Every macOS build is signed +
-notarized + stapled. Nothing is pushed until the artifacts are verified.
+The end-to-end procedure for cutting a Cyboflow release: **gate → version bump +
+changelog → four signed builds → verify → publish to R2 (the in-app update
+channel) → push + GitHub release**. Every macOS build is signed + notarized +
+stapled. Nothing is published until the artifacts are verified. **The R2 publish
+(§5) is what actually ships the update — the GitHub release is an archival
+mirror the app never reads.**
 
 > **Why per-arch, not universal.** `build:mac:universal` currently **fails**:
 > `@electron/universal` can't merge the bundled `claude` / `codex` binaries
@@ -13,8 +16,11 @@ notarized + stapled. Nothing is pushed until the artifacts are verified.
 ## Prerequisites
 
 - Clean `main`, all release-worthy commits merged.
-- Apple signing credentials in `./.envrc.local` (gitignored): `APPLE_ID`,
-  `APPLE_TEAM_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `CSC_LINK`, `CSC_KEY_PASSWORD`.
+- Signing **and** R2 credentials in `./.envrc.local` (gitignored) — 8 vars total:
+  Apple (`APPLE_ID`, `APPLE_TEAM_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `CSC_LINK`,
+  `CSC_KEY_PASSWORD`) + R2 (`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
+  `R2_SECRET_ACCESS_KEY`). R2 is the **in-app auto-update channel** — see
+  `docs/UPDATES.md`. Source with `set -a; . ./.envrc.local; set +a`.
 - Both darwin agent binaries present for **both** arches (a plain install/rebuild
   prunes to host arch). Verify all four exist; if any are missing run the
   cross-arch install **with `--force`** (see
@@ -105,11 +111,60 @@ cd .. && pnpm rebuild better-sqlite3   # restore host-Node ABI for tests/pnpm de
   rebuild that DMG by hand from the (complete, signed, stapled) `.zip` — full
   recipe in `[[project_cross_arch_build_foreign_binaries]]`.
 
-## 5. Push + GitHub release
+## 5. Publish to R2 — the in-app update channel (THE release)
 
-Tag the release commit (matches the artifacts' `buildInfo.gitCommit`), push
-`main` and the tag, then publish the release with **all four DMGs** (matches the
-v0.1.24 shape — no zip/blockmap/yml assets; auto-update is served from R2).
+> **This is the step that actually ships the update.** The app polls
+> `updates.cyboflow.com/<variant>/latest-mac.yml` (a Cloudflare R2 bucket) and
+> downloads the `.zip`; it **never** reads the GitHub release. Skip this and users
+> stay on the old version even though `main`, the tag, and the GitHub release all
+> say the new one. Full detail: `docs/UPDATES.md`.
+
+Publish **both feeds** (`stable/` and `dev/`). For each feed: regenerate the
+**merged** `latest-mac.yml` (each per-arch build overwrites it, so no single build
+lists both arches — `gen-mac-latest-yml.mjs` merges them, **arm64 zip first**),
+then upload with an explicit `PUBLISH_ONLY` allowlist so the mixed `dist-electron`
+doesn't cross-contaminate feeds. Dry-run first.
+
+```bash
+set -a; . ./.envrc.local; set +a   # needs the 3 R2 vars
+
+# --- stable feed ---
+node scripts/gen-mac-latest-yml.mjs dist-electron/latest-mac.yml \
+  Cyboflow-0.1.25-macOS-arm64.zip Cyboflow-0.1.25-macOS-arm64.dmg \
+  Cyboflow-0.1.25-macOS-x64.zip  Cyboflow-0.1.25-macOS-x64.dmg
+cat dist-electron/latest-mac.yml   # sanity: version, 4 files, path=arm64 zip
+S="Cyboflow-0.1.25-macOS-arm64.dmg,Cyboflow-0.1.25-macOS-arm64.dmg.blockmap,\
+Cyboflow-0.1.25-macOS-arm64.zip,Cyboflow-0.1.25-macOS-arm64.zip.blockmap,\
+Cyboflow-0.1.25-macOS-x64.dmg,Cyboflow-0.1.25-macOS-x64.dmg.blockmap,\
+Cyboflow-0.1.25-macOS-x64.zip,Cyboflow-0.1.25-macOS-x64.zip.blockmap,latest-mac.yml"
+PUBLISH_ONLY="$S" UPDATE_DRY_RUN=true pnpm publish:r2   # verify list
+PUBLISH_ONLY="$S" pnpm publish:r2                        # real upload → stable/
+
+# --- dev feed (regenerate the manifest with the Dev-* names, then publish) ---
+node scripts/gen-mac-latest-yml.mjs dist-electron/latest-mac.yml \
+  Cyboflow-Dev-0.1.25-macOS-arm64.zip Cyboflow-Dev-0.1.25-macOS-arm64.dmg \
+  Cyboflow-Dev-0.1.25-macOS-x64.zip  Cyboflow-Dev-0.1.25-macOS-x64.dmg
+D="$(echo "$S" | sed 's/Cyboflow-0/Cyboflow-Dev-0/g')"
+BUILD_VARIANT=dev PUBLISH_ONLY="$D" pnpm publish:r2      # real upload → dev/
+```
+
+Verify both feeds went live:
+
+```bash
+curl -s https://updates.cyboflow.com/stable/latest-mac.yml | grep -m1 version
+curl -s https://updates.cyboflow.com/dev/latest-mac.yml    | grep -m1 version
+```
+
+> `pnpm publish:r2` is a credentialed network write; in auto/headless permission
+> modes the classifier may gate it — run it in an interactive shell or grant the
+> Bash rule.
+
+## 6. Push + GitHub release (archival mirror)
+
+Independent of §5 — the updater never touches GitHub. Tag the release commit
+(matches the artifacts' `buildInfo.gitCommit`), push `main` and the tag, then
+publish the release with **all four DMGs** (matches the v0.1.24 shape — no
+zip/blockmap/yml assets; those live only on R2).
 
 ```bash
 git tag v0.1.25 <release-commit>          # the "chore: release 0.1.25" commit
@@ -123,10 +178,17 @@ gh release create v0.1.25 \
   --title "v0.1.25" --notes-file <changelog-slice>
 ```
 
-The repo is **public** — release DMG URLs are anonymously downloadable.
+The repo is **public** — release DMG URLs are anonymously downloadable (a usable
+mirror, but not the channel the app or website depends on).
 
 ## Landmines
 
+- **R2 is the real release; GitHub is a mirror.** Publishing the GitHub release
+  without §5 leaves every user on the old version (the app polls R2, not GitHub).
+- **Per-arch manifests must be merged** with `gen-mac-latest-yml.mjs` (arm64 zip
+  first) before publishing, or one arch gets no updates.
+- **Publish with `PUBLISH_ONLY`** — `dist-electron` accumulates a mix of
+  variants/arches/stale files; the bare glob cross-contaminates `stable/` ↔ `dev/`.
 - **Never run `build:mac:universal`** — it fails on the agent binaries (see top).
 - **Don't launch the app while a `build:mac` is running** — a live app can grab a
   handle on the mounting DMG and wedge the eject. Quit installed apps first.
