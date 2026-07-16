@@ -3,6 +3,7 @@ import type { PermissionMode } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
+import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 
 // Claude message content types
 /** @deprecated import { TextBlock } from 'shared/types/claudeStream' directly. */
@@ -270,6 +271,12 @@ export interface CreateSessionRequest {
     ultrathink?: boolean;
     /** Per-launch opt-in for Anthropic fast mode (premium, Opus-only). Default off. */
     fastMode?: boolean;
+    /**
+     * Per-agent reasoning-effort selection (IDEA-029), distinct from the
+     * session-level `effort?: 'ultracode'` field above. KEEP IN SYNC with the
+     * main twin in main/src/types/session.ts (request-parity rule).
+     */
+    reasoningEffort?: ReasoningEffort;
   };
   branchName?: string;
 }

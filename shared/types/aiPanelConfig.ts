@@ -1,3 +1,5 @@
+import type { ReasoningEffort } from './reasoningEffort';
+
 /**
  * Unified configuration for AI panels (Claude, etc.)
  */
@@ -16,6 +18,14 @@ export interface AIPanelConfig {
    * here, or the SDK spawn silently reverts to standard speed.
    */
   fastMode?: boolean;
+  /**
+   * Per-agent reasoning-effort selection (IDEA-029) for the spawned turn.
+   * Persisted per-panel in tool_panels.settings (wizard select / EffortPill);
+   * callers that respawn an existing quick-session panel must read the
+   * persisted value and thread it here, or the spawn silently reverts to the
+   * provider's default effort.
+   */
+  reasoningEffort?: ReasoningEffort;
 
   // Future extensibility - specific config values can be added here
   [key: string]: string | number | boolean | Array<unknown> | undefined;
