@@ -3,13 +3,20 @@
  * the real onboardingStore + configStore (only the API layer is mocked) so the
  * gate's resolve/submit/error wiring is exercised end to end: resolved
  * initialization from AppConfig.telemetry (never a hardcoded default), replay
- * re-resolving fresh, both-off continuation, the complete persisted payload
- * (installId preserved), changed-vs-unchanged event emission, duplicate-submit
- * prevention, and the retryable failure path.
+ * re-resolving fresh, each single-channel-off + both-off continuation, the
+ * complete persisted payload (installId preserved), changed-vs-unchanged event
+ * emission, duplicate-submit prevention, and the retryable failure path. Also
+ * covers this step's participation in the shared modal chrome (dialog title +
+ * "STEP n / total" progress, Back, Skip) — the chrome itself is generic
+ * (OnboardingModalCard, no dedicated test file of its own), so these assert
+ * step 3 wires into it correctly rather than re-testing the chrome's mechanics.
  *
  * Steps 1/2 are skipped by jumping the store directly to step 3 after boot
  * hydration resolves — this file is scoped to step 3's behavior, not the full
- * tour walkthrough (covered by onboardingStore.test.ts / onboardingTelemetry.test.ts).
+ * tour walkthrough (Back/Skip/goTo store-level mechanics for step 3 are
+ * covered by onboardingStore.test.ts's "Telemetry step (3)" and "goTo / skip /
+ * resume" describe blocks; onboardingTelemetry.test.ts covers the emitted
+ * onboarding_* usage-telemetry events).
  */
 import '@testing-library/jest-dom';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -135,6 +142,32 @@ describe('OnboardingGate — Telemetry step (3)', () => {
     });
   });
 
+  it('continues with only Sentry (crash/error) off, Aptabase (usage) left on', async () => {
+    await mountAtTelemetryStep(baseAppConfig());
+    fireEvent.click(await screen.findByRole('switch', { name: 'Send anonymized crash & error reports' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next →' }));
+
+    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(4));
+    expect(configUpdate).toHaveBeenCalledWith({
+      telemetry: { installId: 'inst-1', errorReportingEnabled: false, usageMetricsEnabled: true },
+    });
+  });
+
+  it('continues with only Aptabase (usage) off, Sentry (crash/error) left on', async () => {
+    await mountAtTelemetryStep(baseAppConfig());
+    fireEvent.click(await screen.findByRole('switch', { name: 'Send anonymized feature usage metrics' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next →' }));
+
+    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(4));
+    expect(configUpdate).toHaveBeenCalledWith({
+      telemetry: { installId: 'inst-1', errorReportingEnabled: true, usageMetricsEnabled: false },
+    });
+    expect(trackEvent).toHaveBeenCalledWith('telemetry_opt_out_changed', { channel: 'usage', enabled: false });
+    expect(trackEvent).not.toHaveBeenCalledWith('telemetry_opt_out_changed', { channel: 'errors', enabled: true });
+  });
+
   it('submits the complete telemetry object, preserving installId, and advances on success', async () => {
     await mountAtTelemetryStep(baseAppConfig());
     fireEvent.click(await screen.findByRole('button', { name: 'Next →' }));
@@ -211,5 +244,40 @@ describe('OnboardingGate — Telemetry step (3)', () => {
 
     await waitFor(() => expect(useOnboardingStore.getState().step).toBe(4));
     expect(configUpdate).toHaveBeenCalledTimes(2);
+  });
+
+  // Card chrome (title, "STEP n / total" progress, Back/Skip) is rendered by
+  // the shared OnboardingModalCard, driven by the real (unmocked)
+  // onboardingStore — these assert THIS step (3) actually wires up to it
+  // correctly, not the chrome's own generic mechanics.
+  it('renders the dialog title and progress indicator for step 3', async () => {
+    await mountAtTelemetryStep(baseAppConfig());
+    await screen.findByRole('switch', { name: 'Send anonymized crash & error reports' });
+
+    expect(screen.getByRole('dialog', { name: 'Choose what to share' })).toBeInTheDocument();
+    expect(screen.getByText('STEP 4 / 12')).toBeInTheDocument();
+  });
+
+  it('Back from step 3 returns to the Permission step (2) and unmounts the telemetry toggles', async () => {
+    await mountAtTelemetryStep(baseAppConfig());
+    await screen.findByRole('switch', { name: 'Send anonymized crash & error reports' });
+
+    fireEvent.click(screen.getByRole('button', { name: '← Back' }));
+
+    expect(useOnboardingStore.getState().step).toBe(2);
+    await waitFor(() =>
+      expect(screen.queryByRole('switch', { name: 'Send anonymized crash & error reports' })).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole('dialog', { name: 'Set your permission mode' })).toBeInTheDocument();
+  });
+
+  it('Skip from step 3 exits the tour (status → skipped) without persisting telemetry', async () => {
+    await mountAtTelemetryStep(baseAppConfig());
+    await screen.findByRole('switch', { name: 'Send anonymized crash & error reports' });
+
+    fireEvent.click(screen.getByTestId('onboarding-skip'));
+
+    expect(useOnboardingStore.getState().status).toBe('skipped');
+    expect(configUpdate).not.toHaveBeenCalled();
   });
 });
