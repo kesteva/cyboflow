@@ -1715,6 +1715,12 @@ export class McpQueryHandler {
     mimeType: string;
     path: string;
   }> {
+    // Common case (an idea with no attachments — and every epic/task, though those
+    // never reach here): nothing to resolve or containment-check, so return early
+    // WITHOUT touching getCyboflowSubdirectory. Behaviour-preserving (the loop below
+    // would yield [] anyway) and it keeps the read path off the CYBOFLOW_DIR
+    // resolver for the zero-attachment majority.
+    if (attachments.length === 0) return [];
     const artifactsRoot = path.resolve(getCyboflowSubdirectory('artifacts'));
     const result: Array<{ id: string; label: string; mimeType: string; path: string }> = [];
     for (const att of attachments) {
