@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, memo } from 'react';
 import { ChevronRight, ChevronDown, Folder as FolderIcon, FolderOpen, Plus, Settings, GripVertical, GitBranch, RefreshCw, Workflow as WorkflowIcon, FlaskConical } from 'lucide-react';
 import { useErrorStore } from '../stores/errorStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useCyboflowStore } from '../stores/cyboflowStore';
-import { isTerminalRunStatus, useActiveRunsStore } from '../stores/activeRunsStore';
+import { isTerminalRunStatus, useActiveRunsStore, type ActiveRunRow } from '../stores/activeRunsStore';
 import { useSessionStore } from '../stores/sessionStore';
 import ProjectSettings from './ProjectSettings';
 import { EmptyState } from './EmptyState';
@@ -114,10 +114,200 @@ function allProjectIds(projects: ProjectWithRuns[]): Set<number> {
 }
 
 // ---------------------------------------------------------------------------
+// SessionRow — extracted + memoized so a git-status update to ONE session
+// (allSessions gets a new array reference, but unrelated Session objects keep
+// their identity — see sessionStore.updateSessionGitStatusBatch) doesn't force
+// every row in the rail to re-render. See sessionRowPropsEqual below for the
+// comparator: `childRuns` in particular is rebuilt via .filter() on every
+// parent render (new array reference even with unchanged content), so it's
+// compared by content, not identity.
+// ---------------------------------------------------------------------------
+
+export interface SessionRowProps {
+  session: Session;
+  projectId: number;
+  isLastSession: boolean;
+  isActive: boolean;
+  relativeTime: string;
+  sessionDropIndicator: 'before' | 'after' | null;
+  childRuns: ActiveRunRow[];
+  activeRunId: string | null;
+  onSessionClick: (session: Session) => void;
+  onDragStart: (e: React.DragEvent, session: Session, projectId: number) => void;
+  onDragOver: (e: React.DragEvent, session: Session) => void;
+  onDrop: (e: React.DragEvent, session: Session, projectId: number) => void;
+  onDragEnd: () => void;
+  onDragEnter: (e: React.DragEvent) => void;
+  onDragLeave: (e: React.DragEvent) => void;
+  onActiveRunClick: (runId: string, projectId: number) => void;
+}
+
+function childRunsEqual(a: ActiveRunRow[], b: ActiveRunRow[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].id !== b[i].id || a[i].status !== b[i].status || a[i].variant_label !== b[i].variant_label) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function sessionRowPropsEqual(prev: SessionRowProps, next: SessionRowProps): boolean {
+  return (
+    prev.session === next.session &&
+    prev.projectId === next.projectId &&
+    prev.isLastSession === next.isLastSession &&
+    prev.isActive === next.isActive &&
+    prev.relativeTime === next.relativeTime &&
+    prev.sessionDropIndicator === next.sessionDropIndicator &&
+    prev.activeRunId === next.activeRunId &&
+    prev.onSessionClick === next.onSessionClick &&
+    prev.onDragStart === next.onDragStart &&
+    prev.onDragOver === next.onDragOver &&
+    prev.onDrop === next.onDrop &&
+    prev.onDragEnd === next.onDragEnd &&
+    prev.onDragEnter === next.onDragEnter &&
+    prev.onDragLeave === next.onDragLeave &&
+    prev.onActiveRunClick === next.onActiveRunClick &&
+    childRunsEqual(prev.childRuns, next.childRuns)
+  );
+}
+
+export const SessionRow = memo(function SessionRow({
+  session,
+  projectId,
+  isLastSession,
+  isActive,
+  relativeTime,
+  sessionDropIndicator,
+  childRuns,
+  activeRunId,
+  onSessionClick,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  onDragEnd,
+  onDragEnter,
+  onDragLeave,
+  onActiveRunClick,
+}: SessionRowProps) {
+  return (
+    <div className="relative" style={{ marginLeft: '16px' }}>
+      <div className="absolute inset-0 pointer-events-none">
+        {!isLastSession && (
+          <div className="absolute top-0 bottom-0 w-px bg-border-secondary" style={{ left: '8px' }} />
+        )}
+        <div
+          className="absolute h-px bg-border-secondary"
+          style={{ left: '8px', right: 'calc(100% - 16px)', top: '16px' }}
+        />
+      </div>
+
+      {/* Session row — draggable within this project's flat session list. */}
+      <div
+        className={`group/session relative flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors ${
+          isActive ? 'bg-interactive/10' : 'hover:bg-surface-hover'
+        } ${sessionDropIndicator === 'before' ? 'border-t-2 border-interactive' : ''} ${
+          sessionDropIndicator === 'after' ? 'border-b-2 border-interactive' : ''
+        }`}
+        style={{ paddingLeft: '24px' }}
+        draggable
+        onDragStart={(e) => onDragStart(e, session, projectId)}
+        onDragOver={(e) => onDragOver(e, session)}
+        onDrop={(e) => onDrop(e, session, projectId)}
+        onDragEnd={onDragEnd}
+        onDragEnter={onDragEnter}
+        onDragLeave={onDragLeave}
+        onClick={() => onSessionClick(session)}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') onSessionClick(session); }}
+      >
+        <div className="opacity-0 group-hover/session:opacity-100 transition-opacity cursor-move">
+          <GripVertical className="w-3 h-3 text-text-tertiary" />
+        </div>
+        {/* Status indicator dot */}
+        <span
+          className={`w-2 h-2 rounded-full flex-shrink-0 ${statusDotClass(session.status)}`}
+          title={session.status}
+        />
+        <span className="text-sm text-text-primary truncate" title={session.name}>
+          {session.name || session.id.slice(0, 8)}
+        </span>
+        <span className="text-xs text-text-tertiary truncate ml-auto">
+          {relativeTime}
+        </span>
+      </div>
+
+      {/* Workflow runs nested under this session (indented one level). The
+          session-name suffix is dropped here since the parent session row
+          already names it. */}
+      {childRuns.length > 0 && (
+        <div className="relative mt-1 space-y-1">
+          {childRuns.map((run, runIndex) => {
+            const isLastChildRun = runIndex === childRuns.length - 1;
+            const isActiveRun = activeRunId === run.id;
+
+            return (
+              <div key={`run-${run.id}`} className="relative" style={{ marginLeft: '24px' }}>
+                <div className="absolute inset-0 pointer-events-none">
+                  {!isLastChildRun && (
+                    <div className="absolute top-0 bottom-0 w-px bg-border-secondary" style={{ left: '8px' }} />
+                  )}
+                  <div
+                    className="absolute h-px bg-border-secondary"
+                    style={{ left: '8px', right: 'calc(100% - 16px)', top: '16px' }}
+                  />
+                </div>
+
+                <div
+                  className={`relative flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors ${
+                    isActiveRun ? 'bg-interactive/10' : 'hover:bg-surface-hover'
+                  }`}
+                  style={{ paddingLeft: '24px' }}
+                  onClick={() => onActiveRunClick(run.id, projectId)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') onActiveRunClick(run.id, projectId); }}
+                >
+                  <span
+                    className={`w-2 h-2 rounded-full flex-shrink-0 ${statusDotClass(run.status)}`}
+                    title={run.status}
+                  />
+                  <WorkflowIcon className="w-3.5 h-3.5 text-text-tertiary flex-shrink-0" />
+                  <span className="text-sm text-text-primary truncate" title={run.workflowName}>
+                    {run.workflowName}
+                  </span>
+                  {/* A/B variant chip (migration 048) — denormalized
+                      workflow_runs.variant_label off the run row, no extra
+                      query. Absent for baseline runs. */}
+                  {run.variant_label && (
+                    <span
+                      className="rounded-badge border border-border-primary bg-bg-secondary px-1 py-px text-[9px] font-medium text-text-tertiary truncate flex-shrink-0"
+                      title={`Variant: ${run.variant_label}`}
+                    >
+                      {run.variant_label}
+                    </span>
+                  )}
+                  <span className="text-xs text-text-tertiary truncate ml-auto">
+                    {run.status}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}, sessionRowPropsEqual);
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
-export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) {
+function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
   const [projectsWithRuns, setProjectsWithRuns] = useState<ProjectWithRuns[]>([]);
   const [expandedProjects, setExpandedProjects] = useState<Set<number>>(new Set());
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
@@ -912,7 +1102,11 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
     dragCounter.current++;
   };
 
-  const handleSessionDragStart = (
+  // Drag/drop + click handlers below are wrapped in useCallback so a memoized
+  // SessionRow (see below) can treat them as stable props — otherwise a fresh
+  // closure every render would defeat React.memo for every row on every
+  // parent re-render, even an unrelated one.
+  const handleSessionDragStart = useCallback((
     e: React.DragEvent,
     session: Session,
     projectId: number,
@@ -927,9 +1121,9 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
     e.dataTransfer.effectAllowed = 'move';
     // Firefox requires drag data to be populated before it will start a drag.
     e.dataTransfer.setData('text/plain', String(session.id));
-  };
+  }, []);
 
-  const handleSessionDragOver = (e: React.DragEvent, targetSession: Session) => {
+  const handleSessionDragOver = useCallback((e: React.DragEvent, targetSession: Session) => {
     e.preventDefault();
     e.stopPropagation();
     const rect = e.currentTarget.getBoundingClientRect();
@@ -939,28 +1133,28 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
       overSessionId: targetSession.id,
       dropPosition,
     }));
-  };
+  }, []);
 
-  const handleSessionDragEnter = (e: React.DragEvent) => {
+  const handleSessionDragEnter = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
-  };
+  }, []);
 
-  const handleSessionDragLeave = (e: React.DragEvent) => {
+  const handleSessionDragLeave = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
-  };
+  }, []);
 
-  const handleSessionDragEnd = () => {
+  const handleSessionDragEnd = useCallback(() => {
     setSessionDragState({
       sessionId: null,
       projectId: null,
       overSessionId: null,
       dropPosition: null,
     });
-  };
+  }, []);
 
-  const handleSessionDrop = async (
+  const handleSessionDrop = useCallback(async (
     e: React.DragEvent,
     targetSession: Session,
     projectId: number,
@@ -1031,13 +1225,29 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
       });
     }
     handleSessionDragEnd();
-  };
+  }, [sessionDragState, showError, handleSessionDragEnd]);
+
+  // Per-project snapshot of the flat (ungrouped) session list, kept fresh on
+  // every render of THIS component regardless of whether an individual
+  // SessionRow was skipped by memo. handleSessionDropForRow reads it at drop
+  // time (not render time) so a memoized row's onDrop never closes over a
+  // stale ordering — flatSessions is recomputed inline in the project map
+  // below and stashed here.
+  const flatSessionsByProjectRef = useRef<Record<number, Session[]>>({});
+
+  const handleSessionDropForRow = useCallback(
+    (e: React.DragEvent, targetSession: Session, projectId: number) => {
+      const draggableSessions = flatSessionsByProjectRef.current[projectId] ?? [];
+      return handleSessionDrop(e, targetSession, projectId, draggableSessions);
+    },
+    [handleSessionDrop],
+  );
 
   // ---------------------------------------------------------------------------
   // Session row click
   // ---------------------------------------------------------------------------
 
-  const handleSessionClick = (session: Session) => {
+  const handleSessionClick = useCallback((session: Session) => {
     // Picking a session leaves the human-review overview. Done unconditionally
     // (not gated on projectId) so a quick session with a null projectId still
     // dismisses the review pane.
@@ -1071,13 +1281,13 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
     // The center now defaults to home; opening a session must flip it to the
     // session workspace surface.
     useNavigationStore.getState().goToSession();
-  };
+  }, [runsByProject]);
 
   // Active workflow runs (NON-quick) open the workflow-run pane — mirroring how
   // WorkflowPicker opens a freshly-started run via setActiveRun(runId). Quick
   // sessions are handled separately above (they must NOT route through
   // setActiveRun, which throws on the __quick__ sentinel in getPhaseState).
-  const handleActiveRunClick = (runId: string, projectId: number) => {
+  const handleActiveRunClick = useCallback((runId: string, projectId: number) => {
     // Picking a run leaves the human-review overview for the workflow-run pane.
     useNavigationStore.getState().closeHumanReview();
     useNavigationStore.getState().closeBacklog();
@@ -1098,7 +1308,7 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
     // The center now defaults to home; opening a run must flip it to the
     // session workspace surface.
     useNavigationStore.getState().goToSession();
-  };
+  }, [runsByProject]);
 
   // ---------------------------------------------------------------------------
   // Experiment group rows (A/B testing rail treatment)
@@ -1334,6 +1544,11 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                 projectExperiments?.experiments ?? [],
                 projectExperiments?.summariesById ?? {},
               );
+              // Stash this project's flat list on the ref every render (this component
+              // is NOT memoized, so this always runs) — handleSessionDropForRow reads it
+              // at drop time so a memoized SessionRow's onDrop never closes over a stale
+              // ordering even when that particular row was skipped by memo.
+              flatSessionsByProjectRef.current[project.id] = flatSessions;
               const folderCount = project.folders?.length ?? 0;
               // railGroups counts too: a running/grading experiment whose two arm
               // sessions were both merged/dismissed leaves a group with `arms: []`
@@ -1587,7 +1802,8 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                         );
                       })}
 
-                      {/* Active session rows, each with its workflow runs nested beneath */}
+                      {/* Active session rows, each with its workflow runs nested beneath.
+                          Rendered via the memoized SessionRow (see top of file). */}
                       {flatSessions.map((session, index) => {
                         const childRuns = runsForSession(session.id);
                         // A session is "last" (no continuing vertical line) only when no
@@ -1608,127 +1824,25 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                             : null;
 
                         return (
-                          <div
+                          <SessionRow
                             key={session.id}
-                            className="relative"
-                            style={{ marginLeft: '16px' }}
-                          >
-                            <div className="absolute inset-0 pointer-events-none">
-                              {!isLastSession && (
-                                <div
-                                  className="absolute top-0 bottom-0 w-px bg-border-secondary"
-                                  style={{ left: '8px' }}
-                                />
-                              )}
-                              <div
-                                className="absolute h-px bg-border-secondary"
-                                style={{ left: '8px', right: 'calc(100% - 16px)', top: '16px' }}
-                              />
-                            </div>
-
-                            {/* Session row — draggable within this project's flat session list. */}
-                            <div
-                              className={`group/session relative flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors ${
-                                isActive ? 'bg-interactive/10' : 'hover:bg-surface-hover'
-                              } ${sessionDropIndicator === 'before' ? 'border-t-2 border-interactive' : ''} ${
-                                sessionDropIndicator === 'after' ? 'border-b-2 border-interactive' : ''
-                              }`}
-                              style={{ paddingLeft: '24px' }}
-                              draggable
-                              onDragStart={(e) => handleSessionDragStart(e, session, project.id)}
-                              onDragOver={(e) => handleSessionDragOver(e, session)}
-                              onDrop={(e) => handleSessionDrop(e, session, project.id, flatSessions)}
-                              onDragEnd={handleSessionDragEnd}
-                              onDragEnter={handleSessionDragEnter}
-                              onDragLeave={handleSessionDragLeave}
-                              onClick={() => handleSessionClick(session)}
-                              role="button"
-                              tabIndex={0}
-                              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleSessionClick(session); }}
-                            >
-                              <div className="opacity-0 group-hover/session:opacity-100 transition-opacity cursor-move">
-                                <GripVertical className="w-3 h-3 text-text-tertiary" />
-                              </div>
-                              {/* Status indicator dot */}
-                              <span
-                                className={`w-2 h-2 rounded-full flex-shrink-0 ${statusDotClass(session.status)}`}
-                                title={session.status}
-                              />
-                              <span className="text-sm text-text-primary truncate" title={session.name}>
-                                {session.name || session.id.slice(0, 8)}
-                              </span>
-                              <span className="text-xs text-text-tertiary truncate ml-auto">
-                                {relativeTime}
-                              </span>
-                            </div>
-
-                            {/* Workflow runs nested under this session (indented one
-                                level). The session-name suffix is dropped here since the
-                                parent session row already names it. */}
-                            {childRuns.length > 0 && (
-                              <div className="relative mt-1 space-y-1">
-                                {childRuns.map((run, runIndex) => {
-                                  const isLastChildRun = runIndex === childRuns.length - 1;
-                                  const isActiveRun = activeRunId === run.id;
-
-                                  return (
-                                    <div
-                                      key={`run-${run.id}`}
-                                      className="relative"
-                                      style={{ marginLeft: '24px' }}
-                                    >
-                                      <div className="absolute inset-0 pointer-events-none">
-                                        {!isLastChildRun && (
-                                          <div
-                                            className="absolute top-0 bottom-0 w-px bg-border-secondary"
-                                            style={{ left: '8px' }}
-                                          />
-                                        )}
-                                        <div
-                                          className="absolute h-px bg-border-secondary"
-                                          style={{ left: '8px', right: 'calc(100% - 16px)', top: '16px' }}
-                                        />
-                                      </div>
-
-                                      <div
-                                        className={`relative flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors ${
-                                          isActiveRun ? 'bg-interactive/10' : 'hover:bg-surface-hover'
-                                        }`}
-                                        style={{ paddingLeft: '24px' }}
-                                        onClick={() => handleActiveRunClick(run.id, project.id)}
-                                        role="button"
-                                        tabIndex={0}
-                                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleActiveRunClick(run.id, project.id); }}
-                                      >
-                                        <span
-                                          className={`w-2 h-2 rounded-full flex-shrink-0 ${statusDotClass(run.status)}`}
-                                          title={run.status}
-                                        />
-                                        <WorkflowIcon className="w-3.5 h-3.5 text-text-tertiary flex-shrink-0" />
-                                        <span className="text-sm text-text-primary truncate" title={run.workflowName}>
-                                          {run.workflowName}
-                                        </span>
-                                        {/* A/B variant chip (migration 048) — denormalized
-                                            workflow_runs.variant_label off the run row, no
-                                            extra query. Absent for baseline runs. */}
-                                        {run.variant_label && (
-                                          <span
-                                            className="rounded-badge border border-border-primary bg-bg-secondary px-1 py-px text-[9px] font-medium text-text-tertiary truncate flex-shrink-0"
-                                            title={`Variant: ${run.variant_label}`}
-                                          >
-                                            {run.variant_label}
-                                          </span>
-                                        )}
-                                        <span className="text-xs text-text-tertiary truncate ml-auto">
-                                          {run.status}
-                                        </span>
-                                      </div>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            )}
-                          </div>
+                            session={session}
+                            projectId={project.id}
+                            isLastSession={isLastSession}
+                            isActive={isActive}
+                            relativeTime={relativeTime}
+                            sessionDropIndicator={sessionDropIndicator}
+                            childRuns={childRuns}
+                            activeRunId={activeRunId}
+                            onSessionClick={handleSessionClick}
+                            onDragStart={handleSessionDragStart}
+                            onDragOver={handleSessionDragOver}
+                            onDrop={handleSessionDropForRow}
+                            onDragEnd={handleSessionDragEnd}
+                            onDragEnter={handleSessionDragEnter}
+                            onDragLeave={handleSessionDragLeave}
+                            onActiveRunClick={handleActiveRunClick}
+                          />
                         );
                       })}
 
@@ -2025,3 +2139,10 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
     </>
   );
 }
+
+// Wrapped in React.memo — takes no props (see DraggableProjectTreeViewProps),
+// so this skips re-rendering when its parent (Sidebar) re-renders for reasons
+// that don't touch any store this component itself subscribes to. Its OWN
+// store subscriptions (sessions/runs/etc.) still trigger a re-render as
+// normal — memo only prevents a redundant re-render forced by the parent.
+export const DraggableProjectTreeView = memo(DraggableProjectTreeViewImpl);

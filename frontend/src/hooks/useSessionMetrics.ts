@@ -139,9 +139,44 @@ export function useSessionMetrics(session: Session | null): SessionMetrics {
       return;
     }
     const tick = () => setElapsedMs(Date.now() - base);
-    tick();
-    const id = window.setInterval(tick, ELAPSED_TICK_MS);
-    return () => window.clearInterval(id);
+
+    // Pause the 1s interval while the document is hidden (backgrounded/minimized
+    // window) — an offscreen canvas re-rendering "4m 12s" → "4m 13s" every second
+    // is pure idle churn. Cadence stays 1s while visible (the display shows
+    // seconds, so it can't be coarsened); resume fires an immediate catch-up
+    // tick so the display isn't stale by however long the tab was hidden.
+    let id: number | null = null;
+    const start = () => {
+      if (id !== null) return;
+      tick();
+      id = window.setInterval(tick, ELAPSED_TICK_MS);
+    };
+    const stop = () => {
+      if (id === null) return;
+      window.clearInterval(id);
+      id = null;
+    };
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        stop();
+      } else {
+        start();
+      }
+    };
+
+    if (document.hidden) {
+      // Still compute one tick so the display isn't 0 while hidden — just don't
+      // start the interval.
+      tick();
+    } else {
+      start();
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      stop();
+    };
   }, [createdAt]);
 
   // Snapshot metrics — polled from getStatistics.

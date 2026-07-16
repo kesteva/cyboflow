@@ -11,6 +11,7 @@
  *   - dragCounter: an over-highlight clears only when the enter/leave count hits 0.
  */
 import '@testing-library/jest-dom';
+import { useSyncExternalStore } from 'react';
 import { render, screen, waitFor, act, fireEvent, createEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Session } from '../../types/session';
@@ -58,10 +59,30 @@ vi.mock('../../utils/api', () => ({
 }));
 
 let mockSessions: Session[] = [];
+// DraggableProjectTreeView is now memoized (React.memo, see 3.3's SessionRow
+// extraction) — a parent-forced `rerender()` with unchanged (empty) props no
+// longer re-invokes the component. Real zustand hooks stay reactive under
+// memo because the store's OWN subscription (not a parent prop diff) drives
+// the re-render; this mock now mirrors that via useSyncExternalStore so tests
+// that mutate `mockSessions` after mount and expect a live update keep
+// working via setMockSessions() instead of `rerender()`.
+const mockSessionsListeners = new Set<() => void>();
+function setMockSessions(next: Session[]): void {
+  mockSessions = next;
+  mockSessionsListeners.forEach((listener) => listener());
+}
 vi.mock('../../stores/sessionStore', () => ({
   useSessionStore: Object.assign(
-    (selector: (s: { sessions: Session[]; setSessions: (sessions: Session[]) => void }) => unknown) =>
-      selector({ sessions: mockSessions, setSessions: mockSetSessions }),
+    (selector: (s: { sessions: Session[]; setSessions: (sessions: Session[]) => void }) => unknown) => {
+      const sessions = useSyncExternalStore(
+        (onStoreChange) => {
+          mockSessionsListeners.add(onStoreChange);
+          return () => mockSessionsListeners.delete(onStoreChange);
+        },
+        () => mockSessions,
+      );
+      return selector({ sessions, setSessions: mockSetSessions });
+    },
     { getState: () => ({ sessions: mockSessions, setSessions: mockSetSessions }) },
   ),
 }));
@@ -478,17 +499,21 @@ describe('DraggableProjectTreeView — session reorder', () => {
       session('one', 'Session One', 1, 0),
       session('two', 'Session Two', 1, 1),
     ];
-    const result = render(<DraggableProjectTreeView />);
+    render(<DraggableProjectTreeView />);
     await waitFor(() => expect(screen.getByText('Session Two')).toBeInTheDocument());
 
     // Model the event-time array shape defensively: even if a caller supplied the
-    // new row first, display_order remains the rail's source of truth.
-    mockSessions = [
-      session('new', 'New Session', 1, 2),
-      session('one', 'Session One', 1, 0),
-      session('two', 'Session Two', 1, 1),
-    ];
-    result.rerender(<DraggableProjectTreeView />);
+    // new row first, display_order remains the rail's source of truth. Pushed via
+    // setMockSessions (not a parent-forced rerender()) — the component is now
+    // memoized, so a live update must ride the store's own subscription, exactly
+    // as it does with the real zustand store.
+    await act(async () => {
+      setMockSessions([
+        session('new', 'New Session', 1, 2),
+        session('one', 'Session One', 1, 0),
+        session('two', 'Session Two', 1, 1),
+      ]);
+    });
 
     await waitFor(() => expect(screen.getByText('New Session')).toBeInTheDocument());
     const text = document.body.textContent ?? '';

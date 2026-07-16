@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useIPCEvents } from './hooks/useIPCEvents';
 import { useNotifications } from './hooks/useNotifications';
 import { useStuckNotifications } from './hooks/useStuckNotifications';
@@ -109,8 +109,12 @@ function App() {
   useNotifications();
   useStuckNotifications();
 
-  // Start the MCP health polling subscription on mount.
-  const { subscribeToMcpHealth } = useMcpHealthStore();
+  // Start the MCP health polling subscription on mount. Narrowed selector
+  // (not the broad `useMcpHealthStore()` destructure) — the store bumps
+  // `lastCheckedAt` every 5s, and a broad subscription re-rendered App (and
+  // everything beneath it) on every tick even though `subscribeToMcpHealth`
+  // itself is a stable action created once in the store.
+  const subscribeToMcpHealth = useMcpHealthStore((s) => s.subscribeToMcpHealth);
   useEffect(() => {
     const unsubscribe = subscribeToMcpHealth();
     return unsubscribe;
@@ -197,6 +201,12 @@ function App() {
     };
   }, []);
 
+  // Stable handlers for props passed into memoized children (Sidebar). Inline
+  // arrows defeat React.memo on every App re-render; these keep referential
+  // identity across renders since the underlying setters are themselves stable.
+  const handleAboutClick = useCallback(() => setIsAboutOpen(true), []);
+  const handlePromptHistoryClick = useCallback(() => setIsPromptHistoryOpen(true), []);
+
   // Add keyboard shortcut for prompt history
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -236,7 +246,7 @@ function App() {
         <TitleBar
           searchQuery={globalSearch}
           onSearchChange={setGlobalSearch}
-          onPromptHistoryClick={() => setIsPromptHistoryOpen(true)}
+          onPromptHistoryClick={handlePromptHistoryClick}
         />
         {/* Shell geometry: [agent rail | center]. Human review folds into the
             rail as a primary item that swaps the center to a full-width review
@@ -244,8 +254,8 @@ function App() {
         <div className="flex flex-1 overflow-hidden">
           <PerfProfiler id="sidebar">
             <Sidebar
-              onAboutClick={() => setIsAboutOpen(true)}
-              onPromptHistoryClick={() => setIsPromptHistoryOpen(true)}
+              onAboutClick={handleAboutClick}
+              onPromptHistoryClick={handlePromptHistoryClick}
               width={sidebarWidth}
               onResize={startResize}
               pendingReviewCount={reviewQueueCount}

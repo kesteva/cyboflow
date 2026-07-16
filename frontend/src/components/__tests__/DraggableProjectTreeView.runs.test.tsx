@@ -78,9 +78,30 @@ vi.mock('../../utils/api', () => ({
 // Mock sessionStore — supplies the rail's session rows
 // ---------------------------------------------------------------------------
 
+// DraggableProjectTreeView is now memoized (React.memo, see 3.3's SessionRow
+// extraction) — a parent-forced `rerender()` with unchanged (empty) props no
+// longer re-invokes the component. Real zustand hooks stay reactive under
+// memo because the store's OWN subscription (not a parent prop diff) drives
+// the re-render; this mock now mirrors that via useSyncExternalStore so a
+// test that mutates `mockSessions` after mount and expects a live update can
+// use setMockSessions() instead of `rerender()`.
+const mockSessionsListeners = new Set<() => void>();
+function setMockSessions(next: Session[]): void {
+  mockSessions = next;
+  mockSessionsListeners.forEach((listener) => listener());
+}
 vi.mock('../../stores/sessionStore', () => ({
   useSessionStore: Object.assign(
-    (selector: (s: { sessions: Session[] }) => unknown) => selector({ sessions: mockSessions }),
+    (selector: (s: { sessions: Session[] }) => unknown) => {
+      const sessions = React.useSyncExternalStore(
+        (onStoreChange) => {
+          mockSessionsListeners.add(onStoreChange);
+          return () => mockSessionsListeners.delete(onStoreChange);
+        },
+        () => mockSessions,
+      );
+      return selector({ sessions });
+    },
     {
       getState: () => ({ sessions: mockSessions }),
     },
@@ -741,18 +762,20 @@ describe('DraggableProjectTreeView — empty saved expansion', () => {
     // No sessions at first load → the load-time auto-expand opens nothing.
     mockSessions = [];
 
-    let utils: ReturnType<typeof render>;
     await act(async () => {
-      utils = render(<DraggableProjectTreeView />);
+      render(<DraggableProjectTreeView />);
     });
     await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
     expect(screen.queryByText('late-session')).toBeNull();
 
     // Sessions hydrate after the initial load; the reactive effect must expand
     // the project so the late-arriving session becomes visible without a reload.
-    mockSessions = [makeSession({ name: 'late-session', projectId: 1 })];
+    // Pushed via setMockSessions (not a parent-forced rerender()) — the component
+    // is now memoized, so the live update must ride the store's own subscription,
+    // exactly as it does with the real zustand store, and on the SAME mounted
+    // instance (a remount would reset the race-condition-fix refs under test).
     await act(async () => {
-      utils!.rerender(<DraggableProjectTreeView />);
+      setMockSessions([makeSession({ name: 'late-session', projectId: 1 })]);
     });
     await waitFor(() => expect(screen.getByText('late-session')).toBeInTheDocument());
   });

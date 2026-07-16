@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, memo } from 'react';
 import { Settings } from './Settings';
 import { DraggableProjectTreeView } from './DraggableProjectTreeView';
 import { ArchiveProgress } from './ArchiveProgress';
@@ -59,7 +59,12 @@ interface SidebarProps {
 const pillClass =
   'flex h-[22px] w-[22px] flex-shrink-0 items-center justify-center rounded-full bg-interactive text-text-on-interactive';
 
-export function Sidebar({
+// Wrapped in React.memo — App.tsx now passes only stable/primitive props (see
+// App.tsx's handleAboutClick/handlePromptHistoryClick + narrowed store
+// selectors), so this skips re-rendering (and the DraggableProjectTreeView
+// subtree beneath it) on App re-renders that don't actually change anything
+// Sidebar reads, e.g. the mcpHealthStore's 5s poll tick.
+export const Sidebar = memo(function Sidebar({
   onAboutClick,
   onPromptHistoryClick,
   width,
@@ -656,4 +661,4 @@ export function Sidebar({
       </Modal>
     </>
   );
-}
+});
