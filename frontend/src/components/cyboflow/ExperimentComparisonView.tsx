@@ -195,6 +195,14 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
 
   // -- Data loading + polling ------------------------------------------------
 
+  // The frozen per-arm diffs are captured ONCE when the comparison row first
+  // materializes and never change afterward (worktree-independent snapshot). They
+  // are also the single largest payload here — both arms' full unified diffs, which
+  // can be multi-MB each. So fetch them EXACTLY ONCE (not on every 10s poll tick);
+  // this ref guards against a re-fetch once we hold a non-null result. Reset when
+  // the mounted experimentId changes (see the mount effect below).
+  const diffsLoadedRef = useRef(false);
+
   const load = useCallback(async (): Promise<{
     exp: ExperimentRow | null;
     payload: ExperimentComparisonPayload | null;
@@ -209,12 +217,23 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
       setDiffs(null);
       return { exp: expRow, payload: null };
     }
-    const [comparisonPayload, diffsPayload] = await Promise.all([
-      trpc.cyboflow.experiments.getComparison.query({ experimentId }),
-      trpc.cyboflow.experiments.getComparisonDiffs.query({ experimentId }),
-    ]);
+    const comparisonPayload = await trpc.cyboflow.experiments.getComparison.query({ experimentId });
     setPayload(comparisonPayload);
-    setDiffs(diffsPayload);
+    // Fetch the frozen diffs only once, and only after the comparison row exists
+    // (comparisonStatus leaves 'absent'). Before the row exists getComparisonDiffs
+    // returns null, so re-arming the poll for the light status payload never drags
+    // the heavy diff query along with it.
+    if (
+      !diffsLoadedRef.current &&
+      comparisonPayload !== null &&
+      comparisonPayload.comparisonStatus !== 'absent'
+    ) {
+      const diffsPayload = await trpc.cyboflow.experiments.getComparisonDiffs.query({ experimentId });
+      if (diffsPayload !== null) {
+        diffsLoadedRef.current = true;
+        setDiffs(diffsPayload);
+      }
+    }
     return { exp: expRow, payload: comparisonPayload };
   }, [experimentId]);
 
@@ -258,6 +277,10 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
 
   useEffect(() => {
     aliveRef.current = true;
+    // A new mounted experiment starts fresh: allow its frozen diffs to load once
+    // and drop the previous experiment's diffs so a stale render can't leak across.
+    diffsLoadedRef.current = false;
+    setDiffs(null);
     setInitialLoading(true);
     setLoadError(null);
     tick();
@@ -269,8 +292,14 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
 
   // -- Shared changed-file list (client-side union of the two frozen diffs) --
 
-  const armAFiles = useMemo(() => (diffs ? parseFileDiffs(diffs.armA.diff) : []), [diffs]);
-  const armBFiles = useMemo(() => (diffs ? parseFileDiffs(diffs.armB.diff) : []), [diffs]);
+  // Key the parse memos on the diff STRING content, not the `diffs` object ref, so
+  // a fresh (but identical) `diffs` object never forces a re-parse of both full
+  // diffs. With the fetch-once guard above `diffs` is now stable after first load,
+  // but this keeps the parse cheap even if a caller re-sets an equal object.
+  const armADiff = diffs?.armA.diff ?? null;
+  const armBDiff = diffs?.armB.diff ?? null;
+  const armAFiles = useMemo(() => (armADiff !== null ? parseFileDiffs(armADiff) : []), [armADiff]);
+  const armBFiles = useMemo(() => (armBDiff !== null ? parseFileDiffs(armBDiff) : []), [armBDiff]);
   const filePaths = useMemo(() => {
     const set = new Set<string>();
     for (const f of armAFiles) set.add(f.path);
@@ -283,8 +312,14 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
     setSelectedFilePath(filePaths[0] ?? null);
   }, [filePaths, selectedFilePath]);
 
-  const selectedArmADiff = diffs && selectedFilePath ? findFileDiff(diffs.armA.diff, selectedFilePath) : null;
-  const selectedArmBDiff = diffs && selectedFilePath ? findFileDiff(diffs.armB.diff, selectedFilePath) : null;
+  const selectedArmADiff = useMemo(
+    () => (armADiff !== null && selectedFilePath ? findFileDiff(armADiff, selectedFilePath) : null),
+    [armADiff, selectedFilePath],
+  );
+  const selectedArmBDiff = useMemo(
+    () => (armBDiff !== null && selectedFilePath ? findFileDiff(armBDiff, selectedFilePath) : null),
+    [armBDiff, selectedFilePath],
+  );
 
   // -- CTA gating -------------------------------------------------------------
 
@@ -386,6 +421,11 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
     setActionError(null);
     try {
       await trpc.cyboflow.experiments.rerunComparison.mutate({ experimentId });
+      // A re-run re-snapshots the comparison, so the frozen diffs may change —
+      // clear the fetch-once guard so `tick` re-fetches them once the fresh row
+      // materializes (otherwise the guard would pin the stale diffs).
+      diffsLoadedRef.current = false;
+      setDiffs(null);
       // The mount effect's polling loop may have already stopped (comparisonStatus
       // was 'complete' before this re-run) — re-arm it via the shared `tick` so the
       // verdict card resumes polling instead of staying stuck on the stale state
