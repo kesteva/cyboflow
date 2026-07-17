@@ -38,6 +38,7 @@ import {
 import type { JudgeClient } from './evalJury';
 import { CodexJurorUnavailableError } from './codexJudge';
 import { snapshotRunForEval } from './snapshotRunForEval';
+import { runJudgeGrade } from './judgeConcurrency';
 
 /** Legacy fallback count when a required jury is accidentally configured empty. */
 export const DEFAULT_SAMPLE_COUNT = 3;
@@ -368,12 +369,17 @@ export class EvalWorker {
   > {
     for (let tries = 0; tries < 2; tries++) {
       try {
-        const sample = await jurySlot.judge.grade({
-          diff: input.diff,
-          gateResults: input.gateResults,
-          ...(input.diffStatsSummary ? { diffStatsSummary: input.diffStatsSummary } : {}),
-          ...(input.cwd ? { cwd: input.cwd } : {}),
-        });
+        // Gate the judge subprocess spawn behind the shared app-wide ceiling so a
+        // rubric juror and a concurrent pairwise sample don't both spike CPU during
+        // an A/B settle (see judgeConcurrency).
+        const sample = await runJudgeGrade(() =>
+          jurySlot.judge.grade({
+            diff: input.diff,
+            gateResults: input.gateResults,
+            ...(input.diffStatsSummary ? { diffStatsSummary: input.diffStatsSummary } : {}),
+            ...(input.cwd ? { cwd: input.cwd } : {}),
+          }),
+        );
         return { status: 'ok', sample };
       } catch (err) {
         if (err instanceof CodexJurorUnavailableError) {
