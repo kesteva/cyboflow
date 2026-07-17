@@ -40,6 +40,14 @@ export const WORKFLOW_AGENT_RUNTIMES = [
   'codex-sdk',
 ] as const;
 
+/** Human labels for the workflow-scoped runtime picker. Single source shared by
+ * the step inspector and the global Agents-pane editor. */
+export const WORKFLOW_AGENT_RUNTIME_LABELS: Record<WorkflowAgentRuntime, string> = {
+  'claude-sdk': 'Claude SDK',
+  'claude-interactive': 'Claude interactive',
+  'codex-sdk': 'Codex SDK',
+};
+
 export function isWorkflowRuntimeSupported(value: unknown): value is WorkflowAgentRuntime {
   return typeof value === 'string' && (WORKFLOW_AGENT_RUNTIMES as readonly string[]).includes(value);
 }

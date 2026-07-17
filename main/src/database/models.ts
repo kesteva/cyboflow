@@ -607,7 +607,11 @@ export type { ExperimentComparisonRow } from '../../../shared/types/experiments'
  * agent_key). `name` is always the frontmatter name `cyboflow-<agent_key>` and is
  * never user-editable. `tools_json` is a JSON-encoded `CliTool[]`. There is NO
  * `enabled` column. `model` (migration 036, nullable) pins the agent's model to
- * an `AGENT_MODEL_ALIASES` value; NULL means inherit the run's model.
+ * an `AGENT_MODEL_ALIASES` value; NULL means inherit the run's model. `runtime`
+ * (migration 070, nullable) pins the CLI runtime to a `WORKFLOW_AGENT_RUNTIMES`
+ * value; NULL means inherit the run-level provider/runtime. `codex_model`
+ * (migration 070, nullable) is the free-form Codex model id used only when
+ * `runtime === 'codex-sdk'`; NULL means the Codex runtime default.
  * Validation lives in code (mirrors migrations 016/026), not CHECK constraints.
  */
 export interface AgentOverrideRow {
@@ -624,6 +628,8 @@ export interface AgentOverrideRow {
   is_custom: number; // 0 | 1
   version: number;
   model: string | null; // migration 036: AGENT_MODEL_ALIASES value, or NULL = inherit run model
+  runtime: string | null; // migration 070: WORKFLOW_AGENT_RUNTIMES value, or NULL = inherit run runtime
+  codex_model: string | null; // migration 070: free-form Codex model id (runtime='codex-sdk'), or NULL = Codex default
   created_at: string;
   updated_at: string;
 }

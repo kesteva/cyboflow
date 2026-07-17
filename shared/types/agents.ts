@@ -11,6 +11,7 @@
  */
 
 import type { CliTool } from './cliTools';
+import type { WorkflowAgentRuntime } from './agentRuntime';
 
 /**
  * The ONE cyboflow MCP tool a subagent may reference/call: the request-only,
@@ -120,6 +121,18 @@ export interface AgentEntry {
    * resolves it to a concrete snapshot in the subagent `model:` frontmatter.
    */
   model: AgentModelAlias | null;
+  /**
+   * The CLI runtime this agent pins (one of the WORKFLOW_AGENT_RUNTIMES), or
+   * `null` to inherit the run-level provider/runtime. Seeds the editor's runtime
+   * picker; the spawn-time overlay resolves it via `resolveStepAgent` so a
+   * programmatic step spawns this agent on the chosen runtime.
+   */
+  runtime: WorkflowAgentRuntime | null;
+  /**
+   * The Codex model id used when `runtime === 'codex-sdk'`, or `null` for the
+   * Codex runtime default. Ignored for Claude runtimes.
+   */
+  codexModel: string | null;
   /** MCP server names this agent may call; rendered as `mcp__<server>__*` on the tools line. */
   enabledMcps: string[];
   source: AgentSource;

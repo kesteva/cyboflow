@@ -27,7 +27,7 @@ import { SPRINT_BATCH_CAP } from '../../../../shared/types/sprintBatch';
 import { AGENT_MODEL_ALIASES, AGENT_MODEL_LABELS } from '../../../../shared/types/agents';
 import type { AgentEntry, AgentModelAlias } from '../../../../shared/types/agents';
 import type { AgentProvider, WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
-import { WORKFLOW_AGENT_RUNTIMES } from '../../../../shared/types/agentRuntime';
+import { WORKFLOW_AGENT_RUNTIMES, WORKFLOW_AGENT_RUNTIME_LABELS } from '../../../../shared/types/agentRuntime';
 import { HUMAN_GATE_AGENT, resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import { CLI_TOOLS } from '../../../../shared/types/cliTools';
 import type { CliTool } from '../../../../shared/types/cliTools';
@@ -36,13 +36,6 @@ import { trpc } from '../../trpc/client';
 import type { WorkflowEditorAction, WorkflowEditorState } from '../../hooks/useWorkflowEditorState';
 import { useCodexModelCatalog } from '../../stores/codexModelCatalogStore';
 import { AGENT_OPTIONS, MCP_OPTIONS } from './workflowEditorOptions';
-
-/** Display labels for the per-agent runtime `<select>` (Runtime picker, Slice C). */
-const WORKFLOW_AGENT_RUNTIME_LABELS: Record<WorkflowAgentRuntime, string> = {
-  'claude-sdk': 'Claude SDK',
-  'claude-interactive': 'Claude interactive',
-  'codex-sdk': 'Codex SDK',
-};
 
 type InspectorTab = 'step' | 'agent' | 'mcp';
 
