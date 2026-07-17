@@ -53,6 +53,8 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 - The **monitor now sees per-task sprint lanes** in its context (lane digest
   hardened per adversarial review).
 
+## [0.1.25] — 2026-07-16
+
 ### Added
 
 - **Codex juror in the code-review eval jury.** The code-review evaluation jury
