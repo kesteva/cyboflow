@@ -35,6 +35,9 @@ import { pickableVariants } from './variantSelectorLogic';
 import { BASELINE_VARIANT_SENTINEL } from '../../../../shared/types/experiments';
 import { SPRINT_BATCH_MAX_TASKS } from '../../../../shared/types/sprintBatch';
 import type { BacklogTaskItem, Board } from '../../../../shared/types/tasks';
+import type { EpicTaskGroup } from './taskGrouping';
+import { flattenGroups, groupTasksByEpic } from './taskGrouping';
+import { EpicGroupedTaskList } from './EpicGroupedTaskList';
 import { IdeaPickerModal } from './IdeaPickerModal';
 import { bootstrapArmSessionPanels } from '../../utils/bootstrapArmSessionPanels';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
@@ -94,8 +97,10 @@ export function ABTestLaunchModal({
   const [seedIdeaId, setSeedIdeaId] = useState<string | null>(null);
   const [seedIdeaLabel, setSeedIdeaLabel] = useState<string | null>(null);
   const [ideaPickerOpen, setIdeaPickerOpen] = useState(false);
-  // Sprint seed-task multi-select (mirrors TaskBatchPickerModal's data + filter).
-  const [seedTasks, setSeedTasks] = useState<BacklogTaskItem[]>([]);
+  // Sprint seed-task multi-select (mirrors TaskBatchPickerModal's data + filter),
+  // grouped by parent epic for rendering. The flat eligible list is derived.
+  const [seedGroups, setSeedGroups] = useState<EpicTaskGroup[]>([]);
+  const seedTasks = useMemo(() => flattenGroups(seedGroups), [seedGroups]);
   const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(new Set());
   const [tasksLoading, setTasksLoading] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
@@ -144,20 +149,22 @@ export function ABTestLaunchModal({
         const terminalStageIds = new Set<string>(
           boards.flatMap((b: Board) => b.stages.filter((s) => s.is_terminal).map((s) => s.id)),
         );
-        // Tasks with a parent epic are nested under the epic's `children`; flatten
-        // epics first so epic-owned tasks are seedable too.
-        const flattened = rows.flatMap((r) => (r.type === 'epic' ? (r.children ?? []) : [r]));
-        const eligible = flattened.filter(
-          (r) =>
-            r.type === 'task' &&
-            r.approved_at !== null &&
-            r.archived_at === null &&
-            r.stage_position >= 6 &&
-            !terminalStageIds.has(r.stage_id),
-        );
-        setSeedTasks(eligible);
+        // Tasks with a parent epic are nested under the epic's `children`; group
+        // by epic (retaining the association) and keep ONLY sprint-eligible tasks.
+        const isEligible = (r: BacklogTaskItem): boolean =>
+          r.type === 'task' &&
+          r.approved_at !== null &&
+          r.archived_at === null &&
+          r.stage_position >= 6 &&
+          !terminalStageIds.has(r.stage_id);
+        const groups = groupTasksByEpic(rows, isEligible);
+        setSeedGroups(groups);
         // Prune any prior selection to what's still eligible + not in-flight.
-        const eligibleSet = new Set(eligible.filter((t) => t.inFlow.length === 0).map((t) => t.id));
+        const eligibleSet = new Set(
+          flattenGroups(groups)
+            .filter((t) => t.inFlow.length === 0)
+            .map((t) => t.id),
+        );
         setSelectedTaskIds((prev) => new Set(Array.from(prev).filter((id) => eligibleSet.has(id))));
       })
       .catch((err: unknown) => {
@@ -197,6 +204,58 @@ export function ABTestLaunchModal({
     setSelectedTaskIds(new Set(selectableTasks.slice(0, SEED_TASK_CAP).map((t) => t.id)));
   };
 
+  // Select/deselect a whole epic group's tasks, honoring the seed-task cap.
+  const toggleSeedGroup = (taskIds: string[], select: boolean): void => {
+    setSelectedTaskIds((prev) => {
+      const next = new Set(prev);
+      if (!select) {
+        taskIds.forEach((id) => next.delete(id));
+        return next;
+      }
+      for (const id of taskIds) {
+        if (next.size >= SEED_TASK_CAP) break;
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  // One seed-task row — preserves the modal's own markup + test ids while the
+  // shared list owns the epic-group chrome around it.
+  const renderSeedTaskRow = (t: BacklogTaskItem): React.ReactNode => {
+    const inFlight = t.inFlow.length > 0;
+    const checked = selectedTaskIds.has(t.id);
+    const disabled = inFlight || (!checked && atTaskCap);
+    return (
+      <label
+        data-testid={`ab-test-seed-task-item-${t.id}`}
+        className={`flex items-start gap-2 rounded-button border px-2 py-1.5 text-sm ${
+          disabled
+            ? 'cursor-not-allowed border-border-primary bg-bg-secondary opacity-60'
+            : 'cursor-pointer border-border-primary bg-bg-primary hover:bg-bg-hover'
+        }`}
+      >
+        <input
+          type="checkbox"
+          checked={checked}
+          disabled={disabled}
+          onChange={() => toggleTask(t.id)}
+          aria-label={`Select ${t.ref}`}
+          className="mt-0.5"
+        />
+        <span className="flex flex-1 items-center gap-2">
+          <span className="font-medium text-text-primary">{t.ref}</span>
+          <span className="truncate text-text-secondary">{t.title}</span>
+          {inFlight && (
+            <span className="rounded-full bg-bg-tertiary px-1.5 py-0.5 text-[10px] font-medium text-text-tertiary">
+              in flight
+            </span>
+          )}
+        </span>
+      </label>
+    );
+  };
+
   const handleClose = (): void => {
     if (isStarting) return;
     reset();
@@ -210,7 +269,7 @@ export function ABTestLaunchModal({
     if (nextProjectId === selectedProjectId) return;
     setSelectedProjectId(nextProjectId);
     setSelectedTaskIds(new Set());
-    setSeedTasks([]);
+    setSeedGroups([]);
     setSeedIdeaId(null);
     setSeedIdeaLabel(null);
   };
@@ -389,43 +448,15 @@ export function ABTestLaunchModal({
                     </p>
                   )}
                   {!tasksLoading && seedTasks.length > 0 && (
-                    <ul className="flex max-h-52 flex-col gap-1 overflow-y-auto" data-testid="ab-test-seed-task-list">
-                      {seedTasks.map((t) => {
-                        const inFlight = t.inFlow.length > 0;
-                        const checked = selectedTaskIds.has(t.id);
-                        const disabled = inFlight || (!checked && atTaskCap);
-                        return (
-                          <li key={t.id}>
-                            <label
-                              data-testid={`ab-test-seed-task-item-${t.id}`}
-                              className={`flex items-start gap-2 rounded-button border px-2 py-1.5 text-sm ${
-                                disabled
-                                  ? 'cursor-not-allowed border-border-primary bg-bg-secondary opacity-60'
-                                  : 'cursor-pointer border-border-primary bg-bg-primary hover:bg-bg-hover'
-                              }`}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                disabled={disabled}
-                                onChange={() => toggleTask(t.id)}
-                                aria-label={`Select ${t.ref}`}
-                                className="mt-0.5"
-                              />
-                              <span className="flex flex-1 items-center gap-2">
-                                <span className="font-medium text-text-primary">{t.ref}</span>
-                                <span className="truncate text-text-secondary">{t.title}</span>
-                                {inFlight && (
-                                  <span className="rounded-full bg-bg-tertiary px-1.5 py-0.5 text-[10px] font-medium text-text-tertiary">
-                                    in flight
-                                  </span>
-                                )}
-                              </span>
-                            </label>
-                          </li>
-                        );
-                      })}
-                    </ul>
+                    <EpicGroupedTaskList
+                      groups={seedGroups}
+                      selectedIds={selectedTaskIds}
+                      isSelectable={(t) => t.inFlow.length === 0}
+                      onToggleGroup={toggleSeedGroup}
+                      renderTask={renderSeedTaskRow}
+                      testIdPrefix="ab-test-seed-task"
+                      listClassName="max-h-52 overflow-y-auto"
+                    />
                   )}
                   {!tasksLoading && seedTasks.length > 0 && selectedTaskIds.size === 0 && (
                     <p className="text-xs text-status-error" role="alert" data-testid="ab-test-seed-task-required-hint">
