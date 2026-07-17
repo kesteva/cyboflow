@@ -1754,16 +1754,54 @@ export function abandonRotationExperiment(
 // Comparison reads (slice C) — assemble the compare-view payloads
 // ---------------------------------------------------------------------------
 
-/** Read the pairwise comparison row for an experiment (null when absent). */
-function readComparisonRow(db: DatabaseLike, experimentId: string): ExperimentComparisonRow | null {
+/**
+ * The status/verdict projection of a comparison row — every column EXCEPT the two
+ * frozen diff blobs (`diff_a_text`/`diff_b_text`), which can be multi-MB each. The
+ * status/verdict callers (getComparison, comparisonStatus) never read them, and
+ * getComparison is polled every 10s while a comparison is in-flight, so pulling the
+ * blobs into memory on each poll was pure waste. getComparisonDiffs reads the two
+ * columns on its own via {@link readComparisonDiffRow}.
+ */
+type ComparisonStatusRow = Omit<ExperimentComparisonRow, 'diff_a_text' | 'diff_b_text'>;
+
+/** The non-diff columns of `experiment_comparisons`, enumerated for the status read. */
+const COMPARISON_STATUS_COLUMNS =
+  'id, experiment_id, run_id_a, run_id_b, eval_status, base_sha, ' +
+  'diff_a_stats_json, diff_b_stats_json, seed_context, sample_count, per_sample_json, ' +
+  'preference, confidence, rationale, a_count, b_count, tie_count, judge_model, ' +
+  'judge_build_id, prompt_hash, error, decision_review_item_id, snapshot_at, ' +
+  'completed_at, created_at, updated_at';
+
+/** Read the pairwise comparison row (sans diff blobs) for an experiment (null when absent). */
+function readComparisonRow(db: DatabaseLike, experimentId: string): ComparisonStatusRow | null {
   const row = db
-    .prepare('SELECT * FROM experiment_comparisons WHERE experiment_id = ?')
-    .get(experimentId) as ExperimentComparisonRow | undefined;
+    .prepare(`SELECT ${COMPARISON_STATUS_COLUMNS} FROM experiment_comparisons WHERE experiment_id = ?`)
+    .get(experimentId) as ComparisonStatusRow | undefined;
+  return row ?? null;
+}
+
+/** The two frozen diff blobs + their identifying keys (getComparisonDiffs only). */
+interface ComparisonDiffRow {
+  run_id_a: string;
+  run_id_b: string;
+  base_sha: string | null;
+  diff_a_text: string | null;
+  diff_b_text: string | null;
+}
+
+/** Read ONLY the frozen diff blobs for an experiment (null when no comparison row exists). */
+function readComparisonDiffRow(db: DatabaseLike, experimentId: string): ComparisonDiffRow | null {
+  const row = db
+    .prepare(
+      'SELECT run_id_a, run_id_b, base_sha, diff_a_text, diff_b_text ' +
+        'FROM experiment_comparisons WHERE experiment_id = ?',
+    )
+    .get(experimentId) as ComparisonDiffRow | undefined;
   return row ?? null;
 }
 
 /** Build the aggregate verdict from a complete comparison row (null otherwise). */
-function buildVerdict(row: ExperimentComparisonRow | null): PairwiseVerdict | null {
+function buildVerdict(row: ComparisonStatusRow | null): PairwiseVerdict | null {
   if (!row || row.eval_status !== 'complete' || row.preference === null) return null;
   let perSample: PairwiseSample[] = [];
   if (row.per_sample_json) {
@@ -2187,7 +2225,7 @@ export const experimentsRouter = router({
       const deps = requireDeps();
       const exp = getExperiment(deps.db, input.experimentId);
       if (!exp) return null;
-      const comparison = readComparisonRow(deps.db, input.experimentId);
+      const comparison = readComparisonDiffRow(deps.db, input.experimentId);
       if (!comparison) return null;
       const { variantAId, variantBId } = requireSideBySideFields(exp);
       return {
