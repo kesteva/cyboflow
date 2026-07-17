@@ -910,35 +910,37 @@ describe('ArtifactTabRenderer', () => {
     expect(screen.getByTestId('artifact-canvas-open')).toHaveAttribute('href', 'http://localhost:8081');
   });
 
-  it('renders the generic canvas with a disabled open affordance when no url', () => {
+  it('renders the generic canvas with NO open affordance when no url', () => {
     setHook({ loading: false, error: null, data: { kind: 'canvas', payload: {} } });
     render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'generic', mode: 'canvas' })} {...PROPS} />);
     expect(screen.getByTestId('artifact-eyebrow')).toHaveTextContent('◳ Live canvas · generic');
-    expect(screen.getByTestId('artifact-canvas-open-disabled')).toBeInTheDocument();
+    // No URL to open → the action is omitted entirely (no dead/disabled button).
+    expect(screen.queryByTestId('artifact-canvas-open')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('artifact-canvas-open-disabled')).not.toBeInTheDocument();
   });
 
-  it('refuses a javascript: canvas url — renders the disabled span, not a live anchor', () => {
+  it('refuses a javascript: canvas url — no live anchor and no open affordance at all', () => {
     // Build the scheme dynamically so the literal never appears as a script-url.
     const jsUrl = `${'java'}${'script'}:alert(1)`;
     setHook({ loading: false, error: null, data: { kind: 'canvas', payload: { url: jsUrl } } });
     render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas' })} {...PROPS} />);
-    // No live <a href> for a non-localhost (here non-http) payload url.
+    // No live <a href> for a non-localhost (here non-http) payload url — and no button of any kind.
     expect(screen.queryByTestId('artifact-canvas-open')).not.toBeInTheDocument();
-    expect(screen.getByTestId('artifact-canvas-open-disabled')).toBeInTheDocument();
+    expect(screen.queryByTestId('artifact-canvas-open-disabled')).not.toBeInTheDocument();
   });
 
-  it('refuses a file:// canvas url — renders the disabled span, not a live anchor', () => {
+  it('refuses a file:// canvas url — no live anchor and no open affordance at all', () => {
     setHook({ loading: false, error: null, data: { kind: 'canvas', payload: { url: 'file:///etc/passwd' } } });
     render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas' })} {...PROPS} />);
     expect(screen.queryByTestId('artifact-canvas-open')).not.toBeInTheDocument();
-    expect(screen.getByTestId('artifact-canvas-open-disabled')).toBeInTheDocument();
+    expect(screen.queryByTestId('artifact-canvas-open-disabled')).not.toBeInTheDocument();
   });
 
-  it('refuses a remote http canvas url — renders the disabled span, not a live anchor', () => {
+  it('refuses a remote http canvas url — no live anchor and no open affordance at all', () => {
     setHook({ loading: false, error: null, data: { kind: 'canvas', payload: { url: 'http://evil.example.com' } } });
     render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'ui-prototype', mode: 'canvas' })} {...PROPS} />);
     expect(screen.queryByTestId('artifact-canvas-open')).not.toBeInTheDocument();
-    expect(screen.getByTestId('artifact-canvas-open-disabled')).toBeInTheDocument();
+    expect(screen.queryByTestId('artifact-canvas-open-disabled')).not.toBeInTheDocument();
   });
 
   // --- ui-prototype static mockup (Approach C: fileName pointer + srcDoc) ---

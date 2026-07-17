@@ -1188,9 +1188,11 @@ function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: nu
   const expectsHtml = hasFile || (artifact.committed && !hasUrl);
   const { html, loading } = useArtifactHtml(artifact.runId, canvasAtype, expectsHtml);
 
-  // Only a localhost http(s) URL gets a LIVE anchor — a javascript:/file://
-  // /remote URL from the payload must NOT become a clickable link (same gate as
-  // the iframe in LiveCanvasEmbed); otherwise fall back to the disabled span.
+  // Only a localhost http(s) URL (the legacy live dev-server canvas) gets a LIVE
+  // "Open in browser" anchor. A static srcDoc mockup has no URL to open, so the
+  // action is omitted entirely — no dead/disabled button. A javascript:/file://
+  // /remote URL from the payload must NOT become a clickable link either (same
+  // gate as the iframe in LiveCanvasEmbed).
   const openInBrowser: ReactNode = url && isLocalhostUrl(url) ? (
     <a
       data-testid="artifact-canvas-open"
@@ -1211,14 +1213,7 @@ function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: nu
     >
       Open in browser ↗
     </a>
-  ) : (
-    <span
-      data-testid="artifact-canvas-open-disabled"
-      style={{ fontSize: '10px', fontWeight: 600, color: FAINT, border: `1px solid ${HAIRLINE}`, borderRadius: 3, padding: '3px 10px' }}
-    >
-      Open in browser ↗
-    </span>
-  );
+  ) : null;
 
   let body: ReactNode;
   if (loading) {
