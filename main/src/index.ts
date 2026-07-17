@@ -21,6 +21,7 @@ import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { registerIpcHandlers } from './ipc';
 import { registerArtifactImageHandlers } from './ipc/artifactImages';
 import { registerArtifactHtmlHandlers } from './ipc/artifactHtml';
+import { shouldBlockArtifactFrameNavigation, isExternallyOpenable } from './ipc/artifactFrameGuard';
 import { setupEventListeners } from './events';
 import { AppServices } from './ipc/types';
 import { CliManagerFactory } from './services/cliManagerFactory';
@@ -559,6 +560,22 @@ async function createWindow() {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: 'deny' };
+  });
+
+  // Confine static-mockup artifact frames (about:srcdoc, bare sandbox) to their
+  // own document: a bare sandbox blocks scripts and the injected CSP blocks
+  // subresource fetches, but neither stops a user-initiated link navigation, so a
+  // prototype's <a href="https://…"> could still beacon out. Block any navigation
+  // of an about:srcdoc frame to a non-about: URL (offering http(s) links to the OS
+  // browser instead). The app's main frame and the legacy localhost dev-server
+  // prototype iframe are left untouched. See main/src/ipc/artifactFrameGuard.ts.
+  mainWindow.webContents.on('will-frame-navigate', (details) => {
+    if (shouldBlockArtifactFrameNavigation(details.frame?.url ?? '', details.url, details.isMainFrame)) {
+      details.preventDefault();
+      if (isExternallyOpenable(details.url)) {
+        void shell.openExternal(details.url);
+      }
+    }
   });
 
   mainWindow.on('closed', () => {
