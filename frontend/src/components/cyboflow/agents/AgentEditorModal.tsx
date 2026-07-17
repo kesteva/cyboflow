@@ -32,6 +32,7 @@ import { AgentUsageInspector } from './AgentUsageInspector';
 import { useAgentEditorState } from './useAgentEditorState';
 import { estimateTokens } from './agentEditorTokens';
 import { agentModelLabel, referencesForbiddenWriterTool } from '../../../../../shared/types/agents';
+import { WORKFLOW_AGENT_RUNTIME_LABELS } from '../../../../../shared/types/agentRuntime';
 import type { AgentEntry } from '../../../../../shared/types/agents';
 
 export interface AgentEditorModalProps {
@@ -145,6 +146,10 @@ export function AgentEditorModal({
   const liveTokens = estimateTokens(state.draft.systemPrompt);
   const liveToolsEnabled = state.draft.enabledTools.length;
   const liveModel = agentModelLabel(state.draft.model);
+  const liveRuntime =
+    state.draft.runtime === null
+      ? 'inherits run runtime'
+      : WORKFLOW_AGENT_RUNTIME_LABELS[state.draft.runtime];
 
   const canSave =
     dirty &&
@@ -173,6 +178,8 @@ export function AgentEditorModal({
           enabledMcps: state.draft.enabledMcps,
           role: state.draft.role,
           model: state.draft.model,
+          runtime: state.draft.runtime,
+          codexModel: state.draft.codexModel,
         });
         trackEvent('agent_saved', { custom: true });
         onSaved(created.agentKey);
@@ -194,6 +201,8 @@ export function AgentEditorModal({
             enabledMcps: state.draft.enabledMcps,
             role: state.draft.role,
             model: state.draft.model,
+            runtime: state.draft.runtime,
+            codexModel: state.draft.codexModel,
           })
         : await trpc.cyboflow.agents.upsertOverride.mutate({
             projectId,
@@ -205,6 +214,8 @@ export function AgentEditorModal({
             enabledMcps: state.draft.enabledMcps,
             role: state.draft.role,
             model: state.draft.model,
+            runtime: state.draft.runtime,
+            codexModel: state.draft.codexModel,
           });
       trackEvent('agent_saved', { custom: isCustom });
       setEntry(saved);
@@ -389,6 +400,7 @@ export function AgentEditorModal({
                   liveTokens={liveTokens}
                   liveToolsEnabled={liveToolsEnabled}
                   liveModel={liveModel}
+                  liveRuntime={liveRuntime}
                 />
               )}
             </>

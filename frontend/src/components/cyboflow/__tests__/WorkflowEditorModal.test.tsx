@@ -71,6 +71,8 @@ const CUSTOM_AGENT: AgentEntry = {
   systemPrompt: '',
   tools: [],
   model: null,
+  runtime: null,
+  codexModel: null,
   enabledMcps: [],
   source: 'custom',
   isCustom: true,

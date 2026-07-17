@@ -19,6 +19,7 @@ import { useReducer } from 'react';
 import { CLI_TOOLS } from './agentEditorTokens';
 import type { CliTool } from './agentEditorTokens';
 import type { AgentEntry, AgentModelAlias } from '../../../../../shared/types/agents';
+import type { WorkflowAgentRuntime } from '../../../../../shared/types/agentRuntime';
 
 /** The mutable subset of an agent the editor form binds to. */
 export interface AgentDraft {
@@ -29,6 +30,10 @@ export interface AgentDraft {
   enabledTools: CliTool[];
   /** Pinned model alias, or `null` to inherit the run model. */
   model: AgentModelAlias | null;
+  /** Pinned CLI runtime, or `null` to inherit the run-level runtime. */
+  runtime: WorkflowAgentRuntime | null;
+  /** Codex model id used when `runtime === 'codex-sdk'`, or `null` for the default. */
+  codexModel: string | null;
   /** MCP server names granted to this agent (rendered as `mcp__<server>__*`). */
   enabledMcps: string[];
 }
@@ -46,6 +51,8 @@ export type AgentEditorAction =
   | { type: 'SET_DESCRIPTION'; description: string }
   | { type: 'SET_SYSTEM_PROMPT'; systemPrompt: string }
   | { type: 'SET_MODEL'; model: AgentModelAlias | null }
+  | { type: 'SET_RUNTIME'; runtime: WorkflowAgentRuntime | null }
+  | { type: 'SET_CODEX_MODEL'; codexModel: string | null }
   | { type: 'TOGGLE_TOOL'; tool: CliTool }
   | { type: 'TOGGLE_MCP'; server: string };
 
@@ -61,6 +68,8 @@ export function draftFromEntry(entry: AgentEntry): AgentDraft {
     systemPrompt: entry.systemPrompt,
     enabledTools: CLI_TOOLS.filter((t) => enabled.has(t)),
     model: entry.model,
+    runtime: entry.runtime,
+    codexModel: entry.codexModel,
     // Sort so the structural dirty check is order-independent (the catalogue
     // has no fixed order like CLI_TOOLS); TOGGLE_MCP keeps the array sorted.
     enabledMcps: [...entry.enabledMcps].sort(),
@@ -90,6 +99,21 @@ export function agentEditorReducer(
     case 'SET_MODEL':
       return { ...state, draft: { ...state.draft, model: action.model } };
 
+    case 'SET_RUNTIME':
+      // Leaving the Codex runtime clears the Codex model so a Claude runtime
+      // never carries a stale id (mirrors the server-side normalizeRuntime).
+      return {
+        ...state,
+        draft: {
+          ...state.draft,
+          runtime: action.runtime,
+          codexModel: action.runtime === 'codex-sdk' ? state.draft.codexModel : null,
+        },
+      };
+
+    case 'SET_CODEX_MODEL':
+      return { ...state, draft: { ...state.draft, codexModel: action.codexModel } };
+
     case 'TOGGLE_TOOL': {
       const has = state.draft.enabledTools.includes(action.tool);
       const enabledTools = has
@@ -118,7 +142,7 @@ export function agentEditorReducer(
 export function initAgentEditorState(entry: AgentEntry | null): AgentEditorState {
   const draft: AgentDraft = entry
     ? draftFromEntry(entry)
-    : { name: '', description: '', role: '', systemPrompt: '', enabledTools: [], model: null, enabledMcps: [] };
+    : { name: '', description: '', role: '', systemPrompt: '', enabledTools: [], model: null, runtime: null, codexModel: null, enabledMcps: [] };
   return { draft, baseline: structuredClone(draft) };
 }
 

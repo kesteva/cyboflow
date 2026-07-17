@@ -28,8 +28,14 @@ import {
   INHERIT_RUN_MODEL_LABEL,
   type AgentModelAlias,
 } from '../../../../../shared/types/agents';
+import {
+  WORKFLOW_AGENT_RUNTIMES,
+  WORKFLOW_AGENT_RUNTIME_LABELS,
+  type WorkflowAgentRuntime,
+} from '../../../../../shared/types/agentRuntime';
 import type { McpEntry } from '../../../../../shared/types/integrations';
 import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
+import { useCodexModelCatalog } from '../../../stores/codexModelCatalogStore';
 
 export interface AgentEditorFormProps {
   draft: AgentDraft;
@@ -54,6 +60,11 @@ export function AgentEditorForm({
   const nameEditable = mode === 'create' && isCustom;
   // Guarded-model availability (Fable 5): grey out a pinnable model that's pulled.
   const { isAliasUsable } = useModelAvailability();
+  // Codex model catalogue — fetched lazily, only while the Codex runtime is pinned
+  // (the `enabled` gate keeps the hook call unconditional per Rules of Hooks while
+  // deferring the network fetch until a Codex model picker is actually shown).
+  const isCodexRuntime = draft.runtime === 'codex-sdk';
+  const { options: codexModelOptions } = useCodexModelCatalog(isCodexRuntime);
   // The READ-ONLY name field shows the BARE key — strip the load-bearing
   // `cyboflow-` prefix the server persists on `name` — so it matches the
   // de-prefixed modal title and gallery card. The EDITABLE create-mode input
@@ -154,41 +165,104 @@ export function AgentEditorForm({
         )}
       </div>
 
-      {/* ── Model (pin a model, or inherit the run model) ─────────────────── */}
+      {/* ── Runtime (pin a CLI runtime, or inherit the run runtime) ───────── */}
       <div className="mt-6">
         <div className="text-[9px] font-bold uppercase tracking-[0.18em] text-text-tertiary mb-3 flex items-center gap-2">
-          <span>Model</span>
+          <span>Runtime</span>
           <span className="flex-1 h-px bg-border-subtle" />
         </div>
         <select
-          value={draft.model ?? ''}
+          value={draft.runtime ?? ''}
           onChange={(e) =>
             dispatch({
-              type: 'SET_MODEL',
-              model: e.target.value === '' ? null : (e.target.value as AgentModelAlias),
+              type: 'SET_RUNTIME',
+              runtime: e.target.value === '' ? null : (e.target.value as WorkflowAgentRuntime),
             })
           }
-          aria-label="Agent model"
+          aria-label="Agent runtime"
           className="w-full max-w-[320px] rounded-input border border-border-subtle bg-surface-primary px-3 py-2 text-sm text-text-primary"
-          data-testid="agent-model-select"
+          data-testid="agent-runtime-select"
         >
-          <option value="">{INHERIT_RUN_MODEL_LABEL}</option>
-          {AGENT_MODEL_ALIASES.map((alias) => {
-            const disabled = !isAliasUsable(alias);
-            return (
-              <option key={alias} value={alias} disabled={disabled}>
-                {AGENT_MODEL_LABELS[alias]}
-                {disabled ? ' (unavailable)' : ''}
-              </option>
-            );
-          })}
+          <option value="">inherits run runtime</option>
+          {WORKFLOW_AGENT_RUNTIMES.map((runtime) => (
+            <option key={runtime} value={runtime}>
+              {WORKFLOW_AGENT_RUNTIME_LABELS[runtime]}
+            </option>
+          ))}
         </select>
         <p className="mt-1.5 text-[10px] text-text-tertiary">
-          {draft.model === null
-            ? 'This agent runs with whatever model the run uses.'
-            : `This agent always runs on ${AGENT_MODEL_LABELS[draft.model]}, regardless of the run model.`}
+          {draft.runtime === null
+            ? 'This agent runs on whatever provider/runtime the run uses.'
+            : `This agent always runs on ${WORKFLOW_AGENT_RUNTIME_LABELS[draft.runtime]}. Per-agent Codex applies to programmatic runs.`}
         </p>
       </div>
+
+      {/* ── Model — Codex model picker when the Codex runtime is pinned, else
+          the Claude model alias picker (inherit the run model by default). ─── */}
+      {isCodexRuntime ? (
+        <div className="mt-6">
+          <div className="text-[9px] font-bold uppercase tracking-[0.18em] text-text-tertiary mb-3 flex items-center gap-2">
+            <span>Codex model</span>
+            <span className="flex-1 h-px bg-border-subtle" />
+          </div>
+          <select
+            value={draft.codexModel ?? ''}
+            onChange={(e) =>
+              dispatch({
+                type: 'SET_CODEX_MODEL',
+                codexModel: e.target.value === '' ? null : e.target.value,
+              })
+            }
+            aria-label="Agent Codex model"
+            className="w-full max-w-[320px] rounded-input border border-border-subtle bg-surface-primary px-3 py-2 text-sm text-text-primary"
+            data-testid="agent-codex-model-select"
+          >
+            {codexModelOptions.map((opt) => (
+              <option key={opt.id} value={opt.id}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+          <p className="mt-1.5 text-[10px] text-text-tertiary">
+            Codex runs use a single model per run; this pins the model for this agent.
+          </p>
+        </div>
+      ) : (
+        <div className="mt-6">
+          <div className="text-[9px] font-bold uppercase tracking-[0.18em] text-text-tertiary mb-3 flex items-center gap-2">
+            <span>Model</span>
+            <span className="flex-1 h-px bg-border-subtle" />
+          </div>
+          <select
+            value={draft.model ?? ''}
+            onChange={(e) =>
+              dispatch({
+                type: 'SET_MODEL',
+                model: e.target.value === '' ? null : (e.target.value as AgentModelAlias),
+              })
+            }
+            aria-label="Agent model"
+            className="w-full max-w-[320px] rounded-input border border-border-subtle bg-surface-primary px-3 py-2 text-sm text-text-primary"
+            data-testid="agent-model-select"
+          >
+            <option value="">{INHERIT_RUN_MODEL_LABEL}</option>
+            {AGENT_MODEL_ALIASES.map((alias) => {
+              const disabled = !isAliasUsable(alias);
+              return (
+                <option key={alias} value={alias} disabled={disabled}>
+                  {AGENT_MODEL_LABELS[alias]}
+                  {disabled ? ' (unavailable)' : ''}
+                </option>
+              );
+            })}
+          </select>
+          <p className="mt-1.5 text-[10px] text-text-tertiary">
+            {draft.model === null
+              ? 'This agent runs with whatever model the run uses.'
+              : `This agent always runs on ${AGENT_MODEL_LABELS[draft.model]}, regardless of the run model.`}
+          </p>
+        </div>
+      )}
 
       {/* ── System prompt — hero (NO {{var}} chips) ──────────────────────── */}
       <div className="mt-6">

@@ -54,6 +54,8 @@ function makeEntry(overrides: Partial<AgentEntry> = {}): AgentEntry {
     systemPrompt: 'You are the implement agent.\nDo the work.',
     tools: ['Read', 'Edit', 'Write'],
     model: null,
+    runtime: null,
+    codexModel: null,
     enabledMcps: ['filesystem'],
     source: 'builtin',
     isCustom: false,

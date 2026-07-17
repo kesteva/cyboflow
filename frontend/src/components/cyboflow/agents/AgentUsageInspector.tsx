@@ -28,6 +28,8 @@ export interface AgentUsageInspectorProps {
   liveToolsEnabled: number;
   /** Live model display label from the draft (echoes the form's model picker). */
   liveModel: string;
+  /** Live runtime display label from the draft (echoes the form's runtime picker). */
+  liveRuntime: string;
 }
 
 /** Format an ISO timestamp into a short, human "last edited" string. */
@@ -43,6 +45,7 @@ export function AgentUsageInspector({
   liveTokens,
   liveToolsEnabled,
   liveModel,
+  liveRuntime,
 }: AgentUsageInspectorProps): React.JSX.Element {
   const { usage, stats, isCustom } = entry;
   const boundCount = usage.usedBy.length;
@@ -111,6 +114,10 @@ export function AgentUsageInspector({
           Stats
         </div>
         <dl data-testid="agent-stats">
+          <div className="flex justify-between py-1.5 border-b border-dotted border-border-subtle text-[11px]">
+            <dt className="text-text-secondary">runtime</dt>
+            <dd className="font-bold text-text-primary" data-testid="agent-stat-runtime">{liveRuntime}</dd>
+          </div>
           <div className="flex justify-between py-1.5 border-b border-dotted border-border-subtle text-[11px]">
             <dt className="text-text-secondary">model</dt>
             <dd className="font-bold text-text-primary">{liveModel}</dd>
