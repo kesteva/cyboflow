@@ -61,7 +61,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
 
-  // migration 029 + 036 schema (mirrored inline; column order per the contract).
+  // migration 029 + 036 + 070 schema (mirrored inline; column order per the contract).
   db.exec(`
     CREATE TABLE IF NOT EXISTS agent_overrides (
       id TEXT PRIMARY KEY,
@@ -77,6 +77,8 @@ function buildDb(): Database.Database {
       is_custom INTEGER NOT NULL DEFAULT 0,
       version INTEGER NOT NULL DEFAULT 1,
       model TEXT,
+      runtime TEXT,
+      codex_model TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(project_id, agent_key),
@@ -696,6 +698,123 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
         model: 'gpt-4' as unknown as 'opus',
       }),
     ).rejects.toMatchObject({ code: 'invalid_model' });
+  });
+
+  // -------------------------------------------------------------------------
+  // runtime + codex model pin (migration 070)
+  // -------------------------------------------------------------------------
+
+  it('upsert without a runtime leaves runtime + codex_model NULL (inherit run runtime)', async () => {
+    const db = buildDb();
+    const router = AgentOverrideRouter.initialize(dbAdapter(db));
+
+    await router.applyChange(1, {
+      op: 'upsert',
+      agentKey: 'implement',
+      role: 'sprint',
+      description: 'x',
+      systemPrompt: 'y',
+      tools: TOOLS,
+      enabledMcps: [],
+    });
+    const row = router.getByKey(1, 'implement') as AgentOverrideRow;
+    expect(row.runtime).toBeNull();
+    expect(row.codex_model).toBeNull();
+  });
+
+  it('upsert persists a codex-sdk runtime + codex model, and a later upsert can clear them', async () => {
+    const db = buildDb();
+    const router = AgentOverrideRouter.initialize(dbAdapter(db));
+
+    await router.applyChange(1, {
+      op: 'upsert',
+      agentKey: 'implement',
+      role: 'sprint',
+      description: 'x',
+      systemPrompt: 'y',
+      tools: TOOLS,
+      enabledMcps: [],
+      runtime: 'codex-sdk',
+      codexModel: 'gpt-5.2-codex',
+    });
+    let row = router.getByKey(1, 'implement') as AgentOverrideRow;
+    expect(row.runtime).toBe('codex-sdk');
+    expect(row.codex_model).toBe('gpt-5.2-codex');
+
+    await router.applyChange(1, {
+      op: 'upsert',
+      agentKey: 'implement',
+      role: 'sprint',
+      description: 'x2',
+      systemPrompt: 'y2',
+      tools: TOOLS,
+      enabledMcps: [],
+      runtime: null,
+      codexModel: null,
+    });
+    row = router.getByKey(1, 'implement') as AgentOverrideRow;
+    expect(row.runtime).toBeNull();
+    expect(row.codex_model).toBeNull();
+  });
+
+  it('a Claude runtime never persists a codex model (normalizeRuntime nulls it)', async () => {
+    const db = buildDb();
+    const router = AgentOverrideRouter.initialize(dbAdapter(db));
+
+    await router.applyChange(1, {
+      op: 'upsert',
+      agentKey: 'implement',
+      role: 'sprint',
+      description: 'x',
+      systemPrompt: 'y',
+      tools: TOOLS,
+      enabledMcps: [],
+      runtime: 'claude-interactive',
+      // A codexModel supplied alongside a Claude runtime is dropped on persist.
+      codexModel: 'gpt-5.2-codex',
+    });
+    const row = router.getByKey(1, 'implement') as AgentOverrideRow;
+    expect(row.runtime).toBe('claude-interactive');
+    expect(row.codex_model).toBeNull();
+  });
+
+  it('createCustom persists a runtime pin', async () => {
+    const db = buildDb();
+    const router = AgentOverrideRouter.initialize(dbAdapter(db));
+
+    await router.applyChange(1, {
+      op: 'createCustom',
+      name: 'Helper',
+      role: null,
+      description: 'x',
+      systemPrompt: 'y',
+      tools: TOOLS,
+      enabledMcps: [],
+      runtime: 'codex-sdk',
+      codexModel: 'gpt-5.2-codex',
+    });
+    const row = router.getByKey(1, 'helper') as AgentOverrideRow;
+    expect(row.runtime).toBe('codex-sdk');
+    expect(row.codex_model).toBe('gpt-5.2-codex');
+  });
+
+  it('upsert with an unknown runtime throws invalid_runtime', async () => {
+    const db = buildDb();
+    const router = AgentOverrideRouter.initialize(dbAdapter(db));
+
+    await expect(
+      router.applyChange(1, {
+        op: 'upsert',
+        agentKey: 'implement',
+        role: 'sprint',
+        description: 'x',
+        systemPrompt: 'y',
+        tools: TOOLS,
+        enabledMcps: [],
+        // Bypass the static type to exercise the runtime guard.
+        runtime: 'codex-pty' as unknown as 'codex-sdk',
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_runtime' });
   });
 
   // -------------------------------------------------------------------------

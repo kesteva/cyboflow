@@ -27,6 +27,7 @@ import type { DatabaseLike } from './types';
 import type { AgentOverrideRow } from '../database/models';
 import type { CliTool } from '../../../shared/types/cliTools';
 import type { AgentChangedEvent, AgentModelAlias } from '../../../shared/types/agents';
+import type { WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
 import type { WorkflowDefinition, WorkflowStep } from '../../../shared/types/workflows';
 import { CANONICAL_AGENT_KEYS } from '../../../shared/types/agentIdentity';
 import {
@@ -66,6 +67,10 @@ export interface AgentUpsertChange {
   tools: CliTool[];
   /** Pinned model alias, or `null`/omitted to inherit the run model. */
   model?: AgentModelAlias | null;
+  /** Pinned CLI runtime, or `null`/omitted to inherit the run-level runtime. */
+  runtime?: WorkflowAgentRuntime | null;
+  /** Codex model id used when `runtime === 'codex-sdk'`; `null`/omitted = default. */
+  codexModel?: string | null;
   /** MCP server names this agent may call (rendered as `mcp__<server>__*`). */
   enabledMcps: string[];
   /** Optimistic-concurrency guard; when set must equal the current row version. */
@@ -83,6 +88,10 @@ export interface AgentCreateCustomChange {
   tools: CliTool[];
   /** Pinned model alias, or `null`/omitted to inherit the run model. */
   model?: AgentModelAlias | null;
+  /** Pinned CLI runtime, or `null`/omitted to inherit the run-level runtime. */
+  runtime?: WorkflowAgentRuntime | null;
+  /** Codex model id used when `runtime === 'codex-sdk'`; `null`/omitted = default. */
+  codexModel?: string | null;
   /** MCP server names this agent may call (rendered as `mcp__<server>__*`). */
   enabledMcps: string[];
 }
@@ -105,6 +114,10 @@ export interface AgentUpdateCustomChange {
   enabledMcps: string[];
   /** Pinned model alias, or `null`/omitted to inherit the run model. */
   model?: AgentModelAlias | null;
+  /** Pinned CLI runtime, or `null`/omitted to inherit the run-level runtime. */
+  runtime?: WorkflowAgentRuntime | null;
+  /** Codex model id used when `runtime === 'codex-sdk'`; `null`/omitted = default. */
+  codexModel?: string | null;
 }
 
 /** Reset a builtin override (DELETE its row → builtin shows through again). */
@@ -129,6 +142,22 @@ export type AgentOverrideChange =
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Normalize a change's runtime/codexModel pair for persistence. An inherited
+ * (null/undefined) runtime stores NULL; `codex_model` is retained ONLY when the
+ * runtime is 'codex-sdk' — a Claude runtime never persists a Codex model, so a
+ * later switch away from Codex can't leave a stale id behind.
+ */
+function normalizeRuntime(
+  runtime: WorkflowAgentRuntime | null | undefined,
+  codexModel: string | null | undefined,
+): { runtime: string | null; codexModel: string | null } {
+  const r = runtime ?? null;
+  const cm =
+    r === 'codex-sdk' && typeof codexModel === 'string' && codexModel.length > 0 ? codexModel : null;
+  return { runtime: r, codexModel: cm };
+}
 
 /** Slugify a display name to a canonical kebab key. */
 function kebab(name: string): string {
@@ -265,6 +294,8 @@ export class AgentOverrideRouter {
       systemPrompt: change.systemPrompt,
       tools: change.tools,
       model: change.model ?? null,
+      runtime: change.runtime ?? null,
+      codexModel: change.codexModel ?? null,
       enabledMcps: change.enabledMcps,
       isCustom: false,
     };
@@ -275,6 +306,7 @@ export class AgentOverrideRouter {
     const id = `ago_${randomBytes(10).toString('hex')}`;
     const toolsJson = JSON.stringify(change.tools);
     const model = change.model ?? null;
+    const { runtime, codexModel } = normalizeRuntime(change.runtime, change.codexModel);
     const enabledMcpsJson = JSON.stringify(change.enabledMcps);
 
     const txn = this.db.transaction(() => {
@@ -295,8 +327,9 @@ export class AgentOverrideRouter {
         .prepare(
           `INSERT INTO agent_overrides
              (id, project_id, agent_key, base_agent_key, name, role, description,
-              system_prompt, tools_json, enabled_mcps_json, is_custom, version, model, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?)
+              system_prompt, tools_json, enabled_mcps_json, is_custom, version, model,
+              runtime, codex_model, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?, ?, ?)
            ON CONFLICT(project_id, agent_key) DO UPDATE SET
              name = excluded.name,
              role = excluded.role,
@@ -305,6 +338,8 @@ export class AgentOverrideRouter {
              tools_json = excluded.tools_json,
              enabled_mcps_json = excluded.enabled_mcps_json,
              model = excluded.model,
+             runtime = excluded.runtime,
+             codex_model = excluded.codex_model,
              version = agent_overrides.version + 1,
              updated_at = excluded.updated_at`,
         )
@@ -320,6 +355,8 @@ export class AgentOverrideRouter {
           toolsJson,
           enabledMcpsJson,
           model,
+          runtime,
+          codexModel,
           now,
           now,
         );
@@ -345,10 +382,12 @@ export class AgentOverrideRouter {
       systemPrompt: change.systemPrompt,
       tools: change.tools,
       model: change.model ?? null,
+      runtime: change.runtime ?? null,
+      codexModel: change.codexModel ?? null,
       enabledMcps: change.enabledMcps,
       isCustom: true,
     };
-    // Kebab/forbidden/tool/description/model shape checks (throws invalid_key for a bad slug).
+    // Kebab/forbidden/tool/description/model/runtime shape checks (throws invalid_key for a bad slug).
     validateAgentDraft(draft);
 
     // A custom agent must not collide with a canonical builtin key.
@@ -364,6 +403,7 @@ export class AgentOverrideRouter {
     const id = `ago_${randomBytes(10).toString('hex')}`;
     const toolsJson = JSON.stringify(change.tools);
     const model = change.model ?? null;
+    const { runtime, codexModel } = normalizeRuntime(change.runtime, change.codexModel);
     const enabledMcpsJson = JSON.stringify(change.enabledMcps);
 
     const txn = this.db.transaction(() => {
@@ -378,8 +418,9 @@ export class AgentOverrideRouter {
         .prepare(
           `INSERT INTO agent_overrides
              (id, project_id, agent_key, base_agent_key, name, role, description,
-              system_prompt, tools_json, enabled_mcps_json, is_custom, version, model, created_at, updated_at)
-           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?)`,
+              system_prompt, tools_json, enabled_mcps_json, is_custom, version, model,
+              runtime, codex_model, created_at, updated_at)
+           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -392,6 +433,8 @@ export class AgentOverrideRouter {
           toolsJson,
           enabledMcpsJson,
           model,
+          runtime,
+          codexModel,
           now,
           now,
         );
@@ -420,9 +463,11 @@ export class AgentOverrideRouter {
       tools: change.tools,
       enabledMcps: change.enabledMcps,
       model: change.model ?? null,
+      runtime: change.runtime ?? null,
+      codexModel: change.codexModel ?? null,
       isCustom: true,
     };
-    // Kebab/forbidden/tool/description/MCP/model shape checks (mirrors createCustom).
+    // Kebab/forbidden/tool/description/MCP/model/runtime shape checks (mirrors createCustom).
     validateAgentDraft(draft);
     const systemPrompt = ensureResultSection(draft.systemPrompt);
 
@@ -430,6 +475,7 @@ export class AgentOverrideRouter {
     const toolsJson = JSON.stringify(change.tools);
     const enabledMcpsJson = JSON.stringify(change.enabledMcps);
     const model = change.model ?? null;
+    const { runtime, codexModel } = normalizeRuntime(change.runtime, change.codexModel);
 
     const txn = this.db.transaction(() => {
       const existing = this.getByKey(projectId, agentKey);
@@ -455,6 +501,8 @@ export class AgentOverrideRouter {
              tools_json = ?,
              enabled_mcps_json = ?,
              model = ?,
+             runtime = ?,
+             codex_model = ?,
              version = version + 1,
              updated_at = ?
            WHERE project_id = ? AND agent_key = ?`,
@@ -466,6 +514,8 @@ export class AgentOverrideRouter {
           toolsJson,
           enabledMcpsJson,
           model,
+          runtime,
+          codexModel,
           now,
           projectId,
           agentKey,

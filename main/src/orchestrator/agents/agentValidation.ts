@@ -15,6 +15,8 @@ import { isCliTool } from '../../../../shared/types/cliTools';
 import type { CliTool } from '../../../../shared/types/cliTools';
 import { isAgentModelAlias, referencesForbiddenWriterTool } from '../../../../shared/types/agents';
 import type { AgentModelAlias } from '../../../../shared/types/agents';
+import { isWorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
+import type { WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 
 /** The discriminated set of validation/conflict failure codes. */
 export type AgentOverrideErrorCode =
@@ -25,6 +27,7 @@ export type AgentOverrideErrorCode =
   | 'empty_description'
   | 'invalid_key'
   | 'invalid_model'
+  | 'invalid_runtime'
   | 'reserved_key'
   | 'duplicate_key'
   | 'frontmatter_in_body'
@@ -50,6 +53,10 @@ export interface AgentDraft {
   tools: CliTool[];
   /** Pinned model alias, or `null`/omitted to inherit the run model. */
   model?: AgentModelAlias | null;
+  /** Pinned CLI runtime, or `null`/omitted to inherit the run-level runtime. */
+  runtime?: WorkflowAgentRuntime | null;
+  /** Codex model id used when `runtime === 'codex-sdk'`; `null`/omitted = default. */
+  codexModel?: string | null;
   enabledMcps: string[];
   isCustom: boolean;
 }
@@ -123,6 +130,16 @@ export function validateAgentDraft(draft: AgentDraft): void {
     throw new AgentOverrideError(
       'invalid_model',
       `Agent model "${String(draft.model)}" is not a permitted model alias.`,
+    );
+  }
+
+  // runtime is optional: null/undefined inherits the run-level runtime; any other
+  // value must be a known WORKFLOW_AGENT_RUNTIMES value (defense-in-depth — the
+  // tRPC zod already constrains it).
+  if (draft.runtime != null && !isWorkflowAgentRuntime(draft.runtime)) {
+    throw new AgentOverrideError(
+      'invalid_runtime',
+      `Agent runtime "${String(draft.runtime)}" is not a permitted runtime.`,
     );
   }
 

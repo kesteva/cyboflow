@@ -43,6 +43,7 @@ import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows
 import type { AgentOverrideRow } from '../../../database/models';
 import type { AgentEntry, AgentChangedEvent, AgentUsage } from '../../../../../shared/types/agents';
 import { AGENT_MODEL_ALIASES } from '../../../../../shared/types/agents';
+import { WORKFLOW_AGENT_RUNTIMES } from '../../../../../shared/types/agentRuntime';
 
 // ---------------------------------------------------------------------------
 // Context guard
@@ -90,6 +91,7 @@ function rethrowAsTRPCError(err: unknown): never {
       empty_description: 'BAD_REQUEST',
       invalid_key: 'BAD_REQUEST',
       invalid_model: 'BAD_REQUEST',
+      invalid_runtime: 'BAD_REQUEST',
       reserved_key: 'CONFLICT',
       duplicate_key: 'CONFLICT',
       frontmatter_in_body: 'BAD_REQUEST',
@@ -182,6 +184,10 @@ const agentKeySchema = z.string().regex(/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/);
 const projectIdSchema = z.number().int().positive();
 /** Pinned model alias; null/omitted → inherit the run model. */
 const modelSchema = z.enum(AGENT_MODEL_ALIASES).nullable().optional();
+/** Pinned CLI runtime; null/omitted → inherit the run-level runtime. */
+const runtimeSchema = z.enum(WORKFLOW_AGENT_RUNTIMES).nullable().optional();
+/** Codex model id used when runtime='codex-sdk'; null/omitted → Codex default. */
+const codexModelSchema = z.string().nullable().optional();
 
 // ---------------------------------------------------------------------------
 // Router
@@ -236,6 +242,8 @@ export const agentsRouter = router({
         enabledMcps: enabledMcpsSchema,
         role: z.string().nullable().optional(),
         model: modelSchema,
+        runtime: runtimeSchema,
+        codexModel: codexModelSchema,
       }),
     )
     .mutation(async ({ ctx, input }): Promise<AgentEntry> => {
@@ -249,6 +257,8 @@ export const agentsRouter = router({
           systemPrompt: input.systemPrompt,
           tools: input.tools,
           model: input.model ?? null,
+          runtime: input.runtime ?? null,
+          codexModel: input.codexModel ?? null,
           enabledMcps: input.enabledMcps,
         });
       } catch (err) {
@@ -321,6 +331,8 @@ export const agentsRouter = router({
         enabledMcps: enabledMcpsSchema,
         role: z.string().nullable().optional(),
         model: modelSchema,
+        runtime: runtimeSchema,
+        codexModel: codexModelSchema,
       }),
     )
     .mutation(async ({ ctx, input }): Promise<AgentEntry> => {
@@ -335,6 +347,8 @@ export const agentsRouter = router({
           systemPrompt: input.systemPrompt,
           tools: input.tools,
           model: input.model ?? null,
+          runtime: input.runtime ?? null,
+          codexModel: input.codexModel ?? null,
           enabledMcps: input.enabledMcps,
         }));
       } catch (err) {
@@ -369,6 +383,8 @@ export const agentsRouter = router({
         enabledMcps: enabledMcpsSchema,
         role: z.string().nullable().optional(),
         model: modelSchema,
+        runtime: runtimeSchema,
+        codexModel: codexModelSchema,
       }),
     )
     .mutation(async ({ ctx, input }): Promise<AgentEntry> => {
@@ -390,6 +406,8 @@ export const agentsRouter = router({
           tools: input.tools,
           enabledMcps: input.enabledMcps,
           model: input.model ?? null,
+          runtime: input.runtime ?? null,
+          codexModel: input.codexModel ?? null,
         });
       } catch (err) {
         rethrowAsTRPCError(err);
@@ -437,6 +455,8 @@ export const agentsRouter = router({
           systemPrompt: source.systemPrompt,
           tools: source.tools,
           model: source.model,
+          runtime: source.runtime ?? null,
+          codexModel: source.codexModel ?? null,
           enabledMcps: source.enabledMcps,
         }));
       } catch (err) {

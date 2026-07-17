@@ -85,6 +85,8 @@ function createAgentsTestDb(): Database.Database {
       is_custom      INTEGER NOT NULL DEFAULT 0,
       version        INTEGER NOT NULL DEFAULT 1,
       model          TEXT,
+      runtime        TEXT,
+      codex_model    TEXT,
       created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE (project_id, agent_key),
@@ -267,6 +269,47 @@ describe('cyboflow.agents.upsertOverride / resetOverride', () => {
     // Reset drops the override → back to inheriting the run model.
     expect(reset.model).toBeNull();
     expect(reset.stats.model).toBe('inherits run model');
+  });
+
+  it('upsert with a codex-sdk runtime + codex model surfaces both on the entry; reset clears them', async () => {
+    const caller = makeWiredCaller(createAgentsTestDb());
+
+    const pinned = await caller.cyboflow.agents.upsertOverride({
+      projectId: PROJECT_ID,
+      agentKey: 'implement',
+      name: 'cyboflow-implement',
+      description: 'Pin codex.',
+      systemPrompt: 'You are my implement.',
+      tools: ['Read', 'Edit'],
+      runtime: 'codex-sdk',
+      codexModel: 'gpt-5.2-codex',
+    });
+    expect(pinned.runtime).toBe('codex-sdk');
+    expect(pinned.codexModel).toBe('gpt-5.2-codex');
+
+    const reset = await caller.cyboflow.agents.resetOverride({
+      projectId: PROJECT_ID,
+      agentKey: 'implement',
+    });
+    expect(reset.runtime).toBeNull();
+    expect(reset.codexModel).toBeNull();
+  });
+
+  it('upsert with a Claude runtime drops any supplied codex model', async () => {
+    const caller = makeWiredCaller(createAgentsTestDb());
+
+    const pinned = await caller.cyboflow.agents.upsertOverride({
+      projectId: PROJECT_ID,
+      agentKey: 'implement',
+      name: 'cyboflow-implement',
+      description: 'Claude PTY.',
+      systemPrompt: 'You are my implement.',
+      tools: ['Read', 'Edit'],
+      runtime: 'claude-interactive',
+      codexModel: 'gpt-5.2-codex',
+    });
+    expect(pinned.runtime).toBe('claude-interactive');
+    expect(pinned.codexModel).toBeNull();
   });
 });
 

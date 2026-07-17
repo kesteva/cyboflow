@@ -88,6 +88,20 @@ function parseAgentModel(value: string | null | undefined): AgentModelAlias | nu
 }
 
 /**
+ * Narrow an override row's `runtime` cell (`string | null`, or `undefined` on a
+ * DB predating migration 070) to a known {@link WorkflowAgentRuntime} or
+ * `undefined` (inherit). An unrecognized value falls back to inherit.
+ */
+function parseAgentRuntime(value: string | null | undefined): WorkflowAgentRuntime | undefined {
+  return isWorkflowAgentRuntime(value) ? value : undefined;
+}
+
+/** Narrow an override row's `codex_model` cell to a non-empty string, or `undefined`. */
+function parseCodexModel(value: string | null | undefined): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
  * Merge one builtin with its override (or `null`). When an override is present it
  * total-replaces description/systemPrompt/tools/role and source becomes
  * `builtin-override`; otherwise the builtin is returned as `source: 'builtin'`
@@ -122,11 +136,29 @@ export function mergeAgent(
     model: parseAgentModel(override.model),
     enabledMcps: parseMcps(override.enabled_mcps_json),
     source: 'builtin-override',
+    ...runtimeFields(override),
+  };
+}
+
+/**
+ * The optional `runtime` / `codexModel` overlay carried by an override row.
+ * Spread onto an EffectiveAgent so an inherited runtime stays ABSENT (undefined),
+ * keeping the `agent.runtime === undefined` fallback checks in the overlay exact.
+ */
+function runtimeFields(override: AgentOverrideRow): {
+  runtime?: WorkflowAgentRuntime;
+  codexModel?: string;
+} {
+  const runtime = parseAgentRuntime(override.runtime);
+  const codexModel = parseCodexModel(override.codex_model);
+  return {
+    ...(runtime ? { runtime } : {}),
+    ...(codexModel ? { codexModel } : {}),
   };
 }
 
 /** Build an `EffectiveAgent` from a standalone custom override row. */
-function customAgent(override: AgentOverrideRow): EffectiveAgent {
+export function customAgent(override: AgentOverrideRow): EffectiveAgent {
   return {
     agentKey: override.agent_key,
     name: `cyboflow-${override.agent_key}`,
@@ -137,6 +169,7 @@ function customAgent(override: AgentOverrideRow): EffectiveAgent {
     model: parseAgentModel(override.model),
     enabledMcps: parseMcps(override.enabled_mcps_json),
     source: 'custom',
+    ...runtimeFields(override),
   };
 }
 
@@ -328,6 +361,8 @@ export function buildEffectiveEntry(
     systemPrompt: effective.systemPrompt,
     tools: effective.tools,
     model: effective.model,
+    runtime: effective.runtime ?? null,
+    codexModel: effective.codexModel ?? null,
     enabledMcps: effective.enabledMcps,
     source: effective.source,
     isCustom: effective.source === 'custom',
