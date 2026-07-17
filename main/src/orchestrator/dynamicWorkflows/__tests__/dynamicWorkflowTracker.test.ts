@@ -374,7 +374,10 @@ describe('DynamicWorkflowTracker', () => {
     });
     emitLaunch();
 
-    writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
+    writeFileSync(
+      journalPath,
+      '{"type":"started","agentId":"a1"}\n{"type":"started","agentId":"a2"}\n',
+    );
     await vi.advanceTimersByTimeAsync(1000);
     writeFileSync(
       join(transcriptDir, 'agent-a1.jsonl'),
@@ -393,10 +396,27 @@ describe('DynamicWorkflowTracker', () => {
         },
       })}\n`,
     );
+    writeFileSync(
+      join(transcriptDir, 'agent-a2.jsonl'),
+      `${JSON.stringify({
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          model: 'claude-haiku-test',
+          usage: {
+            input_tokens: 23,
+            output_tokens: 29,
+            cache_read_input_tokens: 31,
+            cache_creation_input_tokens: 37,
+          },
+          content: [],
+        },
+      })}\n`,
+    );
 
     router.emitForRun('run-1', userToolResult('tu-x', notificationText('wabc123', 'completed')));
 
-    expect(order).toEqual(['drain', 'persist', 'rollup:run-1']);
+    expect(order).toEqual(['drain', 'persist', 'persist', 'rollup:run-1']);
     expect(persisted).toEqual([
       {
         runId: 'run-1',
@@ -411,6 +431,23 @@ describe('DynamicWorkflowTracker', () => {
               output_tokens: 13,
               cache_read_input_tokens: 17,
               cache_creation_input_tokens: 19,
+            },
+          },
+        },
+      },
+      {
+        runId: 'run-1',
+        dedupKey: 'subagent:wf_aa11-2b:a2',
+        event: {
+          type: 'subagent_usage',
+          subagent: { wfRunId: 'wf_aa11-2b', agentId: 'a2' },
+          message: {
+            model: 'claude-haiku-test',
+            usage: {
+              input_tokens: 23,
+              output_tokens: 29,
+              cache_read_input_tokens: 31,
+              cache_creation_input_tokens: 37,
             },
           },
         },
@@ -504,6 +541,7 @@ describe('DynamicWorkflowTracker', () => {
 
   it('uses the same drain-persist-rollup ordering at the stalled seam', async () => {
     const order: string[] = [];
+    const persisted: Array<{ runId: string; event: unknown; dedupKey: string }> = [];
     const originalDrainToEof = JournalTailer.prototype.drainToEof;
     vi.spyOn(JournalTailer.prototype, 'drainToEof').mockImplementation(function (this: JournalTailer) {
       order.push('drain');
@@ -512,8 +550,9 @@ describe('DynamicWorkflowTracker', () => {
     DynamicWorkflowTracker._resetForTesting();
     tracker = DynamicWorkflowTracker.initialize(dbAdapter(db), {
       rawEventsSink: {
-        persistSubagentUsage: () => {
+        persistSubagentUsage: (runId, event, dedupKey) => {
           order.push('persist');
+          persisted.push({ runId, event, dedupKey });
         },
       },
       rollupUsage: () => {
@@ -523,10 +562,45 @@ describe('DynamicWorkflowTracker', () => {
     emitLaunch();
     writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
     await vi.advanceTimersByTimeAsync(1000);
+    writeFileSync(
+      join(transcriptDir, 'agent-a1.jsonl'),
+      `${JSON.stringify({
+        type: 'assistant',
+        message: {
+          model: 'claude-stalled-test',
+          usage: {
+            input_tokens: 41,
+            output_tokens: 43,
+            cache_read_input_tokens: 47,
+            cache_creation_input_tokens: 53,
+          },
+          content: [],
+        },
+      })}\n`,
+    );
 
     await vi.advanceTimersByTimeAsync(60 * 60 * 1000 + 1000);
 
     expect(order).toEqual(['drain', 'persist', 'rollup']);
+    expect(persisted).toEqual([
+      {
+        runId: 'run-1',
+        dedupKey: 'subagent:wf_aa11-2b:a1',
+        event: {
+          type: 'subagent_usage',
+          subagent: { wfRunId: 'wf_aa11-2b', agentId: 'a1' },
+          message: {
+            model: 'claude-stalled-test',
+            usage: {
+              input_tokens: 41,
+              output_tokens: 43,
+              cache_read_input_tokens: 47,
+              cache_creation_input_tokens: 53,
+            },
+          },
+        },
+      },
+    ]);
     expect(tracker.list()[0].status).toBe('failed');
   });
 
