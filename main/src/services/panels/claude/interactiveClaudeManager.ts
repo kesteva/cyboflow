@@ -294,10 +294,15 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    * Chat runIds whose live PTY turn is parked on an AskUserQuestion gate — the
    * "blocked" signal for the quick-session status board (quickSessionListing).
    * Set by {@link notifyQuestionOpen} (driven by the PreToolUse(AskUserQuestion)
-   * shell hook via mcpQueryHandler) and cleared on the next turn-end
-   * ({@link handleTurnEnd}) or run teardown. In-memory only: a PTY question has
-   * no durable DB state, so a blocked session reads as `running` after an app
-   * restart (its DB status is still `running`) — acceptable for a live board.
+   * shell hook via mcpQueryHandler) and cleared when the user ANSWERS — a
+   * submitted line ({@link sendInput} sees a CR/LF, from the composer's deferred
+   * '\r' or the terminal's Enter) — or on run teardown. It is deliberately NOT
+   * cleared on turn-end: in interactive mode ASKING the question is itself a
+   * turn-end (the PTY parks for input), so clearing there would wipe the flag the
+   * instant it was set (the intermittent-blocked bug). In-memory only: a PTY
+   * question has no durable DB state, so a blocked session reads as `running`
+   * after an app restart (its DB status is still `running`) — acceptable for a
+   * live board.
    */
   private readonly awaitingInputRunIds = new Set<string>();
 
@@ -1391,10 +1396,12 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     const run = this.interactiveRuns.get(panelId);
     if (!run) return;
 
-    // A turn ending clears any AskUserQuestion "blocked" flag for the run: the
-    // gate the flag tracked was answered (the agent could only reach turn-end by
-    // continuing past it). See notifyQuestionOpen / the status board.
-    this.awaitingInputRunIds.delete(run.runId);
+    // NOTE: the AskUserQuestion "blocked" flag is intentionally NOT cleared here.
+    // Asking a question IS a turn-end in interactive mode (the PTY parks for
+    // input), so this fires WHILE the question is still open — clearing it would
+    // wipe the flag the instant notifyQuestionOpen set it. The flag is cleared
+    // when the user actually answers (a submitted line in sendInput) or on
+    // teardown. See awaitingInputRunIds / notifyQuestionOpen.
 
     if (run.persistent) {
       // Re-armable: emit the turn-end event and keep the REPL alive. `turnEnded`
@@ -1466,6 +1473,24 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   /** Snapshot of chat runIds currently blocked on a question (for the status board). */
   getAwaitingInputRunIds(): ReadonlySet<string> {
     return new Set(this.awaitingInputRunIds);
+  }
+
+  /**
+   * Write to the live PTY, then clear the AskUserQuestion "blocked" flag when the
+   * write is a SUBMITTED line (carries a CR/LF). This is the single chokepoint for
+   * BOTH answer paths — the composer (relayUserTurn -> submitToRepl -> sendInput,
+   * whose deferred '\r' lands here) and raw terminal keystrokes (relayInput ->
+   * facade -> sendInput, where Enter is its own '\r'). Bare navigation keystrokes
+   * (arrow-key escape sequences, etc.) carry no CR/LF, so the flag correctly stays
+   * set while the user is still choosing an option. Clearing AFTER super so a
+   * throw on a missing process leaves the flag for teardown to reap.
+   */
+  override sendInput(panelId: string, input: string): void {
+    super.sendInput(panelId, input);
+    if (input.includes('\r') || input.includes('\n')) {
+      const runId = this.interactiveRuns.get(panelId)?.runId ?? panelId;
+      this.awaitingInputRunIds.delete(runId);
+    }
   }
 
   /**

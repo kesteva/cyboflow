@@ -610,7 +610,16 @@ describe('InteractiveClaudeManager', () => {
           prompt: 'hi',
           ...(mode === 'ignore' ? { permissionMode: 'ignore' } : { agentPermissionMode: mode }),
         });
-        expect(inlineSettingsOf(args).hooks?.PreToolUse).toBeUndefined();
+        // Opt-out drops the '*' wildcard GATE, but the non-gating AskUserQuestion
+        // notify hook (the blocked-board signal) STILL rides unconditionally, as
+        // does the Stop turn-end hook.
+        const preToolUse = inlineSettingsOf(args).hooks?.PreToolUse as
+          | Array<{ matcher?: string; hooks?: Array<{ command?: string }> }>
+          | undefined;
+        expect(preToolUse).toHaveLength(1);
+        expect(preToolUse?.[0]?.matcher).toBe('AskUserQuestion');
+        expect(preToolUse?.[0]?.hooks?.[0]?.command).toContain('questionShellHook');
+        expect(preToolUse?.some((g) => g.matcher === '*')).toBe(false);
         expect(inlineSettingsOf(args).hooks?.Stop).toBeDefined();
       },
     );
@@ -666,8 +675,8 @@ describe('InteractiveClaudeManager', () => {
     });
 
     it('4-mode agentPermissionMode takes precedence over the legacy permissionMode for the gate decision', () => {
-      // legacy 'approve' (gate) + 4-mode 'auto' (no gate) → no PreToolUse gate
-      // (the Stop hook is unaffected — it has no opt-out).
+      // legacy 'approve' (gate) + 4-mode 'auto' (no gate) → no '*' PreToolUse gate
+      // (the AskUserQuestion notify hook + Stop hook are unaffected — no opt-out).
       const args = mgr.callBuildCommandArgs({
         panelId: 'p1',
         sessionId: 's1',
@@ -676,7 +685,11 @@ describe('InteractiveClaudeManager', () => {
         permissionMode: 'approve',
         agentPermissionMode: 'auto',
       });
-      expect(inlineSettingsOf(args).hooks?.PreToolUse).toBeUndefined();
+      const preToolUse = inlineSettingsOf(args).hooks?.PreToolUse as
+        | Array<{ matcher?: string }>
+        | undefined;
+      expect(preToolUse?.some((g) => g.matcher === '*')).toBe(false);
+      expect(preToolUse?.some((g) => g.matcher === 'AskUserQuestion')).toBe(true);
       expect(inlineSettingsOf(args).hooks?.Stop).toBeDefined();
     });
   });
@@ -948,7 +961,7 @@ describe('InteractiveClaudeManager', () => {
       // logger (debug -> verbose). A no-logger call would silently no-op this.
       expect(
         logger.verbose.mock.calls.some(
-          (c) => typeof c[0] === 'string' && c[0].includes('opts out of PreToolUse gating'),
+          (c) => typeof c[0] === 'string' && c[0].includes('opts out of wildcard PreToolUse gating'),
         ),
       ).toBe(true);
 
@@ -1884,6 +1897,85 @@ describe('InteractiveClaudeManager', () => {
       expect(pty.writes).not.toContain('\r');
 
       void spawn;
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // AskUserQuestion "blocked" flag lifecycle (quick-session status board):
+  // notifyQuestionOpen SETS it; a turn-end must NOT clear it (asking a question
+  // IS a turn-end in interactive mode); a SUBMITTED line (CR/LF through
+  // sendInput) clears it; a bare navigation keystroke does not.
+  // -------------------------------------------------------------------------
+  describe('AskUserQuestion blocked-flag lifecycle', () => {
+    let db: Database.Database;
+    let mgr: TestableInteractiveClaudeManager;
+
+    beforeEach(() => {
+      db = createTestDb({ disableForeignKeys: true });
+      ApprovalRouter.initialize(dbAdapter(db));
+      QuestionRouter.initialize(dbAdapter(db));
+      mgr = new TestableInteractiveClaudeManager(
+        createMockSessionManager(),
+        createLoggerSpy() as unknown as import('../../../../utils/logger').Logger,
+        createMockConfigManager(),
+        db,
+      );
+    });
+
+    afterEach(() => {
+      ApprovalRouter._resetForTesting();
+      QuestionRouter._resetForTesting();
+      db.close();
+      vi.clearAllMocks();
+    });
+
+    /** Spawn a live REPL and return its runId (=== panelId for a plain mock row). */
+    async function spawnLive(panelId: string): Promise<{ runId: string; spawn: Promise<void> }> {
+      const spawn = mgr.spawnCliProcess({ panelId, sessionId: `sess-${panelId}`, worktreePath: `/tmp/wt-${panelId}`, prompt: 'go' });
+      await waitFor(() => mgr.ptys.length > 0 && mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
+      // Guard the panelId === runId assumption this suite relies on.
+      expect(mgr.notifyTurnEnd(panelId)).toBe(true);
+      return { runId: panelId, spawn };
+    }
+
+    it('a turn-end does NOT clear the flag (asking the question is itself the turn-end)', async () => {
+      const { runId, spawn } = await spawnLive('panel-q-turnend');
+      mgr.notifyQuestionOpen(runId);
+      expect(mgr.getAwaitingInputRunIds().has(runId)).toBe(true);
+
+      // The Stop hook fires as the PTY parks on the open question — the flag must survive.
+      mgr.notifyTurnEnd(runId);
+      expect(mgr.getAwaitingInputRunIds().has(runId)).toBe(true);
+
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+
+    it('a submitted line (CR) through sendInput clears the flag (the answer)', async () => {
+      const { runId, spawn } = await spawnLive('panel-q-submit');
+      mgr.notifyQuestionOpen(runId);
+      expect(mgr.getAwaitingInputRunIds().has(runId)).toBe(true);
+
+      mgr.sendInput(runId, '\r');
+      expect(mgr.getAwaitingInputRunIds().has(runId)).toBe(false);
+
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+
+    it('a bare navigation keystroke (no CR/LF) leaves the flag set', async () => {
+      const { runId, spawn } = await spawnLive('panel-q-nav');
+      mgr.notifyQuestionOpen(runId);
+
+      // Down-arrow escape sequence — the user is still choosing an option.
+      mgr.sendInput(runId, '\x1b[B');
+      expect(mgr.getAwaitingInputRunIds().has(runId)).toBe(true);
+
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
     });
   });
 
