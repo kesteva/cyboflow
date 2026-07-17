@@ -260,7 +260,10 @@ describe('DynamicWorkflowTracker', () => {
     const before = changed.at(-1)?.state.agents[0];
     expect(before).toMatchObject({ agentId: 'a1', status: 'running' });
     expect(before?.model).toBeUndefined();
+    expect(before?.inputTokens).toBeUndefined();
     expect(before?.outputTokens).toBeUndefined();
+    expect(before?.cacheReadInputTokens).toBeUndefined();
+    expect(before?.cacheCreationInputTokens).toBeUndefined();
     expect(before?.toolUses).toBeUndefined();
     expect(before?.startedAt).toBeUndefined();
     expect(before?.lastActivityAt).toBeUndefined();
@@ -295,6 +298,7 @@ describe('DynamicWorkflowTracker', () => {
         agentId: 'a1',
         status: 'running',
         model: 'claude-fable-5',
+        inputTokens: 4,
         outputTokens: 12,
         toolUses: 1,
         startedAt: '2026-06-11T10:00:00.000Z',

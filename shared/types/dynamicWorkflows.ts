@@ -47,8 +47,14 @@ export interface DynamicWorkflowAgent {
   status: 'running' | 'done';
   /** Raw model id from the first assistant transcript line, e.g. 'claude-fable-5'. */
   model?: string;
+  /** Sum of `message.usage.input_tokens` across assistant transcript lines. */
+  inputTokens?: number;
   /** Sum of `message.usage.output_tokens` across assistant transcript lines. */
   outputTokens?: number;
+  /** Sum of `message.usage.cache_read_input_tokens` across assistant transcript lines. */
+  cacheReadInputTokens?: number;
+  /** Sum of `message.usage.cache_creation_input_tokens` across assistant transcript lines. */
+  cacheCreationInputTokens?: number;
   /** Count of `tool_use` content blocks across assistant transcript lines. */
   toolUses?: number;
   /** ISO-8601 — timestamp of the FIRST transcript line (the agent's prompt). */

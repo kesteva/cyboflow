@@ -196,7 +196,12 @@ describe('JournalTailer', () => {
           message: {
             role: 'assistant',
             model: 'claude-fable-5',
-            usage: { input_tokens: 3, output_tokens: 10 },
+            usage: {
+              input_tokens: 3,
+              output_tokens: 10,
+              cache_read_input_tokens: 4,
+              cache_creation_input_tokens: 5,
+            },
             content: [
               { type: 'tool_use', id: 't1', name: 'Read', input: {} },
               { type: 'text', text: 'hi' },
@@ -212,7 +217,10 @@ describe('JournalTailer', () => {
         agentId: 'a1',
         status: 'running',
         model: 'claude-fable-5',
+        inputTokens: 3,
         outputTokens: 10,
+        cacheReadInputTokens: 4,
+        cacheCreationInputTokens: 5,
         toolUses: 1,
         startedAt: '2026-06-11T10:00:00.000Z',
         lastActivityAt: '2026-06-11T10:00:05.000Z',
@@ -229,7 +237,12 @@ describe('JournalTailer', () => {
         message: {
           role: 'assistant',
           model: 'claude-other-model',
-          usage: { output_tokens: 7 },
+          usage: {
+            input_tokens: 11,
+            output_tokens: 7,
+            cache_read_input_tokens: 13,
+            cache_creation_input_tokens: 17,
+          },
           content: [
             { type: 'tool_use', id: 't2', name: 'Edit', input: {} },
             { type: 'tool_use', id: 't3', name: 'Bash', input: {} },
@@ -245,11 +258,133 @@ describe('JournalTailer', () => {
         agentId: 'a1',
         status: 'running',
         model: 'claude-fable-5', // first assistant model wins
+        inputTokens: 14,
         outputTokens: 17,
+        cacheReadInputTokens: 17,
+        cacheCreationInputTokens: 22,
         toolUses: 3,
         startedAt: '2026-06-11T10:00:00.000Z',
         lastActivityAt: '2026-06-11T10:00:09.000Z',
         promptExcerpt: 'Refactor the API layer',
+      },
+    ]);
+
+    tailer!.drainToEof();
+    expect(onAgents).toHaveBeenCalledTimes(2); // unchanged EOF is not re-read or re-emitted
+  });
+
+  it('drains every tracked transcript synchronously to EOF before the next poll', async () => {
+    const { onAgents } = buildTailer();
+    tailer!.start();
+    writeFileSync(
+      journalPath,
+      '{"type":"started","agentId":"a1"}\n{"type":"started","agentId":"a2"}\n',
+    );
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+
+    writeFileSync(
+      join(dir, 'agent-a1.jsonl'),
+      transcriptLine({
+        type: 'assistant',
+        message: {
+          model: 'claude-a',
+          usage: { input_tokens: 2, output_tokens: 3, cache_read_input_tokens: 5 },
+          content: [],
+        },
+        timestamp: '2026-06-11T14:00:00.000Z',
+      }) +
+        transcriptLine({
+          type: 'assistant',
+          message: {
+            model: 'claude-a',
+            usage: { input_tokens: 7, output_tokens: 11, cache_creation_input_tokens: 13 },
+            content: [],
+          },
+          timestamp: '2026-06-11T14:00:01.000Z',
+        }),
+    );
+    writeFileSync(
+      join(dir, 'agent-a2.jsonl'),
+      transcriptLine({
+        type: 'assistant',
+        message: {
+          model: 'claude-b',
+          usage: {
+            input_tokens: 17,
+            output_tokens: 19,
+            cache_read_input_tokens: 23,
+            cache_creation_input_tokens: 29,
+          },
+          content: [],
+        },
+        timestamp: '2026-06-11T14:00:02.000Z',
+      }),
+    );
+
+    tailer!.drainToEof();
+
+    expect(onAgents).toHaveBeenCalledTimes(2);
+    expect(onAgents).toHaveBeenLastCalledWith([
+      {
+        agentId: 'a1',
+        status: 'running',
+        model: 'claude-a',
+        inputTokens: 9,
+        outputTokens: 14,
+        cacheReadInputTokens: 5,
+        cacheCreationInputTokens: 13,
+        startedAt: '2026-06-11T14:00:00.000Z',
+        lastActivityAt: '2026-06-11T14:00:01.000Z',
+      },
+      {
+        agentId: 'a2',
+        status: 'running',
+        model: 'claude-b',
+        inputTokens: 17,
+        outputTokens: 19,
+        cacheReadInputTokens: 23,
+        cacheCreationInputTokens: 29,
+        startedAt: '2026-06-11T14:00:02.000Z',
+        lastActivityAt: '2026-06-11T14:00:02.000Z',
+      },
+    ]);
+  });
+
+  it('skips malformed transcript lines during a synchronous drain without throwing', async () => {
+    const warn = vi.fn();
+    const onAgents = vi.fn<(agents: DynamicWorkflowAgent[]) => void>();
+    tailer = new JournalTailer({
+      journalPath,
+      recordPath,
+      pollMs: POLL_MS,
+      onAgents,
+      onComplete: vi.fn(),
+      onStalled: vi.fn(),
+      logger: { warn },
+    });
+    tailer.start();
+    writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    writeFileSync(
+      join(dir, 'agent-a1.jsonl'),
+      '{"type":"assistant","message":\n' +
+        transcriptLine({
+          type: 'assistant',
+          message: { usage: { input_tokens: 31, output_tokens: 37 }, content: [] },
+          timestamp: '2026-06-11T15:00:00.000Z',
+        }),
+    );
+
+    expect(() => tailer!.drainToEof()).not.toThrow();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('unparseable transcript line skipped'));
+    expect(onAgents).toHaveBeenLastCalledWith([
+      {
+        agentId: 'a1',
+        status: 'running',
+        inputTokens: 31,
+        outputTokens: 37,
+        startedAt: '2026-06-11T15:00:00.000Z',
+        lastActivityAt: '2026-06-11T15:00:00.000Z',
       },
     ]);
   });

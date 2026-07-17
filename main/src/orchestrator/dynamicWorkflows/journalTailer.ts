@@ -8,8 +8,8 @@
  *   - `<transcriptDir>/agent-<agentId>.jsonl` — per-subagent transcript, tailed
  *     with the same offset + remainder strategy (ONLY for agents already known
  *     from the journal — no directory scans) to accumulate the optional live
- *     stats on DynamicWorkflowAgent (model / outputTokens / toolUses /
- *     startedAt / lastActivityAt / promptExcerpt). The transcript landing a
+ *     stats on DynamicWorkflowAgent (model / token usage / toolUses / startedAt /
+ *     lastActivityAt / promptExcerpt). The transcript landing a
  *     beat after the journal `started` line is normal — ENOENT is silent and
  *     retried next tick.
  *   - `<sessionDir>/workflows/wf_<id>.json` — the terminal record written ONCE
@@ -41,10 +41,25 @@ const DEFAULT_IDLE_TIMEOUT_MS = 60 * 60 * 1000;
  */
 const PROMPT_EXCERPT_MAX_CHARS = 600;
 
+const TOKEN_USAGE_FIELDS = [
+  ['input_tokens', 'inputTokens'],
+  ['output_tokens', 'outputTokens'],
+  ['cache_read_input_tokens', 'cacheReadInputTokens'],
+  ['cache_creation_input_tokens', 'cacheCreationInputTokens'],
+] as const;
+
 /** The optional live-stats slice of DynamicWorkflowAgent — keys set only when observed. */
 type AgentTranscriptStats = Pick<
   DynamicWorkflowAgent,
-  'model' | 'outputTokens' | 'toolUses' | 'startedAt' | 'lastActivityAt' | 'promptExcerpt'
+  | 'model'
+  | 'inputTokens'
+  | 'outputTokens'
+  | 'cacheReadInputTokens'
+  | 'cacheCreationInputTokens'
+  | 'toolUses'
+  | 'startedAt'
+  | 'lastActivityAt'
+  | 'promptExcerpt'
 >;
 
 /** Per-agent transcript tail state: byte offset + torn-line buffer + accumulated stats. */
@@ -157,6 +172,22 @@ export class JournalTailer {
     this.lineBuffer = '';
     for (const tail of this.transcriptTails.values()) {
       tail.remainder = '';
+    }
+  }
+
+  /**
+   * Synchronously consume every currently tracked agent transcript through its
+   * present EOF. This is used by terminal paths to close the final poll-window
+   * race before snapshotting cumulative usage. A single onAgents emission
+   * covers all transcript changes, matching the normal per-tick throttle.
+   */
+  drainToEof(): void {
+    let statsChanged = false;
+    for (const agentId of this.agents.keys()) {
+      if (this.pollAgentTranscript(agentId).statsChanged) statsChanged = true;
+    }
+    if (statsChanged) {
+      this.opts.onAgents(this.snapshotAgents());
     }
   }
 
@@ -362,9 +393,13 @@ export class JournalTailer {
         message.usage !== null && typeof message.usage === 'object'
           ? (message.usage as Record<string, unknown>)
           : undefined;
-      if (usage !== undefined && typeof usage.output_tokens === 'number') {
-        stats.outputTokens = (stats.outputTokens ?? 0) + usage.output_tokens;
-        changed = true;
+      if (usage !== undefined) {
+        for (const [usageKey, statsKey] of TOKEN_USAGE_FIELDS) {
+          const value = usage[usageKey];
+          if (typeof value !== 'number') continue;
+          stats[statsKey] = (stats[statsKey] ?? 0) + value;
+          changed = true;
+        }
       }
       if (Array.isArray(message.content)) {
         const toolUseCount = message.content.filter((block: unknown) => {
