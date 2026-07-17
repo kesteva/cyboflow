@@ -208,6 +208,23 @@ export function unifiedStages(
 // never needs to consider it.
 export const READY_FOR_DEV_POSITION = 6;
 export const LAST_EXECUTION_POSITION = 6;
+/** Derived "In development" board position (migration 066). */
+export const IN_DEVELOPMENT_POSITION = 7;
+
+/**
+ * The board column a top-level item belongs in. Normally its own
+ * `stage_position`, EXCEPT a live A/B experiment seed (`experimentSeed`): its
+ * per-arm clones carry the runs and are hidden by their experiment tag, so the
+ * original has no run of its own and its DB stage stays at "Ready for
+ * development" — yet it IS in development (via the arms). We place it in the
+ * "In development" column on READ, derived from the same overlay that drives the
+ * "In experiment" badge. Purely a DISPLAY derivation (no stage write), so it is
+ * correct for every experiment — pre-existing, current, or future — and reverts
+ * automatically the instant the experiment settles and the overlay clears.
+ */
+export function effectiveBoardPosition(item: BacklogTaskItem): number {
+  return item.experimentSeed ? IN_DEVELOPMENT_POSITION : item.stage_position;
+}
 
 /**
  * True when a stage position is a non-terminal ASSERTED EXECUTION stage — only
@@ -337,8 +354,10 @@ export function bucketByStage(
   const byPosition = new Map<number, BacklogTaskItem[]>();
   for (const stage of stages) byPosition.set(stage.position, []);
   // Iterate the full union of top-level ideas/epics/tasks into the shared board.
+  // A live experiment seed is bucketed by its EFFECTIVE position ("In development")
+  // rather than its DB stage_position — see effectiveBoardPosition.
   for (const item of topLevelTasks(tasks)) {
-    const bucket = byPosition.get(item.stage_position);
+    const bucket = byPosition.get(effectiveBoardPosition(item));
     if (bucket) bucket.push(item);
   }
   return stages.map((stage) => ({

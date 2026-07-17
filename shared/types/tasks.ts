@@ -192,11 +192,13 @@ export interface BacklogTaskItem {
   isDone: boolean;
   /**
    * True when this task is the ORIGINAL seed of a LIVE (non-settled) A/B
-   * experiment — its per-arm clones carry the runs, so it has no run of its own,
-   * yet the deriver holds it at "In development" (position 7) while the
-   * experiment runs (C2). A pure DISPLAY hint (drives the "In experiment" card
-   * badge); it is NOT a visibility/eligibility gate, so it is OPTIONAL for shape
-   * parity — an undefined from a partial emit path simply hides the badge.
+   * experiment — its per-arm clones carry the runs (hidden by their experiment
+   * tag), so it has no run of its own. The board derives BOTH its "In development"
+   * column placement (effectiveBoardPosition) AND the "In experiment" card badge
+   * from this flag, purely on READ — its DB stage is never written, so it is
+   * correct for every experiment and reverts the instant the experiment settles.
+   * A pure DISPLAY hint (NOT a visibility/eligibility gate), so it is OPTIONAL for
+   * shape parity — an undefined from a partial emit path simply hides both.
    */
   experimentSeed?: boolean;
   /**

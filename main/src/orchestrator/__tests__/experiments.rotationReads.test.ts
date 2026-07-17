@@ -54,7 +54,7 @@ function makeDeps(raw: Database.Database): ExperimentsDeps {
     runLauncher: { launch: notCalled },
     worktreeManager: { getProjectMainBranch: notCalled, getHeadCommit: notCalled },
     createArmSession: notCalled,
-    taskChangeRouter: { applyChange: notCalled, deleteExperimentArmEntities: notCalled, recomputeTaskExecutionStage: notCalled },
+    taskChangeRouter: { applyChange: notCalled, deleteExperimentArmEntities: notCalled },
     dismissSession: notCalled,
     cancelRun: notCalled,
     getVariant: () => null,

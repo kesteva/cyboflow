@@ -2226,34 +2226,6 @@ export class TaskChangeRouter {
    * recompute in that window sees no merge yet and arm 3 would otherwise yank the
    * just-Done task back to Ready.
    */
-  /**
-   * True when `taskId` is the ORIGINAL seed of a LIVE (non-settled) A/B experiment
-   * — its per-arm clones carry the runs, so it has none of its own, yet the
-   * experiment's decide/fold owns its final body/stage. "Live" = experiments.status
-   * NOT IN the terminal set ('decided'/'abandoned'/'superseded'), matching
-   * isExperimentSettled. Mirrors SprintLaneStore.findLiveExperimentSeedTaskIds'
-   * predicate + the experiments router's replica; kept a local copy (not imported)
-   * for the same chokepoint-encapsulation reason those are. Degrades PERMISSIVELY
-   * (returns false) on a schema lacking experiment_seed_tasks / experiments.
-   */
-  private isLiveExperimentSeed(taskId: string): boolean {
-    try {
-      const row = this.db
-        .prepare(
-          `SELECT 1 FROM experiment_seed_tasks est
-             JOIN experiments e ON e.id = est.experiment_id
-            WHERE est.original_task_id = ?
-              AND e.status NOT IN ('decided', 'abandoned', 'superseded')
-            LIMIT 1`,
-        )
-        .get(taskId);
-      return row !== undefined;
-    } catch (err) {
-      if (err instanceof Error && /no such (column|table)/i.test(err.message)) return false;
-      throw err;
-    }
-  }
-
   async recomputeTaskExecutionStage(taskId: string): Promise<void> {
     // Development-cycle re-open window (migration 067): read reopened_at ALONGSIDE
     // the task row (columnExists-gated for pre-067 schemas) so gatherTaskRuns can
@@ -2281,30 +2253,6 @@ export class TaskChangeRouter {
 
     const runs = this.gatherTaskRuns(taskId, task.reopened_at);
     if (runs.length === 0) {
-      // LIVE EXPERIMENT SEED (C2): an original task whose A/B experiment is still
-      // running has NO run of its own — its per-arm clones carry the runs (and are
-      // hidden by their experiment tag) — so without this it would sit at its
-      // asserted "Ready for development" stage while the experiment executes,
-      // invisible in the "In development" column. Hold it at position 7 while it is
-      // a live seed. This SELF-HEALS: once the experiment settles the predicate is
-      // false and the stale-derived revert below returns it to Ready (discard /
-      // abandon), while decide's winner-fold advances the original directly.
-      if (this.isLiveExperimentSeed(taskId)) {
-        const seedStage = this.lookupStage(task.stage_id);
-        // Never yank a task already parked at a terminal stage (Done / Won't do).
-        if (seedStage?.is_terminal === 1) return;
-        const inDevId = this.stageIdForPosition(task.board_id, IN_DEVELOPMENT_POSITION);
-        if (inDevId && inDevId !== task.stage_id) {
-          await this.applyChange(task.project_id, {
-            actor: 'orchestrator',
-            entityType: 'task',
-            taskId: task.id,
-            stageId: inDevId,
-            kind: 'execution-stage',
-          });
-        }
-        return;
-      }
       // No runs: leave an asserted planning stage untouched. A DERIVED stage with
       // zero runs is a stale projection (e.g. the runs were deleted) — revert it
       // to the entry stage so the task doesn't read as in-development forever.
@@ -2979,6 +2927,33 @@ export class TaskChangeRouter {
    * derivation is type-agnostic — a non-task simply has zero matching direct OR
    * batch-lane runs.
    */
+  /**
+   * READ-ONLY overlay helper: true when `taskId` is the ORIGINAL seed of a LIVE
+   * (non-settled) A/B experiment. Its per-arm clones carry the runs (and are hidden
+   * by their experiment tag), so the original has no run of its own — the board
+   * derives its "In development" placement + "In experiment" badge from THIS flag
+   * (read-side), never a stage write. "Live" = experiments.status NOT IN the
+   * terminal set, matching isExperimentSettled / the read-path helper in
+   * taskListing.ts. Degrades PERMISSIVELY (false) on a schema lacking the tables.
+   */
+  private isLiveExperimentSeed(taskId: string): boolean {
+    try {
+      const row = this.db
+        .prepare(
+          `SELECT 1 FROM experiment_seed_tasks est
+             JOIN experiments e ON e.id = est.experiment_id
+            WHERE est.original_task_id = ?
+              AND e.status NOT IN ('decided', 'abandoned', 'superseded')
+            LIMIT 1`,
+        )
+        .get(taskId);
+      return row !== undefined;
+    } catch (err) {
+      if (err instanceof Error && /no such (column|table)/i.test(err.message)) return false;
+      throw err;
+    }
+  }
+
   private buildBacklogTaskItem(type: TaskType, taskId: string): BacklogTaskItem | null {
     const row = this.readEntity(type, this.projectIdOf(type, taskId) ?? -1, taskId);
     if (!row) return null;

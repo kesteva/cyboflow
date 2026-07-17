@@ -18,6 +18,7 @@ import {
   countArchived,
   unifiedStages,
   bucketByStage,
+  effectiveBoardPosition,
   visibleStages,
   deriveCounts,
   findStageById,
@@ -389,9 +390,39 @@ describe('bucketByStage', () => {
 
   it('preserves the StageBucket shape with one bucket per stage in order', () => {
     const stages = unifiedStages([defaultBoard()], null, true);
-    const buckets = bucketByStage([], stages);
-    expect(buckets.map((b) => b.stage.position)).toEqual([1, 6, 9, 10]);
-    expect(buckets.every((b) => Array.isArray(b.tasks))).toBe(true);
+    expect(bucketByStage([], stages).map((b) => b.stage.position)).toEqual([1, 6, 9, 10]);
+  });
+
+  it('buckets a live experiment seed under In development (7) despite its DB stage_position 6', () => {
+    // The real board carries the derived In-development stage (migration 066);
+    // build one here so the position-7 bucket exists.
+    const board: Board = {
+      ...defaultBoard(),
+      stages: [
+        stage(1, 'Idea', { id: 'board-1-s1' }),
+        stage(6, 'Ready for development', { id: 'board-1-s6' }),
+        stage(7, 'In development', { id: 'board-1-s7', write_policy: 'derived' }),
+        stage(9, 'Done', { id: 'board-1-s9', is_terminal: true }),
+      ],
+    };
+    const stages = unifiedStages([board], null, false);
+    const tasks = [
+      item({ id: 'SEED-1', stage_position: 6, experimentSeed: true }),
+      item({ id: 'NORMAL-1', stage_position: 6 }),
+    ];
+    const buckets = bucketByStage(tasks, stages);
+    const at = (pos: number) => buckets.find((b) => b.stage.position === pos);
+    // The live seed is placed in In-development on read; the normal task stays in Ready.
+    expect(at(7)?.tasks.map((t) => t.id)).toEqual(['SEED-1']);
+    expect(at(6)?.tasks.map((t) => t.id)).toEqual(['NORMAL-1']);
+  });
+});
+
+describe('effectiveBoardPosition', () => {
+  it('returns the In-development position (7) for a live experiment seed, else the DB stage_position', () => {
+    expect(effectiveBoardPosition(item({ stage_position: 6, experimentSeed: true }))).toBe(7);
+    expect(effectiveBoardPosition(item({ stage_position: 6 }))).toBe(6);
+    expect(effectiveBoardPosition(item({ stage_position: 9, experimentSeed: false }))).toBe(9);
   });
 });
 

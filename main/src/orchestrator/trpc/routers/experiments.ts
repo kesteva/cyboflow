@@ -114,13 +114,6 @@ export interface ExperimentsLaunchLike {
 /** TaskChangeRouter structural surface used by the experiment orchestration. */
 export interface ExperimentsTaskChangeLike {
   applyChange(projectId: number, change: TaskChange): Promise<{ taskId: string }>;
-  /**
-   * Re-derive an ORIGINAL seed task's execution stage (C2). At start this pulls the
-   * original to "In development" (position 7) while its arms run; at discard/abandon
-   * it reverts the now-stale derived stage to the entry stage. The decide WINNER path
-   * does NOT call this — its fold advances the original directly to the clone's stage.
-   */
-  recomputeTaskExecutionStage(taskId: string): Promise<void>;
   deleteExperimentArmEntities(
     projectId: number,
     opts: {
@@ -784,16 +777,9 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
         'B',
         seedTasks.map((st, i) => ({ originalTaskId: st.id, cloneTaskId: createdTaskClonesB[i] })),
       );
-      // C2: pull each ORIGINAL seed to "In development" (position 7) now that the
-      // mapping exists (isLiveExperimentSeed is true). The original has no run of
-      // its own — its arm clones do — so the deriver's live-seed branch is what
-      // surfaces it in the board's "In development" column instead of leaving it
-      // stuck at "Ready for development" while the experiment runs. Fail-soft per
-      // task: a stage-move miss must not abort the launch (the badge still fires
-      // off the same read-side predicate).
-      for (const st of seedTasks) {
-        await deps.taskChangeRouter.recomputeTaskExecutionStage(st.id).catch(() => {});
-      }
+      // The board surfaces each original in the "In development" column + "In
+      // experiment" badge purely on READ (its experimentSeed overlay, derived from
+      // this mapping + the running experiment) — no stage write here.
     }
 
     // 6. Launch arm A then B. Idea-seeded arms pass `ideaId = the arm's idea clone`;
@@ -1103,12 +1089,6 @@ export async function decideExperiment(
   // Discard-both (winnerRunId null): sweep both arms (incl. seed TASK clones),
   // dismiss both sessions, drop the seed-task mapping rows.
   if (winnerRunId === null) {
-    // Capture the ORIGINAL seed ids BEFORE deleteExperimentSeedTasks drops the
-    // mapping, so we can revert them off "In development" (C2) once the experiment
-    // is stamped terminal below (uniq — both arms map the same originals).
-    const discardOriginals = [
-      ...new Set(listExperimentSeedTasks(db, experimentId).map((r) => r.original_task_id)),
-    ];
     if (exp.run_a_id) {
       await deps.taskChangeRouter.deleteExperimentArmEntities(projectId, {
         experimentId,
@@ -1131,12 +1111,8 @@ export async function decideExperiment(
       winnerArm: null,
       decidedAt: now,
     });
-    // C2: revert each original off "In development" now that the experiment is
-    // terminal (isLiveExperimentSeed is false) — the deriver's stale-derived branch
-    // returns it to its entry stage. Fail-soft per task.
-    for (const originalId of discardOriginals) {
-      await deps.taskChangeRouter.recomputeTaskExecutionStage(originalId).catch(() => {});
-    }
+    // No stage revert needed — the board derives placement from the experimentSeed
+    // overlay, which flips false the instant the experiment is stamped terminal.
     if (exp.session_a_id) await deps.dismissSession(exp.session_a_id).catch(() => {});
     if (exp.session_b_id) await deps.dismissSession(exp.session_b_id).catch(() => {});
     resolveDecisionReviewItem(deps, experimentId);
@@ -1409,17 +1385,10 @@ export async function abandonExperiment(deps: ExperimentsDeps, experimentId: str
     updateExperimentStatus(db, experimentId, prevStatus);
     throw err;
   }
-  // Capture the ORIGINAL seed ids BEFORE the mapping is dropped so we can revert
-  // them off "In development" (C2). The experiment is already stamped 'abandoned'
-  // above, so isLiveExperimentSeed is false and the deriver reverts each original
-  // to its entry stage. Uniq — both arms map the same originals; fail-soft per task.
-  const abandonOriginals = [
-    ...new Set(listExperimentSeedTasks(db, experimentId).map((r) => r.original_task_id)),
-  ];
+  // No stage revert needed — the board derives each original's placement from the
+  // experimentSeed overlay, which flips false the instant the experiment is stamped
+  // 'abandoned' above (the mapping drop below removes the tie entirely).
   deleteExperimentSeedTasks(db, experimentId);
-  for (const originalId of abandonOriginals) {
-    await deps.taskChangeRouter.recomputeTaskExecutionStage(originalId).catch(() => {});
-  }
 
   // Sweep + mapping-drop succeeded (the experiment was already stamped 'abandoned').
   // Resolve the blocking pairwise decision review item if one was minted before the

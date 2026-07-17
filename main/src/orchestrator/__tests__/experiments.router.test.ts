@@ -463,7 +463,6 @@ describe('experiments router orchestration (slice B)', () => {
           sweepCalls += 1;
           return h.deps.taskChangeRouter.deleteExperimentArmEntities(pid, opts);
         },
-        recomputeTaskExecutionStage: (taskId) => h.deps.taskChangeRouter.recomputeTaskExecutionStage(taskId),
       },
     };
 
@@ -532,7 +531,6 @@ describe('experiments router orchestration (slice B)', () => {
           sweepCalls += 1;
           return h.deps.taskChangeRouter.deleteExperimentArmEntities(pid, opts);
         },
-        recomputeTaskExecutionStage: (taskId) => h.deps.taskChangeRouter.recomputeTaskExecutionStage(taskId),
       },
     };
 
@@ -603,61 +601,64 @@ describe('experiments router orchestration (slice B)', () => {
     expect(launchB?.seedTaskIds?.sort()).toEqual(armBClones.sort());
   });
 
-  // C2: the original seed has no run of its own (its clones carry them), so the
-  // deriver's live-seed branch is what surfaces it in the "In development" column.
+  // Live-experiment-seed overlay: an original seed has no run of its own (its
+  // clones carry them). The board buckets it under "In development" + shows the
+  // "In experiment" badge purely on READ, off this overlay — the DB stage is never
+  // written, so it is correct for every experiment and reverts the instant the
+  // experiment settles (the overlay clears).
   function stagePosition(h: Harness, taskId: string): number {
     const row = h.db
       .prepare('SELECT bs.position AS p FROM tasks t JOIN board_stages bs ON bs.id = t.stage_id WHERE t.id = ?')
       .get(taskId) as { p: number } | undefined;
     return row?.p ?? -1;
   }
-  /** The read-side `experimentSeed` overlay (drives the "In experiment" badge). */
+  /** The read-side `experimentSeed` overlay (drives In-development placement + badge). */
   function experimentSeedFlag(h: Harness, taskId: string): boolean {
     const stageId = field(h.db, 'tasks', taskId, 'stage_id') as string;
     return computeTaskOverlay(dbAdapter(h.db), { id: taskId, stage_id: stageId }).experimentSeed;
   }
 
-  it('C2: task-seeded start pulls each ORIGINAL to In development (7) + flags the badge; abandon reverts to Ready (6)', async () => {
+  it('a task-seeded experiment flags each ORIGINAL as a live seed while running; the DB stage is NOT written; abandon clears it', async () => {
     const h = makeHarness();
     const t1 = await seedEligibleTask(h, 'T1', 'b1');
     const t2 = await seedEligibleTask(h, 'T2', 'b2');
-    expect(stagePosition(h, t1)).toBe(6); // Ready for development
+    expect(experimentSeedFlag(h, t1)).toBe(false);
 
     const res = await startExperiment(h.deps, {
       projectId: 1, workflowId: 'wf-sprint', variantAId: 'vA-sprint', variantBId: 'vB-sprint',
       seedTaskIds: [t1, t2],
     });
 
-    // Held at the derived "In development" stage while the experiment runs...
-    expect(stagePosition(h, t1)).toBe(7);
-    expect(stagePosition(h, t2)).toBe(7);
-    // ...and flagged as a live experiment seed (drives the "In experiment" badge).
+    // Overlay flips true while the experiment runs — the board buckets the original
+    // under "In development" + renders the badge off THIS flag, with no stage write.
     expect(experimentSeedFlag(h, t1)).toBe(true);
+    expect(experimentSeedFlag(h, t2)).toBe(true);
+    expect(stagePosition(h, t1)).toBe(6); // DB stage untouched (Ready for development)
 
     await abandonExperiment(h.deps, res.experimentId);
 
-    // Settled → reverted off "In development", badge cleared.
-    expect(stagePosition(h, t1)).toBe(6);
-    expect(stagePosition(h, t2)).toBe(6);
+    // Settled → overlay clears; the card returns to Ready on the board.
     expect(experimentSeedFlag(h, t1)).toBe(false);
+    expect(experimentSeedFlag(h, t2)).toBe(false);
+    expect(stagePosition(h, t1)).toBe(6);
   });
 
-  it('C2: discard-both decide reverts each ORIGINAL off In development to Ready (6)', async () => {
+  it('discard-both decide clears the live-seed overlay on each ORIGINAL', async () => {
     const h = makeHarness();
     const t1 = await seedEligibleTask(h, 'T1', 'orig-1');
     const res = await startExperiment(h.deps, {
       projectId: 1, workflowId: 'wf-sprint', variantAId: 'vA-sprint', variantBId: 'vB-sprint',
       seedTaskIds: [t1],
     });
-    expect(stagePosition(h, t1)).toBe(7);
+    expect(experimentSeedFlag(h, t1)).toBe(true);
 
     // Both arms settled so decide(null) is permitted.
     setRunStatus(h.db, res.armA.runId, 'completed');
     setRunStatus(h.db, res.armB.runId, 'completed');
     await decideExperiment(h.deps, res.experimentId, null);
 
-    expect(stagePosition(h, t1)).toBe(6);
     expect(experimentSeedFlag(h, t1)).toBe(false);
+    expect(stagePosition(h, t1)).toBe(6);
   });
 
   it('rejects providing BOTH a seed idea and seed tasks', async () => {
@@ -947,7 +948,6 @@ describe('experiments router orchestration (slice B)', () => {
           sweepCalls += 1;
           return h.deps.taskChangeRouter.deleteExperimentArmEntities(pid, opts);
         },
-        recomputeTaskExecutionStage: (taskId) => h.deps.taskChangeRouter.recomputeTaskExecutionStage(taskId),
       },
     };
 
@@ -1305,7 +1305,6 @@ describe('experiments router orchestration (slice B)', () => {
             return h.deps.taskChangeRouter.applyChange(pid, change);
           },
           deleteExperimentArmEntities: (pid, opts) => h.deps.taskChangeRouter.deleteExperimentArmEntities(pid, opts),
-          recomputeTaskExecutionStage: (taskId) => h.deps.taskChangeRouter.recomputeTaskExecutionStage(taskId),
         },
       };
 
@@ -1343,7 +1342,6 @@ describe('experiments router orchestration (slice B)', () => {
             return h.deps.taskChangeRouter.applyChange(pid, change);
           },
           deleteExperimentArmEntities: (pid, opts) => h.deps.taskChangeRouter.deleteExperimentArmEntities(pid, opts),
-          recomputeTaskExecutionStage: (taskId) => h.deps.taskChangeRouter.recomputeTaskExecutionStage(taskId),
         },
       };
 
@@ -1551,7 +1549,6 @@ describe('experiments router orchestration (slice B)', () => {
         taskChangeRouter: {
           applyChange: (pid, change) => h.deps.taskChangeRouter.applyChange(pid, change),
           deleteExperimentArmEntities: () => Promise.reject(new Error('boom-sweep')),
-          recomputeTaskExecutionStage: (taskId) => h.deps.taskChangeRouter.recomputeTaskExecutionStage(taskId),
         },
       };
       await expect(abandonExperiment(deps, res.experimentId)).rejects.toThrow(/boom-sweep/);
