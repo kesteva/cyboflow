@@ -62,6 +62,12 @@ vi.mock('../../stores/quickSessionsStore', () => ({
   useQuickSessionsStore: { getState: () => ({ init: () => () => undefined, refresh: vi.fn() }) },
 }));
 
+// The dynamic-workflow feed drives the idle→running override; no live workflows
+// here, so the board reflects the mocked quick rows verbatim.
+vi.mock('../../stores/dynamicWorkflowStore', () => ({
+  useActiveDynamicWorkflows: () => [],
+}));
+
 import { TypeGroupedQueue } from '../landing/TypeGroupedQueue';
 
 function makeItem(overrides: Partial<ReviewItem> = {}): ReviewItem {

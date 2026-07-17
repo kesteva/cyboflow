@@ -20,6 +20,7 @@
  */
 import React from 'react';
 import { useQuickSessionRows, useQuickSessionsStore } from '../../stores/quickSessionsStore';
+import { useActiveDynamicWorkflows } from '../../stores/dynamicWorkflowStore';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useSessionStore } from '../../stores/sessionStore';
@@ -31,6 +32,29 @@ function sortWeight(row: QuickSessionRow): number {
   if (row.state === 'blocked') return 0;
   if (row.state === 'idle') return row.unviewed ? 1 : 2;
   return 3; // running
+}
+
+/**
+ * Override `idle` → `running` for sessions with a live dynamic workflow.
+ *
+ * A quick session that launches a Claude Code dynamic workflow (the Workflow
+ * tool) parks its PTY turn while the workflow runs DETACHED in the background —
+ * so `sessions.status` reads `completed` and the row derives to `idle`, even
+ * though the session is actively working (and the Active-agents panel shows it
+ * running). This reconciles the board with that panel: any idle row whose
+ * sessionId has an active dynamic workflow is shown `running` (idleSince cleared
+ * so no "quiet for N" label). `blocked` is never overridden — a pending question
+ * still wins.
+ */
+export function overrideRunningForActiveWorkflows(
+  rows: QuickSessionRow[],
+  activeWorkflowSessionIds: ReadonlySet<string>,
+): QuickSessionRow[] {
+  return rows.map((row) =>
+    row.state === 'idle' && activeWorkflowSessionIds.has(row.sessionId)
+      ? { ...row, state: 'running', idleSince: null }
+      : row,
+  );
 }
 
 /** Stable board order: attention first, then longest-quiet idle first. */
@@ -52,8 +76,9 @@ const STATE_CHIP: Record<QuickSessionState, { label: string; className: string }
   running: { label: 'running', className: 'border-border-emphasized text-status-success' },
 };
 
-/** Wall-clock refresh cadence for the "quiet for N" labels (shared across rows). */
-const ELAPSED_TICK_MS = 5000;
+/** Wall-clock refresh cadence for the "quiet for N" labels (shared across rows).
+ *  1s so the counter climbs continuously (per-second) rather than in visible jumps. */
+const ELAPSED_TICK_MS = 1000;
 
 /** Open a quick session AND mark it viewed, then refresh the board so its row updates promptly. */
 function openQuickSession(row: QuickSessionRow): void {
@@ -115,6 +140,9 @@ function QuickSessionRowView({ row, nowMs }: { row: QuickSessionRow; nowMs: numb
  */
 export function QuickSessionsTable(): React.JSX.Element | null {
   const rows = useQuickSessionRows();
+  // Sessions with a live dynamic workflow (Active-agents feed) — used to override
+  // their idle rows to `running` (dynamicWorkflowStore is init'd by LandingHome).
+  const activeDynamicWorkflows = useActiveDynamicWorkflows();
 
   // Join the polling feed while mounted (ref-counted in the store).
   React.useEffect(() => useQuickSessionsStore.getState().init(), []);
@@ -126,7 +154,14 @@ export function QuickSessionsTable(): React.JSX.Element | null {
     return () => clearInterval(id);
   }, []);
 
-  const sorted = React.useMemo(() => sortQuickSessionRows(rows), [rows]);
+  const activeWorkflowSessionIds = React.useMemo(
+    () => new Set(activeDynamicWorkflows.map((w) => w.sessionId)),
+    [activeDynamicWorkflows],
+  );
+  const sorted = React.useMemo(
+    () => sortQuickSessionRows(overrideRunningForActiveWorkflows(rows, activeWorkflowSessionIds)),
+    [rows, activeWorkflowSessionIds],
+  );
   if (sorted.length === 0) return null;
 
   return (
