@@ -22,6 +22,17 @@ interface RawCommitData {
 const execAsync = promisify(exec);
 
 /**
+ * Narrow seam for the Codex-broker reaper (see {@link CodexBrokerReaper}). Worktree
+ * removal is the single chokepoint every dismiss/merge/delete path funnels through,
+ * so it is where we reap the detached `openai-codex` plugin broker daemons rooted in
+ * the worktree being removed. Kept as a minimal interface so WorktreeManager stays
+ * decoupled and unit-testable (a fake satisfies it).
+ */
+export interface WorktreeBrokerReaper {
+  reapForWorktree(worktreePath: string): Promise<void>;
+}
+
+/**
  * Typed, identifiable error thrown by {@link WorktreeManager.mergeWorktreeToBranch}
  * when rebasing a per-task run branch onto the integration branch hits a conflict
  * (or the integration update is not a fast-forward). The retired scheduler-model
@@ -63,9 +74,25 @@ export class WorktreeManager {
   private projectsCache: Map<string, { baseDir: string }> = new Map();
 
   constructor(
-    private configManager?: ConfigManager
+    private configManager?: ConfigManager,
+    private codexBrokerReaper?: WorktreeBrokerReaper,
   ) {
     // No longer initialized with a single repo path
+  }
+
+  /**
+   * Best-effort reap of any detached Codex broker tree rooted in a just-removed
+   * worktree. Fail-soft by contract: the reaper never throws, but we still guard
+   * so a missing reaper (tests) or an unexpected error can never turn a successful
+   * worktree removal into a failure.
+   */
+  private async reapCodexBrokers(worktreePath: string): Promise<void> {
+    if (!this.codexBrokerReaper) return;
+    try {
+      await this.codexBrokerReaper.reapForWorktree(worktreePath);
+    } catch (error) {
+      console.warn(`[WorktreeManager] Codex broker reap failed for ${worktreePath}:`, error);
+    }
   }
 
   private getProjectPaths(projectPath: string, worktreeFolder?: string) {
@@ -263,12 +290,16 @@ export class WorktreeManager {
             errorMessage.includes('does not exist') ||
             errorMessage.includes('No such file or directory')) {
           console.log(`Worktree ${worktreePath} already removed or doesn't exist, skipping...`);
+          // Still reap: a manually-deleted worktree can leave its detached Codex
+          // broker running with a now-gone cwd.
+          await this.reapCodexBrokers(worktreePath);
           return;
         }
 
         // For other errors, still throw
         throw new Error(`Failed to remove worktree: ${errorMessage}`);
       }
+      await this.reapCodexBrokers(worktreePath);
     });
   }
 
@@ -293,10 +324,12 @@ export class WorktreeManager {
             errorMessage.includes('does not exist') ||
             errorMessage.includes('No such file or directory')) {
           console.log(`Worktree ${worktreePath} already removed or doesn't exist, skipping...`);
+          await this.reapCodexBrokers(worktreePath);
           return;
         }
         throw new Error(`Failed to remove worktree: ${errorMessage}`);
       }
+      await this.reapCodexBrokers(worktreePath);
     });
   }
 

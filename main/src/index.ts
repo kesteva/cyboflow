@@ -81,6 +81,7 @@ import { VlmJudgeImpl } from './services/visualVerify/vlmJudge';
 import { DevServerManager } from './services/visualVerify/devServerManager';
 import { StaticServerManager } from './services/visualVerify/staticServerManager';
 import { PrototypeServerReaper } from './services/prototypeServerReaper';
+import { CodexBrokerReaper } from './services/codexBrokerReaper';
 import { FsBaselineStore } from './services/visualVerify/baselineStore';
 import { comparePngFiles } from './services/visualVerify/pixelDiff';
 import { resolveDeliverableContext, resolveStaticHtmlContext } from './orchestrator/verifyConfigLoader';
@@ -328,6 +329,12 @@ let runShellManager: RunShellManager | null = null;
 // all share ONE instance. Stateless (ps + process.kill) — safe to construct at
 // module load; the logger is optional, so no whenReady wiring is required.
 const prototypeServerReaper = new PrototypeServerReaper();
+
+// Reaper for the detached `openai-codex` plugin broker daemons a Codex-using
+// session leaks into a worktree (see CodexBrokerReaper). Stateless (ps +
+// process.kill + fs.existsSync) — safe to construct at module load. Wired into
+// WorktreeManager (reap on worktree removal) and the boot sweep below.
+const codexBrokerReaper = new CodexBrokerReaper();
 
 // Store original console methods before overriding
 // These must be captured immediately when the module loads
@@ -829,7 +836,7 @@ async function initializeServices() {
   archiveProgressManager = new ArchiveProgressManager();
 
   // Create worktree manager
-  worktreeManager = new WorktreeManager(configManager);
+  worktreeManager = new WorktreeManager(configManager, codexBrokerReaper);
 
   // Initialize the active project's worktree directory if one exists
   const activeProject = sessionManager.getActiveProject();
@@ -2440,6 +2447,16 @@ app.whenReady().then(async () => {
     .catch((err) => {
       console.error('[Main] prototype-server boot sweep failed:', err);
     });
+
+  // Boot sweep: kill detached `openai-codex` plugin broker trees whose worktree
+  // (`--cwd`) no longer exists on disk — orphans a prior session or a crash left
+  // behind (the plugin's own SessionEnd reaper never fires under cyboflow's
+  // hard-kill teardown, and the broker has no idle TTL). A broker for a still-live
+  // worktree is spared automatically (its cwd still exists). Fire-and-forget —
+  // never block boot on `ps`.
+  void codexBrokerReaper.sweepOrphans().catch((err) => {
+    console.error('[Main] codex-broker boot sweep failed:', err);
+  });
 
   // Schema-version gate: each packaged kind now owns its own data dir
   // (stable → ~/.cyboflow, Dev DMG → ~/.cyboflow_dev_dmg), so cross-variant

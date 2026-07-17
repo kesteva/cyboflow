@@ -939,3 +939,57 @@ describe('WorktreeManager remote sync (integration)', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Codex-broker reaping on worktree removal (wiring for CodexBrokerReaper).
+//
+// WorktreeManager is the single chokepoint every dismiss/merge/delete path
+// funnels through, so it fires the injected reaper on removal to clean up the
+// detached `openai-codex` plugin broker daemons a Codex-using session leaks into
+// the worktree. These use real temp git repos + a fake reaper seam.
+// ---------------------------------------------------------------------------
+
+describe('WorktreeManager Codex-broker reaping (integration)', () => {
+  it('reaps the removed worktree path on the success path', async () => {
+    await withTempDir('worktree-reap-ok-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const wtPath = join(tmpDir, 'worktrees', 'quick-X');
+      execSync(`git worktree add -b quick-X "${wtPath}"`, { cwd: tmpDir, stdio: 'pipe' });
+
+      const reapForWorktree = vi.fn<(p: string) => Promise<void>>().mockResolvedValue(undefined);
+      const manager = new WorktreeManager(undefined, { reapForWorktree });
+
+      await manager.removeWorktree(tmpDir, 'quick-X');
+
+      expect(reapForWorktree).toHaveBeenCalledWith(wtPath);
+      expect(existsSync(wtPath)).toBe(false);
+    });
+  });
+
+  it('still reaps on the idempotent already-gone path (removeWorktreeByPath)', async () => {
+    await withTempDir('worktree-reap-idem-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const bogus = join(tmpDir, 'worktrees', 'never-existed');
+      const reapForWorktree = vi.fn<(p: string) => Promise<void>>().mockResolvedValue(undefined);
+      const manager = new WorktreeManager(undefined, { reapForWorktree });
+
+      await expect(manager.removeWorktreeByPath(tmpDir, bogus)).resolves.toBeUndefined();
+
+      expect(reapForWorktree).toHaveBeenCalledWith(bogus);
+    });
+  });
+
+  it('a throwing reaper never fails the removal (fail-soft)', async () => {
+    await withTempDir('worktree-reap-soft-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const wtPath = join(tmpDir, 'worktrees', 'quick-Y');
+      execSync(`git worktree add -b quick-Y "${wtPath}"`, { cwd: tmpDir, stdio: 'pipe' });
+
+      const reapForWorktree = vi.fn<(p: string) => Promise<void>>().mockRejectedValue(new Error('boom'));
+      const manager = new WorktreeManager(undefined, { reapForWorktree });
+
+      await expect(manager.removeWorktree(tmpDir, 'quick-Y')).resolves.toBeUndefined();
+      expect(existsSync(wtPath)).toBe(false);
+    });
+  });
+});
