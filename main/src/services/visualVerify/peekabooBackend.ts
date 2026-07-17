@@ -1,6 +1,6 @@
 /**
  * PeekabooBackend — Rung 2 of the layered visual-verification capability ladder
- * (see docs/visual-verification-design.md §5 + §L3). It is the ONLY backend that
+ * (see docs/proposals/visual-verification-design.md §5 + §L3). It is the ONLY backend that
  * can see cyboflow's OWN renderer: it SCREENSHOTS the already-running app via the
  * `peekaboo` CLI rather than bootstrapping a renderer (capturePage / playwright
  * both fail identically on cyboflow's own window — the renderer needs the

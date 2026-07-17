@@ -1,7 +1,7 @@
 /**
  * ConfigManager visual-verification getter coverage — the global master switch
  * and resolved-block getter for layered visual verification (P2; see
- * docs/visual-verification-design.md #7 and shared/types/visualVerification.ts).
+ * docs/proposals/visual-verification-design.md #7 and shared/types/visualVerification.ts).
  *
  * Contract:
  *   - getVisualVerifyEnabled() floors to false on a fresh instance (no config.json)

@@ -1,6 +1,6 @@
 /**
  * DevServerManager — the concrete dev-server spawner for layered visual
- * verification (see docs/visual-verification-design.md §"Locked decisions" #1 +
+ * verification (see docs/proposals/visual-verification-design.md §"Locked decisions" #1 +
  * the S2 slice). The scheduler OWNS the dev server: per a deliverable's
  * `.cyboflow/verify.json` `build` / `start` / `readyWhen` / `${PORT}` contract it
  * stands the deliverable up on a leased `verify:port:<p>`, waits for readiness,

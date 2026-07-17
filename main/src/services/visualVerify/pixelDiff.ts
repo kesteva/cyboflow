@@ -1,6 +1,6 @@
 /**
  * pixelDiff — a ZERO-DEP pixel/SSIM-style pre-diff for the L5 golden-baseline tier
- * (see docs/visual-verification-design.md §"Golden baselines"). It compares a
+ * (see docs/proposals/visual-verification-design.md §"Golden baselines"). It compares a
  * freshly-captured PNG against an accepted baseline PNG and returns a similarity
  * score in [0, 1] (1.0 = identical). The scheduler gates the paid VLM on this: a
  * score >= the baseline-match threshold is a cheap deterministic PASS (no vision

@@ -2818,7 +2818,7 @@ export class McpQueryHandler {
   // --------------------------------------------------------------------------
   // Visual verification request (cyboflow_request_verification)
   //
-  // FIRE-AND-CONTINUE producer seam (docs/visual-verification-design.md §"The
+  // FIRE-AND-CONTINUE producer seam (docs/proposals/visual-verification-design.md §"The
   // collision story" #1): resolve the run's IMMUTABLY-stamped verify posture
   // (migration 055 verify_enabled / verify_type / verify_chain), enqueue ONE
   // verification_requests row via the VerificationScheduler chokepoint, and reply

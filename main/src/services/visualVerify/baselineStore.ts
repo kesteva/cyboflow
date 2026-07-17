@@ -1,6 +1,6 @@
 /**
  * baselineStore — the FILESYSTEM home for git-tracked golden baselines (L5; see
- * docs/visual-verification-design.md §"Golden baselines"). Baselines are NOT
+ * docs/proposals/visual-verification-design.md §"Golden baselines"). Baselines are NOT
  * DB-tracked: they live as plain PNGs under
  *
  *   <projectRoot>/.cyboflow/artifacts/baselines/<key>/<viewport>.png

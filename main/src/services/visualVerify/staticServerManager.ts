@@ -1,6 +1,6 @@
 /**
  * StaticServerManager — the concrete static-file-server spawner for layered
- * visual verification (S9, see docs/visual-verification-design.md §"Locked
+ * visual verification (S9, see docs/proposals/visual-verification-design.md §"Locked
  * decisions" #1 + the S9 slice). It closes the zero-config `htmlPath` blank-page
  * class: a request that points at a BUILT html file (no dev server, no
  * verify.json `start`) was previously loaded over `file://` by the rung-0

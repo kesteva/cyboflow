@@ -22,7 +22,7 @@
  * `WorkflowDefinition` (phases → steps, with per-step `agent` / `human` /
  * `retries` / `loopback`) from `./workflows.ts`. The execution model only changes
  * who walks it — the model (orchestrated) or the host code (programmatic). See
- * `docs/sdk-program-driven-workflows.md` for the full two-plane architecture.
+ * `docs/proposals/sdk-program-driven-workflows.md` for the full two-plane architecture.
  *
  * This file is consumed by both the main process (resolver, registry,
  * ConfigManager) and the renderer. Keep it free of Node.js built-ins so it can

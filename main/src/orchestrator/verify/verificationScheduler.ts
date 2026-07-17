@@ -1,7 +1,7 @@
 /**
  * VerificationScheduler — the main-process singleton that owns the DB-backed
  * verification_requests queue, the ResourceLeasePool (built over the shared
- * `mutex`), and the waterfall drain loop (see docs/visual-verification-design.md
+ * `mutex`), and the waterfall drain loop (see docs/proposals/visual-verification-design.md
  * §4 + "The collision story"). It is the producer-side scheduler for the layered
  * visual-verification MVP: lane agents fire a request (INSERT 'queued' + nudge),
  * never block; this scheduler drains them on ITS OWN setImmediate loop, leases the

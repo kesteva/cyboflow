@@ -1,6 +1,6 @@
 /**
  * verifyConfigLoader — the SOLE reader of a project's `.cyboflow/verify.json`
- * (see docs/visual-verification-design.md §"Config homes" + #6).
+ * (see docs/proposals/visual-verification-design.md §"Config homes" + #6).
  *
  * `.cyboflow/verify.json` is the per-project, per-deliverable "how to run this"
  * product config that travels WITH the deliverable at the project root (sibling

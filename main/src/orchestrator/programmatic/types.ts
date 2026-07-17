@@ -1,6 +1,6 @@
 /**
  * Protocol types for the programmatic execution plane (Stage 1 of the
- * execution-model seam — see docs/sdk-program-driven-workflows.md).
+ * execution-model seam — see docs/proposals/sdk-program-driven-workflows.md).
  *
  * In the `programmatic` execution model, host CODE walks the workflow's DAG (its
  * `WorkflowDefinition`) instead of an orchestrator agent. The `WorkflowController`

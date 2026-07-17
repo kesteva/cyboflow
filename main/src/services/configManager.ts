@@ -405,7 +405,7 @@ export class ConfigManager extends EventEmitter {
 
   /**
    * The global master switch for layered visual verification (see
-   * docs/visual-verification-design.md and shared/types/visualVerification.ts).
+   * docs/proposals/visual-verification-design.md and shared/types/visualVerification.ts).
    *
    * Floors to false when the `visualVerify` block — or its `enabled` member — is
    * absent: verification is OFF by default and no request is ever enqueued. Like

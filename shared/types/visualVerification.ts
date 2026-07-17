@@ -1,6 +1,6 @@
 /**
  * Pure shared seam for layered visual verification (see
- * docs/visual-verification-design.md). Sibling to ./substrate.ts and
+ * docs/proposals/visual-verification-design.md). Sibling to ./substrate.ts and
  * ./executionModel.ts: both the main process (resolver, scheduler, backends,
  * judge, registry) and the renderer (verify panel, settings) import from here.
  *

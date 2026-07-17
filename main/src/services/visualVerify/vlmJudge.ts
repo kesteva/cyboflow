@@ -1,6 +1,6 @@
 /**
  * VlmJudge — the orthogonal "Rung 4" of layered visual verification
- * (docs/visual-verification-design.md §6). A STATELESS Claude vision call applied
+ * (docs/proposals/visual-verification-design.md §6). A STATELESS Claude vision call applied
  * after whichever capture rung produced PNGs: it is shown the screenshots + the
  * acceptance `intent` and returns a structured VerdictV1
  * (pass | fail | low_confidence). Below the configured confidence threshold the

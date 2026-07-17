@@ -1,6 +1,6 @@
 /**
  * visualVerificationResolver — the SINGLE resolution point for a run's layered
- * visual-verification posture (see docs/visual-verification-design.md §2).
+ * visual-verification posture (see docs/proposals/visual-verification-design.md §2).
  * Exact sibling of substrateResolver.ts / executionModelResolver.ts: all three
  * are resolved together in WorkflowRegistry.createRun and stamped IMMUTABLY onto
  * the workflow_runs row (no UPDATE path — a long run can't change posture

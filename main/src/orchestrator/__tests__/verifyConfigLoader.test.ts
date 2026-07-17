@@ -1,6 +1,6 @@
 /**
  * Unit tests for verifyConfigLoader — the SOLE reader of a project's
- * `.cyboflow/verify.json` (see docs/visual-verification-design.md §"Config homes").
+ * `.cyboflow/verify.json` (see docs/proposals/visual-verification-design.md §"Config homes").
  *
  * The loader's whole job is its fail-soft contract: absent file => null;
  * malformed JSON => logger.warn + null; valid JSON => parsed VerifyConfigFile.

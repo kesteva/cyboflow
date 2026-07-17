@@ -104,7 +104,7 @@ cyboflow is desktop-only. `verification.visual_mobile=false`.
 
 The sections above cover verifying **cyboflow's own** renderer while working ON
 this codebase. Separately, cyboflow's *built-in* layered visual verification
-(`cyboflow_request_verification`, see `docs/visual-verification-design.md`) lets a
+(`cyboflow_request_verification`, see `docs/proposals/visual-verification-design.md`) lets a
 lane agent point at a plain built html file via `htmlPath` — e.g. a static site
 export with no dev server. That capture is now served over an ephemeral loopback
 HTTP server rather than `file://`, so `<script type="module">` and other

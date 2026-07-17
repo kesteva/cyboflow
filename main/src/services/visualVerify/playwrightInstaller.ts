@@ -1,6 +1,6 @@
 /**
  * playwrightInstaller — lazy, chromium-ONLY browser-binary provisioning for the
- * Rung-1 PlaywrightBackend (see docs/visual-verification-design.md §L2 +
+ * Rung-1 PlaywrightBackend (see docs/proposals/visual-verification-design.md §L2 +
  * "Open decision #3: Playwright bundling = lazy-install chromium-only"). The
  * `playwright` LIBRARY is a dependency, but its browser binaries are deliberately
  * NOT bundled into the packaged app (they are large + platform-specific). This

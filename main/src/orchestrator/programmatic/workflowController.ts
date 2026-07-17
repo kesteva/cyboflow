@@ -1,7 +1,7 @@
 /**
  * WorkflowController — the host-side, deterministic DAG walker for the
  * `programmatic` execution model (Stage 1; see
- * docs/sdk-program-driven-workflows.md).
+ * docs/proposals/sdk-program-driven-workflows.md).
  *
  * This is the "code walks the DAG" engine. Given a `WorkflowDefinition` (the SAME
  * shared DAG the orchestrated model feeds to an agent), it sequences phases and

@@ -1,6 +1,6 @@
 /**
  * CapturePageBackend — Rung 0 of the layered visual-verification capability
- * ladder (see docs/visual-verification-design.md §5). It renders a deliverable
+ * ladder (see docs/proposals/visual-verification-design.md §5). It renders a deliverable
  * (a localhost URL or a built HTML file) in an OFFSCREEN Electron BrowserWindow
  * and snapshots it with `webContents.capturePage()` → PNG, one PNG per requested
  * viewport. Zero external deps, zero OS permissions, CPU-parallel, NO lease — the

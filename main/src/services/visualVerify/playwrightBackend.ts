@@ -1,6 +1,6 @@
 /**
  * PlaywrightBackend — Rung 1 of the layered visual-verification capability ladder
- * (see docs/visual-verification-design.md §5 + §L2). It drives a real headless
+ * (see docs/proposals/visual-verification-design.md §5 + §L2). It drives a real headless
  * browser via the `playwright` LIBRARY (NOT the playwright MCP server — that single
  * shared profile cannot serve N concurrent lanes) in a FRESH BrowserContext per
  * capture, so each request is fully isolated. It is the interactive-web + responsive

@@ -658,7 +658,7 @@ single write chokepoint, **`SprintLaneStore`** (`main/src/orchestrator/sprintLan
 and never route through `TaskChangeRouter` (board-stage derivation of the underlying tasks
 still does). Lane status `'integrated'` means "task complete + committed in the session
 worktree"; the session Merge close-out moves integrated lanes' tasks to Done and marks the
-batch terminal. See `docs/parallel-sprint-design.md` for the full architecture.
+batch terminal. See `docs/proposals/parallel-sprint-design.md` for the full architecture.
 
 #### Workflow A/B testing — variants, experiments, pairwise grading (migrations 048–050)
 

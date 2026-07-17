@@ -95,7 +95,7 @@ export interface AppConfig {
   // when unset. Intentionally NOT seeded into constructor defaults (byte-identical).
   artifactCommitDir?: string;
   // Layered visual verification settings (see shared/types/visualVerification.ts
-  // and docs/visual-verification-design.md). Master switch defaults OFF. Like the
+  // and docs/proposals/visual-verification-design.md). Master switch defaults OFF. Like the
   // other globals, intentionally NOT seeded into constructor defaults so existing
   // config.json files stay byte-identical; the ConfigManager getter applies floors.
   visualVerify?: VisualVerifyConfig;
