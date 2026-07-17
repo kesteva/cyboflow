@@ -455,7 +455,6 @@ export function ABTestLaunchModal({
                       onToggleGroup={toggleSeedGroup}
                       renderTask={renderSeedTaskRow}
                       testIdPrefix="ab-test-seed-task"
-                      listClassName="max-h-52 overflow-y-auto"
                     />
                   )}
                   {!tasksLoading && seedTasks.length > 0 && selectedTaskIds.size === 0 && (
