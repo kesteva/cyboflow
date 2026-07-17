@@ -18,6 +18,7 @@ import { EventRouter } from '../../../services/streamParser/eventRouter';
 import { ReviewItemRouter } from '../../reviewItemRouter';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { DynamicWorkflowTracker, dynamicWorkflowEvents } from '../dynamicWorkflowTracker';
+import { JournalTailer } from '../journalTailer';
 import {
   DYNAMIC_WORKFLOW_REVIEW_SOURCE,
 } from '../../../../../shared/types/dynamicWorkflows';
@@ -56,10 +57,12 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '026_run_usage_spec_hash_revisions.sql'), 'utf-8'));
   // 034 adds the finding-triage columns the 046 rebuild copies across; 046 widens
   // the kind CHECK so the tracker's `notification` items pass the constraint.
   db.exec(readFileSync(join(migDir, '034_findings_triage.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '046_notification_kind.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '071_raw_events_dedup.sql'), 'utf-8'));
 
   // Seed the run hosting the session (review_items.run_id FK) + the session.
   db.prepare(
@@ -159,6 +162,7 @@ describe('DynamicWorkflowTracker', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     dynamicWorkflowEvents.removeAllListeners('changed');
     dynamicWorkflowEvents.removeAllListeners('removed');
     DynamicWorkflowTracker._resetForTesting();
@@ -347,6 +351,101 @@ describe('DynamicWorkflowTracker', () => {
     expect(items[0].body).toContain('My Session');
   });
 
+  it('drains transcripts, persists nested cumulative usage, then rolls up', async () => {
+    const order: string[] = [];
+    const persisted: Array<{ runId: string; event: unknown; dedupKey: string }> = [];
+    const originalDrainToEof = JournalTailer.prototype.drainToEof;
+    vi.spyOn(JournalTailer.prototype, 'drainToEof').mockImplementation(function (this: JournalTailer) {
+      order.push('drain');
+      originalDrainToEof.call(this);
+    });
+
+    DynamicWorkflowTracker._resetForTesting();
+    tracker = DynamicWorkflowTracker.initialize(dbAdapter(db), {
+      rawEventsSink: {
+        persistSubagentUsage: (runId, event, dedupKey) => {
+          order.push('persist');
+          persisted.push({ runId, event, dedupKey });
+        },
+      },
+      rollupUsage: (_database, runId) => {
+        order.push(`rollup:${runId}`);
+      },
+    });
+    emitLaunch();
+
+    writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
+    await vi.advanceTimersByTimeAsync(1000);
+    writeFileSync(
+      join(transcriptDir, 'agent-a1.jsonl'),
+      `${JSON.stringify({
+        type: 'assistant',
+        message: {
+          role: 'assistant',
+          model: 'claude-sonnet-test',
+          usage: {
+            input_tokens: 11,
+            output_tokens: 13,
+            cache_read_input_tokens: 17,
+            cache_creation_input_tokens: 19,
+          },
+          content: [],
+        },
+      })}\n`,
+    );
+
+    router.emitForRun('run-1', userToolResult('tu-x', notificationText('wabc123', 'completed')));
+
+    expect(order).toEqual(['drain', 'persist', 'rollup:run-1']);
+    expect(persisted).toEqual([
+      {
+        runId: 'run-1',
+        dedupKey: 'subagent:wf_aa11-2b:a1',
+        event: {
+          type: 'subagent_usage',
+          subagent: { wfRunId: 'wf_aa11-2b', agentId: 'a1' },
+          message: {
+            model: 'claude-sonnet-test',
+            usage: {
+              input_tokens: 11,
+              output_tokens: 13,
+              cache_read_input_tokens: 17,
+              cache_creation_input_tokens: 19,
+            },
+          },
+        },
+      },
+    ]);
+  });
+
+  it('uses the real sink with unknown/zero fallbacks at the finalize seam', async () => {
+    emitLaunch();
+    writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
+    await vi.advanceTimersByTimeAsync(1000);
+
+    router.emitForRun('run-1', userToolResult('tu-x', notificationText('wabc123', 'completed')));
+
+    const row = db
+      .prepare(`SELECT event_type, payload_json, dedup_key FROM raw_events WHERE event_type = 'subagent_usage'`)
+      .get() as { event_type: string; payload_json: string; dedup_key: string };
+    expect(row.event_type).toBe('subagent_usage');
+    expect(row.dedup_key).toBe('subagent:wf_aa11-2b:a1');
+    expect(JSON.parse(row.payload_json)).toEqual({
+      type: 'subagent_usage',
+      subagent: { wfRunId: 'wf_aa11-2b', agentId: 'a1' },
+      message: {
+        model: 'unknown',
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+      },
+    });
+    expect(db.prepare('SELECT run_id FROM run_usage WHERE run_id = ?').get('run-1')).toEqual({ run_id: 'run-1' });
+  });
+
   // -------------------------------------------------------------------------
   // finalization: notification accelerator
   // -------------------------------------------------------------------------
@@ -401,6 +500,110 @@ describe('DynamicWorkflowTracker', () => {
       kind: 'notification',
       notificationType: 'dynamic-workflow-stalled',
     });
+  });
+
+  it('uses the same drain-persist-rollup ordering at the stalled seam', async () => {
+    const order: string[] = [];
+    const originalDrainToEof = JournalTailer.prototype.drainToEof;
+    vi.spyOn(JournalTailer.prototype, 'drainToEof').mockImplementation(function (this: JournalTailer) {
+      order.push('drain');
+      originalDrainToEof.call(this);
+    });
+    DynamicWorkflowTracker._resetForTesting();
+    tracker = DynamicWorkflowTracker.initialize(dbAdapter(db), {
+      rawEventsSink: {
+        persistSubagentUsage: () => {
+          order.push('persist');
+        },
+      },
+      rollupUsage: () => {
+        order.push('rollup');
+      },
+    });
+    emitLaunch();
+    writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
+    await vi.advanceTimersByTimeAsync(1000);
+
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000 + 1000);
+
+    expect(order).toEqual(['drain', 'persist', 'rollup']);
+    expect(tracker.list()[0].status).toBe('failed');
+  });
+
+  it('late finalize after a stall overwrites the partial cumulative snapshot', async () => {
+    emitLaunch();
+    writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
+    const transcriptPath = join(transcriptDir, 'agent-a1.jsonl');
+    writeFileSync(
+      transcriptPath,
+      `${JSON.stringify({
+        type: 'assistant',
+        message: {
+          model: 'claude-test',
+          usage: {
+            input_tokens: 2,
+            output_tokens: 3,
+            cache_read_input_tokens: 5,
+            cache_creation_input_tokens: 7,
+          },
+          content: [],
+        },
+      })}\n`,
+    );
+    await vi.advanceTimersByTimeAsync(1000);
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000 + 1000);
+
+    const readPersistedUsage = (): {
+      count: number;
+      usage: Record<string, number>;
+    } => {
+      const rows = db
+        .prepare(`SELECT payload_json FROM raw_events WHERE event_type = 'subagent_usage'`)
+        .all() as Array<{ payload_json: string }>;
+      const payload = JSON.parse(rows[0].payload_json) as {
+        message: { usage: Record<string, number> };
+      };
+      return { count: rows.length, usage: payload.message.usage };
+    };
+
+    expect(readPersistedUsage()).toEqual({
+      count: 1,
+      usage: {
+        input_tokens: 2,
+        output_tokens: 3,
+        cache_read_input_tokens: 5,
+        cache_creation_input_tokens: 7,
+      },
+    });
+
+    appendFileSync(
+      transcriptPath,
+      `${JSON.stringify({
+        type: 'assistant',
+        message: {
+          model: 'claude-test',
+          usage: {
+            input_tokens: 11,
+            output_tokens: 13,
+            cache_read_input_tokens: 17,
+            cache_creation_input_tokens: 19,
+          },
+          content: [],
+        },
+      })}\n`,
+    );
+    router.emitForRun('run-1', userToolResult('tu-late', notificationText('wabc123', 'completed')));
+
+    expect(readPersistedUsage()).toEqual({
+      count: 1,
+      usage: {
+        input_tokens: 13,
+        output_tokens: 16,
+        cache_read_input_tokens: 22,
+        cache_creation_input_tokens: 26,
+      },
+    });
+    expect(tracker.list()[0].status).toBe('failed');
   });
 
   // -------------------------------------------------------------------------
@@ -550,6 +753,35 @@ describe('DynamicWorkflowTracker', () => {
     });
     emitLaunch();
     router.emitForRun('run-1', userToolResult('tu-x', notificationText('wabc123', 'completed')));
+    expect(changed.at(-1)?.state.status).toBe('completed');
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('finalization is fail-soft after the run was cascade-deleted', () => {
+    emitLaunch();
+    db.prepare('DELETE FROM workflow_runs WHERE id = ?').run('run-1');
+
+    expect(() => {
+      router.emitForRun('run-1', userToolResult('tu-late', notificationText('wabc123', 'completed')));
+    }).not.toThrow();
+    expect(changed.at(-1)?.state.status).toBe('completed');
+    expect(db.prepare('SELECT * FROM run_usage WHERE run_id = ?').get('run-1')).toBeUndefined();
+  });
+
+  it('finalization is fail-soft when usage tables are unavailable', async () => {
+    const warn = vi.fn();
+    DynamicWorkflowTracker._resetForTesting();
+    tracker = DynamicWorkflowTracker.initialize(dbAdapter(db), {
+      logger: { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() },
+    });
+    emitLaunch();
+    writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
+    await vi.advanceTimersByTimeAsync(1000);
+    db.exec('DROP TABLE run_usage; DROP TABLE raw_events;');
+
+    expect(() => {
+      router.emitForRun('run-1', userToolResult('tu-unmigrated', notificationText('wabc123', 'completed')));
+    }).not.toThrow();
     expect(changed.at(-1)?.state.status).toBe('completed');
     expect(warn).toHaveBeenCalled();
   });

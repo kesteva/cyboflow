@@ -24,9 +24,11 @@ import { readFileSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { EventRouter } from '../../services/streamParser/eventRouter';
+import { RawEventsSink } from '../../services/streamParser/rawEventsSink';
 import { encodeCwd } from '../../services/panels/claude/transcript/encodeCwd';
 import { WorkflowScriptWatcher } from './workflowScriptWatcher';
 import type { DatabaseLike, LoggerLike } from '../types';
+import { rollupRunUsage } from '../runUsageRollup';
 import { ReviewItemRouter } from '../reviewItemRouter';
 import { DynamicWorkflowDetector } from './dynamicWorkflowDetector';
 import type { DynamicWorkflowLaunchInfo, DynamicWorkflowNotification } from './dynamicWorkflowDetector';
@@ -62,6 +64,17 @@ export interface DynamicWorkflowRunContext {
   sessionId: string;
 }
 
+interface SubagentUsageSink {
+  persistSubagentUsage(runId: string, event: unknown, dedupKey: string): void;
+}
+
+interface DynamicWorkflowTrackerOptions {
+  logger?: LoggerLike;
+  /** Narrow injection seams used by unit tests; production constructs the real sink below. */
+  rawEventsSink?: SubagentUsageSink;
+  rollupUsage?: typeof rollupRunUsage;
+}
+
 export class DynamicWorkflowTracker {
   private static instance: DynamicWorkflowTracker | null = null;
 
@@ -85,19 +98,42 @@ export class DynamicWorkflowTracker {
    */
   private readonly dismissedWfRunIds = new Set<string>();
   private readonly logger: LoggerLike | undefined;
+  private readonly rawEventsSink: SubagentUsageSink | null;
+  private readonly rollupUsage: typeof rollupRunUsage;
 
   constructor(
     private readonly db: DatabaseLike,
-    opts?: { logger?: LoggerLike },
+    opts?: DynamicWorkflowTrackerOptions,
   ) {
     this.logger = opts?.logger;
+    this.rollupUsage = opts?.rollupUsage ?? rollupRunUsage;
+
+    if (opts?.rawEventsSink !== undefined) {
+      this.rawEventsSink = opts.rawEventsSink;
+      return;
+    }
+
+    try {
+      // RawEventsSink only uses prepare() at runtime. DatabaseLike deliberately
+      // exposes that same narrow surface, but the sink's public constructor is
+      // still typed to better-sqlite3, so contain the structural bridge here.
+      const SinkConstructor = RawEventsSink as unknown as new (
+        db: DatabaseLike,
+        logger?: Pick<LoggerLike, 'warn'>,
+      ) => SubagentUsageSink;
+      this.rawEventsSink = new SinkConstructor(db, this.logger);
+    } catch (err) {
+      this.rawEventsSink = null;
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger?.warn(`[dynamicWorkflowTracker] raw-events sink initialization failed: ${message}`);
+    }
   }
 
   // --------------------------------------------------------------------------
   // Lifecycle (singleton, mirroring ReviewItemRouter)
   // --------------------------------------------------------------------------
 
-  static initialize(db: DatabaseLike, opts?: { logger?: LoggerLike }): DynamicWorkflowTracker {
+  static initialize(db: DatabaseLike, opts?: DynamicWorkflowTrackerOptions): DynamicWorkflowTracker {
     DynamicWorkflowTracker.instance = new DynamicWorkflowTracker(db, opts);
     return DynamicWorkflowTracker.instance;
   }
@@ -520,16 +556,16 @@ export class DynamicWorkflowTracker {
 
   /**
    * In-stream `<task-notification>` accelerator. Only terminal statuses on a
-   * tracked RUNNING taskId finalize — and the authoritative record is
-   * PREFERRED: one immediate record read is attempted first; the notification
-   * status is the fallback when the record has not landed yet.
+   * tracked taskId finalize — and the authoritative record is PREFERRED: one
+   * immediate record read is attempted first; the notification status is the
+   * fallback when the record has not landed yet. A late notification after a
+   * stall still refreshes cumulative usage, while finalize's transition guard
+   * leaves the already-terminal state unchanged.
    */
   private handleNotification(info: DynamicWorkflowNotification): void {
     try {
       if (!TERMINAL_NOTIFICATION_STATUSES.has(info.status)) return;
-      const state = [...this.states.values()].find(
-        (s) => s.taskId === info.taskId && s.status === 'running',
-      );
+      const state = [...this.states.values()].find((s) => s.taskId === info.taskId);
       if (state === undefined) return; // not one of ours — the detector forwards every match
 
       const recordPath = this.recordPaths.get(state.wfRunId);
@@ -547,7 +583,8 @@ export class DynamicWorkflowTracker {
 
   /** Terminal transition: set fields, stop the tailer, emit, create the review item. */
   private finalize(state: DynamicWorkflowRunState, record: DynamicWorkflowCompletionRecord): void {
-    if (state.status !== 'running') return; // record/notification race — first finalize wins
+    this.persistTerminalSubagentUsage(state);
+    if (state.status !== 'running') return; // record/notification race — first transition wins
     state.status = record.status;
     // A terminal workflow has no running agents: an agent whose 'result' line
     // never landed in the journal (last-agent/completion race, or a 'started'
@@ -568,11 +605,54 @@ export class DynamicWorkflowTracker {
   /** Stall path: mark failed AND surface a review item so the user is pointed at it. */
   private handleStalled(state: DynamicWorkflowRunState): void {
     if (state.status !== 'running') return;
+    this.persistTerminalSubagentUsage(state);
     state.status = 'failed';
     state.completedAt = new Date().toISOString();
     this.tailers.get(state.wfRunId)?.stop(); // tailer stopped itself already — idempotent
     this.emitChanged(state);
     this.createReviewItem(state, `Dynamic workflow stalled: ${state.name}`, 'dynamic-workflow-stalled');
+  }
+
+  /**
+   * Close the transcript poll-window race and materialize cumulative subagent
+   * usage before the run rollup rescans raw_events. The nested message shape is
+   * load-bearing for the shared usage aggregators.
+   */
+  private persistTerminalSubagentUsage(state: DynamicWorkflowRunState): void {
+    try {
+      this.tailers.get(state.wfRunId)?.drainToEof();
+      const agents = state.agents.map((agent) => ({ ...agent }));
+
+      for (const agent of agents) {
+        this.rawEventsSink?.persistSubagentUsage(
+          state.runId,
+          {
+            type: 'subagent_usage',
+            subagent: {
+              wfRunId: state.wfRunId,
+              agentId: agent.agentId,
+            },
+            message: {
+              model: agent.model ?? 'unknown',
+              usage: {
+                input_tokens: agent.inputTokens ?? 0,
+                output_tokens: agent.outputTokens ?? 0,
+                cache_read_input_tokens: agent.cacheReadInputTokens ?? 0,
+                cache_creation_input_tokens: agent.cacheCreationInputTokens ?? 0,
+              },
+            },
+          },
+          `subagent:${state.wfRunId}:${agent.agentId}`,
+        );
+      }
+
+      this.rollupUsage(this.db, state.runId, this.logger);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger?.warn(
+        `[dynamicWorkflowTracker] terminal subagent usage capture failed for ${state.wfRunId}: ${message}`,
+      );
+    }
   }
 
   /**
