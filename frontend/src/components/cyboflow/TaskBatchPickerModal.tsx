@@ -42,6 +42,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/Modal';
 import { trpc } from '../../trpc/client';
 import type { BacklogTaskItem, Board } from '../../../../shared/types/tasks';
+import type { EpicTaskGroup } from './taskGrouping';
+import { flattenGroups, groupTasksByEpic } from './taskGrouping';
+import { EpicGroupedTaskList } from './EpicGroupedTaskList';
 import { SPRINT_BATCH_MAX_TASKS } from '../../../../shared/types/sprintBatch';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 
@@ -76,7 +79,9 @@ export function TaskBatchPickerModal({
   onClose,
   onPicked,
 }: TaskBatchPickerModalProps): React.JSX.Element {
-  const [tasks, setTasks] = useState<BacklogTaskItem[]>([]);
+  // Batchable tasks grouped by parent epic (for rendering); the flat list is derived.
+  const [groups, setGroups] = useState<EpicTaskGroup[]>([]);
+  const tasks = useMemo(() => flattenGroups(groups), [groups]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -108,9 +113,9 @@ export function TaskBatchPickerModal({
           boards.flatMap((b: Board) => b.stages.filter((s) => s.is_terminal).map((s) => s.id)),
         );
         // The list returns ALL entities NESTED — tasks with a parent epic live
-        // under that epic's `children`, not at the top level. Flatten epics
-        // first so epic-owned tasks are batchable too, then keep ONLY tasks the
-        // strict runs.start pre-check would accept (SprintLaneStore.filterEligibleTaskIds):
+        // under that epic's `children`, not at the top level. Group by epic
+        // (retaining the association for the grouped picker) and keep ONLY tasks
+        // the strict runs.start pre-check would accept (SprintLaneStore.filterEligibleTaskIds):
         // approved (approved_at !== null — pending drafts excluded), NOT archived
         // (migration 024), and at a ready-or-later NON-terminal stage
         // (stage_position >= 6 && stage not terminal — drops Idea-column,
@@ -118,16 +123,15 @@ export function TaskBatchPickerModal({
         // otherwise eligible are kept (rendered disabled) so the user sees why
         // they can't be batched; every other row (ideas / epics / ineligible
         // tasks) is dropped so a check can never abort the whole launch.
-        const flattened = rows.flatMap((r) => (r.type === 'epic' ? (r.children ?? []) : [r]));
-        const batchable = flattened.filter(
-          (r) =>
-            r.type === 'task' &&
-            r.approved_at !== null &&
-            r.archived_at === null &&
-            r.stage_position >= 6 &&
-            !terminalStageIds.has(r.stage_id),
-        );
-        setTasks(batchable);
+        const isEligible = (r: BacklogTaskItem): boolean =>
+          r.type === 'task' &&
+          r.approved_at !== null &&
+          r.archived_at === null &&
+          r.stage_position >= 6 &&
+          !terminalStageIds.has(r.stage_id);
+        const grouped = groupTasksByEpic(rows, isEligible);
+        setGroups(grouped);
+        const batchable = flattenGroups(grouped);
         // On open, seed the selection from the caller's pre-selection (e.g. an
         // epic's ready-for-development child tasks) intersected with what's
         // eligible (not in-flight) and capped at the substrate limit; absent a
@@ -215,6 +219,83 @@ export function TaskBatchPickerModal({
     setSelectedIds(new Set(eligible.slice(0, cap).map((t) => t.id)));
   };
 
+  // Select/deselect a whole epic group's tasks, honoring the batch cap.
+  const toggleGroup = (taskIds: string[], select: boolean): void => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (!select) {
+        taskIds.forEach((id) => next.delete(id));
+        return next;
+      }
+      for (const id of taskIds) {
+        if (next.size >= cap) break;
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  // One task row — preserves this modal's markup (blocked / in-flight chips,
+  // data-* attrs, test ids) while the shared list owns the epic-group chrome.
+  const renderTaskRow = (t: BacklogTaskItem): React.ReactNode => {
+    const inFlight = t.inFlow.length > 0;
+    const checked = selectedIds.has(t.id);
+    const blocked = t.readyToWork === false;
+    // Disabled if in-flight OR (not yet checked AND already at cap).
+    const disabled = inFlight || (!checked && atCap);
+    const blockedRefs = (t.blockedBy ?? []).map((d) => d.ref).join(', ');
+    // The hosting session's name when known, else the short run id — mirrors
+    // FlowMarker's label so the picker reads consistently with the board card.
+    const inFlightLabel = inFlight
+      ? `in development · ${t.inFlow[0].sessionName ?? t.inFlow[0].runId.slice(0, 8)}`
+      : null;
+    return (
+      <label
+        data-testid={`task-batch-picker-item-${t.id}`}
+        data-blocked={blocked ? 'true' : undefined}
+        data-inflight={inFlight ? 'true' : undefined}
+        className={`flex items-start gap-2 rounded-button border px-2 py-1.5 text-sm ${
+          disabled
+            ? 'cursor-not-allowed border-border-primary bg-bg-secondary opacity-60'
+            : 'cursor-pointer border-border-primary bg-bg-primary hover:bg-bg-hover'
+        }`}
+      >
+        <input
+          type="checkbox"
+          checked={checked}
+          disabled={disabled}
+          onChange={() => toggle(t.id)}
+          aria-label={`Select ${t.ref}`}
+          className="mt-0.5"
+        />
+        <span className="flex flex-1 flex-col gap-0.5">
+          <span className="flex items-center gap-2">
+            <span className="font-medium text-text-primary">{t.ref}</span>
+            <span className="truncate text-text-secondary">{t.title}</span>
+          </span>
+          <span className="flex flex-wrap items-center gap-1.5">
+            {inFlightLabel !== null && (
+              <span
+                data-testid={`task-batch-picker-inflight-${t.id}`}
+                className="rounded-full bg-bg-tertiary px-1.5 py-0.5 text-[10px] font-medium text-text-tertiary"
+              >
+                {inFlightLabel}
+              </span>
+            )}
+            {blocked && (
+              <span
+                data-testid={`task-batch-picker-blocked-${t.id}`}
+                className="rounded-full bg-status-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-status-warning"
+              >
+                blocked{blockedRefs ? ` by ${blockedRefs}` : ''}
+              </span>
+            )}
+          </span>
+        </span>
+      </label>
+    );
+  };
+
   const handleLaunch = (): void => {
     if (selectedIds.size === 0) return;
     onPicked(Array.from(selectedIds));
@@ -264,69 +345,14 @@ export function TaskBatchPickerModal({
           )}
 
           {!isLoading && tasks.length > 0 && (
-            <ul className="flex flex-col gap-1" data-testid="task-batch-picker-list">
-              {tasks.map((t) => {
-                const inFlight = t.inFlow.length > 0;
-                const checked = selectedIds.has(t.id);
-                const blocked = t.readyToWork === false;
-                // Disabled if in-flight OR (not yet checked AND already at cap).
-                const disabled = inFlight || (!checked && atCap);
-                const blockedRefs = (t.blockedBy ?? []).map((d) => d.ref).join(', ');
-                // The hosting session's name when known, else the short run id —
-                // mirrors FlowMarker's label so the picker reads consistently
-                // with the board card.
-                const inFlightLabel = inFlight
-                  ? `in development · ${t.inFlow[0].sessionName ?? t.inFlow[0].runId.slice(0, 8)}`
-                  : null;
-                return (
-                  <li key={t.id}>
-                    <label
-                      data-testid={`task-batch-picker-item-${t.id}`}
-                      data-blocked={blocked ? 'true' : undefined}
-                      data-inflight={inFlight ? 'true' : undefined}
-                      className={`flex items-start gap-2 rounded-button border px-2 py-1.5 text-sm ${
-                        disabled
-                          ? 'cursor-not-allowed border-border-primary bg-bg-secondary opacity-60'
-                          : 'cursor-pointer border-border-primary bg-bg-primary hover:bg-bg-hover'
-                      }`}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        disabled={disabled}
-                        onChange={() => toggle(t.id)}
-                        aria-label={`Select ${t.ref}`}
-                        className="mt-0.5"
-                      />
-                      <span className="flex flex-1 flex-col gap-0.5">
-                        <span className="flex items-center gap-2">
-                          <span className="font-medium text-text-primary">{t.ref}</span>
-                          <span className="truncate text-text-secondary">{t.title}</span>
-                        </span>
-                        <span className="flex flex-wrap items-center gap-1.5">
-                          {inFlightLabel !== null && (
-                            <span
-                              data-testid={`task-batch-picker-inflight-${t.id}`}
-                              className="rounded-full bg-bg-tertiary px-1.5 py-0.5 text-[10px] font-medium text-text-tertiary"
-                            >
-                              {inFlightLabel}
-                            </span>
-                          )}
-                          {blocked && (
-                            <span
-                              data-testid={`task-batch-picker-blocked-${t.id}`}
-                              className="rounded-full bg-status-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-status-warning"
-                            >
-                              blocked{blockedRefs ? ` by ${blockedRefs}` : ''}
-                            </span>
-                          )}
-                        </span>
-                      </span>
-                    </label>
-                  </li>
-                );
-              })}
-            </ul>
+            <EpicGroupedTaskList
+              groups={groups}
+              selectedIds={selectedIds}
+              isSelectable={(t) => t.inFlow.length === 0}
+              onToggleGroup={toggleGroup}
+              renderTask={renderTaskRow}
+              testIdPrefix="task-batch-picker"
+            />
           )}
 
           {error && (
