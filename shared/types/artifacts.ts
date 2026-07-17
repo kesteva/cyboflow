@@ -229,6 +229,26 @@ export const MAX_PROTOTYPE_HTML_BYTES = 5 * 1024 * 1024;
  */
 export const MAX_SCREENSHOT_BYTES = 25 * 1024 * 1024;
 
+/** The canvas atypes the `artifacts:load-html` IPC channel can source HTML for. */
+export type LoadArtifactHtmlAtype = 'ui-prototype' | 'generic';
+
+/**
+ * Request/response shapes for the `artifacts:load-html` IPC channel. SHARED so
+ * the main handler, the preload bridge, the renderer `electron.d.ts` declaration,
+ * and the `useArtifactHtml` hook all reference ONE definition — a drifted local
+ * copy would silently drop fields across the boundary (see CODE-PATTERNS.md).
+ */
+export interface LoadArtifactHtmlRequest {
+  runId: string;
+  atype: LoadArtifactHtmlAtype;
+  /** Advisory only (both sources are always tried); retained for call-site clarity. */
+  committed?: boolean;
+}
+
+export interface LoadArtifactHtmlResult {
+  html: string | null;
+}
+
 /**
  * Schema version stamped onto every on-disk committed-artifact manifest
  * (`ArtifactSnapshotManifest.schemaVersion`). Bumped to 2 for the per-

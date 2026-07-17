@@ -10,6 +10,7 @@ import type { ExecutionDiff, GitDiffResult } from './diff';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import type { QuickSessionRow } from '../../../shared/types/quickSessions';
+import type { LoadArtifactHtmlRequest, LoadArtifactHtmlResult } from '../../../shared/types/artifacts';
 import type { UpdaterEvent, UpdateCheckResult } from '../../../shared/types/updater';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/types/modelAvailability';
 import type { CodexModelCatalog } from '../../../shared/types/agentModels';
@@ -215,10 +216,10 @@ interface ElectronAPI {
     // ui-prototype/generic artifact (run subtree first, else the committed
     // project snapshot store) and returns it with a restrictive CSP <meta>
     // already injected. `html: null` on a missing/unreadable file (fail-soft,
-    // not an error). KEEP IN SYNC with main/src/preload.ts `artifacts.loadHtml`.
+    // not an error). Shared request/response types with main/src/preload.ts.
     loadHtml: (
-      req: { runId: string; atype: 'ui-prototype' | 'generic'; committed?: boolean },
-    ) => Promise<IPCResponse<{ html: string | null }>>;
+      req: LoadArtifactHtmlRequest,
+    ) => Promise<IPCResponse<LoadArtifactHtmlResult>>;
   };
 
   // Project management

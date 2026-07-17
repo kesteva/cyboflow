@@ -8,6 +8,7 @@ import type { ToolPanel, FastModeStateNotice, QueuedPanelInput } from '../../sha
 import type { UpdaterEvent, UpdateCheckResult } from '../../shared/types/updater';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../shared/types/modelAvailability';
 import type { CodexModelCatalog } from '../../shared/types/agentModels';
+import type { LoadArtifactHtmlRequest, LoadArtifactHtmlResult } from '../../shared/types/artifacts';
 import {
   CLAUDE_DETECT_CHANNEL,
   CODEX_DETECT_CHANNEL,
@@ -325,11 +326,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('artifacts:load-images', req),
     // Static-mockup HTML load (Approach C) — reads the canonical
     // prototype/index.html for a ui-prototype/generic artifact, CSP-injected
-    // by the main-process handler. KEEP IN SYNC with
-    // frontend/src/types/electron.d.ts `artifacts.loadHtml`.
+    // by the main-process handler. Request/response are the SHARED types so this
+    // and frontend/src/types/electron.d.ts `artifacts.loadHtml` can't drift.
     loadHtml: (
-      req: { runId: string; atype: 'ui-prototype' | 'generic'; committed?: boolean },
-    ): Promise<IPCResponse<{ html: string | null }>> =>
+      req: LoadArtifactHtmlRequest,
+    ): Promise<IPCResponse<LoadArtifactHtmlResult>> =>
       ipcRenderer.invoke('artifacts:load-html', req),
   },
 

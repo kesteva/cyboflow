@@ -266,6 +266,38 @@ describe('registerArtifactHtmlHandlers — artifacts:load-html', () => {
     }
   });
 
+  it('rejects an unrecognized atype (fail-soft null — no wrong-file read)', async () => {
+    // A ui-prototype file exists, but a { atype: 'screenshots' } request must NOT
+    // be defaulted to ui-prototype and read it.
+    await writeRunProto(RUN_ID, '<html><body>proto</body></html>');
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerArtifactHtmlHandlers(
+      ipcMain as unknown as Parameters<typeof registerArtifactHtmlHandlers>[0],
+      emptyServices(),
+    );
+    const res = await invoke(handlers, 'artifacts:load-html', { runId: RUN_ID, atype: 'screenshots' });
+    expect(res.success).toBe(true);
+    expect(res.data?.html).toBeNull();
+  });
+
+  it('reads the run subtree even when committed:true (reap may preserve live bytes)', async () => {
+    // committed:true no longer SKIPS the live subtree — a committed artifact whose
+    // snapshot is not yet durable keeps its bytes there, so it must still resolve.
+    await writeRunProto(RUN_ID, '<html><head></head><body>live</body></html>');
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerArtifactHtmlHandlers(
+      ipcMain as unknown as Parameters<typeof registerArtifactHtmlHandlers>[0],
+      emptyServices(),
+    );
+    const res = await invoke(handlers, 'artifacts:load-html', {
+      runId: RUN_ID,
+      atype: 'ui-prototype',
+      committed: true,
+    });
+    expect(res.success).toBe(true);
+    expect(res.data?.html).toContain('<body>live</body>');
+  });
+
   it('returns null for an empty runId (no read attempted)', async () => {
     const { ipcMain, handlers } = makeHandlerCapture();
     registerArtifactHtmlHandlers(

@@ -1,13 +1,16 @@
 import { IpcMain } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs/promises';
-import { existsSync } from 'fs';
+import { constants as fsConstants } from 'fs';
 import type { AppServices } from './types';
 import { getCyboflowSubdirectory } from '../utils/cyboflowDirectory';
 import {
   ARTIFACT_PROTOTYPE_CSP,
   PROTOTYPE_HTML_RELPATH,
   MAX_PROTOTYPE_HTML_BYTES,
+  type LoadArtifactHtmlAtype,
+  type LoadArtifactHtmlRequest,
+  type LoadArtifactHtmlResult,
 } from '../../../shared/types/artifacts';
 import { safeRunId, resolveArtifactCommitDir, loadCommittedHtml } from '../orchestrator/artifactSnapshot';
 
@@ -75,16 +78,10 @@ export function injectPrototypeCsp(html: string): string {
   return `${meta}${html}`;
 }
 
-interface LoadHtmlRequest {
-  runId: string;
-  atype: 'ui-prototype' | 'generic';
-  committed?: boolean;
-}
-
 /** IPCResponse-compatible result shape (mirrors frontend/src/utils/api.ts). */
 interface LoadHtmlResponse {
   success: boolean;
-  data?: { html: string | null };
+  data?: LoadArtifactHtmlResult;
   error?: string;
 }
 
@@ -92,22 +89,30 @@ interface LoadHtmlResponse {
  * Hardened read of the canonical `prototype/index.html` from the run's LIVE
  * artifacts subtree. Returns the raw document string, or null (fail-soft) when
  * absent / invalid / oversized / escaping the root.
+ *
+ * TOCTOU-hardened: the containing dir is realpath-checked for containment, then
+ * the FINAL component is opened with `O_NOFOLLOW` (a symlinked index.html is
+ * rejected atomically at open, ELOOP), and the `fstat` size check + the bytes
+ * returned come off that SAME descriptor — no lstat→realpath→read window.
  */
 async function loadRunSubtreeHtml(runId: string): Promise<string | null> {
+  let fh: Awaited<ReturnType<typeof fs.open>> | null = null;
   try {
     const runRoot = path.resolve(getCyboflowSubdirectory('artifacts', 'runs', safeRunId(runId)));
     const target = path.resolve(runRoot, PROTOTYPE_HTML_RELPATH);
     if (target !== runRoot && !target.startsWith(runRoot + path.sep)) return null;
-    if (!existsSync(target)) return null;
-    const lst = await fs.lstat(target);
-    if (lst.isSymbolicLink() || !lst.isFile()) return null;
-    if (lst.size > MAX_PROTOTYPE_HTML_BYTES) return null;
     const realRoot = await fs.realpath(runRoot);
-    const realTarget = await fs.realpath(target);
-    if (realTarget !== realRoot && !realTarget.startsWith(realRoot + path.sep)) return null;
-    return await fs.readFile(realTarget, 'utf-8');
+    const realDir = await fs.realpath(path.dirname(target));
+    if (realDir !== realRoot && !realDir.startsWith(realRoot + path.sep)) return null;
+    fh = await fs.open(target, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const st = await fh.stat();
+    if (!st.isFile()) return null;
+    if (st.size > MAX_PROTOTYPE_HTML_BYTES) return null;
+    return await fh.readFile('utf-8');
   } catch {
     return null;
+  } finally {
+    await fh?.close().catch(() => {});
   }
 }
 
@@ -138,25 +143,30 @@ async function loadCommittedStoreHtml(
   }
 }
 
+/** Narrow an untrusted `atype` to a recognized canvas atype, else null. */
+function coerceAtype(atype: unknown): LoadArtifactHtmlAtype | null {
+  return atype === 'ui-prototype' || atype === 'generic' ? atype : null;
+}
+
 export function registerArtifactHtmlHandlers(ipcMain: IpcMain, services: AppServices): void {
   ipcMain.handle(
     'artifacts:load-html',
-    async (_event, req: LoadHtmlRequest): Promise<LoadHtmlResponse> => {
+    async (_event, req: LoadArtifactHtmlRequest): Promise<LoadHtmlResponse> => {
       try {
         const runId = typeof req?.runId === 'string' ? req.runId : '';
-        const atype = req?.atype === 'generic' ? 'generic' : 'ui-prototype';
-        const committed = req?.committed === true;
-        if (runId.length === 0) {
+        // REJECT an unrecognized atype (fail-soft null) rather than defaulting it
+        // to ui-prototype — defaulting would read a DIFFERENT artifact's file for a
+        // request like { atype: 'screenshots' }.
+        const atype = coerceAtype(req?.atype);
+        if (runId.length === 0 || atype === null) {
           return { success: true, data: { html: null } };
         }
 
-        // Source 1: the live run subtree (skipped when the caller KNOWS the
-        // artifact is committed — its subtree was reaped on close-out).
-        let raw: string | null = null;
-        if (!committed) {
-          raw = await loadRunSubtreeHtml(runId);
-        }
-        // Source 2: the committed project snapshot store (fallback / committed).
+        // Try the live run subtree FIRST regardless of the committed hint: reap can
+        // preserve a committed artifact's live bytes when its snapshot isn't yet
+        // durable, so a committed artifact's HTML may still live only in the subtree.
+        let raw = await loadRunSubtreeHtml(runId);
+        // Then the committed project snapshot store.
         if (raw === null) {
           raw = await loadCommittedStoreHtml(services, runId, atype);
         }

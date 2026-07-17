@@ -482,28 +482,33 @@ export async function loadCommittedSnapshot(
 
 /**
  * Read the committed static mockup HTML (`files/prototype/index.html`) for a
- * `(runId, atype)` snapshot, with the same hardening as the live-file handler:
- * containment inside the snapshot files dir, symlink reject, regular-file +
- * size ceiling. Returns the document string, or null (fail-soft) when absent /
- * invalid / oversized.
+ * `(runId, atype)` snapshot, with the same TOCTOU-hardening as the live-file
+ * handler: realpath containment of the files dir, then O_NOFOLLOW open of the
+ * final component (symlink rejected atomically) with the size check + read off
+ * the same descriptor. Returns the document string, or null (fail-soft) when
+ * absent / invalid / oversized.
  */
 export async function loadCommittedHtml(
   storeDir: string,
   runId: string,
   atype: string,
 ): Promise<string | null> {
+  let fh: Awaited<ReturnType<typeof fs.open>> | null = null;
   try {
     const filesRoot = path.join(snapshotDirFor(storeDir, runId, atype), 'files');
     const realRoot = await fs.realpath(filesRoot);
     const target = path.resolve(realRoot, PROTOTYPE_HTML_RELPATH);
     if (target !== realRoot && !target.startsWith(realRoot + path.sep)) return null;
-    const lst = await fs.lstat(target);
-    if (lst.isSymbolicLink() || !lst.isFile()) return null;
-    if (lst.size > MAX_PROTOTYPE_HTML_BYTES) return null;
-    const realTarget = await fs.realpath(target);
-    if (realTarget !== realRoot && !realTarget.startsWith(realRoot + path.sep)) return null;
-    return await fs.readFile(realTarget, 'utf-8');
+    const realDir = await fs.realpath(path.dirname(target));
+    if (realDir !== realRoot && !realDir.startsWith(realRoot + path.sep)) return null;
+    fh = await fs.open(target, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+    const st = await fh.stat();
+    if (!st.isFile()) return null;
+    if (st.size > MAX_PROTOTYPE_HTML_BYTES) return null;
+    return await fh.readFile('utf-8');
   } catch {
     return null;
+  } finally {
+    await fh?.close().catch(() => {});
   }
 }
