@@ -88,10 +88,25 @@ interface RawEventRow {
   payload_json: string;
 }
 
+interface DedupRawEventRow extends RawEventRow {
+  created_at: string;
+  dedup_key: string | null;
+}
+
 function selectRows(db: Database.Database, runId: string): RawEventRow[] {
   return db
     .prepare('SELECT event_type, payload_json FROM raw_events WHERE run_id = ? ORDER BY id')
     .all(runId) as RawEventRow[];
+}
+
+function selectDedupRow(db: Database.Database, dedupKey: string): DedupRawEventRow | undefined {
+  return db
+    .prepare(
+      `SELECT event_type, payload_json, created_at, dedup_key
+       FROM raw_events
+       WHERE dedup_key = ?`,
+    )
+    .get(dedupKey) as DedupRawEventRow | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -148,6 +163,58 @@ describe('RawEventsSink', () => {
     expect(parsedResult.type).toBe('result');
     expect(parsedResult.subtype).toBe('success');
     expect(parsedResult.duration_ms).toBe(1500);
+  });
+
+  it('inserts subagent usage then overwrites payload_json and created_at for the same dedup key', () => {
+    const sink = new RawEventsSink(db);
+    const dedupKey = 'subagent:wf-001:agent-001';
+    const partialEvent = {
+      type: 'subagent_usage',
+      message: { model: 'claude-opus', usage: { output_tokens: 3 } },
+    };
+    const completeEvent = {
+      type: 'subagent_usage',
+      message: { model: 'claude-opus', usage: { input_tokens: 7, output_tokens: 11 } },
+    };
+
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+      sink.persistSubagentUsage(RUN_ID, partialEvent, dedupKey);
+
+      expect(selectDedupRow(db, dedupKey)).toEqual({
+        event_type: 'subagent_usage',
+        payload_json: JSON.stringify(partialEvent),
+        created_at: '2026-01-01T00:00:00.000Z',
+        dedup_key: dedupKey,
+      });
+
+      vi.setSystemTime(new Date('2026-01-01T00:00:05.000Z'));
+      sink.persistSubagentUsage(RUN_ID, completeEvent, dedupKey);
+
+      expect(countRawEvents(db, RUN_ID)).toBe(1);
+      expect(selectDedupRow(db, dedupKey)).toEqual({
+        event_type: 'subagent_usage',
+        payload_json: JSON.stringify(completeEvent),
+        created_at: '2026-01-01T00:00:05.000Z',
+        dedup_key: dedupKey,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('allows multiple append-only raw events with null dedup keys', () => {
+    const sink = new RawEventsSink(db);
+    sink.attachToRouter(router, RUN_ID);
+
+    router.emitForRun(RUN_ID, systemEvent);
+    router.emitForRun(RUN_ID, assistantEvent);
+
+    const rows = db
+      .prepare('SELECT dedup_key FROM raw_events WHERE run_id = ? ORDER BY id')
+      .all(RUN_ID) as Array<{ dedup_key: string | null }>;
+    expect(rows).toEqual([{ dedup_key: null }, { dedup_key: null }]);
   });
 
   // -------------------------------------------------------------------------

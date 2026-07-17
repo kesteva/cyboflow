@@ -16,6 +16,8 @@
  *                  to event_type='unknown' in the table.
  *   payload_json — JSON.stringify of the full typed event object
  *   created_at   — ISO-8601 timestamp at the moment of insert (TEXT column)
+ *   dedup_key    — stable identity for replaceable synthetic events; NULL for
+ *                  the append-only provider event stream
  *
  * Note: 006_cyboflow_schema.sql does NOT include an event_subtype column. Subtype
  * information (e.g. system/init, result/success) is available inside payload_json
@@ -35,6 +37,7 @@ export class RawEventsSink<TEvent extends PersistableStreamEvent = ClaudeStreamE
   private readonly db: Database.Database;
   private readonly logger: Pick<ILogger, 'warn'> | undefined;
   private readonly insertStmt: Database.Statement;
+  private upsertSubagentUsageStmt: Database.Statement | undefined;
 
   /**
    * Map from runId → teardown function returned by EventRouter.onRun().
@@ -51,6 +54,35 @@ export class RawEventsSink<TEvent extends PersistableStreamEvent = ClaudeStreamE
     this.insertStmt = this.db.prepare(
       'INSERT INTO raw_events (run_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)',
     );
+  }
+
+  /**
+   * Persist a cumulative subagent-usage snapshot.
+   *
+   * The partial unique index on dedup_key requires its predicate to be repeated
+   * in the conflict target. Reusing a key replaces the earlier snapshot instead
+   * of summing it or leaving stale partial usage behind.
+   *
+   * Fail-soft: catches all errors, logs at WARN, and returns — never re-throws.
+   */
+  persistSubagentUsage(runId: string, event: unknown, dedupKey: string): void {
+    try {
+      this.upsertSubagentUsageStmt ??= this.db.prepare(`
+        INSERT INTO raw_events (run_id, event_type, payload_json, created_at, dedup_key)
+        VALUES (?, 'subagent_usage', ?, ?, ?)
+        ON CONFLICT(dedup_key) WHERE dedup_key IS NOT NULL DO UPDATE SET
+          payload_json = excluded.payload_json,
+          created_at = excluded.created_at
+      `);
+      const payloadJson = JSON.stringify(event);
+      const createdAt = new Date().toISOString();
+      this.upsertSubagentUsageStmt.run(runId, payloadJson, createdAt, dedupKey);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger?.warn(
+        `[rawEventsSink] subagent usage upsert failed for runId=${runId}: ${message}`,
+      );
+    }
   }
 
   /**

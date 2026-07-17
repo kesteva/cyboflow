@@ -5,7 +5,8 @@
  * 1. createTestDb returns a fresh in-memory DB with the expected tables.
  * 2. seedRun with defaults inserts a single workflow + workflow_run in 'running'.
  * 3. seedRun with overrides.status='awaiting_review' honors the override.
- * 4. Column-level parity: GATE_SCHEMA columns match 006_cyboflow_schema.sql
+ * 4. Column-level parity: GATE_SCHEMA columns match the raw orchestrator schema
+ *    after 006_cyboflow_schema.sql + 071_raw_events_dedup.sql
  *    for workflows, workflow_runs, approvals, raw_events.
  * 5. messages table is intentionally absent from GATE_SCHEMA.
  *
@@ -24,16 +25,22 @@ import { createTestDb, seedRun, seedApproval } from '../orchestratorTestDb';
 // Parity test helpers
 // ---------------------------------------------------------------------------
 
-/** Load the canonical 006_cyboflow_schema.sql into a fresh :memory: DB. */
+/** Load the canonical raw orchestrator schema into a fresh :memory: DB. */
 function createCanonicalDb(): Database.Database {
   const schemaPath = join(
     process.cwd(),
     'src/database/migrations/006_cyboflow_schema.sql',
   );
+  const dedupMigrationPath = join(
+    process.cwd(),
+    'src/database/migrations/071_raw_events_dedup.sql',
+  );
   const sql = readFileSync(schemaPath, 'utf8');
+  const dedupSql = readFileSync(dedupMigrationPath, 'utf8');
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
   db.exec(sql);
+  db.exec(dedupSql);
   return db;
 }
 
@@ -267,14 +274,14 @@ describe('seedApproval', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Parity test: GATE_SCHEMA vs 006_cyboflow_schema.sql column sets
+// Parity test: GATE_SCHEMA vs canonical raw orchestrator schema column sets
 // ---------------------------------------------------------------------------
 
-describe('GATE_SCHEMA parity vs 006_cyboflow_schema.sql', () => {
+describe('GATE_SCHEMA parity vs canonical raw orchestrator schema', () => {
   const TABLES_TO_CHECK = ['workflows', 'workflow_runs', 'approvals', 'raw_events'] as const;
 
   it.each(TABLES_TO_CHECK)(
-    'column set for table "%s" matches between GATE_SCHEMA and 006_cyboflow_schema.sql',
+    'column set for table "%s" matches the canonical schema through migration 071',
     (tableName) => {
       const gateDb = createTestDb();
       const canonicalDb = createCanonicalDb();
@@ -286,6 +293,23 @@ describe('GATE_SCHEMA parity vs 006_cyboflow_schema.sql', () => {
       expect(gateCols).toEqual(canonicalCols);
     },
   );
+
+  it('mirrors the partial unique raw_events dedup index', () => {
+    const gateDb = createTestDb();
+    const canonicalDb = createCanonicalDb();
+    const indexSql = (db: Database.Database): string | undefined =>
+      (
+        db
+          .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_raw_events_dedup'")
+          .get() as { sql: string } | undefined
+      )?.sql;
+
+    for (const sql of [indexSql(gateDb), indexSql(canonicalDb)]) {
+      expect(sql).toMatch(/CREATE UNIQUE INDEX/i);
+      expect(sql).toMatch(/ON raw_events\s*\(dedup_key\)/i);
+      expect(sql).toMatch(/WHERE dedup_key IS NOT NULL/i);
+    }
+  });
 
   it('messages table is intentionally absent from GATE_SCHEMA', () => {
     const db = createTestDb();

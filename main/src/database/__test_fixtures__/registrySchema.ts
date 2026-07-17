@@ -5,7 +5,8 @@
  *   - REGISTRY_SCHEMA (workflows, workflow_runs):
  *       main/src/database/schema.sql (post-TASK-598 reconciliation).
  *   - GATE_SCHEMA additions (approvals, raw_events):
- *       main/src/database/migrations/006_cyboflow_schema.sql.
+ *       main/src/database/migrations/006_cyboflow_schema.sql and
+ *       main/src/database/migrations/071_raw_events_dedup.sql.
  * Any column added to those tables at the canonical site MUST be
  * mirrored here too.
  *
@@ -61,7 +62,8 @@ CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_id ON workflow_runs(workfl
 /**
  * GATE_SCHEMA extends REGISTRY_SCHEMA with the approvals + raw_events tables
  * needed by the day-3 gate integration harness.
- * Source of truth for these tables: main/src/database/migrations/006_cyboflow_schema.sql.
+ * Source of truth for these tables: main/src/database/migrations/006_cyboflow_schema.sql
+ * plus main/src/database/migrations/071_raw_events_dedup.sql.
  */
 export const GATE_SCHEMA = REGISTRY_SCHEMA + `
 CREATE TABLE IF NOT EXISTS approvals (
@@ -85,7 +87,9 @@ CREATE TABLE IF NOT EXISTS raw_events (
   event_type TEXT NOT NULL,
   payload_json TEXT NOT NULL,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  dedup_key TEXT,
   FOREIGN KEY (run_id) REFERENCES workflow_runs(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_raw_events_run_id ON raw_events(run_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_raw_events_dedup ON raw_events(dedup_key) WHERE dedup_key IS NOT NULL;
 `;

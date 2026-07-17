@@ -3,13 +3,13 @@
  *
  * Owns the canonical `raw_events` DDL, the in-memory database factory, and the
  * row-count helper. Imported by runEventBridge.test.ts and runExecutor.test.ts
- * so that schema drift in 006_cyboflow_schema.sql only needs to be reflected
+ * so that schema drift in the raw_events migrations only needs to be reflected
  * once.
  *
  * Schema source of truth: main/src/database/migrations/006_cyboflow_schema.sql
- * (lines 37-44). The fixture intentionally omits the FOREIGN KEY clause because
- * makeRawEventsDb() disables FK enforcement — tests insert raw_events rows
- * without seeding workflow_runs.
+ * plus main/src/database/migrations/071_raw_events_dedup.sql. The fixture
+ * intentionally omits the FOREIGN KEY clause because makeRawEventsDb() disables
+ * FK enforcement — tests insert raw_events rows without seeding workflow_runs.
  */
 import Database from 'better-sqlite3';
 
@@ -19,8 +19,12 @@ export const RAW_EVENTS_DDL = `
     run_id TEXT NOT NULL,
     event_type TEXT NOT NULL,
     payload_json TEXT NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    dedup_key TEXT
+  );
+  CREATE UNIQUE INDEX idx_raw_events_dedup
+    ON raw_events(dedup_key)
+    WHERE dedup_key IS NOT NULL;
 `;
 
 /**
