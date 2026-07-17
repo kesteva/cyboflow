@@ -15,23 +15,21 @@
  * `html: null` (NOT an error), which the renderer surfaces as an explicit empty
  * state rather than a blank iframe.
  *
- * Short-circuit (NO IPC): only a POINTER canvas (`ui-prototype`, always minted
- * with an on-disk `fileName`) or ANY committed canvas (its snapshot may hold
- * `prototype/index.html`) sources inline HTML. A legacy uncommitted `generic`
- * `{ url }` live canvas never has an on-disk document, so it short-circuits to a
- * resolved `html: null` with no round-trip. A null/empty runId does the same.
+ * Short-circuit (NO IPC): the CALLER decides whether on-disk HTML is possible and
+ * passes `enabled`. It is true when the artifact has a `fileName` pointer OR is a
+ * committed canvas with no `url` (its snapshot / preserved subtree may hold
+ * `prototype/index.html`); a url-only live canvas passes `enabled=false` and
+ * short-circuits to a resolved `html: null` with no round-trip. A null/empty
+ * runId does the same.
  *
  * Mirrors {@link useArtifactImages}: reaches the typed `window.electronAPI`
  * surface (declared in frontend/src/types/electron.d.ts) — no cast, no `any`,
  * no local IPCResponse re-declare (imported from utils/api.ts). In-flight
- * results are dropped on unmount / when the [runId, atype, committed] inputs
- * change.
+ * results are dropped on unmount / when the [runId, atype, enabled] inputs change.
  */
 import { useEffect, useState } from 'react';
 import type { IPCResponse } from '../utils/api';
-
-/** Canvas atypes the load-html channel accepts (parity with the preload req). */
-type CanvasAtype = 'ui-prototype' | 'generic';
+import type { LoadArtifactHtmlAtype, LoadArtifactHtmlResult } from '../../../shared/types/artifacts';
 
 export interface UseArtifactHtml {
   /** The static mockup document (CSP <meta> injected), or null when absent/unreadable. */
@@ -51,22 +49,18 @@ function getApi(): Window['electronAPI'] | null {
 
 export function useArtifactHtml(
   runId: string,
-  atype: CanvasAtype,
-  committed: boolean,
+  atype: LoadArtifactHtmlAtype,
+  enabled: boolean,
 ): UseArtifactHtml {
   const [html, setHtml] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Only a pointer canvas (ui-prototype) or a committed canvas may carry inline
-  // HTML; anything else (a legacy uncommitted {url} generic) short-circuits.
-  const wantsHtml = atype === 'ui-prototype' || committed;
-
   useEffect(() => {
     let cancelled = false;
 
-    // No runId, or not a pointer/committed canvas → resolved null, no IPC.
-    if (!runId || !wantsHtml) {
+    // Caller says on-disk HTML isn't possible (url-only canvas) → resolved null.
+    if (!runId || !enabled) {
       setHtml(null);
       setLoading(false);
       setError(null);
@@ -84,8 +78,8 @@ export function useArtifactHtml(
     setLoading(true);
     setError(null);
 
-    api.artifacts.loadHtml({ runId, atype, committed }).then(
-      (res: IPCResponse<{ html: string | null }>) => {
+    api.artifacts.loadHtml({ runId, atype }).then(
+      (res: IPCResponse<LoadArtifactHtmlResult>) => {
         if (cancelled) return;
         if (res.success && res.data) {
           setHtml(res.data.html);
@@ -107,7 +101,7 @@ export function useArtifactHtml(
     return () => {
       cancelled = true;
     };
-  }, [runId, atype, committed, wantsHtml]);
+  }, [runId, atype, enabled]);
 
   return { html, loading, error };
 }

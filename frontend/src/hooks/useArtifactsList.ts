@@ -68,19 +68,33 @@ function upsert(list: Artifact[], next: Artifact): Artifact[] {
 }
 
 /**
- * Merge the async seed snapshot into whatever the subscription already delivered.
+ * Merge the async seed snapshot into whatever the subscription already delivered,
+ * WITHOUT letting the (older) seed override newer subscription state.
  *
- * The seed (`rows`) is DB-authoritative for every id it contains, so it wins on
- * those. But an artifact minted mid-run can arrive over the subscription AFTER
- * the seed snapshot was taken but BEFORE the seed query resolves — its id is in
- * `prev` yet absent from `rows`. A plain `setArtifacts(rows)` would clobber it.
- * We therefore append any such subscription-only id to the seed result instead
- * of dropping it. Seed ordering is preserved; carried-over ids land after it.
+ * The seed snapshot is taken on the server BEFORE the query resolves, so an event
+ * that fires during the flight is NEWER than the seed for that id. Naively taking
+ * the seed for every id it contains would (a) RESURRECT a row deleted mid-flight
+ * and (b) DOWNGRADE a row the subscription just committed/updated back to its
+ * pre-event shape, with no later event to repair it. So the caller records the
+ * ids the subscription touched during the flight (`subUpdatedIds`) and deleted
+ * (`subDeletedIds`); this merge:
+ *   - drops seed rows whose id the subscription DELETED (no resurrection);
+ *   - drops seed rows whose id the subscription UPDATED (prev holds the newer
+ *     shape, carried over below);
+ *   - keeps everything else in `prev` that the (filtered) seed doesn't represent
+ *     — subscription-only ids AND the newer versions of overlapping ids.
+ * Seed ordering is preserved; carried-over ids land after it.
  */
-function mergeSeed(prev: Artifact[], rows: Artifact[]): Artifact[] {
-  const seededIds = new Set(rows.map((a) => a.id));
-  const carriedOver = prev.filter((a) => !seededIds.has(a.id));
-  return carriedOver.length === 0 ? rows : [...rows, ...carriedOver];
+function mergeSeed(
+  prev: Artifact[],
+  rows: Artifact[],
+  subUpdatedIds: Set<string>,
+  subDeletedIds: Set<string>,
+): Artifact[] {
+  const seedWins = rows.filter((a) => !subDeletedIds.has(a.id) && !subUpdatedIds.has(a.id));
+  const seedWinIds = new Set(seedWins.map((a) => a.id));
+  const carriedOver = prev.filter((a) => !seedWinIds.has(a.id) && !subDeletedIds.has(a.id));
+  return carriedOver.length === 0 ? seedWins : [...seedWins, ...carriedOver];
 }
 
 export function useArtifactsList(
@@ -100,6 +114,11 @@ export function useArtifactsList(
 
     // `cancelled` guards the async seed from landing after a dep change/unmount.
     let cancelled = false;
+    // Ids the subscription touched WHILE the seed was in flight — the seed is
+    // older than these, so it must not resurrect a delete or downgrade an update.
+    let seeded = false;
+    const subUpdatedIds = new Set<string>();
+    const subDeletedIds = new Set<string>();
     // Reset so a stale list never flashes while the new seed is in flight, and
     // mark the new run's seed as not-yet-loaded.
     setArtifacts([]);
@@ -108,10 +127,11 @@ export function useArtifactsList(
     void trpc.cyboflow.artifacts.list
       .query({ runId })
       .then((rows) => {
-        // Merge (not replace): preserve any artifact the subscription delivered
-        // while the seed was in flight (its id is in `prev` but absent here).
+        // Merge (not replace): the seed wins only for ids the subscription did NOT
+        // touch mid-flight; newer subscription state (updates/deletes) is preserved.
         if (!cancelled) {
-          setArtifacts((prev) => mergeSeed(prev, rows));
+          setArtifacts((prev) => mergeSeed(prev, rows, subUpdatedIds, subDeletedIds));
+          seeded = true;
           setLoaded(true);
         }
       })
@@ -120,6 +140,7 @@ export function useArtifactsList(
           console.warn('[useArtifactsList] initial list failed:', err);
           // The seed completed (unsuccessfully); unblock consumers waiting on
           // `loaded` so a fetch error doesn't strand the seed pass forever.
+          seeded = true;
           setLoaded(true);
         }
       });
@@ -133,12 +154,20 @@ export function useArtifactsList(
           // The channel carries every run in the project; ignore other runs.
           if (event.runId !== runId) return;
           if (event.action === 'deleted') {
+            if (!seeded) {
+              subDeletedIds.add(event.artifactId);
+              subUpdatedIds.delete(event.artifactId);
+            }
             setArtifacts((prev) => prev.filter((a) => a.id !== event.artifactId));
             return;
           }
           // created / updated / committed all carry the shaped artifact.
           if (event.artifact !== null) {
             const next = event.artifact;
+            if (!seeded) {
+              subUpdatedIds.add(next.id);
+              subDeletedIds.delete(next.id);
+            }
             setArtifacts((prev) => upsert(prev, next));
           }
         },
@@ -194,6 +223,10 @@ export function useSessionArtifactsList(
 
     // `cancelled` guards the async seed from landing after a dep change/unmount.
     let cancelled = false;
+    // Ids the subscription touched WHILE the seed was in flight (see mergeSeed).
+    let seeded = false;
+    const subUpdatedIds = new Set<string>();
+    const subDeletedIds = new Set<string>();
     // Reset so a stale list never flashes while the new seed is in flight, and
     // mark the new session's seed as not-yet-loaded.
     setArtifacts([]);
@@ -202,10 +235,10 @@ export function useSessionArtifactsList(
     void trpc.cyboflow.artifacts.listBySession
       .query({ sessionId })
       .then((rows) => {
-        // Merge (not replace): preserve any artifact the subscription delivered
-        // while the seed was in flight (its id is in `prev` but absent here).
+        // Merge (not replace): newer subscription state wins over the older seed.
         if (!cancelled) {
-          setArtifacts((prev) => mergeSeed(prev, rows));
+          setArtifacts((prev) => mergeSeed(prev, rows, subUpdatedIds, subDeletedIds));
+          seeded = true;
           setLoaded(true);
         }
       })
@@ -214,6 +247,7 @@ export function useSessionArtifactsList(
           console.warn('[useSessionArtifactsList] initial list failed:', err);
           // The seed completed (unsuccessfully); unblock consumers waiting on
           // `loaded` so a fetch error doesn't strand the seed pass forever.
+          seeded = true;
           setLoaded(true);
         }
       });
@@ -228,12 +262,20 @@ export function useSessionArtifactsList(
           // The channel carries every run in the project; ignore other sessions.
           if (event.sessionId !== sessionId) return;
           if (event.action === 'deleted') {
+            if (!seeded) {
+              subDeletedIds.add(event.artifactId);
+              subUpdatedIds.delete(event.artifactId);
+            }
             setArtifacts((prev) => prev.filter((a) => a.id !== event.artifactId));
             return;
           }
           // created / updated / committed all carry the shaped artifact.
           if (event.artifact !== null) {
             const next = event.artifact;
+            if (!seeded) {
+              subUpdatedIds.add(next.id);
+              subDeletedIds.delete(next.id);
+            }
             setArtifacts((prev) => upsert(prev, next));
           }
         },

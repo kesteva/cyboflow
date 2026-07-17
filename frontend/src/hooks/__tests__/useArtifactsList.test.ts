@@ -4,7 +4,9 @@
  * Focus: the seed/subscription race (FINDING E-list-seed-race).
  *   1. Subscription event arriving BEFORE the seed resolves is preserved when
  *      the seed resolves (merge, not clobber).
- *   2. Seed rows are authoritative for ids they contain (seed value wins).
+ *   2. The seed wins ONLY for ids the subscription did not touch mid-flight; a
+ *      subscription update/delete during the flight is NEWER and wins (no
+ *      downgrade, no resurrection).
  *   3. Normal seed-then-subscription path still upserts.
  *   4. 'deleted' events remove by id.
  *   5. Events for OTHER runs on the shared project channel are ignored.
@@ -173,23 +175,66 @@ describe('useArtifactsList', () => {
     expect(ids).toEqual(['art-late', 'art-seed']);
   });
 
-  it('lets the seed value win for ids it contains (DB-authoritative)', async () => {
+  it('lets the seed win for an id the subscription did NOT touch mid-flight', async () => {
     const { result } = renderHook(() => useArtifactsList(RUN, PROJECT));
 
-    // Subscription delivers a stale version of art-1 before the seed lands.
+    // The subscription touches a DIFFERENT id (art-2) during the flight; the seed
+    // remains authoritative for art-1, which no event touched.
     act(() => {
-      lastOnData?.(changedEvent({ artifact: makeArtifact({ id: 'art-1', label: 'stale' }) }));
+      lastOnData?.(changedEvent({ artifact: makeArtifact({ id: 'art-2', label: 'sub-only' }) }));
     });
-    expect(result.current.artifacts).toEqual([makeArtifact({ id: 'art-1', label: 'stale' })]);
 
-    // Seed contains a fresher art-1 — it should win on the shared id.
     await act(async () => {
-      seedDeferred.resolve([makeArtifact({ id: 'art-1', label: 'fresh' })]);
+      seedDeferred.resolve([makeArtifact({ id: 'art-1', label: 'seed' })]);
+      await seedDeferred.promise;
+    });
+
+    expect(result.current.artifacts.find((a) => a.id === 'art-1')?.label).toBe('seed');
+    expect(result.current.artifacts.find((a) => a.id === 'art-2')?.label).toBe('sub-only');
+  });
+
+  it('does NOT let the (older) seed downgrade an id the subscription updated mid-flight', async () => {
+    const { result } = renderHook(() => useArtifactsList(RUN, PROJECT));
+
+    // A commit for art-1 arrives over the subscription while the seed is in flight
+    // — it is NEWER than the seed snapshot (taken server-side before the query
+    // resolved), so it must survive the merge.
+    act(() => {
+      lastOnData?.(
+        changedEvent({ action: 'committed', artifact: makeArtifact({ id: 'art-1', label: 'committed', committed: true }) }),
+      );
+    });
+    expect(result.current.artifacts[0].label).toBe('committed');
+
+    // The (older) seed still holds the pre-commit version — it must NOT win, or the
+    // row would silently revert to uncommitted with no event to repair it.
+    await act(async () => {
+      seedDeferred.resolve([makeArtifact({ id: 'art-1', label: 'pre-commit-seed' })]);
       await seedDeferred.promise;
     });
 
     expect(result.current.artifacts).toHaveLength(1);
-    expect(result.current.artifacts[0].label).toBe('fresh');
+    expect(result.current.artifacts[0].label).toBe('committed');
+  });
+
+  it('does NOT resurrect an id the subscription deleted mid-flight', async () => {
+    const { result } = renderHook(() => useArtifactsList(RUN, PROJECT));
+
+    // art-1 is deleted (reaped) over the subscription while the seed is in flight.
+    act(() => {
+      lastOnData?.(changedEvent({ action: 'deleted', artifactId: 'art-1', artifact: null }));
+    });
+
+    // The (older) seed still contains art-1 — it must NOT come back to life.
+    await act(async () => {
+      seedDeferred.resolve([
+        makeArtifact({ id: 'art-1', label: 'seed-stale' }),
+        makeArtifact({ id: 'art-2', label: 'keep' }),
+      ]);
+      await seedDeferred.promise;
+    });
+
+    expect(result.current.artifacts.map((a) => a.id)).toEqual(['art-2']);
   });
 
   it('reports loaded=false until the seed resolves, then true', async () => {

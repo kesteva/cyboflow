@@ -1177,13 +1177,16 @@ function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: nu
   const url = typeof payload?.url === 'string' ? payload.url : undefined;
   const label = artifact.atype === 'generic' ? 'generic' : 'ui prototype';
 
-  // A static mockup (fileName pointer) or ANY committed canvas resolves its body
-  // from on-disk HTML; a legacy uncommitted {url} live canvas embeds the URL.
-  const wantsInline = typeof fileName === 'string' || artifact.committed || url === undefined;
-  // A pointer/committed artifact for which we EXPECTED on-disk HTML — drives the
-  // explicit "unavailable" empty state when the load fail-softs to null.
-  const expectsHtml = typeof fileName === 'string' || artifact.committed;
-  const { html, loading } = useArtifactHtml(artifact.runId, canvasAtype, artifact.committed);
+  // Render selection keys off the PAYLOAD SHAPE, not the committed flag: a
+  // `fileName` pointer (or a committed canvas with no url — its snapshot may hold
+  // HTML) resolves inline on-disk HTML; a `url` (with no fileName) embeds the
+  // legacy live canvas whether committed or not. This keeps a legacy committed
+  // {url} rendering as a url (not "unavailable") and loads an uncommitted generic
+  // {fileName} (which the old committed-gated hook skipped).
+  const hasFile = typeof fileName === 'string';
+  const hasUrl = typeof url === 'string';
+  const expectsHtml = hasFile || (artifact.committed && !hasUrl);
+  const { html, loading } = useArtifactHtml(artifact.runId, canvasAtype, expectsHtml);
 
   // Only a localhost http(s) URL gets a LIVE anchor — a javascript:/file://
   // /remote URL from the payload must NOT become a clickable link (same gate as
@@ -1223,8 +1226,9 @@ function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: nu
   } else if (html !== null) {
     // Static mockup / committed snapshot — bare-sandbox srcDoc embed.
     body = <LiveCanvasEmbed html={html} />;
-  } else if (url && !wantsInline) {
-    // Legacy live canvas — cross-origin dev-server iframe (allow-scripts).
+  } else if (hasUrl && url) {
+    // Legacy live canvas (url with no resolved HTML) — cross-origin dev-server
+    // iframe (allow-scripts), whether committed or not.
     body = <LiveCanvasEmbed url={url} interactive />;
   } else if (expectsHtml) {
     // Pointer/committed artifact whose HTML did not resolve — explicit empty

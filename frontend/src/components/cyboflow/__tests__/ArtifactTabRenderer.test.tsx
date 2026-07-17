@@ -985,6 +985,31 @@ describe('ArtifactTabRenderer', () => {
     expect(iframe.getAttribute('sandbox')).toBe('');
   });
 
+  it('renders a legacy COMMITTED {url} canvas as the live url embed, NOT "unavailable" (#7)', () => {
+    // Render selection is by payload SHAPE, not the committed flag: a committed
+    // url-only canvas (no snapshot html) must still embed its url.
+    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: { url: 'http://localhost:8081' } } });
+    setHtml({ html: null, loading: false, error: null });
+    render(
+      <ArtifactTabRenderer artifact={makeArtifact({ atype: 'generic', mode: 'canvas', committed: true })} {...PROPS} />,
+    );
+    expect(screen.getByTestId('live-canvas-iframe')).toHaveAttribute('src', 'http://localhost:8081');
+    expect(screen.queryByTestId('artifact-canvas-unavailable')).not.toBeInTheDocument();
+  });
+
+  it('renders an UNCOMMITTED generic {fileName} canvas as inline srcDoc html (#7)', () => {
+    // A fileName pointer means on-disk HTML regardless of committed state — the
+    // old committed-gated hook skipped this and it read as "unavailable".
+    setHook({ loading: false, error: null, data: { kind: 'canvas', payload: { fileName: 'prototype/index.html' } } });
+    setHtml({ html: '<html><body>gen mock</body></html>', loading: false, error: null });
+    render(
+      <ArtifactTabRenderer artifact={makeArtifact({ atype: 'generic', mode: 'canvas', committed: false })} {...PROPS} />,
+    );
+    const iframe = screen.getByTestId('live-canvas-iframe');
+    expect(iframe).toHaveAttribute('srcdoc');
+    expect(iframe).not.toHaveAttribute('src');
+  });
+
   // --- commit-state badge + commit button (ArtifactHeader, shared) ---------
 
   it('shows the session-only badge + Commit button when not committed, and commits on click', async () => {
