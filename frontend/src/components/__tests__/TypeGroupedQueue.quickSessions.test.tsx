@@ -135,12 +135,16 @@ describe('TypeGroupedQueue — quick-session board', () => {
     expect(within(humanGroup).queryByText(/Idle session needs your attention/)).not.toBeInTheDocument();
   });
 
-  it('renders the quick-session board and keeps the queue mounted for an attention row', () => {
+  it('surfaces a blocked quick session as a full-width card (not a board row) and keeps the queue mounted', () => {
     mockQuickRows = [quickRow({ name: 'tidy-valley', state: 'blocked', idleSince: null, unviewed: false })];
     render(<TypeGroupedQueue />);
-    const board = screen.getByTestId('queue-group-quick-sessions');
-    expect(within(board).getByText('tidy-valley')).toBeInTheDocument();
-    expect(within(board).getByText('blocked')).toBeInTheDocument();
+    // Lifted into a full-width card among the waiting-on-input items...
+    const blockedGroup = screen.getByTestId('queue-group-quick-session-blocked');
+    expect(within(blockedGroup).getByText('tidy-valley')).toBeInTheDocument();
+    expect(within(blockedGroup).getByText('blocked')).toBeInTheDocument();
+    // ...and NOT duplicated as a compact board row — with only a blocked row, the
+    // board filters it out and renders nothing.
+    expect(screen.queryByTestId('queue-group-quick-sessions')).not.toBeInTheDocument();
     // A blocked quick session alone keeps the queue up (not the empty state).
     expect(screen.queryByText('No pending reviews')).not.toBeInTheDocument();
   });
@@ -155,5 +159,19 @@ describe('TypeGroupedQueue — quick-session board', () => {
     expect(within(board).getByText('busy-otter')).toBeInTheDocument();
     expect(within(board).getByText('running')).toBeInTheDocument();
     expect(within(board).getByText('quiet-mesa')).toBeInTheDocument();
+  });
+
+  it('splits a blocked session into a card while other sessions stay on the board', () => {
+    mockQuickRows = [
+      quickRow({ sessionId: 's1', name: 'tidy-valley', state: 'blocked', idleSince: null, unviewed: false }),
+      quickRow({ sessionId: 's2', name: 'busy-otter', state: 'running', idleSince: null, unviewed: false }),
+    ];
+    render(<TypeGroupedQueue />);
+    const blockedGroup = screen.getByTestId('queue-group-quick-session-blocked');
+    expect(within(blockedGroup).getByText('tidy-valley')).toBeInTheDocument();
+    // The board still renders the non-blocked session, without the blocked one.
+    const board = screen.getByTestId('queue-group-quick-sessions');
+    expect(within(board).getByText('busy-otter')).toBeInTheDocument();
+    expect(within(board).queryByText('tidy-valley')).not.toBeInTheDocument();
   });
 });

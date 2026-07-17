@@ -2,20 +2,29 @@
  * QuickSessionsTable — the live quick-session status board on the review home.
  *
  * Replaces the old "Idle sessions" group (stale blocking `human_task` rows that
- * never self-cleared on open). Renders EVERY quick session with its live state:
- *   - blocked (red)   — waiting on an AskUserQuestion / permission answer
+ * never self-cleared on open). Renders the COMPACT status of every non-blocked
+ * quick session:
  *   - idle    (rust)  — rested after a turn; an unviewed one shows a dot + how
  *                       long it has been quiet
  *   - running (green) — actively working (no action needed)
  *
- * Rows are ordered by attention: blocked → idle-unviewed (longest quiet first) →
+ * `blocked` sessions (waiting on an AskUserQuestion / permission answer) are NOT
+ * shown here — they are surfaced as full-width cards near the top of the queue
+ * (TypeGroupedQueue), alongside the other waiting-on-input items — so this board
+ * carries only running/idle rows and never duplicates that treatment.
+ *
+ * Rows are ordered by attention: idle-unviewed (longest quiet first) →
  * idle-viewed → running. Opening a row switches to the quick-session host AND
  * marks it viewed (the live fix for bug #1: the old queue item never cleared
  * because opening from the queue never stamped last_viewed_at), then triggers an
  * immediate board refresh so its state updates without waiting for the poll.
  *
+ * Two idle→running overlays run on the live clock: {@link overrideRunningForActiveWorkflows}
+ * (a detached dynamic workflow is still working) and {@link overrideRecentIdleAsRunning}
+ * (a session rested < {@link QUIET_GRACE_MS} ago isn't "quiet" yet).
+ *
  * Data + polling come from {@link useQuickSessionsStore}; this component owns the
- * grouping chrome, the board sort, and a shared ~5s clock for the "quiet for N"
+ * grouping chrome, the board sort, and a shared 1s clock for the "quiet for N"
  * elapsed labels (one interval for the whole table, not one per row).
  */
 import React from 'react';
@@ -55,6 +64,38 @@ export function overrideRunningForActiveWorkflows(
       ? { ...row, state: 'running', idleSince: null }
       : row,
   );
+}
+
+/**
+ * Grace window before a rested session is labeled `idle` / "quiet".
+ *
+ * A turn ending stamps `sessions.updated_at`, so a session that JUST finished
+ * derives to `idle` with "quiet 0s" — noisy, since a follow-up turn often lands
+ * within a few seconds. Within this window after its last turn the row is shown
+ * `running` instead, and only flips to `idle` once it has actually been quiet
+ * for the full window. At the boundary the label reads "quiet 1m", never
+ * resetting a counter (idleSince is preserved, so elapsed keeps climbing from
+ * the real rest time).
+ */
+export const QUIET_GRACE_MS = 60_000;
+
+/**
+ * Override `idle` → `running` for sessions that rested less than {@link QUIET_GRACE_MS}
+ * ago (see the grace-window rationale above). Time-based, so it must be recomputed
+ * against the live clock (`nowMs`). `blocked`/`running` rows and rows with an
+ * unparseable `idleSince` pass through untouched.
+ */
+export function overrideRecentIdleAsRunning(
+  rows: QuickSessionRow[],
+  nowMs: number,
+  graceMs: number = QUIET_GRACE_MS,
+): QuickSessionRow[] {
+  return rows.map((row) => {
+    if (row.state !== 'idle' || row.idleSince === null) return row;
+    const idleMs = Date.parse(row.idleSince);
+    if (Number.isNaN(idleMs)) return row;
+    return nowMs - idleMs < graceMs ? { ...row, state: 'running', idleSince: null } : row;
+  });
 }
 
 /** Stable board order: attention first, then longest-quiet idle first. */
@@ -158,10 +199,16 @@ export function QuickSessionsTable(): React.JSX.Element | null {
     () => new Set(activeDynamicWorkflows.map((w) => w.sessionId)),
     [activeDynamicWorkflows],
   );
-  const sorted = React.useMemo(
-    () => sortQuickSessionRows(overrideRunningForActiveWorkflows(rows, activeWorkflowSessionIds)),
-    [rows, activeWorkflowSessionIds],
-  );
+  const sorted = React.useMemo(() => {
+    // Blocked sessions are surfaced as full-width cards up top (TypeGroupedQueue),
+    // so the compact board carries only running/idle rows — no duplicate treatment.
+    const boardRows = rows.filter((row) => row.state !== 'blocked');
+    const overridden = overrideRecentIdleAsRunning(
+      overrideRunningForActiveWorkflows(boardRows, activeWorkflowSessionIds),
+      nowMs,
+    );
+    return sortQuickSessionRows(overridden);
+  }, [rows, activeWorkflowSessionIds, nowMs]);
   if (sorted.length === 0) return null;
 
   return (

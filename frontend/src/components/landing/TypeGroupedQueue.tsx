@@ -35,6 +35,7 @@ import { PendingApprovalCard } from '../ReviewQueue/PendingApprovalCard';
 import { ReviewItemCard } from '../ReviewQueue/ReviewItemCard';
 import type { QueueItem } from '../../utils/reviewQueueSelectors';
 import { IDLE_REVIEW_SOURCE_PREFIX, type ReviewItem } from '../../../../shared/types/reviews';
+import type { QuickSessionRow } from '../../../../shared/types/quickSessions';
 import type { WorkflowRunStatus } from '../../../../shared/types/cyboflow';
 import type { ActiveRunRow } from '../../stores/activeRunsStore';
 import {
@@ -273,6 +274,41 @@ function ReadyToReviewRow({ run }: { run: ActiveRunRow }): React.JSX.Element {
   );
 }
 
+/**
+ * A single BLOCKED quick session, surfaced as a full-width card among the other
+ * waiting-on-input items rather than as a compact board row. The session parked
+ * on an AskUserQuestion / permission gate in its PTY, so there is no structured
+ * question to render here (unlike a PendingApprovalCard) — the card is an
+ * attention prompt whose "Open session →" jumps into the session to answer.
+ * Opening routes through the quick-session host (setActiveQuickSession), never
+ * the flow-run host, since a quick session has no resolvable workflow definition.
+ */
+function BlockedQuickSessionRow({ row }: { row: QuickSessionRow }): React.JSX.Element {
+  return (
+    <div>
+      <div className="border border-status-error/40 bg-surface-primary p-3 transition-colors hover:border-status-error">
+        <div className="flex items-center gap-2">
+          <span aria-hidden="true" className="h-1.5 w-1.5 shrink-0 rounded-full bg-status-error" />
+          <span
+            className="truncate font-bold text-text-primary"
+            style={{ fontSize: '13px' }}
+            title={row.name}
+          >
+            {row.name}
+          </span>
+          <span className="eyebrow ml-auto shrink-0 border border-status-error px-1.5 py-0.5 text-status-error">
+            blocked
+          </span>
+        </div>
+        <div className="mt-2 text-text-tertiary" style={{ fontSize: '11px' }}>
+          Waiting on your answer — open the session to respond.
+        </div>
+      </div>
+      <OpenSessionLink runId={row.runId} projectId={row.projectId} quickSessionId={row.sessionId} />
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Public component
 // ---------------------------------------------------------------------------
@@ -333,6 +369,13 @@ export function TypeGroupedQueue(): React.JSX.Element {
   // idle-session review items that used to hold this slot.
   const quickRows = useQuickSessionRows();
   const hasAttentionQuick = React.useMemo(() => quickRows.some(needsAttention), [quickRows]);
+  // Blocked quick sessions are lifted OUT of the compact board and rendered as
+  // full-width cards up here with the other waiting-on-input items (the board
+  // filters them out to avoid a duplicate row).
+  const blockedQuickRows = React.useMemo(
+    () => quickRows.filter((row) => row.state === 'blocked'),
+    [quickRows],
+  );
 
   const hasAny =
     permissionItems.length > 0 ||
@@ -384,6 +427,20 @@ export function TypeGroupedQueue(): React.JSX.Element {
           />
           {decisionItems.map((it) => (
             <ReviewItemRow key={it.id} item={it} />
+          ))}
+        </section>
+      )}
+
+      {blockedQuickRows.length > 0 && (
+        <section data-testid="queue-group-quick-session-blocked">
+          <GroupHeader
+            swatchClass="bg-status-error"
+            name="Quick session"
+            count={blockedQuickRows.length}
+            descriptor="Blocked on your answer — open to respond"
+          />
+          {blockedQuickRows.map((row) => (
+            <BlockedQuickSessionRow key={row.sessionId} row={row} />
           ))}
         </section>
       )}

@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   sortQuickSessionRows,
   overrideRunningForActiveWorkflows,
+  overrideRecentIdleAsRunning,
+  QUIET_GRACE_MS,
 } from '../landing/QuickSessionsTable';
 import type { QuickSessionRow } from '../../../../shared/types/quickSessions';
 
@@ -75,5 +77,46 @@ describe('overrideRunningForActiveWorkflows', () => {
     overrideRunningForActiveWorkflows(rows, new Set(['s1']));
     expect(rows[0].state).toBe('idle');
     expect(rows[0].idleSince).toBe('2026-07-06T10:00:00Z');
+  });
+});
+
+describe('overrideRecentIdleAsRunning', () => {
+  const idleSince = '2026-07-06T10:00:00Z';
+  const nowMs = Date.parse(idleSince);
+
+  it('flips an idle row that rested within the grace window to running', () => {
+    const rows = [row({ sessionId: 's1', state: 'idle', idleSince, unviewed: true })];
+    // 30s after the last turn — still inside the 60s grace window.
+    const out = overrideRecentIdleAsRunning(rows, nowMs + 30_000);
+    expect(out[0].state).toBe('running');
+    expect(out[0].idleSince).toBeNull();
+  });
+
+  it('leaves an idle row that has been quiet past the grace window as idle', () => {
+    const rows = [row({ sessionId: 's1', state: 'idle', idleSince })];
+    // Exactly at the boundary is no longer "recent" (>= grace).
+    const out = overrideRecentIdleAsRunning(rows, nowMs + QUIET_GRACE_MS);
+    expect(out[0].state).toBe('idle');
+    expect(out[0].idleSince).toBe(idleSince);
+  });
+
+  it('never touches a running row (no idleSince to measure)', () => {
+    const rows = [row({ sessionId: 's1', state: 'running', idleSince: null })];
+    const out = overrideRecentIdleAsRunning(rows, nowMs + 1_000);
+    expect(out[0].state).toBe('running');
+  });
+
+  it('passes through an idle row with an unparseable idleSince', () => {
+    const rows = [row({ sessionId: 's1', state: 'idle', idleSince: 'not-a-date' })];
+    const out = overrideRecentIdleAsRunning(rows, nowMs);
+    expect(out[0].state).toBe('idle');
+    expect(out[0].idleSince).toBe('not-a-date');
+  });
+
+  it('does not mutate the input rows', () => {
+    const rows = [row({ sessionId: 's1', state: 'idle', idleSince })];
+    overrideRecentIdleAsRunning(rows, nowMs + 1_000);
+    expect(rows[0].state).toBe('idle');
+    expect(rows[0].idleSince).toBe(idleSince);
   });
 });
