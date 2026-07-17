@@ -12,9 +12,10 @@
  *
  * Token/cost aggregation contract (see the shared file's header for the full
  * substrate caveat):
- *   - Token sums come ONLY from `assistant` payloads' `message.usage`. We never
- *     add `result.usage` tokens — `result` events restate per-turn totals and
- *     summing both double-counts (FIND-class double-count guard).
+ *   - Token sums come from primary/provider assistant payloads and synthetic
+ *     `subagent_usage` payloads' `message.usage`. We never add `result.usage`
+ *     tokens — `result` events restate per-turn totals and summing both
+ *     double-counts (FIND-class double-count guard).
  *   - `costUsd` / `numTurns` come from `result` payloads' `total_cost_usd` /
  *     `num_turns`, SUMMED across results (a resumed run emits one `result` per
  *     turn-session). Null when no result ever carried the field.
@@ -115,6 +116,17 @@ function chunk<T>(items: readonly T[], size: number): T[][] {
 /** Build a comma-joined '?' placeholder string of length `n`. */
 function placeholders(n: number): string {
   return new Array(n).fill('?').join(', ');
+}
+
+/** Event kinds whose nested `message.usage` contributes assistant-side tokens. */
+const ASSISTANT_USAGE_EVENT_TYPES = [
+  'assistant',
+  'agent_assistant',
+  'subagent_usage',
+] as const;
+
+function isAssistantUsageEventType(eventType: string): boolean {
+  return ASSISTANT_USAGE_EVENT_TYPES.some((candidate) => candidate === eventType);
 }
 
 /** Narrow an unknown JSON value to a plain object (not array, not null). */
@@ -348,13 +360,16 @@ function fetchMaterializedRollups(
 /**
  * Live raw_events scan for the runs WITHOUT a materialized row — the original
  * Phase-1 aggregation, now scoped to the fallback cohort. Seeds a zeroed rollup
- * for every requested id, then folds in `assistant` + `result` payloads in
- * (run_id, id) order so cost/turn SUMs are deterministic.
+ * for every requested id, then folds in assistant-side usage + `result`
+ * payloads in (run_id, id) order so cost/turn SUMs are deterministic.
  *
  * Parsing rules (all guarded against malformed JSON, which is skipped silently):
  *   - assistant → message.usage.{input,output,cache_read,cache_creation}_tokens
  *     (each optional). `assistantMessageCount` increments ONLY when a `usage`
  *     object is present.
+ *   - subagent_usage → the same nested message.usage token fields, WITHOUT
+ *     incrementing assistantMessageCount (it is a cumulative agent snapshot,
+ *     not a primary assistant message).
  *   - result → total_cost_usd (SUMmed; null when never present) and num_turns
  *     (SUMmed; null when never present).
  *   - result.usage → token fallback used only when the run has no assistant usage
@@ -383,10 +398,10 @@ function scanRawEventRollups(
         `SELECT run_id AS runId, event_type AS eventType, payload_json AS payloadJson
          FROM raw_events
          WHERE run_id IN (${placeholders(ids.length)})
-           AND event_type IN ('assistant', 'result', 'agent_assistant', 'agent_result')
+           AND event_type IN (${placeholders(ASSISTANT_USAGE_EVENT_TYPES.length)}, 'result', 'agent_result')
          ORDER BY run_id, id`,
       )
-      .all(...ids) as RawEventUsageRow[];
+      .all(...ids, ...ASSISTANT_USAGE_EVENT_TYPES) as RawEventUsageRow[];
 
     for (const row of rows) {
       const target = acc.get(row.runId);
@@ -400,7 +415,7 @@ function scanRawEventRollups(
       }
       if (!isRecord(payload)) continue;
 
-      if (row.eventType === 'assistant' || row.eventType === 'agent_assistant') {
+      if (isAssistantUsageEventType(row.eventType)) {
         const message = payload.message;
         if (!isRecord(message)) continue;
         const usage = message.usage;
@@ -410,7 +425,9 @@ function scanRawEventRollups(
         target.outputTokens += asNumber(usage.output_tokens);
         target.cacheReadTokens += asNumber(usage.cache_read_input_tokens);
         target.cacheCreationTokens += asNumber(usage.cache_creation_input_tokens);
-        target.assistantMessageCount += 1;
+        if (row.eventType !== 'subagent_usage') {
+          target.assistantMessageCount += 1;
+        }
       } else {
         // result: SUM total_cost_usd + num_turns when present (null stays null
         // until the first numeric value lands — distinguishes "never reported").
@@ -443,10 +460,13 @@ function scanRawEventRollups(
   for (const rollup of acc.values()) {
     const fallback = resultUsageFallback.get(rollup.runId);
     if (rollup.assistantMessageCount === 0 && fallback !== undefined) {
-      rollup.inputTokens = fallback.inputTokens;
-      rollup.outputTokens = fallback.outputTokens;
-      rollup.cacheReadTokens = fallback.cacheReadTokens;
-      rollup.cacheCreationTokens = fallback.cacheCreationTokens;
+      // Before subagent_usage existed these targets were necessarily zero.
+      // Add instead of replace so a provider whose PRIMARY usage arrives only
+      // on agent_result keeps any independently captured subagent snapshots.
+      rollup.inputTokens += fallback.inputTokens;
+      rollup.outputTokens += fallback.outputTokens;
+      rollup.cacheReadTokens += fallback.cacheReadTokens;
+      rollup.cacheCreationTokens += fallback.cacheCreationTokens;
       rollup.assistantMessageCount = fallback.messageCount;
     }
     rollup.totalTokens = rollup.inputTokens + rollup.outputTokens;
@@ -2094,6 +2114,7 @@ export function selectRotationDashboardRows(
 // ---------------------------------------------------------------------------
 
 interface DailyModelUsageRow {
+  eventType: string;
   payloadJson: string;
   createdAt: string;
 }
@@ -2118,8 +2139,8 @@ const DAY_MODEL_SEP = ' ';
 
 /**
  * Per-(day, model) token buckets for the usage chart at the top of the
- * Statistics section, scanned over the last `days` days of `assistant`
- * raw_events.
+ * Statistics section, scanned over the last `days` days of assistant-side
+ * usage raw_events.
  *
  * Window: rows are kept when `raw_events.created_at >= datetime('now', '-N days')`
  * -- the bind value is the string `-${days} days`, so the lookback is parameterized,
@@ -2137,10 +2158,12 @@ const DAY_MODEL_SEP = ' ';
  * Buckets are keyed by (day, model) where `day` is the UTC date slice of
  * `created_at` (the first 10 chars of SQLite's 'YYYY-MM-DD HH:MM:SS' UTC form).
  * `totalTokens` = inputTokens + outputTokens (cache EXCLUDED, matching the
- * RunUsageRollup convention). Only `assistant` events are scanned -- `result`
- * events (which restate per-turn totals) are excluded by the WHERE clause so their
- * totals can never be double-counted. The result is sorted by `day` ASC then
- * `model` ASC; days with no usage emit no bucket.
+ * RunUsageRollup convention). Primary/provider assistant events and synthetic
+ * `subagent_usage` snapshots are scanned; `result` events (which restate
+ * per-turn totals) are excluded by the WHERE clause so their totals can never
+ * be double-counted. Synthetic snapshots do not increment
+ * `assistantMessageCount`. The result is sorted by `day` ASC then `model` ASC;
+ * days with no usage emit no bucket.
  *
  * @param db        - Narrow DatabaseLike surface.
  * @param projectId - When non-null, restricts to that project; null = all.
@@ -2155,25 +2178,28 @@ export function selectDailyModelUsage(
   // '-N days' is the datetime() modifier; bound as a parameter (the helper never
   // concatenates `days` into the SQL text).
   const windowArg = `-${clampedDays} days`;
+  const eventTypePlaceholders = placeholders(ASSISTANT_USAGE_EVENT_TYPES.length);
 
   // The project scope is an optional JOIN through workflow_runs -> workflows; when
   // projectId is null we skip the joins entirely (a flat raw_events scan).
   const sql =
     projectId === null
-      ? `SELECT e.payload_json AS payloadJson, e.created_at AS createdAt
+      ? `SELECT e.event_type AS eventType, e.payload_json AS payloadJson, e.created_at AS createdAt
          FROM raw_events e
-         WHERE e.event_type IN ('assistant', 'agent_assistant')
+         WHERE e.event_type IN (${eventTypePlaceholders})
            AND e.created_at >= datetime('now', ?)`
-      : `SELECT e.payload_json AS payloadJson, e.created_at AS createdAt
+      : `SELECT e.event_type AS eventType, e.payload_json AS payloadJson, e.created_at AS createdAt
          FROM raw_events e
          JOIN workflow_runs r ON r.id = e.run_id
-         WHERE e.event_type IN ('assistant', 'agent_assistant')
+         WHERE e.event_type IN (${eventTypePlaceholders})
            AND e.created_at >= datetime('now', ?)
            AND r.project_id = ?`;
 
   const stmt = db.prepare(sql);
   const rows = (
-    projectId === null ? stmt.all(windowArg) : stmt.all(windowArg, projectId)
+    projectId === null
+      ? stmt.all(...ASSISTANT_USAGE_EVENT_TYPES, windowArg)
+      : stmt.all(...ASSISTANT_USAGE_EVENT_TYPES, windowArg, projectId)
   ) as DailyModelUsageRow[];
 
   // Accumulate per (day, model); the key joins both on DAY_MODEL_SEP.
@@ -2204,7 +2230,9 @@ export function selectDailyModelUsage(
     };
     bucket.inputTokens += asNumber(usage.input_tokens);
     bucket.outputTokens += asNumber(usage.output_tokens);
-    bucket.assistantMessageCount += 1;
+    if (row.eventType !== 'subagent_usage') {
+      bucket.assistantMessageCount += 1;
+    }
     buckets.set(key, bucket);
   }
 

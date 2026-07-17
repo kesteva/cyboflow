@@ -447,6 +447,26 @@ function assistantPayloadWithModel(
   return base;
 }
 
+/** Construct the tracker-owned nested synthetic subagent usage payload. */
+function subagentUsagePayload(
+  model: string,
+  usage: { input?: number; output?: number; cacheRead?: number; cacheCreation?: number },
+): Record<string, unknown> {
+  return {
+    type: 'subagent_usage',
+    subagent: { wfRunId: 'wf-run-1', agentId: 'agent-1' },
+    message: {
+      model,
+      usage: {
+        input_tokens: usage.input ?? 0,
+        output_tokens: usage.output ?? 0,
+        cache_read_input_tokens: usage.cacheRead ?? 0,
+        cache_creation_input_tokens: usage.cacheCreation ?? 0,
+      },
+    },
+  };
+}
+
 /** Construct a result payload with cost/turns (and a usage block to prove it's ignored). */
 function resultPayload(cost: number | null, turns: number | null): Record<string, unknown> {
   const payload: Record<string, unknown> = { type: 'result', subtype: 'success', is_error: false };
@@ -630,6 +650,64 @@ describe('selectRunUsageRollups', () => {
     expect(rollup.cacheCreationTokens).toBe(5);
     expect(rollup.totalTokens).toBe(375);
     expect(rollup.assistantMessageCount).toBe(2);
+  });
+
+  it('folds nested subagent usage without counting an assistant message and silently drops a flat payload', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 100, output: 20 }));
+    seedEvent(
+      db,
+      'r1',
+      'subagent_usage',
+      subagentUsagePayload('claude-sonnet', {
+        input: 30,
+        output: 5,
+        cacheRead: 7,
+        cacheCreation: 2,
+      }),
+    );
+    // Shape guard: aggregators require payload.message.usage. A flat usage
+    // object must remain a silent no-op rather than accidentally being folded.
+    seedEvent(db, 'r1', 'subagent_usage', {
+      type: 'subagent_usage',
+      usage: { input_tokens: 9_999, output_tokens: 8_888 },
+    });
+
+    const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+    expect(rollup).toMatchObject({
+      inputTokens: 130,
+      outputTokens: 25,
+      cacheReadTokens: 7,
+      cacheCreationTokens: 2,
+      totalTokens: 155,
+      assistantMessageCount: 1,
+    });
+  });
+
+  it('adds provider result fallback usage to subagent snapshots instead of replacing them', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    seedEvent(
+      db,
+      'r1',
+      'subagent_usage',
+      subagentUsagePayload('claude-subagent', { input: 30, output: 5, cacheRead: 7 }),
+    );
+    seedEvent(db, 'r1', 'agent_result', {
+      type: 'agent_result',
+      provider: 'codex',
+      usage: { input_tokens: 100, output_tokens: 20, cache_read_input_tokens: 11 },
+    });
+
+    const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+    expect(rollup).toMatchObject({
+      inputTokens: 130,
+      outputTokens: 25,
+      cacheReadTokens: 18,
+      totalTokens: 155,
+      assistantMessageCount: 1,
+    });
   });
 
   it('sums total_cost_usd and num_turns across multiple result events', () => {
@@ -1667,6 +1745,44 @@ describe('selectDailyModelUsage', () => {
 
     const yesterdayOpus = byKey.get(`${t1.day}|claude-opus`);
     expect(yesterdayOpus?.totalTokens).toBe(2);
+  });
+
+  it('attributes nested subagent usage to its model in both query variants and drops flat usage', () => {
+    seedWorkflow(db, { id: 'wf-a', projectId: 1 });
+    seedWorkflow(db, { id: 'wf-b', projectId: 2 });
+    seedRun(db, { id: 'ra', workflowId: 'wf-a', projectId: 1 });
+    seedRun(db, { id: 'rb', workflowId: 'wf-b', projectId: 2 });
+    const t0 = daysAgoAt(0);
+
+    seedEvent(
+      db,
+      'rb',
+      'subagent_usage',
+      subagentUsagePayload('claude-subagent', { input: 40, output: 6, cacheRead: 3 }),
+      t0.ts,
+    );
+    seedEvent(
+      db,
+      'rb',
+      'subagent_usage',
+      { type: 'subagent_usage', usage: { input_tokens: 9_999, output_tokens: 8_888 } },
+      t0.ts,
+    );
+
+    const allProjects = selectDailyModelUsage(dbAdapter(db), null, 30);
+    expect(allProjects).toEqual([
+      {
+        day: t0.day,
+        model: 'claude-subagent',
+        inputTokens: 40,
+        outputTokens: 6,
+        totalTokens: 46,
+        assistantMessageCount: 0,
+      },
+    ]);
+
+    expect(selectDailyModelUsage(dbAdapter(db), 1, 30)).toEqual([]);
+    expect(selectDailyModelUsage(dbAdapter(db), 2, 30)).toEqual(allProjects);
   });
 
   it('sorts by day ASC then model ASC', () => {

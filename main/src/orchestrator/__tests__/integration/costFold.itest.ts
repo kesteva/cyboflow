@@ -31,9 +31,10 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { DatabaseService } from '../../../database/database';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../../__test_fixtures__/loggerLikeSpy';
+import { selectDailyModelUsage } from '../../insightsQueries';
 import { rollupRunUsage } from '../../runUsageRollup';
 import { TypedEventNarrowing } from '../../../services/streamParser';
-import { sdkAssistantText, sdkResultSuccess } from '../../../test/fakes/fakeSdk';
+import { sdkAssistantText, sdkAssistantToolUse, sdkResultSuccess } from '../../../test/fakes/fakeSdk';
 
 /** The SDK `total_cost_usd` the CLI reported — an arbitrary, precise value. */
 const SDK_TOTAL_COST_USD = 0.4237;
@@ -117,5 +118,101 @@ describe('Tier-3: run_usage.cost_usd is the SDK total_cost_usd verbatim (never r
     expect(row!.outputTokens).toBe(OUTPUT_TOKENS);
     expect(row!.totalTokens).toBe(INPUT_TOKENS + OUTPUT_TOKENS);
     expect(row!.numTurns).toBe(NUM_TURNS);
+  });
+
+  test('Workflow dispatch and nested subagent usage surface once while flat usage silently drops', () => {
+    const primary = sdkAssistantToolUse(
+      'Workflow',
+      { description: 'implement a focused task', prompt: 'Do the work' },
+      { model: 'claude-primary' },
+    );
+    const primaryWithUsage: SDKMessage = {
+      ...primary,
+      message: {
+        ...primary.message,
+        usage: {
+          ...primary.message.usage,
+          input_tokens: 100,
+          output_tokens: 20,
+          cache_read_input_tokens: 11,
+          cache_creation_input_tokens: 3,
+        },
+      },
+    };
+    const nestedSubagentUsage = {
+      type: 'subagent_usage',
+      subagent: { wfRunId: 'wf-run-1', agentId: 'agent-1' },
+      message: {
+        model: 'claude-subagent',
+        usage: {
+          input_tokens: 40,
+          output_tokens: 6,
+          cache_read_input_tokens: 7,
+          cache_creation_input_tokens: 2,
+        },
+      },
+    };
+    const flatSubagentUsage = {
+      type: 'subagent_usage',
+      subagent: { wfRunId: 'wf-run-1', agentId: 'agent-flat' },
+      usage: { input_tokens: 9_999, output_tokens: 8_888 },
+    };
+
+    const insert = db.prepare(
+      'INSERT INTO raw_events (run_id, event_type, payload_json) VALUES (?, ?, ?)',
+    );
+    insert.run(RUN_ID, primaryWithUsage.type, JSON.stringify(primaryWithUsage));
+    insert.run(RUN_ID, 'subagent_usage', JSON.stringify(nestedSubagentUsage));
+    insert.run(RUN_ID, 'subagent_usage', JSON.stringify(flatSubagentUsage));
+
+    // The primary Workflow-dispatch assistant is a normal SDK message and must
+    // still narrow cleanly; synthetic usage is intentionally router-less.
+    const narrowed = new TypedEventNarrowing().narrow(primaryWithUsage);
+    expect('kind' in narrowed && narrowed.kind === '__unknown__').toBe(false);
+
+    rollupRunUsage(dbAdapter(db), RUN_ID, makeSpyLogger());
+
+    const row = db
+      .prepare(
+        `SELECT input_tokens AS inputTokens, output_tokens AS outputTokens,
+                cache_read_tokens AS cacheReadTokens,
+                cache_creation_tokens AS cacheCreationTokens,
+                assistant_message_count AS assistantMessageCount
+         FROM run_usage WHERE run_id = ?`,
+      )
+      .get(RUN_ID) as
+      | {
+          inputTokens: number;
+          outputTokens: number;
+          cacheReadTokens: number;
+          cacheCreationTokens: number;
+          assistantMessageCount: number;
+        }
+      | undefined;
+
+    expect(row).toEqual({
+      inputTokens: 140,
+      outputTokens: 26,
+      cacheReadTokens: 18,
+      cacheCreationTokens: 5,
+      assistantMessageCount: 1,
+    });
+
+    const dailyByModel = new Map(
+      selectDailyModelUsage(dbAdapter(db), null, 30).map((point) => [point.model, point]),
+    );
+    expect(dailyByModel.get('claude-primary')).toMatchObject({
+      inputTokens: 100,
+      outputTokens: 20,
+      totalTokens: 120,
+      assistantMessageCount: 1,
+    });
+    expect(dailyByModel.get('claude-subagent')).toMatchObject({
+      inputTokens: 40,
+      outputTokens: 6,
+      totalTokens: 46,
+      assistantMessageCount: 0,
+    });
+    expect(Array.from(dailyByModel.values()).reduce((sum, point) => sum + point.totalTokens, 0)).toBe(166);
   });
 });
