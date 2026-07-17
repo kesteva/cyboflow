@@ -1,7 +1,7 @@
 import '@testing-library/jest-dom';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import { WorkflowSummaryPanel } from '../WorkflowSummaryPanel';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { ScoreSummary, WorkflowSummaryPanel } from '../WorkflowSummaryPanel';
 import type { RunUsageRollup, RunEval } from '../../../../../shared/types/insights';
 
 const runUsageQuery = vi.fn();
@@ -10,6 +10,7 @@ const reviewItemsListQuery = vi.fn();
 const relayInputMutate = vi.fn();
 const restartMutate = vi.fn();
 const retryStepMutate = vi.fn();
+const retryEvalMutate = vi.fn();
 const showError = vi.fn();
 
 vi.mock('../../../trpc/client', () => ({
@@ -24,6 +25,7 @@ vi.mock('../../../trpc/client', () => ({
         relayInput: { mutate: (...a: unknown[]) => relayInputMutate(...a) },
         restart: { mutate: (...a: unknown[]) => restartMutate(...a) },
         retryStep: { mutate: (...a: unknown[]) => retryStepMutate(...a) },
+        retryEval: { mutate: (...a: unknown[]) => retryEvalMutate(...a) },
       },
     },
   },
@@ -103,6 +105,8 @@ beforeEach(() => {
   restartMutate.mockResolvedValue({ runId: 'run-2', worktreePath: '/w', branchName: 'b' });
   retryStepMutate.mockReset();
   retryStepMutate.mockResolvedValue({ delivered: true, stepId: 'step-1' });
+  retryEvalMutate.mockReset();
+  retryEvalMutate.mockResolvedValue(undefined);
   showError.mockReset();
 });
 
@@ -302,6 +306,76 @@ describe('WorkflowSummaryPanel', () => {
     runEvalQuery.mockResolvedValue(makeEval({ evalStatus: 'failed', band: null, overallScore: null, error: 'boom' }));
     renderPanel();
     expect(await screen.findByTestId('run-summary-eval-failed')).toHaveTextContent('unavailable');
+    expect(screen.getByTestId('run-summary-eval-retry')).toHaveTextContent('Retry quality assessment');
+  });
+
+  it('hides the eval retry button when ScoreSummary has no owning run', () => {
+    render(
+      <ScoreSummary
+        runEval={makeEval({ evalStatus: 'failed', band: null, overallScore: null })}
+        findings={[]}
+        breakdownOpen={false}
+        onToggleBreakdown={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId('run-summary-eval-retry')).not.toBeInTheDocument();
+  });
+
+  it.each(['pending', 'running', 'complete'] as const)(
+    'hides the eval retry button when the eval status is %s',
+    (evalStatus) => {
+      render(
+        <ScoreSummary
+          runId="run-1"
+          runEval={makeEval({
+            evalStatus,
+            ...(evalStatus === 'complete' ? {} : { band: null, overallScore: null }),
+          })}
+          findings={[]}
+          breakdownOpen={false}
+          onToggleBreakdown={vi.fn()}
+        />,
+      );
+      expect(screen.queryByTestId('run-summary-eval-retry')).not.toBeInTheDocument();
+    },
+  );
+
+  it('latches the retry button and resumes eval polling through a terminal status', async () => {
+    let resolveRetry: (() => void) | undefined;
+    let resolveResumedPoll: ((value: RunEval) => void) | undefined;
+    const retryPromise = new Promise<void>((resolve) => {
+      resolveRetry = resolve;
+    });
+    const resumedPollPromise = new Promise<RunEval>((resolve) => {
+      resolveResumedPoll = resolve;
+    });
+    runEvalQuery
+      .mockResolvedValueOnce(makeEval({ evalStatus: 'failed', band: null, overallScore: null, error: 'boom' }))
+      .mockReturnValueOnce(resumedPollPromise);
+    retryEvalMutate.mockReturnValue(retryPromise);
+    renderPanel();
+
+    const retryButton = await screen.findByTestId('run-summary-eval-retry');
+    fireEvent.click(retryButton);
+    expect(retryButton).toBeDisabled();
+    expect(retryButton).toHaveTextContent('Retrying…');
+    fireEvent.click(retryButton);
+    expect(retryEvalMutate).toHaveBeenCalledTimes(1);
+    expect(retryEvalMutate).toHaveBeenCalledWith({ runId: 'run-1' });
+
+    await act(async () => {
+      resolveRetry?.();
+      await retryPromise;
+    });
+    expect(await screen.findByTestId('run-summary-eval-progress')).toHaveTextContent('running');
+    await waitFor(() => expect(runEvalQuery).toHaveBeenCalledTimes(2));
+    expect(runEvalQuery).toHaveBeenNthCalledWith(2, { runId: 'run-1' });
+
+    await act(async () => {
+      resolveResumedPoll?.(makeEval());
+      await resumedPollPromise;
+    });
+    expect(await screen.findByTestId('run-summary-eval-band')).toHaveTextContent('GOOD');
   });
 
   it('renders the band-first hero, gates and active-dimension count when complete', async () => {

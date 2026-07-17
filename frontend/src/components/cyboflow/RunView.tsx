@@ -314,8 +314,13 @@ function renderEvent(event: StreamEvent): ReactElement {
 // RunView
 // ---------------------------------------------------------------------------
 
-export function RunView() {
-  const activeRunId = useCyboflowStore((s) => s.activeRunId);
+interface RunViewProps {
+  runId?: string | null;
+}
+
+export function RunView({ runId: runIdProp }: RunViewProps = {}) {
+  const storeActiveRunId = useCyboflowStore((s) => s.activeRunId);
+  const runId = runIdProp !== undefined ? runIdProp : storeActiveRunId;
   // Live buffer is used ONLY as a change signal — actual rows come from the
   // durable re-query so history survives clicking away and returning.
   const streamEventCount = useCyboflowStore((s) => s.streamEvents.length);
@@ -337,7 +342,7 @@ export function RunView() {
 
   // Initial / runId-change load.
   useEffect(() => {
-    if (!activeRunId) {
+    if (!runId) {
       setEvents([]);
       setIsLoading(false);
       return;
@@ -347,7 +352,7 @@ export function RunView() {
     setEvents([]);
     void (async () => {
       try {
-        const result = await trpc.cyboflow.runs.listRawEvents.query({ runId: activeRunId });
+        const result = await trpc.cyboflow.runs.listRawEvents.query({ runId });
         if (aborted) return;
         setEvents(result);
       } finally {
@@ -357,24 +362,24 @@ export function RunView() {
     return () => {
       aborted = true;
     };
-  }, [activeRunId]);
+  }, [runId]);
 
   // Live re-fetch — debounced re-query whenever this run's streamEvents grow.
   useEffect(() => {
-    if (!activeRunId) return;
+    if (!runId) return;
     if (streamEventCount === 0) return;
     const timer = setTimeout(() => {
-      void loadEvents(activeRunId);
+      void loadEvents(runId);
     }, LIVE_REFETCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [activeRunId, streamEventCount, loadEvents]);
+  }, [runId, streamEventCount, loadEvents]);
 
   // Auto-scroll to the bottom when new events arrive
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [events.length]);
 
-  if (!activeRunId) {
+  if (!runId) {
     return (
       <div className="flex h-full items-center justify-center text-text-secondary text-sm">
         No active run
@@ -386,7 +391,7 @@ export function RunView() {
     <div className="flex h-full flex-col gap-2">
       <div className="flex items-center gap-2">
         <h2 className="text-sm font-semibold text-text-primary">Run</h2>
-        <span className="font-mono text-xs text-text-secondary">{activeRunId}</span>
+        <span className="font-mono text-xs text-text-secondary">{runId}</span>
       </div>
 
       <div className="flex-1 overflow-auto rounded border border-border-primary bg-bg-secondary p-2">

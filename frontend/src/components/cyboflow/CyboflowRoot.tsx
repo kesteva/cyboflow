@@ -62,6 +62,7 @@ import { resolveRunSummaryVariant } from '../../hooks/useRunSummaryVariant';
 import { useRunSummaryDismissStore, useRunSummaryDismissed } from '../../stores/runSummaryDismissStore';
 import { trpc } from '../../trpc/client';
 import { SessionActionToast } from './SessionActionToast';
+import { QuickSessionDockTabs } from './QuickSessionDockTabs';
 
 interface CyboflowRootProps {
   projectId: number | null;
@@ -456,7 +457,12 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                     setIsPickerOpen(true);
                   }}
                   onAddWorkflowToNewSession={() => setAddWorkflowConfirmOpen(true)}
-                  dockContent={quickPanelSurface}
+                  dockContent={
+                    <QuickSessionDockTabs
+                      chatContent={quickPanelSurface}
+                      runId={effectiveSession.chatRunId ?? null}
+                    />
+                  }
                 />
               ) : (
                 quickPanelSurface

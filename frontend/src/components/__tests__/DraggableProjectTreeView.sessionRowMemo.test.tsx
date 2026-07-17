@@ -172,9 +172,16 @@ describe('SessionRow — React.memo actually skips re-rendering on an equal-per-
     const props = makeProps({ isActive: false });
     const { container, rerender } = render(<SessionRow {...props} />);
     const row = container.querySelector('[draggable="true"]');
+    const sessionName = screen.getByText('My Session');
     expect(row?.className).not.toContain('bg-interactive/10');
+    expect(sessionName.className).toContain('text-text-primary');
+    expect(sessionName.className).not.toContain('font-semibold');
+    expect(sessionName.className).not.toContain('text-interactive');
 
     rerender(<SessionRow {...props} isActive />);
     expect(container.querySelector('[draggable="true"]')?.className).toContain('bg-interactive/10');
+    expect(sessionName.className).toContain('font-semibold');
+    expect(sessionName.className).toContain('text-interactive');
+    expect(sessionName.className).not.toContain('text-text-primary');
   });
 });

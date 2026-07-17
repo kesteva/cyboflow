@@ -250,6 +250,7 @@ export function WorkflowSummaryPanel({
 
   // Advisory quality eval (null = no eval row → section absent entirely).
   const [runEval, setRunEval] = useState<RunEval | null>(null);
+  const [retryEvalGeneration, setRetryEvalGeneration] = useState(0);
   const [findings, setFindings] = useState<FindingRow[]>([]);
   const [breakdownOpen, setBreakdownOpen] = useState(false);
 
@@ -317,7 +318,7 @@ export function WorkflowSummaryPanel({
       alive = false;
       if (timer !== undefined) clearTimeout(timer);
     };
-  }, [runId]);
+  }, [runId, retryEvalGeneration]);
 
   // The eval's net-new findings (advisory drill-down). Needs the owning project;
   // filtered to eval-authored findings (source 'agent:eval*') so the panel does
@@ -597,9 +598,16 @@ export function WorkflowSummaryPanel({
       {runEval !== null && !isFailed && (
         <ScoreSummary
           runEval={runEval}
+          runId={runId}
           findings={findings}
           breakdownOpen={breakdownOpen}
           onToggleBreakdown={() => setBreakdownOpen((v) => !v)}
+          onRetrySuccess={() => {
+            setRunEval((current) =>
+              current === null ? null : { ...current, evalStatus: 'pending', error: null },
+            );
+            setRetryEvalGeneration((generation) => generation + 1);
+          }}
         />
       )}
 
@@ -753,9 +761,11 @@ export function WorkflowSummaryPanel({
 
 interface ScoreSummaryProps {
   runEval: RunEval;
+  runId?: string;
   findings: FindingRow[];
   breakdownOpen: boolean;
   onToggleBreakdown: () => void;
+  onRetrySuccess?: () => void;
 }
 
 /**
@@ -770,7 +780,31 @@ interface ScoreSummaryProps {
  * testing slice C) can render the SAME per-arm quality module in its two-column
  * comparison layout instead of forking a duplicate.
  */
-export function ScoreSummary({ runEval, findings, breakdownOpen, onToggleBreakdown }: ScoreSummaryProps): React.JSX.Element {
+export function ScoreSummary({
+  runEval,
+  runId,
+  findings,
+  breakdownOpen,
+  onToggleBreakdown,
+  onRetrySuccess,
+}: ScoreSummaryProps): React.JSX.Element {
+  const [retryingEval, setRetryingEval] = useState(false);
+
+  const handleRetryEval = async (): Promise<void> => {
+    if (runId === undefined || retryingEval) return;
+    setRetryingEval(true);
+    try {
+      await trpc.cyboflow.runs.retryEval.mutate({ runId });
+      onRetrySuccess?.();
+    } catch (err: unknown) {
+      useErrorStore.getState().showError({
+        title: 'Quality assessment retry failed',
+        error: err instanceof Error ? err.message : String(err),
+      });
+      setRetryingEval(false);
+    }
+  };
+
   if (runEval.evalStatus === 'pending' || runEval.evalStatus === 'running') {
     return (
       <p className="mt-5 text-sm text-text-muted" data-testid="run-summary-eval-progress">
@@ -780,9 +814,20 @@ export function ScoreSummary({ runEval, findings, breakdownOpen, onToggleBreakdo
   }
   if (runEval.evalStatus === 'failed') {
     return (
-      <p className="mt-5 text-sm text-text-muted" data-testid="run-summary-eval-failed">
-        Quality assessment unavailable.
-      </p>
+      <div className="mt-5 flex items-center gap-3" data-testid="run-summary-eval-failed">
+        <p className="text-sm text-text-muted">Quality assessment unavailable.</p>
+        {runId !== undefined && (
+          <button
+            type="button"
+            data-testid="run-summary-eval-retry"
+            disabled={retryingEval}
+            onClick={() => void handleRetryEval()}
+            className="rounded-button border border-interactive/40 bg-surface-primary px-3 py-1.5 text-xs font-medium text-interactive hover:bg-interactive/10 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {retryingEval ? 'Retrying…' : 'Retry quality assessment'}
+          </button>
+        )}
+      </div>
     );
   }
 

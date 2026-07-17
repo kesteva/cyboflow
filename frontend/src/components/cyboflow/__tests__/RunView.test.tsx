@@ -107,6 +107,15 @@ describe('RunView', () => {
     expect(screen.getByText('No active run')).toBeInTheDocument();
   });
 
+  it('an explicit null runId renders the placeholder even when the store has an active run', () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('store-run');
+    });
+    render(<RunView runId={null} />);
+    expect(screen.getByText('No active run')).toBeInTheDocument();
+    expect(mockListRawEvents).not.toHaveBeenCalled();
+  });
+
   it('renders the active runId header when a run is set', () => {
     renderWithEvents([], 'run-abc-123');
     expect(screen.queryByText('No active run')).not.toBeInTheDocument();
@@ -116,6 +125,60 @@ describe('RunView', () => {
   it('shows "Waiting for events…" once the empty backfill resolves', async () => {
     renderWithEvents([], 'run-abc-123');
     expect(await screen.findByText(/Waiting for events/)).toBeInTheDocument();
+  });
+
+  it('uses an explicit runId for durable history and live re-fetches', async () => {
+    const historicalEvent: StreamEvent = {
+      type: 'assistant',
+      payload: {
+        type: 'assistant',
+        message: {
+          id: 'm-explicit-history',
+          model: 'claude-sonnet-4-5',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Explicit run history' }],
+        },
+      },
+      timestamp: '2026-05-23T00:00:00Z',
+    };
+    const liveEvent: StreamEvent = {
+      type: 'assistant',
+      payload: {
+        type: 'assistant',
+        message: {
+          id: 'm-explicit-live',
+          model: 'claude-sonnet-4-5',
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Explicit run live update' }],
+        },
+      },
+      timestamp: '2026-05-23T00:00:01Z',
+    };
+
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('different-store-run');
+    });
+    mockListRawEvents
+      .mockResolvedValueOnce([historicalEvent])
+      .mockResolvedValueOnce([historicalEvent, liveEvent]);
+    render(<RunView runId="quick-chat-run" />);
+
+    expect(await screen.findByText('Explicit run history')).toBeInTheDocument();
+    expect(mockListRawEvents).toHaveBeenLastCalledWith({ runId: 'quick-chat-run' });
+
+    vi.useFakeTimers();
+    try {
+      act(() => {
+        useCyboflowStore.getState().appendStreamEvent(liveEvent);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(400);
+      });
+      expect(screen.getByText('Explicit run live update')).toBeInTheDocument();
+      expect(mockListRawEvents).toHaveBeenLastCalledWith({ runId: 'quick-chat-run' });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // -------------------------------------------------------------------------

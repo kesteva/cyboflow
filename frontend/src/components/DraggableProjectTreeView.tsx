@@ -232,7 +232,10 @@ export const SessionRow = memo(function SessionRow({
           className={`w-2 h-2 rounded-full flex-shrink-0 ${statusDotClass(session.status)}`}
           title={session.status}
         />
-        <span className="text-sm text-text-primary truncate" title={session.name}>
+        <span
+          className={`text-sm truncate ${isActive ? 'font-semibold text-interactive' : 'text-text-primary'}`}
+          title={session.name}
+        >
           {session.name || session.id.slice(0, 8)}
         </span>
         <span className="text-xs text-text-tertiary truncate ml-auto">

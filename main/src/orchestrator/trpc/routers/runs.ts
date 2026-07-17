@@ -86,6 +86,7 @@ import {
   updateSessionAgentPermissionMode,
   type SessionAgentPermissionModeDeps,
 } from '../../sessionPermissionMode';
+import { EvalWorker } from '../../eval/evalWorker';
 
 // ---------------------------------------------------------------------------
 // cancelAndRestart dependency bag
@@ -2381,6 +2382,51 @@ export const runsRouter = router({
         });
       }
       return retryRunHandler(input.runId, input.stepId, retryRunDeps);
+    }),
+
+  /**
+   * Retry a failed advisory quality assessment against its original rubric.
+   * The guarded failed → pending update prevents concurrent retry requests from
+   * enqueueing the same evaluation twice.
+   */
+  retryEval: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .mutation(({ ctx, input }): void => {
+      if (!ctx.db) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
+      }
+
+      const row = ctx.db
+        .prepare('SELECT eval_status, rubric_version FROM run_evals WHERE run_id = ?')
+        .get(input.runId) as { eval_status: string; rubric_version: string } | undefined;
+      if (!row) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: `Quality assessment for run ${input.runId} not found`,
+        });
+      }
+      if (row.eval_status !== 'failed') {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: `Quality assessment for run ${input.runId} is '${row.eval_status}' and cannot be retried`,
+        });
+      }
+
+      const result = ctx.db
+        .prepare(
+          `UPDATE run_evals
+             SET eval_status = 'pending', error = NULL, updated_at = ?
+           WHERE run_id = ? AND rubric_version = ? AND eval_status = 'failed'`,
+        )
+        .run(new Date().toISOString(), input.runId, row.rubric_version) as { changes: number };
+      if (result.changes === 0) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: `Quality assessment for run ${input.runId} is already being retried`,
+        });
+      }
+
+      EvalWorker.getInstance().enqueue(input.runId, row.rubric_version);
     }),
 
   /**
