@@ -59,6 +59,9 @@ for f in package.json frontend/package.json main/package.json shared/package.jso
 done
 # edit CHANGELOG.md: insert "## [NEW] — YYYY-MM-DD" above the prior release,
 # grouped Added / Changed / Fixed from `git log --oneline vOLD..HEAD`.
+# CAUTION: if the edit spans "## [Unreleased]\n\n## [OLD]", RE-ADD "## [OLD]" or
+# you merge OLD's notes under NEW (and §6's notes-slice awk runs to EOF). Verify:
+#   grep -nE '^## \[' CHANGELOG.md | head   # "## [OLD]" must still be present
 git add package.json frontend/package.json main/package.json shared/package.json CHANGELOG.md
 git commit -m "chore: release $NEW
 
@@ -92,15 +95,25 @@ alongside a stable prod app.
 
 ## 4. Verify artifacts (do NOT skip)
 
+ The dev builds **overwrite** the stable staging dirs (`mac-arm64/`, `mac/`), so by
+verify time only the **Dev** `.app` bundles survive there — validate the stable
+apps by mounting their DMGs.
+
 ```bash
 cd dist-electron
 ls -lh Cyboflow*-0.1.25-macOS-*.dmg   # expect ~304M arm64 / ~327M x64 — NOT a 215K stub
-for app in mac-arm64/Cyboflow.app mac/Cyboflow.app \
-           "mac-arm64/Cyboflow Dev.app" "mac/Cyboflow Dev.app"; do
+# dev apps still in the staging dirs:
+for app in "mac-arm64/Cyboflow Dev.app" "mac/Cyboflow Dev.app"; do
   xcrun stapler validate "$app"        # "The validate action worked!"
   spctl -a -vvv "$app"                 # "accepted" / source=Notarized Developer ID
 done
-cd .. && pnpm rebuild better-sqlite3   # restore host-Node ABI for tests/pnpm dev
+# stable apps: mount the DMG (staging dir was overwritten by the dev build):
+for arch in arm64 x64; do
+  mnt=$(hdiutil attach "Cyboflow-0.1.25-macOS-$arch.dmg" -nobrowse -noverify -readonly | grep -o '/Volumes/.*' | head -1)
+  xcrun stapler validate "$mnt/Cyboflow.app"; spctl -a -vvv "$mnt/Cyboflow.app"
+  hdiutil detach "$mnt" -quiet
+done
+cd .. && pnpm rebuild better-sqlite3 @homebridge/node-pty-prebuilt-multiarch   # restore host-Node ABI (BOTH)
 ```
 
 - **Size is a stub-check, not a leak-check.** ~300M is correct (bundles Claude +
@@ -192,6 +205,8 @@ mirror, but not the channel the app or website depends on).
 - **Never run `build:mac:universal`** — it fails on the agent binaries (see top).
 - **Don't launch the app while a `build:mac` is running** — a live app can grab a
   handle on the mounting DMG and wedge the eject. Quit installed apps first.
-- **ABI churn:** every mac build leaves `better-sqlite3` on the Electron ABI. Run
-  `pnpm rebuild better-sqlite3` before vitest; `pnpm dev` self-heals via
+- **ABI churn:** every mac build leaves `better-sqlite3` **and** `node-pty` on the
+  Electron ABI. Run `pnpm rebuild better-sqlite3 @homebridge/node-pty-prebuilt-multiarch`
+  before vitest (a `pty.node` dlopen arch-mismatch fails 30+ test files even though
+  every test that loads passes); `pnpm dev` self-heals via
   postinstall.

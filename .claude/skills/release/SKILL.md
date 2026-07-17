@@ -21,8 +21,10 @@ Work through the phases **in order** and do not skip verification.
   and verification, then **stop and ask before** publishing to R2, pushing `main`,
   the tag, or the GitHub release — unless the user has already said to push without
   asking.
-- Every mac build recompiles `better-sqlite3` for the Electron ABI; **restore the
-  host-Node ABI afterward** (`pnpm rebuild better-sqlite3`) or tests break.
+- Every mac build recompiles native modules for the Electron ABI; **restore the
+  host-Node ABI afterward** — rebuild **both** or the gate fails with a `pty.node`
+  / `better_sqlite3.node` `dlopen` arch mismatch:
+  `pnpm rebuild better-sqlite3 @homebridge/node-pty-prebuilt-multiarch`.
 - Don't launch the app while a `build:mac` runs (it can wedge the DMG eject).
 
 ## Phase 0 — Preconditions
@@ -59,6 +61,12 @@ If anything fails, stop and report — do not proceed to a build.
 - In `CHANGELOG.md`, move the `[Unreleased]` items under a new
   `## [<version>] — YYYY-MM-DD` heading (grouped Added / Changed / Fixed), derived
   from `git log --oneline v<last>..HEAD`.
+  - **After the edit, confirm you did NOT eat the previous heading**: an Edit whose
+    `old_string` spans `## [Unreleased]\n\n## [<prev>]` must re-add `## [<prev>]` in
+    the `new_string`, or the prior release's notes merge under the new heading (and
+    the Phase 6 notes-slice awk then runs to EOF). Verify:
+    `grep -nE '^## \[' CHANGELOG.md | head` — the prior version heading must still
+    be there, directly after your new section.
 - Commit exactly those five files:
   ```bash
   git add package.json frontend/package.json main/package.json shared/package.json CHANGELOG.md
@@ -84,15 +92,29 @@ is benign.
 
 ## Phase 4 — Verify (do NOT skip)
 
+The dev builds **reuse and overwrite** the stable staging dirs
+(`dist-electron/mac-arm64/`, `dist-electron/mac/`), so by now only the **Dev**
+`.app` bundles survive there — the stable ones live only inside their DMG/zip.
+Validate the **dev** apps in place and the **stable** apps by mounting their DMGs.
+
 ```bash
 cd dist-electron
 ls -lh Cyboflow*-<version>-macOS-*.dmg   # ~304M arm64 / ~327M x64 — NOT a 215K stub
-for app in mac-arm64/Cyboflow.app mac/Cyboflow.app \
-           "mac-arm64/Cyboflow Dev.app" "mac/Cyboflow Dev.app"; do
+
+# dev apps: still in the staging dirs
+for app in "mac-arm64/Cyboflow Dev.app" "mac/Cyboflow Dev.app"; do
   xcrun stapler validate "$app"          # "The validate action worked!"
   spctl -a -vvv "$app"                   # accepted / Notarized Developer ID
 done
-cd .. && pnpm rebuild better-sqlite3     # restore host-Node ABI
+# stable apps: mount the DMG (the staging dir was overwritten by the dev build)
+for arch in arm64 x64; do
+  mnt=$(hdiutil attach "Cyboflow-<version>-macOS-$arch.dmg" -nobrowse -noverify -readonly | grep -o '/Volumes/.*' | head -1)
+  xcrun stapler validate "$mnt/Cyboflow.app"
+  spctl -a -vvv "$mnt/Cyboflow.app"
+  hdiutil detach "$mnt" -quiet
+done
+
+cd .. && pnpm rebuild better-sqlite3 @homebridge/node-pty-prebuilt-multiarch  # restore host-Node ABI (BOTH)
 ```
 If an arm64 DMG is a 215K stub, rebuild it by hand from the `.zip` (recipe in the
 cross-arch memory / runbook).
