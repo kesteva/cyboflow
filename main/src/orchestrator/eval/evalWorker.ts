@@ -38,7 +38,7 @@ import {
 import type { JudgeClient } from './evalJury';
 import { CodexJurorUnavailableError } from './codexJudge';
 import { snapshotRunForEval } from './snapshotRunForEval';
-import { runJudgeGrade } from './judgeConcurrency';
+import { runJudgeGrade, type JudgeLane } from './judgeConcurrency';
 
 /** Legacy fallback count when a required jury is accidentally configured empty. */
 export const DEFAULT_SAMPLE_COUNT = 3;
@@ -106,6 +106,8 @@ export interface EvalWorkerDeps {
 interface EvalRunRow {
   project_id: number;
   worktree_path: string | null;
+  /** Non-null for a side-by-side A/B experiment arm (migration 049) — selects the serialized judge lane. */
+  experiment_id: string | null;
   diff_text: string | null;
   diff_stats_json: string | null;
   gate_results_json: string | null;
@@ -257,6 +259,7 @@ export class EvalWorker {
     const row = this.db
       .prepare(
         `SELECT r.project_id AS project_id, r.worktree_path AS worktree_path,
+                r.experiment_id AS experiment_id,
                 e.diff_text AS diff_text, e.diff_stats_json AS diff_stats_json,
                 e.gate_results_json AS gate_results_json
          FROM run_evals e
@@ -295,11 +298,17 @@ export class EvalWorker {
     const cwd =
       row.worktree_path && existsSync(row.worktree_path) ? row.worktree_path : undefined;
 
+    // A side-by-side experiment arm shares its CPU with the pairwise judge during
+    // the settle, so it grades on the serialized 'ab' lane; a normal run grades on
+    // the parallel 'normal' lane (see judgeConcurrency).
+    const lane: JudgeLane = row.experiment_id ? 'ab' : 'normal';
+
     const { samples, slots } = await this.collectSamples({
       diff,
       gateResults,
       diffStatsSummary,
       cwd,
+      lane,
     });
     this.collectedSlots.set(evalKey, slots);
     if (samples.length === 0) {
@@ -322,19 +331,28 @@ export class EvalWorker {
   }
 
   /**
-   * Grade each ordered jury slot. Deterministic Codex unavailability is recorded
-   * without retry; every other failure gets one retry before the slot is dropped.
+   * Grade every jury slot, each behind the run's judge-concurrency lane (see
+   * judgeConcurrency): the 'normal' lane runs the jurors in parallel, the 'ab'
+   * lane serializes them. Dispatch is concurrent either way — the limiter decides
+   * the actual overlap — but results are reassembled in SLOT order so `sampleIndex`
+   * and provenance stay deterministic regardless of completion order. Deterministic
+   * Codex unavailability is recorded without retry; every other failure gets one
+   * retry before the slot is dropped.
    */
   private async collectSamples(input: {
     diff: string;
     gateResults: GateResults | null;
     diffStatsSummary?: string;
     cwd?: string;
+    lane: JudgeLane;
   }): Promise<{ samples: JudgeSample[]; slots: JurySlotProvenance[] }> {
+    const outcomes = await Promise.all(
+      this.deps.jury.map((jurySlot) => this.gradeOnceWithRetry(jurySlot, input)),
+    );
     const samples: JudgeSample[] = [];
     const slots: JurySlotProvenance[] = [];
-    for (const jurySlot of this.deps.jury) {
-      const outcome = await this.gradeOnceWithRetry(jurySlot, input);
+    this.deps.jury.forEach((jurySlot, i) => {
+      const outcome = outcomes[i];
       if (outcome.status === 'ok') {
         const sampleIndex = samples.length;
         samples.push(outcome.sample);
@@ -354,7 +372,7 @@ export class EvalWorker {
           ...(outcome.errorCode ? { errorCode: outcome.errorCode } : {}),
         });
       }
-    }
+    });
     return { samples, slots };
   }
 
@@ -363,16 +381,17 @@ export class EvalWorker {
     gateResults: GateResults | null;
     diffStatsSummary?: string;
     cwd?: string;
+    lane: JudgeLane;
   }): Promise<
     | { status: 'ok'; sample: JudgeSample }
     | { status: 'unavailable' | 'failed'; errorCode?: string }
   > {
     for (let tries = 0; tries < 2; tries++) {
       try {
-        // Gate the judge subprocess spawn behind the shared app-wide ceiling so a
-        // rubric juror and a concurrent pairwise sample don't both spike CPU during
-        // an A/B settle (see judgeConcurrency).
-        const sample = await runJudgeGrade(() =>
+        // Gate the judge subprocess spawn behind the run's lane ceiling so an A/B
+        // settle stays serialized (1) while a normal run's jurors run in parallel
+        // (see judgeConcurrency).
+        const sample = await runJudgeGrade(input.lane, () =>
           jurySlot.judge.grade({
             diff: input.diff,
             gateResults: input.gateResults,

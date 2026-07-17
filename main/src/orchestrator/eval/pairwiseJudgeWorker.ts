@@ -466,10 +466,11 @@ export class PairwiseJudgeWorker {
   }): Promise<{ preference: '1' | '2' | 'tie'; confidence: number; rationale: string } | null> {
     for (let tries = 0; tries < 2; tries++) {
       try {
-        // Share the app-wide judge-subprocess ceiling with the rubric EvalWorker so
-        // the two concurrent workers don't both spawn a heavy judge at once during
-        // an A/B settle (see judgeConcurrency).
-        return await runJudgeGrade(() =>
+        // Pairwise judging only exists for a side-by-side A/B experiment, so it
+        // always grades on the serialized 'ab' lane — sharing that ceiling with the
+        // experiment arms' rubric evals so the settle spawns one judge at a time
+        // (see judgeConcurrency).
+        return await runJudgeGrade('ab', () =>
           this.deps.judge.grade({
             diffA: input.diffA,
             diffB: input.diffB,

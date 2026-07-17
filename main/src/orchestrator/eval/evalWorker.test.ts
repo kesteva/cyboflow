@@ -42,6 +42,7 @@ class FakeDb implements DatabaseLike {
 const evalRunRow = () => ({
   project_id: 7,
   worktree_path: '/wt/run-1',
+  experiment_id: null, // normal run → parallel judge lane
   diff_text: 'diff --git a/x b/x\n+changed',
   diff_stats_json: JSON.stringify({ additions: 1, deletions: 0, filesChanged: 1 }),
   gate_results_json: null,
@@ -65,6 +66,26 @@ class FakeJudge implements JudgeClient {
   grade(input: JudgeGradeInput): Promise<JudgeSample> {
     const c = this.calls++;
     return this.impl(input, c);
+  }
+}
+
+/**
+ * A judge that records the peak number of grades in flight at once, so a test can
+ * assert whether the jury was dispatched in parallel (normal lane) or serialized
+ * (A/B lane). One shared instance across the jury slots counts across all of them.
+ */
+class ConcurrencyProbeJudge implements JudgeClient {
+  readonly name = 'probe';
+  readonly resolvedModel = 'claude-opus-4-8';
+  inFlight = 0;
+  maxInFlight = 0;
+  async grade(): Promise<JudgeSample> {
+    this.inFlight += 1;
+    this.maxInFlight = Math.max(this.maxInFlight, this.inFlight);
+    // Yield a macrotask so concurrently-dispatched grades overlap before any resolves.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    this.inFlight -= 1;
+    return sampleAllPass(BROAD_PASS);
   }
 }
 
@@ -185,15 +206,20 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
 
   it('retries a malformed sample once then drops it; >=1 valid still scores', async () => {
     const db = noExistingFindings();
-    // call 0: throws (malformed) then its retry (call 1) also throws -> dropped.
-    // remaining sample slots succeed.
-    const judge = new FakeJudge(async (_input, call) => {
-      if (call < 2) throw new Error('malformed');
-      return sampleAllPass(BROAD_PASS);
+    // One slot's judge throws on the initial try AND its one retry -> that slot is
+    // dropped; the two good slots survive and still score. A dedicated throwing
+    // judge (rather than a global call counter) keeps this deterministic whether
+    // the jurors grade serially or in parallel.
+    const good = new FakeJudge(async () => sampleAllPass(BROAD_PASS));
+    const malformed = new FakeJudge(async () => {
+      throw new Error('malformed');
     });
     const worker = EvalWorker.initialize(db, undefined, {
       gitDiff: vi.fn(),
-      jury: makeClaudeJury(judge),
+      jury: [
+        ...makeClaudeJury(good, 2),
+        { slot: 'claude-3', provider: 'claude', model: 'claude-opus-4-8', judge: malformed },
+      ],
       reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
       appVersion: '0.1.11',
       isEvalEnabled: () => true,
@@ -201,7 +227,44 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     });
     worker.enqueue('run-1', '1.1');
     await worker._queue().onIdle();
-    expect(db.runs.some((r) => r.sql.includes("eval_status = 'complete'"))).toBe(true);
+    expect(malformed.calls).toBe(2); // initial try + one retry, then dropped
+    const complete = db.runs.find((r) => r.sql.includes("eval_status = 'complete'"));
+    expect(complete).toBeTruthy();
+    expect(complete?.params[11]).toBe(2); // sample_count = the two survivors
+  });
+
+  it('grades the jury in parallel for a normal run (normal lane)', async () => {
+    const db = noExistingFindings(); // evalRunRow has experiment_id: null
+    const probe = new ConcurrencyProbeJudge();
+    const worker = EvalWorker.initialize(db, undefined, {
+      gitDiff: vi.fn(),
+      jury: makeClaudeJury(probe, 3),
+      reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      sleep: async () => {},
+    });
+    worker.enqueue('run-1', '1.1');
+    await worker._queue().onIdle();
+    // Default normal-lane concurrency is 3, so all three jurors overlap.
+    expect(probe.maxInFlight).toBeGreaterThan(1);
+  });
+
+  it('serializes the jury for a side-by-side experiment arm (ab lane)', async () => {
+    const db = new FakeDb(() => ({ ...evalRunRow(), experiment_id: 'exp-1' }), () => []);
+    const probe = new ConcurrencyProbeJudge();
+    const worker = EvalWorker.initialize(db, undefined, {
+      gitDiff: vi.fn(),
+      jury: makeClaudeJury(probe, 3),
+      reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      sleep: async () => {},
+    });
+    worker.enqueue('run-1', '1.1');
+    await worker._queue().onIdle();
+    // A tagged experiment arm grades on the concurrency-1 'ab' lane — never overlaps.
+    expect(probe.maxInFlight).toBe(1);
   });
 
   it('marks the eval failed when every sample is malformed (0 valid)', async () => {
