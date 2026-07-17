@@ -129,6 +129,25 @@ export function useRailExperiments(projectIds: number[]): UseRailExperimentsResu
     return () => sub.unsubscribe();
   }, [fetchProject]);
 
+  // (4) Live experiment status-change stream → refetch the owning project. This
+  //     is the signal abandon needs: it can settle both arms with no run-status
+  //     delta (trigger (2) never fires), so without this the abandoned group
+  //     lingers in the rail as its stale pre-abandon row. The event carries
+  //     projectId, so refetch it directly when tracked.
+  useEffect(() => {
+    const onStatusChanged = trpc.cyboflow.experiments?.onStatusChanged;
+    if (!onStatusChanged) return;
+    const sub = onStatusChanged.subscribe(undefined, {
+      onData: (event) => {
+        if (projectIdsRef.current.includes(event.projectId)) {
+          void fetchProject(event.projectId);
+        }
+      },
+      onError: (err: unknown) => console.warn('[useRailExperiments] onStatusChanged error:', err),
+    });
+    return () => sub.unsubscribe();
+  }, [fetchProject]);
+
   // Latest byProject, read (non-reactively) by the subscription callback so it can
   // resolve which project owns the ready experiment without re-subscribing.
   const byProjectRef = useRef<Record<number, RailExperimentData>>(byProject);

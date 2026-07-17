@@ -36,6 +36,7 @@ import type {
   ExperimentArmView,
   ExperimentSummary,
   ExperimentComparisonReadyEvent,
+  ExperimentStatusChangedEvent,
   ExperimentDecision,
   PairwiseVerdict,
   PairwiseSample,
@@ -1405,6 +1406,17 @@ export async function abandonExperiment(deps: ExperimentsDeps, experimentId: str
   if (exp.session_a_id) await deps.dismissSession(exp.session_a_id).catch(() => {});
   if (exp.session_b_id) await deps.dismissSession(exp.session_b_id).catch(() => {});
 
+  // Push the terminal status so the rail invalidates its per-project experiment
+  // cache. abandon can settle both arms with no run-status delta (both already
+  // failed → cancelRun is skipped above), so useRailExperiments' runsByProject
+  // trigger never fires and — without this — the abandoned experiment lingers in
+  // the rail as its stale pre-abandon (running|grading) group. Emitted only on
+  // full success: a fail-closed sweep revert returns before reaching here.
+  experimentEvents.emit(
+    'statusChanged',
+    { experimentId, projectId, status: 'abandoned' } satisfies ExperimentStatusChangedEvent,
+  );
+
   return { experimentId, status: 'abandoned', winnerRunId: null };
 }
 
@@ -2270,6 +2282,26 @@ export const experimentsRouter = router({
       const source = eventToAsyncIterable<ExperimentComparisonReadyEvent>(
         experimentEvents,
         'comparisonReady',
+        abortSignal,
+      );
+      for await (const ev of source) {
+        yield ev;
+      }
+    },
+  ),
+
+  /**
+   * Live experiment status-change stream (all experiments). Emitted by
+   * `abandonExperiment` on a successful teardown so the rail invalidates its
+   * per-project experiment cache even when abandon produced no run-status delta
+   * (both arms already settled). Mirrors onComparisonReady.
+   */
+  onStatusChanged: protectedProcedure.subscription(
+    async function* ({ signal }): AsyncGenerator<ExperimentStatusChangedEvent> {
+      const abortSignal = signal ?? new AbortController().signal;
+      const source = eventToAsyncIterable<ExperimentStatusChangedEvent>(
+        experimentEvents,
+        'statusChanged',
         abortSignal,
       );
       for await (const ev of source) {

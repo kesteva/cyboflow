@@ -444,6 +444,22 @@ export interface ExperimentComparisonReadyEvent {
   status: ComparisonStatus;
 }
 
+/**
+ * Live experiment status-change payload (experiments.onStatusChanged).
+ *
+ * Emitted whenever an experiment's `status` transitions outside the normal
+ * run-lifecycle path that already drives `activeRunsStore` — notably `abandon`,
+ * which can settle both arms without any run-status delta (both already failed)
+ * and emits no other signal. The rail (`useRailExperiments`) subscribes to this
+ * to invalidate its per-project experiment cache; `projectId` lets a subscriber
+ * refetch the owning project directly without first resolving it from the id.
+ */
+export interface ExperimentStatusChangedEvent {
+  experimentId: string;
+  projectId: number;
+  status: ExperimentStatus;
+}
+
 // ===========================================================================
 // Phase 3 — rotation-experiment READ surface (migration 058). Backend types for
 // the fair baseline-vs-variant comparison (selectRotationArmStats), the per-run

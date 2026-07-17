@@ -32,7 +32,8 @@ import {
   getRunningRotationExperiment,
   reconcileRotationExperiment,
 } from '../experimentStore';
-import type { WorkflowVariantRow } from '../../../../shared/types/experiments';
+import type { WorkflowVariantRow, ExperimentStatusChangedEvent } from '../../../../shared/types/experiments';
+import { experimentEvents } from '../trpc/routers/events';
 
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
@@ -392,6 +393,50 @@ describe('experiments router orchestration (slice B)', () => {
     expect(out.status).toBe('abandoned');
     expect(h.canceled).toEqual(expect.arrayContaining([res.armA.runId, res.armB.runId]));
     expect(h.dismissed).toHaveLength(2);
+  });
+
+  it('abandon emits a statusChanged event carrying projectId — the rail-invalidation signal', async () => {
+    const h = makeHarness();
+    const res = await startExperiment(h.deps, { projectId: 1, workflowId: 'wf', variantAId: 'vA', variantBId: 'vB' });
+    // Reproduce the reported bug's shape: both arms already FAILED, so abandon
+    // skips cancelRun and produces NO run-status delta. The statusChanged event
+    // is then the only signal the rail can key off to drop the stale group.
+    setRunStatus(h.db, res.armA.runId, 'failed');
+    setRunStatus(h.db, res.armB.runId, 'failed');
+
+    const events: ExperimentStatusChangedEvent[] = [];
+    const onStatus = (e: ExperimentStatusChangedEvent): void => { events.push(e); };
+    experimentEvents.on('statusChanged', onStatus);
+    try {
+      await abandonExperiment(h.deps, res.experimentId);
+    } finally {
+      experimentEvents.off('statusChanged', onStatus);
+    }
+
+    expect(h.canceled).toHaveLength(0); // both already settled → no run-status delta
+    expect(events).toEqual([{ experimentId: res.experimentId, projectId: 1, status: 'abandoned' }]);
+  });
+
+  it('abandon does NOT emit statusChanged when the entity sweep fails (fail-closed revert)', async () => {
+    const h = makeHarness();
+    const res = await startExperiment(h.deps, { projectId: 1, workflowId: 'wf', variantAId: 'vA', variantBId: 'vB' });
+    // Force the sweep to throw so abandon reverts status and returns before the
+    // session teardown — the event must not fire on a reverted (still-live) run.
+    h.deps.taskChangeRouter.deleteExperimentArmEntities = async () => {
+      throw new Error('sweep boom');
+    };
+
+    const events: ExperimentStatusChangedEvent[] = [];
+    const onStatus = (e: ExperimentStatusChangedEvent): void => { events.push(e); };
+    experimentEvents.on('statusChanged', onStatus);
+    try {
+      await expect(abandonExperiment(h.deps, res.experimentId)).rejects.toThrow(/sweep boom/);
+    } finally {
+      experimentEvents.off('statusChanged', onStatus);
+    }
+
+    expect(events).toHaveLength(0);
+    expect(getExperiment(dbAdapter(h.db), res.experimentId)!.status).not.toBe('abandoned');
   });
 
   it('decide is rejected once the experiment is already decided', async () => {
