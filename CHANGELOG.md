@@ -6,7 +6,52 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-## [0.1.25] — 2026-07-16
+## [0.1.26] — 2026-07-17
+
+### Added
+
+- **Per-agent runtime in the global agent editor.** Each agent can be pinned to a
+  provider/runtime (Claude or Codex) with a Codex-model picker, resolved and
+  persisted through the agent chokepoint. [agent `runtime` + `codex_model` columns]
+- **Live quick-session status board** in the review home — active quick sessions
+  are listed with a running/quiet per-second timer and an unviewed flag for
+  attention weighting (replaces the old `IdleSessionDetector` mint), wired over its
+  own IPC listing.
+- **Telemetry onboarding step.** The first-run tour gains a telemetry step modal
+  (with corrected Settings event semantics); onboarding v1 snapshots migrate
+  forward.
+- **PTY AskUserQuestion blocked-state detection.** Interactive PTY sessions detect
+  an open `AskUserQuestion` via an inline notify hook and stay flagged **blocked**
+  until the user answers.
+- **Opt-in performance tracing.** A single `CYBOFLOW_PERF_TRACE=1` enables both a
+  main-process CPU tracer (per-seam rate counters) and a renderer probe (longtask +
+  React-commit attribution, incl. a `sidebar` area).
+
+### Changed
+
+- **A/B experiment seed originals now sit at _In development_** with an
+  _In-experiment_ badge, via read-side grouping (instead of dropping off-board).
+- **Warm persistent Codex app-server.** The Codex runtime now keeps one app-server
+  warm across resume-continuation turns (mirroring the warm SDK sessions),
+  eliminating per-turn cold-spawn cost; leaks found in adversarial review closed.
+- **git-status is async and concurrency-bounded** — the quick-check no longer
+  blocks the main loop and is capped under the shared concurrency limit, with the
+  last-known status preserved on an operational (timeout/kill) failure. (Addresses
+  the elevated main-process CPU introduced alongside Codex.)
+- **Renderer re-render churn cut** by memoizing the sidebar + session rows; the
+  ui-prototype iframe is paused while the window is hidden.
+
+### Fixed
+
+- A **finished run no longer traps itself** on its completion summary over your
+  follow-up chat — the summary is dismissable per-run (**Back to run** /
+  **Continue in chat** / restore-pill).
+- **Human gates surface through a programmatic→orchestrated/Codex handover.** The
+  silent pass-through guard now covers **all** human gates (not just approve-plan),
+  and the Codex runtime adapter is folded into the handover brief so gates aren't
+  stranded in chat.
+- The **monitor now sees per-task sprint lanes** in its context (lane digest
+  hardened per adversarial review).
 
 ### Added
 
