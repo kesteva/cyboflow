@@ -47,6 +47,7 @@ import type { PermissionPayload } from '../../../../../shared/types/reviews';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { WorkflowBundleWriter } from './workflowBundleWriter';
 import { installWorkflowBundle } from './workflowBundleInstall';
+import { resolveRunEffectiveAgents } from './agentOverlayWriter';
 import { createStreamingPromptInput, createPersistentPromptInput } from './streamingPromptInput';
 import type { PersistentPromptInput, StreamingPromptInput } from './streamingPromptInput';
 import { withLock } from '../../../utils/mutex';
@@ -1114,7 +1115,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // (no dependency on the installed files) so a rejection here strands no
       // refcount; it also drives the warm-reuse fingerprint below.
       const sdkOptions = await this.buildSdkOptions({ ...effectiveOptions, runId });
-      const fingerprint = this.computeOptionsFingerprint(sdkOptions, options.worktreePath);
+      const fingerprint = this.computeOptionsFingerprint(sdkOptions, options.worktreePath, runId);
 
       // Warm-session tri-state (non-lane only). A live warm-idle session for this
       // spawnKey that is a resume-continuation of the SAME conversation and whose
@@ -2004,7 +2005,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * not live SDK mutators). The merged permission allowRules are read fresh from
    * disk here so a mid-session allow-list edit also invalidates the warm session.
    */
-  private computeOptionsFingerprint(sdkOptions: Options, worktreePath: string): OptionsFingerprint {
+  private computeOptionsFingerprint(
+    sdkOptions: Options,
+    worktreePath: string,
+    runId: string,
+  ): OptionsFingerprint {
     const allowRules = loadMergedPermissionRules(worktreePath);
     const material: Record<string, unknown> = {
       model: sdkOptions.model ?? null,
@@ -2017,6 +2022,15 @@ export class ClaudeCodeManager extends AbstractCliManager {
       env: sdkOptions.env ?? null,
       permissionMode: sdkOptions.permissionMode ?? null,
       allowRules,
+      // The agent overlay (.claude/agents/*.md) is written from the run's effective
+      // agent set AFTER this fingerprint (installWorkflowBundle, below) and is read
+      // by the CLI at process START — so a warm parent keeps serving the agent defs
+      // it booted with. Fold a stable digest of the effective agents in so a mid-run
+      // Agents-pane edit drifts the fingerprint and forces a cold respawn that
+      // re-installs the overlay with the edit applied. Sorted by agentKey (the
+      // custom-agent append order in listByProject is un-ORDER-BY'd); fail-soft
+      // (null on any error) so agent resolution never blocks a spawn.
+      agents: this.effectiveAgentsDigest(runId),
     };
     const fields: Record<string, string> = {};
     for (const [key, value] of Object.entries(material)) {
@@ -2029,6 +2043,24 @@ export class ClaudeCodeManager extends AbstractCliManager {
         .join('&'),
     );
     return { combined, fields };
+  }
+
+  /**
+   * A stable, canonically-ordered snapshot of the run's effective agent set — the
+   * fingerprint input that makes a mid-run Agents-pane edit close the warm session
+   * (so the cold respawn re-installs the overlay with the edit applied). Sorted by
+   * `agentKey` so `listByProject`'s un-ORDER-BY'd custom-agent append order can't
+   * spuriously drift the hash every turn. Fail-soft: any resolution error yields
+   * `null` (a stable value) rather than blocking the spawn.
+   */
+  private effectiveAgentsDigest(runId: string): unknown {
+    try {
+      return resolveRunEffectiveAgents(this.db, runId, makeLoggerLike(this.logger))
+        .slice()
+        .sort((a, b) => a.agentKey.localeCompare(b.agentKey));
+    } catch {
+      return null;
+    }
   }
 
   /**

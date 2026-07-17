@@ -25,7 +25,7 @@ import type Database from 'better-sqlite3';
 import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
 import { QuestionRouter } from '../../../../orchestrator/questionRouter';
 import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
-import { createTestDb } from '../../../../orchestrator/__test_fixtures__/orchestratorTestDb';
+import { createTestDb, seedRun } from '../../../../orchestrator/__test_fixtures__/orchestratorTestDb';
 import {
   createModuleFakeSdk,
   scenario,
@@ -228,6 +228,65 @@ describe('ClaudeCodeManager — warm (persistent) SDK session', () => {
     expect(fakeSdk.calls).toHaveLength(2);
     expect(callResume(1)).toBe(SESSION_UUID);
     expect(callModel(1)).toBe('claude-opus-4-8[1m]');
+  });
+
+  // -------------------------------------------------------------------------
+  // (2a') Effective-agent drift → close warm + cold-spawn WITH --resume.
+  //       A mid-run Agents-pane edit (a new agent_overrides row) changes the
+  //       run's effective agent set, which the overlay .md files are written
+  //       from. The digest of that set is folded into the options fingerprint,
+  //       so the warm parent (which read its agent defs at process start) is
+  //       closed and cold-respawned to re-install the edited overlay.
+  // -------------------------------------------------------------------------
+  it('respawns with --resume when the run\'s effective agents change mid-run (agent edit)', async () => {
+    const panelId = 'p-warm-agents';
+    // A real run row so resolveRunEffectiveAgents resolves a project (else the
+    // digest is a stable []), plus the agent_overrides table it reads.
+    seedRun(db, { id: panelId });
+    db.exec(`CREATE TABLE IF NOT EXISTS agent_overrides (
+      id TEXT PRIMARY KEY, project_id INTEGER NOT NULL, agent_key TEXT NOT NULL,
+      base_agent_key TEXT, name TEXT NOT NULL, role TEXT, description TEXT NOT NULL,
+      system_prompt TEXT NOT NULL, tools_json TEXT NOT NULL,
+      enabled_mcps_json TEXT NOT NULL DEFAULT '[]', is_custom INTEGER NOT NULL DEFAULT 0,
+      version INTEGER NOT NULL DEFAULT 1, model TEXT, runtime TEXT, codex_model TEXT,
+      created_at TEXT, updated_at TEXT
+    )`);
+    fakeSdk.setScenario(twoTurnScenario());
+
+    // Turn 1 — cold spawn; the effective set is the built-ins only.
+    await mgr.spawnCliProcess({
+      panelId,
+      sessionId: panelId,
+      worktreePath: '/tmp/wt',
+      prompt: 'first',
+      permissionMode: 'ignore',
+    });
+    expect(fakeSdk.calls).toHaveLength(1);
+
+    // Agents-pane edit: mint a custom agent for this run's project → the effective
+    // agent set (and thus the fingerprint digest) changes.
+    db.prepare(
+      `INSERT INTO agent_overrides
+         (id, project_id, agent_key, base_agent_key, name, role, description,
+          system_prompt, tools_json, enabled_mcps_json, is_custom, version,
+          model, runtime, codex_model, created_at, updated_at)
+       VALUES ('ago_helper', 1, 'my-helper', NULL, 'cyboflow-my-helper', 'custom',
+          'A helper', 'You help.', '["Read"]', '[]', 1, 1, NULL, NULL, NULL,
+          '2026-07-17', '2026-07-17')`,
+    ).run();
+
+    // Turn 2 resume-continues, but the changed agent set drifts the fingerprint.
+    await mgr.spawnCliProcess({
+      panelId,
+      sessionId: panelId,
+      worktreePath: '/tmp/wt',
+      prompt: 'second',
+      permissionMode: 'ignore',
+      isResume: true,
+    });
+    // A second query() ran (cold respawn), carrying --resume from the captured id.
+    expect(fakeSdk.calls).toHaveLength(2);
+    expect(callResume(1)).toBe(SESSION_UUID);
   });
 
   // -------------------------------------------------------------------------
