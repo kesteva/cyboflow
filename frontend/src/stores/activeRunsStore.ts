@@ -165,9 +165,21 @@ export function buildActiveRunRows(
 // Store
 // ---------------------------------------------------------------------------
 
+/**
+ * Coalesce window for the lifecycle-driven refetch. The global lifecycle events
+ * arrive in bursts — an active A/B experiment has TWO concurrent arm runs, each
+ * emitting its own onRunStatusChanged transitions (plus the eval settle churns
+ * more), so a naive re-fetch-per-event fans out `runs.list` + `workflows.list`
+ * across every tracked project many times in a few milliseconds and thrashes the
+ * (unmemoized) rail tree. A short trailing coalesce collapses each burst into ONE
+ * refetch pass while keeping the rail effectively real-time.
+ */
+const LIFECYCLE_REFETCH_DEBOUNCE_MS = 150;
+
 export const useActiveRunsStore = create<ActiveRunsState>((set, get) => {
   let initialized = false;
   let cachedUnsubscribe: (() => void) | null = null;
+  let lifecycleTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Re-fetch every project we already track. */
   const refreshAllKnownProjects = (): void => {
@@ -175,6 +187,20 @@ export const useActiveRunsStore = create<ActiveRunsState>((set, get) => {
     for (const pid of projectIds) {
       void get().refresh(pid);
     }
+  };
+
+  /**
+   * Debounced refetch: the first event in a burst arms a timer, later events in
+   * the window are dropped (the single trailing pass already reflects them), so a
+   * burst of N lifecycle events becomes exactly one refetch-all. Bounded latency —
+   * always fires within LIFECYCLE_REFETCH_DEBOUNCE_MS of the first event.
+   */
+  const scheduleRefreshAllKnownProjects = (): void => {
+    if (lifecycleTimer !== null) return;
+    lifecycleTimer = setTimeout(() => {
+      lifecycleTimer = null;
+      refreshAllKnownProjects();
+    }, LIFECYCLE_REFETCH_DEBOUNCE_MS);
   };
 
   return {
@@ -206,7 +232,9 @@ export const useActiveRunsStore = create<ActiveRunsState>((set, get) => {
       // The global lifecycle subscriptions only signal that *something*
       // changed; we re-fetch the authoritative list rather than mutate
       // optimistically (same source-of-truth strategy as reviewQueueStore).
-      const onLifecycle = () => refreshAllKnownProjects();
+      // Debounced so a burst of transitions (two concurrent A/B arms + eval
+      // settle) collapses into a single refetch pass instead of one per event.
+      const onLifecycle = () => scheduleRefreshAllKnownProjects();
 
       const stuckSub = trpc.cyboflow.events.onStuckDetected.subscribe(undefined, {
         onData: onLifecycle,
@@ -237,6 +265,10 @@ export const useActiveRunsStore = create<ActiveRunsState>((set, get) => {
         approvalCreatedSub.unsubscribe();
         approvalDecidedSub.unsubscribe();
         runStatusSub.unsubscribe();
+        if (lifecycleTimer !== null) {
+          clearTimeout(lifecycleTimer);
+          lifecycleTimer = null;
+        }
         initialized = false;
         cachedUnsubscribe = null;
       };
