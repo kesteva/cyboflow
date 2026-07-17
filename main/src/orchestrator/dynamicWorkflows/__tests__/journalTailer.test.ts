@@ -389,6 +389,62 @@ describe('JournalTailer', () => {
     ]);
   });
 
+  it('buffers a partial transcript line across synchronous drains until it reaches EOF complete', async () => {
+    const warn = vi.fn();
+    const onAgents = vi.fn<(agents: DynamicWorkflowAgent[]) => void>();
+    tailer = new JournalTailer({
+      journalPath,
+      recordPath,
+      pollMs: POLL_MS,
+      onAgents,
+      onComplete: vi.fn(),
+      onStalled: vi.fn(),
+      logger: { warn },
+    });
+    tailer.start();
+    writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+
+    const transcriptPath = join(dir, 'agent-a1.jsonl');
+    const line = transcriptLine({
+      type: 'assistant',
+      message: {
+        model: 'claude-fable-5',
+        usage: {
+          input_tokens: 41,
+          output_tokens: 43,
+          cache_read_input_tokens: 47,
+          cache_creation_input_tokens: 53,
+        },
+        content: [],
+      },
+      timestamp: '2026-06-11T15:30:00.000Z',
+    });
+    writeFileSync(transcriptPath, line.slice(0, -2));
+
+    expect(() => tailer!.drainToEof()).not.toThrow();
+    expect(warn).not.toHaveBeenCalled();
+    expect(onAgents).toHaveBeenCalledTimes(1);
+
+    appendFileSync(transcriptPath, line.slice(-2));
+    tailer.drainToEof();
+
+    expect(onAgents).toHaveBeenCalledTimes(2);
+    expect(onAgents).toHaveBeenLastCalledWith([
+      {
+        agentId: 'a1',
+        status: 'running',
+        model: 'claude-fable-5',
+        inputTokens: 41,
+        outputTokens: 43,
+        cacheReadInputTokens: 47,
+        cacheCreationInputTokens: 53,
+        startedAt: '2026-06-11T15:30:00.000Z',
+        lastActivityAt: '2026-06-11T15:30:00.000Z',
+      },
+    ]);
+  });
+
   it('carries a torn transcript line over to the next poll', async () => {
     const { onAgents } = buildTailer();
     tailer!.start();
