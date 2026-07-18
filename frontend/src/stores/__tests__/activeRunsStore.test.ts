@@ -7,8 +7,14 @@
  *   (b) __quick__ sentinel-workflow runs are excluded
  *   (c) active runs are projected with their resolved workflowName
  *   (d) unknown workflow_id falls back to a generic name
+ *
+ * Also covers `refresh()`'s byte-identical-refetch dedup (the whole-rail
+ * subscriber fix): a refetch that reproduces the SAME rows must reuse the
+ * prior `runsByProject` reference, while a refetch differing in ANY
+ * renderer-observable field — even with status unchanged — must produce a
+ * new reference.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { buildActiveRunRows } from '../activeRunsStore';
 
 type Run = Parameters<typeof buildActiveRunRows>[0][number];
@@ -161,5 +167,128 @@ describe('buildActiveRunRows', () => {
     );
     expect(rows).toHaveLength(1);
     expect(rows[0].workflowName).toBe('workflow');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// refresh() — byte-identical-refetch dedup (skip set() when rows are unchanged)
+// ---------------------------------------------------------------------------
+
+let mockRunsListQuery: ReturnType<typeof vi.fn>;
+let mockWorkflowsListQuery: ReturnType<typeof vi.fn>;
+let mockActiveRunId: string | null;
+
+vi.mock('../../trpc/client', () => ({
+  trpc: {
+    cyboflow: {
+      runs: {
+        list: { get query() { return mockRunsListQuery; } },
+      },
+      workflows: {
+        list: { get query() { return mockWorkflowsListQuery; } },
+      },
+      events: {
+        onStuckDetected: { subscribe: () => ({ unsubscribe: vi.fn() }) },
+        onApprovalCreated: { subscribe: () => ({ unsubscribe: vi.fn() }) },
+        onApprovalDecided: { subscribe: () => ({ unsubscribe: vi.fn() }) },
+        onRunStatusChanged: { subscribe: () => ({ unsubscribe: vi.fn() }) },
+      },
+    },
+  },
+}));
+
+vi.mock('../cyboflowStore', () => ({
+  useCyboflowStore: { getState: () => ({ activeRunId: mockActiveRunId }) },
+}));
+
+const activeWorkflows: Wf[] = [
+  { id: 'wf-planner', project_id: 1, name: 'planner', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
+];
+
+/** A fully-populated run row, matching production shape field-for-field. */
+function makeFullRun(overrides: Partial<Run>): Run {
+  return {
+    id: 'run-1',
+    workflow_id: 'wf-planner',
+    project_id: 1,
+    status: 'running',
+    worktree_path: '/tmp/wt-1',
+    branch_name: 'feature-a',
+    substrate: 'sdk',
+    agent_provider: 'claude',
+    session_id: 'sess-1',
+    permission_mode_snapshot: 'default',
+    created_at: '2026-01-01',
+    updated_at: '2026-01-01',
+    started_at: null,
+    ended_at: null,
+    stuck_reason: null,
+    ...overrides,
+  } as Run;
+}
+
+async function loadActiveRunsStore(): Promise<typeof import('../activeRunsStore')> {
+  vi.resetModules();
+  return import('../activeRunsStore');
+}
+
+describe('activeRunsStore.refresh — byte-identical-refetch dedup', () => {
+  beforeEach(() => {
+    mockActiveRunId = null;
+  });
+
+  it('(a) an identical refetch reuses the prior runsByProject reference (no re-render trigger)', async () => {
+    mockRunsListQuery = vi.fn().mockResolvedValue([makeFullRun({})]);
+    mockWorkflowsListQuery = vi.fn().mockResolvedValue(activeWorkflows);
+
+    const { useActiveRunsStore } = await loadActiveRunsStore();
+    await useActiveRunsStore.getState().refresh(1);
+    const firstMap = useActiveRunsStore.getState().runsByProject;
+    const firstRows = firstMap[1];
+
+    // Second refetch returns a structurally identical (but distinct-object) row.
+    mockRunsListQuery = vi.fn().mockResolvedValue([makeFullRun({})]);
+    await useActiveRunsStore.getState().refresh(1);
+
+    expect(useActiveRunsStore.getState().runsByProject).toBe(firstMap);
+    expect(useActiveRunsStore.getState().runsByProject[1]).toBe(firstRows);
+  });
+
+  it.each([
+    ['session_id', { session_id: 'sess-2' }],
+    ['worktree_path', { worktree_path: '/tmp/wt-2' }],
+    ['branch_name', { branch_name: 'feature-b' }],
+    ['substrate', { substrate: 'interactive' as const }],
+    ['agent_provider', { agent_provider: 'codex' as const }],
+  ])('(b) %s changing WITHOUT a status change produces a new reference', async (_label, delta) => {
+    mockRunsListQuery = vi.fn().mockResolvedValue([makeFullRun({})]);
+    mockWorkflowsListQuery = vi.fn().mockResolvedValue(activeWorkflows);
+
+    const { useActiveRunsStore } = await loadActiveRunsStore();
+    await useActiveRunsStore.getState().refresh(1);
+    const firstMap = useActiveRunsStore.getState().runsByProject;
+    const firstRows = firstMap[1];
+
+    mockRunsListQuery = vi.fn().mockResolvedValue([makeFullRun(delta)]);
+    await useActiveRunsStore.getState().refresh(1);
+
+    expect(useActiveRunsStore.getState().runsByProject).not.toBe(firstMap);
+    expect(useActiveRunsStore.getState().runsByProject[1]).not.toBe(firstRows);
+  });
+
+  it('(c) a status change produces a new reference', async () => {
+    mockRunsListQuery = vi.fn().mockResolvedValue([makeFullRun({ status: 'running' })]);
+    mockWorkflowsListQuery = vi.fn().mockResolvedValue(activeWorkflows);
+
+    const { useActiveRunsStore } = await loadActiveRunsStore();
+    await useActiveRunsStore.getState().refresh(1);
+    const firstMap = useActiveRunsStore.getState().runsByProject;
+    const firstRows = firstMap[1];
+
+    mockRunsListQuery = vi.fn().mockResolvedValue([makeFullRun({ status: 'completed' })]);
+    await useActiveRunsStore.getState().refresh(1);
+
+    expect(useActiveRunsStore.getState().runsByProject).not.toBe(firstMap);
+    expect(useActiveRunsStore.getState().runsByProject[1]).not.toBe(firstRows);
   });
 });

@@ -161,6 +161,47 @@ export function buildActiveRunRows(
     }));
 }
 
+/**
+ * Field-wise equality over one row's ENTIRE renderer-observable shape (every
+ * key of `ActiveRunRow`/`WorkflowRunListRow` — session_id, worktree_path,
+ * branch_name, substrate, agent_provider, workflowName, and so on). A narrower
+ * id/status-only signature would suppress real updates: CyboflowRoot follows
+ * session_id and RunChatView picks its transcript/labels off substrate /
+ * agent_provider / worktree_path / branch_name, so any of those changing must
+ * still produce a new reference even when status does not change. Every field
+ * on the row is a primitive (string | number | boolean | null | undefined) —
+ * confirmed via the WorkflowRunListRow/ActiveRunRow declarations, no nested
+ * objects — so strict-equality-per-key is a safe full-shape comparison, no
+ * `any` needed.
+ */
+function rowEqual(a: ActiveRunRow, b: ActiveRunRow): boolean {
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  const bRecord = b as unknown as Record<string, unknown>;
+  const aRecord = a as unknown as Record<string, unknown>;
+  for (const key of keysA) {
+    if (!(key in bRecord) || aRecord[key] !== bRecord[key]) return false;
+  }
+  return true;
+}
+
+/**
+ * Structural equality over a project's full row list — length plus per-row
+ * `rowEqual`, in list order (both sides derive from the same `runs.list`
+ * ordering, so an index-wise compare is valid and avoids an O(n^2) search).
+ * Used to skip the `set()` for a project when a refetch is byte-identical, so
+ * `runsByProject` keeps its prior top-level reference and the whole-rail
+ * subscriber (DraggableProjectTreeView) does not re-render.
+ */
+function rowsEqual(prev: ActiveRunRow[] | undefined, next: ActiveRunRow[]): boolean {
+  if (prev === undefined || prev.length !== next.length) return false;
+  for (let i = 0; i < prev.length; i++) {
+    if (!rowEqual(prev[i], next[i])) return false;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
@@ -217,9 +258,15 @@ export const useActiveRunsStore = create<ActiveRunsState>((set, get) => {
         // activeRunId change via the rail's effect).
         const pinnedRunId = useCyboflowStore.getState().activeRunId;
         const reachable = buildActiveRunRows(runs, workflows, pinnedRunId);
-        set((state) => ({
-          runsByProject: { ...state.runsByProject, [projectId]: reachable },
-        }));
+        set((state) => {
+          // Byte-identical refetch: skip the write entirely so both the row
+          // array AND the parent `runsByProject` map keep their prior
+          // reference (Object.is-compared by the whole-rail subscriber).
+          if (rowsEqual(state.runsByProject[projectId], reachable)) return state;
+          return {
+            runsByProject: { ...state.runsByProject, [projectId]: reachable },
+          };
+        });
       } catch (err: unknown) {
         console.warn('[activeRunsStore] refresh failed for project', projectId, err);
       }
