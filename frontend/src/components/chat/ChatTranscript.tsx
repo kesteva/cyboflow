@@ -7,7 +7,7 @@ import { MessageSegment } from '../panels/ai/components/MessageSegment';
 import { ToolCallView } from '../panels/ai/components/ToolCallView';
 import { ToolCallGroup } from '../panels/ai/components/ToolCallGroup';
 import { TodoListDisplay } from '../panels/ai/components/TodoListDisplay';
-import type { UnifiedMessage } from '../../../../shared/types/unifiedMessage';
+import type { UnifiedMessage, ToolCall } from '../../../../shared/types/unifiedMessage';
 import type { RichOutputSettings } from '../panels/ai/AbstractAIPanel';
 
 const formatStatusLabel = (value: string): string =>
@@ -73,6 +73,62 @@ const sessionStatusStyles: Record<string, {
   }
 };
 
+// ---------------------------------------------------------------------------
+// Per-row expanded-tool scoping
+// ---------------------------------------------------------------------------
+// The whole-transcript expanded-tool Set changes identity on every tool toggle.
+// Passing it wholesale to each memoized row would re-render EVERY row on a
+// single toggle. Instead each row receives a value-stable STRING signature of
+// only ITS OWN expanded tool ids — toggling a tool outside the row leaves the
+// signature identical (=== equal), so React.memo skips it. The row rebuilds a
+// scoped Set from the signature for `.has()` checks.
+
+function collectToolIds(tool: ToolCall, acc: string[]): void {
+  acc.push(tool.id);
+  if (tool.childToolCalls) {
+    for (const child of tool.childToolCalls) collectToolIds(child, acc);
+  }
+}
+
+function messageToolIds(message: UnifiedMessage): string[] {
+  const acc: string[] = [];
+  for (const seg of message.segments) {
+    if (seg.type === 'tool_call') collectToolIds(seg.tool, acc);
+  }
+  return acc;
+}
+
+function rowExpandedSignature(toolIds: string[], expanded: Set<string>): string {
+  const on = toolIds.filter((id) => expanded.has(id));
+  on.sort();
+  return on.join(',');
+}
+
+function expandedSetFromSignature(signature: string): Set<string> {
+  return new Set(signature ? signature.split(',') : []);
+}
+
+/** Does `message` need extra top-spacing given its predecessor? (data-only) */
+function computeNeedsExtraSpacing(
+  messages: UnifiedMessage[],
+  message: UnifiedMessage,
+  index: number,
+): boolean {
+  const prevMessage = index > 0 ? messages[index - 1] : null;
+  const hasThinking = message.segments.some((seg) => seg.type === 'thinking');
+  return Boolean(
+    prevMessage &&
+      ((prevMessage.role !== message.role) ||
+        (hasThinking && !prevMessage.segments.some((seg) => seg.type === 'thinking'))),
+  );
+}
+
+interface TranscriptTodoItem {
+  id: string;
+  content: string;
+  status: 'pending' | 'in_progress' | 'completed';
+}
+
 export interface ChatTranscriptProps {
   /** Messages already filtered for display (e.g. session-init removed when settings.showSessionInit is false). */
   messages: UnifiedMessage[];
@@ -133,364 +189,84 @@ export interface ChatTranscriptProps {
   renderToolCallExtra?: (toolCallId: string) => React.ReactNode;
 }
 
-/**
- * Pure presentational chat transcript: messages in -> JSX out.
- *
- * Holds NO data fetching, NO IPC, NO window-event listeners, and NO
- * localStorage access. All state (collapse/expand/copy/scroll) is owned by the
- * caller and passed in as props so this component can be reused across the
- * quick-session chat (RichOutputView) and future consumers.
- */
-export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
-  messages: filteredMessages,
+// ---------------------------------------------------------------------------
+// TranscriptMessageRow — one message (regular or system), memoized
+// ---------------------------------------------------------------------------
+// Extracted verbatim from the old inline `renderMessage`/`renderSystemMessage`
+// so a single row re-renders (and re-parses its markdown) only when ITS OWN
+// props change. Live-refetch identity preservation (mergeUnifiedMessages) keeps
+// `message` reference-stable for untouched rows, and the scalar `isCopied` /
+// `isCollapsed` / `expandedSignature` props keep a copy click or a foreign tool
+// toggle from touching sibling rows.
+
+interface TranscriptMessageRowProps {
+  message: UnifiedMessage;
+  needsExtraSpacing: boolean;
+  userMessageIndex?: number;
+  settings: RichOutputSettings;
+  agentName: string;
+  showSystemMessages: boolean;
+  isCollapsed: boolean;
+  isCopied: boolean;
+  expandedSignature: string;
+  onToggleMessageCollapse: (messageId: string) => void;
+  onToggleToolExpand: (toolId: string) => void;
+  onCopyMessage: (message: UnifiedMessage) => void;
+  userMessageRefs: React.MutableRefObject<Map<number, HTMLDivElement>>;
+  renderToolCallExtra?: (toolCallId: string) => React.ReactNode;
+}
+
+const TranscriptMessageRowComponent: React.FC<TranscriptMessageRowProps> = ({
+  message,
+  needsExtraSpacing,
+  userMessageIndex,
   settings,
   agentName,
-  showSystemMessages: showSystemMessagesProp,
-  isWaitingForResponse = false,
-  liveTail,
-  transcriptEndSlot,
-  collapsedMessages,
+  showSystemMessages,
+  isCollapsed,
+  isCopied,
+  expandedSignature,
   onToggleMessageCollapse,
-  expandedTools,
   onToggleToolExpand,
-  copiedMessageId,
   onCopyMessage,
-  showSettings,
-  onSettingsChange,
-  scrollContainerRef,
-  messagesEndRef,
   userMessageRefs,
-  showScrollButton,
-  onScrollToBottom,
   renderToolCallExtra,
 }) => {
-  const showSystemMessages = showSystemMessagesProp ?? true;
+  const expandedTools = useMemo(() => expandedSetFromSignature(expandedSignature), [expandedSignature]);
 
   // Render any caller-supplied extras (e.g. inline AskUserQuestionCard) for the
   // tool_call segments of a message, keyed by tool-call id. No-op when the
-  // caller does not pass `renderToolCallExtra` — preserves RichOutputView's
-  // existing behavior.
-  const renderToolCallExtras = (message: UnifiedMessage): React.ReactNode => {
+  // caller does not pass `renderToolCallExtra`.
+  const renderToolCallExtras = (msg: UnifiedMessage): React.ReactNode => {
     if (!renderToolCallExtra) return null;
-    const extras = message.segments
+    const extras = msg.segments
       .filter((seg): seg is Extract<typeof seg, { type: 'tool_call' }> => seg.type === 'tool_call')
       .map((seg) => {
         const extra = renderToolCallExtra(seg.tool.id);
         if (extra == null) return null;
-        return <div key={`${message.id}-extra-${seg.tool.id}`}>{extra}</div>;
+        return <div key={`${msg.id}-extra-${seg.tool.id}`}>{extra}</div>;
       })
       .filter((node): node is React.ReactElement => node !== null);
     if (extras.length === 0) return null;
     return <>{extras}</>;
   };
 
-  // Render a complete message
-  const renderMessage = (message: UnifiedMessage, index: number, userMessageIndex?: number) => {
-    const isCollapsed = collapsedMessages.has(message.id);
-    const isUser = message.role === 'user';
-    const isSystem = message.role === 'system';
-    const hasTextContent = message.segments.some(seg => seg.type === 'text');
-    const textContent = message.segments
+  const renderSystemMessage = (sysMessage: UnifiedMessage, sysNeedsExtraSpacing: boolean): React.ReactNode => {
+    const textContent = sysMessage.segments
       .filter(seg => seg.type === 'text')
       .map(seg => seg.type === 'text' ? seg.content : '')
       .join('\n\n');
 
-    // Check if message has tool calls, thinking, diffs or tool results
-    const hasToolCalls = message.segments.some(seg => seg.type === 'tool_call');
-    const hasThinking = message.segments.some(seg => seg.type === 'thinking');
-    const hasDiffs = message.segments.some(seg => seg.type === 'diff');
-    const hasToolResults = message.segments.some(seg => seg.type === 'tool_result');
-
-    // Determine if we need extra spacing before this message
-    const prevMessage = index > 0 ? filteredMessages[index - 1] : null;
-    const needsExtraSpacing = prevMessage && (
-      (prevMessage.role !== message.role) ||
-      (hasThinking && !prevMessage.segments.some(seg => seg.type === 'thinking'))
-    );
-
-    // Special rendering for system messages
-    if (isSystem) {
-      return renderSystemMessage(message, needsExtraSpacing || false);
-    }
-
-    // Check if this message has any renderable content (including TodoWrite for now, filtered later)
-    const hasRenderableContent = hasTextContent || hasToolCalls || hasThinking || hasDiffs || hasToolResults;
-
-    // If no renderable content and not a special system message, skip or show raw
-    if (!hasRenderableContent) {
-      // Check if it's a system_info only message that should be handled differently
-      const hasSystemInfo = message.segments.some(seg => seg.type === 'system_info');
-      if (hasSystemInfo) {
-        // Return null to skip rendering - these are handled in renderSystemMessage
-        return null;
-      }
-
-      // For other messages with no renderable content, show as raw JSON fallback
-      if (message.segments.length > 0) {
-        return (
-          <div
-            key={message.id}
-            className={`
-              rounded-lg transition-all bg-surface-tertiary/50 border border-border-primary
-              ${settings.compactMode ? 'p-3' : 'p-4'}
-              ${needsExtraSpacing ? 'mt-4' : ''}
-            `}
-          >
-            <div className="text-xs text-text-tertiary mb-2">Unhandled message type</div>
-            <pre className="text-xs text-text-secondary font-mono overflow-x-auto">
-              {JSON.stringify(message, null, 2)}
-            </pre>
-          </div>
-        );
-      }
-
-      // Skip completely empty messages
-      return null;
-    }
-
-    return (
-      <div
-        key={message.id}
-        ref={isUser && userMessageIndex !== undefined ? (el) => {
-          if (el) userMessageRefs.current.set(userMessageIndex, el);
-        } : undefined}
-        className={`
-          rounded-lg transition-all relative group
-          ${isUser ? 'bg-surface-secondary' : hasThinking ? 'bg-surface-primary/50' : 'bg-surface-primary'}
-          ${hasToolCalls ? 'bg-surface-tertiary/30' : ''}
-          ${settings.compactMode ? 'p-3' : 'p-4'}
-          ${needsExtraSpacing ? 'mt-4' : ''}
-        `}
-      >
-        {/* Message Header */}
-        <div className="flex items-center gap-2 mb-2">
-          <div className={`
-            rounded-full p-1.5 flex-shrink-0
-            ${isUser ? 'bg-status-success/20 text-status-success' : 'bg-interactive/20 text-interactive-on-dark'}
-          `}>
-            {isUser ? <User className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
-          </div>
-          <div className="flex-1 flex items-baseline gap-2">
-            <span className="font-medium text-text-primary text-sm">
-              {isUser ? 'You' : agentName}
-            </span>
-            <span className="text-xs text-text-tertiary">
-              {formatDistanceToNow(parseTimestamp(message.timestamp))}
-            </span>
-            {message.metadata?.duration && (
-              <span className="text-xs text-text-tertiary">
-                · {(message.metadata.duration / 1000).toFixed(1)}s
-              </span>
-            )}
-          </div>
-          {/* Action buttons */}
-          <div className="flex items-center gap-1">
-            {/* Copy button - only for assistant messages */}
-            {!isUser && (
-              <button
-                onClick={() => onCopyMessage(message)}
-                className="p-1.5 rounded-lg bg-surface-secondary/80 hover:bg-surface-secondary transition-all opacity-0 group-hover:opacity-100 border border-border-primary"
-                title="Copy message content as markdown"
-              >
-                {copiedMessageId === message.id ? (
-                  <Check className="w-3.5 h-3.5 text-status-success" />
-                ) : (
-                  <Copy className="w-3.5 h-3.5 text-text-tertiary hover:text-text-secondary" />
-                )}
-              </button>
-            )}
-            {/* Hide/Show button for long messages */}
-            {hasTextContent && textContent.length > 200 && (
-              <button
-                onClick={() => onToggleMessageCollapse(message.id)}
-                className="p-1.5 rounded-lg hover:bg-surface-secondary/50 transition-colors text-text-tertiary hover:text-text-secondary"
-                title={isCollapsed ? "Show full message" : "Collapse message"}
-              >
-                {isCollapsed ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
-              </button>
-            )}
-          </div>
-        </div>
-
-        {/* Message Content */}
-        <div className="ml-7 space-y-2">
-          {/* Thinking segments */}
-          {settings.showThinking && message.segments
-            .filter(seg => seg.type === 'thinking')
-            .map((seg, idx) => (
-              <MessageSegment
-                key={`${message.id}-thinking-${idx}`}
-                segment={seg}
-                messageId={message.id}
-                index={idx}
-                isUser={isUser}
-                expandedTools={expandedTools}
-                collapseTools={settings.collapseTools}
-                showToolCalls={settings.showToolCalls}
-                showThinking={settings.showThinking}
-                onToggleToolExpand={onToggleToolExpand}
-              />
-            ))
-          }
-
-          {/* Text segments - combined into one block */}
-          {hasTextContent && (
-            <MessageSegment
-              segment={{ type: 'text', content: textContent }}
-              messageId={message.id}
-              index={0}
-              isUser={isUser}
-              isCollapsed={isCollapsed}
-              expandedTools={expandedTools}
-              collapseTools={settings.collapseTools}
-              showToolCalls={settings.showToolCalls}
-              showThinking={settings.showThinking}
-              onToggleToolExpand={onToggleToolExpand}
-            />
-          )}
-
-          {/* Group consecutive tools, but break on TodoWrite and filter out SlashCommand */}
-          {settings.showToolCalls && (() => {
-            const toolSegments = message.segments.filter(seg =>
-              seg.type === 'tool_call' && seg.tool.name !== 'SlashCommand'
-            );
-            if (toolSegments.length === 0) return null;
-
-            const groups: { tools: typeof message.segments, isTodoWrite: boolean }[] = [];
-            let currentGroup: typeof message.segments = [];
-
-            toolSegments.forEach((seg) => {
-              if (seg.type === 'tool_call' && seg.tool.name === 'TodoWrite') {
-                // If we have a current group, save it
-                if (currentGroup.length > 0) {
-                  groups.push({ tools: currentGroup, isTodoWrite: false });
-                  currentGroup = [];
-                }
-                // Add TodoWrite as its own group
-                groups.push({ tools: [seg], isTodoWrite: true });
-              } else {
-                // Add to current group
-                currentGroup.push(seg);
-              }
-            });
-
-            // Don't forget the last group if it exists
-            if (currentGroup.length > 0) {
-              groups.push({ tools: currentGroup, isTodoWrite: false });
-            }
-
-            return groups.map((group, groupIdx) => {
-              if (group.isTodoWrite && group.tools.length === 1) {
-                const seg = group.tools[0];
-                if (seg.type === 'tool_call' && seg.tool.result) {
-                  try {
-                    const resultData = typeof seg.tool.result.content === 'string'
-                      ? JSON.parse(seg.tool.result.content)
-                      : seg.tool.result.content;
-                    if (resultData.todos && Array.isArray(resultData.todos)) {
-                      return (
-                        <TodoListDisplay
-                          key={`${message.id}-todo-${groupIdx}`}
-                          todos={resultData.todos}
-                        />
-                      );
-                    }
-                  } catch (e) {
-                    // If parsing fails, show as regular tool
-                  }
-                }
-                // Fallback to regular tool display if TodoWrite has no valid result
-                return (
-                  <MessageSegment
-                    key={`${message.id}-tool-group-${groupIdx}`}
-                    segment={seg}
-                    messageId={message.id}
-                    index={groupIdx}
-                    isUser={isUser}
-                    expandedTools={expandedTools}
-                    collapseTools={settings.collapseTools}
-                    showToolCalls={settings.showToolCalls}
-                    showThinking={settings.showThinking}
-                    onToggleToolExpand={onToggleToolExpand}
-                  />
-                );
-              } else {
-                // Regular tool group
-                return (
-                  <ToolCallGroup
-                    key={`${message.id}-tool-group-${groupIdx}`}
-                    tools={group.tools}
-                    expandedTools={expandedTools}
-                    collapseTools={settings.collapseTools}
-                    onToggleToolExpand={onToggleToolExpand}
-                  />
-                );
-              }
-            });
-          })()}
-
-          {/* Diff segments */}
-          {message.segments
-            .filter(seg => seg.type === 'diff')
-            .map((seg, idx) => (
-              <MessageSegment
-                key={`${message.id}-diff-${idx}`}
-                segment={seg}
-                messageId={message.id}
-                index={idx}
-                isUser={isUser}
-                expandedTools={expandedTools}
-                collapseTools={settings.collapseTools}
-                showToolCalls={settings.showToolCalls}
-                showThinking={settings.showThinking}
-                onToggleToolExpand={onToggleToolExpand}
-              />
-            ))
-          }
-
-          {/* Tool results - only show if not already shown as part of tool calls */}
-          {settings.showToolCalls && message.segments
-            .filter(seg => seg.type === 'tool_result')
-            .map((seg, idx) => (
-              <MessageSegment
-                key={`${message.id}-result-${idx}`}
-                segment={seg}
-                messageId={message.id}
-                index={idx}
-                isUser={isUser}
-                expandedTools={expandedTools}
-                collapseTools={settings.collapseTools}
-                showToolCalls={settings.showToolCalls}
-                showThinking={settings.showThinking}
-                onToggleToolExpand={onToggleToolExpand}
-              />
-            ))
-          }
-
-          {/* Caller-supplied per-tool extras (e.g. inline AskUserQuestionCard). */}
-          {renderToolCallExtras(message)}
-        </div>
-      </div>
-    );
-  };
-
-  const renderSystemMessage = (message: UnifiedMessage, needsExtraSpacing: boolean) => {
-    const textContent = message.segments
-      .filter(seg => seg.type === 'text')
-      .map(seg => seg.type === 'text' ? seg.content : '')
-      .join('\n\n');
-
-    const errorSegment = message.segments.find(seg => seg.type === 'error');
+    const errorSegment = sysMessage.segments.find(seg => seg.type === 'error');
     if (errorSegment?.type === 'error' && errorSegment.error) {
       const { message: errorMessage, details } = errorSegment.error;
 
       return (
         <div
-          key={message.id}
           className={`
             rounded-lg transition-all bg-status-error/10 border border-status-error/30
             ${settings.compactMode ? 'p-3' : 'p-4'}
-            ${needsExtraSpacing ? 'mt-4' : ''}
+            ${sysNeedsExtraSpacing ? 'mt-4' : ''}
           `}
         >
           <div className="flex items-start gap-3">
@@ -503,7 +279,7 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
                   {errorMessage || 'Session Error'}
                 </span>
                 <span className="text-sm text-text-tertiary">
-                  {formatDistanceToNow(parseTimestamp(message.timestamp))}
+                  {formatDistanceToNow(parseTimestamp(sysMessage.timestamp))}
                 </span>
               </div>
               {details && (
@@ -518,8 +294,8 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
     }
 
 
-    if (message.metadata?.systemSubtype === 'init') {
-      const info = message.segments.find(seg => seg.type === 'system_info');
+    if (sysMessage.metadata?.systemSubtype === 'init') {
+      const info = sysMessage.segments.find(seg => seg.type === 'system_info');
       if (info?.type === 'system_info') {
         // Type guard helper to safely convert unknown values to strings
         const toString = (value: unknown): string => typeof value === 'string' ? value : '';
@@ -530,7 +306,6 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
         const toolsLength = Array.isArray(infoData.tools) ? infoData.tools.length : 0;
         return (
           <div
-            key={message.id}
             className={`
               rounded-lg transition-all bg-surface-tertiary border border-border-primary
               ${settings.compactMode ? 'p-3' : 'p-4'}
@@ -544,7 +319,7 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
                 <div className="flex items-center gap-2 mb-2">
                   <span className="font-semibold text-text-primary">Session Started</span>
                   <span className="text-sm text-text-tertiary">
-                    {formatDistanceToNow(parseTimestamp(message.timestamp))}
+                    {formatDistanceToNow(parseTimestamp(sysMessage.timestamp))}
                   </span>
                 </div>
                 <div className="text-sm text-text-secondary space-y-1">
@@ -559,8 +334,8 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
           </div>
         );
       }
-    } else if (message.metadata?.systemSubtype === 'error') {
-      const errorInfo = message.segments.find(seg => seg.type === 'system_info')?.info || {};
+    } else if (sysMessage.metadata?.systemSubtype === 'error') {
+      const errorInfo = sysMessage.segments.find(seg => seg.type === 'system_info')?.info || {};
 
       // Type guard helper to safely convert unknown values to strings
       const toString = (value: unknown): string => typeof value === 'string' ? value : '';
@@ -570,11 +345,10 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
 
       return (
         <div
-          key={message.id}
           className={`
             rounded-lg transition-all bg-status-error/10 border border-status-error/30
             ${settings.compactMode ? 'p-3' : 'p-4'}
-            ${needsExtraSpacing ? 'mt-4' : ''}
+            ${sysNeedsExtraSpacing ? 'mt-4' : ''}
           `}
         >
           <div className="flex items-start gap-3">
@@ -585,11 +359,11 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
               <div className="flex items-center gap-2 mb-2">
                 <span className="font-semibold text-status-error">{errorTitle}</span>
                 <span className="text-sm text-text-tertiary">
-                  {formatDistanceToNow(parseTimestamp(message.timestamp))}
+                  {formatDistanceToNow(parseTimestamp(sysMessage.timestamp))}
                 </span>
-                {message.metadata?.duration && (
+                {sysMessage.metadata?.duration && (
                   <span className="text-xs text-text-tertiary">
-                    · {(message.metadata.duration / 1000).toFixed(1)}s
+                    · {(sysMessage.metadata.duration / 1000).toFixed(1)}s
                   </span>
                 )}
               </div>
@@ -600,8 +374,8 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
           </div>
         </div>
       );
-    } else if (message.metadata?.systemSubtype === 'context_compacted') {
-      const infoSegment = message.segments.find(seg => seg.type === 'system_info');
+    } else if (sysMessage.metadata?.systemSubtype === 'context_compacted') {
+      const infoSegment = sysMessage.segments.find(seg => seg.type === 'system_info');
 
       // Type guard helper to safely convert unknown values to strings
       const toString = (value: unknown): string => typeof value === 'string' ? value : '';
@@ -612,11 +386,10 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
 
       return (
         <div
-          key={message.id}
           className={`
             rounded-lg transition-all bg-status-warning/10 border border-status-warning/30
             ${settings.compactMode ? 'p-3' : 'p-4'}
-            ${needsExtraSpacing ? 'mt-4' : ''}
+            ${sysNeedsExtraSpacing ? 'mt-4' : ''}
           `}
         >
           <div className="flex items-start gap-3">
@@ -629,7 +402,7 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
               <div className="flex items-center gap-2 mb-3">
                 <span className="font-semibold text-status-warning">Context Compacted</span>
                 <span className="text-sm text-text-tertiary">
-                  {formatDistanceToNow(parseTimestamp(message.timestamp))}
+                  {formatDistanceToNow(parseTimestamp(sysMessage.timestamp))}
                 </span>
               </div>
 
@@ -651,15 +424,14 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
           </div>
         </div>
       );
-    } else if (message.metadata?.systemSubtype === 'slash_command_result') {
+    } else if (sysMessage.metadata?.systemSubtype === 'slash_command_result') {
       // Render slash command result with subtle styling
       return (
         <div
-          key={message.id}
           className={`
             rounded-lg transition-all border bg-surface-tertiary/50 border-border-primary
             ${settings.compactMode ? 'p-3' : 'p-4'}
-            ${needsExtraSpacing ? 'mt-4' : ''}
+            ${sysNeedsExtraSpacing ? 'mt-4' : ''}
           `}
         >
           <div className="flex items-start gap-3">
@@ -672,7 +444,7 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
                   Result
                 </span>
                 <span className="text-sm text-text-tertiary">
-                  {formatDistanceToNow(parseTimestamp(message.timestamp))}
+                  {formatDistanceToNow(parseTimestamp(sysMessage.timestamp))}
                 </span>
               </div>
               <div className="bg-surface-secondary rounded-lg p-3 text-sm text-text-primary whitespace-pre-wrap font-mono">
@@ -682,8 +454,8 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
           </div>
         </div>
       );
-    } else if (message.metadata?.systemSubtype === 'git_operation' || message.metadata?.systemSubtype === 'git_error') {
-      const isError = message.metadata.systemSubtype === 'git_error';
+    } else if (sysMessage.metadata?.systemSubtype === 'git_operation' || sysMessage.metadata?.systemSubtype === 'git_error') {
+      const isError = sysMessage.metadata.systemSubtype === 'git_error';
       const rawOutput = textContent;
       const isSuccess = !isError && (rawOutput.includes('✓') || rawOutput.includes('Successfully'));
 
@@ -693,7 +465,6 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
 
       return (
         <div
-          key={message.id}
           className={`
             rounded-lg transition-all border
             ${isError
@@ -703,7 +474,7 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
                 : 'bg-interactive/10 border-interactive/30'
             }
             ${settings.compactMode ? 'p-3' : 'p-4'}
-            ${needsExtraSpacing ? 'mt-4' : ''}
+            ${sysNeedsExtraSpacing ? 'mt-4' : ''}
           `}
         >
           <div className="flex items-start gap-3">
@@ -733,7 +504,7 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
                   {isError ? 'Git Operation Failed' : '🔄 Git Operation'}
                 </span>
                 <span className="text-sm text-text-tertiary">
-                  {formatDistanceToNow(parseTimestamp(message.timestamp))}
+                  {formatDistanceToNow(parseTimestamp(sysMessage.timestamp))}
                 </span>
               </div>
               <div className="space-y-2">
@@ -793,7 +564,7 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
     }
 
     // Check if there's system_info to display
-    const systemInfo = message.segments.find(seg => seg.type === 'system_info');
+    const systemInfo = sysMessage.segments.find(seg => seg.type === 'system_info');
     if (systemInfo?.type === 'system_info' && systemInfo.info) {
       const info = systemInfo.info;
 
@@ -825,12 +596,11 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
 
         return (
           <div
-            key={message.id}
             className={`
               rounded-lg transition-all border
               ${config.container}
               ${settings.compactMode ? 'p-3' : 'p-4'}
-              ${needsExtraSpacing ? 'mt-4' : ''}
+              ${sysNeedsExtraSpacing ? 'mt-4' : ''}
             `}
           >
             <div className="flex items-start gap-3">
@@ -843,7 +613,7 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
                     {title}
                   </span>
                   <span className="text-sm text-text-tertiary">
-                    {formatDistanceToNow(parseTimestamp(message.timestamp))}
+                    {formatDistanceToNow(parseTimestamp(sysMessage.timestamp))}
                   </span>
                 </div>
                 <div className="text-sm text-text-secondary whitespace-pre-wrap">
@@ -869,11 +639,10 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
 
         return (
           <div
-            key={message.id}
             className={`
               rounded-lg transition-all bg-interactive/5 border border-interactive/20
               ${settings.compactMode ? 'p-2' : 'p-3'}
-              ${needsExtraSpacing ? 'mt-4' : ''}
+              ${sysNeedsExtraSpacing ? 'mt-4' : ''}
             `}
           >
             <div className="flex items-center gap-2 text-xs text-interactive">
@@ -894,11 +663,10 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
 
         return (
           <div
-            key={message.id}
             className={`
               rounded-lg transition-all bg-status-success/5 border border-status-success/20
               ${settings.compactMode ? 'p-2' : 'p-3'}
-              ${needsExtraSpacing ? 'mt-4' : ''}
+              ${sysNeedsExtraSpacing ? 'mt-4' : ''}
             `}
           >
             <div className="flex items-center gap-2 text-xs text-status-success">
@@ -920,11 +688,10 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
 
         return (
           <div
-            key={message.id}
             className={`
               rounded-lg transition-all bg-surface-tertiary/30 border border-border-primary
               ${settings.compactMode ? 'p-2' : 'p-3'}
-              ${needsExtraSpacing ? 'mt-4' : ''}
+              ${sysNeedsExtraSpacing ? 'mt-4' : ''}
             `}
           >
             <div className="flex items-center gap-3 text-xs text-text-tertiary">
@@ -946,11 +713,10 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
     if (textContent) {
       return (
         <div
-          key={message.id}
           className={`
             rounded-lg transition-all bg-surface-tertiary/50 border border-border-primary
             ${settings.compactMode ? 'p-3' : 'p-4'}
-            ${needsExtraSpacing ? 'mt-4' : ''}
+            ${sysNeedsExtraSpacing ? 'mt-4' : ''}
           `}
         >
           <div className="text-sm text-text-secondary">
@@ -964,282 +730,724 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
     return null;
   };
 
-  // Memoize the rendered messages to prevent unnecessary re-renders
-  const renderedMessages = useMemo(() => {
-    let userMessageIndex = 0;
-    const elements: (React.ReactElement | null)[] = [];
+  const isUser = message.role === 'user';
+  const isSystem = message.role === 'system';
+  const hasTextContent = message.segments.some(seg => seg.type === 'text');
+  const textContent = message.segments
+    .filter(seg => seg.type === 'text')
+    .map(seg => seg.type === 'text' ? seg.content : '')
+    .join('\n\n');
 
-    // Group consecutive tool-only messages
-    let i = 0;
-    while (i < filteredMessages.length) {
-      const msg = filteredMessages[i];
-      const isUser = msg.role === 'user';
+  // Check if message has tool calls, thinking, diffs or tool results
+  const hasToolCalls = message.segments.some(seg => seg.type === 'tool_call');
+  const hasThinking = message.segments.some(seg => seg.type === 'thinking');
+  const hasDiffs = message.segments.some(seg => seg.type === 'diff');
+  const hasToolResults = message.segments.some(seg => seg.type === 'tool_result');
 
-      // Check if this message contains only tool calls
-      const hasOnlyToolCalls = !isUser &&
-        msg.segments.length > 0 &&
-        msg.segments.every(seg => seg.type === 'tool_call');
+  // Special rendering for system messages
+  if (isSystem) {
+    return <>{renderSystemMessage(message, needsExtraSpacing)}</>;
+  }
 
-      if (hasOnlyToolCalls && settings.showToolCalls) {
-        // Collect consecutive tool messages, but break on TodoWrite
-        const toolGroups: { messages: typeof filteredMessages, isTodoWrite: boolean }[] = [];
-        let currentGroup: typeof filteredMessages = [];
-        const messagesToProcess = [msg];
-        let j = i + 1;
+  // Check if this message has any renderable content (including TodoWrite for now, filtered later)
+  const hasRenderableContent = hasTextContent || hasToolCalls || hasThinking || hasDiffs || hasToolResults;
 
-        // First collect all consecutive tool-only messages
-        while (j < filteredMessages.length) {
-          const nextMsg = filteredMessages[j];
-          const nextHasOnlyToolCalls = !nextMsg.role || (nextMsg.role === 'assistant' &&
-            nextMsg.segments.length > 0 &&
-            nextMsg.segments.every(seg => seg.type === 'tool_call'));
+  // If no renderable content and not a special system message, skip or show raw
+  if (!hasRenderableContent) {
+    // Check if it's a system_info only message that should be handled differently
+    const hasSystemInfo = message.segments.some(seg => seg.type === 'system_info');
+    if (hasSystemInfo) {
+      // Return null to skip rendering - these are handled in renderSystemMessage
+      return null;
+    }
 
-          if (nextHasOnlyToolCalls) {
-            messagesToProcess.push(nextMsg);
-            j++;
-          } else {
-            break;
-          }
+    // For other messages with no renderable content, show as raw JSON fallback
+    if (message.segments.length > 0) {
+      return (
+        <div
+          className={`
+            rounded-lg transition-all bg-surface-tertiary/50 border border-border-primary
+            ${settings.compactMode ? 'p-3' : 'p-4'}
+            ${needsExtraSpacing ? 'mt-4' : ''}
+          `}
+        >
+          <div className="text-xs text-text-tertiary mb-2">Unhandled message type</div>
+          <pre className="text-xs text-text-secondary font-mono overflow-x-auto">
+            {JSON.stringify(message, null, 2)}
+          </pre>
+        </div>
+      );
+    }
+
+    // Skip completely empty messages
+    return null;
+  }
+
+  return (
+    <div
+      ref={isUser && userMessageIndex !== undefined ? (el) => {
+        if (el) userMessageRefs.current.set(userMessageIndex, el);
+      } : undefined}
+      className={`
+        rounded-lg transition-all relative group
+        ${isUser ? 'bg-surface-secondary' : hasThinking ? 'bg-surface-primary/50' : 'bg-surface-primary'}
+        ${hasToolCalls ? 'bg-surface-tertiary/30' : ''}
+        ${settings.compactMode ? 'p-3' : 'p-4'}
+        ${needsExtraSpacing ? 'mt-4' : ''}
+      `}
+    >
+      {/* Message Header */}
+      <div className="flex items-center gap-2 mb-2">
+        <div className={`
+          rounded-full p-1.5 flex-shrink-0
+          ${isUser ? 'bg-status-success/20 text-status-success' : 'bg-interactive/20 text-interactive-on-dark'}
+        `}>
+          {isUser ? <User className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
+        </div>
+        <div className="flex-1 flex items-baseline gap-2">
+          <span className="font-medium text-text-primary text-sm">
+            {isUser ? 'You' : agentName}
+          </span>
+          <span className="text-xs text-text-tertiary">
+            {formatDistanceToNow(parseTimestamp(message.timestamp))}
+          </span>
+          {message.metadata?.duration && (
+            <span className="text-xs text-text-tertiary">
+              · {(message.metadata.duration / 1000).toFixed(1)}s
+            </span>
+          )}
+        </div>
+        {/* Action buttons */}
+        <div className="flex items-center gap-1">
+          {/* Copy button - only for assistant messages */}
+          {!isUser && (
+            <button
+              onClick={() => onCopyMessage(message)}
+              className="p-1.5 rounded-lg bg-surface-secondary/80 hover:bg-surface-secondary transition-all opacity-0 group-hover:opacity-100 border border-border-primary"
+              title="Copy message content as markdown"
+            >
+              {isCopied ? (
+                <Check className="w-3.5 h-3.5 text-status-success" />
+              ) : (
+                <Copy className="w-3.5 h-3.5 text-text-tertiary hover:text-text-secondary" />
+              )}
+            </button>
+          )}
+          {/* Hide/Show button for long messages */}
+          {hasTextContent && textContent.length > 200 && (
+            <button
+              onClick={() => onToggleMessageCollapse(message.id)}
+              className="p-1.5 rounded-lg hover:bg-surface-secondary/50 transition-colors text-text-tertiary hover:text-text-secondary"
+              title={isCollapsed ? "Show full message" : "Collapse message"}
+            >
+              {isCollapsed ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Message Content */}
+      <div className="ml-7 space-y-2">
+        {/* Thinking segments */}
+        {settings.showThinking && message.segments
+          .filter(seg => seg.type === 'thinking')
+          .map((seg, idx) => (
+            <MessageSegment
+              key={`${message.id}-thinking-${idx}`}
+              segment={seg}
+              messageId={message.id}
+              index={idx}
+              isUser={isUser}
+              expandedTools={expandedTools}
+              collapseTools={settings.collapseTools}
+              showToolCalls={settings.showToolCalls}
+              showThinking={settings.showThinking}
+              onToggleToolExpand={onToggleToolExpand}
+            />
+          ))
         }
 
-        // Now group them, breaking on TodoWrite
-        for (const toolMsg of messagesToProcess) {
-          const hasTodoWrite = toolMsg.segments.some(seg =>
-            seg.type === 'tool_call' && seg.tool.name === 'TodoWrite'
+        {/* Text segments - combined into one block */}
+        {hasTextContent && (
+          <MessageSegment
+            segment={{ type: 'text', content: textContent }}
+            messageId={message.id}
+            index={0}
+            isUser={isUser}
+            isCollapsed={isCollapsed}
+            expandedTools={expandedTools}
+            collapseTools={settings.collapseTools}
+            showToolCalls={settings.showToolCalls}
+            showThinking={settings.showThinking}
+            onToggleToolExpand={onToggleToolExpand}
+          />
+        )}
+
+        {/* Group consecutive tools, but break on TodoWrite and filter out SlashCommand */}
+        {settings.showToolCalls && (() => {
+          const toolSegments = message.segments.filter(seg =>
+            seg.type === 'tool_call' && seg.tool.name !== 'SlashCommand'
           );
+          if (toolSegments.length === 0) return null;
 
-          if (hasTodoWrite) {
-            // Save current group if any
-            if (currentGroup.length > 0) {
-              toolGroups.push({ messages: currentGroup, isTodoWrite: false });
-              currentGroup = [];
-            }
-            // Add TodoWrite message as its own group
-            toolGroups.push({ messages: [toolMsg], isTodoWrite: true });
-          } else {
-            // Add to current group
-            currentGroup.push(toolMsg);
-          }
-        }
+          const groups: { tools: typeof message.segments, isTodoWrite: boolean }[] = [];
+          let currentGroup: typeof message.segments = [];
 
-        // Save last group if any
-        if (currentGroup.length > 0) {
-          toolGroups.push({ messages: currentGroup, isTodoWrite: false });
-        }
-
-        // toolMessages is no longer needed since we use toolGroups now
-
-        // Render each group
-        if (toolGroups.length > 0) {
-          toolGroups.forEach((group, groupIdx) => {
-            if (group.isTodoWrite) {
-              // Render TodoWrite display
-              const todoMsg = group.messages[0];
-              const todoSegment = todoMsg.segments.find(seg =>
-                seg.type === 'tool_call' && seg.tool.name === 'TodoWrite'
-              );
-
-              if (todoSegment && todoSegment.type === 'tool_call') {
-                let todos = todoSegment.tool.input?.todos;
-                if (!todos && todoSegment.tool.result) {
-                  try {
-                    const resultContent = typeof todoSegment.tool.result.content === 'string'
-                      ? JSON.parse(todoSegment.tool.result.content)
-                      : todoSegment.tool.result.content;
-                    todos = resultContent?.todos;
-                  } catch (e) {
-                    // Failed to parse result
-                  }
-                }
-
-                // Type guard to ensure todos is an array
-                const validTodos = Array.isArray(todos) ? todos : [];
-
-                if (validTodos.length > 0) {
-                  // Wrap TodoListDisplay in an assistant message block
-                  elements.push(
-                    <div
-                      key={`todo-display-${i}-${groupIdx}`}
-                      className={`
-                        rounded-lg transition-all relative group
-                        bg-surface-primary
-                        ${settings.compactMode ? 'p-3 mt-2' : 'p-4 mt-3'}
-                      `}
-                    >
-                      {/* Message Header */}
-                      <div className="flex items-center gap-2 mb-2">
-                        <div className="rounded-full p-1.5 flex-shrink-0 bg-interactive/20 text-interactive-on-dark">
-                          <Bot className="w-4 h-4" />
-                        </div>
-                        <div className="flex-1 flex items-baseline gap-2">
-                          <span className="font-medium text-text-primary text-sm">
-                            {agentName}
-                          </span>
-                          <span className="text-xs text-text-tertiary">
-                            {formatDistanceToNow(parseTimestamp(todoMsg.timestamp))}
-                          </span>
-                        </div>
-                      </div>
-
-                      {/* Todo List Content */}
-                      <div className="ml-7">
-                        <TodoListDisplay todos={validTodos} timestamp={todoMsg.timestamp} />
-                      </div>
-                    </div>
-                  );
-                }
+          toolSegments.forEach((seg) => {
+            if (seg.type === 'tool_call' && seg.tool.name === 'TodoWrite') {
+              // If we have a current group, save it
+              if (currentGroup.length > 0) {
+                groups.push({ tools: currentGroup, isTodoWrite: false });
+                currentGroup = [];
               }
-            } else if (group.messages.length > 1) {
-              // Render tool group
-              const allToolSegments = group.messages.flatMap(m =>
-                m.segments.filter(seg => seg.type === 'tool_call')
-              );
-
-              elements.push(
-                <div
-                  key={`tool-group-${i}-${groupIdx}`}
-                  className={`rounded-lg bg-surface-primary ${settings.compactMode ? 'p-3 mt-2' : 'p-4 mt-3'}`}
-                >
-                  <div className="flex items-center gap-2 mb-2">
-                    <div className="rounded-full p-1.5 flex-shrink-0 bg-interactive/20 text-interactive-on-dark">
-                      <Bot className="w-4 h-4" />
-                    </div>
-                    <div className="flex-1 flex items-baseline gap-2">
-                      <span className="font-medium text-text-primary text-sm">
-                        {agentName}
-                      </span>
-                      <span className="text-xs text-text-tertiary">
-                        Tool sequence
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2 text-[10px]">
-                      {allToolSegments.filter(seg => seg.type === 'tool_call' && seg.tool.status === 'success').length > 0 && (
-                        <span className="text-status-success">
-                          {allToolSegments.filter(seg => seg.type === 'tool_call' && seg.tool.status === 'success').length}✓
-                        </span>
-                      )}
-                      {allToolSegments.filter(seg => seg.type === 'tool_call' && seg.tool.status === 'error').length > 0 && (
-                        <span className="text-status-error">
-                          {allToolSegments.filter(seg => seg.type === 'tool_call' && seg.tool.status === 'error').length}✗
-                        </span>
-                      )}
-                      {allToolSegments.filter(seg => seg.type === 'tool_call' && seg.tool.status === 'pending').length > 0 && (
-                        <span className="text-text-tertiary">
-                          {allToolSegments.filter(seg => seg.type === 'tool_call' && seg.tool.status === 'pending').length}⏳
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="ml-7 space-y-[1px]">
-                    {allToolSegments.map((seg, segIdx) => (
-                      <div key={`grouped-tool-${i}-${groupIdx}-${segIdx}`}>
-                        {seg.type === 'tool_call' && (
-                          <ToolCallView
-                            tool={seg.tool}
-                            isExpanded={settings.collapseTools ? expandedTools.has(seg.tool.id) : false}
-                            collapseTools={settings.collapseTools}
-                            onToggleExpand={onToggleToolExpand}
-                            expandedTools={expandedTools}
-                          />
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              );
-              // Inline tool-call extras (e.g. AskUserQuestionCard) for grouped tools.
-              group.messages.forEach((toolMsg) => {
-                const extras = renderToolCallExtras(toolMsg);
-                if (extras) {
-                  elements.push(
-                    <React.Fragment key={`tool-group-extra-${i}-${groupIdx}-${toolMsg.id}`}>
-                      {extras}
-                    </React.Fragment>,
-                  );
-                }
-              });
-            } else if (group.messages.length === 1) {
-              // Single tool message, render normally
-              const element = renderMessage(group.messages[0], i);
-              elements.push(element);
+              // Add TodoWrite as its own group
+              groups.push({ tools: [seg], isTodoWrite: true });
+            } else {
+              // Add to current group
+              currentGroup.push(seg);
             }
           });
 
-          i = j; // Skip all the messages we processed
-        } else {
-          // Single tool-only message, render normally
-          const element = renderMessage(msg, i, isUser ? userMessageIndex : undefined);
-          if (isUser) userMessageIndex++;
-          elements.push(element);
-          i++;
-        }
-      } else {
-        // Regular message, render normally
-        const element = renderMessage(msg, i, isUser ? userMessageIndex : undefined);
-        if (isUser) userMessageIndex++;
-
-        // If this message has TodoWrite mixed with other content, also render TodoWrite separately
-        if (!isUser && msg.segments.some(seg => seg.type === 'tool_call' && seg.tool.name === 'TodoWrite')) {
-          // Find the last TodoWrite in this message
-          const todoSegments = msg.segments.filter(seg => seg.type === 'tool_call' && seg.tool.name === 'TodoWrite');
-          const lastTodoSegment = todoSegments[todoSegments.length - 1];
-
-          if (lastTodoSegment && lastTodoSegment.type === 'tool_call' && lastTodoSegment.tool.input?.todos) {
-            // Type guard to ensure todos is an array
-            const todoList = Array.isArray(lastTodoSegment.tool.input.todos) ? lastTodoSegment.tool.input.todos : [];
-
-            if (todoList.length > 0) {
-              // First add the regular message (with TodoWrite filtered out in renderMessage)
-              elements.push(element);
-
-              // Then add the TodoWrite display separately, wrapped in an assistant message block
-              const todoElement = (
-              <div
-                key={`todo-display-${msg.id}`}
-                className={`
-                  rounded-lg transition-all relative group
-                  bg-surface-primary
-                  ${settings.compactMode ? 'p-3 mt-2' : 'p-4 mt-3'}
-                `}
-              >
-                {/* Message Header */}
-                <div className="flex items-center gap-2 mb-2">
-                  <div className="rounded-full p-1.5 flex-shrink-0 bg-interactive/20 text-interactive-on-dark">
-                    <Bot className="w-4 h-4" />
-                  </div>
-                  <div className="flex-1 flex items-baseline gap-2">
-                    <span className="font-medium text-text-primary text-sm">
-                      {agentName}
-                    </span>
-                    <span className="text-xs text-text-tertiary">
-                      {formatDistanceToNow(parseTimestamp(msg.timestamp))}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Todo List Content */}
-                <div className="ml-7">
-                  <TodoListDisplay todos={todoList} timestamp={msg.timestamp} />
-                </div>
-              </div>
-            );
-            elements.push(todoElement);
-            } else {
-              elements.push(element);
-            }
-          } else {
-            elements.push(element);
+          // Don't forget the last group if it exists
+          if (currentGroup.length > 0) {
+            groups.push({ tools: currentGroup, isTodoWrite: false });
           }
-        } else {
-          elements.push(element);
+
+          return groups.map((group, groupIdx) => {
+            if (group.isTodoWrite && group.tools.length === 1) {
+              const seg = group.tools[0];
+              if (seg.type === 'tool_call' && seg.tool.result) {
+                try {
+                  const resultData = typeof seg.tool.result.content === 'string'
+                    ? JSON.parse(seg.tool.result.content)
+                    : seg.tool.result.content;
+                  if (resultData.todos && Array.isArray(resultData.todos)) {
+                    return (
+                      <TodoListDisplay
+                        key={`${message.id}-todo-${groupIdx}`}
+                        todos={resultData.todos}
+                      />
+                    );
+                  }
+                } catch (e) {
+                  // If parsing fails, show as regular tool
+                }
+              }
+              // Fallback to regular tool display if TodoWrite has no valid result
+              return (
+                <MessageSegment
+                  key={`${message.id}-tool-group-${groupIdx}`}
+                  segment={seg}
+                  messageId={message.id}
+                  index={groupIdx}
+                  isUser={isUser}
+                  expandedTools={expandedTools}
+                  collapseTools={settings.collapseTools}
+                  showToolCalls={settings.showToolCalls}
+                  showThinking={settings.showThinking}
+                  onToggleToolExpand={onToggleToolExpand}
+                />
+              );
+            } else {
+              // Regular tool group
+              return (
+                <ToolCallGroup
+                  key={`${message.id}-tool-group-${groupIdx}`}
+                  tools={group.tools}
+                  expandedTools={expandedTools}
+                  collapseTools={settings.collapseTools}
+                  onToggleToolExpand={onToggleToolExpand}
+                />
+              );
+            }
+          });
+        })()}
+
+        {/* Diff segments */}
+        {message.segments
+          .filter(seg => seg.type === 'diff')
+          .map((seg, idx) => (
+            <MessageSegment
+              key={`${message.id}-diff-${idx}`}
+              segment={seg}
+              messageId={message.id}
+              index={idx}
+              isUser={isUser}
+              expandedTools={expandedTools}
+              collapseTools={settings.collapseTools}
+              showToolCalls={settings.showToolCalls}
+              showThinking={settings.showThinking}
+              onToggleToolExpand={onToggleToolExpand}
+            />
+          ))
         }
+
+        {/* Tool results - only show if not already shown as part of tool calls */}
+        {settings.showToolCalls && message.segments
+          .filter(seg => seg.type === 'tool_result')
+          .map((seg, idx) => (
+            <MessageSegment
+              key={`${message.id}-result-${idx}`}
+              segment={seg}
+              messageId={message.id}
+              index={idx}
+              isUser={isUser}
+              expandedTools={expandedTools}
+              collapseTools={settings.collapseTools}
+              showToolCalls={settings.showToolCalls}
+              showThinking={settings.showThinking}
+              onToggleToolExpand={onToggleToolExpand}
+            />
+          ))
+        }
+
+        {/* Caller-supplied per-tool extras (e.g. inline AskUserQuestionCard). */}
+        {renderToolCallExtras(message)}
+      </div>
+    </div>
+  );
+};
+
+const TranscriptMessageRow = React.memo(TranscriptMessageRowComponent);
+TranscriptMessageRow.displayName = 'TranscriptMessageRow';
+
+// ---------------------------------------------------------------------------
+// TranscriptToolGroupRow — consecutive tool-only messages combined, memoized
+// ---------------------------------------------------------------------------
+
+interface TranscriptToolGroupRowProps {
+  messages: UnifiedMessage[];
+  settings: RichOutputSettings;
+  agentName: string;
+  expandedSignature: string;
+  onToggleToolExpand: (toolId: string) => void;
+  renderToolCallExtra?: (toolCallId: string) => React.ReactNode;
+}
+
+const TranscriptToolGroupRowComponent: React.FC<TranscriptToolGroupRowProps> = ({
+  messages,
+  settings,
+  agentName,
+  expandedSignature,
+  onToggleToolExpand,
+  renderToolCallExtra,
+}) => {
+  const expandedTools = useMemo(() => expandedSetFromSignature(expandedSignature), [expandedSignature]);
+
+  const allToolSegments = messages.flatMap(m =>
+    m.segments.filter(seg => seg.type === 'tool_call')
+  );
+
+  const extras: React.ReactNode[] = [];
+  if (renderToolCallExtra) {
+    messages.forEach((toolMsg) => {
+      const rowExtras = toolMsg.segments
+        .filter((seg): seg is Extract<typeof seg, { type: 'tool_call' }> => seg.type === 'tool_call')
+        .map((seg) => {
+          const extra = renderToolCallExtra(seg.tool.id);
+          if (extra == null) return null;
+          return <div key={`${toolMsg.id}-extra-${seg.tool.id}`}>{extra}</div>;
+        })
+        .filter((node): node is React.ReactElement => node !== null);
+      if (rowExtras.length > 0) {
+        extras.push(
+          <React.Fragment key={`tool-group-extra-${toolMsg.id}`}>{rowExtras}</React.Fragment>,
+        );
+      }
+    });
+  }
+
+  return (
+    <>
+      <div className={`rounded-lg bg-surface-primary ${settings.compactMode ? 'p-3 mt-2' : 'p-4 mt-3'}`}>
+        <div className="flex items-center gap-2 mb-2">
+          <div className="rounded-full p-1.5 flex-shrink-0 bg-interactive/20 text-interactive-on-dark">
+            <Bot className="w-4 h-4" />
+          </div>
+          <div className="flex-1 flex items-baseline gap-2">
+            <span className="font-medium text-text-primary text-sm">
+              {agentName}
+            </span>
+            <span className="text-xs text-text-tertiary">
+              Tool sequence
+            </span>
+          </div>
+          <div className="flex items-center gap-2 text-[10px]">
+            {allToolSegments.filter(seg => seg.type === 'tool_call' && seg.tool.status === 'success').length > 0 && (
+              <span className="text-status-success">
+                {allToolSegments.filter(seg => seg.type === 'tool_call' && seg.tool.status === 'success').length}✓
+              </span>
+            )}
+            {allToolSegments.filter(seg => seg.type === 'tool_call' && seg.tool.status === 'error').length > 0 && (
+              <span className="text-status-error">
+                {allToolSegments.filter(seg => seg.type === 'tool_call' && seg.tool.status === 'error').length}✗
+              </span>
+            )}
+            {allToolSegments.filter(seg => seg.type === 'tool_call' && seg.tool.status === 'pending').length > 0 && (
+              <span className="text-text-tertiary">
+                {allToolSegments.filter(seg => seg.type === 'tool_call' && seg.tool.status === 'pending').length}⏳
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="ml-7 space-y-[1px]">
+          {allToolSegments.map((seg, segIdx) => (
+            <div key={`grouped-tool-${segIdx}`}>
+              {seg.type === 'tool_call' && (
+                <ToolCallView
+                  tool={seg.tool}
+                  isExpanded={settings.collapseTools ? expandedTools.has(seg.tool.id) : false}
+                  collapseTools={settings.collapseTools}
+                  onToggleExpand={onToggleToolExpand}
+                  expandedTools={expandedTools}
+                />
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+      {extras}
+    </>
+  );
+};
+
+const TranscriptToolGroupRow = React.memo(TranscriptToolGroupRowComponent);
+TranscriptToolGroupRow.displayName = 'TranscriptToolGroupRow';
+
+// ---------------------------------------------------------------------------
+// TranscriptTodoRow — standalone TodoWrite display wrapped in an assistant block
+// ---------------------------------------------------------------------------
+
+interface TranscriptTodoRowProps {
+  todos: TranscriptTodoItem[];
+  timestamp: string;
+  agentName: string;
+  compactMode: boolean;
+}
+
+const TranscriptTodoRowComponent: React.FC<TranscriptTodoRowProps> = ({
+  todos,
+  timestamp,
+  agentName,
+  compactMode,
+}) => (
+  <div
+    className={`
+      rounded-lg transition-all relative group
+      bg-surface-primary
+      ${compactMode ? 'p-3 mt-2' : 'p-4 mt-3'}
+    `}
+  >
+    {/* Message Header */}
+    <div className="flex items-center gap-2 mb-2">
+      <div className="rounded-full p-1.5 flex-shrink-0 bg-interactive/20 text-interactive-on-dark">
+        <Bot className="w-4 h-4" />
+      </div>
+      <div className="flex-1 flex items-baseline gap-2">
+        <span className="font-medium text-text-primary text-sm">
+          {agentName}
+        </span>
+        <span className="text-xs text-text-tertiary">
+          {formatDistanceToNow(parseTimestamp(timestamp))}
+        </span>
+      </div>
+    </div>
+
+    {/* Todo List Content */}
+    <div className="ml-7">
+      <TodoListDisplay todos={todos} timestamp={timestamp} />
+    </div>
+  </div>
+);
+
+const TranscriptTodoRow = React.memo(TranscriptTodoRowComponent);
+TranscriptTodoRow.displayName = 'TranscriptTodoRow';
+
+// ---------------------------------------------------------------------------
+// Row descriptors — the grouping "prepass"
+// ---------------------------------------------------------------------------
+// The walk below is byte-identical to the old inline loop, but it emits data
+// DESCRIPTORS instead of JSX. It depends ONLY on the message array + settings,
+// so a copy click or a tool toggle never re-runs it — those flow through the
+// per-row scalar props computed at render time. On a live refetch the walk is
+// cheap (no markdown parse); reference-reused messages produce rows whose props
+// are unchanged, so React.memo skips them.
+
+type RowDescriptor =
+  | { kind: 'message'; key: string; message: UnifiedMessage; needsExtraSpacing: boolean; userMessageIndex?: number; toolIds: string[] }
+  | { kind: 'toolgroup'; key: string; messages: UnifiedMessage[]; toolIds: string[] }
+  | { kind: 'todo'; key: string; todos: TranscriptTodoItem[]; timestamp: string };
+
+function buildRowDescriptors(
+  filteredMessages: UnifiedMessage[],
+  settings: RichOutputSettings,
+): RowDescriptor[] {
+  let userMessageIndex = 0;
+  const descriptors: RowDescriptor[] = [];
+
+  // Group consecutive tool-only messages
+  let i = 0;
+  while (i < filteredMessages.length) {
+    const msg = filteredMessages[i];
+    const isUser = msg.role === 'user';
+
+    // Check if this message contains only tool calls
+    const hasOnlyToolCalls = !isUser &&
+      msg.segments.length > 0 &&
+      msg.segments.every(seg => seg.type === 'tool_call');
+
+    if (hasOnlyToolCalls && settings.showToolCalls) {
+      // Collect consecutive tool messages, but break on TodoWrite
+      const toolGroups: { messages: UnifiedMessage[], isTodoWrite: boolean }[] = [];
+      let currentGroup: UnifiedMessage[] = [];
+      const messagesToProcess = [msg];
+      let j = i + 1;
+
+      // First collect all consecutive tool-only messages
+      while (j < filteredMessages.length) {
+        const nextMsg = filteredMessages[j];
+        const nextHasOnlyToolCalls = !nextMsg.role || (nextMsg.role === 'assistant' &&
+          nextMsg.segments.length > 0 &&
+          nextMsg.segments.every(seg => seg.type === 'tool_call'));
+
+        if (nextHasOnlyToolCalls) {
+          messagesToProcess.push(nextMsg);
+          j++;
+        } else {
+          break;
+        }
+      }
+
+      // Now group them, breaking on TodoWrite
+      for (const toolMsg of messagesToProcess) {
+        const hasTodoWrite = toolMsg.segments.some(seg =>
+          seg.type === 'tool_call' && seg.tool.name === 'TodoWrite'
+        );
+
+        if (hasTodoWrite) {
+          // Save current group if any
+          if (currentGroup.length > 0) {
+            toolGroups.push({ messages: currentGroup, isTodoWrite: false });
+            currentGroup = [];
+          }
+          // Add TodoWrite message as its own group
+          toolGroups.push({ messages: [toolMsg], isTodoWrite: true });
+        } else {
+          // Add to current group
+          currentGroup.push(toolMsg);
+        }
+      }
+
+      // Save last group if any
+      if (currentGroup.length > 0) {
+        toolGroups.push({ messages: currentGroup, isTodoWrite: false });
+      }
+
+      // Render each group
+      if (toolGroups.length > 0) {
+        toolGroups.forEach((group, groupIdx) => {
+          if (group.isTodoWrite) {
+            // Render TodoWrite display
+            const todoMsg = group.messages[0];
+            const todoSegment = todoMsg.segments.find(seg =>
+              seg.type === 'tool_call' && seg.tool.name === 'TodoWrite'
+            );
+
+            if (todoSegment && todoSegment.type === 'tool_call') {
+              let todos = todoSegment.tool.input?.todos;
+              if (!todos && todoSegment.tool.result) {
+                try {
+                  const resultContent = typeof todoSegment.tool.result.content === 'string'
+                    ? JSON.parse(todoSegment.tool.result.content)
+                    : todoSegment.tool.result.content;
+                  todos = resultContent?.todos;
+                } catch (e) {
+                  // Failed to parse result
+                }
+              }
+
+              // Type guard to ensure todos is an array
+              const validTodos = Array.isArray(todos) ? todos : [];
+
+              if (validTodos.length > 0) {
+                descriptors.push({
+                  kind: 'todo',
+                  key: `todo-display-${i}-${groupIdx}`,
+                  todos: validTodos,
+                  timestamp: todoMsg.timestamp,
+                });
+              }
+            }
+          } else if (group.messages.length > 1) {
+            // Render tool group
+            descriptors.push({
+              kind: 'toolgroup',
+              key: `tool-group-${i}-${groupIdx}`,
+              messages: group.messages,
+              toolIds: group.messages.flatMap(messageToolIds),
+            });
+          } else if (group.messages.length === 1) {
+            // Single tool message, render normally
+            descriptors.push({
+              kind: 'message',
+              key: group.messages[0].id,
+              message: group.messages[0],
+              needsExtraSpacing: computeNeedsExtraSpacing(filteredMessages, group.messages[0], i),
+              toolIds: messageToolIds(group.messages[0]),
+            });
+          }
+        });
+
+        i = j; // Skip all the messages we processed
+      } else {
+        // Single tool-only message, render normally
+        descriptors.push({
+          kind: 'message',
+          key: msg.id,
+          message: msg,
+          needsExtraSpacing: computeNeedsExtraSpacing(filteredMessages, msg, i),
+          userMessageIndex: isUser ? userMessageIndex : undefined,
+          toolIds: messageToolIds(msg),
+        });
+        if (isUser) userMessageIndex++;
         i++;
       }
-    }
+    } else {
+      // Regular message, render normally
+      const currentUserMessageIndex = isUser ? userMessageIndex : undefined;
+      if (isUser) userMessageIndex++;
 
-    return elements.filter(element => element !== null); // Filter out null elements
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filteredMessages, collapsedMessages, expandedTools, settings, onToggleToolExpand, agentName, showSystemMessages, copiedMessageId, renderToolCallExtra]);
+      descriptors.push({
+        kind: 'message',
+        key: msg.id,
+        message: msg,
+        needsExtraSpacing: computeNeedsExtraSpacing(filteredMessages, msg, i),
+        userMessageIndex: currentUserMessageIndex,
+        toolIds: messageToolIds(msg),
+      });
+
+      // If this message has TodoWrite mixed with other content, also render TodoWrite separately
+      if (!isUser && msg.segments.some(seg => seg.type === 'tool_call' && seg.tool.name === 'TodoWrite')) {
+        // Find the last TodoWrite in this message
+        const todoSegments = msg.segments.filter(seg => seg.type === 'tool_call' && seg.tool.name === 'TodoWrite');
+        const lastTodoSegment = todoSegments[todoSegments.length - 1];
+
+        if (lastTodoSegment && lastTodoSegment.type === 'tool_call' && lastTodoSegment.tool.input?.todos) {
+          // Type guard to ensure todos is an array
+          const todoList = Array.isArray(lastTodoSegment.tool.input.todos) ? lastTodoSegment.tool.input.todos : [];
+
+          if (todoList.length > 0) {
+            // Add the TodoWrite display separately, wrapped in an assistant message block
+            descriptors.push({
+              kind: 'todo',
+              key: `todo-display-${msg.id}`,
+              todos: todoList,
+              timestamp: msg.timestamp,
+            });
+          }
+        }
+      }
+      i++;
+    }
+  }
+
+  return descriptors;
+}
+
+/**
+ * Pure presentational chat transcript: messages in -> JSX out.
+ *
+ * Holds NO data fetching, NO IPC, NO window-event listeners, and NO
+ * localStorage access. All state (collapse/expand/copy/scroll) is owned by the
+ * caller and passed in as props so this component can be reused across the
+ * quick-session chat (RichOutputView) and future consumers.
+ *
+ * Rendering is split into a memoized grouping prepass (`buildRowDescriptors`,
+ * keyed on the message array + settings) and memoized per-row components that
+ * receive only their own scalar state — so a live refetch, a copy click, or a
+ * single tool toggle re-renders only the affected row(s) rather than the whole
+ * transcript.
+ */
+export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
+  messages: filteredMessages,
+  settings,
+  agentName,
+  showSystemMessages: showSystemMessagesProp,
+  isWaitingForResponse = false,
+  liveTail,
+  transcriptEndSlot,
+  collapsedMessages,
+  onToggleMessageCollapse,
+  expandedTools,
+  onToggleToolExpand,
+  copiedMessageId,
+  onCopyMessage,
+  showSettings,
+  onSettingsChange,
+  scrollContainerRef,
+  messagesEndRef,
+  userMessageRefs,
+  showScrollButton,
+  onScrollToBottom,
+  renderToolCallExtra,
+}) => {
+  const showSystemMessages = showSystemMessagesProp ?? true;
+
+  // Grouping prepass — recomputes only when the message array or settings change
+  // (NOT on copy / tool-toggle), and never parses markdown.
+  const descriptors = useMemo(
+    () => buildRowDescriptors(filteredMessages, settings),
+    [filteredMessages, settings],
+  );
+
+  // Map descriptors → memoized rows. This runs on every render but is cheap:
+  // per-row scalar state (isCopied / isCollapsed / expanded signature) is
+  // computed here so React.memo re-renders only the rows whose state changed.
+  const renderedMessages = descriptors.map((desc) => {
+    if (desc.kind === 'toolgroup') {
+      return (
+        <TranscriptToolGroupRow
+          key={desc.key}
+          messages={desc.messages}
+          settings={settings}
+          agentName={agentName}
+          expandedSignature={rowExpandedSignature(desc.toolIds, expandedTools)}
+          onToggleToolExpand={onToggleToolExpand}
+          renderToolCallExtra={renderToolCallExtra}
+        />
+      );
+    }
+    if (desc.kind === 'todo') {
+      return (
+        <TranscriptTodoRow
+          key={desc.key}
+          todos={desc.todos}
+          timestamp={desc.timestamp}
+          agentName={agentName}
+          compactMode={settings.compactMode}
+        />
+      );
+    }
+    return (
+      <TranscriptMessageRow
+        key={desc.key}
+        message={desc.message}
+        needsExtraSpacing={desc.needsExtraSpacing}
+        userMessageIndex={desc.userMessageIndex}
+        settings={settings}
+        agentName={agentName}
+        showSystemMessages={showSystemMessages}
+        isCollapsed={collapsedMessages.has(desc.message.id)}
+        isCopied={copiedMessageId === desc.message.id}
+        expandedSignature={rowExpandedSignature(desc.toolIds, expandedTools)}
+        onToggleMessageCollapse={onToggleMessageCollapse}
+        onToggleToolExpand={onToggleToolExpand}
+        onCopyMessage={onCopyMessage}
+        userMessageRefs={userMessageRefs}
+        renderToolCallExtra={renderToolCallExtra}
+      />
+    );
+  });
 
   return (
     <div className="h-full flex flex-col bg-bg-primary relative">

@@ -198,7 +198,11 @@ export function UnifiedChatView({
     setExpandedTools(new Set());
   }, [railId]);
 
-  // Filter session-init messages unless the setting opts in.
+  // Filter session-init messages unless the setting opts in. Keyed on the
+  // `messages` array identity: the run/panel source hooks preserve that identity
+  // across live refetches when nothing changed (mergeUnifiedMessages), so this
+  // returns a stable `filteredMessages` reference and ChatTranscript's grouping
+  // prepass short-circuits instead of re-parsing the whole transcript.
   const filteredMessages = useMemo(() => {
     if (settings.showSessionInit) return messages;
     return messages.filter(

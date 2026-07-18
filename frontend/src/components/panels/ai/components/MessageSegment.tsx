@@ -16,7 +16,7 @@ interface MessageSegmentProps {
   onToggleToolExpand: (toolId: string) => void;
 }
 
-export const MessageSegment: React.FC<MessageSegmentProps> = ({
+const MessageSegmentComponent: React.FC<MessageSegmentProps> = ({
   segment,
   messageId: _messageId,  // Prefix with _ to indicate intentionally unused
   index: _index,  // Prefix with _ to indicate intentionally unused
@@ -170,3 +170,11 @@ export const MessageSegment: React.FC<MessageSegmentProps> = ({
       return null;
   }
 };
+
+// Memoized: when a transcript row re-renders for an unrelated reason (a copy
+// click, a sibling tool toggle), a segment whose props are unchanged skips
+// re-rendering — and for text/thinking segments the memoized MarkdownPreview
+// avoids re-parsing regardless. Stable keys at the call sites keep local
+// diff-expansion state across live refetches.
+export const MessageSegment = React.memo(MessageSegmentComponent);
+MessageSegment.displayName = 'MessageSegment';
