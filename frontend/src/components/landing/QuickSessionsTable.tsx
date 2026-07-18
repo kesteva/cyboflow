@@ -188,11 +188,45 @@ export function QuickSessionsTable(): React.JSX.Element | null {
   // Join the polling feed while mounted (ref-counted in the store).
   React.useEffect(() => useQuickSessionsStore.getState().init(), []);
 
-  // One shared clock for every row's elapsed label.
+  // One shared clock for every row's elapsed label. `formatElapsed` renders
+  // seconds for sub-minute durations ("quiet 12s"), so the cadence stays 1s
+  // while visible — it can't be coarsened. Pause the interval while the
+  // document is hidden (backgrounded/minimized window), mirroring the pattern
+  // in useSessionMetrics.ts: stop on hide, restart + immediate catch-up tick
+  // on visible so the label isn't stale by however long the tab was hidden.
   const [nowMs, setNowMs] = React.useState<number>(() => Date.now());
   React.useEffect(() => {
-    const id = setInterval(() => setNowMs(Date.now()), ELAPSED_TICK_MS);
-    return () => clearInterval(id);
+    const tick = () => setNowMs(Date.now());
+    let id: number | null = null;
+    const start = () => {
+      if (id !== null) return;
+      tick();
+      id = window.setInterval(tick, ELAPSED_TICK_MS);
+    };
+    const stop = () => {
+      if (id === null) return;
+      window.clearInterval(id);
+      id = null;
+    };
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        stop();
+      } else {
+        start();
+      }
+    };
+
+    if (document.hidden) {
+      tick();
+    } else {
+      start();
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      stop();
+    };
   }, []);
 
   const activeWorkflowSessionIds = React.useMemo(

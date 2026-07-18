@@ -41,6 +41,25 @@ interface QuickSessionsState {
 let pollHandle: ReturnType<typeof setInterval> | null = null;
 let consumerCount = 0;
 
+/** Field-by-field equality over every field the UI consumes (see {@link QuickSessionRow}). */
+function rowsEqual(a: QuickSessionRow, b: QuickSessionRow): boolean {
+  return (
+    a.sessionId === b.sessionId &&
+    a.name === b.name &&
+    a.projectId === b.projectId &&
+    a.runId === b.runId &&
+    a.state === b.state &&
+    a.idleSince === b.idleSince &&
+    a.unviewed === b.unviewed
+  );
+}
+
+/** True when two row lists carry identical content (same length, same rows in the same order). */
+function sameRows(a: QuickSessionRow[], b: QuickSessionRow[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((row, i) => rowsEqual(row, b[i]));
+}
+
 export const useQuickSessionsStore = create<QuickSessionsState>((set, get) => ({
   rows: [],
 
@@ -48,7 +67,12 @@ export const useQuickSessionsStore = create<QuickSessionsState>((set, get) => ({
     try {
       const res = await API.sessions.listQuick();
       if (res.success && Array.isArray(res.data)) {
-        set({ rows: res.data });
+        // Skip the set() when the fetch is byte-for-byte the same as the last
+        // snapshot — every board subscriber re-renders on a `rows` identity
+        // change, and the 3s poll otherwise replaces an unchanged array every tick.
+        if (!sameRows(get().rows, res.data)) {
+          set({ rows: res.data });
+        }
       }
     } catch {
       // Best-effort board — a transient IPC failure keeps the last snapshot.
