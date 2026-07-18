@@ -79,6 +79,15 @@ describe('cyboflow.runs.retryEval', () => {
     expect(evalWorkerMocks.enqueue).not.toHaveBeenCalled();
   });
 
+  it('rejects an empty run id before enqueueing an eval', async () => {
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+
+    await expect(caller.cyboflow.runs.retryEval({ runId: '' })).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST',
+    );
+    expect(evalWorkerMocks.enqueue).not.toHaveBeenCalled();
+  });
+
   it.each(['pending', 'running', 'complete'] as const)(
     'throws PRECONDITION_FAILED and does not enqueue a %s eval',
     async (status) => {
