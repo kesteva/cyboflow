@@ -49,6 +49,7 @@ vi.mock('../../../trpc/client', () => ({
     cyboflow: {
       runs: {
         list: { query: vi.fn().mockResolvedValue([]) },
+        listRawEvents: { query: vi.fn().mockResolvedValue([]) },
         listUnifiedMessages: { query: vi.fn().mockResolvedValue([]) },
         contextUsage: { query: vi.fn().mockResolvedValue({ usedTokens: null, contextWindow: null }) },
         start: {
@@ -252,6 +253,7 @@ import { API } from '../../../utils/api';
 // to avoid TypeScript errors when the worktree's tRPC type predates the
 // getPhaseState / onStepTransition procedures added in later sprints.
 const tRpcRuns = (trpc.cyboflow.runs as unknown) as {
+  listRawEvents: { query: ReturnType<typeof vi.fn> };
   getPhaseState: { query: ReturnType<typeof vi.fn> };
   onStepTransition: { subscribe: ReturnType<typeof vi.fn> };
 };
@@ -264,6 +266,7 @@ beforeEach(() => {
   mockQuickSessionStart.mockClear();
   vi.mocked(API.sessions.createQuick).mockClear();
   vi.mocked(API.sessions.getOrCreateMainRepoSession).mockResolvedValue({ success: true, data: undefined });
+  tRpcRuns.listRawEvents.query.mockClear();
   tRpcRuns.getPhaseState.query.mockClear();
   tRpcRuns.onStepTransition.subscribe.mockClear();
   // jsdom does not implement scrollIntoView; stub it so RunView's auto-scroll
@@ -857,6 +860,26 @@ describe('CyboflowRoot — resting-session canvas', () => {
     expect(screen.getByRole('tablist', { name: 'Panel Tabs' })).toBeInTheDocument();
     // Not the run overlay.
     expect(screen.queryByTestId('workflow-canvas')).not.toBeInTheDocument();
+  });
+
+  it('threads a worktree quick session chatRunId into its Data Stream dock tab', async () => {
+    const session = makeQuickSession({ chatRunId: 'run-quick-chat-1' });
+    vi.mocked(API.sessions.get).mockResolvedValue({ success: true, data: session });
+    act(() => {
+      useSessionStore.setState({ sessions: [session] });
+      useCyboflowStore.getState().setActiveQuickSession(session.id);
+    });
+    render(<CyboflowRoot projectId={1} />);
+
+    const dataStreamTab = await screen.findByRole('tab', { name: 'Data Stream' });
+    await waitFor(() => {
+      expect(tRpcRuns.listRawEvents.query).toHaveBeenCalledWith({ runId: 'run-quick-chat-1' });
+    });
+
+    fireEvent.click(dataStreamTab);
+
+    expect(screen.getByTestId('quick-session-dock-data-stream-panel')).toHaveStyle({ display: 'block' });
+    expect(screen.getByText('run-quick-chat-1')).toBeInTheDocument();
   });
 
   it('does NOT mount QuickSessionCanvas for the bare main-repo session', async () => {
