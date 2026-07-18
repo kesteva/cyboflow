@@ -408,6 +408,14 @@ export function mcpDenyListSdkGuards(disabledMcps: readonly string[]): {
 const CYBOFLOW_MCP_TOOL_PREFIX = 'mcp__cyboflow__';
 
 /**
+ * SDK `allowedTools` whole-server grant for the first-party 'cyboflow' MCP
+ * server (the CLI's `mcp__<server>` allow form). Used ONLY by the global-agent
+ * isolation spawn (S0.2(a)) so its scoped cyboflow MCP tools auto-allow without a
+ * human prompt — the isolation PreToolUse hook denies everything else fail-closed.
+ */
+const CYBOFLOW_MCP_SERVER_ALLOW_RULE = 'mcp__cyboflow';
+
+/**
  * Instrumentation-only watchdog window for the SDK substrate's first query()
  * event. The SDK surfaces a failed claude subprocess spawn (bad executable
  * path, auth hang) by yielding NOTHING — no throw, no event — so the session
@@ -528,6 +536,26 @@ function firstChangedFingerprintField(prev: OptionsFingerprint, next: OptionsFin
   return 'combined';
 }
 
+/**
+ * The minimal contract an injected per-spawn events sink must satisfy (S0.2(c)).
+ *
+ * The built-in {@link RawEventsSink} conforms to this structurally; the
+ * global-agent thread (S0.3) provides its own conforming implementation to
+ * persist the transcript into `agent_thread_events` (thread-keyed) instead of
+ * `raw_events` (run-keyed, FK'd to `workflow_runs`, which a run-less agent
+ * thread has no row in). Mirror RawEventsSink's attach/detach lifecycle:
+ * `attachToRouter` subscribes to the router's per-run event stream, `dispose`
+ * tears the subscription down (cleanupPipeline calls it with the runId).
+ *
+ * Exported so an orchestrator-level implementation can conform without reaching
+ * into ClaudeCodeManager internals — it depends only on {@link EventRouter}
+ * (the same public streamParser router the built-in sink subscribes to).
+ */
+export interface SpawnEventsSink {
+  attachToRouter(router: EventRouter, runId: string): void;
+  dispose(runId?: string): void;
+}
+
 interface ClaudeSpawnOptions {
   panelId: string;
   sessionId: string;
@@ -604,6 +632,49 @@ interface ClaudeSpawnOptions {
    * for event attribution and the substrate-registry lookup.
    */
   spawnKey?: string;
+  /**
+   * S0.2(a) — HERMETIC global-agent isolation. When 'agent', buildSdkOptions
+   * produces a spawn that inherits NOTHING from the user's environment:
+   *   - `settingSources: []` (no user/project settings → no inherited MCP
+   *     servers, plugins, or permission `allow` rules);
+   *   - `strictMcpConfig: true` + an EXCLUSIVE mcpServers map = only the composed
+   *     'cyboflow' entry (composeMcpServers skips the base-project merge);
+   *   - `plugins: []` (no inherited plugins);
+   *   - a PINNED fail-closed permission policy: permissionMode 'default' (NOT the
+   *     live session/global mode, NOT 'auto'), and a dedicated PreToolUse hook
+   *     that allows ONLY the `mcp__cyboflow__*` family and denies everything else
+   *     — so a prompt-injected agent cannot invoke an inherited mutating tool.
+   * The agent's own scoped cyboflow MCP tools still flow without human prompts
+   * (allowedTools grant + the hook's family fast-allow). Absent ⇒ byte-identical
+   * to before (settingSources ['user','project'], live-mode permission policy).
+   */
+  isolation?: 'agent';
+  /**
+   * S0.2(b) — the SDK's base built-in toolset (`Options.tools`). Passed through
+   * VERBATIM to `sdkOptions.tools` when present; the global-agent thread passes
+   * `[]` to disable ALL built-in tools (reads flow through the scoped MCP family
+   * so scope stays enforceable server-side). Absent ⇒ `sdkOptions.tools` unset
+   * (the implicit full builtin toolset), byte-identical to before. Joins the warm
+   * fingerprint so a toolset change busts the warm process.
+   */
+  tools?: string[];
+  /**
+   * S0.2(c) — inject a per-spawn events sink. When set, the built-in
+   * RawEventsSink attach is SUPPRESSED and the SAME narrowed event stream is
+   * routed into this sink instead (single-writer contract for the global-agent
+   * transcript). Absent ⇒ the default RawEventsSink persists into raw_events as
+   * before.
+   */
+  eventsSink?: SpawnEventsSink;
+  /**
+   * S0.2(d) — MCP scope tag. When 'global-agent', composeMcpServers stamps
+   * `CYBOFLOW_MCP_SCOPE='global-agent'` into the 'cyboflow' MCP entry's env so
+   * the server advertises the global-agent tool family (and gates out the
+   * run-scoped tools). CYBOFLOW_RUN_ID stays `runId || sessionId` — the synthetic
+   * `agent:<threadId>` identity arrives as sessionId. Absent ⇒ no scope env,
+   * byte-identical to before.
+   */
+  mcpScope?: 'global-agent';
 }
 
 /**
@@ -736,7 +807,8 @@ interface StubCliProcess {
 /** Per-run pipeline tuple stored in the pipelines map. */
 interface PipelineTuple {
   router: EventRouter;
-  sink: RawEventsSink;
+  /** The built-in RawEventsSink, or a caller-injected SpawnEventsSink (S0.2(c)). */
+  sink: SpawnEventsSink;
   runId: string;
 }
 
@@ -1252,9 +1324,13 @@ export class ClaudeCodeManager extends AbstractCliManager {
         this.bundleRefcountBySession.set(sessionId, (this.bundleRefcountBySession.get(sessionId) ?? 0) + 1);
       }
 
-      // Set up the per-run pipeline (EventRouter + RawEventsSink).
+      // Set up the per-run pipeline (EventRouter + events sink). S0.2(c): a
+      // caller-injected eventsSink SUPPRESSES the built-in RawEventsSink attach
+      // and receives the SAME narrowed event stream (single-writer contract for
+      // the global-agent transcript, which persists thread-keyed instead of into
+      // the run-FK'd raw_events). Absent ⇒ the default RawEventsSink as before.
       const router = new EventRouter();
-      const sink = new RawEventsSink(this.db, this.logger);
+      const sink: SpawnEventsSink = options.eventsSink ?? new RawEventsSink(this.db, this.logger);
       sink.attachToRouter(router, runId);
       this.pipelines.set(spawnKey, { router, sink, runId });
 
@@ -2177,6 +2253,16 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // custom-agent append order in listByProject is un-ORDER-BY'd); fail-soft
       // (null on any error) so agent resolution never blocks a spawn.
       agents: this.effectiveAgentsDigest(runId),
+      // S0.2(b): the base builtin toolset (agent-thread hard-restriction) and the
+      // isolation-mode surface (settingSources []/allowedTools grant) join the
+      // fingerprint so a `tools`/`isolation`/`mcpScope` change busts the warm
+      // process. mcpScope's `CYBOFLOW_MCP_SCOPE` env already lives inside
+      // mcpServers above; tools/settingSources/allowedTools are otherwise
+      // uncovered. Non-isolation spawns leave all three constant (unset ⇒ null),
+      // so the existing warm path is byte-identical.
+      tools: sdkOptions.tools ?? null,
+      settingSources: sdkOptions.settingSources ?? null,
+      allowedTools: sdkOptions.allowedTools ?? null,
     };
     const fields: Record<string, string> = {};
     for (const [key, value] of Object.entries(material)) {
@@ -2490,7 +2576,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
       },
       mcpServers: await this.composeMcpServers(options),
       env: this.composeRunEnv(options),
-      settingSources: ['user', 'project'],
+      // S0.2(a): a global-agent isolation spawn loads NO user/project settings —
+      // no inherited MCP servers, plugins, or permission `allow` rules. Every
+      // other spawn keeps the ['user','project'] sources it always had.
+      settingSources: options.isolation === 'agent' ? [] : ['user', 'project'],
       // Enable markdown previews for AskUserQuestion option items. The model emits
       // the `preview` field on each option when this is set; the renderer uses it
       // to display rich content alongside each choice. Unconditional — even when
@@ -2561,7 +2650,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // next tool call with no re-spawn. On an auto-UNSUPPORTED model the flag stays
     // unset and the hook's per-call eligibility check routes 'auto' through the
     // ApprovalRouter instead (there is no classifier to defer to).
-    if (modelSupportsAutoMode(options.model)) {
+    // S0.2(a): a global-agent isolation spawn NEVER routes through the native
+    // auto classifier — its permission policy is pinned fail-closed below
+    // (permissionMode 'default' + the family-only isolation hook), independent of
+    // the model. Skip the auto pin entirely for it.
+    if (options.isolation !== 'agent' && modelSupportsAutoMode(options.model)) {
       // SDK PermissionMode includes 'auto' (sdk.d.ts). This is the native
       // auto-mode the LOCKED design routes BOTH substrates through.
       sdkOptions.permissionMode = 'auto';
@@ -2656,6 +2749,30 @@ export class ClaudeCodeManager extends AbstractCliManager {
       sdkOptions.resume = claudeSessionId;
     }
 
+    // S0.2(b): hard-restrict the base built-in toolset when the caller pins one
+    // (the global-agent thread passes `[]` = no built-ins). Applies to EVERY
+    // spawn, not just isolation; absent ⇒ `tools` stays unset (implicit full
+    // builtin toolset), byte-identical to before.
+    if (options.tools !== undefined) {
+      sdkOptions.tools = options.tools;
+    }
+
+    // S0.2(a): HERMETIC isolation overrides, applied LAST so they win over the
+    // auto-pin / model / settings logic above regardless of ordering. A
+    // prompt-injected global agent cannot reach an inherited mutating tool: no
+    // config-file MCP discovery (strictMcpConfig + the exclusive cyboflow-only
+    // mcpServers composeMcpServers already returned), no inherited plugins, and a
+    // pinned fail-closed permission policy (permissionMode 'default' — NOT the
+    // live session/global mode, NOT 'auto' — plus the family-only PreToolUse hook
+    // from composeHookOptions). Its own scoped cyboflow MCP tools still flow
+    // without prompts via the whole-server allowedTools grant.
+    if (options.isolation === 'agent') {
+      sdkOptions.strictMcpConfig = true;
+      sdkOptions.plugins = [];
+      sdkOptions.permissionMode = 'default';
+      sdkOptions.allowedTools = [CYBOFLOW_MCP_SERVER_ALLOW_RULE];
+    }
+
     return sdkOptions;
   }
 
@@ -2680,7 +2797,12 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * cyboflow_submit_checkpoint during the session.
    */
   private async composeMcpServers(options: ClaudeSpawnOptions): Promise<Record<string, McpServerConfig>> {
-    const { mcpServers } = this.getBaseProjectMcpServers(options.sessionId);
+    // S0.2(a): a global-agent isolation spawn gets an EXCLUSIVE mcpServers map —
+    // NO base-project (.mcp.json / ~/.claude.json) merge, no inherited servers.
+    // Only the 'cyboflow' entry injected below is present, so a prompt-injected
+    // agent has nothing else to call. Every other spawn merges the base as before.
+    const mcpServers: Record<string, unknown> =
+      options.isolation === 'agent' ? {} : this.getBaseProjectMcpServers(options.sessionId).mcpServers;
 
     // Per-session MCP removal (deny-list from sessions.disabled_mcp_servers_json,
     // read at spawn). Delete each disabled server from the composed record — but
@@ -2719,9 +2841,14 @@ export class ClaudeCodeManager extends AbstractCliManager {
             // (options.runId, threaded through the spawn path by RunExecutor).
             // For legacy quick sessions that have no run, options.runId is
             // undefined/empty and we fall back to sessionId so the value is
-            // always populated. Empty string is treated as absent.
+            // always populated. Empty string is treated as absent. The global
+            // agent's synthetic `agent:<threadId>` identity arrives as sessionId.
             CYBOFLOW_RUN_ID: (options.runId && options.runId.length > 0) ? options.runId : options.sessionId,
             CYBOFLOW_ORCH_SOCKET: this.orchSocketPath,
+            // S0.2(d): tag the server's advertised tool scope. 'global-agent'
+            // makes cyboflowMcpServer surface the global-agent tool family (and
+            // gate out the run-scoped tools). Absent ⇒ no scope env, run-scoped.
+            ...(options.mcpScope === 'global-agent' ? { CYBOFLOW_MCP_SCOPE: 'global-agent' } : {}),
           },
           // SDK 0.3.142 made MCP startup non-blocking by default; block startup
           // until the injected socket server is connected so turn-1 cyboflow_*
@@ -2808,6 +2935,22 @@ export class ClaudeCodeManager extends AbstractCliManager {
     options: ClaudeSpawnOptions,
     permissionRules?: MergedPermissionRules,
   ): Pick<Options, 'hooks' | 'canUseTool'> {
+    // S0.2(a): a global-agent isolation spawn uses a PINNED fail-closed policy
+    // that does NOT consult the session/global permission mode and NEVER reaches
+    // the run-scoped ApprovalRouter (a run-less agent thread has no gate run). The
+    // dedicated hook allows ONLY the `mcp__cyboflow__*` family and denies
+    // everything else; no canUseTool is installed because nothing ever reaches the
+    // 'ask' tier (the hook is terminal for every tool, and the family is granted
+    // by the allowedTools whole-server rule set in buildSdkOptions).
+    if (options.isolation === 'agent') {
+      return {
+        hooks: {
+          PreToolUse: [
+            { hooks: [this.makeIsolationPreToolUseHook()], timeout: PRE_TOOL_USE_HOOK_TIMEOUT_SECONDS },
+          ],
+        },
+      };
+    }
     const gateRunId = options.runId ?? options.panelId;
     const ownerSessionId = this.resolveOwnerSessionId(gateRunId);
     // F13: use the per-spawn snapshot when the caller loaded it (spawnCliProcess),
@@ -2827,6 +2970,39 @@ export class ClaudeCodeManager extends AbstractCliManager {
         PreToolUse: [{ hooks: [hook], timeout: PRE_TOOL_USE_HOOK_TIMEOUT_SECONDS }],
       },
       canUseTool: this.makeCanUseTool(gateRunId, allowRules, spawnKind),
+    };
+  }
+
+  /**
+   * The global-agent isolation PreToolUse hook (S0.2(a)). Fail-closed and
+   * self-contained: it consults NO session/global permission mode, NO worktree
+   * settings, and NEVER the ApprovalRouter. A terminal decision for every tool —
+   *   - `mcp__cyboflow__*` (the scoped global-agent family) → allow;
+   *   - everything else → deny.
+   * With `tools: []`, an EXCLUSIVE cyboflow-only mcpServers map, and
+   * `settingSources: []`, no other tool should even exist to call — this is
+   * defense-in-depth so a prompt-injected agent that somehow references a
+   * built-in or inherited tool is refused rather than routed to a human prompt.
+   */
+  private makeIsolationPreToolUseHook(): HookCallback {
+    return async (input, _toolUseId, _ctx) => {
+      const pretool = input as PreToolUseHookInput;
+      if (pretool.tool_name.startsWith(CYBOFLOW_MCP_TOOL_PREFIX)) {
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse' as const,
+            permissionDecision: 'allow' as const,
+          },
+        };
+      }
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse' as const,
+          permissionDecision: 'deny' as const,
+          permissionDecisionReason:
+            'Global-agent isolation: only the cyboflow global-agent tool family is permitted.',
+        },
+      };
     };
   }
 
