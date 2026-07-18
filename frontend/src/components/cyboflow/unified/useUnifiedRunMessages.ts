@@ -124,17 +124,27 @@ export function useUnifiedRunMessages(
     selectedRunIdRef.current = runId;
   }, [runId]);
 
+  // Request generation, shared by the initial and live paths. Responses commit
+  // only when they are the LATEST issued request: overlapping same-run queries
+  // have no server-side ordering, so an older snapshot resolving after a newer
+  // one (e.g. after the result-triggered final refetch) would otherwise be
+  // merged as authoritative and roll the settled transcript back — with no
+  // post-result stream event left to trigger a correcting refetch.
+  const fetchGenRef = useRef(0);
+
   // Re-query helper for the live path (preserves the prior messages on error).
   const loadMessages = useCallback(async (currentRunId: string): Promise<void> => {
+    const gen = ++fetchGenRef.current;
     try {
       const result = await trpc.cyboflow.runs.listUnifiedMessages.query({ runId: currentRunId });
-      // Discard a stale response for a run that is no longer selected.
-      if (selectedRunIdRef.current !== currentRunId) return;
+      // Discard a stale response: wrong run, or an older request generation.
+      if (selectedRunIdRef.current !== currentRunId || gen !== fetchGenRef.current) return;
       setMessages((prev) => mergeUnifiedMessages(prev, result));
       setLoadError(null);
+      setIsLoading(false);
     } catch (err: unknown) {
+      if (selectedRunIdRef.current !== currentRunId || gen !== fetchGenRef.current) return;
       setLoadError(err instanceof Error ? err.message : String(err));
-    } finally {
       setIsLoading(false);
     }
   }, []);
@@ -149,6 +159,7 @@ export function useUnifiedRunMessages(
     }
 
     let aborted = false;
+    const gen = ++fetchGenRef.current;
     setIsLoading(true);
     setLoadError(null);
     setMessages([]);
@@ -156,15 +167,15 @@ export function useUnifiedRunMessages(
     void (async () => {
       try {
         const result = await trpc.cyboflow.runs.listUnifiedMessages.query({ runId });
-        if (aborted) return;
+        if (aborted || gen !== fetchGenRef.current) return;
         // A fresh conversation resets to [] above, so there is nothing to reuse;
         // route through the merge for a single, consistent install path.
         setMessages((prev) => mergeUnifiedMessages(prev, result));
       } catch (err: unknown) {
-        if (aborted) return;
+        if (aborted || gen !== fetchGenRef.current) return;
         setLoadError(err instanceof Error ? err.message : String(err));
       } finally {
-        if (!aborted) setIsLoading(false);
+        if (!aborted && gen === fetchGenRef.current) setIsLoading(false);
       }
     })();
 

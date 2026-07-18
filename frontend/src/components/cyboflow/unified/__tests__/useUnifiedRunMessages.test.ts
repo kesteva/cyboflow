@@ -249,4 +249,86 @@ describe('useUnifiedRunMessages — live path', () => {
 
     expect(result.current.messages.map((m) => m.id)).toEqual(['b1']);
   });
+
+  it('(j) commits only the LATEST of two overlapping same-run refetches (reverse-order resolution)', async () => {
+    const deferreds: Deferred<UnifiedMessage[]>[] = [];
+    mockList.mockImplementation(() => {
+      const d = createDeferred<UnifiedMessage[]>();
+      deferreds.push(d);
+      return d.promise;
+    });
+
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-1');
+    });
+    const { result } = renderHook(() => useUnifiedRunMessages('run-1'));
+
+    // #0 = initial load → resolve empty.
+    await waitFor(() => expect(deferreds.length).toBe(1));
+    await act(async () => {
+      deferreds[0].resolve([]);
+    });
+
+    // Two debounced live refetches, both left pending: #1 (older), #2 (newer).
+    act(() => {
+      useCyboflowStore.getState().appendStreamEvent(streamEvent);
+    });
+    await waitFor(() => expect(deferreds.length).toBe(2), { timeout: 2000 });
+    act(() => {
+      useCyboflowStore.getState().appendStreamEvent(streamEvent);
+    });
+    await waitFor(() => expect(deferreds.length).toBe(3), { timeout: 2000 });
+
+    // The NEWER request resolves first with the settled transcript...
+    const settled = assistant('m1', { type: 'text', content: 'final reply' });
+    await act(async () => {
+      deferreds[2].resolve([settled]);
+    });
+    await waitFor(() => expect(result.current.messages.map((m) => m.id)).toEqual(['m1']));
+
+    // ...then the OLDER request resolves with a pre-settlement snapshot. It has
+    // no post-result trigger left behind it, so committing it would leave the
+    // transcript stale — it must be discarded.
+    await act(async () => {
+      deferreds[1].resolve([]);
+    });
+    expect(result.current.messages.map((m) => m.id)).toEqual(['m1']);
+    expect(result.current.messages[0].segments).toEqual([{ type: 'text', content: 'final reply' }]);
+  });
+
+  it('(k) an in-flight initial load cannot overwrite a newer live refetch', async () => {
+    const deferreds: Deferred<UnifiedMessage[]>[] = [];
+    mockList.mockImplementation(() => {
+      const d = createDeferred<UnifiedMessage[]>();
+      deferreds.push(d);
+      return d.promise;
+    });
+
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-1');
+    });
+    const { result } = renderHook(() => useUnifiedRunMessages('run-1'));
+
+    // #0 = initial load, left PENDING while a live refetch overtakes it.
+    await waitFor(() => expect(deferreds.length).toBe(1));
+    act(() => {
+      useCyboflowStore.getState().appendStreamEvent(streamEvent);
+    });
+    await waitFor(() => expect(deferreds.length).toBe(2), { timeout: 2000 });
+
+    // The newer live refetch (#1) lands with content...
+    const settled = assistant('m1', { type: 'text', content: 'live wins' });
+    await act(async () => {
+      deferreds[1].resolve([settled]);
+    });
+    await waitFor(() => expect(result.current.messages.map((m) => m.id)).toEqual(['m1']));
+
+    // ...then the older initial load (#0) finally resolves empty — it must not
+    // wipe the newer snapshot, and must not resurrect a loading state.
+    await act(async () => {
+      deferreds[0].resolve([]);
+    });
+    expect(result.current.messages.map((m) => m.id)).toEqual(['m1']);
+    expect(result.current.isLoading).toBe(false);
+  });
 });
