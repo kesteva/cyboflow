@@ -29,6 +29,7 @@ import { WorkflowsView } from './components/workflows/WorkflowsView';
 import { ExperimentComparisonView } from './components/cyboflow/ExperimentComparisonView';
 import { VerifyQueueView } from './components/cyboflow/VerifyQueueView';
 import { StatusBar } from './components/StatusBar';
+import { AgentRail, shouldShowAgentRail } from './components/agentRail/AgentRail';
 import { useMcpHealthStore } from './stores/mcpHealthStore';
 import { useReviewQueueSlice } from './stores/reviewQueueSlice';
 import { useReviewQueueStore } from './stores/reviewQueueStore';
@@ -368,6 +369,9 @@ function App() {
               </ErrorBoundary>
             )}
           </div>
+          {/* Global "cyboflow agent" rail — every landing-family surface
+              except the session workspace (RunRightRail) and the wizard. */}
+          {shouldShowAgentRail(view) && <AgentRail />}
         </div>
         {/* Persistent status bar at the bottom of the app shell */}
         <StatusBar />
