@@ -1,8 +1,11 @@
 /**
- * AgentThreadView — the global-agent thread's transcript + composer (S1.2),
- * mounted inside AgentRail's body. Renders through the SAME UnifiedChatView
- * the workflow-run and quick-session hosts use (ChatMode 'agent') so the three
- * never visually drift — see docs/proposals/GLOBAL-AGENT-PLAN.md §2.3 / §3 S1.2.
+ * AgentThreadView — the global-agent thread's transcript, proposal cards, and
+ * composer (S1.2 + S1.3), mounted inside AgentRail's body. Renders through the
+ * SAME UnifiedChatView the workflow-run and quick-session hosts use (ChatMode
+ * 'agent') so the three never visually drift — see
+ * docs/proposals/GLOBAL-AGENT-PLAN.md §2.3 / §3 S1.2/S1.3. {@link ProposalCardList}
+ * mounts above the suggestion chips/composer, keyed off
+ * `useAgentThreadStore(s => s.proposals)`.
  */
 import { useEffect } from 'react';
 import { UnifiedChatView } from '../cyboflow/unified/UnifiedChatView';
@@ -10,6 +13,7 @@ import { useUnifiedAgentThreadMessages } from '../cyboflow/unified/useUnifiedAge
 import { useAgentThreadStore } from '../../stores/agentThreadStore';
 import { AgentComposer } from './AgentComposer';
 import { AgentSuggestionChips } from './AgentSuggestionChips';
+import { ProposalCardList } from './ProposalCardList';
 
 /**
  * Module-scoped once-per-app-launch gate for the auto-digest trigger. A plain
@@ -27,6 +31,7 @@ export function AgentThreadView(): React.ReactElement {
   const sending = useAgentThreadStore((s) => s.sending);
   const sendMessage = useAgentThreadStore((s) => s.sendMessage);
   const triggerDigest = useAgentThreadStore((s) => s.triggerDigest);
+  const proposals = useAgentThreadStore((s) => s.proposals);
 
   const { messages, loadError } = useUnifiedAgentThreadMessages(thread?.id ?? null);
 
@@ -60,9 +65,7 @@ export function AgentThreadView(): React.ReactElement {
       railId={thread?.id ?? 'agent'}
       bottomSlot={
         <div className="flex flex-col gap-2 border-t border-border-primary p-3">
-          {/* S1.3 mounts the ProposalCard list here, keyed off
-              useAgentThreadStore(s => s.proposals) — deliberately out of scope
-              for S1.2 (see docs/proposals/GLOBAL-AGENT-PLAN.md §3 S1.3). */}
+          <ProposalCardList proposals={proposals} />
           <AgentSuggestionChips onSend={handleSend} disabled={sending} />
           <AgentComposer
             onSend={handleSend}

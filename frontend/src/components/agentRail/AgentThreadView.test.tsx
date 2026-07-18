@@ -16,7 +16,7 @@ import '@testing-library/jest-dom';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ComponentType, ReactNode } from 'react';
-import type { AgentThread } from '../../../../shared/types/agentThread';
+import type { AgentThread, AgentProposal } from '../../../../shared/types/agentThread';
 
 // -- UnifiedChatView stub: captures mode/running and renders bottomSlot verbatim. --
 interface UnifiedChatViewStubProps {
@@ -37,18 +37,29 @@ vi.mock('../cyboflow/unified/useUnifiedAgentThreadMessages', () => ({
   useUnifiedAgentThreadMessages: () => ({ messages: [], isLoading: false, loadError: null }),
 }));
 
+// -- ProposalCardList stub: this file tests AgentThreadView's OWN wiring (the
+//    proposals selector -> prop passthrough), not ProposalCardList's rendering
+//    (covered by ProposalCardList.test.tsx / ProposalCard.test.tsx). --
+vi.mock('./ProposalCardList', () => ({
+  ProposalCardList: ({ proposals }: { proposals: AgentProposal[] }) => (
+    <div data-testid="proposal-card-list-stub" data-count={proposals.length} />
+  ),
+}));
+
 // -- agentThreadStore stub: a plain selector-applying function (not a real
 //    subscribing Zustand store), driven by the mutable fixture vars below. --
 const mockSendMessage = vi.fn().mockResolvedValue(undefined);
 const mockTriggerDigest = vi.fn().mockResolvedValue(undefined);
 let mockThread: AgentThread | null = null;
 let mockSending = false;
+let mockProposals: AgentProposal[] = [];
 
 interface FakeAgentThreadState {
   thread: AgentThread | null;
   sending: boolean;
   sendMessage: typeof mockSendMessage;
   triggerDigest: typeof mockTriggerDigest;
+  proposals: AgentProposal[];
 }
 
 vi.mock('../../stores/agentThreadStore', () => ({
@@ -58,6 +69,7 @@ vi.mock('../../stores/agentThreadStore', () => ({
       sending: mockSending,
       sendMessage: mockSendMessage,
       triggerDigest: mockTriggerDigest,
+      proposals: mockProposals,
     }),
 }));
 
@@ -84,6 +96,7 @@ beforeEach(() => {
   mockTriggerDigest.mockClear();
   mockThread = null;
   mockSending = false;
+  mockProposals = [];
 });
 
 describe('AgentThreadView — UnifiedChatView wiring', () => {
@@ -97,11 +110,27 @@ describe('AgentThreadView — UnifiedChatView wiring', () => {
     expect(stub).toHaveAttribute('data-running', 'true');
   });
 
-  it('leaves the S1.3 proposal-card slot as a comment placeholder — chips + composer are the only rendered bottomSlot content', async () => {
+  it('renders ProposalCardList above the chips + composer, passing store.proposals through', async () => {
     mockThread = makeThread();
+    mockProposals = [
+      {
+        id: 'p1',
+        threadId: 'thread-1',
+        kind: 'open-session',
+        payload: { kind: 'open-session', navigation: { target: 'run', runId: 'run-1' } },
+        preconditions: null,
+        status: 'proposed',
+        result: null,
+        idempotencyKey: null,
+        createdAt: '2026-07-17T00:00:00.000Z',
+        decidedAt: null,
+      },
+    ];
     const AgentThreadView = await loadAgentThreadView();
     render(<AgentThreadView />);
 
+    const stub = screen.getByTestId('proposal-card-list-stub');
+    expect(stub).toHaveAttribute('data-count', '1');
     expect(screen.getByTestId('agent-suggestion-chips')).toBeInTheDocument();
     expect(screen.getByTestId('agent-composer')).toBeInTheDocument();
   });
