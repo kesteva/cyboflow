@@ -22,23 +22,35 @@
  * The event bridge is live-tail ONLY — it publishes envelopes for the renderer and
  * captures the session id; it NEVER appends events (single-writer contract: the
  * sink owns durability).
+ *
+ * Every spawn also threads {@link getAgentSystemPrompt} (S1.4) as
+ * `systemPromptAppend` — the role, the promptable contract, tool guidance,
+ * digest format, and proposal-quality bar. `computeOptionsFingerprint`
+ * (claudeCodeManager.ts) hashes the full composed `systemPrompt` object, so an
+ * edit to `agentThreadPrompt.ts` changes the append text on the next turn and
+ * correctly busts the warm persistent SDK process rather than reusing a
+ * process spawned under the old prompt.
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentThread } from '../../../../shared/types/agentThread';
-import type { SpawnEventsSink } from '../../services/panels/claude/claudeCodeManager';
+import type { ClaudeSpawnOptions } from '../../services/panels/claude/claudeCodeManager';
 import type { LoggerLike } from '../types';
 import type { AgentThreadDbStore } from './agentThreadDbStore';
 import { AgentThreadEventsSink, agentSpawnIdentity } from './agentThreadEventsSink';
+import { getAgentSystemPrompt } from './agentThreadPrompt';
 
 // ---------------------------------------------------------------------------
-// Placeholder digest prompt (S1.4 finalizes the wording)
+// Digest trigger prompt
 // ---------------------------------------------------------------------------
 
 /**
- * Synthetic turn text for a digest request. Intentionally a short, sensible
- * placeholder — S1.4 authors the final agent prompt + digest format; this exists
- * so triggerDigest has something to send end-to-end in Stage 0.
+ * Synthetic turn text sent for a digest request. Deliberately just a short,
+ * plain ask — the actual digest FORMAT (grouping, ordering, "Needs your
+ * attention" shortlist) lives in {@link getAgentSystemPrompt}'s system-prompt
+ * append (S1.4), not in this per-turn text, so it stays in effect no matter
+ * how the digest is triggered (this synthetic prompt, or the human just
+ * asking "where is everything?" themselves).
  */
 export const DIGEST_PROMPT =
   'Give me a concise digest of where all sessions/runs are and what needs my attention.';
@@ -51,24 +63,28 @@ export const DIGEST_THROTTLE_MS = 10 * 60 * 1000;
 // ---------------------------------------------------------------------------
 
 /**
- * The subset of the global-agent spawn contract this service passes. Structurally
- * a subset of ClaudeCodeManager's (unexported) ClaudeSpawnOptions — field names +
- * types match so the real manager satisfies {@link AgentSpawnManagerLike} (S0.6
- * wiring verifies the assignment). `eventsSink` reuses the exported
- * {@link SpawnEventsSink} type so the injected sink type-checks at the seam.
+ * The subset of the global-agent spawn contract this service passes. Defined as
+ * a `Pick<>` of the manager's exported {@link ClaudeSpawnOptions} (S0.6 parity
+ * fix) rather than a hand-copied structural mirror, so a field-type drift on the
+ * manager side FAILS THE BUILD here instead of silently diverging under method
+ * bivariance. `systemPromptAppend` carries {@link getAgentSystemPrompt} on every
+ * turn (S1.4). The real ClaudeCodeManager satisfies {@link AgentSpawnManagerLike}
+ * (asserted at compile time in agentThreadService.parity.test.ts).
  */
-export interface AgentSpawnOptions {
-  panelId: string;
-  sessionId: string;
-  worktreePath: string;
-  prompt: string;
-  isolation?: 'agent';
-  tools?: string[];
-  mcpScope?: 'global-agent';
-  eventsSink?: SpawnEventsSink;
-  model?: string;
-  resumeSessionId?: string;
-}
+export type AgentSpawnOptions = Pick<
+  ClaudeSpawnOptions,
+  | 'panelId'
+  | 'sessionId'
+  | 'worktreePath'
+  | 'prompt'
+  | 'isolation'
+  | 'tools'
+  | 'mcpScope'
+  | 'eventsSink'
+  | 'model'
+  | 'resumeSessionId'
+  | 'systemPromptAppend'
+>;
 
 /**
  * The narrow manager slice this service depends on: the single spawn/continue
@@ -266,6 +282,10 @@ export class AgentThreadService {
       tools: [],
       mcpScope: 'global-agent',
       eventsSink: this.sink,
+      // Every turn — cold spawn or warm continuation — carries the SAME
+      // system-prompt append, so a warm process's fingerprint only changes
+      // when the prompt content itself changes (see the class doc comment).
+      systemPromptAppend: getAgentSystemPrompt(),
       ...(model !== undefined ? { model } : {}),
       ...(resumeSessionId !== undefined ? { resumeSessionId } : {}),
     };

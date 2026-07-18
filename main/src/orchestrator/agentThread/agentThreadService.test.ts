@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { AgentThreadDbStore } from './agentThreadDbStore';
 import { AgentThreadEventsSink } from './agentThreadEventsSink';
+import { getAgentSystemPrompt } from './agentThreadPrompt';
 import {
   AgentThreadService,
   DIGEST_PROMPT,
@@ -171,6 +172,9 @@ describe('AgentThreadService', () => {
       expect(opts.model).toBe('claude-opus');
       expect(opts.resumeSessionId).toBeUndefined();
       expect(opts.worktreePath).toBe(join(h.homeBase, thread.id));
+      // S1.4: the global-agent system prompt is threaded as systemPromptAppend
+      // on every spawn (the fingerprint-busting seam noted on the class doc).
+      expect(opts.systemPromptAppend).toBe(getAgentSystemPrompt());
 
       // system-init capture persisted the id.
       expect(h.store.getThread(thread.id)?.claudeSessionId).toBe('sess-1');
@@ -187,6 +191,19 @@ describe('AgentThreadService', () => {
 
       expect(h.manager.calls).toHaveLength(2);
       expect(h.manager.calls[1].resumeSessionId).toBe('sess-1');
+    });
+
+    it('threads the system prompt into EVERY spawn call, warm continuation included', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'first');
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'second');
+
+      expect(h.manager.calls).toHaveLength(2);
+      for (const call of h.manager.calls) {
+        expect(call.systemPromptAppend).toBe(getAgentSystemPrompt());
+      }
     });
 
     it('passes the injected sink and performs zero appendEvent calls of its own', async () => {
