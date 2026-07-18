@@ -130,6 +130,14 @@ import type { RunGitDiff } from '../../shared/types/runFiles';
 import type { RunStatusChangedEvent } from '../../shared/types/cyboflow';
 import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../shared/types/cyboflow';
 import { cancelRunHandler } from './orchestrator/cancelRunHandler';
+import { randomUUID } from 'node:crypto';
+import { AgentThreadDbStore } from './orchestrator/agentThread/agentThreadDbStore';
+import {
+  setProposalExecutorDeps,
+  reconcileOrphanedExecutingProposals,
+  type ProposalExecutorDeps,
+  type TaskFieldsSnapshot,
+} from './orchestrator/agentThread/proposalExecutor';
 import type { ApprovalRequest } from './orchestrator/approvalRouter';
 import type { QuestionRequest } from './orchestrator/questionRouter';
 import type { ApprovalDecidedEvent } from '../../shared/types/approvals';
@@ -3678,6 +3686,113 @@ app.whenReady().then(async () => {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+
+    // Global-agent proposal executor (migration 071). A user-confirmed proposal
+    // executes server-side through the SAME chokepoints, stamped actor:'user' — the
+    // executor owns the CAS state machine, the launch compensation saga, and boot
+    // reconciliation of rows stranded 'executing' by a crash. Deps mirror
+    // setExperimentsDeps: the quick-session core, the run launcher, the FULL safe
+    // session-dismiss (dismissSessionFully — cancels hosted runs + removes the
+    // worktree) + git-neutral run cancel (the same compensation primitives the A/B
+    // rollback ladder uses), the TaskChangeRouter chokepoint, and the workflow registry.
+    const agentProposalStore = new AgentThreadDbStore(experimentsDb);
+    const proposalExecutorDeps: ProposalExecutorDeps = {
+      store: agentProposalStore,
+      newIdempotencyKey: () => randomUUID(),
+      createQuickSession: async ({ projectId, nameHint }) => {
+        const { session } = await createQuickSessionCore(
+          {
+            taskQueue: taskQueue!,
+            sessionManager,
+            workflowRegistry,
+            getDb: () => databaseService.getDb(),
+          },
+          // Pin 'sdk': an agent-launched host session backs a workflow run, not a user
+          // quick session, so its sentinel must not inherit the quick-session PTY default.
+          { projectId, nameHint, requestedSubstrate: 'sdk' },
+        );
+        return { sessionId: session.id, worktreePath: session.worktreePath };
+      },
+      launchRun: async (args) => {
+        const workflow = workflowRegistry
+          .listByProject(args.projectId)
+          .find((w) => w.name === args.workflowName);
+        if (!workflow) {
+          throw new Error(`launch-run: no '${args.workflowName}' workflow for project ${args.projectId}`);
+        }
+        const project = sessionManager.getProjectById(args.projectId);
+        if (!project) throw new Error(`launch-run: project ${args.projectId} not found`);
+        // Map seeds to the launcher's per-workflow params, respecting its seed guards
+        // (seedTaskIds→sprint, findingIds→compound, ideaIds→planner, single ideaId→ship).
+        const seedTaskIds = args.workflowName === 'sprint' ? args.taskIds : undefined;
+        const findingIds = args.workflowName === 'compound' ? args.findingIds : undefined;
+        const ideaId = args.workflowName === 'ship' ? args.ideaIds?.[0] : undefined;
+        const launchOptions =
+          args.workflowName === 'planner' && args.ideaIds && args.ideaIds.length > 0
+            ? { ideaIds: args.ideaIds }
+            : undefined;
+        const { runId, worktreePath, branchName } = await runLauncher.launch(
+          workflow.id,
+          project.path,
+          args.substrate,
+          undefined,
+          ideaId,
+          args.sessionId,
+          undefined,
+          undefined,
+          seedTaskIds,
+          args.projectId,
+          undefined,
+          findingIds,
+          undefined,
+          undefined,
+          undefined,
+          launchOptions,
+        );
+        return { runId, worktreePath, branchName };
+      },
+      cancelRun: async (runId) => {
+        await cancelRunHandler(runId, cancelRunDepsBag);
+      },
+      dismissSession: dismissSessionFully,
+      runExists: (runId) =>
+        experimentsDb.prepare('SELECT 1 FROM workflow_runs WHERE id = ?').get(runId) !== undefined,
+      applyTaskChange: async (projectId, change) => {
+        await TaskChangeRouter.getInstance().applyChange(projectId, change);
+      },
+      readTaskFields: (projectId, taskId) => {
+        // The item may be an idea/epic/task (all share priority + stage_id) — resolve
+        // it across the three tables the same way TaskChangeRouter's locateEntity does.
+        const row = experimentsDb
+          .prepare(
+            `SELECT priority, stage_id AS stageId FROM (
+               SELECT id, project_id, priority, stage_id FROM ideas
+               UNION ALL SELECT id, project_id, priority, stage_id FROM epics
+               UNION ALL SELECT id, project_id, priority, stage_id FROM tasks
+             ) WHERE id = ? AND project_id = ?`,
+          )
+          .get(taskId, projectId) as TaskFieldsSnapshot | undefined;
+        return row ?? null;
+      },
+      runInTransaction: <T>(fn: () => T): T => experimentsDb.transaction(fn)() as T,
+      readEffectiveWorkflowSpec: (workflowId) => {
+        const w = workflowRegistry.getById(workflowId);
+        return w ? resolveWorkflowDefinition(w.name, w.spec_json) : null;
+      },
+      applyWorkflowSpec: (workflowId, definition) => workflowRegistry.updateSpec(workflowId, definition),
+      logger: loggerLike,
+    };
+    setProposalExecutorDeps(proposalExecutorDeps);
+    console.log('[Main] proposal executor deps wired');
+
+    // Boot reconciliation: finalize any proposal stranded 'executing' by a crash
+    // (verifies observable side effects; NEVER re-runs them). Fire-and-forget +
+    // fail-soft — a reconcile failure must never wedge boot.
+    void reconcileOrphanedExecutingProposals(proposalExecutorDeps).catch((err) => {
+      loggerLike.error('[Main] proposal executor boot reconcile failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
 
     // Boot recovery: reconcile EVERY workflow's rotation experiment against its live
     // weighted pool (migration 058). Config could have drifted while a pre-058 build
