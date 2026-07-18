@@ -8,10 +8,11 @@
  * workspace, which keeps its own `RunRightRail`, or the new-flow wizard.
  * See docs/proposals/GLOBAL-AGENT-PLAN.md §2.6 / §3 S1.1.
  *
- * S1.1 SCOPE: layout only — header/body/footer chrome + collapse/resize.
- * The body is an honest placeholder; the composer is a disabled shell.
- * Thread view, live data, and the composer's send path land in S1.2 against
- * the real `agentThread` tRPC router (S0.6); proposal cards in S1.3.
+ * S1.1 shipped the layout: header/body/footer chrome + collapse/resize. S1.2
+ * wires the body to the real `agentThread` tRPC router (S0.6) — the thread
+ * transcript, composer, and suggestion chips now render through
+ * {@link AgentThreadView} (which itself renders through the shared
+ * `UnifiedChatView`). Proposal cards land in S1.3.
  *
  * Collapse + resize mirror `RunRightRail` (components/cyboflow/RunRightRail.tsx):
  * a left-edge drag handle using delta-from-drag-start math — the rail is
@@ -22,6 +23,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { AgentThreadView } from './AgentThreadView';
 
 /** Default expanded rail width. */
 const RAIL_DEFAULT_WIDTH = 320;
@@ -205,34 +207,10 @@ export function AgentRail() {
         </div>
       </div>
 
-      {/* Body — honest placeholder. The digest + conversation land in S1.2
-          against the real agentThread store/backend; this is NOT fake data. */}
-      <div className="flex flex-1 flex-col items-center justify-center gap-2 overflow-y-auto p-4 text-center">
-        <p
-          data-testid="agent-rail-empty-state"
-          className="text-[11px] leading-relaxed text-text-tertiary"
-        >
-          The session digest and conversation will appear here once the agent
-          thread is wired up.
-        </p>
-      </div>
-
-      {/* Footer — disabled composer placeholder so the layout is honest about
-          what is coming; S1.2 wires the real send mutation. */}
-      <div className="border-t border-border-primary p-3">
-        <div className="flex items-center gap-2 border border-border-primary bg-bg-tertiary px-2 py-1.5 opacity-60">
-          <span aria-hidden="true" className="text-interactive">
-            &#9656;
-          </span>
-          <input
-            type="text"
-            disabled
-            readOnly
-            placeholder="Ask, or run /plan /approve /triage…"
-            data-testid="agent-rail-composer-placeholder"
-            className="flex-1 bg-transparent text-[11px] italic text-text-tertiary placeholder:italic placeholder:text-text-tertiary outline-none"
-          />
-        </div>
+      {/* Body: the global-agent thread — transcript, composer, suggestion
+          chips — rendered through the shared UnifiedChatView (S1.2). */}
+      <div data-testid="agent-rail-thread-view" className="flex flex-1 flex-col overflow-hidden">
+        <AgentThreadView />
       </div>
     </aside>
   );

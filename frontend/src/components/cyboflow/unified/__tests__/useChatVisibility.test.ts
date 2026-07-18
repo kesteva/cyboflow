@@ -92,6 +92,11 @@ describe('resolveChatStatus', () => {
     expect(resolveChatStatus({ mode: 'flow', running: false })).toBe('paused');
     expect(resolveChatStatus({ mode: 'flow', running: true })).toBe('executing');
   });
+
+  it('mode=agent falls through to the quick-style pill (no gated "paused" state)', () => {
+    expect(resolveChatStatus({ mode: 'agent', running: false })).toBe('interactive');
+    expect(resolveChatStatus({ mode: 'agent', running: true })).toBe('generating');
+  });
 });
 
 describe('resolveFlowStatusPill', () => {

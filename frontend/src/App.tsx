@@ -30,6 +30,7 @@ import { ExperimentComparisonView } from './components/cyboflow/ExperimentCompar
 import { VerifyQueueView } from './components/cyboflow/VerifyQueueView';
 import { StatusBar } from './components/StatusBar';
 import { AgentRail, shouldShowAgentRail } from './components/agentRail/AgentRail';
+import { useAgentThreadStore } from './stores/agentThreadStore';
 import { useMcpHealthStore } from './stores/mcpHealthStore';
 import { useReviewQueueSlice } from './stores/reviewQueueSlice';
 import { useReviewQueueStore } from './stores/reviewQueueStore';
@@ -155,6 +156,13 @@ function App() {
   // is idempotent while wired (BacklogPane's own init no-ops), and returns the
   // unsubscribe used as the cleanup.
   useEffect(() => useBacklogStore.getState().init(), []);
+
+  // Init the global-agent thread store at the app-shell level (not inside
+  // AgentRail) so `thread`/`liveTailTick`/subscriptions survive the rail's own
+  // mount/unmount cycle as the user navigates in and out of the session view
+  // (shouldShowAgentRail unmounts <AgentRail/> there). Idempotent; returns the
+  // unsubscribe used as the cleanup.
+  useEffect(() => useAgentThreadStore.getState().init(), []);
 
   // Load config on app startup
   useEffect(() => {

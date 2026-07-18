@@ -1,23 +1,29 @@
 /**
- * AgentRail component tests (S1.1 — rail shell only, no data wiring).
+ * AgentRail component tests (S1.1 shell + S1.2 body mount).
  *
  * Behaviors verified:
  *   1. Header renders the glyph mark, title, subtitle, and GLOBAL chip.
- *   2. Body renders the placeholder empty-state copy (not fake data).
- *   3. Footer renders a disabled composer placeholder (input-shaped, disabled,
- *      italic hint text).
- *   4. Collapse toggle flips the rendered shell (expanded <-> thin strip) and
+ *   2. Body mounts AgentThreadView (the real thread/composer/chips — see
+ *      AgentThreadView.test.tsx and agentThreadStore.test.ts for ITS
+ *      behavior; mocked here as a stub so the rail-shell tests stay free of
+ *      live tRPC/store wiring).
+ *   3. Collapse toggle flips the rendered shell (expanded <-> thin strip) and
  *      persists the choice to localStorage under 'cyboflow.agentRail.collapsed'.
- *   5. Width persists to localStorage under 'cyboflow.agentRail.width' after a
+ *   4. Width persists to localStorage under 'cyboflow.agentRail.width' after a
  *      simulated left-edge drag (mirrors RunRightRail's drag test), plus the
  *      underlying clamp math is unit-tested directly since drag simulation in
  *      jsdom can be flaky.
- *   6. shouldShowAgentRail — the App.tsx gating predicate — returns true for
+ *   5. shouldShowAgentRail — the App.tsx gating predicate — returns true for
  *      every non-session, non-wizard view and false for 'session'/'wizard'.
  */
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+
+vi.mock('./AgentThreadView', () => ({
+  AgentThreadView: () => <div data-testid="agent-thread-view-stub">AgentThreadView</div>,
+}));
+
 import { AgentRail, clampAgentRailWidth, shouldShowAgentRail } from './AgentRail';
 
 const WIDTH_KEY = 'cyboflow.agentRail.width';
@@ -47,28 +53,12 @@ describe('AgentRail — header', () => {
   });
 });
 
-describe('AgentRail — body placeholder', () => {
-  it('renders honest placeholder copy, not fake data', () => {
+describe('AgentRail — body', () => {
+  it('mounts AgentThreadView (the real thread/composer/chips)', () => {
     render(<AgentRail />);
 
-    const empty = screen.getByTestId('agent-rail-empty-state');
-    expect(empty).toBeInTheDocument();
-    expect(empty).toHaveTextContent(
-      'The session digest and conversation will appear here once the agent thread is wired up.',
-    );
-  });
-});
-
-describe('AgentRail — composer placeholder', () => {
-  it('renders a disabled, input-shaped composer with italic hint text', () => {
-    render(<AgentRail />);
-
-    const composer = screen.getByTestId('agent-rail-composer-placeholder');
-    expect(composer).toBeInTheDocument();
-    expect(composer.tagName).toBe('INPUT');
-    expect(composer).toBeDisabled();
-    expect(composer).toHaveAttribute('placeholder', 'Ask, or run /plan /approve /triage…');
-    expect(composer).toHaveClass('italic');
+    expect(screen.getByTestId('agent-rail-thread-view')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-thread-view-stub')).toBeInTheDocument();
   });
 });
 

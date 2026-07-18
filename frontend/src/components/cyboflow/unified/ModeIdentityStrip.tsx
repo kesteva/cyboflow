@@ -52,7 +52,7 @@ export function ModeIdentityStrip({
       <span className="text-text-disabled">·</span>
       <span>{transportLabel} transport</span>
       <span className="text-text-disabled">·</span>
-      <span>{mode === 'quick' ? 'quick session' : 'flow run'}</span>
+      <span>{mode === 'quick' ? 'quick session' : mode === 'flow' ? 'flow run' : 'agent thread'}</span>
       <span className="flex-1" />
       <ChatStatusPill status={status} />
     </div>

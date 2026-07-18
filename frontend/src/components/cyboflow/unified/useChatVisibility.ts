@@ -21,8 +21,13 @@
 /** design `transport`; mirrors `CliSubstrate` ('sdk' | 'interactive'). */
 export type ChatTransport = 'sdk' | 'interactive';
 
-/** quick session vs. flow run. */
-export type ChatMode = 'quick' | 'flow';
+/**
+ * quick session vs. flow run vs. the global agent thread (S1.2 — the agent
+ * thread hosts through the SAME UnifiedChatView surface; it carries none of
+ * the flow/quick composer machinery, but the transcript/identity-strip/meta-
+ * strip chrome is shared so the three hosts never visually drift).
+ */
+export type ChatMode = 'quick' | 'flow' | 'agent';
 
 /**
  * States of the mode-identity status pill. Quick sessions use interactive /
@@ -122,6 +127,9 @@ export function resolveChatVisibility(input: ChatVisibilityInput): ChatVisibilit
  * The mode-identity status pill, derived purely from (mode, running):
  *   flow  → executing (running) | paused (idle, waiting at a gate)
  *   quick → generating (running) | interactive (idle)
+ *   agent → generating (a turn in flight) | interactive (idle) — same
+ *           quick-style pill; the agent thread is a standing chat, not a
+ *           gated flow run, so "paused" would misdescribe an idle thread.
  *
  * NOTE: for FLOW runs prefer {@link resolveFlowStatusPill}, which reflects the
  * real run status (awaiting_review / done / failed / …) instead of collapsing
