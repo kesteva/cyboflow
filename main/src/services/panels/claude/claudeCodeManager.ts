@@ -556,7 +556,7 @@ export interface SpawnEventsSink {
   dispose(runId?: string): void;
 }
 
-interface ClaudeSpawnOptions {
+export interface ClaudeSpawnOptions {
   panelId: string;
   sessionId: string;
   worktreePath: string;

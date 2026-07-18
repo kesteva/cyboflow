@@ -6,6 +6,7 @@
  * 'better-sqlite3', or main/src/services/*.
  */
 import { router } from './trpc';
+import { agentThreadRouter } from './routers/agentThread';
 import { agentsRouter } from './routers/agents';
 import { runsRouter } from './routers/runs';
 import { approvalsRouter } from './routers/approvals';
@@ -29,6 +30,7 @@ import { verificationRequestsRouter } from './routers/verificationRequests';
 
 export const appRouter = router({
   cyboflow: router({
+    agentThread: agentThreadRouter,
     agents: agentsRouter,
     approvals: approvalsRouter,
     artifacts: artifactsRouter,

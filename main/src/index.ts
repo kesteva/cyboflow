@@ -132,17 +132,21 @@ import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../shared/types/cyboflow';
 import { cancelRunHandler } from './orchestrator/cancelRunHandler';
 import { randomUUID } from 'node:crypto';
 import { AgentThreadDbStore } from './orchestrator/agentThread/agentThreadDbStore';
+import { AgentThreadService } from './orchestrator/agentThread/agentThreadService';
 import {
   setProposalExecutorDeps,
   reconcileOrphanedExecutingProposals,
+  executeProposal,
+  getProposalExecutorDeps,
   type ProposalExecutorDeps,
   type TaskFieldsSnapshot,
 } from './orchestrator/agentThread/proposalExecutor';
+import { agentThreadEvents } from './orchestrator/trpc/routers/agentThread';
 import type { ApprovalRequest } from './orchestrator/approvalRouter';
 import type { QuestionRequest } from './orchestrator/questionRouter';
 import type { ApprovalDecidedEvent } from '../../shared/types/approvals';
 import type { QuestionAnsweredEvent } from '../../shared/types/questions';
-import type { ClaudeStreamEvent } from '../../shared/types/claudeStream';
+import type { ClaudeStreamEvent, StreamEnvelope } from '../../shared/types/claudeStream';
 import type { DatabaseLike } from './orchestrator/types';
 import { buildApprovalCreatedEvent } from './orchestrator/approvalCreatedBridge';
 import { buildQuestionCreatedEvent } from './orchestrator/questionCreatedBridge';
@@ -236,6 +240,15 @@ let runLauncher: RunLauncher;
 // Module-scoped so the tRPC boot wiring block (setNudgeRunDeps) can reach the
 // same RunExecutor instance built in initializeServices().
 let runExecutor: RunExecutor;
+// Global-agent chat thread (migration 071). Both are built in
+// initializeServices() (the store BEFORE the OrchSocketServer so its
+// McpQueryHandler gets it; the service under the ClaudeCodeManager instanceof
+// narrowing) and read later in app.whenReady()'s createContext + proposal-executor
+// wiring — hence module scope. The service is null when the default CLI manager is
+// not a ClaudeCodeManager (the isolation spawn fields require it); the router
+// guards on it.
+let agentThreadStore: AgentThreadDbStore;
+let agentThreadService: AgentThreadService | null = null;
 // Monitor-actuation seam (retry_step): bound in the tRPC dep-wiring block —
 // where db/runQueues/runExecutor are all live — to the SAME retryRunHandler
 // chokepoint the runs.retryStep mutation uses. The monitorFactory (built earlier,
@@ -541,6 +554,17 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
             ? await gitDiffManager.captureDiffAgainstRef(worktreePath, baseRef)
             : await gitDiffManager.captureWorkingDirectoryDiff(worktreePath);
           return { diff: result.diff, stats: result.stats, changedFiles: result.changedFiles };
+        },
+        // Global-agent chat thread (migration 074). The service is null only when
+        // the default CLI manager is not a ClaudeCodeManager; the router guards on
+        // it. The store is the SAME instance the MCP propose handler + executor
+        // use. The executor invoker reads the setProposalExecutorDeps holder
+        // lazily at confirm-time (wired in the whenReady dep block, which runs
+        // before createWindow), so referencing it here is safe.
+        agentThreadService: agentThreadService ?? undefined,
+        agentThreadStore,
+        agentProposalExecutor: {
+          execute: (proposalId: string) => executeProposal(getProposalExecutorDeps(), proposalId),
         },
       }),
   });
@@ -1655,6 +1679,13 @@ async function initializeServices() {
     win.webContents.send(`cyboflow:pty:${runId}`, data);
   };
 
+  // Global-agent thread store (migration 071) — constructed HERE, before the
+  // OrchSocketServer, because the MCP cyboflow_propose_action handler needs it as
+  // the `agentThreadStore` dep (S0.4 left it optional; propose_action fails closed
+  // until this lands). The SAME instance is reused by the proposal executor
+  // (app.whenReady, below) and injected into the tRPC context — one store, one DB.
+  agentThreadStore = new AgentThreadDbStore(cyboflowDb);
+
   // OrchSocketServer — the orchestrator-side half of the Cyboflow MCP IPC link.
   // Stands up the Unix-domain socket under ~/.cyboflow/sockets/orch.sock that the
   // spawned cyboflowMcpServer subprocess(es) connect back to so the cyboflow_*
@@ -1673,6 +1704,11 @@ async function initializeServices() {
     {
       onInteractiveTurnEnd: (runId) => interactiveCliManager.notifyTurnEnd(runId),
       onInteractiveQuestionOpen: (runId) => interactiveCliManager.notifyQuestionOpen(runId),
+      // Global-agent proposal writer: the cyboflow_propose_action MCP tool (global
+      // scope) inserts agent_proposals rows through this store. Without it the
+      // handler fails closed (returns an error) — so it must be the SAME instance
+      // the executor + tRPC context read.
+      agentThreadStore,
       // Workflow/variant configuration tools (cyboflow_*_workflow / _variant):
       // forward the WorkflowRegistry as the narrow WorkflowConfigLike structural
       // surface so quick sessions can edit flows + variants over MCP without the
@@ -2418,6 +2454,32 @@ async function initializeServices() {
   if (defaultCliManager instanceof ClaudeCodeManager) {
     defaultCliManager.setOrchSocketPath(socketPath);
     defaultCliManager.setChatSentinelProvider(chatSentinelProvider);
+    // Global-agent chat thread service (migration 071). Hosts the standing SDK
+    // conversation with the S0.2 isolation spawn contract + the
+    // AgentThreadEventsSink as the single durable transcript writer. It needs the
+    // CONCRETE ClaudeCodeManager (the isolation/tools/mcpScope/eventsSink spawn
+    // fields live on ClaudeSpawnOptions, and warm reuse rides its 'output' stream),
+    // hence construction under this instanceof narrowing. The `publish` closure
+    // does BOTH the raw cyboflow:stream:<threadId> IPC send AND an emit on
+    // agentThreadEvents so the tRPC onThreadEvent subscription can live-tail too.
+    // Model default follows ConfigManager (open question §5); the neutral home base
+    // is the per-kind data dir + /agent-home (dev vs prod resolved by
+    // getCyboflowSubdirectory).
+    agentThreadService = new AgentThreadService({
+      store: agentThreadStore,
+      manager: defaultCliManager,
+      publish: (id, envelope) => {
+        // The service builds `{ type, payload, timestamp }` envelopes; the publish
+        // dep types them `unknown` to stay decoupled from the concrete discriminated
+        // StreamEnvelope union, so bridge with the SAME boundary cast runEventBridge
+        // uses (its `type` is a plain string, not the narrow discriminant).
+        cyboflowPublisher.publish(id, envelope as StreamEnvelope);
+        agentThreadEvents.emit('message', { threadId: id, envelope });
+      },
+      defaultModel: () => configManager.getDefaultModel(),
+      homeDirBase: getCyboflowSubdirectory('agent-home'),
+      logger: cyboflowLogger,
+    });
   }
   if (interactiveCliManager instanceof InteractiveClaudeManager) {
     interactiveCliManager.setOrchSocketPath(socketPath);
@@ -3695,9 +3757,10 @@ app.whenReady().then(async () => {
     // session-dismiss (dismissSessionFully — cancels hosted runs + removes the
     // worktree) + git-neutral run cancel (the same compensation primitives the A/B
     // rollback ladder uses), the TaskChangeRouter chokepoint, and the workflow registry.
-    const agentProposalStore = new AgentThreadDbStore(experimentsDb);
+    // Reuse the SINGLE agentThreadStore built in initializeServices (same DB) — the
+    // MCP propose handler, this executor, and the tRPC context all share one store.
     const proposalExecutorDeps: ProposalExecutorDeps = {
-      store: agentProposalStore,
+      store: agentThreadStore,
       newIdempotencyKey: () => randomUUID(),
       createQuickSession: async ({ projectId, nameHint }) => {
         const { session } = await createQuickSessionCore(

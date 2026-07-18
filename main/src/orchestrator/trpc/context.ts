@@ -16,6 +16,8 @@ import type { RunGitDiff } from '../../../../shared/types/runFiles';
 import type { WorkflowDescriptor } from '../workflowRegistry';
 import type { AgentOverrideRow } from '../../database/models';
 import type { WorkflowVariantRow, WorkflowVariantStatus } from '../../../../shared/types/experiments';
+import type { AgentThread, AgentProposal, AgentProposalStatus } from '../../../../shared/types/agentThread';
+import type { ExecuteProposalResult } from '../agentThread/proposalExecutor';
 
 /**
  * Narrow structural interface for AgentOverrideRouter used in tRPC context.
@@ -107,6 +109,49 @@ export interface WorkflowRegistryLike {
 }
 
 /**
+ * Narrow structural slice of AgentThreadService the agentThread router needs
+ * (global-agent chat thread, migration 071). Declared here — not imported as the
+ * concrete class — so the tRPC subtree never pulls in the service's node:fs /
+ * claudeCodeManager-type dependencies, preserving the standalone-typecheck
+ * invariant and test substitutability. The real AgentThreadService satisfies it
+ * structurally.
+ */
+export interface AgentThreadServiceLike {
+  /** Load-or-create the single 'global' thread + ensure its neutral home dir. */
+  ensureGlobalThread(): AgentThread;
+  /** Send one turn (spawn/warm-continue). Also used to inject executor loopback turns. */
+  sendMessage(threadId: string, text: string): Promise<void>;
+  /** Trigger a synthetic digest turn, server-throttled (throttled ⇒ triggered:false). */
+  triggerDigest(threadId: string): Promise<{ triggered: true } | { triggered: false; reason: 'throttled' }>;
+}
+
+/**
+ * Narrow structural slice of AgentThreadDbStore the agentThread router needs for
+ * the proposal card lifecycle it owns directly: listing a thread's proposals, and
+ * the open-session Confirm path (CAS-claim → finalize 'executed', since the
+ * executor rejects open-session by design — plan §2.5). Declared here (not the
+ * concrete store) for the same standalone-typecheck reason as above.
+ */
+export interface AgentThreadStoreLike {
+  listProposals(threadId: string, opts?: { statuses?: AgentProposalStatus[] }): AgentProposal[];
+  getProposal(id: string): AgentProposal | null;
+  claimProposal(id: string, idempotencyKey: string): boolean;
+  finalizeProposal(id: string, status: 'executed' | 'failed', resultJson: string | null): boolean;
+  dismissProposal(id: string): boolean;
+}
+
+/**
+ * Narrow structural slice for invoking the boot-wired proposal executor from the
+ * router. The concrete closure (index.ts) reads the late-bound
+ * setProposalExecutorDeps holder — keeping the FULL ProposalExecutorDeps surface
+ * (createQuickSession / launchRun / TaskChangeRouter / …) out of the tRPC subtree,
+ * so the router stays standalone-typecheck-clean and unit-testable with a fake.
+ */
+export interface AgentProposalExecutorLike {
+  execute(proposalId: string): Promise<ExecuteProposalResult>;
+}
+
+/**
  * Injectable dependencies for the tRPC context.
  *
  * All fields are optional so callers (and unit tests) that do not need a
@@ -192,6 +237,32 @@ export interface ContextDeps {
    * the gitDiff procedure throws PRECONDITION_FAILED.
    */
   gitDiff?: (worktreePath: string, baseRef?: string) => Promise<RunGitDiff>;
+
+  /**
+   * Live AgentThreadService (global-agent chat thread, migration 071).
+   *
+   * Injected from `main/src/index.ts` via the singleton constructed in
+   * initializeServices. Using the narrow {@link AgentThreadServiceLike} interface
+   * (not the concrete class) preserves the standalone-typecheck invariant. The
+   * agentThread router guards on it — `undefined` is the intentional default so
+   * tests that do not exercise the agent thread can omit it.
+   */
+  agentThreadService?: AgentThreadServiceLike;
+
+  /**
+   * Live AgentThreadDbStore (proposals + thread rows, migration 071). The SAME
+   * instance the MCP propose_action handler + proposal executor share. Narrowed to
+   * {@link AgentThreadStoreLike} for the standalone-typecheck invariant.
+   */
+  agentThreadStore?: AgentThreadStoreLike;
+
+  /**
+   * Boot-wired proposal-executor invoker (reads setProposalExecutorDeps). Narrowed
+   * to {@link AgentProposalExecutorLike} so the router never imports the full
+   * executor-deps surface. `undefined` ⇒ confirmProposal for executable kinds
+   * throws PRECONDITION_FAILED.
+   */
+  agentProposalExecutor?: AgentProposalExecutorLike;
 }
 
 /**
@@ -214,6 +285,9 @@ export function createContext(deps: ContextDeps = {}): {
   agentOverrideRouter?: AgentOverrideRouterLike;
   getForcedSubstrate: () => CliSubstrate | null;
   gitDiff?: (worktreePath: string, baseRef?: string) => Promise<RunGitDiff>;
+  agentThreadService?: AgentThreadServiceLike;
+  agentThreadStore?: AgentThreadStoreLike;
+  agentProposalExecutor?: AgentProposalExecutorLike;
 } {
   const {
     setDockBadge = (_count: number) => undefined,
@@ -222,6 +296,9 @@ export function createContext(deps: ContextDeps = {}): {
     agentOverrideRouter,
     getForcedSubstrate = () => null,
     gitDiff,
+    agentThreadService,
+    agentThreadStore,
+    agentProposalExecutor,
   } = deps;
   return {
     userId: 'local' as const,
@@ -231,6 +308,9 @@ export function createContext(deps: ContextDeps = {}): {
     agentOverrideRouter,
     getForcedSubstrate,
     gitDiff,
+    agentThreadService,
+    agentThreadStore,
+    agentProposalExecutor,
   };
 }
 
