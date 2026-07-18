@@ -22,6 +22,21 @@ if (!runId || !socketPath) {
 }
 
 // ---------------------------------------------------------------------------
+// Scope gate (S0.4 / global agent)
+//
+// CYBOFLOW_MCP_SCOPE=global-agent restricts this subprocess to the read +
+// propose-action tool family declared below the run-scoped 31 — none of the
+// run-scoped tools are listed or callable. Unset/any other value keeps the
+// EXISTING tool list with ZERO behavior change, and the agent family is not
+// exposed. Set only by the agent spawn's MCP entry (AgentThreadService,
+// later task) — a run-scoped session spawn never sets this env var. The
+// subprocess is single-scope-bound for its whole lifetime (mirrors `runId`
+// being a closed-over module const), so one module-init branch is sufficient
+// — no per-call gating needed.
+// ---------------------------------------------------------------------------
+const IS_GLOBAL_AGENT_SCOPE = process.env.CYBOFLOW_MCP_SCOPE === 'global-agent';
+
+// ---------------------------------------------------------------------------
 // Crash-isolation handlers (install early so they cover all subsequent code)
 // ---------------------------------------------------------------------------
 
@@ -144,7 +159,105 @@ const server = new Server(
   { capabilities: { tools: {} } },
 );
 
+// ---------------------------------------------------------------------------
+// Global-agent tool family (S0.4) — the ONLY tools advertised when
+// IS_GLOBAL_AGENT_SCOPE is true. Every read is cross-project (no
+// CYBOFLOW_RUN_ID project binding); cyboflow_propose_action is the sole
+// write-shaped tool and it NEVER executes — see its description below.
+// ---------------------------------------------------------------------------
+const GLOBAL_AGENT_TOOLS = [
+  {
+    name: 'cyboflow_overview',
+    description:
+      'READ-ONLY, cross-project digest: for every project, its active/recent sessions (each with its live run — workflow name, status, current step — when one exists), plus a pending blocking-gate count and a pending-question count. Compact JSON. No arguments.',
+    inputSchema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'cyboflow_backlog',
+    description:
+      "READ-ONLY, cross-project backlog listing (ideas/epics/tasks) with priority/stage/version. Omit project_id to see every project merged into one list; pass it to scope to one project. include_archived / include_done mirror cyboflow_list_tasks' semantics (both default false).",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number', description: 'Optional — scope to one project. Omitted = every project.' },
+        task_type: { type: 'string', enum: ['idea', 'epic', 'task'], description: 'Optional filter to one entity type.' },
+        include_archived: { type: 'boolean', description: 'Include archived items. Defaults to false.' },
+        include_done: { type: 'boolean', description: 'Include done/retired items. Defaults to false.' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'cyboflow_entity',
+    description:
+      "READ-ONLY: fetch one backlog entity's full body by opaque id or display ref (e.g. 'TASK-014'). A ref is unique only WITHIN a project — pass project_id to disambiguate a ref across projects (an opaque id needs no project_id, it is already globally unique).",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: "Opaque backlog id OR display ref (e.g. 'TASK-014') (required)" },
+        project_id: { type: 'number', description: 'Optional — disambiguates a ref across projects.' },
+      },
+      required: ['task_id'],
+    },
+  },
+  {
+    name: 'cyboflow_queue',
+    description:
+      'READ-ONLY, cross-project review_items inbox listing (kind, blocking, status, title, entity link). Defaults to pending items only; pass include_resolved to see resolved/dismissed ones too. Omit project_id to see every project.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number', description: 'Optional — scope to one project. Omitted = every project.' },
+        include_resolved: { type: 'boolean', description: 'Include resolved/dismissed items. Defaults to false.' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'cyboflow_workflows',
+    description:
+      'READ-ONLY, cross-project workflow listing (id, name, scope global|project, is_built_in, has_custom_spec). Omit project_id to see every workflow row across every project; pass it to also include that project\'s own scoped rows.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'number', description: 'Optional — also include this project\'s own scoped rows.' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'cyboflow_workflow',
+    description:
+      "READ-ONLY: one workflow's EFFECTIVE definition (spec_json wins, else the built-in fallback) plus a server-computed `spec_hash` — pin THIS hash in a cyboflow_propose_action{kind:'edit-workflow'} call's payload as the precondition your edit was drafted against (the server re-verifies it at confirm time; propose_action itself also re-computes it server-side, ignoring anything a caller might pass). Unknown id -> 'not_found'.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        workflow_id: { type: 'string', description: 'The workflow id (from cyboflow_workflows) (required)' },
+      },
+      required: ['workflow_id'],
+    },
+  },
+  {
+    name: 'cyboflow_propose_action',
+    description:
+      "THE ONLY write-shaped tool available to the global agent. Records a proposal — a candidate action for a human to review — and returns { proposalId }. Calling this tool NEVER executes anything: no run is launched, no task is reprioritized, no workflow is edited, nothing navigates. A human must explicitly confirm the resulting proposal card before any side effect happens, and confirmation runs through the SAME chokepoints every other write in this app uses (TaskChangeRouter / WorkflowRegistry / RunLauncher), stamped actor:'user'. After calling this tool, STOP and describe the proposal in your reply — do NOT claim the action happened, and do NOT poll or retry waiting for it to happen. `payload_json` is a JSON-encoded object (field names camelCase, matching shared/types/agentThread.ts AgentProposalPayload exactly) whose `kind` selects its shape: launch-run {kind,projectId,workflowName,substrate?,taskIds?,ideaIds?,findingIds?,note?}; reprioritize-backlog {kind,projectId,items:[{taskId,priority?,stageId?}]}; edit-workflow {kind,workflowId,definitionJson,summary?} (preconditions — the current spec hash — are captured server-side from a fresh read, never trusted from the caller, even if you include one); open-session {kind,navigation:{target:'run',runId}|{target:'quick-session',sessionId,runId?}}. An unrecognized kind or a payload missing a kind's required fields is rejected with 'invalid_payload'.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        payload_json: {
+          type: 'string',
+          description: 'JSON-encoded AgentProposalPayload (required) — see the tool description for the per-kind shape.',
+        },
+      },
+      required: ['payload_json'],
+    },
+  },
+];
+
 server.setRequestHandler(ListToolsRequestSchema, async () => {
+  if (IS_GLOBAL_AGENT_SCOPE) {
+    return { tools: GLOBAL_AGENT_TOOLS };
+  }
   return {
     tools: [
       {
@@ -777,7 +890,115 @@ function invalidQuestionArguments(): CallToolResult {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Global-agent CallTool dispatch (S0.4) — the ONLY tools reachable when
+// IS_GLOBAL_AGENT_SCOPE is true. Snake_case wire args -> camelCase
+// mcpQueryHandler params, same 4-layer pattern as the run-scoped cases below.
+// ---------------------------------------------------------------------------
+async function handleGlobalAgentCallTool(request: {
+  params: { name: string; arguments?: Record<string, unknown> };
+}): Promise<CallToolResult> {
+  switch (request.params.name) {
+    case 'cyboflow_overview': {
+      // No arguments — cross-project, run-unbound.
+      return executeMcpQuery('mcp-overview', {});
+    }
+
+    case 'cyboflow_backlog': {
+      const args = (request.params.arguments ?? {}) as {
+        project_id?: unknown;
+        task_type?: unknown;
+        include_archived?: unknown;
+        include_done?: unknown;
+      };
+      const { project_id, task_type, include_archived, include_done } = args;
+      if (project_id !== undefined && typeof project_id !== 'number') {
+        return invalidArgs('project_id: number (optional)');
+      }
+      if (task_type !== undefined && task_type !== 'idea' && task_type !== 'epic' && task_type !== 'task') {
+        return invalidArgs("task_type: 'idea' | 'epic' | 'task' (optional)");
+      }
+      if (include_archived !== undefined && typeof include_archived !== 'boolean') {
+        return invalidArgs('include_archived: boolean (optional)');
+      }
+      if (include_done !== undefined && typeof include_done !== 'boolean') {
+        return invalidArgs('include_done: boolean (optional)');
+      }
+      const queryParams: Record<string, unknown> = {};
+      if (project_id !== undefined) queryParams['projectId'] = project_id;
+      if (task_type !== undefined) queryParams['taskType'] = task_type;
+      if (include_archived !== undefined) queryParams['includeArchived'] = include_archived;
+      if (include_done !== undefined) queryParams['includeDone'] = include_done;
+      return executeMcpQuery('mcp-backlog', queryParams);
+    }
+
+    case 'cyboflow_entity': {
+      const args = (request.params.arguments ?? {}) as { task_id?: unknown; project_id?: unknown };
+      const { task_id, project_id } = args;
+      if (typeof task_id !== 'string' || task_id.length === 0) {
+        return invalidArgs('task_id: string');
+      }
+      if (project_id !== undefined && typeof project_id !== 'number') {
+        return invalidArgs('project_id: number (optional)');
+      }
+      const queryParams: Record<string, unknown> = { taskId: task_id };
+      if (project_id !== undefined) queryParams['projectId'] = project_id;
+      return executeMcpQuery('mcp-entity', queryParams);
+    }
+
+    case 'cyboflow_queue': {
+      const args = (request.params.arguments ?? {}) as { project_id?: unknown; include_resolved?: unknown };
+      const { project_id, include_resolved } = args;
+      if (project_id !== undefined && typeof project_id !== 'number') {
+        return invalidArgs('project_id: number (optional)');
+      }
+      if (include_resolved !== undefined && typeof include_resolved !== 'boolean') {
+        return invalidArgs('include_resolved: boolean (optional)');
+      }
+      const queryParams: Record<string, unknown> = {};
+      if (project_id !== undefined) queryParams['projectId'] = project_id;
+      if (include_resolved !== undefined) queryParams['includeResolved'] = include_resolved;
+      return executeMcpQuery('mcp-queue', queryParams);
+    }
+
+    case 'cyboflow_workflows': {
+      const args = (request.params.arguments ?? {}) as { project_id?: unknown };
+      const { project_id } = args;
+      if (project_id !== undefined && typeof project_id !== 'number') {
+        return invalidArgs('project_id: number (optional)');
+      }
+      const queryParams: Record<string, unknown> = {};
+      if (project_id !== undefined) queryParams['projectId'] = project_id;
+      return executeMcpQuery('mcp-workflows', queryParams);
+    }
+
+    case 'cyboflow_workflow': {
+      const args = (request.params.arguments ?? {}) as { workflow_id?: unknown };
+      const { workflow_id } = args;
+      if (typeof workflow_id !== 'string' || workflow_id.length === 0) {
+        return invalidArgs('workflow_id: string');
+      }
+      return executeMcpQuery('mcp-workflow', { workflowId: workflow_id });
+    }
+
+    case 'cyboflow_propose_action': {
+      const args = (request.params.arguments ?? {}) as { payload_json?: unknown };
+      const { payload_json } = args;
+      if (typeof payload_json !== 'string' || payload_json.length === 0) {
+        return invalidArgs('payload_json: string (JSON-encoded AgentProposalPayload)');
+      }
+      return executeMcpQuery('mcp-propose-action', { payloadJson: payload_json });
+    }
+
+    default:
+      throw new Error(`Unknown tool: ${request.params.name}`);
+  }
+}
+
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  if (IS_GLOBAL_AGENT_SCOPE) {
+    return handleGlobalAgentCallTool(request);
+  }
   switch (request.params.name) {
     case 'cyboflow_list_pending_approvals': {
       return executeMcpQuery('mcp-list-pending-approvals', {});

@@ -242,6 +242,31 @@ describe('cyboflowMcpServer ListTools', () => {
     expect(schema.properties['depends_on_task_id'].type).toBe('string');
     expect(schema.properties['kind'].enum).toEqual(['blocking', 'related']);
   });
+
+  // S0.4 scope-gate, default-scope direction: this file's beforeAll never sets
+  // CYBOFLOW_MCP_SCOPE, so the module initializes with IS_GLOBAL_AGENT_SCOPE
+  // false — the run-scoped tool list is unaffected AND the global-agent family
+  // is not exposed. The other direction (CYBOFLOW_MCP_SCOPE=global-agent
+  // advertises ONLY the agent family) is covered by
+  // cyboflowMcpServerGlobalAgentScope.test.ts — a separate file, since the
+  // scope env var is read once at module-init time and this file's module
+  // instance is already bootstrapped unset.
+  it('does NOT expose the global-agent tool family in the default (unset CYBOFLOW_MCP_SCOPE) scope', async () => {
+    const tools = await listTools();
+    const names = tools.map((t) => t.name);
+    const globalAgentToolNames = [
+      'cyboflow_overview',
+      'cyboflow_backlog',
+      'cyboflow_entity',
+      'cyboflow_queue',
+      'cyboflow_workflows',
+      'cyboflow_workflow',
+      'cyboflow_propose_action',
+    ];
+    for (const name of globalAgentToolNames) {
+      expect(names).not.toContain(name);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

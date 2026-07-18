@@ -76,13 +76,28 @@ import { isAcceptEditsAutoApprovable } from '../permissionModeMapper';
 import { TaskChangeRouter, TaskChangeError } from '../taskChangeRouter';
 import type { TaskChange, TaskActor, TaskDependencyKind } from '../taskChangeRouter';
 import { ReviewItemRouter, ReviewItemError } from '../reviewItemRouter';
-import type { ReviewActor, ReviewItemCreate, ReviewItemTriage } from '../reviewItemRouter';
+import type { ReviewActor, ReviewItemCreate, ReviewItemTriage, ReviewItemDbRow } from '../reviewItemRouter';
 import { selectFindingForSeed } from '../reviewItemListing';
 import { selectProjectBacklog, selectTaskById, resolveBacklogRef, selectIdeaAttachments } from '../taskListing';
 import { ArtifactRouter, ArtifactError } from '../artifactRouter';
 import type { ArtifactActor } from '../artifactRouter';
 import type { ArtifactType } from '../../../../shared/types/artifacts';
 import { PROTOTYPE_HTML_RELPATH, MAX_PROTOTYPE_HTML_BYTES } from '../../../../shared/types/artifacts';
+import { QUICK_WORKFLOW_NAME, LEGACY_DROPPED_WORKFLOW_NAMES } from '../workflowRegistry';
+import { AgentThreadDbStore } from '../agentThread/agentThreadDbStore';
+import { computeSpecHash } from '../agentThread/specHash';
+import {
+  AGENT_PROPOSAL_KINDS,
+  type AgentNavigationTarget,
+  type AgentProposalKind,
+  type AgentProposalPayload,
+  type AgentProposalPreconditions,
+  type EditWorkflowProposalPayload,
+  type LaunchRunProposalPayload,
+  type OpenSessionProposalPayload,
+  type ReprioritizeBacklogItem,
+  type ReprioritizeBacklogProposalPayload,
+} from '../../../../shared/types/agentThread';
 import { VerificationScheduler } from '../verify/verificationScheduler';
 import {
   FALLBACK_CHAINS,
@@ -97,7 +112,7 @@ import { SprintLaneStore, SprintLaneError } from '../sprintLaneStore';
 import { SPRINT_BATCH_MAX_TASKS, AWAITING_VERIFY_STEP } from '../../../../shared/types/sprintBatch';
 import type { SprintBatchTaskStatus } from '../../../../shared/types/sprintBatch';
 import { resolveRunFanOutInner } from '../laneChainResolution';
-import type { CliSubstrate } from '../../../../shared/types/substrate';
+import { isCliSubstrate, type CliSubstrate } from '../../../../shared/types/substrate';
 import { runStatusEvents } from '../trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../../../shared/types/cyboflow';
 import type { BacklogTaskItem, EntityCategory, IdeaAttachment, IdeaScope, Priority, TaskType } from '../../../../shared/types/tasks';
@@ -487,6 +502,80 @@ export type McpQueryMessage =
       inRotation?: boolean;
       weight?: number;
     }
+  // -------------------------------------------------------------------------
+  // Global-agent tool family (S0.4). runId carries the 'agent:<threadId>'
+  // sentinel (see resolveGlobalAgentContext), NEVER a workflow_runs row — a
+  // run-scoped runId is rejected by every handler below. Every read is
+  // cross-project (no CYBOFLOW_RUN_ID project binding, unlike the run-scoped
+  // tools above); mcp-propose-action is the ONLY write, and it only ever
+  // inserts a proposal row — it never reaches TaskChangeRouter /
+  // ReviewItemRouter / WorkflowRegistry directly.
+  // -------------------------------------------------------------------------
+  | {
+      /** READ-ONLY, cross-project: sessions + runs digest + blocked-gate/question counts per project. */
+      type: 'mcp-overview';
+      requestId: string;
+      runId: string;
+    }
+  | {
+      /** READ-ONLY, cross-project backlog listing. Omitted projectId = every project merged. */
+      type: 'mcp-backlog';
+      requestId: string;
+      runId: string;
+      projectId?: number;
+      taskType?: TaskType;
+      includeArchived?: boolean;
+      includeDone?: boolean;
+    }
+  | {
+      /**
+       * READ-ONLY: one entity's full body by opaque id or display ref. A ref
+       * (e.g. 'TASK-014') is unique only WITHIN a project — pass projectId to
+       * disambiguate; omitted, the first cross-project match wins.
+       */
+      type: 'mcp-entity';
+      requestId: string;
+      runId: string;
+      taskId: string;
+      projectId?: number;
+    }
+  | {
+      /** READ-ONLY, cross-project review_items inbox. Defaults to pending items only. */
+      type: 'mcp-queue';
+      requestId: string;
+      runId: string;
+      projectId?: number;
+      includeResolved?: boolean;
+    }
+  | {
+      /** READ-ONLY, cross-project workflow listing. Omitted projectId = every workflow row. */
+      type: 'mcp-workflows';
+      requestId: string;
+      runId: string;
+      projectId?: number;
+    }
+  | {
+      /** READ-ONLY: one workflow's effective definition + a server-computed spec_hash (propose-action CAS material). */
+      type: 'mcp-workflow';
+      requestId: string;
+      runId: string;
+      workflowId: string;
+    }
+  | {
+      /**
+       * THE ONLY write-shaped global-agent tool. payloadJson is a JSON-encoded
+       * AgentProposalPayload (shared/types/agentThread.ts) — validated + narrowed
+       * server-side by kind; preconditions (spec hash / task versions) are ALWAYS
+       * captured server-side, never trusted from the caller. Inserts an
+       * agent_proposals row via AgentThreadDbStore and appends a
+       * 'proposal-created' transcript marker event. NEVER executes anything —
+       * confirmation is a separate human-gated flow (proposalExecutor, S0.5).
+       */
+      type: 'mcp-propose-action';
+      requestId: string;
+      runId: string;
+      payloadJson: string;
+    }
   | {
       type: 'shell-approval-request';
       requestId: string;
@@ -524,6 +613,162 @@ export interface McpQueryResponse {
   ok: boolean;
   data?: unknown;
   error?: string;
+}
+
+/**
+ * Parse the global-agent sentinel form 'agent:<threadId>' out of a
+ * CYBOFLOW_RUN_ID. Accepts ONLY this exact shape — a bare workflow_runs id (or
+ * the 'orchestrator' health-check sentinel) is rejected. The reverse also
+ * holds with NO code change required on the run-scoped side:
+ * resolveTaskRunContext / resolveReviewItemRunContext do a strict
+ * `SELECT ... FROM workflow_runs WHERE id = ?` lookup, and an
+ * 'agent:<threadId>' string never matches a real run row, so those resolvers
+ * fall through to their existing 'run_not_found' branch — see
+ * mcpQueryHandler.test.ts for the two-way coverage.
+ *
+ * A free function (not a class method): it touches no DB/state, so every
+ * global-agent handler below calls it directly and every unit test can call
+ * it directly too.
+ */
+export function resolveGlobalAgentContext(
+  runId: string,
+): { ok: true; threadId: string } | { ok: false; error: string } {
+  const prefix = 'agent:';
+  if (!runId.startsWith(prefix) || runId.length <= prefix.length) {
+    return { ok: false, error: 'not_a_global_agent_run' };
+  }
+  return { ok: true, threadId: runId.slice(prefix.length) };
+}
+
+// ---------------------------------------------------------------------------
+// cyboflow_propose_action payload validation (S0.4) — narrows an unknown JSON
+// value into an AgentProposalPayload, dispatching on `kind`. Every branch
+// extracts each field to a local const BEFORE narrowing it so TypeScript's
+// control-flow analysis reliably narrows a `Record<string, unknown>` property
+// access (narrowing a bare `raw.foo` expression across a guard is fragile;
+// binding it to a local first is not). Returns null (never throws) on any
+// malformed shape or unrecognized kind — the caller responds ok:false
+// 'invalid_payload' rather than propagate a parse exception.
+// ---------------------------------------------------------------------------
+
+function isStringArray(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((x) => typeof x === 'string');
+}
+
+function isAgentPriority(v: unknown): v is Priority {
+  return v === 'P0' || v === 'P1' || v === 'P2';
+}
+
+function parseAgentNavigationTarget(raw: unknown): AgentNavigationTarget | null {
+  if (!isRecord(raw)) return null;
+  const target = raw.target;
+  if (target === 'run') {
+    const runId = raw.runId;
+    if (typeof runId !== 'string' || runId.length === 0) return null;
+    return { target: 'run', runId };
+  }
+  if (target === 'quick-session') {
+    const sessionId = raw.sessionId;
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return null;
+    const navRunId = raw.runId;
+    if (navRunId !== undefined && (typeof navRunId !== 'string' || navRunId.length === 0)) return null;
+    return navRunId !== undefined
+      ? { target: 'quick-session', sessionId, runId: navRunId }
+      : { target: 'quick-session', sessionId };
+  }
+  return null;
+}
+
+function parseAgentProposalPayload(raw: unknown): AgentProposalPayload | null {
+  if (!isRecord(raw)) return null;
+  const kindRaw = raw.kind;
+  if (typeof kindRaw !== 'string' || !(AGENT_PROPOSAL_KINDS as readonly string[]).includes(kindRaw)) {
+    return null;
+  }
+  const kind = kindRaw as AgentProposalKind;
+
+  switch (kind) {
+    case 'launch-run': {
+      const projectId = raw.projectId;
+      const workflowName = raw.workflowName;
+      if (typeof projectId !== 'number') return null;
+      if (typeof workflowName !== 'string' || !isCyboflowWorkflowName(workflowName)) return null;
+      const payload: LaunchRunProposalPayload = { kind: 'launch-run', projectId, workflowName };
+
+      const substrate = raw.substrate;
+      if (substrate !== undefined) {
+        if (!isCliSubstrate(substrate)) return null;
+        payload.substrate = substrate;
+      }
+      const taskIds = raw.taskIds;
+      if (taskIds !== undefined) {
+        if (!isStringArray(taskIds)) return null;
+        payload.taskIds = taskIds;
+      }
+      const ideaIds = raw.ideaIds;
+      if (ideaIds !== undefined) {
+        if (!isStringArray(ideaIds)) return null;
+        payload.ideaIds = ideaIds;
+      }
+      const findingIds = raw.findingIds;
+      if (findingIds !== undefined) {
+        if (!isStringArray(findingIds)) return null;
+        payload.findingIds = findingIds;
+      }
+      const note = raw.note;
+      if (note !== undefined) {
+        if (typeof note !== 'string') return null;
+        payload.note = note;
+      }
+      return payload;
+    }
+    case 'reprioritize-backlog': {
+      const projectId = raw.projectId;
+      const itemsRaw = raw.items;
+      if (typeof projectId !== 'number') return null;
+      if (!Array.isArray(itemsRaw) || itemsRaw.length === 0) return null;
+      const items: ReprioritizeBacklogItem[] = [];
+      for (const entryRaw of itemsRaw) {
+        if (!isRecord(entryRaw)) return null;
+        const taskId = entryRaw.taskId;
+        if (typeof taskId !== 'string' || taskId.length === 0) return null;
+        const item: ReprioritizeBacklogItem = { taskId };
+        const priority = entryRaw.priority;
+        if (priority !== undefined) {
+          if (!isAgentPriority(priority)) return null;
+          item.priority = priority;
+        }
+        const stageId = entryRaw.stageId;
+        if (stageId !== undefined) {
+          if (typeof stageId !== 'string' || stageId.length === 0) return null;
+          item.stageId = stageId;
+        }
+        if (item.priority === undefined && item.stageId === undefined) return null; // no-op row
+        items.push(item);
+      }
+      const payload: ReprioritizeBacklogProposalPayload = { kind: 'reprioritize-backlog', projectId, items };
+      return payload;
+    }
+    case 'edit-workflow': {
+      const workflowId = raw.workflowId;
+      const definitionJson = raw.definitionJson;
+      if (typeof workflowId !== 'string' || workflowId.length === 0) return null;
+      if (typeof definitionJson !== 'string' || definitionJson.length === 0) return null;
+      const payload: EditWorkflowProposalPayload = { kind: 'edit-workflow', workflowId, definitionJson };
+      const summary = raw.summary;
+      if (summary !== undefined) {
+        if (typeof summary !== 'string') return null;
+        payload.summary = summary;
+      }
+      return payload;
+    }
+    case 'open-session': {
+      const navigation = parseAgentNavigationTarget(raw.navigation);
+      if (!navigation) return null;
+      const payload: OpenSessionProposalPayload = { kind: 'open-session', navigation };
+      return payload;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -665,6 +910,21 @@ export interface McpQueryHandlerDeps {
    * ok:false error codes by writeWorkflowConfigError.
    */
   workflowConfig?: WorkflowConfigLike;
+
+  /**
+   * Persistence for the global-agent chat thread (agent_threads /
+   * agent_thread_events / agent_proposals — migration 071). Concrete class
+   * import (NOT a structural WorkflowConfigLike-style interface): unlike
+   * workflowConfig, AgentThreadDbStore lives under main/src/orchestrator/
+   * agentThread/ — orchestrator layer, not main/src/services — so the
+   * ORCHESTRATOR LAYERING RULE does not require an injected structural
+   * surface here. Injected via the deps bag anyway (mirroring the
+   * workflowConfig precedent) purely for test ergonomics: a test can hand in
+   * a store built against an in-memory fixture DB without constructing the
+   * whole McpQueryHandler's `db`. Absent → cyboflow_propose_action returns
+   * 'agent_thread_store_unavailable'; every other handler is unaffected.
+   */
+  agentThreadStore?: AgentThreadDbStore;
 }
 
 /**
@@ -851,6 +1111,27 @@ export class McpQueryHandler {
           break;
         case 'mcp-set-baseline-rotation':
           this.handleSetBaselineRotation(msg, client);
+          break;
+        case 'mcp-overview':
+          this.handleAgentOverview(msg, client);
+          break;
+        case 'mcp-backlog':
+          this.handleAgentBacklog(msg, client);
+          break;
+        case 'mcp-entity':
+          this.handleAgentEntity(msg, client);
+          break;
+        case 'mcp-queue':
+          this.handleAgentQueue(msg, client);
+          break;
+        case 'mcp-workflows':
+          this.handleAgentWorkflows(msg, client);
+          break;
+        case 'mcp-workflow':
+          this.handleAgentWorkflow(msg, client);
+          break;
+        case 'mcp-propose-action':
+          this.handleProposeAction(msg, client);
           break;
         case 'shell-approval-request':
           // Async-deferred — the FIRST handler that does NOT writeResponse
@@ -3886,6 +4167,434 @@ export class McpQueryHandler {
     } catch (err) {
       this.writeWorkflowConfigError(client, msg.requestId, err);
     }
+  }
+
+  // --------------------------------------------------------------------------
+  // Global-agent tool family (S0.4)
+  // --------------------------------------------------------------------------
+
+  /** Read a raw `workflows` row directly (no WorkflowConfigLike dep needed for a read). Null when absent. */
+  private readWorkflowRow(workflowId: string): WorkflowRow | null {
+    const row = this.db
+      .prepare(
+        `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at
+           FROM workflows WHERE id = ?`,
+      )
+      .get(workflowId) as WorkflowRow | undefined;
+    return row ?? null;
+  }
+
+  /**
+   * Resolve a display ref (e.g. 'TASK-014') to its opaque id in ANY project.
+   * Unlike resolveBacklogRef (single-project-scoped — used by the run-write
+   * guarded tools to prevent cross-project ref-probing), the global agent has
+   * legitimate cross-project visibility, so an unscoped scan is intended, not
+   * a leak. Returns the FIRST match across ideas -> epics -> tasks; a ref
+   * collision across two projects is NOT disambiguated here (pass an explicit
+   * projectId to disambiguate).
+   */
+  private resolveBacklogRefAnyProject(ref: string): string | null {
+    const tables = ['ideas', 'epics', 'tasks'] as const;
+    for (const table of tables) {
+      const row = this.db.prepare(`SELECT id FROM ${table} WHERE ref = ? LIMIT 1`).get(ref) as
+        | { id: string }
+        | undefined;
+      if (row) return row.id;
+    }
+    return null;
+  }
+
+  private handleAgentOverview(
+    msg: Extract<McpQueryMessage, { type: 'mcp-overview' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+
+    const projects = this.db
+      .prepare('SELECT id, name FROM projects ORDER BY name')
+      .all() as Array<{ id: number; name: string }>;
+
+    interface SessionOverviewRow {
+      session_id: string;
+      session_name: string;
+      session_status: string;
+      project_id: number;
+      is_quick: number;
+      updated_at: string;
+      run_id: string | null;
+      run_status: string | null;
+      current_step_id: string | null;
+      workflow_name: string | null;
+    }
+    // Capped at the 200 most-recently-updated non-archived sessions across
+    // every project — "active/recent" per the tool contract, not an
+    // exhaustive dump. A run can never be session-less (WorkflowRegistry.
+    // createRun's hard invariant), so this single LEFT JOIN also covers every
+    // running/awaiting-human run — there is no run reachable ONLY off a
+    // session-less path.
+    const sessionRows = this.db
+      .prepare(
+        `SELECT s.id AS session_id, s.name AS session_name, s.status AS session_status,
+                s.project_id AS project_id, s.is_quick AS is_quick, s.updated_at AS updated_at,
+                wr.id AS run_id, wr.status AS run_status, wr.current_step_id AS current_step_id,
+                w.name AS workflow_name
+           FROM sessions s
+           LEFT JOIN workflow_runs wr ON wr.id = s.run_id
+           LEFT JOIN workflows w ON w.id = wr.workflow_id
+          WHERE s.archived = 0
+          ORDER BY s.updated_at DESC
+          LIMIT 200`,
+      )
+      .all() as SessionOverviewRow[];
+
+    const blockedRows = this.db
+      .prepare(
+        `SELECT project_id, COUNT(*) AS n FROM review_items WHERE blocking = 1 AND status = 'pending' GROUP BY project_id`,
+      )
+      .all() as Array<{ project_id: number; n: number }>;
+    const blockedByProject = new Map(blockedRows.map((r) => [r.project_id, r.n]));
+
+    const questionRows = this.db
+      .prepare(
+        `SELECT wr.project_id AS project_id, COUNT(*) AS n
+           FROM questions q JOIN workflow_runs wr ON wr.id = q.run_id
+          WHERE q.status = 'pending'
+          GROUP BY wr.project_id`,
+      )
+      .all() as Array<{ project_id: number; n: number }>;
+    const questionsByProject = new Map(questionRows.map((r) => [r.project_id, r.n]));
+
+    const sessionsByProject = new Map<number, Array<Record<string, unknown>>>();
+    for (const row of sessionRows) {
+      const bucket = sessionsByProject.get(row.project_id) ?? [];
+      bucket.push({
+        session_id: row.session_id,
+        name: row.session_name,
+        status: row.session_status,
+        is_quick: row.is_quick === 1,
+        updated_at: row.updated_at,
+        run:
+          row.run_id !== null
+            ? {
+                run_id: row.run_id,
+                workflow_name: row.workflow_name,
+                status: row.run_status,
+                current_step_id: row.current_step_id,
+              }
+            : null,
+      });
+      sessionsByProject.set(row.project_id, bucket);
+    }
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: {
+        projects: projects.map((p) => ({
+          project_id: p.id,
+          project_name: p.name,
+          sessions: sessionsByProject.get(p.id) ?? [],
+          blocked_gates_count: blockedByProject.get(p.id) ?? 0,
+          pending_questions_count: questionsByProject.get(p.id) ?? 0,
+        })),
+      },
+    });
+  }
+
+  private handleAgentBacklog(
+    msg: Extract<McpQueryMessage, { type: 'mcp-backlog' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+
+    // selectProjectBacklog(db, null) merges EVERY project's backlog into one
+    // list — the cross-project read this tool is for. msg.projectId narrows
+    // to a single project exactly like cyboflow_list_tasks does.
+    const tree = selectProjectBacklog(this.db, msg.projectId ?? null);
+    const flat: BacklogTaskItem[] = [];
+    for (const item of tree) {
+      flat.push(item);
+      if (item.type === 'epic' && item.children) {
+        flat.push(...item.children);
+      }
+    }
+
+    const includeArchived = msg.includeArchived ?? false;
+    const includeDone = msg.includeDone ?? false;
+    const filtered = flat.filter((item) => {
+      if (item.archived_at !== null && !includeArchived) return false;
+      const isDoneOrRetired = item.isDone === true || item.decomposed_at !== null;
+      if (isDoneOrRetired && !includeDone) return false;
+      if (msg.taskType !== undefined && item.type !== msg.taskType) return false;
+      return true;
+    });
+
+    // Cross-project rows need project_id on the wire (the run-scoped
+    // toCompactTask omits it — a single-project caller already knows its own
+    // project); spread + add rather than duplicate the whole projection.
+    const tasks = filtered.map((item) => ({
+      ...McpQueryHandler.toCompactTask(item),
+      project_id: item.project_id,
+    }));
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { tasks, total: tasks.length, hidden_count: flat.length - tasks.length },
+    });
+  }
+
+  private handleAgentEntity(
+    msg: Extract<McpQueryMessage, { type: 'mcp-entity' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+
+    let item = selectTaskById(this.db, msg.taskId);
+    if (!item) {
+      const resolvedId =
+        msg.projectId !== undefined
+          ? resolveBacklogRef(this.db, msg.projectId, msg.taskId)
+          : this.resolveBacklogRefAnyProject(msg.taskId);
+      if (resolvedId) item = selectTaskById(this.db, resolvedId);
+    }
+
+    if (!item || (msg.projectId !== undefined && item.project_id !== msg.projectId)) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'not_found' });
+      return;
+    }
+
+    // Hide experiment-sandboxed drafts (migration 053): a run-scoped
+    // handleGetTask scopes this to the owning arm; the global agent has no
+    // arm of its own to scope against, so a tagged row is never safe to
+    // surface here — treat it exactly like a genuine miss.
+    if (item.experiment_id) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'not_found' });
+      return;
+    }
+
+    const task = McpQueryHandler.toFullTask(item);
+    if (item.type === 'idea') {
+      const attachments = selectIdeaAttachments(this.db, item.id);
+      task['attachments'] = McpQueryHandler.toMcpAttachments(attachments);
+    }
+
+    this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: true, data: { task } });
+  }
+
+  private handleAgentQueue(
+    msg: Extract<McpQueryMessage, { type: 'mcp-queue' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (!(msg.includeResolved ?? false)) {
+      clauses.push("status = 'pending'");
+    }
+    if (msg.projectId !== undefined) {
+      clauses.push('project_id = ?');
+      params.push(msg.projectId);
+    }
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : '';
+    // Capped at 200 — an inbox digest, not an exhaustive dump.
+    const rows = this.db
+      .prepare(`SELECT * FROM review_items ${where} ORDER BY created_at ASC, id ASC LIMIT 200`)
+      .all(...params) as ReviewItemDbRow[];
+    const items = rows.map((r) => ReviewItemRouter.shapeRow(r));
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { items, total: items.length },
+    });
+  }
+
+  private handleAgentWorkflows(
+    msg: Extract<McpQueryMessage, { type: 'mcp-workflows' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+
+    // Same exclusion + "must resolve to a usable definition" filter as
+    // WorkflowRegistry.listByProject, but scanning every project at once
+    // (or one project when msg.projectId narrows) rather than unioning
+    // (project_id = ? OR project_id IS NULL) per-project — there is no
+    // per-project repetition to dedupe here.
+    const excluded = [QUICK_WORKFLOW_NAME, ...LEGACY_DROPPED_WORKFLOW_NAMES];
+    const placeholders = excluded.map(() => '?').join(', ');
+    const clauses = [`name NOT IN (${placeholders})`];
+    const params: unknown[] = [...excluded];
+    if (msg.projectId !== undefined) {
+      clauses.push('(project_id = ? OR project_id IS NULL)');
+      params.push(msg.projectId);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at
+           FROM workflows
+          WHERE ${clauses.join(' AND ')}
+          ORDER BY name`,
+      )
+      .all(...params) as WorkflowRow[];
+    const usable = rows.filter((row) => resolveWorkflowDefinition(row.name, row.spec_json) !== null);
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { workflows: usable.map((r) => McpQueryHandler.toCompactWorkflow(r)) },
+    });
+  }
+
+  private handleAgentWorkflow(
+    msg: Extract<McpQueryMessage, { type: 'mcp-workflow' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+
+    const row = this.readWorkflowRow(msg.workflowId);
+    if (!row) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'not_found' });
+      return;
+    }
+    const definition = resolveWorkflowDefinition(row.name, row.spec_json);
+    const baselineRow = this.db
+      .prepare(
+        'SELECT baseline_in_rotation AS inRotation, baseline_rotation_weight AS weight FROM workflows WHERE id = ?',
+      )
+      .get(msg.workflowId) as { inRotation: number; weight: number } | undefined;
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: {
+        workflow: McpQueryHandler.toCompactWorkflow(row),
+        definition,
+        baseline_rotation: baselineRow ? { inRotation: baselineRow.inRotation === 1, weight: baselineRow.weight } : null,
+        // CAS material for a future cyboflow_propose_action{kind:'edit-workflow'}
+        // call — null only when the row is a broken custom flow with no
+        // resolvable definition (definition is also null in that case).
+        spec_hash: definition !== null ? computeSpecHash(definition) : null,
+      },
+    });
+  }
+
+  private handleProposeAction(
+    msg: Extract<McpQueryMessage, { type: 'mcp-propose-action' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+    const store = this.deps.agentThreadStore;
+    if (!store) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'agent_thread_store_unavailable',
+      });
+      return;
+    }
+
+    let raw: unknown;
+    try {
+      raw = JSON.parse(msg.payloadJson);
+    } catch {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_json' });
+      return;
+    }
+    const payload = parseAgentProposalPayload(raw);
+    if (!payload) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_payload' });
+      return;
+    }
+
+    // Preconditions are ALWAYS captured server-side here — the wire payload
+    // carries no precondition field for the caller to even attempt to spoof;
+    // this re-read is what makes that true rather than merely documented.
+    let preconditions: AgentProposalPreconditions | null = null;
+    if (payload.kind === 'edit-workflow') {
+      const row = this.readWorkflowRow(payload.workflowId);
+      if (!row) {
+        this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'workflow_not_found' });
+        return;
+      }
+      const definition = resolveWorkflowDefinition(row.name, row.spec_json);
+      if (definition === null) {
+        this.writeResponse(client, {
+          type: 'mcp-query-response',
+          requestId: msg.requestId,
+          ok: false,
+          error: 'workflow_unresolvable',
+        });
+        return;
+      }
+      preconditions = { kind: 'edit-workflow', specHash: computeSpecHash(definition) };
+    } else if (payload.kind === 'reprioritize-backlog') {
+      const expectedVersions: Record<string, number> = {};
+      for (const item of payload.items) {
+        const identity = this.readTaskIdentity(item.taskId);
+        if (!identity) {
+          this.writeResponse(client, {
+            type: 'mcp-query-response',
+            requestId: msg.requestId,
+            ok: false,
+            error: `task_not_found:${item.taskId}`,
+          });
+          return;
+        }
+        expectedVersions[item.taskId] = identity.version;
+      }
+      preconditions = { kind: 'reprioritize-backlog', expectedVersions };
+    }
+    // launch-run and open-session carry no preconditions (shared type contract).
+
+    const proposal = store.createProposal({ threadId: ctx.threadId, payload, preconditions });
+    store.appendEvent(
+      ctx.threadId,
+      'proposal-created',
+      JSON.stringify({ proposalId: proposal.id, kind: proposal.kind }),
+    );
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { proposalId: proposal.id },
+    });
   }
 
   // --------------------------------------------------------------------------
