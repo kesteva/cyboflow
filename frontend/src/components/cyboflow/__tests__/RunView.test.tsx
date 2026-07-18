@@ -630,6 +630,51 @@ describe('RunView', () => {
     expect(screen.queryByText('History for run A')).not.toBeInTheDocument();
   });
 
+  it('discards a stale listRawEvents response from a previously-selected run (reverse-order resolution)', async () => {
+    const eventA: StreamEvent = {
+      type: 'assistant',
+      payload: { type: 'assistant', message: { id: 'm-a', model: 'claude-sonnet-4-5', role: 'assistant', content: [{ type: 'text', text: 'Stale history for run A' }] } },
+      timestamp: '2026-05-22T00:00:00Z',
+    };
+    const eventB: StreamEvent = {
+      type: 'assistant',
+      payload: { type: 'assistant', message: { id: 'm-b', model: 'claude-sonnet-4-5', role: 'assistant', content: [{ type: 'text', text: 'Fresh history for run B' }] } },
+      timestamp: '2026-05-22T00:00:01Z',
+    };
+
+    // Deferred-response mock: a run switch does not cancel an in-flight query,
+    // so run-A's response can land AFTER run-B's — it must be discarded, not
+    // installed over run-B's Data Stream.
+    const resolvers: Array<(events: StreamEvent[]) => void> = [];
+    mockListRawEvents.mockImplementation(
+      () => new Promise<StreamEvent[]>((resolve) => resolvers.push(resolve)),
+    );
+
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-A');
+    });
+    render(<RunView />);
+    // #0 = run-A initial load (left pending).
+    expect(resolvers.length).toBe(1);
+
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-B');
+    });
+    // #1 = run-B initial load; resolve it FIRST.
+    expect(resolvers.length).toBe(2);
+    await act(async () => {
+      resolvers[1]([eventB]);
+    });
+    expect(await screen.findByText('Fresh history for run B')).toBeInTheDocument();
+
+    // The stale run-A response resolves last — run-B's stream must survive.
+    await act(async () => {
+      resolvers[0]([eventA]);
+    });
+    expect(screen.getByText('Fresh history for run B')).toBeInTheDocument();
+    expect(screen.queryByText('Stale history for run A')).not.toBeInTheDocument();
+  });
+
   it('does NOT manage the stream-event subscription (subscription is in the store)', () => {
     const mockSubFn = vi.mocked(subscribeToStreamEvents);
     const callsBefore = mockSubFn.mock.calls.length;

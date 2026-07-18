@@ -332,13 +332,30 @@ export function RunView({ runId: runIdProp }: RunViewProps = {}) {
   const [events, setEvents] = useState<StreamEvent[]>([]);
   const [isLoading, setIsLoading] = useState(false);
 
+  // Response fences: overlapping queries have no server-side ordering, and a
+  // run switch does not cancel an in-flight query — so a completion commits
+  // only when it is BOTH the latest issued request AND for the still-current
+  // run (prop-or-store; the ref tracks the component's EFFECTIVE runId, not the
+  // store's activeRunId, so a prop-driven host isn't permanently fenced out).
+  // Otherwise a stale response could overwrite a newer snapshot (or a
+  // newly-selected run's Data Stream) with no later trigger left to correct it.
+  const fetchGenRef = useRef(0);
+  const runIdRef = useRef<string | null>(runId);
+  useEffect(() => {
+    runIdRef.current = runId;
+  }, [runId]);
+
   // Re-query the durable raw_events log. Result type is INFERRED from AppRouter
   // (StreamEnvelope[]), which is exactly the renderer's StreamEvent.
   const loadEvents = useCallback(async (runId: string): Promise<void> => {
+    const gen = ++fetchGenRef.current;
     try {
       const result = await trpc.cyboflow.runs.listRawEvents.query({ runId });
+      if (runIdRef.current !== runId || gen !== fetchGenRef.current) return;
       setEvents(result);
-    } finally {
+      setIsLoading(false);
+    } catch {
+      if (runIdRef.current !== runId || gen !== fetchGenRef.current) return;
       setIsLoading(false);
     }
   }, []);
@@ -351,15 +368,16 @@ export function RunView({ runId: runIdProp }: RunViewProps = {}) {
       return;
     }
     let aborted = false;
+    const gen = ++fetchGenRef.current;
     setIsLoading(true);
     setEvents([]);
     void (async () => {
       try {
         const result = await trpc.cyboflow.runs.listRawEvents.query({ runId });
-        if (aborted) return;
+        if (aborted || gen !== fetchGenRef.current) return;
         setEvents(result);
       } finally {
-        if (!aborted) setIsLoading(false);
+        if (!aborted && gen === fetchGenRef.current) setIsLoading(false);
       }
     })();
     return () => {
