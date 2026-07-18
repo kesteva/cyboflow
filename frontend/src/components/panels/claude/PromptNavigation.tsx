@@ -144,32 +144,57 @@ export function PromptNavigation({ panelId, prompts: controlledPrompts, onNaviga
     };
   }, [isControlled, panelId, fetchPrompts]);
 
-  // Use requestAnimationFrame for smooth UI updates for ongoing durations
+  // Periodic re-render for ongoing durations, driven by a 5s interval rather than
+  // a rAF loop — a rAF loop wakes at display cadence (60-120Hz) purely to compare
+  // timestamps, which is a sustained CPU cost for a value that only needs to
+  // change every 5s. Paused while the tab/window is hidden (no user is watching
+  // the duration tick), with an immediate catch-up update on becoming visible.
   useEffect(() => {
     if (isControlled) return; // parent re-renders drive duration updates
-    // Only run the animation if there's a prompt without a completion timestamp
+    // Only run the timer if there's a prompt without a completion timestamp
     const hasOngoingPrompt = prompts.length > 0 &&
-      prompts[prompts.length - 1] && 
+      prompts[prompts.length - 1] &&
       !prompts[prompts.length - 1].completion_timestamp;
-    
+
     if (!hasOngoingPrompt) {
-      return; // No need to animate if there's no ongoing prompt
+      return; // No need to tick if there's no ongoing prompt
     }
 
-    let animationId: number;
-    let lastUpdate = 0;
     const UPDATE_INTERVAL = 5000; // Update every 5 seconds instead of every second
 
-    const updateOngoingDuration = (timestamp: number) => {
-      if (timestamp - lastUpdate >= UPDATE_INTERVAL) {
-        setFetchedPrompts(prev => [...prev]); // Force re-render for duration updates
-        lastUpdate = timestamp;
-      }
-      animationId = requestAnimationFrame(updateOngoingDuration);
+    const forceUpdate = () => setFetchedPrompts(prev => [...prev]); // Force re-render for duration updates
+
+    let intervalId: ReturnType<typeof setInterval> | undefined;
+
+    const startTimer = () => {
+      if (intervalId !== undefined) return;
+      intervalId = setInterval(forceUpdate, UPDATE_INTERVAL);
     };
 
-    animationId = requestAnimationFrame(updateOngoingDuration);
-    return () => cancelAnimationFrame(animationId);
+    const stopTimer = () => {
+      if (intervalId === undefined) return;
+      clearInterval(intervalId);
+      intervalId = undefined;
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        stopTimer();
+      } else {
+        forceUpdate(); // catch up immediately on becoming visible
+        startTimer();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    if (document.visibilityState !== 'hidden') {
+      startTimer();
+    }
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      stopTimer();
+    };
   }, [isControlled, prompts]);
 
   const handlePromptClick = (marker: PromptMarker, index: number) => {
