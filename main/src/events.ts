@@ -22,6 +22,7 @@ import { DEFAULT_PERMISSION_MODE } from '../../shared/types/permissionMode';
 import type { GitStatus } from './types/session';
 import { deriveLiveContextUsage } from './utils/liveContextUsage';
 import { isAnyEffortLevel } from '../../shared/types/reasoningEffort';
+import { isAgentThreadSpawnId } from '../../shared/types/agentThread';
 
 /**
  * Crystal session IDs are 36-char dashed UUIDs (e.g. `91e56989-0674-...`).
@@ -543,6 +544,10 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
       // by runEventBridge; skip Crystal session validation (which would log
       // "Session not found" against the `sessions` table cyboflow never writes to).
       if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;
+      // The global-agent thread spawns with the synthetic identity
+      // panelId === sessionId === 'agent:<threadId>' (no sessions/panels row
+      // exists by design); skip Crystal validation for it too.
+      if (isAgentThreadSpawnId(panelId) || isAgentThreadSpawnId(sessionId)) return;
 
       const validation = panelId
         ? validatePanelEventContext({ panelId, sessionId }, panelId, sessionId)
@@ -596,6 +601,10 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
       // cyboflow workflow runs are owned by the workflow orchestrator; skip the
       // Crystal session validation (mirror of the spawned-handler guard at line 510).
       if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;
+      // The global-agent thread spawns with the synthetic identity
+      // panelId === sessionId === 'agent:<threadId>' (no sessions/panels row
+      // exists by design); skip Crystal validation for it too.
+      if (isAgentThreadSpawnId(panelId) || isAgentThreadSpawnId(sessionId)) return;
 
       const validation = panelId
         ? validatePanelEventContext({ panelId, sessionId }, panelId, sessionId)
@@ -891,6 +900,10 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
   }) => {
     // cyboflow workflow runs are handled by runEventBridge; skip Crystal validation.
     if (isCyboflowRunId(output.panelId) || isCyboflowRunId(output.sessionId)) return;
+    // The global-agent thread spawns with the synthetic identity
+    // panelId === sessionId === 'agent:<threadId>' (no sessions/panels row
+    // exists by design); skip Crystal validation for it too.
+    if (isAgentThreadSpawnId(output.panelId) || isAgentThreadSpawnId(output.sessionId)) return;
 
     // Validate the output has valid context
     const validation = output.panelId
@@ -942,6 +955,10 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
   claudeCodeManager.on('spawned', async ({ panelId, sessionId }: { panelId?: string; sessionId: string }) => {
     // cyboflow workflow runs are handled by runEventBridge; skip Crystal validation.
     if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;
+    // The global-agent thread spawns with the synthetic identity
+    // panelId === sessionId === 'agent:<threadId>' (no sessions/panels row
+    // exists by design); skip Crystal validation for it too.
+    if (isAgentThreadSpawnId(panelId) || isAgentThreadSpawnId(sessionId)) return;
 
     // Validate the event context
     const validation = panelId
@@ -1004,6 +1021,10 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
   claudeCodeManager.on('exit', async ({ panelId, sessionId, exitCode, signal }: { panelId?: string; sessionId: string; exitCode: number; signal: string }) => {
     // cyboflow workflow runs are handled by runEventBridge; skip Crystal validation.
     if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;
+    // The global-agent thread spawns with the synthetic identity
+    // panelId === sessionId === 'agent:<threadId>' (no sessions/panels row
+    // exists by design); skip Crystal validation for it too.
+    if (isAgentThreadSpawnId(panelId) || isAgentThreadSpawnId(sessionId)) return;
 
     const validation = panelId
       ? validatePanelEventContext({ panelId, sessionId }, panelId, sessionId)
@@ -1171,6 +1192,10 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
   claudeCodeManager.on('error', async ({ panelId, sessionId, error }: { panelId?: string; sessionId: string; error: string }) => {
     // cyboflow workflow runs are handled by runEventBridge; skip Crystal validation.
     if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;
+    // The global-agent thread spawns with the synthetic identity
+    // panelId === sessionId === 'agent:<threadId>' (no sessions/panels row
+    // exists by design); skip Crystal validation for it too.
+    if (isAgentThreadSpawnId(panelId) || isAgentThreadSpawnId(sessionId)) return;
 
     // Validate the event context
     const validation = panelId

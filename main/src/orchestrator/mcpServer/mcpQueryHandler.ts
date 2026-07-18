@@ -88,6 +88,8 @@ import { AgentThreadDbStore } from '../agentThread/agentThreadDbStore';
 import { computeSpecHash } from '../agentThread/specHash';
 import {
   AGENT_PROPOSAL_KINDS,
+  AGENT_THREAD_SPAWN_PREFIX,
+  isAgentThreadSpawnId,
   type AgentNavigationTarget,
   type AgentProposalKind,
   type AgentProposalPayload,
@@ -633,11 +635,10 @@ export interface McpQueryResponse {
 export function resolveGlobalAgentContext(
   runId: string,
 ): { ok: true; threadId: string } | { ok: false; error: string } {
-  const prefix = 'agent:';
-  if (!runId.startsWith(prefix) || runId.length <= prefix.length) {
+  if (!isAgentThreadSpawnId(runId)) {
     return { ok: false, error: 'not_a_global_agent_run' };
   }
-  return { ok: true, threadId: runId.slice(prefix.length) };
+  return { ok: true, threadId: runId.slice(AGENT_THREAD_SPAWN_PREFIX.length) };
 }
 
 // ---------------------------------------------------------------------------

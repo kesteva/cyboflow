@@ -65,6 +65,29 @@ export interface AgentThreadEvent {
 }
 
 // ---------------------------------------------------------------------------
+// Spawn identity (panelId === sessionId === runId for a global-agent thread)
+// ---------------------------------------------------------------------------
+
+/**
+ * Prefix for the synthetic spawn identity of a global-agent thread:
+ * `agent:<threadId>`. The thread's SDK conversation spawns with
+ * panelId === sessionId === runId === this identity — no
+ * sessions/panels/workflow_runs row exists for it by design, so any
+ * Crystal-era session/panel validation must treat an id carrying this prefix
+ * as exempt rather than log a "not found" failure against those tables.
+ */
+export const AGENT_THREAD_SPAWN_PREFIX = 'agent:';
+
+/**
+ * True iff `id` is a global-agent thread's synthetic spawn identity — starts
+ * with {@link AGENT_THREAD_SPAWN_PREFIX} and has a non-empty threadId
+ * remainder. `'agent:'` alone (empty remainder) does not count.
+ */
+export function isAgentThreadSpawnId(id: string | null | undefined): boolean {
+  return typeof id === 'string' && id.startsWith(AGENT_THREAD_SPAWN_PREFIX) && id.length > AGENT_THREAD_SPAWN_PREFIX.length;
+}
+
+// ---------------------------------------------------------------------------
 // Navigation target (open-session proposal)
 // ---------------------------------------------------------------------------
 

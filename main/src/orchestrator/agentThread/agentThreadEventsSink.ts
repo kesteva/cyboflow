@@ -25,13 +25,14 @@ import type { SpawnEventsSink } from '../../services/panels/claude/claudeCodeMan
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { AgentThreadDbStore } from './agentThreadDbStore';
 import type { LoggerLike } from '../types';
+import { AGENT_THREAD_SPAWN_PREFIX, isAgentThreadSpawnId } from '../../../../shared/types/agentThread';
 
 /** Spawn-identity prefix for a global-agent thread: `agent:<threadId>`. */
-export const AGENT_SPAWN_PREFIX = 'agent:';
+export const AGENT_SPAWN_PREFIX = AGENT_THREAD_SPAWN_PREFIX;
 
 /** Compose the synthetic spawn identity (panelId === sessionId === runId) for a thread. */
 export function agentSpawnIdentity(threadId: string): string {
-  return `${AGENT_SPAWN_PREFIX}${threadId}`;
+  return `${AGENT_THREAD_SPAWN_PREFIX}${threadId}`;
 }
 
 /**
@@ -41,8 +42,8 @@ export function agentSpawnIdentity(threadId: string): string {
  * id if one ever arrives).
  */
 export function threadIdFromSpawnIdentity(spawnIdentity: string): string {
-  return spawnIdentity.startsWith(AGENT_SPAWN_PREFIX)
-    ? spawnIdentity.slice(AGENT_SPAWN_PREFIX.length)
+  return isAgentThreadSpawnId(spawnIdentity)
+    ? spawnIdentity.slice(AGENT_THREAD_SPAWN_PREFIX.length)
     : spawnIdentity;
 }
 

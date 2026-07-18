@@ -1,7 +1,7 @@
 /**
  * Table-driven guards for the leaf shared modules that ride the IPC/tRPC wire.
  *
- * These three helpers are the runtime narrowing points for values that arrive
+ * These helpers are the runtime narrowing points for values that arrive
  * from config / frontmatter / env / the DB (all `unknown` at the boundary). A
  * silent regression here (accepting a bad value, or rejecting a good one) does
  * not fail the build — it corrupts a run's substrate, mis-sorts a finding, or
@@ -13,12 +13,16 @@
  *      sentinel that must NOT pass the guard).
  *   3. extractToolResultText — string content, array-of-blocks content, the
  *      error `tool_result` shape (is_error + array content), and degenerate inputs.
+ *   4. isAgentThreadSpawnId — the global-agent thread's synthetic
+ *      `agent:<threadId>` spawn identity vs. a cyboflow workflow-run id, a
+ *      Crystal session id, and the empty-remainder edge case.
  */
 import { describe, it, expect } from 'vitest';
 import { isCliSubstrate, DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
 import { isFindingPriority, FINDING_PRIORITIES } from '../../../shared/types/reviews';
 import { extractToolResultText } from '../../../shared/utils/extractToolResultText';
 import type { ToolResultBlock } from '../../../shared/types/claudeStream';
+import { isAgentThreadSpawnId, AGENT_THREAD_SPAWN_PREFIX } from '../../../shared/types/agentThread';
 
 describe('isCliSubstrate', () => {
   it.each([
@@ -136,5 +140,37 @@ describe('extractToolResultText', () => {
     // helper explicitly defends against (returns '' rather than throwing).
     expect(extractToolResultText(null as unknown as ToolResultBlock['content'])).toBe('');
     expect(extractToolResultText(undefined as unknown as ToolResultBlock['content'])).toBe('');
+  });
+});
+
+describe('isAgentThreadSpawnId', () => {
+  it('accepts a real spawn identity — prefix plus a non-empty threadId', () => {
+    expect(isAgentThreadSpawnId('agent:x')).toBe(true);
+    expect(isAgentThreadSpawnId(`${AGENT_THREAD_SPAWN_PREFIX}550e8400-e29b-41d4-a716-446655440000`)).toBe(true);
+  });
+
+  it('rejects the bare prefix with an empty threadId remainder', () => {
+    // 'agent:' alone must NOT count — an empty threadId is not a real thread.
+    expect(isAgentThreadSpawnId('agent:')).toBe(false);
+  });
+
+  it('rejects a cyboflow workflow-run id (32-char no-dash hex)', () => {
+    // The sibling isCyboflowRunId exemption's shape — must not cross-match.
+    expect(isAgentThreadSpawnId('0d33e5082da8447eb1234567890abcd')).toBe(false);
+  });
+
+  it('rejects a Crystal session id (36-char dashed uuid)', () => {
+    expect(isAgentThreadSpawnId('91e56989-0674-4e9a-9abc-1234567890ab')).toBe(false);
+  });
+
+  it('rejects null, undefined, and the empty string', () => {
+    expect(isAgentThreadSpawnId(null)).toBe(false);
+    expect(isAgentThreadSpawnId(undefined)).toBe(false);
+    expect(isAgentThreadSpawnId('')).toBe(false);
+  });
+
+  it('is case-sensitive — a wrong-case prefix does not match', () => {
+    expect(isAgentThreadSpawnId('Agent:x')).toBe(false);
+    expect(isAgentThreadSpawnId('AGENT:x')).toBe(false);
   });
 });
