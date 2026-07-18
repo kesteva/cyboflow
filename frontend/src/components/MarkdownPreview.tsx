@@ -24,6 +24,19 @@ interface MarkdownPreviewProps {
 // re-parses (see the `useMemo` + `React.memo` below).
 const REMARK_PLUGINS = [remarkGfm];
 
+/**
+ * Stable, collision-resistant React key for a mermaid chart: djb2 over the full
+ * source plus its length. Sibling diagrams routinely share a 20-char prefix
+ * ("graph TD;"...), so a prefix key would collide and mis-reconcile them.
+ */
+function chartKey(source: string): string {
+  let hash = 5381;
+  for (let i = 0; i < source.length; i++) {
+    hash = ((hash << 5) + hash + source.charCodeAt(i)) | 0;
+  }
+  return `mermaid-${source.length}-${hash}`;
+}
+
 const MARKDOWN_COMPONENTS: Components = {
   code({ node, className, children, ...props }: CodeComponentProps) {
     const match = /language-(\w+)/.exec(className || '');
@@ -34,12 +47,14 @@ const MARKDOWN_COMPONENTS: Components = {
     const inline = !className || !className.includes('language-');
 
     if (!inline && language === 'mermaid') {
-      // Key + id are derived from the chart text (deterministic) so the diagram
-      // re-renders only when its source changes — no monotonic counter/Date.now
-      // in the render path, which would break memoization identity.
+      // Key + id are derived from the FULL chart text (deterministic) so the
+      // diagram re-renders only when its source changes — no monotonic
+      // counter/Date.now in the render path, which would break memoization
+      // identity. A hash of the whole source (not a prefix) keeps sibling
+      // diagrams that share an opening line ("graph TD;"...) from colliding.
       return (
         <MermaidRenderer
-          key={`mermaid-${codeString.substring(0, 20)}`}
+          key={chartKey(codeString)}
           chart={codeString}
           id="markdown-preview"
         />

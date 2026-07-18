@@ -12,6 +12,12 @@ export const MermaidRenderer: React.FC<MermaidRendererProps> = ({ chart, id }) =
   const [errorMessage, setErrorMessage] = useState('');
 
   useEffect(() => {
+    // Cancellation fence: `mermaid.render` is async and this effect re-runs on
+    // every `chart` revision (streamed charts revise rapidly). Without the
+    // fence, an OLDER render resolving last would overwrite the newer chart's
+    // SVG in the shared elementRef.
+    let cancelled = false;
+
     const renderChart = async () => {
       if (!elementRef.current || !chart) return;
 
@@ -33,12 +39,14 @@ export const MermaidRenderer: React.FC<MermaidRendererProps> = ({ chart, id }) =
 
         // Render the chart
         const { svg } = await mermaid.render(graphId, chart);
+        if (cancelled) return;
 
         // Insert the SVG
         if (elementRef.current) {
           elementRef.current.innerHTML = svg;
         }
       } catch (error: unknown) {
+        if (cancelled) return;
         console.error('Mermaid rendering error:', error);
         setHasError(true);
 
@@ -76,7 +84,10 @@ export const MermaidRenderer: React.FC<MermaidRendererProps> = ({ chart, id }) =
 
     // Render with a small delay to ensure DOM is ready
     const timer = setTimeout(renderChart, 50);
-    return () => clearTimeout(timer);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [chart, id]);
 
   if (hasError) {
