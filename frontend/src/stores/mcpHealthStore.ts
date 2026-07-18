@@ -82,7 +82,7 @@ export interface McpHealthActions {
 // Store
 // ---------------------------------------------------------------------------
 
-export const useMcpHealthStore = create<McpHealthState & McpHealthActions>()((set) => ({
+export const useMcpHealthStore = create<McpHealthState & McpHealthActions>()((set, get) => ({
   // Default state: 'starting' (yellow) — never 'healthy' before first probe.
   status: 'starting',
   lastCheckedAt: null,
@@ -105,14 +105,27 @@ export const useMcpHealthStore = create<McpHealthState & McpHealthActions>()((se
 
         if (!alive) return;
 
+        const nextStatus = toUiStatus(raw.status);
+        const nextError = raw.lastError ?? null;
+        // McpServerHealth does not expose a PID field yet — default null.
+        // FUTURE(TASK-535): populate pid from the health snapshot once the
+        //   subprocess lifecycle manager exposes it.
+        const nextPid: number | null = null;
+
+        const prev = get();
+        if (prev.status === nextStatus && prev.lastError === nextError && prev.pid === nextPid) {
+          // Unchanged health payload — skip the set entirely so `lastCheckedAt`
+          // doesn't bump (and every store subscriber doesn't re-render) on a
+          // steady-state 5s poll. `lastCheckedAt` then reflects the last actual
+          // status transition rather than "last polled at".
+          return;
+        }
+
         set({
-          status: toUiStatus(raw.status),
+          status: nextStatus,
           lastCheckedAt: Date.now(),
-          lastError: raw.lastError ?? null,
-          // McpServerHealth does not expose a PID field yet — default null.
-          // FUTURE(TASK-535): populate pid from the health snapshot once the
-          //   subprocess lifecycle manager exposes it.
-          pid: null,
+          lastError: nextError,
+          pid: nextPid,
         });
       } catch {
         // Orchestrator not yet ready — stay in current state.

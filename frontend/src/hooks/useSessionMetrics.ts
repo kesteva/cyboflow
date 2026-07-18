@@ -204,11 +204,40 @@ export function useSessionMetrics(session: Session | null): SessionMetrics {
       }
     };
 
-    void load();
-    const id = window.setInterval(() => void load(), STATS_POLL_MS);
-    return () => {
-      cancelled = true;
+    // Pause the 5s poll while the document is hidden — mirrors the elapsed-tick
+    // gate above (same rationale: an offscreen canvas re-fetching stats every 5s
+    // is pure idle churn). Cadence stays 5s while visible; resume fires an
+    // immediate catch-up load so the snapshot isn't stale by however long the
+    // tab was hidden.
+    let id: number | null = null;
+    const start = () => {
+      if (id !== null) return;
+      id = window.setInterval(() => void load(), STATS_POLL_MS);
+    };
+    const stop = () => {
+      if (id === null) return;
       window.clearInterval(id);
+      id = null;
+    };
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        stop();
+      } else {
+        void load();
+        start();
+      }
+    };
+
+    void load();
+    if (!document.hidden) {
+      start();
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      cancelled = true;
+      stop();
     };
   }, [sessionId]);
 

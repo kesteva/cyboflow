@@ -16,6 +16,7 @@
  * above the indicator.  No external popover primitive is required.
  */
 import { useState, useRef, useEffect } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { cn } from '../utils/cn';
 import { useMcpHealthStore } from '../stores/mcpHealthStore';
 import type { McpHealthStatus } from '../stores/mcpHealthStore';
@@ -54,7 +55,20 @@ function formatTimestamp(ts: number | null): string {
 // ---------------------------------------------------------------------------
 
 export function McpHealthIndicator() {
-  const { status, lastCheckedAt, lastError, pid } = useMcpHealthStore();
+  // Narrow, shallow-equal selector over exactly the fields this component
+  // renders (rather than subscribing to the whole store with no selector,
+  // which re-renders on ANY store write). Combined with the store's skip of
+  // `set()` for an unchanged polled payload (see mcpHealthStore.ts), this
+  // component now only re-renders when status/lastError/pid/lastCheckedAt
+  // actually change — not on every steady-state 5s poll tick.
+  const { status, lastCheckedAt, lastError, pid } = useMcpHealthStore(
+    useShallow((s) => ({
+      status: s.status,
+      lastCheckedAt: s.lastCheckedAt,
+      lastError: s.lastError,
+      pid: s.pid,
+    })),
+  );
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 

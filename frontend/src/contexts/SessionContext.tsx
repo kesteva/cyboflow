@@ -1,4 +1,4 @@
-import React, { createContext, useContext, ReactNode } from 'react';
+import React, { createContext, useContext, useMemo, ReactNode } from 'react';
 import { Session } from '../types/session';
 import type { LucideIcon } from 'lucide-react';
 
@@ -37,25 +37,32 @@ export const SessionProvider: React.FC<{
   }>;
   isMerging?: boolean;
 }> = ({ children, session, projectName, gitBranchActions, isMerging }) => {
+  // Memoize the provider value — without it, a fresh object every render
+  // re-renders every consumer even when nothing they read actually changed.
+  // useMemo must run unconditionally (before the `!session` early return
+  // below) to keep hook-call order stable across renders.
+  const value = useMemo<SessionContextValue | null>(() => {
+    if (!session) return null;
+    return {
+      sessionId: session.id,
+      workingDirectory: session.worktreePath,
+      projectId: session.projectId?.toString() || '',
+      projectName,
+      session,
+      gitBranchActions,
+      isMerging,
+    };
+  }, [session, projectName, gitBranchActions, isMerging]);
+
   // FIX: Don't render children without a valid session
   // This prevents components that require session from rendering
-  if (!session) {
+  if (!value) {
     return (
       <div className="flex items-center justify-center h-full text-text-tertiary">
         No session selected
       </div>
     );
   }
-
-  const value: SessionContextValue = {
-    sessionId: session.id,
-    workingDirectory: session.worktreePath,
-    projectId: session.projectId?.toString() || '',
-    projectName,
-    session,
-    gitBranchActions,
-    isMerging
-  };
 
   return (
     <SessionContext.Provider value={value}>

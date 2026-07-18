@@ -110,6 +110,32 @@ describe('useVerificationRequests', () => {
     expect(result.current.requests.map((r) => r.id)).toEqual(['vr-1', 'vr-2']);
   });
 
+  it('keeps the same requests array reference when a poll repeats identical rows', async () => {
+    vi.useFakeTimers();
+    listQuerySpy.mockResolvedValue([row('vr-1')]);
+    const { result } = renderHook(() =>
+      useVerificationRequests({ projectId: 1, refetchIntervalMs: 1000 }),
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(listQuerySpy).toHaveBeenCalledTimes(1);
+    const requestsAfterFirstLoad = result.current.requests;
+    expect(requestsAfterFirstLoad).toHaveLength(1);
+
+    // Next poll resolves a content-equal-but-distinct array/row objects.
+    listQuerySpy.mockResolvedValue([row('vr-1')]);
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+      await Promise.resolve();
+    });
+
+    expect(listQuerySpy).toHaveBeenCalledTimes(2);
+    // Same reference — the unchanged-content poll should not have re-set state.
+    expect(result.current.requests).toBe(requestsAfterFirstLoad);
+  });
+
   it('surfaces a query rejection as an Error', async () => {
     listQuerySpy.mockRejectedValueOnce(new Error('boom'));
     const { result } = renderHook(() => useVerificationRequests({ projectId: 1 }));

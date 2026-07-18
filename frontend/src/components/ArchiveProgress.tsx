@@ -19,17 +19,46 @@ interface ArchiveProgressData {
   totalCount: number;
 }
 
+/** Field-by-field ArchiveTask compare (small fixed shape — no need for a deep-equal util). */
+function archiveTaskEqual(a: ArchiveTask, b: ArchiveTask): boolean {
+  return (
+    a.sessionId === b.sessionId &&
+    a.sessionName === b.sessionName &&
+    a.worktreeName === b.worktreeName &&
+    a.projectName === b.projectName &&
+    a.status === b.status &&
+    a.startTime === b.startTime &&
+    a.endTime === b.endTime &&
+    a.error === b.error
+  );
+}
+
+/**
+ * Content-equal compare for the polled/pushed progress payload. Each fetch
+ * hands back a fresh object even when nothing changed, so a naive `setProgress`
+ * re-renders the persistently-mounted Sidebar every 2s regardless — this lets
+ * callers skip the state update (and `null → null` skips too, since `a === b`
+ * already holds for two `null`s).
+ */
+function archiveProgressEqual(a: ArchiveProgressData | null, b: ArchiveProgressData | null): boolean {
+  if (a === b) return true;
+  if (a === null || b === null) return false;
+  if (a.activeCount !== b.activeCount || a.totalCount !== b.totalCount) return false;
+  if (a.tasks.length !== b.tasks.length) return false;
+  return a.tasks.every((task, i) => archiveTaskEqual(task, b.tasks[i]));
+}
+
 export function ArchiveProgress() {
   const [progress, setProgress] = useState<ArchiveProgressData | null>(null);
   const [isExpanded, setIsExpanded] = useState(false);
 
   useEffect(() => {
     // Initial load
-    loadProgress();
+    void loadProgress();
 
     // Listen for progress updates
     const handleProgress = (_event: IpcRendererEvent, data: ArchiveProgressData) => {
-      setProgress(data);
+      setProgress((prev) => (archiveProgressEqual(prev, data) ? prev : data));
       // Auto-expand when there are active tasks
       if (data.activeCount > 0 && !isExpanded) {
         setIsExpanded(true);
@@ -38,12 +67,41 @@ export function ArchiveProgress() {
 
     window.electron?.on('archive:progress', handleProgress);
 
-    // Poll for initial state in case we missed events
-    const interval = setInterval(loadProgress, 2000);
+    // Poll for initial state in case we missed events — paused while the
+    // document is hidden. ArchiveProgress lives in the persistently-mounted
+    // Sidebar, so an offscreen 2s poll (almost always resolving to the same
+    // null/empty progress) is pure idle churn; resume fires an immediate
+    // catch-up load so the panel isn't stale by however long the tab was
+    // hidden. Cadence stays 2s while an archive is actually in progress and
+    // the window is visible.
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+    const startPolling = () => {
+      if (intervalId !== null) return;
+      intervalId = setInterval(() => void loadProgress(), 2000);
+    };
+    const stopPolling = () => {
+      if (intervalId === null) return;
+      clearInterval(intervalId);
+      intervalId = null;
+    };
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        stopPolling();
+      } else {
+        void loadProgress();
+        startPolling();
+      }
+    };
+
+    if (!document.hidden) {
+      startPolling();
+    }
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
       window.electron?.off('archive:progress', handleProgress);
-      clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      stopPolling();
     };
   }, [isExpanded]);
 
@@ -52,7 +110,7 @@ export function ArchiveProgress() {
     try {
       const response = await window.electron.invoke('archive:get-progress');
       if (response.success) {
-        setProgress(response.data);
+        setProgress((prev) => (archiveProgressEqual(prev, response.data) ? prev : response.data));
       }
     } catch (error) {
       console.error('Failed to load archive progress:', error);

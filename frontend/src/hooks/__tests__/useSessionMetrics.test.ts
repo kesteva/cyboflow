@@ -5,7 +5,7 @@
  * renderHook + a mocked API.sessions.getStatistics (no real Electron IPC).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { renderHook, waitFor, act } from '@testing-library/react';
 
 const { mockGetStatistics } = vi.hoisted(() => ({
   mockGetStatistics: vi.fn(),
@@ -149,6 +149,42 @@ describe('useSessionMetrics', () => {
   it('never renders NaN for a malformed createdAt', () => {
     const { result } = renderHook(() => useSessionMetrics(makeSession({ createdAt: 'not-a-date' })));
     expect(result.current.elapsed).toBe('0s');
+  });
+
+  it('pauses the stats poll while the document is hidden, resumes with a catch-up load on re-show', async () => {
+    vi.useFakeTimers();
+    const hiddenSpy = vi.spyOn(document, 'hidden', 'get');
+    hiddenSpy.mockReturnValue(false);
+
+    try {
+      renderHook(() => useSessionMetrics(makeSession()));
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(mockGetStatistics).toHaveBeenCalledTimes(1);
+
+      // Hide the document — the 5s poll must stop firing.
+      hiddenSpy.mockReturnValue(true);
+      act(() => {
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(20_000);
+        await Promise.resolve();
+      });
+      expect(mockGetStatistics).toHaveBeenCalledTimes(1);
+
+      // Re-show — an immediate catch-up load fires, then the 5s cadence resumes.
+      hiddenSpy.mockReturnValue(false);
+      await act(async () => {
+        document.dispatchEvent(new Event('visibilitychange'));
+        await Promise.resolve();
+      });
+      expect(mockGetStatistics).toHaveBeenCalledTimes(2);
+    } finally {
+      hiddenSpy.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it('falls back to the worktree basename for the branch when stats omit it', async () => {

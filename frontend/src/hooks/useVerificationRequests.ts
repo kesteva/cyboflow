@@ -51,6 +51,39 @@ export interface UseVerificationRequestsResult {
 
 const DEFAULT_REFETCH_INTERVAL_MS = 2500;
 
+/** Full-field compare of one row — the shape is small and fixed, so this is cheaper than JSON.stringify. */
+function rowEqual(a: VerificationRequest, b: VerificationRequest): boolean {
+  return (
+    a.id === b.id &&
+    a.run_id === b.run_id &&
+    a.project_id === b.project_id &&
+    a.status === b.status &&
+    a.verify_type === b.verify_type &&
+    a.deliverable_json === b.deliverable_json &&
+    a.chain_json === b.chain_json &&
+    a.current_backend === b.current_backend &&
+    a.attempt === b.attempt &&
+    a.verdict_json === b.verdict_json &&
+    a.error_message === b.error_message &&
+    a.enqueued_at === b.enqueued_at &&
+    a.leased_at === b.leased_at &&
+    a.ended_at === b.ended_at
+  );
+}
+
+/**
+ * Content-equal compare for the polled row list. Every poll hands back a fresh
+ * array even when the queue is static, so a naive `setRequests` re-renders
+ * VerifyQueueView every `refetchIntervalMs` regardless — this lets the poll
+ * loop skip the state update (and keep the prior array reference) when nothing
+ * changed.
+ */
+function requestsEqual(a: VerificationRequest[], b: VerificationRequest[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  return a.every((row, i) => rowEqual(row, b[i]));
+}
+
 export function useVerificationRequests({
   projectId,
   runId,
@@ -83,7 +116,7 @@ export function useVerificationRequests({
         })
         .then((rows) => {
           if (cancelled) return;
-          setRequests(rows);
+          setRequests((prev) => (requestsEqual(prev, rows) ? prev : rows));
           setError(null);
           if (firstLoad) setIsLoading(false);
         })

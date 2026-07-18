@@ -179,6 +179,36 @@ describe('mcpHealthStore — subscribeToMcpHealth', () => {
     expect(mockMcpServerQuery.mock.calls.length).toBe(callCountAfterFirstTick);
   });
 
+  it('skips the set() (same state reference, frozen lastCheckedAt) when a poll repeats the same payload', async () => {
+    const runningHealth: McpServerHealth = { status: 'running', restartAttempts: 0 };
+    mockMcpServerQuery.mockResolvedValue(runningHealth);
+
+    const t0 = 1_000_000;
+    vi.setSystemTime(t0);
+
+    const unsubscribe = useMcpHealthStore.getState().subscribeToMcpHealth();
+    await flushInitialPoll();
+
+    // First poll transitions starting -> healthy: a real set() happened.
+    const stateAfterFirstPoll = useMcpHealthStore.getState();
+    expect(stateAfterFirstPoll.status).toBe('healthy');
+    expect(stateAfterFirstPoll.lastCheckedAt).toBe(t0);
+
+    // Advance to the next 5s tick with the SAME payload — the store should
+    // skip its set() entirely, so getState() returns the identical object
+    // reference and lastCheckedAt does not bump.
+    const t1 = t0 + 5000;
+    vi.setSystemTime(t1);
+    vi.advanceTimersByTime(5000);
+    await flushInitialPoll();
+
+    const stateAfterSecondPoll = useMcpHealthStore.getState();
+    expect(stateAfterSecondPoll).toBe(stateAfterFirstPoll);
+    expect(stateAfterSecondPoll.lastCheckedAt).toBe(t0);
+
+    unsubscribe();
+  });
+
   it('stays in current state when tRPC query throws', async () => {
     mockMcpServerQuery.mockRejectedValue(new Error('tRPC unavailable'));
 
