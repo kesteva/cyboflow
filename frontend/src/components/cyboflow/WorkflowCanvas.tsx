@@ -8,9 +8,12 @@
  *   - steps after currentStepId → pending
  *   - currentStepId null / not found → all pending
  *
- * Measures step-card rects via ResizeObserver and useLayoutEffect, runs the RAF
- * token clock via useWorkflowTokenAnimation, and renders the SVG edge overlay
- * via WorkflowCanvasEdges.
+ * Measures step-card rects via ResizeObserver and useLayoutEffect, and renders
+ * the SVG edge overlay via WorkflowCanvasEdges. The animated token's per-frame
+ * RAF clock lives in the isolated, memoized WorkflowCanvasToken child (this
+ * component only computes its stable from/to endpoints on step transitions /
+ * re-measures) so WorkflowCanvas itself never re-renders at animation-frame
+ * rate — see WorkflowCanvasToken for the isolation rationale.
  *
  * TASK-769 / TASK-780 / IDEA-026
  */
@@ -20,7 +23,7 @@ import type { WorkflowDefinition, WorkflowStep } from '../../../../shared/types/
 import { WorkflowStepCard } from './WorkflowStepCard';
 import type { StepStatus } from './WorkflowStepCard';
 import { WorkflowCanvasEdges, HEAD_BAR_CENTER_Y } from './WorkflowCanvasEdges';
-import { useWorkflowTokenAnimation } from '../../hooks/useWorkflowTokenAnimation';
+import { WorkflowCanvasToken } from './WorkflowCanvasToken';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
 import { ARTIFACT_COLORS, ARTIFACT_GLYPHS, ARTIFACT_RENDER_MODE } from '../../../../shared/types/artifacts';
 
@@ -252,13 +255,16 @@ export function WorkflowCanvas({
     };
   }, [definition]);
 
-  // ── Animated token clock ───────────────────────────────────────────────────
-  const t = useWorkflowTokenAnimation({
-    enabled: effectiveRunning && currentIdx >= 0 && currentIdx < stepIds.length - 1,
-  });
+  // ── Token enable + stable endpoints ────────────────────────────────────────
+  // enabled/endpoints change only on real state changes (run status, step
+  // transition, rect re-measure) — the per-frame interpolation + RAF clock
+  // live entirely inside the memoized WorkflowCanvasToken child so this
+  // component's render never runs at animation-frame rate.
+  const tokenEnabled = effectiveRunning && currentIdx >= 0 && currentIdx < stepIds.length - 1;
 
-  // ── Token position via linear interpolation ───────────────────────────────
-  const token = useMemo<{ x: number; y: number } | null>(() => {
+  const tokenEndpoints = useMemo<
+    { fromX: number; fromY: number; toX: number; toY: number } | null
+  >(() => {
     if (currentIdx < 0 || currentIdx >= stepIds.length - 1) return null;
 
     const currentId = stepIds[currentIdx];
@@ -269,16 +275,13 @@ export function WorkflowCanvas({
     const toRect = stepRects.get(nextId);
     if (!fromRect || !toRect) return null;
 
-    const fromX = fromRect.x + fromRect.width / 2;
-    const toX = toRect.x + toRect.width / 2;
-    const fromY = fromRect.y + HEAD_BAR_CENTER_Y;
-    const toY = toRect.y + HEAD_BAR_CENTER_Y;
-
     return {
-      x: fromX + (toX - fromX) * t,
-      y: fromY + (toY - fromY) * t,
+      fromX: fromRect.x + fromRect.width / 2,
+      toX: toRect.x + toRect.width / 2,
+      fromY: fromRect.y + HEAD_BAR_CENTER_Y,
+      toY: toRect.y + HEAD_BAR_CENTER_Y,
     };
-  }, [t, stepRects, currentIdx, stepIds]);
+  }, [stepRects, currentIdx, stepIds]);
 
   // ── Running pill — uses Tailwind animate-pulse (1.4s built-in) ───────────
 
@@ -447,7 +450,15 @@ export function WorkflowCanvas({
             currentStepIndex={currentIdx}
             stepRects={stepRects}
             containerRect={containerRect}
-            token={token}
+          />
+          {/* Animated token — isolated child owns the per-frame RAF clock so
+              its ~60-120fps ticks never re-render WorkflowCanvas itself. */}
+          <WorkflowCanvasToken
+            enabled={tokenEnabled}
+            fromX={tokenEndpoints?.fromX}
+            fromY={tokenEndpoints?.fromY}
+            toX={tokenEndpoints?.toX}
+            toY={tokenEndpoints?.toY}
           />
         </div>
 

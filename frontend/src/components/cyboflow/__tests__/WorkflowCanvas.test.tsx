@@ -7,6 +7,8 @@
  *   3. State derivation — currentStepId='step-b': step-a → done, step-b → running, step-c → pending.
  *   4. State derivation — currentStepId=null: all steps pending.
  *   5. WorkflowCanvasEdges overlay present when currentStepId is supplied.
+ *   6. Animated token overlay (WorkflowCanvasToken) present only while running
+ *      and mid-workflow; absent when not running or at the final step.
  */
 import '@testing-library/jest-dom';
 import { render, screen } from '@testing-library/react';
@@ -236,5 +238,41 @@ describe('WorkflowCanvas', () => {
     // WorkflowCanvasEdges always renders an <svg> (even when containerRect is null
     // in jsdom and no paths are resolved), because the svg element is unconditional.
     expect(container.querySelectorAll('svg').length).toBeGreaterThan(0);
+  });
+
+  it('renders the animated token overlay while running and mid-workflow (not the final step)', () => {
+    render(
+      <WorkflowCanvas
+        definition={MOCK_DEFINITION}
+        currentStepId="step-b"
+        isRunning={true}
+      />,
+    );
+
+    expect(screen.getByTestId('workflow-canvas-token-overlay')).toBeInTheDocument();
+  });
+
+  it('omits the token overlay when not running', () => {
+    render(
+      <WorkflowCanvas
+        definition={MOCK_DEFINITION}
+        currentStepId="step-b"
+        isRunning={false}
+      />,
+    );
+
+    expect(screen.queryByTestId('workflow-canvas-token-overlay')).not.toBeInTheDocument();
+  });
+
+  it('omits the token overlay at the final step, even while running', () => {
+    render(
+      <WorkflowCanvas
+        definition={MOCK_DEFINITION}
+        currentStepId="step-d"
+        isRunning={true}
+      />,
+    );
+
+    expect(screen.queryByTestId('workflow-canvas-token-overlay')).not.toBeInTheDocument();
   });
 });
