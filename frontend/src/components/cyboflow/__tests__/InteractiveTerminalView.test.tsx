@@ -35,6 +35,14 @@ const xtermBuffer = { viewportY: 0, baseY: 0 };
 let onDataHandler: ((data: string) => void) | undefined;
 const onDataDispose = vi.fn();
 
+// Pending term.write completion callbacks. Real xterm invokes write(data, cb)'s
+// callback AFTER the chunk is parsed; the re-attach drain chains its segment
+// writes off that callback. The mock defers them here so a test can step the
+// drain (pumpOneWrite) or run it to completion (pumpWrites) — and inject a live
+// chunk mid-drain to assert ordering. Writes with no callback (direct live path)
+// are recorded but enqueue nothing.
+let pendingWriteCbs: Array<() => void> = [];
+
 const termMock = {
   open: vi.fn((parent?: HTMLElement) => {
     // Mirror xterm: open() creates `this.element` and parents it. The keep-alive
@@ -46,7 +54,9 @@ const termMock = {
       parent.appendChild(termMock.element);
     }
   }),
-  write: vi.fn(),
+  write: vi.fn((_data?: string, cb?: () => void) => {
+    if (typeof cb === 'function') pendingWriteCbs.push(cb);
+  }),
   loadAddon: vi.fn(),
   dispose: vi.fn(),
   scrollToBottom: vi.fn(),
@@ -195,6 +205,7 @@ beforeEach(() => {
   // it so each test starts with no cached terminal (ISSUE B keep-alive cache).
   __resetInteractiveTerminalCacheForTests();
   stubMatchMedia(false);
+  pendingWriteCbs = [];
   termMock.open.mockClear();
   termMock.write.mockClear();
   termMock.loadAddon.mockClear();
@@ -269,6 +280,32 @@ function makeRenderable(): void {
   act(() => {
     resizeObserverCb?.();
   });
+}
+
+// Fire the captured ResizeObserver once (drives ensureAttached / re-attach). Used
+// after a switch-back remount when makeRenderable's layout getters are already in
+// place from the first mount.
+function fireResize(): void {
+  act(() => {
+    resizeObserverCb?.();
+  });
+}
+
+// Run the deferred term.write completion callbacks to completion, chaining the
+// re-attach drain segment-by-segment until the buffer empties.
+function pumpWrites(): void {
+  act(() => {
+    while (pendingWriteCbs.length > 0) {
+      const cb = pendingWriteCbs.shift();
+      cb?.();
+    }
+  });
+}
+
+// Concatenation of every chunk handed to term.write, in call order — the exact
+// byte sequence the terminal received (buffered drains + direct live writes).
+function writtenText(): string {
+  return termMock.write.mock.calls.map((c) => c[0] as string).join('');
 }
 
 // ---------------------------------------------------------------------------
@@ -605,5 +642,133 @@ describe('InteractiveTerminalView — guardFirstInteraction', () => {
     // The workflow-run guardrail is byte-identical: first mousedown warns.
     fireEvent.mouseDown(screen.getByTestId('interactive-terminal-surface'));
     expect(screen.getByText('Direct terminal access')).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Detached-terminal visibility gate — a backgrounded interactive terminal must
+// NOT run the full xterm ANSI parser per PTY chunk (the perf fix), while never
+// dropping a byte (the 50k-line scrollback / lossless invariant). Chunks are
+// buffered while detached and drained IN ORDER on re-attach.
+// ---------------------------------------------------------------------------
+
+describe('InteractiveTerminalView — detached buffering / ordered re-attach drain', () => {
+  it('(a) buffers PTY chunks while detached instead of writing them (no parse when hidden)', () => {
+    const { unmount } = render(<InteractiveTerminalView runId="run-detached-buffer" />);
+    makeRenderable(); // attached (empty flush → no writes)
+    termMock.write.mockClear();
+
+    unmount(); // switch away → detached; the PTY subscription stays alive
+    deliver('while-hidden-1');
+    deliver('while-hidden-2');
+
+    // Detached: the full ANSI parser must NOT run — nothing is written to xterm.
+    expect(termMock.write).not.toHaveBeenCalled();
+  });
+
+  it('(b) re-attach drains the buffered chunks in order, then resumes live direct writes', () => {
+    const { unmount } = render(<InteractiveTerminalView runId="run-drain-order" />);
+    makeRenderable();
+    termMock.write.mockClear();
+
+    unmount(); // detached
+    deliver('AAA');
+    deliver('BBB');
+    expect(termMock.write).not.toHaveBeenCalled();
+
+    // Switch back: a fresh mount, driven to attach by the ResizeObserver backstop.
+    render(<InteractiveTerminalView runId="run-drain-order" />);
+    fireResize(); // ensureAttached → beginFlush starts the ordered drain
+    pumpWrites(); // chain the segment writes to completion
+
+    // Buffered data drained first, in arrival order (coalesced into one segment).
+    expect(writtenText()).toBe('AAABBB');
+
+    // Direct live writes resume once the buffer is fully drained.
+    deliver('CCC');
+    expect(writtenText()).toBe('AAABBBCCC');
+  });
+
+  it('(c) a live chunk arriving mid-flush is queued BEHIND the buffered drain', () => {
+    const { unmount } = render(<InteractiveTerminalView runId="run-midflush" />);
+    makeRenderable();
+    termMock.write.mockClear();
+
+    unmount(); // detached
+    deliver('BUF'); // buffered
+
+    render(<InteractiveTerminalView runId="run-midflush" />);
+    fireResize(); // beginFlush writes 'BUF' (its completion callback is deferred)
+
+    // While still flushing, a live chunk must NOT interleave ahead — it lands on
+    // the buffer tail and is written only after the drain reaches it.
+    deliver('LIVE');
+    expect(writtenText()).toBe('BUF');
+
+    pumpWrites(); // drain completes: 'LIVE' written after 'BUF'
+    expect(writtenText()).toBe('BUFLIVE');
+
+    // Fully drained → attached: further live writes go direct.
+    deliver('MORE');
+    expect(writtenText()).toBe('BUFLIVEMORE');
+  });
+
+  it('(d) repeated detach/re-attach preserves the full byte sequence in order', () => {
+    const first = render(<InteractiveTerminalView runId="run-repeat" />);
+    makeRenderable();
+    termMock.write.mockClear();
+
+    deliver('L1'); // attached → direct
+    first.unmount();
+    deliver('D1');
+    deliver('D2'); // buffered
+
+    const second = render(<InteractiveTerminalView runId="run-repeat" />);
+    fireResize();
+    pumpWrites(); // drains 'D1D2'
+    deliver('L2'); // attached → direct
+    second.unmount();
+    deliver('D3'); // buffered
+
+    render(<InteractiveTerminalView runId="run-repeat" />);
+    fireResize();
+    pumpWrites(); // drains 'D3'
+    deliver('L3'); // attached → direct
+
+    expect(writtenText()).toBe('L1D1D2L2D3L3');
+  });
+
+  it('(e) overflow feeds the OLDEST buffered segment into the detached xterm rather than dropping', () => {
+    vi.useFakeTimers();
+    try {
+      const { unmount } = render(<InteractiveTerminalView runId="run-overflow" />);
+      makeRenderable(); // opened + attached
+      termMock.write.mockClear();
+
+      unmount(); // detached; `opened` stays true so the buffer can back-drain
+
+      // Two distinct 3MiB chunks: each exceeds the 64KiB coalesce cap, so they are
+      // two segments totalling 6MiB — over the 4MiB detached-buffer bound.
+      const big1 = 'A'.repeat(3 * 1024 * 1024);
+      const big2 = 'B'.repeat(3 * 1024 * 1024);
+      deliver(big1);
+      deliver(big2); // crosses the bound → schedules the background overflow drain
+
+      // Nothing is written synchronously — the overflow drain is an idle timer.
+      expect(termMock.write).not.toHaveBeenCalled();
+
+      act(() => {
+        vi.advanceTimersByTime(1);
+      });
+
+      // The OLDEST segment (big1) is fed into the (detached) xterm; big2 stays
+      // buffered — memory is bounded but NO bytes are dropped.
+      expect(termMock.write).toHaveBeenCalledTimes(1);
+      const written = termMock.write.mock.calls[0][0] as string;
+      expect(written.length).toBe(big1.length);
+      expect(written[0]).toBe('A');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

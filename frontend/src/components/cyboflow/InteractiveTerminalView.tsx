@@ -117,13 +117,85 @@ interface TerminalCacheEntry {
   liveSeen: boolean;
   /** Has the one-shot startup backlog replay already been requested/applied? */
   backlogRequested: boolean;
-  /** True once `term.open()` has succeeded once — after that the xterm buffer
-   *  accepts writes regardless of DOM attachment, so live bytes are written
-   *  straight through (no buffering) even while detached. */
+  /** True once `term.open()` has succeeded once. After that the xterm buffer
+   *  accepts writes regardless of DOM attachment — but we still do NOT push live
+   *  bytes through the full ANSI parser while `attachment !== 'attached'`; they
+   *  are buffered (see `attachment`) so a backgrounded terminal costs no parse. */
   opened: boolean;
-  /** PTY bytes received before the FIRST successful open(), buffered in arrival
-   *  order and flushed once the terminal is first renderable. */
-  pending: string[];
+  /**
+   * Visibility gate for the once-bound PTY handler (the perf fix). The onData
+   * relay closes over the cache entry (not the per-mount `detached` flag), so it
+   * must read the live attachment state from HERE:
+   *   - `'attached'`  — visible + drained: write each chunk straight through.
+   *   - `'detached'`  — switched away / pre-first-open: buffer chunks, never write.
+   *   - `'flushing'`  — re-attaching: draining the buffer in order; live chunks
+   *                     arriving now queue BEHIND the drain (append to the tail).
+   */
+  attachment: 'attached' | 'detached' | 'flushing';
+  /** Raw PTY chunks accumulated while detached/flushing (and pre-first-open), in
+   *  strict arrival order, coalesced into `SEGMENT_COALESCE_LIMIT`-bounded segments
+   *  to cap array length. NEVER dropped — backend can recover only a 256KiB tail. */
+  buffer: string[];
+  /** Running total length of `buffer` (chars ≈ bytes), for the overflow bound. */
+  bufferBytes: number;
+  /** Idle timer that feeds the OLDEST buffered segments into the (detached) xterm
+   *  when `buffer` exceeds `DETACHED_BUFFER_LIMIT` — bounds memory WITHOUT ever
+   *  dropping bytes. Undefined when no background drain is scheduled. */
+  overflowTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Monotonic drain generation. A re-attach bumps it so a stale in-flight
+   *  `term.write` callback from a prior (interrupted) flush cannot resume the
+   *  chain against a newer flush of the same entry. */
+  flushId: number;
+}
+
+// Coalesce buffered chunks into segments no larger than this so the buffer array
+// stays short (concatenation is cheap; ANSI parsing is what we are avoiding).
+const SEGMENT_COALESCE_LIMIT = 64 * 1024;
+// Detached-buffer memory bound. Past this we feed the OLDEST buffered segments
+// into the (detached) xterm — bytes are moved into xterm's own 50k-line
+// scrollback (its normal semantics), never dropped.
+const DETACHED_BUFFER_LIMIT = 4 * 1024 * 1024;
+
+/**
+ * Append a raw chunk to an entry's detached buffer, coalescing into the trailing
+ * segment while it stays under `SEGMENT_COALESCE_LIMIT`. Preserves arrival order.
+ */
+function bufferChunk(entry: TerminalCacheEntry, chunk: string): void {
+  const buf = entry.buffer;
+  const last = buf.length - 1;
+  if (last >= 0 && buf[last].length + chunk.length <= SEGMENT_COALESCE_LIMIT) {
+    buf[last] = buf[last] + chunk;
+  } else {
+    buf.push(chunk);
+  }
+  entry.bufferBytes += chunk.length;
+}
+
+/**
+ * Background memory-bound drain (never a data drop). While the entry is detached
+ * and its buffer exceeds `DETACHED_BUFFER_LIMIT`, feed the OLDEST segment into the
+ * (opened-but-detached) xterm one segment per idle tick, so xterm's own 50k-line
+ * scrollback applies its normal semantics and buffer memory stays bounded.
+ */
+function scheduleOverflowDrain(entry: TerminalCacheEntry): void {
+  if (entry.overflowTimer !== undefined) return;
+  entry.overflowTimer = setTimeout(() => {
+    entry.overflowTimer = undefined;
+    overflowDrainStep(entry);
+  }, 0);
+}
+
+function overflowDrainStep(entry: TerminalCacheEntry): void {
+  // Only bound memory while genuinely detached + writable; a re-attach flush
+  // (which clears this timer) owns the buffer otherwise.
+  if (entry.attachment !== 'detached' || !entry.opened) return;
+  if (entry.bufferBytes <= DETACHED_BUFFER_LIMIT) return;
+  const segment = entry.buffer.shift();
+  if (segment === undefined) return;
+  entry.bufferBytes -= segment.length;
+  // Raw write into the detached xterm buffer — no scroll side effect while hidden.
+  entry.term.write(segment);
+  if (entry.bufferBytes > DETACHED_BUFFER_LIMIT) scheduleOverflowDrain(entry);
 }
 
 const terminalCache = new Map<string, TerminalCacheEntry>();
@@ -140,6 +212,10 @@ export function disposeInteractiveTerminal(runId: string): void {
   const entry = terminalCache.get(runId);
   if (!entry) return;
   terminalCache.delete(runId);
+  if (entry.overflowTimer !== undefined) {
+    clearTimeout(entry.overflowTimer);
+    entry.overflowTimer = undefined;
+  }
   try {
     entry.unsubscribePty();
   } catch {
@@ -334,25 +410,41 @@ export function InteractiveTerminalView({
         liveSeen: false,
         backlogRequested: false,
         opened: false,
-        pending: [],
+        attachment: 'detached',
+        buffer: [],
+        bufferBytes: 0,
+        overflowTimer: undefined,
+        flushId: 0,
       };
 
       // Subscribe ONCE per cache entry and keep it alive across detach/re-attach.
       // Raw bytes go DIRECTLY to term.write (via writeWithAutoScroll) — NEVER into
-      // the structured cyboflow stream store. Before the FIRST open() the renderer
-      // has no dimensions (a write would crash in CompositionHelper), so bytes are
-      // buffered; once opened, xterm's buffer accepts writes regardless of DOM
-      // attachment, so bytes keep accumulating into the scrollback EVEN WHILE the
-      // view is switched away — which is exactly what preserves the live history.
+      // the structured cyboflow stream store. The write is gated on the entry's
+      // VISIBILITY state (`attachment`), read from the entry (not a stale per-mount
+      // closure): only an 'attached' (visible + drained) terminal runs the full
+      // ANSI parser per chunk. While 'detached' (switched away, or before the first
+      // open) or 'flushing' (re-attach drain in progress) the chunk is buffered in
+      // strict arrival order — so a backgrounded interactive terminal costs zero
+      // parse work yet loses no bytes; the buffer drains into the scrollback on
+      // re-attach. This is what preserves the full live history cheaply.
       created.unsubscribePty = subscribeToPtyBytes({
         runId,
         onData: (chunk) => {
           created.liveSeen = true;
-          if (!created.opened) {
-            created.pending.push(chunk);
+          if (created.attachment === 'attached') {
+            writeWithAutoScroll(created.term, chunk);
             return;
           }
-          writeWithAutoScroll(created.term, chunk);
+          // Detached or mid-flush: buffer (queued behind any in-flight drain,
+          // strictly ordered, never dropped). Only start the memory-bound
+          // background drain while fully detached and over the threshold.
+          bufferChunk(created, chunk);
+          if (
+            created.attachment === 'detached' &&
+            created.bufferBytes > DETACHED_BUFFER_LIMIT
+          ) {
+            scheduleOverflowDrain(created);
+          }
         },
       });
 
@@ -380,14 +472,54 @@ export function InteractiveTerminalView({
     activeEntry.relayEnabled = relayEnabledRef.current;
     term.options.disableStdin = !relayEnabledRef.current;
 
-    // Flush buffered PTY bytes (pre-first-open arrivals) once the terminal is
-    // open. Only runs for the very first attach of an entry (after that `opened`
-    // stays true and live bytes write straight through).
-    const flushPending = (): void => {
-      if (detached || !activeEntry.opened || activeEntry.pending.length === 0) return;
-      const buffered = activeEntry.pending.join('');
-      activeEntry.pending = [];
-      writeWithAutoScroll(term, buffered);
+    // Was the viewport pinned to the bottom before a drain began? Mirrors
+    // writeWithAutoScroll's pre-write check so the single post-drain scroll
+    // respects a user who had scrolled up.
+    const atBottom = (): boolean => {
+      const buf = term.buffer.active;
+      return buf.viewportY >= buf.baseY;
+    };
+
+    // Drain one buffered segment into xterm, then chain the next via term.write's
+    // completion callback (coarse batches so one enormous single write can't
+    // freeze the renderer). Live chunks arriving mid-flush were appended to the
+    // buffer TAIL by the onData handler, so they drain in order behind this.
+    //
+    // Guards: a detach during the flush flips `attachment` back to 'detached'
+    // (cleanup) — the next callback then bails, leaving the remaining buffer
+    // intact + ordered for the following re-attach. `flushId` fences a stale
+    // callback from a prior interrupted flush against a newer one.
+    const drainNext = (pinned: boolean, token: number): void => {
+      if (activeEntry.attachment !== 'flushing' || activeEntry.flushId !== token) return;
+      const segment = activeEntry.buffer.shift();
+      if (segment === undefined) {
+        activeEntry.attachment = 'attached';
+        if (pinned) term.scrollToBottom();
+        return;
+      }
+      activeEntry.bufferBytes -= segment.length;
+      term.write(segment, () => drainNext(pinned, token));
+    };
+
+    // Enter the flush state and start draining the buffer in order. A no-op unless
+    // the entry is opened and currently 'detached' (so a second driver — the
+    // ResizeObserver backstop — cannot start a concurrent drain). An empty buffer
+    // transitions straight to 'attached' with no write and no scroll.
+    const beginFlush = (): void => {
+      if (detached || !activeEntry.opened) return;
+      if (activeEntry.attachment !== 'detached') return;
+      if (activeEntry.overflowTimer !== undefined) {
+        clearTimeout(activeEntry.overflowTimer);
+        activeEntry.overflowTimer = undefined;
+      }
+      if (activeEntry.buffer.length === 0) {
+        activeEntry.attachment = 'attached';
+        return;
+      }
+      const token = ++activeEntry.flushId;
+      const pinned = atBottom();
+      activeEntry.attachment = 'flushing';
+      drainNext(pinned, token);
     };
 
     // Defer term.open() until the container has a non-zero layout box. xterm
@@ -420,7 +552,10 @@ export function InteractiveTerminalView({
         return;
       }
       activeEntry.opened = true;
-      flushPending();
+      // Re-attach: drain everything buffered while detached (pre-open bytes on the
+      // very first attach, or accumulated live bytes on a switch-back) into the
+      // scrollback IN ORDER, then resume direct writes.
+      beginFlush();
     };
 
     // Replay-on-attach (blank-xterm fix): the live cyboflow:pty channel only
@@ -437,11 +572,15 @@ export function InteractiveTerminalView({
         .query({ runId })
         .then(({ backlog }) => {
           if (detached || !backlog || activeEntry.liveSeen) return;
-          if (!activeEntry.opened) {
-            activeEntry.pending.unshift(backlog);
+          if (activeEntry.attachment === 'attached') {
+            writeWithAutoScroll(term, backlog);
             return;
           }
-          writeWithAutoScroll(term, backlog);
+          // Startup paint is the OLDEST content → buffer front, so it drains ahead
+          // of any (later) live bytes on flush. `liveSeen` is false here, so the
+          // buffer holds no live bytes yet and this stays strictly ordered.
+          activeEntry.buffer.unshift(backlog);
+          activeEntry.bufferBytes += backlog.length;
         })
         .catch(() => {
           /* no backlog available — proceed with live bytes only */
@@ -509,6 +648,11 @@ export function InteractiveTerminalView({
       // disposeInteractiveTerminal (real end-of-life: panel close / Cancel /
       // Dismiss / session close-out) — NEVER on a switch.
       detached = true;
+      // Flip the visibility gate back to 'detached': the once-bound PTY handler
+      // now buffers instead of writing, and an in-flight flush's next term.write
+      // callback sees `attachment !== 'flushing'` and stops chaining — the
+      // remaining buffer stays intact + ordered for the next re-attach.
+      activeEntry.attachment = 'detached';
       if (openRaf !== undefined) cancelAnimationFrame(openRaf);
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeObserver.disconnect();
