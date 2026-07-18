@@ -418,6 +418,40 @@ describe('QuickSessionComposer — read-only effort pill (migration 029)', () =>
   });
 });
 
+describe('QuickSessionComposer — interactive reasoning-effort pill (IDEA-029)', () => {
+  const EFFORT_PILL_TITLE = 'Reasoning effort — applies on your next message';
+
+  it('renders the effort pill for an idle Claude SDK session', () => {
+    render(<Harness session={makeSession({ status: 'ready' })} interactive={false} />);
+    expect(screen.getByTitle(EFFORT_PILL_TITLE)).toBeInTheDocument();
+  });
+
+  it('renders the effort pill for an idle codex-sdk session (the app-server turn carries effort)', () => {
+    render(
+      <Harness
+        session={makeSession({ status: 'ready', agentProvider: 'codex', agentRuntime: 'codex-sdk' })}
+        interactive={false}
+      />,
+    );
+    expect(screen.getByTitle(EFFORT_PILL_TITLE)).toBeInTheDocument();
+  });
+
+  it('omits the effort pill for a PTY-backed (interactive) session — no turn-options object', () => {
+    render(
+      <Harness
+        session={makeSession({ status: 'ready', substrate: 'interactive', agentProvider: 'codex', agentRuntime: 'codex-pty' })}
+        interactive
+      />,
+    );
+    expect(screen.queryByTitle(EFFORT_PILL_TITLE)).toBeNull();
+  });
+
+  it('omits the effort pill while a turn is running (choice is already baked into the spawn)', () => {
+    render(<Harness session={makeSession({ status: 'running' })} interactive={false} />);
+    expect(screen.queryByTitle(EFFORT_PILL_TITLE)).toBeNull();
+  });
+});
+
 describe('QuickSessionComposer — agent permission pill (Issue #1)', () => {
   it('renders the permission pill for a RUNNING SDK session', () => {
     render(<Harness session={makeSession({ status: 'running' })} interactive={false} />);

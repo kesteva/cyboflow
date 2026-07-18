@@ -145,10 +145,11 @@ vi.mock('../../../../utils/api', () => ({
       detectBranch: vi.fn().mockResolvedValue({ success: true, data: 'main' }),
     },
     sessions: { createQuick: vi.fn() },
-    // useQuickSession persists the launch model + fast-mode on the SDK panel.
+    // useQuickSession persists the launch model + fast-mode + effort on the panel.
     claudePanels: {
       setModel: vi.fn().mockResolvedValue({ success: true }),
       setFastMode: vi.fn().mockResolvedValue({ success: true }),
+      setEffort: vi.fn().mockResolvedValue({ success: true }),
     },
     models: {
       getCodexCatalog: vi.fn().mockResolvedValue({
@@ -878,16 +879,50 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     );
   });
 
-  it('hides the reasoning-effort select for a Codex quick session', async () => {
+  it('shows the reasoning-effort select for a codex-sdk quick session (Codex scale) and threads it via setEffort', async () => {
     await renderLockedWizard();
     await selectQuickAndConfigure();
 
     // Present under the default Claude SDK runtime...
     expect(screen.getByTestId('wizard-effort-select')).toBeInTheDocument();
 
-    // ...gone once the runtime flips to Codex (no effort flag on that path).
+    // ...and STILL present once the runtime flips to codex-sdk (IDEA-029: the
+    // app-server turn carries `effort`). The runtime flip clears the prior Claude
+    // pick (scales differ), so the select resets to 'Default', now on the Codex
+    // scale — which exposes the Codex-only 'minimal' level.
     await act(async () => {
       fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-sdk' } });
+    });
+    const effortSelect = screen.getByTestId('wizard-effort-select') as HTMLSelectElement;
+    expect(effortSelect.value).toBe(''); // reset to 'Default' on the runtime flip
+    expect(screen.getByRole('option', { name: 'minimal' })).toBeInTheDocument(); // Codex-only level
+
+    await act(async () => {
+      fireEvent.change(effortSelect, { target: { value: 'minimal' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    // codex-sdk carries effort via panel-settings persistence (setEffort), NOT
+    // claudeConfig (create-quick reads claudeConfig only for the Claude provider).
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: 1, agentProvider: 'codex', agentRuntime: 'codex-sdk' }),
+    );
+    expect(mockCreateQuick.mock.calls[0]?.[0]).not.toHaveProperty('claudeConfig');
+    expect(vi.mocked(API.claudePanels.setEffort)).toHaveBeenCalledWith('panel-001', 'minimal');
+  });
+
+  it('hides the reasoning-effort select for a codex-pty quick session (no turn-options object)', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    // Present under the default Claude SDK runtime...
+    expect(screen.getByTestId('wizard-effort-select')).toBeInTheDocument();
+
+    // ...gone once the runtime flips to codex-pty — the PTY CLI emits no effort flag.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-pty' } });
     });
     expect(screen.queryByTestId('wizard-effort-select')).toBeNull();
   });

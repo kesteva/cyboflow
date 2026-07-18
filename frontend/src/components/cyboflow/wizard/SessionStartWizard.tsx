@@ -252,9 +252,10 @@ export default function SessionStartWizard(): React.JSX.Element {
   // QUICK-only, surfaced only while Opus is selected.
   const [model, setModel] = useState<string>(DEFAULT_QUICK_MODEL);
   const [fastMode, setFastMode] = useState<boolean>(false);
-  // Per-session reasoning-effort selection (IDEA-029), QUICK + Claude only — a
-  // workflow's per-agent effort is set in the step inspector, and Codex quick /
-  // Ultracode emit no --effort flag, so the control is gated out there. `null`
+  // Per-session reasoning-effort selection (IDEA-029), QUICK on every
+  // effort-capable runtime (Claude SDK/interactive + codex-sdk). Gated out only
+  // for codex-pty (no turn-options object) and Ultracode (pins xhigh, suppresses
+  // --effort); a workflow's per-agent effort is set in the step inspector. `null`
   // means "provider default" (no explicit selection sent).
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort | null>(null);
   // Tracks the previous effective runtime so the effect below clears a pending
@@ -1154,18 +1155,15 @@ export default function SessionStartWizard(): React.JSX.Element {
                 agentRuntime={effectiveRuntime}
               />
             </div>
-            {/* Reasoning-effort picker (IDEA-029) — QUICK + ULTRACODE only; a
-                workflow's per-agent effort is a step-inspector concern, not a
-                launch-time one. 'Default' (empty value) omits an explicit
-                selection so the spawn falls back to the provider default. */}
-            {/* Reasoning-effort select — QUICK + Claude only. Excluded for
-                Ultracode (the card pins xhigh; interactive buildCommandArgs
-                suppresses --effort while effort==='ultracode', so a selection
-                would be a silent no-op) and for Codex quick sessions (the
-                codex-sdk turn path + codex-pty CLI emit no effort flag today, so
-                the control would persist a setting no spawn reads). Per-agent
-                Codex effort lives in the workflow step inspector instead. */}
-            {selection.kind === 'quick' && effectiveProvider === 'claude' && (
+            {/* Reasoning-effort select — QUICK, every effort-capable runtime.
+                Shown for Claude (SDK Options.effort / interactive --effort) AND
+                codex-sdk (startCodexSdkTurn → buildCodexAppServerTurnOptions maps
+                it onto the app-server turn). Excluded only for codex-pty, whose
+                PTY CLI has no turn-options object to carry the flag. Ultracode is
+                a separate card (selection.kind==='ultracode'): its interactive
+                spawn pins xhigh and suppresses --effort, so no select there.
+                effortLevelsForProvider adapts the scale (Codex none..xhigh). */}
+            {selection.kind === 'quick' && effectiveRuntime !== 'codex-pty' && (
               <div className="flex flex-col gap-1">
                 <label htmlFor="wizard-effort" className="text-xs font-medium text-text-secondary">
                   Reasoning effort

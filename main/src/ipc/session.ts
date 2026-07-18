@@ -291,6 +291,14 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
 
     const settings = databaseService.getPanelSettings(panelId);
     const model = typeof settings?.model === 'string' ? settings.model : undefined;
+    // Per-turn reasoning effort (IDEA-029), persisted on the panel by the wizard
+    // launch / composer EffortPill exactly like `model`. buildCodexAppServerTurnOptions
+    // maps it onto the app-server turn's `effort`, so a codex-sdk quick session
+    // honors it on the very NEXT turn with no warm-respawn — effort is a per-turn
+    // startTurn param here, not a spawn-baked option (contrast the Claude SDK seam,
+    // where it rides Options.effort and must sit in the warm fingerprint).
+    const rawEffort = settings?.reasoningEffort;
+    const reasoningEffort = isAnyEffortLevel(rawEffort) ? rawEffort : undefined;
     const resumeTarget = new AgentInvocationStore(databaseService.getDb())
       .getLatestTopLevelResumeTarget(runId);
     const resumeSessionId =
@@ -313,6 +321,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       ...(agentPermissionMode !== undefined ? { agentPermissionMode } : {}),
       ...(model !== undefined ? { model } : {}),
       ...(resumeSessionId !== undefined ? { resumeSessionId } : {}),
+      ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
     });
   };
 

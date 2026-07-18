@@ -58,10 +58,14 @@ interface UseQuickSessionReturn {
    *
    * `reasoningEffort` (IDEA-029, the wizard's effort select / the in-composer
    * EffortPill) rides claudeConfig alongside model/fastMode for the interactive
-   * eager spawn, and is persisted on the frontend-created SDK panel the same way
-   * model is. NOTE: only threaded for the Claude provider today — a Codex quick
-   * launch does not yet carry it (main's create-quick only reads claudeConfig for
-   * `quickAgentProvider === 'claude'`).
+   * eager spawn, and is persisted on the frontend-created panel the same way model
+   * is — for BOTH Claude SDK and codex-sdk (codex-sdk has no eager server spawn, so
+   * its panel is frontend-created here and startCodexSdkTurn reads the persisted
+   * effort per turn). Only codex-pty is excluded: it emits no effort flag and its
+   * panel is server-eager-created, so it never reaches the persistence branch. The
+   * claudeConfig ride stays Claude-only (create-quick reads it for
+   * `quickAgentProvider === 'claude'`); codex-sdk relies solely on the setEffort
+   * persistence below.
    */
   start: (
     agentPermissionMode?: PermissionMode,
@@ -164,9 +168,17 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
           // claudeConfig only reaches the interactive eager spawn, never this
           // frontend-created SDK panel.
           if (model !== undefined) await API.claudePanels.setModel(claudePanel.id, model);
+          // fastMode is Claude-only (no Codex analogue).
           if (!isCodexRuntime) {
             await API.claudePanels.setFastMode(claudePanel.id, fastMode === true);
-            if (reasoningEffort !== undefined) await API.claudePanels.setEffort(claudePanel.id, reasoningEffort);
+          }
+          // Reasoning effort persists for every effort-capable runtime that owns a
+          // frontend-created panel: Claude SDK AND codex-sdk (startCodexSdkTurn reads
+          // it per turn → buildCodexAppServerTurnOptions maps it onto the app-server
+          // turn). Only codex-pty is excluded — it is server-eager-created (so it
+          // never reaches this frontend branch) and emits no effort flag regardless.
+          if (reasoningEffort !== undefined && agentRuntime !== 'codex-pty') {
+            await API.claudePanels.setEffort(claudePanel.id, reasoningEffort);
           }
         }
         await panelApi.createPanel({

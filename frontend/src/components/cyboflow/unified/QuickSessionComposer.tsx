@@ -350,13 +350,15 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
     ) : undefined;
 
   // Reasoning-effort selector (IDEA-029), next to the model pill. Mirrors the
-  // model pill's mounting (idle quick SDK session only) — a running turn's
-  // effort choice is already baked into the in-flight spawn and a mid-turn
-  // change would be discarded. CLAUDE only: the codex-sdk turn path and codex-pty
-  // CLI emit no effort flag today, so the pill would persist a setting no Codex
-  // spawn reads (per-agent Codex effort lives in the workflow step inspector).
+  // model pill's mounting (idle non-PTY quick session only) — a running turn's
+  // effort choice is already baked into the in-flight spawn and a mid-turn change
+  // would be discarded. Shown for BOTH providers that carry the flag: Claude
+  // (Options.effort / --effort) and codex-sdk (startCodexSdkTurn → the app-server
+  // turn's effort). codex-pty is the only effort-incapable runtime, and it always
+  // renders as `interactive`, so the `!interactive` guard already excludes it —
+  // EffortPill's agentProvider prop picks the right scale (Codex none..xhigh).
   const effortSlot =
-    !interactive && !running && panelId && agentProvider === 'claude' ? (
+    !interactive && !running && panelId ? (
       <EffortPill
         panelId={panelId}
         agentProvider={agentProvider}
