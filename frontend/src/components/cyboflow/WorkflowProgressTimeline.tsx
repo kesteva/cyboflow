@@ -4,7 +4,10 @@
  *
  * Consumes:
  *   phaseState prop (UseWorkflowPhaseStateResult) — caller owns tRPC lifecycle
- *   useCyboflowStore                              — streamEvents for log-line projection
+ *
+ * Log-line projection (getStepTimeWindow / projectLogLines below) is a TASK-765
+ * forward-looking placeholder — it always no-ops in v1, so no live event stream
+ * is read here (see @cyboflow-hidden marker above those helpers).
  *
  * Renders protoflow §4a: vertical feed with phase sections (colored swatch + label +
  * step count), timeline step items with state-keyed 2px left borders + 8px bullet +
@@ -17,7 +20,6 @@
  * TASK-768 / TASK-781 / TASK-783 / IDEA-026
  */
 import { useEffect, type ReactElement } from 'react';
-import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
 import { useArtifactsList } from '../../hooks/useArtifactsList';
@@ -67,6 +69,11 @@ interface TimeWindow {
   end: number | null; // null = open (still running)
 }
 
+// @cyboflow-hidden: TASK-765 forward-looking placeholder in cyboflow v1 — the render
+// call site below feeds an empty events array, so this always returns null and
+// projectLogLines below always returns []. Re-enable by threading a live
+// `workflow_step_transition` event stream through the call site once step-transition
+// timestamps land on WorkflowStepState.
 /**
  * Attempt to derive time-window for a step from streamEvents.
  * Currently no `workflow_step_transition` event type is in the StreamEvent union,
@@ -274,9 +281,6 @@ export function WorkflowProgressTimeline({
   // ── Phase state from prop (caller — CyboflowRoot — owns tRPC lifecycle) ───
   const { definition, stepStates, isLoading, error } = phaseState;
 
-  // Stream events for log-line projection
-  const streamEvents = useCyboflowStore((s) => s.streamEvents);
-
   // ── Center-pane session key for the "creates ⟨artifact⟩" chip ──────────────
   // The chip opens an artifact tab keyed by the run's parent session (the same
   // key RunCenterPane uses: session_id ?? runId). Resolve the run from
@@ -393,11 +397,13 @@ export function WorkflowProgressTimeline({
                 const isRunning = status === 'running';
                 const isPending = status === 'pending';
 
-                // Log-line projection
-                const window = getStepTimeWindow(step.id, stepStates, streamEvents);
+                // Log-line projection — no live event stream is subscribed to (see
+                // @cyboflow-hidden marker on the helpers below), so this always
+                // resolves to the v1 degraded no-op: window null, logLines empty.
+                const window = getStepTimeWindow(step.id, stepStates, []);
                 const logLines = isPending
                   ? []
-                  : projectLogLines(streamEvents, window);
+                  : projectLogLines([], window);
 
                 // Start timestamp for elapsed time calculation
                 // unreachable in v1 — kept for TASK-765 (window is always null until step timestamps land)
