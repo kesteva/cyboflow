@@ -9,7 +9,8 @@
  * `setActiveRun`, so rendering straight from it erased the stream when you
  * clicked away from a run and returned. Re-querying the durable log keeps the
  * full history on return while still reflecting live deltas (≤ debounce lag).
- * `streamEvents.length` is used only as a "new events arrived" change signal.
+ * `streamEventsVersion` is used only as a "new events arrived" change signal —
+ * NOT `streamEvents.length`, which stops changing once the buffer hits its cap.
  *
  * Events are rendered via a typed switch dispatch over StreamEvent.type —
  * each of the five SDK discriminators (system / assistant / user / result /
@@ -321,9 +322,11 @@ interface RunViewProps {
 export function RunView({ runId: runIdProp }: RunViewProps = {}) {
   const storeActiveRunId = useCyboflowStore((s) => s.activeRunId);
   const runId = runIdProp !== undefined ? runIdProp : storeActiveRunId;
-  // Live buffer is used ONLY as a change signal — actual rows come from the
-  // durable re-query so history survives clicking away and returning.
-  const streamEventCount = useCyboflowStore((s) => s.streamEvents.length);
+  // The monotonic flush version is used ONLY as a change signal — actual rows
+  // come from the durable re-query so history survives clicking away and
+  // returning. Keyed on the version (not length) so it keeps firing after the
+  // capped buffer stops growing.
+  const streamEventsVersion = useCyboflowStore((s) => s.streamEventsVersion);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const [events, setEvents] = useState<StreamEvent[]>([]);
@@ -364,15 +367,15 @@ export function RunView({ runId: runIdProp }: RunViewProps = {}) {
     };
   }, [runId]);
 
-  // Live re-fetch — debounced re-query whenever this run's streamEvents grow.
+  // Live re-fetch — debounced re-query whenever this run's stream flushes.
   useEffect(() => {
     if (!runId) return;
-    if (streamEventCount === 0) return;
+    if (streamEventsVersion === 0) return;
     const timer = setTimeout(() => {
       void loadEvents(runId);
     }, LIVE_REFETCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [runId, streamEventCount, loadEvents]);
+  }, [runId, streamEventsVersion, loadEvents]);
 
   // Auto-scroll to the bottom when new events arrive
   useEffect(() => {

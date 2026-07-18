@@ -111,3 +111,51 @@ export function deriveRunContextUsage(events: readonly StreamEvent[]): string | 
   const parts = deriveRunContextUsageParts(events);
   return formatContextUsage(parts.used, parts.contextWindow);
 }
+
+/** Starting accumulator for {@link stepRunContextUsageParts}. */
+export const EMPTY_CONTEXT_USAGE_PARTS: RunContextUsageParts = { used: null, contextWindow: null };
+
+/**
+ * Incremental single-event form of {@link deriveRunContextUsageParts}: folding
+ * this over a stream starting from {@link EMPTY_CONTEXT_USAGE_PARTS} yields the
+ * exact same result as a full re-scan, but each step is O(1). The store folds it
+ * at stream-flush time so the meter reads a stored scalar instead of re-scanning
+ * the whole buffer on every delta.
+ *
+ * Returns the SAME `prev` object when the event moves neither number, so a
+ * zustand selector on the stored parts keeps reference identity across the many
+ * events (deltas, tool calls, non-init system rows) that carry no meter fact.
+ */
+export function stepRunContextUsageParts(
+  prev: RunContextUsageParts,
+  event: StreamEvent,
+): RunContextUsageParts {
+  if (event.type === 'assistant') {
+    const u = event.payload.message.usage;
+    if (!u) return prev;
+    // Same disjoint-partition sum as the full scan's `assistant` branch.
+    const n =
+      (u.input_tokens ?? 0) +
+      (u.cache_read_input_tokens ?? 0) +
+      (u.cache_creation_input_tokens ?? 0);
+    if (n <= 0 || n === prev.used) return prev;
+    return { used: n, contextWindow: prev.contextWindow };
+  }
+
+  if (event.type === 'result') {
+    // A `result` carries the context WINDOW only (see the full-scan branch): its
+    // cumulative token counts are NOT a live snapshot, so `used` is untouched.
+    const mu = event.payload.modelUsage;
+    if (mu === undefined) return prev;
+    for (const modelData of Object.values(mu)) {
+      if (modelData === null || typeof modelData !== 'object') continue;
+      const cw = (modelData as Record<string, unknown>).contextWindow;
+      if (typeof cw !== 'number' || cw <= 0) continue;
+      if (cw === prev.contextWindow) return prev;
+      return { used: prev.used, contextWindow: cw };
+    }
+    return prev;
+  }
+
+  return prev;
+}

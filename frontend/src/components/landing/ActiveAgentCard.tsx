@@ -24,7 +24,6 @@ import { formatElapsed } from '../../utils/homeClassify';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import type { ActiveRunRow } from '../../stores/activeRunsStore';
-import type { StreamEvent } from '../../utils/cyboflowApi';
 import { FlowProgress } from './FlowProgress';
 
 /** Wall-clock refresh cadence for the elapsed counter. */
@@ -33,20 +32,6 @@ const ELAPSED_TICK_MS = 30_000;
 export interface ActiveAgentCardProps {
   run: ActiveRunRow;
   projectName: string;
-}
-
-/**
- * Pull the model name from the first system/init stream event in the log, or
- * null when none has arrived. Narrows the discriminated StreamEvent union — no
- * casts, no `any`.
- */
-function findInitModel(events: StreamEvent[]): string | null {
-  for (const event of events) {
-    if (event.type === 'system' && event.payload.subtype === 'init') {
-      return event.payload.model;
-    }
-  }
-  return null;
 }
 
 function openRunSession(run: ActiveRunRow): void {
@@ -66,13 +51,12 @@ export function ActiveAgentCard({ run, projectName }: ActiveAgentCardProps): Rea
     return () => clearInterval(id);
   }, []);
 
-  // Model: only when THIS run is the active run (its stream log is live).
+  // Model: only when THIS run is the active run (its stream log is live). The
+  // store pre-derives the init model into a stable scalar, so this selects that
+  // instead of subscribing to (and scanning) the whole streamEvents array.
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
-  const streamEvents = useCyboflowStore((s) => s.streamEvents);
-  const model = useMemo(() => {
-    if (activeRunId !== run.id) return null;
-    return findInitModel(streamEvents);
-  }, [activeRunId, run.id, streamEvents]);
+  const initModel = useCyboflowStore((s) => s.initModel);
+  const model = activeRunId === run.id ? initModel : null;
 
   // Current step display name — find the step whose id matches currentStepId
   // across every phase in the resolved definition.

@@ -26,7 +26,7 @@ import { MODEL_OPTIONS } from './unified/ModelPill';
 import { API } from '../../utils/api';
 import { InteractiveTerminalView } from './InteractiveTerminalView';
 import { UnifiedChatView } from './unified/UnifiedChatView';
-import { deriveRunContextUsageParts, formatContextUsage } from './unified/runContextUsage';
+import { formatContextUsage } from './unified/runContextUsage';
 import { LiveTail } from '../chat/LiveTail';
 import { reduceLiveTail } from '../../utils/liveTailReducer';
 import { trpc } from '../../trpc/client';
@@ -56,7 +56,10 @@ function selectPrimaryArtifact(artifacts: Artifact[]): Artifact | null {
 export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   const selectedSessionId = useCyboflowStore((s) => s.selectedSessionId);
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
+  // The live tail genuinely needs per-flush updates over the whole (capped)
+  // buffer; the context-% meter below reads the pre-folded scalar instead.
   const streamEvents = useCyboflowStore((s) => s.streamEvents);
+  const liveContextParts = useCyboflowStore((s) => s.contextUsageParts);
   const questionQueue = useQuestionStore((s) => s.queue);
   const runsByProject = useActiveRunsStore((s) => s.runsByProject);
   const openArtifactTab = useCenterPaneStore((s) => s.openArtifactTab);
@@ -112,12 +115,13 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   }, [runId, isInteractive]);
   const contextUsage = useMemo(() => {
     if (isInteractive) return null;
-    const live = deriveRunContextUsageParts(streamEvents);
+    // liveContextParts is folded incrementally in the store at flush time — no
+    // full-buffer scan here, and no whole-array subscription for the meter path.
     return formatContextUsage(
-      live.used ?? baselineUsage.used,
-      live.contextWindow ?? baselineUsage.contextWindow,
+      liveContextParts.used ?? baselineUsage.used,
+      liveContextParts.contextWindow ?? baselineUsage.contextWindow,
     );
-  }, [isInteractive, streamEvents, baselineUsage]);
+  }, [isInteractive, liveContextParts, baselineUsage]);
 
   // Messages — run-scoped source. Interactive runs keep the live xterm as the
   // transcript, so the structured fetch is disabled there.

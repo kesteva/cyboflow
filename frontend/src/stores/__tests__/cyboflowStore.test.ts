@@ -29,8 +29,12 @@
  *       subscription
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { useCyboflowStore } from '../cyboflowStore';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  useCyboflowStore,
+  __setStreamEventSyncFlush,
+  __flushStreamEvents,
+} from '../cyboflowStore';
 import type { StreamEvent } from '../../utils/cyboflowApi';
 
 // ---------------------------------------------------------------------------
@@ -481,5 +485,211 @@ describe('cyboflowStore subscription lifecycle', () => {
     // Explorer / Diff / panels keep following it.
     expect(state.activeRunId).toBeNull();
     expect(state.selectedSessionId).toBe('sess-1');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stream-event coalescing + bounded buffer + derived scalars.
+//
+// Guards the corrected redesign (an adversarial review rejected the naive
+// buffer-clear-at-result version): appendStreamEvent micro-batches into one
+// set() per flush, the buffer is capped (drop-oldest) rather than cleared, a
+// monotonic streamEventsVersion drives debounced consumers, and the context
+// meter + init model are folded into store scalars atomically at flush time.
+// ---------------------------------------------------------------------------
+
+const MODEL = 'claude-opus-4-8';
+
+function unknownEvent(i: number): StreamEvent {
+  return { type: 'unknown', payload: { i }, timestamp: '2026-07-17T00:00:00Z' } as unknown as StreamEvent;
+}
+function initEvent(model: string): StreamEvent {
+  return {
+    type: 'system',
+    payload: {
+      type: 'system',
+      subtype: 'init',
+      model,
+      session_id: 'sess',
+      cwd: '/tmp',
+      tools: [],
+      mcp_servers: [],
+      permissionMode: 'default',
+    },
+    timestamp: '2026-07-17T00:00:00Z',
+  } as unknown as StreamEvent;
+}
+function assistantEvent(usage: Record<string, number>): StreamEvent {
+  return { type: 'assistant', payload: { message: { usage } }, timestamp: '2026-07-17T00:00:00Z' } as unknown as StreamEvent;
+}
+function resultEvent(modelUsage: Record<string, unknown>): StreamEvent {
+  return { type: 'result', payload: { modelUsage }, timestamp: '2026-07-17T00:00:00Z' } as unknown as StreamEvent;
+}
+function payloadI(event: StreamEvent): number {
+  return (event.payload as unknown as { i: number }).i;
+}
+
+describe('cyboflowStore stream-event coalescing', () => {
+  beforeEach(() => {
+    // Each test starts in synchronous-flush mode (the store's default under
+    // vitest); coalescing tests opt out explicitly.
+    __setStreamEventSyncFlush(true);
+    mockSubscribe.mockImplementation(() => vi.fn());
+    useCyboflowStore.getState().clearActiveRun();
+  });
+
+  afterEach(() => {
+    // Restore sync flush + drain any pending timer so a lingering flush can't
+    // bump the version during a later test.
+    __setStreamEventSyncFlush(true);
+    useCyboflowStore.getState().clearActiveRun();
+  });
+
+  it('(g) coalesces N rapid appends into a single set()/version bump on flush', () => {
+    __setStreamEventSyncFlush(false);
+    useCyboflowStore.getState().setActiveRun('run-coalesce');
+
+    const versionsSeen: number[] = [];
+    const unsub = useCyboflowStore.subscribe((s) => versionsSeen.push(s.streamEventsVersion));
+
+    for (let i = 0; i < 20; i += 1) {
+      useCyboflowStore.getState().appendStreamEvent(unknownEvent(i));
+    }
+    // Still batched — no set() yet.
+    expect(useCyboflowStore.getState().streamEvents).toHaveLength(0);
+    expect(useCyboflowStore.getState().streamEventsVersion).toBe(0);
+
+    __flushStreamEvents();
+    unsub();
+
+    // Exactly one set() from the flush → one version bump, all 20 applied.
+    expect(useCyboflowStore.getState().streamEvents).toHaveLength(20);
+    expect(useCyboflowStore.getState().streamEventsVersion).toBe(1);
+    expect(versionsSeen).toEqual([1]);
+  });
+
+  it('(g) a batch containing a result flushes immediately', () => {
+    __setStreamEventSyncFlush(false);
+    useCyboflowStore.getState().setActiveRun('run-coalesce-2');
+
+    useCyboflowStore.getState().appendStreamEvent(unknownEvent(1));
+    expect(useCyboflowStore.getState().streamEvents).toHaveLength(0); // batched
+
+    useCyboflowStore.getState().appendStreamEvent(resultEvent({ [MODEL]: { contextWindow: 200000 } }));
+    // The result forces an immediate flush of the whole pending batch.
+    expect(useCyboflowStore.getState().streamEvents).toHaveLength(2);
+    expect(useCyboflowStore.getState().streamEventsVersion).toBe(1);
+  });
+
+  it('(a) a result in the same batch as its deltas bumps the version exactly once', () => {
+    __setStreamEventSyncFlush(false);
+    useCyboflowStore.getState().setActiveRun('run-settle');
+
+    const versionsSeen: number[] = [];
+    const unsub = useCyboflowStore.subscribe((s) => versionsSeen.push(s.streamEventsVersion));
+
+    useCyboflowStore.getState().appendStreamEvent(assistantEvent({ input_tokens: 2000, cache_read_input_tokens: 60000 }));
+    useCyboflowStore.getState().appendStreamEvent(unknownEvent(1));
+    useCyboflowStore.getState().appendStreamEvent(resultEvent({ [MODEL]: { contextWindow: 200000 } }));
+    unsub();
+
+    // The debounce key (version) bumps once for the whole batch, so the refetch
+    // keyed on it fires exactly once — no cancelled-without-rearm hazard.
+    expect(useCyboflowStore.getState().streamEventsVersion).toBe(1);
+    expect(versionsSeen).toEqual([1]);
+    // Queue fully drained; a follow-up flush is a no-op (no orphaned timer).
+    __flushStreamEvents();
+    expect(useCyboflowStore.getState().streamEventsVersion).toBe(1);
+  });
+
+  it('(c) the context-meter scalar survives past the result (not reset)', () => {
+    useCyboflowStore.getState().setActiveRun('run-meter');
+
+    useCyboflowStore.getState().appendStreamEvent(assistantEvent({ input_tokens: 2000, cache_read_input_tokens: 60000 })); // used=62000
+    useCyboflowStore.getState().appendStreamEvent(resultEvent({ [MODEL]: { contextWindow: 200000 } })); // window=200000
+    expect(useCyboflowStore.getState().contextUsageParts).toEqual({ used: 62000, contextWindow: 200000 });
+
+    // Events after the result must NOT wipe the scalar.
+    useCyboflowStore.getState().appendStreamEvent(unknownEvent(1));
+    useCyboflowStore.getState().appendStreamEvent(unknownEvent(2));
+    expect(useCyboflowStore.getState().contextUsageParts).toEqual({ used: 62000, contextWindow: 200000 });
+
+    // A next-turn assistant updates `used`; the window persists.
+    useCyboflowStore.getState().appendStreamEvent(assistantEvent({ input_tokens: 1000, cache_read_input_tokens: 5000 })); // used=6000
+    expect(useCyboflowStore.getState().contextUsageParts).toEqual({ used: 6000, contextWindow: 200000 });
+  });
+
+  it('(d) caps the buffer at MAX_STREAM_EVENTS (drop-oldest) while the version keeps incrementing', () => {
+    useCyboflowStore.getState().setActiveRun('run-cap');
+
+    const MAX = 4000;
+    const total = MAX + 5;
+    for (let i = 0; i < total; i += 1) {
+      useCyboflowStore.getState().appendStreamEvent(unknownEvent(i));
+    }
+
+    const state = useCyboflowStore.getState();
+    expect(state.streamEvents).toHaveLength(MAX);
+    // Oldest dropped: the buffer holds the LAST MAX events.
+    expect(payloadI(state.streamEvents[0])).toBe(total - MAX);
+    expect(payloadI(state.streamEvents[MAX - 1])).toBe(total - 1);
+    // Version keeps incrementing even though length is pinned at the cap — this
+    // is the starvation guard for the (now version-keyed) debounced consumers.
+    expect(state.streamEventsVersion).toBe(total);
+  });
+
+  it('(e) initModel is set from the first system/init event and is stable thereafter', () => {
+    useCyboflowStore.getState().setActiveRun('run-init');
+    expect(useCyboflowStore.getState().initModel).toBeNull();
+
+    // A non-init event first — still no model.
+    useCyboflowStore.getState().appendStreamEvent(unknownEvent(0));
+    expect(useCyboflowStore.getState().initModel).toBeNull();
+
+    // First init sets it.
+    useCyboflowStore.getState().appendStreamEvent(initEvent('claude-opus-4-8'));
+    expect(useCyboflowStore.getState().initModel).toBe('claude-opus-4-8');
+
+    // A later init does NOT overwrite it.
+    useCyboflowStore.getState().appendStreamEvent(initEvent('claude-sonnet-4-5'));
+    expect(useCyboflowStore.getState().initModel).toBe('claude-opus-4-8');
+  });
+
+  it('(f) run switch resets buffer + version + scalars', () => {
+    useCyboflowStore.getState().setActiveRun('run-f1');
+    useCyboflowStore.getState().appendStreamEvent(initEvent('claude-x'));
+    useCyboflowStore.getState().appendStreamEvent(assistantEvent({ input_tokens: 2000, cache_read_input_tokens: 60000 }));
+    useCyboflowStore.getState().appendStreamEvent(resultEvent({ [MODEL]: { contextWindow: 200000 } }));
+
+    let s = useCyboflowStore.getState();
+    expect(s.streamEvents).toHaveLength(3);
+    expect(s.streamEventsVersion).toBe(3);
+    expect(s.initModel).toBe('claude-x');
+    expect(s.contextUsageParts).toEqual({ used: 62000, contextWindow: 200000 });
+
+    useCyboflowStore.getState().setActiveRun('run-f2');
+    s = useCyboflowStore.getState();
+    expect(s.streamEvents).toHaveLength(0);
+    expect(s.streamEventsVersion).toBe(0);
+    expect(s.initModel).toBeNull();
+    expect(s.contextUsageParts).toEqual({ used: null, contextWindow: null });
+  });
+
+  it('(f) run switch discards events still queued for the previous run', () => {
+    __setStreamEventSyncFlush(false);
+    useCyboflowStore.getState().setActiveRun('run-old');
+
+    useCyboflowStore.getState().appendStreamEvent(unknownEvent(1)); // queued, not flushed
+    useCyboflowStore.getState().appendStreamEvent(unknownEvent(2));
+    expect(useCyboflowStore.getState().streamEvents).toHaveLength(0);
+
+    // Switch before the flush timer fires — the queued run-old events must be
+    // discarded, not leaked into run-new's buffer.
+    useCyboflowStore.getState().setActiveRun('run-new');
+    __flushStreamEvents();
+
+    const s = useCyboflowStore.getState();
+    expect(s.streamEvents).toHaveLength(0);
+    expect(s.streamEventsVersion).toBe(0); // no leaked bump from the discarded batch
   });
 });

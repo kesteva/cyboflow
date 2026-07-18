@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { deriveRunContextUsage } from '../runContextUsage';
+import {
+  deriveRunContextUsage,
+  deriveRunContextUsageParts,
+  stepRunContextUsageParts,
+  EMPTY_CONTEXT_USAGE_PARTS,
+} from '../runContextUsage';
 import type { StreamEvent } from '../../../../utils/cyboflowApi';
 
 // Minimal stream-event fixtures. The real StreamEvent union carries many more
@@ -11,7 +16,18 @@ function assistant(usage: Record<string, number>): StreamEvent {
 function result(modelUsage: Record<string, unknown> | undefined): StreamEvent {
   return { type: 'result', payload: { modelUsage } } as unknown as StreamEvent;
 }
+function streamDelta(): StreamEvent {
+  return {
+    type: 'stream_event',
+    payload: { event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'x' } } },
+  } as unknown as StreamEvent;
+}
 const MODEL = 'claude-opus-4-8';
+
+/** Fold the incremental step over a sequence, matching the store's flush loop. */
+function foldParts(events: StreamEvent[]): { used: number | null; contextWindow: number | null } {
+  return events.reduce(stepRunContextUsageParts, EMPTY_CONTEXT_USAGE_PARTS);
+}
 
 describe('deriveRunContextUsage', () => {
   it('returns null for an empty stream', () => {
@@ -86,5 +102,71 @@ describe('deriveRunContextUsage', () => {
 
   it('ignores a window with zero used tokens', () => {
     expect(deriveRunContextUsage([result({ [MODEL]: { contextWindow: 200000 } })])).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// stepRunContextUsageParts — the incremental form used by the store at flush
+// time. It MUST equal a full re-scan (deriveRunContextUsageParts), and must
+// preserve object identity when an event carries no meter fact (so a zustand
+// selector on the stored parts short-circuits).
+// ---------------------------------------------------------------------------
+
+describe('stepRunContextUsageParts (incremental) equals the full scan', () => {
+  const sequences: Array<[string, StreamEvent[]]> = [
+    ['empty', []],
+    ['assistant-only (no window yet)', [assistant({ input_tokens: 5000, cache_read_input_tokens: 40000 })]],
+    ['result-only (no numerator)', [result({ [MODEL]: { contextWindow: 200000 } })]],
+    [
+      'assistant + result + next-turn deltas + later assistant',
+      [
+        assistant({ input_tokens: 5000, cache_read_input_tokens: 40000 }),
+        result({ [MODEL]: { contextWindow: 200000, inputTokens: 8000, cacheReadInputTokens: 120000 } }),
+        streamDelta(),
+        streamDelta(),
+        assistant({ input_tokens: 2000, cache_read_input_tokens: 60000, cache_creation_input_tokens: 0 }),
+        result({ [MODEL]: { contextWindow: 200000 } }),
+      ],
+    ],
+    [
+      'cumulative trailing result must NOT peg (regression: ctx 100%)',
+      [
+        assistant({ input_tokens: 1, cache_read_input_tokens: 95708, cache_creation_input_tokens: 273 }),
+        result({
+          ['claude-opus-4-7[1m]']: {
+            contextWindow: 1_000_000,
+            inputTokens: 171,
+            cacheReadInputTokens: 2_156_264,
+            cacheCreationInputTokens: 235_454,
+          },
+        }),
+      ],
+    ],
+    ['zero-usage assistant is ignored', [
+      result({ [MODEL]: { contextWindow: 200000 } }),
+      assistant({ input_tokens: 3000, cache_read_input_tokens: 5000 }),
+      assistant({ input_tokens: 0, cache_read_input_tokens: 0 }),
+    ]],
+    ['malformed window ignored', [result({ [MODEL]: { contextWindow: 'lots' } as unknown as Record<string, number> })]],
+  ];
+
+  it.each(sequences)('(b) matches deriveRunContextUsageParts for: %s', (_label, events) => {
+    expect(foldParts(events)).toEqual(deriveRunContextUsageParts(events));
+  });
+
+  it('returns the SAME object reference when an event carries no meter fact', () => {
+    const parts = { used: 62000, contextWindow: 200000 };
+    // A stream_event delta, an assistant with an equal count, and a result with
+    // an equal window all leave both numbers untouched → identity preserved.
+    expect(stepRunContextUsageParts(parts, streamDelta())).toBe(parts);
+    expect(stepRunContextUsageParts(parts, assistant({ input_tokens: 62000 }))).toBe(parts);
+    expect(stepRunContextUsageParts(parts, result({ [MODEL]: { contextWindow: 200000 } }))).toBe(parts);
+  });
+
+  it('returns a NEW object when a number changes', () => {
+    const parts = { used: 1000, contextWindow: null as number | null };
+    const next = stepRunContextUsageParts(parts, result({ [MODEL]: { contextWindow: 200000 } }));
+    expect(next).not.toBe(parts);
+    expect(next).toEqual({ used: 1000, contextWindow: 200000 });
   });
 });
