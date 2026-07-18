@@ -179,7 +179,7 @@ describe('mcpHealthStore — subscribeToMcpHealth', () => {
     expect(mockMcpServerQuery.mock.calls.length).toBe(callCountAfterFirstTick);
   });
 
-  it('skips the set() (same state reference, frozen lastCheckedAt) when a poll repeats the same payload', async () => {
+  it('bumps ONLY lastCheckedAt when a poll repeats the same payload (truthful last-probe time)', async () => {
     const runningHealth: McpServerHealth = { status: 'running', restartAttempts: 0 };
     mockMcpServerQuery.mockResolvedValue(runningHealth);
 
@@ -194,17 +194,20 @@ describe('mcpHealthStore — subscribeToMcpHealth', () => {
     expect(stateAfterFirstPoll.status).toBe('healthy');
     expect(stateAfterFirstPoll.lastCheckedAt).toBe(t0);
 
-    // Advance to the next 5s tick with the SAME payload — the store should
-    // skip its set() entirely, so getState() returns the identical object
-    // reference and lastCheckedAt does not bump.
+    // Advance to the next 5s tick with the SAME payload — `lastCheckedAt` must
+    // stay truthful (the time of the last successful probe) per its field
+    // contract, while status/lastError/pid keep their values so narrowed
+    // selectors (McpHealthIndicator excludes the timestamp) don't re-render.
+    // (advanceTimersByTime also advances the mocked Date.now clock.)
     const t1 = t0 + 5000;
-    vi.setSystemTime(t1);
     vi.advanceTimersByTime(5000);
     await flushInitialPoll();
 
     const stateAfterSecondPoll = useMcpHealthStore.getState();
-    expect(stateAfterSecondPoll).toBe(stateAfterFirstPoll);
-    expect(stateAfterSecondPoll.lastCheckedAt).toBe(t0);
+    expect(stateAfterSecondPoll.lastCheckedAt).toBe(t1);
+    expect(stateAfterSecondPoll.status).toBe(stateAfterFirstPoll.status);
+    expect(stateAfterSecondPoll.lastError).toBe(stateAfterFirstPoll.lastError);
+    expect(stateAfterSecondPoll.pid).toBe(stateAfterFirstPoll.pid);
 
     unsubscribe();
   });

@@ -114,10 +114,12 @@ export const useMcpHealthStore = create<McpHealthState & McpHealthActions>()((se
 
         const prev = get();
         if (prev.status === nextStatus && prev.lastError === nextError && prev.pid === nextPid) {
-          // Unchanged health payload — skip the set entirely so `lastCheckedAt`
-          // doesn't bump (and every store subscriber doesn't re-render) on a
-          // steady-state 5s poll. `lastCheckedAt` then reflects the last actual
-          // status transition rather than "last polled at".
+          // Unchanged health payload — bump ONLY `lastCheckedAt`, which stays
+          // truthful ("last successful probe") per its field contract. The
+          // always-visible dot doesn't re-render on this steady-state write:
+          // McpHealthIndicator's selector deliberately excludes the timestamp;
+          // only an OPEN diagnostics popover subscribes to it (LastCheckedRow).
+          set({ lastCheckedAt: Date.now() });
           return;
         }
 

@@ -30,7 +30,11 @@ const mockStoreState: StoreShape = {
 };
 
 vi.mock('../stores/mcpHealthStore', () => ({
-  useMcpHealthStore: () => mockStoreState,
+  // Apply the selector like the real hook does — LastCheckedRow selects the
+  // bare `lastCheckedAt` scalar, so returning the whole state object for every
+  // call would hand it an object where a number|null is expected.
+  useMcpHealthStore: (selector?: (s: typeof mockStoreState) => unknown) =>
+    selector ? selector(mockStoreState) : mockStoreState,
 }));
 
 // Import after mock is set up

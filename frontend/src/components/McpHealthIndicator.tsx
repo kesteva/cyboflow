@@ -54,17 +54,33 @@ function formatTimestamp(ts: number | null): string {
 // Component
 // ---------------------------------------------------------------------------
 
+/**
+ * "Last checked" popover row, split out so ONLY it subscribes to
+ * `lastCheckedAt`. Every successful 5s probe bumps that timestamp (it is the
+ * truthful "last probed at" time), and this row is mounted only while the
+ * diagnostics popover is open — so the steady-state poll re-renders nothing
+ * except an open popover, never the always-visible dot.
+ */
+function LastCheckedRow() {
+  const lastCheckedAt = useMcpHealthStore((s) => s.lastCheckedAt);
+  return (
+    <div className="flex justify-between">
+      <span className="text-text-muted">Last checked</span>
+      <span>{formatTimestamp(lastCheckedAt)}</span>
+    </div>
+  );
+}
+
 export function McpHealthIndicator() {
   // Narrow, shallow-equal selector over exactly the fields this component
   // renders (rather than subscribing to the whole store with no selector,
-  // which re-renders on ANY store write). Combined with the store's skip of
-  // `set()` for an unchanged polled payload (see mcpHealthStore.ts), this
-  // component now only re-renders when status/lastError/pid/lastCheckedAt
-  // actually change — not on every steady-state 5s poll tick.
-  const { status, lastCheckedAt, lastError, pid } = useMcpHealthStore(
+  // which re-renders on ANY store write). `lastCheckedAt` is deliberately
+  // EXCLUDED — it bumps on every successful 5s probe and lives in
+  // LastCheckedRow, mounted only while the popover is open — so this
+  // component re-renders only when status/lastError/pid actually change.
+  const { status, lastError, pid } = useMcpHealthStore(
     useShallow((s) => ({
       status: s.status,
-      lastCheckedAt: s.lastCheckedAt,
       lastError: s.lastError,
       pid: s.pid,
     })),
@@ -151,10 +167,7 @@ export function McpHealthIndicator() {
               </span>
             </div>
 
-            <div className="flex justify-between">
-              <span className="text-text-muted">Last checked</span>
-              <span>{formatTimestamp(lastCheckedAt)}</span>
-            </div>
+            <LastCheckedRow />
 
             <div className="flex justify-between">
               <span className="text-text-muted">PID</span>
