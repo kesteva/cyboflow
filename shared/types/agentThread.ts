@@ -74,8 +74,29 @@ export interface AgentThreadEvent {
  * setActiveRun — hence the two-armed discriminant instead of a single runId.
  */
 export type AgentNavigationTarget =
-  | { target: 'run'; runId: string }
-  | { target: 'quick-session'; sessionId: string; runId?: string };
+  | {
+      target: 'run';
+      runId: string;
+      /**
+       * Resolved server-side at propose time (never trust a caller-supplied
+       * value); the renderer activates this project before dispatching
+       * navigation, since the global agent is cross-project by design and the
+       * target run may not belong to the CURRENTLY active project.
+       */
+      projectId?: number;
+    }
+  | {
+      target: 'quick-session';
+      sessionId: string;
+      runId?: string;
+      /**
+       * Resolved server-side at propose time (never trust a caller-supplied
+       * value); the renderer activates this project before dispatching
+       * navigation, since the global agent is cross-project by design and the
+       * target session may not belong to the CURRENTLY active project.
+       */
+      projectId?: number;
+    };
 
 // ---------------------------------------------------------------------------
 // Per-kind proposal payloads

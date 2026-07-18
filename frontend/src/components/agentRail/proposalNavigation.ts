@@ -11,22 +11,28 @@
  * for the review queue's "Open session →" link. This mirrors that file's
  * openRunSession / openQuickSession helpers.
  *
- * DEVIATION (flagged for the parent session — see the S1.3 final report):
- * {@link AgentNavigationTarget} carries no projectId, so unlike
- * TypeGroupedQueue's helpers (and ReviewItemCard's handleAnswerInSession) this
- * cannot call `useNavigationStore.setActiveProjectId`. CyboflowRoot resolves
+ * CROSS-PROJECT GAP (was a DEVIATION flagged in the S1.3 final report — now
+ * closed): {@link AgentNavigationTarget} carries an optional `projectId`,
+ * resolved server-side at propose time (never trusted from a caller) by
+ * cyboflow_propose_action's open-session handler
+ * (main/src/orchestrator/mcpServer/mcpQueryHandler.ts). CyboflowRoot resolves
  * the active run via `runsByProject[projectId]` keyed off whatever project is
- * CURRENTLY active in navigationStore — if the target run/session belongs to a
- * different project, the session pane can fail to find it. A full fix needs a
- * projectId added to the shared-types navigation payload
- * (shared/types/agentThread.ts) and threaded through the propose/execute path,
- * which is outside this task's frontend-only surface.
+ * CURRENTLY active in navigationStore, so when the target carries a
+ * projectId, we activate that project FIRST — same as TypeGroupedQueue's
+ * openRunSession / openQuickSession and ReviewItemCard's
+ * handleAnswerInSession — before dispatching setActiveRun /
+ * setActiveQuickSession. A target with no projectId (e.g. an older proposal
+ * persisted before this enrichment shipped) falls back to today's
+ * behavior: dispatch against whatever project is already active.
  */
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import type { AgentNavigationTarget } from '../../../../shared/types/agentThread';
 
 export function navigateToProposalTarget(navigation: AgentNavigationTarget): void {
+  if (navigation.projectId !== undefined) {
+    useNavigationStore.getState().setActiveProjectId(navigation.projectId);
+  }
   if (navigation.target === 'run') {
     useCyboflowStore.getState().setActiveRun(navigation.runId);
   } else {

@@ -584,6 +584,7 @@ describe('McpQueryHandler global-agent tool family', () => {
     });
 
     it('open-session: accepts a discriminated navigation payload with null preconditions', async () => {
+      seedRunFor(db, 'run-xyz', 1);
       const payload = { kind: 'open-session', navigation: { target: 'run', runId: 'run-xyz' } };
       const { socket, writes } = makeSocketDouble();
       await handler.handleMessage(
@@ -597,8 +598,132 @@ describe('McpQueryHandler global-agent tool family', () => {
       );
       const { proposalId } = parseLastWrite(writes).data as { proposalId: string };
       const proposal = store.getProposal(proposalId) as AgentProposal;
-      expect(proposal.payload).toEqual(payload);
+      // The stored navigation is ENRICHED with the run's server-resolved
+      // projectId — see the dedicated enrichment tests below for the full
+      // contract (both arms + the caller-supplied-bogus-projectId overwrite).
+      expect(proposal.payload).toEqual({
+        kind: 'open-session',
+        navigation: { target: 'run', runId: 'run-xyz', projectId: 1 },
+      });
       expect(proposal.preconditions).toBeNull();
+    });
+
+    it("open-session: enriches a 'run' target with the run's server-resolved projectId, overwriting any caller-supplied projectId", async () => {
+      seedRunFor(db, 'run-enrich', 2);
+      const payload = {
+        kind: 'open-session',
+        navigation: { target: 'run', runId: 'run-enrich', projectId: 999 }, // bogus — must be overwritten
+      };
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        {
+          type: 'mcp-propose-action',
+          requestId: 'r1',
+          runId: 'agent:thread-1',
+          payloadJson: JSON.stringify(payload),
+        },
+        socket,
+      );
+      const res = parseLastWrite(writes);
+      expect(res.ok).toBe(true);
+      const { proposalId } = res.data as { proposalId: string };
+      const proposal = store.getProposal(proposalId) as AgentProposal;
+      expect(proposal.payload).toEqual({
+        kind: 'open-session',
+        navigation: { target: 'run', runId: 'run-enrich', projectId: 2 },
+      });
+    });
+
+    it("open-session: enriches a 'quick-session' target with the session's server-resolved projectId, overwriting any caller-supplied projectId", async () => {
+      seedSession(db, 'sess-enrich', 2, { runId: 'run-under-sess', isQuick: true });
+      const payload = {
+        kind: 'open-session',
+        navigation: {
+          target: 'quick-session',
+          sessionId: 'sess-enrich',
+          runId: 'run-under-sess',
+          projectId: 999, // bogus — must be overwritten
+        },
+      };
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        {
+          type: 'mcp-propose-action',
+          requestId: 'r1',
+          runId: 'agent:thread-1',
+          payloadJson: JSON.stringify(payload),
+        },
+        socket,
+      );
+      const res = parseLastWrite(writes);
+      expect(res.ok).toBe(true);
+      const { proposalId } = res.data as { proposalId: string };
+      const proposal = store.getProposal(proposalId) as AgentProposal;
+      expect(proposal.payload).toEqual({
+        kind: 'open-session',
+        navigation: {
+          target: 'quick-session',
+          sessionId: 'sess-enrich',
+          runId: 'run-under-sess',
+          projectId: 2,
+        },
+      });
+    });
+
+    it("open-session: enriches an IDLE 'quick-session' target (no runId) with its projectId", async () => {
+      seedSession(db, 'sess-idle', 1, { isQuick: true });
+      const payload = { kind: 'open-session', navigation: { target: 'quick-session', sessionId: 'sess-idle' } };
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        {
+          type: 'mcp-propose-action',
+          requestId: 'r1',
+          runId: 'agent:thread-1',
+          payloadJson: JSON.stringify(payload),
+        },
+        socket,
+      );
+      const res = parseLastWrite(writes);
+      expect(res.ok).toBe(true);
+      const { proposalId } = res.data as { proposalId: string };
+      const proposal = store.getProposal(proposalId) as AgentProposal;
+      expect(proposal.payload).toEqual({
+        kind: 'open-session',
+        navigation: { target: 'quick-session', sessionId: 'sess-idle', projectId: 1 },
+      });
+    });
+
+    it("open-session: rejects a 'run' target whose runId does not exist with run_not_found", async () => {
+      const payload = { kind: 'open-session', navigation: { target: 'run', runId: 'run-does-not-exist' } };
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        {
+          type: 'mcp-propose-action',
+          requestId: 'r1',
+          runId: 'agent:thread-1',
+          payloadJson: JSON.stringify(payload),
+        },
+        socket,
+      );
+      expect(parseLastWrite(writes)).toMatchObject({ ok: false, error: 'run_not_found' });
+    });
+
+    it("open-session: rejects a 'quick-session' target whose sessionId does not exist with session_not_found", async () => {
+      const payload = {
+        kind: 'open-session',
+        navigation: { target: 'quick-session', sessionId: 'sess-does-not-exist' },
+      };
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        {
+          type: 'mcp-propose-action',
+          requestId: 'r1',
+          runId: 'agent:thread-1',
+          payloadJson: JSON.stringify(payload),
+        },
+        socket,
+      );
+      expect(parseLastWrite(writes)).toMatchObject({ ok: false, error: 'session_not_found' });
     });
 
     it('edit-workflow: captures a server-computed spec_hash even when the caller supplies a bogus one', async () => {

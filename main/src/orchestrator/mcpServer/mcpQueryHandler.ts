@@ -4579,8 +4579,49 @@ export class McpQueryHandler {
         expectedVersions[item.taskId] = identity.version;
       }
       preconditions = { kind: 'reprioritize-backlog', expectedVersions };
+    } else if (payload.kind === 'open-session') {
+      // No preconditions (shared type contract), but the navigation target IS
+      // enriched here with its OWNING project, resolved server-side from the
+      // run/session row itself — never trust a caller-supplied projectId
+      // (parseAgentNavigationTarget never even copies one out of the wire
+      // payload, so this is the only source). The renderer
+      // (frontend/src/components/agentRail/proposalNavigation.ts) activates
+      // this project before dispatching navigation, since the global agent is
+      // cross-project by design and the target run/session may not belong to
+      // whatever project happens to be active when the card is confirmed. A
+      // target that does not resolve to a real row is an agent mistake, not
+      // something to persist as a broken card — reject the proposal outright
+      // rather than let it round-trip a stale/typo'd id.
+      const nav = payload.navigation;
+      if (nav.target === 'run') {
+        const row = this.db.prepare('SELECT project_id FROM workflow_runs WHERE id = ?').get(nav.runId) as
+          | { project_id?: unknown }
+          | undefined;
+        if (!row || typeof row.project_id !== 'number') {
+          this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'run_not_found' });
+          return;
+        }
+        payload.navigation = { target: 'run', runId: nav.runId, projectId: row.project_id };
+      } else {
+        const row = this.db.prepare('SELECT project_id FROM sessions WHERE id = ?').get(nav.sessionId) as
+          | { project_id?: unknown }
+          | undefined;
+        if (!row || typeof row.project_id !== 'number') {
+          this.writeResponse(client, {
+            type: 'mcp-query-response',
+            requestId: msg.requestId,
+            ok: false,
+            error: 'session_not_found',
+          });
+          return;
+        }
+        payload.navigation =
+          nav.runId !== undefined
+            ? { target: 'quick-session', sessionId: nav.sessionId, runId: nav.runId, projectId: row.project_id }
+            : { target: 'quick-session', sessionId: nav.sessionId, projectId: row.project_id };
+      }
     }
-    // launch-run and open-session carry no preconditions (shared type contract).
+    // launch-run carries no preconditions (shared type contract).
 
     const proposal = store.createProposal({ threadId: ctx.threadId, payload, preconditions });
     store.appendEvent(
