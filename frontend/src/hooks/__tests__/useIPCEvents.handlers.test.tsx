@@ -59,7 +59,6 @@ function makeEvents() {
     onSessionsLoaded: make('onSessionsLoaded'),
     onPanelUpdated: make('onPanelUpdated'),
     onSessionOutput: make('onSessionOutput'),
-    onTerminalOutput: make('onTerminalOutput'),
     onSessionOutputAvailable: make('onSessionOutputAvailable'),
     onZombieProcessesDetected: make('onZombieProcessesDetected'),
     onGitStatusUpdated: make('onGitStatusUpdated'),
@@ -101,7 +100,6 @@ beforeEach(() => {
     sessions: [],
     activeSessionId: null,
     activeMainRepoSession: null,
-    terminalOutput: {},
     gitStatusLoading: new Set(),
     gitStatusBatchTimer: null,
     pendingGitStatusLoading: new Map(),
@@ -208,14 +206,6 @@ describe('output handlers — validateEventSession missing-sessionId drop', () =
     expect(events[0].detail).toEqual({ sessionId: 's1', panelId: 'p1' });
   });
 
-  it('onTerminalOutput drops a missing-sessionId payload, stores a valid one', () => {
-    renderHook(() => useIPCEvents());
-    fire('onTerminalOutput', { type: 'stdout', data: 'x' } as unknown as { sessionId: string; type: 'stdout'; data: string });
-    expect(useSessionStore.getState().getTerminalOutput('s1')).toEqual([]);
-    fire('onTerminalOutput', { sessionId: 's1', type: 'stdout', data: 'hello' });
-    expect(useSessionStore.getState().getTerminalOutput('s1')).toEqual(['hello']);
-  });
-
   it('onSessionOutputAvailable preserves panel identity for transcript refetches', () => {
     const events = collectEvents('session-output-available');
     renderHook(() => useIPCEvents());
@@ -304,7 +294,7 @@ describe('unmount teardown', () => {
   it('calls every registered unsubscribe exactly once', () => {
     const { unmount } = renderHook(() => useIPCEvents());
     const unsubs = captured.unsubs;
-    expect(unsubs.length).toBeGreaterThanOrEqual(13);
+    expect(unsubs.length).toBeGreaterThanOrEqual(12);
     unmount();
     for (const u of unsubs) expect(u).toHaveBeenCalledTimes(1);
   });

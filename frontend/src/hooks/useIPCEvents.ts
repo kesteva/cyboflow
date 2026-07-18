@@ -268,8 +268,6 @@ export function useIPCEvents() {
         return; // Ignore invalid events
       }
 
-      console.log(`[useIPCEvents] Received session output for ${output.sessionId}, type: ${output.type}`);
-
       // Feed the LiveTail progressive-render buffer (panelLiveEventsStore) for
       // quick-session panels — see toLiveTailEnvelope's doc comment. No-ops
       // for non-panel output or any payload that isn't a stream_event/result.
@@ -294,29 +292,19 @@ export function useIPCEvents() {
     });
     unsubscribeFunctions.push(unsubscribeSessionOutput);
 
-    const unsubscribeTerminalOutput = window.electronAPI.events.onTerminalOutput((output: { sessionId: string; type: 'stdout' | 'stderr'; data: string }) => {
-      // Validate event has required session context
-      if (!validateEventSession(output)) {
-        return; // Ignore invalid events
-      }
-
-      console.log(`[useIPCEvents] Received terminal output for ${output.sessionId}`);
-      // Store terminal output in session store for display
-      useSessionStore.getState().addTerminalOutput(output);
-    });
-    unsubscribeFunctions.push(unsubscribeTerminalOutput);
-    
     const unsubscribeOutputAvailable = window.electronAPI.events.onSessionOutputAvailable((info) => {
       // Validate event has required session context
       if (!validateEventSession(info)) {
         return; // Ignore invalid events
       }
 
-      console.log(
-        `[useIPCEvents] Output available notification for session ${info.sessionId}` +
-          (info.panelId ? `, panel ${info.panelId}` : ''),
-      );
-      
+      // NOTE: this dispatches the same 'session-output-available' CustomEvent
+      // as the onSessionOutput handler above, and downstream listeners debounce
+      // so a same-tick double-fire is cheap — but the two IPC channels are NOT
+      // always paired (main emits 'session-output-available' alone for codex-sdk
+      // panel output, and 'session-output' alone for panel-cancellation messages —
+      // see sessionManager.ts addPanelOutput / ipc/session.ts stop handler), so
+      // both dispatches are load-bearing and must stay.
       // Emit custom event to notify that output is available
       window.dispatchEvent(new CustomEvent('session-output-available', {
         detail: {

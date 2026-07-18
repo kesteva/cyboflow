@@ -3,7 +3,6 @@
  *
  * deleteSession must drop the deleted session's per-session in-memory state in
  * sibling stores so they don't grow unbounded across the app's lifetime:
- *   - terminalOutput (already covered by the existing cleanup) and
  *   - centerPaneStore.bySession (the tabbed center-pane tab state) — clearSession
  *     was defined + tested but never wired into production until this fix.
  */
@@ -27,7 +26,7 @@ function makeSession(id: string): Session {
 
 describe('sessionStore.deleteSession — resource reclamation', () => {
   beforeEach(() => {
-    useSessionStore.setState({ sessions: [], terminalOutput: {}, activeSessionId: null });
+    useSessionStore.setState({ sessions: [], activeSessionId: null });
     useCenterPaneStore.setState({ bySession: {} });
   });
 
@@ -56,19 +55,5 @@ describe('sessionStore.deleteSession — resource reclamation', () => {
 
     expect(useCenterPaneStore.getState().bySession['sess-a']).toBeUndefined();
     expect(useCenterPaneStore.getState().bySession['sess-b']).toBeDefined();
-  });
-
-  it('still clears the deleted session terminal output (existing behavior preserved)', () => {
-    const session = makeSession('sess-1');
-    useSessionStore.setState({
-      sessions: [session],
-      terminalOutput: { 'sess-1': ['line'], 'sess-2': ['keep'] },
-    });
-
-    useSessionStore.getState().deleteSession(session);
-
-    const out = useSessionStore.getState().terminalOutput;
-    expect(out['sess-1']).toBeUndefined();
-    expect(out['sess-2']).toEqual(['keep']);
   });
 });

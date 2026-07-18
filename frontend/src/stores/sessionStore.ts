@@ -10,7 +10,6 @@ interface SessionStore {
   activeSessionId: string | null;
   activeMainRepoSession: Session | null; // Special storage for main repo session
   isLoaded: boolean;
-  terminalOutput: Record<string, string[]>; // sessionId -> terminal output lines
   deletingSessionIds: Set<string>; // Track sessions currently being deleted
   gitStatusLoading: Set<string>; // Track sessions currently loading git status
   
@@ -29,9 +28,6 @@ interface SessionStore {
   setSessionOutput: (sessionId: string, output: string) => void;
   setSessionOutputs: (sessionId: string, outputs: SessionOutput[]) => void;
   clearSessionOutput: (sessionId: string) => void;
-  addTerminalOutput: (output: { sessionId: string; type: 'stdout' | 'stderr'; data: string }) => void;
-  clearTerminalOutput: (sessionId: string) => void;
-  getTerminalOutput: (sessionId: string) => string[];
   createSession: (request: CreateSessionInput) => Promise<void>;
   markSessionAsViewed: (sessionId: string) => Promise<void>;
   
@@ -59,7 +55,6 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   activeSessionId: null,
   activeMainRepoSession: null,
   isLoaded: false,
-  terminalOutput: {},
   deletingSessionIds: new Set(),
   gitStatusLoading: new Set(),
   
@@ -131,12 +126,8 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   deleteSession: (deletedSession) => set((state) => {
     // Clear the active main repo session if it's being deleted
     const newActiveMainRepoSession = state.activeMainRepoSession?.id === deletedSession.id 
-      ? null 
+      ? null
       : state.activeMainRepoSession;
-    
-    // Clean up terminal output for deleted session to free memory
-    const newTerminalOutput = { ...state.terminalOutput };
-    delete newTerminalOutput[deletedSession.id];
 
     // Reclaim the deleted session's center-pane tab state (otherwise
     // centerPaneStore.bySession grows unbounded — clearSession was never wired in).
@@ -147,8 +138,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     return {
       sessions: state.sessions.filter(session => session.id !== deletedSession.id),
       activeSessionId: state.activeSessionId === deletedSession.id ? null : state.activeSessionId,
-      activeMainRepoSession: newActiveMainRepoSession,
-      terminalOutput: newTerminalOutput
+      activeMainRepoSession: newActiveMainRepoSession
     };
   }),
   
@@ -449,42 +439,6 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     }
   },
   
-  addTerminalOutput: (output) => set((state) => {
-    // Performance optimization: Much stricter limit to prevent memory issues
-    const MAX_TERMINAL_LINES = 1000; // Drastically reduced from 5000
-    
-    const existingOutput = state.terminalOutput[output.sessionId] || [];
-    
-    // If already at max, remove oldest before adding new
-    let updatedOutput: string[];
-    if (existingOutput.length >= MAX_TERMINAL_LINES) {
-      // Shift array instead of creating new one for better performance
-      updatedOutput = existingOutput.slice(-(MAX_TERMINAL_LINES - 1));
-      updatedOutput.push(output.data);
-    } else {
-      updatedOutput = [...existingOutput, output.data];
-    }
-    
-    return {
-      terminalOutput: {
-        ...state.terminalOutput,
-        [output.sessionId]: updatedOutput
-      }
-    };
-  }),
-
-  clearTerminalOutput: (sessionId: string) => set((state) => ({
-    terminalOutput: {
-      ...state.terminalOutput,
-      [sessionId]: []
-    }
-  })),
-
-  getTerminalOutput: (sessionId) => {
-    const state = get();
-    return state.terminalOutput[sessionId] || [];
-  },
-  
   getActiveSession: () => {
     const state = get();
     
@@ -677,24 +631,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       
       return session;
     });
-    
-    // Also cleanup terminal outputs for inactive sessions
-    const cleanedTerminalOutput: Record<string, string[]> = {};
-    Object.keys(state.terminalOutput).forEach(sessionId => {
-      if (sessionId === activeId) {
-        // Keep active session's terminal output
-        cleanedTerminalOutput[sessionId] = state.terminalOutput[sessionId];
-      } else if (state.terminalOutput[sessionId].length > 50) {
-        // Trim inactive session's terminal output more aggressively
-        cleanedTerminalOutput[sessionId] = state.terminalOutput[sessionId].slice(-50);
-      } else {
-        cleanedTerminalOutput[sessionId] = state.terminalOutput[sessionId];
-      }
-    });
-    
+
     return {
-      sessions: cleanedSessions,
-      terminalOutput: cleanedTerminalOutput
+      sessions: cleanedSessions
     };
   })
 }));

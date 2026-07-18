@@ -60,7 +60,6 @@ function resetStore() {
     sessions: [],
     activeSessionId: null,
     activeMainRepoSession: null,
-    terminalOutput: {},
     gitStatusLoading: new Set(),
     gitStatusBatchTimer: null,
     pendingGitStatusLoading: new Map(),
