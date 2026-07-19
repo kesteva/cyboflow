@@ -97,6 +97,21 @@ export class DynamicWorkflowTracker {
    * resurrect a dismissed card. This makes dismiss permanent across both paths.
    */
   private readonly dismissedWfRunIds = new Set<string>();
+  /**
+   * wfRunIds whose terminal transition has been CLAIMED — set SYNCHRONOUSLY (before
+   * any await) by the first finalize()/handleStalled() to reach it. Finalization is
+   * now async (it awaits the usage drain while status is still 'running'), which
+   * opened two races: (a) a dismiss() during the drain would still let the in-flight
+   * continuation emit a terminal event + review item for a gone run (ghost card),
+   * and (b) a handleStalled() that only checked status before its await would
+   * overwrite a finalize() that completed during the drain with 'failed' (+ a dup
+   * review item). The claim makes the winner deterministic: only the claimant runs
+   * the user-visible side effects. A non-claimant still drains + persists cumulative
+   * usage (a late finalize after a stall must refresh the snapshot) but stops there.
+   * Cleared with the state on dismiss/cap-eviction/dispose so a re-tracked wfRunId
+   * can re-claim.
+   */
+  private readonly terminalClaimed = new Set<string>();
   private readonly logger: LoggerLike | undefined;
   private readonly rawEventsSink: SubagentUsageSink | null;
   private readonly rollupUsage: typeof rollupRunUsage;
@@ -403,6 +418,7 @@ export class DynamicWorkflowTracker {
     this.tailers.delete(wfRunId);
     this.recordPaths.delete(wfRunId);
     this.states.delete(wfRunId);
+    this.terminalClaimed.delete(wfRunId);
     this.emitRemoved(wfRunId);
     return true;
   }
@@ -546,6 +562,7 @@ export class DynamicWorkflowTracker {
       this.tailers.delete(wfRunId);
       this.recordPaths.delete(wfRunId);
       this.states.delete(wfRunId);
+      this.terminalClaimed.delete(wfRunId);
       excess--;
     }
   }
@@ -583,8 +600,23 @@ export class DynamicWorkflowTracker {
 
   /** Terminal transition: set fields, stop the tailer, emit, create the review item. */
   private async finalize(state: DynamicWorkflowRunState, record: DynamicWorkflowCompletionRecord): Promise<void> {
+    // Claim the terminal transition SYNCHRONOUSLY, before any await, so a second
+    // finalize (record/notification race) or a racing stall cannot also own it.
+    // A non-claimant still drains + persists usage below — a late finalize after a
+    // stall must refresh the cumulative snapshot — but stops short of the
+    // user-visible side effects.
+    const claimed = !this.terminalClaimed.has(state.wfRunId);
+    if (claimed) this.terminalClaimed.add(state.wfRunId);
+
     await this.persistTerminalSubagentUsage(state);
-    if (state.status !== 'running') return; // record/notification race — first transition wins
+
+    // Re-validate object identity after the await: dismiss()/cap-eviction may have
+    // removed or replaced this state during the drain. Drop the side effects
+    // silently if so (the drain + usage persist finishing is fine) — never emit a
+    // terminal event or create a review item for a run that is no longer tracked.
+    if (this.states.get(state.wfRunId) !== state) return;
+    if (!claimed) return; // another terminal path already owns the transition
+
     state.status = record.status;
     // A terminal workflow has no running agents: an agent whose 'result' line
     // never landed in the journal (last-agent/completion race, or a 'started'
@@ -604,8 +636,19 @@ export class DynamicWorkflowTracker {
 
   /** Stall path: mark failed AND surface a review item so the user is pointed at it. */
   private async handleStalled(state: DynamicWorkflowRunState): Promise<void> {
-    if (state.status !== 'running') return;
+    // Claim synchronously — see finalize(). Previously the ONLY guard was a status
+    // check BEFORE the await, so a finalize() that completed during this drain got
+    // overwritten with 'failed' (wrong status + duplicate review item). Now a
+    // finalize that claimed first wins, and this path defers below.
+    const claimed = !this.terminalClaimed.has(state.wfRunId);
+    if (claimed) this.terminalClaimed.add(state.wfRunId);
+
     await this.persistTerminalSubagentUsage(state);
+
+    // Re-validate identity after the await (dismiss()/cap-eviction) — see finalize().
+    if (this.states.get(state.wfRunId) !== state) return;
+    if (!claimed) return; // a finalize already owns the terminal transition
+
     state.status = 'failed';
     state.completedAt = new Date().toISOString();
     this.tailers.get(state.wfRunId)?.stop(); // tailer stopped itself already — idempotent
@@ -768,6 +811,7 @@ export class DynamicWorkflowTracker {
     this.recordPaths.clear();
     this.states.clear();
     this.dismissedWfRunIds.clear();
+    this.terminalClaimed.clear();
   }
 
   // --------------------------------------------------------------------------

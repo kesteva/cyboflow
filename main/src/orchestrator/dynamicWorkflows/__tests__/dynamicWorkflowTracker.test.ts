@@ -705,6 +705,99 @@ describe('DynamicWorkflowTracker', () => {
   });
 
   // -------------------------------------------------------------------------
+  // terminal-transition race (dismiss / stall vs. an in-flight async finalize)
+  // -------------------------------------------------------------------------
+
+  it('a normal finalize still emits exactly one terminal change and one review item', async () => {
+    // Regression guard for the non-racing path: the claim + identity re-validation
+    // must not change the single-transition behavior.
+    emitLaunch();
+    const before = changed.length;
+    writeFileSync(recordPath, JSON.stringify({ status: 'completed', summary: 'Done once' }));
+    await advance(1000);
+
+    const terminalChanges = changed.slice(before).filter((e) => e.state.status === 'completed');
+    expect(terminalChanges).toHaveLength(1);
+    expect(tracker.list()[0].status).toBe('completed');
+
+    await ReviewItemRouter.getInstance()._queueForProject(1).onIdle();
+    expect(pendingReviewItems()).toHaveLength(1);
+    expect(pendingReviewItems()[0].title).toBe('Dynamic workflow finished: Parallel refactor');
+  });
+
+  it('a dismiss during an in-flight finalize drain emits no terminal event and no review item', async () => {
+    // Dismiss the run WHILE finalize is parked in its usage drain. The finalize
+    // continuation must re-validate object identity and drop its side effects — no
+    // ghost card, no ghost review item.
+    const originalDrainToEof = JournalTailer.prototype.drainToEof;
+    vi.spyOn(JournalTailer.prototype, 'drainToEof').mockImplementation(async function (this: JournalTailer) {
+      tracker.dismiss('wf_aa11-2b'); // operator dismisses mid-drain
+      await originalDrainToEof.call(this);
+    });
+
+    emitLaunch();
+    const before = changed.length;
+    writeFileSync(recordPath, JSON.stringify({ status: 'completed', summary: 'All done' }));
+    await advance(1000); // tailer reads the record -> finalize -> drain dismisses mid-flight
+
+    // The dismissal fired 'removed' and dropped the state.
+    expect(removed).toEqual(['wf_aa11-2b']);
+    expect(tracker.list()).toHaveLength(0);
+
+    // No terminal 'changed' after the dismissal (the only emits are the launch's
+    // 'running' snapshots), and no review item was ever created.
+    const after = changed.slice(before);
+    expect(after.every((e) => e.state.status === 'running')).toBe(true);
+
+    await ReviewItemRouter.getInstance()._queueForProject(1).onIdle();
+    expect(pendingReviewItems()).toHaveLength(0);
+  });
+
+  it('a stall racing an in-flight finalize does not overwrite it (finalize wins, single review item)', async () => {
+    // Gate finalize's usage drain so the 1h stall timer fires while finalize is
+    // still in flight. finalize claimed the transition first (synchronously, on the
+    // notification emit), so the stall must defer without overwriting the status to
+    // 'failed' or creating a second review item.
+    let releaseDrain: () => void = () => {};
+    const drainGate = new Promise<void>((resolve) => {
+      releaseDrain = () => resolve();
+    });
+    let drainCalls = 0;
+    const originalDrainToEof = JournalTailer.prototype.drainToEof;
+    vi.spyOn(JournalTailer.prototype, 'drainToEof').mockImplementation(async function (this: JournalTailer) {
+      drainCalls += 1;
+      if (drainCalls === 1) {
+        await drainGate;
+      }
+      await originalDrainToEof.call(this);
+    });
+
+    emitLaunch();
+    writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
+    await advance(1000);
+
+    // 1) finalize claims synchronously, then parks in its gated drain (call #1).
+    router.emitForRun('run-1', userToolResult('tu-x', notificationText('wabc123', 'completed')));
+    expect(drainCalls).toBe(1);
+
+    // 2) the stall fires while finalize is parked — handleStalled claims 2nd and,
+    //    being a non-claimant, defers without overwriting.
+    await vi.advanceTimersByTimeAsync(60 * 60 * 1000 + 2000);
+    expect(tracker.list()[0].status).toBe('running'); // finalize still gated, stall deferred
+
+    // 3) release finalize's drain; it applies the 'completed' terminal transition.
+    releaseDrain();
+    await flushIo();
+
+    expect(tracker.list()[0].status).toBe('completed'); // finalize won — NOT 'failed'
+
+    await ReviewItemRouter.getInstance()._queueForProject(1).onIdle();
+    const items = pendingReviewItems();
+    expect(items).toHaveLength(1); // exactly one — the stall created no duplicate
+    expect(items[0].title).toBe('Dynamic workflow finished: Parallel refactor');
+  });
+
+  // -------------------------------------------------------------------------
   // router attachment lifecycle
   // -------------------------------------------------------------------------
 
