@@ -476,8 +476,8 @@ export class DynamicWorkflowTracker {
           state.agents = agents;
           this.emitChanged(state);
         },
-        onComplete: (record) => this.finalize(state, record),
-        onStalled: () => this.handleStalled(state),
+        onComplete: (record) => void this.finalize(state, record),
+        onStalled: () => void this.handleStalled(state),
         logger: this.logger,
       });
 
@@ -571,10 +571,10 @@ export class DynamicWorkflowTracker {
       const recordPath = this.recordPaths.get(state.wfRunId);
       const record = recordPath !== undefined ? readCompletionRecord(recordPath, this.logger) : null;
       if (record !== null) {
-        this.finalize(state, record);
+        void this.finalize(state, record);
         return;
       }
-      this.finalize(state, { status: info.status === 'completed' ? 'completed' : 'failed' });
+      void this.finalize(state, { status: info.status === 'completed' ? 'completed' : 'failed' });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.logger?.warn(`[dynamicWorkflowTracker] notification handling failed for ${info.taskId}: ${message}`);
@@ -582,8 +582,8 @@ export class DynamicWorkflowTracker {
   }
 
   /** Terminal transition: set fields, stop the tailer, emit, create the review item. */
-  private finalize(state: DynamicWorkflowRunState, record: DynamicWorkflowCompletionRecord): void {
-    this.persistTerminalSubagentUsage(state);
+  private async finalize(state: DynamicWorkflowRunState, record: DynamicWorkflowCompletionRecord): Promise<void> {
+    await this.persistTerminalSubagentUsage(state);
     if (state.status !== 'running') return; // record/notification race — first transition wins
     state.status = record.status;
     // A terminal workflow has no running agents: an agent whose 'result' line
@@ -603,9 +603,9 @@ export class DynamicWorkflowTracker {
   }
 
   /** Stall path: mark failed AND surface a review item so the user is pointed at it. */
-  private handleStalled(state: DynamicWorkflowRunState): void {
+  private async handleStalled(state: DynamicWorkflowRunState): Promise<void> {
     if (state.status !== 'running') return;
-    this.persistTerminalSubagentUsage(state);
+    await this.persistTerminalSubagentUsage(state);
     state.status = 'failed';
     state.completedAt = new Date().toISOString();
     this.tailers.get(state.wfRunId)?.stop(); // tailer stopped itself already — idempotent
@@ -618,9 +618,12 @@ export class DynamicWorkflowTracker {
    * usage before the run rollup rescans raw_events. The nested message shape is
    * load-bearing for the shared usage aggregators.
    */
-  private persistTerminalSubagentUsage(state: DynamicWorkflowRunState): void {
+  private async persistTerminalSubagentUsage(state: DynamicWorkflowRunState): Promise<void> {
     try {
-      this.tailers.get(state.wfRunId)?.drainToEof();
+      // Await the drain: it runs through the tailer's serialized queue (behind any
+      // in-flight tick), so state.agents reflects the final EOF usage before we
+      // snapshot it — the tick can no longer race this read.
+      await this.tailers.get(state.wfRunId)?.drainToEof();
       const agents = state.agents.map((agent) => ({ ...agent }));
 
       for (const agent of agents) {

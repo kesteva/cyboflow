@@ -23,7 +23,8 @@
  * All fs errors are fail-soft: logged at WARN, retried next tick. The journal
  * not existing yet is normal (it appears shortly after launch).
  */
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { open, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import type { DynamicWorkflowAgent, DynamicWorkflowTotals } from '../../../../shared/types/dynamicWorkflows';
 import type { LoggerLike } from '../types';
@@ -136,6 +137,7 @@ export class JournalTailer {
   private readonly idleTimeoutMs: number;
 
   private timer: ReturnType<typeof setInterval> | null = null;
+  private stopped = false;
   /** Byte offset into the journal up to which lines have been consumed. */
   private offset = 0;
   /** Partial trailing line buffered until its newline arrives. */
@@ -146,6 +148,19 @@ export class JournalTailer {
   private readonly transcriptTails = new Map<string, AgentTranscriptTail>();
   private lastActivityAt = Date.now();
 
+  /**
+   * Per-tailer serialized task chain. Every operation that touches the shared
+   * offset / lineBuffer / transcript-tail state — the periodic {@link tick}, an
+   * on-demand {@link drainToEof}, and {@link stop}'s buffer release — runs
+   * through this chain, so no two ever interleave. drainToEof (which the tracker
+   * fires immediately before its terminal usage snapshot) therefore cannot race
+   * a tick mid-read: it queues behind any in-flight tick and the caller awaits
+   * it. Async fs IO inside a task no longer makes that ordering implicit.
+   */
+  private queue: Promise<void> = Promise.resolve();
+  /** True while a periodic tick is queued or running — coalesces a burst to one pending tick. */
+  private tickScheduled = false;
+
   constructor(private readonly opts: JournalTailerOptions) {
     this.pollMs = opts.pollMs ?? DEFAULT_POLL_MS;
     this.idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
@@ -154,47 +169,87 @@ export class JournalTailer {
   /** Begin polling. No-op when already started. */
   start(): void {
     if (this.timer !== null) return;
+    this.stopped = false;
     this.lastActivityAt = Date.now();
-    this.timer = setInterval(() => this.tick(), this.pollMs);
+    this.timer = setInterval(() => this.scheduleTick(), this.pollMs);
   }
 
   /** Stop polling. Idempotent. */
   stop(): void {
+    this.stopped = true;
     if (this.timer !== null) {
       clearInterval(this.timer);
       this.timer = null;
     }
-    // Release the heavy partial-line buffers: stopped tailers are retained in
-    // the tracker until session-cap eviction/dispose, and a torn transcript
-    // line can be multi-KB (tool results). The accumulated per-agent `stats`
-    // are deliberately KEPT — snapshotAgents() may still be read for the final
-    // terminal-state emission after stop().
-    this.lineBuffer = '';
-    for (const tail of this.transcriptTails.values()) {
-      tail.remainder = '';
-    }
+    // Release the heavy partial-line buffers through the queue so the reset
+    // never lands mid-parse of an in-flight tick/drain. Stopped tailers are
+    // retained in the tracker until session-cap eviction/dispose, and a torn
+    // transcript line can be multi-KB (tool results). The accumulated per-agent
+    // `stats` are deliberately KEPT — snapshotAgents() may still be read for the
+    // final terminal-state emission after stop().
+    void this.enqueue(async () => {
+      this.lineBuffer = '';
+      for (const tail of this.transcriptTails.values()) {
+        tail.remainder = '';
+      }
+    });
   }
 
   /**
-   * Synchronously consume every currently tracked agent transcript through its
-   * present EOF. This is used by terminal paths to close the final poll-window
-   * race before snapshotting cumulative usage. A single onAgents emission
-   * covers all transcript changes, matching the normal per-tick throttle.
+   * Consume every currently tracked agent transcript through its present EOF.
+   * Terminal paths await this to close the final poll-window race before
+   * snapshotting cumulative usage; it runs through the serialized queue, so it
+   * waits for any in-flight tick and no tick can interleave it. A single
+   * onAgents emission covers all transcript changes, matching the per-tick
+   * throttle. Always drains even after stop() — the tracker calls it post-stop
+   * on the tick-completion path to capture the last usage.
    */
-  drainToEof(): void {
-    let statsChanged = false;
-    for (const agentId of this.agents.keys()) {
-      if (this.pollAgentTranscript(agentId).statsChanged) statsChanged = true;
-    }
-    if (statsChanged) {
-      this.opts.onAgents(this.snapshotAgents());
-    }
+  async drainToEof(): Promise<void> {
+    await this.enqueue(async () => {
+      let statsChanged = false;
+      for (const agentId of this.agents.keys()) {
+        if ((await this.pollAgentTranscript(agentId)).statsChanged) statsChanged = true;
+      }
+      if (statsChanged) {
+        this.opts.onAgents(this.snapshotAgents());
+      }
+    });
   }
 
-  private tick(): void {
+  /** Coalesce interval fires: enqueue a tick only when none is already pending. */
+  private scheduleTick(): void {
+    if (this.tickScheduled) return;
+    this.tickScheduled = true;
+    void this.enqueue(() => this.tick());
+  }
+
+  /**
+   * Append `task` to the serialized chain. The chain is kept alive across a
+   * task rejection (so one bad task doesn't poison later ones); the returned
+   * promise still carries this task's own result/rejection for the caller.
+   */
+  private enqueue<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(task, task);
+    this.queue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async tick(): Promise<void> {
+    // Cleared as the tick actually begins running: a burst of interval fires
+    // during this run enqueues at most one successor.
+    this.tickScheduled = false;
+    if (this.stopped) return; // a stop() landed after this tick was queued
+    // Sample the stall clock synchronously at tick start, before any await: the
+    // idle window is anchored to when this poll began, not to when its async fs
+    // reads happen to resolve (which the interleaving of real IO makes
+    // nondeterministic). One poll interval of skew on a stall stamp is immaterial.
+    const now = Date.now();
     try {
       // (a) Journal growth — live agent lifecycle.
-      const journal = this.pollJournal();
+      const journal = await this.pollJournal();
 
       // (b) Agent transcript growth — live per-agent stats. Capped to agents
       //     already tracked from the journal; a transcript that has not landed
@@ -202,7 +257,7 @@ export class JournalTailer {
       let transcriptsGrew = false;
       let statsChanged = false;
       for (const agentId of this.agents.keys()) {
-        const result = this.pollAgentTranscript(agentId);
+        const result = await this.pollAgentTranscript(agentId);
         if (result.grew) transcriptsGrew = true;
         if (result.statsChanged) statsChanged = true;
       }
@@ -215,7 +270,9 @@ export class JournalTailer {
 
       let activity = journal.grew || transcriptsGrew;
 
-      // (c) Terminal record — authoritative completion.
+      // (c) Terminal record — authoritative completion. A tiny terminal-only
+      //     JSON read; kept synchronous so the exported readCompletionRecord
+      //     stays a plain sync helper for the tracker's accelerator path.
       if (existsSync(this.opts.recordPath)) {
         const record = readCompletionRecord(this.opts.recordPath, this.opts.logger);
         if (record !== null) {
@@ -230,8 +287,8 @@ export class JournalTailer {
 
       // (d) Stall detection — nothing changed for idleTimeoutMs.
       if (activity) {
-        this.lastActivityAt = Date.now();
-      } else if (Date.now() - this.lastActivityAt >= this.idleTimeoutMs) {
+        this.lastActivityAt = now;
+      } else if (now - this.lastActivityAt >= this.idleTimeoutMs) {
         this.stop();
         this.opts.onStalled();
       }
@@ -248,13 +305,18 @@ export class JournalTailer {
    * `grew` is true iff the journal gained bytes this tick; `changed` is true
    * iff any agent's lifecycle moved (the caller emits onAgents once per tick).
    */
-  private pollJournal(): { grew: boolean; changed: boolean } {
+  private async pollJournal(): Promise<{ grew: boolean; changed: boolean }> {
     try {
-      if (!existsSync(this.opts.journalPath)) return { grew: false, changed: false }; // appears shortly after launch
-      const size = statSync(this.opts.journalPath).size;
+      let size: number;
+      try {
+        size = (await stat(this.opts.journalPath)).size;
+      } catch (err) {
+        if (isENOENT(err)) return { grew: false, changed: false }; // appears shortly after launch
+        throw err; // other fs errors fall through to the warn below
+      }
       if (size <= this.offset) return { grew: false, changed: false };
 
-      this.lineBuffer += readAppendedSlice(this.opts.journalPath, this.offset, size);
+      this.lineBuffer += await readAppendedSlice(this.opts.journalPath, this.offset, size);
       this.offset = size;
 
       const lines = this.lineBuffer.split('\n');
@@ -310,7 +372,7 @@ export class JournalTailer {
    * re-parsed from the start. ENOENT is silent (the transcript lands after
    * the journal `started` line); other fs errors warn and retry next tick.
    */
-  private pollAgentTranscript(agentId: string): { grew: boolean; statsChanged: boolean } {
+  private async pollAgentTranscript(agentId: string): Promise<{ grew: boolean; statsChanged: boolean }> {
     let tail = this.transcriptTails.get(agentId);
     if (tail === undefined) {
       tail = { offset: 0, remainder: '', promptCaptured: false, stats: {} };
@@ -318,11 +380,16 @@ export class JournalTailer {
     }
     const transcriptPath = path.join(path.dirname(this.opts.journalPath), `agent-${agentId}.jsonl`);
     try {
-      if (!existsSync(transcriptPath)) return { grew: false, statsChanged: false };
-      const size = statSync(transcriptPath).size;
+      let size: number;
+      try {
+        size = (await stat(transcriptPath)).size;
+      } catch (err) {
+        if (isENOENT(err)) return { grew: false, statsChanged: false }; // lands after the journal `started` line
+        throw err;
+      }
       if (size <= tail.offset) return { grew: false, statsChanged: false };
 
-      tail.remainder += readAppendedSlice(transcriptPath, tail.offset, size);
+      tail.remainder += await readAppendedSlice(transcriptPath, tail.offset, size);
       tail.offset = size;
 
       const lines = tail.remainder.split('\n');
@@ -429,16 +496,25 @@ export class JournalTailer {
 }
 
 /** Read [start, end) bytes of a file as utf8 — appended slices are small, one alloc is fine. */
-function readAppendedSlice(filePath: string, start: number, end: number): string {
+async function readAppendedSlice(filePath: string, start: number, end: number): Promise<string> {
   const length = end - start;
   const buf = Buffer.alloc(length);
-  const fd = openSync(filePath, 'r');
+  const fh = await open(filePath, 'r');
   try {
-    readSync(fd, buf, 0, length, start);
+    await fh.read(buf, 0, length, start);
   } finally {
-    closeSync(fd);
+    await fh.close();
   }
   return buf.toString('utf8');
+}
+
+/** True for a Node fs "file not found" error — a missing journal/transcript is normal. */
+function isENOENT(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as NodeJS.ErrnoException).code === 'ENOENT'
+  );
 }
 
 /**

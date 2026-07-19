@@ -1,11 +1,17 @@
 /**
  * Unit tests for JournalTailer — incremental journal.jsonl tailing, terminal
  * record handling, and stall detection. Uses fake timers (mirroring
- * stuckDetector.test.ts) over a real tmp directory; all file IO inside ticks
- * is synchronous, so advancing timers drives the polls deterministically.
+ * stuckDetector.test.ts) over a real tmp directory.
+ *
+ * The tailer's ticks/drains run async fs/promises IO through a serialized queue,
+ * and fake timers do NOT advance the libuv poll phase — so after firing the fake
+ * interval we must turn the real event loop to let that IO settle. `advance()`
+ * bundles the fake-timer advance with a bounded real-fs `flushIo()`; direct
+ * `await tailer.drainToEof()` naturally awaits its own queued IO.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JournalTailer, readCompletionRecord } from '../journalTailer';
@@ -18,6 +24,17 @@ describe('JournalTailer', () => {
   let journalPath: string;
   let recordPath: string;
   let tailer: JournalTailer | null;
+
+  /** Turn the real event loop so queued async-IO tasks settle under fake timers. */
+  async function flushIo(): Promise<void> {
+    for (let i = 0; i < 40; i++) await stat(dir);
+  }
+
+  /** Advance the fake interval, then drain the real fs IO the ticks kicked off. */
+  async function advance(ms: number): Promise<void> {
+    await vi.advanceTimersByTimeAsync(ms);
+    await flushIo();
+  }
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -54,14 +71,14 @@ describe('JournalTailer', () => {
     tailer!.start();
 
     // Journal does not exist yet — no callbacks, no errors.
-    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+    await advance(POLL_MS * 2);
     expect(onAgents).not.toHaveBeenCalled();
 
     writeFileSync(
       journalPath,
       '{"type":"started","agentId":"a1"}\n{"type":"started","agentId":"a2"}\n',
     );
-    await vi.advanceTimersByTimeAsync(POLL_MS);
+    await advance(POLL_MS);
     expect(onAgents).toHaveBeenCalledTimes(1);
     expect(onAgents).toHaveBeenLastCalledWith([
       { agentId: 'a1', status: 'running' },
@@ -69,7 +86,7 @@ describe('JournalTailer', () => {
     ]);
 
     appendFileSync(journalPath, '{"type":"result","agentId":"a1"}\n');
-    await vi.advanceTimersByTimeAsync(POLL_MS);
+    await advance(POLL_MS);
     expect(onAgents).toHaveBeenLastCalledWith([
       { agentId: 'a1', status: 'done' },
       { agentId: 'a2', status: 'running' },
@@ -83,12 +100,12 @@ describe('JournalTailer', () => {
 
     // Second line is incomplete — only a1 should surface.
     writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n{"type":"result","agentId":"a1"');
-    await vi.advanceTimersByTimeAsync(POLL_MS);
+    await advance(POLL_MS);
     expect(onAgents).toHaveBeenCalledTimes(1);
     expect(onAgents).toHaveBeenLastCalledWith([{ agentId: 'a1', status: 'running' }]);
 
     appendFileSync(journalPath, '}\n');
-    await vi.advanceTimersByTimeAsync(POLL_MS);
+    await advance(POLL_MS);
     expect(onAgents).toHaveBeenLastCalledWith([{ agentId: 'a1', status: 'done' }]);
   });
 
@@ -96,7 +113,7 @@ describe('JournalTailer', () => {
     const { onAgents } = buildTailer();
     tailer!.start();
     writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
-    await vi.advanceTimersByTimeAsync(POLL_MS * 3);
+    await advance(POLL_MS * 3);
     expect(onAgents).toHaveBeenCalledTimes(1);
   });
 
@@ -115,7 +132,7 @@ describe('JournalTailer', () => {
         durationMs: 7890,
       }),
     );
-    await vi.advanceTimersByTimeAsync(POLL_MS);
+    await advance(POLL_MS);
     expect(onComplete).toHaveBeenCalledTimes(1);
     expect(onComplete).toHaveBeenCalledWith({
       status: 'completed',
@@ -125,7 +142,7 @@ describe('JournalTailer', () => {
 
     // Stopped: later journal appends are ignored.
     writeFileSync(journalPath, '{"type":"started","agentId":"late"}\n');
-    await vi.advanceTimersByTimeAsync(POLL_MS * 3);
+    await advance(POLL_MS * 3);
     expect(onAgents).not.toHaveBeenCalled();
   });
 
@@ -133,7 +150,7 @@ describe('JournalTailer', () => {
     const { onComplete } = buildTailer();
     tailer!.start();
     writeFileSync(recordPath, JSON.stringify({ status: 'failed' }));
-    await vi.advanceTimersByTimeAsync(POLL_MS);
+    await advance(POLL_MS);
     expect(onComplete).toHaveBeenCalledWith({ status: 'failed', summary: undefined, totals: {} });
   });
 
@@ -141,33 +158,33 @@ describe('JournalTailer', () => {
     const { onComplete } = buildTailer();
     tailer!.start();
     writeFileSync(recordPath, '{"status":'); // mid-write
-    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+    await advance(POLL_MS * 2);
     expect(onComplete).not.toHaveBeenCalled();
 
     writeFileSync(recordPath, JSON.stringify({ status: 'completed' }));
-    await vi.advanceTimersByTimeAsync(POLL_MS);
+    await advance(POLL_MS);
     expect(onComplete).toHaveBeenCalledTimes(1);
   });
 
   it('calls onStalled (and stops) after idleTimeoutMs with no file activity', async () => {
     const { onStalled, onComplete } = buildTailer({ idleTimeoutMs: 500 });
     tailer!.start();
-    await vi.advanceTimersByTimeAsync(600);
+    await advance(600);
     expect(onStalled).toHaveBeenCalledTimes(1);
     expect(onComplete).not.toHaveBeenCalled();
     // Stopped — no second stall fires.
-    await vi.advanceTimersByTimeAsync(1000);
+    await advance(1000);
     expect(onStalled).toHaveBeenCalledTimes(1);
   });
 
   it('journal activity resets the idle clock', async () => {
     const { onStalled } = buildTailer({ idleTimeoutMs: 500 });
     tailer!.start();
-    await vi.advanceTimersByTimeAsync(300);
+    await advance(300);
     writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
-    await vi.advanceTimersByTimeAsync(400); // 700ms total, but only 400ms since activity
+    await advance(400); // 700ms total, but only 400ms since activity
     expect(onStalled).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(200); // now >=500ms idle
+    await advance(200); // now >=500ms idle
     expect(onStalled).toHaveBeenCalledTimes(1);
   });
 
@@ -210,7 +227,7 @@ describe('JournalTailer', () => {
           timestamp: '2026-06-11T10:00:05.000Z',
         }),
     );
-    await vi.advanceTimersByTimeAsync(POLL_MS);
+    await advance(POLL_MS);
     expect(onAgents).toHaveBeenCalledTimes(1);
     expect(onAgents).toHaveBeenLastCalledWith([
       {
@@ -251,7 +268,7 @@ describe('JournalTailer', () => {
         timestamp: '2026-06-11T10:00:09.000Z',
       }),
     );
-    await vi.advanceTimersByTimeAsync(POLL_MS);
+    await advance(POLL_MS);
     expect(onAgents).toHaveBeenCalledTimes(2); // a stats-only change still emits
     expect(onAgents).toHaveBeenLastCalledWith([
       {
@@ -269,18 +286,18 @@ describe('JournalTailer', () => {
       },
     ]);
 
-    tailer!.drainToEof();
+    await tailer!.drainToEof();
     expect(onAgents).toHaveBeenCalledTimes(2); // unchanged EOF is not re-read or re-emitted
   });
 
-  it('drains every tracked transcript synchronously to EOF before the next poll', async () => {
+  it('drains every tracked transcript to EOF before the next poll', async () => {
     const { onAgents } = buildTailer();
     tailer!.start();
     writeFileSync(
       journalPath,
       '{"type":"started","agentId":"a1"}\n{"type":"started","agentId":"a2"}\n',
     );
-    await vi.advanceTimersByTimeAsync(POLL_MS);
+    await advance(POLL_MS);
 
     writeFileSync(
       join(dir, 'agent-a1.jsonl'),
@@ -321,7 +338,7 @@ describe('JournalTailer', () => {
       }),
     );
 
-    tailer!.drainToEof();
+    await tailer!.drainToEof();
 
     expect(onAgents).toHaveBeenCalledTimes(2);
     expect(onAgents).toHaveBeenLastCalledWith([
@@ -350,7 +367,7 @@ describe('JournalTailer', () => {
     ]);
   });
 
-  it('skips malformed transcript lines during a synchronous drain without throwing', async () => {
+  it('skips malformed transcript lines during a drain without throwing', async () => {
     const warn = vi.fn();
     const onAgents = vi.fn<(agents: DynamicWorkflowAgent[]) => void>();
     tailer = new JournalTailer({
@@ -364,7 +381,7 @@ describe('JournalTailer', () => {
     });
     tailer.start();
     writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
-    await vi.advanceTimersByTimeAsync(POLL_MS);
+    await advance(POLL_MS);
     writeFileSync(
       join(dir, 'agent-a1.jsonl'),
       '{"type":"assistant","message":\n' +
@@ -375,7 +392,7 @@ describe('JournalTailer', () => {
         }),
     );
 
-    expect(() => tailer!.drainToEof()).not.toThrow();
+    await expect(tailer!.drainToEof()).resolves.toBeUndefined();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('unparseable transcript line skipped'));
     expect(onAgents).toHaveBeenLastCalledWith([
       {
@@ -389,7 +406,7 @@ describe('JournalTailer', () => {
     ]);
   });
 
-  it('buffers a partial transcript line across synchronous drains until it reaches EOF complete', async () => {
+  it('buffers a partial transcript line across drains until it reaches EOF complete', async () => {
     const warn = vi.fn();
     const onAgents = vi.fn<(agents: DynamicWorkflowAgent[]) => void>();
     tailer = new JournalTailer({
@@ -403,7 +420,7 @@ describe('JournalTailer', () => {
     });
     tailer.start();
     writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
-    await vi.advanceTimersByTimeAsync(POLL_MS);
+    await advance(POLL_MS);
 
     const transcriptPath = join(dir, 'agent-a1.jsonl');
     const line = transcriptLine({
@@ -422,12 +439,12 @@ describe('JournalTailer', () => {
     });
     writeFileSync(transcriptPath, line.slice(0, -2));
 
-    expect(() => tailer!.drainToEof()).not.toThrow();
+    await expect(tailer!.drainToEof()).resolves.toBeUndefined();
     expect(warn).not.toHaveBeenCalled();
     expect(onAgents).toHaveBeenCalledTimes(1);
 
     appendFileSync(transcriptPath, line.slice(-2));
-    tailer.drainToEof();
+    await tailer.drainToEof();
 
     expect(onAgents).toHaveBeenCalledTimes(2);
     expect(onAgents).toHaveBeenLastCalledWith([
@@ -456,13 +473,13 @@ describe('JournalTailer', () => {
       timestamp: '2026-06-11T11:00:00.000Z',
     });
     writeFileSync(transcriptPath, full.slice(0, 25)); // torn mid-JSON, no newline yet
-    await vi.advanceTimersByTimeAsync(POLL_MS);
+    await advance(POLL_MS);
     // The journal change emits, but the torn line contributes no stats (and no warn-skip).
     expect(onAgents).toHaveBeenCalledTimes(1);
     expect(onAgents).toHaveBeenLastCalledWith([{ agentId: 'a1', status: 'running' }]);
 
     appendFileSync(transcriptPath, full.slice(25));
-    await vi.advanceTimersByTimeAsync(POLL_MS);
+    await advance(POLL_MS);
     expect(onAgents).toHaveBeenLastCalledWith([
       {
         agentId: 'a1',
@@ -479,7 +496,7 @@ describe('JournalTailer', () => {
     const { onAgents } = buildTailer();
     tailer!.start();
     writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
-    await vi.advanceTimersByTimeAsync(POLL_MS * 3); // transcript absent — no errors, no re-emits
+    await advance(POLL_MS * 3); // transcript absent — no errors, no re-emits
     expect(onAgents).toHaveBeenCalledTimes(1);
     expect(onAgents).toHaveBeenLastCalledWith([{ agentId: 'a1', status: 'running' }]);
 
@@ -487,7 +504,7 @@ describe('JournalTailer', () => {
       join(dir, 'agent-a1.jsonl'),
       transcriptLine({ type: 'user', message: { role: 'user', content: 'Go' }, timestamp: '2026-06-11T12:00:00.000Z' }),
     );
-    await vi.advanceTimersByTimeAsync(POLL_MS);
+    await advance(POLL_MS);
     expect(onAgents).toHaveBeenLastCalledWith([
       {
         agentId: 'a1',
@@ -518,7 +535,7 @@ describe('JournalTailer', () => {
           timestamp: '2026-06-11T13:00:01.000Z',
         }),
     );
-    await vi.advanceTimersByTimeAsync(POLL_MS);
+    await advance(POLL_MS);
     const agents = onAgents.mock.calls.at(-1)?.[0];
     expect(agents?.[0]?.promptExcerpt).toBe('p'.repeat(600));
     expect(agents?.[0]?.lastActivityAt).toBe('2026-06-11T13:00:01.000Z');
@@ -530,12 +547,134 @@ describe('JournalTailer', () => {
     tailer!.stop();
     tailer!.stop(); // no throw
     writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
-    await vi.advanceTimersByTimeAsync(POLL_MS * 2);
+    await advance(POLL_MS * 2);
     expect(onAgents).not.toHaveBeenCalled();
 
     tailer!.start();
-    await vi.advanceTimersByTimeAsync(POLL_MS);
+    await advance(POLL_MS);
     expect(onAgents).toHaveBeenCalledTimes(1);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Serialization: the periodic tick, drainToEof, and stop's buffer release all
+  // run through one queue, so none can interleave another mid-read (F22).
+  // ---------------------------------------------------------------------------
+
+  it('a drain queued behind an in-flight tick reads each transcript slice once (no double-count)', async () => {
+    const { onAgents } = buildTailer();
+    tailer!.start();
+    writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
+    await advance(POLL_MS);
+
+    writeFileSync(
+      join(dir, 'agent-a1.jsonl'),
+      transcriptLine({
+        type: 'assistant',
+        message: { model: 'm', usage: { input_tokens: 10, output_tokens: 20 }, content: [] },
+        timestamp: '2026-06-11T20:00:00.000Z',
+      }),
+    );
+    // Fire the periodic tick (its transcript read is now in-flight under fake
+    // timers) and queue a drain behind it WITHOUT flushing in between. If the two
+    // could interleave from offset 0 the usage would double to 20/40.
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    await tailer!.drainToEof(); // serialized behind the tick; awaiting settles both
+
+    const agents = onAgents.mock.calls.at(-1)?.[0];
+    expect(agents?.[0]).toMatchObject({ agentId: 'a1', inputTokens: 10, outputTokens: 20 });
+  });
+
+  it('stop() during an in-flight tick does not corrupt the read (buffer release is serialized)', async () => {
+    const { onAgents } = buildTailer();
+    tailer!.start();
+    writeFileSync(
+      journalPath,
+      '{"type":"started","agentId":"a1"}\n{"type":"started","agentId":"a2"}\n',
+    );
+    // Tick enqueued with its journal read in-flight; stop() lands mid-flight.
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    tailer!.stop(); // stopped=true + buffer release queued BEHIND the running tick
+    await flushIo();
+
+    // The in-flight tick still finished its journal read cleanly — both agents
+    // surfaced, no partial-line corruption from a concurrent buffer reset.
+    expect(onAgents).toHaveBeenLastCalledWith([
+      { agentId: 'a1', status: 'running' },
+      { agentId: 'a2', status: 'running' },
+    ]);
+  });
+
+  it('an append between a tick and a drain is consumed exactly once (offset carried across the queue)', async () => {
+    const { onAgents } = buildTailer();
+    tailer!.start();
+    writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
+    writeFileSync(
+      join(dir, 'agent-a1.jsonl'),
+      transcriptLine({
+        type: 'assistant',
+        message: { model: 'm', usage: { input_tokens: 10, output_tokens: 20 }, content: [] },
+        timestamp: '2026-06-11T21:00:00.000Z',
+      }),
+    );
+    await advance(POLL_MS); // tick consumes line 1 -> 10/20
+
+    appendFileSync(
+      join(dir, 'agent-a1.jsonl'),
+      transcriptLine({
+        type: 'assistant',
+        message: { model: 'm', usage: { input_tokens: 3, output_tokens: 4 }, content: [] },
+        timestamp: '2026-06-11T21:00:01.000Z',
+      }),
+    );
+    await tailer!.drainToEof(); // reads ONLY the appended line -> cumulative 13/24
+
+    const agents = onAgents.mock.calls.at(-1)?.[0];
+    expect(agents?.[0]).toMatchObject({ agentId: 'a1', inputTokens: 13, outputTokens: 24 });
+  });
+
+  it('tolerates a mid-sequence journal truncation without crashing or re-reading', async () => {
+    const { onAgents } = buildTailer({ idleTimeoutMs: 10 * 60 * 1000 });
+    tailer!.start();
+    writeFileSync(
+      journalPath,
+      '{"type":"started","agentId":"a1"}\n{"type":"started","agentId":"a2"}\n',
+    );
+    await advance(POLL_MS);
+    const callsAfterFirst = onAgents.mock.calls.length;
+    expect(callsAfterFirst).toBe(1);
+
+    // Rewrite the journal shorter than the bytes already consumed (rotation).
+    // size <= offset is treated as no growth: no crash, no spurious re-emit.
+    writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
+    await advance(POLL_MS);
+    expect(onAgents).toHaveBeenCalledTimes(callsAfterFirst);
+    expect(onAgents.mock.calls.at(-1)?.[0]).toEqual([
+      { agentId: 'a1', status: 'running' },
+      { agentId: 'a2', status: 'running' },
+    ]);
+  });
+
+  it('drainToEof settles its onAgents emission before the awaited promise resolves', async () => {
+    const { onAgents } = buildTailer();
+    tailer!.start();
+    writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
+    await advance(POLL_MS);
+    writeFileSync(
+      join(dir, 'agent-a1.jsonl'),
+      transcriptLine({
+        type: 'assistant',
+        message: { model: 'm', usage: { input_tokens: 5, output_tokens: 7 }, content: [] },
+        timestamp: '2026-06-11T22:00:00.000Z',
+      }),
+    );
+
+    // A finalize reads state.agents right after awaiting the drain — the final
+    // usage emission must already have landed by the time the promise resolves.
+    let usageAtResolve: DynamicWorkflowAgent | undefined;
+    await tailer!.drainToEof().then(() => {
+      usageAtResolve = onAgents.mock.calls.at(-1)?.[0]?.[0];
+    });
+    expect(usageAtResolve).toMatchObject({ agentId: 'a1', inputTokens: 5, outputTokens: 7 });
   });
 });
 

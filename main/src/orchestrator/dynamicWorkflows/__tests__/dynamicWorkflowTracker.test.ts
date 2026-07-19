@@ -12,6 +12,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { EventRouter } from '../../../services/streamParser/eventRouter';
@@ -171,6 +172,24 @@ describe('DynamicWorkflowTracker', () => {
     rmSync(base, { recursive: true, force: true });
   });
 
+  /**
+   * The tailer's async fs/promises ticks/drains and the tracker's async
+   * finalize/stall cascade run through serialized promise queues; fake timers do
+   * NOT advance the libuv poll phase, so we turn the real event loop via bounded
+   * real-fs `stat()` calls to let that IO settle. Use after advancing the fake
+   * interval, and after a terminal `<task-notification>` (which kicks off an
+   * un-awaited async finalize).
+   */
+  async function flushIo(): Promise<void> {
+    for (let i = 0; i < 40; i++) await stat(base);
+  }
+
+  /** Advance the fake interval, then drain the real fs IO the ticks kicked off. */
+  async function advance(ms: number): Promise<void> {
+    await vi.advanceTimersByTimeAsync(ms);
+    await flushIo();
+  }
+
   /** Run the detect-a-launch flow for the default wf_aa11-2b artifacts. */
   function emitLaunch(): void {
     tracker.attachToRouter(router, { runId: 'run-1', sessionId: 'sess-1' });
@@ -240,14 +259,14 @@ describe('DynamicWorkflowTracker', () => {
     emitLaunch();
 
     writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n{"type":"started","agentId":"a2"}\n');
-    await vi.advanceTimersByTimeAsync(1000);
+    await advance(1000);
     expect(changed.at(-1)?.state.agents).toEqual([
       { agentId: 'a1', status: 'running' },
       { agentId: 'a2', status: 'running' },
     ]);
 
     appendFileSync(journalPath, '{"type":"result","agentId":"a1"}\n');
-    await vi.advanceTimersByTimeAsync(1000);
+    await advance(1000);
     expect(changed.at(-1)?.state.agents).toEqual([
       { agentId: 'a1', status: 'done' },
       { agentId: 'a2', status: 'running' },
@@ -258,7 +277,7 @@ describe('DynamicWorkflowTracker', () => {
   it('merges agent transcript stats into the emitted state (absent before any parse)', async () => {
     emitLaunch();
     writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
-    await vi.advanceTimersByTimeAsync(1000);
+    await advance(1000);
 
     // Before the transcript lands, the optional stats fields are absent.
     const before = changed.at(-1)?.state.agents[0];
@@ -295,7 +314,7 @@ describe('DynamicWorkflowTracker', () => {
         '',
       ].join('\n'),
     );
-    await vi.advanceTimersByTimeAsync(1000);
+    await advance(1000);
     expect(changed.length).toBe(emitsBefore + 1); // a stats-only change also emits onChanged
     expect(changed.at(-1)?.state.agents).toEqual([
       {
@@ -323,7 +342,7 @@ describe('DynamicWorkflowTracker', () => {
       recordPath,
       JSON.stringify({ status: 'completed', summary: 'All done', agentCount: 3, totalTokens: 999 }),
     );
-    await vi.advanceTimersByTimeAsync(1000);
+    await advance(1000);
 
     const final = changed.at(-1)?.state;
     expect(final?.status).toBe('completed');
@@ -355,9 +374,9 @@ describe('DynamicWorkflowTracker', () => {
     const order: string[] = [];
     const persisted: Array<{ runId: string; event: unknown; dedupKey: string }> = [];
     const originalDrainToEof = JournalTailer.prototype.drainToEof;
-    vi.spyOn(JournalTailer.prototype, 'drainToEof').mockImplementation(function (this: JournalTailer) {
+    vi.spyOn(JournalTailer.prototype, 'drainToEof').mockImplementation(async function (this: JournalTailer) {
       order.push('drain');
-      originalDrainToEof.call(this);
+      await originalDrainToEof.call(this);
     });
 
     DynamicWorkflowTracker._resetForTesting();
@@ -378,7 +397,7 @@ describe('DynamicWorkflowTracker', () => {
       journalPath,
       '{"type":"started","agentId":"a1"}\n{"type":"started","agentId":"a2"}\n',
     );
-    await vi.advanceTimersByTimeAsync(1000);
+    await advance(1000);
     writeFileSync(
       join(transcriptDir, 'agent-a1.jsonl'),
       `${JSON.stringify({
@@ -415,6 +434,7 @@ describe('DynamicWorkflowTracker', () => {
     );
 
     router.emitForRun('run-1', userToolResult('tu-x', notificationText('wabc123', 'completed')));
+    await flushIo(); // finalize -> drain -> persist -> rollup runs async off the notification
 
     expect(order).toEqual(['drain', 'persist', 'persist', 'rollup:run-1']);
     expect(persisted).toEqual([
@@ -458,9 +478,10 @@ describe('DynamicWorkflowTracker', () => {
   it('uses the real sink with unknown/zero fallbacks at the finalize seam', async () => {
     emitLaunch();
     writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
-    await vi.advanceTimersByTimeAsync(1000);
+    await advance(1000);
 
     router.emitForRun('run-1', userToolResult('tu-x', notificationText('wabc123', 'completed')));
+    await flushIo();
 
     const row = db
       .prepare(`SELECT event_type, payload_json, dedup_key FROM raw_events WHERE event_type = 'subagent_usage'`)
@@ -490,6 +511,7 @@ describe('DynamicWorkflowTracker', () => {
   it('a terminal notification without a record finalizes (killed -> failed)', async () => {
     emitLaunch();
     router.emitForRun('run-1', userToolResult('tu-x', notificationText('wabc123', 'killed')));
+    await flushIo();
 
     const final = changed.at(-1)?.state;
     expect(final?.status).toBe('failed');
@@ -503,6 +525,7 @@ describe('DynamicWorkflowTracker', () => {
     emitLaunch();
     writeFileSync(recordPath, JSON.stringify({ status: 'completed', summary: 'Record wins' }));
     router.emitForRun('run-1', userToolResult('tu-x', notificationText('wabc123', 'failed')));
+    await flushIo();
 
     const final = changed.at(-1)?.state;
     expect(final?.status).toBe('completed');
@@ -523,7 +546,7 @@ describe('DynamicWorkflowTracker', () => {
   it('marks a stalled workflow failed and creates a "stalled" review item', async () => {
     emitLaunch();
     // No journal, no record — let the default 1h idle timeout elapse.
-    await vi.advanceTimersByTimeAsync(60 * 60 * 1000 + 2000);
+    await advance(60 * 60 * 1000 + 2000);
 
     const final = changed.at(-1)?.state;
     expect(final?.status).toBe('failed');
@@ -543,9 +566,9 @@ describe('DynamicWorkflowTracker', () => {
     const order: string[] = [];
     const persisted: Array<{ runId: string; event: unknown; dedupKey: string }> = [];
     const originalDrainToEof = JournalTailer.prototype.drainToEof;
-    vi.spyOn(JournalTailer.prototype, 'drainToEof').mockImplementation(function (this: JournalTailer) {
+    vi.spyOn(JournalTailer.prototype, 'drainToEof').mockImplementation(async function (this: JournalTailer) {
       order.push('drain');
-      originalDrainToEof.call(this);
+      await originalDrainToEof.call(this);
     });
     DynamicWorkflowTracker._resetForTesting();
     tracker = DynamicWorkflowTracker.initialize(dbAdapter(db), {
@@ -561,7 +584,7 @@ describe('DynamicWorkflowTracker', () => {
     });
     emitLaunch();
     writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
-    await vi.advanceTimersByTimeAsync(1000);
+    await advance(1000);
     writeFileSync(
       join(transcriptDir, 'agent-a1.jsonl'),
       `${JSON.stringify({
@@ -579,7 +602,7 @@ describe('DynamicWorkflowTracker', () => {
       })}\n`,
     );
 
-    await vi.advanceTimersByTimeAsync(60 * 60 * 1000 + 1000);
+    await advance(60 * 60 * 1000 + 1000);
 
     expect(order).toEqual(['drain', 'persist', 'rollup']);
     expect(persisted).toEqual([
@@ -624,8 +647,8 @@ describe('DynamicWorkflowTracker', () => {
         },
       })}\n`,
     );
-    await vi.advanceTimersByTimeAsync(1000);
-    await vi.advanceTimersByTimeAsync(60 * 60 * 1000 + 1000);
+    await advance(1000);
+    await advance(60 * 60 * 1000 + 1000);
 
     const readPersistedUsage = (): {
       count: number;
@@ -667,6 +690,7 @@ describe('DynamicWorkflowTracker', () => {
       })}\n`,
     );
     router.emitForRun('run-1', userToolResult('tu-late', notificationText('wabc123', 'completed')));
+    await flushIo();
 
     expect(readPersistedUsage()).toEqual({
       count: 1,
@@ -697,7 +721,7 @@ describe('DynamicWorkflowTracker', () => {
 
     // The file-based tailer is still live after detach.
     writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
-    await vi.advanceTimersByTimeAsync(1000);
+    await advance(1000);
     expect(changed.at(-1)?.state.agents).toEqual([{ agentId: 'a1', status: 'running' }]);
   });
 
@@ -705,7 +729,7 @@ describe('DynamicWorkflowTracker', () => {
   // per-session cap
   // -------------------------------------------------------------------------
 
-  it('caps tracked states at 5 per session, dropping the oldest terminal one', () => {
+  it('caps tracked states at 5 per session, dropping the oldest terminal one', async () => {
     tracker.attachToRouter(router, { runId: 'run-1', sessionId: 'sess-1' });
     const launchNth = (n: number): void => {
       const tDir = join(base, 'subagents', 'workflows', `wf_cap${n}`);
@@ -716,7 +740,9 @@ describe('DynamicWorkflowTracker', () => {
 
     for (let n = 1; n <= 5; n++) launchNth(n);
     // Terminate #1 so it becomes droppable (running states are never dropped).
+    // finalize is async now — settle it before the next launch triggers the cap.
     router.emitForRun('run-1', userToolResult('tu-x', notificationText('w1', 'killed')));
+    await flushIo();
     launchNth(6);
 
     const ids = tracker.list('sess-1').map((s) => s.wfRunId);
@@ -732,7 +758,7 @@ describe('DynamicWorkflowTracker', () => {
   it('resolveReviewItemsForSession resolves pending dynamic-workflow items for the session run', async () => {
     emitLaunch();
     writeFileSync(recordPath, JSON.stringify({ status: 'completed', summary: 'Done' }));
-    await vi.advanceTimersByTimeAsync(1000);
+    await advance(1000);
     await ReviewItemRouter.getInstance()._queueForProject(1).onIdle();
     expect(pendingReviewItems()).toHaveLength(1);
 
@@ -758,7 +784,7 @@ describe('DynamicWorkflowTracker', () => {
   it('dismiss forgets a tracked run and emits removed; idempotent', async () => {
     emitLaunch();
     writeFileSync(recordPath, JSON.stringify({ status: 'completed', summary: 'Done' }));
-    await vi.advanceTimersByTimeAsync(1000);
+    await advance(1000);
     expect(tracker.list()).toHaveLength(1);
 
     expect(tracker.dismiss('wf_aa11-2b')).toBe(true);
@@ -780,7 +806,7 @@ describe('DynamicWorkflowTracker', () => {
     expect(tracker.list()).toHaveLength(0);
   });
 
-  it('dismissTerminalForSession dismisses only terminal runs, leaving a running one', () => {
+  it('dismissTerminalForSession dismisses only terminal runs, leaving a running one', async () => {
     tracker.attachToRouter(router, { runId: 'run-1', sessionId: 'sess-1' });
     const launchNth = (n: number): void => {
       const tDir = join(base, 'subagents', 'workflows', `wf_d${n}`);
@@ -790,8 +816,9 @@ describe('DynamicWorkflowTracker', () => {
     };
     launchNth(1);
     launchNth(2);
-    // Terminate #1 only; #2 stays running.
+    // Terminate #1 only; #2 stays running. finalize is async — settle it first.
     router.emitForRun('run-1', userToolResult('tu-x', notificationText('w1', 'completed')));
+    await flushIo();
 
     const dismissedCount = tracker.dismissTerminalForSession('sess-1');
     expect(dismissedCount).toBe(1);
@@ -814,6 +841,7 @@ describe('DynamicWorkflowTracker', () => {
     expect(state.projectId).toBe(-1);
 
     router.emitForRun('run-2', userToolResult('tu-x', notificationText('wg1', 'completed')));
+    await flushIo();
     expect(changed.at(-1)?.state.status).toBe('completed');
     expect(pendingReviewItems()).toHaveLength(0);
   });
@@ -827,17 +855,19 @@ describe('DynamicWorkflowTracker', () => {
     });
     emitLaunch();
     router.emitForRun('run-1', userToolResult('tu-x', notificationText('wabc123', 'completed')));
+    await flushIo();
     expect(changed.at(-1)?.state.status).toBe('completed');
     expect(warn).toHaveBeenCalled();
   });
 
-  it('finalization is fail-soft after the run was cascade-deleted', () => {
+  it('finalization is fail-soft after the run was cascade-deleted', async () => {
     emitLaunch();
     db.prepare('DELETE FROM workflow_runs WHERE id = ?').run('run-1');
 
     expect(() => {
       router.emitForRun('run-1', userToolResult('tu-late', notificationText('wabc123', 'completed')));
     }).not.toThrow();
+    await flushIo();
     expect(changed.at(-1)?.state.status).toBe('completed');
     expect(db.prepare('SELECT * FROM run_usage WHERE run_id = ?').get('run-1')).toBeUndefined();
   });
@@ -850,12 +880,13 @@ describe('DynamicWorkflowTracker', () => {
     });
     emitLaunch();
     writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
-    await vi.advanceTimersByTimeAsync(1000);
+    await advance(1000);
     db.exec('DROP TABLE run_usage; DROP TABLE raw_events;');
 
     expect(() => {
       router.emitForRun('run-1', userToolResult('tu-unmigrated', notificationText('wabc123', 'completed')));
     }).not.toThrow();
+    await flushIo();
     expect(changed.at(-1)?.state.status).toBe('completed');
     expect(warn).toHaveBeenCalled();
   });
