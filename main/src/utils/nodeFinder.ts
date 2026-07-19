@@ -5,11 +5,39 @@ import { execSync } from 'child_process';
 import { findExecutableInPath } from './shellPath';
 import { app } from 'electron';
 
+let cachedNodePath: string | null = null;
+
+/**
+ * Clear the cached resolved Node.js path (for tests, or if the cached path
+ * turns out to be stale — e.g. after an nvm version switch).
+ */
+export function clearNodeExecutableCache(): void {
+  cachedNodePath = null;
+}
+
 /**
  * Find the Node.js executable, trying multiple strategies
  * This is crucial for macOS GUI apps that don't inherit PATH properly
+ *
+ * Memoized at module scope: this is called on every PTY-substrate spawn/turn,
+ * so re-running the full PATH/common-locations/`which` search each time would
+ * repeat several subprocess forks per call for no benefit — the resolved path
+ * doesn't change within a process lifetime. A genuine failure (the bare
+ * 'node' fallback) is deliberately NOT cached so a later call can retry.
  */
 export async function findNodeExecutable(): Promise<string> {
+  if (cachedNodePath) {
+    return cachedNodePath;
+  }
+
+  const resolved = await resolveNodeExecutable();
+  if (resolved !== 'node') {
+    cachedNodePath = resolved;
+  }
+  return resolved;
+}
+
+async function resolveNodeExecutable(): Promise<string> {
   // First, try to find node in PATH
   const nodeInPath = findExecutableInPath('node');
   if (nodeInPath) {

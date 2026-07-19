@@ -361,11 +361,15 @@ export function findExecutableInPath(executable: string): string | null {
     const fullPath = path.join(dir, executable);
     searchedPaths++;
     try {
-      execSync(`test -x "${fullPath}"`, { stdio: 'ignore' });
+      // In-process executability check — no /bin/sh fork per PATH directory.
+      // Was execSync('test -x "<fullPath>"') here, which forked a subprocess
+      // per candidate per call and stormed the process table for callers that
+      // resolve executables on every spawn (see findNodeExecutable).
+      fs.accessSync(fullPath, fs.constants.X_OK);
       console.log(`[ShellPath] Found executable at: ${fullPath}`);
       return fullPath;
     } catch {
-      // Not found in this directory
+      // Not found in this directory, or not executable
     }
   }
 
