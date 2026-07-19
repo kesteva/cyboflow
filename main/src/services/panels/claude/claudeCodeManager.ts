@@ -3800,35 +3800,75 @@ export class ClaudeCodeManager extends AbstractCliManager {
   // ---------------------------------------------------------------------------
 
   /**
-   * F14: per-file content-validated cache of a parsed MCP config source
-   * (`.mcp.json` / `~/.claude.json`), keyed by absolute path. Those files are read
-   * on EVERY turn (getBaseProjectMcpServers → composeMcpServers → buildSdkOptions)
-   * but rarely change and can be large; caching the PARSED value keyed on the raw
-   * text skips the per-turn JSON.parse while a byte-exact raw compare guarantees a
-   * stale parse is never served (a same-length edit still re-parses). The cached
-   * `parsed` is DEEP-FROZEN; callers structuredClone before handing it to the
-   * mutating composition step. Cleared for a file that becomes absent/malformed.
+   * F14: per-file cache of a parsed MCP config source (`.mcp.json` /
+   * `~/.claude.json`), keyed by absolute path. Those files are consulted on
+   * EVERY turn (getBaseProjectMcpServers → composeMcpServers → buildSdkOptions)
+   * but rarely change and can be large. Two-tier validation: a statSync
+   * fast-path (mtimeMs+size+ino — `ino` also catches the atomic
+   * write-to-temp-then-rename pattern) skips both the read AND the parse when
+   * the file is untouched; when metadata changed, a byte-exact raw compare
+   * still reuses the parse for touch-only rewrites. The cached `parsed` is
+   * DEEP-FROZEN; callers structuredClone before handing it to the mutating
+   * composition step. Bounded at MCP_CONFIG_CACHE_MAX entries (oldest-inserted
+   * evicted); cleared for a file that becomes absent/malformed.
    */
-  private readonly mcpConfigParseCache = new Map<string, { raw: string; parsed: unknown }>();
+  private readonly mcpConfigParseCache = new Map<
+    string,
+    { mtimeMs: number; size: number; ino: number; raw: string; parsed: unknown }
+  >();
+  private static readonly MCP_CONFIG_CACHE_MAX = 32;
 
   /**
-   * Parse a JSON MCP-config file's raw text through the content-validated cache
-   * (F14). Reuses the cached parsed value ONLY on a byte-exact raw match and
-   * re-parses + re-freezes on any difference. Throws (like `JSON.parse`) on
-   * malformed input so the caller's existing try/catch logs the same warning;
-   * evicts the stale cache entry first so a later good read re-populates it.
+   * Read + parse a JSON MCP-config file through the two-tier cache (F14).
+   * Returns undefined when the file does not exist (the statSync doubles as the
+   * existence probe, replacing the callers' previous existsSync+readFileSync
+   * pair). Throws (like `JSON.parse`) on malformed input so the caller's
+   * existing try/catch logs the same warning; evicts the stale cache entry
+   * first so a later good read re-populates it.
    */
-  private parseMcpConfigCached(filePath: string, raw: string): unknown {
-    const cached = this.mcpConfigParseCache.get(filePath);
-    if (cached !== undefined && cached.raw === raw) return cached.parsed;
-    let parsed: unknown;
+  private readMcpConfigCached(filePath: string): unknown {
+    let stat: fs.Stats;
     try {
-      parsed = deepFreeze(JSON.parse(raw));
-    } catch (err) {
+      stat = fs.statSync(filePath);
+    } catch {
       this.mcpConfigParseCache.delete(filePath);
-      throw err;
+      return undefined;
     }
-    this.mcpConfigParseCache.set(filePath, { raw, parsed });
+    const cached = this.mcpConfigParseCache.get(filePath);
+    if (
+      cached !== undefined &&
+      cached.mtimeMs === stat.mtimeMs &&
+      cached.size === stat.size &&
+      cached.ino === stat.ino
+    ) {
+      return cached.parsed;
+    }
+    const raw = fs.readFileSync(filePath, 'utf8');
+    let parsed: unknown;
+    if (cached !== undefined && cached.raw === raw) {
+      parsed = cached.parsed;
+    } else {
+      try {
+        parsed = deepFreeze(JSON.parse(raw));
+      } catch (err) {
+        this.mcpConfigParseCache.delete(filePath);
+        throw err;
+      }
+    }
+    if (
+      !this.mcpConfigParseCache.has(filePath) &&
+      this.mcpConfigParseCache.size >= ClaudeCodeManager.MCP_CONFIG_CACHE_MAX
+    ) {
+      const oldest = this.mcpConfigParseCache.keys().next().value;
+      if (oldest !== undefined) this.mcpConfigParseCache.delete(oldest);
+    }
+    this.mcpConfigParseCache.set(filePath, {
+      mtimeMs: stat.mtimeMs,
+      size: stat.size,
+      ino: stat.ino,
+      raw,
+      parsed,
+    });
     return parsed;
   }
 
@@ -3852,34 +3892,31 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
       // .mcp.json in the base project directory.
       const mcpJsonPath = path.join(baseProjectPath, '.mcp.json');
-      if (fs.existsSync(mcpJsonPath)) {
-        this.logger?.verbose(`[MCP] Found .mcp.json at: ${mcpJsonPath}`);
-        try {
-          const mcpJsonContent = fs.readFileSync(mcpJsonPath, 'utf8');
-          const mcpJson = this.parseMcpConfigCached(mcpJsonPath, mcpJsonContent) as {
-            mcpServers?: Record<string, unknown>;
-          };
-          if (mcpJson.mcpServers) {
-            // structuredClone off the deep-frozen cache so `result.mcpServers` is a
-            // FRESH mutable map — the composition step's delete/inject never reaches
-            // the cached parse.
-            Object.assign(result.mcpServers, structuredClone(mcpJson.mcpServers));
-          }
-        } catch (parseError) {
-          this.logger?.warn(`[MCP] Failed to parse .mcp.json: ${parseError}`);
+      try {
+        const mcpJson = this.readMcpConfigCached(mcpJsonPath) as
+          | { mcpServers?: Record<string, unknown> }
+          | undefined;
+        if (mcpJson?.mcpServers) {
+          this.logger?.verbose(`[MCP] Found .mcp.json at: ${mcpJsonPath}`);
+          // structuredClone off the deep-frozen cache so `result.mcpServers` is a
+          // FRESH mutable map — the composition step's delete/inject never reaches
+          // the cached parse.
+          Object.assign(result.mcpServers, structuredClone(mcpJson.mcpServers));
         }
+      } catch (parseError) {
+        this.logger?.warn(`[MCP] Failed to parse .mcp.json: ${parseError}`);
       }
 
       // ~/.claude.json — project-specific and global servers.
       const claudeConfigPath = path.join(os.homedir(), '.claude.json');
-      if (fs.existsSync(claudeConfigPath)) {
-        try {
-          const claudeConfig = fs.readFileSync(claudeConfigPath, 'utf8');
-          const config = this.parseMcpConfigCached(claudeConfigPath, claudeConfig) as {
-            projects?: Record<string, { mcpServers?: Record<string, unknown> }>;
-            mcpServers?: Record<string, unknown>;
-          };
-
+      try {
+        const config = this.readMcpConfigCached(claudeConfigPath) as
+          | {
+              projects?: Record<string, { mcpServers?: Record<string, unknown> }>;
+              mcpServers?: Record<string, unknown>;
+            }
+          | undefined;
+        if (config !== undefined) {
           // structuredClone every value pulled off the deep-frozen cache so the
           // returned map is fresh + mutable (the composition step mutates it).
           const projectConfig = config.projects?.[baseProjectPath];
@@ -3896,9 +3933,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
               }
             }
           }
-        } catch (parseError) {
-          this.logger?.warn(`[MCP] Failed to parse ~/.claude.json: ${parseError}`);
         }
+      } catch (parseError) {
+        this.logger?.warn(`[MCP] Failed to parse ~/.claude.json: ${parseError}`);
       }
 
       const serverCount = Object.keys(result.mcpServers).length;
