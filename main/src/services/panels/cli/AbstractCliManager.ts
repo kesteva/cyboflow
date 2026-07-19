@@ -58,6 +58,14 @@ interface CliSpawnedEvent {
   sessionId: string;
 }
 
+// Diagnostic tail kept for the exit-time "last output" error message — not a
+// scrollback buffer, just enough context to classify the failure.
+const LAST_OUTPUT_TAIL_BYTES = 8192;
+// Pathological-growth cap for the incomplete-line buffer in
+// setupProcessHandlers — a legitimate incomplete trailing line stays well
+// under this, so it only trips for a runaway single line / newline-free burst.
+const LINE_BUFFER_CAP_BYTES = 1024 * 1024;
+
 /**
  * Abstract base class for managing CLI tool processes in Cyboflow
  * Provides common functionality for spawning, managing, and communicating with CLI tools
@@ -702,12 +710,24 @@ export abstract class AbstractCliManager extends EventEmitter {
 
     ptyProcess.onData((data: string) => {
       hasReceivedOutput = true;
-      lastOutput += data;
+      // lastOutput only backs the exit-time diagnostic tail (see
+      // handleProcessRuntimeFailure) — bound it so a long-lived process can't
+      // accumulate its entire lifetime of output in memory.
+      lastOutput = (lastOutput + data).slice(-LAST_OUTPUT_TAIL_BYTES);
       buffer += data;
 
       // Process complete lines
       const lines = buffer.split('\n');
       buffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+      // Guard against a pathological stretch with no newline (or a single
+      // runaway line) growing the incomplete-line remainder without bound.
+      // Complete lines above are already split out and emitted regardless,
+      // so this only ever trims the still-unterminated trailing portion.
+      if (buffer.length > LINE_BUFFER_CAP_BYTES) {
+        this.logger?.verbose(`[${this.getCliToolName()}] incomplete-line buffer exceeded ${LINE_BUFFER_CAP_BYTES} bytes for session ${sessionId}; dropping oldest bytes`);
+        buffer = buffer.slice(-LINE_BUFFER_CAP_BYTES);
+      }
 
       for (const line of lines) {
         if (line.trim()) {
@@ -833,14 +853,14 @@ export abstract class AbstractCliManager extends EventEmitter {
    * Handle process runtime failure
    */
   protected async handleProcessRuntimeFailure(exitCode: number | null, signal: number | undefined, panelId: string, sessionId: string, lastOutput: string): Promise<void> {
-    this.logger?.error(`Last output from ${this.getCliToolName()}: ${lastOutput.substring(-500)}`);
+    this.logger?.error(`Last output from ${this.getCliToolName()}: ${lastOutput.slice(-500)}`);
 
     const errorMessage = {
       type: 'session',
       data: {
         status: 'error',
         message: `${this.getCliToolName()} exited with error (exit code: ${exitCode})`,
-        details: lastOutput.length > 0 ? `Last output:\n${lastOutput.substring(-500)}` : 'No additional details available'
+        details: lastOutput.length > 0 ? `Last output:\n${lastOutput.slice(-500)}` : 'No additional details available'
       }
     };
 
