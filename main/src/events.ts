@@ -1,5 +1,5 @@
 import type { BrowserWindow } from 'electron';
-import { execSync } from './utils/commandExecutor';
+import { runGitAsync } from './utils/runGit';
 import type { AppServices } from './ipc/types';
 import { addSessionLog } from './ipc/logs';
 import { panelManager } from './services/panelManager';
@@ -1094,10 +1094,7 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
         let commitInfo = `\r\n\x1b[36m[${timestamp}]\x1b[0m \x1b[1m\x1b[44m\x1b[37m 📊 SESSION SUMMARY \x1b[0m\r\n\r\n`;
 
         // Check for uncommitted changes
-        const statusOutput = execSync('git status --porcelain', {
-          cwd: session.worktreePath,
-          encoding: 'utf8'
-        }).trim();
+        const statusOutput = (await runGitAsync(session.worktreePath, ['status', '--porcelain'])).trim();
 
         if (statusOutput) {
           const uncommittedFiles = statusOutput.split('\n').length;
@@ -1128,14 +1125,13 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
 
         let commits: GitCommit[] = [];
         try {
-          commits = gitDiffManager.getCommitHistory(session.worktreePath, 10, mainBranch);
+          commits = await gitDiffManager.getCommitHistory(session.worktreePath, 10, mainBranch);
           // Commit count logging removed - shown in session summary
         } catch (error) {
           console.error(`[Events] Error getting commit history:`, error);
           // If there's an error, try without specifying main branch (get all commits)
           try {
-            const fallbackCommand = `git log --format="%H|%s|%ai|%an" --numstat -n 10`;
-            const logOutput = execSync(fallbackCommand, { cwd: session.worktreePath, encoding: 'utf8' });
+            const logOutput = await runGitAsync(session.worktreePath, ['log', '--format=%H|%s|%ai|%an', '--numstat', '-n', '10']);
             // Fallback output logging removed - only errors are logged
           } catch (fallbackError) {
             console.error(`[Events] Fallback also failed:`, fallbackError);
@@ -1237,10 +1233,7 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
         let commitInfo = `\r\n\x1b[36m[${timestamp}]\x1b[0m \x1b[1m\x1b[41m\x1b[37m 📊 SESSION SUMMARY (ERROR) \x1b[0m\r\n\r\n`;
 
         // Check for uncommitted changes
-        const statusOutput = execSync('git status --porcelain', {
-          cwd: session.worktreePath,
-          encoding: 'utf8'
-        }).trim();
+        const statusOutput = (await runGitAsync(session.worktreePath, ['status', '--porcelain'])).trim();
 
         if (statusOutput) {
           const uncommittedFiles = statusOutput.split('\n').length;
@@ -1271,14 +1264,13 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
         
         let commits: GitCommit[] = [];
         try {
-          commits = gitDiffManager.getCommitHistory(session.worktreePath, 10, mainBranch);
+          commits = await gitDiffManager.getCommitHistory(session.worktreePath, 10, mainBranch);
           // Commit count logging removed - shown in session summary
         } catch (error) {
           console.error(`[Events] Error getting commit history:`, error);
           // If there's an error, try without specifying main branch (get all commits)
           try {
-            const fallbackCommand = `git log --format="%H|%s|%ai|%an" --numstat -n 10`;
-            const logOutput = execSync(fallbackCommand, { cwd: session.worktreePath, encoding: 'utf8' });
+            const logOutput = await runGitAsync(session.worktreePath, ['log', '--format=%H|%s|%ai|%an', '--numstat', '-n', '10']);
             // Fallback output logging removed - only errors are logged
           } catch (fallbackError) {
             console.error(`[Events] Fallback also failed:`, fallbackError);

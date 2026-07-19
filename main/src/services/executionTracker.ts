@@ -3,7 +3,7 @@ import type { Logger } from '../utils/logger';
 import type { SessionManager } from './sessionManager';
 import { GitDiffManager, type GitDiffResult } from './gitDiffManager';
 import type { CreateExecutionDiffData, ExecutionDiff } from '../database/models';
-import { execSync } from '../utils/commandExecutor';
+import { runGitAsync } from '../utils/runGit';
 import { formatForDisplay } from '../utils/timestampUtils';
 import { commitManager } from './commitManager';
 import type { CommitModeSettings } from '../../../shared/types';
@@ -40,7 +40,7 @@ export class ExecutionTracker extends EventEmitter {
       const executionSequence = await this.sessionManager.getNextExecutionSequence(sessionId);
       
       // Capture the current commit hash as the starting point
-      const beforeCommitHash = this.gitDiffManager.getCurrentCommitHash(worktreePath);
+      const beforeCommitHash = await this.gitDiffManager.getCurrentCommitHash(worktreePath);
       console.log(`[ExecutionTracker] Starting from commit: ${beforeCommitHash}, sequence: ${executionSequence}`);
       this.logger?.verbose(`Starting from commit: ${beforeCommitHash}`);
       
@@ -171,7 +171,7 @@ export class ExecutionTracker extends EventEmitter {
       }
       
       // Get the current commit hash after auto-commit
-      const afterCommitHash = this.gitDiffManager.getCurrentCommitHash(context.worktreePath);
+      const afterCommitHash = await this.gitDiffManager.getCurrentCommitHash(context.worktreePath);
       
       let executionDiff: GitDiffResult;
       
@@ -195,11 +195,7 @@ export class ExecutionTracker extends EventEmitter {
       if (afterCommitHash !== context.beforeCommitHash && afterCommitHash !== 'UNCOMMITTED') {
         try {
           // Get the commit message from git log
-          // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
-          commitMessage = execSync(`git log -1 --format=%s ${afterCommitHash}`, {
-            cwd: context.worktreePath,
-            encoding: 'utf8'
-          }).trim();
+          commitMessage = (await runGitAsync(context.worktreePath, ['log', '-1', '--format=%s', afterCommitHash])).trim();
           this.logger?.verbose(`Retrieved commit message: ${commitMessage}`);
         } catch (error) {
           this.logger?.warn(`Failed to get commit message: ${error}`);

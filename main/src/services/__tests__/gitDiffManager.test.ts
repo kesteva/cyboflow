@@ -317,3 +317,75 @@ describe('GitDiffManager.captureCommitDiff', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// TASK-680/F11: getCommitHistory, getCommitDiff, and hasChanges were converted
+// from execSync to runGitAsync — these exercise the now-async public API
+// directly against real temp git repos (no mocking).
+// ---------------------------------------------------------------------------
+
+describe('GitDiffManager.getCommitHistory (async)', () => {
+  it('returns commits unique to the current branch, newest first, with parsed numstat', async () => {
+    await withTempDir('gitdiff-history-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'base.txt', 'base\n', 'base commit');
+      execSync('git checkout -b feature', { cwd: repo, stdio: 'pipe' });
+      const sha1 = commitFile(repo, 'a.txt', 'a1\n', 'feature commit 1');
+      const sha2 = commitFile(repo, 'b.txt', 'b1\n', 'feature commit 2');
+
+      const manager = new GitDiffManager();
+      const commits = await manager.getCommitHistory(repo, 50, 'main');
+
+      expect(commits.map(c => c.hash)).toEqual([sha2, sha1]);
+      expect(commits[0].message).toBe('feature commit 2');
+      expect(commits[0].stats.filesChanged).toBe(1);
+      expect(commits[0].stats.additions).toBe(1);
+    });
+  });
+
+  it('returns an empty array when the branch has no commits unique from main', async () => {
+    await withTempDir('gitdiff-history-empty-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'base.txt', 'base\n', 'base commit');
+
+      const manager = new GitDiffManager();
+      const commits = await manager.getCommitHistory(repo, 50, 'main');
+
+      expect(commits).toEqual([]);
+    });
+  });
+});
+
+describe('GitDiffManager.getCommitDiff (async)', () => {
+  it('returns the diff, stats, and changed files for a single commit hash', async () => {
+    await withTempDir('gitdiff-commitdiff-single2-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'a.txt', 'a1\n', 'c1');
+      const sha2 = commitFile(repo, 'a.txt', 'a1\na2\n', 'c2');
+
+      const manager = new GitDiffManager();
+      const result = await manager.getCommitDiff(repo, sha2);
+
+      expect(result.afterHash).toBe(sha2);
+      expect(result.beforeHash).toBe(`${sha2}~1`);
+      expect(result.changedFiles).toEqual(['a.txt']);
+      expect(result.diff).toContain('+a2');
+      expect(result.stats.filesChanged).toBe(1);
+    });
+  });
+});
+
+describe('GitDiffManager.hasChanges (async)', () => {
+  it('is false for a clean worktree and true after an uncommitted edit', async () => {
+    await withTempDir('gitdiff-haschanges-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'a.txt', 'a1\n', 'c1');
+
+      const manager = new GitDiffManager();
+      expect(await manager.hasChanges(repo)).toBe(false);
+
+      fs.writeFileSync(path.join(repo, 'a.txt'), 'a1\na2\n');
+      expect(await manager.hasChanges(repo)).toBe(true);
+    });
+  });
+});

@@ -1,6 +1,7 @@
 import { IpcMain } from 'electron';
 import type { AppServices } from './types';
 import { execSync } from '../utils/commandExecutor';
+import { runGitAsync } from '../utils/runGit';
 import { buildGitCommitCommand, escapeShellArg } from '../utils/shellEscape';
 import { isCommitFooterEnabled } from '../utils/commitFooter';
 import { panelManager } from '../services/panelManager';
@@ -423,7 +424,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
 
     if (!useFallback) {
       try {
-        commits = gitDiffManager.getCommitHistory(session.worktreePath, limit, comparisonBranch);
+        commits = await gitDiffManager.getCommitHistory(session.worktreePath, limit, comparisonBranch);
       } catch (error) {
         if (session.isMainRepo) {
           console.warn(`[IPC:git] Falling back to local commit history for session ${session.id}:`, error);
@@ -434,7 +435,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
           // base_commit unresolvable (e.g. gc'd) — retry against main before giving up.
           console.warn(`[IPC:git] base_commit ${comparisonBranch} unresolvable for session ${session.id}; comparing against ${mainBranch}:`, error);
           comparisonBranch = mainBranch;
-          commits = gitDiffManager.getCommitHistory(session.worktreePath, limit, comparisonBranch);
+          commits = await gitDiffManager.getCommitHistory(session.worktreePath, limit, comparisonBranch);
         } else {
           throw error;
         }
@@ -499,7 +500,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       }));
 
       // Check for uncommitted changes
-      const hasUncommittedChanges = gitDiffManager.hasChanges(session.worktreePath);
+      const hasUncommittedChanges = await gitDiffManager.hasChanges(session.worktreePath);
       if (hasUncommittedChanges) {
         // Get stats for uncommitted changes
         const uncommittedDiff = await gitDiffManager.captureWorkingDirectoryDiff(session.worktreePath);
@@ -546,7 +547,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
 
       // Get diff for the specific commit
       const commit = commits[executionIndex];
-      const diff = gitDiffManager.getCommitDiff(session.worktreePath, commit.hash);
+      const diff = await gitDiffManager.getCommitDiff(session.worktreePath, commit.hash);
       return { success: true, data: diff };
     } catch (error) {
       console.error('Failed to get execution diff:', error);
@@ -637,10 +638,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       if (executionIds && executionIds.length === 1 && executionIds[0] === 0) {
         // Verify the worktree exists and has uncommitted changes
         try {
-          const status = execSync('git status --porcelain', { 
-            cwd: session.worktreePath, 
-            encoding: 'utf8' 
-          });
+          await runGitAsync(session.worktreePath, ['status', '--porcelain']);
         } catch (error) {
           console.error('Error checking git status:', error);
         }
@@ -675,22 +673,14 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
           if (commitIndex >= 0 && commitIndex < commits.length) {
             const fromCommit = commits[commitIndex];
             // Get diff from commit to working directory (includes uncommitted changes)
-            // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
-            const diff = execSync(
-              `git diff ${fromCommit.hash}`,
-              { cwd: session.worktreePath, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 }
-            );
+            const diff = await runGitAsync(session.worktreePath, ['diff', fromCommit.hash]);
 
             const stats = gitDiffManager.parseDiffStats(
-              // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
-              execSync(`git diff --stat ${fromCommit.hash}`, { cwd: session.worktreePath, encoding: 'utf8' })
+              await runGitAsync(session.worktreePath, ['diff', '--stat', fromCommit.hash])
             );
 
-            // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
-            const changedFiles = execSync(
-              `git diff --name-only ${fromCommit.hash}`,
-              { cwd: session.worktreePath, encoding: 'utf8' }
-            ).trim().split('\n').filter(Boolean);
+            const changedFiles = (await runGitAsync(session.worktreePath, ['diff', '--name-only', fromCommit.hash]))
+              .trim().split('\n').filter(Boolean);
 
             return {
               success: true,
@@ -722,11 +712,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
 
           try {
             // Try to get the parent of the older commit
-            // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
-            const parentHash = execSync(`git rev-parse ${olderCommit.hash}^`, {
-              cwd: session.worktreePath,
-              encoding: 'utf8'
-            }).trim();
+            const parentHash = (await runGitAsync(session.worktreePath, ['rev-parse', `${olderCommit.hash}^`])).trim();
             fromCommitHash = parentHash;
           } catch (error) {
             // If there's no parent (initial commit), use git's empty tree hash
@@ -756,33 +742,21 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
           let fromCommitHash: string;
           try {
             // Try to get the parent of the commit
-            // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
-            fromCommitHash = execSync(`git rev-parse ${commits[0].hash}^`, {
-              cwd: session.worktreePath,
-              encoding: 'utf8'
-            }).trim();
+            fromCommitHash = (await runGitAsync(session.worktreePath, ['rev-parse', `${commits[0].hash}^`])).trim();
           } catch (error) {
             // If there's no parent (initial commit), use git's empty tree hash
             fromCommitHash = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
           }
 
           // Get diff from parent to working directory (includes the commit and any uncommitted changes)
-          // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
-          const diff = execSync(
-            `git diff ${fromCommitHash}`,
-            { cwd: session.worktreePath, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 }
-          );
-          
+          const diff = await runGitAsync(session.worktreePath, ['diff', fromCommitHash]);
+
           const stats = gitDiffManager.parseDiffStats(
-            // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
-            execSync(`git diff --stat ${fromCommitHash}`, { cwd: session.worktreePath, encoding: 'utf8' })
+            await runGitAsync(session.worktreePath, ['diff', '--stat', fromCommitHash])
           );
 
-          // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
-          const changedFiles = execSync(
-            `git diff --name-only ${fromCommitHash}`,
-            { cwd: session.worktreePath, encoding: 'utf8' }
-          ).trim().split('\n').filter(f => f);
+          const changedFiles = (await runGitAsync(session.worktreePath, ['diff', '--name-only', fromCommitHash]))
+            .trim().split('\n').filter(f => f);
 
           return {
             success: true,
@@ -800,33 +774,21 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
 
         try {
           // Try to get the parent of the first commit
-          // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
-          fromCommitHash = execSync(`git rev-parse ${firstCommit.hash}^`, {
-            cwd: session.worktreePath,
-            encoding: 'utf8'
-          }).trim();
+          fromCommitHash = (await runGitAsync(session.worktreePath, ['rev-parse', `${firstCommit.hash}^`])).trim();
         } catch (error) {
           // If there's no parent (initial commit), use git's empty tree hash
           fromCommitHash = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
         }
 
         // Get diff from the parent of first commit to working directory (includes uncommitted changes)
-        // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
-        const diff = execSync(
-          `git diff ${fromCommitHash}`,
-          { cwd: session.worktreePath, encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 }
-        );
-        
+        const diff = await runGitAsync(session.worktreePath, ['diff', fromCommitHash]);
+
         const stats = gitDiffManager.parseDiffStats(
-          // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
-          execSync(`git diff --stat ${fromCommitHash}`, { cwd: session.worktreePath, encoding: 'utf8' })
+          await runGitAsync(session.worktreePath, ['diff', '--stat', fromCommitHash])
         );
 
-        // TODO(TASK-680): migrate to runGit(cwd, args[]) — see main/src/utils/runGit.ts
-        const changedFiles = execSync(
-          `git diff --name-only ${fromCommitHash}`,
-          { cwd: session.worktreePath, encoding: 'utf8' }
-        ).trim().split('\n').filter(f => f);
+        const changedFiles = (await runGitAsync(session.worktreePath, ['diff', '--name-only', fromCommitHash]))
+          .trim().split('\n').filter(f => f);
 
         return {
           success: true, 
@@ -865,7 +827,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         const commitIndex = executionIds[0] - 1;
         if (commitIndex >= 0 && commitIndex < commits.length) {
           const commit = commits[commitIndex];
-          const diff = gitDiffManager.getCommitDiff(session.worktreePath, commit.hash);
+          const diff = await gitDiffManager.getCommitDiff(session.worktreePath, commit.hash);
           return { success: true, data: diff };
         }
       }
