@@ -165,7 +165,7 @@ import { setExperimentsDeps } from './orchestrator/trpc/routers/experiments';
 import { recoverExperiments, reconcileExperimentStatus, dismissAndSweepHalfCreatedExperiment, reconcileAllRotationExperiments } from './orchestrator/experimentStore';
 import { createQuickSessionCore } from './services/createQuickSessionCore';
 import * as fs from 'fs';
-import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs } from './utils/devDebugLog';
+import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs, flushDevDebugLogs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
 import { getBootDatabasePath, getDemoBootEnvironment, getDemoBootError } from './services/demo/demoBootstrap';
 
@@ -499,11 +499,109 @@ if (!gotSingleInstanceLock) {
     .finally(() => app.exit(0));
 }
 
+/**
+ * Bind the single orchestrator tRPC IPC handler to a BrowserWindow.
+ *
+ * Called from createWindow() BEFORE the renderer loads (the first window) and
+ * again on the macOS 'activate' re-created window. The adapter creates the
+ * global trpc-electron handler exactly once and only attachWindow()s thereafter
+ * (see ipcAdapter.ts), so the initial and re-created windows call this the same
+ * way. Requires initializeServices() to have run — createWindow is only ever
+ * invoked after it, so databaseService / configManager / workflowRegistry /
+ * gitDiffManager and the AgentOverrideRouter singleton are all live here.
+ */
+function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
+  const db = makeDatabaseLike(databaseService);
+  attachOrchestratorTrpc({
+    window: win,
+    router: appRouter,
+    createContext: () =>
+      createContext({
+        db,
+        setDockBadge: (count) => dockBadgeService.setBadgeCount(count),
+        workflowRegistry,
+        agentOverrideRouter: AgentOverrideRouter.getInstance(),
+        getForcedSubstrate: () => configManager.getForcedSubstrate(),
+        // Run-scoped Diff tab: closure over GitDiffManager keeps the standalone
+        // runs router free of a services/* import. Narrow the GitDiffResult down
+        // to the RunGitDiff wire shape (diff + stats + changedFiles).
+        gitDiff: async (worktreePath: string, baseRef?: string) => {
+          // With the run's base_sha, diff the working tree against it so commits
+          // made since launch (e.g. sprint/ship merging task lanes) show too;
+          // without it, fall back to the working-directory diff (vs HEAD).
+          const result = baseRef
+            ? await gitDiffManager.captureDiffAgainstRef(worktreePath, baseRef)
+            : await gitDiffManager.captureWorkingDirectoryDiff(worktreePath);
+          return { diff: result.diff, stats: result.stats, changedFiles: result.changedFiles };
+        },
+      }),
+  });
+}
+
+// Deferrable (non-first-paint) startup work, kicked off once the main window's
+// first frame is painted ('ready-to-show') rather than on the critical path to
+// first paint. Idempotent: the macOS 'activate' re-created window fires
+// 'ready-to-show' again, and these sweeps / git polling must run only once.
+let deferredStartupWorkStarted = false;
+function runDeferredStartupWork(): void {
+  if (deferredStartupWorkStarted) return;
+  deferredStartupWorkStarted = true;
+
+  // Git status polling is comparatively expensive (spawns git per session), so it
+  // is held back until the window is visible instead of started during init.
+  gitStatusManager.startPolling();
+
+  // Boot sweep (TASK-057): kill detached ui-prototype `http.server` processes
+  // pointing under THIS instance's artifacts/runs root that a prior session or a
+  // crash left behind. LIVE-RUN-AWARE backstop: after an unclean shutdown a run
+  // left non-terminal (e.g. awaiting_review) still has its server up, and killing
+  // it would leave the prototype tab dead when the user reopens to review — so a
+  // server whose runId still has a NON-terminal workflow_runs row is spared. The
+  // clean-quit path is already fully covered by the before-quit sweep. DB error →
+  // treat as not-live (reap) so a crashed-DB boot never strands servers.
+  // Fire-and-forget — never block on `ps`.
+  void prototypeServerReaper
+    .sweepOrphans(getCyboflowSubdirectory('artifacts', 'runs'), (runId) => {
+      try {
+        return !!databaseService
+          .getDb()
+          .prepare(
+            `SELECT 1 FROM workflow_runs WHERE id = ? AND status NOT IN ${TERMINAL_RUN_STATUSES_SQL_IN}`,
+          )
+          .get(runId);
+      } catch {
+        return false;
+      }
+    })
+    .catch((err) => {
+      console.error('[Main] prototype-server boot sweep failed:', err);
+    });
+
+  // Boot sweep: kill detached `openai-codex` plugin broker trees whose worktree
+  // (`--cwd`) no longer exists on disk — orphans a prior session or a crash left
+  // behind (the plugin's own SessionEnd reaper never fires under cyboflow's
+  // hard-kill teardown, and the broker has no idle TTL). A broker for a still-live
+  // worktree is spared automatically (its cwd still exists). Fire-and-forget —
+  // never block on `ps`.
+  void codexBrokerReaper.sweepOrphans().catch((err) => {
+    console.error('[Main] codex-broker boot sweep failed:', err);
+  });
+}
+
 async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
     icon: path.join(__dirname, '../assets/icon.png'),
+    // First-paint: start hidden and paint the renderer's root background so the
+    // window never flashes an empty white frame while the (heavy) renderer boots;
+    // it is revealed on 'ready-to-show' below, once the first frame is painted.
+    // '#f5f1e8' is the default Paper theme's --color-bg-primary (var(--paper),
+    // frontend/src/styles/tokens/colors.css); the renderer's inline theme script
+    // re-applies the user's saved theme before its first paint, so the show gate
+    // is what actually removes the flash and this color just blends the frame.
+    show: false,
+    backgroundColor: '#f5f1e8',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -521,6 +619,20 @@ async function createWindow() {
   // Increase max listeners to prevent warning when many panels are active
   // Each panel can register multiple event listeners
   mainWindow.webContents.setMaxListeners(100);
+
+  // Reveal the window only once the renderer has painted its first frame, and
+  // kick off the deferrable startup work at that point. Registered BEFORE
+  // loadURL/loadFile so the one-shot 'ready-to-show' is never missed.
+  mainWindow.once('ready-to-show', () => {
+    mainWindow?.show();
+    runDeferredStartupWork();
+  });
+
+  // Bind the tRPC IPC handler to this window BEFORE the renderer loads, so an
+  // early renderer request never races handler registration. On the first window
+  // the adapter creates the single global handler; on the macOS 'activate'
+  // re-created window it only attaches to it (never a second createIPCHandler).
+  attachOrchestratorTrpcToWindow(mainWindow);
 
   if (isDevelopment) {
     await loadDevUrlWithRetry(mainWindow, 'http://localhost:4521');
@@ -630,8 +742,10 @@ async function createWindow() {
       appendDevDebugLog('backend', 'log', 'BACKEND', message, { error: originalError });
     }
 
-    // Forward to renderer
-    if (mainWindow && !mainWindow.isDestroyed()) {
+    // Forward to renderer (dev-only). In production the renderer never mirrors
+    // backend logs, so this IPC send + serialization would be pure overhead on
+    // every log line — gate it on isDevelopment (F2).
+    if (isDevelopment && mainWindow && !mainWindow.isDestroyed()) {
       try {
         mainWindow.webContents.send('main-log', 'log', message);
       } catch (e) {
@@ -669,7 +783,8 @@ async function createWindow() {
         appendDevDebugLog('backend', 'error', 'BACKEND', message, { error: originalError });
       }
 
-      if (mainWindow && !mainWindow.isDestroyed()) {
+      // Forward to renderer (dev-only, F2 — see console.log override above).
+      if (isDevelopment && mainWindow && !mainWindow.isDestroyed()) {
         try {
           mainWindow.webContents.send('main-log', 'error', message);
         } catch (e) {
@@ -702,7 +817,8 @@ async function createWindow() {
       appendDevDebugLog('backend', 'warn', 'BACKEND', message, { error: originalError });
     }
 
-    if (mainWindow && !mainWindow.isDestroyed()) {
+    // Forward to renderer (dev-only, F2 — see console.log override above).
+    if (isDevelopment && mainWindow && !mainWindow.isDestroyed()) {
       try {
         mainWindow.webContents.send('main-log', 'warn', message);
       } catch (e) {
@@ -726,7 +842,8 @@ async function createWindow() {
       appendDevDebugLog('backend', 'info', 'BACKEND', message, { error: originalError });
     }
 
-    if (mainWindow && !mainWindow.isDestroyed()) {
+    // Forward to renderer (dev-only, F2 — see console.log override above).
+    if (isDevelopment && mainWindow && !mainWindow.isDestroyed()) {
       try {
         mainWindow.webContents.send('main-log', 'info', message);
       } catch (e) {
@@ -744,7 +861,8 @@ async function createWindow() {
       appendDevDebugLog('backend', 'debug', 'BACKEND', message, { error: originalError });
     }
 
-    if (mainWindow && !mainWindow.isDestroyed()) {
+    // Forward to renderer (dev-only, F2 — see console.log override above).
+    if (isDevelopment && mainWindow && !mainWindow.isDestroyed()) {
       try {
         mainWindow.webContents.send('main-log', 'debug', message);
       } catch (e) {
@@ -2404,8 +2522,9 @@ async function initializeServices() {
     });
   }
   
-  // Start git status polling
-  gitStatusManager.startPolling();
+  // NOTE: git status polling is no longer started here — it is deferred to the
+  // main window's first 'ready-to-show' (see runDeferredStartupWork) so it never
+  // competes with the critical path to first paint.
 }
 
 // Initialize telemetry (error reporting + usage metrics) BEFORE the app 'ready'
@@ -2428,41 +2547,11 @@ app.whenReady().then(async () => {
   console.log('[Main] App is ready, initializing services...');
   await initializeServices();
 
-  // Boot sweep (TASK-057): kill detached ui-prototype `http.server` processes
-  // pointing under THIS instance's artifacts/runs root that a prior session or a
-  // crash left behind. LIVE-RUN-AWARE backstop: after an unclean shutdown a run
-  // left non-terminal (e.g. awaiting_review) still has its server up, and killing
-  // it would leave the prototype tab dead when the user reopens to review — so a
-  // server whose runId still has a NON-terminal workflow_runs row is spared. The
-  // clean-quit path is already fully covered by the before-quit sweep. DB error →
-  // treat as not-live (reap) so a crashed-DB boot never strands servers.
-  // Fire-and-forget — never block boot on `ps`.
-  void prototypeServerReaper
-    .sweepOrphans(getCyboflowSubdirectory('artifacts', 'runs'), (runId) => {
-      try {
-        return !!databaseService
-          .getDb()
-          .prepare(
-            `SELECT 1 FROM workflow_runs WHERE id = ? AND status NOT IN ${TERMINAL_RUN_STATUSES_SQL_IN}`,
-          )
-          .get(runId);
-      } catch {
-        return false;
-      }
-    })
-    .catch((err) => {
-      console.error('[Main] prototype-server boot sweep failed:', err);
-    });
-
-  // Boot sweep: kill detached `openai-codex` plugin broker trees whose worktree
-  // (`--cwd`) no longer exists on disk — orphans a prior session or a crash left
-  // behind (the plugin's own SessionEnd reaper never fires under cyboflow's
-  // hard-kill teardown, and the broker has no idle TTL). A broker for a still-live
-  // worktree is spared automatically (its cwd still exists). Fire-and-forget —
-  // never block boot on `ps`.
-  void codexBrokerReaper.sweepOrphans().catch((err) => {
-    console.error('[Main] codex-broker boot sweep failed:', err);
-  });
+  // NOTE: the prototype-server and codex-broker boot sweeps are no longer run
+  // here — they are deferred to the main window's first 'ready-to-show' (see
+  // runDeferredStartupWork) so they never compete with the critical path to
+  // first paint. They were already fire-and-forget, so nothing downstream waits
+  // on them.
 
   // Schema-version gate: each packaged kind now owns its own data dir
   // (stable → ~/.cyboflow, Dev DMG → ~/.cyboflow_dev_dmg), so cross-variant
@@ -2537,35 +2626,15 @@ app.whenReady().then(async () => {
         ReviewItemRouter.getInstance().applyReviewItem(projectId, change),
     });
     await orchestrator.start();
-    if (!mainWindow) {
-      throw new Error(
-        'mainWindow is null after createWindow — cannot attach orchestrator tRPC bridge'
-      );
-    }
-    attachOrchestratorTrpc({
-      window: mainWindow,
-      router: appRouter,
-      createContext: () => createContext({
-        db,
-        setDockBadge: (count) => dockBadgeService.setBadgeCount(count),
-        workflowRegistry,
-        agentOverrideRouter: AgentOverrideRouter.getInstance(),
-        getForcedSubstrate: () => configManager.getForcedSubstrate(),
-        // Run-scoped Diff tab: closure over GitDiffManager keeps the standalone
-        // runs router free of a services/* import. Narrow the GitDiffResult down
-        // to the RunGitDiff wire shape (diff + stats + changedFiles).
-        gitDiff: async (worktreePath: string, baseRef?: string) => {
-          // With the run's base_sha, diff the working tree against it so commits
-          // made since launch (e.g. sprint/ship merging task lanes) show too;
-          // without it, fall back to the working-directory diff (vs HEAD).
-          const result = baseRef
-            ? await gitDiffManager.captureDiffAgainstRef(worktreePath, baseRef)
-            : await gitDiffManager.captureWorkingDirectoryDiff(worktreePath);
-          return { diff: result.diff, stats: result.stats, changedFiles: result.changedFiles };
-        },
-      }),
-    });
-    console.log('[Main] Orchestrator started and tRPC IPC handler attached');
+    // NOTE: the tRPC IPC handler is now attached inside createWindow() — BEFORE
+    // the renderer loads — so an early renderer request never races handler
+    // registration. See attachOrchestratorTrpcToWindow. createContext's deps
+    // (db / workflowRegistry / AgentOverrideRouter / configManager /
+    // gitDiffManager) are all live post-initializeServices, and the late-init
+    // singletons wired below (Approval/Question routers) are only invoked by
+    // user-action mutations, never by mount-time reads — so attaching ahead of
+    // this block is safe.
+    console.log('[Main] Orchestrator started (tRPC IPC handler attached pre-load in createWindow)');
 
     // Wire ApprovalRouter after the RunQueueRegistry is live.
     // Permission decisions are produced in-process by the SDK PreToolUse hook
@@ -3946,6 +4015,11 @@ app.on('before-quit', async (event) => {
   if (taskQueue) {
     await taskQueue.close();
   }
+
+  // Flush any buffered dev-mode debug log lines so pending writes land before
+  // exit (dev-only; a no-op that resolves immediately in production, where the
+  // dev-log writer is never fed). See utils/devDebugLog.ts (F16).
+  await flushDevDebugLogs();
 
   // Close logger to ensure all logs are flushed
   if (logger) {

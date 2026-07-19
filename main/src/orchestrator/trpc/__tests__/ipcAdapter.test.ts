@@ -1,8 +1,13 @@
 /**
  * Unit tests for ipcAdapter.ts.
  *
- * Verifies that attachOrchestratorTrpc forwards router, createContext, and
- * the BrowserWindow to trpc-electron's createIPCHandler with the correct shape.
+ * Verifies that attachOrchestratorTrpc:
+ *  - forwards router, createContext, and the BrowserWindow to trpc-electron's
+ *    createIPCHandler with the correct shape on the FIRST call, and
+ *  - upholds the single-handler invariant: a SECOND call does NOT create a
+ *    second handler (which would register a duplicate global ipcMain listener
+ *    and double-execute every request) — it only attachWindow()s the retained
+ *    handler.
  *
  * trpc-electron/main is mocked so the test remains electron-free (no real IPC
  * channel is opened — the adapter's wiring is the only thing asserted).
@@ -18,10 +23,10 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // ---------------------------------------------------------------------------
 
 // vi.mock is hoisted to top of file — factory must not reference variables
-// declared outside the factory. Use vi.fn() inline and retrieve via vi.mocked
-// after import.
+// declared outside the factory. Return a fresh handler (with a spied
+// attachWindow) per createIPCHandler call so the adapter can retain + reuse it.
 vi.mock('trpc-electron/main', () => ({
-  createIPCHandler: vi.fn(),
+  createIPCHandler: vi.fn(() => ({ attachWindow: vi.fn(), detachWindow: vi.fn() })),
   exposeElectronTRPC: vi.fn(),
 }));
 
@@ -36,7 +41,11 @@ vi.mock('electron', () => ({
 }));
 
 // Import after mocks are registered
-import { attachOrchestratorTrpc, type AttachOrchestratorTrpcOpts } from '../ipcAdapter';
+import {
+  attachOrchestratorTrpc,
+  __resetOrchestratorTrpcHandlerForTests,
+  type AttachOrchestratorTrpcOpts,
+} from '../ipcAdapter';
 import { appRouter } from '../router';
 import { createContext } from '../context';
 import * as trpcElectronMain from 'trpc-electron/main';
@@ -48,6 +57,9 @@ import * as trpcElectronMain from 'trpc-electron/main';
 /** Minimal BrowserWindow stub — only the reference identity matters for wiring tests. */
 type FakeBrowserWindow = AttachOrchestratorTrpcOpts['window'];
 
+/** Shape of the mocked handler createIPCHandler returns. */
+type MockHandler = { attachWindow: ReturnType<typeof vi.fn> };
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -57,6 +69,8 @@ describe('attachOrchestratorTrpc', () => {
 
   beforeEach(() => {
     mockCreateIPCHandler.mockClear();
+    // Each case starts with no retained handler.
+    __resetOrchestratorTrpcHandlerForTests();
   });
 
   it('attaches router and createContext via createIPCHandler', async () => {
@@ -90,15 +104,21 @@ describe('attachOrchestratorTrpc', () => {
     expect(typeof ctx.setDockBadge).toBe('function');
   });
 
-  it('passes distinct window instances independently', () => {
+  it('creates the handler exactly once and only attachWindow()s later windows', () => {
     const win1 = {} as FakeBrowserWindow;
     const win2 = {} as FakeBrowserWindow;
 
     attachOrchestratorTrpc({ window: win1, router: appRouter, createContext });
     attachOrchestratorTrpc({ window: win2, router: appRouter, createContext });
 
-    expect(mockCreateIPCHandler).toHaveBeenCalledTimes(2);
+    // Single-handler invariant: createIPCHandler runs ONCE. A second call would
+    // register a duplicate global ipcMain listener and double-execute mutations.
+    expect(mockCreateIPCHandler).toHaveBeenCalledTimes(1);
     expect(mockCreateIPCHandler.mock.calls[0][0].windows).toEqual([win1]);
-    expect(mockCreateIPCHandler.mock.calls[1][0].windows).toEqual([win2]);
+
+    // The second window is bound via attachWindow on the retained handler.
+    const handler = mockCreateIPCHandler.mock.results[0].value as MockHandler;
+    expect(handler.attachWindow).toHaveBeenCalledTimes(1);
+    expect(handler.attachWindow).toHaveBeenCalledWith(win2);
   });
 });
