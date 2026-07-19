@@ -4,7 +4,7 @@
  * journalTailer.test.ts.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WorkflowScriptWatcher, type WorkflowScriptLaunch } from '../workflowScriptWatcher';
@@ -109,5 +109,54 @@ describe('WorkflowScriptWatcher', () => {
     await vi.advanceTimersByTimeAsync(POLL_MS * 3);
 
     expect(launches).toHaveLength(0);
+  });
+
+  it('never emits scripts that existed before start(); a post-start script emits exactly once', async () => {
+    // A (re)started watcher over a key dir that already holds historical
+    // workflows from prior claude sessions in the SAME worktree. Without the
+    // baseline pass these would all replay and the tracker would misattribute
+    // them to whatever run is currently active.
+    writeScript('uuid-old-1', 'historical-a-wf_old111.js');
+    writeScript('uuid-old-2', 'historical-b-wf_old222.js');
+
+    const launches: WorkflowScriptLaunch[] = [];
+    const watcher = new WorkflowScriptWatcher(keyDir, (l) => launches.push(l));
+    watcher.start(); // baseline records both historical scripts WITHOUT emitting
+
+    await vi.advanceTimersByTimeAsync(POLL_MS * 3);
+    expect(launches).toHaveLength(0); // historical workflows are never (re)attributed
+
+    // A genuinely new script appearing AFTER start() is reported, exactly once.
+    const fresh = writeScript('uuid-new', 'fresh-wf_new999.js');
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(launches).toHaveLength(1);
+    expect(launches[0].wfRunId).toBe('wf_new999');
+    expect(launches[0].scriptPath).toBe(fresh);
+
+    await vi.advanceTimersByTimeAsync(POLL_MS * 3);
+    expect(launches).toHaveLength(1); // not re-emitted on later polls
+    watcher.stop();
+  });
+
+  it('detects a second workflow added to an already-scanned session dir (mtime gate reopens)', async () => {
+    const launches: WorkflowScriptLaunch[] = [];
+    const watcher = new WorkflowScriptWatcher(keyDir, (l) => launches.push(l));
+    watcher.start();
+
+    writeScript('uuid-1', 'first-wf_111.js');
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(launches.map((l) => l.wfRunId)).toEqual(['wf_111']);
+
+    // A second script in the SAME session dir. Bump the dir mtime deterministically
+    // (real fs mtime granularity would otherwise make this flaky) so the gate
+    // re-opens the readdir instead of skipping the unchanged-looking dir.
+    writeScript('uuid-1', 'second-wf_222.js');
+    const scriptsDir = join(keyDir, 'uuid-1', 'workflows', 'scripts');
+    const bumped = new Date(statSync(scriptsDir).mtimeMs + 5000);
+    utimesSync(scriptsDir, bumped, bumped);
+
+    await vi.advanceTimersByTimeAsync(POLL_MS);
+    expect(launches.map((l) => l.wfRunId).sort()).toEqual(['wf_111', 'wf_222']);
+    watcher.stop();
   });
 });

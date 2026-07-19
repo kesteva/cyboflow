@@ -47,6 +47,15 @@ export class WorkflowScriptWatcher {
   private stopped = false;
   /** wfRunIds already reported — onLaunch fires at most once per workflow. */
   private readonly seen = new Set<string>();
+  /**
+   * `<uuid>/workflows/scripts` path -> the dir's last observed `mtimeMs`. Gates
+   * the recurring readdir: a new `*-wf_*.js` file is added DIRECTLY to this dir,
+   * which bumps its own mtime, so an unchanged mtime means no new scripts to
+   * scan. (The parent key dir's mtime does NOT reflect such nested writes, so we
+   * must stat each scripts dir itself.) Only committed after a successful
+   * readdir so a transient readdir failure retries next tick.
+   */
+  private readonly scriptsDirMtimes = new Map<string, number>();
 
   constructor(
     /** `~/.claude/projects/<encodeCwd(worktreePath)>` — the session's project key dir. */
@@ -55,10 +64,18 @@ export class WorkflowScriptWatcher {
     private readonly logger?: Pick<LoggerLike, 'warn'>,
   ) {}
 
-  /** Begin polling. An immediate scan catches a script already on disk. */
+  /**
+   * Begin polling. A baseline pass records every script ALREADY on disk into
+   * `seen` WITHOUT emitting — only scripts that appear AFTER start() are
+   * reported as launches. The key dir is shared by every claude session that
+   * has ever run in this worktree, so it accumulates historical `<uuid>` dirs;
+   * without the baseline, a (re)started watcher would replay all of them and
+   * the tracker would misattribute those historical workflows to the currently
+   * active run.
+   */
   start(): void {
-    this.scan();
-    this.timer = setInterval(() => this.scan(), POLL_INTERVAL_MS);
+    this.scan(false); // baseline — seed `seen` + dir mtimes, emit nothing
+    this.timer = setInterval(() => this.scan(true), POLL_INTERVAL_MS);
   }
 
   stop(): void {
@@ -70,11 +87,14 @@ export class WorkflowScriptWatcher {
   }
 
   /**
-   * Scan every `<uuid>/workflows/scripts` dir under the key dir for new
-   * `*-wf_*.js` scripts. Fail-soft: a missing key dir (claude has not created the
-   * session dir yet) or scripts dir is simply skipped until a later tick.
+   * Scan every `<uuid>/workflows/scripts` dir under the key dir for `*-wf_*.js`
+   * scripts, gating the per-dir readdir on the dir's own mtime. When `emitNew`
+   * is false (the baseline pass) newly-discovered scripts are recorded into
+   * `seen` but not reported. Fail-soft: a missing key dir (claude has not
+   * created the session dir yet) or scripts dir is simply skipped until a later
+   * tick.
    */
-  private scan(): void {
+  private scan(emitNew: boolean): void {
     if (this.stopped) return;
     let sessionDirs: fs.Dirent[];
     try {
@@ -87,18 +107,34 @@ export class WorkflowScriptWatcher {
       if (!entry.isDirectory()) continue;
       const sessionUuidPath = path.join(this.keyDir, entry.name);
       const scriptsDir = path.join(sessionUuidPath, 'workflows', 'scripts');
+
+      let mtimeMs: number;
+      try {
+        mtimeMs = fs.statSync(scriptsDir).mtimeMs;
+      } catch {
+        continue; // no workflows launched under this session dir (yet)
+      }
+      // Unchanged mtime => no new *-wf_*.js in this dir since we last read it.
+      if (this.scriptsDirMtimes.get(scriptsDir) === mtimeMs) continue;
+
       let files: string[];
       try {
         files = fs.readdirSync(scriptsDir);
       } catch {
-        continue; // no workflows launched under this session dir (yet)
+        continue; // leave the mtime uncommitted so we retry next tick
       }
+      // Commit the mtime observed BEFORE the readdir: a write landing between the
+      // stat and the readdir is still captured by the readdir, and the older
+      // recorded mtime just triggers one extra (deduped) readdir next tick.
+      this.scriptsDirMtimes.set(scriptsDir, mtimeMs);
+
       for (const file of files) {
         const match = file.match(SCRIPT_RE);
         if (match === null) continue;
         const wfRunId = match[1];
         if (this.seen.has(wfRunId)) continue;
         this.seen.add(wfRunId);
+        if (!emitNew) continue; // baseline pass — record, do not report
         try {
           this.onLaunch({
             wfRunId,
