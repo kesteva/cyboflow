@@ -2943,8 +2943,10 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // never overlap. Zero-cost for a session with no hosted runs.
       const runTokenTotals = selectSessionRunTokenTotals(databaseService.getDb(), sessionId);
 
-      // Get execution diffs for file changes
-      const executionDiffs = databaseService.getExecutionDiffs(sessionId);
+      // Get execution diff stats for file changes — narrow projection, no
+      // git_diff blobs (this poll only ever reads the stats_* / files_changed
+      // columns; see getExecutionDiffStats).
+      const executionDiffs = databaseService.getExecutionDiffStats(sessionId);
       
       // Calculate file statistics
       let totalFilesChanged = 0;

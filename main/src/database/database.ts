@@ -48,6 +48,28 @@ interface ExecutionDiffRow {
   timestamp: string;
 }
 
+// Narrow row shape for getExecutionDiffStats — no git_diff or other blob columns.
+interface ExecutionDiffStatsDbRow {
+  execution_sequence: number;
+  files_changed?: string;
+  stats_additions: number;
+  stats_deletions: number;
+  stats_files_changed: number;
+}
+
+/**
+ * Return shape of getExecutionDiffStats — the stats-only projection of
+ * execution_diffs for pollers (e.g. sessions:get-statistics) that don't need
+ * the git_diff blob ExecutionDiff (models.ts) carries for diff-viewer callers.
+ */
+export interface ExecutionDiffStats {
+  execution_sequence: number;
+  files_changed: string[]; // JSON array of changed file paths
+  stats_additions: number;
+  stats_deletions: number;
+  stats_files_changed: number;
+}
+
 /**
  * Result of the boot-time schema-version gate. `tooNew` is set when the database
  * on disk was advanced (forward-migrated) by a NEWER build than the one now
@@ -72,6 +94,17 @@ export class DatabaseService {
   /** @internal — testing only: overrides the migrations directory used by runFileBasedMigrations() */
   private migrationsDirOverride: string | null = null;
 
+  /**
+   * Incremental cache for getSessionTokenUsage: per-session running totals plus
+   * the highest session_outputs.id already folded in, so the 5s stats poll only
+   * SELECTs + JSON.parses rows appended since the last call instead of the
+   * session's entire output history every tick. `id` is AUTOINCREMENT so it
+   * never gets reused, making it a safe incremental watermark; entries are
+   * dropped (see invalidateSessionTokenUsageCache) wherever session_outputs rows
+   * for a session are deleted/rewritten, or the session itself is archived.
+   */
+  private readonly sessionTokenUsageCache = new Map<string, { lastId: number; totals: SessionTokenTotals }>();
+
   /** @internal — testing only */
   setMigrationsDirForTesting(dir: string): void {
     this.migrationsDirOverride = dir;
@@ -86,6 +119,13 @@ export class DatabaseService {
     // SQLite ignores FOREIGN KEY ... ON DELETE CASCADE unless this pragma is set.
     // Applies per-connection; must run before any FK-bearing schema is queried.
     this.db.pragma('foreign_keys = ON');
+    // WAL lets readers proceed while a writer holds the log, NORMAL trades a
+    // sliver of durability (checkpoint-only fsync) for throughput under WAL,
+    // and busy_timeout keeps concurrent access from immediately raising
+    // SQLITE_BUSY. In-memory test DBs report journal_mode 'memory' — expected.
+    this.db.pragma('journal_mode = WAL');
+    this.db.pragma('synchronous = NORMAL');
+    this.db.pragma('busy_timeout = 5000');
   }
 
   /**
@@ -2448,6 +2488,7 @@ export class DatabaseService {
 
   archiveSession(id: string): boolean {
     const result = this.db.prepare('UPDATE sessions SET archived = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(id);
+    this.invalidateSessionTokenUsageCache(id);
     return result.changes > 0;
   }
 
@@ -2516,6 +2557,7 @@ export class DatabaseService {
 
   clearSessionOutputs(sessionId: string): void {
     this.db.prepare('DELETE FROM session_outputs WHERE session_id = ?').run(sessionId);
+    this.invalidateSessionTokenUsageCache(sessionId);
   }
 
   // Claude panel output operations - use panel_id for Claude-specific data
@@ -2564,7 +2606,13 @@ export class DatabaseService {
   }
 
   clearPanelOutputs(panelId: string): void {
+    // Panel outputs carry the owning session_id too (see addPanelOutput), so
+    // they count towards that session's getSessionTokenUsage cache.
+    const panel = this.getPanel(panelId);
     this.db.prepare('DELETE FROM session_outputs WHERE panel_id = ?').run(panelId);
+    if (panel) {
+      this.invalidateSessionTokenUsageCache(panel.sessionId);
+    }
   }
 
   // Conversation message operations
@@ -2829,6 +2877,28 @@ export class DatabaseService {
     `).all(sessionId) as ExecutionDiffRow[];
     
     return rows.map(this.convertDbExecutionDiff.bind(this));
+  }
+
+  /**
+   * Stats-only projection of getExecutionDiffs — for pollers (e.g. the
+   * session-statistics IPC handler) that only fold stats_* / files_changed and
+   * would otherwise materialize every multi-MB git_diff blob just to discard it.
+   */
+  getExecutionDiffStats(sessionId: string): ExecutionDiffStats[] {
+    const rows = this.db.prepare(`
+      SELECT execution_sequence, files_changed, stats_additions, stats_deletions, stats_files_changed
+      FROM execution_diffs
+      WHERE session_id = ?
+      ORDER BY execution_sequence ASC
+    `).all(sessionId) as ExecutionDiffStatsDbRow[];
+
+    return rows.map(row => ({
+      execution_sequence: row.execution_sequence,
+      files_changed: row.files_changed ? JSON.parse(row.files_changed) as string[] : [],
+      stats_additions: row.stats_additions,
+      stats_deletions: row.stats_deletions,
+      stats_files_changed: row.stats_files_changed,
+    }));
   }
 
   getExecutionDiff(id: number): ExecutionDiff | undefined {
@@ -3496,16 +3566,48 @@ export class DatabaseService {
 
   // Session statistics methods
   getSessionTokenUsage(sessionId: string): SessionTokenTotals {
+    const cached = this.sessionTokenUsageCache.get(sessionId);
+    const lastId = cached?.lastId ?? 0;
+
+    // Only the rows appended since the last call are read + JSON.parsed —
+    // `id` (AUTOINCREMENT) is a safe monotonic watermark. ORDER BY id ASC
+    // (not timestamp) so ties on the same millisecond can't be skipped.
     const rows = this.db.prepare(`
-      SELECT data
+      SELECT id, data
       FROM session_outputs
-      WHERE session_id = ? AND type = 'json'
-      ORDER BY timestamp ASC
-    `).all(sessionId) as { data: string }[];
+      WHERE session_id = ? AND type = 'json' AND id > ?
+      ORDER BY id ASC
+    `).all(sessionId, lastId) as { id: number; data: string }[];
+
+    if (rows.length === 0) {
+      return cached?.totals ?? sumSessionOutputTokenUsage([]);
+    }
 
     // SDK turn usage is NESTED (per-turn total on the `result` message), not the
     // flat top-level shape this method used to read — see sessionTokenUsage.ts.
-    return sumSessionOutputTokenUsage(rows);
+    const delta = sumSessionOutputTokenUsage(rows);
+    const base = cached?.totals;
+    const merged: SessionTokenTotals = base ? {
+      totalInputTokens: base.totalInputTokens + delta.totalInputTokens,
+      totalOutputTokens: base.totalOutputTokens + delta.totalOutputTokens,
+      totalCacheReadTokens: base.totalCacheReadTokens + delta.totalCacheReadTokens,
+      totalCacheCreationTokens: base.totalCacheCreationTokens + delta.totalCacheCreationTokens,
+      messageCount: base.messageCount + delta.messageCount,
+    } : delta;
+
+    this.sessionTokenUsageCache.set(sessionId, { lastId: rows[rows.length - 1].id, totals: merged });
+    return merged;
+  }
+
+  /**
+   * Drop a session's getSessionTokenUsage cache entry. Called wherever
+   * session_outputs rows for the session are deleted/rewritten (the cached
+   * running total would otherwise include tokens from rows that no longer
+   * exist) and when the session itself is archived, so the map doesn't grow
+   * unboundedly with entries for sessions no longer being polled.
+   */
+  private invalidateSessionTokenUsageCache(sessionId: string): void {
+    this.sessionTokenUsageCache.delete(sessionId);
   }
 
   getSessionOutputCounts(sessionId: string): { json: number; stdout: number; stderr: number } {
