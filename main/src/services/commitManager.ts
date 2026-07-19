@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import { existsSync } from 'fs';
 import type { Logger } from '../utils/logger';
-import { execSync } from '../utils/commandExecutor';
+import { execSync, execAsync } from '../utils/commandExecutor';
 import { buildGitCommitCommand } from '../utils/shellEscape';
 import { isCommitFooterEnabled } from '../utils/commitFooter';
 import { runGit } from '../utils/runGit';
@@ -138,27 +138,36 @@ export class CommitManager extends EventEmitter {
     const startTime = Date.now();
     const pollInterval = 1000; // Check every second
 
+    // Capture the baseline HEAD before polling begins. A clean working tree
+    // alone is NOT proof Claude created a commit — the tree may already be
+    // clean at the start of the turn (no changes made, or changes discarded).
+    // Success requires HEAD to have actually moved past this baseline.
+    let baselineHead: string;
+    try {
+      baselineHead = (await execAsync('git log -1 --format=%H', { cwd: worktreePath })).stdout.trim();
+    } catch (error: unknown) {
+      this.logger?.error(`Error capturing baseline HEAD for structured commit:`, error instanceof Error ? error : undefined);
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+
     return new Promise((resolve) => {
       const checkForCommit = async () => {
         try {
           // Check if there are uncommitted changes
-          const statusOutput = execSync('git status --porcelain', {
-            cwd: worktreePath,
-            encoding: 'utf8',
-          }).trim();
+          const statusOutput = (await execAsync('git status --porcelain', { cwd: worktreePath })).stdout.trim();
 
           if (!statusOutput) {
-            // No uncommitted changes, assume Claude committed
-            const lastCommit = execSync('git log -1 --format=%H', {
-              cwd: worktreePath,
-              encoding: 'utf8',
-            }).trim();
+            const currentHead = (await execAsync('git log -1 --format=%H', { cwd: worktreePath })).stdout.trim();
 
-            this.logger?.verbose(`Detected structured mode commit: ${lastCommit}`);
-            this.emit('commit-created', { sessionId, commitHash: lastCommit, mode: 'structured' });
-            
-            resolve({ success: true, commitHash: lastCommit });
-            return;
+            if (currentHead !== baselineHead) {
+              this.logger?.verbose(`Detected structured mode commit: ${currentHead}`);
+              this.emit('commit-created', { sessionId, commitHash: currentHead, mode: 'structured' });
+
+              resolve({ success: true, commitHash: currentHead });
+              return;
+            }
+            // Tree is clean but HEAD hasn't moved — no new commit yet (e.g. a
+            // turn that made no changes). Fall through to timeout/reschedule.
           }
 
           // Check for timeout
