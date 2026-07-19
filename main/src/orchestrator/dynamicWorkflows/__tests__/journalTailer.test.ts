@@ -19,6 +19,15 @@ import type { DynamicWorkflowAgent } from '../../../../../shared/types/dynamicWo
 
 const POLL_MS = 50;
 
+/** White-box peek at the tailer's private partial-line buffers (release invariant). */
+interface TailerInternals {
+  lineBuffer: string;
+  transcriptTails: Map<string, { remainder: string }>;
+}
+function internals(t: JournalTailer): TailerInternals {
+  return t as unknown as TailerInternals;
+}
+
 describe('JournalTailer', () => {
   let dir: string;
   let journalPath: string;
@@ -675,6 +684,73 @@ describe('JournalTailer', () => {
       usageAtResolve = onAgents.mock.calls.at(-1)?.[0]?.[0];
     });
     expect(usageAtResolve).toMatchObject({ agentId: 'a1', inputTokens: 5, outputTokens: 7 });
+  });
+
+  it('reassembles a torn terminal transcript line through the drain (buffers survive the terminal stop)', async () => {
+    // Regression (F22 follow-up): the terminal tick reads only the PREFIX of a
+    // concurrently appended transcript line AND observes the completion record
+    // in the same tick. The old stop()-on-terminal-tick queued a buffer reset
+    // BEFORE the finalize drain, discarding that prefix — the reassembled final
+    // line then failed to parse and its tokens were undercounted. haltScheduling()
+    // keeps the buffer alive so the awaited drain reassembles the full line.
+    const { onAgents, onComplete } = buildTailer();
+    tailer!.start();
+    writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
+    await advance(POLL_MS); // a1 tracked
+
+    const transcriptPath = join(dir, 'agent-a1.jsonl');
+    const firstLine = transcriptLine({
+      type: 'assistant',
+      message: { model: 'm', usage: { output_tokens: 5 }, content: [] },
+      timestamp: '2026-06-11T23:00:00.000Z',
+    });
+    const terminalLine = transcriptLine({
+      type: 'assistant',
+      message: { model: 'm', usage: { output_tokens: 100 }, content: [] },
+      timestamp: '2026-06-11T23:00:01.000Z',
+    });
+    // Transcript = line1 (complete) + only the PREFIX of the terminal line (torn,
+    // no trailing newline). The completion record is already present, so ONE tick
+    // buffers the torn prefix, counts line1, then fires onComplete.
+    writeFileSync(transcriptPath, firstLine + terminalLine.slice(0, -12));
+    writeFileSync(recordPath, JSON.stringify({ status: 'completed' }));
+
+    await advance(POLL_MS);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    // Only line1 has been counted; the terminal line is still torn in the buffer.
+    expect(onAgents.mock.calls.at(-1)?.[0]?.[0]).toMatchObject({ agentId: 'a1', outputTokens: 5 });
+
+    // The writer flushes the rest of the terminal line, then the tracker's
+    // finalize drains to EOF (mirrored here by an explicit drainToEof). The prefix
+    // must have survived the terminal stop for reassembly to succeed.
+    appendFileSync(transcriptPath, terminalLine.slice(-12));
+    await tailer!.drainToEof();
+
+    // 5 + 100: the reassembled terminal line was counted. Before the fix the
+    // discarded prefix left the drain reading only the torn suffix (parse-skip),
+    // so this stayed at 5 (undercount).
+    expect(onAgents.mock.calls.at(-1)?.[0]?.[0]).toMatchObject({ agentId: 'a1', outputTokens: 105 });
+  });
+
+  it('stop() releases the partial-line buffers even without a terminal drain (dismiss/eviction path)', async () => {
+    buildTailer();
+    tailer!.start();
+    // A complete `started` line (tracks a1) plus a torn journal line; and a torn
+    // transcript line — both land in the partial-line buffers.
+    writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n{"type":"result","agentId":"a1"');
+    writeFileSync(join(dir, 'agent-a1.jsonl'), '{"type":"assistant","message":{"model":"m"');
+    await advance(POLL_MS);
+
+    const peek = internals(tailer!);
+    expect(peek.lineBuffer).not.toBe('');
+    expect(peek.transcriptTails.get('a1')?.remainder).not.toBe('');
+
+    // dismiss()/cap-eviction/dispose reach the tailer through stop() with no drain.
+    tailer!.stop();
+    await flushIo();
+
+    expect(peek.lineBuffer).toBe('');
+    expect(peek.transcriptTails.get('a1')?.remainder).toBe('');
   });
 });
 

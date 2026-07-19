@@ -174,19 +174,40 @@ export class JournalTailer {
     this.timer = setInterval(() => this.scheduleTick(), this.pollMs);
   }
 
-  /** Stop polling. Idempotent. */
-  stop(): void {
+  /**
+   * Halt scheduling ONLY — clear the interval and set the stopped flag so no
+   * further tick runs. Deliberately does NOT touch the partial-line buffers.
+   * The terminal-record / stall paths inside {@link tick} call this (not
+   * {@link stop}) so a torn line this tick buffered survives the immediately
+   * following awaited terminal drainToEof — the tracker's finalize()/
+   * handleStalled() then call stop() AFTER that drain to release the buffers.
+   * Idempotent.
+   */
+  private haltScheduling(): void {
     this.stopped = true;
     if (this.timer !== null) {
       clearInterval(this.timer);
       this.timer = null;
     }
-    // Release the heavy partial-line buffers through the queue so the reset
-    // never lands mid-parse of an in-flight tick/drain. Stopped tailers are
-    // retained in the tracker until session-cap eviction/dispose, and a torn
-    // transcript line can be multi-KB (tool results). The accumulated per-agent
-    // `stats` are deliberately KEPT — snapshotAgents() may still be read for the
-    // final terminal-state emission after stop().
+  }
+
+  /**
+   * Stop polling AND release the heavy partial-line buffers. Idempotent.
+   *
+   * Buffer release is a SEPARATE concern from halting scheduling (see
+   * {@link haltScheduling}): the terminal-tick path halts scheduling but keeps
+   * the buffers so the awaited terminal drainToEof can still reassemble a torn
+   * line; only the non-drain callers here — the tracker's dismiss(),
+   * cap-eviction, dispose(), plus finalize()/handleStalled() AFTER their drain —
+   * need the release. It runs through the queue so the reset never lands
+   * mid-parse of an in-flight tick/drain. Stopped tailers are retained in the
+   * tracker until session-cap eviction/dispose, and a torn transcript line can
+   * be multi-KB (tool results). The accumulated per-agent `stats` are
+   * deliberately KEPT — snapshotAgents() may still be read for the final
+   * terminal-state emission after stop().
+   */
+  stop(): void {
+    this.haltScheduling();
     void this.enqueue(async () => {
       this.lineBuffer = '';
       for (const tail of this.transcriptTails.values()) {
@@ -201,8 +222,10 @@ export class JournalTailer {
    * snapshotting cumulative usage; it runs through the serialized queue, so it
    * waits for any in-flight tick and no tick can interleave it. A single
    * onAgents emission covers all transcript changes, matching the per-tick
-   * throttle. Always drains even after stop() — the tracker calls it post-stop
-   * on the tick-completion path to capture the last usage.
+   * throttle. Always drains even after scheduling has halted — the tracker's
+   * finalize()/handleStalled() call it on the terminal path (behind the
+   * terminal tick's haltScheduling()) to capture the last usage before stop()
+   * releases the buffers.
    */
   async drainToEof(): Promise<void> {
     await this.enqueue(async () => {
@@ -276,7 +299,12 @@ export class JournalTailer {
       if (existsSync(this.opts.recordPath)) {
         const record = readCompletionRecord(this.opts.recordPath, this.opts.logger);
         if (record !== null) {
-          this.stop();
+          // Halt scheduling but KEEP the partial-line buffers: onComplete leads
+          // synchronously into the tracker's finalize(), whose awaited
+          // drainToEof() must still see any torn line this tick buffered so it
+          // can reassemble the concurrently-appended suffix. finalize() calls
+          // stop() (the buffer release) AFTER that drain.
+          this.haltScheduling();
           this.opts.onComplete(record);
           return;
         }
@@ -289,7 +317,9 @@ export class JournalTailer {
       if (activity) {
         this.lastActivityAt = now;
       } else if (now - this.lastActivityAt >= this.idleTimeoutMs) {
-        this.stop();
+        // Same as the completion path: halt scheduling but keep the buffers for
+        // handleStalled()'s awaited drain; its stop() releases them afterward.
+        this.haltScheduling();
         this.opts.onStalled();
       }
     } catch (err) {
