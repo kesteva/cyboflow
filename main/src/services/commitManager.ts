@@ -129,25 +129,37 @@ export class CommitManager extends EventEmitter {
 
   /**
    * Monitor for structured mode commit (polling git status)
+   *
+   * `baselineHead`, when provided, is used as the pre-turn HEAD instead of
+   * capturing HEAD at the start of the wait. Callers that invoke this AFTER
+   * the turn already completed (e.g. ExecutionTracker.endExecution) must
+   * pass the pre-turn hash they captured at startExecution — otherwise the
+   * commit Claude already made never registers as HEAD moving, since HEAD
+   * only moves relative to whatever baseline we compare against.
    */
   async waitForStructuredCommit(
     sessionId: string,
     worktreePath: string,
-    timeoutMs: number = 30000
+    timeoutMs: number = 30000,
+    baselineHead?: string
   ): Promise<CommitResult> {
     const startTime = Date.now();
     const pollInterval = 1000; // Check every second
 
-    // Capture the baseline HEAD before polling begins. A clean working tree
-    // alone is NOT proof Claude created a commit — the tree may already be
-    // clean at the start of the turn (no changes made, or changes discarded).
-    // Success requires HEAD to have actually moved past this baseline.
-    let baselineHead: string;
-    try {
-      baselineHead = (await execAsync('git log -1 --format=%H', { cwd: worktreePath })).stdout.trim();
-    } catch (error: unknown) {
-      this.logger?.error(`Error capturing baseline HEAD for structured commit:`, error instanceof Error ? error : undefined);
-      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    // A clean working tree alone is NOT proof Claude created a commit — the
+    // tree may already be clean at the start of the turn (no changes made,
+    // or changes discarded). Success requires HEAD to have actually moved
+    // past the baseline.
+    let baseline: string;
+    if (baselineHead !== undefined) {
+      baseline = baselineHead;
+    } else {
+      try {
+        baseline = (await execAsync('git log -1 --format=%H', { cwd: worktreePath })).stdout.trim();
+      } catch (error: unknown) {
+        this.logger?.error(`Error capturing baseline HEAD for structured commit:`, error instanceof Error ? error : undefined);
+        return { success: false, error: error instanceof Error ? error.message : String(error) };
+      }
     }
 
     return new Promise((resolve) => {
@@ -159,7 +171,7 @@ export class CommitManager extends EventEmitter {
           if (!statusOutput) {
             const currentHead = (await execAsync('git log -1 --format=%H', { cwd: worktreePath })).stdout.trim();
 
-            if (currentHead !== baselineHead) {
+            if (currentHead !== baseline) {
               this.logger?.verbose(`Detected structured mode commit: ${currentHead}`);
               this.emit('commit-created', { sessionId, commitHash: currentHead, mode: 'structured' });
 
@@ -185,8 +197,12 @@ export class CommitManager extends EventEmitter {
         }
       };
 
-      // Start polling
-      setTimeout(checkForCommit, pollInterval);
+      // Run the first check immediately — a commit that already exists when
+      // the wait starts (the common case: the baseline is the pre-turn hash
+      // and Claude's commit already landed during the turn) must succeed
+      // without waiting a full poll interval. Subsequent checks reschedule
+      // via setTimeout.
+      checkForCommit();
     });
   }
 

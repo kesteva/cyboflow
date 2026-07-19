@@ -8,6 +8,16 @@
  * begins and only reports success once HEAD has actually moved past that
  * baseline while the tree is clean.
  *
+ * A follow-up regression: waitForStructuredCommit is invoked from
+ * ExecutionTracker.endExecution, which runs AFTER Claude's turn (and its
+ * structured commit) already completed. Baselining HEAD at wait-start meant
+ * a correctly-created commit never registered as "new" (the wait itself
+ * starts after HEAD already moved). The fix threads an optional
+ * `baselineHead` through so callers can pass the PRE-TURN hash instead of
+ * capturing HEAD at the start of the wait, and the first poll iteration
+ * runs immediately (no initial delay) so an already-existing commit
+ * resolves without waiting a full poll interval.
+ *
  * Uses real temp git repos (no mocking), matching the convention in
  * gitPlumbingCommands.test.ts. Real wall-clock time is involved because the
  * poll interval (1s) is not injectable — tests are sized to still run fast
@@ -66,6 +76,45 @@ describe('CommitManager.waitForStructuredCommit — baseline-HEAD false-positive
 
       const result = await resultPromise;
       expect(result).toEqual({ success: true, commitHash: newHead });
+    });
+  }, 10000);
+
+  it('with an explicit baseline, a commit made BEFORE the wait starts resolves success immediately', async () => {
+    await withTempDir('commit-wait-preexisting-baseline-', async (dir) => {
+      initRepoMain(dir);
+      commitFile(dir, 'a.txt', 'a\n', 'base');
+      const preTurnHead = execSync('git rev-parse HEAD', { cwd: dir, encoding: 'utf8' }).trim();
+
+      // Simulate the turn (and Claude's structured commit) already having
+      // completed BEFORE waitForStructuredCommit is even called — the
+      // ExecutionTracker.endExecution ordering that triggered the regression.
+      commitFile(dir, 'b.txt', 'b\n', 'claude commit');
+      const newHead = execSync('git rev-parse HEAD', { cwd: dir, encoding: 'utf8' }).trim();
+
+      const commitManager = new CommitManager();
+      const start = Date.now();
+      const result = await commitManager.waitForStructuredCommit('sess-preexisting', dir, 30000, preTurnHead);
+      const elapsedMs = Date.now() - start;
+
+      expect(result).toEqual({ success: true, commitHash: newHead });
+      // Must resolve on the immediate first check, well under one poll interval.
+      expect(elapsedMs).toBeLessThan(1000);
+    });
+  }, 10000);
+
+  it('with an explicit baseline, an unchanged HEAD + clean tree still times out (no false positive)', async () => {
+    await withTempDir('commit-wait-baseline-timeout-', async (dir) => {
+      initRepoMain(dir);
+      commitFile(dir, 'a.txt', 'a\n', 'base');
+      const preTurnHead = execSync('git rev-parse HEAD', { cwd: dir, encoding: 'utf8' }).trim();
+
+      const commitManager = new CommitManager();
+      // Tree is clean and HEAD never moves — passing the baseline explicitly
+      // must not short-circuit to success.
+      const result = await commitManager.waitForStructuredCommit('sess-baseline-timeout', dir, 800, preTurnHead);
+
+      expect(result).toEqual({ success: false, error: 'Timeout waiting for commit' });
+      expect(execSync('git rev-parse HEAD', { cwd: dir, encoding: 'utf8' }).trim()).toBe(preTurnHead);
     });
   }, 10000);
 });

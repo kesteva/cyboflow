@@ -162,7 +162,8 @@ export class ExecutionTracker extends EventEmitter {
         const structuredCommitResult = await commitManager.waitForStructuredCommit(
           sessionId,
           context.worktreePath,
-          5000 // 5 second timeout for now, can be adjusted
+          5000, // 5 second timeout for now, can be adjusted
+          context.beforeCommitHash // pre-turn HEAD: the turn (and Claude's commit) already ran
         );
         
         if (!structuredCommitResult.success) {
