@@ -3572,9 +3572,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
    */
   override sendInput(panelId: string, input: string): void {
     this.enqueuePanelInput(panelId, randomUUID(), input);
-    const run = this.sdkRuns.get(panelId);
-    const turnInFlight = run ? run.turnInFlight : false;
-    if (!turnInFlight) this.maybeDrainPanelInputQueue(panelId);
+    if (this.isPanelIdleForDrain(panelId)) this.maybeDrainPanelInputQueue(panelId);
   }
 
   // ---------------------------------------------------------------------------
@@ -3623,13 +3621,35 @@ export class ClaudeCodeManager extends AbstractCliManager {
   }
 
   /**
+   * Whether the panel is idle for a queued-input drain — the single idleness
+   * authority shared by the enqueue-then-check guard
+   * ({@link flushPanelInputQueueIfIdle}) and the {@link sendInput} override.
+   *
+   * A warm SDK session stays registered in the base `processes` map while PARKED
+   * between turns, so {@link isPanelRunning} reports it "running" even when no
+   * turn is in flight — reading that here would strand a message enqueued in the
+   * park window until a rest-point drain that never comes (the just-finished
+   * turn already drained an empty queue). So when an SDK run record exists (the
+   * SDK substrate) idleness is the record's own state: no turn in flight AND not
+   * tearing down (a `closing` run's warm input is being torn down — its queue is
+   * re-drained at the next cold-respawn's rest boundary, never pushed into a
+   * dying input). The process-map `isPanelRunning` fallback is used ONLY when
+   * there is no SDK run record (e.g. the PTY substrate).
+   */
+  private isPanelIdleForDrain(panelId: string): boolean {
+    const run = this.sdkRuns.get(panelId);
+    if (run) return !run.turnInFlight && !run.closing;
+    return !this.isPanelRunning(panelId);
+  }
+
+  /**
    * Deliver the panel's queued input NOW if the panel is idle — closes the race
    * where the turn ended between the composer reading `status==='running'` and the
-   * enqueue landing (the rest-point drain already fired). No-op while running (the
-   * rest-point drain will handle it) or when the queue is empty.
+   * enqueue landing (the rest-point drain already fired). No-op while a turn is in
+   * flight (the rest-point drain will handle it) or when the queue is empty.
    */
   flushPanelInputQueueIfIdle(panelId: string): void {
-    if (this.isPanelRunning(panelId)) return;
+    if (!this.isPanelIdleForDrain(panelId)) return;
     this.maybeDrainPanelInputQueue(panelId);
   }
 

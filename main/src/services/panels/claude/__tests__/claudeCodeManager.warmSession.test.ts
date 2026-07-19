@@ -95,6 +95,11 @@ function setTurnInFlight(mgr: ClaudeCodeManager, key: string, value: boolean): v
   const run = getSdkRuns(mgr).get(key) as unknown as { turnInFlight: boolean } | undefined;
   if (run) run.turnInFlight = value;
 }
+/** Force a warm-idle run's teardown flag (a `closing` run must not accept a drain). */
+function setClosing(mgr: ClaudeCodeManager, key: string, value: boolean): void {
+  const run = getSdkRuns(mgr).get(key) as unknown as { closing: boolean } | undefined;
+  if (run) run.closing = value;
+}
 
 const flush = () => new Promise<void>((r) => setImmediate(r));
 /** Flush several macrotasks so a fire-and-forget warm-session drain fully settles. */
@@ -787,5 +792,107 @@ describe('ClaudeCodeManager — warm (persistent) SDK session', () => {
 
     // Restore so the afterEach teardown does not treat it as a live turn.
     setTurnInFlight(mgr, 'p-mid-0', false);
+  });
+
+  // -------------------------------------------------------------------------
+  // (queued-input drain race) A warm-IDLE session stays in the base `processes`
+  // map while parked, so isPanelRunning() reports it "running" even with no turn
+  // in flight. The enqueue-then-check guard (flushPanelInputQueueIfIdle) must
+  // read idleness from the SDK run record, NOT isPanelRunning — otherwise a
+  // message enqueued in the park window (turn already drained an empty queue) is
+  // stranded until a rest-point drain that never comes.
+  // -------------------------------------------------------------------------
+  it('flushPanelInputQueueIfIdle drains a message enqueued against a parked warm session', async () => {
+    const panelId = 'p-drain-idle';
+    const deliver = vi.fn();
+    mgr.setPanelInputDeliverer(deliver);
+    fakeSdk.setScenario(twoTurnScenario());
+
+    // Turn 1 parks warm-idle: process retained (isPanelRunning true) but no turn.
+    await mgr.spawnCliProcess({
+      panelId,
+      sessionId: panelId,
+      worktreePath: '/tmp/wt',
+      prompt: 'first',
+      permissionMode: 'ignore',
+    });
+    expect(getProcesses(mgr).has(panelId)).toBe(true); // base map → isPanelRunning true
+    expect(mgr.isPanelRunning(panelId)).toBe(true);
+    expect(getSdkRuns(mgr).get(panelId)?.turnInFlight).toBe(false);
+
+    // A message lands AFTER the turn's rest-point drain fired against an empty queue.
+    mgr.enqueuePanelInput(panelId, 'raced', 'sent right after the turn ended');
+    mgr.flushPanelInputQueueIfIdle(panelId);
+    await settle();
+
+    // Delivered despite isPanelRunning being true, and the buffer is cleared.
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(deliver).toHaveBeenCalledWith(panelId, 'sent right after the turn ended');
+    expect(mgr.listPanelInputQueue(panelId)).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // The opposite guard: while a turn is genuinely in flight, the enqueue-then-
+  // check path must NOT drain — the turn's own rest-point drain delivers it, so
+  // a mid-turn flush leaves the message buffered (no double-delivery, no abort).
+  // -------------------------------------------------------------------------
+  it('flushPanelInputQueueIfIdle does NOT drain while a turn is in flight', async () => {
+    const panelId = 'p-drain-inflight';
+    const deliver = vi.fn();
+    mgr.setPanelInputDeliverer(deliver);
+    fakeSdk.setScenario(twoTurnScenario());
+
+    await mgr.spawnCliProcess({
+      panelId,
+      sessionId: panelId,
+      worktreePath: '/tmp/wt',
+      prompt: 'first',
+      permissionMode: 'ignore',
+    });
+    // Force the parked run to look mid-turn.
+    setTurnInFlight(mgr, panelId, true);
+
+    mgr.enqueuePanelInput(panelId, 'mid', 'while you work');
+    mgr.flushPanelInputQueueIfIdle(panelId);
+    await settle();
+
+    // Not delivered; the message stays buffered for the real rest-point drain.
+    expect(deliver).not.toHaveBeenCalled();
+    expect(mgr.listPanelInputQueue(panelId)).toEqual([{ id: 'mid', text: 'while you work' }]);
+
+    // Restore so the afterEach teardown does not treat it as a live turn.
+    setTurnInFlight(mgr, panelId, false);
+  });
+
+  // -------------------------------------------------------------------------
+  // A `closing` warm run (teardown initiated) is NOT idle for a drain — its warm
+  // input is being torn down, so a message must not be pushed into a dying input;
+  // it re-drains at the next cold-respawn's rest boundary.
+  // -------------------------------------------------------------------------
+  it('flushPanelInputQueueIfIdle does NOT drain a run whose teardown has begun (closing)', async () => {
+    const panelId = 'p-drain-closing';
+    const deliver = vi.fn();
+    mgr.setPanelInputDeliverer(deliver);
+    fakeSdk.setScenario(twoTurnScenario());
+
+    await mgr.spawnCliProcess({
+      panelId,
+      sessionId: panelId,
+      worktreePath: '/tmp/wt',
+      prompt: 'first',
+      permissionMode: 'ignore',
+    });
+    // turnInFlight is false, but teardown has begun.
+    setClosing(mgr, panelId, true);
+
+    mgr.enqueuePanelInput(panelId, 'late', 'arrived during teardown');
+    mgr.flushPanelInputQueueIfIdle(panelId);
+    await settle();
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(mgr.listPanelInputQueue(panelId)).toEqual([{ id: 'late', text: 'arrived during teardown' }]);
+
+    // Restore so the afterEach teardown path settles cleanly.
+    setClosing(mgr, panelId, false);
   });
 });
