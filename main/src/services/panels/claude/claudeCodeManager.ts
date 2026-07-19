@@ -442,6 +442,24 @@ function warmSdkDisabled(): boolean {
   return process.env.CYBOFLOW_DISABLE_WARM_SDK === '1';
 }
 
+/**
+ * F21: app-wide cap on IDLE warm SDK sessions (turnInFlight false AND not closing).
+ * Each resident warm session holds a live claude subprocess + its worktree file
+ * handles open, so N idle conversations pin N processes with no ceiling. When a
+ * session parks, the least-recently-used idle warm session PAST this cap is evicted
+ * via the same graceful close the idle TTL uses (its next turn cold-resumes with
+ * `--resume`, no data loss). A mid-turn session is never counted or evicted. Read
+ * per park so it can be flipped without a restart, mirroring warmSdkDisabled.
+ */
+const WARM_MAX_IDLE_DEFAULT = 4;
+
+function warmMaxIdle(): number {
+  const raw = process.env.CYBOFLOW_WARM_MAX_IDLE;
+  if (raw === undefined) return WARM_MAX_IDLE_DEFAULT;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 1 ? n : WARM_MAX_IDLE_DEFAULT;
+}
+
 /** A promise a producer settles out-of-band. Used for per-turn completion. */
 interface Deferred<T> {
   readonly promise: Promise<T>;
@@ -459,6 +477,23 @@ function createDeferred<T>(): Deferred<T> {
 /** SHA-1 hex of a string — a bounded, stable fingerprint digest (not for crypto). */
 function sha1(input: string): string {
   return createHash('sha1').update(input).digest('hex');
+}
+
+/**
+ * Recursively freeze a plain JSON value (object/array + nested), returning it.
+ * Used by the F14 MCP-config parse cache so a cached parsed value can never be
+ * mutated by the downstream composition step (which deletes disabled servers and
+ * injects the cyboflow entry) — every read structuredClones a fresh mutable copy,
+ * and the frozen original catches an accidental in-place mutation loudly in dev.
+ */
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const key of Object.keys(value as Record<string, unknown>)) {
+      deepFreeze((value as Record<string, unknown>)[key]);
+    }
+    Object.freeze(value);
+  }
+  return value;
 }
 
 /**
@@ -594,6 +629,7 @@ type ColdSpawnReason =
   | 'no-warm'
   | 'ttl-expired'
   | 'post-error'
+  | 'idle-evicted'
   | 'disabled'
   | `fingerprint:${string}`;
 
@@ -624,6 +660,12 @@ interface WarmSession {
   fingerprint: OptionsFingerprint;
   idleTimer: ReturnType<typeof setTimeout> | null;
   turnWatchdog: ReturnType<typeof setTimeout> | null;
+  /**
+   * Monotonic sequence stamped each time this session PARKS idle (F21), so the
+   * idle-warm cap can pick the true least-recently-used victim (smallest seq). 0
+   * until the first park (the session is turnInFlight before then, never a victim).
+   */
+  parkSeq: number;
 }
 
 /**
@@ -761,10 +803,17 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * {@link recordWarmCloseReason} (evict oldest) so it cannot grow unboundedly
    * over a long-lived app session.
    */
-  private readonly warmCloseReasonBySpawn = new Map<string, 'ttl-expired' | 'post-error'>();
+  private readonly warmCloseReasonBySpawn = new Map<string, 'ttl-expired' | 'post-error' | 'idle-evicted'>();
+
+  /**
+   * Monotonic counter stamped onto a warm session's `parkSeq` each time it parks
+   * idle (F21) so {@link enforceWarmIdleCap} can evict the true least-recently-used
+   * idle session. Never reset — a strictly-increasing integer over the app session.
+   */
+  private warmParkSeq = 0;
 
   /** Record a warm-close reason, evicting the oldest entry past the cap. */
-  private recordWarmCloseReason(spawnKey: string, reason: 'ttl-expired' | 'post-error'): void {
+  private recordWarmCloseReason(spawnKey: string, reason: 'ttl-expired' | 'post-error' | 'idle-evicted'): void {
     // Re-set moves the key to the tail so eviction stays oldest-first.
     this.warmCloseReasonBySpawn.delete(spawnKey);
     this.warmCloseReasonBySpawn.set(spawnKey, reason);
@@ -1123,8 +1172,15 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // === options, so this is byte-identical. Runs BEFORE the bundle install
       // (no dependency on the installed files) so a rejection here strands no
       // refcount; it also drives the warm-reuse fingerprint below.
-      const sdkOptions = await this.buildSdkOptions({ ...effectiveOptions, runId });
-      const fingerprint = this.computeOptionsFingerprint(sdkOptions, options.worktreePath, runId);
+      // F13: read the merged user/project permission rules ONCE per spawn into an
+      // immutable snapshot shared by BOTH the PreToolUse hook / canUseTool
+      // construction (inside buildSdkOptions) AND the options fingerprint below —
+      // the two otherwise each re-read the same three settings files. NOT cached
+      // across turns (a revoked allow-rule must take effect on the very next turn),
+      // and the interactive MCP approval path keeps reading fresh per call.
+      const permissionRules = this.loadSpawnPermissionRules(options.worktreePath);
+      const sdkOptions = await this.buildSdkOptions({ ...effectiveOptions, runId }, permissionRules);
+      const fingerprint = this.computeOptionsFingerprint(sdkOptions, options.worktreePath, runId, permissionRules);
 
       // Warm-session tri-state (non-lane only). A live warm-idle session for this
       // spawnKey that is a resume-continuation of the SAME conversation and whose
@@ -1151,7 +1207,6 @@ export class ClaudeCodeManager extends AbstractCliManager {
             runId,
             finalPrompt,
             options,
-            dbSession,
           );
           if (outcome.dispatched) return;
           // The push LOST a race to a concurrent close (abort / TTL / terminal-error
@@ -1285,6 +1340,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
               fingerprint,
               idleTimer: null,
               turnWatchdog: null,
+              parkSeq: 0,
             }
           : null,
       };
@@ -1363,10 +1419,21 @@ export class ClaudeCodeManager extends AbstractCliManager {
   }
 
   /**
-   * Push a follow-up turn into a live WARM session instead of respawning: refresh
-   * the co-located bundle, disarm the idle timer, push the prompt into the
-   * persistent input, and — only if the push was ACCEPTED — commit the turn (emit
-   * turn-start, arm the watchdog) and await its rest boundary.
+   * Push a follow-up turn into a live WARM session instead of respawning: disarm
+   * the idle timer, push the prompt into the persistent input, and — only if the
+   * push was ACCEPTED — commit the turn (emit turn-start, arm the watchdog) and
+   * await its rest boundary.
+   *
+   * F5: does NOT re-run installWorkflowBundle. The SDK reads `.claude/agents` +
+   * `.claude/commands` ONLY at process START, so a live warm subprocess keeps
+   * serving the bundle it booted with — re-installing per push (execFileSync git
+   * rev-parse + dir scans + N+M sync file writes) does nothing for the running
+   * process. The cold spawn's install already wrote the bundle AND the git-exclude
+   * globs (see installWorkflowBundle → ensureBundleExcluded). Any agent/config
+   * drift that WOULD require a fresh install is caught earlier: the effective-agents
+   * digest is folded into the options fingerprint (computeOptionsFingerprint), so a
+   * mid-run Agents-pane edit fails warm-reuse eligibility → cold respawn → the
+   * cold-path install runs with the edit applied.
    *
    * Returns `{ dispatched: false }` when the push was REJECTED (the input was
    * closed by a teardown racing between eligibility and here). Pushing FIRST and
@@ -1387,16 +1454,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
     runId: string,
     finalPrompt: string,
     options: ClaudeSpawnOptions,
-    dbSession: { in_place?: unknown } | undefined,
   ): Promise<{ dispatched: boolean }> {
     const warm = run.warm;
     if (warm === null) return { dispatched: false }; // caller only reaches here for warm runs.
-
-    // Refresh the co-located bundle (idempotent file write). NO refcount bump —
-    // the cold spawn's single bump covers the warm process's whole lifetime.
-    if (!dbSession?.in_place) {
-      installWorkflowBundle(this.db, this.bundleWriter, runId, run.worktreePath, makeLoggerLike(this.logger));
-    }
 
     this.clearWarmIdleTimer(run);
 
@@ -1966,7 +2026,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // path re-invoking after a TTL close already started) re-closes harmlessly and
     // awaits the same iteratorDone.
     run.closing = true;
-    if (reason === 'ttl-expired' || reason === 'post-error') {
+    if (reason === 'ttl-expired' || reason === 'post-error' || reason === 'idle-evicted') {
       this.recordWarmCloseReason(spawnKey, reason);
     }
     this.clearWarmTimers(run);
@@ -1995,9 +2055,14 @@ export class ClaudeCodeManager extends AbstractCliManager {
     }
   }
 
-  /** Arm the warm-idle TTL: after SDK_WARM_SESSION_TTL_MS idle, close the session. */
+  /**
+   * Park a warm session idle: stamp its LRU sequence, arm the idle TTL (after
+   * SDK_WARM_SESSION_TTL_MS idle, close the session), then enforce the app-wide
+   * idle-warm cap (F21). Called at the turn-rest boundary for a run that stays warm.
+   */
   private armWarmIdleTimer(run: ClaudeSdkRun, spawnKey: string): void {
     if (run.warm === null) return;
+    run.warm.parkSeq = ++this.warmParkSeq;
     this.clearWarmIdleTimer(run);
     run.warm.idleTimer = setTimeout(() => {
       this.logger?.info(
@@ -2005,6 +2070,72 @@ export class ClaudeCodeManager extends AbstractCliManager {
       );
       void this.closeWarmSession(spawnKey, 'ttl-expired');
     }, SDK_WARM_SESSION_TTL_MS);
+    this.enforceWarmIdleCap(spawnKey);
+  }
+
+  /**
+   * F21: enforce the app-wide idle-warm cap when a session parks. Counts warm
+   * sessions that are truly idle (warm record present, turnInFlight false, not
+   * `closing`) and, while over cap, evicts the least-recently-used idle one (the
+   * smallest parkSeq) via {@link closeWarmSession} — the SAME graceful close the
+   * idle TTL uses, so the evicted conversation's next turn cold-resumes with
+   * `--resume` and loses no data. The just-parked session is the most-recently-used,
+   * so it is never the victim.
+   *
+   * Fully SYNCHRONOUS: the idle recount and the fire-and-forget close are one
+   * uninterrupted tick, and closeWarmSession synchronously flips the victim's
+   * `closing` flag before its first await. So (a) a concurrent new turn on a
+   * candidate — which sets turnInFlight true under the per-spawn lock in a separate
+   * task — cannot interleave mid-eviction, and if it already landed the candidate
+   * is excluded (turnInFlight) and the next LRU is chosen; (b) the next loop
+   * recount sees the victim as `closing` and drops it, so the loop is bounded and
+   * never double-evicts. A mid-turn process is NEVER a candidate. Sprint-lane
+   * spawns never reach here: a lane's `run.warm` is null (warmEnabled === false for
+   * a composite spawnKey), so it is neither parked nor counted.
+   */
+  private enforceWarmIdleCap(justParkedSpawnKey: string): void {
+    const cap = warmMaxIdle();
+    for (;;) {
+      let idleCount = 0;
+      let victimKey: string | null = null;
+      let victimSeq = Infinity;
+      for (const [key, r] of this.sdkRuns) {
+        if (r.warm === null || r.turnInFlight || r.closing) continue;
+        idleCount++;
+        if (key === justParkedSpawnKey) continue; // newest — never the victim
+        if (r.warm.parkSeq < victimSeq) {
+          victimSeq = r.warm.parkSeq;
+          victimKey = key;
+        }
+      }
+      if (idleCount <= cap || victimKey === null) return;
+      this.logger?.info(
+        `[ClaudeCodeManager] warm idle cap ${cap} exceeded (${idleCount} idle) — evicting LRU warm session (spawn ${victimKey}, parkSeq ${victimSeq})`,
+      );
+      // Fire-and-forget graceful close (same as the TTL path). closeWarmSession
+      // synchronously sets closing=true before its first await, so the next
+      // iteration's recount excludes this victim.
+      void this.closeWarmSession(victimKey, 'idle-evicted');
+    }
+  }
+
+  /**
+   * F13: load the merged user/project permission rules ONCE per spawn into a
+   * deep-frozen snapshot, shared by BOTH the options fingerprint and the PreToolUse
+   * hook / canUseTool construction (which otherwise each re-read the same three
+   * settings files). Frozen so neither consumer can mutate the shared snapshot.
+   *
+   * Deliberately NOT cached across spawns/turns — the reviewed NO-SHIP was any
+   * mtime/cross-turn cache, because a stale cache could keep a revoked
+   * auto-approval rule active. This snapshot lives for a single spawn only; the
+   * next turn reads disk again. The interactive MCP approval path
+   * (mcpQueryHandler) intentionally keeps its own fresh per-call read.
+   */
+  private loadSpawnPermissionRules(worktreePath: string): MergedPermissionRules {
+    const rules = loadMergedPermissionRules(worktreePath);
+    Object.freeze(rules.allow);
+    Object.freeze(rules.deny);
+    return Object.freeze(rules);
   }
 
   /**
@@ -2018,8 +2149,13 @@ export class ClaudeCodeManager extends AbstractCliManager {
     sdkOptions: Options,
     worktreePath: string,
     runId: string,
+    permissionRules?: MergedPermissionRules,
   ): OptionsFingerprint {
-    const allowRules = loadMergedPermissionRules(worktreePath);
+    // F13: reuse the per-spawn snapshot the hook construction already loaded (when
+    // spawnCliProcess passed it) so a single spawn reads the settings files once;
+    // load fresh for any direct caller. Reading here (fresh, not a cross-turn
+    // cache) is what makes a mid-session allow-list edit invalidate the warm run.
+    const allowRules = permissionRules ?? loadMergedPermissionRules(worktreePath);
     const material: Record<string, unknown> = {
       model: sdkOptions.model ?? null,
       betas: sdkOptions.betas ?? null,
@@ -2340,7 +2476,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
   // SDK options builder
   // ---------------------------------------------------------------------------
 
-  private async buildSdkOptions(options: ClaudeSpawnOptions): Promise<Options> {
+  private async buildSdkOptions(
+    options: ClaudeSpawnOptions,
+    permissionRules?: MergedPermissionRules,
+  ): Promise<Options> {
     const sdkOptions: Options = {
       cwd: options.worktreePath,
       includePartialMessages: true,
@@ -2362,7 +2501,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
           previewFormat: 'markdown' as const,
         },
       },
-      ...this.composeHookOptions(options),
+      ...this.composeHookOptions(options, permissionRules),
     };
 
     // Per-session MCP deny-list ENFORCEMENT (sessions.disabled_mcp_servers_json).
@@ -2665,10 +2804,16 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * sentinel, never the panel). Immutable for the process lifetime — the same
    * invariant fix A's spawnKey === runId identity relies on.
    */
-  private composeHookOptions(options: ClaudeSpawnOptions): Pick<Options, 'hooks' | 'canUseTool'> {
+  private composeHookOptions(
+    options: ClaudeSpawnOptions,
+    permissionRules?: MergedPermissionRules,
+  ): Pick<Options, 'hooks' | 'canUseTool'> {
     const gateRunId = options.runId ?? options.panelId;
     const ownerSessionId = this.resolveOwnerSessionId(gateRunId);
-    const allowRules = loadMergedPermissionRules(options.worktreePath);
+    // F13: use the per-spawn snapshot when the caller loaded it (spawnCliProcess),
+    // else load fresh — the hook + canUseTool below still read the rules exactly
+    // ONCE. Direct callers (unit tests, any non-spawn path) keep loading here.
+    const allowRules = permissionRules ?? loadMergedPermissionRules(options.worktreePath);
     const isLaneSpawn = options.spawnKey !== undefined && options.spawnKey !== options.panelId;
     const spawnKind: AgentDispatchSpawnKind = isLaneSpawn
       ? 'lane'
@@ -3655,6 +3800,39 @@ export class ClaudeCodeManager extends AbstractCliManager {
   // ---------------------------------------------------------------------------
 
   /**
+   * F14: per-file content-validated cache of a parsed MCP config source
+   * (`.mcp.json` / `~/.claude.json`), keyed by absolute path. Those files are read
+   * on EVERY turn (getBaseProjectMcpServers → composeMcpServers → buildSdkOptions)
+   * but rarely change and can be large; caching the PARSED value keyed on the raw
+   * text skips the per-turn JSON.parse while a byte-exact raw compare guarantees a
+   * stale parse is never served (a same-length edit still re-parses). The cached
+   * `parsed` is DEEP-FROZEN; callers structuredClone before handing it to the
+   * mutating composition step. Cleared for a file that becomes absent/malformed.
+   */
+  private readonly mcpConfigParseCache = new Map<string, { raw: string; parsed: unknown }>();
+
+  /**
+   * Parse a JSON MCP-config file's raw text through the content-validated cache
+   * (F14). Reuses the cached parsed value ONLY on a byte-exact raw match and
+   * re-parses + re-freezes on any difference. Throws (like `JSON.parse`) on
+   * malformed input so the caller's existing try/catch logs the same warning;
+   * evicts the stale cache entry first so a later good read re-populates it.
+   */
+  private parseMcpConfigCached(filePath: string, raw: string): unknown {
+    const cached = this.mcpConfigParseCache.get(filePath);
+    if (cached !== undefined && cached.raw === raw) return cached.parsed;
+    let parsed: unknown;
+    try {
+      parsed = deepFreeze(JSON.parse(raw));
+    } catch (err) {
+      this.mcpConfigParseCache.delete(filePath);
+      throw err;
+    }
+    this.mcpConfigParseCache.set(filePath, { raw, parsed });
+    return parsed;
+  }
+
+  /**
    * Get MCP servers from the base project (.mcp.json + ~/.claude.json).
    * The cyboflow-permissions server is NOT included — replaced by the
    * PreToolUse hook in buildSdkOptions.
@@ -3678,9 +3856,14 @@ export class ClaudeCodeManager extends AbstractCliManager {
         this.logger?.verbose(`[MCP] Found .mcp.json at: ${mcpJsonPath}`);
         try {
           const mcpJsonContent = fs.readFileSync(mcpJsonPath, 'utf8');
-          const mcpJson = JSON.parse(mcpJsonContent) as { mcpServers?: Record<string, unknown> };
+          const mcpJson = this.parseMcpConfigCached(mcpJsonPath, mcpJsonContent) as {
+            mcpServers?: Record<string, unknown>;
+          };
           if (mcpJson.mcpServers) {
-            Object.assign(result.mcpServers, mcpJson.mcpServers);
+            // structuredClone off the deep-frozen cache so `result.mcpServers` is a
+            // FRESH mutable map — the composition step's delete/inject never reaches
+            // the cached parse.
+            Object.assign(result.mcpServers, structuredClone(mcpJson.mcpServers));
           }
         } catch (parseError) {
           this.logger?.warn(`[MCP] Failed to parse .mcp.json: ${parseError}`);
@@ -3692,22 +3875,24 @@ export class ClaudeCodeManager extends AbstractCliManager {
       if (fs.existsSync(claudeConfigPath)) {
         try {
           const claudeConfig = fs.readFileSync(claudeConfigPath, 'utf8');
-          const config = JSON.parse(claudeConfig) as {
+          const config = this.parseMcpConfigCached(claudeConfigPath, claudeConfig) as {
             projects?: Record<string, { mcpServers?: Record<string, unknown> }>;
             mcpServers?: Record<string, unknown>;
           };
 
+          // structuredClone every value pulled off the deep-frozen cache so the
+          // returned map is fresh + mutable (the composition step mutates it).
           const projectConfig = config.projects?.[baseProjectPath];
           if (projectConfig?.mcpServers && Object.keys(projectConfig.mcpServers).length > 0) {
             this.logger?.verbose(`[MCP] Found ${Object.keys(projectConfig.mcpServers).length} project-specific MCP servers in ~/.claude.json`);
-            Object.assign(result.mcpServers, projectConfig.mcpServers);
+            Object.assign(result.mcpServers, structuredClone(projectConfig.mcpServers));
           }
 
           if (config.mcpServers && Object.keys(config.mcpServers).length > 0) {
             this.logger?.verbose(`[MCP] Found ${Object.keys(config.mcpServers).length} global MCP servers in ~/.claude.json`);
             for (const [name, serverConfig] of Object.entries(config.mcpServers)) {
               if (!result.mcpServers[name]) {
-                result.mcpServers[name] = serverConfig;
+                result.mcpServers[name] = structuredClone(serverConfig);
               }
             }
           }

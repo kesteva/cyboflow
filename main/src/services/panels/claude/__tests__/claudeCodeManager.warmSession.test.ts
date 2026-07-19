@@ -82,8 +82,25 @@ function getProcesses(mgr: ClaudeCodeManager): Map<string, unknown> {
 function getPipelines(mgr: ClaudeCodeManager): Map<string, unknown> {
   return (mgr as unknown as { pipelines: Map<string, unknown> }).pipelines;
 }
+/** The WorkflowBundleWriter the manager installs the co-located bundle through. */
+function getBundleWriter(mgr: ClaudeCodeManager): { write(worktree: string, bundle: unknown): unknown } {
+  return (mgr as unknown as { bundleWriter: { write(worktree: string, bundle: unknown): unknown } }).bundleWriter;
+}
+/** Read a warm-idle run's teardown flag (F21 eviction marks it before draining). */
+function runClosing(mgr: ClaudeCodeManager, key: string): boolean | undefined {
+  return (getSdkRuns(mgr).get(key) as unknown as { closing?: boolean } | undefined)?.closing;
+}
+/** Force a warm-idle run to look mid-turn (F21: a mid-turn run is never evicted). */
+function setTurnInFlight(mgr: ClaudeCodeManager, key: string, value: boolean): void {
+  const run = getSdkRuns(mgr).get(key) as unknown as { turnInFlight: boolean } | undefined;
+  if (run) run.turnInFlight = value;
+}
 
 const flush = () => new Promise<void>((r) => setImmediate(r));
+/** Flush several macrotasks so a fire-and-forget warm-session drain fully settles. */
+async function settle(): Promise<void> {
+  for (let i = 0; i < 6; i++) await flush();
+}
 
 /** Resume `resume` field of the nth query() call's options (undefined when absent). */
 function callResume(n: number): unknown {
@@ -100,6 +117,7 @@ describe('ClaudeCodeManager — warm (persistent) SDK session', () => {
   beforeEach(() => {
     fakeSdk.reset();
     delete process.env.CYBOFLOW_DISABLE_WARM_SDK;
+    delete process.env.CYBOFLOW_WARM_MAX_IDLE;
     ModelAvailabilityService._resetForTesting();
     ModelAvailabilityService.initialize();
     db = createTestDb();
@@ -117,6 +135,7 @@ describe('ClaudeCodeManager — warm (persistent) SDK session', () => {
     ApprovalRouter._resetForTesting();
     QuestionRouter._resetForTesting();
     ModelAvailabilityService._resetForTesting();
+    delete process.env.CYBOFLOW_WARM_MAX_IDLE;
     db.close();
     vi.clearAllMocks();
   });
@@ -596,5 +615,177 @@ describe('ClaudeCodeManager — warm (persistent) SDK session', () => {
     });
     expect(fakeSdk.calls).toHaveLength(2);
     expect(callResume(1)).toBe(SESSION_UUID);
+  });
+
+  // -------------------------------------------------------------------------
+  // (F5a) An unchanged warm turn does NOT re-install the co-located bundle — the
+  //       SDK reads .claude/agents|commands only at process start, so re-writing
+  //       per push (git rev-parse + dir scans + N+M file writes) is pure waste.
+  //       The cold turn installed it once; the warm push installs nothing.
+  // -------------------------------------------------------------------------
+  it('(F5) skips the bundle install on an unchanged warm turn; the cold turn installed it once', async () => {
+    const panelId = 'p-warm-f5a';
+    const builder = twoTurnScenario();
+    fakeSdk.setScenario(builder);
+    const writeSpy = vi.spyOn(getBundleWriter(mgr), 'write');
+
+    // Turn 1 — cold spawn installs the bundle once.
+    await mgr.spawnCliProcess({
+      panelId,
+      sessionId: panelId,
+      worktreePath: '/tmp/wt',
+      prompt: 'first',
+      permissionMode: 'ignore',
+    });
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+
+    // Turn 2 — resume continuation → warm push. NO respawn, NO re-install.
+    writeSpy.mockClear();
+    await mgr.spawnCliProcess({
+      panelId,
+      sessionId: panelId,
+      worktreePath: '/tmp/wt',
+      prompt: 'second',
+      permissionMode: 'ignore',
+      isResume: true,
+    });
+    expect(fakeSdk.calls).toHaveLength(1); // warm push, no cold respawn
+    expect(builder.pushed).toEqual(['second']);
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // (F5b) Config drift that fails warm reuse (a changed model → fingerprint
+  //       mismatch) cold-respawns — and the cold path re-installs the bundle, so
+  //       the install seam is exercised exactly when a fresh process needs it.
+  // -------------------------------------------------------------------------
+  it('(F5) a fingerprint-drift cold respawn DOES re-install the bundle', async () => {
+    const panelId = 'p-warm-f5b';
+    fakeSdk.setScenario(twoTurnScenario());
+    const writeSpy = vi.spyOn(getBundleWriter(mgr), 'write');
+
+    await mgr.spawnCliProcess({
+      panelId,
+      sessionId: panelId,
+      worktreePath: '/tmp/wt',
+      prompt: 'first',
+      permissionMode: 'ignore',
+    });
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+
+    // Turn 2 pins a different model → fingerprint mismatch → close warm + cold spawn.
+    writeSpy.mockClear();
+    await mgr.spawnCliProcess({
+      panelId,
+      sessionId: panelId,
+      worktreePath: '/tmp/wt',
+      prompt: 'second',
+      permissionMode: 'ignore',
+      isResume: true,
+      model: 'opus',
+    });
+    expect(fakeSdk.calls).toHaveLength(2); // cold respawn
+    expect(writeSpy).toHaveBeenCalledTimes(1); // re-installed on the cold path
+  });
+
+  // -------------------------------------------------------------------------
+  // (F21) Parking past the app-wide idle-warm cap evicts the least-recently-used
+  //       idle session via the same graceful close the TTL uses.
+  // -------------------------------------------------------------------------
+  it('(F21) evicts the LRU idle warm session when a park exceeds the idle cap', async () => {
+    process.env.CYBOFLOW_WARM_MAX_IDLE = '2';
+    // Three conversations each park warm-idle; the 3rd park pushes the idle count
+    // to 3 > cap 2, evicting the LRU (the first, smallest parkSeq).
+    for (let i = 0; i < 3; i++) {
+      fakeSdk.setScenario(twoTurnScenario());
+      await mgr.spawnCliProcess({
+        panelId: `p-cap-${i}`,
+        sessionId: `p-cap-${i}`,
+        worktreePath: '/tmp/wt',
+        prompt: 'first',
+        permissionMode: 'ignore',
+      });
+    }
+    // The eviction close fires synchronously at the 3rd park; let its drain settle.
+    await settle();
+    expect(getSdkRuns(mgr).has('p-cap-0')).toBe(false); // LRU evicted
+    expect(getSdkRuns(mgr).has('p-cap-1')).toBe(true);
+    expect(getSdkRuns(mgr).has('p-cap-2')).toBe(true);
+    expect(getSdkRuns(mgr).size).toBe(2);
+  });
+
+  // -------------------------------------------------------------------------
+  // (F21) An evicted conversation loses no data: its next turn cold-resumes with
+  //       --resume from the captured claude session id.
+  // -------------------------------------------------------------------------
+  it('(F21) an evicted conversation cold-resumes on its next turn', async () => {
+    process.env.CYBOFLOW_WARM_MAX_IDLE = '2';
+    for (let i = 0; i < 3; i++) {
+      fakeSdk.setScenario(twoTurnScenario());
+      await mgr.spawnCliProcess({
+        panelId: `p-evq-${i}`,
+        sessionId: `p-evq-${i}`,
+        worktreePath: '/tmp/wt',
+        prompt: 'first',
+        permissionMode: 'ignore',
+      });
+    }
+    await settle();
+    expect(getSdkRuns(mgr).has('p-evq-0')).toBe(false);
+    const coldCallsBefore = fakeSdk.calls.length; // 3 cold spawns so far
+
+    // Re-drive the evicted conversation → a fresh cold query() carrying --resume.
+    fakeSdk.setScenario(scenario().systemInit({ sessionId: SESSION_UUID }).resultSuccess());
+    await mgr.spawnCliProcess({
+      panelId: 'p-evq-0',
+      sessionId: 'p-evq-0',
+      worktreePath: '/tmp/wt',
+      prompt: 'again',
+      permissionMode: 'ignore',
+      isResume: true,
+    });
+    expect(fakeSdk.calls.length).toBe(coldCallsBefore + 1);
+    expect(callResume(coldCallsBefore)).toBe(SESSION_UUID);
+  });
+
+  // -------------------------------------------------------------------------
+  // (F21) A mid-turn session is NEVER evicted — even when it is the LRU by
+  //       parkSeq. The cap skips it (turnInFlight) and evicts the next LRU idle.
+  // -------------------------------------------------------------------------
+  it('(F21) never evicts a mid-turn session, even when it is the oldest', async () => {
+    process.env.CYBOFLOW_WARM_MAX_IDLE = '2';
+    // Park sessions 0 and 1 idle.
+    for (let i = 0; i < 2; i++) {
+      fakeSdk.setScenario(twoTurnScenario());
+      await mgr.spawnCliProcess({
+        panelId: `p-mid-${i}`,
+        sessionId: `p-mid-${i}`,
+        worktreePath: '/tmp/wt',
+        prompt: 'first',
+        permissionMode: 'ignore',
+      });
+    }
+    // Session 0 is the LRU by parkSeq; flip it to look mid-turn so the cap must skip it.
+    setTurnInFlight(mgr, 'p-mid-0', true);
+
+    // Park two more idle sessions → idle set = {1,2,3} = 3 > cap 2. The LRU IDLE is
+    // session 1 (session 0 excluded as mid-turn), so session 1 is the victim.
+    for (let i = 2; i < 4; i++) {
+      fakeSdk.setScenario(twoTurnScenario());
+      await mgr.spawnCliProcess({
+        panelId: `p-mid-${i}`,
+        sessionId: `p-mid-${i}`,
+        worktreePath: '/tmp/wt',
+        prompt: 'first',
+        permissionMode: 'ignore',
+      });
+    }
+    await settle();
+    expect(getSdkRuns(mgr).has('p-mid-0')).toBe(true); // mid-turn LRU survives
+    expect(getSdkRuns(mgr).has('p-mid-1')).toBe(false); // LRU idle evicted instead
+    expect(runClosing(mgr, 'p-mid-0')).not.toBe(true);
+
+    // Restore so the afterEach teardown does not treat it as a live turn.
+    setTurnInFlight(mgr, 'p-mid-0', false);
   });
 });
