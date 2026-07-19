@@ -1,7 +1,7 @@
 import { EventEmitter } from 'events';
 import { watch, FSWatcher, readdirSync, statSync } from 'fs';
 import { join, relative } from 'path';
-import { execSync, ExtendedExecSyncOptions } from '../utils/commandExecutor';
+import { fastCheckWorkingDirectory } from './gitPlumbingCommands';
 import type { Logger } from '../utils/logger';
 
 interface WatchedSession {
@@ -16,6 +16,11 @@ interface WatchedSession {
   watchedTopDirs: Set<string>;
   lastModified: number;
   pendingRefresh: boolean;
+  // Single-flight guard: only one checkIfRefreshNeeded() may run at a time per
+  // session. A debounce firing while a check is already in flight sets
+  // dirtyWhileInFlight instead of spawning a second concurrent git check.
+  checkInFlight: boolean;
+  dirtyWhileInFlight: boolean;
 }
 
 /**
@@ -80,7 +85,9 @@ export class GitFileWatcher extends EventEmitter {
       watchers: [],
       watchedTopDirs: new Set(),
       lastModified: Date.now(),
-      pendingRefresh: false
+      pendingRefresh: false,
+      checkInFlight: false,
+      dirtyWhileInFlight: false
     };
     this.watchedSessions.set(sessionId, session);
 
@@ -255,78 +262,80 @@ export class GitFileWatcher extends EventEmitter {
     // Set new timer
     const timer = setTimeout(() => {
       this.refreshDebounceTimers.delete(sessionId);
-      this.performRefreshCheck(sessionId);
+      // performRefreshCheck is async (it awaits git plumbing calls) but this
+      // callback can't await it — errors are already handled internally, this
+      // catch is just a backstop against an unhandled rejection.
+      this.performRefreshCheck(sessionId).catch((error) => {
+        this.logger?.error(`[GitFileWatcher] Unexpected error in refresh check for session ${sessionId}:`, error as Error);
+      });
     }, this.DEBOUNCE_MS);
 
     this.refreshDebounceTimers.set(sessionId, timer);
   }
 
   /**
-   * Perform the actual refresh check using git plumbing commands
+   * Perform the actual refresh check using git plumbing commands.
+   *
+   * Single-flight + dirty-bit contract: checkIfRefreshNeeded() is async (git
+   * spawns via runGitAsync), so a debounce firing while a prior check for the
+   * same session is still in flight must NOT start a second concurrent check —
+   * it marks dirtyWhileInFlight instead. When the in-flight check completes it
+   * consumes that flag and loops for exactly one more check, so a file-change
+   * event that arrives mid-check is never dropped. A stopWatching() call mid-
+   * check (session removed/replaced in the map) ends the loop without emitting
+   * or rerunning.
    */
-  private performRefreshCheck(sessionId: string): void {
+  private async performRefreshCheck(sessionId: string): Promise<void> {
     const session = this.watchedSessions.get(sessionId);
     if (!session || !session.pendingRefresh) {
       return;
     }
 
-    session.pendingRefresh = false;
+    if (session.checkInFlight) {
+      session.dirtyWhileInFlight = true;
+      return;
+    }
 
+    session.checkInFlight = true;
     try {
-      // Quick check if the index is dirty using git update-index
-      // This is much faster than running full git status
-      const needsRefresh = this.checkIfRefreshNeeded(session.worktreePath);
-      
-      if (needsRefresh) {
-        this.logger?.info(`[GitFileWatcher] Session ${sessionId} needs refresh`);
-        this.emit('needs-refresh', sessionId);
-      } else {
-        this.logger?.info(`[GitFileWatcher] Session ${sessionId} no refresh needed`);
+      let keepChecking = true;
+      while (keepChecking) {
+        session.pendingRefresh = false;
+        session.dirtyWhileInFlight = false;
+
+        const needsRefresh = await this.checkIfRefreshNeeded(session.worktreePath);
+
+        // The session may have been stopped, or replaced by a new
+        // startWatching() call, while the check was in flight — either way
+        // this stale run must not emit or trigger a follow-up check.
+        if (this.watchedSessions.get(sessionId) !== session) {
+          return;
+        }
+
+        if (needsRefresh) {
+          this.logger?.info(`[GitFileWatcher] Session ${sessionId} needs refresh`);
+          this.emit('needs-refresh', sessionId);
+        } else {
+          this.logger?.info(`[GitFileWatcher] Session ${sessionId} no refresh needed`);
+        }
+
+        keepChecking = session.dirtyWhileInFlight;
       }
-    } catch (error) {
-      this.logger?.error(`[GitFileWatcher] Error checking session ${sessionId}:`, error as Error);
-      // On error, emit refresh to be safe
-      this.emit('needs-refresh', sessionId);
+    } finally {
+      session.checkInFlight = false;
     }
   }
 
   /**
    * Quick check if git status needs refreshing
-   * Returns true if there are changes, false if working tree is clean
+   * Returns true if there are changes, false if working tree is clean.
+   * Delegates to the async gitPlumbingCommands twin (runGitAsync) instead of
+   * sync execSync so this never blocks the main thread on the fs.watch path.
    */
-  private checkIfRefreshNeeded(worktreePath: string): boolean {
+  private async checkIfRefreshNeeded(worktreePath: string): Promise<boolean> {
     try {
-      // First, refresh the index to ensure it's up to date
-      // This is very fast and updates git's internal cache
-      execSync('git update-index --refresh --ignore-submodules', { cwd: worktreePath, encoding: 'utf8', silent: true });
-
-      // Check for unstaged changes (modified files)
-      try {
-        execSync('git diff-files --quiet --ignore-submodules', { cwd: worktreePath, encoding: 'utf8', silent: true });
-      } catch {
-        // Non-zero exit means there are unstaged changes
-        return true;
-      }
-
-      // Check for staged changes
-      try {
-        execSync('git diff-index --cached --quiet HEAD --ignore-submodules', { cwd: worktreePath, encoding: 'utf8', silent: true });
-      } catch {
-        // Non-zero exit means there are staged changes
-        return true;
-      }
-      
-      // Check for untracked files
-      const untrackedOutput = execSync('git ls-files --others --exclude-standard', { cwd: worktreePath })
-        .toString()
-        .trim();
-      
-      if (untrackedOutput) {
-        return true;
-      }
-      
-      // Working tree is clean
-      return false;
+      const status = await fastCheckWorkingDirectory(worktreePath);
+      return status.hasModified || status.hasStaged || status.hasUntracked || status.hasConflicts;
     } catch (error) {
       // If any command fails unexpectedly, assume refresh is needed
       this.logger?.error('[GitFileWatcher] Error in checkIfRefreshNeeded:', error as Error);
