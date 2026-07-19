@@ -2600,11 +2600,12 @@ app.whenReady().then(async () => {
     return open;
   });
 
-  console.log('[Main] Services initialized, creating window...');
-  await createWindow();
-  console.log('[Main] Window created successfully');
+  console.log('[Main] Services initialized, wiring orchestrator...');
 
-  // Wire tRPC orchestrator after BrowserWindow is available
+  // Wire the orchestrator + every tRPC router dependency BEFORE creating the
+  // window. The renderer can fire mutations (runs.start, closeout, …) as soon
+  // as it loads; creating the window only after this block guarantees no
+  // request ever reaches a router whose deps setter has not run yet.
   {
     // Reuse the module-level RunQueueRegistry instantiated in initializeServices()
     // so RunLauncher, Orchestrator, and ApprovalRouter all share the same instance.
@@ -2626,15 +2627,12 @@ app.whenReady().then(async () => {
         ReviewItemRouter.getInstance().applyReviewItem(projectId, change),
     });
     await orchestrator.start();
-    // NOTE: the tRPC IPC handler is now attached inside createWindow() — BEFORE
-    // the renderer loads — so an early renderer request never races handler
-    // registration. See attachOrchestratorTrpcToWindow. createContext's deps
-    // (db / workflowRegistry / AgentOverrideRouter / configManager /
-    // gitDiffManager) are all live post-initializeServices, and the late-init
-    // singletons wired below (Approval/Question routers) are only invoked by
-    // user-action mutations, never by mount-time reads — so attaching ahead of
-    // this block is safe.
-    console.log('[Main] Orchestrator started (tRPC IPC handler attached pre-load in createWindow)');
+    // NOTE: the tRPC IPC handler is attached inside createWindow() — BEFORE the
+    // renderer loads — and createWindow() itself only runs after this whole
+    // wiring block, so every router dependency setter (setStartRunDeps,
+    // setRunCloseoutDeps, Approval/Question routers, …) has run before the
+    // renderer can issue a single request.
+    console.log('[Main] Orchestrator started (tRPC IPC handler attaches pre-load in createWindow)');
 
     // Wire ApprovalRouter after the RunQueueRegistry is live.
     // Permission decisions are produced in-process by the SDK PreToolUse hook
@@ -3874,6 +3872,12 @@ app.whenReady().then(async () => {
     setHealthProvider(orchestratorHealth);
     console.log('[Main] health.mcpServer deps wired');
   }
+
+  // Create the window only now — after ALL router deps above are wired — so a
+  // fast user action right after first paint can never hit an un-wired mutation.
+  console.log('[Main] Orchestrator wired, creating window...');
+  await createWindow();
+  console.log('[Main] Window created successfully');
 
   // Record app open in the local database (used for app-update detection)
   try {
