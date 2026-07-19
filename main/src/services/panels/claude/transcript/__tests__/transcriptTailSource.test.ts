@@ -11,6 +11,13 @@
  * timeout -> reject + loud logger; incremental tail with a split line + a
  * malformed line; onTurnEnd firing; truncation/re-append (inode/offset re-sync);
  * stop() exits the loop; and the collision fallback (binds the cwd-matching file).
+ *
+ * F15 (async tick I/O, main/src/.../transcriptTailSource.ts): the tail tick's
+ * stat/open/read/close moved off the main thread onto `fs/promises`. Additional
+ * coverage below: ticks never overlap (a slow tick suppresses the next 50ms
+ * tick rather than racing it); stop() mid-read never lets a dispatch land after
+ * teardown; and a second append landing while a tick is already mid-read is
+ * picked up cleanly on the NEXT tick (no loss, no duplication).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
@@ -18,6 +25,38 @@ import * as os from 'os';
 import * as path from 'path';
 import { TranscriptTailSource } from '../transcriptTailSource';
 import { encodeCwd } from '../encodeCwd';
+
+/**
+ * F15: a controllable gate on `fs/promises`' `open()`, used by 'stop-during-read'
+ * and 'append-during-read' below to land stop()/a second append EXACTLY inside a
+ * tick's async I/O window (between stat() and the read) without depending on real
+ * disk timing. `fs/promises`' exports are non-configurable (`vi.spyOn` throws
+ * "Cannot redefine property"), so gating goes through `vi.mock` instead — its
+ * factory is hoisted above imports, so the shared state must come from
+ * `vi.hoisted` to be visible both there and in the tests that arm it. Every other
+ * test passes through untouched (`armed` defaults false).
+ */
+const openGate = vi.hoisted(() => ({
+  armed: false,
+  reached: false,
+  release: undefined as (() => void) | undefined,
+}));
+
+vi.mock('fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs/promises')>();
+  return {
+    ...actual,
+    open: async (...args: Parameters<typeof actual.open>) => {
+      if (openGate.armed && !openGate.reached) {
+        openGate.reached = true;
+        await new Promise<void>((resolve) => {
+          openGate.release = resolve;
+        });
+      }
+      return actual.open(...args);
+    },
+  };
+});
 
 function makeSpyLogger() {
   return { warn: vi.fn(), error: vi.fn(), verbose: vi.fn() };
@@ -77,6 +116,9 @@ beforeEach(() => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-transcript-'));
   keyDir = path.join(tmpRoot, encodeCwd(WORKTREE));
   fs.mkdirSync(keyDir, { recursive: true });
+  openGate.armed = false;
+  openGate.reached = false;
+  openGate.release = undefined;
 });
 
 afterEach(() => {
@@ -306,6 +348,111 @@ describe('TranscriptTailSource', () => {
     fs.appendFileSync(file, assistantTextLine('two') + '\n');
     await new Promise((r) => setTimeout(r, 200));
     expect(received).toHaveLength(countAtStop); // nothing more forwarded
+  });
+
+  it('ticks never overlap: a slow tick suppresses the next 50ms tick rather than racing it', async () => {
+    const logger = makeSpyLogger();
+    const src = trackedSource({
+      worktreePath: WORKTREE,
+      projectsRoot: tmpRoot,
+      discoveryTimeoutMs: 1500,
+      logger,
+    });
+
+    await src.start(() => undefined);
+    const file = path.join(keyDir, 'session-overlap.jsonl');
+    fs.writeFileSync(file, '');
+    await src.waitForFirstLine(1500);
+
+    // Stub the tick body itself so concurrency is asserted directly, independent
+    // of real disk-I/O timing (which is far faster than the 50ms cadence locally
+    // and would never naturally overlap).
+    let concurrent = 0;
+    let maxConcurrent = 0;
+    let calls = 0;
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const stub = async (): Promise<void> => {
+      calls++;
+      concurrent++;
+      maxConcurrent = Math.max(maxConcurrent, concurrent);
+      await gate;
+      concurrent--;
+    };
+    (src as unknown as { readAppended: () => Promise<void> }).readAppended = stub;
+
+    // Let several 50ms ticks elapse while the first stubbed call is stuck on the gate.
+    await new Promise((r) => setTimeout(r, 220));
+    expect(calls).toBe(1); // every later interval firing was skipped, not queued
+    expect(maxConcurrent).toBe(1);
+
+    release?.();
+    await waitFor(() => calls >= 2); // once released, ticking resumes normally
+  });
+
+  it('stop-during-read: no dispatch lands after teardown even if the in-flight read finishes later', async () => {
+    const logger = makeSpyLogger();
+    const received: unknown[] = [];
+    const src = trackedSource({
+      worktreePath: WORKTREE,
+      projectsRoot: tmpRoot,
+      discoveryTimeoutMs: 1500,
+      logger,
+    });
+
+    await src.start((obj) => received.push(obj));
+    const file = path.join(keyDir, 'session-stopread.jsonl');
+    fs.writeFileSync(file, '');
+    await src.waitForFirstLine(1500);
+
+    fs.appendFileSync(file, assistantTextLine('pending') + '\n');
+
+    // Gate the tick's open() so it is caught between stat() (already resolved)
+    // and the actual read — the window where stop() must still prevent dispatch.
+    openGate.armed = true;
+    await waitFor(() => openGate.reached);
+    src.stop();
+    openGate.release?.();
+
+    // Let the gated read actually finish in the background before asserting.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(received).toHaveLength(0); // stop() landed before the read completed
+  });
+
+  it('append-during-read: a second append mid-tick is picked up cleanly next tick (no loss, no duplication)', async () => {
+    const logger = makeSpyLogger();
+    const received: unknown[] = [];
+    const src = trackedSource({
+      worktreePath: WORKTREE,
+      projectsRoot: tmpRoot,
+      discoveryTimeoutMs: 1500,
+      logger,
+    });
+
+    await src.start((obj) => received.push(obj));
+    const file = path.join(keyDir, 'session-appendread.jsonl');
+    fs.writeFileSync(file, '');
+    await src.waitForFirstLine(1500);
+
+    fs.appendFileSync(file, assistantTextLine('first') + '\n');
+
+    // Gate open() so a SECOND append lands AFTER this tick's stat() already
+    // captured the smaller (first-line-only) size — it must not be swept into
+    // this tick's read.
+    openGate.armed = true;
+    await waitFor(() => openGate.reached);
+    fs.appendFileSync(file, assistantTextLine('second') + '\n');
+    openGate.release?.();
+
+    await waitFor(() => received.length >= 2);
+
+    expect(received).toHaveLength(2);
+    const r0 = received[0] as { message: { content: Array<{ text: string }> } };
+    const r1 = received[1] as { message: { content: Array<{ text: string }> } };
+    expect(r0.message.content[0].text).toBe('first');
+    expect(r1.message.content[0].text).toBe('second');
   });
 
   it('collision fallback: binds the file whose top-level cwd matches the worktree', async () => {

@@ -18,6 +18,7 @@
  * no-op observability, so the constructor demands it.
  */
 import * as fs from 'fs';
+import * as fsp from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import type { Logger } from '../../../../utils/logger';
@@ -125,6 +126,13 @@ export class TranscriptTailSource implements TranscriptSource {
   private buffer = '';
   private stopped = false;
 
+  /**
+   * The currently-running readAppended() tick, if any — ticks never overlap
+   * (F15): a tick still awaiting its fs/promises I/O when the next 50ms interval
+   * fires is left to finish; the new tick is skipped rather than racing it.
+   */
+  private tickInFlight: Promise<void> | undefined;
+
   constructor(opts: TranscriptTailSourceOptions) {
     this.worktreePath = opts.worktreePath;
     this.projectsRoot =
@@ -197,6 +205,15 @@ export class TranscriptTailSource implements TranscriptSource {
     return this.firstLinePromise;
   }
 
+  /**
+   * Tear down all watchers/intervals. `stopped` flips synchronously (the
+   * interface is deliberately sync, not `Promise<void>` — every implementer and
+   * test double keys off that), so a readAppended() tick already in flight is not
+   * awaited here; instead it is CANCELLED cooperatively — every await-resume point
+   * in readAppended() re-checks `stopped` and bails before touching offset/buffer
+   * or dispatching, so no read's output can land after this call returns even
+   * though the underlying fs/promises calls finish in the background.
+   */
   stop(): void {
     this.stopped = true;
     this.discoveryGaveUp = true; // make any pending late-discovery timer inert
@@ -468,26 +485,47 @@ export class TranscriptTailSource implements TranscriptSource {
 
   private startTail(): void {
     // Read whatever is already in the bound file, then poll for appends.
-    this.readAppended();
+    this.tick();
     this.tailInterval = setInterval(() => {
-      this.readAppended();
+      this.tick();
     }, POLL_INTERVAL_MS);
   }
 
   /**
-   * Read bytes appended since `offset`, re-syncing on truncation / inode change,
-   * then frame and dispatch complete lines.
+   * Fire one tail tick, unless the previous tick's fs/promises I/O is still in
+   * flight (F15 in-flight guard) — ticks never overlap. A slow disk (or a huge
+   * appended chunk) can make one tick outlive the 50ms cadence; skipping the next
+   * tick rather than starting a second concurrent read keeps offset/buffer
+   * mutation single-threaded without an explicit lock.
    */
-  private readAppended(): void {
+  private tick(): void {
+    if (this.tickInFlight !== undefined) return;
+    const run = this.readAppended();
+    this.tickInFlight = run;
+    void run.finally(() => {
+      if (this.tickInFlight === run) this.tickInFlight = undefined;
+    });
+  }
+
+  /**
+   * Read bytes appended since `offset`, re-syncing on truncation / inode change,
+   * then frame and dispatch complete lines. Runs on `fs/promises` (stat/open/
+   * read/close on a `FileHandle`) so the 50ms tick never blocks the main thread.
+   * `stop()` flips `this.stopped` synchronously; every await-resume point below
+   * re-checks it and bails before mutating offset/buffer or dispatching, so a
+   * tick already in flight when stop() lands produces no observable output.
+   */
+  private async readAppended(): Promise<void> {
     if (this.stopped || this.boundPath === undefined) return;
 
     let stat: fs.Stats;
     try {
-      stat = fs.statSync(this.boundPath);
+      stat = await fsp.stat(this.boundPath);
     } catch {
       // File vanished — nothing to read this tick.
       return;
     }
+    if (this.stopped) return; // stop() landed while stat() awaited
 
     // Re-sync on rotation/truncation: new inode OR shrunk below our offset.
     if ((this.inode !== undefined && stat.ino !== this.inode) || stat.size < this.offset) {
@@ -500,15 +538,16 @@ export class TranscriptTailSource implements TranscriptSource {
 
     let chunk: string;
     try {
-      const fd = fs.openSync(this.boundPath, 'r');
+      const handle = await fsp.open(this.boundPath, 'r');
       try {
+        if (this.stopped) return; // stop() landed while open() awaited
         const len = stat.size - this.offset;
         const buf = Buffer.alloc(len);
-        const read = fs.readSync(fd, buf, 0, len, this.offset);
-        chunk = buf.subarray(0, read).toString('utf8');
-        this.offset += read;
+        const { bytesRead } = await handle.read(buf, 0, len, this.offset);
+        chunk = buf.subarray(0, bytesRead).toString('utf8');
+        this.offset += bytesRead;
       } finally {
-        fs.closeSync(fd);
+        await handle.close();
       }
     } catch (err) {
       this.logger.warn(
@@ -516,6 +555,8 @@ export class TranscriptTailSource implements TranscriptSource {
       );
       return;
     }
+
+    if (this.stopped) return; // stop() landed while read()/close() awaited — never dispatch after teardown
 
     // Rolling-buffer framing (mirrors cyboflowMcpServer.ts:69-79). A line split
     // across two appends is reassembled here.
