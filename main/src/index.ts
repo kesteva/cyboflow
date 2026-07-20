@@ -619,6 +619,39 @@ function runDeferredStartupWork(): void {
   void codexBrokerReaper.sweepOrphans().catch((err) => {
     console.error('[Main] codex-broker boot sweep failed:', err);
   });
+
+  // Boot sweep #2: the same brokers, but in worktrees that STILL EXIST. The sweep
+  // above spares those (their `--cwd` resolves) and WorktreeManager's reap only
+  // fires on removal — so a broker whose session ended days ago but whose worktree
+  // was never dismissed leaks indefinitely (no idle TTL). There is no idle signal
+  // to test for (broker.log is 0 bytes, mtime frozen at spawn), so this is scoped
+  // to THIS install's worktree roots instead: at boot no cyboflow session is live
+  // yet, making any broker under those roots a previous-lifetime leftover, while
+  // brokers from other tools (Warp / plain terminal) sit outside them and are
+  // never matched. Fire-and-forget — never block on `ps` or the projects query.
+  void (async () => {
+    let roots: string[];
+    try {
+      roots = databaseService.getAllProjects().flatMap((project) => {
+        const projectPath = project.path?.trim();
+        if (!projectPath) return [];
+        const folder = (project.worktree_folder || '').trim() || 'worktrees';
+        // Both layouts WorktreeManager creates: the per-project worktree folder
+        // and the nested `.cyboflow/worktrees/<workflow>/<runId8>` run layout.
+        return [
+          path.join(projectPath, folder),
+          path.join(projectPath, '.cyboflow', 'worktrees'),
+        ];
+      });
+    } catch (err) {
+      // A crashed/locked DB at boot must not strand the sweep's siblings.
+      console.error('[Main] codex-broker worktree-root sweep: project lookup failed:', err);
+      return;
+    }
+    await codexBrokerReaper.sweepForWorktreeRoots(roots);
+  })().catch((err) => {
+    console.error('[Main] codex-broker worktree-root sweep failed:', err);
+  });
 }
 
 async function createWindow() {

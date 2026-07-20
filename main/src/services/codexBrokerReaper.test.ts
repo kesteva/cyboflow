@@ -207,6 +207,118 @@ describe('CodexBrokerReaper.sweepOrphans', () => {
   });
 });
 
+describe('CodexBrokerReaper.sweepForWorktreeRoots', () => {
+  const ROOT = '/Users/me/dev/cyboflow/worktrees';
+
+  it('kills a broker under a root even though its worktree STILL EXISTS', async () => {
+    // The regression this sweep exists for: sweepOrphans spares this broker
+    // (cwd resolves) and reapForWorktree never fires (worktree never removed),
+    // so before this seam it leaked forever.
+    const killPid = vi.fn<(pid: number) => void>();
+    const reaper = new CodexBrokerReaper({
+      listProcesses: fixedLister(leakedTree(`${ROOT}/quick-A`, 100)),
+      killPid,
+      pathExists: () => true, // every worktree is alive on disk
+    });
+
+    await reaper.sweepForWorktreeRoots([ROOT]);
+
+    expect(killPid.mock.calls.map((c) => c[0]).sort((a, b) => a - b)).toEqual([100, 101, 102, 103]);
+  });
+
+  it('SPARES a broker outside the roots (another tool’s live session)', async () => {
+    // The safety property: a Warp / plain-terminal Claude session's broker is
+    // indistinguishable by age and may be mid-turn. It must never be matched.
+    const killPid = vi.fn<(pid: number) => void>();
+    const rows: CodexBrokerProcess[] = [
+      ...leakedTree(`${ROOT}/quick-A`, 100),
+      ...leakedTree('/Users/me/.warp/worktrees/cyboflow/ridge-ravine', 200),
+    ];
+    const reaper = new CodexBrokerReaper({
+      listProcesses: fixedLister(rows),
+      killPid,
+      pathExists: () => true,
+    });
+
+    await reaper.sweepForWorktreeRoots([ROOT]);
+
+    expect(killPid.mock.calls.map((c) => c[0]).sort((a, b) => a - b)).toEqual([100, 101, 102, 103]);
+  });
+
+  it('does NOT match a root that merely shares a path prefix', async () => {
+    const killPid = vi.fn<(pid: number) => void>();
+    const reaper = new CodexBrokerReaper({
+      listProcesses: fixedLister(leakedTree(`${ROOT}-archive/quick-A`, 100)),
+      killPid,
+      pathExists: () => true,
+    });
+
+    await reaper.sweepForWorktreeRoots([ROOT]);
+
+    expect(killPid).not.toHaveBeenCalled();
+  });
+
+  it('matches across MULTIPLE roots (per-project worktree folder + .cyboflow layout)', async () => {
+    const killPid = vi.fn<(pid: number) => void>();
+    const nested = '/Users/me/dev/other/.cyboflow/worktrees';
+    const rows: CodexBrokerProcess[] = [
+      ...leakedTree(`${ROOT}/quick-A`, 100),
+      ...leakedTree(`${nested}/sprint/ab12cd34`, 200),
+      ...leakedTree('/Users/me/elsewhere/tree', 300),
+    ];
+    const reaper = new CodexBrokerReaper({
+      listProcesses: fixedLister(rows),
+      killPid,
+      pathExists: () => true,
+    });
+
+    await reaper.sweepForWorktreeRoots([ROOT, nested]);
+
+    expect(killPid.mock.calls.map((c) => c[0]).sort((a, b) => a - b)).toEqual([
+      100, 101, 102, 103, 200, 201, 202, 203,
+    ]);
+  });
+
+  it('kills NOTHING when given no roots (match-all footgun guard)', async () => {
+    const killPid = vi.fn<(pid: number) => void>();
+    const reaper = new CodexBrokerReaper({
+      listProcesses: fixedLister(leakedTree(`${ROOT}/quick-A`, 100)),
+      killPid,
+      pathExists: () => true,
+    });
+
+    await reaper.sweepForWorktreeRoots([]);
+
+    expect(killPid).not.toHaveBeenCalled();
+  });
+
+  it('drops blank/whitespace roots rather than treating them as match-all', async () => {
+    const killPid = vi.fn<(pid: number) => void>();
+    const reaper = new CodexBrokerReaper({
+      listProcesses: fixedLister(leakedTree('/Users/me/elsewhere/tree', 100)),
+      killPid,
+      pathExists: () => true,
+    });
+
+    await reaper.sweepForWorktreeRoots(['', '   ']);
+
+    expect(killPid).not.toHaveBeenCalled();
+  });
+
+  it('tolerates a trailing slash on a root', async () => {
+    const killPid = vi.fn<(pid: number) => void>();
+    const reaper = new CodexBrokerReaper({
+      listProcesses: fixedLister(leakedTree(`${ROOT}/quick-A`, 100)),
+      killPid,
+      pathExists: () => true,
+    });
+
+    await reaper.sweepForWorktreeRoots([`${ROOT}/`]);
+
+    expect(killPid.mock.calls.map((c) => c[0]).sort((a, b) => a - b)).toEqual([100, 101, 102, 103]);
+  });
+});
+
 describe('CodexBrokerReaper fail-soft', () => {
   it('does not throw when listing processes fails', async () => {
     const reaper = new CodexBrokerReaper({

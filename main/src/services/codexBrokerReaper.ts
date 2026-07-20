@@ -16,11 +16,16 @@
  * `codex` helper → `node_repl` worker tree leaks per worktree that ever used
  * Codex, surviving dismiss/merge indefinitely.
  *
- * This service reaps them at the two seams the main process owns:
+ * This service reaps them at the three seams the main process owns:
  *   1. worktree removal ({@link reapForWorktree}, wired into WorktreeManager) —
- *      the chokepoint every dismiss/merge/delete path funnels through; and
+ *      the chokepoint every dismiss/merge/delete path funnels through;
  *   2. boot ({@link sweepOrphans}) — brokers whose `--cwd` no longer exists on
- *      disk, left behind by a prior session or a crash.
+ *      disk, left behind by a prior session or a crash; and
+ *   3. boot ({@link sweepForWorktreeRoots}) — brokers under one of THIS install's
+ *      worktree roots. Covers the case neither of the above can: a worktree that
+ *      still exists and was never removed, whose session ended days ago. Boot-only
+ *      and root-scoped by design — see that method's docstring for why an
+ *      age/idle-based sweep is not possible here and would be unsafe.
  *
  * These are the plugin's broker daemons, NOT cyboflow's own Codex SDK runtime
  * (CodexManager) nor the ui-prototype `http.server` (PrototypeServerReaper) — both
@@ -203,10 +208,57 @@ export class CodexBrokerReaper {
   }
 
   /**
+   * Kill every Codex broker whose `--cwd` is AT or UNDER one of `worktreeRoots`,
+   * plus each broker's descendant tree.
+   *
+   * BOOT ONLY — this is deliberately NOT safe to call mid-session. It closes the
+   * gap {@link sweepOrphans} structurally cannot: a broker in a worktree that
+   * STILL EXISTS. Such a broker has a live cwd (so the orphan sweep spares it) and
+   * its worktree was never removed (so {@link reapForWorktree} never fired), yet
+   * the session that spawned it ended long ago — the broker has no idle TTL, so it
+   * lives forever. Observed in the wild: three cyboflow worktrees holding brokers
+   * idle for 2+ days, one having accumulated 7 `node_repl` + MCP worker pairs.
+   *
+   * WHY BOOT IS THE SAFE MOMENT, AND WHY THIS IS ROOT-SCOPED RATHER THAN AGE-BASED.
+   * There is no idle signal to test: the broker's `broker.log` is 0 bytes with an
+   * mtime frozen at spawn, and its socket/pid files are removed on shutdown, so
+   * their presence means "alive", not "recently used". An age-based sweep would
+   * therefore have to guess — and would be actively harmful, because brokers for
+   * OTHER tools' worktrees (a Warp or plain-terminal Claude session) are
+   * indistinguishable by age and may be mid-turn. Restricting to cyboflow's own
+   * worktree roots removes the guess entirely: at boot no cyboflow session is yet
+   * running, so any broker under a cyboflow worktree root is by construction a
+   * leftover from a previous app lifetime, and third-party brokers live outside
+   * those roots and are never matched.
+   *
+   * A blank/whitespace root is dropped (matching '' would match EVERY broker); if
+   * that leaves no roots this is a no-op. Fail-soft throughout.
+   */
+  async sweepForWorktreeRoots(worktreeRoots: string[]): Promise<void> {
+    const bases = worktreeRoots.map(trimDir).filter((root) => root.length > 0);
+    if (bases.length === 0) {
+      this.logger?.debug('[CodexBrokerReaper] no worktree roots — skipping sweep');
+      return;
+    }
+    await this.killBrokerTrees(
+      (cwd) => {
+        const c = trimDir(cwd);
+        // Unlike sweepOrphans, an unparseable cwd is NOT treated as a match here:
+        // this sweep's whole safety property is "provably under a cyboflow root".
+        if (c.length === 0) return false;
+        return bases.some((base) => c === base || c.startsWith(base + '/'));
+      },
+      'sweepForWorktreeRoots',
+      bases.join(', '),
+    );
+  }
+
+  /**
    * Kill every Codex broker whose `--cwd` no longer exists on disk, plus each
    * broker's descendant tree. Used at boot to clear orphans a prior session or a
    * crash left behind. A broker for a still-live worktree is spared automatically
-   * (its cwd exists). Fail-soft.
+   * (its cwd exists) — see {@link sweepForWorktreeRoots} for the companion sweep
+   * that covers those. Fail-soft.
    */
   async sweepOrphans(): Promise<void> {
     await this.killBrokerTrees(
