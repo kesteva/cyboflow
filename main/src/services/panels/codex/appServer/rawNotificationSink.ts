@@ -5,6 +5,15 @@ import type { AppServerNotification } from './client';
 
 export const CODEX_RAW_NOTIFICATION_EVENT_TYPE = 'codex_app_server_notification';
 
+// Delta chunks exist only to paint the live UI as the turn streams; the
+// finished output/message is persisted again in full on 'item/completed'.
+// These two methods alone were measured at ~161 MB of the production
+// raw_events table, so we never persist them here.
+const NON_PERSISTED_DELTA_METHODS: ReadonlySet<string> = new Set([
+  'item/commandExecution/outputDelta',
+  'item/agentMessage/delta',
+]);
+
 export class CodexRawNotificationSink {
   private readonly insertStmt: Database.Statement;
 
@@ -23,6 +32,9 @@ export class CodexRawNotificationSink {
   }
 
   persist(runId: string, notification: AppServerNotification): void {
+    if (NON_PERSISTED_DELTA_METHODS.has(notification.method)) {
+      return;
+    }
     perfBump('raw.codex');
     try {
       this.insertStmt.run(

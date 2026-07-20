@@ -174,7 +174,9 @@ export function bridgeEvents(opts: BridgeEventsOptions): RunEventBridge {
     // Default legacy behaviour: construct router + sink and wire INSERT pipeline.
     router = opts.router ?? new EventRouter();
     // db is guaranteed non-undefined here — the guard above throws when it is absent.
-    sink = opts.sink ?? new RawEventsSink(db!, logger);
+    // stream_event deltas have a durable final stored alongside them — skip
+    // persisting the deltas themselves to cut raw_events bloat.
+    sink = opts.sink ?? new RawEventsSink(db!, logger, { skipEventTypes: ['stream_event'] });
     // Attach the sink to the router so emitForRun triggers INSERT synchronously.
     sink.attachToRouter(router, runId);
   }

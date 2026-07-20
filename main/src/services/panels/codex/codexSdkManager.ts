@@ -774,7 +774,12 @@ export class CodexSdkManager extends AbstractCliManager {
     // Observe immediately while preserving rejection for the later await.
     void terminal.promise.catch(() => undefined);
     const router = new EventRouter<AgentStreamEvent>();
-    const sink = new RawEventsSink<AgentStreamEvent>(this.db, this.logger);
+    // CodexRawNotificationSink already persists the raw app-server notification
+    // payload verbatim — skip the generic 'agent_unknown' wrap here to kill the
+    // double-write.
+    const sink = new RawEventsSink<AgentStreamEvent>(this.db, this.logger, {
+      skipEventTypes: ['agent_unknown'],
+    });
     sink.attachToRouter(router, runId);
     const usageAccumulator = new CodexTurnUsageAccumulator();
 

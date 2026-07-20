@@ -6,7 +6,11 @@
  * can insert raw_events rows without also seeding the workflow_runs table.
  *
  * Coverage (8 cases):
- *   1. Happy path — 5 mixed-variant events → 5 rows AND 5 publish calls in event order
+ *   1. Happy path — 5 mixed-variant events → 5 publish calls in event order, but
+ *      only 4 rows: the default sink (constructed with no `sink` injected) now
+ *      skips persisting 'stream_event' rows — the durable final is stored
+ *      alongside them, so live streaming (unaffected — it never reads raw_events)
+ *      does not need the delta persisted too. See rawEventsSink.ts skipEventTypes.
  *   2. Ordering — INSERT row exists BEFORE publisher.publish fires for each event
  *   3. Fail-soft — forced INSERT failure → publish still fires, 1 warn logged
  *   4. Filter by panelId — event for different panelId → zero rows, zero publish calls
@@ -134,7 +138,7 @@ describe('runEventBridge', () => {
   // 1. Happy path: 5 mixed-variant events → 5 rows AND 5 publish calls
   // -------------------------------------------------------------------------
 
-  it('happy path: 5 mixed-variant events produce 5 rows and 5 publish calls in event order', () => {
+  it('happy path: 5 mixed-variant events produce 5 publish calls, but only 4 rows (stream_event is not persisted by default)', () => {
     const { publish, asPublisher } = makePublisher();
     bridgeEvents({ runId: RUN_ID, source, publisher: asPublisher, db });
 
@@ -150,19 +154,18 @@ describe('runEventBridge', () => {
       emitOutput(source, RUN_ID, event);
     }
 
-    // 5 rows in the DB
-    expect(countRawEvents(db, RUN_ID)).toBe(5);
+    // 4 rows in the DB — the default sink skips 'stream_event' persistence.
+    expect(countRawEvents(db, RUN_ID)).toBe(4);
 
-    // 5 publish calls
+    // 5 publish calls — persistence skipping does not affect the publish path.
     expect(publish).toHaveBeenCalledTimes(5);
 
-    // Verify event_type column order
+    // Verify event_type column order (stream_event is absent)
     const rows = selectRows(db, RUN_ID);
     expect(rows[0].event_type).toBe('system');
     expect(rows[1].event_type).toBe('assistant');
     expect(rows[2].event_type).toBe('user');
     expect(rows[3].event_type).toBe('result');
-    expect(rows[4].event_type).toBe('stream_event');
   });
 
   // -------------------------------------------------------------------------
@@ -586,9 +589,10 @@ describe('runEventBridge', () => {
 
     // -----------------------------------------------------------------------
     // (d) skipPersistence: false (or absent) — preserves legacy behaviour
-    //     5 events → 5 rows and 5 publish calls
+    //     5 events → 4 rows (stream_event is skipped by the default sink) and
+    //     5 publish calls
     // -----------------------------------------------------------------------
-    it('(d) skipPersistence: false/absent preserves legacy behaviour — 5 INSERTs, 5 publishes', () => {
+    it('(d) skipPersistence: false/absent preserves legacy behaviour — 4 INSERTs (stream_event skipped), 5 publishes', () => {
       const realDb = makeRawEventsDb();
       const { publish, asPublisher } = makePublisher();
       const src = new EventEmitter();
@@ -607,7 +611,7 @@ describe('runEventBridge', () => {
         emitOutput(src, SP_RUN_ID, ev);
       }
 
-      expect(countRawEvents(realDb, SP_RUN_ID)).toBe(5);
+      expect(countRawEvents(realDb, SP_RUN_ID)).toBe(4);
       expect(publish).toHaveBeenCalledTimes(5);
     });
 

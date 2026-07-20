@@ -10,6 +10,8 @@
  *   2. Fail-soft — forced INSERT error on the 3rd call → 4 rows, 1 warn, no exception.
  *   3. Unknown variant — kind='__unknown__' → event_type='unknown', raw payload preserved.
  *   4. dispose() — listener detached; subsequent events produce zero new rows.
+ *   9. skipEventTypes option — configured derived types are suppressed from
+ *      persistence while others still land; omitted options is unchanged.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -401,6 +403,36 @@ describe('RawEventsSink', () => {
     const firstContent = parsed.message.content[0] as { type: 'text'; text: string };
     expect(firstContent.text).toBe(largeText);
     expect(firstContent.text).toHaveLength(100_000);
+  });
+
+  // -------------------------------------------------------------------------
+  // 9. skipEventTypes option — configured derived types are not persisted;
+  //    other types on the same run still are. Omitted options behaves exactly
+  //    as before (covered by every test above, none of which pass options).
+  // -------------------------------------------------------------------------
+
+  it('skipEventTypes: suppresses persistence of the configured derived type while other types on the same run still persist', () => {
+    const sink = new RawEventsSink(db, undefined, { skipEventTypes: ['stream_event'] });
+    sink.attachToRouter(router, RUN_ID);
+
+    router.emitForRun(RUN_ID, systemEvent);
+    router.emitForRun(RUN_ID, streamEvent);
+    router.emitForRun(RUN_ID, assistantEvent);
+
+    expect(countRawEvents(db, RUN_ID)).toBe(2);
+
+    const rows = selectRows(db, RUN_ID);
+    expect(rows.map((r) => r.event_type)).toEqual(['system', 'assistant']);
+  });
+
+  it('skipEventTypes: omitted options behaves exactly as before — stream_event is persisted when no skip set is configured', () => {
+    const sink = new RawEventsSink(db);
+    sink.attachToRouter(router, RUN_ID);
+
+    router.emitForRun(RUN_ID, streamEvent);
+
+    expect(countRawEvents(db, RUN_ID)).toBe(1);
+    expect(selectRows(db, RUN_ID)[0].event_type).toBe('stream_event');
   });
 
   it('persists provider-neutral agent events without projecting away identity', () => {

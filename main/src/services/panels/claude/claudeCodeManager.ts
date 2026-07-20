@@ -1328,9 +1328,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // caller-injected eventsSink SUPPRESSES the built-in RawEventsSink attach
       // and receives the SAME narrowed event stream (single-writer contract for
       // the global-agent transcript, which persists thread-keyed instead of into
-      // the run-FK'd raw_events). Absent ⇒ the default RawEventsSink as before.
+      // the run-FK'd raw_events). Absent ⇒ the default RawEventsSink, which
+      // skips stream_event deltas — the durable final is stored alongside them.
       const router = new EventRouter();
-      const sink: SpawnEventsSink = options.eventsSink ?? new RawEventsSink(this.db, this.logger);
+      const sink: SpawnEventsSink = options.eventsSink ?? new RawEventsSink(this.db, this.logger, { skipEventTypes: ['stream_event'] });
       sink.attachToRouter(router, runId);
       this.pipelines.set(spawnKey, { router, sink, runId });
 

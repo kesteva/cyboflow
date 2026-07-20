@@ -22,6 +22,15 @@
  * Note: 006_cyboflow_schema.sql does NOT include an event_subtype column. Subtype
  * information (e.g. system/init, result/success) is available inside payload_json
  * and can be queried via SQLite's JSON functions if needed.
+ *
+ * Note: the constructor's `options.skipEventTypes` suppresses PERSISTENCE only —
+ * routing/subscription via EventRouter is unaffected, so live UI streaming (which
+ * is fed in-memory, not from raw_events) never notices. This exists to stop
+ * writing rows with exactly one reader (the debug "Data Stream" tab) that bloat
+ * the append-only table: delta-class events (e.g. 'stream_event') already have a
+ * durable final stored alongside them, and Codex's 'agent_unknown' wrap is
+ * already persisted raw by CodexRawNotificationSink, so persisting it again here
+ * is a pure double-write.
  */
 
 import type Database from 'better-sqlite3';
@@ -38,6 +47,7 @@ export class RawEventsSink<TEvent extends PersistableStreamEvent = ClaudeStreamE
   private readonly logger: Pick<ILogger, 'warn'> | undefined;
   private readonly insertStmt: Database.Statement;
   private upsertSubagentUsageStmt: Database.Statement | undefined;
+  private readonly skipEventTypes: ReadonlySet<string>;
 
   /**
    * Map from runId → teardown function returned by EventRouter.onRun().
@@ -45,9 +55,14 @@ export class RawEventsSink<TEvent extends PersistableStreamEvent = ClaudeStreamE
    */
   private readonly teardowns = new Map<string, () => void>();
 
-  constructor(db: Database.Database, logger?: Pick<ILogger, 'warn'>) {
+  constructor(
+    db: Database.Database,
+    logger?: Pick<ILogger, 'warn'>,
+    options?: { skipEventTypes?: readonly string[] },
+  ) {
     this.db = db;
     this.logger = logger;
+    this.skipEventTypes = new Set(options?.skipEventTypes ?? []);
 
     // Prepare once at construction time (better-sqlite3 best practice).
     // 006_cyboflow_schema.sql has no event_subtype column; subtype data lives in payload_json.
@@ -138,9 +153,12 @@ export class RawEventsSink<TEvent extends PersistableStreamEvent = ClaudeStreamE
    * Fail-soft: catches all errors, logs at WARN, and returns — never re-throws.
    */
   private handleEvent(runId: string, event: TEvent): void {
-    perfBump('raw.claude');
     try {
       const eventType = derivePersistedEventType(event);
+      if (this.skipEventTypes.has(eventType)) {
+        return;
+      }
+      perfBump('raw.claude');
       const payloadJson = JSON.stringify(event);
       const createdAt = new Date().toISOString();
       this.insertStmt.run(runId, eventType, payloadJson, createdAt);

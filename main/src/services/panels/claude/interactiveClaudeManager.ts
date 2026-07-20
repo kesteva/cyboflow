@@ -971,8 +971,10 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // Per-run pipeline (EventRouter + RawEventsSink). The manager OWNS raw_events
     // persistence (single INSERT per line); the RunExecutor bridge for interactive
     // runs runs with skipPersistence:true (wired in S4/TASK-809).
+    // stream_event deltas have a durable final stored alongside them — skip
+    // persisting the deltas themselves to cut raw_events bloat.
     const router = new EventRouter();
-    const sink = new RawEventsSink(this.db, this.logger);
+    const sink = new RawEventsSink(this.db, this.logger, { skipEventTypes: ['stream_event'] });
     sink.attachToRouter(router, runId);
     this.pipelines.set(panelId, { router, sink, runId });
 
