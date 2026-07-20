@@ -77,7 +77,7 @@ function buildDb(): Database.Database {
     '060_compound_recommendations_atype.sql',
     '062_approve_ideas_atype.sql',
     '063_per_idea_spec_artifacts.sql',
-    '070_approve_designs_and_per_idea_arch.sql',
+    '073_approve_designs_and_per_idea_arch.sql',
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }

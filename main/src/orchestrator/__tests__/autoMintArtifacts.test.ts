@@ -96,7 +96,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '063_per_idea_spec_artifacts.sql'), 'utf-8'));
   // 070 adds the 'approve-designs' atype to the CHECK and makes 'arch-design'
   // per-entity (one-per-(run, atype, source_ref)) alongside idea-spec.
-  db.exec(readFileSync(join(migDir, '070_approve_designs_and_per_idea_arch.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '073_approve_designs_and_per_idea_arch.sql'), 'utf-8'));
   // workflow_runs.session_id (migration 019) — added directly here; migration 019
   // itself backfills from the Crystal-legacy `sessions` table, which this entity
   // test DB doesn't create. ArtifactRouter's emitChange resolves this column on

@@ -19,7 +19,7 @@ import type { CaptureOrigin, VerdictV1 } from './visualVerification';
 /**
  * Artifact kinds. The bespoke (templated) types plus a `generic` fallback
  * that renders in the live canvas. Keep in sync with the `artifacts.atype`
- * CHECK constraint (currently widened by migration 070).
+ * CHECK constraint (currently widened by migration 073).
  */
 export type ArtifactType =
   | 'idea-spec'

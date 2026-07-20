@@ -1,14 +1,14 @@
 /**
- * Migration 070_approve_designs_and_per_idea_arch.sql — schema + constraint tests.
+ * Migration 073_approve_designs_and_per_idea_arch.sql — schema + constraint tests.
  *
- * Applies the artifacts chain 006 -> … -> 045 -> 060 -> 062 -> 063 -> 070 against
+ * Applies the artifacts chain 006 -> … -> 045 -> 060 -> 062 -> 063 -> 073 against
  * an in-memory SQLite instance. Proves:
  *   1. 'approve-designs' is insertable alongside every pre-existing atype; a bogus
  *      atype is still rejected by the widened CHECK.
  *   2. arch-design is now PER-ENTITY: two arch-design rows with DIFFERENT
  *      source_ref coexist in one run; a duplicate (run, atype, source_ref) is
  *      rejected — mirroring what 063 did for idea-spec.
- *   3. idea-spec stays per-entity (unchanged by 070).
+ *   3. idea-spec stays per-entity (unchanged by 073).
  *   4. A non-per-entity atype (approve-ideas / generic) is still strictly
  *      one-per-(run, atype).
  *   5. Pre-existing artifacts rows survive the copy verbatim.
@@ -57,7 +57,7 @@ const THROUGH_063 = [
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
   seedProject(db);
-  apply(db, [...THROUGH_063, '070_approve_designs_and_per_idea_arch.sql']);
+  apply(db, [...THROUGH_063, '073_approve_designs_and_per_idea_arch.sql']);
   return db;
 }
 
@@ -97,7 +97,7 @@ interface TableInfoRow {
   pk: number;
 }
 
-describe('Migration 070: approve-designs atype + per-idea arch-design', () => {
+describe('Migration 073: approve-designs atype + per-idea arch-design', () => {
   it('(a) accepts approve-designs alongside every pre-existing atype, rejects a bogus one', () => {
     const db = buildDb();
     seedRun(db, 'run-1');
@@ -177,14 +177,14 @@ describe('Migration 070: approve-designs atype + per-idea arch-design', () => {
   it('(e) preserves pre-existing artifacts rows across the copy', () => {
     const db = new Database(':memory:');
     seedProject(db);
-    apply(db, THROUGH_063); // up to but NOT including 070
+    apply(db, THROUGH_063); // up to but NOT including 073
     seedRun(db, 'run-keep');
     db.prepare(
       `INSERT INTO artifacts (id, run_id, atype, label, mode, payload_json, source_ref, committed)
        VALUES ('art_keep', 'run-keep', 'arch-design', 'Keep me', 'template', NULL, 'ide_1', 1)`,
     ).run();
 
-    apply(db, ['070_approve_designs_and_per_idea_arch.sql']);
+    apply(db, ['073_approve_designs_and_per_idea_arch.sql']);
 
     const row = db
       .prepare(
@@ -220,7 +220,7 @@ describe('Migration 070: approve-designs atype + per-idea arch-design', () => {
   });
 
   it('(g) the fresh-DB initialize() path includes approve-designs + the split indexes', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration070-'));
+    const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration073-'));
     try {
       const svc = new DatabaseService(join(dir, 'test.db'));
       svc.setMigrationsDirForTesting(join(__dirname, '..', 'migrations'));
@@ -230,7 +230,7 @@ describe('Migration 070: approve-designs atype + per-idea arch-design', () => {
       const cols = (db.prepare('PRAGMA table_info(artifacts)').all() as TableInfoRow[]).map((c) => c.name);
       expect(cols).toContain('atype');
 
-      db.prepare(`INSERT INTO projects (id, name, path) VALUES (1, 'Proj', '/tmp/proj-070')`).run();
+      db.prepare(`INSERT INTO projects (id, name, path) VALUES (1, 'Proj', '/tmp/proj-073')`).run();
       db.prepare(
         `INSERT INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'planner', '{}')`,
       ).run();

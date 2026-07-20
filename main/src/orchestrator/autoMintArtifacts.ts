@@ -460,7 +460,7 @@ async function mintArchDesignForIdea(
 
 /**
  * arch-design mint for EVERY idea the run OWNS — the per-entity sibling of
- * mintIdeaSpecForOwnedIdeas (migration 070 makes arch-design identity
+ * mintIdeaSpecForOwnedIdeas (migration 073 makes arch-design identity
  * (run_id, atype, source_ref), so the per-idea rows coexist). A multi-idea planner
  * run that runs architecture across several ideas surfaces one architecture tab
  * per idea. Each per-idea mint is content-gated inside mintArchDesignForIdea (an
@@ -859,7 +859,7 @@ export async function handleStepCompletion(
         return;
       }
 
-      // Per OWNED idea (migration 070 made arch-design per-entity), so a
+      // Per OWNED idea (migration 073 made arch-design per-entity), so a
       // multi-idea planner batch surfaces one architecture tab per idea.
       await mintArchDesignForOwnedIdeas(db, runId, projectId, STEP_ORIGIN[step.id] ?? null, logger);
       return;

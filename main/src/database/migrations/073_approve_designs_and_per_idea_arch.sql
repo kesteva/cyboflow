@@ -1,4 +1,4 @@
--- Migration 070: two artifacts-table changes for the multi-idea planner design flow.
+-- Migration 073: two artifacts-table changes for the multi-idea planner design flow.
 --
 --   (A) Widen the artifacts.atype CHECK to add 'approve-designs' — the joint
 --       human-approval surface for a multi-idea batch's architecture designs,
