@@ -126,6 +126,10 @@ const CLEAN_STATUS: GitIndexStatus = {
 interface TestWatchedSession {
   sessionId: string;
   worktreePath: string;
+  // Topology fields stopWatching() walks — seeded empty so a seeded session can
+  // be torn down without a real fs.watch behind it.
+  watchers: unknown[];
+  watchedTopDirs: Set<string>;
   lastModified: number;
   pendingRefresh: boolean;
   checkInFlight: boolean;
@@ -147,6 +151,8 @@ function seedSession(watcher: GitFileWatcher, sessionId: string, worktreePath = 
   const session: TestWatchedSession = {
     sessionId,
     worktreePath,
+    watchers: [],
+    watchedTopDirs: new Set(),
     lastModified: Date.now(),
     pendingRefresh: true, // a change is already pending, as handleFileChange would set
     checkInFlight: false,
