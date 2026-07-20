@@ -8,8 +8,8 @@
  *
  * These tests pin the manager-layer threading end to end: legacy positional
  * args → unified config → extractAgentConfig → the cliManager's positional
- * (permissionMode, model, fastMode) tail, for startPanel AND continuePanel, in
- * both call styles. The IPC side (panels:continue reading the persisted
+ * (permissionMode, model, fastMode, reasoningEffort) tail, for startPanel AND
+ * continuePanel, in both call styles. The IPC side (panels:continue reading the persisted
  * tool_panels.settings value) mirrors sessions:input and is covered by the live
  * smoke; this layer is where the value was being lost.
  */
@@ -40,7 +40,7 @@ describe('ClaudePanelManager fast-mode threading', () => {
     const { cli, manager } = makeManager();
     await manager.startPanel('panel-1', '/wt', 'hi', 'ignore', 'opus', true);
     expect(cli.startPanel).toHaveBeenCalledWith(
-      'panel-1', 'sess-1', '/wt', 'hi', 'ignore', 'opus', true,
+      'panel-1', 'sess-1', '/wt', 'hi', 'ignore', 'opus', true, undefined,
     );
   });
 
@@ -48,7 +48,7 @@ describe('ClaudePanelManager fast-mode threading', () => {
     const { cli, manager } = makeManager();
     await manager.continuePanel('panel-1', '/wt', 'hi', [], 'opus', true);
     expect(cli.continuePanel).toHaveBeenCalledWith(
-      'panel-1', 'sess-1', '/wt', 'hi', [], undefined, 'opus', true,
+      'panel-1', 'sess-1', '/wt', 'hi', [], undefined, 'opus', true, undefined,
     );
   });
 
@@ -62,7 +62,7 @@ describe('ClaudePanelManager fast-mode threading', () => {
       fastMode: true,
     });
     expect(cli.startPanel).toHaveBeenCalledWith(
-      'panel-1', 'sess-1', '/wt', 'hi', undefined, 'opus', true,
+      'panel-1', 'sess-1', '/wt', 'hi', undefined, 'opus', true, undefined,
     );
   });
 
@@ -70,11 +70,11 @@ describe('ClaudePanelManager fast-mode threading', () => {
     const { cli, manager } = makeManager();
     await manager.startPanel('panel-1', '/wt', 'hi', 'ignore', 'opus');
     expect(cli.startPanel).toHaveBeenCalledWith(
-      'panel-1', 'sess-1', '/wt', 'hi', 'ignore', 'opus', undefined,
+      'panel-1', 'sess-1', '/wt', 'hi', 'ignore', 'opus', undefined, undefined,
     );
     await manager.continuePanel('panel-1', '/wt', 'hi', [], 'opus');
     expect(cli.continuePanel).toHaveBeenCalledWith(
-      'panel-1', 'sess-1', '/wt', 'hi', [], undefined, 'opus', undefined,
+      'panel-1', 'sess-1', '/wt', 'hi', [], undefined, 'opus', undefined, undefined,
     );
   });
 });

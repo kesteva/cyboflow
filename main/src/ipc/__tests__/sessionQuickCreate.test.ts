@@ -551,6 +551,8 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
       'sonnet',
       undefined,
       true,
+      undefined, // resumeSessionId — fresh eager spawn, not a resume
+      undefined, // reasoningEffort — no persisted setting in this test
     );
   });
 
@@ -726,6 +728,7 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
       undefined,
       'gpt-5.5',
       'test-run-id-abc',
+      undefined, // reasoningEffort — no persisted setting in this test
     );
     expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
     expect(fakeRegisterLivePanel).not.toHaveBeenCalled();
@@ -765,6 +768,7 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
       undefined,
       undefined,
       'test-run-id-abc',
+      undefined, // reasoningEffort — no persisted setting in this test
     );
   });
 
@@ -979,6 +983,8 @@ describe('sessions:input handler - substrate routing', () => {
       undefined, // model — no persisted panel settings in this test
       undefined, // effort — a respawn carries no ultracode card setting
       false, // fastMode — default off (no persisted opt-in)
+      undefined, // resumeSessionId — fresh-fallback respawn, not an explicit resume
+      undefined, // reasoningEffort — no persisted setting in this test
     );
     expect(fakeClaudeCodeManager.startPanel).not.toHaveBeenCalled();
     expect(fakeSessionManager.updateSession).toHaveBeenCalledWith(SESSION_ID, { status: 'running' });
@@ -1050,6 +1056,7 @@ describe('sessions:input handler - substrate routing', () => {
       undefined,
       undefined,
       undefined,
+      undefined, // reasoningEffort — no persisted setting in this test
     );
     expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
     expect(fakeClaudeCodeManager.startPanel).not.toHaveBeenCalled();
