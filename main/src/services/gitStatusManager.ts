@@ -19,6 +19,22 @@ interface GitStatusCache {
   };
 }
 
+/**
+ * @cyboflow-hidden — the per-session git-status badge (SessionListItem →
+ * GitStatusIndicator: ahead/behind + dirty/untracked dots) was the ONLY consumer
+ * of this manager's output. It was dropped when the sidebar went run-centric
+ * (TASK-687 "remodel sidebar to show project > workflow runs"), which deleted
+ * every <SessionListItem> render; the component is now orphaned and nothing in
+ * the live UI reads session.gitStatus. Until the badge returns (planned alongside
+ * upcoming diff-view work), leave this flag false so we don't spawn an FSEvents
+ * file watcher + periodic git subprocesses per active session to feed an unmounted
+ * UI. Flip to true to revive the entire pipeline (watcher + auto-refresh) unchanged
+ * — no other code needs to move. The manual/on-demand paths (getGitStatus IPC,
+ * project-refresh button, post-rebase updateProjectGitStatusAfterMainUpdate) stay
+ * live regardless; only the automatic hammering is gated.
+ */
+const GIT_STATUS_BADGE_ENABLED = false;
+
 
 export class GitStatusManager extends EventEmitter {
   private cache: GitStatusCache = {};
@@ -68,7 +84,11 @@ export class GitStatusManager extends EventEmitter {
     private sessionManager: SessionManager,
     private worktreeManager: WorktreeManager,
     private gitDiffManager: GitDiffManager,
-    private logger?: Logger
+    private logger?: Logger,
+    // @cyboflow-hidden — defaults to the disabled module flag so production runs
+    // with the automatic watcher/polling off (see GIT_STATUS_BADGE_ENABLED).
+    // Overridable so tests can exercise the real auto-refresh entry points.
+    private readonly badgeEnabled: boolean = GIT_STATUS_BADGE_ENABLED
   ) {
     super();
     // Increase max listeners to prevent warnings when many components listen to git status events
@@ -96,7 +116,12 @@ export class GitStatusManager extends EventEmitter {
   setActiveSession(sessionId: string | null): void {
     const previousActive = this.activeSessionId;
     this.activeSessionId = sessionId;
-    
+
+    // @cyboflow-hidden — badge pipeline disabled (see GIT_STATUS_BADGE_ENABLED).
+    // Still track activeSessionId above so on-demand callers behave, but skip
+    // starting the file watcher / kicking the auto-refresh.
+    if (!this.badgeEnabled) return;
+
     if (previousActive !== sessionId) {
       console.log(`[GitStatus] Active session changed from ${previousActive} to ${sessionId}`);
       
@@ -181,7 +206,11 @@ export class GitStatusManager extends EventEmitter {
   handleVisibilityChange(isHidden: boolean): void {
     this.isWindowVisible = !isHidden;
     this.gitLogger.logFocusChange(!isHidden);
-    
+
+    // @cyboflow-hidden — badge pipeline disabled (see GIT_STATUS_BADGE_ENABLED);
+    // no active-session auto-refresh on focus.
+    if (!this.badgeEnabled) return;
+
     // If window becomes visible and we have an active session, refresh it
     // NOT wrapped in executeWithLimit — see fetchGitStatusCoalesced's comment.
     if (!isHidden && this.activeSessionId) {

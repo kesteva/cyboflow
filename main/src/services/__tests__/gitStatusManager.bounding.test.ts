@@ -332,7 +332,11 @@ describe('GitStatusManager — concurrency-cap deadlock regression', () => {
       });
 
       const { sessionManager, worktreeManager, gitDiffManager } = makeFakeCollaborators();
-      const manager = new GitStatusManager(sessionManager, worktreeManager, gitDiffManager);
+      // badgeEnabled=true: this regression drives the auto-refresh entry points
+      // (setActiveSession + handleVisibilityChange), which are gated off in
+      // production while the git-status badge is unmounted (see
+      // GIT_STATUS_BADGE_ENABLED). Opt back in so the call sites actually fire.
+      const manager = new GitStatusManager(sessionManager, worktreeManager, gitDiffManager, undefined, true);
       const internals = manager as unknown as GitStatusManagerInternals;
 
       // Drive this through the REAL production entry points that fire rapid same-session
