@@ -6,6 +6,30 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.27] — 2026-07-20
+
+### Added
+
+- Reasoning-effort control across the app (IDEA-029): a picker in the session-start wizard and quick-session composer, per-agent effort in the workflow step inspector, and a provider-aware effort vocabulary threaded through Claude and Codex spawns (SDK + interactive). Persisted per session and re-applied on launch/respawn, including on auto/`/context` turns.
+- Epic-grouped task lists in the batch and A/B seed-task pickers — collapsible epic groups with tri-state selection via a shared `EpicGroupedTaskList`.
+- Native static-mockup `ui-prototype` artifacts and the IDEA-039 artifact lifecycle: producer contract renders to a self-contained static HTML mockup.
+- Subagent usage folded into Insights — subagent transcript usage is captured, deduplicated, and persisted.
+- Improved run monitoring and eval-recovery flows.
+
+### Changed
+
+- Major main-process performance pass: WAL pragmas and narrowed SQLite hot-poll queries, git diff/history/status exec paths converted to async, serialized and async journal/transcript tailing, first-paint restructure with dev-gated log forwarding, bounded PTY and per-session log buffers, and a cached MCP-config parse fast-path.
+- Renderer CPU pass: coalesced stream events with a capped buffer, identity-preserving transcript merge with memoized markdown rows, request-generation fences against stale refetches, visibility-gated polling/timers, and an isolated workflow-canvas animation leaf.
+- Eval judge concurrency split into normal (3) vs A/B (1) lanes and capped app-wide; A/B comparison diffs fetched once instead of every 10s poll.
+
+### Fixed
+
+- File-watching EMFILE pressure: `gitFileWatcher` no longer recursively watches `node_modules`/`.git`.
+- Reaped leaked `openai-codex` plugin broker daemons and hardened warm SDK/Codex session lifecycle (warm session busted when a run's effective agents change; queued-input drain treats parked warm sessions as idle).
+- Codex replies no longer disappear when a turn produces no stream deltas.
+- Artifact durability and CSP hardening: `srcdoc` frames confined from off-document navigation, `artifacts:load-html` read path hardened, render selected by payload shape.
+- Correctness fixes surfaced by the audits: wire all tRPC router deps before creating the window, baseline structured-commit detection on the pre-turn HEAD, claim terminal workflow transitions before async drains, keep tailer partial buffers alive through the terminal drain, and bounded kill grace with macOS-safe descendant enumeration on terminal close.
+
 ## [0.1.26] — 2026-07-17
 
 ### Added
