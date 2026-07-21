@@ -39,6 +39,14 @@ export function AgentComposer({ onSend, disabled, model }: AgentComposerProps): 
   useLayoutEffect(() => {
     const el = textareaRef.current;
     if (!el) return;
+    // Empty value → clear the inline height entirely so the box rests at its
+    // CSS single-line baseline. An empty textarea's scrollHeight is unreliable
+    // (it can report the previous rendered height, e.g. the 4-line cap on
+    // mount), so measuring it would wedge the empty composer tall.
+    if (value.length === 0) {
+      el.style.height = '';
+      return;
+    }
     el.style.height = 'auto';
     el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_PX)}px`;
   }, [value]);
