@@ -1075,9 +1075,11 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        // A real agent key: the guard consults the RESOLVED agent set, so a codex
+        // pin only trips when it lands on an agent that actually spawns.
         registry.updateSpec(workflowId, {
           ...makeDefinition('sprint'),
-          agentConfigs: { someAgent: { runtime: 'codex-sdk' } },
+          agentConfigs: { implement: { runtime: 'codex-sdk' } },
         });
 
         interface CountRow { count: number }
@@ -1115,7 +1117,7 @@ describe('WorkflowRegistry', () => {
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
         registry.updateSpec(workflowId, {
           ...makeDefinition('sprint'),
-          agentConfigs: { someAgent: { runtime: 'codex-sdk' } },
+          agentConfigs: { implement: { runtime: 'codex-sdk' } },
         });
 
         const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
@@ -1160,6 +1162,109 @@ describe('WorkflowRegistry', () => {
         interface AgentRow { agent_provider: string }
         const row = db.prepare('SELECT agent_provider FROM workflow_runs WHERE id = ?').get(result.runId) as AgentRow;
         expect(row.agent_provider).toBe('codex');
+      });
+    });
+
+    // ───── mixed-provider guard extends to the agent_overrides catalogue ─────
+
+    /**
+     * Create the `agent_overrides` table (migrations 029/036/038/070 folded) on
+     * the fixture DB, which does not include it. FK to projects(id) dropped so the
+     * table is self-contained. Idempotent via IF NOT EXISTS.
+     */
+    function ensureAgentOverridesTable(): void {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS agent_overrides (
+          id             TEXT PRIMARY KEY,
+          project_id     INTEGER NOT NULL,
+          agent_key      TEXT NOT NULL,
+          base_agent_key TEXT,
+          name           TEXT NOT NULL,
+          role           TEXT,
+          description    TEXT NOT NULL,
+          system_prompt  TEXT NOT NULL,
+          tools_json     TEXT NOT NULL,
+          is_custom      INTEGER NOT NULL DEFAULT 0,
+          version        INTEGER NOT NULL DEFAULT 1,
+          created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+          model          TEXT,
+          enabled_mcps_json TEXT NOT NULL DEFAULT '[]',
+          runtime        TEXT,
+          codex_model    TEXT,
+          UNIQUE (project_id, agent_key)
+        );
+      `);
+    }
+
+    /** Insert a builtin-override row pinning `agentKey` onto `runtime`. */
+    function insertRuntimeOverride(agentKey: string, runtime: string, codexModel: string): void {
+      db.prepare(
+        `INSERT INTO agent_overrides
+           (id, project_id, agent_key, base_agent_key, name, role, description,
+            system_prompt, tools_json, is_custom, version, enabled_mcps_json, runtime, codex_model)
+         VALUES (?, 1, ?, ?, ?, 'sprint', 'desc', 'body', '["Read"]', 0, 1, '[]', ?, ?)`,
+      ).run(`ago_${agentKey}`, agentKey, agentKey, `cyboflow-${agentKey}`, runtime, codexModel);
+    }
+
+    it('throws MixedProviderOrchestratedError for an orchestrated run whose CATALOGUE pins an agent onto Codex', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'catalogue-codex-orchestrated.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+        ensureAgentOverridesTable();
+        // A Codex pin set through the Agents editor — NOT the workflow spec.
+        insertRuntimeOverride('implement', 'codex-sdk', 'gpt-5.2-codex');
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        let thrown: unknown;
+        try {
+          registry.createRun(workflowId, undefined, TEST_SESSION_ID);
+        } catch (err) {
+          thrown = err;
+        }
+        expect((thrown as Error | undefined)?.name).toBe('MixedProviderOrchestratedError');
+      });
+    });
+
+    it('does NOT throw for a programmatic run with the same CATALOGUE Codex pin', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'catalogue-codex-programmatic.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+        ensureAgentOverridesTable();
+        insertRuntimeOverride('implement', 'codex-sdk', 'gpt-5.2-codex');
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+          requestedExecutionModel: 'programmatic',
+        });
+        expect(result.executionModel).toBe('programmatic');
+        expect(registry.getRunById(result.runId)).not.toBeNull();
+      });
+    });
+
+    it('does NOT throw when a workflow config MASKS a catalogue Codex pin back to a Claude runtime (no false positive)', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'catalogue-codex-masked.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+        ensureAgentOverridesTable();
+        insertRuntimeOverride('implement', 'codex-sdk', 'gpt-5.2-codex');
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        // The workflow config pins the SAME agent back to a Claude runtime — it
+        // wins over the catalogue, so the effective set is single-provider Claude.
+        registry.updateSpec(workflowId, {
+          ...makeDefinition('sprint'),
+          agentConfigs: { implement: { runtime: 'claude-sdk' } },
+        });
+
+        const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
+        expect(result.executionModel).toBe('orchestrated');
+        expect(registry.getRunById(result.runId)).not.toBeNull();
       });
     });
 

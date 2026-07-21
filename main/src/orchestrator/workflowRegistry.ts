@@ -18,6 +18,9 @@ import type { LoggerLike, DatabaseLike } from './types';
 import type { PermissionMode, WorkflowRow, WorkflowRunRow, CyboflowWorkflowName, WorkflowDefinition } from '../../../shared/types/workflows';
 import { isCyboflowWorkflowName, resolveWorkflowDefinition, parseWorkflowDefinition } from '../../../shared/types/workflows';
 import { MixedProviderOrchestratedError } from '../../../shared/types/executionModelErrors';
+import { computeEffectiveAgents, applyWorkflowAgentConfigs } from './agents/effectiveAgents';
+import { loadBuiltInAgents } from './agents/agentCatalogue';
+import type { AgentOverrideRow } from '../database/models';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import {
   claudeRuntimeFromSubstrate,
@@ -1186,16 +1189,16 @@ export class WorkflowRegistry {
           env: process.env,
         });
 
-    // Mixed-provider / orchestrated guard (Phase 2 slice D1). A workflow agent
-    // config can pin a single agent onto Codex
-    // (`WorkflowAgentConfig.runtime === 'codex-sdk'`), but that per-agent
-    // override is only honored by the PROGRAMMATIC step runner, which spawns
-    // each step as its own CLI process. An ORCHESTRATED run is a single agent
-    // process for the whole DAG, so a per-step Codex override would be
-    // SILENTLY IGNORED there. Guard here, before any workflow_runs row exists,
-    // so a mixed flow never launches silently-degraded — a later slice's UI
-    // catches MixedProviderOrchestratedError to prompt "switch to
-    // programmatic?" instead.
+    // Mixed-provider / orchestrated guard (Phase 2 slice D1). A per-agent Codex
+    // pin — set EITHER in a workflow agent config
+    // (`WorkflowAgentConfig.runtime === 'codex-sdk'`) OR in the project's
+    // `agent_overrides` catalogue via the Agents editor — is only honored by the
+    // PROGRAMMATIC step runner, which spawns each step as its own CLI process. An
+    // ORCHESTRATED run is a single agent process for the whole DAG, so a per-step
+    // Codex override would be SILENTLY IGNORED there. Guard here, before any
+    // workflow_runs row exists, so a mixed flow never launches silently-degraded —
+    // a later slice's UI catches MixedProviderOrchestratedError to prompt "switch
+    // to programmatic?" instead.
     //
     // Scoped to the run's BASE provider being Claude: a whole-run Codex
     // request (agentProvider === 'codex' — every step already targets Codex)
@@ -1215,10 +1218,20 @@ export class WorkflowRegistry {
         opts?.variantSpecJson !== undefined
           ? parseWorkflowDefinition(opts.variantSpecJson)
           : resolveWorkflowDefinition(workflow.name, workflow.spec_json);
-      const hasCodexAgentConfig = Object.values(
-        effectiveDefinitionForMixCheck?.agentConfigs ?? {},
-      ).some((agentConfig) => agentConfig?.runtime === 'codex-sdk');
-      if (hasCodexAgentConfig) {
+      // Resolve the run's EFFECTIVE agent set (project catalogue overrides layered
+      // UNDER the workflow's agentConfigs — the same precedence the spawn-time
+      // overlay applies; variant deltas can't touch `runtime`, so they're
+      // irrelevant here) and detect any agent that resolves onto Codex. Checking
+      // the effective set — not agentConfigs alone — is what makes this catch a
+      // Codex pin set in the Agents editor, while a workflow config that pins an
+      // agent back to a Claude runtime correctly MASKS a catalogue Codex pin (no
+      // false positive). Fail-soft: any read/parse error yields false.
+      if (
+        this.effectiveSetPinsCodexRuntime(
+          runProjectId,
+          effectiveDefinitionForMixCheck?.agentConfigs,
+        )
+      ) {
         throw new MixedProviderOrchestratedError();
       }
     }
@@ -1343,6 +1356,47 @@ export class WorkflowRegistry {
     createTx();
 
     return { runId, permissionMode, substrate, executionModel };
+  }
+
+  /**
+   * Does the run's EFFECTIVE agent set pin any agent onto the Codex runtime?
+   *
+   * Layers the project's `agent_overrides` catalogue UNDER the workflow's
+   * `agentConfigs` — the SAME precedence the spawn-time overlay applies
+   * (`resolveRunEffectiveAgents`), minus variant deltas, which can only touch
+   * systemPrompt/model and never `runtime`. Consulting the RESOLVED set (not
+   * `agentConfigs` alone) is what lets the mixed-provider guard catch a Codex pin
+   * set through the Agents editor, while a workflow config that pins an agent back
+   * to a Claude runtime correctly MASKS a catalogue Codex pin (no false positive).
+   *
+   * Fail-soft: any read/parse error yields `false` — an unresolvable agent set
+   * can't be proven "mixed", and this check must never break a launch.
+   */
+  private effectiveSetPinsCodexRuntime(
+    projectId: number,
+    agentConfigs: WorkflowDefinition['agentConfigs'] | undefined,
+  ): boolean {
+    try {
+      // A missing/unreadable catalogue table is treated as NO overrides (not a
+      // hard failure) so the workflow-config signal below still resolves — the
+      // definition-only detection must survive a schema-narrow DB. In production
+      // the table always exists (migration 029).
+      let overrides: AgentOverrideRow[] = [];
+      try {
+        overrides = this.db
+          .prepare('SELECT * FROM agent_overrides WHERE project_id = ?')
+          .all(projectId) as AgentOverrideRow[];
+      } catch {
+        overrides = [];
+      }
+      let effective = computeEffectiveAgents(loadBuiltInAgents(), overrides);
+      if (agentConfigs) {
+        effective = applyWorkflowAgentConfigs(effective, agentConfigs);
+      }
+      return effective.some((agent) => agent.runtime === 'codex-sdk');
+    } catch {
+      return false;
+    }
   }
 
   /**
