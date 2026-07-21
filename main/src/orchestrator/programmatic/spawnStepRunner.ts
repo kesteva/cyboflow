@@ -98,14 +98,26 @@ export interface SpawnStepRunnerOptions {
    * `runStep` (NOT captured at construction), mirroring the `agentPermissionMode`/
    * `stepGuidance` thunks above, so a workflow-scoped agent config edited mid-run
    * is honored on the step's next spawn. Returns the step's canonical agent key's
-   * runtime/codexModel or `undefined` (the thunk absent, the step's `agent`
+   * runtime/model/codexModel or `undefined` (the thunk absent, the step's `agent`
    * resolving to no canonical key — e.g. the `human` gate — or the resolved agent
-   * carrying no runtime override) ⇒ no per-spawn override, so the spawn falls back
+   * carrying no override at all) ⇒ no per-spawn override, so the spawn falls back
    * to the run-level provider/runtime resolution (byte-identical to today).
+   *
+   * `model` is the resolved CONCRETE Claude model id (the caller resolves the
+   * alias via modelContext.bareModelId), used for a Claude-runtime step. It is
+   * the ONLY channel a per-agent Claude model pin has on this plane: a
+   * programmatic step turn IS the agent (a top-level spawn), so the agent
+   * overlay's `model:` frontmatter — which binds only when the CLI dispatches a
+   * subagent — never applies here.
    */
-  resolveStepAgent?: (
-    agentKey: string,
-  ) => { runtime?: WorkflowAgentRuntime; codexModel?: string; effort?: ReasoningEffort } | undefined;
+  resolveStepAgent?: (agentKey: string) =>
+    | {
+        runtime?: WorkflowAgentRuntime;
+        model?: string;
+        codexModel?: string;
+        effort?: ReasoningEffort;
+      }
+    | undefined;
 }
 
 export class SpawnStepRunner implements StepRunner {
@@ -140,7 +152,12 @@ export class SpawnStepRunner implements StepRunner {
     const stepAgent = agentKey ? this.opts.resolveStepAgent?.(agentKey) : undefined;
     const stepRuntime = stepAgent?.runtime;
     const stepProvider = stepRuntime ? providerForRuntime(stepRuntime) : undefined;
-    const spawnModel = stepProvider === 'codex' ? stepAgent?.codexModel : this.opts.model;
+    // Codex steps take the per-agent Codex model; Claude steps take the per-agent
+    // Claude model when one is pinned, else the run-level model. Without the
+    // per-agent branch a Claude model pin was silently ignored on this plane —
+    // the run model always won (see resolveStepAgent's doc-comment).
+    const spawnModel =
+      stepProvider === 'codex' ? stepAgent?.codexModel : (stepAgent?.model ?? this.opts.model);
     // Normalize the per-agent effort against the provider this step actually
     // spawns under — the step-runtime override's provider when present, else the
     // run-level provider. A value outside that provider's scale is dropped here

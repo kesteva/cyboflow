@@ -7,7 +7,7 @@ import { WorktreeManager } from './services/worktreeManager';
 import { GitDiffManager } from './services/gitDiffManager';
 import { GitStatusManager } from './services/gitStatusManager';
 import { ExecutionTracker } from './services/executionTracker';
-import { ModelAvailabilityService } from './services/modelAvailabilityService';
+import { ModelAvailabilityService, isModelUsable } from './services/modelAvailabilityService';
 import { DatabaseService } from './database/database';
 import { RunCommandManager } from './services/runCommandManager';
 import { Logger } from './utils/logger';
@@ -29,6 +29,7 @@ import { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './services/panels/claude/interactiveClaudeManager';
 import { resolveRunEffectiveAgents } from './services/panels/claude/agentOverlayWriter';
+import { bareModelId } from './services/panels/claude/modelContext';
 import { CodexPtyManager } from './services/panels/codex/codexPtyManager';
 import { CodexSdkManager } from './services/panels/codex/codexSdkManager';
 import { SubstrateDispatchFacade } from './services/substrateDispatchFacade';
@@ -1945,16 +1946,23 @@ async function initializeServices() {
     // Per-step agent-runtime resolver (Codex-per-step mixing): resolves the run's
     // FULL effective agent set (project overrides + workflow agentConfigs + variant
     // deltas — the same layering the agent overlay writes to disk) and looks up the
-    // requested agentKey's runtime/codexModel/effort. Absent runtime AND effort
+    // requested agentKey's runtime/model/codexModel/effort. Absent EVERY override
     // (unoverridden agent) -> undefined, so the step spawns under the run-level
-    // provider/runtime with no per-agent effort. Effort is returned even without a
-    // runtime override so a Claude agent can carry a reasoning-effort pin (IDEA-029).
+    // provider/runtime/model with no per-agent effort. Effort is returned even
+    // without a runtime override so a Claude agent can carry a reasoning-effort pin
+    // (IDEA-029), and `model` likewise so a Claude agent can carry a MODEL pin: a
+    // programmatic step turn IS the agent (a top-level spawn), so the agent
+    // overlay's `model:` frontmatter never binds on this plane and this resolver is
+    // the pin's only channel. The alias is resolved to its concrete snapshot here
+    // (mirroring the overlay writer) so the spawn receives a real model id.
     resolveStepAgent: (runId, agentKey) => {
       const eff = resolveRunEffectiveAgents(rawDb, runId);
       const a = eff.find((e) => e.agentKey === agentKey);
-      if (!a || (!a.runtime && !a.effort)) return undefined;
+      if (!a || (!a.runtime && !a.effort && !a.model)) return undefined;
+      const model = bareModelId(a.model, isModelUsable);
       return {
         ...(a.runtime ? { runtime: a.runtime } : {}),
+        ...(model ? { model } : {}),
         ...(a.codexModel ? { codexModel: a.codexModel } : {}),
         ...(a.effort ? { effort: a.effort } : {}),
       };

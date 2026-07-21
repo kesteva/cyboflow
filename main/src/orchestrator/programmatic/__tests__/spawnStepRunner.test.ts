@@ -379,6 +379,45 @@ describe('SpawnStepRunner', () => {
       expect(passed.prompt).not.toContain('# Runtime adapter: Codex');
     });
 
+    it("honors a per-agent Claude MODEL pin: runtime 'claude-sdk' + model spawns with the pinned model, not the run model", async () => {
+      // Regression: a Claude model pin used to be dropped here — the run-level
+      // model unconditionally won for any non-Codex provider. A programmatic step
+      // turn IS the agent (a top-level spawn), so the overlay's `model:`
+      // frontmatter never binds; this resolver is the pin's only channel.
+      const spawner = makeSpawner();
+      const runner = new SpawnStepRunner(spawner, {
+        ...opts,
+        model: 'claude-run-model',
+        resolveStepAgent: (agentKey) =>
+          agentKey === 'implement' ? { runtime: 'claude-sdk', model: 'claude-sonnet-5' } : undefined,
+      });
+
+      await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+      const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+      expect(passed.agentProvider).toBe('claude');
+      expect(passed.agentRuntime).toBe('claude-sdk');
+      expect(passed.model).toBe('claude-sonnet-5');
+    });
+
+    it('a per-agent Codex model still wins over a Claude model pin on a Codex step', async () => {
+      const spawner = makeSpawner();
+      const runner = new SpawnStepRunner(spawner, {
+        ...opts,
+        model: 'claude-run-model',
+        resolveStepAgent: () => ({
+          runtime: 'codex-sdk',
+          model: 'claude-sonnet-5',
+          codexModel: 'gpt-5.2-codex',
+        }),
+      });
+
+      await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+      const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+      expect(passed.model).toBe('gpt-5.2-codex');
+    });
+
     it('resolveStepAgent returning undefined for this step (agent unoverridden) omits agentProvider/agentRuntime and keeps opts.model', async () => {
       const spawner = makeSpawner();
       const runner = new SpawnStepRunner(spawner, {
