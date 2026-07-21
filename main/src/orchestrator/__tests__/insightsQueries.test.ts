@@ -714,6 +714,42 @@ describe('selectRunUsageRollups', () => {
     expect(rollup.multiModel).toBe(true);
   });
 
+  it('flags multiple models from raw_events even when token usage is materialized', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    seedRunUsage(db, {
+      runId: 'r1',
+      inputTokens: 400,
+      outputTokens: 100,
+      costUsd: 0.25,
+      assistantMessageCount: 3,
+    });
+    seedEvent(
+      db,
+      'r1',
+      'assistant',
+      assistantPayloadWithModel('claude-sonnet-4-5', { input: 1, output: 1 }),
+    );
+    seedEvent(db, 'r1', 'agent_assistant', {
+      type: 'agent_message',
+      provider: 'codex',
+      role: 'assistant',
+      model: 'gpt-5.5',
+      content: [{ type: 'text', text: 'provider-neutral event' }],
+    });
+
+    const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+    expect(rollup).toMatchObject({
+      model: null,
+      multiModel: true,
+      // Model cardinality comes from raw_events without displacing the durable
+      // run_usage token/cost values.
+      inputTokens: 400,
+      outputTokens: 100,
+      costUsd: 0.25,
+    });
+  });
+
   it('folds nested subagent usage without counting an assistant message and silently drops a flat payload', () => {
     seedWorkflow(db, { id: 'wf-1' });
     seedRun(db, { id: 'r1', workflowId: 'wf-1' });

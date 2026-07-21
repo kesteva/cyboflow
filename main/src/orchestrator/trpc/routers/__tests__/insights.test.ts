@@ -232,6 +232,8 @@ describe('cyboflow.insights.runUsage', () => {
     const result = await caller.cyboflow.insights.runUsage({ runId: 'run-1' });
 
     expect(result).toBe(rollup);
+    expect(result.model).toBe('claude-sonnet-4-5');
+    expect(result.multiModel).toBe(false);
     expect(insightsQueries.selectRunUsageRollups).toHaveBeenCalledWith(fakeDb, ['run-1']);
   });
 
