@@ -66,6 +66,12 @@ function seedRun(db: Database.Database, runId: string): void {
     `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
      VALUES (?, 'wf', 1, 'awaiting_review', 'default')`,
   ).run(runId);
+  // A pending blocking decision gate — the pre-write revalidation requires it to
+  // still be open when the revision lands.
+  db.prepare(
+    `INSERT INTO review_items (id, project_id, run_id, kind, status, blocking, title)
+     VALUES (?, 1, ?, 'decision', 'pending', 1, 'approve-plan')`,
+  ).run(`rvw_${runId}`, runId);
 }
 
 function seedIdea(db: Database.Database, id: string, body: string): void {
@@ -305,5 +311,165 @@ describe('runRevisionBatch', () => {
     expect(applyTaskChange).not.toHaveBeenCalled();
     const batch = db.prepare('SELECT status FROM feedback_batches WHERE id = ?').get(batchId) as { status: string };
     expect(batch.status).toBe('failed');
+  });
+
+  it('gate resolved mid-flight → batch-failed, applyTaskChange never called', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    seedIdea(db, 'ide_1', '# Idea\n\nOriginal spec.\n');
+    const router = FeedbackRouter.initialize(dbAdapter(db));
+    const batchId = await seedSentBatch(router, 'run-1', 'idea-spec', 'ide_1');
+
+    const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
+    // The user resolves the review gate WHILE the revision agent is running.
+    const queryFn: RevisionQueryFn = vi.fn(async () => {
+      db.prepare("UPDATE review_items SET status = 'resolved' WHERE run_id = 'run-1'").run();
+      return { revisedDocument: '# Idea\n\nRevised spec.\n' };
+    });
+
+    await runRevisionBatch(
+      { projectId: 1, runId: 'run-1', batchId, atype: 'idea-spec', sourceRef: 'ide_1' },
+      { db: dbAdapter(db), queryFn, feedbackRouter: router, applyTaskChange },
+    );
+
+    expect(queryFn).toHaveBeenCalledTimes(1);
+    expect(applyTaskChange).not.toHaveBeenCalled();
+    const batch = db.prepare('SELECT status, error FROM feedback_batches WHERE id = ?').get(batchId) as {
+      status: string;
+      error: string | null;
+    };
+    expect(batch.status).toBe('failed');
+    expect(batch.error).toContain('review gate resolved');
+  });
+
+  it('batch canceled mid-flight → batch-failed, no write', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    seedIdea(db, 'ide_1', '# Idea\n\nOriginal spec.\n');
+    const router = FeedbackRouter.initialize(dbAdapter(db));
+    const batchId = await seedSentBatch(router, 'run-1', 'idea-spec', 'ide_1');
+
+    const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
+    // The batch flips out of 'pending' while the agent runs (e.g. a concurrent sweep).
+    const queryFn: RevisionQueryFn = vi.fn(async () => {
+      db.prepare("UPDATE feedback_batches SET status = 'failed' WHERE id = ?").run(batchId);
+      return { revisedDocument: '# Idea\n\nRevised spec.\n' };
+    });
+
+    await runRevisionBatch(
+      { projectId: 1, runId: 'run-1', batchId, atype: 'idea-spec', sourceRef: 'ide_1' },
+      { db: dbAdapter(db), queryFn, feedbackRouter: router, applyTaskChange },
+    );
+
+    expect(applyTaskChange).not.toHaveBeenCalled();
+    const batch = db.prepare('SELECT status FROM feedback_batches WHERE id = ?').get(batchId) as { status: string };
+    expect(batch.status).toBe('failed');
+  });
+
+  it('arch-design output with an extra unfenced H2 → batch-failed, no write', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    seedIdea(db, 'ide_1', '# Idea\n\nIntro.\n\n## Architecture design\n\nOld.\n\n## Rollout\n\nShip.');
+    const router = FeedbackRouter.initialize(dbAdapter(db));
+    const batchId = await seedSentBatch(router, 'run-1', 'arch-design', 'ide_1');
+
+    const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
+    await runRevisionBatch(
+      { projectId: 1, runId: 'run-1', batchId, atype: 'arch-design', sourceRef: 'ide_1' },
+      {
+        db: dbAdapter(db),
+        // The agent leaked a second section outside the architecture design.
+        queryFn: fakeQuery('## Architecture design\n\nNew.\n\n## Rollout\n\nExtra content.'),
+        feedbackRouter: router,
+        applyTaskChange,
+      },
+    );
+
+    expect(applyTaskChange).not.toHaveBeenCalled();
+    const batch = db.prepare('SELECT status, error FROM feedback_batches WHERE id = ?').get(batchId) as {
+      status: string;
+      error: string | null;
+    };
+    expect(batch.status).toBe('failed');
+    expect(batch.error).toContain('outside the architecture section');
+  });
+
+  it('arch-design output with the extra H2 inside a code fence → accepted', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    seedIdea(db, 'ide_1', '# Idea\n\nIntro.\n\n## Architecture design\n\nOld.\n\n## Rollout\n\nShip.');
+    const router = FeedbackRouter.initialize(dbAdapter(db));
+    const batchId = await seedSentBatch(router, 'run-1', 'arch-design', 'ide_1');
+
+    const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
+    await runRevisionBatch(
+      { projectId: 1, runId: 'run-1', batchId, atype: 'arch-design', sourceRef: 'ide_1' },
+      {
+        db: dbAdapter(db),
+        // The "## Rollout" line is INSIDE a fence — it neither starts nor leaks a section.
+        queryFn: fakeQuery('## Architecture design\n\nNew design.\n\n```md\n## Rollout example\n```'),
+        feedbackRouter: router,
+        applyTaskChange,
+      },
+    );
+
+    expect(applyTaskChange).toHaveBeenCalledTimes(1);
+    const written = applyTaskChange.mock.calls[0][1].fields.body;
+    expect(extractArchDesignSection(written)).toContain('New design.');
+    expect(written).toContain('## Rollout example');
+    const batch = db.prepare('SELECT status FROM feedback_batches WHERE id = ?').get(batchId) as { status: string };
+    expect(batch.status).toBe('applied');
+  });
+
+  it('arch-design bare section content without a heading → heading prepended + applied', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    seedIdea(db, 'ide_1', '# Idea\n\nIntro.\n\n## Architecture design\n\nOld.\n\n## Rollout\n\nShip.');
+    const router = FeedbackRouter.initialize(dbAdapter(db));
+    const batchId = await seedSentBatch(router, 'run-1', 'arch-design', 'ide_1');
+
+    const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
+    await runRevisionBatch(
+      { projectId: 1, runId: 'run-1', batchId, atype: 'arch-design', sourceRef: 'ide_1' },
+      {
+        db: dbAdapter(db),
+        // No heading, no H2 — benign bare section content; the worker prepends the heading.
+        queryFn: fakeQuery('A queue-based design with no heading line.'),
+        feedbackRouter: router,
+        applyTaskChange,
+      },
+    );
+
+    expect(applyTaskChange).toHaveBeenCalledTimes(1);
+    const written = applyTaskChange.mock.calls[0][1].fields.body;
+    expect(extractArchDesignSection(written)).toBe('A queue-based design with no heading line.');
+    // The following section is preserved (the bare content did not leak into it).
+    expect(written).toContain('## Rollout\n\nShip.');
+    const batch = db.prepare('SELECT status FROM feedback_batches WHERE id = ?').get(batchId) as { status: string };
+    expect(batch.status).toBe('applied');
+  });
+
+  it('stale anchor → the prompt carries the stale-anchor warning', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    // The seeded ANCHOR quote ("the quoted text") does NOT appear in this body →
+    // the anchor is stale, so the prompt must warn the agent.
+    seedIdea(db, 'ide_1', '# Idea\n\nOriginal spec with different words.\n');
+    const router = FeedbackRouter.initialize(dbAdapter(db));
+    const batchId = await seedSentBatch(router, 'run-1', 'idea-spec', 'ide_1');
+
+    let capturedPrompt = '';
+    const queryFn: RevisionQueryFn = vi.fn(async (args) => {
+      capturedPrompt = args.prompt;
+      return { revisedDocument: '# Idea\n\nRevised.\n' };
+    });
+    const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
+
+    await runRevisionBatch(
+      { projectId: 1, runId: 'run-1', batchId, atype: 'idea-spec', sourceRef: 'ide_1' },
+      { db: dbAdapter(db), queryFn, feedbackRouter: router, applyTaskChange },
+    );
+
+    expect(capturedPrompt).toContain('no longer appears verbatim in the current document');
   });
 });

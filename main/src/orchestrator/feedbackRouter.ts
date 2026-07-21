@@ -555,6 +555,41 @@ export class FeedbackRouter {
   }
 
   // --------------------------------------------------------------------------
+  // Boot recovery
+  // --------------------------------------------------------------------------
+
+  /**
+   * Fail every batch left `pending` by an app exit (called once at boot). A
+   * pending batch is orphaned when the process dies mid-revision: its comments
+   * stay 'sent' and its (runId, atype, sourceRef) trips the send-batch 'busy'
+   * guard forever. Each is routed through the normal `batch-failed` op — so the
+   * per-project serialization, the sent→draft comment revert, and the change-event
+   * emit all come for free — and the user can edit + resend. Returns the count
+   * actually swept (a 0-count no-op when nothing is pending).
+   *
+   * Accepted edge: a crash AFTER the revision body write commits but BEFORE the
+   * batch-applied flip leaves the revision applied while this sweep reverts the
+   * comments to drafts — safe (no data loss: the user sees the updated doc and can
+   * delete the re-drafted comments).
+   */
+  async sweepInterruptedBatches(): Promise<number> {
+    const rows = this.db
+      .prepare(`SELECT id, project_id FROM feedback_batches WHERE status = 'pending'`)
+      .all() as Array<{ id: string; project_id: number }>;
+
+    let swept = 0;
+    for (const row of rows) {
+      const result = await this.apply(row.project_id, {
+        op: 'batch-failed',
+        batchId: row.id,
+        error: 'interrupted by app restart — resend to retry',
+      });
+      if (result.failed) swept++;
+    }
+    return swept;
+  }
+
+  // --------------------------------------------------------------------------
   // Internals
   // --------------------------------------------------------------------------
 

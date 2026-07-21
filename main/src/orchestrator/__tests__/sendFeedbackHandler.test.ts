@@ -36,6 +36,7 @@ function buildDb(): Database.Database {
     '014_native_tasks.sql',
     '015_entity_model_rebuild.sql',
     '016_review_items.sql',
+    '035_artifacts.sql',
     '075_artifact_feedback.sql',
   ]) {
     db.exec(readFileSync(join(MIG_DIR, f), 'utf-8'));
@@ -68,6 +69,14 @@ function seedIdea(db: Database.Database, id: string, decomposedAt: string | null
     `INSERT INTO ideas (id, project_id, ref, title, board_id, stage_id, version, body, decomposed_at)
      VALUES (?, 1, 'IDEA-1', 'T', 'board', 'stage', 1, '# Idea\n\nspec', ?)`,
   ).run(id, decomposedAt);
+}
+
+/** Seed the per-entity artifact row the identity guard requires (runId, atype, sourceRef). */
+function seedArtifact(db: Database.Database, runId: string, sourceRef: string, atype = 'idea-spec'): void {
+  db.prepare(
+    `INSERT INTO artifacts (id, run_id, atype, label, mode, source_ref)
+     VALUES (?, ?, ?, 'Idea spec', 'template', ?)`,
+  ).run(`art_${runId}_${sourceRef}`, runId, atype, sourceRef);
 }
 
 const ANCHOR: CommentAnchor = { quote: 'q', occurrence: 0, bodyHash: 'h' };
@@ -124,20 +133,34 @@ describe('sendFeedbackHandler — guard matrix', () => {
     expect(res).toEqual({ noOp: true, reason: 'no_gate' });
   });
 
-  it('not_found when the idea row is missing (gate present)', async () => {
+  it('not_found when the idea row is missing (gate + artifact present)', async () => {
     const db = buildDb();
     seedRun(db, 'run-1', 'awaiting_review');
     seedGate(db, 'run-1');
+    seedArtifact(db, 'run-1', 'ide_gone'); // pass the identity guard so the idea check is reached
     FeedbackRouter.initialize(dbAdapter(db));
     const { deps } = makeDeps(db);
     const res = await sendFeedbackHandler({ runId: 'run-1', atype: 'idea-spec', sourceRef: 'ide_gone' }, deps);
     expect(res).toEqual({ noOp: true, reason: 'not_found' });
   });
 
+  it('not_found when the per-entity artifact row is absent (gate present, unrelated idea)', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1', 'awaiting_review');
+    seedGate(db, 'run-1');
+    seedIdea(db, 'ide_1'); // the idea exists, but this run never produced its artifact
+    FeedbackRouter.initialize(dbAdapter(db));
+    const { deps, launchRevision } = makeDeps(db);
+    const res = await sendFeedbackHandler({ runId: 'run-1', atype: 'idea-spec', sourceRef: 'ide_1' }, deps);
+    expect(res).toEqual({ noOp: true, reason: 'not_found' });
+    expect(launchRevision).not.toHaveBeenCalled();
+  });
+
   it('decomposed when the idea has been decomposed', async () => {
     const db = buildDb();
     seedRun(db, 'run-1', 'awaiting_review');
     seedGate(db, 'run-1');
+    seedArtifact(db, 'run-1', 'ide_1');
     seedIdea(db, 'ide_1', '2026-07-21T00:00:00.000Z');
     FeedbackRouter.initialize(dbAdapter(db));
     const { deps } = makeDeps(db);
@@ -149,6 +172,7 @@ describe('sendFeedbackHandler — guard matrix', () => {
     const db = buildDb();
     seedRun(db, 'run-1', 'awaiting_review');
     seedGate(db, 'run-1');
+    seedArtifact(db, 'run-1', 'ide_1');
     seedIdea(db, 'ide_1');
     FeedbackRouter.initialize(dbAdapter(db));
     const { deps, launchRevision } = makeDeps(db);
@@ -161,6 +185,7 @@ describe('sendFeedbackHandler — guard matrix', () => {
     const db = buildDb();
     seedRun(db, 'run-1', 'awaiting_review');
     seedGate(db, 'run-1');
+    seedArtifact(db, 'run-1', 'ide_1');
     seedIdea(db, 'ide_1');
     const router = FeedbackRouter.initialize(dbAdapter(db));
     await seedDraft(router, 'run-1', 'ide_1');
@@ -179,6 +204,7 @@ describe('sendFeedbackHandler — happy path', () => {
     const db = buildDb();
     seedRun(db, 'run-1', 'awaiting_review');
     seedGate(db, 'run-1');
+    seedArtifact(db, 'run-1', 'ide_1');
     seedIdea(db, 'ide_1');
     const router = FeedbackRouter.initialize(dbAdapter(db));
     await seedDraft(router, 'run-1', 'ide_1');

@@ -696,6 +696,85 @@ describe('FeedbackRouter (in-artifact feedback chokepoint)', () => {
     expect(db.prepare('SELECT id FROM feedback_comments WHERE id = ?').get(commentId)).toBeUndefined();
     expect(db.prepare('SELECT id FROM feedback_batches WHERE id = ?').get(batchId)).toBeUndefined();
   });
+
+  // -------------------------------------------------------------------------
+  // sweepInterruptedBatches (boot recovery)
+  // -------------------------------------------------------------------------
+
+  it('sweepInterruptedBatches flips pending→failed across projects, reverts comments to drafts, emits, returns count', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1', 1);
+    seedRun(db, 'run-2', 2);
+    const router = FeedbackRouter.initialize(dbAdapter(db));
+
+    const { commentId: c1 } = await router.apply(1, {
+      op: 'create-comment',
+      runId: 'run-1',
+      atype: 'idea-spec',
+      sourceRef: 'idea-1',
+      anchor: ANCHOR,
+      body: 'p1',
+    });
+    const { batchId: b1 } = await router.apply(1, { op: 'send-batch', runId: 'run-1', atype: 'idea-spec', sourceRef: 'idea-1' });
+    const { commentId: c2 } = await router.apply(2, {
+      op: 'create-comment',
+      runId: 'run-2',
+      atype: 'arch-design',
+      sourceRef: 'idea-2',
+      anchor: ANCHOR,
+      body: 'p2',
+    });
+    const { batchId: b2 } = await router.apply(2, { op: 'send-batch', runId: 'run-2', atype: 'arch-design', sourceRef: 'idea-2' });
+
+    const events: FeedbackChangedEvent[] = [];
+    feedbackEvents.on(feedbackProjectChannel(1), (e: FeedbackChangedEvent) => events.push(e));
+    feedbackEvents.on(feedbackProjectChannel(2), (e: FeedbackChangedEvent) => events.push(e));
+
+    const swept = await router.sweepInterruptedBatches();
+    expect(swept).toBe(2);
+
+    for (const b of [b1, b2]) {
+      const row = db.prepare('SELECT status, error FROM feedback_batches WHERE id = ?').get(b) as {
+        status: string;
+        error: string | null;
+      };
+      expect(row.status).toBe('failed');
+      expect(row.error).toContain('interrupted by app restart');
+    }
+    for (const c of [c1, c2]) {
+      const row = db.prepare('SELECT status, batch_id, sent_at FROM feedback_comments WHERE id = ?').get(c) as {
+        status: string;
+        batch_id: string | null;
+        sent_at: string | null;
+      };
+      expect(row.status).toBe('draft');
+      expect(row.batch_id).toBeNull();
+      expect(row.sent_at).toBeNull();
+    }
+    // One change-event per swept batch (one per project channel).
+    expect(events).toHaveLength(2);
+  });
+
+  it('sweepInterruptedBatches is a 0-count no-op when nothing is pending', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const router = FeedbackRouter.initialize(dbAdapter(db));
+    // A draft comment that was never sent leaves no pending batch behind.
+    await router.apply(1, {
+      op: 'create-comment',
+      runId: 'run-1',
+      atype: 'idea-spec',
+      sourceRef: 'idea-1',
+      anchor: ANCHOR,
+      body: 'x',
+    });
+
+    const events: FeedbackChangedEvent[] = [];
+    feedbackEvents.on(feedbackProjectChannel(1), (e: FeedbackChangedEvent) => events.push(e));
+    const swept = await router.sweepInterruptedBatches();
+    expect(swept).toBe(0);
+    expect(events).toHaveLength(0);
+  });
 });
 
 // Compile-time smoke: FeedbackRouter satisfies a DatabaseLike-injected constructor.

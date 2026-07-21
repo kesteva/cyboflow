@@ -1174,6 +1174,19 @@ async function initializeServices() {
       },
     ),
   );
+  // Boot recovery: fail any feedback batch left `pending` by a previous app exit
+  // (an orphaned pending batch permanently trips the send-batch 'busy' guard).
+  // Fire-and-forget — the sweep is not on the critical boot path.
+  void FeedbackRouter.getInstance()
+    .sweepInterruptedBatches()
+    .then((n) => {
+      if (n > 0) cyboflowLogger.info(`[feedback] swept ${n} interrupted feedback batch(es) at boot`);
+    })
+    .catch((err: unknown) => {
+      cyboflowLogger.error('[feedback] sweepInterruptedBatches failed at boot', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
   // Single write chokepoint for `agent_overrides` (migration 029) — the
   // cyboflow.agents tRPC router reaches it via getInstance(). Serializes
   // per-project; emits AgentChangedEvent post-commit on the per-project channel.

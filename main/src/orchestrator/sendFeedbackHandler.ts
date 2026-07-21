@@ -134,6 +134,7 @@ function feedbackErrorReason(err: unknown): SendFeedbackNoOpReason | null {
  *   1. run row missing                                  → { noOp: 'not_found' }
  *   2. status !== awaiting_review                       → { noOp: 'not_parked' }
  *   3. no pending blocking decision gate for the run    → { noOp: 'no_gate' }
+ *   3b. no per-entity artifact binding (runId,atype,ref) → { noOp: 'not_found' }
  *   4. idea row missing                                 → { noOp: 'not_found' }
  *      idea.decomposed_at non-null                      → { noOp: 'decomposed' }
  *   5. FeedbackRouter send-batch: 'busy' / 'no_comments' mapped; other errors rethrow.
@@ -162,6 +163,17 @@ export async function sendFeedbackHandler(
     )
     .get(runId) as { ok: number } | undefined;
   if (!gate) return noOp('no_gate');
+
+  // 3b: the per-entity artifact row is the authority binding (runId, atype,
+  // sourceRef) — it is minted ONLY for documents this run actually owns/produced.
+  // Without it a client could target any idea in the project with orchestrator-
+  // authority body writes, so its absence is a hard not_found. We deliberately do
+  // NOT require the artifact to correspond to the parked gate: send-at-any-parked-
+  // gate is the agreed design (a spec comment may land while the design gate is up).
+  const artifact = db
+    .prepare('SELECT 1 AS ok FROM artifacts WHERE run_id = ? AND atype = ? AND source_ref = ? LIMIT 1')
+    .get(runId, atype, sourceRef) as { ok: number } | undefined;
+  if (!artifact) return noOp('not_found');
 
   // 4: the owning idea must exist and not be decomposed.
   const idea = db
