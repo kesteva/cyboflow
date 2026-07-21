@@ -141,13 +141,39 @@ describe('latestBatchStatus', () => {
     expect(latestBatchStatus([], 'idea-1')).toBeNull();
   });
 
-  it('picks the highest-round batch across BOTH atypes for the idea', () => {
+  it('picks the most RECENT batch (by createdAt) across BOTH atypes for the idea', () => {
     const batches = [
-      makeBatch({ id: 'b1', atype: 'idea-spec', sourceRef: 'idea-1', round: 1, status: 'applied' }),
-      makeBatch({ id: 'b2', atype: 'arch-design', sourceRef: 'idea-1', round: 2, status: 'pending' }),
-      makeBatch({ id: 'b3', atype: 'idea-spec', sourceRef: 'idea-OTHER', round: 5, status: 'applied' }),
+      makeBatch({ id: 'b1', atype: 'idea-spec', sourceRef: 'idea-1', round: 1, status: 'applied', createdAt: '2026-07-01T00:00:00.000Z' }),
+      makeBatch({ id: 'b2', atype: 'arch-design', sourceRef: 'idea-1', round: 2, status: 'pending', createdAt: '2026-07-02T00:00:00.000Z' }),
+      makeBatch({ id: 'b3', atype: 'idea-spec', sourceRef: 'idea-OTHER', round: 5, status: 'applied', createdAt: '2026-07-03T00:00:00.000Z' }),
     ];
     expect(latestBatchStatus(batches, 'idea-1')).toEqual({ kind: 'pending', round: 2 });
+  });
+
+  it('an OLDER-createdAt applied idea-spec round does not hide a NEWER pending arch-design round', () => {
+    // round is scoped per (atype, sourceRef) — idea-spec round 2 is not "later"
+    // than arch-design round 1 just because its round number is higher.
+    const batches = [
+      makeBatch({ id: 'b-spec', atype: 'idea-spec', sourceRef: 'idea-1', round: 2, status: 'applied', createdAt: '2026-07-01T00:00:00.000Z' }),
+      makeBatch({ id: 'b-arch', atype: 'arch-design', sourceRef: 'idea-1', round: 1, status: 'pending', createdAt: '2026-07-05T00:00:00.000Z' }),
+    ];
+    expect(latestBatchStatus(batches, 'idea-1')).toEqual({ kind: 'pending', round: 1 });
+  });
+
+  it('ties on createdAt break by status priority: pending > failed > applied', () => {
+    const tied = '2026-07-01T00:00:00.000Z';
+    const applied = makeBatch({ id: 'b-applied', round: 1, status: 'applied', createdAt: tied });
+    const failed = makeBatch({ id: 'b-failed', round: 2, status: 'failed', error: 'boom', createdAt: tied });
+    const pending = makeBatch({ id: 'b-pending', round: 3, status: 'pending', createdAt: tied });
+
+    expect(latestBatchStatus([applied, failed], 'idea-1')).toEqual({ kind: 'failed', round: 2, error: 'boom' });
+    expect(latestBatchStatus([failed, pending], 'idea-1')).toEqual({ kind: 'pending', round: 3 });
+    expect(latestBatchStatus([applied, pending, failed], 'idea-1')).toEqual({ kind: 'pending', round: 3 });
+  });
+
+  it('passes a single batch through unchanged', () => {
+    const batches = [makeBatch({ round: 4, status: 'applied' })];
+    expect(latestBatchStatus(batches, 'idea-1')).toEqual({ kind: 'applied', round: 4 });
   });
 
   it('surfaces a failed batch with its error', () => {

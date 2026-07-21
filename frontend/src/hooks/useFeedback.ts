@@ -18,6 +18,14 @@
  * without disturbing any other document's, so the same merge works for both
  * modes (in doc-scoped mode every existing entry already belongs to the one
  * scoped document, so "replace matching entries" reduces to a full replace).
+ *
+ * The seed query and the subscription open concurrently, so an event can
+ * arrive before the seed resolves. Applying it immediately would then get
+ * clobbered by the (now stale) seed snapshot. Events that arrive while the
+ * seed is in flight are buffered and replayed — in arrival order, through
+ * `mergeFeedbackEvent` — on top of the seed once it settles (empty state if
+ * the seed failed), so the newest write always wins regardless of arrival
+ * order. Once the seed has settled, events apply directly.
  */
 import { useEffect, useState } from 'react';
 import { trpc } from '../trpc/client';
@@ -81,6 +89,11 @@ export function useFeedback(
     }
 
     let cancelled = false;
+    // Seed is in flight until the `feedback.list` promise settles (resolve or
+    // reject) — events that arrive before then go here instead of `setState`
+    // directly, so they can't be clobbered by the (older) seed snapshot.
+    let seedSettled = false;
+    const buffered: FeedbackChangedEvent[] = [];
     setState(EMPTY_STATE);
     setLoading(true);
 
@@ -92,12 +105,15 @@ export function useFeedback(
       })
       .then((result) => {
         if (cancelled) return;
-        setState(result);
+        seedSettled = true;
+        setState(buffered.reduce<FeedbackState>((acc, event) => mergeFeedbackEvent(acc, event), result));
         setLoading(false);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
         console.warn('[useFeedback] initial list failed:', err);
+        seedSettled = true;
+        setState((prev) => buffered.reduce<FeedbackState>((acc, event) => mergeFeedbackEvent(acc, event), prev));
         setLoading(false);
       });
 
@@ -110,6 +126,10 @@ export function useFeedback(
           if (event.runId !== runId) return;
           if (atype !== undefined && event.atype !== atype) return;
           if (sourceRef !== undefined && event.sourceRef !== sourceRef) return;
+          if (!seedSettled) {
+            buffered.push(event);
+            return;
+          }
           setState((prev) => mergeFeedbackEvent(prev, event));
         },
         onError: (err: unknown) => console.warn('[useFeedback] onFeedbackChanged error:', err),

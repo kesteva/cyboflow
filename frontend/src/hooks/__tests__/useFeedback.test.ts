@@ -13,6 +13,11 @@
  *  6. mergeFeedbackEvent (pure) leaves other documents' entries untouched.
  *  7. Doc-scoped createComment/sendBatch forward the bound atype+sourceRef;
  *     run-scoped mutation calls throw (no atype/sourceRef to bind).
+ *  8. Seed/subscription race: an event that arrives before the seed resolves
+ *     is buffered and replayed on top of the seed (not clobbered by it);
+ *     multiple buffered events replay in arrival order; a seed failure still
+ *     applies buffered events (on top of empty state); post-seed events apply
+ *     directly, with no buffering.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
@@ -27,14 +32,20 @@ type OnDataFn = (event: FeedbackChangedEvent) => void;
 interface DeferredSeed {
   promise: Promise<{ comments: FeedbackComment[]; batches: FeedbackBatch[] }>;
   resolve: (rows: { comments: FeedbackComment[]; batches: FeedbackBatch[] }) => void;
+  reject: (err: unknown) => void;
 }
 
 function deferSeed(): DeferredSeed {
   let resolve!: (rows: { comments: FeedbackComment[]; batches: FeedbackBatch[] }) => void;
-  const promise = new Promise<{ comments: FeedbackComment[]; batches: FeedbackBatch[] }>((res) => {
+  let reject!: (err: unknown) => void;
+  const promise = new Promise<{ comments: FeedbackComment[]; batches: FeedbackBatch[] }>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  // Swallow the eventual rejection here so tests that never await it don't
+  // trip an unhandled-rejection warning — the hook's own `.catch` still runs.
+  promise.catch(() => {});
+  return { promise, resolve, reject };
 }
 
 let seedDeferred: DeferredSeed;
@@ -223,6 +234,78 @@ describe('useFeedback', () => {
       );
     });
     expect(result.current.comments.map((c) => c.id)).toEqual(['c-arch', 'c-spec-v2']);
+  });
+
+  it('buffers an event that arrives before the seed resolves, replaying it on top of the (older) seed snapshot', async () => {
+    const { result } = renderHook(() => useFeedback(PROJECT, RUN, 'idea-spec', 'idea-1'));
+
+    // Live event arrives while the seed is still in flight.
+    const live = [makeComment({ id: 'c-live' })];
+    act(() => {
+      lastOnData?.(changedEvent({ comments: live }));
+    });
+    // Not applied yet — buffered until the seed settles.
+    expect(result.current.comments).toEqual([]);
+
+    // Seed resolves with an OLDER snapshot for the same document.
+    await act(async () => {
+      seedDeferred.resolve({ comments: [makeComment({ id: 'c-stale' })], batches: [] });
+    });
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    // The buffered live event wins over the stale seed snapshot.
+    expect(result.current.comments).toEqual(live);
+  });
+
+  it('replays multiple buffered events in arrival order on top of the seed', async () => {
+    const { result } = renderHook(() => useFeedback(PROJECT, RUN, 'idea-spec', 'idea-1'));
+
+    act(() => {
+      lastOnData?.(changedEvent({ comments: [makeComment({ id: 'c-first' })] }));
+    });
+    act(() => {
+      lastOnData?.(changedEvent({ comments: [makeComment({ id: 'c-second' })] }));
+    });
+
+    await act(async () => {
+      seedDeferred.resolve({ comments: [makeComment({ id: 'c-seed' })], batches: [] });
+    });
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    // Each event fully replaces the (same) document's slice, so the final
+    // state reflecting the SECOND event (not the first) proves replay order.
+    expect(result.current.comments).toEqual([makeComment({ id: 'c-second' })]);
+  });
+
+  it('applies buffered events on top of empty state when the seed fails', async () => {
+    const { result } = renderHook(() => useFeedback(PROJECT, RUN, 'idea-spec', 'idea-1'));
+
+    const live = [makeComment({ id: 'c-live' })];
+    act(() => {
+      lastOnData?.(changedEvent({ comments: live }));
+    });
+
+    await act(async () => {
+      seedDeferred.reject(new Error('seed boom'));
+      await seedDeferred.promise.catch(() => {});
+    });
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.comments).toEqual(live);
+  });
+
+  it('applies events directly (no buffering) once the seed has settled', async () => {
+    const { result } = renderHook(() => useFeedback(PROJECT, RUN, 'idea-spec', 'idea-1'));
+    await act(async () => {
+      seedDeferred.resolve({ comments: [], batches: [] });
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    const post = [makeComment({ id: 'c-post' })];
+    act(() => {
+      lastOnData?.(changedEvent({ comments: post }));
+    });
+    expect(result.current.comments).toEqual(post);
   });
 
   it('unsubscribes on unmount', async () => {

@@ -73,15 +73,25 @@ export type ChipStatus =
   | { kind: 'applied'; round: number }
   | { kind: 'failed'; round: number; error: string | null };
 
+/** Status priority when batches tie on `createdAt` — higher wins. */
+const STATUS_PRIORITY: Record<FeedbackBatch['status'], number> = { pending: 2, failed: 1, applied: 0 };
+
 /**
- * The chip to show on one idea's gate row: derived from the LATEST-round batch
- * across every document (idea-spec + arch-design) for that idea. Null when the
- * idea has no feedback batches at all (no chip).
+ * The chip to show on one idea's gate row: derived from the most RECENT batch
+ * across every document (idea-spec + arch-design) for that idea. `round` is
+ * scoped per (runId, atype, sourceRef), so it is not comparable across
+ * documents — recency is `createdAt` (ISO-8601, lexicographically ordered),
+ * tie-broken by status priority (pending > failed > applied, since a pending
+ * revision is always the most operationally relevant thing to show). Null
+ * when the idea has no feedback batches at all (no chip).
  */
 export function latestBatchStatus(batches: FeedbackBatch[], ideaId: string): ChipStatus | null {
   const forIdea = batches.filter((b) => b.sourceRef === ideaId);
   if (forIdea.length === 0) return null;
-  const latest = forIdea.reduce((a, b) => (b.round > a.round ? b : a));
+  const latest = forIdea.reduce((a, b) => {
+    if (b.createdAt !== a.createdAt) return b.createdAt > a.createdAt ? b : a;
+    return STATUS_PRIORITY[b.status] > STATUS_PRIORITY[a.status] ? b : a;
+  });
   if (latest.status === 'pending') return { kind: 'pending', round: latest.round };
   if (latest.status === 'applied') return { kind: 'applied', round: latest.round };
   return { kind: 'failed', round: latest.round, error: latest.error };
