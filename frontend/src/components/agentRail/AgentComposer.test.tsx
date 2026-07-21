@@ -4,24 +4,19 @@ import { describe, it, expect, vi } from 'vitest';
 import { AgentComposer } from './AgentComposer';
 
 describe('AgentComposer', () => {
-  it('renders the placeholder + model chip (model ?? "default")', () => {
-    render(<AgentComposer onSend={vi.fn()} disabled={false} model={null} />);
+  it('renders the placeholder and no model chip', () => {
+    render(<AgentComposer onSend={vi.fn()} disabled={false} />);
 
     expect(screen.getByTestId('agent-composer-input')).toHaveAttribute(
       'placeholder',
       'Ask, or run /plan /approve /triage…',
     );
-    expect(screen.getByTestId('agent-composer-model-chip')).toHaveTextContent('default');
-  });
-
-  it('shows the thread model when set', () => {
-    render(<AgentComposer onSend={vi.fn()} disabled={false} model="claude-opus-4-5" />);
-    expect(screen.getByTestId('agent-composer-model-chip')).toHaveTextContent('claude-opus-4-5');
+    expect(screen.queryByTestId('agent-composer-model-chip')).not.toBeInTheDocument();
   });
 
   it('Send button calls onSend with the trimmed text and clears the input', () => {
     const onSend = vi.fn();
-    render(<AgentComposer onSend={onSend} disabled={false} model={null} />);
+    render(<AgentComposer onSend={onSend} disabled={false} />);
 
     const input = screen.getByTestId('agent-composer-input');
     fireEvent.change(input, { target: { value: '  where is everything?  ' } });
@@ -34,7 +29,7 @@ describe('AgentComposer', () => {
 
   it('Cmd+Enter sends, matching UnifiedComposer keybinding', () => {
     const onSend = vi.fn();
-    render(<AgentComposer onSend={onSend} disabled={false} model={null} />);
+    render(<AgentComposer onSend={onSend} disabled={false} />);
 
     const input = screen.getByTestId('agent-composer-input');
     fireEvent.change(input, { target: { value: 'triage the backlog' } });
@@ -45,7 +40,7 @@ describe('AgentComposer', () => {
 
   it('does not send an empty/whitespace-only draft', () => {
     const onSend = vi.fn();
-    render(<AgentComposer onSend={onSend} disabled={false} model={null} />);
+    render(<AgentComposer onSend={onSend} disabled={false} />);
 
     const input = screen.getByTestId('agent-composer-input');
     fireEvent.change(input, { target: { value: '   ' } });
@@ -56,7 +51,7 @@ describe('AgentComposer', () => {
   });
 
   it('disables the textarea + send button while a turn is in flight', () => {
-    render(<AgentComposer onSend={vi.fn()} disabled model={null} />);
+    render(<AgentComposer onSend={vi.fn()} disabled />);
 
     expect(screen.getByTestId('agent-composer-input')).toBeDisabled();
     expect(screen.getByTestId('agent-composer-send')).toBeDisabled();
@@ -64,7 +59,7 @@ describe('AgentComposer', () => {
 
   it('typing multiline text does not break send', () => {
     const onSend = vi.fn();
-    render(<AgentComposer onSend={onSend} disabled={false} model={null} />);
+    render(<AgentComposer onSend={onSend} disabled={false} />);
 
     const input = screen.getByTestId('agent-composer-input');
     fireEvent.change(input, { target: { value: 'line one\nline two\nline three\nline four\nline five' } });
@@ -76,11 +71,11 @@ describe('AgentComposer', () => {
 
   it('does not call onSend when disabled, even via Cmd+Enter', () => {
     const onSend = vi.fn();
-    const { rerender } = render(<AgentComposer onSend={onSend} disabled={false} model={null} />);
+    const { rerender } = render(<AgentComposer onSend={onSend} disabled={false} />);
     const input = screen.getByTestId('agent-composer-input');
     fireEvent.change(input, { target: { value: 'queued while disabled' } });
 
-    rerender(<AgentComposer onSend={onSend} disabled model={null} />);
+    rerender(<AgentComposer onSend={onSend} disabled />);
     fireEvent.keyDown(screen.getByTestId('agent-composer-input'), { key: 'Enter', metaKey: true });
 
     expect(onSend).not.toHaveBeenCalled();

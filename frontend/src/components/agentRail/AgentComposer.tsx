@@ -18,8 +18,6 @@ export interface AgentComposerProps {
   onSend: (text: string) => void;
   /** Disabled while a turn is in flight, or before the thread has loaded. */
   disabled: boolean;
-  /** thread.model (null ⇒ ConfigManager default — shown as "default"). */
-  model: string | null;
 }
 
 const PLACEHOLDER = 'Ask, or run /plan /approve /triage…';
@@ -30,7 +28,7 @@ const COMPOSER_MAX_LINES = 4;
 const COMPOSER_LINE_HEIGHT_PX = 16;
 const COMPOSER_MAX_PX = COMPOSER_MAX_LINES * COMPOSER_LINE_HEIGHT_PX;
 
-export function AgentComposer({ onSend, disabled, model }: AgentComposerProps): React.ReactElement {
+export function AgentComposer({ onSend, disabled }: AgentComposerProps): React.ReactElement {
   const [value, setValue] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -86,13 +84,6 @@ export function AgentComposer({ onSend, disabled, model }: AgentComposerProps): 
         data-testid="agent-composer-input"
         className="max-h-16 min-h-[18px] flex-1 resize-none overflow-y-auto bg-transparent text-[11px] leading-4 text-text-primary outline-none placeholder:italic placeholder:text-text-tertiary disabled:cursor-not-allowed"
       />
-      <span
-        data-testid="agent-composer-model-chip"
-        title="Model — session config"
-        className="shrink-0 border border-border-primary px-1.5 py-0.5 text-[9px] uppercase tracking-[0.1em] text-text-tertiary"
-      >
-        {model ?? 'default'}
-      </span>
       <button
         type="button"
         onClick={submit}
@@ -101,9 +92,12 @@ export function AgentComposer({ onSend, disabled, model }: AgentComposerProps): 
         aria-label="Send"
         title="Send (⌘⏎)"
         className={
+          // `self-stretch` makes the button's height track the composer's content
+          // box — i.e. the auto-growing textarea — so it grows line-for-line with
+          // the text while its width stays fixed (px-1.5). The icon is centered.
           canSend
-            ? 'shrink-0 border border-interactive bg-interactive px-1.5 py-1 text-[color:var(--color-text-on-interactive)] transition-[filter] hover:brightness-110'
-            : 'shrink-0 cursor-not-allowed border border-border-primary px-1.5 py-1 text-text-disabled opacity-50'
+            ? 'flex shrink-0 items-center justify-center self-stretch border border-interactive bg-interactive px-1.5 text-[color:var(--color-text-on-interactive)] transition-[filter] hover:brightness-110'
+            : 'flex shrink-0 cursor-not-allowed items-center justify-center self-stretch border border-border-primary px-1.5 text-text-disabled opacity-50'
         }
       >
         <CornerDownLeft className="h-3 w-3" />

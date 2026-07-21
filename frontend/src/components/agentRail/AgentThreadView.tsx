@@ -67,11 +67,7 @@ export function AgentThreadView(): React.ReactElement {
         <div className="flex flex-col gap-2 border-t border-border-primary p-3">
           <ProposalCardList proposals={proposals} />
           <AgentSuggestionChips onSend={handleSend} disabled={sending} />
-          <AgentComposer
-            onSend={handleSend}
-            disabled={sending || thread === null}
-            model={thread?.model ?? null}
-          />
+          <AgentComposer onSend={handleSend} disabled={sending || thread === null} />
         </div>
       }
     />
