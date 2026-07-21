@@ -50,6 +50,14 @@ function deferSeed(): DeferredSeed {
 
 let seedDeferred: DeferredSeed;
 let lastOnData: OnDataFn | null;
+let lastOnStarted: (() => void) | null;
+/**
+ * When true (default) the mock link signals `started` synchronously on
+ * subscribe — the hook dispatches its seed from that signal. Set false to
+ * hold the signal back and drive it manually via lastOnStarted (the
+ * subscribe-before-seed ordering test).
+ */
+let autoStart: boolean;
 let unsubscribeSpy: ReturnType<typeof vi.fn>;
 let subscribeSpy: ReturnType<typeof vi.fn>;
 let listQuerySpy: ReturnType<typeof vi.fn>;
@@ -74,10 +82,12 @@ vi.mock('../../trpc/client', () => {
           onFeedbackChanged: {
             subscribe: (
               input: { projectId: number },
-              handlers: { onData: OnDataFn; onError: (e: unknown) => void },
+              handlers: { onStarted?: () => void; onData: OnDataFn; onError: (e: unknown) => void },
             ) => {
               subscribeSpy(input);
               lastOnData = handlers.onData;
+              lastOnStarted = handlers.onStarted ?? null;
+              if (autoStart) handlers.onStarted?.();
               return { unsubscribe: unsubscribeSpy };
             },
           },
@@ -142,6 +152,8 @@ function changedEvent(overrides: Partial<FeedbackChangedEvent> = {}): FeedbackCh
 beforeEach(() => {
   seedDeferred = deferSeed();
   lastOnData = null;
+  lastOnStarted = null;
+  autoStart = true;
   unsubscribeSpy = vi.fn();
   subscribeSpy = vi.fn();
   listQuerySpy = vi.fn();
@@ -348,6 +360,46 @@ describe('useFeedback', () => {
 
     await expect(result.current.createComment({ quote: 'x', occurrence: 0, bodyHash: 'h' }, 'y')).rejects.toThrow();
     await expect(result.current.sendBatch()).rejects.toThrow();
+  });
+});
+
+describe('useFeedback seed ordering (subscribe before seed)', () => {
+  it('does not dispatch the seed query until the subscription signals started', async () => {
+    autoStart = false;
+    renderHook(() => useFeedback(PROJECT, RUN, 'idea-spec', 'idea-1'));
+
+    // Subscription registered, seed NOT yet dispatched — the ordering that
+    // closes the lost-event window (an event landing after the seed snapshot
+    // but before the listener attaches would otherwise be seen by neither).
+    expect(subscribeSpy).toHaveBeenCalledTimes(1);
+    expect(listQuerySpy).not.toHaveBeenCalled();
+
+    act(() => {
+      lastOnStarted?.();
+    });
+    expect(listQuerySpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to a timer-driven seed when the link never signals started', async () => {
+    vi.useFakeTimers();
+    try {
+      autoStart = false;
+      renderHook(() => useFeedback(PROJECT, RUN, 'idea-spec', 'idea-1'));
+      expect(listQuerySpy).not.toHaveBeenCalled();
+
+      act(() => {
+        vi.advanceTimersByTime(350);
+      });
+      expect(listQuerySpy).toHaveBeenCalledTimes(1);
+
+      // A late started signal after the fallback must not double-seed.
+      act(() => {
+        lastOnStarted?.();
+      });
+      expect(listQuerySpy).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

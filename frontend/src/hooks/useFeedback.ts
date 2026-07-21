@@ -93,35 +93,48 @@ export function useFeedback(
     // reject) — events that arrive before then go here instead of `setState`
     // directly, so they can't be clobbered by the (older) seed snapshot.
     let seedSettled = false;
+    let seedStarted = false;
     const buffered: FeedbackChangedEvent[] = [];
     setState(EMPTY_STATE);
     setLoading(true);
 
-    trpc.cyboflow.feedback.list
-      .query({
-        runId,
-        ...(atype !== undefined ? { atype } : {}),
-        ...(sourceRef !== undefined ? { sourceRef } : {}),
-      })
-      .then((result) => {
-        if (cancelled) return;
-        seedSettled = true;
-        setState(buffered.reduce<FeedbackState>((acc, event) => mergeFeedbackEvent(acc, event), result));
-        setLoading(false);
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        console.warn('[useFeedback] initial list failed:', err);
-        seedSettled = true;
-        setState((prev) => buffered.reduce<FeedbackState>((acc, event) => mergeFeedbackEvent(acc, event), prev));
-        setLoading(false);
-      });
+    // The subscription is opened BEFORE the seed query is dispatched, and the
+    // seed only fires once the link signals the subscription started (or after
+    // a short fallback for links that never signal `started`). This closes the
+    // lost-event window where an update lands after the seed snapshot is taken
+    // but before the change-stream listener is attached — such an event would
+    // appear in neither the seed nor the buffer, sticking the UI on stale
+    // state with no later event to correct it.
+    const runSeed = (): void => {
+      if (seedStarted || cancelled) return;
+      seedStarted = true;
+      trpc.cyboflow.feedback.list
+        .query({
+          runId,
+          ...(atype !== undefined ? { atype } : {}),
+          ...(sourceRef !== undefined ? { sourceRef } : {}),
+        })
+        .then((result) => {
+          if (cancelled) return;
+          seedSettled = true;
+          setState(buffered.reduce<FeedbackState>((acc, event) => mergeFeedbackEvent(acc, event), result));
+          setLoading(false);
+        })
+        .catch((err: unknown) => {
+          if (cancelled) return;
+          console.warn('[useFeedback] initial list failed:', err);
+          seedSettled = true;
+          setState((prev) => buffered.reduce<FeedbackState>((acc, event) => mergeFeedbackEvent(acc, event), prev));
+          setLoading(false);
+        });
+    };
 
     // Project-scoped change stream. Payload type is inferred from AppRouter
     // (FeedbackChangedEvent) — never a local mirror or `unknown` + guard.
     const sub = trpc.cyboflow.feedback.onFeedbackChanged.subscribe(
       { projectId },
       {
+        onStarted: () => runSeed(),
         onData: (event) => {
           if (event.runId !== runId) return;
           if (atype !== undefined && event.atype !== atype) return;
@@ -135,9 +148,14 @@ export function useFeedback(
         onError: (err: unknown) => console.warn('[useFeedback] onFeedbackChanged error:', err),
       },
     );
+    // Fallback for links that never emit `started`: by 300ms the local-IPC
+    // subscription is attached in practice. runSeed is idempotent, so the
+    // faster of onStarted/this timer wins and the other no-ops.
+    const seedFallback = window.setTimeout(runSeed, 300);
 
     return () => {
       cancelled = true;
+      window.clearTimeout(seedFallback);
       sub.unsubscribe();
     };
   }, [projectId, runId, atype, sourceRef]);
