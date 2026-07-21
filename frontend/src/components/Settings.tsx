@@ -68,6 +68,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // Global assistant on/off (default ON). Off hides the agent rail and blocks
   // the server-side kill switch, so no turn (including the auto-digest) spawns.
   const [assistantEnabled, setAssistantEnabled] = useState(true);
+  // Extra folders (one per line) the assistant may read, beyond the app's
+  // registered project folders (always readable regardless of this list).
+  const [assistantFolderPathsText, setAssistantFolderPathsText] = useState('');
   const [defaultAgentPermissionMode, setDefaultAgentPermissionMode] = useState<PermissionMode>('default');
   // Global CLI runtime: false = allow SDK (per-run picker available, default
   // 'sdk'); true = force the interactive PTY substrate everywhere (SDK disabled).
@@ -156,6 +159,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setEnableCyboflowFooter(data.enableCyboflowFooter !== false); // Default to true
       setAssistantModel(data.assistantModel ?? '');
       setAssistantEnabled(data.assistantEnabled !== false);
+      setAssistantFolderPathsText((data.assistantFolderAccess ?? []).join('\n'));
       setDefaultAgentPermissionMode(data.defaultAgentPermissionMode ?? 'default');
       setInteractivePtyOnly(data.interactivePtyOnly ?? false);
       setDefaultExecutionModel(data.defaultExecutionModel ?? 'programmatic');
@@ -196,7 +200,15 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         .split('\n')
         .map(p => p.trim())
         .filter(p => p.length > 0);
-      
+
+      // Explicit array (possibly empty), never undefined — mirrors
+      // additionalPaths below: updateConfig merges partials, so undefined
+      // would fail to clear a previously-set list.
+      const parsedAssistantFolderPaths = assistantFolderPathsText
+        .split('\n')
+        .map(p => p.trim())
+        .filter(p => p.length > 0);
+
       const response = await API.config.update({
         verbose,
         systemPromptAppend: globalSystemPrompt,
@@ -211,6 +223,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         // Explicit boolean, never undefined — updateConfig merges partials, so
         // an undefined value would fail to overwrite a stored `false`.
         assistantEnabled: assistantEnabled,
+        assistantFolderAccess: parsedAssistantFolderPaths,
         defaultAgentPermissionMode,
         interactivePtyOnly,
         defaultExecutionModel,
@@ -667,6 +680,20 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                     onChange={setAssistantModel}
                     allowDefaultOption={{ label: 'App default' }}
                   />
+                  <div className="mt-3">
+                    <label className="block text-xs font-medium text-text-secondary mb-1">
+                      Folder access
+                    </label>
+                    <Textarea
+                      label=""
+                      value={assistantFolderPathsText}
+                      onChange={(e) => setAssistantFolderPathsText(e.target.value)}
+                      placeholder="/path/to/extra/folder"
+                      rows={3}
+                      fullWidth
+                      helperText="Extra folders the assistant may read (one per line). Your project folders are always readable. Secret files (.env, keys) are always denied."
+                    />
+                  </div>
                 </div>
               </SettingsSection>
 

@@ -17,6 +17,9 @@ export interface AppConfig {
   // Global assistant on/off; absent ⇒ enabled. When false the assistant spawns
   // no turns (zero tokens) and the rail is hidden.
   assistantEnabled?: boolean;
+  // Extra folders the cyboflow assistant may read, beyond the app's registered
+  // project folders (which are always readable regardless of this list).
+  assistantFolderAccess?: string[];
   // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
   defaultSubstrate?: CliSubstrate;
   // Global hard lock: when true, every run/session is forced onto the interactive
