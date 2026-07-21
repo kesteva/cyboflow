@@ -4,6 +4,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import * as net from 'net';
 import type { QuestionPayload } from '../../../../shared/types/questions';
+import { ASSISTANT_REFERENCE } from '../agentThread/assistantReference';
 
 // ---------------------------------------------------------------------------
 // Env-var bootstrap — must happen before anything else
@@ -247,6 +248,21 @@ const GLOBAL_AGENT_TOOLS = [
         sql: { type: 'string', description: 'A single read-only SQL statement (SELECT/WITH/EXPLAIN) (required)' },
       },
       required: ['sql'],
+    },
+  },
+  {
+    name: 'cyboflow_reference',
+    description:
+      "READ-ONLY deeper product reference on cyboflow's features (the four built-in flows, sessions/worktrees, the backlog & board, the review queue, experiments & variants). Call with NO topic (or an empty one) to get the table of contents — every topic key plus a one-line summary — then call again with a `topic` key for that section's full markdown. Serves static, curated content: use it when the user asks how a cyboflow feature works or what a flow does. An unknown topic is rejected with the list of valid keys.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        topic: {
+          type: 'string',
+          description: 'Optional kebab-case topic key (from the no-topic table of contents). Omit to get the table of contents.',
+        },
+      },
+      required: [],
     },
   },
   {
@@ -1000,6 +1016,33 @@ async function handleGlobalAgentCallTool(request: {
         return invalidArgs('sql: string (a single read-only SELECT/WITH/EXPLAIN statement)');
       }
       return executeMcpQuery('mcp-db-query', { sql });
+    }
+
+    case 'cyboflow_reference': {
+      // Static, curated product reference — served DIRECTLY from the imported
+      // content module. Unlike every other global-agent tool it does NOT
+      // round-trip through executeMcpQuery / the orchestrator socket: the
+      // content is compiled into this process, so there is nothing to fetch.
+      const args = (request.params.arguments ?? {}) as { topic?: unknown };
+      const { topic } = args;
+      if (topic !== undefined && typeof topic !== 'string') {
+        return invalidArgs('topic: string (optional kebab-case topic key)');
+      }
+      const validKeys = Object.keys(ASSISTANT_REFERENCE);
+      if (topic === undefined || topic.length === 0) {
+        // No topic → table of contents (key + title + one-liner per topic).
+        const toc = validKeys.map((key) => ({
+          topic: key,
+          title: ASSISTANT_REFERENCE[key].title,
+          oneLiner: ASSISTANT_REFERENCE[key].oneLiner,
+        }));
+        return { content: [{ type: 'text', text: JSON.stringify({ topics: toc }) }] };
+      }
+      const entry = ASSISTANT_REFERENCE[topic];
+      if (!entry) {
+        return { content: [{ type: 'text', text: JSON.stringify({ error: 'unknown_topic', validTopics: validKeys }) }] };
+      }
+      return { content: [{ type: 'text', text: JSON.stringify({ topic, title: entry.title, body: entry.body }) }] };
     }
 
     case 'cyboflow_propose_action': {

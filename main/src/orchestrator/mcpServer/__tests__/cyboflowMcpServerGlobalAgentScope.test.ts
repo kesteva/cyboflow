@@ -18,6 +18,7 @@
  * reached the query layer rather than being rejected as unknown/invalid).
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { ASSISTANT_REFERENCE } from '../../agentThread/assistantReference';
 
 type RequestHandler = (request: {
   params: { name: string; arguments?: Record<string, unknown> };
@@ -106,7 +107,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Re
 }
 
 describe('cyboflowMcpServer ListTools (CYBOFLOW_MCP_SCOPE=global-agent)', () => {
-  it('advertises EXACTLY the 8-tool global-agent family — no run-scoped tool leaks in', async () => {
+  it('advertises EXACTLY the 9-tool global-agent family — no run-scoped tool leaks in', async () => {
     const tools = await listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(
@@ -117,6 +118,7 @@ describe('cyboflowMcpServer ListTools (CYBOFLOW_MCP_SCOPE=global-agent)', () => 
         'cyboflow_overview',
         'cyboflow_propose_action',
         'cyboflow_queue',
+        'cyboflow_reference',
         'cyboflow_workflow',
         'cyboflow_workflows',
       ].sort(),
@@ -190,5 +192,33 @@ describe('cyboflowMcpServer CallTool (CYBOFLOW_MCP_SCOPE=global-agent)', () => {
 
     const valid = await callTool('cyboflow_db_query', { sql: 'SELECT 1' });
     expect(valid.error).toBe('[Cyboflow MCP] IPC client not connected');
+  });
+
+  it('cyboflow_reference with no topic returns the table of contents covering every topic key', async () => {
+    const result = await callTool('cyboflow_reference', {});
+    const topics = result.topics as Array<{ topic: string; title: string; oneLiner: string }>;
+    expect(Array.isArray(topics)).toBe(true);
+    // Served DIRECTLY from the content module — no IPC round-trip, so never the
+    // 'IPC client not connected' short-circuit the other tools hit here.
+    expect(result.error).toBeUndefined();
+    const keys = topics.map((t) => t.topic).sort();
+    expect(keys).toEqual(Object.keys(ASSISTANT_REFERENCE).sort());
+    for (const t of topics) {
+      expect(t.title.length).toBeGreaterThan(0);
+      expect(t.oneLiner.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('cyboflow_reference with a known topic returns that topic body', async () => {
+    const [firstKey] = Object.keys(ASSISTANT_REFERENCE);
+    const result = await callTool('cyboflow_reference', { topic: firstKey });
+    expect(result).toMatchObject({ topic: firstKey, title: ASSISTANT_REFERENCE[firstKey].title });
+    expect(result.body).toBe(ASSISTANT_REFERENCE[firstKey].body);
+  });
+
+  it('cyboflow_reference with an unknown topic errors and lists the valid keys', async () => {
+    const result = await callTool('cyboflow_reference', { topic: 'no-such-topic' });
+    expect(result.error).toBe('unknown_topic');
+    expect((result.validTopics as string[]).sort()).toEqual(Object.keys(ASSISTANT_REFERENCE).sort());
   });
 });

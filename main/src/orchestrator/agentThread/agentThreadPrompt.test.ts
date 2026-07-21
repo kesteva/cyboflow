@@ -33,14 +33,18 @@ describe('agentThreadPrompt', () => {
       'cyboflow_workflows',
       'cyboflow_workflow',
       'cyboflow_db_query',
+      'cyboflow_reference',
     ]) {
       expect(prompt).toContain(tool);
     }
   });
 
-  it('is dense but not padded — within the ~60-120 line target', () => {
+  it('is dense but not padded — within the ~60-160 line target', () => {
+    // Ceiling widened from 130 → 160 when the "What cyboflow is" product
+    // overview + the cyboflow_reference tool bullet were added; the prompt now
+    // carries a compact feature summary on top of the tool/contract guidance.
     const lines = getAgentSystemPrompt().split('\n').length;
     expect(lines).toBeGreaterThanOrEqual(60);
-    expect(lines).toBeLessThanOrEqual(130);
+    expect(lines).toBeLessThanOrEqual(160);
   });
 });
