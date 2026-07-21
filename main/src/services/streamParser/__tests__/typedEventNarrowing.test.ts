@@ -155,4 +155,38 @@ describe('TypedEventNarrowing', () => {
     if (thinkingEvent.type !== 'stream_event') throw new Error('Expected StreamEvent');
     expect(thinkingEvent.event.delta?.type).toBe('thinking_delta');
   });
+
+  // -------------------------------------------------------------------------
+  // MCP tool_result user event — regression test for the global-agent transcript
+  // -------------------------------------------------------------------------
+
+  it('narrows a user tool_result event whose tool_use_result is an ARRAY (MCP shape) to the user variant, not __unknown__', () => {
+    // Verbatim shape observed in agent_thread_events: an MCP tool result carries
+    // `tool_use_result` as an array of content blocks, not the file-tool metadata
+    // object. Modelling only the object arm demoted every one of these to
+    // { kind: '__unknown__' }, so the tool's result vanished from the transcript.
+    const raw = {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'toolu_01FqtmdyMPD2ddeG46qoLCG2',
+            content: [{ type: 'text', text: '{"projects":[]}' }],
+          },
+        ],
+      },
+      tool_use_result: [{ type: 'text', text: '{"projects":[]}' }],
+      parent_tool_use_id: null,
+      session_id: 'd42c1de3-6218-4698-8f3e-46491acd17e2',
+    };
+
+    const event = narrower.narrow(raw);
+    expect('kind' in event).toBe(false);
+    if ('kind' in event) throw new Error('MCP tool_result user event narrowed to __unknown__');
+    expect(event.type).toBe('user');
+    if (event.type !== 'user') throw new Error('Expected UserEvent');
+    expect(event.message.content[0].type).toBe('tool_result');
+  });
 });

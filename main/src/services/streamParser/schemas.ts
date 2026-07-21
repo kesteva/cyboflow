@@ -200,14 +200,23 @@ const userEventSchema = z.object({
     // Mirrors the additive widening of UserEvent.message.content in claudeStream.ts.
     content: z.array(z.union([toolResultBlockSchema, textBlockSchema])),
   }).passthrough(),
-  tool_use_result: z.object({
-    filenames: z.array(z.string()).optional(),
-    /** camelCase on the wire per SamSaffron gist */
-    durationMs: z.number().optional(),
-    /** camelCase on the wire per SamSaffron gist */
-    numFiles: z.number().optional(),
-    truncated: z.boolean().optional(),
-  }).passthrough().optional(),
+  // Two wire shapes observed: the file-tool metadata OBJECT (SamSaffron gist), and
+  // an ARRAY of content blocks — what an MCP tool result carries (confirmed in the
+  // global-agent thread's persisted events, where every MCP tool_result user event
+  // fell through to `{kind:'__unknown__'}` and its result vanished from the
+  // transcript). Nothing reads this field; it is declared only so the variant
+  // narrows, so the array arm stays deliberately loose.
+  tool_use_result: z.union([
+    z.object({
+      filenames: z.array(z.string()).optional(),
+      /** camelCase on the wire per SamSaffron gist */
+      durationMs: z.number().optional(),
+      /** camelCase on the wire per SamSaffron gist */
+      numFiles: z.number().optional(),
+      truncated: z.boolean().optional(),
+    }).passthrough(),
+    z.array(z.unknown()),
+  ]).optional(),
   parent_tool_use_id: z.union([z.string(), z.null()]).optional(),
   session_id: z.string().optional(),
   uuid: z.string().optional(),

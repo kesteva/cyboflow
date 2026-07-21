@@ -180,14 +180,22 @@ export interface UserEvent {
      */
     content: Array<ToolResultBlock | TextBlock>;
   };
-  tool_use_result?: {
-    filenames?: string[];
-    /** camelCase on the wire per SamSaffron gist */
-    durationMs?: number;
-    /** camelCase on the wire per SamSaffron gist */
-    numFiles?: number;
-    truncated?: boolean;
-  };
+  /**
+   * Two wire shapes: the file-tool metadata object below, and an ARRAY of content
+   * blocks (what MCP tool results carry). Nothing reads this field — it is declared
+   * so the variant NARROWS; modelling only the object arm silently demoted every
+   * MCP tool_result user event to `{kind:'__unknown__'}`.
+   */
+  tool_use_result?:
+    | {
+        filenames?: string[];
+        /** camelCase on the wire per SamSaffron gist */
+        durationMs?: number;
+        /** camelCase on the wire per SamSaffron gist */
+        numFiles?: number;
+        truncated?: boolean;
+      }
+    | unknown[];
   parent_tool_use_id?: string | null;
   session_id?: string;
   uuid?: string;
