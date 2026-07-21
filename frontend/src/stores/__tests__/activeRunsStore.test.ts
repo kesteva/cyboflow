@@ -124,6 +124,66 @@ describe('buildActiveRunRows', () => {
     expect(rows.map((r) => r.id)).toEqual(['new', 'old']);
   });
 
+  it('(a2c) drops a rail-dismissed terminal run from its session history slot (migration 075)', () => {
+    const rows = buildActiveRunRows(
+      [
+        // Newest terminal for sess-a, but the user hit "Complete workflow" on it.
+        makeRun({
+          id: 'sess-a-done',
+          status: 'completed',
+          session_id: 'sess-a',
+          created_at: '2026-02-01',
+          rail_dismissed_at: '2026-02-01T12:00:00Z',
+        }),
+        // A live run in the same session must still show.
+        makeRun({ id: 'live', status: 'running', session_id: 'sess-a' }),
+      ],
+      workflows,
+    );
+    expect(rows.map((r) => r.id)).toEqual(['live']);
+  });
+
+  it('(a2d) a dismissed newest terminal does NOT let an older terminal backfill the slot', () => {
+    const rows = buildActiveRunRows(
+      [
+        // Newest terminal is dismissed; the slot points at it, so the older
+        // terminal must NOT resurface as history.
+        makeRun({
+          id: 'newest',
+          status: 'completed',
+          session_id: 'sess-a',
+          created_at: '2026-02-01',
+          rail_dismissed_at: '2026-02-01T12:00:00Z',
+        }),
+        makeRun({
+          id: 'older',
+          status: 'failed',
+          session_id: 'sess-a',
+          created_at: '2026-01-01',
+        }),
+      ],
+      workflows,
+    );
+    expect(rows).toEqual([]);
+  });
+
+  it('(a2e) a pinned run still shows even when rail-dismissed', () => {
+    const rows = buildActiveRunRows(
+      [
+        makeRun({
+          id: 'dismissed',
+          status: 'completed',
+          session_id: 'sess-a',
+          created_at: '2026-02-01',
+          rail_dismissed_at: '2026-02-01T12:00:00Z',
+        }),
+      ],
+      workflows,
+      'dismissed', // explicitly selected — selection wins over dismissal
+    );
+    expect(rows.map((r) => r.id)).toEqual(['dismissed']);
+  });
+
   it('(a3) never resurrects a pinned __quick__ run', () => {
     const rows = buildActiveRunRows(
       [makeRun({ id: 'r-quick', workflow_id: 'wf-1-__quick__', status: 'completed' })],

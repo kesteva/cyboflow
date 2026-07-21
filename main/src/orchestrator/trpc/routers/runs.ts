@@ -1829,15 +1829,26 @@ export const runsRouter = router({
    * stages are left wherever the run's gates put them (a Planner's tasks stay
    * Ready-for-development; nothing reverts).
    *
-   * Guards:
-   *   - only an 'awaiting_review' run can be ended (a running/paused run must
-   *     be cancelled or allowed to drain);
-   *   - a run with pending BLOCKING review items cannot be ended — resolve the
-   *     gates first (mirrors aggregate-unblock; prevents silently bypassing an
-   *     open human gate).
+   * Rail dismissal (migration 075): "Complete workflow" is the user's explicit
+   * acknowledgement that they are DONE with this run, so end also stamps
+   * rail_dismissed_at — for the just-completed awaiting_review run AND for a run
+   * the user completes when it is already terminal (finished/failed on its own).
+   * buildActiveRunRows drops a rail-dismissed terminal run from its session's
+   * retained-history slot, so the run leaves the left rail instead of lingering as
+   * "planner · completed". An already-terminal run is therefore NO LONGER a plain
+   * no-op: it is the acknowledgement path.
    *
-   * Returns { ended: true } or { noOp: true, reason } — 'not_found' /
-   * 'already_terminal' (idempotent) / 'not_rested' / 'blocking_items_pending'.
+   * Guards:
+   *   - a running/paused run cannot be ended (must be cancelled or allowed to
+   *     drain) → { noOp: 'not_rested' };
+   *   - an 'awaiting_review' run with pending BLOCKING review items cannot be
+   *     ended — resolve the gates first (mirrors aggregate-unblock; prevents
+   *     silently bypassing an open human gate).
+   *
+   * Returns { ended: true } (a rested run completed, OR an already-terminal run
+   * acknowledged/dismissed from the rail) or { noOp: true, reason } — 'not_found' /
+   * 'already_terminal' (a concurrent terminal transition won the completion race) /
+   * 'not_rested' / 'blocking_items_pending'.
    */
   end: protectedProcedure
     .input(z.object({ runId: z.string().min(1) }))
@@ -1853,8 +1864,24 @@ export const runsRouter = router({
         .prepare('SELECT status, batch_id AS batchId, task_id AS taskId FROM workflow_runs WHERE id = ?')
         .get(input.runId) as { status?: string; batchId?: string | null; taskId?: string | null } | undefined;
       if (!run?.status) return { noOp: true, reason: 'not_found' };
+      // Already terminal (finished/failed/canceled on its own): "Complete
+      // workflow" is the user acknowledging it, so stamp rail_dismissed_at (once)
+      // to drop it from the left-rail retained-history slot rather than no-op.
+      // Idempotent — a second acknowledgement leaves the first stamp untouched.
       if (['completed', 'failed', 'canceled'].includes(run.status)) {
-        return { noOp: true, reason: 'already_terminal' };
+        const info = db
+          .prepare(
+            `UPDATE workflow_runs
+                SET rail_dismissed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+              WHERE id = ? AND rail_dismissed_at IS NULL`,
+          )
+          .run(input.runId) as { changes: number };
+        // Refetch the rail so the dismissed run drops immediately (mirrors the
+        // completion path's runStatusEvents emit). Only when we actually stamped.
+        if (info.changes > 0) {
+          runStatusEvents.emit('changed', { runId: input.runId, status: run.status });
+        }
+        return { ended: true };
       }
       if (run.status !== 'awaiting_review') return { noOp: true, reason: 'not_rested' };
       if (countPendingBlockingReviewItems(db, input.runId) > 0) {
@@ -1864,7 +1891,8 @@ export const runsRouter = router({
       const info = db
         .prepare(
           `UPDATE workflow_runs
-              SET status = 'completed', ended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+              SET status = 'completed', ended_at = CURRENT_TIMESTAMP,
+                  rail_dismissed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
             WHERE id = ? AND status = 'awaiting_review'`,
         )
         .run(input.runId) as { changes: number };

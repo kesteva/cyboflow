@@ -1,0 +1,27 @@
+-- Migration 075: rail-dismissed stamp for explicit "Complete workflow".
+--
+-- The left rail retains the NEWEST terminal workflow run per parent session as
+-- reachable history (activeRunsStore.buildActiveRunRows), so a finished run's
+-- summary stays one click away even after the pane returns to the resting
+-- session. That retention is correct for a run that finished on its own, but it
+-- also kept a run in the sidebar AFTER the user explicitly hit "Complete
+-- workflow" on it — the exact "I completed it but it's still there" report.
+--
+-- rail_dismissed_at records the instant the user explicitly completed/acknowledged
+-- a run from the completion summary (runs.end). buildActiveRunRows drops a
+-- terminal run whose rail_dismissed_at is set from the retained-history slot, so
+-- an explicitly-completed run leaves the rail while its parent session stays.
+-- Older terminal runs never backfill the vacated slot (the newest-terminal
+-- computation still points at the dismissed run).
+--
+-- Nullable DATETIME (mirrors ended_at); NULL = never dismissed -> the run keeps
+-- the pre-075 retention behaviour exactly. No backfill: existing terminal runs
+-- stay reachable until the user completes them. workflow_runs columns are added
+-- purely by these numbered migrations, so a fresh install runs this ALTER exactly
+-- like an upgrade — no schema.sql parity concern.
+--
+-- NOTE: No explicit BEGIN/COMMIT -- runFileBasedMigrations() in database.ts wraps
+-- every file in a this.transaction(...) call. Re-running after a ledger reset
+-- throws "duplicate column name", which the runner treats as idempotent success.
+
+ALTER TABLE workflow_runs ADD COLUMN rail_dismissed_at DATETIME;

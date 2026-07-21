@@ -1247,6 +1247,121 @@ describe('cyboflow.runs.cancel (Phase 4a)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// cyboflow.runs.end — "Complete workflow" backend, incl. rail dismissal (mig 075).
+//
+// end uses ctx.db directly (no injected dep bag), so these drive it through the
+// real caller over an in-memory DB. The rail_dismissed_at stamp is the migration-
+// 075 fix: "Complete workflow" on an already-terminal run must drop it from the
+// left rail, and completing a rested run must stamp it too. The router-side
+// close-outs (ApprovalRouter/QuestionRouter/SprintLaneStore/TaskChangeRouter) are
+// try/catch fail-soft and are no-ops here (uninitialised in tests); review_items
+// is absent so countPendingBlockingReviewItems fail-softs to 0.
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.runs.end (Complete workflow + rail dismissal, migration 075)', () => {
+  it('(end-a) already-terminal run: stamps rail_dismissed_at and returns { ended: true }', async () => {
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const { runId } = seedRun(db, { status: 'completed' });
+    try {
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+      const result = await caller.cyboflow.runs.end({ runId });
+
+      expect(result).toEqual({ ended: true });
+      const row = db
+        .prepare('SELECT status, rail_dismissed_at AS railDismissedAt FROM workflow_runs WHERE id = ?')
+        .get(runId) as { status: string; railDismissedAt: string | null };
+      // Status is untouched (git-neutral); only the rail stamp lands.
+      expect(row.status).toBe('completed');
+      expect(row.railDismissedAt).not.toBeNull();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('(end-b) a failed run is also dismissible (Close out on the failed summary)', async () => {
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const { runId } = seedRun(db, { status: 'failed' });
+    try {
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+      const result = await caller.cyboflow.runs.end({ runId });
+
+      expect(result).toEqual({ ended: true });
+      const row = db
+        .prepare('SELECT status, rail_dismissed_at AS railDismissedAt FROM workflow_runs WHERE id = ?')
+        .get(runId) as { status: string; railDismissedAt: string | null };
+      expect(row.status).toBe('failed');
+      expect(row.railDismissedAt).not.toBeNull();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('(end-c) is idempotent: re-completing keeps the first stamp untouched', async () => {
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const { runId } = seedRun(db, { status: 'completed' });
+    db.prepare("UPDATE workflow_runs SET rail_dismissed_at = '2020-01-01 00:00:00' WHERE id = ?").run(runId);
+    try {
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+      const result = await caller.cyboflow.runs.end({ runId });
+
+      expect(result).toEqual({ ended: true });
+      const row = db
+        .prepare('SELECT rail_dismissed_at AS railDismissedAt FROM workflow_runs WHERE id = ?')
+        .get(runId) as { railDismissedAt: string | null };
+      // The WHERE rail_dismissed_at IS NULL guard means the prior stamp survives.
+      expect(row.railDismissedAt).toBe('2020-01-01 00:00:00');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('(end-d) rested awaiting_review run: completes AND stamps rail_dismissed_at', async () => {
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const { runId } = seedRun(db, { status: 'awaiting_review' });
+    try {
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+      const result = await caller.cyboflow.runs.end({ runId });
+
+      expect(result).toEqual({ ended: true });
+      const row = db
+        .prepare('SELECT status, rail_dismissed_at AS railDismissedAt FROM workflow_runs WHERE id = ?')
+        .get(runId) as { status: string; railDismissedAt: string | null };
+      expect(row.status).toBe('completed');
+      expect(row.railDismissedAt).not.toBeNull();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('(end-e) unknown run → { noOp: not_found }', async () => {
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    try {
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+      const result = await caller.cyboflow.runs.end({ runId: 'no-such-run' });
+      expect(result).toEqual({ noOp: true, reason: 'not_found' });
+    } finally {
+      db.close();
+    }
+  });
+
+  it('(end-f) a still-running run cannot be ended → { noOp: not_rested }, no stamp', async () => {
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const { runId } = seedRun(db, { status: 'running' });
+    try {
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+      const result = await caller.cyboflow.runs.end({ runId });
+      expect(result).toEqual({ noOp: true, reason: 'not_rested' });
+      const row = db
+        .prepare('SELECT rail_dismissed_at AS railDismissedAt FROM workflow_runs WHERE id = ?')
+        .get(runId) as { railDismissedAt: string | null };
+      expect(row.railDismissedAt).toBeNull();
+    } finally {
+      db.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // cyboflow.runs.setPermissionMode — session-mode write chokepoint (permission-
 // mode redesign §3d / Slice 5).
 //

@@ -191,7 +191,8 @@ interface WorkflowSummaryPanelProps {
  *     "Retry failed step" (runs.retryStep, crash-safe resume of the SAME run row
  *     at the failed step) leads when offered; PRIMARY "Restart flow" (runs.restart,
  *     mints a new run in the same session/worktree); secondary "Close out"
- *     (runs.end is a no-op on a terminal run, so this is pure navigation).
+ *     (runs.end stamps rail_dismissed_at on the terminal run — migration 075 — so
+ *     the failed run also leaves the left-rail history slot, then navigates).
  *   - 'review' → "Ready for review": the run is STILL running at an open human gate,
  *     so the summary — including the eval score, which lands exactly at this step —
  *     is INPUT to the decision. No "Complete workflow" primary — it would no-op

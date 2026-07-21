@@ -193,6 +193,18 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     );
     agentProviderRuntimeAdded = true;
   };
+  // Migration 075 (rail-dismissed stamp): listRunsHandler's SELECT projects
+  // rail_dismissed_at, and runs.end stamps it. Both the read-model surface
+  // (includeSubstrate) and the row-level readers (includeWorkflowRunTaskColumns)
+  // therefore need the column — folded in idempotently like the sibling stamps so
+  // passing both flags never double-ALTERs. Plain nullable DATETIME; additive —
+  // never widens GATE_SCHEMA.
+  let railDismissedAdded = false;
+  const addRailDismissedColumnOnce = (): void => {
+    if (railDismissedAdded) return;
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN rail_dismissed_at DATETIME');
+    railDismissedAdded = true;
+  };
   if (options?.includeStuckDetectedAt) {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN stuck_detected_at INTEGER');
   }
@@ -228,6 +240,8 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     addVariantColumnsOnce();
     // Migrations 059-064: provider/runtime supersede substrate for new integrations.
     addAgentProviderRuntimeColumnsOnce();
+    // Migration 075: listRunsHandler's SELECT projects rail_dismissed_at.
+    addRailDismissedColumnOnce();
   }
   if (options?.includeQuestionsTable) {
     // Migration 010 references stuck_detected_at (added in migration 007) in the
@@ -275,6 +289,8 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     addVariantColumnsOnce();
     // Migrations 059-064: getRunById projects agent_provider/agent_runtime.
     addAgentProviderRuntimeColumnsOnce();
+    // Migration 075: runs.end stamps rail_dismissed_at on the completed run.
+    addRailDismissedColumnOnce();
   }
   return db;
 }

@@ -311,6 +311,16 @@ export interface WorkflowRunListRow {
    */
   experiment_id?: string | null;
   experiment_arm?: ExperimentArm | null;
+  /**
+   * Explicit-completion rail stamp (migration 075). Set when the user hits
+   * "Complete workflow" on a run's completion summary (runs.end). The left-rail
+   * retention (activeRunsStore.buildActiveRunRows) drops a terminal run whose
+   * rail_dismissed_at is set from its parent session's retained-history slot, so
+   * an explicitly-completed run leaves the sidebar. NULL = never dismissed → the
+   * pre-075 "newest terminal per session stays reachable" behaviour. Optional +
+   * additive, mirroring `ended_at`.
+   */
+  rail_dismissed_at?: string | null;
 }
 
 /**

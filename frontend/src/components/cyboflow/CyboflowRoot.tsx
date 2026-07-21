@@ -625,10 +625,12 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
 
       {/* End-workflow confirm — the human gate for a run that reached a terminal
           status on its own (completed / failed) OR rested at awaiting_review
-          with no open gates. For a rested run, confirming first completes it
-          via runs.end (git-neutral; the session keeps the worktree); for an
-          already-terminal run it is pure navigation. Either way the run
-          overlay drops back to the session's resting QuickSessionCanvas. */}
+          with no open gates. Confirming calls runs.end either way: a rested run
+          is completed (git-neutral; the session keeps the worktree), and an
+          already-terminal run is stamped rail_dismissed_at (migration 075) so it
+          leaves the left-rail retained-history slot instead of lingering as
+          "planner · completed". Either way the run overlay drops back to the
+          session's resting QuickSessionCanvas. */}
       {activeRunId !== null && (
         <RunEndDialog
           isOpen={isEndOpen}
@@ -636,28 +638,30 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
           status={activeRun?.status}
           onConfirm={() => {
             setIsEndOpen(false);
-            if (activeRun?.status === 'awaiting_review') {
-              trpc.cyboflow.runs.end
-                .mutate({ runId: activeRunId })
-                .then((result) => {
-                  if ('noOp' in result && result.reason === 'blocking_items_pending') {
-                    useErrorStore.getState().showError({
-                      title: 'Cannot end workflow',
-                      error: 'This run still has pending review items — resolve them in the Human review queue first.',
-                    });
-                    return;
-                  }
-                  returnToRestingSession();
-                })
-                .catch((err: unknown) => {
+            // "Complete workflow" is ONE action for both a rested run (runs.end
+            // completes it) and an already-terminal one (runs.end stamps
+            // rail_dismissed_at — migration 075). Either way the run drops out of
+            // the left-rail retained-history slot and the pane returns to the
+            // resting session. A non-rested/non-terminal run resolves as a benign
+            // { noOp: 'not_rested' } and just navigates (matches prior behaviour).
+            trpc.cyboflow.runs.end
+              .mutate({ runId: activeRunId })
+              .then((result) => {
+                if ('noOp' in result && result.reason === 'blocking_items_pending') {
                   useErrorStore.getState().showError({
-                    title: 'End workflow failed',
-                    error: err instanceof Error ? err.message : String(err),
+                    title: 'Cannot end workflow',
+                    error: 'This run still has pending review items — resolve them in the Human review queue first.',
                   });
+                  return;
+                }
+                returnToRestingSession();
+              })
+              .catch((err: unknown) => {
+                useErrorStore.getState().showError({
+                  title: 'End workflow failed',
+                  error: err instanceof Error ? err.message : String(err),
                 });
-              return;
-            }
-            returnToRestingSession();
+              });
           }}
         />
       )}

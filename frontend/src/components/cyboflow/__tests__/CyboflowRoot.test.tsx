@@ -96,6 +96,9 @@ vi.mock('../../../trpc/client', () => ({
         },
         // Phase 4a — git-neutral run Cancel.
         cancel: { mutate: vi.fn().mockResolvedValue({ success: true }) },
+        // "Complete workflow" — completes a rested run / dismisses a terminal one
+        // from the rail (migration 075). Confirm always routes through this now.
+        end: { mutate: vi.fn().mockResolvedValue({ ended: true }) },
         // Interactive "request changes" relay (end-of-workflow summary CTA).
         relayInput: { mutate: vi.fn().mockResolvedValue({ success: true }) },
       },

@@ -150,10 +150,17 @@ export function buildActiveRunRows(
     // Keep every active row, the newest terminal row per parent session, and the
     // selected row. This is intentionally not a history list: older terminal
     // rows and unpinned terminal rows without a parent session remain hidden.
+    // A rail-dismissed terminal run (the user hit "Complete workflow" — migration
+    // 075) leaves the retained-history slot entirely: it fails the retention
+    // clause below, and because newestTerminalBySession still points AT the
+    // dismissed run, no older terminal run backfills the vacated slot. The
+    // pinned/selected run still wins so an explicitly-open run never vanishes.
     .filter((run) =>
       !isTerminalRunStatus(run.status) ||
       run.id === pinnedRunId ||
-      (run.session_id != null && newestTerminalBySession.get(run.session_id)?.id === run.id),
+      (run.session_id != null &&
+        run.rail_dismissed_at == null &&
+        newestTerminalBySession.get(run.session_id)?.id === run.id),
     )
     .map((run) => ({
       ...run,
