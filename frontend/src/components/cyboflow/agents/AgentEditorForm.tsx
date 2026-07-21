@@ -192,14 +192,37 @@ export function AgentEditorForm({
         </select>
         <p className="mt-1.5 text-[10px] text-text-tertiary">
           {draft.runtime === null
-            ? 'This agent runs on whatever provider/runtime the run uses.'
-            : `This agent always runs on ${WORKFLOW_AGENT_RUNTIME_LABELS[draft.runtime]}. Per-agent Codex applies to programmatic runs.`}
+            ? 'This agent runs on whatever provider/runtime the run uses. Pin a runtime to choose a model.'
+            : `This agent always runs on ${WORKFLOW_AGENT_RUNTIME_LABELS[draft.runtime]}.`}
         </p>
+        {draft.runtime !== null && (
+          <p
+            className="mt-1.5 text-[10px] text-text-tertiary"
+            data-testid="agent-runtime-plane-note"
+          >
+            Per-agent runtime is honored on <b className="font-semibold">programmatic</b> runs,
+            which spawn each step as its own process. An orchestrated run is a single process for
+            the whole flow, so this pin has no effect there.
+          </p>
+        )}
       </div>
 
-      {/* ── Model — Codex model picker when the Codex runtime is pinned, else
-          the Claude model alias picker (inherit the run model by default). ─── */}
-      {isCodexRuntime ? (
+      {/* ── Model — gated on a PINNED runtime. Under an inherited runtime the
+          effective provider is whatever the run uses, so a model pin would be
+          non-deterministic (and is dropped outright on a programmatic run) —
+          the picker is hidden rather than offering a pin that may not apply.
+          Pinned Codex gets the Codex model picker, pinned Claude the alias. ─── */}
+      {draft.runtime === null ? (
+        <div className="mt-6">
+          <div className="text-[9px] font-bold uppercase tracking-[0.18em] text-text-tertiary mb-3 flex items-center gap-2">
+            <span>Model</span>
+            <span className="flex-1 h-px bg-border-subtle" />
+          </div>
+          <p className="text-[10px] text-text-tertiary" data-testid="agent-model-requires-runtime">
+            This agent inherits the run model. Pin a runtime above to choose a specific model.
+          </p>
+        </div>
+      ) : isCodexRuntime ? (
         <div className="mt-6">
           <div className="text-[9px] font-bold uppercase tracking-[0.18em] text-text-tertiary mb-3 flex items-center gap-2">
             <span>Codex model</span>

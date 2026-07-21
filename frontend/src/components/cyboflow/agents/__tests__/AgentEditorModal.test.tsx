@@ -409,16 +409,27 @@ describe('AgentEditorModal — absent legacy affordances', () => {
 });
 
 describe('AgentEditorModal — model picker', () => {
-  it('seeds the picker from entry.model and the stat shows the inherit sentinel by default', async () => {
-    await renderModal(); // BUILTIN_ENTRY.model === null
-    const select = screen.getByTestId('agent-model-select') as HTMLSelectElement;
-    expect(select.value).toBe(''); // '' = inherit
+  // The model picker is GATED on a pinned runtime: under an inherited runtime the
+  // effective provider depends on the run, so a model pin is non-deterministic
+  // (and is dropped outright on a programmatic run). The picker is hidden rather
+  // than offering a pin that may silently not apply.
+  it('hides the model picker under an inherited runtime and explains why', async () => {
+    await renderModal(); // BUILTIN_ENTRY.runtime === null
+    expect(screen.queryByTestId('agent-model-select')).not.toBeInTheDocument();
+    expect(screen.getByTestId('agent-model-requires-runtime')).toBeInTheDocument();
     expect(screen.getByTestId('agent-stats')).toHaveTextContent('inherits run model');
+  });
+
+  it('shows the picker once a Claude runtime is pinned, seeded from entry.model', async () => {
+    await renderModal({ entry: { ...BUILTIN_ENTRY, runtime: 'claude-sdk' } });
+    const select = screen.getByTestId('agent-model-select') as HTMLSelectElement;
+    expect(select.value).toBe(''); // '' = inherit the run model
   });
 
   it('seeds a pinned model and echoes its label in the live stat', async () => {
     const pinned: AgentEntry = {
       ...BUILTIN_ENTRY,
+      runtime: 'claude-sdk',
       model: 'sonnet',
       stats: { ...BUILTIN_ENTRY.stats, model: 'Sonnet 5' },
     };
@@ -427,8 +438,17 @@ describe('AgentEditorModal — model picker', () => {
     expect(screen.getByTestId('agent-stats')).toHaveTextContent('Sonnet 5');
   });
 
+  it('switching the runtime back to inherit hides the picker and drops the pin', async () => {
+    await renderModal({
+      entry: { ...BUILTIN_ENTRY, runtime: 'claude-sdk', model: 'sonnet' },
+    });
+    fireEvent.change(screen.getByTestId('agent-runtime-select'), { target: { value: '' } });
+    expect(screen.queryByTestId('agent-model-select')).not.toBeInTheDocument();
+    expect(screen.getByTestId('agent-stats')).toHaveTextContent('inherits run model');
+  });
+
   it('changing the model marks dirty and sends the alias through upsertOverride', async () => {
-    const { onSaved } = await renderModal();
+    const { onSaved } = await renderModal({ entry: { ...BUILTIN_ENTRY, runtime: 'claude-sdk' } });
     const select = screen.getByTestId('agent-model-select');
     fireEvent.change(select, { target: { value: 'haiku' } });
 

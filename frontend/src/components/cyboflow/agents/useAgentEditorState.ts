@@ -100,14 +100,20 @@ export function agentEditorReducer(
       return { ...state, draft: { ...state.draft, model: action.model } };
 
     case 'SET_RUNTIME':
-      // Leaving the Codex runtime clears the Codex model so a Claude runtime
-      // never carries a stale id (mirrors the server-side normalizeRuntime).
+      // A model pin is only meaningful alongside a pinned runtime — under an
+      // INHERITED runtime the effective provider depends on the run, so the pin
+      // is non-deterministic (and on a programmatic run it is dropped outright).
+      // So each model field survives ONLY under its own provider's runtime:
+      // Codex model under 'codex-sdk', Claude model under a Claude runtime, and
+      // neither under inherit. Mirrors the server-side normalizeRuntime.
       return {
         ...state,
         draft: {
           ...state.draft,
           runtime: action.runtime,
           codexModel: action.runtime === 'codex-sdk' ? state.draft.codexModel : null,
+          model:
+            action.runtime !== null && action.runtime !== 'codex-sdk' ? state.draft.model : null,
         },
       };
 

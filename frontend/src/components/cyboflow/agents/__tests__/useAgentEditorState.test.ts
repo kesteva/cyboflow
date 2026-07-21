@@ -70,4 +70,27 @@ describe('agentEditorReducer — runtime/codexModel', () => {
     state = agentEditorReducer(state, { type: 'SET_CODEX_MODEL', codexModel: 'gpt-5.2-codex' });
     expect(state.draft.codexModel).toBe('gpt-5.2-codex');
   });
+
+  // A Claude model pin is only meaningful under a pinned Claude runtime — under
+  // an inherited runtime the effective provider depends on the run, and the pin
+  // is dropped outright on a programmatic run. The editor no longer offers that
+  // state, so the reducer must not leave one behind either.
+  it('SET_RUNTIME to inherit (null) clears a pinned Claude model', () => {
+    let state = initAgentEditorState(entry({ runtime: 'claude-sdk', model: 'sonnet' }));
+    state = agentEditorReducer(state, { type: 'SET_RUNTIME', runtime: null });
+    expect(state.draft.runtime).toBeNull();
+    expect(state.draft.model).toBeNull();
+  });
+
+  it('SET_RUNTIME to codex-sdk clears a pinned Claude model', () => {
+    let state = initAgentEditorState(entry({ runtime: 'claude-sdk', model: 'sonnet' }));
+    state = agentEditorReducer(state, { type: 'SET_RUNTIME', runtime: 'codex-sdk' });
+    expect(state.draft.model).toBeNull();
+  });
+
+  it('SET_RUNTIME between Claude runtimes keeps the pinned Claude model', () => {
+    let state = initAgentEditorState(entry({ runtime: 'claude-sdk', model: 'sonnet' }));
+    state = agentEditorReducer(state, { type: 'SET_RUNTIME', runtime: 'claude-interactive' });
+    expect(state.draft.model).toBe('sonnet');
+  });
 });
