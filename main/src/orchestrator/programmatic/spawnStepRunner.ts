@@ -152,17 +152,27 @@ export class SpawnStepRunner implements StepRunner {
     const stepAgent = agentKey ? this.opts.resolveStepAgent?.(agentKey) : undefined;
     const stepRuntime = stepAgent?.runtime;
     const stepProvider = stepRuntime ? providerForRuntime(stepRuntime) : undefined;
-    // Codex steps take the per-agent Codex model; Claude steps take the per-agent
-    // Claude model when one is pinned, else the run-level model. Without the
-    // per-agent branch a Claude model pin was silently ignored on this plane —
-    // the run model always won (see resolveStepAgent's doc-comment).
+    // The provider this step ACTUALLY spawns under: the per-step runtime override's
+    // provider when present, else the run-level provider.
+    const runProvider = this.opts.promptRenderContext?.provider ?? 'claude';
+    const effectiveProvider = stepProvider ?? runProvider;
+    // Resolve the spawn model to one that BELONGS to the effective provider. The
+    // per-agent pin is consulted for the matching provider only (Codex model for a
+    // Codex step, Claude model for a Claude step). The run-level model is inherited
+    // ONLY when the step stays on the run's provider — a step that FLIPS provider
+    // must never inherit the other provider's concrete id (a claude-* id into a
+    // Codex spawn, or a gpt-* id into a Claude spawn), which would reject or
+    // misroute the turn; a flipped step with no matching per-agent model omits
+    // `model` so the provider default applies. (Without this, a per-agent Claude
+    // model pin — including a legacy model-only override — would override the Codex
+    // model on a whole-run Codex programmatic run.)
+    const perAgentModel = effectiveProvider === 'codex' ? stepAgent?.codexModel : stepAgent?.model;
     const spawnModel =
-      stepProvider === 'codex' ? stepAgent?.codexModel : (stepAgent?.model ?? this.opts.model);
-    // Normalize the per-agent effort against the provider this step actually
-    // spawns under — the step-runtime override's provider when present, else the
-    // run-level provider. A value outside that provider's scale is dropped here
-    // (see normalizeEffortSelection), never forwarded to a spawn that rejects it.
-    const effortProvider = stepProvider ?? this.opts.promptRenderContext?.provider ?? 'claude';
+      perAgentModel ?? (effectiveProvider === runProvider ? this.opts.model : undefined);
+    // Normalize the per-agent effort against the provider this step actually spawns
+    // under. A value outside that provider's scale is dropped here (see
+    // normalizeEffortSelection), never forwarded to a spawn that rejects it.
+    const effortProvider = effectiveProvider;
     const stepEffort = stepAgent?.effort
       ? normalizeEffortSelection(effortProvider, stepAgent.effort)
       : undefined;

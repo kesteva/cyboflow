@@ -400,6 +400,47 @@ describe('SpawnStepRunner', () => {
       expect(passed.model).toBe('claude-sonnet-5');
     });
 
+    it('does NOT let a per-agent Claude model pin override the Codex model on a WHOLE-RUN Codex programmatic run', async () => {
+      // Regression (adversarial review): on a whole-run Codex run the step inherits
+      // the run provider (stepProvider undefined). A model-only / no-runtime agent
+      // override returns a `claude-*` model; it must NOT hijack the Codex spawn —
+      // the run's Codex model wins, never a Claude id fed to a Codex process.
+      const spawner = makeSpawner();
+      const runner = new SpawnStepRunner(spawner, {
+        ...opts,
+        model: 'gpt-5.6-codex',
+        promptRenderContext: { provider: 'codex', runtime: 'codex-sdk', executionModel: 'programmatic' },
+        resolveStepAgent: (agentKey) =>
+          agentKey === 'implement' ? { model: 'claude-sonnet-5' } : undefined,
+      });
+
+      await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+      const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+      expect(passed.model).toBe('gpt-5.6-codex');
+    });
+
+    it('does NOT inherit the run Codex model into a per-step Claude override (provider flip omits the mismatched model)', async () => {
+      // Regression (adversarial review): a Claude runtime override on a whole-run
+      // Codex run flips the step to Claude; with no per-agent Claude model it must
+      // NOT fall back to the run's `gpt-*` model — it omits `model` so the Claude
+      // default applies.
+      const spawner = makeSpawner();
+      const runner = new SpawnStepRunner(spawner, {
+        ...opts,
+        model: 'gpt-5.6-codex',
+        promptRenderContext: { provider: 'codex', runtime: 'codex-sdk', executionModel: 'programmatic' },
+        resolveStepAgent: (agentKey) =>
+          agentKey === 'implement' ? { runtime: 'claude-sdk' } : undefined,
+      });
+
+      await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+      const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+      expect(passed.agentProvider).toBe('claude');
+      expect('model' in passed).toBe(false);
+    });
+
     it('a per-agent Codex model still wins over a Claude model pin on a Codex step', async () => {
       const spawner = makeSpawner();
       const runner = new SpawnStepRunner(spawner, {
