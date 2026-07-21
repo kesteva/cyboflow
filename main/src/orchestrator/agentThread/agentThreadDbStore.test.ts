@@ -11,10 +11,16 @@ import type {
   ReprioritizeBacklogProposalPayload,
 } from '../../../../shared/types/agentThread';
 
-const MIGRATION = readFileSync(
-  join(__dirname, '..', '..', 'database', 'migrations', '074_agent_threads.sql'),
-  'utf-8',
-);
+const MIGRATION =
+  readFileSync(
+    join(__dirname, '..', '..', 'database', 'migrations', '074_agent_threads.sql'),
+    'utf-8',
+  ) +
+  '\n' +
+  readFileSync(
+    join(__dirname, '..', '..', 'database', 'migrations', '076_agent_thread_last_digest.sql'),
+    'utf-8',
+  );
 
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
@@ -82,6 +88,22 @@ describe('AgentThreadDbStore', () => {
 
       expect(store.updateClaudeSessionId('thread-1', null)).toBe(true);
       expect(store.getThread('thread-1')?.claudeSessionId).toBeNull();
+    });
+
+    it('last_digest_at defaults to null and round-trips through set/get (migration 076)', () => {
+      const store = new AgentThreadDbStore(dbAdapter(db));
+      store.createThread({ id: 'thread-1' });
+
+      // Never digested → null. A missing thread also reads null (no row).
+      expect(store.getLastDigestAt('thread-1')).toBeNull();
+      expect(store.getLastDigestAt('missing')).toBeNull();
+
+      store.setLastDigestAt('thread-1', 1_700_000_000_000);
+      expect(store.getLastDigestAt('thread-1')).toBe(1_700_000_000_000);
+
+      // A later stamp overwrites.
+      store.setLastDigestAt('thread-1', 1_700_000_500_000);
+      expect(store.getLastDigestAt('thread-1')).toBe(1_700_000_500_000);
     });
   });
 

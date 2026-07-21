@@ -16,10 +16,16 @@ import {
 } from './agentThreadService';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 
-const MIGRATION = readFileSync(
-  join(__dirname, '..', '..', 'database', 'migrations', '074_agent_threads.sql'),
-  'utf-8',
-);
+const MIGRATION =
+  readFileSync(
+    join(__dirname, '..', '..', 'database', 'migrations', '074_agent_threads.sql'),
+    'utf-8',
+  ) +
+  '\n' +
+  readFileSync(
+    join(__dirname, '..', '..', 'database', 'migrations', '076_agent_thread_last_digest.sql'),
+    'utf-8',
+  );
 
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
@@ -339,6 +345,39 @@ describe('AgentThreadService', () => {
       const third = await h.service.triggerDigest(thread.id);
       expect(third).toEqual({ triggered: true });
       expect(h.manager.calls).toHaveLength(2);
+    });
+
+    it('persists the last-digest time so the throttle survives a restart (new service, same store)', async () => {
+      const thread = h.service.ensureGlobalThread();
+
+      const first = await h.service.triggerDigest(thread.id);
+      expect(first).toEqual({ triggered: true });
+      expect(h.store.getLastDigestAt(thread.id)).toBe(h.clock.value);
+
+      // Simulate an app restart: a fresh service over the SAME store, with its
+      // in-memory throttle map empty. A launch-time digest a few minutes later
+      // must still be throttled off the persisted value.
+      const restartClock = { value: h.clock.value + 5 * 60 * 1000 };
+      const restarted = new AgentThreadService({
+        store: h.store,
+        manager: h.manager,
+        publish: () => {},
+        defaultModel: () => 'claude-opus',
+        enabled: () => true,
+        homeDirBase: h.homeBase,
+        now: () => restartClock.value,
+      });
+
+      const afterRestart = await restarted.triggerDigest(thread.id);
+      expect(afterRestart).toEqual({ triggered: false, reason: 'throttled' });
+      expect(h.manager.calls).toHaveLength(1);
+
+      // A day on from the original fire, the restarted service digests again.
+      restartClock.value = h.clock.value + DIGEST_THROTTLE_MS;
+      const nextDay = await restarted.triggerDigest(thread.id);
+      expect(nextDay).toEqual({ triggered: true });
+      expect(h.manager.calls).toHaveLength(2);
+      restarted.dispose();
     });
 
     it('returns {triggered:false, reason:"disabled"} without sending or stamping the throttle when the kill switch is off, and sends once re-enabled', async () => {

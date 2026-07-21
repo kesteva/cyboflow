@@ -118,6 +118,25 @@ export class AgentThreadDbStore {
     return result.changes === 1;
   }
 
+  /**
+   * Read the persisted auto-digest timestamp (epoch ms), or null if the thread
+   * has never auto-digested (or does not exist). Backs the once-per-day throttle
+   * across restarts (migration 076).
+   */
+  getLastDigestAt(threadId: string): number | null {
+    const row = this.db
+      .prepare(`SELECT last_digest_at FROM agent_threads WHERE id = ?`)
+      .get(threadId) as { last_digest_at: number | null } | undefined;
+    return row?.last_digest_at ?? null;
+  }
+
+  /** Stamp the auto-digest timestamp (epoch ms). No-op if the thread is gone. */
+  setLastDigestAt(threadId: string, atMs: number): void {
+    this.db
+      .prepare(`UPDATE agent_threads SET last_digest_at = ? WHERE id = ?`)
+      .run(atMs, threadId);
+  }
+
   private toThread(row: ThreadRow): AgentThread {
     return {
       id: row.id,

@@ -18,10 +18,16 @@ import { selectAgentThreadUnifiedMessages } from '../agentThreadUnifiedMessagesL
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 
-const MIGRATION = readFileSync(
-  join(__dirname, '..', '..', 'database', 'migrations', '074_agent_threads.sql'),
-  'utf-8',
-);
+const MIGRATION =
+  readFileSync(
+    join(__dirname, '..', '..', 'database', 'migrations', '074_agent_threads.sql'),
+    'utf-8',
+  ) +
+  '\n' +
+  readFileSync(
+    join(__dirname, '..', '..', 'database', 'migrations', '076_agent_thread_last_digest.sql'),
+    'utf-8',
+  );
 
 function buildDb(): Database.Database {
   const db = new Database(':memory:');

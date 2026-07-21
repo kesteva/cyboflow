@@ -55,8 +55,15 @@ import { getAgentSystemPrompt } from './agentThreadPrompt';
 export const DIGEST_PROMPT =
   'Give me a concise digest of where all sessions/runs are and what needs my attention.';
 
-/** Server-side digest throttle: at most one synthetic digest per thread per window. */
-export const DIGEST_THROTTLE_MS = 10 * 60 * 1000;
+/**
+ * Server-side AUTO-digest throttle: at most one automatic digest per thread per
+ * day. The frontend fires `triggerDigest` once per launch, so without a
+ * cross-restart floor the digest re-ran on every app open. The last-fire time is
+ * persisted (migration 076) so this window spans restarts. Only the AUTO path is
+ * gated — a user asking for a status update (chip / typed message) goes through
+ * `sendMessage` and is never throttled.
+ */
+export const DIGEST_THROTTLE_MS = 24 * 60 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Narrow manager slice + spawn options
@@ -282,8 +289,10 @@ export class AgentThreadService {
   }
 
   /**
-   * Trigger a digest turn, server-throttled to at most one per
-   * {@link DIGEST_THROTTLE_MS} per thread. A throttled call returns
+   * Trigger the AUTO-digest turn, throttled to at most one per
+   * {@link DIGEST_THROTTLE_MS} (a day) per thread. The last-fire time is read
+   * from — and stamped to — persistent storage so the window survives an app
+   * restart (the frontend fires this once per launch). A throttled call returns
    * `{triggered:false, reason:'throttled'}` WITHOUT sending.
    */
   async triggerDigest(threadId: string): Promise<DigestTriggerResult> {
@@ -291,12 +300,15 @@ export class AgentThreadService {
       return { triggered: false, reason: 'disabled' };
     }
     const now = this.nowMs();
-    const last = this.lastDigestAt.get(threadId);
+    // In-memory guard defends against a same-launch double-fire before the DB
+    // write lands; the persisted value carries the throttle across restarts.
+    const last = this.lastDigestAt.get(threadId) ?? this.deps.store.getLastDigestAt(threadId) ?? undefined;
     if (last !== undefined && now - last < DIGEST_THROTTLE_MS) {
       return { triggered: false, reason: 'throttled' };
     }
-    // Stamp BEFORE the (awaited) send so a concurrent trigger cannot double-fire.
+    // Stamp BOTH BEFORE the (awaited) send so a concurrent trigger cannot double-fire.
     this.lastDigestAt.set(threadId, now);
+    this.deps.store.setLastDigestAt(threadId, now);
     await this.sendTurn(threadId, DIGEST_PROMPT, false);
     return { triggered: true };
   }
