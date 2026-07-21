@@ -19,7 +19,7 @@ import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 
 const MIGRATION = readFileSync(
-  join(__dirname, '..', '..', 'database', 'migrations', '071_agent_threads.sql'),
+  join(__dirname, '..', '..', 'database', 'migrations', '074_agent_threads.sql'),
   'utf-8',
 );
 
