@@ -95,6 +95,12 @@ export interface AppConfig {
   // the trigger seam via configManager.getCodeReviewEvalEnabled(). NOT seeded into
   // constructor defaults, so existing config.json files stay byte-identical.
   codeReviewEvalEnabled?: boolean;
+  // Global on/off for computing the run-summary cost from the run's token
+  // breakdown and model pricing instead of displaying the provider-reported
+  // cost. Absent/undefined = DISABLED (reported cost, preserving today's
+  // display). Read via configManager.getComputeCostFromRates(). NOT seeded
+  // into constructor defaults, so existing config.json files stay byte-identical.
+  computeCostFromRates?: boolean;
   // Sub-toggle of the code-review eval (A/B testing slice C): whether variant- and
   // experiment-tagged runs are auto-graded (per-arm K=3 eval AND the pairwise
   // judge). Absent/undefined = ENABLED (default ON). OFF => per-arm eval is
@@ -205,6 +211,8 @@ export interface UpdateConfigRequest {
   quickSessionDefaultSubstrate?: CliSubstrate;
   // Global on/off for the code-review eval (see AppConfig.codeReviewEvalEnabled).
   codeReviewEvalEnabled?: boolean;
+  // Global run-summary computed-cost toggle (see AppConfig.computeCostFromRates).
+  computeCostFromRates?: boolean;
   // Auto-grade variant & experiment runs sub-toggle (see AppConfig.autoGradeVariantRuns).
   autoGradeVariantRuns?: boolean;
   // On-disk location for COMMITTED-artifact manifests (see AppConfig.artifactCommitDir).

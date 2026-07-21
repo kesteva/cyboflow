@@ -90,6 +90,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // Global code-review-eval toggle (default ON) — the K=3 Opus jury pass fired at
   // a built-in flow's human-review step. A per-run Configure override outranks it.
   const [codeReviewEvalEnabled, setCodeReviewEvalEnabled] = useState(true);
+  // Run-summary cost display mode: false (default) uses the provider-reported
+  // cost; true computes it from the run's token breakdown and model rates.
+  const [computeCostFromRates, setComputeCostFromRates] = useState(false);
   // A/B testing slice C sub-toggle: auto-grade variant/experiment-arm runs
   // (per-arm rubric eval + the pairwise judge) on top of the global eval toggle
   // above. Absent/undefined = ENABLED.
@@ -166,6 +169,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setQuickSessionWorktreeMode(data.quickSessionWorktreeMode ?? 'worktree');
       setQuickSessionDefaultSubstrate(data.quickSessionDefaultSubstrate ?? 'interactive');
       setCodeReviewEvalEnabled(data.codeReviewEvalEnabled ?? true);
+      setComputeCostFromRates(data.computeCostFromRates ?? false);
       setAutoGradeVariantRuns(data.autoGradeVariantRuns ?? true);
       setErrorReportingEnabled(data.telemetry?.errorReportingEnabled ?? true);
       setUsageMetricsEnabled(data.telemetry?.usageMetricsEnabled ?? true);
@@ -230,6 +234,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         quickSessionWorktreeMode,
         quickSessionDefaultSubstrate,
         codeReviewEvalEnabled,
+        computeCostFromRates,
         autoGradeVariantRuns,
         // Empty field → undefined → the getter floors to the default (config.json
         // stays free of the key). A set value is trimmed before persisting.
@@ -927,6 +932,40 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                     variants or running an A/B test, without touching the global toggle above.
                   </p>
                 </div>
+              </SettingsSection>
+
+              <SettingsSection
+                title="Computed Run Cost"
+                description="Choose how run-summary cards determine their displayed cost"
+                icon={<FileText className="w-4 h-4" />}
+              >
+                <div className="flex flex-col gap-1.5">
+                  {([
+                    { enabled: false, label: 'Off', hint: 'Default · show provider-reported cost' },
+                    { enabled: true, label: 'On', hint: 'Compute from token usage and model rates' },
+                  ] as const).map(({ enabled, label, hint }) => (
+                    <button
+                      key={label}
+                      type="button"
+                      data-testid={`computed-run-cost-${enabled ? 'on' : 'off'}`}
+                      onClick={() => setComputeCostFromRates(enabled)}
+                      aria-pressed={computeCostFromRates === enabled}
+                      className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
+                        computeCostFromRates === enabled
+                          ? 'border-interactive bg-interactive-surface'
+                          : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
+                      }`}
+                    >
+                      <span className="text-text-primary font-medium text-sm">{label}</span>
+                      <span className="text-xs text-text-tertiary">{hint}</span>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-text-tertiary mt-2">
+                  When enabled, run-summary cards estimate cost from the run&apos;s token breakdown
+                  and resolved model pricing. Leave it off to show the cost reported by the provider.
+                  This setting applies globally to every run summary.
+                </p>
               </SettingsSection>
 
               <SettingsSection

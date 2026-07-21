@@ -363,6 +363,17 @@ export class ConfigManager extends EventEmitter {
   }
 
   /**
+   * Global run-summary cost display mode. Floors to FALSE when unset so existing
+   * users continue to see the provider-reported cost until they explicitly opt
+   * into computing cost from token usage and model pricing. Like
+   * `getCodeReviewEvalEnabled`, NOT seeded into the constructor defaults, so
+   * existing config.json files are not rewritten on launch.
+   */
+  getComputeCostFromRates(): boolean {
+    return this.config.computeCostFromRates ?? false;
+  }
+
+  /**
    * Sub-toggle of the code-review eval (A/B testing slice C): whether variant- and
    * experiment-tagged runs get auto-graded (per-arm K=3 eval AND the pairwise
    * judge). Defaults to TRUE when unset so activating variants grades them out of

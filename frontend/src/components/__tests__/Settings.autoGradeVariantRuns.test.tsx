@@ -37,6 +37,7 @@ function baseConfig(over: Partial<AppConfig> = {}): AppConfig {
   return {
     gitRepoPath: '/repo',
     codeReviewEvalEnabled: true,
+    computeCostFromRates: false,
     autoGradeVariantRuns: true,
     ...over,
   };
@@ -77,6 +78,32 @@ describe('Settings — autoGradeVariantRuns toggle', () => {
     await waitFor(() =>
       expect(configUpdate).toHaveBeenCalledWith(
         expect.objectContaining({ autoGradeVariantRuns: false, codeReviewEvalEnabled: true }),
+      ),
+    );
+  });
+
+  it('loads computed run cost off by default and round-trips an enabled selection', async () => {
+    configGet.mockResolvedValue({
+      success: true,
+      data: baseConfig({ computeCostFromRates: undefined }),
+    });
+    render(<Settings isOpen onClose={vi.fn()} initialTab="ai" />);
+
+    const offButton = await screen.findByTestId('computed-run-cost-off');
+    const onButton = screen.getByTestId('computed-run-cost-on');
+    expect(offButton).toHaveAttribute('aria-pressed', 'true');
+    expect(onButton).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(onButton);
+    expect(onButton).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+    await waitFor(() =>
+      expect(configUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          computeCostFromRates: true,
+          codeReviewEvalEnabled: true,
+        }),
       ),
     );
   });

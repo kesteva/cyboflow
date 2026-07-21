@@ -48,6 +48,10 @@ export interface AppConfig {
   // built-in flow's human-review step). Absent/undefined = ENABLED. A per-run
   // Configure override (workflow_runs.eval_enabled) outranks this; NULL inherits it.
   codeReviewEvalEnabled?: boolean;
+  // Global run-summary cost display mode. When true, compute cost from the run's
+  // token breakdown and model pricing; absent/false preserves the provider-
+  // reported cost shown today.
+  computeCostFromRates?: boolean;
   // A/B testing slice C sub-toggle: whether variant / experiment-arm runs are
   // auto-graded (per-arm rubric eval + the pairwise judge) at their terminal
   // status, on top of the global codeReviewEvalEnabled toggle above. Absent =
