@@ -1,5 +1,5 @@
 /**
- * AgentRail — shell for the global "cyboflow agent" rail (S1.1).
+ * AgentRail — shell for the global "cyboflow assistant" rail (S1.1).
  *
  * Mounted by App.tsx as a flex SIBLING of the view-switch div, gated by
  * {@link shouldShowAgentRail} (`view !== 'session' && view !== 'wizard'`) so
@@ -141,8 +141,8 @@ export function AgentRail() {
         <button
           type="button"
           data-testid="agent-rail-expand"
-          aria-label="Expand cyboflow agent"
-          title="Expand cyboflow agent"
+          aria-label="Expand cyboflow assistant"
+          title="Expand cyboflow assistant"
           onClick={handleToggleCollapse}
           className="flex h-8 w-full items-center justify-center text-text-tertiary hover:text-text-primary"
         >
@@ -163,7 +163,7 @@ export function AgentRail() {
         data-testid="agent-rail-resize-handle"
         role="separator"
         aria-orientation="vertical"
-        aria-label="Resize cyboflow agent rail"
+        aria-label="Resize cyboflow assistant rail"
         onMouseDown={handleResizeDown}
         title="Drag to resize"
         className="absolute left-0 top-0 z-10 h-full w-1.5 -translate-x-1/2 cursor-ew-resize"
@@ -175,8 +175,8 @@ export function AgentRail() {
         <button
           type="button"
           data-testid="agent-rail-collapse"
-          aria-label="Collapse cyboflow agent"
-          title="Collapse cyboflow agent"
+          aria-label="Collapse cyboflow assistant"
+          title="Collapse cyboflow assistant"
           onClick={handleToggleCollapse}
           className="flex h-6 w-6 shrink-0 items-center justify-center text-text-tertiary hover:text-text-primary"
         >
@@ -195,7 +195,7 @@ export function AgentRail() {
         </div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">
-            <h2 className="truncate text-[13px] font-bold text-text-primary">cyboflow agent</h2>
+            <h2 className="truncate text-[13px] font-bold text-text-primary">cyboflow assistant</h2>
             <span
               data-testid="agent-rail-global-chip"
               className="shrink-0 rounded-[4px] border border-interactive px-1.5 py-px text-[9px] font-bold uppercase tracking-[0.14em] text-interactive"
@@ -203,7 +203,6 @@ export function AgentRail() {
               Global
             </span>
           </div>
-          <p className="truncate text-[10px] text-text-tertiary">acts across all sessions</p>
         </div>
       </div>
 

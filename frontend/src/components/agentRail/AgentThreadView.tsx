@@ -52,7 +52,7 @@ export function AgentThreadView(): React.ReactElement {
 
   return (
     <UnifiedChatView
-      name="cyboflow agent"
+      name="cyboflow assistant"
       transport="sdk"
       mode="agent"
       running={sending}

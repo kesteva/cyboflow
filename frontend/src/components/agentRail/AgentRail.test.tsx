@@ -2,7 +2,7 @@
  * AgentRail component tests (S1.1 shell + S1.2 body mount).
  *
  * Behaviors verified:
- *   1. Header renders the glyph mark, title, subtitle, and GLOBAL chip.
+ *   1. Header renders the glyph mark, title, and GLOBAL chip.
  *   2. Body mounts AgentThreadView (the real thread/composer/chips — see
  *      AgentThreadView.test.tsx and agentThreadStore.test.ts for ITS
  *      behavior; mocked here as a stub so the rail-shell tests stay free of
@@ -45,8 +45,8 @@ describe('AgentRail — header', () => {
     render(<AgentRail />);
 
     expect(screen.getByTestId('agent-rail-glyph')).toBeInTheDocument();
-    expect(screen.getByText('cyboflow agent')).toBeInTheDocument();
-    expect(screen.getByText('acts across all sessions')).toBeInTheDocument();
+    expect(screen.getByText('cyboflow assistant')).toBeInTheDocument();
+    expect(screen.queryByText('acts across all sessions')).not.toBeInTheDocument();
     const chip = screen.getByTestId('agent-rail-global-chip');
     expect(chip).toBeInTheDocument();
     expect(chip).toHaveTextContent('Global');

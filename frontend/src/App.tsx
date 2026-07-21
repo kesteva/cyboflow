@@ -377,7 +377,7 @@ function App() {
               </ErrorBoundary>
             )}
           </div>
-          {/* Global "cyboflow agent" rail — every landing-family surface
+          {/* Global "cyboflow assistant" rail — every landing-family surface
               except the session workspace (RunRightRail) and the wizard. */}
           {shouldShowAgentRail(view) && <AgentRail />}
         </div>
