@@ -238,6 +238,18 @@ const GLOBAL_AGENT_TOOLS = [
     },
   },
   {
+    name: 'cyboflow_db_query',
+    description:
+      "READ-ONLY, cross-project ad-hoc SQL diagnostic query — for questions the other curated tools can't answer (e.g. 'why did session X get stuck', an event timeline, token usage). Runs on a DEDICATED readonly database connection: read-only is enforced by that connection itself, not merely by validation, so a write attempt is refused regardless. A single SELECT, WITH, or EXPLAIN statement only — no ATTACH, no PRAGMA, no multiple statements (';' followed by more SQL is rejected). Explore the schema first with `SELECT name, sql FROM sqlite_master WHERE type='table'`. Results are capped (200 rows, ~100KB). Prefer the curated tools (cyboflow_overview / _backlog / _entity / _queue / _workflows / _workflow) when they already answer the question — reach for this only when they don't.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sql: { type: 'string', description: 'A single read-only SQL statement (SELECT/WITH/EXPLAIN) (required)' },
+      },
+      required: ['sql'],
+    },
+  },
+  {
     name: 'cyboflow_propose_action',
     description:
       "THE ONLY write-shaped tool available to the global agent. Records a proposal — a candidate action for a human to review — and returns { proposalId }. Calling this tool NEVER executes anything: no run is launched, no task is reprioritized, no workflow is edited, nothing navigates. A human must explicitly confirm the resulting proposal card before any side effect happens, and confirmation runs through the SAME chokepoints every other write in this app uses (TaskChangeRouter / WorkflowRegistry / RunLauncher), stamped actor:'user'. After calling this tool, STOP and describe the proposal in your reply — do NOT claim the action happened, and do NOT poll or retry waiting for it to happen. `payload_json` is a JSON-encoded object (field names camelCase, matching shared/types/agentThread.ts AgentProposalPayload exactly) whose `kind` selects its shape: launch-run {kind,projectId,workflowName,substrate?,taskIds?,ideaIds?,findingIds?,note?}; reprioritize-backlog {kind,projectId,items:[{taskId,priority?,stageId?}]}; edit-workflow {kind,workflowId,definitionJson,summary?} (preconditions — the current spec hash — are captured server-side from a fresh read, never trusted from the caller, even if you include one); open-session {kind,navigation:{target:'run',runId}|{target:'quick-session',sessionId,runId?}}. An unrecognized kind or a payload missing a kind's required fields is rejected with 'invalid_payload'.",
@@ -979,6 +991,15 @@ async function handleGlobalAgentCallTool(request: {
         return invalidArgs('workflow_id: string');
       }
       return executeMcpQuery('mcp-workflow', { workflowId: workflow_id });
+    }
+
+    case 'cyboflow_db_query': {
+      const args = (request.params.arguments ?? {}) as { sql?: unknown };
+      const { sql } = args;
+      if (typeof sql !== 'string' || sql.length === 0) {
+        return invalidArgs('sql: string (a single read-only SELECT/WITH/EXPLAIN statement)');
+      }
+      return executeMcpQuery('mcp-db-query', { sql });
     }
 
     case 'cyboflow_propose_action': {

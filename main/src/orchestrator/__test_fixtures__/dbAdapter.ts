@@ -12,5 +12,6 @@ export function dbAdapter(db: Database.Database): DatabaseLike {
     prepare: (sql: string) => db.prepare(sql),
     transaction: <T>(fn: (...args: unknown[]) => T) =>
       db.transaction(fn as (...args: unknown[]) => T) as (...args: unknown[]) => T,
+    name: db.name,
   };
 }

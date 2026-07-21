@@ -28,6 +28,18 @@ export interface PreparedStatement {
 export interface DatabaseLike {
   prepare(sql: string): PreparedStatement;
   transaction<T>(fn: (...args: unknown[]) => T): (...args: unknown[]) => T;
+  /**
+   * OPTIONAL on-disk file path of the underlying database (mirrors
+   * better-sqlite3's `Database.name`). Deliberately optional — the dozens of
+   * hand-rolled fake `DatabaseLike` literals across the test suite omit it,
+   * and that must keep compiling. Only the two real adapters (loggerAdapter's
+   * `makeDatabaseLike` and the `dbAdapter` test fixture) populate it, from the
+   * real better-sqlite3 handle they wrap. Consumers that need a real on-disk
+   * path (e.g. mcpQueryHandler's readonly `cyboflow_db_query` sibling
+   * connection) must treat an absent/empty value or ':memory:' as
+   * "unavailable" and fail gracefully rather than assume it is set.
+   */
+  readonly name?: string;
 }
 
 // ---------------------------------------------------------------------------

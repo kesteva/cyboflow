@@ -89,6 +89,12 @@ Rules that follow directly from this:
   returns \`spec_hash\`; the server independently re-captures that hash at
   propose time as the real CAS precondition, but fetching fresh yourself is
   what keeps your edit honest about what it's actually changing.
+- \`cyboflow_db_query\` (\`sql\`) — READ-ONLY ad-hoc SQL for diagnostics the
+  tools above can't answer (why a session is stuck, an event timeline, token
+  usage). A single SELECT/WITH/EXPLAIN statement, capped results. Explore the
+  schema first with \`SELECT name, sql FROM sqlite_master WHERE
+  type='table'\`. Prefer the curated tools above when they already answer the
+  question.
 - \`cyboflow_propose_action\` (\`payload_json\`: a JSON-encoded string) — the
   only write. Its \`kind\` selects the payload shape (camelCase fields):
   - \`launch-run\`: \`{kind, projectId, workflowName, substrate?, taskIds?,

@@ -60,6 +60,12 @@
 import * as net from 'net';
 import * as path from 'path';
 import { existsSync, lstatSync, statSync, realpathSync } from 'fs';
+// Only cyboflow_db_query's readonly sibling connection needs a real
+// better-sqlite3 handle — every other query in this file goes through the
+// injected DatabaseLike `this.db`. This file carries no standalone-typecheck
+// invariant (unlike orchSocketServer.ts, which must stay import-clean of
+// 'better-sqlite3'/'electron' so runLauncher.ts's structural boundary holds).
+import BetterSqlite3Database from 'better-sqlite3';
 import type { DatabaseLike, LoggerLike } from '../types';
 import { getCyboflowSubdirectory } from '../../utils/cyboflowDirectory';
 import { resolveWorkflowDefinition, isPermissionMode, isCyboflowWorkflowName } from '../../../../shared/types/workflows';
@@ -579,6 +585,21 @@ export type McpQueryMessage =
       payloadJson: string;
     }
   | {
+      /**
+       * READ-ONLY, cross-project ad-hoc SQL diagnostic query. Executed on a
+       * DEDICATED readonly better-sqlite3 connection (opened `{ readonly:
+       * true }` against the same on-disk file the orchestrator db already
+       * points at) — read-only is enforced BY CONSTRUCTION, not merely by the
+       * statement-shape validation the handler also applies as
+       * defense-in-depth. A single SELECT/WITH/EXPLAIN statement only;
+       * results capped at 200 rows / ~100KB serialized.
+       */
+      type: 'mcp-db-query';
+      requestId: string;
+      runId: string;
+      sql: string;
+    }
+  | {
       type: 'shell-approval-request';
       requestId: string;
       runId: string;
@@ -639,6 +660,129 @@ export function resolveGlobalAgentContext(
     return { ok: false, error: 'not_a_global_agent_run' };
   }
   return { ok: true, threadId: runId.slice(AGENT_THREAD_SPAWN_PREFIX.length) };
+}
+
+// ---------------------------------------------------------------------------
+// cyboflow_db_query statement-shape validation (S0.4 global-agent) — pure,
+// throws nothing. This is DEFENSE-IN-DEPTH: the primary read-only guarantee
+// comes from executing on a dedicated `{ readonly: true }` better-sqlite3
+// connection (see getGlobalAgentReadonlyDb below), which SQLite itself
+// refuses to write through regardless of what slips past this validator.
+// ---------------------------------------------------------------------------
+
+const DB_QUERY_MAX_ROWS = 200;
+const DB_QUERY_MAX_PAYLOAD_BYTES = 100_000;
+const DB_QUERY_MAX_STRING_LEN = 2000;
+
+const READER_KEYWORD_RE = /^(SELECT|WITH|EXPLAIN)\b/i;
+const FORBIDDEN_KEYWORD_RE = /\b(ATTACH|PRAGMA)\b/i;
+
+/** Strips leading whitespace and leading `--`/`/* *\/` comments (repeatedly,
+ * since a query may open with several comment lines before the keyword). */
+function stripLeadingSqlComments(sql: string): string {
+  let s = sql;
+  for (;;) {
+    const trimmed = s.replace(/^\s+/, '');
+    if (trimmed.startsWith('--')) {
+      const nl = trimmed.indexOf('\n');
+      s = nl === -1 ? '' : trimmed.slice(nl + 1);
+      continue;
+    }
+    if (trimmed.startsWith('/*')) {
+      const end = trimmed.indexOf('*/');
+      s = end === -1 ? '' : trimmed.slice(end + 2);
+      continue;
+    }
+    return trimmed;
+  }
+}
+
+/**
+ * True when non-whitespace, non-comment SQL content follows the first
+ * top-level `;` — i.e. more than one statement was submitted. Skips over
+ * single-quoted string literals (SQL's `''` escape) and comments while
+ * scanning so a `;` inside a string literal doesn't false-positive.
+ */
+function hasTrailingStatement(sql: string): boolean {
+  let i = 0;
+  let inString = false;
+  while (i < sql.length) {
+    const ch = sql[i];
+    if (inString) {
+      if (ch === "'") {
+        if (sql[i + 1] === "'") { i += 2; continue; }
+        inString = false;
+      }
+      i += 1;
+      continue;
+    }
+    if (ch === "'") { inString = true; i += 1; continue; }
+    if (ch === '-' && sql[i + 1] === '-') {
+      const nl = sql.indexOf('\n', i);
+      i = nl === -1 ? sql.length : nl + 1;
+      continue;
+    }
+    if (ch === '/' && sql[i + 1] === '*') {
+      const end = sql.indexOf('*/', i + 2);
+      i = end === -1 ? sql.length : end + 2;
+      continue;
+    }
+    if (ch === ';') {
+      return stripLeadingSqlComments(sql.slice(i + 1)).length > 0;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+type DbQueryValidation =
+  | { ok: true; sql: string }
+  | { ok: false; reason: 'empty_sql' | 'not_a_select' | 'multiple_statements' | 'forbidden_keyword' };
+
+function validateReadonlySql(rawSql: unknown): DbQueryValidation {
+  if (typeof rawSql !== 'string' || rawSql.trim().length === 0) {
+    return { ok: false, reason: 'empty_sql' };
+  }
+  const stripped = stripLeadingSqlComments(rawSql);
+  if (stripped.length === 0) {
+    return { ok: false, reason: 'empty_sql' };
+  }
+  if (!READER_KEYWORD_RE.test(stripped)) {
+    return { ok: false, reason: 'not_a_select' };
+  }
+  // Scanned over the WHOLE raw string (not just the stripped head) — ATTACH /
+  // PRAGMA are rejected wherever they appear, including mid-statement.
+  if (FORBIDDEN_KEYWORD_RE.test(rawSql)) {
+    return { ok: false, reason: 'forbidden_keyword' };
+  }
+  if (hasTrailingStatement(rawSql)) {
+    return { ok: false, reason: 'multiple_statements' };
+  }
+  return { ok: true, sql: rawSql };
+}
+
+/** Row-value sanitization shared by the cyboflow_db_query result path. */
+function sanitizeDbQueryValue(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return value.length > DB_QUERY_MAX_STRING_LEN
+      ? `${value.slice(0, DB_QUERY_MAX_STRING_LEN)}…[truncated]`
+      : value;
+  }
+  if (typeof value === 'bigint') {
+    return Number.isSafeInteger(Number(value)) ? Number(value) : value.toString();
+  }
+  if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+    return `<blob ${value.length} bytes>`;
+  }
+  return value;
+}
+
+function sanitizeDbQueryRow(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(row)) {
+    out[key] = sanitizeDbQueryValue(value);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -981,6 +1125,16 @@ export class McpQueryHandler {
   private readonly inFlightShellApprovals = new Map<string, Set<InFlightShellApproval>>();
 
   /**
+   * Lazily-opened, cached readonly sibling connection backing
+   * cyboflow_db_query (mcp-db-query). Opened once on first use against
+   * `this.db.name` (the on-disk file path the injected DatabaseLike wraps)
+   * and reused for the process lifetime — mirrors the main db connection's
+   * own lifetime, so no explicit dispose path is needed here (this class has
+   * no existing close()/dispose() to hook into).
+   */
+  private globalAgentReadonlyDb: BetterSqlite3Database.Database | null = null;
+
+  /**
    * @param db     Orchestrator DB surface.
    * @param logger Optional structured logger. Passed through for connect /
    *               disconnect / precondition diagnostics on the shell-approval
@@ -1133,6 +1287,9 @@ export class McpQueryHandler {
           break;
         case 'mcp-propose-action':
           this.handleProposeAction(msg, client);
+          break;
+        case 'mcp-db-query':
+          this.handleAgentDbQuery(msg, client);
           break;
         case 'shell-approval-request':
           // Async-deferred — the FIRST handler that does NOT writeResponse
@@ -4636,6 +4793,92 @@ export class McpQueryHandler {
       requestId: msg.requestId,
       ok: true,
       data: { proposalId: proposal.id },
+    });
+  }
+
+  /**
+   * Returns the cached readonly sibling connection, opening it on first use.
+   * Throws (never returns a connection able to write) when `this.db.name` is
+   * absent/empty or ':memory:' — an in-memory or adapter-less DatabaseLike
+   * has no on-disk file for a sibling connection to point at (this is the
+   * common shape in unit tests that don't go through makeDatabaseLike/
+   * dbAdapter). Read-only is enforced BY CONSTRUCTION here via `{ readonly:
+   * true }` — SQLite itself refuses any write attempted through this handle,
+   * independent of validateReadonlySql's statement-shape checks.
+   */
+  private getGlobalAgentReadonlyDb(): BetterSqlite3Database.Database {
+    if (this.globalAgentReadonlyDb) return this.globalAgentReadonlyDb;
+    const dbPath = this.db.name;
+    if (!dbPath || dbPath === ':memory:') {
+      throw new Error('db_query_unavailable: no on-disk database file for this connection');
+    }
+    this.globalAgentReadonlyDb = new BetterSqlite3Database(dbPath, { readonly: true, fileMustExist: true });
+    return this.globalAgentReadonlyDb;
+  }
+
+  private handleAgentDbQuery(
+    msg: Extract<McpQueryMessage, { type: 'mcp-db-query' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+
+    const validation = validateReadonlySql(msg.sql);
+    if (!validation.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: validation.reason });
+      return;
+    }
+
+    // Errors from here (unreachable db file, sqlite syntax errors, unknown
+    // tables, or SQLite's own readonly-connection write refusal) are left to
+    // propagate — handleMessage's outer try/catch turns them into a
+    // structured ok:false response carrying sqlite's message, same as every
+    // other handler in this file.
+    const readonlyDb = this.getGlobalAgentReadonlyDb();
+    const stmt = readonlyDb.prepare(validation.sql);
+
+    if (!stmt.reader) {
+      // A non-reader statement (e.g. a write form that slipped past
+      // validateReadonlySql, such as `WITH x AS (SELECT 1) INSERT ...`) is
+      // NEVER executed — calling .run() is exactly the write attempt the
+      // readonly connection exists to prevent, so we simply decline rather
+      // than let SQLite throw mid-write.
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { columns: [], rows: [], rowCount: 0, truncated: false, note: 'statement returned no rows' },
+      });
+      return;
+    }
+
+    const columns = stmt.columns().map((c) => c.name);
+    const rows: Array<Record<string, unknown>> = [];
+    let truncated = false;
+    let payloadBytes = 0;
+    for (const rawRow of stmt.iterate()) {
+      if (rows.length >= DB_QUERY_MAX_ROWS) {
+        truncated = true;
+        break;
+      }
+      const sanitized = sanitizeDbQueryRow(rawRow as Record<string, unknown>);
+      const size = Buffer.byteLength(JSON.stringify(sanitized), 'utf8');
+      if (rows.length > 0 && payloadBytes + size > DB_QUERY_MAX_PAYLOAD_BYTES) {
+        truncated = true;
+        break;
+      }
+      rows.push(sanitized);
+      payloadBytes += size;
+    }
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { columns, rows, rowCount: rows.length, truncated },
     });
   }
 

@@ -53,10 +53,16 @@ export function makeDatabaseLike(databaseService: {
   getDb: () => {
     prepare: DatabaseLike['prepare'];
     transaction: DatabaseLike['transaction'];
+    name: string;
   };
 }): DatabaseLike {
   return {
     prepare: (sql) => databaseService.getDb().prepare(sql),
     transaction: (fn) => databaseService.getDb().transaction(fn),
+    // The real better-sqlite3 Database.Database structurally satisfies this
+    // (its .name is the on-disk file path) — threaded through so
+    // mcpQueryHandler's cyboflow_db_query tool can open a readonly sibling
+    // connection without this adapter importing better-sqlite3 itself.
+    name: databaseService.getDb().name,
   };
 }

@@ -106,12 +106,13 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Re
 }
 
 describe('cyboflowMcpServer ListTools (CYBOFLOW_MCP_SCOPE=global-agent)', () => {
-  it('advertises EXACTLY the 7-tool global-agent family — no run-scoped tool leaks in', async () => {
+  it('advertises EXACTLY the 8-tool global-agent family — no run-scoped tool leaks in', async () => {
     const tools = await listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(
       [
         'cyboflow_backlog',
+        'cyboflow_db_query',
         'cyboflow_entity',
         'cyboflow_overview',
         'cyboflow_propose_action',
@@ -120,6 +121,11 @@ describe('cyboflowMcpServer ListTools (CYBOFLOW_MCP_SCOPE=global-agent)', () => 
         'cyboflow_workflows',
       ].sort(),
     );
+  });
+
+  it('cyboflow_db_query requires sql', async () => {
+    const tools = await listTools();
+    expect(tools.find((t) => t.name === 'cyboflow_db_query')!.inputSchema.required).toEqual(['sql']);
   });
 
   it("cyboflow_propose_action's description states the promptable contract (never executes; human must confirm)", async () => {
@@ -177,5 +183,12 @@ describe('cyboflowMcpServer CallTool (CYBOFLOW_MCP_SCOPE=global-agent)', () => {
     expect(await callTool('cyboflow_backlog', { task_type: 'not-a-real-type' })).toMatchObject({
       error: 'invalid_arguments',
     });
+  });
+
+  it('cyboflow_db_query rejects a missing sql without dispatching, and dispatches a valid call', async () => {
+    expect(await callTool('cyboflow_db_query', {})).toMatchObject({ error: 'invalid_arguments' });
+
+    const valid = await callTool('cyboflow_db_query', { sql: 'SELECT 1' });
+    expect(valid.error).toBe('[Cyboflow MCP] IPC client not connected');
   });
 });

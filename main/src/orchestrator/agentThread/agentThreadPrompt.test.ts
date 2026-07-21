@@ -32,6 +32,7 @@ describe('agentThreadPrompt', () => {
       'cyboflow_queue',
       'cyboflow_workflows',
       'cyboflow_workflow',
+      'cyboflow_db_query',
     ]) {
       expect(prompt).toContain(tool);
     }
