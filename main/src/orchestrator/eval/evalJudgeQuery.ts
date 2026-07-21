@@ -1,6 +1,7 @@
 /**
  * evalJudgeQuery — the SDK boundary for the code-review eval jury. This is the
- * ONLY `@anthropic-ai/claude-agent-sdk` importer in the eval/ tree, exactly
+ * ONLY `@anthropic-ai/claude-agent-sdk` caller in the eval/ tree (value-loaded
+ * lazily via utils/lazyAgentSdk so app boot never parses the SDK), exactly
  * mirroring monitorQuery.ts in the programmatic/ tree: keeping the jury, worker,
  * scoring, and snapshot SDK-free means they stay standalone-typecheckable and the
  * jury is fully fakeable in tests (inject a `EvalStructuredQueryFn` that returns a
@@ -24,7 +25,7 @@
  * Standalone-typecheck note: nothing here imports electron / better-sqlite3 / a
  * concrete service beyond the claude-exe resolver and the pure model-alias helper.
  */
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { loadSdkQuery } from '../../utils/lazyAgentSdk';
 import type { LoggerLike } from '../types';
 import { resolveClaudeExecutablePath } from '../../services/panels/claude/claudeExecutablePath';
 
@@ -108,6 +109,7 @@ export function makeEvalJudgeQuery(
       // cleanly on its own. (Contrast claudeCodeManager's flow turns, which MUST
       // stream input to keep the AskUserQuestion gate alive; see
       // services/panels/claude/streamingPromptInput.ts.)
+      const query = await loadSdkQuery();
       const q = query({
         prompt,
         options: {

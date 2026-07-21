@@ -1,7 +1,8 @@
 /**
  * pairwiseJudgeQuery — the SDK boundary for the A/B pairwise judge (slice C). A
  * sibling of evalJudgeQuery.ts: the ONLY `@anthropic-ai/claude-agent-sdk`
- * importer in the pairwise tree, so the worker, scoring, and prompt-build modules
+ * caller in the pairwise tree (value-loaded lazily via utils/lazyAgentSdk so app
+ * boot never parses the SDK), so the worker, scoring, and prompt-build modules
  * stay standalone-typecheckable and fully fakeable (inject a
  * `PairwiseStructuredQueryFn` that returns a canned object — no claude
  * subprocess).
@@ -28,7 +29,7 @@
  * Standalone-typecheck note: nothing here imports electron / better-sqlite3 / a
  * concrete service beyond the claude-exe resolver.
  */
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { loadSdkQuery } from '../../utils/lazyAgentSdk';
 import type { LoggerLike } from '../types';
 import { resolveClaudeExecutablePath } from '../../services/panels/claude/claudeExecutablePath';
 
@@ -100,6 +101,7 @@ export function makePairwiseJudgeQuery(
   return async ({ prompt, schema, model, signal }) => {
     const { controller, didTimeOut, cleanup } = makeDeadline(timeoutMs, signal);
     try {
+      const query = await loadSdkQuery();
       const q = query({
         prompt,
         options: {

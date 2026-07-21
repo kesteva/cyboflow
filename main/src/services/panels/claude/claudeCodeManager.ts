@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { randomUUID, createHash } from 'crypto';
 import { app } from 'electron';
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { loadSdkQuery } from '../../../utils/lazyAgentSdk';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
 import { readInstalledPluginIds, buildExclusiveEnabledPluginsMap } from '../../../orchestrator/integrations/installedPlugins';
 import { resolveClaudeExecutablePath } from './claudeExecutablePath';
@@ -1680,6 +1680,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
         const closeInputOnAbort = (): void => promptInput.close();
         abortController.signal.addEventListener('abort', closeInputOnAbort, { once: true });
         try {
+          const query = await loadSdkQuery();
           const q = query({ prompt: promptInput.stream, options: { ...activeOptions, abortController } });
           for await (const event of q) {
             if (firstEventTimer) {

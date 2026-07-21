@@ -9,7 +9,8 @@
  * fabricates a pass/fail.
  *
  * SDK boundary, mirroring main/src/orchestrator/programmatic/monitorQuery.ts: the
- * only `@anthropic-ai/claude-agent-sdk` importer here. The model + executable path
+ * only `@anthropic-ai/claude-agent-sdk` caller here (value-loaded lazily via
+ * utils/lazyAgentSdk so app boot never parses the SDK). The model + executable path
  * are injected so the call is isolated and fully fakeable (tests pass a mocked
  * `runQuery` and never touch the network). Images are read from artifactsDir and
  * sent inline as base64 image blocks via the async-iterable prompt, so judging
@@ -20,8 +21,8 @@
  */
 import { readFile } from 'node:fs/promises';
 import { extname, join, basename } from 'node:path';
-import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { loadSdkQuery } from '../../utils/lazyAgentSdk';
 import type { LoggerLike } from '../../orchestrator/types';
 import type {
   VerdictV1,
@@ -233,6 +234,7 @@ export function makeSdkVisionQuery(
     else signal.addEventListener('abort', onAbort, { once: true });
 
     try {
+      const query = await loadSdkQuery();
       const q = query({
         prompt,
         options: {

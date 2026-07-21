@@ -1,8 +1,9 @@
 /**
  * monitorQuery — the SDK boundary for the on-demand monitor (the unify-monitor
  * refactor; supersedes the Stage 3 one-shot supervisor query). This is the ONLY
- * `@anthropic-ai/claude-agent-sdk` importer in the programmatic/ tree after the
- * refactor, keeping the monitor brain (`monitor.ts`), the controller, and the host
+ * `@anthropic-ai/claude-agent-sdk` caller in the programmatic/ tree after the
+ * refactor (value-loaded lazily via utils/lazyAgentSdk so app boot never parses
+ * the SDK), keeping the monitor brain (`monitor.ts`), the controller, and the host
  * SDK-free so they stay standalone-typecheckable and exhaustively fakeable.
  *
  * It exposes TWO fakeable function shapes the monitor brain depends on:
@@ -26,7 +27,7 @@
  * Standalone-typecheck note: this is the SDK-importing leaf; nothing here imports
  * electron / better-sqlite3 / a concrete service beyond the claude-exe resolver.
  */
-import { query } from '@anthropic-ai/claude-agent-sdk';
+import { loadSdkQuery } from '../../utils/lazyAgentSdk';
 import type { LoggerLike } from '../types';
 import { resolveClaudeExecutablePath } from '../../services/panels/claude/claudeExecutablePath';
 import { emitSeamError } from '../telemetrySink';
@@ -144,6 +145,7 @@ export function makeSdkStructuredQuery(
       // interactive canUseTool "ask" — so it needs no stdin held open for control
       // roundtrips and terminates cleanly after the result. (Flow turns in
       // claudeCodeManager MUST stream input; see streamingPromptInput.ts.)
+      const query = await loadSdkQuery();
       const q = query({
         prompt,
         options: {
@@ -207,6 +209,7 @@ export function makeSdkTextQuery(
       // Single-shot STRING prompt (not streaming-input): same rationale as the
       // structured query above — read-only, no interactive tools, terminates on
       // its own. See streamingPromptInput.ts for the flow-turn streaming case.
+      const query = await loadSdkQuery();
       const q = query({
         prompt,
         options: {
