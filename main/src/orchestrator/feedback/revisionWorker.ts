@@ -27,8 +27,8 @@ import {
   ARCH_DESIGN_HEADING_LINE_RE,
   ARCH_DESIGN_SECTION_HEADING,
   extractArchDesignSection,
-  FENCE_LINE_RE,
   H2_LINE_RE,
+  makeFenceState,
   replaceArchDesignSection,
 } from '../../../../shared/types/artifacts';
 import { hashDocumentText, type FeedbackAtype } from '../../../../shared/types/feedback';
@@ -441,19 +441,17 @@ function composeNewBody(atype: FeedbackAtype, originalBody: string, revisedDocum
  */
 function validateArchSection(doc: string): { ok: true; section: string } | { ok: false } {
   const lines = doc.split(/\r?\n/);
-  let inFence = false;
+  const fence = makeFenceState();
   const h2Indices: number[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (FENCE_LINE_RE.test(line)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) continue;
+    if (fence.handleLine(line)) continue;
+    if (fence.inFence()) continue;
     if (H2_LINE_RE.test(line)) h2Indices.push(i);
   }
-  // Unterminated fence: unsafe to splice regardless of heading shape.
-  if (inFence) return { ok: false };
+  // Unterminated fence (including a ``` opener "closed" only by a mismatched
+  // ~~~ or a shorter run): unsafe to splice regardless of heading shape.
+  if (fence.inFence()) return { ok: false };
 
   const firstNonBlankIdx = lines.findIndex((l) => l.trim().length > 0);
   const firstNonBlank = firstNonBlankIdx === -1 ? '' : lines[firstNonBlankIdx];

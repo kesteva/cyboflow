@@ -178,4 +178,44 @@ describe('replaceArchDesignSection', () => {
       );
     }
   });
+
+  // Fence pairing (makeFenceState): a fence closes only on a MATCHING marker —
+  // same char, run ≥ opener. The naive toggle this replaced treated any ```/~~~
+  // line as a close, so a ~~~ inside a ``` fence flipped the state and let the
+  // fenced '## ' lines below it terminate (or spoof) sections.
+  it('a ~~~ line inside a ``` fence is content — fenced H2s stay fenced past it', () => {
+    const body = [
+      `${HEADING}`,
+      '',
+      'intro.',
+      '```md',
+      '~~~',
+      '## fenced heading (still inside the ``` fence)',
+      '```',
+      '',
+      'outro.',
+      '',
+      '## After',
+      'z',
+    ].join('\n');
+    // The fenced '## ...' must NOT terminate the section; '## After' does.
+    expect(extractArchDesignSection(body)).toBe(
+      'intro.\n```md\n~~~\n## fenced heading (still inside the ``` fence)\n```\n\noutro.',
+    );
+  });
+
+  it('a shorter closing run does not close a longer opener (````md needs ≥ 4 backticks)', () => {
+    const body = [
+      `${HEADING}`,
+      '',
+      '````md',
+      '```',
+      '## still fenced',
+      '````',
+      '',
+      '## After',
+      'z',
+    ].join('\n');
+    expect(extractArchDesignSection(body)).toBe('````md\n```\n## still fenced\n````');
+  });
 });

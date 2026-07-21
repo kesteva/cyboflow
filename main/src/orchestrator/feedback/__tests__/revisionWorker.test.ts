@@ -560,4 +560,77 @@ describe('runRevisionBatch', () => {
     const batch = db.prepare('SELECT status FROM feedback_batches WHERE id = ?').get(batchId) as { status: string };
     expect(batch.status).toBe('failed');
   });
+
+  it('arch-design output with a ``` fence "closed" by ~~~ → batch-failed (mismatched delimiters)', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    seedIdea(db, 'ide_1', '# Idea\n\nIntro.\n\n## Architecture design\n\nOld.\n\n## Rollout\n\nShip.');
+    const router = FeedbackRouter.initialize(dbAdapter(db));
+    const batchId = await seedSentBatch(router, 'run-1', 'arch-design', 'ide_1');
+
+    const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
+    await runRevisionBatch(
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'arch-design', sourceRef: 'ide_1' },
+      {
+        db: dbAdapter(db),
+        // CommonMark: a ``` fence only closes on a matching ``` run — the ~~~ is
+        // fence CONTENT, so the backtick fence is still open at EOF and would
+        // swallow the idea body's following sections after the splice.
+        queryFn: fakeQuery('## Architecture design\n\nNew.\n\n```md\ncode\n~~~'),
+        feedbackRouter: router,
+        applyTaskChange,
+      },
+    );
+
+    expect(applyTaskChange).not.toHaveBeenCalled();
+    const batch = db.prepare('SELECT status FROM feedback_batches WHERE id = ?').get(batchId) as { status: string };
+    expect(batch.status).toBe('failed');
+  });
+
+  it('arch-design output closing a ```` fence with a shorter ``` run → batch-failed', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    seedIdea(db, 'ide_1', '# Idea\n\nIntro.\n\n## Architecture design\n\nOld.\n\n## Rollout\n\nShip.');
+    const router = FeedbackRouter.initialize(dbAdapter(db));
+    const batchId = await seedSentBatch(router, 'run-1', 'arch-design', 'ide_1');
+
+    const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
+    await runRevisionBatch(
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'arch-design', sourceRef: 'ide_1' },
+      {
+        // A 4-backtick opener needs a closing run of ≥4; the 3-run line is content.
+        db: dbAdapter(db),
+        queryFn: fakeQuery('## Architecture design\n\nNew.\n\n````md\ncode\n```'),
+        feedbackRouter: router,
+        applyTaskChange,
+      },
+    );
+
+    expect(applyTaskChange).not.toHaveBeenCalled();
+    const batch = db.prepare('SELECT status FROM feedback_batches WHERE id = ?').get(batchId) as { status: string };
+    expect(batch.status).toBe('failed');
+  });
+
+  it('arch-design output with correctly paired mixed fences (``` then ~~~ blocks) → accepted', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    seedIdea(db, 'ide_1', '# Idea\n\nIntro.\n\n## Architecture design\n\nOld.\n\n## Rollout\n\nShip.');
+    const router = FeedbackRouter.initialize(dbAdapter(db));
+    const batchId = await seedSentBatch(router, 'run-1', 'arch-design', 'ide_1');
+
+    const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
+    await runRevisionBatch(
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'arch-design', sourceRef: 'ide_1' },
+      {
+        db: dbAdapter(db),
+        queryFn: fakeQuery('## Architecture design\n\nNew.\n\n```md\n## fenced\n```\n\n~~~\n## also fenced\n~~~'),
+        feedbackRouter: router,
+        applyTaskChange,
+      },
+    );
+
+    expect(applyTaskChange).toHaveBeenCalledTimes(1);
+    const batch = db.prepare('SELECT status FROM feedback_batches WHERE id = ?').get(batchId) as { status: string };
+    expect(batch.status).toBe('applied');
+  });
 });

@@ -151,8 +151,50 @@ export const ARCH_DESIGN_HEADING_LINE_RE = new RegExp(
  */
 export const H2_LINE_RE = /^##(?:[ \t]|$)/;
 
-/** A ``` / ~~~ fence line (CommonMark allows up to 3 leading spaces). Exported for the same grammar-parity reason as {@link H2_LINE_RE}. */
-export const FENCE_LINE_RE = /^ {0,3}(?:```|~~~)/;
+/**
+ * Stateful fenced-code-block tracker shared by the section extractor, the
+ * section replacer, and agent-output validators (revisionWorker) — ONE fence
+ * grammar so a document one of them accepts can never be mis-parsed by another.
+ *
+ * CommonMark-ish pairing (the part that matters for section boundaries): a
+ * fence opens on ``` or ~~~ (3+ run, ≤3 leading spaces, optional info string)
+ * and closes ONLY on a matching marker — same character, run length ≥ the
+ * opener's, nothing but whitespace after. A non-matching marker line inside an
+ * open fence is CONTENT (the naive toggle this replaces treated it as a close,
+ * so a ``` fence "closed" by ~~~ silently swallowed everything after it).
+ */
+export interface FenceState {
+  /** Feed one line; returns true when the line IS a fence delimiter (open or close). */
+  handleLine(line: string): boolean;
+  /** True while inside an open fence (after feeding the opener, before a matching closer). */
+  inFence(): boolean;
+}
+
+export function makeFenceState(): FenceState {
+  let open: { char: string; len: number } | null = null;
+  return {
+    handleLine(line: string): boolean {
+      const m = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+      if (!m) return false;
+      const marker = m[1];
+      const char = marker[0];
+      if (open === null) {
+        open = { char, len: marker.length };
+        return true;
+      }
+      // A closing fence must match the opener's char, be at least as long, and
+      // carry no info string. Anything else is fence CONTENT.
+      if (char === open.char && marker.length >= open.len && m[2].trim().length === 0) {
+        open = null;
+        return true;
+      }
+      return false;
+    },
+    inFence(): boolean {
+      return open !== null;
+    },
+  };
+}
 
 /**
  * Extract the '## Architecture design' section from an idea body: everything
@@ -168,17 +210,14 @@ export function extractArchDesignSection(body: string | null | undefined): strin
   if (!body) return null;
   const lines = body.split(/\r?\n/);
 
-  let inFence = false;
+  const fence = makeFenceState();
   let sectionStart = -1; // line index AFTER the most recent heading match
   let sectionEnd = lines.length;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (FENCE_LINE_RE.test(line)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) continue;
+    if (fence.handleLine(line)) continue;
+    if (fence.inFence()) continue;
     if (ARCH_DESIGN_HEADING_LINE_RE.test(line)) {
       // A later heading supersedes any earlier one (last section wins).
       sectionStart = i + 1;
@@ -217,16 +256,13 @@ export function replaceArchDesignSection(body: string | null | undefined, newSec
 
   // Re-run the exact scan extractArchDesignSection uses to locate the span, but
   // keep the heading LINE index (sectionStart - 1) so the whole section is swapped.
-  let inFence = false;
+  const fence = makeFenceState();
   let sectionStart = -1; // line index AFTER the most recent heading match
   let sectionEnd = lines.length;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (FENCE_LINE_RE.test(line)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) continue;
+    if (fence.handleLine(line)) continue;
+    if (fence.inFence()) continue;
     if (ARCH_DESIGN_HEADING_LINE_RE.test(line)) {
       sectionStart = i + 1;
       sectionEnd = lines.length;
