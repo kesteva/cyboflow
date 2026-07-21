@@ -31,16 +31,22 @@ describe('ConfigManager.computeCostFromRates', () => {
     expect(manager.getComputeCostFromRates()).toBe(false);
   });
 
-  it('persists an enabled value and round-trips through a fresh initialize', async () => {
+  it('persists alongside the eval toggle and round-trips through a fresh initialize', async () => {
     const manager = new ConfigManager('/tmp/test-git-path');
     await manager.initialize();
-    await manager.updateConfig({ computeCostFromRates: true });
+    await manager.updateConfig({
+      codeReviewEvalEnabled: false,
+      computeCostFromRates: true,
+    });
 
+    expect(manager.getCodeReviewEvalEnabled()).toBe(false);
     expect(manager.getComputeCostFromRates()).toBe(true);
 
     const reloaded = new ConfigManager('/tmp/test-git-path');
     await reloaded.initialize();
+    expect(reloaded.getConfig().codeReviewEvalEnabled).toBe(false);
     expect(reloaded.getConfig().computeCostFromRates).toBe(true);
+    expect(reloaded.getCodeReviewEvalEnabled()).toBe(false);
     expect(reloaded.getComputeCostFromRates()).toBe(true);
   });
 });
