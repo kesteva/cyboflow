@@ -24,8 +24,11 @@
  * is the precomputed projection of the same `assistant`/`result` scan above —
  * written once at run finalization. The two read-heavy rollup paths
  * (`selectRunUsageRollups` / `selectWorkflowUsageStats`) prefer it and skip the
- * raw_events scan for any run that has one, falling back to the live scan ONLY
- * for runs without a materialized row (historic runs, runs still in flight).
+ * token/cost raw_events scan for any run that has one, falling back to the live
+ * usage scan ONLY for runs without a materialized row (historic runs, runs still
+ * in flight). Model identity is never materialized, so reads still perform a
+ * narrow assistant-event scan for `payload.message.model` (or the provider-
+ * neutral `agent_assistant` shape's top-level `payload.model`).
  * The WRITER of that row (`rollupRunUsage` in runUsageRollup.ts) must NOT use the
  * materialized-first read — it would read back its own stale row on each
  * re-materialization and freeze the values. It takes the force-scan sibling
@@ -286,6 +289,8 @@ const RUN_ID_CHUNK_SIZE = 400;
 function zeroRollup(runId: string): RunUsageRollup {
   return {
     runId,
+    model: null,
+    multiModel: false,
     inputTokens: 0,
     outputTokens: 0,
     cacheReadTokens: 0,
@@ -314,6 +319,10 @@ function rollupFromMaterializedRow(row: RunUsageMaterializedRow): RunUsageRollup
   const outputTokens = asNumber(row.output_tokens);
   return {
     runId: row.run_id,
+    // `run_usage` deliberately has no model columns. selectRunUsageRollups
+    // resolves these fields from assistant-side raw_events at read time.
+    model: null,
+    multiModel: false,
     inputTokens,
     outputTokens,
     cacheReadTokens: asNumber(row.cache_read_tokens),
@@ -326,6 +335,69 @@ function rollupFromMaterializedRow(row: RunUsageMaterializedRow): RunUsageRollup
     startedAt: null,
     endedAt: null,
   };
+}
+
+/** Model-resolution projection accumulated from assistant-side raw events. */
+interface RunModelResolution {
+  model: string | null;
+  multiModel: boolean;
+}
+
+/** Fold one reported model id into an exact-one-vs-many run resolution. */
+function recordRunModel(target: RunModelResolution, value: unknown): void {
+  if (typeof value !== 'string' || target.multiModel) return;
+  if (target.model === null) {
+    target.model = value;
+  } else if (target.model !== value) {
+    target.model = null;
+    target.multiModel = true;
+  }
+}
+
+/** Read the model id from legacy SDK or provider-neutral assistant payloads. */
+function assistantEventModel(eventType: string, payload: Record<string, unknown>): unknown {
+  if (isRecord(payload.message)) return payload.message.model;
+  return eventType === 'agent_assistant' ? payload.model : undefined;
+}
+
+/**
+ * Resolve model cardinality for materialized rollups. Token/cost values still
+ * come exclusively from `run_usage`; only model identity is read from
+ * assistant/provider raw events so no schema column or migration is required.
+ */
+function fetchMaterializedRunModels(
+  db: DatabaseLike,
+  runIds: readonly string[],
+): Map<string, RunModelResolution> {
+  const out = new Map<string, RunModelResolution>();
+  for (const id of runIds) out.set(id, { model: null, multiModel: false });
+  if (runIds.length === 0) return out;
+
+  for (const ids of chunk(runIds, RUN_ID_CHUNK_SIZE)) {
+    const rows = db
+      .prepare(
+        `SELECT run_id AS runId, event_type AS eventType, payload_json AS payloadJson
+         FROM raw_events
+         WHERE run_id IN (${placeholders(ids.length)})
+           AND event_type IN (${placeholders(ASSISTANT_USAGE_EVENT_TYPES.length)})
+         ORDER BY run_id, id`,
+      )
+      .all(...ids, ...ASSISTANT_USAGE_EVENT_TYPES) as RawEventUsageRow[];
+
+    for (const row of rows) {
+      const target = out.get(row.runId);
+      if (target === undefined) continue;
+      let payload: unknown;
+      try {
+        payload = JSON.parse(row.payloadJson);
+      } catch {
+        continue;
+      }
+      if (!isRecord(payload)) continue;
+      recordRunModel(target, assistantEventModel(row.eventType, payload));
+    }
+  }
+  return out;
 }
 
 /**
@@ -416,6 +488,10 @@ function scanRawEventRollups(
       if (!isRecord(payload)) continue;
 
       if (isAssistantUsageEventType(row.eventType)) {
+        // Model resolution is independent of whether this particular assistant
+        // message carried usage; all assistant/provider events identify the
+        // model(s) that participated in the run.
+        recordRunModel(target, assistantEventModel(row.eventType, payload));
         const message = payload.message;
         if (!isRecord(message)) continue;
         const usage = message.usage;
@@ -511,7 +587,8 @@ function fetchRunTimestamps(
 /**
  * Token/cost rollup per run, via a TWO-TIER read (migration 026):
  *   1. Bulk-fetch the materialized `run_usage` rows for all requested ids.
- *      Any run WITH a row maps directly — no raw_events touched.
+ *      Any run WITH a row maps token/cost fields directly; a narrow assistant
+ *      raw_events scan resolves its model(s) at read time.
  *   2. The remaining ids (no materialized row — historic runs, runs still in
  *      flight) fall back to the live `assistant` + `result` raw_events scan.
  * Ids found in NEITHER tier still get a zeroed rollup, so callers can index by
@@ -531,8 +608,17 @@ export function selectRunUsageRollups(
 
   // Tier 1: materialized rows win outright.
   const materialized = fetchMaterializedRollups(db, runIds);
+  const materializedModels = fetchMaterializedRunModels(db, Array.from(materialized.keys()));
+  for (const [id, modelResolution] of materializedModels) {
+    const rollup = materialized.get(id);
+    if (rollup !== undefined) {
+      rollup.model = modelResolution.model;
+      rollup.multiModel = modelResolution.multiModel;
+    }
+  }
 
-  // Tier 2: scan raw_events only for ids that lack a materialized row.
+  // Tier 2: scan usage/result raw_events only for ids that lack a materialized
+  // row (materialized ids already received the narrower model-only scan above).
   const fallbackIds = runIds.filter((id) => !materialized.has(id));
   const scanned =
     fallbackIds.length === 0
@@ -670,8 +756,8 @@ interface RunIdRow {
  * Two-tier benefit: the recent-runs window qualifies a run on EITHER an
  * EXISTS(run_usage) or an EXISTS(raw_events) — so a run whose raw_events were
  * pruned but whose usage was materialized still counts. An early bulk-fetch of
- * the materialized rollups means the run_usage hit path never loads raw_events
- * (`selectRunUsageRollups` scans them only for the fallback ids). The LIMIT is
+ * the materialized rollups means the run_usage hit path never loads token/cost
+ * raw_events; it performs only the narrow model-resolution scan. The LIMIT is
  * applied AFTER the OR, so the N-runs cap semantics are unchanged.
  *
  * @param db                   - Narrow DatabaseLike surface.
@@ -735,7 +821,7 @@ export function selectWorkflowUsageStats(
     ) as RunIdRow[];
     const runIds = runIdRows.map((row) => row.runId);
     // selectRunUsageRollups already does the materialized-first two-tier read,
-    // so run_usage hits here never load raw_events.
+    // so run_usage hits here load only model identity from raw_events, not usage.
     const rollups = selectRunUsageRollups(db, runIds);
 
     const usedRollups = rollups.filter((r) => r.assistantMessageCount > 0);

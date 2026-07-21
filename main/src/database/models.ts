@@ -476,10 +476,13 @@ export interface TaskExternalLinkRow {
 /**
  * `run_usage` row (migration 026) — the durable per-run token/cost rollup, one
  * row per run (run_id PRIMARY KEY, hard-FK -> workflow_runs ON DELETE CASCADE).
- * Persisted twin of shared/types/insights.ts RunUsageRollup: insightsQueries
- * computes the rollup from raw_events and the Phase-2 writer upserts it here.
+ * Persisted token/cost subset of shared/types/insights.ts RunUsageRollup:
+ * insightsQueries computes the rollup from raw_events and the Phase-2 writer
+ * upserts it here.
  * `total_tokens` is input + output. `cost_usd` / `num_turns` are nullable (NULL
- * when no terminal result payload carried them — SDK-only).
+ * when no terminal result payload carried them — SDK-only). Model identity is
+ * intentionally NOT persisted here; selectRunUsageRollups resolves model(s)
+ * from assistant-side raw_events at read time.
  */
 export interface RunUsageRow {
   run_id: string;

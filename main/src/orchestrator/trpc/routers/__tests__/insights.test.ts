@@ -211,6 +211,8 @@ describe('cyboflow.insights.workflowUsage', () => {
 describe('cyboflow.insights.runUsage', () => {
   const rollup: RunUsageRollup = {
     runId: 'run-1',
+    model: 'claude-sonnet-4-5',
+    multiModel: false,
     inputTokens: 100,
     outputTokens: 50,
     cacheReadTokens: 10,
@@ -241,6 +243,8 @@ describe('cyboflow.insights.runUsage', () => {
 
     expect(result).toEqual({
       runId: 'run-empty',
+      model: null,
+      multiModel: false,
       inputTokens: 0,
       outputTokens: 0,
       cacheReadTokens: 0,

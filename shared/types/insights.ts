@@ -53,6 +53,13 @@ export interface WorkflowRunStats {
 /** Token/cost rollup for one run, aggregated from persisted `raw_events`. */
 export interface RunUsageRollup {
   runId: string;
+  /**
+   * The sole model id reported by this run's assistant-side raw events. Null
+   * when no model was reported or when the run used more than one model.
+   */
+  model: string | null;
+  /** True when assistant-side raw events reported more than one distinct model id. */
+  multiModel: boolean;
   /** Sums over `assistant` payloads' message.usage (NOT result.usage — result events double-count turn totals). */
   inputTokens: number;
   outputTokens: number;

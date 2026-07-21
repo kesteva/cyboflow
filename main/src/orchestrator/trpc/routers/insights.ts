@@ -104,6 +104,8 @@ const projectIdSchema = z.number().int().positive().nullable();
 function zeroedRunUsageRollup(runId: string): RunUsageRollup {
   return {
     runId,
+    model: null,
+    multiModel: false,
     inputTokens: 0,
     outputTokens: 0,
     cacheReadTokens: 0,

@@ -37,6 +37,8 @@ vi.mock('../../../stores/errorStore', () => ({
 
 const ROLLUP: RunUsageRollup = {
   runId: 'run-1',
+  model: 'claude-opus-4-5',
+  multiModel: false,
   inputTokens: 13000,
   outputTokens: 3000,
   cacheCreationTokens: 640000,

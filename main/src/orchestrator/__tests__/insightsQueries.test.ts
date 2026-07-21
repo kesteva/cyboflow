@@ -652,6 +652,68 @@ describe('selectRunUsageRollups', () => {
     expect(rollup.assistantMessageCount).toBe(2);
   });
 
+  it('resolves one model from raw_events at read time for a materialized run', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    seedRunUsage(db, {
+      runId: 'r1',
+      inputTokens: 300,
+      outputTokens: 75,
+      assistantMessageCount: 2,
+    });
+    // Model identity is intentionally absent from run_usage, so even this
+    // materialized hit must resolve it from assistant-side raw_events.
+    seedEvent(
+      db,
+      'r1',
+      'assistant',
+      assistantPayloadWithModel('claude-sonnet-4-5', { input: 1, output: 1 }),
+    );
+    seedEvent(db, 'r1', 'agent_assistant', {
+      type: 'agent_message',
+      provider: 'codex',
+      role: 'assistant',
+      model: 'claude-sonnet-4-5',
+      content: [{ type: 'text', text: 'provider-neutral event' }],
+    });
+
+    const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+    expect(rollup).toMatchObject({
+      model: 'claude-sonnet-4-5',
+      multiModel: false,
+      // The raw events supply model identity only; materialized token values win.
+      inputTokens: 300,
+      outputTokens: 75,
+    });
+  });
+
+  it('flags a run with multiple distinct assistant-side models', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    seedEvent(
+      db,
+      'r1',
+      'assistant',
+      assistantPayloadWithModel('claude-opus-4-5', { input: 100, output: 20 }),
+    );
+    seedEvent(
+      db,
+      'r1',
+      'agent_assistant',
+      {
+        type: 'agent_message',
+        provider: 'codex',
+        role: 'assistant',
+        model: 'gpt-5.5',
+        content: [{ type: 'text', text: 'provider-neutral event' }],
+      },
+    );
+
+    const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+    expect(rollup.model).toBeNull();
+    expect(rollup.multiModel).toBe(true);
+  });
+
   it('folds nested subagent usage without counting an assistant message and silently drops a flat payload', () => {
     seedWorkflow(db, { id: 'wf-1' });
     seedRun(db, { id: 'r1', workflowId: 'wf-1' });

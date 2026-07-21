@@ -150,6 +150,8 @@ vi.mock('../../../trpc/client', () => ({
         runUsage: {
           query: vi.fn().mockResolvedValue({
             runId: 'run-planner-1',
+            model: 'claude-opus-4-5',
+            multiModel: false,
             inputTokens: 13000,
             outputTokens: 3000,
             cacheReadTokens: 50000,
