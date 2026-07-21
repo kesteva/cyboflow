@@ -61,6 +61,14 @@ export function draftFromEntry(entry: AgentEntry): AgentDraft {
   // Normalise the enabled set to CLI_TOOLS order so the dirty check is stable
   // regardless of the order the server returned the tools in.
   const enabled = new Set(entry.tools);
+  // Legacy coherence: a pre-migration-070 row can carry a Claude `model` pin with
+  // NO runtime (the old editor had only a model picker). The runtime-gated form
+  // would otherwise HIDE that still-active pin (it shows for a pinned runtime
+  // only). Seed such a row's draft to the Claude SDK runtime so the pin is
+  // visible + editable and its meaning is explicit; on the next save it persists
+  // as a proper claude-sdk + model pin. A model-less inherit row is untouched.
+  const runtime =
+    entry.runtime === null && entry.model !== null ? 'claude-sdk' : entry.runtime;
   return {
     name: entry.name,
     description: entry.description,
@@ -68,7 +76,7 @@ export function draftFromEntry(entry: AgentEntry): AgentDraft {
     systemPrompt: entry.systemPrompt,
     enabledTools: CLI_TOOLS.filter((t) => enabled.has(t)),
     model: entry.model,
-    runtime: entry.runtime,
+    runtime,
     codexModel: entry.codexModel,
     // Sort so the structural dirty check is order-independent (the catalogue
     // has no fixed order like CLI_TOOLS); TOGGLE_MCP keeps the array sorted.

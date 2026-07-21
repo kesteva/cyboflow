@@ -93,4 +93,21 @@ describe('agentEditorReducer — runtime/codexModel', () => {
     state = agentEditorReducer(state, { type: 'SET_RUNTIME', runtime: 'claude-interactive' });
     expect(state.draft.model).toBe('sonnet');
   });
+
+  // A legacy (pre-migration-070) row can carry a Claude model pin with NO runtime.
+  // The runtime-gated form would hide that still-active pin, so the draft seeds it
+  // to claude-sdk to make the pin visible + editable and coherent with the runtime.
+  it('SEED upgrades a legacy model-without-runtime row to the claude-sdk runtime', () => {
+    const state = initAgentEditorState(entry({ runtime: null, model: 'sonnet' }));
+    expect(state.draft.runtime).toBe('claude-sdk');
+    expect(state.draft.model).toBe('sonnet');
+    // Not dirty: the seed sets the baseline too, so opening + closing persists nothing.
+    expect(state.baseline.runtime).toBe('claude-sdk');
+  });
+
+  it('SEED leaves a model-less inherit row untouched (no phantom runtime)', () => {
+    const state = initAgentEditorState(entry({ runtime: null, model: null }));
+    expect(state.draft.runtime).toBeNull();
+    expect(state.draft.model).toBeNull();
+  });
 });

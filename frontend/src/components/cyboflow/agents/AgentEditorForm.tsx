@@ -195,14 +195,15 @@ export function AgentEditorForm({
             ? 'This agent runs on whatever provider/runtime the run uses. Pin a runtime to choose a model.'
             : `This agent always runs on ${WORKFLOW_AGENT_RUNTIME_LABELS[draft.runtime]}.`}
         </p>
-        {draft.runtime !== null && (
+        {draft.runtime === 'codex-sdk' && (
           <p
             className="mt-1.5 text-[10px] text-text-tertiary"
             data-testid="agent-runtime-plane-note"
           >
-            Per-agent runtime is honored on <b className="font-semibold">programmatic</b> runs,
-            which spawn each step as its own process. An orchestrated run is a single process for
-            the whole flow, so this pin has no effect there.
+            A per-agent <b className="font-semibold">Codex</b> runtime applies to{' '}
+            <b className="font-semibold">programmatic</b> runs, which spawn each step as its own
+            process. An orchestrated run shares one runtime for the whole flow, so a Codex pin
+            there is blocked at launch — switch the run to programmatic to use it.
           </p>
         )}
       </div>

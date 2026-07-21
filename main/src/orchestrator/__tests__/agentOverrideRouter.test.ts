@@ -634,10 +634,12 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
     expect((router.getByKey(1, 'implement') as AgentOverrideRow).model).toBeNull();
   });
 
-  it('upsert persists a pinned model, and a later upsert can clear it', async () => {
+  it('upsert persists a pinned model (under a Claude runtime), and a later upsert can clear it', async () => {
     const db = buildDb();
     const router = AgentOverrideRouter.initialize(dbAdapter(db));
 
+    // A Claude model pin requires a pinned Claude runtime (the model-gating
+    // invariant); the two persist together.
     await router.applyChange(1, {
       op: 'upsert',
       agentKey: 'implement',
@@ -646,6 +648,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       systemPrompt: 'y',
       tools: TOOLS,
       enabledMcps: [],
+      runtime: 'claude-sdk',
       model: 'sonnet',
     });
     expect((router.getByKey(1, 'implement') as AgentOverrideRow).model).toBe('sonnet');
@@ -658,12 +661,13 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       systemPrompt: 'y2',
       tools: TOOLS,
       enabledMcps: [],
+      runtime: 'claude-sdk',
       model: null,
     });
     expect((router.getByKey(1, 'implement') as AgentOverrideRow).model).toBeNull();
   });
 
-  it('createCustom persists a pinned model', async () => {
+  it('createCustom persists a pinned model (under a Claude runtime)', async () => {
     const db = buildDb();
     const router = AgentOverrideRouter.initialize(dbAdapter(db));
 
@@ -675,6 +679,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       systemPrompt: 'y',
       tools: TOOLS,
       enabledMcps: [],
+      runtime: 'claude-sdk',
       model: 'haiku',
     });
     expect((router.getByKey(1, 'helper') as AgentOverrideRow).model).toBe('haiku');
@@ -776,6 +781,71 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
     const row = router.getByKey(1, 'implement') as AgentOverrideRow;
     expect(row.runtime).toBe('claude-interactive');
     expect(row.codex_model).toBeNull();
+  });
+
+  it('a Claude model alias is nulled under an inherited (null) runtime — model requires a Claude runtime', async () => {
+    const db = buildDb();
+    const router = AgentOverrideRouter.initialize(dbAdapter(db));
+
+    // An out-of-band caller supplying a model with NO runtime: the pin is
+    // non-deterministic (depends on the run provider), so persistence drops it —
+    // mirroring the editor's runtime-gated picker.
+    await router.applyChange(1, {
+      op: 'upsert',
+      agentKey: 'implement',
+      role: 'sprint',
+      description: 'x',
+      systemPrompt: 'y',
+      tools: TOOLS,
+      enabledMcps: [],
+      runtime: null,
+      model: 'sonnet',
+    });
+    const row = router.getByKey(1, 'implement') as AgentOverrideRow;
+    expect(row.runtime).toBeNull();
+    expect(row.model).toBeNull();
+  });
+
+  it('a Claude model alias is nulled under a Codex runtime (meaningless there)', async () => {
+    const db = buildDb();
+    const router = AgentOverrideRouter.initialize(dbAdapter(db));
+
+    await router.applyChange(1, {
+      op: 'upsert',
+      agentKey: 'implement',
+      role: 'sprint',
+      description: 'x',
+      systemPrompt: 'y',
+      tools: TOOLS,
+      enabledMcps: [],
+      runtime: 'codex-sdk',
+      codexModel: 'gpt-5.2-codex',
+      model: 'sonnet',
+    });
+    const row = router.getByKey(1, 'implement') as AgentOverrideRow;
+    expect(row.runtime).toBe('codex-sdk');
+    expect(row.codex_model).toBe('gpt-5.2-codex');
+    expect(row.model).toBeNull();
+  });
+
+  it('a Claude model alias PERSISTS under a pinned Claude runtime', async () => {
+    const db = buildDb();
+    const router = AgentOverrideRouter.initialize(dbAdapter(db));
+
+    await router.applyChange(1, {
+      op: 'upsert',
+      agentKey: 'implement',
+      role: 'sprint',
+      description: 'x',
+      systemPrompt: 'y',
+      tools: TOOLS,
+      enabledMcps: [],
+      runtime: 'claude-sdk',
+      model: 'sonnet',
+    });
+    const row = router.getByKey(1, 'implement') as AgentOverrideRow;
+    expect(row.runtime).toBe('claude-sdk');
+    expect(row.model).toBe('sonnet');
   });
 
   it('createCustom persists a runtime pin', async () => {

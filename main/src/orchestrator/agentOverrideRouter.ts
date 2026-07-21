@@ -144,19 +144,31 @@ export type AgentOverrideChange =
 // ---------------------------------------------------------------------------
 
 /**
- * Normalize a change's runtime/codexModel pair for persistence. An inherited
- * (null/undefined) runtime stores NULL; `codex_model` is retained ONLY when the
- * runtime is 'codex-sdk' — a Claude runtime never persists a Codex model, so a
- * later switch away from Codex can't leave a stale id behind.
+ * Normalize a change's runtime/model/codexModel triple for persistence, enforcing
+ * the runtime-gated invariant the editor's picker imposes — for ALL write callers,
+ * not just the UI:
+ *   - an inherited (null/undefined) runtime stores NULL;
+ *   - `codex_model` is retained ONLY when the runtime is 'codex-sdk' — a Claude
+ *     runtime never persists a Codex model, so a later switch can't leave a stale id;
+ *   - the Claude `model` alias is retained ONLY under a pinned CLAUDE runtime. Under
+ *     an inherited runtime a model pin is non-deterministic (it depends on the run
+ *     provider) and under Codex it is meaningless, so it stores NULL. This mirrors
+ *     the editor reducer (which clears `model` off a non-Claude runtime) and keeps a
+ *     non-editor caller from persisting the orphan states the picker forbids. The
+ *     editor never sends null-runtime + model (it seeds a legacy model-only row to
+ *     claude-sdk), so this only ever clears an out-of-band or explicitly-inherited pin.
  */
 function normalizeRuntime(
   runtime: WorkflowAgentRuntime | null | undefined,
   codexModel: string | null | undefined,
-): { runtime: string | null; codexModel: string | null } {
+  model: AgentModelAlias | null | undefined,
+): { runtime: string | null; codexModel: string | null; model: AgentModelAlias | null } {
   const r = runtime ?? null;
+  const isClaudeRuntime = r === 'claude-sdk' || r === 'claude-interactive';
   const cm =
     r === 'codex-sdk' && typeof codexModel === 'string' && codexModel.length > 0 ? codexModel : null;
-  return { runtime: r, codexModel: cm };
+  const m = isClaudeRuntime ? (model ?? null) : null;
+  return { runtime: r, codexModel: cm, model: m };
 }
 
 /** Slugify a display name to a canonical kebab key. */
@@ -305,8 +317,11 @@ export class AgentOverrideRouter {
     const now = new Date().toISOString();
     const id = `ago_${randomBytes(10).toString('hex')}`;
     const toolsJson = JSON.stringify(change.tools);
-    const model = change.model ?? null;
-    const { runtime, codexModel } = normalizeRuntime(change.runtime, change.codexModel);
+    const { runtime, codexModel, model } = normalizeRuntime(
+      change.runtime,
+      change.codexModel,
+      change.model,
+    );
     const enabledMcpsJson = JSON.stringify(change.enabledMcps);
 
     const txn = this.db.transaction(() => {
@@ -402,8 +417,11 @@ export class AgentOverrideRouter {
     const now = new Date().toISOString();
     const id = `ago_${randomBytes(10).toString('hex')}`;
     const toolsJson = JSON.stringify(change.tools);
-    const model = change.model ?? null;
-    const { runtime, codexModel } = normalizeRuntime(change.runtime, change.codexModel);
+    const { runtime, codexModel, model } = normalizeRuntime(
+      change.runtime,
+      change.codexModel,
+      change.model,
+    );
     const enabledMcpsJson = JSON.stringify(change.enabledMcps);
 
     const txn = this.db.transaction(() => {
@@ -474,8 +492,11 @@ export class AgentOverrideRouter {
     const now = new Date().toISOString();
     const toolsJson = JSON.stringify(change.tools);
     const enabledMcpsJson = JSON.stringify(change.enabledMcps);
-    const model = change.model ?? null;
-    const { runtime, codexModel } = normalizeRuntime(change.runtime, change.codexModel);
+    const { runtime, codexModel, model } = normalizeRuntime(
+      change.runtime,
+      change.codexModel,
+      change.model,
+    );
 
     const txn = this.db.transaction(() => {
       const existing = this.getByKey(projectId, agentKey);
