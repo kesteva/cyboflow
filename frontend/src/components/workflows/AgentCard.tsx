@@ -2,8 +2,9 @@
  * AgentCard — one agent tile in the stacked gallery's Agents section.
  *
  * Renders an {@link AgentGalleryEntry}: the agent name, a role chip, the
- * description, a model chip showing the agent's pinned model or "inherits run
- * model" (edited via the model picker in the Agent editor), the tools count as
+ * description, a run-target chip showing what the agent actually runs as — its
+ * pinned Codex model / runtime, its pinned Claude model, or "inherits run model"
+ * (edited via the runtime + model pickers in the Agent editor), the tools count as
  * "N of {@link CLI_TOOLS.length}", and a footer carrying the token estimate
  * (or an EMPTY slot when `tokensEstimate === null` — never a fabricated number)
  * plus an Edit action. A custom or override agent shows a source badge.
@@ -64,7 +65,8 @@ export function AgentCard({ entry, onEdit }: AgentCardProps): React.JSX.Element 
             {entry.role}
           </span>
         )}
-        {/* The agent's model: "inherits run model" or its pinned model label. */}
+        {/* The agent's RUN TARGET: its pinned Codex model / runtime, its pinned
+            Claude model, or "inherits run model" (see agentRunTargetLabel). */}
         <span
           data-testid="agent-card-model-chip"
           className="rounded-badge border border-border-primary bg-bg-secondary px-1.5 py-px text-[9.5px] text-text-tertiary"

@@ -40,7 +40,7 @@ import { create } from 'zustand';
 import { trpc } from '../trpc/client';
 import { API } from '../utils/api';
 import type { Project } from '../types/project';
-import type { AgentEntry } from '../../../shared/types/agents';
+import { agentRunTargetLabel, type AgentEntry } from '../../../shared/types/agents';
 import type { McpEntry, PluginEntry } from '../../../shared/types/integrations';
 import type {
   WorkflowRow,
@@ -81,8 +81,10 @@ export interface WorkflowGalleryEntry {
  *   - `name`         = the entry's display name
  *   - `isOverride`   = `isOverridden`
  *   - `tokensEstimate` = `stats.estPromptTokens`
- *   - `model`        = `stats.model` (display label: "inherits run model" or the
- *                      pinned model's friendly label)
+ *   - `model`        = `agentRunTargetLabel(...)` — the RUN-TARGET display label,
+ *                      folding the pinned runtime + model into one string. NOT
+ *                      `stats.model`, which looks only at the Claude alias and so
+ *                      rendered a Codex-pinned agent as "inherits run model".
  */
 export interface AgentGalleryEntry {
   id: string;
@@ -129,7 +131,13 @@ export function toAgentGalleryEntry(entry: AgentEntry): AgentGalleryEntry {
     isCustom: entry.isCustom,
     isOverride: entry.isOverridden,
     tokensEstimate: entry.stats.estPromptTokens,
-    model: entry.stats.model,
+    // Runtime-aware: a Codex-pinned agent shows its Codex model / "Codex SDK"
+    // instead of the misleading "inherits run model" the Claude-only label gave.
+    model: agentRunTargetLabel({
+      runtime: entry.runtime,
+      model: entry.model,
+      codexModel: entry.codexModel,
+    }),
   };
 }
 

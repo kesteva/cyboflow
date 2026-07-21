@@ -11,7 +11,7 @@
  */
 
 import type { CliTool } from './cliTools';
-import type { WorkflowAgentRuntime } from './agentRuntime';
+import { WORKFLOW_AGENT_RUNTIME_LABELS, type WorkflowAgentRuntime } from './agentRuntime';
 
 /**
  * The ONE cyboflow MCP tool a subagent may reference/call: the request-only,
@@ -71,6 +71,33 @@ export const INHERIT_RUN_MODEL_LABEL = 'inherits run model';
 /** Display label for an agent's pinned model, or the inherit sentinel for null. */
 export function agentModelLabel(model: AgentModelAlias | null): string {
   return model === null ? INHERIT_RUN_MODEL_LABEL : AGENT_MODEL_LABELS[model];
+}
+
+/**
+ * Compact "what will this agent run as" label for the Agents-catalogue card chip.
+ * Folds the agent's pinned runtime + model into ONE deterministic string, so a
+ * Codex-pinned agent no longer reads as "inherits run model" (the old chip looked
+ * only at the Claude `model` alias and ignored `runtime`/`codexModel`):
+ *   - inherit runtime (null): the pinned Claude model label, else the inherit
+ *     sentinel (a legacy row with a model but no runtime still shows the model);
+ *   - Codex runtime: the pinned Codex model id, else the runtime label ("Codex SDK");
+ *   - a Claude runtime: the pinned Claude model label, else the runtime label.
+ */
+export function agentRunTargetLabel(cfg: {
+  runtime: WorkflowAgentRuntime | null;
+  model: AgentModelAlias | null;
+  codexModel: string | null;
+}): string {
+  const { runtime, model, codexModel } = cfg;
+  if (runtime === null) {
+    return model === null ? INHERIT_RUN_MODEL_LABEL : AGENT_MODEL_LABELS[model];
+  }
+  if (runtime === 'codex-sdk') {
+    return codexModel !== null && codexModel !== ''
+      ? codexModel
+      : WORKFLOW_AGENT_RUNTIME_LABELS[runtime];
+  }
+  return model === null ? WORKFLOW_AGENT_RUNTIME_LABELS[runtime] : AGENT_MODEL_LABELS[model];
 }
 
 export interface AgentUsageStep {
