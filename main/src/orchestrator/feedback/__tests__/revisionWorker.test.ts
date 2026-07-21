@@ -123,7 +123,7 @@ describe('runRevisionBatch', () => {
     const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
 
     await runRevisionBatch(
-      { projectId: 1, runId: 'run-1', batchId, atype: 'idea-spec', sourceRef: 'ide_1' },
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'idea-spec', sourceRef: 'ide_1' },
       { db: dbAdapter(db), queryFn: fakeQuery('# Idea\n\nRevised spec.\n'), feedbackRouter: router, applyTaskChange },
     );
 
@@ -154,7 +154,7 @@ describe('runRevisionBatch', () => {
     const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
 
     await runRevisionBatch(
-      { projectId: 1, runId: 'run-1', batchId, atype: 'arch-design', sourceRef: 'ide_1' },
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'arch-design', sourceRef: 'ide_1' },
       {
         db: dbAdapter(db),
         queryFn: fakeQuery('## Architecture design\n\nNew queue-based design.'),
@@ -187,7 +187,7 @@ describe('runRevisionBatch', () => {
     // The agent revised the spec AND (against the rules) rewrote the arch section.
     const misbehaved = '# Idea\n\nRevised spec intro.\n\n## Architecture design\n\nMUTATED arch!\n\n## Risks\n\nnone.';
     await runRevisionBatch(
-      { projectId: 1, runId: 'run-1', batchId, atype: 'idea-spec', sourceRef: 'ide_1' },
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'idea-spec', sourceRef: 'ide_1' },
       { db: dbAdapter(db), queryFn: fakeQuery(misbehaved), feedbackRouter: router, applyTaskChange },
     );
 
@@ -208,7 +208,7 @@ describe('runRevisionBatch', () => {
 
     const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
     await runRevisionBatch(
-      { projectId: 1, runId: 'run-1', batchId, atype: 'idea-spec', sourceRef: 'ide_1' },
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'idea-spec', sourceRef: 'ide_1' },
       { db: dbAdapter(db), queryFn: fakeQuery('# Idea\n\nRevised, no arch here.'), feedbackRouter: router, applyTaskChange },
     );
 
@@ -226,7 +226,7 @@ describe('runRevisionBatch', () => {
 
     const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
     await runRevisionBatch(
-      { projectId: 1, runId: 'run-1', batchId, atype: 'idea-spec', sourceRef: 'ide_1' },
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'idea-spec', sourceRef: 'ide_1' },
       { db: dbAdapter(db), queryFn: fakeQuery('   '), feedbackRouter: router, applyTaskChange },
     );
 
@@ -256,7 +256,7 @@ describe('runRevisionBatch', () => {
       throw new Error('revision query timed out after 300000ms');
     });
     await runRevisionBatch(
-      { projectId: 1, runId: 'run-1', batchId, atype: 'idea-spec', sourceRef: 'ide_1' },
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'idea-spec', sourceRef: 'ide_1' },
       { db: dbAdapter(db), queryFn: throwingQuery, feedbackRouter: router, applyTaskChange },
     );
 
@@ -281,7 +281,7 @@ describe('runRevisionBatch', () => {
       throw Object.assign(new Error('entity ide_1 version is 2, expected 1'), { code: 'concurrency' });
     });
     await runRevisionBatch(
-      { projectId: 1, runId: 'run-1', batchId, atype: 'idea-spec', sourceRef: 'ide_1' },
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'idea-spec', sourceRef: 'ide_1' },
       { db: dbAdapter(db), queryFn: fakeQuery('# Idea\n\nrevised'), feedbackRouter: router, applyTaskChange },
     );
 
@@ -303,7 +303,7 @@ describe('runRevisionBatch', () => {
     const queryFn = fakeQuery('# Idea\n\nrevised');
     const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'x' }));
     await runRevisionBatch(
-      { projectId: 1, runId: 'run-1', batchId, atype: 'idea-spec', sourceRef: 'ide_missing' },
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'idea-spec', sourceRef: 'ide_missing' },
       { db: dbAdapter(db), queryFn, feedbackRouter: router, applyTaskChange },
     );
 
@@ -328,7 +328,7 @@ describe('runRevisionBatch', () => {
     });
 
     await runRevisionBatch(
-      { projectId: 1, runId: 'run-1', batchId, atype: 'idea-spec', sourceRef: 'ide_1' },
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'idea-spec', sourceRef: 'ide_1' },
       { db: dbAdapter(db), queryFn, feedbackRouter: router, applyTaskChange },
     );
 
@@ -357,7 +357,7 @@ describe('runRevisionBatch', () => {
     });
 
     await runRevisionBatch(
-      { projectId: 1, runId: 'run-1', batchId, atype: 'idea-spec', sourceRef: 'ide_1' },
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'idea-spec', sourceRef: 'ide_1' },
       { db: dbAdapter(db), queryFn, feedbackRouter: router, applyTaskChange },
     );
 
@@ -375,7 +375,7 @@ describe('runRevisionBatch', () => {
 
     const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
     await runRevisionBatch(
-      { projectId: 1, runId: 'run-1', batchId, atype: 'arch-design', sourceRef: 'ide_1' },
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'arch-design', sourceRef: 'ide_1' },
       {
         db: dbAdapter(db),
         // The agent leaked a second section outside the architecture design.
@@ -403,7 +403,7 @@ describe('runRevisionBatch', () => {
 
     const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
     await runRevisionBatch(
-      { projectId: 1, runId: 'run-1', batchId, atype: 'arch-design', sourceRef: 'ide_1' },
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'arch-design', sourceRef: 'ide_1' },
       {
         db: dbAdapter(db),
         // The "## Rollout" line is INSIDE a fence — it neither starts nor leaks a section.
@@ -430,7 +430,7 @@ describe('runRevisionBatch', () => {
 
     const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
     await runRevisionBatch(
-      { projectId: 1, runId: 'run-1', batchId, atype: 'arch-design', sourceRef: 'ide_1' },
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'arch-design', sourceRef: 'ide_1' },
       {
         db: dbAdapter(db),
         // No heading, no H2 — benign bare section content; the worker prepends the heading.
@@ -466,10 +466,98 @@ describe('runRevisionBatch', () => {
     const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
 
     await runRevisionBatch(
-      { projectId: 1, runId: 'run-1', batchId, atype: 'idea-spec', sourceRef: 'ide_1' },
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'idea-spec', sourceRef: 'ide_1' },
       { db: dbAdapter(db), queryFn, feedbackRouter: router, applyTaskChange },
     );
 
     expect(capturedPrompt).toContain('no longer appears verbatim in the current document');
+  });
+
+  it('a DIFFERENT later gate does not validate the batch — bound-gate revalidation fails it', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    seedIdea(db, 'ide_1', '# Idea\n\nOriginal spec.\n');
+    const router = FeedbackRouter.initialize(dbAdapter(db));
+    const batchId = await seedSentBatch(router, 'run-1', 'idea-spec', 'ide_1');
+
+    const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
+    // Mid-flight, the ORIGINAL gate resolves and the run advances to a NEW gate
+    // (e.g. approve-design → approve-plan). The run is parked again and a pending
+    // blocking decision exists — but it is not the gate this batch was sent under.
+    const queryFn: RevisionQueryFn = vi.fn(async () => {
+      db.prepare("UPDATE review_items SET status = 'resolved' WHERE id = 'rvw_run-1'").run();
+      db.prepare(
+        `INSERT INTO review_items (id, project_id, run_id, kind, status, blocking, title)
+         VALUES ('rvw_later', 1, 'run-1', 'decision', 'pending', 1, 'approve-plan')`,
+      ).run();
+      return { revisedDocument: '# Idea\n\nRevised spec.\n' };
+    });
+
+    await runRevisionBatch(
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'idea-spec', sourceRef: 'ide_1' },
+      { db: dbAdapter(db), queryFn, feedbackRouter: router, applyTaskChange },
+    );
+
+    expect(applyTaskChange).not.toHaveBeenCalled();
+    const batch = db.prepare('SELECT status, error FROM feedback_batches WHERE id = ?').get(batchId) as {
+      status: string;
+      error: string | null;
+    };
+    expect(batch.status).toBe('failed');
+    expect(batch.error).toContain('review gate resolved');
+  });
+
+  it('arch-design output with a bare ## terminator → batch-failed (extractor-grammar parity)', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    seedIdea(db, 'ide_1', '# Idea\n\nIntro.\n\n## Architecture design\n\nOld.\n\n## Rollout\n\nShip.');
+    const router = FeedbackRouter.initialize(dbAdapter(db));
+    const batchId = await seedSentBatch(router, 'run-1', 'arch-design', 'ide_1');
+
+    const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
+    await runRevisionBatch(
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'arch-design', sourceRef: 'ide_1' },
+      {
+        db: dbAdapter(db),
+        // A bare '##' line terminates the section in the extractor's grammar, so
+        // 'Trailing content' would land OUTSIDE the architecture section post-splice.
+        queryFn: fakeQuery('## Architecture design\n\nNew.\n\n##\nTrailing content.'),
+        feedbackRouter: router,
+        applyTaskChange,
+      },
+    );
+
+    expect(applyTaskChange).not.toHaveBeenCalled();
+    const batch = db.prepare('SELECT status, error FROM feedback_batches WHERE id = ?').get(batchId) as {
+      status: string;
+      error: string | null;
+    };
+    expect(batch.status).toBe('failed');
+    expect(batch.error).toContain('outside the architecture section');
+  });
+
+  it('arch-design output with an UNTERMINATED fence → batch-failed (would swallow following sections)', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    seedIdea(db, 'ide_1', '# Idea\n\nIntro.\n\n## Architecture design\n\nOld.\n\n## Rollout\n\nShip.');
+    const router = FeedbackRouter.initialize(dbAdapter(db));
+    const batchId = await seedSentBatch(router, 'run-1', 'arch-design', 'ide_1');
+
+    const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
+    await runRevisionBatch(
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'arch-design', sourceRef: 'ide_1' },
+      {
+        db: dbAdapter(db),
+        // The fence never closes: after splicing, the idea body's '## Rollout'
+        // would be absorbed into the fenced arch section.
+        queryFn: fakeQuery('## Architecture design\n\nNew.\n\n```md\nunclosed fence'),
+        feedbackRouter: router,
+        applyTaskChange,
+      },
+    );
+
+    expect(applyTaskChange).not.toHaveBeenCalled();
+    const batch = db.prepare('SELECT status FROM feedback_batches WHERE id = ?').get(batchId) as { status: string };
+    expect(batch.status).toBe('failed');
   });
 });

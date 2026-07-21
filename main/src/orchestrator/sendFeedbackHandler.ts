@@ -52,6 +52,14 @@ export interface RevisionBatchInfo {
   sourceRef: string;
   round: number;
   commentIds: string[];
+  /**
+   * The pending blocking decision gate ids open at send time — the batch is
+   * bound to them: the revision's pre-write revalidation requires one of these
+   * EXACT gates to still be pending, so it can never land under a different,
+   * later gate. In-memory pass-through only (an in-flight revision never
+   * survives restart; the boot sweep fails its batch).
+   */
+  gateReviewItemIds: string[];
 }
 
 export interface SendFeedbackDeps {
@@ -154,15 +162,18 @@ export async function sendFeedbackHandler(
   if (!run) return noOp('not_found');
   if (run.status !== 'awaiting_review') return noOp('not_parked');
 
-  // 3: a blocking decision gate must be open (the document can still influence it).
-  const gate = db
+  // 3: a blocking decision gate must be open (the document can still influence
+  // it). Capture the gate IDS — the batch is bound to them, so the revision's
+  // pre-write revalidation can require one of these exact gates to still be
+  // pending (a different later gate must not accept a stale revision).
+  const gateRows = db
     .prepare(
-      `SELECT 1 AS ok FROM review_items
-        WHERE run_id = ? AND kind = 'decision' AND status = 'pending' AND blocking = 1
-        LIMIT 1`,
+      `SELECT id FROM review_items
+        WHERE run_id = ? AND kind = 'decision' AND status = 'pending' AND blocking = 1`,
     )
-    .get(runId) as { ok: number } | undefined;
-  if (!gate) return noOp('no_gate');
+    .all(runId) as Array<{ id: string }>;
+  if (gateRows.length === 0) return noOp('no_gate');
+  const gateReviewItemIds = gateRows.map((r) => r.id);
 
   // 3b: the per-entity artifact row is the authority binding (runId, atype,
   // sourceRef) — it is minted ONLY for documents this run actually owns/produced.
@@ -213,6 +224,7 @@ export async function sendFeedbackHandler(
     sourceRef,
     round,
     commentIds,
+    gateReviewItemIds,
   }).catch(async (err: unknown) => {
     logger?.error('[sendFeedback] launchRevision rejected before completing', {
       batchId,

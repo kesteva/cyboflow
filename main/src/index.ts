@@ -1163,6 +1163,7 @@ async function initializeServices() {
         batchId: info.batchId,
         atype: info.atype,
         sourceRef: info.sourceRef,
+        gateReviewItemIds: info.gateReviewItemIds,
       },
       {
         db: cyboflowDb,

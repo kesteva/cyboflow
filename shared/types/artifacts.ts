@@ -138,16 +138,21 @@ export const ARCH_DESIGN_SECTION_HEADING = 'Architecture design';
  * `[ \t]` — never `\s`, which spans newlines and lets a bare '##' line plus a
  * later 'Architecture design' text line spoof the heading.
  */
-const ARCH_DESIGN_HEADING_LINE_RE = new RegExp(
+export const ARCH_DESIGN_HEADING_LINE_RE = new RegExp(
   `^##[ \\t]+${ARCH_DESIGN_SECTION_HEADING}[ \\t]*$`,
   'i',
 );
 
-/** An H2 line (or a bare '##' empty ATX heading) — terminates the section. */
-const H2_LINE_RE = /^##(?:[ \t]|$)/;
+/**
+ * An H2 line (or a bare '##' empty ATX heading) — terminates the section.
+ * Exported so validators of agent-produced sections (revisionWorker) use the
+ * EXACT delimiter grammar the extractor does — a delimiter this matches but a
+ * validator misses is a section-boundary escape.
+ */
+export const H2_LINE_RE = /^##(?:[ \t]|$)/;
 
-/** A ``` / ~~~ fence line (CommonMark allows up to 3 leading spaces). */
-const FENCE_LINE_RE = /^ {0,3}(?:```|~~~)/;
+/** A ``` / ~~~ fence line (CommonMark allows up to 3 leading spaces). Exported for the same grammar-parity reason as {@link H2_LINE_RE}. */
+export const FENCE_LINE_RE = /^ {0,3}(?:```|~~~)/;
 
 /**
  * Extract the '## Architecture design' section from an idea body: everything

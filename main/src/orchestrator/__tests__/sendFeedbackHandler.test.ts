@@ -224,6 +224,9 @@ describe('sendFeedbackHandler — happy path', () => {
       atype: 'idea-spec',
       sourceRef: 'ide_1',
       round: 1,
+      // The batch is BOUND to the gate(s) open at send time — the revision's
+      // pre-write revalidation requires one of these exact ids to stay pending.
+      gateReviewItemIds: ['rvw_run-1'],
     });
 
     const batch = db.prepare('SELECT status FROM feedback_batches WHERE id = ?').get(res.batchId) as {

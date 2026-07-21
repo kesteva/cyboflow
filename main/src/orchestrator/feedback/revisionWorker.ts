@@ -24,8 +24,11 @@ import { existsSync } from 'node:fs';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type { RevisionQueryFn } from './revisionQuery';
 import {
+  ARCH_DESIGN_HEADING_LINE_RE,
   ARCH_DESIGN_SECTION_HEADING,
   extractArchDesignSection,
+  FENCE_LINE_RE,
+  H2_LINE_RE,
   replaceArchDesignSection,
 } from '../../../../shared/types/artifacts';
 import { hashDocumentText, type FeedbackAtype } from '../../../../shared/types/feedback';
@@ -85,6 +88,16 @@ export interface RunRevisionBatchArgs {
   atype: FeedbackAtype;
   /** The owning idea id (feedback source_ref IS the idea id). */
   sourceRef: string;
+  /**
+   * The pending blocking decision review_item ids that were open when the user
+   * clicked Send — the batch is BOUND to them: the pre-write revalidation
+   * requires at least one of these EXACT gates to still be pending, so a
+   * revision can never land under a different, later gate (e.g. sent at
+   * approve-design, landing after the run advanced to approve-plan). In-memory
+   * pass-through is sufficient — an in-flight revision never survives an app
+   * restart (the boot sweep fails its batch).
+   */
+  gateReviewItemIds: string[];
   /** Optional model pin for the revision agent (undefined → SDK default). */
   model?: string;
   signal?: AbortSignal;
@@ -106,19 +119,6 @@ export const REVISION_OUTPUT_SCHEMA: Record<string, unknown> = {
 
 /** Canonical arch-design heading line the worker prepends / validates against. */
 const ARCH_HEADING_LINE = `## ${ARCH_DESIGN_SECTION_HEADING}`;
-
-/** Tolerant (case-insensitive) match of the arch-design heading as a whole line. */
-const ARCH_HEADING_LINE_RE = new RegExp(`^##[ \\t]+${ARCH_DESIGN_SECTION_HEADING}[ \\t]*$`, 'i');
-
-/**
- * A ``` / ~~~ fence line (CommonMark allows up to 3 leading spaces). Mirrors
- * FENCE_LINE_RE in shared/types/artifacts.ts (not exported there) so the
- * arch-output validation is fence-aware the same way the extractor is.
- */
-const FENCE_LINE_RE = /^ {0,3}(?:```|~~~)/;
-
-/** An unfenced H2 line (`## ` prefix) — the heading level the arch section owns. */
-const H2_PREFIX_RE = /^##[ \t]/;
 
 interface IdeaRow {
   body: string | null;
@@ -142,7 +142,7 @@ export async function runRevisionBatch(
   args: RunRevisionBatchArgs,
   deps: RevisionWorkerDeps,
 ): Promise<void> {
-  const { projectId, runId, batchId, atype, sourceRef, model, signal } = args;
+  const { projectId, runId, batchId, atype, sourceRef, gateReviewItemIds, model, signal } = args;
   const { db, queryFn, feedbackRouter, applyTaskChange, logger } = deps;
 
   const fail = async (reason: string): Promise<void> => {
@@ -224,7 +224,7 @@ export async function runRevisionBatch(
     // window is accepted by design: the body write itself is serialized through
     // TaskChangeRouter, and a post-resolve landing is voided (the optimistic
     // expectedVersion guard below still covers a concurrent body write).
-    const gateStillOpen = revalidateGateStillOpen(db, runId, batchId, sourceRef);
+    const gateStillOpen = revalidateGateStillOpen(db, runId, batchId, sourceRef, gateReviewItemIds);
     if (!gateStillOpen.ok) {
       await fail(gateStillOpen.reason);
       return;
@@ -423,15 +423,21 @@ function composeNewBody(atype: FeedbackAtype, originalBody: string, revisedDocum
 
 /**
  * Strictly validate the arch-design agent's returned document so its content
- * cannot escape the architecture section once spliced (an unfenced H2 after the
- * section would leak into the following idea-body section post-splice).
+ * cannot escape the architecture section once spliced (a section TERMINATOR after
+ * the heading would push everything below it outside the architecture boundary).
  *
- * Fence-aware scan for unfenced `## ` H2 lines:
- *  - Accept when the first non-blank line IS the arch heading AND there is no
- *    OTHER unfenced H2 — return the document as the section verbatim.
- *  - When there is NO arch heading anywhere AND no unfenced H2 at all, the agent
+ * Uses the extractor's EXACT delimiter grammar (H2_LINE_RE / FENCE_LINE_RE
+ * imported from shared/types/artifacts.ts — a delimiter the extractor honors but
+ * this scan misses is a boundary escape; bare `##` was exactly such a gap):
+ *  - Reject an UNTERMINATED fence outright — after splicing, an open fence would
+ *    swallow the idea body's following H2 sections into the arch section, and a
+ *    later replacement would then delete them.
+ *  - Accept when the first non-blank line IS the arch heading AND no OTHER
+ *    unfenced H2/terminator line exists — the document is the section verbatim.
+ *  - When there is NO arch heading anywhere AND no terminator at all, the agent
  *    returned bare section content (benign) — prepend the canonical heading.
- *  - Any other shape (extra H2s, a full-document echo, heading not leading) → reject.
+ *  - Any other shape (extra H2s, bare `##`, a full-document echo, heading not
+ *    leading) → reject.
  */
 function validateArchSection(doc: string): { ok: true; section: string } | { ok: false } {
   const lines = doc.split(/\r?\n/);
@@ -444,21 +450,23 @@ function validateArchSection(doc: string): { ok: true; section: string } | { ok:
       continue;
     }
     if (inFence) continue;
-    if (H2_PREFIX_RE.test(line)) h2Indices.push(i);
+    if (H2_LINE_RE.test(line)) h2Indices.push(i);
   }
+  // Unterminated fence: unsafe to splice regardless of heading shape.
+  if (inFence) return { ok: false };
 
   const firstNonBlankIdx = lines.findIndex((l) => l.trim().length > 0);
   const firstNonBlank = firstNonBlankIdx === -1 ? '' : lines[firstNonBlankIdx];
-  const headingLed = ARCH_HEADING_LINE_RE.test(firstNonBlank);
+  const headingLed = ARCH_DESIGN_HEADING_LINE_RE.test(firstNonBlank);
 
   if (headingLed) {
-    // The leading heading is itself an unfenced H2; accept only if it is the ONLY one.
+    // The leading heading is itself an H2; accept only if it is the ONLY delimiter.
     const otherH2 = h2Indices.filter((idx) => idx !== firstNonBlankIdx);
     return otherH2.length === 0 ? { ok: true, section: doc } : { ok: false };
   }
 
   if (h2Indices.length === 0) {
-    // Bare section content — no heading, no H2 to leak. Prepend the canonical heading.
+    // Bare section content — no heading, no terminator to leak. Prepend the canonical heading.
     return { ok: true, section: `${ARCH_HEADING_LINE}\n\n${doc.replace(/^\s+/, '')}` };
   }
 
@@ -468,14 +476,17 @@ function validateArchSection(doc: string): { ok: true; section: string } | { ok:
 /**
  * Pre-write gate revalidation (Fix 1 companion). Returns ok:false with a concise
  * human-readable reason when the review gate is no longer live for this batch —
- * the run left awaiting_review, the pending blocking decision gate resolved, the
- * idea was decomposed, or the batch itself is no longer pending.
+ * the run left awaiting_review, the SPECIFIC gate(s) the batch was sent under all
+ * resolved (a different later gate does NOT count: the document already had its
+ * chance to influence the original decision), the idea was decomposed, or the
+ * batch itself is no longer pending.
  */
 function revalidateGateStillOpen(
   db: DatabaseLike,
   runId: string,
   batchId: string,
   sourceRef: string,
+  gateReviewItemIds: string[],
 ): { ok: true } | { ok: false; reason: string } {
   const run = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as
     | { status: string }
@@ -484,13 +495,19 @@ function revalidateGateStillOpen(
     return { ok: false, reason: 'the review gate resolved before the revision landed — feedback was not applied' };
   }
 
+  // Bound-gate check: at least one of the EXACT gates open at send time must
+  // still be pending. An empty binding never validates (fail closed).
+  if (gateReviewItemIds.length === 0) {
+    return { ok: false, reason: 'the review gate resolved before the revision landed — feedback was not applied' };
+  }
+  const placeholders = gateReviewItemIds.map(() => '?').join(', ');
   const gate = db
     .prepare(
       `SELECT 1 AS ok FROM review_items
-        WHERE run_id = ? AND kind = 'decision' AND status = 'pending' AND blocking = 1
+        WHERE id IN (${placeholders}) AND status = 'pending' AND blocking = 1
         LIMIT 1`,
     )
-    .get(runId) as { ok: number } | undefined;
+    .get(...gateReviewItemIds) as { ok: number } | undefined;
   if (!gate) {
     return { ok: false, reason: 'the review gate resolved before the revision landed — feedback was not applied' };
   }
