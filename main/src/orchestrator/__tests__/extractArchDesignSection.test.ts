@@ -204,6 +204,33 @@ describe('replaceArchDesignSection', () => {
     );
   });
 
+  it('a backtick "opener" whose info string contains a backtick is NOT a fence — following sections survive', () => {
+    // CommonMark: a backtick-fence info string cannot contain a backtick, so the
+    // ```js`oops line is plain content, NOT an opener. A tracker that wrongly
+    // opened a backtick fence there could never close it on the tilde fence that
+    // follows, so '## Rollout' (and everything after) would be swallowed into the
+    // architecture section — and deleted by a section replacement. The tilde
+    // fence itself is properly opened AND closed so the case isolates the
+    // invalid-opener rule.
+    const body = [
+      '# Idea',
+      '',
+      `${HEADING}`,
+      '',
+      'intro.',
+      '```js`oops',
+      '~~~',
+      '~~~',
+      '',
+      '## Rollout',
+      'ship it',
+    ].join('\n');
+    expect(extractArchDesignSection(body)).toBe('intro.\n```js`oops\n~~~\n~~~');
+    const out = replaceArchDesignSection(body, `${HEADING}\n\nnew.`);
+    expect(out).toContain('## Rollout\nship it');
+    expect(extractArchDesignSection(out)).toBe('new.');
+  });
+
   it('a shorter closing run does not close a longer opener (````md needs ≥ 4 backticks)', () => {
     const body = [
       `${HEADING}`,

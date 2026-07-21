@@ -179,6 +179,11 @@ export function makeFenceState(): FenceState {
       const marker = m[1];
       const char = marker[0];
       if (open === null) {
+        // CommonMark: a BACKTICK fence is not recognized when its info string
+        // contains a backtick (it reads as inline code instead). Treating such
+        // a line as an opener would swallow everything to EOF once no matching
+        // closer exists. Tilde-fence info strings have no such restriction.
+        if (char === '`' && m[2].includes('`')) return false;
         open = { char, len: marker.length };
         return true;
       }
