@@ -171,7 +171,7 @@ export function AgentRail() {
       />
 
       {/* Header: collapse chevron, glyph mark, title/subtitle, GLOBAL chip. */}
-      <div className="flex items-start gap-2 border-b border-border-primary p-3">
+      <div className="flex items-center gap-2 border-b border-border-primary p-3">
         <button
           type="button"
           data-testid="agent-rail-collapse"
