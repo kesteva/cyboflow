@@ -1472,7 +1472,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
   /**
    * Emit the per-turn 'spawned' + session_info descriptor. Both fire once per
    * LOGICAL turn (cold spawn AND warm push) so events.ts drives the quick-session
-   * status lifecycle, auto-context, context meter and git refresh identically on
+   * status lifecycle, context meter and git refresh identically on
    * warm turns as it did when every turn was a fresh subprocess.
    */
   private emitTurnStart(displayPanelId: string, sessionId: string, options: ClaudeSpawnOptions): void {
@@ -2019,7 +2019,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     run.steeredThisTurn = false;
 
     // Per-turn 'exit' — events.ts keys the whole quick-session status lifecycle,
-    // auto-context, context meter and git refresh on this.
+    // context meter and git refresh on this.
     this.emit('exit', {
       panelId: displayPanelId,
       sessionId,

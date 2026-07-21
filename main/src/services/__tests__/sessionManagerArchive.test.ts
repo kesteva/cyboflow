@@ -16,8 +16,6 @@
  * fail-soft contract — that the (real, electron-importing) panel require throwing
  * does not abort the rest of teardown.
  *
- * addPanelOutput has two branches: the auto-context-capture buffer (no DB write)
- * vs the normal DB-persist path.
  *
  * Mocks mirror sessionManager.mainRepoPermission.test.ts, extended with the
  * terminalSessionManager seam archiveSession constructs.
@@ -144,20 +142,7 @@ describe('SessionManager.archiveSession', () => {
 });
 
 describe('SessionManager.addPanelOutput', () => {
-  it('buffers into the auto-context capture (no DB write) when capture is active', () => {
-    const db = makeDbMock();
-    const mgr = makeManager(db);
-    mgr.beginAutoContextCapture('panel-ac');
-
-    mgr.addPanelOutput('panel-ac', { type: 'stdout', data: 'captured', timestamp: new Date() });
-
-    expect(db.addPanelOutput).not.toHaveBeenCalled();
-    const buffered = mgr.consumeAutoContextCapture('panel-ac');
-    expect(buffered).toHaveLength(1);
-    expect(buffered[0].data).toBe('captured');
-  });
-
-  it('persists to the DB on the normal path (no active capture)', () => {
+  it('persists to the DB on the normal path', () => {
     const db = makeDbMock();
     const mgr = makeManager(db);
 

@@ -78,10 +78,9 @@ export interface ClaudePanelState extends BaseAIPanelState {
   // Claude-specific state
   permissionMode?: 'approve' | 'ignore'; // Permission mode for Claude
 
-  // Automatic context tracking
+  // Context meter, refreshed after each successful turn from the turn's own
+  // SDK usage data (see the exit handler in main/src/events.ts)
   contextUsage?: string | null;          // Latest context usage summary (e.g., "54k/200k tokens (27%)")
-  autoContextRunState?: 'idle' | 'running'; // Tracks whether an automatic /context run is in progress
-  lastAutoContextAt?: string;            // ISO timestamp of the most recent automatic context refresh
 }
 
 /**

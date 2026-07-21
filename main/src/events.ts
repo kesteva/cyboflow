@@ -4,7 +4,6 @@ import type { AppServices } from './ipc/types';
 import { addSessionLog } from './ipc/logs';
 import { panelManager } from './services/panelManager';
 import type { ToolPanel, ClaudePanelState, BaseAIPanelState, PanelStatus } from '../../shared/types/panels';
-import type { ClaudePanelManager } from './services/panels/claude/claudePanelManager';
 import type { SessionOutput } from './types/session';
 import {
   validateSessionExists,
@@ -21,7 +20,6 @@ import type { Project } from './database/models';
 import { DEFAULT_PERMISSION_MODE } from '../../shared/types/permissionMode';
 import type { GitStatus } from './types/session';
 import { deriveLiveContextUsage } from './utils/liveContextUsage';
-import { isAnyEffortLevel } from '../../shared/types/reasoningEffort';
 import { isAgentThreadSpawnId } from '../../shared/types/agentThread';
 
 /**
@@ -48,8 +46,7 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     gitStatusManager,
     worktreeManager,
     archiveProgressManager,
-    databaseService,
-    logger
+    databaseService
   } = services;
 
   // Guarded-model availability (Fable 5): forward status flips to the renderer so
@@ -65,30 +62,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
       }
     }
   });
-
-  let cachedClaudePanelManager: ClaudePanelManager | undefined;
-  let attemptedClaudeManagerResolve = false;
-
-  const resolveClaudePanelManager = (): ClaudePanelManager | undefined => {
-    if (cachedClaudePanelManager) {
-      return cachedClaudePanelManager;
-    }
-
-    try {
-      const { claudePanelManager: resolvedClaudeManager } = require('./ipc/claudePanel');
-      if (resolvedClaudeManager) {
-        cachedClaudePanelManager = resolvedClaudeManager as ClaudePanelManager;
-      }
-    } catch (error) {
-      if (!attemptedClaudeManagerResolve) {
-        const message = error instanceof Error ? error.message : String(error);
-        (logger || console).warn?.(`[Main] Unable to load Claude panel manager for lifecycle events: ${message}`);
-        attemptedClaudeManagerResolve = true;
-      }
-    }
-
-    return cachedClaudePanelManager;
-  };
 
   // eslint-disable-next-line no-control-regex
   const ANSI_ESCAPE_REGEX = /\x1B\[[0-9;]*m/g;
@@ -203,18 +176,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
   };
 
   const extractContextUsageFromOutputs = (outputs: SessionOutput[]): string | null => {
-    console.log(`[auto-context-debug] extractContextUsageFromOutputs called with ${outputs.length} outputs`);
-
-    // Log output types for debugging
-    const typeCounts: Record<string, number> = {};
-    for (const output of outputs) {
-      const key = output.type === 'json' && output.data && typeof output.data === 'object'
-        ? `json:${(output.data as Record<string, unknown>).type || 'unknown'}`
-        : output.type;
-      typeCounts[key] = (typeCounts[key] || 0) + 1;
-    }
-    console.log(`[auto-context-debug] Output types: ${JSON.stringify(typeCounts)}`);
-
     // Prefer the LIVE single-turn context (newest assistant usage + window) over
     // the result event's cumulative modelUsage, which otherwise pegs the meter at
     // 100% on long multi-tool turns (deriveLiveContextUsage owns the rationale +
@@ -222,7 +183,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     // assistant usage is present (e.g. PTY stdout streams).
     const liveContext = deriveLiveContextUsage(outputs);
     if (liveContext) {
-      console.log(`[auto-context-debug] Found live context (assistant usage): ${liveContext}`);
       return liveContext;
     }
 
@@ -234,14 +194,12 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
         // Try to extract from result message (new format)
         const resultContext = extractContextFromResultJson(jsonData);
         if (resultContext) {
-          console.log(`[auto-context-debug] Found context in result JSON: ${resultContext}`);
           return resultContext;
         }
 
         // Try to extract from init message
         const initContext = extractContextFromInitJson(jsonData);
         if (initContext) {
-          console.log(`[auto-context-debug] Found context in init JSON: ${initContext}`);
           return initContext;
         }
 
@@ -253,7 +211,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
           // Try original regex
           const match = candidate.match(CONTEXT_USAGE_REGEX);
           if (match) {
-            console.log(`[auto-context-debug] Found context via original regex: ${match[1]}`);
             return match[1].replace(/\s+/g, ' ').trim();
           }
 
@@ -263,9 +220,7 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
             const used = parseInt(altMatch[1].replace(/,/g, ''), 10);
             const max = parseInt(altMatch[2].replace(/,/g, ''), 10);
             const percentage = Math.round((used / max) * 100);
-            const result = `${formatTokenCount(used)}/${formatTokenCount(max)} tokens (${percentage}%)`;
-            console.log(`[auto-context-debug] Found context via alt regex: ${result}`);
-            return result;
+            return `${formatTokenCount(used)}/${formatTokenCount(max)} tokens (${percentage}%)`;
           }
         }
         continue;
@@ -284,7 +239,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
         // Try original regex
         const match = line.match(CONTEXT_USAGE_REGEX);
         if (match) {
-          console.log(`[auto-context-debug] Found context in stdout via original regex: ${match[1]}`);
           return match[1].replace(/\s+/g, ' ').trim();
         }
 
@@ -294,14 +248,11 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
           const used = parseInt(altMatch[1].replace(/,/g, ''), 10);
           const max = parseInt(altMatch[2].replace(/,/g, ''), 10);
           const percentage = Math.round((used / max) * 100);
-          const result = `${formatTokenCount(used)}/${formatTokenCount(max)} tokens (${percentage}%)`;
-          console.log(`[auto-context-debug] Found context in stdout via alt regex: ${result}`);
-          return result;
+          return `${formatTokenCount(used)}/${formatTokenCount(max)} tokens (${percentage}%)`;
         }
       }
     }
 
-    console.log(`[auto-context-debug] No context usage found in outputs`);
     return null;
   };
 
@@ -318,10 +269,7 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
       }
 
       const existing = (panel.state.customState as ClaudePanelState | undefined) ?? {};
-      const baseState: ClaudePanelState = {
-        ...existing,
-        autoContextRunState: existing.autoContextRunState ?? 'idle'
-      };
+      const baseState: ClaudePanelState = { ...existing };
 
       if (!('contextUsage' in baseState)) {
         baseState.contextUsage = null;
@@ -414,119 +362,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
 
     // Use the panel's state.isActive property which is set when a panel becomes active
     return panel.state.isActive === true;
-  };
-
-  const finalizeAutoContextRun = async (panelId: string): Promise<void> => {
-    console.log(`[auto-context-debug] finalizeAutoContextRun called for panel ${panelId}`);
-    try {
-      const bufferedOutputs = sessionManager.consumeAutoContextCapture(panelId);
-      const outputs = bufferedOutputs.length > 0
-        ? bufferedOutputs
-        : (typeof sessionManager.getPanelOutputs === 'function'
-            ? sessionManager.getPanelOutputs(panelId, 200)
-            : []);
-      console.log(`[auto-context-debug] Extracted ${outputs.length} outputs for context usage analysis`);
-
-      const contextUsage = extractContextUsageFromOutputs(outputs);
-      console.log(`[auto-context-debug] Context usage extracted: ${contextUsage || 'none found'}`);
-
-      const timestamp = new Date().toISOString();
-
-      console.log(`[auto-context-debug] Setting autoContextRunState back to 'idle'`);
-      await updateClaudePanelCustomState(panelId, (state) => ({
-        ...state,
-        autoContextRunState: 'idle',
-        lastAutoContextAt: timestamp,
-        contextUsage: contextUsage ?? state.contextUsage ?? null
-      }));
-      console.log(`[auto-context-debug] finalizeAutoContextRun completed successfully`);
-    } catch (error) {
-      console.error(`[Main] Failed to finalize automatic context run for panel ${panelId}:`, error);
-      console.log(`[auto-context-debug] Error in finalizeAutoContextRun: ${error instanceof Error ? error.message : String(error)}`);
-      sessionManager.clearAutoContextCapture(panelId);
-      await updateClaudePanelCustomState(panelId, (state) => ({
-        ...state,
-        autoContextRunState: 'idle'
-      }));
-    }
-  };
-
-  const startAutoContextRun = async (panelId: string, sessionId: string): Promise<void> => {
-    console.log(`[auto-context-debug] startAutoContextRun called - panelId: ${panelId}, sessionId: ${sessionId}`);
-
-    const claudeManager = resolveClaudePanelManager();
-    if (!claudeManager) {
-      console.log(`[auto-context-debug] claudeManager not available - returning early`);
-      return;
-    }
-
-    const session = sessionManager.getSession(sessionId);
-    console.log(`[auto-context-debug] session exists: ${!!session}, archived: ${session?.archived}, worktreePath: ${session?.worktreePath}`);
-    if (!session || session.archived || !session.worktreePath) {
-      console.log(`[auto-context-debug] Session check failed - returning early`);
-      return;
-    }
-
-    const panel = panelManager.getPanel(panelId);
-    console.log(`[auto-context-debug] panel exists: ${!!panel}`);
-    if (!panel) {
-      console.log(`[auto-context-debug] Panel not found - returning early`);
-      return;
-    }
-
-    console.log(`[auto-context-debug] Starting auto context capture for panel ${panelId}`);
-    sessionManager.clearAutoContextCapture(panelId);
-    sessionManager.beginAutoContextCapture(panelId);
-
-    let modelOverride: string | undefined;
-    const currentState = (panel.state.customState as ClaudePanelState | undefined) ?? {};
-    if (typeof currentState.model === 'string' && currentState.model.trim().length > 0) {
-      modelOverride = currentState.model;
-    }
-
-    // Forward the per-panel fast-mode + reasoning-effort launch settings on the
-    // automatic /context turn. Both are part of the SDK options fingerprint
-    // (claudeCodeManager.computeOptionsFingerprint), so omitting them here spawns
-    // /context with a DIFFERENT fingerprint than the user's turns — closing the
-    // warm process and re-cold-spawning on both this turn and the next user turn.
-    // Read the same persisted settings sessions:input threads on every respawn.
-    const launchSettings = databaseService.getPanelSettings(panelId);
-    const fastModeOverride = launchSettings?.fastMode === true;
-    const rawLaunchEffort = launchSettings?.reasoningEffort;
-    const reasoningEffortOverride = isAnyEffortLevel(rawLaunchEffort) ? rawLaunchEffort : undefined;
-
-    const conversationHistory = sessionManager.getPanelConversationMessages
-      ? sessionManager.getPanelConversationMessages(panelId)
-      : [];
-    console.log(`[auto-context-debug] conversation history length: ${conversationHistory.length}, model: ${modelOverride || 'default'}`);
-
-    console.log(`[auto-context-debug] Setting autoContextRunState to 'running'`);
-    await updateClaudePanelCustomState(panelId, (state) => ({
-      ...state,
-      autoContextRunState: 'running'
-    }));
-
-    try {
-      console.log(`[auto-context-debug] Calling claudeManager.continuePanel with /context prompt`);
-      await claudeManager.continuePanel(
-        panelId,
-        session.worktreePath,
-        '/context',
-        conversationHistory,
-        modelOverride,
-        fastModeOverride,
-        reasoningEffortOverride
-      );
-      console.log(`[auto-context-debug] claudeManager.continuePanel completed successfully`);
-    } catch (error) {
-      console.log(`[auto-context-debug] claudeManager.continuePanel threw error: ${error instanceof Error ? error.message : String(error)}`);
-      (logger || console).warn?.(`[Main] Failed to run automatic /context for panel ${panelId}: ${error instanceof Error ? error.message : String(error)}`);
-      sessionManager.clearAutoContextCapture(panelId);
-      await updateClaudePanelCustomState(panelId, (state) => ({
-        ...state,
-        autoContextRunState: 'idle'
-      }));
-    }
   };
 
   const attachProcessLifecycleHandlers = (
@@ -1035,63 +870,28 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
       return;
     }
 
-    let skipSessionSummary = false;
-
-    console.log(`[auto-context-debug] Claude exit handler called - panelId: ${panelId}, sessionId: ${sessionId}, exitCode: ${exitCode}`);
-
-    if (panelId) {
-      // Use mutex to prevent race conditions between concurrent exit handlers
-      const { withLock } = await import('./utils/mutex');
+    // Refresh the context-% meter on every successful turn from the turn's own
+    // SDK usage data: the newest assistant message's usage (input + cache read +
+    // cache creation) is the API-reported prompt size for this turn, so no extra
+    // probe turn is needed (the old hidden `/context` continuation doubled every
+    // turn and is gone). getPanelOutputs is oldest→newest, so reverse to let the
+    // NEWEST assistant usage / context window win.
+    if (panelId && exitCode === 0) {
       try {
-        await withLock(`auto-context-${panelId}`, async () => {
-          const panel = panelManager.getPanel(panelId);
-          console.log(`[auto-context-debug] Panel exists: ${!!panel}`);
-
-          if (panel) {
-            const customState = (panel.state.customState as ClaudePanelState | undefined) ?? {};
-            const autoState = customState.autoContextRunState ?? 'idle';
-            console.log(`[auto-context-debug] autoContextRunState: ${autoState}, exitCode: ${exitCode}`);
-
-            if (autoState === 'running') {
-              console.log(`[auto-context-debug] Finalizing auto context run for panel ${panelId}`);
-              skipSessionSummary = true;
-              await finalizeAutoContextRun(panelId);
-            } else if (exitCode === 0) {
-              // Refresh the context-% meter on every successful turn. Otherwise
-              // the extractor only runs inside finalizeAutoContextRun (the
-              // auto-compaction path above), which a normal quick session may
-              // never enter — leaving ClaudePanelState.contextUsage null and the
-              // ChatMetaStrip stuck at "--%". getPanelOutputs is oldest→newest, so
-              // reverse to let the NEWEST result's modelUsage win.
-              try {
-                const recentOutputs =
-                  typeof sessionManager.getPanelOutputs === 'function'
-                    ? [...sessionManager.getPanelOutputs(panelId, 200)].reverse()
-                    : [];
-                const turnContextUsage = extractContextUsageFromOutputs(recentOutputs);
-                if (turnContextUsage) {
-                  await updateClaudePanelCustomState(panelId, (state) => ({
-                    ...state,
-                    contextUsage: turnContextUsage,
-                  }));
-                }
-              } catch (ctxErr) {
-                console.warn('[auto-context] per-turn context-% refresh failed:', ctxErr);
-              }
-              console.log(`[auto-context-debug] Starting auto context run for panel ${panelId}`);
-              await startAutoContextRun(panelId, sessionId);
-            } else {
-              console.log(`[auto-context-debug] Skipping auto context - exitCode is ${exitCode}, not 0`);
-            }
-          } else {
-            console.log(`[auto-context-debug] Panel ${panelId} not found in panelManager`);
-          }
-        });
-      } catch (autoContextError) {
-        console.error(`[Main] Failed to handle automatic context usage for panel ${panelId}:`, autoContextError);
+        const recentOutputs =
+          typeof sessionManager.getPanelOutputs === 'function'
+            ? [...sessionManager.getPanelOutputs(panelId, 200)].reverse()
+            : [];
+        const turnContextUsage = extractContextUsageFromOutputs(recentOutputs);
+        if (turnContextUsage) {
+          await updateClaudePanelCustomState(panelId, (state) => ({
+            ...state,
+            contextUsage: turnContextUsage,
+          }));
+        }
+      } catch (ctxErr) {
+        console.warn(`[Main] per-turn context-% refresh failed for panel ${panelId}:`, ctxErr);
       }
-    } else {
-      console.log(`[auto-context-debug] No panelId in exit event - skipping auto context`);
     }
 
     // Refresh git status after Claude exits, as it may have made commits
@@ -1101,11 +901,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     } catch (error) {
       console.error(`Failed to refresh git status for session ${sessionId} after exit:`, error);
     }
-
-    if (skipSessionSummary) {
-      return;
-    }
-
 
     // Add commit information when session ends
     try {
@@ -1205,24 +1000,6 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     if (!validation.valid) {
       logValidationFailure('claudeCodeManager error event', validation);
       return; // Don't process invalid events
-    }
-
-    if (panelId) {
-      try {
-        const panel = panelManager.getPanel(panelId);
-        if (panel) {
-          const customState = (panel.state.customState as ClaudePanelState | undefined) ?? {};
-          if ((customState.autoContextRunState ?? 'idle') === 'running') {
-            sessionManager.clearAutoContextCapture(panelId);
-            await updateClaudePanelCustomState(panelId, (state) => ({
-              ...state,
-              autoContextRunState: 'idle'
-            }));
-          }
-        }
-      } catch (autoContextCleanupError) {
-        console.error(`[Main] Failed to clean up automatic context run after error for panel ${panelId}:`, autoContextCleanupError);
-      }
     }
 
     if (panelId) {
