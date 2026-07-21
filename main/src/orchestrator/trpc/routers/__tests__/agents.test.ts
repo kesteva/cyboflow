@@ -250,6 +250,8 @@ describe('cyboflow.agents.upsertOverride / resetOverride', () => {
   it('upsert with a pinned model surfaces it on the entry + stats; reset clears it', async () => {
     const caller = makeWiredCaller(createAgentsTestDb());
 
+    // A Claude model pin requires a pinned Claude runtime (the model-gating
+    // invariant enforced in normalizeRuntime); the two persist together.
     const pinned = await caller.cyboflow.agents.upsertOverride({
       projectId: PROJECT_ID,
       agentKey: 'implement',
@@ -257,6 +259,7 @@ describe('cyboflow.agents.upsertOverride / resetOverride', () => {
       description: 'Pin sonnet.',
       systemPrompt: 'You are my implement.',
       tools: ['Read', 'Edit'],
+      runtime: 'claude-sdk',
       model: 'sonnet',
     });
     expect(pinned.model).toBe('sonnet');
