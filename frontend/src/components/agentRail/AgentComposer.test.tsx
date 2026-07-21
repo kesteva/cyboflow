@@ -62,6 +62,18 @@ describe('AgentComposer', () => {
     expect(screen.getByTestId('agent-composer-send')).toBeDisabled();
   });
 
+  it('typing multiline text does not break send', () => {
+    const onSend = vi.fn();
+    render(<AgentComposer onSend={onSend} disabled={false} model={null} />);
+
+    const input = screen.getByTestId('agent-composer-input');
+    fireEvent.change(input, { target: { value: 'line one\nline two\nline three\nline four\nline five' } });
+    fireEvent.click(screen.getByTestId('agent-composer-send'));
+
+    expect(onSend).toHaveBeenCalledWith('line one\nline two\nline three\nline four\nline five');
+    expect(input).toHaveValue('');
+  });
+
   it('does not call onSend when disabled, even via Cmd+Enter', () => {
     const onSend = vi.fn();
     const { rerender } = render(<AgentComposer onSend={onSend} disabled={false} model={null} />);

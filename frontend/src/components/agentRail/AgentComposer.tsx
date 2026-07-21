@@ -10,7 +10,7 @@
  * composers (border/mono-text/uppercase-button conventions, italic placeholder
  * per the design packet) without inheriting that machinery.
  */
-import { useCallback, useState, type KeyboardEvent } from 'react';
+import { useCallback, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { CornerDownLeft } from 'lucide-react';
 
 export interface AgentComposerProps {
@@ -24,8 +24,24 @@ export interface AgentComposerProps {
 
 const PLACEHOLDER = 'Ask, or run /plan /approve /triage…';
 
+/** Auto-grow cap: 4 lines at the textarea's `leading-4` (16px) line height,
+ * plus the textarea's own vertical padding (none). */
+const COMPOSER_MAX_LINES = 4;
+const COMPOSER_LINE_HEIGHT_PX = 16;
+const COMPOSER_MAX_PX = COMPOSER_MAX_LINES * COMPOSER_LINE_HEIGHT_PX;
+
 export function AgentComposer({ onSend, disabled, model }: AgentComposerProps): React.ReactElement {
   const [value, setValue] = useState('');
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-grow up to COMPOSER_MAX_PX (4 lines), then scroll — re-measured on
+  // every value change so the box also shrinks back after a send clears it.
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_PX)}px`;
+  }, [value]);
 
   const submit = useCallback(() => {
     const text = value.trim();
@@ -52,6 +68,7 @@ export function AgentComposer({ onSend, disabled, model }: AgentComposerProps): 
         &#9656;
       </span>
       <textarea
+        ref={textareaRef}
         value={value}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={handleKeyDown}
@@ -59,7 +76,7 @@ export function AgentComposer({ onSend, disabled, model }: AgentComposerProps): 
         rows={1}
         placeholder={PLACEHOLDER}
         data-testid="agent-composer-input"
-        className="max-h-[96px] min-h-[18px] flex-1 resize-none bg-transparent text-[11px] text-text-primary outline-none placeholder:italic placeholder:text-text-tertiary disabled:cursor-not-allowed"
+        className="max-h-16 min-h-[18px] flex-1 resize-none overflow-y-auto bg-transparent text-[11px] leading-4 text-text-primary outline-none placeholder:italic placeholder:text-text-tertiary disabled:cursor-not-allowed"
       />
       <span
         data-testid="agent-composer-model-chip"
