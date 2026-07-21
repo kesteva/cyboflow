@@ -91,6 +91,42 @@ function makeDefinition(id: string): WorkflowDefinition {
 }
 
 /**
+ * A sprint-shaped definition whose fan-out inner chain binds `implement` and
+ * `task-verify` — used by the mixed-provider guard tests so a Codex pin on those
+ * agents is REACHABLE (the guard scopes to agents the workflow can dispatch,
+ * including fan-out inner steps). `compounder` is deliberately NOT bound here, so
+ * it stands in for an unreachable catalogue pin.
+ */
+function sprintLikeDefinition(): WorkflowDefinition {
+  return {
+    id: 'sprint',
+    phases: [
+      {
+        id: 'execute',
+        label: 'Execute',
+        color: '#c96442',
+        steps: [
+          {
+            id: 'execute-tasks',
+            name: 'Execute tasks',
+            agent: 'human',
+            mcps: [],
+            retries: 0,
+            fanOut: {
+              over: 'tasks',
+              inner: [
+                { id: 'implement', agent: 'implement' },
+                { id: 'task-verify', agent: 'task-verify' },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/**
  * Build a stub WorkflowConfigProvider supplying the global defaults that
  * createRun feeds into the resolvers. Mirrors ConfigManager's surface without
  * importing the concrete service (standalone-typecheck invariant).
@@ -1075,10 +1111,11 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
-        // A real agent key: the guard consults the RESOLVED agent set, so a codex
-        // pin only trips when it lands on an agent that actually spawns.
+        // A REACHABLE agent key (fan-out inner): the guard consults the resolved
+        // agent set scoped to agents this workflow can dispatch, so a codex pin
+        // only trips when it lands on an agent that actually spawns.
         registry.updateSpec(workflowId, {
-          ...makeDefinition('sprint'),
+          ...sprintLikeDefinition(),
           agentConfigs: { implement: { runtime: 'codex-sdk' } },
         });
 
@@ -1116,7 +1153,7 @@ describe('WorkflowRegistry', () => {
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
         registry.updateSpec(workflowId, {
-          ...makeDefinition('sprint'),
+          ...sprintLikeDefinition(),
           agentConfigs: { implement: { runtime: 'codex-sdk' } },
         });
 
@@ -1207,16 +1244,18 @@ describe('WorkflowRegistry', () => {
       ).run(`ago_${agentKey}`, agentKey, agentKey, `cyboflow-${agentKey}`, runtime, codexModel);
     }
 
-    it('throws MixedProviderOrchestratedError for an orchestrated run whose CATALOGUE pins an agent onto Codex', async () => {
+    it('throws MixedProviderOrchestratedError for an orchestrated run whose CATALOGUE pins a REACHABLE agent onto Codex', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const path = writeTempMd(tmpDir, 'catalogue-codex-orchestrated.md', '---\n---\n');
         registry.seed(1, [{ name: 'sprint', path }]);
         ensureAgentOverridesTable();
-        // A Codex pin set through the Agents editor — NOT the workflow spec.
+        // A Codex pin set through the Agents editor — NOT the workflow spec — on a
+        // fan-out inner agent the workflow dispatches.
         insertRuntimeOverride('implement', 'codex-sdk', 'gpt-5.2-codex');
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        registry.updateSpec(workflowId, sprintLikeDefinition());
 
         let thrown: unknown;
         try {
@@ -1237,11 +1276,46 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        registry.updateSpec(workflowId, sprintLikeDefinition());
 
         const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
           requestedExecutionModel: 'programmatic',
         });
         expect(result.executionModel).toBe('programmatic');
+        expect(registry.getRunById(result.runId)).not.toBeNull();
+      });
+    });
+
+    it('does NOT throw when the CATALOGUE pins an agent the workflow never dispatches (guard scoped to reachable agents)', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'catalogue-codex-unreachable.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+        ensureAgentOverridesTable();
+        // `compounder` is a Compound-only agent; sprintLikeDefinition never binds
+        // it, so pinning it to Codex cannot cause a mix on this run.
+        insertRuntimeOverride('compounder', 'codex-sdk', 'gpt-5.2-codex');
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        registry.updateSpec(workflowId, sprintLikeDefinition());
+
+        const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
+        expect(result.executionModel).toBe('orchestrated');
+        expect(registry.getRunById(result.runId)).not.toBeNull();
+      });
+    });
+
+    it('does NOT throw a __quick__ sentinel run when the catalogue pins an agent onto Codex (quick sessions never bricked)', async () => {
+      await withTempDir('workflow-registry-test-', async () => {
+        ensureAgentOverridesTable();
+        // A catalogue Codex pin used to throw MixedProviderOrchestratedError on
+        // EVERY quick-session/chat-sentinel createRun (both callers uncatch it),
+        // bricking quick sessions project-wide. The sentinel is now exempt.
+        insertRuntimeOverride('implement', 'codex-sdk', 'gpt-5.2-codex');
+        const quickWorkflowId = registry.ensureQuickWorkflow(1);
+
+        const result = registry.createRun(quickWorkflowId, undefined, TEST_SESSION_ID);
+        expect(result.executionModel).toBe('orchestrated');
         expect(registry.getRunById(result.runId)).not.toBeNull();
       });
     });
@@ -1255,10 +1329,11 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
-        // The workflow config pins the SAME agent back to a Claude runtime — it
-        // wins over the catalogue, so the effective set is single-provider Claude.
+        // The workflow config pins the SAME (reachable) agent back to a Claude
+        // runtime — it wins over the catalogue, so the effective set is
+        // single-provider Claude and the guard must not trip.
         registry.updateSpec(workflowId, {
-          ...makeDefinition('sprint'),
+          ...sprintLikeDefinition(),
           agentConfigs: { implement: { runtime: 'claude-sdk' } },
         });
 

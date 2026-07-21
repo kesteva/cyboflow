@@ -20,6 +20,7 @@ import { isCyboflowWorkflowName, resolveWorkflowDefinition, parseWorkflowDefinit
 import { MixedProviderOrchestratedError } from '../../../shared/types/executionModelErrors';
 import { computeEffectiveAgents, applyWorkflowAgentConfigs } from './agents/effectiveAgents';
 import { loadBuiltInAgents } from './agents/agentCatalogue';
+import { resolveStepAgentKey } from '../../../shared/types/agentIdentity';
 import type { AgentOverrideRow } from '../database/models';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import {
@@ -1203,7 +1204,13 @@ export class WorkflowRegistry {
     // Scoped to the run's BASE provider being Claude: a whole-run Codex
     // request (agentProvider === 'codex' — every step already targets Codex)
     // is a single consistent provider, not a mix, and must NOT trip this.
-    if (executionModel === 'orchestrated' && agentProvider === 'claude') {
+    //
+    // The `__quick__` sentinel is EXEMPT: a quick chat is a single ad-hoc Claude
+    // turn, not a DAG that dispatches step agents, so a per-agent Codex pin is
+    // inert there — and neither the quick-session nor the chat-sentinel createRun
+    // caller catches MixedProviderOrchestratedError, so tripping it would brick
+    // quick sessions project-wide the moment any agent is pinned to Codex.
+    if (executionModel === 'orchestrated' && agentProvider === 'claude' && !isQuickSentinel) {
       // Resolve the same effective definition the frozen spec below is
       // derived from: a variant run's frozen opts.variantSpecJson when
       // present, else the workflow's own resolved definition. For the variant
@@ -1211,27 +1218,14 @@ export class WorkflowRegistry {
       // deliberately — a frozen variant spec must stand on its own and should
       // never fall back to a built-in default the variant didn't ask for.
       // Fails soft to null on a missing/malformed definition (no throw): an
-      // unreadable spec has no codex agent config to detect, so it can't be
+      // unreadable spec has no reachable agents to detect, so it can't be
       // "mixed" either — spec validation is a separate concern owned by the
       // workflow/variant editors, not this guard.
       const effectiveDefinitionForMixCheck: WorkflowDefinition | null =
         opts?.variantSpecJson !== undefined
           ? parseWorkflowDefinition(opts.variantSpecJson)
           : resolveWorkflowDefinition(workflow.name, workflow.spec_json);
-      // Resolve the run's EFFECTIVE agent set (project catalogue overrides layered
-      // UNDER the workflow's agentConfigs — the same precedence the spawn-time
-      // overlay applies; variant deltas can't touch `runtime`, so they're
-      // irrelevant here) and detect any agent that resolves onto Codex. Checking
-      // the effective set — not agentConfigs alone — is what makes this catch a
-      // Codex pin set in the Agents editor, while a workflow config that pins an
-      // agent back to a Claude runtime correctly MASKS a catalogue Codex pin (no
-      // false positive). Fail-soft: any read/parse error yields false.
-      if (
-        this.effectiveSetPinsCodexRuntime(
-          runProjectId,
-          effectiveDefinitionForMixCheck?.agentConfigs,
-        )
-      ) {
+      if (this.effectiveSetPinsCodexRuntime(runProjectId, effectiveDefinitionForMixCheck)) {
         throw new MixedProviderOrchestratedError();
       }
     }
@@ -1359,42 +1353,68 @@ export class WorkflowRegistry {
   }
 
   /**
-   * Does the run's EFFECTIVE agent set pin any agent onto the Codex runtime?
+   * Does an agent THIS workflow can actually dispatch resolve onto the Codex
+   * runtime? — the orchestrated mixed-provider trip condition.
    *
-   * Layers the project's `agent_overrides` catalogue UNDER the workflow's
-   * `agentConfigs` — the SAME precedence the spawn-time overlay applies
-   * (`resolveRunEffectiveAgents`), minus variant deltas, which can only touch
-   * systemPrompt/model and never `runtime`. Consulting the RESOLVED set (not
-   * `agentConfigs` alone) is what lets the mixed-provider guard catch a Codex pin
-   * set through the Agents editor, while a workflow config that pins an agent back
-   * to a Claude runtime correctly MASKS a catalogue Codex pin (no false positive).
+   * Two-part check:
+   *   1. REACHABILITY — the agent keys the workflow can spawn: every phase step's
+   *      agent plus every fan-out inner step's agent (resolveStepAgentKey maps a
+   *      step label to its canonical key; the `human` gate → null). A Codex pin on
+   *      an agent this workflow never spawns (e.g. a planner-only agent pinned in
+   *      the catalogue, launched under sprint) can't cause a mix, so it must NOT
+   *      trip — scoping to reachable agents avoids blocking unrelated workflows.
+   *   2. EFFECTIVE RUNTIME — the project `agent_overrides` catalogue layered UNDER
+   *      the workflow's `agentConfigs` (the same precedence the spawn-time overlay
+   *      applies; variant deltas can't touch `runtime`, so they're excluded).
+   *      Consulting the RESOLVED set is what catches a Codex pin set through the
+   *      Agents editor, while a workflow config that pins an agent back to a Claude
+   *      runtime correctly MASKS a catalogue Codex pin (no false positive).
    *
-   * Fail-soft: any read/parse error yields `false` — an unresolvable agent set
-   * can't be proven "mixed", and this check must never break a launch.
+   * Fail-soft: an unresolvable definition (null) or any read/parse error yields
+   * `false` — an unprovable mix must never break a launch. A missing catalogue
+   * table is expected on a schema-narrow test DB (→ no overrides); a genuine read
+   * error is logged so a silently-disabled guard stays diagnosable.
    */
   private effectiveSetPinsCodexRuntime(
     projectId: number,
-    agentConfigs: WorkflowDefinition['agentConfigs'] | undefined,
+    definition: WorkflowDefinition | null,
   ): boolean {
     try {
-      // A missing/unreadable catalogue table is treated as NO overrides (not a
-      // hard failure) so the workflow-config signal below still resolves — the
-      // definition-only detection must survive a schema-narrow DB. In production
-      // the table always exists (migration 029).
+      if (definition === null) return false;
+      const reachable = new Set<string>();
+      for (const phase of definition.phases) {
+        for (const step of phase.steps) {
+          const key = resolveStepAgentKey(step.id, step.agent);
+          if (key !== null) reachable.add(key);
+          for (const inner of step.fanOut?.inner ?? []) {
+            const innerKey = resolveStepAgentKey(inner.id, inner.agent);
+            if (innerKey !== null) reachable.add(innerKey);
+          }
+        }
+      }
+      if (reachable.size === 0) return false;
+
       let overrides: AgentOverrideRow[] = [];
       try {
         overrides = this.db
           .prepare('SELECT * FROM agent_overrides WHERE project_id = ?')
           .all(projectId) as AgentOverrideRow[];
-      } catch {
-        overrides = [];
+      } catch (err) {
+        this.logger.warn(
+          `WorkflowRegistry.effectiveSetPinsCodexRuntime: agent_overrides read failed for project ${projectId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
       let effective = computeEffectiveAgents(loadBuiltInAgents(), overrides);
-      if (agentConfigs) {
-        effective = applyWorkflowAgentConfigs(effective, agentConfigs);
+      if (definition.agentConfigs) {
+        effective = applyWorkflowAgentConfigs(effective, definition.agentConfigs);
       }
-      return effective.some((agent) => agent.runtime === 'codex-sdk');
-    } catch {
+      return effective.some(
+        (agent) => agent.runtime === 'codex-sdk' && reachable.has(agent.agentKey),
+      );
+    } catch (err) {
+      this.logger.warn(
+        `WorkflowRegistry.effectiveSetPinsCodexRuntime: resolution failed for project ${projectId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
       return false;
     }
   }
