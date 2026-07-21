@@ -6,6 +6,27 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.28] — 2026-07-21
+
+### Added
+
+- **Cyboflow assistant** — a global agent rail on the landing-family views: a thread view with an auto-growing composer, suggestion chips, and a digest trigger, backed by `AgentThreadService` + a dedicated events sink, an `agentThread` tRPC router with transcript projection, and a global-agent system prompt threaded into every spawn (migration 074).
+- Assistant proposal flow: proposal action cards in the rail and a proposal executor with a CAS state machine, launch saga, and boot reconciliation; resolved proposal cards clear after a transient notification window.
+- Read-only MCP surface for the assistant: a global-agent scope gate + read-tool family with `cyboflow_propose_action`, a `cyboflow_db_query` tool, a `cyboflow_reference` product deep-dive, and a product-overview tool — plus a folder-access setting for extra read-scope folders.
+- Assistant settings section: model override for the global assistant and a zero-token kill switch.
+- Planner approve-designs batch gate: an `approve-designs` gate with per-idea architecture-design identity (migration 073), an ApproveDesigns artifact renderer with per-idea arch-design tabs, and joint approve-ideas/approve-designs gates delivered via auto-created surfaces.
+
+### Changed
+
+- Renamed the agent rail to "cyboflow assistant" and dropped the subtitle / the "Kick off top tasks" suggestion chip.
+- `raw_events` noise reduction: stop persisting noise classes at the write path, and migration 072 prunes existing noise with a conditional post-migration `VACUUM`.
+
+### Fixed
+
+- Provider-aware model selection — no cross-provider model bleed: per-agent Claude/Codex model pins propagate on programmatic runs, the mixed-provider guard is scoped to reachable agents (exempting the quick sentinel and covering `agent_overrides` Codex pins), the agent model picker is gated on a pinned runtime, the agent card chip reflects the pinned Codex runtime/model, and legacy model-without-runtime pins are made coherent in both editor and server.
+- Exempt agent-thread spawn ids from Crystal session validation; open-session navigation now carries the server-resolved `projectId`.
+- The empty assistant composer rests at single-line height.
+
 ## [0.1.27] — 2026-07-20
 
 ### Added
