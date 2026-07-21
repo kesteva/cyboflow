@@ -107,8 +107,10 @@ interface AgentOutputPayload {
   timestamp: Date | string;
 }
 
-/** Discriminated result of a digest trigger — throttled calls do NOT send. */
-export type DigestTriggerResult = { triggered: true } | { triggered: false; reason: 'throttled' };
+/** Discriminated result of a digest trigger — throttled/disabled calls do NOT send. */
+export type DigestTriggerResult =
+  | { triggered: true }
+  | { triggered: false; reason: 'throttled' | 'disabled' };
 
 export interface AgentThreadServiceDeps {
   store: AgentThreadDbStore;
@@ -122,6 +124,15 @@ export interface AgentThreadServiceDeps {
    * restart.
    */
   defaultModel: () => string | null;
+  /**
+   * Authoritative kill switch for the global assistant, checked per turn. The
+   * caller wires this to `configManager.isAssistantEnabled()`, so a Settings
+   * "Enable assistant" toggle takes effect on the very next call with no
+   * restart. When false, `sendMessage` throws before any spawn/bridge work and
+   * `triggerDigest` returns `{triggered:false, reason:'disabled'}` without
+   * stamping the throttle.
+   */
+  enabled: () => boolean;
   /** Base dir for per-thread neutral home dirs (`<base>/<threadId>/`). */
   homeDirBase: string;
   /** Injectable clock for the digest throttle (tests advance it). */
@@ -214,6 +225,9 @@ export class AgentThreadService {
    * ONCE fresh (the bridge re-captures the new id from the fresh turn's init).
    */
   async sendMessage(threadId: string, text: string): Promise<void> {
+    if (!this.deps.enabled()) {
+      throw new Error('assistant is disabled in settings');
+    }
     const thread = this.deps.store.getThread(threadId);
     if (thread === null) {
       throw new Error(`AgentThreadService: unknown thread ${threadId}`);
@@ -247,6 +261,9 @@ export class AgentThreadService {
    * `{triggered:false, reason:'throttled'}` WITHOUT sending.
    */
   async triggerDigest(threadId: string): Promise<DigestTriggerResult> {
+    if (!this.deps.enabled()) {
+      return { triggered: false, reason: 'disabled' };
+    }
     const now = this.nowMs();
     const last = this.lastDigestAt.get(threadId);
     if (last !== undefined && now - last < DIGEST_THROTTLE_MS) {

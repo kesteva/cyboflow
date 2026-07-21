@@ -93,6 +93,10 @@ function App() {
   const [isTokenTestOpen, setIsTokenTestOpen] = useState(false);
   const { currentError, clearError } = useErrorStore();
   const { fetchConfig } = useConfigStore();
+  // Global assistant on/off (Settings → Assistant). Reactive off the shared
+  // config store: fetchConfig() below primes it at mount, and Settings'
+  // post-save refetch flips this without an app restart. Absent ⇒ enabled.
+  const assistantEnabled = useConfigStore((state) => state.config?.assistantEnabled !== false);
   const { activeProjectId } = useNavigationStore();
   
   // One-shot migration: move legacy crystal-sidebar-width → cyboflow-sidebar-width (mount only)
@@ -379,7 +383,7 @@ function App() {
           </div>
           {/* Global "cyboflow assistant" rail — every landing-family surface
               except the session workspace (RunRightRail) and the wizard. */}
-          {shouldShowAgentRail(view) && <AgentRail />}
+          {shouldShowAgentRail(view) && assistantEnabled && <AgentRail />}
         </div>
         {/* Persistent status bar at the bottom of the app shell */}
         <StatusBar />

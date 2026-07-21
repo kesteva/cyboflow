@@ -2477,6 +2477,7 @@ async function initializeServices() {
         agentThreadEvents.emit('message', { threadId: id, envelope });
       },
       defaultModel: () => configManager.getAssistantModel() ?? configManager.getDefaultModel(),
+      enabled: () => configManager.isAssistantEnabled(),
       homeDirBase: getCyboflowSubdirectory('agent-home'),
       logger: cyboflowLogger,
     });

@@ -190,6 +190,8 @@ export const agentThreadRouter = router({
    * Trigger a synthetic digest turn. Server-throttled (≥10 min per thread) — a
    * throttled call returns { triggered: false, reason: 'throttled' } WITHOUT
    * sending, so the frontend's first-open-per-launch trigger stays idempotent.
+   * When the global assistant kill switch is off, returns
+   * { triggered: false, reason: 'disabled' } WITHOUT stamping the throttle.
    */
   triggerDigest: protectedProcedure
     .input(z.object({ threadId: z.string() }))
@@ -197,7 +199,7 @@ export const agentThreadRouter = router({
       async ({
         ctx,
         input,
-      }): Promise<{ triggered: true } | { triggered: false; reason: 'throttled' }> => {
+      }): Promise<{ triggered: true } | { triggered: false; reason: 'throttled' | 'disabled' }> => {
         return requireService(ctx).triggerDigest(input.threadId);
       },
     ),

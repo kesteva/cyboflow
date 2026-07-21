@@ -47,6 +47,11 @@ export interface AppConfig {
   // Model alias for the global cyboflow assistant (the agent-rail chat), e.g.
   // 'sonnet' | 'opus' | 'fable'. Unset ⇒ falls back to defaultModel.
   assistantModel?: string;
+  // Global assistant on/off; absent ⇒ enabled. When false the assistant spawns
+  // no turns (zero tokens) — enforced authoritatively by AgentThreadService via
+  // ConfigManager.isAssistantEnabled(), and the renderer hides the agent rail
+  // (so the auto-digest, which lives inside the rail, cannot fire either).
+  assistantEnabled?: boolean;
   // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
   defaultSubstrate?: CliSubstrate;
   // Global hard lock: when true, every run/session is forced onto the interactive
@@ -174,6 +179,8 @@ export interface UpdateConfigRequest {
   defaultModel?: string;
   // Model alias for the global cyboflow assistant (see AppConfig.assistantModel).
   assistantModel?: string;
+  // Global assistant on/off (see AppConfig.assistantEnabled).
+  assistantEnabled?: boolean;
   // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
   defaultSubstrate?: CliSubstrate;
   // Global hard lock — force the interactive PTY substrate and disable the SDK

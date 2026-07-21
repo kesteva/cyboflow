@@ -266,6 +266,17 @@ export class ConfigManager extends EventEmitter {
   }
 
   /**
+   * Global assistant on/off — the authoritative server-side kill switch consumed
+   * by AgentThreadService (checked per turn). Floors to TRUE (enabled) when
+   * unset, so existing users keep the assistant on. Like `assistantModel`, NOT
+   * seeded into the constructor defaults, so existing config.json files stay
+   * byte-identical for users who never touch the toggle.
+   */
+  isAssistantEnabled(): boolean {
+    return this.config.assistantEnabled !== false;
+  }
+
+  /**
    * The global default CLI substrate for new workflow runs (IDEA-013 / TASK-806).
    *
    * Floors to DEFAULT_SUBSTRATE ('sdk') when unset. `defaultSubstrate` is

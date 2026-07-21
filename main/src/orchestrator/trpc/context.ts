@@ -121,8 +121,14 @@ export interface AgentThreadServiceLike {
   ensureGlobalThread(): AgentThread;
   /** Send one turn (spawn/warm-continue). Also used to inject executor loopback turns. */
   sendMessage(threadId: string, text: string): Promise<void>;
-  /** Trigger a synthetic digest turn, server-throttled (throttled ⇒ triggered:false). */
-  triggerDigest(threadId: string): Promise<{ triggered: true } | { triggered: false; reason: 'throttled' }>;
+  /**
+   * Trigger a synthetic digest turn, server-throttled (throttled ⇒
+   * triggered:false) and gated by the global assistant kill switch
+   * (disabled ⇒ triggered:false, reason:'disabled').
+   */
+  triggerDigest(
+    threadId: string,
+  ): Promise<{ triggered: true } | { triggered: false; reason: 'throttled' | 'disabled' }>;
 }
 
 /**

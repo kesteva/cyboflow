@@ -65,6 +65,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // Model alias for the global cyboflow assistant (the agent-rail chat). '' =
   // follow the app's default model (defaultModel / getDefaultModel()).
   const [assistantModel, setAssistantModel] = useState('');
+  // Global assistant on/off (default ON). Off hides the agent rail and blocks
+  // the server-side kill switch, so no turn (including the auto-digest) spawns.
+  const [assistantEnabled, setAssistantEnabled] = useState(true);
   const [defaultAgentPermissionMode, setDefaultAgentPermissionMode] = useState<PermissionMode>('default');
   // Global CLI runtime: false = allow SDK (per-run picker available, default
   // 'sdk'); true = force the interactive PTY substrate everywhere (SDK disabled).
@@ -152,6 +155,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setInitialDemoMode(data.demoMode || false);
       setEnableCyboflowFooter(data.enableCyboflowFooter !== false); // Default to true
       setAssistantModel(data.assistantModel ?? '');
+      setAssistantEnabled(data.assistantEnabled !== false);
       setDefaultAgentPermissionMode(data.defaultAgentPermissionMode ?? 'default');
       setInteractivePtyOnly(data.interactivePtyOnly ?? false);
       setDefaultExecutionModel(data.defaultExecutionModel ?? 'programmatic');
@@ -204,6 +208,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         // Empty ('App default') → undefined so getAssistantModel() floors to
         // getDefaultModel() and config.json stays free of the key.
         assistantModel: assistantModel.trim() ? assistantModel.trim() : undefined,
+        // Explicit boolean, never undefined — updateConfig merges partials, so
+        // an undefined value would fail to overwrite a stored `false`.
+        assistantEnabled: assistantEnabled,
         defaultAgentPermissionMode,
         interactivePtyOnly,
         defaultExecutionModel,
@@ -644,13 +651,23 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                 description="The cyboflow assistant in the rail. Unset uses the app default model."
                 icon={<Bot className="w-4 h-4" />}
               >
-                <ModelSelector
-                  id="assistant-model"
-                  label=""
-                  value={assistantModel}
-                  onChange={setAssistantModel}
-                  allowDefaultOption={{ label: 'App default' }}
+                <Checkbox
+                  label="Enable assistant"
+                  checked={assistantEnabled}
+                  onChange={(e) => setAssistantEnabled(e.target.checked)}
                 />
+                <p className="text-xs text-text-tertiary mt-1 mb-3">
+                  When off, the assistant rail is hidden and uses no tokens.
+                </p>
+                <div className={!assistantEnabled ? 'opacity-50 pointer-events-none' : undefined}>
+                  <ModelSelector
+                    id="assistant-model"
+                    label=""
+                    value={assistantModel}
+                    onChange={setAssistantModel}
+                    allowDefaultOption={{ label: 'App default' }}
+                  />
+                </div>
               </SettingsSection>
 
               <SettingsSection

@@ -94,6 +94,8 @@ interface Harness {
   published: Array<{ id: string; envelope: unknown }>;
   homeBase: string;
   clock: { value: number };
+  /** Mutable enabled flag — flip `enabled.value` mid-test to exercise the kill switch. */
+  enabled: { value: boolean };
 }
 
 function makeHarness(): Harness {
@@ -103,15 +105,17 @@ function makeHarness(): Harness {
   const published: Array<{ id: string; envelope: unknown }> = [];
   const homeBase = mkdtempSync(join(tmpdir(), 'agent-home-'));
   const clock = { value: 1_000_000 };
+  const enabled = { value: true };
   const service = new AgentThreadService({
     store,
     manager,
     publish: (id, envelope) => published.push({ id, envelope }),
     defaultModel: () => 'claude-opus',
+    enabled: () => enabled.value,
     homeDirBase: homeBase,
     now: () => clock.value,
   });
-  return { db, store, manager, service, published, homeBase, clock };
+  return { db, store, manager, service, published, homeBase, clock, enabled };
 }
 
 describe('AgentThreadService', () => {
@@ -154,6 +158,15 @@ describe('AgentThreadService', () => {
   describe('sendMessage', () => {
     it('throws on an unknown thread', async () => {
       await expect(h.service.sendMessage('nope', 'hi')).rejects.toThrow(/unknown thread/);
+    });
+
+    it('throws and never spawns when the global assistant kill switch is off', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.enabled.value = false;
+
+      await expect(h.service.sendMessage(thread.id, 'hello')).rejects.toThrow(/disabled/);
+
+      expect(h.manager.calls).toHaveLength(0);
     });
 
     it('turn 1 cold-spawns with the isolation contract and no resume; captures the session id', async () => {
@@ -287,6 +300,23 @@ describe('AgentThreadService', () => {
       const third = await h.service.triggerDigest(thread.id);
       expect(third).toEqual({ triggered: true });
       expect(h.manager.calls).toHaveLength(2);
+    });
+
+    it('returns {triggered:false, reason:"disabled"} without sending or stamping the throttle when the kill switch is off, and sends once re-enabled', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.enabled.value = false;
+
+      const result = await h.service.triggerDigest(thread.id);
+      expect(result).toEqual({ triggered: false, reason: 'disabled' });
+      expect(h.manager.calls).toHaveLength(0);
+
+      // Re-enabling immediately (no elapsed clock) still sends — proof the
+      // disabled call above did NOT stamp the throttle.
+      h.enabled.value = true;
+      const after = await h.service.triggerDigest(thread.id);
+      expect(after).toEqual({ triggered: true });
+      expect(h.manager.calls).toHaveLength(1);
+      expect(h.manager.calls[0].prompt).toBe(DIGEST_PROMPT);
     });
   });
 });
