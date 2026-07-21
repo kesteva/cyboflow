@@ -262,6 +262,9 @@ describe('cyboflowMcpServer ListTools', () => {
       'cyboflow_workflows',
       'cyboflow_workflow',
       'cyboflow_propose_action',
+      'cyboflow_fs_read',
+      'cyboflow_fs_list',
+      'cyboflow_fs_grep',
     ];
     for (const name of globalAgentToolNames) {
       expect(names).not.toContain(name);

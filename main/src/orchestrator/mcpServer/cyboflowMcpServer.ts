@@ -266,6 +266,48 @@ const GLOBAL_AGENT_TOOLS = [
     },
   },
   {
+    name: 'cyboflow_fs_read',
+    description:
+      "READ-ONLY file read, scoped to the registered project folders (plus any folders the user configured as extra assistant access). Use it to read source, config, or docs to answer code-level questions about a project. Returns { path, content, truncated, totalBytes }. The path must resolve inside an allowed folder (a scope_denied error names the allowed roots so you can retry within them); secret files (.env, private keys, credential stores) are refused; binary files are refused; content is capped (~256KB) — pass offset_line + limit_lines to page through a large file.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Absolute path to a file inside an allowed project/extra folder (required)' },
+        offset_line: { type: 'number', description: 'Optional 1-based line to start from (with limit_lines) for large-file paging.' },
+        limit_lines: { type: 'number', description: 'Optional number of lines to return from offset_line.' },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'cyboflow_fs_list',
+    description:
+      "READ-ONLY directory listing, scoped to the registered project folders (plus configured extras). Returns { path, entries:[{name, type:'file'|'dir'|'symlink', size}], truncated } (capped at 500 entries). The path must resolve inside an allowed folder (scope_denied otherwise, naming the roots). Secret file NAMES are shown (metadata), but their content stays unreadable via read/grep. Use it to discover a project's layout before reading or grepping.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: 'Absolute path to a directory inside an allowed project/extra folder (required)' },
+      },
+      required: ['path'],
+    },
+  },
+  {
+    name: 'cyboflow_fs_grep',
+    description:
+      "READ-ONLY recursive regex search, scoped to the registered project folders (plus configured extras). Returns { matches:[{file, line, text}], truncated, filesScanned }. Case-insensitive by default (set case_sensitive:true to change). The walk never follows symlinks and skips .git/node_modules/dist/build/.venv/__pycache__; secret and binary files are skipped. Optional `glob` filters by basename (e.g. *.ts). Caps: 200 matches, 20000 files scanned, per-line text truncated to 500 chars. An invalid regex returns invalid_regex; an out-of-scope path returns scope_denied naming the allowed roots. Use it for code-level questions; prefer cyboflow_db_query for app-state/database questions.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pattern: { type: 'string', description: 'Regular-expression pattern to search for (required)' },
+        path: { type: 'string', description: 'Absolute path to a file or directory inside an allowed folder (required)' },
+        glob: { type: 'string', description: 'Optional basename glob to filter files, e.g. *.ts' },
+        case_sensitive: { type: 'boolean', description: 'Optional; match case-sensitively. Defaults to false (case-insensitive).' },
+        max_results: { type: 'number', description: 'Optional cap on matches, clamped to <= 200.' },
+      },
+      required: ['pattern', 'path'],
+    },
+  },
+  {
     name: 'cyboflow_propose_action',
     description:
       "THE ONLY write-shaped tool available to the global agent. Records a proposal — a candidate action for a human to review — and returns { proposalId }. Calling this tool NEVER executes anything: no run is launched, no task is reprioritized, no workflow is edited, nothing navigates. A human must explicitly confirm the resulting proposal card before any side effect happens, and confirmation runs through the SAME chokepoints every other write in this app uses (TaskChangeRouter / WorkflowRegistry / RunLauncher), stamped actor:'user'. After calling this tool, STOP and describe the proposal in your reply — do NOT claim the action happened, and do NOT poll or retry waiting for it to happen. `payload_json` is a JSON-encoded object (field names camelCase, matching shared/types/agentThread.ts AgentProposalPayload exactly) whose `kind` selects its shape: launch-run {kind,projectId,workflowName,substrate?,taskIds?,ideaIds?,findingIds?,note?}; reprioritize-backlog {kind,projectId,items:[{taskId,priority?,stageId?}]}; edit-workflow {kind,workflowId,definitionJson,summary?} (preconditions — the current spec hash — are captured server-side from a fresh read, never trusted from the caller, even if you include one); open-session {kind,navigation:{target:'run',runId}|{target:'quick-session',sessionId,runId?}}. An unrecognized kind or a payload missing a kind's required fields is rejected with 'invalid_payload'.",
@@ -1043,6 +1085,64 @@ async function handleGlobalAgentCallTool(request: {
         return { content: [{ type: 'text', text: JSON.stringify({ error: 'unknown_topic', validTopics: validKeys }) }] };
       }
       return { content: [{ type: 'text', text: JSON.stringify({ topic, title: entry.title, body: entry.body }) }] };
+    }
+
+    case 'cyboflow_fs_read': {
+      const args = (request.params.arguments ?? {}) as { path?: unknown; offset_line?: unknown; limit_lines?: unknown };
+      const { path: fsPath, offset_line, limit_lines } = args;
+      if (typeof fsPath !== 'string' || fsPath.length === 0) {
+        return invalidArgs('path: string');
+      }
+      if (offset_line !== undefined && typeof offset_line !== 'number') {
+        return invalidArgs('offset_line: number (optional)');
+      }
+      if (limit_lines !== undefined && typeof limit_lines !== 'number') {
+        return invalidArgs('limit_lines: number (optional)');
+      }
+      const queryParams: Record<string, unknown> = { path: fsPath };
+      if (offset_line !== undefined) queryParams['offsetLine'] = offset_line;
+      if (limit_lines !== undefined) queryParams['limitLines'] = limit_lines;
+      return executeMcpQuery('mcp-fs-read', queryParams);
+    }
+
+    case 'cyboflow_fs_list': {
+      const args = (request.params.arguments ?? {}) as { path?: unknown };
+      const { path: fsPath } = args;
+      if (typeof fsPath !== 'string' || fsPath.length === 0) {
+        return invalidArgs('path: string');
+      }
+      return executeMcpQuery('mcp-fs-list', { path: fsPath });
+    }
+
+    case 'cyboflow_fs_grep': {
+      const args = (request.params.arguments ?? {}) as {
+        pattern?: unknown;
+        path?: unknown;
+        glob?: unknown;
+        case_sensitive?: unknown;
+        max_results?: unknown;
+      };
+      const { pattern, path: fsPath, glob, case_sensitive, max_results } = args;
+      if (typeof pattern !== 'string' || pattern.length === 0) {
+        return invalidArgs('pattern: string');
+      }
+      if (typeof fsPath !== 'string' || fsPath.length === 0) {
+        return invalidArgs('path: string');
+      }
+      if (glob !== undefined && typeof glob !== 'string') {
+        return invalidArgs('glob: string (optional)');
+      }
+      if (case_sensitive !== undefined && typeof case_sensitive !== 'boolean') {
+        return invalidArgs('case_sensitive: boolean (optional)');
+      }
+      if (max_results !== undefined && typeof max_results !== 'number') {
+        return invalidArgs('max_results: number (optional)');
+      }
+      const queryParams: Record<string, unknown> = { pattern, path: fsPath };
+      if (glob !== undefined) queryParams['glob'] = glob;
+      if (case_sensitive !== undefined) queryParams['caseSensitive'] = case_sensitive;
+      if (max_results !== undefined) queryParams['maxResults'] = max_results;
+      return executeMcpQuery('mcp-fs-grep', queryParams);
     }
 
     case 'cyboflow_propose_action': {

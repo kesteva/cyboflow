@@ -34,6 +34,9 @@ describe('agentThreadPrompt', () => {
       'cyboflow_workflow',
       'cyboflow_db_query',
       'cyboflow_reference',
+      'cyboflow_fs_read',
+      'cyboflow_fs_list',
+      'cyboflow_fs_grep',
     ]) {
       expect(prompt).toContain(tool);
     }

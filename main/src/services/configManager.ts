@@ -277,6 +277,23 @@ export class ConfigManager extends EventEmitter {
   }
 
   /**
+   * Extra absolute folder paths the global assistant's scoped filesystem tools
+   * (cyboflow_fs_read / _list / _grep) may read, on TOP of the registered
+   * project folders (which the orchestrator handler always includes). Trims
+   * each entry, drops blanks, and floors to [] when unset — so a user who never
+   * grants extra folders keeps project-only access. Like `assistantModel`, NOT
+   * seeded into constructor defaults (config.json stays byte-identical).
+   */
+  getAssistantFolderAccess(): string[] {
+    const raw = this.config.assistantFolderAccess;
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter((entry): entry is string => typeof entry === 'string')
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+  }
+
+  /**
    * The global default CLI substrate for new workflow runs (IDEA-013 / TASK-806).
    *
    * Floors to DEFAULT_SUBSTRATE ('sdk') when unset. `defaultSubstrate` is

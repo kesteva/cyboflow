@@ -59,7 +59,23 @@
  */
 import * as net from 'net';
 import * as path from 'path';
-import { existsSync, lstatSync, statSync, realpathSync } from 'fs';
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync, lstatSync, openSync, readSync, closeSync } from 'fs';
+import type { Dirent, Stats } from 'fs';
+import {
+  isPathWithinRoots,
+  isSecretPath,
+  bufferLooksBinary,
+  compileBasenameGlob,
+  matchesBasenameGlob,
+  FS_READ_MAX_BYTES,
+  FS_LIST_MAX_ENTRIES,
+  FS_GREP_MAX_RESULTS,
+  FS_GREP_MAX_FILES,
+  FS_GREP_MAX_LINE_LEN,
+  FS_GREP_MAX_FILE_BYTES,
+  BINARY_SNIFF_BYTES,
+  GREP_SKIP_DIRS,
+} from './fsAccessGuard';
 // Only cyboflow_db_query's readonly sibling connection needs a real
 // better-sqlite3 handle — every other query in this file goes through the
 // injected DatabaseLike `this.db`. This file carries no standalone-typecheck
@@ -600,6 +616,56 @@ export type McpQueryMessage =
       sql: string;
     }
   | {
+      /**
+       * READ-ONLY, FOLDER-SCOPED file read. Scoped to the registered project
+       * folders + user-configured extras (assistantFolderAccess); the target is
+       * canonicalized with realpathSync and required to sit inside one of those
+       * roots (symlink escapes are defeated by resolving first). Secret files
+       * (.env / private keys / credential stores) are refused even in-scope;
+       * binary files (NUL in the first 8KB) are refused; content is capped at
+       * FS_READ_MAX_BYTES with optional 1-based offsetLine/limitLines paging.
+       */
+      type: 'mcp-fs-read';
+      requestId: string;
+      runId: string;
+      path: string;
+      /** 1-based line to start from (with limitLines) for large-file paging. */
+      offsetLine?: number;
+      limitLines?: number;
+    }
+  | {
+      /**
+       * READ-ONLY, FOLDER-SCOPED directory listing. Same scope guard as
+       * mcp-fs-read. Unlike read/grep, listing is NOT secret-filtered — a
+       * secret file's NAME is metadata, so it still appears in the entries (its
+       * content is unreachable via read/grep). Capped at FS_LIST_MAX_ENTRIES.
+       */
+      type: 'mcp-fs-list';
+      requestId: string;
+      runId: string;
+      path: string;
+    }
+  | {
+      /**
+       * READ-ONLY, FOLDER-SCOPED recursive regex grep. Same scope guard. The
+       * walk never follows symlinks and skips GREP_SKIP_DIRS (.git/node_modules/
+       * dist/build/.venv/__pycache__); secret + binary files are skipped;
+       * optional basename `glob` (e.g. *.ts) narrows the file set. Caps:
+       * FS_GREP_MAX_RESULTS matches, FS_GREP_MAX_FILES scanned, per-line text
+       * truncated to FS_GREP_MAX_LINE_LEN. Invalid regex → 'invalid_regex'.
+       */
+      type: 'mcp-fs-grep';
+      requestId: string;
+      runId: string;
+      pattern: string;
+      path: string;
+      glob?: string;
+      /** Case-insensitive by default; set true for a case-sensitive match. */
+      caseSensitive?: boolean;
+      /** Clamped to [1, FS_GREP_MAX_RESULTS]. */
+      maxResults?: number;
+    }
+  | {
       type: 'shell-approval-request';
       requestId: string;
       runId: string;
@@ -1070,6 +1136,17 @@ export interface McpQueryHandlerDeps {
    * 'agent_thread_store_unavailable'; every other handler is unaffected.
    */
   agentThreadStore?: AgentThreadDbStore;
+
+  /**
+   * Extra absolute folder paths the global-agent filesystem tools
+   * (cyboflow_fs_read / _list / _grep) may read, BEYOND the always-included
+   * registered project paths. Wired in main/src/index.ts to
+   * `configManager.getAssistantFolderAccess()`. Absent (or returning []) ⇒ only
+   * project folders are readable — keeps existing tests compiling without
+   * declaring the dep. Never trusted as canonical: the handler realpathSync's
+   * every entry and drops any that don't exist.
+   */
+  getAssistantFolderAccess?: () => string[];
 }
 
 /**
@@ -1290,6 +1367,15 @@ export class McpQueryHandler {
           break;
         case 'mcp-db-query':
           this.handleAgentDbQuery(msg, client);
+          break;
+        case 'mcp-fs-read':
+          this.handleFsRead(msg, client);
+          break;
+        case 'mcp-fs-list':
+          this.handleFsList(msg, client);
+          break;
+        case 'mcp-fs-grep':
+          this.handleFsGrep(msg, client);
           break;
         case 'shell-approval-request':
           // Async-deferred — the FIRST handler that does NOT writeResponse
@@ -4879,6 +4965,369 @@ export class McpQueryHandler {
       requestId: msg.requestId,
       ok: true,
       data: { columns, rows, rowCount: rows.length, truncated },
+    });
+  }
+
+  // --------------------------------------------------------------------------
+  // Global-agent filesystem tools (cyboflow_fs_read / _list / _grep)
+  //
+  // READ-ONLY and FOLDER-SCOPED. Enforcement is entirely server-side here — the
+  // agent's isolation contract (tools:[], PreToolUse allowing only
+  // mcp__cyboflow__*) is untouched. The allowed roots are the registered
+  // project paths PLUS the user-configured assistantFolderAccess extras; every
+  // target is canonicalized with realpathSync and must land inside a
+  // canonicalized root (defeating symlink escapes), and read/grep content
+  // access additionally refuses secret files even when they are in scope.
+  // --------------------------------------------------------------------------
+
+  /**
+   * The canonicalized set of folders the fs tools may read: every registered
+   * `projects.path` plus every `getAssistantFolderAccess()` extra, each passed
+   * through realpathSync (so a symlinked root is compared as its real target).
+   * Roots that don't exist on disk are DROPPED rather than throwing — a stale
+   * project row must never break the tools for the live folders. Cheap enough
+   * to recompute per call (no caching).
+   */
+  private resolveFsAllowedRoots(): string[] {
+    const raw = new Set<string>();
+    try {
+      const rows = this.db.prepare('SELECT path FROM projects').all() as Array<{ path?: unknown }>;
+      for (const row of rows) {
+        if (typeof row.path === 'string' && row.path.length > 0) raw.add(row.path);
+      }
+    } catch {
+      // A missing projects table (bare test fixture) simply yields no project
+      // roots — the configured extras still apply.
+    }
+    const extras = this.deps.getAssistantFolderAccess?.() ?? [];
+    for (const entry of extras) {
+      if (typeof entry === 'string' && entry.length > 0) raw.add(entry);
+    }
+    const canonical: string[] = [];
+    for (const root of raw) {
+      try {
+        canonical.push(realpathSync(root));
+      } catch {
+        // Skip a root that no longer exists — never throw.
+      }
+    }
+    return canonical;
+  }
+
+  /**
+   * Resolve + scope-check a requested path for the fs tools. Canonicalizes with
+   * realpathSync (a nonexistent target throws → 'not_found') then requires the
+   * real path to be inside one of the allowed roots (else 'scope_denied', whose
+   * message names the roots so the model can self-correct). Shared by all three
+   * fs handlers.
+   */
+  private resolveFsTarget(
+    requestedPath: unknown,
+  ):
+    | { ok: true; real: string; roots: string[] }
+    | { ok: false; error: string } {
+    if (typeof requestedPath !== 'string' || requestedPath.length === 0) {
+      return { ok: false, error: 'invalid_arguments: path must be a non-empty string' };
+    }
+    const roots = this.resolveFsAllowedRoots();
+    let real: string;
+    try {
+      real = realpathSync(requestedPath);
+    } catch {
+      return { ok: false, error: 'not_found' };
+    }
+    if (!isPathWithinRoots(real, roots)) {
+      const rootList = roots.length > 0 ? roots.join(', ') : '(none registered)';
+      return { ok: false, error: `scope_denied (allowed roots: ${rootList})` };
+    }
+    return { ok: true, real, roots };
+  }
+
+  /** True when a file's first BINARY_SNIFF_BYTES contain a NUL byte. */
+  private fileLooksBinary(absPath: string): boolean {
+    const fd = openSync(absPath, 'r');
+    try {
+      const buf = Buffer.alloc(BINARY_SNIFF_BYTES);
+      const read = readSync(fd, buf, 0, BINARY_SNIFF_BYTES, 0);
+      return bufferLooksBinary(buf.subarray(0, read));
+    } finally {
+      closeSync(fd);
+    }
+  }
+
+  private handleFsRead(
+    msg: Extract<McpQueryMessage, { type: 'mcp-fs-read' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+    const resolved = this.resolveFsTarget(msg.path);
+    if (!resolved.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: resolved.error });
+      return;
+    }
+    if (isSecretPath(resolved.real)) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'denied_secret_pattern' });
+      return;
+    }
+    let stat: Stats;
+    try {
+      stat = statSync(resolved.real);
+    } catch {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'not_found' });
+      return;
+    }
+    if (stat.isDirectory()) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'is_a_directory' });
+      return;
+    }
+    if (this.fileLooksBinary(resolved.real)) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'binary_file' });
+      return;
+    }
+
+    const buffer = readFileSync(resolved.real);
+    const totalBytes = buffer.length;
+
+    // Line-window paging (1-based offsetLine) for large files, else a raw
+    // byte-capped slice. Either way the returned content is floored at
+    // FS_READ_MAX_BYTES with `truncated` set when content was dropped.
+    let content: string;
+    let truncated = false;
+    const hasLineWindow =
+      (typeof msg.offsetLine === 'number' && msg.offsetLine > 0) ||
+      (typeof msg.limitLines === 'number' && msg.limitLines > 0);
+    if (hasLineWindow) {
+      const lines = buffer.toString('utf8').split('\n');
+      const start = typeof msg.offsetLine === 'number' && msg.offsetLine > 0 ? msg.offsetLine - 1 : 0;
+      const count = typeof msg.limitLines === 'number' && msg.limitLines > 0 ? msg.limitLines : lines.length;
+      const windowText = lines.slice(start, start + count).join('\n');
+      if (start + count < lines.length || start > 0) truncated = true;
+      const windowBuf = Buffer.from(windowText, 'utf8');
+      if (windowBuf.length > FS_READ_MAX_BYTES) {
+        content = windowBuf.subarray(0, FS_READ_MAX_BYTES).toString('utf8');
+        truncated = true;
+      } else {
+        content = windowText;
+      }
+    } else if (totalBytes > FS_READ_MAX_BYTES) {
+      content = buffer.subarray(0, FS_READ_MAX_BYTES).toString('utf8');
+      truncated = true;
+    } else {
+      content = buffer.toString('utf8');
+    }
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { path: resolved.real, content, truncated, totalBytes },
+    });
+  }
+
+  private handleFsList(
+    msg: Extract<McpQueryMessage, { type: 'mcp-fs-list' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+    const resolved = this.resolveFsTarget(msg.path);
+    if (!resolved.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: resolved.error });
+      return;
+    }
+    let stat: Stats;
+    try {
+      stat = statSync(resolved.real);
+    } catch {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'not_found' });
+      return;
+    }
+    if (!stat.isDirectory()) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'not_a_directory' });
+      return;
+    }
+
+    // Listing is metadata-only (NOT secret-filtered): a secret file's name is
+    // surfaced but its content stays unreachable via read/grep.
+    const dirents = readdirSync(resolved.real, { withFileTypes: true });
+    const entries: Array<{ name: string; type: 'file' | 'dir' | 'symlink'; size: number }> = [];
+    let truncated = false;
+    for (const dirent of dirents) {
+      if (entries.length >= FS_LIST_MAX_ENTRIES) {
+        truncated = true;
+        break;
+      }
+      let type: 'file' | 'dir' | 'symlink';
+      if (dirent.isSymbolicLink()) type = 'symlink';
+      else if (dirent.isDirectory()) type = 'dir';
+      else type = 'file';
+      let size = 0;
+      try {
+        // lstat so a symlink (esp. a broken one) reports its own size, never
+        // its (possibly out-of-scope / missing) target.
+        size = lstatSync(path.join(resolved.real, dirent.name)).size;
+      } catch {
+        size = 0;
+      }
+      entries.push({ name: dirent.name, type, size });
+    }
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { path: resolved.real, entries, truncated },
+    });
+  }
+
+  private handleFsGrep(
+    msg: Extract<McpQueryMessage, { type: 'mcp-fs-grep' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+    if (typeof msg.pattern !== 'string' || msg.pattern.length === 0) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_arguments: pattern must be a non-empty string' });
+      return;
+    }
+    const resolved = this.resolveFsTarget(msg.path);
+    if (!resolved.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: resolved.error });
+      return;
+    }
+
+    let regex: RegExp;
+    try {
+      regex = new RegExp(msg.pattern, msg.caseSensitive === true ? '' : 'i');
+    } catch {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_regex' });
+      return;
+    }
+
+    const maxResults = Math.max(
+      1,
+      Math.min(
+        typeof msg.maxResults === 'number' && msg.maxResults > 0 ? Math.floor(msg.maxResults) : FS_GREP_MAX_RESULTS,
+        FS_GREP_MAX_RESULTS,
+      ),
+    );
+    const globRe = compileBasenameGlob(typeof msg.glob === 'string' ? msg.glob : '');
+
+    const matches: Array<{ file: string; line: number; text: string }> = [];
+    let filesScanned = 0;
+    let truncated = false;
+
+    // Grep a single file's content into `matches`. Returns false to signal the
+    // caller to stop the whole walk (a cap was hit).
+    const grepFile = (absPath: string): boolean => {
+      let content: string;
+      try {
+        content = readFileSync(absPath, 'utf8');
+      } catch {
+        return true; // unreadable — skip, keep walking
+      }
+      const lines = content.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        regex.lastIndex = 0;
+        if (!regex.test(lines[i])) continue;
+        if (matches.length >= maxResults) {
+          truncated = true;
+          return false;
+        }
+        const raw = lines[i];
+        matches.push({
+          file: absPath,
+          line: i + 1,
+          text: raw.length > FS_GREP_MAX_LINE_LEN ? `${raw.slice(0, FS_GREP_MAX_LINE_LEN)}…` : raw,
+        });
+      }
+      return true;
+    };
+
+    // Depth-first walk with its OWN recursion — never follows symlinks (dir or
+    // file) and skips GREP_SKIP_DIRS. Returns false when a cap stops the walk.
+    const walk = (dir: string): boolean => {
+      let dirents: Dirent[];
+      try {
+        dirents = readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return true; // unreadable dir — skip
+      }
+      for (const dirent of dirents) {
+        if (dirent.isSymbolicLink()) continue; // never follow symlinks
+        const full = path.join(dir, dirent.name);
+        if (dirent.isDirectory()) {
+          if (GREP_SKIP_DIRS.has(dirent.name)) continue;
+          if (!walk(full)) return false;
+          continue;
+        }
+        if (!dirent.isFile()) continue;
+        if (!matchesBasenameGlob(dirent.name, globRe)) continue;
+        if (isSecretPath(full)) continue; // deny content of secret files
+        if (filesScanned >= FS_GREP_MAX_FILES) {
+          truncated = true;
+          return false;
+        }
+        filesScanned += 1;
+        try {
+          // Oversized files are skipped outright — grepFile reads the whole
+          // file into memory, so a giant in-scope log must not balloon the
+          // main process.
+          if (lstatSync(full).size > FS_GREP_MAX_FILE_BYTES) continue;
+          if (this.fileLooksBinary(full)) continue; // skip binaries
+        } catch {
+          continue;
+        }
+        if (!grepFile(full)) return false;
+      }
+      return true;
+    };
+
+    let rootStat: Stats;
+    try {
+      rootStat = statSync(resolved.real);
+    } catch {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'not_found' });
+      return;
+    }
+    if (rootStat.isDirectory()) {
+      walk(resolved.real);
+    } else if (rootStat.isFile()) {
+      // A single-file grep target: apply the same secret guard directly.
+      if (isSecretPath(resolved.real)) {
+        this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'denied_secret_pattern' });
+        return;
+      }
+      if (matchesBasenameGlob(path.basename(resolved.real), globRe)) {
+        filesScanned += 1;
+        try {
+          if (
+            lstatSync(resolved.real).size <= FS_GREP_MAX_FILE_BYTES &&
+            !this.fileLooksBinary(resolved.real)
+          ) {
+            grepFile(resolved.real);
+          }
+        } catch {
+          /* unreadable — leave matches empty */
+        }
+      }
+    }
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { matches, truncated, filesScanned },
     });
   }
 

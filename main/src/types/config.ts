@@ -52,6 +52,13 @@ export interface AppConfig {
   // ConfigManager.isAssistantEnabled(), and the renderer hides the agent rail
   // (so the auto-digest, which lives inside the rail, cannot fire either).
   assistantEnabled?: boolean;
+  // Extra folders the global cyboflow assistant may read via its scoped
+  // filesystem tools (cyboflow_fs_read / _list / _grep), BEYOND the registered
+  // project folders (which are always included). Read via
+  // getAssistantFolderAccess() (trims entries, drops blanks, floors to []). NOT
+  // seeded into constructor defaults, so existing config.json files stay
+  // byte-identical for users who never grant extra folders.
+  assistantFolderAccess?: string[];
   // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
   defaultSubstrate?: CliSubstrate;
   // Global hard lock: when true, every run/session is forced onto the interactive
@@ -181,6 +188,8 @@ export interface UpdateConfigRequest {
   assistantModel?: string;
   // Global assistant on/off (see AppConfig.assistantEnabled).
   assistantEnabled?: boolean;
+  // Extra folders the global assistant may read (see AppConfig.assistantFolderAccess).
+  assistantFolderAccess?: string[];
   // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
   defaultSubstrate?: CliSubstrate;
   // Global hard lock — force the interactive PTY substrate and disable the SDK

@@ -107,7 +107,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Re
 }
 
 describe('cyboflowMcpServer ListTools (CYBOFLOW_MCP_SCOPE=global-agent)', () => {
-  it('advertises EXACTLY the 9-tool global-agent family — no run-scoped tool leaks in', async () => {
+  it('advertises EXACTLY the 12-tool global-agent family — no run-scoped tool leaks in', async () => {
     const tools = await listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(
@@ -115,6 +115,9 @@ describe('cyboflowMcpServer ListTools (CYBOFLOW_MCP_SCOPE=global-agent)', () => 
         'cyboflow_backlog',
         'cyboflow_db_query',
         'cyboflow_entity',
+        'cyboflow_fs_grep',
+        'cyboflow_fs_list',
+        'cyboflow_fs_read',
         'cyboflow_overview',
         'cyboflow_propose_action',
         'cyboflow_queue',
@@ -191,6 +194,25 @@ describe('cyboflowMcpServer CallTool (CYBOFLOW_MCP_SCOPE=global-agent)', () => {
     expect(await callTool('cyboflow_db_query', {})).toMatchObject({ error: 'invalid_arguments' });
 
     const valid = await callTool('cyboflow_db_query', { sql: 'SELECT 1' });
+    expect(valid.error).toBe('[Cyboflow MCP] IPC client not connected');
+  });
+
+  it('cyboflow_fs_read rejects a missing path without dispatching, and dispatches a valid call', async () => {
+    expect(await callTool('cyboflow_fs_read', {})).toMatchObject({ error: 'invalid_arguments' });
+    const valid = await callTool('cyboflow_fs_read', { path: '/some/project/file.ts' });
+    expect(valid.error).toBe('[Cyboflow MCP] IPC client not connected');
+  });
+
+  it('cyboflow_fs_list rejects a missing path without dispatching, and dispatches a valid call', async () => {
+    expect(await callTool('cyboflow_fs_list', {})).toMatchObject({ error: 'invalid_arguments' });
+    const valid = await callTool('cyboflow_fs_list', { path: '/some/project' });
+    expect(valid.error).toBe('[Cyboflow MCP] IPC client not connected');
+  });
+
+  it('cyboflow_fs_grep requires both pattern and path, and dispatches a valid call', async () => {
+    expect(await callTool('cyboflow_fs_grep', { path: '/some/project' })).toMatchObject({ error: 'invalid_arguments' });
+    expect(await callTool('cyboflow_fs_grep', { pattern: 'foo' })).toMatchObject({ error: 'invalid_arguments' });
+    const valid = await callTool('cyboflow_fs_grep', { pattern: 'foo', path: '/some/project', glob: '*.ts' });
     expect(valid.error).toBe('[Cyboflow MCP] IPC client not connected');
   });
 

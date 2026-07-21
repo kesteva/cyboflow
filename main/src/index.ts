@@ -1709,6 +1709,12 @@ async function initializeServices() {
       // handler fails closed (returns an error) — so it must be the SAME instance
       // the executor + tRPC context read.
       agentThreadStore,
+      // Global-agent scoped filesystem tools (cyboflow_fs_read / _list / _grep):
+      // the always-included roots are the registered project paths; this dep
+      // supplies the user-configured EXTRA folders on top. Absent ⇒ [] (project
+      // folders only). The orchestrator handler realpath's + scope-checks every
+      // access — this only widens the root set, never bypasses enforcement.
+      getAssistantFolderAccess: () => configManager.getAssistantFolderAccess(),
       // Workflow/variant configuration tools (cyboflow_*_workflow / _variant):
       // forward the WorkflowRegistry as the narrow WorkflowConfigLike structural
       // surface so quick sessions can edit flows + variants over MCP without the

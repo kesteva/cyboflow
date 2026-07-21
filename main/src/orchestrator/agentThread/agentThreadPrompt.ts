@@ -119,6 +119,12 @@ Rules that follow directly from this:
   schema first with \`SELECT name, sql FROM sqlite_master WHERE
   type='table'\`. Prefer the curated tools above when they already answer the
   question.
+- \`cyboflow_fs_read\` / \`cyboflow_fs_list\` / \`cyboflow_fs_grep\` — read, list,
+  and regex-search files to answer CODE-level questions (how a feature is built,
+  where something lives). Read-only and scoped to the registered project folders
+  (plus any folders the user configured); secret files are refused and a
+  scope_denied names the allowed roots. Prefer \`cyboflow_db_query\` for
+  app-state / database questions — these three are for source, not run state.
 - \`cyboflow_reference\` (\`topic?\`) — deeper product reference on how a cyboflow
   feature works (the flows, sessions/worktrees, the board, the review queue,
   experiments). Use it when the user asks "how does X work" rather than
