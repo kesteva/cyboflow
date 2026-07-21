@@ -254,6 +254,18 @@ export class ConfigManager extends EventEmitter {
   }
 
   /**
+   * Model alias for the global cyboflow assistant (the agent-rail chat).
+   * Floors to null (unset) when absent or blank — callers fall back to
+   * getDefaultModel(). Like the other optional globals, `assistantModel` is
+   * NOT seeded into the constructor defaults, so existing config.json files
+   * stay byte-identical for users who never override it.
+   */
+  getAssistantModel(): string | null {
+    const value = this.config.assistantModel?.trim();
+    return value && value.length > 0 ? value : null;
+  }
+
+  /**
    * The global default CLI substrate for new workflow runs (IDEA-013 / TASK-806).
    *
    * Floors to DEFAULT_SUBSTRATE ('sdk') when unset. `defaultSubstrate` is

@@ -2476,7 +2476,7 @@ async function initializeServices() {
         cyboflowPublisher.publish(id, envelope as StreamEnvelope);
         agentThreadEvents.emit('message', { threadId: id, envelope });
       },
-      defaultModel: () => configManager.getDefaultModel(),
+      defaultModel: () => configManager.getAssistantModel() ?? configManager.getDefaultModel(),
       homeDirBase: getCyboflowSubdirectory('agent-home'),
       logger: cyboflowLogger,
     });

@@ -23,7 +23,8 @@ import {
   FolderOpen,
   ScanEye,
   AlarmClock,
-  Compass
+  Compass,
+  Bot
 } from 'lucide-react';
 import { Textarea, Checkbox } from './ui/Input';
 import { Button } from './ui/Button';
@@ -32,6 +33,7 @@ import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';
 import { CollapsibleCard } from './ui/CollapsibleCard';
 import { SettingsSection } from './ui/SettingsSection';
 import { PERMISSION_MODE_OPTIONS } from './cyboflow/AgentPermissionModeSelector';
+import { ModelSelector } from './cyboflow/ModelSelector';
 import { useOnboardingStore } from '../stores/onboardingStore';
 import { IntegrationsSettings } from './settings/IntegrationsSettings';
 
@@ -60,6 +62,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   const [buildVariant, setBuildVariant] = useState<'stable' | 'dev' | undefined>(undefined);
   const [additionalPathsText, setAdditionalPathsText] = useState('');
   const [enableCyboflowFooter, setEnableCyboflowFooter] = useState(true);
+  // Model alias for the global cyboflow assistant (the agent-rail chat). '' =
+  // follow the app's default model (defaultModel / getDefaultModel()).
+  const [assistantModel, setAssistantModel] = useState('');
   const [defaultAgentPermissionMode, setDefaultAgentPermissionMode] = useState<PermissionMode>('default');
   // Global CLI runtime: false = allow SDK (per-run picker available, default
   // 'sdk'); true = force the interactive PTY substrate everywhere (SDK disabled).
@@ -146,6 +151,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setDemoMode(data.demoMode || false);
       setInitialDemoMode(data.demoMode || false);
       setEnableCyboflowFooter(data.enableCyboflowFooter !== false); // Default to true
+      setAssistantModel(data.assistantModel ?? '');
       setDefaultAgentPermissionMode(data.defaultAgentPermissionMode ?? 'default');
       setInteractivePtyOnly(data.interactivePtyOnly ?? false);
       setDefaultExecutionModel(data.defaultExecutionModel ?? 'programmatic');
@@ -195,6 +201,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         forceAskUserQuestionGateFailure,
         demoMode,
         enableCyboflowFooter,
+        // Empty ('App default') → undefined so getAssistantModel() floors to
+        // getDefaultModel() and config.json stays free of the key.
+        assistantModel: assistantModel.trim() ? assistantModel.trim() : undefined,
         defaultAgentPermissionMode,
         interactivePtyOnly,
         defaultExecutionModel,
@@ -628,6 +637,20 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                 <p className="text-xs text-text-tertiary mt-1">
                   When enabled, commits made through Cyboflow will include a footer crediting Cyboflow. This helps others know you're using Cyboflow for AI-powered development.
                 </p>
+              </SettingsSection>
+
+              <SettingsSection
+                title="Assistant"
+                description="The cyboflow assistant in the rail. Unset uses the app default model."
+                icon={<Bot className="w-4 h-4" />}
+              >
+                <ModelSelector
+                  id="assistant-model"
+                  label=""
+                  value={assistantModel}
+                  onChange={setAssistantModel}
+                  allowDefaultOption={{ label: 'App default' }}
+                />
               </SettingsSection>
 
               <SettingsSection

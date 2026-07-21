@@ -11,6 +11,9 @@ export interface AppConfig {
   runScript?: string[];
   claudeExecutablePath?: string;
   defaultPermissionMode?: 'approve' | 'ignore';
+  // Model alias for the global cyboflow assistant (the agent-rail chat), e.g.
+  // 'sonnet' | 'opus' | 'fable'. Unset ⇒ falls back to the app's default model.
+  assistantModel?: string;
   // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
   defaultSubstrate?: CliSubstrate;
   // Global hard lock: when true, every run/session is forced onto the interactive

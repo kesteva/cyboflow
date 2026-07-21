@@ -52,6 +52,13 @@ interface ModelSelectorProps {
   /** Runtime context; model availability is provider/runtime scoped. */
   agentProvider?: AgentProvider;
   agentRuntime?: AgentRuntime;
+  /**
+   * When set, prepends a `value=''` option (Claude path only) so the caller can
+   * offer "follow the app default" instead of pinning a concrete alias. The
+   * empty value is never passed to `isAliasUsable`/`unavailableReason`, so it
+   * is always enabled.
+   */
+  allowDefaultOption?: { label: string };
 }
 
 export function ModelSelector({
@@ -61,13 +68,14 @@ export function ModelSelector({
   label = 'Model',
   agentProvider = 'claude',
   agentRuntime = 'claude-sdk',
+  allowDefaultOption,
 }: ModelSelectorProps): React.JSX.Element {
   const isCodexRuntime = agentProvider === 'codex' || agentRuntime.startsWith('codex-');
   const { options: codexOptions } = useCodexModelCatalog(isCodexRuntime);
   const codexActive = codexOptions.find((o) => o.id === value);
   const claudeActive = MODEL_OPTIONS.find((o) => o.id === value);
   const { isAliasUsable, unavailableReason } = useModelAvailability();
-  const activeReason = unavailableReason(value);
+  const activeReason = value ? unavailableReason(value) : undefined;
 
   return (
     <div className="flex flex-col gap-1">
@@ -88,15 +96,20 @@ export function ModelSelector({
             </option>
           ))
         ) : (
-          MODEL_OPTIONS.map((o) => {
-            const disabled = !isAliasUsable(o.id);
-            return (
-              <option key={o.id} value={o.id} disabled={disabled}>
-                {o.context ? `${o.label} · ${o.context}` : o.label} — {o.description}
-                {disabled ? ' (unavailable)' : ''}
-              </option>
-            );
-          })
+          <>
+            {allowDefaultOption && (
+              <option value="">{allowDefaultOption.label}</option>
+            )}
+            {MODEL_OPTIONS.map((o) => {
+              const disabled = !isAliasUsable(o.id);
+              return (
+                <option key={o.id} value={o.id} disabled={disabled}>
+                  {o.context ? `${o.label} · ${o.context}` : o.label} — {o.description}
+                  {disabled ? ' (unavailable)' : ''}
+                </option>
+              );
+            })}
+          </>
         )}
       </select>
       {isCodexRuntime ? (

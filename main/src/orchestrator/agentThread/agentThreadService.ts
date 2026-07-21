@@ -115,7 +115,12 @@ export interface AgentThreadServiceDeps {
   manager: AgentSpawnManagerLike;
   /** Live-tail publish to the renderer's `cyboflow:stream:<threadId>` channel. */
   publish: (id: string, envelope: unknown) => void;
-  /** ConfigManager default model (null ⇒ leave the spawn's model unset). */
+  /**
+   * ConfigManager default model (null ⇒ leave the spawn's model unset). The
+   * caller wires this to `getAssistantModel() ?? getDefaultModel()`, so a
+   * Settings "Assistant" model override takes effect on the next turn with no
+   * restart.
+   */
   defaultModel: () => string | null;
   /** Base dir for per-thread neutral home dirs (`<base>/<threadId>/`). */
   homeDirBase: string;

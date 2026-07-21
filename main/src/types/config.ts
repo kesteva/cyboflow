@@ -44,6 +44,9 @@ export interface AppConfig {
   defaultPermissionMode?: 'approve' | 'ignore';
   // Default model for new sessions
   defaultModel?: string;
+  // Model alias for the global cyboflow assistant (the agent-rail chat), e.g.
+  // 'sonnet' | 'opus' | 'fable'. Unset ⇒ falls back to defaultModel.
+  assistantModel?: string;
   // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
   defaultSubstrate?: CliSubstrate;
   // Global hard lock: when true, every run/session is forced onto the interactive
@@ -169,6 +172,8 @@ export interface UpdateConfigRequest {
   systemPromptAppend?: string;
   defaultPermissionMode?: 'approve' | 'ignore';
   defaultModel?: string;
+  // Model alias for the global cyboflow assistant (see AppConfig.assistantModel).
+  assistantModel?: string;
   // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
   defaultSubstrate?: CliSubstrate;
   // Global hard lock — force the interactive PTY substrate and disable the SDK
