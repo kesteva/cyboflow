@@ -7,7 +7,7 @@ describe('AgentSuggestionChips', () => {
   it('renders the static Stage-1 chip set', () => {
     render(<AgentSuggestionChips onSend={vi.fn()} disabled={false} />);
 
-    expect(screen.getByText('Where is everything?')).toBeInTheDocument();
+    expect(screen.getByText('Status update')).toBeInTheDocument();
     expect(screen.getByText('Triage the backlog')).toBeInTheDocument();
     expect(screen.getByText('Modify a workflow')).toBeInTheDocument();
     expect(screen.queryByText('Kick off top tasks')).not.toBeInTheDocument();

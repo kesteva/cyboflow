@@ -13,14 +13,14 @@ export interface AgentSuggestionChipsProps {
 
 /** Fixed Stage-1 set. Widen only via a future stage (see plan §5 open questions). */
 const SUGGESTION_CHIPS: readonly string[] = [
-  'Where is everything?',
+  'Status update',
   'Triage the backlog',
   'Modify a workflow',
 ];
 
 export function AgentSuggestionChips({ onSend, disabled }: AgentSuggestionChipsProps): React.ReactElement {
   return (
-    <div data-testid="agent-suggestion-chips" className="flex flex-wrap gap-1.5">
+    <div data-testid="agent-suggestion-chips" className="flex flex-wrap justify-center gap-1.5">
       {SUGGESTION_CHIPS.map((chip, idx) => (
         <button
           key={chip}
