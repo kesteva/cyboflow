@@ -160,3 +160,14 @@
   margin: 0 0.2em 0.25em -1.6em;
   vertical-align: middle;
 }
+
+/*
+ * In-artifact feedback highlights (IDEA-033) — painted via the CSS Custom
+ * Highlight API by frontend/src/utils/textAnchors.ts (`applyHighlights`,
+ * registered under FEEDBACK_HIGHLIGHT_NAME = 'cyboflow-feedback'). Uses the
+ * theme's interactive-accent RGB token so it reads correctly in both light and
+ * dark themes without a separate override block.
+ */
+::highlight(cyboflow-feedback) {
+  background-color: rgba(var(--color-interactive-rgb), 0.25);
+}

@@ -31,11 +31,15 @@ import { MarkdownPreview } from '../MarkdownPreview';
 import { ArtifactHeader } from './ArtifactHeader';
 import { TaskDetailModal } from './TaskDetailModal';
 import { LiveCanvasEmbed, isLocalhostUrl } from './LiveCanvasEmbed';
+import { FeedbackDocPanel } from './feedback/FeedbackDocPanel';
+import { FeedbackChip } from './feedback/FeedbackChip';
+import { latestBatchStatus } from './feedback/feedbackLogic';
 import { useArtifactData } from '../../hooks/useArtifactData';
 import { useArtifactImages } from '../../hooks/useArtifactImages';
 import { useArtifactHtml } from '../../hooks/useArtifactHtml';
 import { useReviewItemActions } from '../../hooks/useReviewItemActions';
 import { useReviewItemsSlice } from '../../stores/reviewItemsSlice';
+import { useFeedback } from '../../hooks/useFeedback';
 import { useQuestionStore } from '../../stores/questionStore';
 import { ARTIFACT_COLORS, extractArchDesignSection } from '../../../../shared/types/artifacts';
 import type { Artifact, ApproveIdeasArtifactPayload, ApproveDesignsArtifactPayload } from '../../../../shared/types/artifacts';
@@ -127,37 +131,59 @@ function IdeaSpecBody({ artifact, projectId }: { artifact: Artifact; projectId: 
         <StateRow testid="artifact-idea-empty" color={MUTED} text="No idea content to display." />
       ) : (
         <div style={{ flex: 1 }}>
-          <div
-            data-testid="artifact-idea-doc"
-            style={{
-              maxWidth: 680,
-              margin: '0 auto',
-              background: 'var(--color-surface-primary)',
-              border: `1px solid ${HAIRLINE}`,
-              padding: '34px 40px 56px',
-              marginTop: 18,
-              marginBottom: 18,
-            }}
-          >
-            <div
-              style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '.16em', textTransform: 'uppercase', color: accent, marginBottom: 8 }}
-            >
-              {idea.ref}
-            </div>
-            <h1 style={{ fontSize: '22px', fontWeight: 700, lineHeight: 1.25, color: INK, margin: '0 0 6px' }}>
-              {idea.title}
-            </h1>
-            {summaryIsCaption && (
-              <div style={{ fontSize: '11px', color: FAINT, marginBottom: 18 }}>{idea.summary}</div>
-            )}
-            {specMarkdown ? (
-              <MarkdownPreview content={specMarkdown} />
-            ) : (
-              <div data-testid="artifact-idea-nobody" style={{ fontSize: '12px', color: FAINT, fontStyle: 'italic' }}>
-                This idea has no spec body yet.
+          {(() => {
+            const doc = (
+              <div
+                data-testid="artifact-idea-doc"
+                style={{
+                  maxWidth: 680,
+                  margin: '0 auto',
+                  background: 'var(--color-surface-primary)',
+                  border: `1px solid ${HAIRLINE}`,
+                  padding: '34px 40px 56px',
+                  marginTop: 18,
+                  marginBottom: 18,
+                }}
+              >
+                <div
+                  style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '.16em', textTransform: 'uppercase', color: accent, marginBottom: 8 }}
+                >
+                  {idea.ref}
+                </div>
+                <h1 style={{ fontSize: '22px', fontWeight: 700, lineHeight: 1.25, color: INK, margin: '0 0 6px' }}>
+                  {idea.title}
+                </h1>
+                {summaryIsCaption && (
+                  <div style={{ fontSize: '11px', color: FAINT, marginBottom: 18 }}>{idea.summary}</div>
+                )}
+                {specMarkdown ? (
+                  <MarkdownPreview content={specMarkdown} />
+                ) : (
+                  <div data-testid="artifact-idea-nobody" style={{ fontSize: '12px', color: FAINT, fontStyle: 'italic' }}>
+                    This idea has no spec body yet.
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            );
+            // Feedback is only coherent against the structured `body` doc — the
+            // revision agent rewrites `body`, so commenting on the `summary`
+            // fallback (bodyHasStructure=false) would have nothing to anchor to.
+            return bodyHasStructure ? (
+              <FeedbackDocPanel
+                projectId={projectId}
+                runId={artifact.runId}
+                atype="idea-spec"
+                sourceRef={idea.id}
+                documentSource={specMarkdown}
+                ideaDecomposed={idea.decomposed_at !== null}
+                accent={accent}
+              >
+                {doc}
+              </FeedbackDocPanel>
+            ) : (
+              doc
+            );
+          })()}
         </div>
       )}
     </Shell>
@@ -193,34 +219,54 @@ function ArchDesignBody({ artifact, projectId }: { artifact: Artifact; projectId
         <StateRow testid="artifact-arch-empty" color={MUTED} text="No architecture design yet." />
       ) : (
         <div style={{ flex: 1 }}>
-          <div
-            data-testid="artifact-arch-doc"
-            style={{
-              maxWidth: 680,
-              margin: '0 auto',
-              background: 'var(--color-surface-primary)',
-              border: `1px solid ${HAIRLINE}`,
-              padding: '34px 40px 56px',
-              marginTop: 18,
-              marginBottom: 18,
-            }}
-          >
-            <div
-              style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '.16em', textTransform: 'uppercase', color: accent, marginBottom: 8 }}
-            >
-              {idea.ref}
-            </div>
-            <h1 style={{ fontSize: '22px', fontWeight: 700, lineHeight: 1.25, color: INK, margin: '0 0 18px' }}>
-              Architecture design
-            </h1>
-            {section ? (
-              <MarkdownPreview content={section} />
-            ) : (
-              <div data-testid="artifact-arch-nosection" style={{ fontSize: '12px', color: FAINT, fontStyle: 'italic' }}>
-                No architecture design yet.
+          {(() => {
+            const doc = (
+              <div
+                data-testid="artifact-arch-doc"
+                style={{
+                  maxWidth: 680,
+                  margin: '0 auto',
+                  background: 'var(--color-surface-primary)',
+                  border: `1px solid ${HAIRLINE}`,
+                  padding: '34px 40px 56px',
+                  marginTop: 18,
+                  marginBottom: 18,
+                }}
+              >
+                <div
+                  style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '.16em', textTransform: 'uppercase', color: accent, marginBottom: 8 }}
+                >
+                  {idea.ref}
+                </div>
+                <h1 style={{ fontSize: '22px', fontWeight: 700, lineHeight: 1.25, color: INK, margin: '0 0 18px' }}>
+                  Architecture design
+                </h1>
+                {section ? (
+                  <MarkdownPreview content={section} />
+                ) : (
+                  <div data-testid="artifact-arch-nosection" style={{ fontSize: '12px', color: FAINT, fontStyle: 'italic' }}>
+                    No architecture design yet.
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            );
+            // Feedback needs an actual section to anchor comments against.
+            return section ? (
+              <FeedbackDocPanel
+                projectId={projectId}
+                runId={artifact.runId}
+                atype="arch-design"
+                sourceRef={idea.id}
+                documentSource={section}
+                ideaDecomposed={idea.decomposed_at !== null}
+                accent={accent}
+              >
+                {doc}
+              </FeedbackDocPanel>
+            ) : (
+              doc
+            );
+          })()}
         </div>
       )}
     </Shell>
@@ -1368,12 +1414,15 @@ function IdeaVerdictRow({
   readOnly,
   onSetVerdict,
   onOpenSpec,
+  chip,
 }: {
   idea: ApproveIdeasArtifactPayload['ideas'][number];
   verdict: IdeaVerdict | null;
   readOnly: boolean;
   onSetVerdict: (verdict: IdeaVerdict) => void;
   onOpenSpec: () => void;
+  /** The "changes requested" feedback chip (IDEA-033) — null when the idea has no feedback batches. */
+  chip?: ReactElement | null;
 }): ReactElement {
   const buttonStyle = (active: boolean, activeColor: string): CSSProperties => ({
     fontSize: '10.5px',
@@ -1424,6 +1473,7 @@ function IdeaVerdictRow({
             </span>
           )}
           <span style={{ fontSize: '9px', color: FAINT }}>View spec →</span>
+          {chip}
         </div>
         <div style={{ fontSize: '12px', fontWeight: 600, color: INK, marginTop: 2 }}>{idea.title}</div>
         {idea.summary && <div style={{ fontSize: '10.5px', color: MUTED, marginTop: 3, lineHeight: 1.4 }}>{idea.summary}</div>}
@@ -1460,6 +1510,38 @@ function IdeaVerdictRow({
 function ApproveIdeasBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
   const accent = ARTIFACT_COLORS['approve-ideas'];
   const ideas = useMemo(() => parseApproveIdeasIdeas(artifact.payloadJson), [artifact.payloadJson]);
+
+  // "Changes requested" chips (IDEA-033): ONE feedback.list call for the whole
+  // run (not per-row) via the run-scoped useFeedback. The artifact payload's
+  // rows carry only a display ref, while feedback batches key on the idea's
+  // opaque id — so a one-time ref->id resolution (mirroring openSpec's lookup
+  // below) lets each row find its own chip.
+  const { batches: feedbackBatches } = useFeedback(projectId, artifact.runId);
+  const hasFeedbackBatches = feedbackBatches.length > 0;
+  const [refToId, setRefToId] = useState<Record<string, string>>({});
+  useEffect(() => {
+    // Only pay for the ref->id resolution once this run actually has feedback
+    // batches to show chips for — the common case (no feedback yet) skips the
+    // extra tasks.list call entirely.
+    if (!hasFeedbackBatches) return;
+    let cancelled = false;
+    trpc.cyboflow.tasks.list
+      .query({ projectId })
+      .then((rows) => {
+        if (cancelled) return;
+        const map: Record<string, string> = {};
+        for (const row of rows) {
+          if (row.type === 'idea') map[row.ref] = row.id;
+        }
+        setRefToId(map);
+      })
+      .catch(() => {
+        // Best-effort — a failed resolution just means no chips render.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, hasFeedbackBatches]);
 
   // Reuse the already-wired project-scoped review_items inbox (refcounted) —
   // no new subscription. Filter client-side to THIS run's pending batch gate.
@@ -1585,16 +1667,21 @@ function ApproveIdeasBody({ artifact, projectId }: { artifact: Artifact; project
                 No pending approval gate for this run.
               </div>
             )}
-            {ideas.map((idea) => (
-              <IdeaVerdictRow
-                key={idea.ref}
-                idea={idea}
-                verdict={verdicts[idea.ref] ?? null}
-                readOnly={readOnly}
-                onSetVerdict={(verdict) => setVerdict(idea.ref, verdict)}
-                onOpenSpec={() => openSpec(idea.ref)}
-              />
-            ))}
+            {ideas.map((idea) => {
+              const ideaId = refToId[idea.ref];
+              const chipStatus = ideaId ? latestBatchStatus(feedbackBatches, ideaId) : null;
+              return (
+                <IdeaVerdictRow
+                  key={idea.ref}
+                  idea={idea}
+                  verdict={verdicts[idea.ref] ?? null}
+                  readOnly={readOnly}
+                  onSetVerdict={(verdict) => setVerdict(idea.ref, verdict)}
+                  onOpenSpec={() => openSpec(idea.ref)}
+                  chip={<FeedbackChip status={chipStatus} />}
+                />
+              );
+            })}
             {specError && (
               <span data-testid="approve-ideas-spec-error" style={{ fontSize: '10px', color: VERDICT_FAIL }}>
                 {specError}
@@ -1772,12 +1859,15 @@ function DesignVerdictRow({
   readOnly,
   onSetVerdict,
   onOpenSpec,
+  chip,
 }: {
   design: ApproveDesignsArtifactPayload['designs'][number];
   verdict: IdeaVerdict | null;
   readOnly: boolean;
   onSetVerdict: (verdict: IdeaVerdict) => void;
   onOpenSpec: () => void;
+  /** The "changes requested" feedback chip (IDEA-033) — null when the idea has no feedback batches. */
+  chip?: ReactElement | null;
 }): ReactElement {
   const buttonStyle = (active: boolean, activeColor: string): CSSProperties => ({
     fontSize: '10.5px',
@@ -1828,6 +1918,7 @@ function DesignVerdictRow({
             </span>
           )}
           <span style={{ fontSize: '9px', color: FAINT }}>View spec →</span>
+          {chip}
         </div>
         <div style={{ fontSize: '12px', fontWeight: 600, color: INK, marginTop: 2 }}>{design.title}</div>
         {design.summary && <div style={{ fontSize: '10.5px', color: MUTED, marginTop: 3, lineHeight: 1.4 }}>{design.summary}</div>}
@@ -1864,6 +1955,38 @@ function DesignVerdictRow({
 function ApproveDesignsBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
   const accent = ARTIFACT_COLORS['approve-designs'];
   const designs = useMemo(() => parseApproveDesignsDesigns(artifact.payloadJson), [artifact.payloadJson]);
+
+  // "Changes requested" chips (IDEA-033): ONE feedback.list call for the whole
+  // run (not per-row) via the run-scoped useFeedback. The artifact payload's
+  // rows carry only a display ref, while feedback batches key on the idea's
+  // opaque id — so a one-time ref->id resolution (mirroring openSpec's lookup
+  // below) lets each row find its own chip.
+  const { batches: feedbackBatches } = useFeedback(projectId, artifact.runId);
+  const hasFeedbackBatches = feedbackBatches.length > 0;
+  const [refToId, setRefToId] = useState<Record<string, string>>({});
+  useEffect(() => {
+    // Only pay for the ref->id resolution once this run actually has feedback
+    // batches to show chips for — the common case (no feedback yet) skips the
+    // extra tasks.list call entirely.
+    if (!hasFeedbackBatches) return;
+    let cancelled = false;
+    trpc.cyboflow.tasks.list
+      .query({ projectId })
+      .then((rows) => {
+        if (cancelled) return;
+        const map: Record<string, string> = {};
+        for (const row of rows) {
+          if (row.type === 'idea') map[row.ref] = row.id;
+        }
+        setRefToId(map);
+      })
+      .catch(() => {
+        // Best-effort — a failed resolution just means no chips render.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, hasFeedbackBatches]);
 
   // Reuse the already-wired project-scoped review_items inbox (refcounted) —
   // no new subscription. Filter client-side to THIS run's pending batch gate.
@@ -1990,16 +2113,21 @@ function ApproveDesignsBody({ artifact, projectId }: { artifact: Artifact; proje
                 No pending approval gate for this run.
               </div>
             )}
-            {designs.map((design) => (
-              <DesignVerdictRow
-                key={design.ref}
-                design={design}
-                verdict={verdicts[design.ref] ?? null}
-                readOnly={readOnly}
-                onSetVerdict={(verdict) => setVerdict(design.ref, verdict)}
-                onOpenSpec={() => openSpec(design.ref)}
-              />
-            ))}
+            {designs.map((design) => {
+              const ideaId = refToId[design.ref];
+              const chipStatus = ideaId ? latestBatchStatus(feedbackBatches, ideaId) : null;
+              return (
+                <DesignVerdictRow
+                  key={design.ref}
+                  design={design}
+                  verdict={verdicts[design.ref] ?? null}
+                  readOnly={readOnly}
+                  onSetVerdict={(verdict) => setVerdict(design.ref, verdict)}
+                  onOpenSpec={() => openSpec(design.ref)}
+                  chip={<FeedbackChip status={chipStatus} />}
+                />
+              );
+            })}
             {specError && (
               <span data-testid="approve-designs-spec-error" style={{ fontSize: '10px', color: VERDICT_FAIL }}>
                 {specError}

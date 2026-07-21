@@ -18,6 +18,7 @@ import { ArtifactTabRenderer } from '../ArtifactTabRenderer';
 import { useArtifactData, type ArtifactData } from '../../../hooks/useArtifactData';
 import { useArtifactImages, type UseArtifactImages } from '../../../hooks/useArtifactImages';
 import { useArtifactHtml, type UseArtifactHtml } from '../../../hooks/useArtifactHtml';
+import { useFeedback, type UseFeedbackResult } from '../../../hooks/useFeedback';
 import type { Artifact, ArtifactType } from '../../../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../../../shared/types/tasks';
 import type { ReviewItem } from '../../../../../shared/types/reviews';
@@ -44,6 +45,26 @@ vi.mock('../../../hooks/useArtifactHtml', () => ({ useArtifactHtml: vi.fn() }));
 const mockHtml = vi.mocked(useArtifactHtml);
 function setHtml(value: UseArtifactHtml): void {
   mockHtml.mockReturnValue(value);
+}
+
+// In-artifact feedback (IDEA-033) reads through useFeedback — mocked so the
+// idea-spec/arch-design doc bodies and the approve-ideas/approve-designs gate
+// chips never touch the real trpc.cyboflow.feedback surface. Defaults to the
+// empty state (no comments/batches, no pending gate impact); individual tests
+// override per-call via setFeedback.
+vi.mock('../../../hooks/useFeedback', () => ({ useFeedback: vi.fn() }));
+const mockFeedback = vi.mocked(useFeedback);
+function setFeedback(value: Partial<UseFeedbackResult> = {}): void {
+  mockFeedback.mockReturnValue({
+    comments: [],
+    batches: [],
+    loading: false,
+    createComment: vi.fn().mockResolvedValue(undefined),
+    updateComment: vi.fn().mockResolvedValue(undefined),
+    deleteComment: vi.fn().mockResolvedValue(undefined),
+    sendBatch: vi.fn().mockResolvedValue({ sent: true, batchId: 'batch-1', round: 1 }),
+    ...value,
+  });
 }
 
 // Stub MarkdownPreview (avoids react-markdown ESM in jsdom); echo the content.
@@ -177,10 +198,13 @@ describe('ArtifactTabRenderer', () => {
     mockHook.mockReset();
     mockImages.mockReset();
     mockHtml.mockReset();
+    mockFeedback.mockReset();
     // Default: no resolved screenshot bytes (per-card fallback path).
     setImages({ images: {}, loading: false, error: null });
     // Default: no on-disk static mockup html (legacy url / placeholder paths).
     setHtml({ html: null, loading: false, error: null });
+    // Default: no feedback comments/batches for any document.
+    setFeedback();
     commitMutate.mockClear();
     acceptBaselineMutate.mockClear();
     reviewItemsResolveMutate.mockClear();
