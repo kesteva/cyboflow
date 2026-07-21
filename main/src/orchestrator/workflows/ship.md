@@ -309,6 +309,13 @@ Enter this phase only after **every** lane is terminal (`integrated` or
   UI prototype or architecture ran. Auto-revise each must-fix once, never loop,
   and report every remaining issue with `blocking: false` for the existing design
   gate preview.
+- **Re-fetch entity bodies after every gate.** While you are parked at a human
+  gate, the user can send in-artifact feedback that revises the idea's spec or
+  `## Architecture design` section through a host-side revision agent — the body
+  in your context may be stale by the time the gate resolves. After ANY gate
+  resolution, re-fetch the idea via `cyboflow_get_task` before folding its content
+  into downstream work (decomposition briefs, design re-delegations, task specs);
+  never quote a body you fetched before the gate.
 - Use **AskUserQuestion** for every human gate (`approve-idea`, `approve-design`,
   `approve-plan`, `human-review`) and any clarifying question;
   never silently proceed past a gate.

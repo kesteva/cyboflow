@@ -346,6 +346,13 @@ a summary held only in your context.
   UI prototype or architecture ran. Auto-revise each must-fix once, never loop,
   and report every remaining issue with `blocking: false` for the existing design
   gate preview.
+- **Re-fetch entity bodies after every gate.** While you are parked at a human
+  gate, the user can send in-artifact feedback that revises an idea's spec or
+  `## Architecture design` section through a host-side revision agent — the body
+  in your context may be stale by the time the gate resolves. After ANY gate
+  resolution, re-fetch the idea via `cyboflow_get_task` before folding its content
+  into downstream work (decomposition briefs, design re-delegations, task specs);
+  never quote a body you fetched before the gate.
 - **Batch lineage is mandatory.** In a run seeded as a batch, pass
   `originating_idea_id` on every `cyboflow_create_task` (tasks and epics) — the write
   chokepoint refuses to guess and a missing link lands NULL with a warning.
