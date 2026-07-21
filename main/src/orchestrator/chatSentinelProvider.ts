@@ -113,6 +113,34 @@ export function makeChatSentinelProvider(deps: ChatSentinelProviderDeps): ChatSe
   const persistChatRunId = db.prepare(
     `UPDATE sessions SET chat_run_id = @runId WHERE id = @sessionId AND chat_run_id IS NULL`,
   );
+  // Reuse-branch repair. Flip a parked/force-failed `__quick__` chat sentinel
+  // back to `'running'` so the reused id hands the spawn seam a LIVE run — the
+  // approval gate (`UPDATE … WHERE status='running'`) and every run-scoped MCP
+  // write (which reject a terminal run with `run_not_active`) then work on the
+  // resumed turn. The sentinel LEAVES `'running'` and no quick-turn path restored
+  // it when:
+  //   - the app restarts → runRecovery force-fails the orphan to `'failed'`
+  //     (error_message='app_restart'), or
+  //   - the session is closed out → Merge/Create-PR `'completed'`, Dismiss `'canceled'`.
+  // Doing it HERE (the shared gate seam both substrates funnel through) heals the
+  // interactive REPL, which — unlike the SDK manager (claudeCodeManager's own
+  // reviveQuickRunToRunning call, now a redundant no-op) — has no revive seam.
+  // Mirrors reviveQuickRunToRunning (services/cyboflow/transitions.ts): inlined to
+  // keep this orchestrator module off the services layer (standalone-typecheck
+  // parity with advanceRun above), subquery-guarded to the `__quick__` workflow so
+  // a non-quick run can NEVER be force-flipped to `'running'`, and clears the stale
+  // terminal stamps so the row is truthful.
+  const reviveChatSentinel = db.prepare(
+    `UPDATE workflow_runs
+        SET status = 'running',
+            error_message = NULL,
+            ended_at = NULL,
+            started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+            updated_at = CURRENT_TIMESTAMP
+      WHERE id = @runId
+        AND status != 'running'
+        AND workflow_id IN (SELECT id FROM workflows WHERE name = '${QUICK_WORKFLOW_NAME}')`,
+  );
 
   return (sessionId: string): string => {
     const session = selectSession.get(sessionId) as SessionGateRow | undefined;
@@ -132,9 +160,20 @@ export function makeChatSentinelProvider(deps: ChatSentinelProviderDeps): ChatSe
       }
     }
 
-    // Already have a persistent chat vehicle → reuse it (revive at SDK spawn flips
-    // it back to 'running' if it drained/failed between turns).
-    if (session.chat_run_id) return session.chat_run_id;
+    // Already have a persistent chat vehicle → reuse it, first reviving a
+    // parked/force-failed sentinel back to 'running' (see reviveChatSentinel
+    // above) so the reused id is live on BOTH substrates — the interactive REPL
+    // has no revive seam of its own, so this is where a resumed quick PTY session
+    // regains its approval gate + MCP access after an app_restart force-fail.
+    if (session.chat_run_id) {
+      const revived = reviveChatSentinel.run({ runId: session.chat_run_id }).changes > 0;
+      if (revived) {
+        logger?.info(
+          `chatSentinelProvider: revived parked __quick__ chat sentinel ${session.chat_run_id} → 'running' for session ${sessionId}`,
+        );
+      }
+      return session.chat_run_id;
+    }
 
     // Mint-on-read: a flow-only/legacy session (chat_run_id NULL) gets a fresh
     // __quick__ sentinel as its chat vehicle, on the session's own substrate.

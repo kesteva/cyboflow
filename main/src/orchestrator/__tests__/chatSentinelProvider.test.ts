@@ -269,7 +269,7 @@ describe('chatSentinelProvider', () => {
     expect(count).toBe(1);
   });
 
-  it('returns the EXISTING chat_run_id and that sentinel revives:true despite a TERMINAL flow run (#4)', () => {
+  it('returns the EXISTING chat_run_id and REVIVES the parked sentinel to running (despite a TERMINAL flow run, #4)', () => {
     // run_id = terminal flow run; chat_run_id = a parked __quick__ sentinel.
     seedFlowRun(db, 'flow-terminal-2', 'completed');
     seedQuickSentinel(db, 'chat-parked-2', 'failed');
@@ -277,15 +277,67 @@ describe('chatSentinelProvider', () => {
 
     const gateRunId = provider('sess-existing');
     expect(gateRunId).toBe('chat-parked-2'); // reused, NOT re-minted
-
-    // The chat sentinel is a __quick__ run, so reviveQuickRunToRunning matches.
     expect(workflowNameForRun(db, gateRunId)).toBe(QUICK_WORKFLOW_NAME);
-    const revival = reviveQuickRunToRunning(db, gateRunId);
-    expect(revival.revived).toBe(true);
+
+    // The PROVIDER ITSELF flipped the parked sentinel back to 'running' — no
+    // caller-side reviveQuickRunToRunning needed. The SDK manager's own later
+    // call is now a redundant no-op (single source of truth = the shared seam).
     expect(runStatus(db, gateRunId)).toBe('running');
+    expect(reviveQuickRunToRunning(db, gateRunId).revived).toBe(false);
 
     // The terminal flow run (run_id) is untouched by the revive.
     expect(runStatus(db, 'flow-terminal-2')).toBe('completed');
+  });
+
+  it('revives a __quick__ sentinel force-failed by an app_restart (error_message=app_restart) and clears the stale stamps', () => {
+    // Reproduce the exact resume-after-restart bug (IDEA-046): boot recovery
+    // force-fails the interactive quick session's running sentinel to
+    // 'failed'/'app_restart', so the reused chat_run_id would otherwise hand the
+    // spawn seam a terminal run and every MCP write / approval would fail closed.
+    seedQuickSentinel(db, 'chat-restart-8', 'failed');
+    db.prepare(
+      `UPDATE workflow_runs SET error_message = 'app_restart', ended_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    ).run('chat-restart-8');
+    seedSession(db, { id: 'sess-restart', runId: 'chat-restart-8', chatRunId: 'chat-restart-8' });
+
+    const gateRunId = provider('sess-restart');
+    expect(gateRunId).toBe('chat-restart-8');
+    expect(runStatus(db, gateRunId)).toBe('running');
+
+    // Terminal stamps cleared so the row is truthful once live again.
+    const row = db
+      .prepare('SELECT error_message, ended_at FROM workflow_runs WHERE id = ?')
+      .get(gateRunId) as { error_message: string | null; ended_at: string | null };
+    expect(row.error_message).toBeNull();
+    expect(row.ended_at).toBeNull();
+  });
+
+  it('reuse of an already-running sentinel is a no-op (no spurious status churn)', () => {
+    seedQuickSentinel(db, 'chat-live-9', 'running');
+    seedSession(db, { id: 'sess-live', runId: 'chat-live-9', chatRunId: 'chat-live-9' });
+    const before = db
+      .prepare('SELECT updated_at FROM workflow_runs WHERE id = ?')
+      .get('chat-live-9') as { updated_at: string };
+
+    expect(provider('sess-live')).toBe('chat-live-9');
+    expect(runStatus(db, 'chat-live-9')).toBe('running');
+    // The guarded UPDATE (status != 'running') matched 0 rows → updated_at untouched.
+    const after = db
+      .prepare('SELECT updated_at FROM workflow_runs WHERE id = ?')
+      .get('chat-live-9') as { updated_at: string };
+    expect(after.updated_at).toBe(before.updated_at);
+  });
+
+  it('NEVER flips a non-__quick__ run to running (subquery guard) even if it is somehow the chat_run_id', () => {
+    // Defensive: chat_run_id is a __quick__ run by construction, but the revive
+    // must not force-flip a real flow run to 'running' if that invariant is ever
+    // violated. Point chat_run_id at a terminal SPRINT (non-quick) run.
+    seedFlowRun(db, 'flow-nonquick-10', 'failed');
+    seedSession(db, { id: 'sess-nonquick', runId: null, chatRunId: 'flow-nonquick-10' });
+
+    expect(provider('sess-nonquick')).toBe('flow-nonquick-10');
+    // The non-quick run's terminal status is left exactly as-is.
+    expect(runStatus(db, 'flow-nonquick-10')).toBe('failed');
   });
 
   it('REJECTS a chat turn while the session run_id flow run is non-terminal (chat-during-active-flow)', () => {
