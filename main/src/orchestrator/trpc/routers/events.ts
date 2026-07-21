@@ -107,6 +107,32 @@ export const runStatusEvents = new EventEmitter();
  */
 export const experimentEvents = new EventEmitter();
 
+/**
+ * Main-process EventEmitter for in-artifact feedback lifecycle events
+ * (IDEA-033 — highlight+comment feedback on the idea-spec / arch-design
+ * artifact tabs).
+ *
+ * FeedbackRouter (feedbackRouter.ts) emits on this emitter after every
+ * committed write, via feedbackProjectChannel(projectId):
+ *   feedbackEvents.emit(feedbackProjectChannel(projectId), event satisfies FeedbackChangedEvent);
+ *
+ * Project-scoped channel (mirrors artifactProjectChannel in artifactRouter.ts)
+ * rather than the single global channel the emitters above use — a feedback
+ * subscription is opened per project (a user can have several documents/runs
+ * open at once), so the channel keeps unrelated projects' comment traffic
+ * from crossing subscriptions. Hosted here (rather than alongside the router,
+ * as reviewItemChangeEvents/artifactChangeEvents are) so the future
+ * onFeedbackChanged subscription procedure and FeedbackRouter share one
+ * instance without a circular import — mirroring how questionRouter.ts
+ * already imports runStatusEvents from this file.
+ */
+export const feedbackEvents = new EventEmitter();
+
+/** Build the emit channel name for a project. Exported so FeedbackRouter and the tRPC subscription stay in sync. */
+export function feedbackProjectChannel(projectId: number): string {
+  return `feedback-project-${projectId}`;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
