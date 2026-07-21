@@ -15,7 +15,6 @@ export interface AgentSuggestionChipsProps {
 const SUGGESTION_CHIPS: readonly string[] = [
   'Where is everything?',
   'Triage the backlog',
-  'Kick off top tasks',
   'Modify a workflow',
 ];
 

@@ -9,8 +9,8 @@ describe('AgentSuggestionChips', () => {
 
     expect(screen.getByText('Where is everything?')).toBeInTheDocument();
     expect(screen.getByText('Triage the backlog')).toBeInTheDocument();
-    expect(screen.getByText('Kick off top tasks')).toBeInTheDocument();
     expect(screen.getByText('Modify a workflow')).toBeInTheDocument();
+    expect(screen.queryByText('Kick off top tasks')).not.toBeInTheDocument();
   });
 
   it('clicking a chip sends its label verbatim as the canned prompt', () => {
@@ -26,7 +26,7 @@ describe('AgentSuggestionChips', () => {
   it('disables every chip while a turn is in flight', () => {
     render(<AgentSuggestionChips onSend={vi.fn()} disabled />);
 
-    for (let i = 0; i < 4; i += 1) {
+    for (let i = 0; i < 3; i += 1) {
       expect(screen.getByTestId(`agent-suggestion-chip-${i}`)).toBeDisabled();
     }
   });
