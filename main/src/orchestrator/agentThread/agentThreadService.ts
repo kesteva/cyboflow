@@ -225,6 +225,17 @@ export class AgentThreadService {
    * ONCE fresh (the bridge re-captures the new id from the fresh turn's init).
    */
   async sendMessage(threadId: string, text: string): Promise<void> {
+    return this.sendTurn(threadId, text, true);
+  }
+
+  /**
+   * Shared turn body. `recordUserTurn` distinguishes a human-authored message
+   * (persisted + live-published as a `role:'user'` turn, so it appears in the
+   * transcript the same way it does in a run's chat) from the AUTO-fired digest,
+   * whose synthetic prompt nobody typed — rendering that as a "You" bubble would
+   * attribute a machine-triggered turn to the person.
+   */
+  private async sendTurn(threadId: string, text: string, recordUserTurn: boolean): Promise<void> {
     if (!this.deps.enabled()) {
       throw new Error('assistant is disabled in settings');
     }
@@ -236,6 +247,21 @@ export class AgentThreadService {
     // is captured. Idempotent — repeated turns reuse the one listener.
     this.ensureEventBridge(threadId);
     this.ensureHomeDir(threadId);
+
+    // Persist + publish the human's own turn BEFORE the spawn, so it renders
+    // immediately rather than only once the assistant's first event lands. Never
+    // repeated on the stale-resume retry below (which re-enters `spawn`, not this).
+    if (recordUserTurn) {
+      try {
+        const userEvent = this.sink.recordUserTurn(threadId, text);
+        this.deps.publish(threadId, this.toEnvelope(userEvent));
+      } catch (err) {
+        // Fail-soft: a transcript-echo failure must never block the actual turn.
+        this.deps.logger?.warn(
+          `[agentThreadService] user-turn record failed for thread ${threadId}: ${errMessage(err)}`,
+        );
+      }
+    }
 
     const model = (thread.model ?? this.deps.defaultModel()) ?? undefined;
     const resumeSessionId = thread.claudeSessionId ?? undefined;
@@ -271,7 +297,7 @@ export class AgentThreadService {
     }
     // Stamp BEFORE the (awaited) send so a concurrent trigger cannot double-fire.
     this.lastDigestAt.set(threadId, now);
-    await this.sendMessage(threadId, DIGEST_PROMPT);
+    await this.sendTurn(threadId, DIGEST_PROMPT, false);
     return { triggered: true };
   }
 

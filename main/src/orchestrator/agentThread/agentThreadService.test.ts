@@ -219,7 +219,7 @@ describe('AgentThreadService', () => {
       }
     });
 
-    it('passes the injected sink and performs zero appendEvent calls of its own', async () => {
+    it('passes the injected sink and routes its only write (the human turn) through it', async () => {
       const appendSpy = vi.spyOn(h.store, 'appendEvent');
       const thread = h.service.ensureGlobalThread();
       h.manager.queueInit('sess-1');
@@ -228,8 +228,37 @@ describe('AgentThreadService', () => {
 
       const opts = h.manager.calls[0];
       expect(opts.eventsSink).toBeInstanceOf(AgentThreadEventsSink);
-      // The sink is the single durable writer — the service never appends itself.
-      expect(appendSpy).not.toHaveBeenCalled();
+      // The sink stays the single durable writer: the service never calls
+      // appendEvent itself — the one row here is the user turn the SINK wrote.
+      expect(appendSpy).toHaveBeenCalledTimes(1);
+      expect(appendSpy.mock.calls[0][1]).toBe('user');
+    });
+
+    it('records + publishes the human turn as a user event BEFORE spawning', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueInit('sess-1');
+
+      await h.service.sendMessage(thread.id, 'where are my sessions?');
+
+      // Persisted: the SDK never echoes the prompt, so without this the person's
+      // own message is missing from the reconstructed transcript entirely.
+      const rows = h.store.listEvents(thread.id);
+      expect(rows[0].eventType).toBe('user');
+      expect(rows[0].payloadJson).toContain('where are my sessions?');
+
+      // Published first, so it renders without waiting on the assistant's reply.
+      const first = h.published[0].envelope as { type: string; payload: { type: string } };
+      expect(first.type).toBe('user');
+      expect(first.payload.type).toBe('user');
+    });
+
+    it('a turn that fails to spawn still leaves the human turn in the transcript', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueThrow('API Error: 401 unauthorized');
+
+      await expect(h.service.sendMessage(thread.id, 'hello')).rejects.toThrow(/401/);
+
+      expect(h.store.listEvents(thread.id).map((r) => r.eventType)).toEqual(['user']);
     });
 
     it('publishes live-tail envelopes to the thread id (not the spawn identity)', async () => {
@@ -281,6 +310,16 @@ describe('AgentThreadService', () => {
   });
 
   describe('triggerDigest', () => {
+    it('does NOT record the synthetic digest prompt as a human turn', async () => {
+      const thread = h.service.ensureGlobalThread();
+
+      await h.service.triggerDigest(thread.id);
+
+      // The digest is auto-fired (first open per launch); nobody typed
+      // DIGEST_PROMPT, so attributing it to the user would be a false "You" bubble.
+      expect(h.store.listEvents(thread.id).some((r) => r.eventType === 'user')).toBe(false);
+    });
+
     it('first triggers, second within the window is throttled, and it fires again after the window', async () => {
       const thread = h.service.ensureGlobalThread();
 

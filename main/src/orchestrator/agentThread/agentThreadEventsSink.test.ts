@@ -157,4 +157,26 @@ describe('AgentThreadEventsSink', () => {
     expect(store.listEvents('thread-1')).toHaveLength(0);
     expect(store.listEvents('thread-2')).toHaveLength(0);
   });
+
+  it('recordUserTurn persists the human turn as a projectable user-text event', () => {
+    const sink = new AgentThreadEventsSink(store);
+    // No router attach — the human's turn is written directly, not off the stream.
+    const event = sink.recordUserTurn('thread-1', 'where are my sessions?');
+
+    const rows = store.listEvents('thread-1');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].eventType).toBe('user');
+    const persisted = JSON.parse(rows[0].payloadJson) as {
+      type: string;
+      parent_tool_use_id: string | null;
+      message: { content: Array<{ type: string; text: string }> };
+    };
+    expect(persisted.type).toBe('user');
+    // Parentless — MessageProjection only renders top-level user events as turns.
+    expect(persisted.parent_tool_use_id).toBeNull();
+    expect(persisted.message.content).toEqual([
+      { type: 'text', text: 'where are my sessions?' },
+    ]);
+    expect(event).toEqual(persisted);
+  });
 });

@@ -22,7 +22,8 @@
 import type { EventRouter } from '../../services/streamParser/eventRouter';
 import { derivePersistedEventType } from '../../services/streamParser/derivers';
 import type { SpawnEventsSink } from '../../services/panels/claude/claudeCodeManager';
-import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
+import type { ClaudeStreamEvent, UserEvent } from '../../../../shared/types/claudeStream';
+import { buildUserTextEvent } from '../programmatic/syntheticEvents';
 import type { AgentThreadDbStore } from './agentThreadDbStore';
 import type { LoggerLike } from '../types';
 import { AGENT_THREAD_SPAWN_PREFIX, isAgentThreadSpawnId } from '../../../../shared/types/agentThread';
@@ -93,6 +94,24 @@ export class AgentThreadEventsSink implements SpawnEventsSink {
       teardown();
     }
     this.teardowns.clear();
+  }
+
+  /**
+   * Persist the human's composer input as a synthetic user-text turn, and return
+   * the event so the caller can publish it on live-tail.
+   *
+   * The SDK stream never echoes the prompt back — its only `user` events are
+   * tool_result plumbing — so without this write the person's own messages are
+   * absent from the reconstructed transcript entirely (the chat reads as a
+   * monologue of assistant replies). Routed through the SAME `handleEvent` path
+   * as stream events so `agent_thread_events` keeps exactly one writer, and
+   * built with the same `buildUserTextEvent` shape the programmatic monitor
+   * injects, which `MessageProjection` already renders as a `role:'user'` turn.
+   */
+  recordUserTurn(threadId: string, text: string): UserEvent {
+    const event = buildUserTextEvent(text);
+    this.handleEvent(threadId, event);
+    return event;
   }
 
   /**
