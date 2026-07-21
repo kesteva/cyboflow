@@ -41,6 +41,10 @@ import { QuestionRouter } from './orchestrator/questionRouter';
 import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
 import { ReviewItemRouter, reviewItemChangeEvents, reviewItemProjectChannel } from './orchestrator/reviewItemRouter';
 import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
+import { FeedbackRouter } from './orchestrator/feedbackRouter';
+import { setRevisionLauncher } from './orchestrator/sendFeedbackHandler';
+import { runRevisionBatch } from './orchestrator/feedback/revisionWorker';
+import { makeRevisionQuery } from './orchestrator/feedback/revisionQuery';
 import { ArtifactRouter } from './orchestrator/artifactRouter';
 import { setRunArtifactsDirResolver } from './orchestrator/autoMintArtifacts';
 import { resolveArtifactCommitDir } from './orchestrator/artifactSnapshot';
@@ -1142,6 +1146,34 @@ async function initializeServices() {
   // it opens a blocking decision review_item (pausing the run) and applies
   // aggregate-unblock auto-resume when the run's last blocking item resolves.
   ReviewItemRouter.initialize(cyboflowDb);
+  // In-artifact feedback write chokepoint (migration 075, IDEA-033) — the single
+  // serialized writer for feedback_comments / feedback_batches; the
+  // cyboflow.feedback tRPC router reaches it via getInstance(). Its feedbackEvents
+  // emitter (hosted in trpc/routers/events.ts) is consumed directly by
+  // cyboflow.feedback.onFeedbackChanged. The revision LAUNCHER — the host-driven
+  // scoped SDK agent that rewrites the idea body on "Send feedback" — is wired here
+  // (it binds makeRevisionQuery + TaskChangeRouter, both off-limits to the
+  // standalone tRPC router) and read by sendFeedbackHandler via getRevisionLauncher.
+  FeedbackRouter.initialize(cyboflowDb);
+  setRevisionLauncher((info) =>
+    runRevisionBatch(
+      {
+        projectId: info.projectId,
+        runId: info.runId,
+        batchId: info.batchId,
+        atype: info.atype,
+        sourceRef: info.sourceRef,
+      },
+      {
+        db: cyboflowDb,
+        queryFn: makeRevisionQuery(cyboflowLogger),
+        feedbackRouter: FeedbackRouter.getInstance(),
+        applyTaskChange: (projectId, change) =>
+          TaskChangeRouter.getInstance().applyChange(projectId, change),
+        logger: cyboflowLogger,
+      },
+    ),
+  );
   // Single write chokepoint for `agent_overrides` (migration 029) — the
   // cyboflow.agents tRPC router reaches it via getInstance(). Serializes
   // per-project; emits AgentChangedEvent post-commit on the per-project channel.

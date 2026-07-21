@@ -13,6 +13,7 @@ import { approvalsRouter } from './routers/approvals';
 import { workflowsRouter } from './routers/workflows';
 import { dynamicWorkflowsRouter } from './routers/dynamicWorkflows';
 import { eventsRouter } from './routers/events';
+import { feedbackRouter } from './routers/feedback';
 import { filesRouter } from './routers/files';
 import { healthRouter } from './routers/health';
 import { insightsRouter } from './routers/insights';
@@ -37,6 +38,7 @@ export const appRouter = router({
     dynamicWorkflows: dynamicWorkflowsRouter,
     events: eventsRouter,
     experiments: experimentsRouter,
+    feedback: feedbackRouter,
     files: filesRouter,
     health: healthRouter,
     insights: insightsRouter,
