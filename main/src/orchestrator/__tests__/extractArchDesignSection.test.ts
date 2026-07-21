@@ -8,8 +8,11 @@
 import { describe, it, expect } from 'vitest';
 import {
   extractArchDesignSection,
+  replaceArchDesignSection,
   ARCH_DESIGN_SECTION_HEADING,
 } from '../../../../shared/types/artifacts';
+
+const HEADING = `## ${ARCH_DESIGN_SECTION_HEADING}`;
 
 describe('extractArchDesignSection', () => {
   it('exports the canonical heading text', () => {
@@ -107,5 +110,72 @@ describe('extractArchDesignSection', () => {
     const body =
       '## Architecture design\n\nstale v1\n\n## Risks\n\nr\n\n## Architecture design\n\nfresh v2\n';
     expect(extractArchDesignSection(body)).toBe('fresh v2');
+  });
+});
+
+describe('replaceArchDesignSection', () => {
+  it('swaps a mid-body section, preserving surrounding bytes and the following H2', () => {
+    const body = '# Idea\n\nIntro.\n\n## Architecture design\n\nold design.\n\n## Rollout\n\nship it.';
+    const out = replaceArchDesignSection(body, `${HEADING}\n\nnew design.`);
+    expect(out).toBe('# Idea\n\nIntro.\n\n## Architecture design\n\nnew design.\n\n## Rollout\n\nship it.');
+    expect(extractArchDesignSection(out)).toBe('new design.');
+  });
+
+  it('swaps a section that runs to EOF (no following H2)', () => {
+    const body = '# Idea\n\n## Architecture design\n\noriginal.';
+    const out = replaceArchDesignSection(body, `${HEADING}\n\nreplacement.`);
+    expect(out).toBe('# Idea\n\n## Architecture design\n\nreplacement.');
+    expect(extractArchDesignSection(out)).toBe('replacement.');
+  });
+
+  it('appends a new section (heading-led) when the body has none, after a blank line', () => {
+    const body = '# Idea\n\nIntro with no arch section.';
+    const out = replaceArchDesignSection(body, `${HEADING}\n\nfresh.`);
+    expect(out).toBe('# Idea\n\nIntro with no arch section.\n\n## Architecture design\n\nfresh.');
+    expect(extractArchDesignSection(out)).toBe('fresh.');
+  });
+
+  it('append keeps exactly one blank line when the body already ends with a newline', () => {
+    expect(replaceArchDesignSection('body\n', `${HEADING}\ns`)).toBe(`body\n\n${HEADING}\ns`);
+    expect(replaceArchDesignSection('body\n\n', `${HEADING}\ns`)).toBe(`body\n\n${HEADING}\ns`);
+    expect(replaceArchDesignSection('', `${HEADING}\ns`)).toBe(`${HEADING}\ns`);
+  });
+
+  it('replaces the LAST heading when the body carries more than one (last wins, matching extract)', () => {
+    const body = `${HEADING}\n\nstale.\n\n## Risks\n\nr\n\n${HEADING}\n\nfresh.`;
+    const out = replaceArchDesignSection(body, `${HEADING}\n\nrevised.`);
+    // The earlier (stale) heading + its section are preserved byte-for-byte; only the
+    // last section is swapped — extract likewise reads the last one.
+    expect(out).toBe(`${HEADING}\n\nstale.\n\n## Risks\n\nr\n\n${HEADING}\n\nrevised.`);
+    expect(extractArchDesignSection(out)).toBe('revised.');
+  });
+
+  it('does not treat a heading-looking line inside a fence as the section (fence-aware)', () => {
+    const body = '## Architecture design\n\nreal.\n\n```md\n## Architecture design\nfenced\n```\n\ntail.';
+    const out = replaceArchDesignSection(body, `${HEADING}\n\nswapped.`);
+    // The whole real section (through EOF; the fenced copy neither starts nor ends it)
+    // is replaced; the fenced text was part of that section, so it is swapped out too.
+    expect(out).toBe(`${HEADING}\n\nswapped.`);
+    expect(extractArchDesignSection(out)).toBe('swapped.');
+  });
+
+  it('preserves CRLF bytes outside the swapped section', () => {
+    const body = '# Idea\r\n\r\n## Architecture design\r\n\r\nold.\r\n\r\n## Next\r\nx';
+    const out = replaceArchDesignSection(body, `${HEADING}\n\nnew.`);
+    expect(out).toBe('# Idea\r\n\r\n## Architecture design\n\nnew.\r\n\r\n## Next\r\nx');
+    expect(extractArchDesignSection(out)).toBe('new.');
+  });
+
+  it('round-trips: extract(replace(body, s)) === extract(s) for a heading-led section', () => {
+    const s = `${HEADING}\n\nComponents:\n\n- one\n- two\n`;
+    for (const body of [
+      '',
+      '# Idea\n\nno section',
+      `# Idea\n\n${HEADING}\n\nprior\n\n## After\n\nz`,
+    ]) {
+      expect(extractArchDesignSection(replaceArchDesignSection(body, s))).toBe(
+        extractArchDesignSection(s),
+      );
+    }
   });
 });

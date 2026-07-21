@@ -189,6 +189,73 @@ export function extractArchDesignSection(body: string | null | undefined): strin
 }
 
 /**
+ * Byte-preserving inverse-companion of {@link extractArchDesignSection}: replace
+ * the WHOLE '## Architecture design' section — the heading line through the same
+ * next-H2-or-EOF boundary extract uses, and the same "last heading wins" choice —
+ * with `newSection`, leaving every other byte of `body` untouched. When no such
+ * section exists, `newSection` is appended after a blank-line separator (the body's
+ * existing bytes are never rewritten).
+ *
+ * `newSection` is expected to be a COMPLETE section that begins with its own
+ * '## Architecture design' heading line (what the architecture agent emits, and
+ * what the append path needs to produce a re-extractable section). The original
+ * section's trailing blank-line run is preserved after the splice so the following
+ * H2 stays visually separated.
+ *
+ * Round-trip: `extractArchDesignSection(replaceArchDesignSection(body, s))` equals
+ * `extractArchDesignSection(s)` — the content of `s` after its heading, trimmed the
+ * same way extract trims — for any `s` that carries the heading line.
+ */
+export function replaceArchDesignSection(body: string | null | undefined, newSection: string): string {
+  const base = body ?? '';
+  const lines = base.split(/\r?\n/);
+
+  // Re-run the exact scan extractArchDesignSection uses to locate the span, but
+  // keep the heading LINE index (sectionStart - 1) so the whole section is swapped.
+  let inFence = false;
+  let sectionStart = -1; // line index AFTER the most recent heading match
+  let sectionEnd = lines.length;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (FENCE_LINE_RE.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    if (ARCH_DESIGN_HEADING_LINE_RE.test(line)) {
+      sectionStart = i + 1;
+      sectionEnd = lines.length;
+    } else if (sectionStart !== -1 && sectionEnd === lines.length && H2_LINE_RE.test(line)) {
+      sectionEnd = i;
+    }
+  }
+
+  if (sectionStart === -1) {
+    // No section: append after a blank line, never rewriting existing bytes.
+    if (base.length === 0) return newSection;
+    const sep = base.endsWith('\n\n') ? '' : base.endsWith('\n') ? '\n' : '\n\n';
+    return base + sep + newSection;
+  }
+
+  // Char offsets for each logical line start (consistent with split(/\r?\n/)).
+  const lineStarts: number[] = [0];
+  const nlRe = /\r?\n/g;
+  let m: RegExpExecArray | null;
+  while ((m = nlRe.exec(base)) !== null) {
+    lineStarts.push(m.index + m[0].length);
+  }
+
+  const headingStart = lineStarts[sectionStart - 1];
+  const endOffset = sectionEnd < lines.length ? lineStarts[sectionEnd] : base.length;
+
+  const region = base.slice(headingStart, endOffset);
+  const trailing = /(?:\r?\n)*$/.exec(region)?.[0] ?? '';
+  const coreNew = newSection.replace(/(?:\r?\n)*$/, '');
+
+  return base.slice(0, headingStart) + coreNew + trailing + base.slice(endOffset);
+}
+
+/**
  * Default on-disk location for COMMITTED-artifact manifests, written when the
  * user explicitly commits an artifact (FEATURE #3 durability snapshot). A
  * RELATIVE value resolves against the owning project's ROOT (not the run's
