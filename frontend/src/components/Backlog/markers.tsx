@@ -57,7 +57,8 @@ export function PriorityTag({ priority }: { priority: Priority }): React.JSX.Ele
   );
 }
 
-const CATEGORY_LABEL: Record<EntityCategory, string> = {
+/** Canonical display labels for the entity category enum — reuse this instead of re-capitalizing. */
+export const CATEGORY_LABEL: Record<EntityCategory, string> = {
   feature: 'Feature',
   bug: 'Bug',
   chore: 'Chore',

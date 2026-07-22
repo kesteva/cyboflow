@@ -1,8 +1,8 @@
 /**
  * EpicDetailEditor — modal editor for an `epic` entity (and reused for solo
- * `task` entities, whose editable surface — title / summary / priority / body —
- * is identical to an epic's). Mirror of {@link IdeaDetailEditor} minus the
- * idea-only scope hint.
+ * `task` entities, whose editable surface — title / summary / priority /
+ * category / body — is identical to an epic's). Mirror of
+ * {@link IdeaDetailEditor} minus the idea-only scope hint.
  *
  * Opened from the dedicated Edit affordance on an epic / task card (NOT a
  * full-card click). Saves through `cyboflow.tasks.update` — which funnels into
@@ -16,7 +16,8 @@ import { useEffect, useState } from 'react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';
 import { MarkdownPreview } from './MarkdownPreview';
 import { trpc } from '../trpc/client';
-import type { BacklogTaskItem, Priority } from '../../../shared/types/tasks';
+import { CATEGORY_LABEL } from './Backlog/markers';
+import type { BacklogTaskItem, EntityCategory, Priority } from '../../../shared/types/tasks';
 
 interface EpicDetailEditorProps {
   /** The epic (or solo task) being edited — its current field values seed the form. */
@@ -28,11 +29,13 @@ interface EpicDetailEditorProps {
 }
 
 const PRIORITIES: Priority[] = ['P0', 'P1', 'P2'];
+const CATEGORIES: EntityCategory[] = ['feature', 'bug', 'chore'];
 
 export function EpicDetailEditor({ epic, isOpen, onClose, onSaved }: EpicDetailEditorProps): React.JSX.Element {
   const [title, setTitle] = useState(epic.title);
   const [summary, setSummary] = useState(epic.summary ?? '');
   const [priority, setPriority] = useState<Priority>(epic.priority);
+  const [category, setCategory] = useState<EntityCategory>(epic.category);
   const [body, setBody] = useState(epic.body ?? '');
   const [bodyMode, setBodyMode] = useState<'write' | 'preview'>('write');
   const [submitting, setSubmitting] = useState(false);
@@ -44,10 +47,11 @@ export function EpicDetailEditor({ epic, isOpen, onClose, onSaved }: EpicDetailE
     setTitle(epic.title);
     setSummary(epic.summary ?? '');
     setPriority(epic.priority);
+    setCategory(epic.category);
     setBody(epic.body ?? '');
     setBodyMode('write');
     setError(null);
-  }, [isOpen, epic.id, epic.version, epic.title, epic.summary, epic.priority, epic.body]);
+  }, [isOpen, epic.id, epic.version, epic.title, epic.summary, epic.priority, epic.category, epic.body]);
 
   const handleSubmit = async (): Promise<void> => {
     if (title.trim().length === 0 || submitting) return;
@@ -61,6 +65,7 @@ export function EpicDetailEditor({ epic, isOpen, onClose, onSaved }: EpicDetailE
         summary: summary.trim().length > 0 ? summary.trim() : null,
         body: body.length > 0 ? body : null,
         priority,
+        category,
         expectedVersion: epic.version,
       });
       onSaved?.(result.taskId);
@@ -114,6 +119,22 @@ export function EpicDetailEditor({ epic, isOpen, onClose, onSaved }: EpicDetailE
               {PRIORITIES.map((p) => (
                 <option key={p} value={p}>
                   {p}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
+            Category
+            <select
+              value={category}
+              onChange={(e) => setCategory(e.target.value as EntityCategory)}
+              className="rounded-input border border-border-primary bg-input-bg px-2 py-1.5 text-sm text-input-text"
+              aria-label="Epic category"
+            >
+              {CATEGORIES.map((c) => (
+                <option key={c} value={c}>
+                  {CATEGORY_LABEL[c]}
                 </option>
               ))}
             </select>
