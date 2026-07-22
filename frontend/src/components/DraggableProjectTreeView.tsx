@@ -346,7 +346,6 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
     overSessionId: null,
     dropPosition: null,
   });
-  const [sessionOrderOverrides, setSessionOrderOverrides] = useState<Record<string, number>>({});
   const dragCounter = useRef(0);
 
   // Auto-expand bookkeeping. `restoredSavedExpansion` is true once load restores
@@ -1210,10 +1209,12 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
     try {
       const response = await API.sessions.reorder(sessionOrders);
       if (response.success) {
+        // Single order source: patch the store sessions' displayOrder directly.
+        // (A separate never-cleared override map used to shadow it and would win
+        // over a fresh server-side display_order after a reload — dropped.)
         const displayOrderById: Record<string, number> = Object.fromEntries(
           sessionOrders.map(({ id, displayOrder }) => [id, displayOrder]),
         );
-        setSessionOrderOverrides((prev) => ({ ...prev, ...displayOrderById }));
         const sessionStore = useSessionStore.getState();
         sessionStore.setSessions(
           sessionStore.sessions.map((session) => {
@@ -1509,8 +1510,8 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
               const projectSessions = allSessions
                 .filter((s) => s.projectId === project.id && !s.isMainRepo && !s.archived)
                 .sort((a, b) => {
-                  const aOrder = sessionOrderOverrides[a.id] ?? a.displayOrder ?? Number.MAX_SAFE_INTEGER;
-                  const bOrder = sessionOrderOverrides[b.id] ?? b.displayOrder ?? Number.MAX_SAFE_INTEGER;
+                  const aOrder = a.displayOrder ?? Number.MAX_SAFE_INTEGER;
+                  const bOrder = b.displayOrder ?? Number.MAX_SAFE_INTEGER;
                   // Deterministic id tiebreaker: reorder assigns dense indices over
                   // the flat list only, so an experiment ARM session's stale
                   // display_order can numerically collide with a flat row's — without
