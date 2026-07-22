@@ -3,7 +3,7 @@ import { NotificationSettings } from './NotificationSettings';
 import { UpdateSettings } from './UpdateSettings';
 import { useNotifications } from '../hooks/useNotifications';
 import { API } from '../utils/api';
-import { trackEvent } from '../utils/telemetry';
+import { emitTelemetryChangeEvents, trackEvent } from '../utils/telemetry';
 import type { AppConfig } from '../types/config';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { CliSubstrate } from '../../../shared/types/substrate';
@@ -271,19 +271,16 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
 
       // Diff the saved telemetry flags against the pre-save baseline (captured
       // from `_config`, still holding the value loaded at fetch time — fetchConfig()
-      // below overwrites it) and emit telemetry_opt_out_changed ONLY for a channel
-      // that actually changed value. Firing on every checkbox click (the prior
-      // behavior) meant a canceled dialog or a failed save could still emit a
-      // false change event; post-success + diff keeps the event semantics
-      // identical to the onboarding Telemetry step.
-      const baselineErrorReporting = _config?.telemetry?.errorReportingEnabled ?? true;
-      const baselineUsageMetrics = _config?.telemetry?.usageMetricsEnabled ?? true;
-      if (baselineErrorReporting !== errorReportingEnabled) {
-        trackEvent('telemetry_opt_out_changed', { channel: 'errors', enabled: errorReportingEnabled });
-      }
-      if (baselineUsageMetrics !== usageMetricsEnabled) {
-        trackEvent('telemetry_opt_out_changed', { channel: 'usage', enabled: usageMetricsEnabled });
-      }
+      // below overwrites it) via the shared helper — one event per channel that
+      // actually changed value, fired only after a successful save, keeping the
+      // event semantics identical to the onboarding Telemetry step.
+      emitTelemetryChangeEvents(
+        {
+          errorReportingEnabled: _config?.telemetry?.errorReportingEnabled ?? true,
+          usageMetricsEnabled: _config?.telemetry?.usageMetricsEnabled ?? true,
+        },
+        { errorReportingEnabled, usageMetricsEnabled },
+      );
 
       // Update the useNotifications hook with new settings
       updateSettings(notificationSettings);

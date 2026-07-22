@@ -15,7 +15,7 @@ import {
 } from '../../stores/onboardingStore';
 import { onboardingTelemetryEvents } from '../../stores/onboardingTelemetry';
 import { ONBOARDING_EVENTS, ONBOARDING_MODAL_STEPS, ONBOARDING_PREF_KEY } from '../../utils/onboarding';
-import { trackEvent } from '../../utils/telemetry';
+import { emitTelemetryChangeEvents, trackEvent } from '../../utils/telemetry';
 import { OnboardingOverlay } from './OnboardingOverlay';
 import { OnboardingModalCard, type PrimaryAction } from './OnboardingModalCard';
 import { Coachmark } from './Coachmark';
@@ -360,20 +360,7 @@ export function OnboardingGate(): React.JSX.Element | null {
         return;
       }
       const baseline = telemetryBaselineRef.current;
-      if (baseline) {
-        if (baseline.errorReportingEnabled !== telemetryDraft.errorReportingEnabled) {
-          trackEvent('telemetry_opt_out_changed', {
-            channel: 'errors',
-            enabled: telemetryDraft.errorReportingEnabled,
-          });
-        }
-        if (baseline.usageMetricsEnabled !== telemetryDraft.usageMetricsEnabled) {
-          trackEvent('telemetry_opt_out_changed', {
-            channel: 'usage',
-            enabled: telemetryDraft.usageMetricsEnabled,
-          });
-        }
-      }
+      if (baseline) emitTelemetryChangeEvents(baseline, telemetryDraft);
       next();
     } finally {
       telemetryNextInFlight.current = false;

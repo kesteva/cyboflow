@@ -31,9 +31,19 @@ const projectsGetAll = vi.fn();
 const configGet = vi.fn();
 const configUpdate = vi.fn();
 
-vi.mock('../../utils/telemetry', () => ({
-  trackEvent: (...a: unknown[]) => trackEvent(...a),
-}));
+vi.mock('../../utils/telemetry', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../utils/telemetry')>();
+  return {
+    ...actual,
+    trackEvent: (...a: unknown[]) => trackEvent(...a),
+    // Delegate to the REAL diff-and-emit helper with the spy injected, so the
+    // shared logic stays single-source while assertions still see the events.
+    emitTelemetryChangeEvents: (
+      baseline: Parameters<typeof actual.emitTelemetryChangeEvents>[0],
+      next: Parameters<typeof actual.emitTelemetryChangeEvents>[1],
+    ) => actual.emitTelemetryChangeEvents(baseline, next, ((...a: unknown[]) => trackEvent(...a)) as typeof actual.trackEvent),
+  };
+});
 
 vi.mock('../../utils/api', () => ({
   API: {
