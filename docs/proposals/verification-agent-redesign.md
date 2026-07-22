@@ -1,6 +1,6 @@
 # Verification Agent Redesign — from "handed a path" to "handed a task"
 
-Status: PROPOSAL (pre-implementation, pending adversarial review)
+Status: PROPOSAL v2 (post-adversarial-review; v1 findings dispositioned in §9)
 Supersedes the capture/judge core of `docs/proposals/visual-verification-design.md`
 (the scheduler spine, merge gate, and delivery chokepoints from that design are
 retained — see "What survives" below).
@@ -75,81 +75,102 @@ Root cause is structural, not incidental:
    queue manages **environments and deployment** of those workflow-defined
    agents. A/B variants of verification prompts/models work with zero new
    plumbing.
-6. **Claude-scoped for now.** `runtime: 'codex-sdk'` is not supported for this
-   agent. The workflow editor must *communicate* this (no Codex runtime option
-   offered for the visual-verification agent), and the deploy seam must enforce
-   it (an out-of-band Codex pin — e.g. written via the MCP config tools — is
-   dropped with a logged warning, falling back to Claude).
+6. **Claude-scoped for now.** The visual-verification agent resolves in the
+   **Claude provider namespace unconditionally** (§5.4). The workflow editor
+   must *communicate* this (no Codex runtime option offered; "always runs on
+   Claude" instead of runtime inheritance), and the deploy seam enforces it.
 7. **Screenshot artifact emission survives, plus a verification report.** The
    run's `screenshots` artifact keeps working exactly as today (harness-written
    through ArtifactRouter), and its payload is extended with a structured
    **verification report**: the behaviors tested and each behavior's result.
    MCP scoping for the verification agent is defined explicitly (see §5.4): it
    gets **no MCP servers at all** — every state write is harness-mediated.
+8. *(v2, from adversarial review)* **Lane-consistent snapshot builds.** The
+   verification build runs against a temporary `git worktree` at a recorded
+   snapshot commit, not the live shared sprint worktree — so a neighboring
+   lane's mid-edit state can never break (or be blamed for) this lane's
+   verification (§5.5). When snapshot preconditions cannot be met, build
+   failures are routed to the fail-open infra bucket instead of consuming the
+   lane's retry budget.
+9. *(v2)* **Honest isolation framing + guards, not a false read-only claim.**
+   The verifier shares the trust tier of the implement/write-tests agents (which
+   already run unrestricted Bash in the same worktree today). v1 hardens with
+   hermetic SDK settings, a post-run mutation check, and lease quarantine; an
+   OS-enforced sandbox is a listed hardening follow-up (§5.4).
+10. *(v2)* **The baseline feature is retired entirely.** Accept-as-baseline +
+    SSIM pre-diff have zero live usage; the button is removed and
+    `baselineStore`/`pixelDiff` retire with the legacy path (§5.10).
 
 ## 3. What survives, what is replaced, what is retired
 
-**Survives unchanged (or lightly extended):**
+**Survives unchanged (or extended per §5):**
 
 - `verification_requests` queue + drain loop + `ResourceLeasePool` + per-request
-  deadline/abort + `runRecovery` (`verificationScheduler.ts`).
+  deadline/abort + `runRecovery` (`verificationScheduler.ts`) — extended with a
+  queued-age deadline, delivery outbox, and queued-row recovery (§5.6).
 - The fire-and-continue MCP seam (`cyboflow_request_verification` — schema
   extended, §5.2).
 - `verdictDelivery.ts` three-chokepoint sequence and `mergeGateLaneAdvance.ts`
-  (posture table amended, §5.6).
+  (posture table amended §5.7; finding supersession added).
 - The `awaiting-verify` lane park + `SchedulerVisualVerifyGate` actuation in
   programmatic mode.
 - Immutable per-run stamps `verify_enabled` / `verify_type` / `verify_chain`
-  (chain value changes, §5.7).
-- `baselineStore` + Accept-as-baseline (baselineKey still threads through).
+  (chain value changes, §5.8).
+- The Verify-Queue panel (`VerifyQueueView`) — extended for task/report rows
+  (§5.11).
 
 **Replaced:**
 
 - Capture backends (`capturePageBackend`, `playwrightBackend`,
   `peekabooBackend`), `DevServerManager`/`StaticServerManager`-driven
-  deliverable resolution, `pixelDiff` SSIM pre-diff, and `vlmJudge` → one
-  **VerificationAgentRunner** that deploys the workflow-defined `visual-verify`
-  agent per request.
+  deliverable resolution, and `vlmJudge` → one **VerificationAgentRunner** that
+  deploys the workflow-defined `visual-verify` agent per request.
 - The in-lane `visual-verify` *dispatcher subagent* → retired. The lane step
   remains (vocabulary unchanged) but becomes agentless (§5.3).
 
 **Retired in place (`@cyboflow-hidden`, not deleted):** the replaced modules
-above, consistent with repo convention, with a legacy kill-switch for rollback
-(§5.7).
+above, plus `pixelDiff` + `baselineStore` + the Accept-as-baseline surface
+(button, `artifacts.acceptAsBaseline` tRPC — §5.10), with a legacy kill-switch
+for rollback (§5.8).
 
 ## 4. Architecture overview
 
 ```
 task-verify (in-lane, per task)
-  │  PASS + UI deliverable → composes VerificationTaskV1
-  │  (behaviors from acceptance criteria; build/serve from repo docs/verify.json hint)
+  │  PASS → REQUIRED composition contract (§5.1/§5.3): either a
+  │  `## Visual verification task` fence or an explicit NOT-APPLICABLE line
   ▼
 visual-verify lane step (agentless)
-  │  programmatic: WorkflowController enqueues directly on the scheduler
+  │  programmatic: WorkflowController reads the typed step output, enqueues
+  │    directly on the scheduler (idempotency key: runId+taskRef+attempt)
   │  orchestrated: orchestrator calls cyboflow_request_verification(task=...)
   │  then parks the lane at awaiting-verify (unchanged)
   ▼
-VerificationScheduler (queue/lease spine, unchanged)
-  │  resolves EffectiveAgent for 'visual-verify' via resolveStepAgent(runId, key)
-  │  provisions environment: leased port, artifacts dir, env vars
+VerificationScheduler (queue/lease spine, + queued-age deadline + outbox)
+  │  resolves EffectiveAgent for 'visual-verify' (Claude namespace, §5.4)
+  │  provisions environment: SNAPSHOT worktree @ recorded sha, leased port,
+  │  artifacts dir, env vars
   ▼
 VerificationAgentRunner (new)
-  │  deploys ONE Claude SDK session: cwd = run worktree,
+  │  deploys ONE Claude SDK session: cwd = snapshot worktree,
   │  system prompt = workflow-defined instructions + immutable harness contract,
-  │  tools = Bash/Read/Grep/Glob (hard ceiling; no Write/Edit; no MCP)
+  │  tools = Bash/Read/Grep/Glob (hard ceiling; no Write/Edit; ZERO MCP servers)
   │  agent: builds, serves on $VERIFY_PORT, drives UI via bundled driver CLI,
   │  screenshots into $VERIFY_ARTIFACTS_DIR, returns VerificationReportV1
-  │  harness: validates report + files, kills process tree, releases leases
+  │  harness: validates report + files, mutation check, kills process tree,
+  │  quarantines-or-releases leases, disposes snapshot
   ▼
-verdictDelivery (unchanged seams, extended payload)
-  ├─ ArtifactRouter: screenshots artifact { fileNames, reports[], verdict }
+verdictDelivery (unchanged seams; outbox-replayable; extended payload)
+  ├─ ArtifactRouter: atomic MERGE into screenshots artifact
+  │    { fileNames, reports[], verdict }
   ├─ applyMergeGateVerdict: PASS advance / FAIL loopback / infra fail-open
+  │    + supersession of prior visual findings for this lane generation
   └─ ReviewItemRouter: finding carries the report + real error text
 ```
 
 Ownership split: **the workflow defines who verifies** (instructions, model,
 effort — editable, overridable, A/B-testable); **the central queue defines
-where and how they run** (worktree, environment, leases, tool sandbox,
+where and how they run** (snapshot, environment, leases, tool sandbox,
 timeouts, verdict delivery).
 
 ## 5. Detailed design
@@ -163,12 +184,12 @@ interface VerificationTaskV1 {
   version: 1;
   taskRef?: string;            // lane attribution (unchanged semantics)
   summary: string;             // replaces the old one-sentence `intent`
-  build?: string[];            // shell steps, run in the worktree, in order
+  build?: string[];            // shell steps, run in the snapshot worktree, in order
   serve?: {                    // optional long-running serve step
     cmd: string;               // may reference ${PORT}
     readyWhen?: { urlPath?: string; timeoutMs?: number };
   };
-  target?: { url?: string; htmlPath?: string };  // pre-live target (legacy path)
+  target?: { url?: string; htmlPath?: string };  // pre-live target (degenerate path)
   behaviors: Array<{           // the verification steps — the core payload
     id: string;                // stable within the task, e.g. "b1"
     description: string;       // what behavior, in user terms
@@ -176,13 +197,13 @@ interface VerificationTaskV1 {
     expected: string;          // what must be observed for PASS
   }>;
   viewports?: ViewportSpec[];
-  baselineKey?: string;
   timeoutMs?: number;          // capped by scheduler config
 }
 ```
 
-Composition: **task-verify** gains a result-contract section. On `VERDICT: PASS`
-for a task with a user-visible UI deliverable, it appends:
+Composition: **task-verify** gains a **required, two-sided** result contract.
+When visual verification is enabled for the run, every `VERDICT: PASS` result
+MUST contain exactly one of:
 
 ````markdown
 ## Visual verification task
@@ -191,47 +212,77 @@ for a task with a user-visible UI deliverable, it appends:
 ```
 ````
 
-parsed with the existing shared CommonMark-paired fence grammar (same parser
-family as arch-section parsing). Build/serve commands come from what task-verify
-can actually see: the project's own docs (README/CLAUDE.md), `package.json`
-scripts, an existing `.cyboflow/verify.json` (now a *hint*, no longer a
-prerequisite), and the diff itself. Behaviors derive from the task's acceptance
-criteria — task-verify already holds them and has just evaluated them, so it is
-the best-placed author. Backend-only tasks simply omit the section (visual
-verification is skipped for that lane exactly as today's `VERDICT: SKIPPED`).
+or the explicit line `VISUAL-VERIFICATION: NOT-APPLICABLE — <one-line reason>`
+(backend-only change, no user-visible UI). Absence of *both*, a duplicate
+fence, or an unparseable/schema-invalid fence is an **output-contract failure**:
+the orchestrator/controller re-delegates task-verify once with the contract
+error, and a second failure marks the lane `failed`. A missing section is
+NEVER silently treated as "nothing to verify" — that would let a truncated
+response bypass the gate (v1-review finding 2). Parsing uses the shared
+CommonMark-paired fence grammar (same parser family as arch-section parsing).
+
+Build/serve commands come from what task-verify can actually see: the project's
+own docs (README/CLAUDE.md), `package.json` scripts, an existing
+`.cyboflow/verify.json` (now a *hint*, no longer a prerequisite), and the diff
+itself. Behaviors derive from the task's acceptance criteria — task-verify
+already holds them and has just evaluated them, so it is the best-placed
+author.
 
 Grading-your-own-homework note: task-verify *authors the steps* but does not
 *execute or judge* them — the verification agent independently drives and
 judges, and the human-facing report lists the behaviors verbatim, so
 easy-grader drift is visible in review.
 
-### 5.2 MCP + request plumbing
+### 5.2 MCP + request plumbing (dual-format contract)
 
 `cyboflow_request_verification` gains one optional field: `task` (a
 `VerificationTaskV1` object; JSON-schema-validated). `intent` remains accepted
-for backward compatibility (a task-less request behaves as a degenerate task
-with `summary=intent` and no build/behaviors). `mcpQueryHandler.
-handleRequestVerification` persists it to a new nullable
-`verification_requests.task_json` column. `deliverable_json` stays for legacy
-rows.
+(a task-less request behaves as a degenerate task with `summary=intent` and no
+build/behaviors).
 
-### 5.3 Lane flow — who fires the request
+Persistence is **dual-write** (v1-review finding 9): every new row writes BOTH
+the new nullable `verification_requests.task_json` AND a legacy-shaped
+`deliverable_json` (`{ intent: task.summary, url?, htmlPath?, taskRef }` — the
+NOT-NULL column every legacy reader, the recovery sweep, and the Verify-Queue
+projection already consume). Dispatch is keyed on the run's stamped
+`verify_chain` (§5.8), never on which column happens to be populated. `taskRef`
+precedence: `task.taskRef ?? task_ref` wire arg, written identically into both
+columns.
+
+### 5.3 Lane flow — who fires the request, and the typed step-output channel
 
 The in-lane `visual-verify` dispatcher subagent is retired. The `visual-verify`
 inner step stays in the canonical chain (lane vocabulary, gate parking, and
-`awaiting-verify` semantics unchanged) but becomes **agentless**, mirroring the
-existing `human` gate precedent (`resolveStepAgentKey` returns null → the
-runner special-cases it):
+`awaiting-verify` semantics unchanged) but becomes **agentless**.
+
+**Typed step output (new seam, v1-review finding 2).** Today
+`SpawnStepRunner.runStep` resolves to `ok/failed/aborted` only — the controller
+never sees the step agent's text, so there is nothing to parse. v2 adds a
+**durable typed step-output channel**: the spawn seam captures the step agent's
+final assistant message, persists it on the step record, and returns it in the
+step result. For task-verify the controller parses it into
+`{ verdict, visualTask?: VerificationTaskV1 | 'not_applicable' }` (contract in
+§5.1). This channel is generic (any step's parsed output can ride it) but v2
+only consumes it for task-verify.
 
 - **Programmatic mode:** after task-verify PASS, `WorkflowController.driveItem`
-  parses the `## Visual verification task` fence from the task-verify result.
-  If present, it enqueues **directly on the scheduler** (main-process call — no
-  MCP hop) and parks the lane at `awaiting-verify`. If absent → advance (no UI
-  deliverable), identical to today's SKIPPED handling.
+  reads the parsed output. `visualTask` present → enqueue **directly on the
+  scheduler** (main-process call, no MCP hop) with **idempotency key
+  `(runId, taskRef, attempt)`** — re-walking the chain after a crash or
+  loopback never double-enqueues; a fresh attempt (bumped by the merge-gate
+  loopback) is a NEW key and re-fires. `'not_applicable'` → advance without a
+  request. Contract failure → §5.1 handling. The lane then parks at
+  `awaiting-verify` as today. **Feedback threading:** on a visual FAIL
+  loopback, the re-delegated implement prompt carries the verification
+  report's failed behaviors + evidence verbatim (the controller has the report
+  via the outbox row, §5.6) — not just "a blocking finding exists".
 - **Orchestrated mode:** `fan-out-instructions.ts` and `sprint.md`/`ship.md`
   prose change: the orchestrator itself calls
   `cyboflow_request_verification(task=<the fence content>, task_ref=...)` and
-  parks the lane. No subagent delegation for this step.
+  parks the lane; on loopback it re-delegates implement with the finding's
+  report body and, after the fix, re-runs task-verify → the fresh fence
+  re-fires the request. The same required/not-applicable contract applies (the
+  orchestrator enforces it per the prose).
 
 The `visual-verify` **agentKey survives** and is repurposed: it now names the
 centrally-deployed verification agent. Existing workflow `agentConfigs`,
@@ -255,29 +306,47 @@ Per request, the runner:
 
 1. **Resolves the workflow-defined agent** via the injected
    `resolveStepAgent(runId, 'visual-verify')` → `EffectiveAgent`
-   (systemPrompt/model/effort). **Claude-only enforcement:** if the effective
-   agent carries `runtime: 'codex-sdk'`, the runtime pin is dropped with a
-   logged warning (and a Sentry seam breadcrumb) and the agent runs on the
-   resolved Claude model. Model alias `null` inherits the run model as usual.
-2. **Provisions the environment:** acquires `verify:port` (when
-   `task.build/serve/target.url` implies one) + the `sprint-verify-<batchId>`
-   batch lease (serialization vs sibling lanes, unchanged) + a new
-   `verify:agent` count-1 lease bounding concurrent agent deployments; exports
-   `VERIFY_PORT`, `VERIFY_ARTIFACTS_DIR` (the run's artifacts dir),
-   `VERIFY_DRIVER` (path to the bundled driver CLI, below).
-3. **Deploys the agent:** `query()` with `cwd` = the run's worktree
-   (server-resolved from `workflow_runs.worktree_path` — the agent is never
-   trusted to name it), `customSystemPrompt` = the workflow-defined
-   instructions **plus an immutable harness-appended contract** (environment
-   variables, output schema, prohibitions — config can shape the persona and
-   judgment style, never the sandbox), `allowedTools: ['Bash', 'Read', 'Grep',
-   'Glob']` — a **hard ceiling the config cannot widen**: no Write/Edit (the
-   agent must not modify the worktree it judges), and **no MCP servers of any
-   kind** (`mcpServers: {}`). That is the well-defined MCP scope: *empty*. The
-   agent's outputs are files (PNGs into `VERIFY_ARTIFACTS_DIR`) plus its
-   structured report; every cyboflow-state write (artifact, finding, lane) is
+   (systemPrompt/effort). **Model resolution is Claude-namespace-only**
+   (v1-review finding 8): a pinned Claude alias is used; an unpinned agent
+   inherits the run model ONLY when the run's provider is Claude; on a Codex
+   run (or any non-Claude inherit) it falls back to a validated Claude default
+   from config — a `gpt-*`/`codexModel` id can never reach the query. A
+   `runtime: 'codex-sdk'` pin is dropped with a logged warning + Sentry seam
+   breadcrumb.
+2. **Provisions the environment:**
+   - **Snapshot worktree** (§5.5): `git worktree add <tmp> <snapshotSha>` +
+     dependency-dir linking; the agent never touches the live sprint worktree.
+   - Leases: `verify:port` (when the task implies a server) + the
+     `sprint-verify-<batchId>` batch lease + a new `verify:agent` count-1
+     lease bounding concurrent deployments.
+   - Env: `VERIFY_PORT`, `VERIFY_ARTIFACTS_DIR` (the run's artifacts dir),
+     `VERIFY_DRIVER` (path to the bundled driver CLI).
+3. **Deploys the agent:** `query()` with `cwd` = the snapshot worktree,
+   `customSystemPrompt` = the workflow-defined instructions **plus an immutable
+   harness-appended contract** (environment variables, output schema,
+   prohibitions — config shapes the persona and judgment style, never the
+   sandbox), `allowedTools: ['Bash', 'Read', 'Grep', 'Glob']` (a hard ceiling
+   the config cannot widen), **hermetic SDK settings** (v1-review finding 1):
+   `settingSources: []`, `strictMcpConfig: true`, no plugins, and
+   `mcpServers: {}` — the well-defined MCP scope is *empty*. The agent's
+   outputs are files (PNGs into `VERIFY_ARTIFACTS_DIR`) plus its structured
+   report; every cyboflow-state write (artifact, finding, lane) is
    harness-mediated through the existing chokepoints, preserving the "verify
    agents never write cyboflow state" invariant.
+
+   **Honest threat model (v1-review finding 1).** Bash is arbitrary code
+   execution; removing Write/Edit is a *behavioral* contract, not a security
+   boundary, and build steps composed from repository content are a
+   prompt-injection-to-shell path. This is explicitly the SAME trust tier as
+   the implement/write-tests agents, which already run unrestricted Bash in
+   the same worktree today — the verifier adds no new privilege. v1 guards:
+   the snapshot worktree means tracked-source mutation cannot corrupt the real
+   run worktree at all; a **post-run mutation check** (`git diff --quiet` on
+   tracked files in the snapshot) demotes the report to `low_confidence` with
+   a finding when the verifier modified sources it was judging; and the
+   process-tree reaper + port probe below. An OS-enforced sandbox (read-only
+   source mount, restricted network, process namespace) is a designated
+   hardening follow-up, not a v1 gate.
 4. **The agent executes the task:** runs `build` steps; starts `serve` (told to
    background it and record the PID); waits for readiness; exercises each
    behavior via the **bundled driver CLI** — a small node script shipped with
@@ -306,13 +375,14 @@ interface VerificationReportV1 {
 }
 ```
 
-6. **Cleans up deterministically:** the harness kills the SDK subprocess's
-   entire process tree after the report (or on abort/deadline) — the backstop
-   for any serve process the agent leaked — then probes the leased port is
-   free before releasing it. Deadline default rises to **10 minutes** (builds
-   are real work; the old 5-minute default stays the floor, `task.timeoutMs`
-   capped by config), still under the scheduler's existing per-request
-   abort/`raceWithAbort` machinery.
+6. **Cleans up deterministically:** kills the SDK subprocess's entire process
+   tree (or on abort/deadline), probes the leased port; a port that will not
+   free is **quarantined, not released** (v1-review finding 1) — the lease
+   stays held with a logged reason until a sweep confirms it free, so a leaked
+   server can never collide with the next verification. The snapshot worktree
+   is `git worktree remove --force`d. Deadline default rises to **10 minutes**
+   (`task.timeoutMs` capped by config), still under the scheduler's existing
+   per-request abort/`raceWithAbort` machinery.
 
 Report validation is harness-side and strict: every `screenshots.fileName`
 must exist in `VERIFY_ARTIFACTS_DIR` (basename-only, same safety rules as
@@ -320,13 +390,106 @@ must exist in `VERIFY_ARTIFACTS_DIR` (basename-only, same safety rules as
 `outcome: 'pass'` with any `behaviors[].result === 'fail'` is coerced to
 `fail` (the structured verdict, not prose, drives the gate).
 
-### 5.5 Artifact payload — screenshots + report
+### 5.5 Lane-consistent snapshot builds
+
+Sprint lanes share one worktree; other lanes' *uncommitted, mid-edit* state
+would otherwise break this lane's build and be blamed for it under fail-closed
+(v1-review finding 7). Resolution (user-locked): verification builds run
+against a **temporary `git worktree` at a recorded `snapshotSha`**.
+
+- `snapshotSha` is captured at enqueue time (the shared branch HEAD). Committed
+  neighbor work is included (deterministic and gate-vetted by those lanes'
+  own chains); uncommitted mess is excluded by construction.
+- **Precondition:** the lane's own diff must be committed before its
+  visual-verify step fires. The sprint lane chain already commits per task in
+  agent space; implementation must verify/enforce commit-before-verify
+  ordering in both modes (prose + controller). **Fallback:** when the lane's
+  files are still dirty at enqueue (ordering violated), the harness verifies
+  the live shared worktree instead and routes any build/launch failure to the
+  fail-open infra bucket — attribution is unprovable there, so it must not
+  consume the lane's retry budget.
+- **Dependency dirs:** a fresh `git worktree` has no `node_modules`. The
+  provisioner links untracked dependency roots (`node_modules`, and any
+  project-declared equivalents) from the run worktree into the snapshot
+  (symlink; hardlink-copy where a tool resolves symlinks poorly). Documented
+  risk: stale deps when the diff changes lockfiles — the agent's build step
+  surfaces that as a real build error with the log excerpt in the report.
+- Snapshot disposal is unconditional (teardown step 6), including on abort.
+
+### 5.6 Scheduler robustness: queued-age deadline + delivery outbox
+
+Two retained-spine gaps become load-bearing under the agent engine and are
+fixed in v2 (v1-review findings 3 and 4):
+
+- **Queued-age deadline.** The per-request deadline today starts only after a
+  lease is acquired; contended rows can sit `queued` forever with no retry
+  scheduled and `SchedulerVisualVerifyGate` waiting indefinitely. v2 adds an
+  enqueue-age deadline covering queued + lease-wait time, a wake-up armed on
+  every lease release AND a fallback timer while any row is queued, and a boot
+  recovery sweep for stale `queued` rows. Expiry transitions through the
+  normal terminal-delivery path as `skipped` with the concrete lease reason.
+- **Delivery outbox.** Today the terminal status commits first and the three
+  deliveries (artifact, lane, finding) run after — a crash between them
+  strands the lane at `awaiting-verify` forever, and `runRecovery` only
+  sweeps leased/running rows. v2 writes `delivery_state='pending'` atomically
+  with the terminal status + `report_json`, makes all three consumers
+  idempotent by requestId, replays every terminal-but-pending request at boot,
+  and stamps `delivered` only after all three effects commit.
+
+### 5.7 Fail posture (amended) + finding supersession
+
+| Outcome | Request status | Merge gate | Finding |
+|---|---|---|---|
+| All behaviors pass | `passed` | advance → integrated | none; **prior under-cap visual findings for this lane generation are auto-resolved (superseded)** |
+| Any behavior fails | `failed` (verdict) | **fail closed**: loopback ≤3× → failed | blocking; body = report (behaviors failed + evidence + feedback) |
+| `build_failed` / `launch_failed` in the snapshot | `failed` (verdict-less, `error_message` = buildLogExcerpt) | **fail closed** (a deliverable that cannot build from its own committed state is a smoke FAIL, and is frequently code-caused) | blocking; body **includes the build/launch log excerpt** |
+| Build/launch failure in the dirty-worktree fallback (§5.5) | `skipped` | fail open: advance | non-blocking, reason = unattributable shared-worktree build failure |
+| Agent spawn/SDK/API error, budget exhausted | `skipped` | fail open: advance | non-blocking, with the concrete reason |
+| Queued-age/lease-starvation expiry | `skipped` | fail open: advance | non-blocking, with the lease reason |
+| Deadline exceeded / orphaned by restart | `timeout` | fail open: advance | non-blocking |
+| Behaviors `not_testable` (but none failed) | `low_confidence` | advisory pass-through | non-blocking "needs human visual review", listing untested behaviors |
+| Post-run mutation check tripped | `low_confidence` | advisory pass-through | non-blocking, "verifier modified tracked sources" |
+
+**Finding supersession (v1-review finding 5).** Visual findings are correlated
+by `(runId, taskRef, attempt)`. On every terminal verdict for a lane, prior
+unresolved visual-verify findings for the same `(runId, taskRef)` at lower
+attempts are resolved through `ReviewItemRouter` with a supersession note —
+so a recovered lane leaves no stale blocking item to park the sprint at a
+later outer-step boundary, and repeated failures don't accumulate blockers
+(only the latest is live).
+
+The FAIL finding body change closes the loop the investigation flagged: the
+re-delegated implement agent finally receives *what was tested, what failed,
+and why*, not "investigate the capture/judge step".
+
+### 5.8 Engine stamp, rollback, retirement
+
+- `resolveVisualVerification` stamps `verify_chain: ['agent']` for new runs.
+  Dispatch keys on the stamp: `['agent']` → runner; legacy chains → the
+  retired-in-place legacy path, which keeps draining pre-upgrade in-flight
+  runs (stamps are immutable per run).
+- Kill switch: `CYBOFLOW_VERIFY_LEGACY=1` (a) stamps legacy chains for NEW
+  runs and (b) at boot, terminalizes any queued/leased/running agent-chain
+  rows as `skipped` (reason "agent engine disabled") **through the normal
+  delivery path** — parked lanes advance with a finding instead of wedging
+  (v1-review finding 9).
+- **Old-binary rollback:** a pre-upgrade binary reads the dual-written
+  `deliverable_json` fine; it has no 'agent' backend registered, so agent-chain
+  rows resolve to `skipped` (fail-open) rather than erroring. `task_json` /
+  `report_json` / `delivery_state` are additive nullable columns it ignores.
+- `maxPerRunJudgeCalls` is generalized to a per-run **agent-deployment budget**
+  (same `projects.visual_verify_budget_calls` knob; an exhausted budget →
+  `skipped` with reason, fail-open).
+
+### 5.9 Artifact payload — screenshots + report (atomic merge)
 
 `ScreenshotsArtifactPayload` (`shared/types/artifacts.ts`) is extended:
 
 ```ts
 interface TaskVerificationReportEntry {
   taskRef: string | null;
+  requestId: string;             // disambiguates; part of the merge identity
+  attempt: number;
   summary: string;               // the task's summary
   behaviors: Array<{ id: string; description: string; expected: string;
                      result: 'pass' | 'fail' | 'not_testable';
@@ -337,134 +500,148 @@ interface TaskVerificationReportEntry {
 interface ScreenshotsArtifactPayload {
   fileNames?: string[];
   verdict?: VerdictV1;           // latest verdict (existing banner, unchanged)
-  reports?: TaskVerificationReportEntry[];   // NEW: merged by taskRef
+  reports?: TaskVerificationReportEntry[];   // NEW
   captureOrigin?: CaptureOrigin; // gains 'agent' member
   diagnostics?: string[];
   [key: string]: unknown;
 }
 ```
 
-Delivery changes from replace-wholesale to **read-merge-write**: the enrich
-step reads the current payload, unions `fileNames`, and upserts the report
-entry by `taskRef` (last write wins per task). This also fixes the existing
-multi-lane wart where each lane's verdict clobbered the previous payload. The
-known auto-mint re-mint hazard (the safety-net scan historically rewrote
-`{fileNames}`-only payloads) must preserve `reports` the same way it now
-preserves `verdict`. The screenshots tab renderer adds a per-task "Behaviors
-tested" table (behavior, result badge, evidence screenshot links) under the
-existing verdict banner.
+**Atomic merge (v1-review finding 6).** A read-then-`apply` sequence outside
+the router is a lost-update race (two deliveries read the same payload; the
+second write drops the first's report — and the auto-mint scan has the same
+stale-read window). v2 adds an ArtifactRouter **merge operation** that reads,
+validates, merges, and writes *inside* the per-project queue + DB transaction.
+Verdict delivery AND the auto-mint safety-net scan route through it. Reports
+are keyed by `(taskRef, requestId)` — latest attempt per lane wins for the
+banner; older entries are retained (bounded, newest-N) for the report history.
+The screenshots tab renderer adds a per-task "Behaviors tested" table
+(behavior, result badge, evidence screenshot links) under the existing verdict
+banner.
 
-### 5.6 Fail posture (amended)
+### 5.10 Baseline retirement
 
-| Outcome | Request status | Merge gate | Finding |
-|---|---|---|---|
-| All behaviors pass | `passed` | advance → integrated | none |
-| Any behavior fails | `failed` (verdict) | **fail closed**: loopback ≤3× → failed | blocking; body = report (behaviors failed + evidence + feedback) |
-| `build_failed` / `launch_failed` | `failed` (verdict-less, `error_message` = buildLogExcerpt) | **fail closed** (locked decision: a deliverable that cannot build/launch is a smoke FAIL — and is frequently code-caused, so loopback is actionable) | blocking; body **includes the build/launch log excerpt** (fixes the non-actionable-feedback defect) |
-| Agent spawn/SDK/API error, lease starvation, budget exhausted | `skipped` | fail open: advance | non-blocking, with the concrete reason |
-| Deadline exceeded / orphaned by restart | `timeout` | fail open: advance | non-blocking |
-| Behaviors `not_testable` (but none failed) | `low_confidence` | advisory pass-through | non-blocking "needs human visual review", listing untested behaviors |
+Accept-as-baseline + the SSIM pre-diff have zero live usage (one screenshots
+artifact ever; no baseline ever stored). They retire entirely (user-locked):
+the verdict-banner button is removed, the `artifacts.acceptAsBaseline` tRPC
+endpoint is withdrawn, and `pixelDiff` + `baselineStore` join the legacy
+modules under `@cyboflow-hidden`. `VerdictV1.baselineKey` stays type-tolerated
+for legacy rows' rendering. If deterministic screenshot-compare ever matters,
+it returns as a designed follow-up on the agent path — never as a write-only
+button.
 
-The FAIL finding body change closes the loop the investigation flagged: the
-re-delegated implement agent finally receives *what was tested, what failed,
-and why*, not "investigate the capture/judge step".
+### 5.11 Verify-Queue panel
 
-### 5.7 Engine stamp, rollback, retirement
+`VerifyQueueView` currently renders `deliverable_json.intent` and
+capture-specific lifecycle copy ("Awaiting a free capture slot", "Capturing /
+judging") — agent-engine rows would show blank summaries and stale states
+(v1-review finding 11). v2 extends the shared row + tRPC projection + polling
+equality check with: task summary (from `task_json`, falling back to
+`deliverable_json.intent` for legacy rows), agent deployment state, report
+outcome, and engine identity; the view renders both row formats.
 
-- `resolveVisualVerification` stamps `verify_chain: ['agent']` for new runs
-  (the stamp is already immutable per run, so in-flight legacy runs keep their
-  old chain and are drained by the legacy path until gone).
-- Kill switch: `CYBOFLOW_VERIFY_LEGACY=1` makes the resolver stamp the old
-  chain — cheap insurance since the legacy modules are retired in place with
-  `@cyboflow-hidden`, not deleted.
-- `maxPerRunJudgeCalls` is generalized to a per-run **agent-deployment budget**
-  (same `projects.visual_verify_budget_calls` knob; an exhausted budget →
-  `skipped` with reason, fail-open).
-
-### 5.8 Workflow editor — communicating Claude-only
+### 5.12 Workflow editor — communicating Claude-only
 
 New shared constant `CLAUDE_ONLY_AGENT_KEYS: ReadonlySet<string> =
 new Set(['visual-verify'])` (`shared/types/agentRuntime.ts`), consumed in
 three places:
 
-1. **`AgentEditorForm.tsx`** — for a Claude-only agentKey the runtime select
-   renders only "inherits run runtime" and the Claude runtime option (no
-   `codex-sdk` entry), with a helper note: *"Visual verification runs on Claude
-   (vision judging + structured report). A Codex runtime isn't available for
-   this agent."* Codex-model controls never render.
+1. **`AgentEditorForm.tsx`** — for a Claude-only agentKey the runtime row
+   renders no select at all: a static "Always runs on Claude" line with the
+   helper note *"Visual verification runs on Claude (vision judging +
+   structured report). A Codex runtime isn't available for this agent."*
+   (no "inherits run runtime" option — inheritance is provider-conditional
+   per §5.4 and offering it would misstate the invariant). Codex-model
+   controls never render.
 2. **`WorkflowStepInspector.tsx`** (per-step `agentConfigs` editing) — same
-   filtering + note.
+   treatment.
 3. **Server-side enforcement** at the deploy seam (§5.4) — because
    `agentConfigs` can also be written via the MCP workflow-config tools,
    bypassing the editor. UI communicates; the resolver enforces.
 
-### 5.9 Data model / migration
+### 5.13 Data model / migration
 
 One migration (number assigned at land time — check the branch-collision
 landmine list first):
 
-- `verification_requests` + `task_json TEXT NULL`, `report_json TEXT NULL`.
+- `verification_requests` + `task_json TEXT NULL`, `report_json TEXT NULL`,
+  `delivery_state TEXT NULL` (§5.6), `snapshot_sha TEXT NULL` (§5.5).
 - No `workflow_runs` changes (existing stamps suffice).
 - Both migration test fixtures + `createTestDb` follow the established
   pattern (verify columns already flow through `includeSubstrate` /
   `includeWorkflowRunTaskColumns`; do NOT re-ALTER in fixtures).
 
-### 5.10 Known limitations (documented, not solved here)
+### 5.14 Known limitations (documented, not solved here)
 
-- **Shared-worktree dirty neighbors:** a sprint builds one shared worktree, so
-  a mid-sprint build can compile other lanes' half-finished edits. The
-  `sprint-verify-<batchId>` lease still serializes verifications; the deferred
-  commit-side batch mutex (route lane commits through an orchestrator
-  chokepoint) becomes *more* valuable once verification actually builds, and
-  stays deferred.
 - **The 93% funnel:** most verify-enabled runs never reach the verify step at
   all (canceled/failed runs; `__quick__` sessions never wire it in). This
   redesign fixes what happens once the step fires, not run survival.
 - **native-desktop / mobile types:** out of scope; those `verify_type`s keep
   resolving to `skipped` with a reason.
+- **OS-sandboxed runner:** designated hardening follow-up (§5.4).
+- **Commit-side batch mutex:** still deferred; the snapshot design (§5.5)
+  removes the dirty-neighbor dependency on it, but batch-wide commit
+  choreography remains a future improvement.
 
 ## 6. Testing plan
 
-- Unit (`pnpm test:unit`, the AC gate): task-fence composer/parser round-trip;
-  `VerificationTaskV1`/`ReportV1` schema validation incl. the
-  pass-with-failed-behavior coercion; report→payload merge by `taskRef` (incl.
-  the auto-mint preservation case); Claude-only runtime drop in the resolver;
-  posture table in `mergeGateLaneAdvance`/`verdictDelivery` (build_failed
-  blocking, skipped/timeout non-blocking); editor option filtering
-  (`AgentEditorForm` + `WorkflowStepInspector` component tests); agentless
-  `visual-verify` step special-case in `spawnStepRunner`/controller walk.
+- Unit (`pnpm test:unit`, the AC gate): task-fence composer/parser round-trip
+  incl. the required/NOT-APPLICABLE contract and duplicate/malformed-fence
+  failures; `VerificationTaskV1`/`ReportV1` schema validation incl. the
+  pass-with-failed-behavior coercion; dual-write + chain-keyed dispatch (new
+  rows readable by legacy readers; legacy rows by the new path); typed
+  step-output capture + idempotent enqueue by `(runId, taskRef, attempt)`;
+  queued-age deadline + wake-up + boot sweep; outbox replay (terminal-but-
+  pending redelivery, consumer idempotency); atomic artifact merge under
+  interleaved deliveries + auto-mint; finding supersession across attempts;
+  Claude-namespace model resolution (Codex-run inherit → Claude default);
+  posture table incl. snapshot-vs-fallback build-failure routing and the
+  mutation-check demotion; editor rendering for `CLAUDE_ONLY_AGENT_KEYS`;
+  Verify-Queue projection for mixed row formats.
 - The runner is tested against an injected fake structured-query fn (the
-  `JudgeClient`-style seam — no SDK import in the module under test).
+  `JudgeClient`-style seam — no SDK import in the module under test); snapshot
+  provisioning/teardown against a fixture repo.
 - `agentParity.test.ts`: the rewritten `visual-verify.md` ships byte-identical
   sprint→ship.
 - No `main/src/services/panels/claude/` changes are planned; if any land,
   `pnpm test:integration` becomes part of the gate per CLAUDE.md.
 - Live smoke (manual, before merge): enable the per-run toggle → sprint with a
-  real UI task → watch build → drive → screenshots + report in the artifact tab
-  → FAIL loopback carries the report.
+  real UI task → watch snapshot build → drive → screenshots + report in the
+  artifact tab → FAIL loopback carries the report → PASS supersedes the
+  finding.
 
 ## 7. Task breakdown (indicative sprint slicing)
 
 1. Shared types + schemas (`VerificationTaskV1`, `VerificationReportV1`,
    payload extension, `CLAUDE_ONLY_AGENT_KEYS`) + fence parser reuse.
-2. Migration + request plumbing (`task_json`/`report_json`, MCP schema field,
-   handler threading).
-3. task-verify prompt contract (sprint + ship, byte-identical) + fan-out
-   instruction rewrite + `sprint.md`/`ship.md` prose.
-4. Agentless `visual-verify` step: controller/spawnStepRunner special-case +
-   direct enqueue (programmatic); orchestrated prose already in (3).
-5. Driver CLI (bundled playwright wrapper) + packaging entry.
-6. `VerificationAgentRunner` (resolve → provision → deploy → validate →
-   teardown) + scheduler integration behind the `['agent']` chain stamp.
-7. Verdict delivery: read-merge-write payload, report-carrying findings,
-   posture amendments.
-8. Frontend: editor Claude-only filtering + notes; screenshots tab report
-   rendering.
-9. Legacy retirement: `@cyboflow-hidden` marks, `CYBOFLOW_VERIFY_LEGACY`
-   resolver path, budget generalization.
-10. Test hardening pass + live smoke.
+2. Migration + dual-format request plumbing (`task_json`/`report_json`/
+   `delivery_state`/`snapshot_sha`, MCP schema field, dual-write handler).
+3. Typed step-output channel (spawn seam capture → persisted step record →
+   controller parse) + the task-verify contract enforcement.
+4. task-verify prompt contract (sprint + ship, byte-identical) + fan-out
+   instruction rewrite + `sprint.md`/`ship.md` prose (incl. loopback re-fire +
+   report threading).
+5. Agentless `visual-verify` step: controller/spawnStepRunner special-case +
+   idempotent direct enqueue (programmatic).
+6. Snapshot provisioner (worktree add/link-deps/dispose + commit-precondition
+   check + dirty fallback routing).
+7. Driver CLI (bundled playwright wrapper) + packaging entry.
+8. `VerificationAgentRunner` (Claude-namespace resolve → provision → deploy →
+   validate → mutation check → teardown/quarantine) + scheduler integration
+   behind the `['agent']` chain stamp.
+9. Scheduler robustness: queued-age deadline + wake-ups + boot sweep; delivery
+   outbox + idempotent consumers + replay.
+10. Verdict delivery: atomic artifact merge op (router + auto-mint reroute),
+    report-carrying findings, posture amendments, finding supersession.
+11. Frontend: editor Claude-only rendering; screenshots-tab report table;
+    Verify-Queue projection + view for mixed rows; baseline button/tRPC
+    removal.
+12. Legacy + baseline retirement: `@cyboflow-hidden` marks,
+    `CYBOFLOW_VERIFY_LEGACY` semantics (incl. boot terminalization), budget
+    generalization.
+13. Test hardening pass + live smoke.
 
-## 8. Open questions (for adversarial review)
+## 8. Open questions
 
 1. Driver CLI vs. granting a Playwright MCP server in the agent's `mcpServers`
    map: the CLI keeps the tool surface auditable and the MCP scope empty; an
@@ -477,7 +654,22 @@ landmine list first):
 3. Transcript persistence for the verification agent (an
    `AgentThreadEventsSink`-style durable transcript vs. report-only). Proposal:
    report + `error_message` only for v1; transcripts deferred.
-4. Whether `build_failed` fail-closed needs a per-project escape hatch
-   (`verify.json: failOpenOnBuildError`) for projects with flaky builds.
-   Proposal: no escape hatch in v1; the non-blocking-finding path already
-   exists for infra classes.
+
+## 9. Adversarial review dispositions (v1 → v2)
+
+Codex review of v1 returned no-ship with 9 must-fix + 2 advisory findings.
+Dispositions:
+
+| # | Finding | Disposition |
+|---|---|---|
+| 1 | Bash falsifies the read-only isolation claim; hermetic SDK settings missing; reaper gaps | **Accepted, reframed** (user-locked): honest threat model (same tier as implement), hermetic settings, snapshot isolation, post-run mutation check, lease quarantine (§5.4); OS sandbox = follow-up (§5.14) |
+| 2 | No programmatic result channel; missing fence silently bypasses re-verification | **Accepted**: typed step-output channel, required/NOT-APPLICABLE contract, idempotent enqueue by attempt, report threading into implement (§5.1, §5.3) |
+| 3 | Lease starvation parks lanes forever (no queued-age deadline, no wake-up, no queued recovery) | **Accepted**: §5.6 |
+| 4 | Terminal status + delivery not crash-atomic; stranded `awaiting-verify` lanes | **Accepted**: delivery outbox + idempotent consumers + boot replay (§5.6) |
+| 5 | Retry-success leaves prior blocking findings pending; sprints park later anyway | **Accepted**: finding supersession by `(runId, taskRef, attempt)` (§5.7) |
+| 6 | Artifact read-merge-write is a lost-update race (incl. auto-mint) | **Accepted**: atomic ArtifactRouter merge op; both writers rerouted (§5.9) |
+| 7 | Fail-closed builds blame dirty neighbor lanes | **Accepted** (user-locked): lane-consistent snapshot builds; dirty fallback routes to fail-open infra (§5.5, §5.7) |
+| 8 | Claude-only fallback can pass a Codex model to Claude | **Accepted**: Claude-namespace-only resolution + editor shows "Always runs on Claude" (§5.4, §5.12) |
+| 9 | Migration/rollback lacks a dual-format contract | **Accepted**: dual-write, chain-keyed dispatch, kill-switch boot terminalization, old-binary posture (§5.2, §5.8) |
+| 10 | Accept-as-baseline becomes write-only | **Accepted, resolved by retirement** (user-locked): feature removed entirely (§5.10) |
+| 11 | Verify-Queue panel can't render new rows | **Accepted**: projection + view extension (§5.11) |
