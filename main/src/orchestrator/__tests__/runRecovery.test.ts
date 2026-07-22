@@ -469,10 +469,24 @@ describe('archived-session review-item sweeps', () => {
     const directId = await createReviewItem(router, 'run-direct', 'Direct finding', 'visual-verify');
     const legacyId = await createReviewItem(router, 'run-legacy', 'Legacy permission', 'approval', 'permission');
     const activeId = await createReviewItem(router, 'run-active', 'Keep active', 'visual-verify');
+    const applySpy = vi.spyOn(router, 'applyReviewItem');
 
     const result = await dismissPendingReviewItemsForSession(adapter, 'sess-archived');
 
     expect(result).toEqual({ itemsDismissed: 2, itemsFailed: 0 });
+    expect(applySpy).toHaveBeenCalledTimes(2);
+    expect(applySpy).toHaveBeenCalledWith(1, {
+      op: 'dismiss',
+      actor: 'user',
+      reviewItemId: directId,
+      resolution: 'session dismissed',
+    });
+    expect(applySpy).toHaveBeenCalledWith(1, {
+      op: 'dismiss',
+      actor: 'user',
+      reviewItemId: legacyId,
+      resolution: 'session dismissed',
+    });
     const statuses = db
       .prepare('SELECT id, status, resolution FROM review_items ORDER BY id')
       .all() as Array<{ id: string; status: string; resolution: string | null }>;
@@ -508,13 +522,26 @@ describe('archived-session review-item sweeps', () => {
     });
 
     const originalApply = router.applyReviewItem.bind(router);
-    vi.spyOn(router, 'applyReviewItem')
+    const applySpy = vi.spyOn(router, 'applyReviewItem')
       .mockRejectedValueOnce(new Error('synthetic row failure'))
       .mockImplementation((projectId, change) => originalApply(projectId, change));
 
     const result = await backfillArchivedSessionReviewItems(adapter);
 
     expect(result).toEqual({ itemsDismissed: 1, itemsFailed: 1 });
+    expect(applySpy).toHaveBeenCalledTimes(2);
+    expect(applySpy).toHaveBeenCalledWith(1, {
+      op: 'dismiss',
+      actor: 'orchestrator',
+      reviewItemId: firstArchivedId,
+      resolution: 'archived session boot backfill',
+    });
+    expect(applySpy).toHaveBeenCalledWith(1, {
+      op: 'dismiss',
+      actor: 'orchestrator',
+      reviewItemId: secondArchivedId,
+      resolution: 'archived session boot backfill',
+    });
     const archivedStatuses = db
       .prepare('SELECT id, status FROM review_items WHERE id IN (?, ?) ORDER BY id')
       .all(firstArchivedId, secondArchivedId) as Array<{ id: string; status: string }>;

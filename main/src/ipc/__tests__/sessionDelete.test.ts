@@ -90,12 +90,13 @@ function makeServices(
     get: () => undefined,
     all: () => [],
   };
+  const prepare = vi.fn((sql: string) => {
+    lastSql = sql;
+    preparedSql.push(sql);
+    return stmt;
+  });
   const fakeDb = {
-    prepare: (sql: string) => {
-      lastSql = sql;
-      preparedSql.push(sql);
-      return stmt;
-    },
+    prepare,
     transaction: <T>(fn: (...a: unknown[]) => T) => fn,
   };
 
@@ -165,6 +166,7 @@ function makeServices(
     awaitCleanup: () => cleanupPromise ?? Promise.resolve(),
     runCalls,
     preparedSql,
+    prepare,
   };
 }
 
@@ -371,6 +373,10 @@ describe('sessions:delete — fail-soft close-out', () => {
     expect(sweepSql).toBeDefined();
     expect(sweepSql).toContain('r.session_id = ?');
     expect(sweepSql).toContain('s.run_id = r.id');
+    const sweepPrepareIndex = made.preparedSql.indexOf(sweepSql!);
+    expect(made.archiveSession.mock.invocationCallOrder[0]).toBeLessThan(
+      made.prepare.mock.invocationCallOrder[sweepPrepareIndex],
+    );
   });
 });
 
