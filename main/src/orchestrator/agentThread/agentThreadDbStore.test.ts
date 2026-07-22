@@ -104,6 +104,10 @@ describe('AgentThreadDbStore', () => {
       // A later stamp overwrites.
       store.setLastDigestAt('thread-1', 1_700_000_500_000);
       expect(store.getLastDigestAt('thread-1')).toBe(1_700_000_500_000);
+
+      // null restores/clears it — the rollback path when a recap send fails.
+      store.setLastDigestAt('thread-1', null);
+      expect(store.getLastDigestAt('thread-1')).toBeNull();
     });
   });
 

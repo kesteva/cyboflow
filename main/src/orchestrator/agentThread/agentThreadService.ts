@@ -45,25 +45,19 @@ import { getAgentSystemPrompt } from './agentThreadPrompt';
 // ---------------------------------------------------------------------------
 
 /**
- * Synthetic turn text sent for a digest request. Deliberately just a short,
- * plain ask — the actual digest FORMAT (grouping, ordering, "Needs your
- * attention" shortlist) lives in {@link getAgentSystemPrompt}'s system-prompt
- * append (S1.4), not in this per-turn text, so it stays in effect no matter
- * how the digest is triggered (this synthetic prompt, or the human just
- * asking "where is everything?" themselves).
+ * Synthetic turn text sent for the auto-digest — a once-per-day **daily
+ * recap**. Deliberately a short, plain ask naming the three sections; the
+ * concrete FORMAT (ordering, refs, "Needs your attention" shortlist) lives in
+ * {@link getAgentSystemPrompt}'s system-prompt append (S1.4), not in this
+ * per-turn text, so it stays in effect no matter how the recap is triggered
+ * (this synthetic prompt, or the human just asking "what's my recap?").
  */
 export const DIGEST_PROMPT =
-  'Give me a concise digest of where all sessions/runs are and what needs my attention.';
-
-/**
- * Server-side AUTO-digest throttle: at most one automatic digest per thread per
- * day. The frontend fires `triggerDigest` once per launch, so without a
- * cross-restart floor the digest re-ran on every app open. The last-fire time is
- * persisted (migration 076) so this window spans restarts. Only the AUTO path is
- * gated — a user asking for a status update (chip / typed message) goes through
- * `sendMessage` and is never throttled.
- */
-export const DIGEST_THROTTLE_MS = 24 * 60 * 60 * 1000;
+  'Give me my daily recap, in three sections: (1) what was completed in the ' +
+  'last day — runs and sessions that finished, tasks integrated, ideas planned; ' +
+  '(2) what is in flight right now — running or paused sessions and runs, and ' +
+  'where each one is; (3) what needs my input — every blocked run, pending gate, ' +
+  'and open review item across all projects. Keep it tight.';
 
 // ---------------------------------------------------------------------------
 // Narrow manager slice + spawn options
@@ -187,17 +181,34 @@ function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * True when two epoch-ms instants fall on the same LOCAL calendar day. The
+ * once-per-day digest cap is a human-facing "one recap a day" notion, so it is
+ * anchored to the machine's local day (a boot at 00:30 is a new day's recap),
+ * not a rolling 24h window — a rolling window would also creep the recap later
+ * every day (a 9am recap blocks tomorrow's 8:30am boot). DST inside one
+ * timezone is handled by the local getters; a machine-TIMEZONE change between
+ * two same-day boots can shift which named day the stored instant lands on
+ * (accepted: rare, self-corrects the next day, worst case one extra or one
+ * suppressed recap). A non-finite stored value is never "the same day" — the
+ * digest fires, the safe default.
+ */
+function isSameLocalDay(aMs: number, bMs: number): boolean {
+  if (!Number.isFinite(aMs) || !Number.isFinite(bMs)) return false;
+  const a = new Date(aMs);
+  const b = new Date(bMs);
+  return (
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate()
+  );
+}
+
 export class AgentThreadService {
   /** ONE durable writer for all threads; owns the runId → threadId mapping. */
   private readonly sink: AgentThreadEventsSink;
   /** threadId → 'output' listener, so the bridge attaches at most once per thread. */
   private readonly eventBridges = new Map<string, (payload: unknown) => void>();
-  /**
-   * threadId → last-digest wall-clock (ms). In-memory only: resets on app
-   * restart, which is acceptable — the throttle guards against burst spam within
-   * a session, not across restarts.
-   */
-  private readonly lastDigestAt = new Map<string, number>();
 
   constructor(private readonly deps: AgentThreadServiceDeps) {
     this.sink = new AgentThreadEventsSink(deps.store, deps.logger);
@@ -289,27 +300,41 @@ export class AgentThreadService {
   }
 
   /**
-   * Trigger the AUTO-digest turn, throttled to at most one per
-   * {@link DIGEST_THROTTLE_MS} (a day) per thread. The last-fire time is read
-   * from — and stamped to — persistent storage so the window survives an app
-   * restart (the frontend fires this once per launch). A throttled call returns
-   * `{triggered:false, reason:'throttled'}` WITHOUT sending.
+   * Trigger the AUTO daily-recap turn, capped to at most ONE per local calendar
+   * day per thread. The last-fire instant is read from — and stamped to —
+   * persistent storage (agent_threads.last_digest_at, migration 076) so the cap
+   * survives an app restart (the frontend fires this once per launch; the old
+   * in-memory throttle reset every restart, re-firing on multi-boot days). A
+   * capped call returns `{triggered:false, reason:'throttled'}` WITHOUT
+   * sending. Only the AUTO path is gated — a user asking for a status update
+   * (chip / typed message) goes through `sendMessage` and is never throttled.
    */
   async triggerDigest(threadId: string): Promise<DigestTriggerResult> {
     if (!this.deps.enabled()) {
       return { triggered: false, reason: 'disabled' };
     }
     const now = this.nowMs();
-    // In-memory guard defends against a same-launch double-fire before the DB
-    // write lands; the persisted value carries the throttle across restarts.
-    const last = this.lastDigestAt.get(threadId) ?? this.deps.store.getLastDigestAt(threadId) ?? undefined;
-    if (last !== undefined && now - last < DIGEST_THROTTLE_MS) {
+    const last = this.deps.store.getLastDigestAt(threadId);
+    if (last !== null && isSameLocalDay(last, now)) {
       return { triggered: false, reason: 'throttled' };
     }
-    // Stamp BOTH BEFORE the (awaited) send so a concurrent trigger cannot double-fire.
-    this.lastDigestAt.set(threadId, now);
+    // Stamp SYNCHRONOUSLY before the awaited send: better-sqlite3 is sync and
+    // there is no await between the read above and this write, so a concurrent
+    // same-launch trigger sees the fresh stamp and is throttled (no
+    // double-fire, no in-memory shadow needed). But the send can still fail for
+    // transient boot-time reasons (offline, auth, model unavailable, a
+    // stale-resume whose one fresh retry also fails) — so ROLL BACK to the
+    // prior value on throw, or a failed first boot of the day would consume the
+    // whole day's allowance and suppress the recap until tomorrow. Restoring
+    // keeps the day retryable on the next boot while preserving the synchronous
+    // double-fire guard.
     this.deps.store.setLastDigestAt(threadId, now);
-    await this.sendTurn(threadId, DIGEST_PROMPT, false);
+    try {
+      await this.sendTurn(threadId, DIGEST_PROMPT, false);
+    } catch (err) {
+      this.deps.store.setLastDigestAt(threadId, last);
+      throw err;
+    }
     return { triggered: true };
   }
 

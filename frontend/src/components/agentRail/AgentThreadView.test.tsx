@@ -49,7 +49,9 @@ vi.mock('./ProposalCardList', () => ({
 // -- agentThreadStore stub: a plain selector-applying function (not a real
 //    subscribing Zustand store), driven by the mutable fixture vars below. --
 const mockSendMessage = vi.fn().mockResolvedValue(undefined);
-const mockTriggerDigest = vi.fn().mockResolvedValue(undefined);
+// Default: the backend consumed the day's cap, so the once-per-launch gate stays
+// closed (mirrors the store's 'consumed' outcome for triggered/throttled).
+const mockTriggerDigest = vi.fn().mockResolvedValue('consumed');
 let mockThread: AgentThread | null = null;
 let mockSending = false;
 let mockProposals: AgentProposal[] = [];
@@ -201,5 +203,27 @@ describe('AgentThreadView — auto-digest (once per launch)', () => {
     render(<AgentThreadView />);
     await Promise.resolve();
     expect(mockTriggerDigest).toHaveBeenCalledTimes(1);
+  });
+
+  it('reopens the launch gate on a non-consuming (retry) outcome, so a remount re-fires this launch', async () => {
+    // e.g. the assistant was disabled on first render, or the call failed before
+    // the backend stamped the day — the gate must not stay closed.
+    mockTriggerDigest.mockResolvedValue('retry');
+    const AgentThreadView = await loadAgentThreadView();
+
+    mockThread = makeThread();
+    const { unmount } = render(<AgentThreadView />);
+    await waitFor(() => expect(mockTriggerDigest).toHaveBeenCalledTimes(1));
+    // Let the .then(outcome => reopen) microtask run before remounting.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    unmount();
+    render(<AgentThreadView />);
+    await waitFor(() => expect(mockTriggerDigest).toHaveBeenCalledTimes(2));
+
+    // Restore the shared mock's default for any later test (mockClear in
+    // beforeEach resets calls, not the resolved value).
+    mockTriggerDigest.mockResolvedValue('consumed');
   });
 });

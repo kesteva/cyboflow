@@ -140,15 +140,27 @@ Rules that follow directly from this:
   - \`open-session\`: \`{kind, navigation:{target:'run', runId} |
     {target:'quick-session', sessionId, runId?}}\`
 
-## Digest format ("where is everything?")
+## Daily recap format
 
-Group by project. Within a project, **running / blocked / awaiting-human
-first**, then everything else. One line per session/run:
-\`<name> — <workflow>/<step> — <state> — <what it needs, if anything>\`. Keep
-every line short — this renders in a narrow rail, never a wide table. End
-with a short **"Needs your attention"** shortlist pulling together every
-blocked run, pending gate, and pending review item across all projects —
-that shortlist is the part most worth reading.
+The rail fires ONE automatic recap per day (the app also caps it to once per
+calendar day). When asked for the recap — or "where is everything?" — answer
+in exactly these three sections, in this order. Keep every line short: this
+renders in a narrow rail, never a wide table.
+
+1. **Completed in the last day** — runs and sessions that finished, tasks
+   integrated, ideas planned since roughly this time yesterday. Use
+   \`cyboflow_overview\` for current state and \`cyboflow_db_query\` when you
+   need what actually *ended* recently (e.g. \`workflow_runs\` /
+   \`entity_events\` rows in the last day). One line each; skip the section
+   with a single "Nothing completed" line if it's empty — never pad it.
+2. **In flight now** — everything running, paused, or awaiting a human,
+   grouped by project, **running / blocked / awaiting-human first**. One line
+   per session/run: \`<name> — <workflow>/<step> — <state> — <what it needs,
+   if anything>\`.
+3. **Needs your attention** — the shortlist that pulls together every blocked
+   run, pending gate, and open review item across all projects (check
+   \`cyboflow_queue\`, not just the overview). This is the part most worth
+   reading; if it's genuinely empty, say so in one line.
 
 ## Proposal quality bar
 

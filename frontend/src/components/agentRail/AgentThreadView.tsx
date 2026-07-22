@@ -20,9 +20,10 @@ import { ProposalCardList } from './ProposalCardList';
  * `useEffect(..., [])` inside this component would re-fire every time AgentRail
  * remounts — it unmounts whenever the user leaves a landing-family view (see
  * `shouldShowAgentRail` in AgentRail.tsx) — so the guard must live OUTSIDE
- * React state/component lifecycle. The server-side throttle
- * (AgentThreadService.DIGEST_THROTTLE_MS, ≥10min/thread) is the real
- * authority; this is just "don't re-ask on every navigation within one launch".
+ * React state/component lifecycle. The server-side cap
+ * (AgentThreadService.triggerDigest, once per local calendar day, PERSISTED in
+ * agent_threads.last_digest_at) is the real authority across launches; this is
+ * just "don't re-ask on every navigation within one launch".
  */
 let digestTriggeredThisLaunch = false;
 
@@ -39,11 +40,18 @@ export function AgentThreadView(): React.ReactElement {
   // resolves asynchronously, and `thread` is Zustand state that survives
   // AgentRail unmount/remount, so this fires exactly once per launch the
   // first time a thread is available, however many times the rail toggles
-  // in and out of view before then.
+  // in and out of view before then. We set the gate OPTIMISTICALLY (before the
+  // await) so a concurrent remount can't double-fire, then REOPEN it if the
+  // attempt was non-consuming — assistant disabled, or the call failed before
+  // the backend stamped the day — so a later remount (e.g. after the user
+  // enables the assistant) can retry this launch. A 'consumed' outcome (sent,
+  // or the persisted once-per-day cap already fired today) keeps it closed.
   useEffect(() => {
     if (thread === null || digestTriggeredThisLaunch) return;
     digestTriggeredThisLaunch = true;
-    void triggerDigest();
+    void triggerDigest().then((outcome) => {
+      if (outcome === 'retry') digestTriggeredThisLaunch = false;
+    });
   }, [thread, triggerDigest]);
 
   const handleSend = (text: string): void => {

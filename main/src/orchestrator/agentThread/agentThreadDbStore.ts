@@ -130,8 +130,13 @@ export class AgentThreadDbStore {
     return row?.last_digest_at ?? null;
   }
 
-  /** Stamp the auto-digest timestamp (epoch ms). No-op if the thread is gone. */
-  setLastDigestAt(threadId: string, atMs: number): void {
+  /**
+   * Stamp the auto-digest timestamp (epoch ms), or restore/clear it with a
+   * prior value. The service passes the PREVIOUS value (possibly null) back to
+   * ROLL BACK a speculative stamp when the recap send fails, keeping that day
+   * retryable on the next boot. No-op if the thread is gone.
+   */
+  setLastDigestAt(threadId: string, atMs: number | null): void {
     this.db
       .prepare(`UPDATE agent_threads SET last_digest_at = ? WHERE id = ?`)
       .run(atMs, threadId);

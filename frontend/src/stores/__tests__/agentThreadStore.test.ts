@@ -283,7 +283,7 @@ describe('sendMessage', () => {
 });
 
 describe('triggerDigest', () => {
-  it('sets sending true while in flight and calls the mutation with the thread id', async () => {
+  it('sets sending true while in flight, calls the mutation, and returns "consumed" when triggered', async () => {
     useAgentThreadStore.setState({ thread: makeThread() });
     let resolveDigest: (() => void) | undefined;
     mockTriggerDigestMutate = vi.fn().mockReturnValue(
@@ -296,11 +296,39 @@ describe('triggerDigest', () => {
     expect(useAgentThreadStore.getState().sending).toBe(true);
 
     resolveDigest?.();
-    await promise;
+    const outcome = await promise;
 
+    expect(outcome).toBe('consumed');
     expect(useAgentThreadStore.getState().sending).toBe(false);
     expect(mockTriggerDigestMutate).toHaveBeenCalledTimes(1);
     expect(mockTriggerDigestMutate).toHaveBeenCalledWith({ threadId: 'thread-1' });
+  });
+
+  it('returns "consumed" when the backend reports the day already fired (throttled)', async () => {
+    useAgentThreadStore.setState({ thread: makeThread() });
+    mockTriggerDigestMutate = vi.fn().mockResolvedValue({ triggered: false, reason: 'throttled' });
+
+    const outcome = await useAgentThreadStore.getState().triggerDigest();
+    expect(outcome).toBe('consumed');
+  });
+
+  it('returns "retry" when the assistant is disabled (nothing was stamped)', async () => {
+    useAgentThreadStore.setState({ thread: makeThread() });
+    mockTriggerDigestMutate = vi.fn().mockResolvedValue({ triggered: false, reason: 'disabled' });
+
+    const outcome = await useAgentThreadStore.getState().triggerDigest();
+    expect(outcome).toBe('retry');
+  });
+
+  it('returns "retry" and swallows the error when the mutation rejects', async () => {
+    useAgentThreadStore.setState({ thread: makeThread() });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockTriggerDigestMutate = vi.fn().mockRejectedValue(new Error('ipc down'));
+
+    const outcome = await useAgentThreadStore.getState().triggerDigest();
+    expect(outcome).toBe('retry');
+    expect(useAgentThreadStore.getState().sending).toBe(false);
+    errSpy.mockRestore();
   });
 });
 

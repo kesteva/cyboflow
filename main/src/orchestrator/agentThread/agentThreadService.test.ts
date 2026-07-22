@@ -10,11 +10,23 @@ import { getAgentSystemPrompt } from './agentThreadPrompt';
 import {
   AgentThreadService,
   DIGEST_PROMPT,
-  DIGEST_THROTTLE_MS,
   type AgentSpawnManagerLike,
   type AgentSpawnOptions,
 } from './agentThreadService';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
+
+/** One local calendar day, in ms — advance the clock past it to re-fire the digest. */
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Base clock pinned to LOCAL noon of a fixed date. The digest cap keys off the
+ * local calendar day, so the fixture must start mid-local-day: a base near local
+ * midnight would flip calendar day under a small `+1h` advance on some machine
+ * timezones, making the same-day-throttle assertion timezone-fragile. Local noon
+ * + fixed advances (`+1h` stays same day, `+ONE_DAY_MS` lands next day) is
+ * deterministic in every timezone.
+ */
+const LOCAL_NOON_BASE = new Date(2026, 5, 15, 12, 0, 0, 0).getTime();
 
 const MIGRATION =
   readFileSync(
@@ -110,7 +122,7 @@ function makeHarness(): Harness {
   const manager = new FakeManager();
   const published: Array<{ id: string; envelope: unknown }> = [];
   const homeBase = mkdtempSync(join(tmpdir(), 'agent-home-'));
-  const clock = { value: 1_000_000 };
+  const clock = { value: LOCAL_NOON_BASE };
   const enabled = { value: true };
   const service = new AgentThreadService({
     store,
@@ -326,7 +338,7 @@ describe('AgentThreadService', () => {
       expect(h.store.listEvents(thread.id).some((r) => r.eventType === 'user')).toBe(false);
     });
 
-    it('first triggers, second within the window is throttled, and it fires again after the window', async () => {
+    it('first triggers, a later same-day call is capped, and it fires again the next day', async () => {
       const thread = h.service.ensureGlobalThread();
 
       const first = await h.service.triggerDigest(thread.id);
@@ -334,30 +346,31 @@ describe('AgentThreadService', () => {
       expect(h.manager.calls).toHaveLength(1);
       expect(h.manager.calls[0].prompt).toBe(DIGEST_PROMPT);
 
-      // Within the window — throttled, no new spawn.
-      h.clock.value += DIGEST_THROTTLE_MS - 1;
+      // Later the SAME calendar day (e.g. a second boot an hour later) — capped,
+      // no new spawn. This is the multi-boot case the persisted cap fixes.
+      h.clock.value += 60 * 60 * 1000;
       const second = await h.service.triggerDigest(thread.id);
       expect(second).toEqual({ triggered: false, reason: 'throttled' });
       expect(h.manager.calls).toHaveLength(1);
 
-      // Past the window — triggers again.
-      h.clock.value += 2;
+      // Next calendar day — the daily recap fires again.
+      h.clock.value += ONE_DAY_MS;
       const third = await h.service.triggerDigest(thread.id);
       expect(third).toEqual({ triggered: true });
       expect(h.manager.calls).toHaveLength(2);
     });
 
-    it('persists the last-digest time so the throttle survives a restart (new service, same store)', async () => {
+    it('persists the last-digest time so the cap survives a restart (new service, same store)', async () => {
       const thread = h.service.ensureGlobalThread();
 
       const first = await h.service.triggerDigest(thread.id);
       expect(first).toEqual({ triggered: true });
       expect(h.store.getLastDigestAt(thread.id)).toBe(h.clock.value);
 
-      // Simulate an app restart: a fresh service over the SAME store, with its
-      // in-memory throttle map empty. A launch-time digest a few minutes later
-      // must still be throttled off the persisted value.
-      const restartClock = { value: h.clock.value + 5 * 60 * 1000 };
+      // Simulate an app restart: a fresh service over the SAME store (all
+      // in-memory state gone). A launch-time digest an hour later the same day
+      // must still be capped off the persisted value.
+      const restartClock = { value: h.clock.value + 60 * 60 * 1000 };
       const restarted = new AgentThreadService({
         store: h.store,
         manager: h.manager,
@@ -372,12 +385,33 @@ describe('AgentThreadService', () => {
       expect(afterRestart).toEqual({ triggered: false, reason: 'throttled' });
       expect(h.manager.calls).toHaveLength(1);
 
-      // A day on from the original fire, the restarted service digests again.
-      restartClock.value = h.clock.value + DIGEST_THROTTLE_MS;
+      // The next calendar day, the restarted service digests again.
+      restartClock.value = h.clock.value + ONE_DAY_MS;
       const nextDay = await restarted.triggerDigest(thread.id);
       expect(nextDay).toEqual({ triggered: true });
       expect(h.manager.calls).toHaveLength(2);
       restarted.dispose();
+    });
+
+    it('a failed send rolls back the stamp so the day stays retryable (not silently burned)', async () => {
+      const thread = h.service.ensureGlobalThread();
+
+      // First trigger's send throws (e.g. offline / auth failure at boot). No
+      // resumeSessionId yet, so this is a clean throw, not a stale-resume retry.
+      h.manager.queueThrow('spawn failed');
+      await expect(h.service.triggerDigest(thread.id)).rejects.toThrow('spawn failed');
+      // The speculative stamp must have been rolled back.
+      expect(h.store.getLastDigestAt(thread.id)).toBeNull();
+
+      // Same calendar day, next boot — the recap must still fire (the failure did
+      // NOT consume the day's allowance). Default behavior sends successfully.
+      const retry = await h.service.triggerDigest(thread.id);
+      expect(retry).toEqual({ triggered: true });
+      expect(h.manager.calls.at(-1)?.prompt).toBe(DIGEST_PROMPT);
+      // Now it IS stamped, so a further same-day trigger is throttled.
+      expect(h.store.getLastDigestAt(thread.id)).toBe(h.clock.value);
+      const third = await h.service.triggerDigest(thread.id);
+      expect(third).toEqual({ triggered: false, reason: 'throttled' });
     });
 
     it('returns {triggered:false, reason:"disabled"} without sending or stamping the throttle when the kill switch is off, and sends once re-enabled', async () => {
