@@ -2493,7 +2493,7 @@ export class DatabaseService {
 
     // Only update the updated_at timestamp if we're changing something other than is_favorite, auto_commit, skip_continue_next, commit_mode, or commit_mode_settings
     // This prevents the session from showing as "unviewed" when just toggling these settings
-    const isOnlyToggleUpdate = updates.length === 1 && (updates[0] === 'is_favorite = ?' || updates[0] === 'auto_commit = ?' || updates[0] === 'skip_continue_next = ?' || updates[0] === 'commit_mode = ?' || updates[0] === 'commit_mode_settings = ?' || updates[0] === 'agent_permission_mode = ?' || updates[0] === 'agent_provider = ?' || updates[0] === 'agent_runtime = ?' || updates[0] === 'agent_model = ?' || updates[0] === 'disabled_mcp_servers_json = ?' || updates[0] === 'enabled_plugins_json = ?');
+    const isOnlyToggleUpdate = updates.length === 1 && (updates[0] === 'is_favorite = ?' || updates[0] === 'auto_commit = ?' || updates[0] === 'skip_continue_next = ?' || updates[0] === 'commit_mode = ?' || updates[0] === 'commit_mode_settings = ?' || updates[0] === 'agent_permission_mode = ?' || updates[0] === 'agent_provider = ?' || updates[0] === 'agent_runtime = ?' || updates[0] === 'agent_model = ?' || updates[0] === 'disabled_mcp_servers_json = ?' || updates[0] === 'enabled_plugins_json = ?' || updates[0] === 'folder_id = ?');
     if (!isOnlyToggleUpdate) {
       updates.push('updated_at = CURRENT_TIMESTAMP');
     }
@@ -2515,12 +2515,18 @@ export class DatabaseService {
   }
 
   markSessionAsViewed(id: string): Session | undefined {
+    // Deliberately does NOT bump updated_at: updated_at doubles as the
+    // session's last-ACTIVITY clock (the quick-sessions board derives its
+    // "quiet for N" label from it), and merely viewing a session is not
+    // activity — bumping it here reset the idle clock on every open.
+    // Viewed-ness stays correct: unviewed is last_viewed_at < updated_at,
+    // and stamping last_viewed_at alone flips that to viewed.
     this.db.prepare(`
-      UPDATE sessions 
-      SET last_viewed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP 
+      UPDATE sessions
+      SET last_viewed_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(id);
-    
+
     return this.getSession(id);
   }
 
@@ -3032,9 +3038,11 @@ export class DatabaseService {
   }
 
   updateSessionDisplayOrder(sessionId: string, displayOrder: number): void {
+    // No updated_at bump: display_order is presentation metadata, and
+    // updated_at doubles as the last-activity clock (see markSessionAsViewed).
     this.db.prepare(`
-      UPDATE sessions 
-      SET display_order = ?, updated_at = CURRENT_TIMESTAMP 
+      UPDATE sessions
+      SET display_order = ?
       WHERE id = ?
     `).run(displayOrder, sessionId);
   }
@@ -3056,9 +3064,13 @@ export class DatabaseService {
   }
 
   reorderSessions(sessionOrders: Array<{ id: string; displayOrder: number }>): void {
+    // No updated_at bump: a sidebar drag rewrites EVERY session's row in one
+    // transaction, so bumping updated_at here stamped the whole project with
+    // an identical timestamp and collapsed the quick-sessions board's
+    // "quiet for N" labels (idleSince = updated_at) to a single shared value.
     const stmt = this.db.prepare(`
-      UPDATE sessions 
-      SET display_order = ?, updated_at = CURRENT_TIMESTAMP 
+      UPDATE sessions
+      SET display_order = ?
       WHERE id = ?
     `);
     
