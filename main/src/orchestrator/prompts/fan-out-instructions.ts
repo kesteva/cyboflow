@@ -121,29 +121,42 @@ function renderChainEntry(step: FanOutInnerStep, n: number, ctx: ChainContext): 
         `it touched** (same list, so it judges this task's changes only). Read its \`VERDICT\`. On ` +
         `\`FAIL\`, re-delegate \`${loopbackAgent(targetId, ctx.innerById)}\` with its ` +
         `\`## Fix guidance\` and re-verify — up to **3×** (see the attempt protocol below) before ` +
-        `marking the lane \`failed\` and **continuing the other lanes**.`
+        `marking the lane \`failed\` and **continuing the other lanes**. On \`PASS\`, ALSO enforce ` +
+        `its **visual-verification output contract**: the result must carry exactly ONE of a ` +
+        `\`## Visual verification task\` section (a single json fence holding the composed ` +
+        `verification task) or the bare line \`VISUAL-VERIFICATION: NOT-APPLICABLE — <reason>\`. ` +
+        `A PASS with neither, both, a duplicate, or an unparseable fence is an ` +
+        `**output-contract failure** — NEVER treat it as "nothing to verify": re-delegate ` +
+        `\`${agent}\` ONCE with the contract error; a second contract failure marks the lane ` +
+        `\`failed\`. Retain the fence's JSON object (or the not-applicable reason) — the next ` +
+        `step consumes it.`
       );
     case 'visual-verify':
       return (
-        `${head} treat this as the **async visual merge-gate**: delegate to \`${agent}\`, which ` +
-        `FIRES exactly one \`cyboflow_request_verification\` (passing this lane's \`task_ref\`) and ` +
-        `returns immediately — it does NOT capture, judge, or wait. Then move the lane to ` +
-        `\`${AWAITING_VERIFY_STEP}\` via \`cyboflow_update_sprint_task\` ` +
-        `(\`current_step: '${AWAITING_VERIFY_STEP}'\`) and PARK it there. The main-process verifier ` +
-        `captures + judges the deliverable asynchronously and drives the lane off the park step for ` +
-        `you — **PASS** advances the lane toward \`integrated\`; **FAIL** loops the lane back to ` +
-        `\`${loopbackAgent(targetId, ctx.innerById)}\` with a bumped \`attempt\` and a BLOCKING ` +
-        `finding carrying the judge's feedback (up to **3×** before the lane is \`failed\`); **low ` +
-        `confidence** raises a non-blocking "needs human visual review" finding and lets the lane ` +
-        `proceed. When you observe a lane the gate looped back (its \`current_step\` returned to the ` +
-        `loopback target with a higher \`attempt\` and a blocking visual finding), RE-DELEGATE that ` +
-        `target with the finding's feedback, then re-fire the verification request. Do **NOT** ` +
-        `advance a lane to \`integrated\` until its merge-gate has PASSED (or the run has visual ` +
-        `verification disabled). A \`VERDICT: SKIPPED\` from the subagent is NOT a gate — proceed. ` +
-        `When a regression traces to already-merged work, the verifier's finding carries ` +
-        `\`category: 'post-merge-bug'\`. The verifier produces and surfaces the screenshots ` +
-        `artifact itself — you do NOT capture screenshots or report a \`screenshots\` artifact ` +
-        `for this step.`
+        `${head} treat this as the **async visual merge-gate** — there is NO subagent to delegate ` +
+        `for this step; YOU fire the request. If task-verify returned ` +
+        `\`VISUAL-VERIFICATION: NOT-APPLICABLE\`, skip this step entirely (no request, no park) ` +
+        `and continue the chain. Otherwise call \`cyboflow_request_verification\` ONCE, passing ` +
+        `\`task\` = the JSON object from task-verify's \`## Visual verification task\` fence ` +
+        `(verbatim — do not rewrite it) and \`task_ref\` = this lane's ref. If it returns ` +
+        `\`{ skipped: true }\`, visual verification is disabled for this run — continue without ` +
+        `parking. Otherwise move the lane to \`${AWAITING_VERIFY_STEP}\` via ` +
+        `\`cyboflow_update_sprint_task\` (\`current_step: '${AWAITING_VERIFY_STEP}'\`) and PARK it ` +
+        `there. The central verification agent builds the deliverable in a clean snapshot of the ` +
+        `branch, drives the composed behaviors, captures screenshots, and its verdict drives the ` +
+        `lane off the park step for you — **PASS** advances the lane toward \`integrated\`; ` +
+        `**FAIL** loops the lane back to \`${loopbackAgent(targetId, ctx.innerById)}\` with a ` +
+        `bumped \`attempt\` and a BLOCKING finding carrying the verification report (behaviors ` +
+        `failed + evidence; up to **3×** before the lane is \`failed\`); **low confidence** raises ` +
+        `a non-blocking "needs human visual review" finding and lets the lane proceed. When you ` +
+        `observe a lane the gate looped back (its \`current_step\` returned to the loopback target ` +
+        `with a higher \`attempt\` and a blocking visual finding), RE-DELEGATE that target with ` +
+        `the finding's report, then re-run \`task-verify\` — its fresh contract re-fires the ` +
+        `request. Do **NOT** advance a lane to \`integrated\` until its merge-gate has PASSED (or ` +
+        `verification is disabled / not applicable). When a regression traces to already-merged ` +
+        `work, the verifier's finding carries \`category: 'post-merge-bug'\`. The verifier ` +
+        `produces and surfaces the screenshots artifact itself — you do NOT capture screenshots ` +
+        `or report a \`screenshots\` artifact for this step.`
       );
     default: {
       // Generic fallback for a custom / renamed inner id: delegate, carry the

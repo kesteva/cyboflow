@@ -5,8 +5,10 @@
  *
  * Behaviors covered:
  *  1. Canonical 5-step chain + no explicit maxConcurrency → the default cap (5),
- *     DAG-wave + same-file-guard dispatch, all 5 lane ids + all 5 `cyboflow-<agent>`
- *     names, the awaiting-verify park, and the loopback/attempt protocol.
+ *     DAG-wave + same-file-guard dispatch, all 5 lane ids + the 4 delegated
+ *     `cyboflow-<agent>` names (visual-verify is orchestrator-fired, not
+ *     delegated), the task-verify output contract, the awaiting-verify park,
+ *     and the loopback/attempt protocol.
  *  2. Explicit maxConcurrency 3 → "at most 3" and no cap-5 text.
  *  3. maxConcurrency 1 → strictly-serial dispatch (no DAG waves / same-file guard).
  *  4. A custom 2-step chain (custom ids, one explicit loopback + one defaulted)
@@ -112,16 +114,30 @@ describe('buildFanOutAppend — canonical chain, default cap', () => {
     expect(block).toContain('same file');
   });
 
-  it('lists all 5 lane ids and all 5 cyboflow-<agent> delegates', () => {
+  it('lists all 5 lane ids and the 4 delegated cyboflow-<agent> names', () => {
     for (const id of ['implement', 'write-tests', 'code-review', 'task-verify', 'visual-verify']) {
       expect(block).toContain(`\`${id}\``);
+    }
+    for (const id of ['implement', 'write-tests', 'code-review', 'task-verify']) {
       expect(block).toContain(`cyboflow-${id}`);
     }
   });
 
-  it('parks the visual merge-gate at awaiting-verify', () => {
+  it('enforces the task-verify visual-verification output contract on PASS', () => {
+    expect(block).toContain('visual-verification output contract');
+    expect(block).toContain('## Visual verification task');
+    expect(block).toContain('VISUAL-VERIFICATION: NOT-APPLICABLE');
+    expect(block).toContain('output-contract failure');
+  });
+
+  it('parks the visual merge-gate at awaiting-verify, fired by the orchestrator itself', () => {
     expect(block).toContain('awaiting-verify');
     expect(block).toContain('async visual merge-gate');
+    // The dispatcher subagent is retired: the orchestrator fires the request
+    // directly with the composed task; there is no cyboflow-visual-verify delegate.
+    expect(block).not.toContain('cyboflow-visual-verify');
+    expect(block).toContain('cyboflow_request_verification');
+    expect(block).toContain('NO subagent to delegate');
   });
 
   it('emits the loopback + attempt protocol', () => {
