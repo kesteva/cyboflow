@@ -343,12 +343,22 @@ interface RunModelResolution {
   multiModel: boolean;
 }
 
-/** Fold one reported model id into an exact-one-vs-many run resolution. */
+/**
+ * Fold one reported model id into an exact-one-vs-many run resolution.
+ *
+ * The `'unknown'` sentinel (persisted by dynamic subagent usage when model
+ * discovery fails — see dynamicWorkflowTracker's subagent snapshot) and
+ * blank/whitespace-only strings are NOT model identities: folding them in
+ * would flip a single-model run to multiModel and wrongly suppress the
+ * computed-cost path, so they are skipped entirely.
+ */
 function recordRunModel(target: RunModelResolution, value: unknown): void {
   if (typeof value !== 'string' || target.multiModel) return;
+  const trimmed = value.trim();
+  if (trimmed === '' || trimmed === 'unknown') return;
   if (target.model === null) {
-    target.model = value;
-  } else if (target.model !== value) {
+    target.model = trimmed;
+  } else if (target.model !== trimmed) {
     target.model = null;
     target.multiModel = true;
   }

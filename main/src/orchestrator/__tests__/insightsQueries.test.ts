@@ -750,6 +750,38 @@ describe('selectRunUsageRollups', () => {
     });
   });
 
+  it("ignores the 'unknown' subagent sentinel and blanks — a known+unknown run stays single-model (raw path)", () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    seedEvent(
+      db,
+      'r1',
+      'assistant',
+      assistantPayloadWithModel('claude-opus-4-5', { input: 100, output: 20 }),
+    );
+    // Dynamic subagent usage persists message.model 'unknown' when discovery
+    // fails; a whitespace-only id is equally meaningless. Neither is a model
+    // identity, so neither may flip the run to multiModel.
+    seedEvent(db, 'r1', 'subagent_usage', subagentUsagePayload('unknown', { input: 30, output: 5 }));
+    seedEvent(db, 'r1', 'subagent_usage', subagentUsagePayload('  ', { input: 1, output: 1 }));
+
+    const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+    expect(rollup.model).toBe('claude-opus-4-5');
+    expect(rollup.multiModel).toBe(false);
+  });
+
+  it("resolves an unknown-only run to model null WITHOUT the multiModel flag (materialized path)", () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    seedRunUsage(db, { runId: 'r1', inputTokens: 300, outputTokens: 75, assistantMessageCount: 1 });
+    seedEvent(db, 'r1', 'subagent_usage', subagentUsagePayload('unknown', { input: 30, output: 5 }));
+
+    const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+    // No real model was established — but two distinct models weren't either.
+    expect(rollup.model).toBeNull();
+    expect(rollup.multiModel).toBe(false);
+  });
+
   it('folds nested subagent usage without counting an assistant message and silently drops a flat payload', () => {
     seedWorkflow(db, { id: 'wf-1' });
     seedRun(db, { id: 'r1', workflowId: 'wf-1' });
