@@ -6,6 +6,25 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.29] — 2026-07-22
+
+### Added
+
+- **In-artifact feedback** (IDEA-033): highlight text in an artifact, attach a comment, and send it to a host-driven revision agent — backed by a `FeedbackRouter` write chokepoint, quote-based DOM anchor utilities, gate chips, and byte-preserving arch-section splicing (`replaceArchDesignSection`). Migration 077 + shared types.
+- Computed run cost: a setting to recompute run summary cost from resolved run-usage models.
+
+### Changed
+
+- Dropped the hidden per-turn `/context` probe turn and deferred the `@anthropic-ai/claude-agent-sdk` parse off the boot path (faster startup, fewer wasted turns).
+- Assistant rail polish: centered suggestion chips with the first renamed to "Status update", composer model chip removed with the send button tracking the textarea height, the human's turn persisted in the transcript, a vertically centered header row, and the auto-digest throttled to once per calendar day (persisted across restarts).
+
+### Fixed
+
+- Quick sessions: revive the parked `__quick__` chat sentinel on reuse so resumed quick sessions keep MCP access, drop an explicitly-completed run from the left rail (migration 075), echo flow-run chat sends into the transcript on the Claude SDK path, and show minutes-only quiet labels (refresh coarsened to 30s).
+- Lifecycle cleanup: reap artifacts for retired entities, dismiss review items for archived sessions, reap leaked Codex brokers in worktrees that still exist, and stop presentation-only writes from bumping `sessions.updated_at`.
+- Daily-recap digest: calendar-day cap, rollback on failure, and a frontend retry gate.
+- Markdown fence-grammar hardening for arch-section parsing: shared CommonMark-paired fence grammar, and reject backtick-fence openers that carry backticks in the info string.
+
 ## [0.1.28] — 2026-07-21
 
 ### Added
