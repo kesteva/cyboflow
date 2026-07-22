@@ -35,13 +35,19 @@ import type {
 } from '../../../../shared/types/visualVerification';
 
 const MIG_DIR = join(__dirname, '..', '..', 'database', 'migrations');
-const THROUGH_055 = [
+const THROUGH_078 = [
   '006_cyboflow_schema.sql',
   '011_workflow_step_tracking.sql',
   '014_native_tasks.sql',
   '015_entity_model_rebuild.sql',
   '016_review_items.sql',
   '055_visual_verification.sql',
+  // Migration 078 (verification-agent dual-format request plumbing): additive
+  // nullable columns on verification_requests (task_json/report_json/
+  // delivery_state/snapshot_sha) — this suite's enqueue() calls now write
+  // task_json/snapshot_sha alongside deliverable_json, so the real column set
+  // must be present.
+  '078_verification_agent_requests.sql',
 ];
 
 function buildDb(): Database.Database {
@@ -57,7 +63,7 @@ function buildDb(): Database.Database {
     );
   `);
   db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
-  for (const f of THROUGH_055) db.exec(readFileSync(join(MIG_DIR, f), 'utf-8'));
+  for (const f of THROUGH_078) db.exec(readFileSync(join(MIG_DIR, f), 'utf-8'));
   return db;
 }
 

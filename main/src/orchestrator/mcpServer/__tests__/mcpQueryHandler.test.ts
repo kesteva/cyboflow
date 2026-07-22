@@ -4159,7 +4159,13 @@ describe('McpQueryHandler — mcp-request-verification', () => {
         error_message TEXT,
         enqueued_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         leased_at DATETIME,
-        ended_at DATETIME
+        ended_at DATETIME,
+        -- Migration 078 (verification-agent dual-format request plumbing).
+        task_json TEXT,
+        report_json TEXT,
+        delivery_state TEXT,
+        snapshot_sha TEXT,
+        enqueue_key TEXT
       );
     `);
 
@@ -4355,6 +4361,187 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     expect(response.error).toBe('run_not_active');
     const count = vdb.prepare('SELECT COUNT(*) AS n FROM verification_requests').get() as { n: number };
     expect(count.n).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Dual-format contract (verification-agent redesign §5.2, migration 078):
+  // `task` (a VerificationTaskV1) is strictly validated server-side and, when
+  // valid, is authoritative for the persisted deliverable — task_json dual-
+  // writes alongside deliverable_json. `task` absent leaves the legacy path
+  // (exercised by every test above this block) byte-identical.
+  // -------------------------------------------------------------------------
+
+  it('absent task → task_json stays NULL (unchanged legacy path)', async () => {
+    seedVerifyRun(vdb, 'run-v5a', {
+      enabled: true,
+      type: 'static-render-snapshot',
+      chain: ['capturePage'],
+    });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-5a',
+        runId: 'run-v5a',
+        intent: 'legacy check',
+        url: 'http://localhost:5173',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    const data = response.data as { requestId: string };
+    const row = vdb
+      .prepare('SELECT task_json, deliverable_json FROM verification_requests WHERE id = ?')
+      .get(data.requestId) as { task_json: string | null; deliverable_json: string };
+    expect(row.task_json).toBeNull();
+    expect(JSON.parse(row.deliverable_json)).toEqual({ intent: 'legacy check', url: 'http://localhost:5173' });
+  });
+
+  it('invalid task → ok:false invalid_verification_task, nothing enqueued', async () => {
+    seedVerifyRun(vdb, 'run-v5b', {
+      enabled: true,
+      type: 'static-render-snapshot',
+      chain: ['capturePage'],
+    });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-5b',
+        runId: 'run-v5b',
+        intent: 'ignored, task wins',
+        // Missing `summary` — an invalid VerificationTaskV1.
+        task: { version: 1, behaviors: [] },
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toMatch(/^invalid_verification_task: summary:/);
+    const count = vdb.prepare('SELECT COUNT(*) AS n FROM verification_requests').get() as { n: number };
+    expect(count.n).toBe(0);
+  });
+
+  it('valid task → enqueued input derives intent/url/htmlPath/viewports/taskRef from the task and dual-writes task_json', async () => {
+    seedVerifyRun(vdb, 'run-v5c', {
+      enabled: true,
+      type: 'static-render-snapshot',
+      chain: ['capturePage'],
+    });
+
+    const task = {
+      version: 1,
+      taskRef: 'TASK-042',
+      summary: 'Check the settings toggle renders, default off',
+      behaviors: [{ id: 'b1', description: 'toggle renders', expected: 'toggle visible, unchecked' }],
+      target: { url: 'http://localhost:5173', htmlPath: '/tmp/out/index.html' },
+      viewports: [{ width: 1280, height: 720 }],
+    };
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-5c',
+        runId: 'run-v5c',
+        // Legacy fields present but SUPERSEDED by the task per the dual-format contract.
+        intent: 'ignored, task wins',
+        url: 'http://ignored',
+        task,
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    const data = response.data as { requestId: string };
+    const row = vdb
+      .prepare('SELECT deliverable_json, task_json FROM verification_requests WHERE id = ?')
+      .get(data.requestId) as { deliverable_json: string; task_json: string | null };
+
+    const deliverable = JSON.parse(row.deliverable_json) as Record<string, unknown>;
+    expect(deliverable.intent).toBe(task.summary);
+    expect(deliverable.url).toBe('http://localhost:5173');
+    expect(deliverable.htmlPath).toBe('/tmp/out/index.html');
+    expect(deliverable.viewports).toEqual([{ width: 1280, height: 720 }]);
+    expect(deliverable.taskRef).toBe('TASK-042');
+
+    expect(row.task_json).not.toBeNull();
+    expect(JSON.parse(row.task_json as string)).toEqual(task);
+  });
+
+  it('task+wire taskRef precedence: task.taskRef wins over the wire task_ref arg, and both columns agree', async () => {
+    seedVerifyRun(vdb, 'run-v5d', {
+      enabled: true,
+      type: 'static-render-snapshot',
+      chain: ['capturePage'],
+    });
+
+    const task = {
+      version: 1,
+      taskRef: 'TASK-100',
+      summary: 'Check the page renders',
+      behaviors: [],
+    };
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-5d',
+        runId: 'run-v5d',
+        intent: 'ignored',
+        task,
+        taskRef: 'TASK-999',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    const data = response.data as { requestId: string };
+    const row = vdb
+      .prepare('SELECT deliverable_json, task_json FROM verification_requests WHERE id = ?')
+      .get(data.requestId) as { deliverable_json: string; task_json: string };
+    expect((JSON.parse(row.deliverable_json) as { taskRef?: string }).taskRef).toBe('TASK-100');
+    expect((JSON.parse(row.task_json) as { taskRef?: string }).taskRef).toBe('TASK-100');
+  });
+
+  it('task without a taskRef falls back to the wire task_ref arg, reflected into BOTH columns', async () => {
+    seedVerifyRun(vdb, 'run-v5e', {
+      enabled: true,
+      type: 'static-render-snapshot',
+      chain: ['capturePage'],
+    });
+
+    const task = { version: 1, summary: 'Check the page renders', behaviors: [] };
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-5e',
+        runId: 'run-v5e',
+        intent: 'ignored',
+        task,
+        taskRef: 'TASK-777',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    const data = response.data as { requestId: string };
+    const row = vdb
+      .prepare('SELECT deliverable_json, task_json FROM verification_requests WHERE id = ?')
+      .get(data.requestId) as { deliverable_json: string; task_json: string };
+    expect((JSON.parse(row.deliverable_json) as { taskRef?: string }).taskRef).toBe('TASK-777');
+    expect((JSON.parse(row.task_json) as { taskRef?: string }).taskRef).toBe('TASK-777');
   });
 });
 

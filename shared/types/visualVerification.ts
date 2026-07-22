@@ -652,6 +652,35 @@ export function normalizeVerificationReportV1(
 }
 
 /**
+ * Derive the legacy-shaped `VerificationRequestInput` a `VerificationTaskV1`
+ * dual-writes (§5.2 dual-format contract). Every new request persists BOTH the
+ * task AND this derived legacy shape so every pre-existing reader (legacy
+ * capture/judge path, the recovery sweep, the Verify-Queue projection) keeps
+ * working unchanged whether or not `task_json` is populated:
+ *   - `intent` = `task.summary`.
+ *   - `url` / `htmlPath` = `task.target.url` / `task.target.htmlPath`, when present
+ *     (the degenerate pre-live path — a build/serve task has neither).
+ *   - `viewports` = `task.viewports`, when present.
+ *   - `taskRef` precedence is `task.taskRef ?? taskRef` (the explicit wire arg) —
+ *     mirrors the design doc's "written identically into both columns" rule; the
+ *     caller is responsible for any further single-lane default fallback.
+ * Pure — no side effects, no defaulting beyond the stated precedence. Omits
+ * absent fields entirely (never writes an `undefined` member onto the result).
+ */
+export function deriveLegacyInputFromTask(
+  task: VerificationTaskV1,
+  taskRef?: string,
+): VerificationRequestInput {
+  const input: VerificationRequestInput = { intent: task.summary };
+  if (task.target?.url !== undefined) input.url = task.target.url;
+  if (task.target?.htmlPath !== undefined) input.htmlPath = task.target.htmlPath;
+  if (task.viewports !== undefined) input.viewports = task.viewports;
+  const effectiveTaskRef = task.taskRef ?? taskRef;
+  if (effectiveTaskRef !== undefined) input.taskRef = effectiveTaskRef;
+  return input;
+}
+
+/**
  * The immutable context a backend receives for one capture attempt. `artifactsDir`
  * is the run's $CYBOFLOW_RUN_ARTIFACTS_DIR — backends write PNGs there. `requestId`
  * / `runId` thread provenance; `type` + `input` carry the resolved request.

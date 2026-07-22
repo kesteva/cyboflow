@@ -671,14 +671,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_request_verification',
         description:
-          'Request a visual verification of a rendered deliverable for THIS run (derived from CYBOFLOW_RUN_ID — no run argument). FIRE-AND-CONTINUE: this returns { requestId } IMMEDIATELY and the lane NEVER blocks on the verdict — the main-process scheduler captures + judges the deliverable on its own loop and delivers the verdict asynchronously (to the screenshots artifact + the review queue). describe the natural-language acceptance to check in `intent` and point at the deliverable via `url` or `html_path`. If visual verification is DISABLED for this run, this is a no-op that returns { skipped: true } (never an error). `type_override` can only NARROW within the run\'s resolved capability — it cannot enable a disabled run or add a backend the host lacks.',
+          'Request a visual verification of a rendered deliverable for THIS run (derived from CYBOFLOW_RUN_ID — no run argument). FIRE-AND-CONTINUE: this returns { requestId } IMMEDIATELY and the lane NEVER blocks on the verdict — the main-process scheduler deploys the verification agent and delivers the verdict asynchronously (to the screenshots artifact + the review queue). The PREFERRED form is `task`: a composed verification task (the `## Visual verification task` fence object task-verify emits — version/summary/build/serve/target/behaviors, matching VerificationTaskV1) that the agent independently builds, drives, and judges. `intent` + `url`/`html_path` remain the LEGACY degenerate form (a bare acceptance sentence and a pre-live target, no build/behaviors) — still accepted for backward compatibility and simple checks. If visual verification is DISABLED for this run, this is a no-op that returns { skipped: true } (never an error). `type_override` can only NARROW within the run\'s resolved capability — it cannot enable a disabled run or add a backend the host lacks.',
         inputSchema: {
           type: 'object',
           properties: {
             intent: {
               type: 'string',
               description:
-                'Natural-language acceptance the verifier judges the rendered result against (required), e.g. "the settings panel shows the new visual-verify toggle, default off".',
+                'Natural-language acceptance the verifier judges against, e.g. "the settings panel shows the new visual-verify toggle, default off" (required unless `task` is passed — a task-form call derives it from task.summary). LEGACY form when passed alone with `url`/`html_path`. When `task` is ALSO passed, `task` is authoritative for the deliverable/behaviors and `intent` may simply repeat task.summary.',
+            },
+            task: {
+              type: 'object',
+              description:
+                'PREFERRED form: a composed VerificationTaskV1 object ({ version: 1, summary, build?, serve?, target?, behaviors, viewports?, timeoutMs?, taskRef? }) — the task-verify subagent\'s `## Visual verification task` fence, passed through verbatim. Validated strictly server-side; malformed shapes are rejected with an `invalid_verification_task` error naming the offending field. When present, `task` supersedes `url`/`html_path`/`viewports` for the persisted deliverable.',
             },
             type_override: {
               type: 'string',
@@ -714,7 +719,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 "Optional lane ref of the task this verification is for (e.g. \"TASK-008\"), used by the visual merge-gate to drive the async verdict onto the right lane. Pass YOUR task's ref in a multi-task sprint; omit for a single-task run.",
             },
           },
-          required: ['intent'],
+          // `intent` is required for the legacy form only — a `task`-form call
+          // derives it from task.summary, so neither field is schema-required.
+          required: [],
         },
       },
       // ---------------------------------------------------------------------
@@ -2046,6 +2053,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     case 'cyboflow_request_verification': {
       const args = (request.params.arguments ?? {}) as {
         intent?: unknown;
+        task?: unknown;
         type_override?: unknown;
         url?: unknown;
         html_path?: unknown;
@@ -2053,10 +2061,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         baseline_key?: unknown;
         task_ref?: unknown;
       };
-      const { intent, type_override, url, html_path, viewports, baseline_key, task_ref } = args;
-      if (typeof intent !== 'string' || intent.length === 0) {
+      const { intent: rawIntent, task, type_override, url, html_path, viewports, baseline_key, task_ref } = args;
+      // `intent` is required for the LEGACY form only. A task-form call (the
+      // fan-out prose passes just `task` + `task_ref`) derives a best-effort
+      // intent from task.summary here — unvalidated; the handler strictly
+      // validates the task server-side and derives the persisted deliverable
+      // from it, so this stand-in never drives judging on the task path.
+      const taskSummary =
+        typeof task === 'object' && task !== null && !Array.isArray(task)
+          ? (task as { summary?: unknown }).summary
+          : undefined;
+      const intent =
+        typeof rawIntent === 'string' && rawIntent.length > 0
+          ? rawIntent
+          : typeof taskSummary === 'string' && taskSummary.length > 0
+            ? taskSummary
+            : undefined;
+      if (intent === undefined) {
         return {
-          content: [{ type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'intent: string' }) }],
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'intent: string (or task.summary)' }),
+            },
+          ],
         };
       }
       const validTypes = [
@@ -2094,6 +2122,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
       }
       const queryParams: Record<string, unknown> = { intent };
+      // `task` is threaded through VERBATIM, unvalidated — the handler strictly
+      // validates its shape server-side (parseVerificationTaskV1) so a malformed
+      // task can never silently coerce into a bogus deliverable. When present it
+      // supersedes intent/url/html_path/viewports for the persisted deliverable
+      // (§5.2 dual-format contract), though `intent` stays wire-required above so
+      // every call carries SOME acceptance text even before task-verify's prompt
+      // contract (a later slice) starts omitting it.
+      if (task !== undefined) queryParams['task'] = task;
       if (type_override !== undefined) queryParams['typeOverride'] = type_override;
       if (url !== undefined) queryParams['url'] = url;
       if (html_path !== undefined) queryParams['htmlPath'] = html_path;

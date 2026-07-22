@@ -126,10 +126,13 @@ import { VerificationScheduler } from '../verify/verificationScheduler';
 import {
   FALLBACK_CHAINS,
   isVerificationType,
+  parseVerificationTaskV1,
+  deriveLegacyInputFromTask,
 } from '../../../../shared/types/visualVerification';
 import type {
   VerificationType,
   VerificationRequestInput,
+  VerificationTaskV1,
   VisualBackendId,
 } from '../../../../shared/types/visualVerification';
 import { SprintLaneStore, SprintLaneError } from '../sprintLaneStore';
@@ -399,6 +402,16 @@ export type McpQueryMessage =
       runId: string;
       /** Natural-language acceptance the VlmJudge checks (required). */
       intent: string;
+      /**
+       * PREFERRED dual-format form (redesign §5.2): the composed VerificationTaskV1
+       * fence object, UNVALIDATED at the wire (loose — strict validation happens
+       * here via parseVerificationTaskV1). When present it is authoritative for the
+       * deliverable — the handler derives the legacy `input` FROM the task
+       * (deriveLegacyInputFromTask) rather than from `intent`/`url`/`htmlPath`, and
+       * both `deliverable_json` AND `task_json` are persisted (dual-write). Absent
+       * ⇒ behavior is byte-identical to the pre-redesign legacy path.
+       */
+      task?: unknown;
       /** Agent-declared verification type. Narrows only — invalid/out-of-chain is dropped. */
       typeOverride?: VerificationType;
       url?: string;
@@ -3396,6 +3409,15 @@ export class McpQueryHandler {
    * verdict). Guards mirror the other run-bound writes (sentinel / missing /
    * terminal run reject via resolveReviewItemRunContext). Fully fail-soft: any
    * unexpected error is surfaced as an ok:false reply rather than throwing.
+   *
+   * DUAL-FORMAT (redesign §5.2): when `msg.task` is present it is strictly
+   * validated (parseVerificationTaskV1) — an invalid task replies ok:false with
+   * `invalid_verification_task: <error>` and enqueues nothing. A valid task is
+   * authoritative: the legacy `deliverable_json` shape is DERIVED from it
+   * (deriveLegacyInputFromTask) rather than from `intent`/`url`/`htmlPath`, and
+   * both the derived input AND the task are passed to the scheduler so
+   * `task_json` dual-writes alongside `deliverable_json`. `msg.task` absent ⇒ this
+   * method's behavior is byte-identical to the pre-redesign legacy path.
    */
   private handleRequestVerification(
     msg: Extract<McpQueryMessage, { type: 'mcp-request-verification' }>,
@@ -3450,26 +3472,67 @@ export class McpQueryHandler {
     // (the scheduler treats an empty chain as a SKIP, never a fabricated fail).
     const chain = FALLBACK_CHAINS[effectiveType].filter((backend) => stampedChain.includes(backend));
 
-    // Build the deliverable input, dropping any malformed optional members.
-    const input: VerificationRequestInput = { intent: msg.intent };
-    if (typeof msg.url === 'string') input.url = msg.url;
-    if (typeof msg.htmlPath === 'string') input.htmlPath = msg.htmlPath;
-    if (typeof msg.baselineKey === 'string') input.baselineKey = msg.baselineKey;
-    // taskRef threads the lane attribution into deliverable_json so the async
-    // merge-gate verdict can be driven onto the right lane (multi-lane batches).
-    // When the agent OMITS it, best-effort default it from the lane context WHEN
-    // unambiguous (a single-lane batch) — a belt-and-suspenders mitigation for the
-    // gate's strict attribution (locked decision #2). A multi-lane batch CANNOT be
-    // defaulted here (the wire carries no itemId), so it stays absent and the
-    // gate's single-lane-only rule for a taskRef-less event is the invariant.
-    if (typeof msg.taskRef === 'string' && msg.taskRef.length > 0) {
-      input.taskRef = msg.taskRef;
-    } else {
-      const defaulted = this.defaultTaskRefForRun(msg.runId);
-      if (defaulted !== undefined) input.taskRef = defaulted;
+    // DUAL-FORMAT CONTRACT (redesign §5.2): when `task` is present it is
+    // authoritative for the deliverable. Strictly validate it FIRST — an invalid
+    // task must never fall through to a bogus legacy-shaped enqueue.
+    let task: VerificationTaskV1 | undefined;
+    if (msg.task !== undefined) {
+      const parsed = parseVerificationTaskV1(msg.task);
+      if (!parsed.ok) {
+        this.writeResponse(client, {
+          type: 'mcp-query-response',
+          requestId: msg.requestId,
+          ok: false,
+          error: `invalid_verification_task: ${parsed.error}`,
+        });
+        return;
+      }
+      task = parsed.task;
     }
-    const viewports = this.parseViewports(msg.viewports);
-    if (viewports !== undefined) input.viewports = viewports;
+
+    let input: VerificationRequestInput;
+    if (task) {
+      // taskRef precedence: task.taskRef ?? the wire task_ref arg (§5.2 "written
+      // identically into both columns"). deriveLegacyInputFromTask applies exactly
+      // this precedence; the legacy per-field url/htmlPath/baselineKey/viewports
+      // wire args are superseded by the task (task is authoritative).
+      const wireTaskRef = typeof msg.taskRef === 'string' && msg.taskRef.length > 0 ? msg.taskRef : undefined;
+      input = deriveLegacyInputFromTask(task, wireTaskRef);
+      // Neither the task nor the wire carried a taskRef: fall back to the existing
+      // single-lane default (same mitigation as the legacy path below), and
+      // reflect the defaulted value into BOTH the persisted input AND the task
+      // object so deliverable_json and task_json agree (§5.2).
+      if (input.taskRef === undefined) {
+        const defaulted = this.defaultTaskRefForRun(msg.runId);
+        if (defaulted !== undefined) {
+          input.taskRef = defaulted;
+          task = { ...task, taskRef: defaulted };
+        }
+      } else if (task.taskRef !== input.taskRef) {
+        task = { ...task, taskRef: input.taskRef };
+      }
+    } else {
+      // Build the deliverable input, dropping any malformed optional members.
+      input = { intent: msg.intent };
+      if (typeof msg.url === 'string') input.url = msg.url;
+      if (typeof msg.htmlPath === 'string') input.htmlPath = msg.htmlPath;
+      if (typeof msg.baselineKey === 'string') input.baselineKey = msg.baselineKey;
+      // taskRef threads the lane attribution into deliverable_json so the async
+      // merge-gate verdict can be driven onto the right lane (multi-lane batches).
+      // When the agent OMITS it, best-effort default it from the lane context WHEN
+      // unambiguous (a single-lane batch) — a belt-and-suspenders mitigation for the
+      // gate's strict attribution (locked decision #2). A multi-lane batch CANNOT be
+      // defaulted here (the wire carries no itemId), so it stays absent and the
+      // gate's single-lane-only rule for a taskRef-less event is the invariant.
+      if (typeof msg.taskRef === 'string' && msg.taskRef.length > 0) {
+        input.taskRef = msg.taskRef;
+      } else {
+        const defaulted = this.defaultTaskRefForRun(msg.runId);
+        if (defaulted !== undefined) input.taskRef = defaulted;
+      }
+      const viewports = this.parseViewports(msg.viewports);
+      if (viewports !== undefined) input.viewports = viewports;
+    }
 
     try {
       const requestId = VerificationScheduler.getInstance().enqueue({
@@ -3478,6 +3541,7 @@ export class McpQueryHandler {
         type: effectiveType,
         input,
         chain,
+        task,
       });
       // Reply SYNCHRONOUSLY (the lane continues), then kick the drain loop. enqueue
       // already nudges; the extra nudge is harmless (coalesced) and makes the

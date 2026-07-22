@@ -8,6 +8,8 @@ import { describe, it, expect } from 'vitest';
 import {
   parseVerificationTaskV1,
   normalizeVerificationReportV1,
+  deriveLegacyInputFromTask,
+  type VerificationTaskV1,
 } from '../../../../../shared/types/visualVerification';
 
 const VALID_TASK = {
@@ -280,5 +282,64 @@ describe('normalizeVerificationReportV1', () => {
     const result = normalizeVerificationReportV1({ ...VALID_REPORT, outcome: 'maybe' }, EXPECTED_IDS);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toMatch(/^outcome:/);
+  });
+});
+
+describe('deriveLegacyInputFromTask', () => {
+  const MINIMAL_TASK: VerificationTaskV1 = {
+    version: 1,
+    summary: 'Check the login form renders',
+    behaviors: [],
+  };
+
+  it('maps summary to intent and omits absent optional fields', () => {
+    const input = deriveLegacyInputFromTask(MINIMAL_TASK);
+    expect(input).toEqual({ intent: 'Check the login form renders' });
+    expect('url' in input).toBe(false);
+    expect('htmlPath' in input).toBe(false);
+    expect('viewports' in input).toBe(false);
+    expect('taskRef' in input).toBe(false);
+  });
+
+  it('derives url/htmlPath from task.target', () => {
+    const task: VerificationTaskV1 = {
+      ...MINIMAL_TASK,
+      target: { url: 'http://localhost:3000', htmlPath: '/tmp/out/index.html' },
+    };
+    const input = deriveLegacyInputFromTask(task);
+    expect(input.url).toBe('http://localhost:3000');
+    expect(input.htmlPath).toBe('/tmp/out/index.html');
+  });
+
+  it('derives viewports from the task', () => {
+    const task: VerificationTaskV1 = {
+      ...MINIMAL_TASK,
+      viewports: [{ width: 1280, height: 720, label: 'desktop' }],
+    };
+    const input = deriveLegacyInputFromTask(task);
+    expect(input.viewports).toEqual([{ width: 1280, height: 720, label: 'desktop' }]);
+  });
+
+  it('taskRef precedence: task.taskRef wins over the explicit arg', () => {
+    const task: VerificationTaskV1 = { ...MINIMAL_TASK, taskRef: 'TASK-008' };
+    const input = deriveLegacyInputFromTask(task, 'TASK-999');
+    expect(input.taskRef).toBe('TASK-008');
+  });
+
+  it('falls back to the explicit arg when task.taskRef is absent', () => {
+    const input = deriveLegacyInputFromTask(MINIMAL_TASK, 'TASK-999');
+    expect(input.taskRef).toBe('TASK-999');
+  });
+
+  it('omits taskRef entirely when neither the task nor the arg carries one', () => {
+    const input = deriveLegacyInputFromTask(MINIMAL_TASK);
+    expect('taskRef' in input).toBe(false);
+  });
+
+  it('is pure — never mutates the input task', () => {
+    const task: VerificationTaskV1 = { ...MINIMAL_TASK, target: { url: 'http://localhost:3000' } };
+    const snapshot = JSON.parse(JSON.stringify(task));
+    deriveLegacyInputFromTask(task, 'TASK-1');
+    expect(task).toEqual(snapshot);
   });
 });

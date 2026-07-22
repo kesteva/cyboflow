@@ -78,7 +78,16 @@ function buildDb(): Database.Database {
       error_message    TEXT,
       enqueued_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
       leased_at        DATETIME,
-      ended_at         DATETIME
+      ended_at         DATETIME,
+      -- Migration 078 (verification-agent dual-format request plumbing): additive
+      -- nullable columns the scheduler's enqueue() may now dual-write alongside
+      -- deliverable_json (task_json/snapshot_sha/enqueue_key) or the terminal
+      -- delivery may set later (report_json/delivery_state — untouched by THIS slice).
+      task_json        TEXT,
+      report_json      TEXT,
+      delivery_state   TEXT,
+      snapshot_sha     TEXT,
+      enqueue_key      TEXT
     );
   `);
   return db;
@@ -179,6 +188,245 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+describe('VerificationScheduler — enqueue dual-write (verification-agent redesign §5.2/§5.13)', () => {
+  /** Read back the raw persisted row for the dual-write assertions below. */
+  function rawRow(
+    id: string,
+  ): { deliverable_json: string; task_json: string | null; snapshot_sha: string | null } {
+    return db
+      .prepare('SELECT deliverable_json, task_json, snapshot_sha FROM verification_requests WHERE id = ?')
+      .get(id) as { deliverable_json: string; task_json: string | null; snapshot_sha: string | null };
+  }
+
+  it('enqueue WITHOUT a task leaves task_json/snapshot_sha NULL and writes deliverable_json exactly as before', () => {
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+
+    const id = sched.enqueue({
+      runId: 'run-1',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { intent: 'looks right', url: 'http://localhost:3000' },
+      chain: ['capturePage'],
+    });
+
+    const row = rawRow(id);
+    expect(row.task_json).toBeNull();
+    expect(row.snapshot_sha).toBeNull();
+    expect(JSON.parse(row.deliverable_json)).toEqual({ intent: 'looks right', url: 'http://localhost:3000' });
+  });
+
+  it('enqueue WITH a task dual-writes: the row carries BOTH a legacy-shaped deliverable_json AND task_json', () => {
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+
+    const task = {
+      version: 1 as const,
+      summary: 'Check the login form renders',
+      behaviors: [{ id: 'b1', description: 'renders', expected: 'form visible' }],
+    };
+
+    const id = sched.enqueue({
+      runId: 'run-1',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { intent: task.summary },
+      chain: ['capturePage'],
+      task,
+    });
+
+    const row = rawRow(id);
+    expect(row.task_json).not.toBeNull();
+    expect(JSON.parse(row.task_json as string)).toEqual(task);
+    expect(JSON.parse(row.deliverable_json)).toEqual({ intent: task.summary });
+  });
+
+  it('enqueue persists snapshot_sha when passed', () => {
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+
+    const id = sched.enqueue({
+      runId: 'run-1',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { intent: 'looks right' },
+      chain: ['capturePage'],
+      snapshotSha: 'abc123deadbeef',
+    });
+
+    expect(rawRow(id).snapshot_sha).toBe('abc123deadbeef');
+  });
+
+  it('enqueue treats an explicit snapshotSha: null the same as omitted (NULL)', () => {
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+
+    const id = sched.enqueue({
+      runId: 'run-1',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { intent: 'looks right' },
+      chain: ['capturePage'],
+      snapshotSha: null,
+    });
+
+    expect(rawRow(id).snapshot_sha).toBeNull();
+  });
+
+  it('enqueue TWICE with the same enqueueKey returns the SAME requestId and inserts only ONE row', () => {
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+
+    const first = sched.enqueue({
+      runId: 'run-1',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { intent: 'looks right' },
+      chain: ['capturePage'],
+      enqueueKey: 'run-1:TASK-008:1',
+    });
+    const second = sched.enqueue({
+      runId: 'run-1',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { intent: 'looks right (re-walked after a crash)' },
+      chain: ['capturePage'],
+      enqueueKey: 'run-1:TASK-008:1',
+    });
+
+    expect(second).toBe(first);
+    const count = db
+      .prepare('SELECT COUNT(*) AS n FROM verification_requests WHERE enqueue_key = ?')
+      .get('run-1:TASK-008:1') as { n: number };
+    expect(count.n).toBe(1);
+  });
+
+  it('enqueue with DIFFERENT enqueueKeys inserts TWO distinct rows', () => {
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+
+    const first = sched.enqueue({
+      runId: 'run-1',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { intent: 'looks right' },
+      chain: ['capturePage'],
+      enqueueKey: 'run-1:TASK-008:1',
+    });
+    const second = sched.enqueue({
+      runId: 'run-1',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { intent: 'looks right, attempt 2' },
+      chain: ['capturePage'],
+      enqueueKey: 'run-1:TASK-008:2',
+    });
+
+    expect(second).not.toBe(first);
+    const count = db.prepare('SELECT COUNT(*) AS n FROM verification_requests').get() as { n: number };
+    expect(count.n).toBe(2);
+  });
+
+  it('a CANCELED row sharing the key does NOT block a fresh enqueue (a re-attempt after cancel re-fires)', () => {
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+
+    const canceled = sched.enqueue({
+      runId: 'run-1',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { intent: 'looks right' },
+      chain: ['capturePage'],
+      enqueueKey: 'run-1:TASK-008:1',
+    });
+    // Mirror cancelForRun's sweep signature exactly (status='timeout' AND
+    // error_message='canceled') rather than calling cancelForRun itself, so this
+    // test stays scoped to the dedup lookup rather than the abort machinery.
+    db.prepare(
+      `UPDATE verification_requests SET status = 'timeout', error_message = 'canceled' WHERE id = ?`,
+    ).run(canceled);
+
+    const freshAttempt = sched.enqueue({
+      runId: 'run-1',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { intent: 'looks right, re-fired' },
+      chain: ['capturePage'],
+      enqueueKey: 'run-1:TASK-008:1',
+    });
+
+    expect(freshAttempt).not.toBe(canceled);
+    const count = db
+      .prepare('SELECT COUNT(*) AS n FROM verification_requests WHERE enqueue_key = ?')
+      .get('run-1:TASK-008:1') as { n: number };
+    expect(count.n).toBe(2);
+  });
+
+  it('enqueue WITHOUT an enqueueKey never dedups — two calls insert two rows', () => {
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+
+    const first = sched.enqueue({
+      runId: 'run-1',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { intent: 'looks right' },
+      chain: ['capturePage'],
+    });
+    const second = sched.enqueue({
+      runId: 'run-1',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { intent: 'looks right' },
+      chain: ['capturePage'],
+    });
+
+    expect(second).not.toBe(first);
+    const count = db.prepare('SELECT COUNT(*) AS n FROM verification_requests').get() as { n: number };
+    expect(count.n).toBe(2);
+  });
+});
 
 describe('VerificationScheduler — dev-server seam (S2)', () => {
   it('acquires the port lease BEFORE spawning, and spawns with that leased port', async () => {

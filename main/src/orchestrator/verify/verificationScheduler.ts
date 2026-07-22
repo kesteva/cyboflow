@@ -41,6 +41,7 @@ import type {
   ResolvedVisualVerifyConfig,
   VerificationBackendRegistry,
   VerificationRequestInput,
+  VerificationTaskV1,
   VerificationType,
   VerdictV1,
   VisualBackend,
@@ -843,6 +844,26 @@ export class VerificationScheduler {
    * Called by the mcp-request-verification handler (P6); the lane never blocks on
    * the outcome. The chain is stamped from chain_json (resolved live chain); the
    * scheduler picks the cheapest usable backend within it at drain time.
+   *
+   * DUAL-WRITE (redesign §5.2/§5.13, migration 078): `deliverable_json` is ALWAYS
+   * written from `req.input` exactly as before — every legacy reader (recovery
+   * sweep, Verify-Queue projection, runRecovery) keeps working unchanged. When
+   * `req.task` is supplied, `task_json` is ADDITIONALLY written (serialized
+   * verbatim); otherwise it is NULL. `req.snapshotSha`, when supplied, is written
+   * to `snapshot_sha`; otherwise NULL. This slice only OPENS these two channels —
+   * no caller in this slice populates `task`/`snapshotSha` yet (later slices own
+   * snapshot capture and the typed step-output enqueue path). `report_json` /
+   * `delivery_state` are NOT touched here — those are written by the terminal
+   * delivery path (§5.6, a later slice).
+   *
+   * IDEMPOTENT ENQUEUE (redesign §5.3): when `req.enqueueKey` is supplied, an
+   * existing NON-canceled row sharing that key is returned AS-IS (no new INSERT,
+   * no nudge) — a controller re-walking the chain after a crash or a merge-gate
+   * loopback must never double-enqueue for the same attempt. "Canceled" mirrors
+   * cancelForRun's sweep signature (`status='timeout' AND error_message='canceled'`)
+   * — a canceled row does NOT block a fresh enqueue, so a genuinely fresh attempt
+   * re-fires normally. `req.enqueueKey` absent ⇒ no dedup lookup, always inserts
+   * (byte-identical to the pre-dedup behavior).
    */
   enqueue(req: {
     runId: string;
@@ -850,13 +871,31 @@ export class VerificationScheduler {
     type: VerificationType;
     input: VerificationRequestInput;
     chain: VisualBackendId[];
+    /** The composed task (§5.1), when this request was enqueued via the dual-format contract. Absent ⇒ task_json stays NULL. */
+    task?: VerificationTaskV1;
+    /** The git sha the verification agent's snapshot worktree was built at (§5.5). Absent/null ⇒ snapshot_sha stays NULL. */
+    snapshotSha?: string | null;
+    /** Idempotency key (§5.3), caller-opaque — convention `${runId}:${taskRef}:${attempt}`. Absent ⇒ no dedup. */
+    enqueueKey?: string;
   }): string {
+    if (req.enqueueKey !== undefined) {
+      const existingId = this.findLiveRequestByEnqueueKey(req.enqueueKey);
+      if (existingId !== undefined) {
+        this.logger?.debug('[VerificationScheduler] idempotent enqueue — reusing existing request', {
+          requestId: existingId,
+          runId: req.runId,
+          enqueueKey: req.enqueueKey,
+        });
+        return existingId;
+      }
+    }
+
     const id = `vr_${randomUUID().replace(/-/g, '')}`;
     this.db
       .prepare(
         `INSERT INTO verification_requests
-           (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt)
-         VALUES (?, ?, ?, 'queued', ?, ?, ?, 0)`,
+           (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, task_json, snapshot_sha, enqueue_key)
+         VALUES (?, ?, ?, 'queued', ?, ?, ?, 0, ?, ?, ?)`,
       )
       .run(
         id,
@@ -865,15 +904,42 @@ export class VerificationScheduler {
         req.type,
         JSON.stringify(req.input),
         JSON.stringify(req.chain),
+        req.task !== undefined ? JSON.stringify(req.task) : null,
+        req.snapshotSha ?? null,
+        req.enqueueKey ?? null,
       );
     this.logger?.debug('[VerificationScheduler] enqueued request', {
       requestId: id,
       runId: req.runId,
       type: req.type,
       chain: req.chain,
+      hasTask: req.task !== undefined,
+      hasEnqueueKey: req.enqueueKey !== undefined,
     });
     this.nudge();
     return id;
+  }
+
+  /**
+   * Idempotent-enqueue lookup (§5.3): the newest row sharing `enqueueKey` whose
+   * status is NOT the cancelForRun sweep signature (`status='timeout' AND
+   * error_message='canceled'`). Any other status — including a genuine (non-
+   * cancel) 'timeout' or any terminal verdict — is a live dedup hit, since the
+   * caller's concern is "does a request for this exact attempt already exist
+   * anywhere in its lifecycle", not merely "is one still queued". A canceled row
+   * is deliberately excluded so a fresh attempt after cancellation re-fires.
+   */
+  private findLiveRequestByEnqueueKey(enqueueKey: string): string | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT id FROM verification_requests
+          WHERE enqueue_key = ?
+            AND NOT (status = 'timeout' AND error_message = 'canceled')
+          ORDER BY enqueued_at DESC
+          LIMIT 1`,
+      )
+      .get(enqueueKey) as { id: string } | undefined;
+    return row?.id;
   }
 
   // --------------------------------------------------------------------------
