@@ -177,7 +177,13 @@ import {
 } from './services/cyboflow/transitions';
 import { readWorkflowPromptForRow } from './orchestrator/workflowPromptReaderAdapter';
 import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
-import { recoverActiveStateOrphans, recoverArchivedSessionRunOrphans, backfillTerminalOutcomes, stampSessionRunsOutcome } from './orchestrator/runRecovery';
+import {
+  recoverActiveStateOrphans,
+  recoverArchivedSessionRunOrphans,
+  backfillArchivedSessionReviewItems,
+  backfillTerminalOutcomes,
+  stampSessionRunsOutcome,
+} from './orchestrator/runRecovery';
 import { setExperimentsDeps } from './orchestrator/trpc/routers/experiments';
 import { recoverExperiments, reconcileExperimentStatus, dismissAndSweepHalfCreatedExperiment, reconcileAllRotationExperiments } from './orchestrator/experimentStore';
 import { createQuickSessionCore } from './services/createQuickSessionCore';
@@ -2931,6 +2937,16 @@ app.whenReady().then(async () => {
     const archivedOrphanRecovery = recoverArchivedSessionRunOrphans(db);
     if (archivedOrphanRecovery.runsCanceled > 0) {
       console.log(`[Main] Canceled ${archivedOrphanRecovery.runsCanceled} run(s) orphaned by archived sessions (approvals canceled: ${archivedOrphanRecovery.approvalsCanceled})`);
+    }
+
+    // Boot backfill: older archived sessions may still own pending review items.
+    // Dismiss them through the ReviewItemRouter chokepoint (never raw SQL),
+    // fail-soft per row so one bad item cannot block startup.
+    const archivedReviewItemBackfill = await backfillArchivedSessionReviewItems(db, loggerLike);
+    if (archivedReviewItemBackfill.itemsDismissed > 0 || archivedReviewItemBackfill.itemsFailed > 0) {
+      console.log(
+        `[Main] Backfilled archived-session review items (dismissed: ${archivedReviewItemBackfill.itemsDismissed}, failed: ${archivedReviewItemBackfill.itemsFailed})`,
+      );
     }
 
     // Boot recovery: stamp outcome on failed/canceled runs that never got one

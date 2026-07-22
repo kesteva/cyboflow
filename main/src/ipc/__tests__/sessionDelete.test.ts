@@ -358,6 +358,20 @@ describe('sessions:delete — fail-soft close-out', () => {
     expect(stamp?.sql).toContain('outcome IS NULL');
     expect(stamp?.args).toEqual(['dismissed', 's1']);
   });
+
+  it('runs the archive-only pending review-item sweep after archiving the session', async () => {
+    const made = makeServices({ id: 's1', substrate: 'sdk', is_main_repo: true });
+    const handlers = register(made.services);
+
+    await invoke(handlers, 'sessions:delete', 's1');
+
+    const sweepSql = made.preparedSql.find(
+      (sql) => sql.includes('FROM review_items ri') && sql.includes("ri.status = 'pending'"),
+    );
+    expect(sweepSql).toBeDefined();
+    expect(sweepSql).toContain('r.session_id = ?');
+    expect(sweepSql).toContain('s.run_id = r.id');
+  });
 });
 
 describe('sessions:delete — branch close-out', () => {

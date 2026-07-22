@@ -16,8 +16,129 @@
  * clean state.
  */
 import { emitUsage } from './telemetrySink';
-import type { DatabaseLike } from './types';
+import { ReviewItemRouter } from './reviewItemRouter';
+import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
+
+interface PendingReviewItemRow {
+  id: string;
+  project_id: number;
+}
+
+export interface ReviewItemSweepResult {
+  itemsDismissed: number;
+  itemsFailed: number;
+}
+
+async function dismissPendingReviewItemRows(
+  rows: PendingReviewItemRow[],
+  actor: 'user' | 'orchestrator',
+  resolution: string,
+  logger?: Pick<LoggerLike, 'warn'>,
+): Promise<ReviewItemSweepResult> {
+  let itemsDismissed = 0;
+  let itemsFailed = 0;
+
+  for (const row of rows) {
+    try {
+      await ReviewItemRouter.getInstance().applyReviewItem(row.project_id, {
+        op: 'dismiss',
+        actor,
+        reviewItemId: row.id,
+        resolution,
+      });
+      itemsDismissed += 1;
+    } catch (err) {
+      itemsFailed += 1;
+      logger?.warn('[runRecovery] failed to dismiss archived-session review item', {
+        reviewItemId: row.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return { itemsDismissed, itemsFailed };
+}
+
+/**
+ * Dismiss every pending review item attached to any run hosted by one session.
+ *
+ * This is intentionally an archive-only sibling of
+ * DynamicWorkflowTracker.resolveReviewItemsForSession. Merge keeps its existing,
+ * dynamic-workflow-only resolve semantics; session dismiss owns this broader
+ * all-source/all-kind dismissal exactly once at the sessions:delete seam.
+ */
+export async function dismissPendingReviewItemsForSession(
+  db: DatabaseLike,
+  sessionId: string,
+  logger?: Pick<LoggerLike, 'warn'>,
+): Promise<ReviewItemSweepResult> {
+  let rows: PendingReviewItemRow[];
+  try {
+    rows = db
+      .prepare(
+        `SELECT DISTINCT ri.id, ri.project_id
+           FROM review_items ri
+           JOIN workflow_runs r ON r.id = ri.run_id
+          WHERE ri.status = 'pending'
+            AND (
+              r.session_id = ?
+              OR EXISTS (
+                SELECT 1 FROM sessions s
+                 WHERE s.id = ? AND s.run_id = r.id
+              )
+            )`,
+      )
+      .all(sessionId, sessionId) as PendingReviewItemRow[];
+  } catch (err) {
+    logger?.warn('[runRecovery] archived-session review-item sweep query failed', {
+      sessionId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { itemsDismissed: 0, itemsFailed: 0 };
+  }
+
+  return dismissPendingReviewItemRows(rows, 'user', 'session dismissed', logger);
+}
+
+/**
+ * Boot-time, idempotent backfill for stale pending review items whose owning
+ * session was already archived. Every row is dismissed independently through
+ * ReviewItemRouter so one malformed item cannot block the rest of boot.
+ */
+export async function backfillArchivedSessionReviewItems(
+  db: DatabaseLike,
+  logger?: Pick<LoggerLike, 'warn'>,
+): Promise<ReviewItemSweepResult> {
+  let rows: PendingReviewItemRow[];
+  try {
+    rows = db
+      .prepare(
+        `SELECT DISTINCT ri.id, ri.project_id
+           FROM review_items ri
+           JOIN workflow_runs r ON r.id = ri.run_id
+          WHERE ri.status = 'pending'
+            AND (
+              EXISTS (
+                SELECT 1 FROM sessions s
+                 WHERE s.id = r.session_id AND s.archived = 1
+              )
+              OR EXISTS (
+                SELECT 1 FROM sessions s2
+                 WHERE s2.run_id = r.id AND s2.archived = 1
+              )
+            )`,
+      )
+      .all() as PendingReviewItemRow[];
+  } catch (err) {
+    logger?.warn('[runRecovery] archived-session review-item backfill query failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { itemsDismissed: 0, itemsFailed: 0 };
+  }
+
+  return dismissPendingReviewItemRows(rows, 'orchestrator', 'archived session boot backfill', logger);
+}
 
 export interface RecoveryResult {
   runningRecovered: number;

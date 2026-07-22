@@ -2,7 +2,7 @@
  * Unit tests for DynamicWorkflowTracker — launch detection through a REAL
  * EventRouter, journal-tail state emissions, record/notification finalization,
  * review-item creation via ReviewItemRouter, the per-session cap, and the
- * merge/dismiss auto-resolve sweep.
+ * merge-only auto-resolve sweep.
  *
  * DB setup mirrors reviewItemRouter.test.ts (better-sqlite3 :memory: +
  * migrations via the shared dbAdapter fixture) plus a minimal sessions table
@@ -845,7 +845,7 @@ describe('DynamicWorkflowTracker', () => {
   });
 
   // -------------------------------------------------------------------------
-  // merge/dismiss auto-resolve sweep
+  // merge-only auto-resolve sweep
   // -------------------------------------------------------------------------
 
   it('resolveReviewItemsForSession resolves pending dynamic-workflow items for the session run', async () => {

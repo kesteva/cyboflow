@@ -21,14 +21,20 @@
  * All tests use in-memory better-sqlite3 + dbAdapter + real RunQueueRegistry —
  * no mocks, exercises real SQL and real registry semantics.
  */
-import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import Database from 'better-sqlite3';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
   recoverActiveStateOrphans,
   recoverArchivedSessionRunOrphans,
+  dismissPendingReviewItemsForSession,
+  backfillArchivedSessionReviewItems,
   backfillTerminalOutcomes,
   stampSessionRunsOutcome,
   stampSessionRunsPrOpen,
 } from '../runRecovery';
+import { ReviewItemRouter } from '../reviewItemRouter';
 import { RunQueueRegistry } from '../RunQueueRegistry';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun, seedApproval } from '../__test_fixtures__/orchestratorTestDb';
@@ -375,6 +381,147 @@ describe('recoverArchivedSessionRunOrphans', () => {
     expect(result.approvalsCanceled).toBe(1);
     const appr = db.prepare('SELECT status FROM approvals WHERE run_id = ?').get(runId) as { status: string };
     expect(appr.status).toBe('timed_out');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Archived-session review-item sweeps. These use the real ReviewItemRouter so
+// the tests prove every dismissal passes through the write chokepoint and emits
+// its entity_events audit row.
+// ---------------------------------------------------------------------------
+
+describe('archived-session review-item sweeps', () => {
+  function buildReviewSweepDb(): Database.Database {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    db.exec(`
+      CREATE TABLE projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        archived INTEGER NOT NULL DEFAULT 0,
+        run_id TEXT
+      );
+      INSERT INTO projects (id, name, path) VALUES (1, 'Proj', '/tmp/p1');
+    `);
+
+    const migrations = join(__dirname, '..', '..', 'database', 'migrations');
+    for (const file of [
+      '006_cyboflow_schema.sql',
+      '011_workflow_step_tracking.sql',
+      '014_native_tasks.sql',
+      '015_entity_model_rebuild.sql',
+      '016_review_items.sql',
+      '019_workflow_run_session_id.sql',
+      '034_findings_triage.sql',
+      '046_notification_kind.sql',
+    ]) {
+      db.exec(readFileSync(join(migrations, file), 'utf8'));
+    }
+
+    for (const runId of ['run-direct', 'run-legacy', 'run-active']) {
+      seedRun(db, {
+        id: runId,
+        workflowId: 'wf-review-sweep',
+        workflowName: 'sprint',
+        status: 'completed',
+      });
+    }
+    db.prepare(`INSERT INTO sessions (id, archived, run_id) VALUES ('sess-archived', 1, 'run-legacy')`).run();
+    db.prepare(`INSERT INTO sessions (id, archived, run_id) VALUES ('sess-active', 0, 'run-active')`).run();
+    db.prepare(`UPDATE workflow_runs SET session_id = 'sess-archived' WHERE id = 'run-direct'`).run();
+    db.prepare(`UPDATE workflow_runs SET session_id = 'sess-active' WHERE id = 'run-active'`).run();
+    return db;
+  }
+
+  async function createReviewItem(
+    router: ReviewItemRouter,
+    runId: string,
+    title: string,
+    source: string,
+    kind: 'finding' | 'permission' = 'finding',
+  ): Promise<string> {
+    const { reviewItemId } = await router.applyReviewItem(1, {
+      op: 'create',
+      actor: 'agent:test',
+      kind,
+      title,
+      runId,
+      source,
+    });
+    return reviewItemId;
+  }
+
+  afterEach(() => {
+    ReviewItemRouter._resetForTesting();
+    vi.restoreAllMocks();
+  });
+
+  it('dismisses every pending item for all runs at the archive-only session seam', async () => {
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    const router = ReviewItemRouter.initialize(adapter);
+    const directId = await createReviewItem(router, 'run-direct', 'Direct finding', 'visual-verify');
+    const legacyId = await createReviewItem(router, 'run-legacy', 'Legacy permission', 'approval', 'permission');
+    const activeId = await createReviewItem(router, 'run-active', 'Keep active', 'visual-verify');
+
+    const result = await dismissPendingReviewItemsForSession(adapter, 'sess-archived');
+
+    expect(result).toEqual({ itemsDismissed: 2, itemsFailed: 0 });
+    const statuses = db
+      .prepare('SELECT id, status, resolution FROM review_items ORDER BY id')
+      .all() as Array<{ id: string; status: string; resolution: string | null }>;
+    expect(statuses.find((row) => row.id === directId)).toMatchObject({
+      status: 'dismissed',
+      resolution: 'session dismissed',
+    });
+    expect(statuses.find((row) => row.id === legacyId)).toMatchObject({
+      status: 'dismissed',
+      resolution: 'session dismissed',
+    });
+    expect(statuses.find((row) => row.id === activeId)).toMatchObject({
+      status: 'pending',
+      resolution: null,
+    });
+    expect(
+      db.prepare("SELECT COUNT(*) AS count FROM entity_events WHERE kind = 'dismissed'").get() as { count: number },
+    ).toEqual({ count: 2 });
+  });
+
+  it('boot backfill only dismisses pending items for archived sessions and continues after one item fails', async () => {
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    const router = ReviewItemRouter.initialize(adapter);
+    const firstArchivedId = await createReviewItem(router, 'run-direct', 'First archived', 'source-a');
+    const secondArchivedId = await createReviewItem(router, 'run-legacy', 'Second archived', 'source-b');
+    const activeId = await createReviewItem(router, 'run-active', 'Still active', 'source-c');
+    const resolvedId = await createReviewItem(router, 'run-direct', 'Already resolved', 'source-d');
+    await router.applyReviewItem(1, {
+      op: 'resolve',
+      actor: 'user',
+      reviewItemId: resolvedId,
+    });
+
+    const originalApply = router.applyReviewItem.bind(router);
+    vi.spyOn(router, 'applyReviewItem')
+      .mockRejectedValueOnce(new Error('synthetic row failure'))
+      .mockImplementation((projectId, change) => originalApply(projectId, change));
+
+    const result = await backfillArchivedSessionReviewItems(adapter);
+
+    expect(result).toEqual({ itemsDismissed: 1, itemsFailed: 1 });
+    const archivedStatuses = db
+      .prepare('SELECT id, status FROM review_items WHERE id IN (?, ?) ORDER BY id')
+      .all(firstArchivedId, secondArchivedId) as Array<{ id: string; status: string }>;
+    expect(archivedStatuses.filter((row) => row.status === 'dismissed')).toHaveLength(1);
+    expect(archivedStatuses.filter((row) => row.status === 'pending')).toHaveLength(1);
+    expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get(activeId) as { status: string }).status).toBe('pending');
+    expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get(resolvedId) as { status: string }).status).toBe('resolved');
   });
 });
 

@@ -30,7 +30,7 @@ import { transitionToRunning } from '../services/cyboflow/transitions';
 import { assertTransitionAllowed } from '../services/cyboflow/stateMachine';
 import { createQuickSessionCore } from '../services/createQuickSessionCore';
 import { isPermissionMode, type PermissionMode } from '../../../shared/types/workflows';
-import { stampSessionRunsOutcome } from '../orchestrator/runRecovery';
+import { dismissPendingReviewItemsForSession, stampSessionRunsOutcome } from '../orchestrator/runRecovery';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
 import { selectSessionRunTokenTotals } from '../orchestrator/insightsQueries';
 import { isCliSubstrate } from '../../../shared/types/substrate';
@@ -1149,14 +1149,20 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       }
       trackUsage('session_resolved', { action: 'dismiss' });
 
-      // Auto-resolve any open dynamic-workflow review items for this session —
-      // dismissing the session IS the human's close-out action. Fire-and-forget:
-      // a resolve failure must never fail the dismiss itself.
-      void DynamicWorkflowTracker.tryGetInstance()
-        ?.resolveReviewItemsForSession(sessionId, 'user')
-        .catch((err: unknown) => {
-          console.warn(`[IPC:session] Failed to auto-resolve dynamic-workflow review items for session ${sessionId}:`, err);
-        });
+      // Archive semantics intentionally differ from merge: dismiss ALL pending
+      // review items across every run hosted by this session, while git merge
+      // keeps the narrower dynamic-workflow-only resolve sweep. The helper is
+      // fail-soft per row, and this is the sole owner of archive close-out.
+      const reviewItemSweep = await dismissPendingReviewItemsForSession(
+        makeDatabaseLike(databaseService),
+        sessionId,
+        {
+          warn: (message, context) => console.warn(`[IPC:session] ${message}`, context),
+        },
+      );
+      if (reviewItemSweep.itemsDismissed > 0) {
+        console.log(`[IPC:session] Dismissed ${reviewItemSweep.itemsDismissed} pending review item(s) for session ${sessionId}`);
+      }
 
       // Add the archive message to session output
       sessionManager.addSessionOutput(sessionId, {

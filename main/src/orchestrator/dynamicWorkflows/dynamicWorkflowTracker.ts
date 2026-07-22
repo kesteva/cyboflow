@@ -12,7 +12,8 @@
  *
  * Finalization creates a non-blocking `notification` review item via the
  * ReviewItemRouter chokepoint (source = DYNAMIC_WORKFLOW_REVIEW_SOURCE);
- * `resolveReviewItemsForSession` is the merge/dismiss auto-resolve sweep.
+ * `resolveReviewItemsForSession` is the merge-only auto-resolve sweep. Session
+ * dismiss uses the broader archive-only sibling in runRecovery.ts.
  *
  * Singleton lifecycle mirrors ReviewItemRouter (initialize/getInstance/
  * _resetForTesting) plus `tryGetInstance` — managers that may run before
@@ -747,13 +748,14 @@ export class DynamicWorkflowTracker {
   }
 
   // --------------------------------------------------------------------------
-  // Merge/dismiss auto-resolve sweep
+  // Merge-only auto-resolve sweep
   // --------------------------------------------------------------------------
 
   /**
    * Resolve every PENDING dynamic-workflow review item attached to the
-   * session's run (sessions.run_id). Called from the session merge/dismiss
-   * close-out. Fail-soft per item; returns the resolved count.
+   * session's run (sessions.run_id). Called from the session merge close-out.
+   * Archive/dismiss intentionally uses a separate all-source dismissal sweep.
+   * Fail-soft per item; returns the resolved count.
    */
   async resolveReviewItemsForSession(sessionId: string, actor: 'user'): Promise<number> {
     let rows: Array<{ id: string; project_id: number }>;
