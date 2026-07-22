@@ -19,6 +19,7 @@ import { IdeaAttachmentStrip } from '../cyboflow/IdeaAttachmentStrip';
 import { useIdeaAttachments } from '../../hooks/useIdeaAttachments';
 import { trpc } from '../../trpc/client';
 import { useBacklogStore } from '../../stores/backlogStore';
+import { CATEGORY_LABEL } from './markers';
 import type { EntityCategory, IdeaAttachment, IdeaScope, Priority, TaskType } from '../../../../shared/types/tasks';
 
 /** Empty seed for the attachment hook (stable reference). */
@@ -220,7 +221,7 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
             >
               {CATEGORIES.map((c) => (
                 <option key={c} value={c}>
-                  {c.charAt(0).toUpperCase() + c.slice(1)}
+                  {CATEGORY_LABEL[c]}
                 </option>
               ))}
             </select>

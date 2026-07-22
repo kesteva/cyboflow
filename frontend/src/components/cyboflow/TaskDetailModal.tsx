@@ -33,6 +33,7 @@ import { useEffect, useState, type ReactElement } from 'react';
 import { Modal } from '../ui/Modal';
 import { MarkdownPreview } from '../MarkdownPreview';
 import { trpc } from '../../trpc/client';
+import { CATEGORY_LABEL } from '../Backlog/markers';
 import type { BacklogTaskItem, EntityCategory } from '../../../../shared/types/tasks';
 
 const CATEGORIES: EntityCategory[] = ['feature', 'bug', 'chore'];
@@ -155,7 +156,7 @@ export function TaskDetailModal({ task, onClose }: TaskDetailModalProps): ReactE
             >
               {CATEGORIES.map((c) => (
                 <option key={c} value={c}>
-                  {c.charAt(0).toUpperCase() + c.slice(1)}
+                  {CATEGORY_LABEL[c]}
                 </option>
               ))}
             </select>
