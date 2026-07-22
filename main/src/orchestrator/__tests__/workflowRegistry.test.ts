@@ -2505,6 +2505,14 @@ describe('WorkflowRegistry', () => {
       });
       const { runId } = registry.createRun(row.id, undefined, TEST_SESSION_ID);
 
+      // createRun snapshots a workflow_revisions row (spec-capture) — confirm
+      // it exists before archiving so the post-archive assertion below proves
+      // the revision genuinely SURVIVES rather than never having existed.
+      const revisionsBefore = db
+        .prepare('SELECT COUNT(*) AS count FROM workflow_revisions WHERE workflow_id = ?')
+        .get(row.id) as { count: number };
+      expect(revisionsBefore.count).toBeGreaterThan(0);
+
       expect(() => registry.archiveWorkflow(row.id)).not.toThrow();
 
       const archived = registry.getById(row.id);
@@ -2514,6 +2522,13 @@ describe('WorkflowRegistry', () => {
       // The run row survives untouched.
       const runRow = db.prepare('SELECT id FROM workflow_runs WHERE id = ?').get(runId);
       expect(runRow).toBeDefined();
+
+      // The workflow_revisions snapshot(s) also survive — archive is a single
+      // UPDATE with no cascade to run/revision history.
+      const revisionsAfter = db
+        .prepare('SELECT COUNT(*) AS count FROM workflow_revisions WHERE workflow_id = ?')
+        .get(row.id) as { count: number };
+      expect(revisionsAfter.count).toBe(revisionsBefore.count);
     });
 
     it('unarchiveWorkflow clears archived_at back to NULL', () => {
