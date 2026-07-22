@@ -225,6 +225,47 @@ describe('workflowsStore — global-workflow dedup', () => {
 });
 
 // ---------------------------------------------------------------------------
+// showArchived → includeArchived threading (TASK-091)
+// ---------------------------------------------------------------------------
+
+describe('workflowsStore — showArchived → includeArchived threading', () => {
+  it('defaults showArchived to false and queries with includeArchived: false', async () => {
+    mockWorkflowsListQuery = vi.fn().mockResolvedValue([]);
+
+    const { useWorkflowsStore } = await loadStore();
+    expect(useWorkflowsStore.getState().showArchived).toBe(false);
+    await useWorkflowsStore.getState().init();
+
+    expect(mockWorkflowsListQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ includeArchived: false }),
+    );
+  });
+
+  it('toggleShowArchived flips the flag and re-fetches with includeArchived: true', async () => {
+    mockWorkflowsListQuery = vi.fn().mockResolvedValue([]);
+
+    const { useWorkflowsStore } = await loadStore();
+    await useWorkflowsStore.getState().init();
+    mockWorkflowsListQuery.mockClear();
+
+    await useWorkflowsStore.getState().toggleShowArchived();
+
+    expect(useWorkflowsStore.getState().showArchived).toBe(true);
+    expect(mockWorkflowsListQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ includeArchived: true }),
+    );
+
+    // Toggling again flips back to false and re-fetches accordingly.
+    mockWorkflowsListQuery.mockClear();
+    await useWorkflowsStore.getState().toggleShowArchived();
+    expect(useWorkflowsStore.getState().showArchived).toBe(false);
+    expect(mockWorkflowsListQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ includeArchived: false }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Machine-global MCP + plugin catalogues (fetched ONCE, not per project)
 // ---------------------------------------------------------------------------
 

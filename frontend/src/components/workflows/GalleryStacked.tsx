@@ -51,6 +51,8 @@ export interface GalleryStackedProps {
   onEditWorkflow?: (entry: WorkflowGalleryEntry) => void;
   onDuplicateWorkflow?: (entry: WorkflowGalleryEntry) => void;
   onDeleteWorkflow?: (entry: WorkflowGalleryEntry) => void;
+  onArchiveWorkflow?: (entry: WorkflowGalleryEntry) => void;
+  onUnarchiveWorkflow?: (entry: WorkflowGalleryEntry) => void;
   onAbTestWorkflow?: (entry: WorkflowGalleryEntry) => void;
   onNewWorkflow?: () => void;
   onEditAgent?: (entry: AgentGalleryEntry) => void;
@@ -69,6 +71,8 @@ export function GalleryStacked({
   onEditWorkflow,
   onDuplicateWorkflow,
   onDeleteWorkflow,
+  onArchiveWorkflow,
+  onUnarchiveWorkflow,
   onAbTestWorkflow,
   onNewWorkflow,
   onEditAgent,
@@ -93,6 +97,8 @@ export function GalleryStacked({
             onEdit={onEditWorkflow}
             onDuplicate={onDuplicateWorkflow}
             onDelete={onDeleteWorkflow}
+            onArchive={onArchiveWorkflow}
+            onUnarchive={onUnarchiveWorkflow}
             onAbTest={onAbTestWorkflow}
           />
         ))}

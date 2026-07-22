@@ -258,7 +258,9 @@ export const useActiveRunsStore = create<ActiveRunsState>((set, get) => {
       try {
         const [runs, workflows] = await Promise.all([
           trpc.cyboflow.runs.list.query({ projectId }),
-          trpc.cyboflow.workflows.list.query({ projectId }),
+          // A currently-running flow can be archived mid-run — the rail must not
+          // lose it from its workflow-name lookup just because it got archived.
+          trpc.cyboflow.workflows.list.query({ projectId, includeArchived: true }),
         ]);
         // Pin the currently-selected run so it stays reachable even when
         // terminal (read non-reactively — refresh already re-runs on

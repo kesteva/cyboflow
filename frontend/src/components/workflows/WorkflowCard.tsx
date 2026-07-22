@@ -45,11 +45,25 @@ export interface WorkflowCardProps {
    */
   onAbTest?: (entry: WorkflowGalleryEntry) => void;
   /**
-   * Delete this workflow. Only invoked for a DELETABLE card (see `deletable`
-   * below) — a global built-in and the __quick__ sentinel never offer Delete,
-   * mirroring the registry's `deleteWorkflow` guard. Omitting it hides the button.
+   * Delete this workflow. Only invoked for a DELETABLE, non-archived card that
+   * has NEVER been run (see `deletable` below) — a global built-in, the
+   * __quick__ sentinel, and any archived row never offer Delete; nor does a
+   * deletable row with run history (Archive is the general-purpose escape
+   * hatch for those). Mirrors the registry's `deleteWorkflow` guard. Omitting
+   * it hides the button.
    */
   onDelete?: (entry: WorkflowGalleryEntry) => void;
+  /**
+   * Archive this workflow (migration 078 soft-archive). Offered for every
+   * DELETABLE, non-archived card regardless of run history — the reversible
+   * general-purpose removal path. Omitting it hides the button.
+   */
+  onArchive?: (entry: WorkflowGalleryEntry) => void;
+  /**
+   * Unarchive this workflow. Offered for every DELETABLE, ARCHIVED card.
+   * Omitting it hides the button.
+   */
+  onUnarchive?: (entry: WorkflowGalleryEntry) => void;
 }
 
 /** Small uppercase footer button — the design's `.GB-mini`. */
@@ -89,17 +103,21 @@ export function WorkflowCard({
   onEdit,
   onDuplicate,
   onDelete,
+  onArchive,
+  onUnarchive,
   onAbTest,
 }: WorkflowCardProps): React.JSX.Element {
   const { row, definition, meta, lastUsedAt, projectName } = entry;
   const used =
     lastUsedAt !== null ? `used ${formatDistanceToNow(lastUsedAt)}` : 'never run';
 
-  // Delete is offered for everything EXCEPT a GLOBAL built-in (project_id null AND
-  // a cyboflow built-in name) and the __quick__ sentinel — both re-seed, so the
-  // server refuses to delete them. Mirrors the registry's deleteWorkflow guard.
+  // Delete/Archive/Unarchive are offered for everything EXCEPT a GLOBAL built-in
+  // (project_id null AND a cyboflow built-in name) and the __quick__ sentinel —
+  // both re-seed, so the server refuses to delete/archive them. Mirrors the
+  // registry's deleteWorkflow/archiveWorkflow guards.
   const deletable =
     !(row.project_id === null && isCyboflowWorkflowName(row.name)) && row.name !== '__quick__';
+  const isArchived = row.archived_at !== null;
 
   return (
     <div
@@ -170,7 +188,21 @@ export function WorkflowCard({
             testId={`workflow-card-duplicate-${row.id}`}
             onClick={onDuplicate !== undefined ? () => onDuplicate(entry) : undefined}
           />
-          {deletable && onDelete !== undefined && (
+          {deletable && !isArchived && onArchive !== undefined && (
+            <MiniButton
+              label="Archive"
+              testId={`workflow-card-archive-${row.id}`}
+              onClick={() => onArchive(entry)}
+            />
+          )}
+          {deletable && isArchived && onUnarchive !== undefined && (
+            <MiniButton
+              label="Unarchive"
+              testId={`workflow-card-unarchive-${row.id}`}
+              onClick={() => onUnarchive(entry)}
+            />
+          )}
+          {deletable && !isArchived && lastUsedAt === null && onDelete !== undefined && (
             <MiniButton
               label="Delete"
               danger

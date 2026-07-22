@@ -109,6 +109,7 @@ export function WorkflowsView(): React.JSX.Element {
   const loading = useWorkflowsStore((s) => s.loading);
   const error = useWorkflowsStore((s) => s.error);
   const projectFilter = useWorkflowsStore((s) => s.projectFilter);
+  const showArchived = useWorkflowsStore((s) => s.showArchived);
   const workflows = useWorkflowsStore((s) => s.workflows);
   const agents = useWorkflowsStore((s) => s.agents);
   const mcps = useWorkflowsStore((s) => s.mcps);
@@ -199,6 +200,12 @@ export function WorkflowsView(): React.JSX.Element {
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const deleteInFlightRef = useRef(false);
+
+  // ── Archive / Unarchive workflow (migration 078 soft-archive) ──────────────
+  // Reversible + non-destructive, so both fire directly with no confirm dialog
+  // (unlike Delete). Synchronous in-flight latches mirror duplicateInFlightRef.
+  const archiveInFlightRef = useRef(false);
+  const unarchiveInFlightRef = useRef(false);
 
   // ── A/B test launcher (Slice B thin launch UI) ──────────────────────────────
   // The card's target workflow + the resolved launch project (mirrors
@@ -343,6 +350,38 @@ export function WorkflowsView(): React.JSX.Element {
     })();
   };
 
+  // Archive a card directly (no confirm dialog — reversible + non-destructive).
+  const onArchiveWorkflow = (entry: WorkflowGalleryEntry): void => {
+    if (archiveInFlightRef.current) return;
+    archiveInFlightRef.current = true;
+    void (async () => {
+      try {
+        await trpc.cyboflow.workflows.archive.mutate({ workflowId: entry.row.id });
+        await useWorkflowsStore.getState().refresh();
+      } catch (err: unknown) {
+        console.warn('[WorkflowsView] Archive workflow failed', err);
+      } finally {
+        archiveInFlightRef.current = false;
+      }
+    })();
+  };
+
+  // Unarchive a card directly (plain mutate + refresh, no confirm dialog).
+  const onUnarchiveWorkflow = (entry: WorkflowGalleryEntry): void => {
+    if (unarchiveInFlightRef.current) return;
+    unarchiveInFlightRef.current = true;
+    void (async () => {
+      try {
+        await trpc.cyboflow.workflows.unarchive.mutate({ workflowId: entry.row.id });
+        await useWorkflowsStore.getState().refresh();
+      } catch (err: unknown) {
+        console.warn('[WorkflowsView] Unarchive workflow failed', err);
+      } finally {
+        unarchiveInFlightRef.current = false;
+      }
+    })();
+  };
+
   // Open the A/B test launcher for a card. The launch project mirrors
   // onEditWorkflow's fallback for a GLOBAL flow (project_id null, migration
   // 030): the card's own project, else the resolved target project. With no
@@ -404,7 +443,16 @@ export function WorkflowsView(): React.JSX.Element {
               Workflows
             </h2>
           </div>
-          <div className="flex-shrink-0 pt-1 font-mono">
+          <div className="flex flex-shrink-0 items-center gap-4 pt-1 font-mono">
+            <label className="flex items-center gap-1.5 text-xs text-text-secondary">
+              <input
+                type="checkbox"
+                data-testid="workflows-show-archived-toggle"
+                checked={showArchived}
+                onChange={() => void useWorkflowsStore.getState().toggleShowArchived()}
+              />
+              Show archived
+            </label>
             <WorkflowsProjectFilter />
           </div>
         </div>
@@ -447,6 +495,8 @@ export function WorkflowsView(): React.JSX.Element {
             onEditWorkflow={onEditWorkflow}
             onDuplicateWorkflow={onDuplicateWorkflow}
             onDeleteWorkflow={onDeleteWorkflow}
+            onArchiveWorkflow={onArchiveWorkflow}
+            onUnarchiveWorkflow={onUnarchiveWorkflow}
             onAbTestWorkflow={onAbTestWorkflow}
             onNewWorkflow={onNewWorkflow}
             onEditAgent={onEditAgent}
@@ -526,8 +576,12 @@ export function WorkflowsView(): React.JSX.Element {
             <ModalHeader title="Delete workflow" />
             <ModalBody>
               <p className="text-sm leading-relaxed text-text-secondary">
-                Delete <b className="text-text-primary">{deleteTarget.row.name}</b>? This
-                can&rsquo;t be undone. A workflow with run history can&rsquo;t be deleted.
+                Permanently delete{' '}
+                <b className="text-text-primary">{deleteTarget.row.name}</b>? This
+                can&rsquo;t be undone. Delete is only offered for a flow that has
+                never been run; if you just want it out of the gallery,{' '}
+                <b className="text-text-primary">Archive</b> is the reversible
+                option.
               </p>
               {deleteError !== null && (
                 <p

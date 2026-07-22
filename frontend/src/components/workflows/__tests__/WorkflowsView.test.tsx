@@ -37,6 +37,7 @@ let mockInitialized = true;
 let mockLoading = false;
 let mockError: string | null = null;
 let mockProjectFilter: number | null = null;
+let mockShowArchived = false;
 let mockWorkflows: WorkflowGalleryEntry[] = [];
 let mockAgents: AgentGalleryEntry[] = [];
 let mockMcps: McpEntry[] = [];
@@ -45,6 +46,7 @@ let mockPlugins: PluginEntry[] = [];
 const mockInit = vi.fn(async () => {});
 const mockRefresh = vi.fn(async () => {});
 const mockSetProjectFilter = vi.fn(async () => {});
+const mockToggleShowArchived = vi.fn(async () => {});
 
 function snapshot() {
   return {
@@ -52,6 +54,7 @@ function snapshot() {
     loading: mockLoading,
     error: mockError,
     projectFilter: mockProjectFilter,
+    showArchived: mockShowArchived,
     workflows: mockWorkflows,
     agents: mockAgents,
     mcps: mockMcps,
@@ -59,6 +62,7 @@ function snapshot() {
     init: mockInit,
     refresh: mockRefresh,
     setProjectFilter: mockSetProjectFilter,
+    toggleShowArchived: mockToggleShowArchived,
   };
 }
 
@@ -105,12 +109,16 @@ vi.mock('../../../stores/navigationStore', () => ({
 
 const mockCreateCustom = vi.fn(async (_args: unknown) => ({ id: 'wf-copy' }));
 const mockDelete = vi.fn(async (_args: unknown) => ({ ok: true as const }));
+const mockArchive = vi.fn(async (_args: unknown) => ({ ok: true as const }));
+const mockUnarchive = vi.fn(async (_args: unknown) => ({ ok: true as const }));
 vi.mock('../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
       workflows: {
         createCustom: { mutate: (args: unknown) => mockCreateCustom(args) },
         delete: { mutate: (args: unknown) => mockDelete(args) },
+        archive: { mutate: (args: unknown) => mockArchive(args) },
+        unarchive: { mutate: (args: unknown) => mockUnarchive(args) },
       },
     },
   },
@@ -230,6 +238,7 @@ beforeEach(() => {
   mockLoading = false;
   mockError = null;
   mockProjectFilter = null;
+  mockShowArchived = false;
   mockWorkflows = [buildWorkflowEntry()];
   mockAgents = [buildAgentEntry()];
   mockMcps = [];
@@ -465,5 +474,42 @@ describe('WorkflowsView delete-workflow wiring', () => {
     fireEvent.click(screen.getByTestId('workflow-delete-cancel'));
     expect(screen.queryByTestId('workflow-delete-dialog')).not.toBeInTheDocument();
     expect(mockDelete).not.toHaveBeenCalled();
+  });
+});
+
+describe('WorkflowsView archive/unarchive wiring', () => {
+  it('Archive fires directly (no dialog) and calls workflows.archive then refreshes', async () => {
+    render(<WorkflowsView />);
+    await waitFor(() => expect(screen.getByTestId('gallery-stacked')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('workflow-card-archive-wf-planner'));
+    await waitFor(() => expect(mockArchive).toHaveBeenCalledWith({ workflowId: 'wf-planner' }));
+    await waitFor(() => expect(mockRefresh).toHaveBeenCalled());
+    // No confirm dialog was ever shown for Archive.
+    expect(screen.queryByTestId('workflow-delete-dialog')).not.toBeInTheDocument();
+  });
+
+  it('Unarchive fires directly and calls workflows.unarchive then refreshes', async () => {
+    mockWorkflows = [
+      buildWorkflowEntry({
+        row: { ...buildWorkflowEntry().row, archived_at: '2026-06-12T00:00:00.000Z' },
+      }),
+    ];
+    render(<WorkflowsView />);
+    await waitFor(() => expect(screen.getByTestId('gallery-stacked')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('workflow-card-unarchive-wf-planner'));
+    await waitFor(() => expect(mockUnarchive).toHaveBeenCalledWith({ workflowId: 'wf-planner' }));
+    await waitFor(() => expect(mockRefresh).toHaveBeenCalled());
+  });
+
+  it('the "Show archived" toggle reflects showArchived and calls toggleShowArchived on click', async () => {
+    render(<WorkflowsView />);
+    await waitFor(() => expect(screen.getByTestId('gallery-stacked')).toBeInTheDocument());
+
+    const toggle = screen.getByTestId('workflows-show-archived-toggle');
+    expect(toggle).not.toBeChecked();
+    fireEvent.click(toggle);
+    expect(mockToggleShowArchived).toHaveBeenCalledTimes(1);
   });
 });

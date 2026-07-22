@@ -154,6 +154,8 @@ export interface WorkflowsState {
   error: string | null;
   /** Active project filter; null = ALL projects (the default). In-memory only. */
   projectFilter: number | null;
+  /** Whether archived workflows are included in the gallery. In-memory only. */
+  showArchived: boolean;
 
   /** Workflow cards across the resolved project set. */
   workflows: WorkflowGalleryEntry[];
@@ -177,6 +179,8 @@ export interface WorkflowsState {
   refresh: () => Promise<void>;
   /** Set the project filter (null = ALL projects) and refresh. */
   setProjectFilter: (projectId: number | null) => Promise<void>;
+  /** Toggle whether archived workflows are included, then refresh. */
+  toggleShowArchived: () => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -300,7 +304,13 @@ export const useWorkflowsStore = create<WorkflowsState>((set, get) => {
             }
           };
           const [rows, agentEntries, runs] = await Promise.all([
-            safe('workflows.list', trpc.cyboflow.workflows.list.query({ projectId })),
+            safe(
+              'workflows.list',
+              trpc.cyboflow.workflows.list.query({
+                projectId,
+                includeArchived: get().showArchived,
+              }),
+            ),
             safe('agents.list', trpc.cyboflow.agents.list.query({ projectId })),
             safe('runs.list', trpc.cyboflow.runs.list.query({ projectId })),
           ]);
@@ -389,6 +399,7 @@ export const useWorkflowsStore = create<WorkflowsState>((set, get) => {
     loading: false,
     error: null,
     projectFilter: null,
+    showArchived: false,
     workflows: [],
     agents: [],
     mcps: [],
@@ -420,6 +431,11 @@ export const useWorkflowsStore = create<WorkflowsState>((set, get) => {
 
     setProjectFilter: async (projectId) => {
       set({ projectFilter: projectId });
+      await runFetch();
+    },
+
+    toggleShowArchived: async () => {
+      set((s) => ({ showArchived: !s.showArchived }));
       await runFetch();
     },
   };
