@@ -31,7 +31,11 @@ import {
   makeFenceState,
   replaceArchDesignSection,
 } from '../../../../shared/types/artifacts';
-import { hashDocumentText, type FeedbackAtype } from '../../../../shared/types/feedback';
+import {
+  FEEDBACK_PARKED_RUN_STATUSES,
+  hashDocumentText,
+  type FeedbackAtype,
+} from '../../../../shared/types/feedback';
 
 // ---------------------------------------------------------------------------
 // Injected collaborator interfaces (narrow slices, injected at the wiring seam)
@@ -474,7 +478,8 @@ function validateArchSection(doc: string): { ok: true; section: string } | { ok:
 /**
  * Pre-write gate revalidation (Fix 1 companion). Returns ok:false with a concise
  * human-readable reason when the review gate is no longer live for this batch —
- * the run left awaiting_review, the SPECIFIC gate(s) the batch was sent under all
+ * the run left its parked status (FEEDBACK_PARKED_RUN_STATUSES — awaiting_review
+ * or awaiting_input), the SPECIFIC gate(s) the batch was sent under all
  * resolved (a different later gate does NOT count: the document already had its
  * chance to influence the original decision), the idea was decomposed, or the
  * batch itself is no longer pending.
@@ -489,7 +494,7 @@ function revalidateGateStillOpen(
   const run = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as
     | { status: string }
     | undefined;
-  if (!run || run.status !== 'awaiting_review') {
+  if (!run || !FEEDBACK_PARKED_RUN_STATUSES.includes(run.status)) {
     return { ok: false, reason: 'the review gate resolved before the revision landed — feedback was not applied' };
   }
 

@@ -23,6 +23,20 @@ export function isFeedbackAtype(value: unknown): value is FeedbackAtype {
 }
 
 /**
+ * Run statuses that count as "parked at a human gate" for feedback purposes.
+ * Human gates park runs under TWO statuses depending on the gate surface:
+ * `awaiting_review` (HumanStepManager human steps, blocking findings) and
+ * `awaiting_input` (QuestionRouter inline AskUserQuestion gates — e.g. the
+ * single-idea `approve-idea` stub gate). Both co-write a pending blocking
+ * `decision` review item, which is the actual gate binding; the status check is
+ * only the cheap first-line guard, so it must accept both.
+ */
+export const FEEDBACK_PARKED_RUN_STATUSES: readonly string[] = [
+  'awaiting_review',
+  'awaiting_input',
+];
+
+/**
  * Anchors a comment to a span of the RENDERED document text.
  *
  * The documents live on `ideas.body` (a moving target — revisions rewrite it),

@@ -44,6 +44,8 @@ function buildDb(): Database.Database {
   db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
   for (const f of [
     '006_cyboflow_schema.sql',
+    '007_add_stuck_reason.sql', // stuck columns 010's table rebuild copies
+    '010_questions.sql', // widens the run-status CHECK to include 'awaiting_input'
     '011_workflow_step_tracking.sql',
     '014_native_tasks.sql',
     '015_entity_model_rebuild.sql',
@@ -58,14 +60,14 @@ function buildDb(): Database.Database {
   return db;
 }
 
-function seedRun(db: Database.Database, runId: string): void {
+function seedRun(db: Database.Database, runId: string, status = 'awaiting_review'): void {
   db.prepare(
     `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf', 1, 'planner', '{}')`,
   ).run();
   db.prepare(
     `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
-     VALUES (?, 'wf', 1, 'awaiting_review', 'default')`,
-  ).run(runId);
+     VALUES (?, 'wf', 1, ?, 'default')`,
+  ).run(runId, status);
   // A pending blocking decision gate — the pre-write revalidation requires it to
   // still be open when the revision lands.
   db.prepare(
@@ -139,6 +141,28 @@ describe('runRevisionBatch', () => {
       fields: { body: '# Idea\n\nRevised spec.\n' },
     });
 
+    const batch = db.prepare('SELECT status FROM feedback_batches WHERE id = ?').get(batchId) as { status: string };
+    expect(batch.status).toBe('applied');
+  });
+
+  // Inline AskUserQuestion gates (QuestionRouter — the single-idea approve-idea
+  // stub gate) park the run at 'awaiting_input'; the pre-write revalidation must
+  // treat it as parked exactly like 'awaiting_review'.
+  it('applies when the run is parked at awaiting_input (inline question gate)', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1', 'awaiting_input');
+    seedIdea(db, 'ide_1', '# Idea\n\nOriginal spec.\n');
+    const router = FeedbackRouter.initialize(dbAdapter(db));
+    const batchId = await seedSentBatch(router, 'run-1', 'idea-spec', 'ide_1');
+
+    const applyTaskChange = vi.fn(async (_p: number, _c: RevisionTaskChange) => ({ taskId: 'ide_1' }));
+
+    await runRevisionBatch(
+      { projectId: 1, runId: 'run-1', batchId, gateReviewItemIds: ['rvw_run-1'], atype: 'idea-spec', sourceRef: 'ide_1' },
+      { db: dbAdapter(db), queryFn: fakeQuery('# Idea\n\nRevised spec.\n'), feedbackRouter: router, applyTaskChange },
+    );
+
+    expect(applyTaskChange).toHaveBeenCalledTimes(1);
     const batch = db.prepare('SELECT status FROM feedback_batches WHERE id = ?').get(batchId) as { status: string };
     expect(batch.status).toBe('applied');
   });

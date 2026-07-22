@@ -3,8 +3,9 @@
  * cyboflow.feedback.sendBatch mutation (IDEA-033).
  *
  * "Send feedback" is only honoured while the document can still influence the
- * pending decision: the run must be parked in awaiting_review at a blocking
- * decision gate, and the owning idea must not yet be decomposed (approve-plan
+ * pending decision: the run must be parked at a blocking decision gate
+ * (awaiting_review or awaiting_input — see FEEDBACK_PARKED_RUN_STATUSES),
+ * and the owning idea must not yet be decomposed (approve-plan
  * passed). When the guard chain clears, it mints a batch via the FeedbackRouter
  * chokepoint and FIRES a host-driven revision (runRevisionBatch, injected as
  * `launchRevision`) DETACHED — the mutation returns immediately with the batch id
@@ -17,10 +18,11 @@
  * without the tRPC context/router.
  */
 import type { DatabaseLike, LoggerLike } from './types';
-import type {
-  FeedbackAtype,
-  SendFeedbackNoOpReason,
-  SendFeedbackResult,
+import {
+  FEEDBACK_PARKED_RUN_STATUSES,
+  type FeedbackAtype,
+  type SendFeedbackNoOpReason,
+  type SendFeedbackResult,
 } from '../../../shared/types/feedback';
 
 // ---------------------------------------------------------------------------
@@ -140,7 +142,7 @@ function feedbackErrorReason(err: unknown): SendFeedbackNoOpReason | null {
  *
  * Guard chain (against the injected db):
  *   1. run row missing                                  → { noOp: 'not_found' }
- *   2. status !== awaiting_review                       → { noOp: 'not_parked' }
+ *   2. status not in FEEDBACK_PARKED_RUN_STATUSES       → { noOp: 'not_parked' }
  *   3. no pending blocking decision gate for the run    → { noOp: 'no_gate' }
  *   3b. no per-entity artifact binding (runId,atype,ref) → { noOp: 'not_found' }
  *   4. idea row missing                                 → { noOp: 'not_found' }
@@ -160,7 +162,7 @@ export async function sendFeedbackHandler(
     .prepare('SELECT project_id, status, worktree_path FROM workflow_runs WHERE id = ?')
     .get(runId) as RunRow | undefined;
   if (!run) return noOp('not_found');
-  if (run.status !== 'awaiting_review') return noOp('not_parked');
+  if (!FEEDBACK_PARKED_RUN_STATUSES.includes(run.status)) return noOp('not_parked');
 
   // 3: a blocking decision gate must be open (the document can still influence
   // it). Capture the gate IDS — the batch is bound to them, so the revision's

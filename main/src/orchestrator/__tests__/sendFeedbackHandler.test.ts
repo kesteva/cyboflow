@@ -32,6 +32,8 @@ function buildDb(): Database.Database {
   db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
   for (const f of [
     '006_cyboflow_schema.sql',
+    '007_add_stuck_reason.sql', // stuck columns 010's table rebuild copies
+    '010_questions.sql', // widens the run-status CHECK to include 'awaiting_input'
     '011_workflow_step_tracking.sql',
     '014_native_tasks.sql',
     '015_entity_model_rebuild.sql',
@@ -114,13 +116,30 @@ describe('sendFeedbackHandler — guard matrix', () => {
     expect(res).toEqual({ noOp: true, reason: 'not_found' });
   });
 
-  it('not_parked when the run is not awaiting_review', async () => {
+  it('not_parked when the run is not at a parked status', async () => {
     const db = buildDb();
     seedRun(db, 'run-1', 'running');
     FeedbackRouter.initialize(dbAdapter(db));
     const { deps } = makeDeps(db);
     const res = await sendFeedbackHandler({ runId: 'run-1', atype: 'idea-spec', sourceRef: 'ide_1' }, deps);
     expect(res).toEqual({ noOp: true, reason: 'not_parked' });
+  });
+
+  // Inline AskUserQuestion gates (QuestionRouter — e.g. the single-idea
+  // approve-idea stub gate) park the run at 'awaiting_input', NOT
+  // 'awaiting_review'; both must clear the parked guard.
+  it('accepts a run parked at awaiting_input (inline question gate)', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1', 'awaiting_input');
+    seedGate(db, 'run-1');
+    seedArtifact(db, 'run-1', 'ide_1');
+    seedIdea(db, 'ide_1');
+    const router = FeedbackRouter.initialize(dbAdapter(db));
+    await seedDraft(router, 'run-1', 'ide_1');
+    const { deps, launchRevision } = makeDeps(db);
+    const res = await sendFeedbackHandler({ runId: 'run-1', atype: 'idea-spec', sourceRef: 'ide_1' }, deps);
+    expect(res).toMatchObject({ sent: true, round: 1 });
+    expect(launchRevision).toHaveBeenCalledTimes(1);
   });
 
   it('no_gate when no pending blocking decision gate is open', async () => {
