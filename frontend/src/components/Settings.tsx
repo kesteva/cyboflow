@@ -5,6 +5,7 @@ import { useNotifications } from '../hooks/useNotifications';
 import { API } from '../utils/api';
 import { emitTelemetryChangeEvents, trackEvent } from '../utils/telemetry';
 import type { AppConfig } from '../types/config';
+import type { AssistantContextRetention } from '../../../shared/types/agentThread';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
@@ -24,7 +25,8 @@ import {
   ScanEye,
   AlarmClock,
   Compass,
-  Bot
+  Bot,
+  History
 } from 'lucide-react';
 import { Textarea, Checkbox } from './ui/Input';
 import { Button } from './ui/Button';
@@ -71,6 +73,10 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // Extra folders (one per line) the assistant may read, beyond the app's
   // registered project folders (always readable regardless of this list).
   const [assistantFolderPathsText, setAssistantFolderPathsText] = useState('');
+  // How the assistant's standing conversation handles each new local day:
+  // start fresh (default), start with a /compact, or rely on SDK auto-compaction.
+  const [assistantContextRetention, setAssistantContextRetention] =
+    useState<AssistantContextRetention>('clear-daily');
   const [defaultAgentPermissionMode, setDefaultAgentPermissionMode] = useState<PermissionMode>('default');
   // Global CLI runtime: false = allow SDK (per-run picker available, default
   // 'sdk'); true = force the interactive PTY substrate everywhere (SDK disabled).
@@ -163,6 +169,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setAssistantModel(data.assistantModel ?? '');
       setAssistantEnabled(data.assistantEnabled !== false);
       setAssistantFolderPathsText((data.assistantFolderAccess ?? []).join('\n'));
+      setAssistantContextRetention(data.assistantContextRetention ?? 'clear-daily');
       setDefaultAgentPermissionMode(data.defaultAgentPermissionMode ?? 'default');
       setInteractivePtyOnly(data.interactivePtyOnly ?? false);
       setDefaultExecutionModel(data.defaultExecutionModel ?? 'programmatic');
@@ -228,6 +235,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         // an undefined value would fail to overwrite a stored `false`.
         assistantEnabled: assistantEnabled,
         assistantFolderAccess: parsedAssistantFolderPaths,
+        // Always the explicit value — updateConfig merges partials, so sending
+        // undefined for the default would fail to overwrite a stored override.
+        assistantContextRetention,
         defaultAgentPermissionMode,
         interactivePtyOnly,
         defaultExecutionModel,
@@ -1068,6 +1078,44 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                     fullWidth
                     helperText="Extra folders the assistant may read (one per line). Your project folders are always readable. Secret files (.env, keys) are always denied."
                   />
+                </div>
+              </SettingsSection>
+
+              <SettingsSection
+                title="Context Retention"
+                description="How the assistant's standing conversation handles each new day"
+                icon={<History className="w-4 h-4" />}
+              >
+                <div className={!assistantEnabled ? 'opacity-50 pointer-events-none' : undefined}>
+                  <div className="flex flex-col gap-1.5">
+                    {([
+                      { mode: 'clear-daily', label: 'Clear daily', hint: 'Default · each day starts a fresh conversation' },
+                      { mode: 'compact-daily', label: 'Compact daily', hint: 'Each day starts from a compacted context' },
+                      { mode: 'auto-compact', label: 'Auto-compact', hint: 'One ongoing conversation; compact only when full' },
+                    ] as const).map(({ mode, label, hint }) => (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => setAssistantContextRetention(mode)}
+                        aria-pressed={assistantContextRetention === mode}
+                        className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
+                          assistantContextRetention === mode
+                            ? 'border-interactive bg-interactive-surface'
+                            : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
+                        }`}
+                      >
+                        <span className="text-text-primary font-medium text-sm">{label}</span>
+                        <span className="text-xs text-text-tertiary">{hint}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-xs text-text-tertiary mt-2">
+                    Applied on the first assistant turn of each new day. "Clear daily" starts a fresh
+                    conversation — your chat history stays visible, but the assistant no longer carries
+                    prior days in its working context. "Compact daily" keeps the conversation but
+                    summarizes it down first. "Auto-compact" leaves everything to the model's built-in
+                    compaction, so context accumulates across days.
+                  </p>
                 </div>
               </SettingsSection>
             </CollapsibleCard>
