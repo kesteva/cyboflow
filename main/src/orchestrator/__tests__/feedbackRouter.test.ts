@@ -1,6 +1,6 @@
 /**
  * Unit tests for FeedbackRouter — the in-artifact feedback write chokepoint
- * (feedback_batches / feedback_comments, migration 075, IDEA-033).
+ * (feedback_batches / feedback_comments, migration 077, IDEA-033).
  *
  * Covered:
  *  - create/update/delete draft lifecycle, incl. body-trim + empty-body rejection.
@@ -57,7 +57,7 @@ function buildDb(): Database.Database {
     '014_native_tasks.sql',
     '015_entity_model_rebuild.sql',
     '016_review_items.sql',
-    '075_artifact_feedback.sql',
+    '077_artifact_feedback.sql',
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }

@@ -9,7 +9,7 @@
  * open, then the batch flips to 'applied' and its comments to 'addressed'
  * (consumed — per-round, not threaded).
  *
- * Backed by migration 075 (feedback_batches / feedback_comments); all writes go
+ * Backed by migration 077 (feedback_batches / feedback_comments); all writes go
  * through the FeedbackRouter chokepoint (main/src/orchestrator/feedbackRouter.ts).
  */
 

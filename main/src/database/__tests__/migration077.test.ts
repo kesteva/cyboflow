@@ -1,8 +1,8 @@
 /**
- * Migration 075: in-artifact feedback on spec/architecture documents
+ * migration 077: in-artifact feedback on spec/architecture documents
  * (feedback_batches / feedback_comments, IDEA-033).
  *
- * Applies the chain 006 -> 011 -> 014 -> 015 -> 016 -> 075 against an
+ * Applies the chain 006 -> 011 -> 014 -> 015 -> 016 -> 077 against an
  * in-memory SQLite instance (mirrors reviewItemRouter.test.ts's buildDb —
  * feedback_batches/feedback_comments FK to workflow_runs, which 006 creates).
  * Proves: expected columns on both tables, the atype/status CHECK
@@ -37,7 +37,7 @@ function buildDb(): Database.Database {
     );
   `);
   db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
-  for (const f of [...THROUGH_016, '075_artifact_feedback.sql']) {
+  for (const f of [...THROUGH_016, '077_artifact_feedback.sql']) {
     db.exec(readFileSync(join(MIG_DIR, f), 'utf-8'));
   }
   return db;
@@ -91,7 +91,7 @@ function insertComment(
   );
 }
 
-describe('Migration 075: feedback_batches / feedback_comments', () => {
+describe('migration 077: feedback_batches / feedback_comments', () => {
   it('creates the expected columns on both tables', () => {
     const db = buildDb();
 
@@ -228,7 +228,7 @@ describe('Migration 075: feedback_batches / feedback_comments', () => {
     insertBatch(db, 'b1');
     insertComment(db, 'c1');
 
-    expect(() => db.exec(readFileSync(join(MIG_DIR, '075_artifact_feedback.sql'), 'utf-8'))).not.toThrow();
+    expect(() => db.exec(readFileSync(join(MIG_DIR, '077_artifact_feedback.sql'), 'utf-8'))).not.toThrow();
 
     const batchCount = (db.prepare('SELECT COUNT(*) AS n FROM feedback_batches').get() as { n: number }).n;
     expect(batchCount).toBe(1);

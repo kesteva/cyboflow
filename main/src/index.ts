@@ -1146,7 +1146,7 @@ async function initializeServices() {
   // it opens a blocking decision review_item (pausing the run) and applies
   // aggregate-unblock auto-resume when the run's last blocking item resolves.
   ReviewItemRouter.initialize(cyboflowDb);
-  // In-artifact feedback write chokepoint (migration 075, IDEA-033) — the single
+  // In-artifact feedback write chokepoint (migration 077, IDEA-033) — the single
   // serialized writer for feedback_comments / feedback_batches; the
   // cyboflow.feedback tRPC router reaches it via getInstance(). Its feedbackEvents
   // emitter (hosted in trpc/routers/events.ts) is consumed directly by

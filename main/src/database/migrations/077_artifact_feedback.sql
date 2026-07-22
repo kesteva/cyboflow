@@ -1,4 +1,4 @@
--- Migration 075: in-artifact feedback on spec/architecture documents (IDEA-033).
+-- Migration 077: in-artifact feedback on spec/architecture documents (IDEA-033).
 --
 -- Users highlight sections of the idea-spec / arch-design artifact tabs while a
 -- planner/ship run is parked at a human gate, save comments, and "send" the

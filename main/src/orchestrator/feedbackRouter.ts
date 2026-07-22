@@ -1,6 +1,6 @@
 /**
  * FeedbackRouter — the SINGLE write chokepoint for the two in-artifact
- * feedback tables (feedback_batches / feedback_comments, migration 075,
+ * feedback tables (feedback_batches / feedback_comments, migration 077,
  * IDEA-033).
  *
  * Users highlight sections of the idea-spec / arch-design artifact tabs while
