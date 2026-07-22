@@ -43,6 +43,7 @@ import { isQuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
 import { AgentInvocationStore } from '../orchestrator/agentInvocationStore';
 import { encodeCwd } from '../services/panels/claude/transcript/encodeCwd';
+import { getCurrentBranch } from '../services/gitPlumbingCommands';
 import { ClaudeCodeManager } from '../services/panels/claude/claudeCodeManager';
 import { updateSessionAgentPermissionMode } from '../orchestrator/sessionPermissionMode';
 import { listQuickSessions } from '../orchestrator/quickSessionListing';
@@ -2933,6 +2934,13 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         return { success: false, error: 'Session not found' };
       }
 
+      // Resolve the LIVE worktree branch once per session (worktree-level,
+      // not per-panel) — falls back to the stored baseBranch only when the
+      // worktree is unreadable or in a detached HEAD state (getCurrentBranch
+      // returns null). baseBranch itself is untouched below.
+      const liveBranch = getCurrentBranch(session.worktreePath);
+      const resolvedBranch = liveBranch ?? (session.baseBranch || 'main');
+
       // Calculate session duration
       const startTime = new Date(session.createdAt).getTime();
       const endTime = session.status === 'stopped' || session.status === 'completed_unviewed'
@@ -3032,7 +3040,9 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           updatedAt: session.lastActivity || session.createdAt,
           duration: duration,
           worktreePath: session.worktreePath,
-          branch: session.baseBranch || 'main'
+          // Live worktree branch (resolved once above), falling back to
+          // baseBranch only on detached HEAD / unreadable worktree.
+          branch: resolvedBranch
         },
         tokens: {
           totalInputTokens: tokenUsageData.totalInputTokens,
