@@ -49,6 +49,9 @@ const ROLLUP: RunUsageRollup = {
   runId: 'run-1',
   model: 'claude-opus-4-5',
   multiModel: false,
+  perModelUsage: [
+    { model: 'claude-opus-4-5', inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheCreationTokens: 0 },
+  ],
   inputTokens: 100,
   outputTokens: 50,
   cacheCreationTokens: 0,

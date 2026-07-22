@@ -214,6 +214,9 @@ describe('cyboflow.insights.runUsage', () => {
     runId: 'run-1',
     model: 'claude-sonnet-4-5',
     multiModel: false,
+    perModelUsage: [
+      { model: 'claude-sonnet-4-5', inputTokens: 100, outputTokens: 50, cacheReadTokens: 10, cacheCreationTokens: 5 },
+    ],
     inputTokens: 100,
     outputTokens: 50,
     cacheReadTokens: 10,
@@ -248,6 +251,7 @@ describe('cyboflow.insights.runUsage', () => {
       runId: 'run-empty',
       model: null,
       multiModel: false,
+      perModelUsage: [],
       inputTokens: 0,
       outputTokens: 0,
       cacheReadTokens: 0,

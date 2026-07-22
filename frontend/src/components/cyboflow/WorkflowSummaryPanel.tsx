@@ -275,23 +275,63 @@ export function WorkflowSummaryPanel({
   const isReview = variant === 'review';
   const isProgrammatic = executionModel === 'programmatic';
 
-  const displayedCost = useMemo(() => {
+  // The multi-model cost note rendered under the meta line — 'mixed' when NO
+  // model in the breakdown could be priced (full fallback to the reported total,
+  // same as pre-TASK-092 behavior); 'partial' when at least one model was priced
+  // but at least one other was not (the total sums only the priced models, so the
+  // note must say so rather than silently under-reporting). Null otherwise.
+  type CostNote = { kind: 'mixed' } | { kind: 'partial'; unpricedCount: number } | null;
+  const [displayedCost, costNote] = useMemo<[number | null, CostNote]>(() => {
+    if (usage === null) return [null, null];
+    if (!computeCostFromRates) return [usage.costUsd, null];
+    if (usage.multiModel) {
+      // Sum the rate-card cost per model in the breakdown. A model
+      // computeSessionCostUsd cannot price (unknown/unpriced) contributes $0
+      // rather than corrupting the total — but is tracked so the UI can flag the
+      // result as a PARTIAL estimate instead of silently under-reporting it.
+      let total = 0;
+      let pricedCount = 0;
+      let unpricedCount = 0;
+      for (const m of usage.perModelUsage) {
+        const modelCost = computeSessionCostUsd(
+          {
+            input: m.inputTokens,
+            output: m.outputTokens,
+            cacheWrite: m.cacheCreationTokens,
+            cacheRead: m.cacheReadTokens,
+          },
+          m.model,
+        );
+        if (modelCost === null) {
+          unpricedCount += 1;
+        } else {
+          total += modelCost;
+          pricedCount += 1;
+        }
+      }
+      // Nothing in the breakdown could be priced (including an empty
+      // breakdown) — there is nothing sensible to sum, so fall back to the
+      // durable reported total exactly as before TASK-092.
+      if (pricedCount === 0) return [usage.costUsd, { kind: 'mixed' }];
+      return [total, unpricedCount > 0 ? { kind: 'partial', unpricedCount } : null];
+    }
     // model === null with multiModel false means the model could not be
     // resolved at all (e.g. a materialized run whose raw_events were pruned) —
     // fall back to the durable reported cost rather than rendering an em dash
     // for a run whose cost is actually known.
-    if (usage === null || !computeCostFromRates || usage.multiModel || usage.model === null) {
-      return usage?.costUsd ?? null;
-    }
-    return computeSessionCostUsd(
-      {
-        input: usage.inputTokens,
-        output: usage.outputTokens,
-        cacheWrite: usage.cacheCreationTokens,
-        cacheRead: usage.cacheReadTokens,
-      },
-      usage.model,
-    );
+    if (usage.model === null) return [usage.costUsd, null];
+    return [
+      computeSessionCostUsd(
+        {
+          input: usage.inputTokens,
+          output: usage.outputTokens,
+          cacheWrite: usage.cacheCreationTokens,
+          cacheRead: usage.cacheReadTokens,
+        },
+        usage.model,
+      ),
+      null,
+    ];
   }, [computeCostFromRates, usage]);
 
   useEffect(() => {
@@ -611,9 +651,15 @@ export function WorkflowSummaryPanel({
               {usage != null && usage.assistantMessageCount > 0 && <> · {usage.assistantMessageCount} messages</>}
               {runtime !== null && <> · runtime {runtime}</>}
             </div>
-            {computeCostFromRates && usage?.multiModel === true && (
+            {computeCostFromRates && usage?.multiModel === true && costNote?.kind === 'mixed' && (
               <p className="text-xs text-text-tertiary" data-testid="run-summary-mixed-model-cost-note">
                 mixed models — showing reported cost
+              </p>
+            )}
+            {computeCostFromRates && usage?.multiModel === true && costNote?.kind === 'partial' && (
+              <p className="text-xs text-text-tertiary" data-testid="run-summary-partial-model-cost-note">
+                partial estimate — includes {costNote.unpricedCount} unpriced model
+                {costNote.unpricedCount > 1 ? 's' : ''}
               </p>
             )}
           </div>

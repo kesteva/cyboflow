@@ -71,6 +71,24 @@ export interface RunUsageRollup {
   model: string | null;
   /** True when assistant-side raw events reported more than one distinct model id. */
   multiModel: boolean;
+  /**
+   * Per-model token breakdown, resolved the same way as {@link model} (assistant-side
+   * `payload.message.model`, 'unknown' when an event carried none). Populated
+   * whenever assistant-side raw events were scanned for model identity — i.e.
+   * always, on both the materialized and raw-events read tiers (see
+   * insightsQueries.ts `fetchMaterializedRunModels` / `scanRawEventRollups`) — so
+   * it is non-empty even for single-model runs, not gated on `multiModel`. Lets a
+   * multi-model run's rate-card cost be computed as a per-model sum instead of
+   * falling back to the reported total. Field names mirror the run-level token
+   * fields above (`inputTokens`/`outputTokens`/`cacheReadTokens`/`cacheCreationTokens`).
+   */
+  perModelUsage: {
+    model: string;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+  }[];
   /** Sums over `assistant` payloads' message.usage (NOT result.usage — result events double-count turn totals). */
   inputTokens: number;
   outputTokens: number;

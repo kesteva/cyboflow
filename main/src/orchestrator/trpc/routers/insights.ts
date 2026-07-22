@@ -106,6 +106,7 @@ function zeroedRunUsageRollup(runId: string): RunUsageRollup {
     runId,
     model: null,
     multiModel: false,
+    perModelUsage: [],
     inputTokens: 0,
     outputTokens: 0,
     cacheReadTokens: 0,

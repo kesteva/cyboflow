@@ -779,6 +779,87 @@ describe('selectRunUsageRollups', () => {
     });
   });
 
+  it('aggregates per-model token breakdown into perModelUsage for a multi-model run (raw path, TASK-092)', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    // Two turns from the same model — must accumulate into the same bucket.
+    seedEvent(
+      db,
+      'r1',
+      'assistant',
+      assistantPayloadWithModel('claude-opus-4-5', { input: 100, output: 20, cacheRead: 5, cacheCreation: 2 }),
+    );
+    seedEvent(
+      db,
+      'r1',
+      'assistant',
+      assistantPayloadWithModel('claude-opus-4-5', { input: 50, output: 10 }),
+    );
+    seedEvent(
+      db,
+      'r1',
+      'subagent_usage',
+      subagentUsagePayload('claude-haiku-4-5', { input: 30, output: 5, cacheRead: 1 }),
+    );
+
+    const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+    expect(rollup.multiModel).toBe(true);
+    expect(rollup.perModelUsage).toHaveLength(2);
+    expect(rollup.perModelUsage).toEqual(
+      expect.arrayContaining([
+        { model: 'claude-opus-4-5', inputTokens: 150, outputTokens: 30, cacheReadTokens: 5, cacheCreationTokens: 2 },
+        { model: 'claude-haiku-4-5', inputTokens: 30, outputTokens: 5, cacheReadTokens: 1, cacheCreationTokens: 0 },
+      ]),
+    );
+    // Conservation: the per-model buckets sum to the same totals as the
+    // run-level fields (no fallback path was involved here).
+    const summed = rollup.perModelUsage.reduce(
+      (acc, m) => ({ input: acc.input + m.inputTokens, output: acc.output + m.outputTokens }),
+      { input: 0, output: 0 },
+    );
+    expect(summed.input).toBe(rollup.inputTokens);
+    expect(summed.output).toBe(rollup.outputTokens);
+  });
+
+  it('aggregates per-model token breakdown into perModelUsage for a multi-model run (materialized path, TASK-092)', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    seedRunUsage(db, {
+      runId: 'r1',
+      inputTokens: 151,
+      outputTokens: 31,
+      assistantMessageCount: 3,
+    });
+    seedEvent(
+      db,
+      'r1',
+      'assistant',
+      assistantPayloadWithModel('claude-sonnet-4-5', { input: 100, output: 20 }),
+    );
+    seedEvent(
+      db,
+      'r1',
+      'assistant',
+      assistantPayloadWithModel('claude-sonnet-4-5', { input: 1, output: 1 }),
+    );
+    seedEvent(
+      db,
+      'r1',
+      'subagent_usage',
+      subagentUsagePayload('claude-haiku-4-5', { input: 50, output: 10 }),
+    );
+
+    const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+    expect(rollup.multiModel).toBe(true);
+    expect(rollup.perModelUsage).toEqual(
+      expect.arrayContaining([
+        { model: 'claude-sonnet-4-5', inputTokens: 101, outputTokens: 21, cacheReadTokens: 0, cacheCreationTokens: 0 },
+        { model: 'claude-haiku-4-5', inputTokens: 50, outputTokens: 10, cacheReadTokens: 0, cacheCreationTokens: 0 },
+      ]),
+    );
+    expect(rollup.perModelUsage).toHaveLength(2);
+  });
+
   it("ignores the 'unknown' subagent sentinel and blanks — a known+unknown run stays single-model (raw path)", () => {
     seedWorkflow(db, { id: 'wf-1' });
     seedRun(db, { id: 'r1', workflowId: 'wf-1' });

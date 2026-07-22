@@ -41,6 +41,15 @@ const ROLLUP: RunUsageRollup = {
   runId: 'run-1',
   model: 'claude-opus-4-5',
   multiModel: false,
+  perModelUsage: [
+    {
+      model: 'claude-opus-4-5',
+      inputTokens: 13000,
+      outputTokens: 3000,
+      cacheCreationTokens: 640000,
+      cacheReadTokens: 7674110,
+    },
+  ],
   inputTokens: 13000,
   outputTokens: 3000,
   cacheCreationTokens: 640000,
@@ -166,16 +175,92 @@ describe('WorkflowSummaryPanel', () => {
     expect(screen.queryByTestId('run-summary-mixed-model-cost-note')).not.toBeInTheDocument();
   });
 
-  it('falls back to reported cost with a note for a mixed-model run', async () => {
+  it('falls back to reported cost with a note when EVERY model in a multi-model breakdown is unpriced', async () => {
     useConfigStore.setState({
       config: { computeCostFromRates: true } as AppConfig,
     });
-    runUsageQuery.mockResolvedValue({ ...ROLLUP, model: null, multiModel: true });
+    // All-unknown breakdown — nothing sensible to sum, so this must behave
+    // exactly like the pre-TASK-092 "mixed models" fallback.
+    runUsageQuery.mockResolvedValue({
+      ...ROLLUP,
+      model: null,
+      multiModel: true,
+      perModelUsage: [
+        { model: 'unknown-model-a', inputTokens: 13000, outputTokens: 3000, cacheCreationTokens: 0, cacheReadTokens: 0 },
+        { model: 'unknown-model-b', inputTokens: 5000, outputTokens: 1000, cacheCreationTokens: 0, cacheReadTokens: 0 },
+      ],
+    });
     renderPanel();
     expect(await screen.findByTestId('run-summary-meta')).toHaveTextContent('cost $3.95');
     expect(screen.getByTestId('run-summary-mixed-model-cost-note')).toHaveTextContent(
       'mixed models — showing reported cost',
     );
+    expect(screen.queryByTestId('run-summary-partial-model-cost-note')).not.toBeInTheDocument();
+  });
+
+  it('sums the rate-card cost per model for a multi-model run with 2+ known models', async () => {
+    useConfigStore.setState({
+      config: { computeCostFromRates: true } as AppConfig,
+    });
+    runUsageQuery.mockResolvedValue({
+      ...ROLLUP,
+      model: null,
+      multiModel: true,
+      costUsd: 3.95, // must NOT be what renders — proves the sum wins over the reported total.
+      perModelUsage: [
+        // opus: 1,000,000 * $5/MTok + 100,000 * $25/MTok = $5 + $2.5 = $7.50
+        { model: 'claude-opus-4-5', inputTokens: 1_000_000, outputTokens: 100_000, cacheCreationTokens: 0, cacheReadTokens: 0 },
+        // sonnet: 2,000,000 * $3/MTok + 200,000 * $15/MTok = $6 + $3 = $9.00
+        { model: 'claude-sonnet-4-5', inputTokens: 2_000_000, outputTokens: 200_000, cacheCreationTokens: 0, cacheReadTokens: 0 },
+      ],
+    });
+    renderPanel();
+    expect(await screen.findByTestId('run-summary-meta')).toHaveTextContent('cost $16.50');
+    expect(screen.queryByTestId('run-summary-mixed-model-cost-note')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('run-summary-partial-model-cost-note')).not.toBeInTheDocument();
+  });
+
+  it('sums only the priced models and flags a PARTIAL estimate when one model in the breakdown is unpriced', async () => {
+    useConfigStore.setState({
+      config: { computeCostFromRates: true } as AppConfig,
+    });
+    runUsageQuery.mockResolvedValue({
+      ...ROLLUP,
+      model: null,
+      multiModel: true,
+      perModelUsage: [
+        // opus: $7.50 (as above) — priced, included.
+        { model: 'claude-opus-4-5', inputTokens: 1_000_000, outputTokens: 100_000, cacheCreationTokens: 0, cacheReadTokens: 0 },
+        // unpriced model — excluded from the sum (contributes $0), not silently
+        // folded into it, but the run's cost is not corrupted by it either.
+        { model: 'some-unpriced-model', inputTokens: 5_000_000, outputTokens: 500_000, cacheCreationTokens: 0, cacheReadTokens: 0 },
+      ],
+    });
+    renderPanel();
+    expect(await screen.findByTestId('run-summary-meta')).toHaveTextContent('cost $7.50');
+    expect(screen.queryByTestId('run-summary-mixed-model-cost-note')).not.toBeInTheDocument();
+    expect(screen.getByTestId('run-summary-partial-model-cost-note')).toHaveTextContent(
+      'partial estimate — includes 1 unpriced model',
+    );
+  });
+
+  it('leaves the toggle-OFF behavior unchanged for a multi-model run (verbatim reported cost, no note)', async () => {
+    useConfigStore.setState({
+      config: { computeCostFromRates: false } as AppConfig,
+    });
+    runUsageQuery.mockResolvedValue({
+      ...ROLLUP,
+      model: null,
+      multiModel: true,
+      perModelUsage: [
+        { model: 'claude-opus-4-5', inputTokens: 1_000_000, outputTokens: 100_000, cacheCreationTokens: 0, cacheReadTokens: 0 },
+        { model: 'claude-sonnet-4-5', inputTokens: 2_000_000, outputTokens: 200_000, cacheCreationTokens: 0, cacheReadTokens: 0 },
+      ],
+    });
+    renderPanel();
+    expect(await screen.findByTestId('run-summary-meta')).toHaveTextContent('cost $3.95');
+    expect(screen.queryByTestId('run-summary-mixed-model-cost-note')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('run-summary-partial-model-cost-note')).not.toBeInTheDocument();
   });
 
   it('falls back to reported cost when the model is unresolved (pruned raw_events), without the mixed note', async () => {

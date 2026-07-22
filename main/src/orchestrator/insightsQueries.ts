@@ -298,12 +298,61 @@ interface RunUsageMaterializedRow {
 /** Max ids per IN-list chunk; keeps us well under SQLite's parameter ceiling. */
 const RUN_ID_CHUNK_SIZE = 400;
 
+/** Per-model token accumulator (keyed by model id) backing `RunUsageRollup.perModelUsage`. */
+interface ModelUsageAccumulator {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+}
+
+/**
+ * Fold one assistant `message.usage` object into a model's running accumulator
+ * in `buckets`, creating the bucket lazily. `model` is the {@link bucketModelId}
+ * resolution ('unknown' when the event carried none).
+ */
+function foldModelUsage(
+  buckets: Map<string, ModelUsageAccumulator>,
+  model: string,
+  usage: Record<string, unknown>,
+): void {
+  const bucket = buckets.get(model) ?? {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheCreationTokens: 0,
+  };
+  bucket.inputTokens += asNumber(usage.input_tokens);
+  bucket.outputTokens += asNumber(usage.output_tokens);
+  bucket.cacheReadTokens += asNumber(usage.cache_read_input_tokens);
+  bucket.cacheCreationTokens += asNumber(usage.cache_creation_input_tokens);
+  buckets.set(model, bucket);
+}
+
+/**
+ * Model id used as the per-model bucket key for `perModelUsage` — 'unknown' when
+ * the event carried none (mirrors the `DailyModelUsagePoint` scan's UNKNOWN_MODEL
+ * sentinel convention below). Unlike `recordRunModel`'s exact-one-vs-many
+ * resolution, this key is NOT skipped for blank/'unknown' — perModelUsage aims to
+ * conserve the full token total across its buckets.
+ */
+function bucketModelId(eventType: string, payload: Record<string, unknown>): string {
+  const raw = assistantEventModel(eventType, payload);
+  return typeof raw === 'string' && raw.trim() !== '' ? raw.trim() : 'unknown';
+}
+
+/** Flatten a model→accumulator map into the `RunUsageRollup.perModelUsage` array shape. */
+function perModelUsageArray(buckets: Map<string, ModelUsageAccumulator>): RunUsageRollup['perModelUsage'] {
+  return Array.from(buckets.entries()).map(([model, b]) => ({ model, ...b }));
+}
+
 /** A freshly-zeroed rollup for a run id with no usage data in either tier. */
 function zeroRollup(runId: string): RunUsageRollup {
   return {
     runId,
     model: null,
     multiModel: false,
+    perModelUsage: [],
     inputTokens: 0,
     outputTokens: 0,
     cacheReadTokens: 0,
@@ -336,6 +385,7 @@ function rollupFromMaterializedRow(row: RunUsageMaterializedRow): RunUsageRollup
     // resolves these fields from assistant-side raw_events at read time.
     model: null,
     multiModel: false,
+    perModelUsage: [],
     inputTokens,
     outputTokens,
     cacheReadTokens: asNumber(row.cache_read_tokens),
@@ -354,6 +404,8 @@ function rollupFromMaterializedRow(row: RunUsageMaterializedRow): RunUsageRollup
 interface RunModelResolution {
   model: string | null;
   multiModel: boolean;
+  /** Per-model token buckets, folded alongside model identity (see bucketModelId). */
+  perModelUsage: Map<string, ModelUsageAccumulator>;
 }
 
 /**
@@ -365,7 +417,7 @@ interface RunModelResolution {
  * would flip a single-model run to multiModel and wrongly suppress the
  * computed-cost path, so they are skipped entirely.
  */
-function recordRunModel(target: RunModelResolution, value: unknown): void {
+function recordRunModel(target: { model: string | null; multiModel: boolean }, value: unknown): void {
   if (typeof value !== 'string' || target.multiModel) return;
   const trimmed = value.trim();
   if (trimmed === '' || trimmed === 'unknown') return;
@@ -399,7 +451,7 @@ function fetchMaterializedRunModels(
   runIds: readonly string[],
 ): Map<string, RunModelResolution> {
   const out = new Map<string, RunModelResolution>();
-  for (const id of runIds) out.set(id, { model: null, multiModel: false });
+  for (const id of runIds) out.set(id, { model: null, multiModel: false, perModelUsage: new Map() });
   if (runIds.length === 0) return out;
 
   for (const ids of chunk(runIds, RUN_ID_CHUNK_SIZE)) {
@@ -424,6 +476,16 @@ function fetchMaterializedRunModels(
       }
       if (!isRecord(payload)) continue;
       recordRunModel(target, assistantEventModel(row.eventType, payload));
+
+      // Per-model token breakdown (perModelUsage): folded from the SAME
+      // assistant-type rows already fetched for model resolution above — this
+      // query already covers every assistant-type event for the run, so no
+      // extra raw_events read is needed to also aggregate tokens per model.
+      const message = payload.message;
+      if (!isRecord(message)) continue;
+      const usage = message.usage;
+      if (!isRecord(usage)) continue;
+      foldModelUsage(target.perModelUsage, bucketModelId(row.eventType, payload), usage);
     }
   }
   return out;
@@ -490,7 +552,13 @@ function scanRawEventRollups(
     cacheCreationTokens: number;
     messageCount: number;
   }>();
-  for (const id of runIds) acc.set(id, zeroRollup(id));
+  // Per-model buckets, seeded per requested run id so every run (even those with
+  // no usage) gets a (possibly empty) perModelUsage array below.
+  const modelBuckets = new Map<string, Map<string, ModelUsageAccumulator>>();
+  for (const id of runIds) {
+    acc.set(id, zeroRollup(id));
+    modelBuckets.set(id, new Map());
+  }
   if (runIds.length === 0) return acc;
 
   for (const ids of chunk(runIds, RUN_ID_CHUNK_SIZE)) {
@@ -532,6 +600,10 @@ function scanRawEventRollups(
         target.cacheCreationTokens += asNumber(usage.cache_creation_input_tokens);
         if (row.eventType !== 'subagent_usage') {
           target.assistantMessageCount += 1;
+        }
+        const buckets = modelBuckets.get(row.runId);
+        if (buckets !== undefined) {
+          foldModelUsage(buckets, bucketModelId(row.eventType, payload), usage);
         }
       } else {
         // result: SUM total_cost_usd + num_turns when present (null stays null
@@ -575,6 +647,12 @@ function scanRawEventRollups(
       rollup.assistantMessageCount = fallback.messageCount;
     }
     rollup.totalTokens = rollup.inputTokens + rollup.outputTokens;
+    // Note: the result.usage fallback folded above carries no model identity
+    // (a terminal `result` payload is not attributed to a specific assistant
+    // turn's model), so it is never reflected in perModelUsage — a run that hit
+    // ONLY that fallback path resolves to model=null/multiModel=false (see
+    // recordRunModel) and an empty perModelUsage, consistent with each other.
+    rollup.perModelUsage = perModelUsageArray(modelBuckets.get(rollup.runId) ?? new Map());
   }
   return acc;
 }
@@ -643,6 +721,7 @@ export function selectRunUsageRollups(
     if (rollup !== undefined) {
       rollup.model = modelResolution.model;
       rollup.multiModel = modelResolution.multiModel;
+      rollup.perModelUsage = perModelUsageArray(modelResolution.perModelUsage);
     }
   }
 
