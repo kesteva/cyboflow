@@ -1192,6 +1192,12 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
     }
     reorderedSessions.splice(targetIndex + (dropPosition === 'after' ? 1 : 0), 0, movedSession);
 
+    // INVARIANT: dense indices are assigned over the DRAGGABLE (flat) list only —
+    // experiment ARM sessions (claimed by groupRailExperiments) keep their prior
+    // display_order and may numerically collide/interleave with these indices.
+    // That is fine: arm sessions render inside their experiment group row, never
+    // as flat rows, so their display_order does not affect what the user sees;
+    // the render sort resolves any collision with a deterministic id tiebreaker.
     const sessionOrders = reorderedSessions.map((session, index) => ({
       id: session.id,
       displayOrder: index,
@@ -1505,7 +1511,12 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                 .sort((a, b) => {
                   const aOrder = sessionOrderOverrides[a.id] ?? a.displayOrder ?? Number.MAX_SAFE_INTEGER;
                   const bOrder = sessionOrderOverrides[b.id] ?? b.displayOrder ?? Number.MAX_SAFE_INTEGER;
-                  return aOrder - bOrder;
+                  // Deterministic id tiebreaker: reorder assigns dense indices over
+                  // the flat list only, so an experiment ARM session's stale
+                  // display_order can numerically collide with a flat row's — without
+                  // a tiebreaker the collision order would be store order (unstable
+                  // across reloads).
+                  return aOrder - bOrder || a.id.localeCompare(b.id);
                 });
               // Also drop run rows whose parent session was dismissed (archived):
               // the run's worktree is the session's, which is now gone, so the run
