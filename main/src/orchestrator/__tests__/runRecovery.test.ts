@@ -39,6 +39,7 @@ import { ReviewItemRouter } from '../reviewItemRouter';
 import { RunQueueRegistry } from '../RunQueueRegistry';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun, seedApproval } from '../__test_fixtures__/orchestratorTestDb';
+import { buildReviewInboxDb, seedInboxRun, seedBlockingReviewItem } from '../__test_fixtures__/reviewInboxTestDb';
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -475,6 +476,115 @@ describe('recoverActiveStateOrphans', () => {
     };
     expect(row.status).toBe('failed');
     expect(row.outcome).toBe('interrupted');
+  });
+
+  it('NEVER resumes a __quick__ sentinel run, even when it passes every other gate', () => {
+    // A quick session idles at status='running' by design and satisfies every
+    // other resume clause (sdk, fresh, existing worktree, captured session id) —
+    // but its workflow row has no readable prompt (spec_json='{}'), so a boot
+    // execute() would fail the prompt read and convert restart noise into a
+    // genuine-looking failure. It must take the force-fail path; the next chat
+    // turn heals it via reviveQuickRunToRunning.
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+    const adapter = dbAdapter(db);
+    const runQueues = new RunQueueRegistry();
+
+    seedRun(db, { id: 'run-Q1', status: 'running', workflowName: '__quick__', worktreePath: process.cwd() });
+    db.prepare('UPDATE workflow_runs SET claude_session_id = ? WHERE id = ?').run('sess-quick', 'run-Q1');
+
+    const result = recoverActiveStateOrphans(adapter, runQueues);
+
+    expect(result.orchestratedToResume).toEqual([]);
+    expect(result.runningRecovered).toBe(1);
+    const row = db.prepare('SELECT status, outcome FROM workflow_runs WHERE id = ?').get('run-Q1') as {
+      status: string;
+      outcome: string | null;
+    };
+    expect(row.status).toBe('failed');
+    expect(row.outcome).toBe('interrupted');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// recoverActiveStateOrphans — folded review_items reconciliation. The blocking
+// permission review_item co-written with a pending approval can never resolve
+// after a restart (the canUseTool promise died with the process), so the sweep
+// resolves it alongside the approvals timeout — for BOTH the force-failed and
+// the resumed-orchestrated subsets. Uses the migration-backed inbox fixture
+// (GATE_SCHEMA deliberately lacks review_items — that is the table-absent arm,
+// which the existing tests above already cover implicitly).
+// ---------------------------------------------------------------------------
+
+describe('recoverActiveStateOrphans — review_items reconciliation', () => {
+  function makeInboxDb(): ReturnType<typeof buildReviewInboxDb> {
+    const db = buildReviewInboxDb();
+    // Columns the recovery sweep reads that the fixture's migration set (006..016)
+    // predates: substrate (013), execution_model (031), claude_session_id (018).
+    db.exec("ALTER TABLE workflow_runs ADD COLUMN substrate TEXT NOT NULL DEFAULT 'sdk'");
+    db.exec("ALTER TABLE workflow_runs ADD COLUMN execution_model TEXT NOT NULL DEFAULT 'orchestrated'");
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN claude_session_id TEXT');
+    return db;
+  }
+
+  function seedPendingGate(db: ReturnType<typeof buildReviewInboxDb>, runId: string, itemId: string): void {
+    db.prepare(
+      `INSERT INTO approvals (id, run_id, tool_name, tool_input_json, tool_use_id, status, created_at)
+       VALUES (?, ?, 'Bash', '{}', ?, 'pending', ?)`,
+    ).run(`appr-${runId}`, runId, `appr-${runId}`, new Date().toISOString());
+    seedBlockingReviewItem(db, {
+      id: itemId,
+      runId,
+      kind: 'permission',
+      payloadJson: JSON.stringify({ kind: 'permission', toolName: 'Bash', approvalId: `appr-${runId}` }),
+    });
+  }
+
+  it('resolves the pending permission review_item for a RESUMED orchestrated run', () => {
+    const db = makeInboxDb();
+    seedInboxRun(db, 'run-RV1', 'running');
+    // Make it resumable: existing worktree + captured session id (fresh by default).
+    db.prepare('UPDATE workflow_runs SET worktree_path = ?, claude_session_id = ? WHERE id = ?')
+      .run(process.cwd(), 'sess-rv1', 'run-RV1');
+    seedPendingGate(db, 'run-RV1', 'rvw-RV1');
+
+    const result = recoverActiveStateOrphans(dbAdapter(db), new RunQueueRegistry());
+
+    expect(result.orchestratedToResume).toEqual([{ id: 'run-RV1' }]);
+    expect(result.approvalsCanceled).toBe(1);
+    const item = db
+      .prepare('SELECT status, resolved_by, resolution FROM review_items WHERE id = ?')
+      .get('rvw-RV1') as { status: string; resolved_by: string | null; resolution: string | null };
+    expect(item.status).toBe('resolved');
+    expect(item.resolved_by).toBe('system');
+    expect(item.resolution).toBe('app_restart');
+  });
+
+  it('resolves the pending permission review_item for a FORCE-FAILED run', () => {
+    const db = makeInboxDb();
+    seedInboxRun(db, 'run-RV2', 'running'); // no session id → unresumable
+    seedPendingGate(db, 'run-RV2', 'rvw-RV2');
+
+    const result = recoverActiveStateOrphans(dbAdapter(db), new RunQueueRegistry());
+
+    expect(result.runningRecovered).toBe(1);
+    const item = db
+      .prepare('SELECT status, resolution FROM review_items WHERE id = ?')
+      .get('rvw-RV2') as { status: string; resolution: string | null };
+    expect(item.status).toBe('resolved');
+    expect(item.resolution).toBe('app_restart');
+  });
+
+  it('leaves the pending permission review_item of a PROGRAMMATIC resume untouched (survive-contract)', () => {
+    const db = makeInboxDb();
+    seedInboxRun(db, 'run-RV3', 'awaiting_review');
+    db.prepare("UPDATE workflow_runs SET execution_model = 'programmatic' WHERE id = ?").run('run-RV3');
+    seedPendingGate(db, 'run-RV3', 'rvw-RV3');
+
+    const result = recoverActiveStateOrphans(dbAdapter(db), new RunQueueRegistry());
+
+    expect(result.programmaticToResume).toHaveLength(1);
+    const item = db.prepare('SELECT status FROM review_items WHERE id = ?').get('rvw-RV3') as { status: string };
+    expect(item.status).toBe('pending');
   });
 });
 

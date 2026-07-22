@@ -18,7 +18,8 @@
 import { existsSync } from 'fs';
 import { emitUsage } from './telemetrySink';
 import { AgentInvocationStore } from './agentInvocationStore';
-import { ReviewItemRouter } from './reviewItemRouter';
+import { hasReviewItemsTable, resolveReviewItemById } from './reviewItemListing';
+import { ReviewItemRouter, emitReviewItemChangedById } from './reviewItemRouter';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
 
@@ -190,10 +191,12 @@ export function recoverActiveStateOrphans(
   // survive a restart and is never force-failed here.
   const candidates = db
     .prepare(
-      `SELECT id, status, execution_model, current_step_id, substrate, worktree_path,
-              CASE WHEN julianday('now') - julianday(updated_at) <= ? THEN 1 ELSE 0 END AS is_fresh
-         FROM workflow_runs
-        WHERE status IN ('starting', 'running', 'awaiting_review')`,
+      `SELECT r.id, r.status, r.execution_model, r.current_step_id, r.substrate, r.worktree_path,
+              CASE WHEN w.name = '__quick__' THEN 1 ELSE 0 END AS is_quick,
+              CASE WHEN julianday('now') - julianday(r.updated_at) <= ? THEN 1 ELSE 0 END AS is_fresh
+         FROM workflow_runs r
+         LEFT JOIN workflows w ON w.id = r.workflow_id
+        WHERE r.status IN ('starting', 'running', 'awaiting_review')`,
     )
     .all(STALE_RESUMABLE_RECOVERY_DAYS) as {
     id: string;
@@ -202,6 +205,7 @@ export function recoverActiveStateOrphans(
     current_step_id: string | null;
     substrate: string | null;
     worktree_path: string | null;
+    is_quick: number;
     is_fresh: number;
   }[];
 
@@ -232,8 +236,17 @@ export function recoverActiveStateOrphans(
   // resume target excludes Codex orchestrated threads, whose boot-resume is
   // unverified (the primary getLatestTopLevelResumeTarget query has no provider
   // filter, so target.provider is the authoritative gate).
+  //
+  // The `__quick__` sentinel is NEVER resumable: a quick session idles at
+  // status='running' by design and would pass every other gate, but its workflow
+  // row has no readable prompt (spec_json='{}'), so a boot execute() would fail
+  // the prompt read and convert restart noise into a genuine-looking failure —
+  // and even a successful spawn would be an unrequested autonomous turn. Quick
+  // orphans take the force-fail path; reviveQuickRunToRunning heals them on the
+  // next chat turn (the documented recovery contract, transitions.ts).
   const invocationStore = new AgentInvocationStore(db);
-  const isResumable = (r: { id: string; substrate: string | null; worktree_path: string | null; is_fresh: number }): boolean => {
+  const isResumable = (r: { id: string; substrate: string | null; worktree_path: string | null; is_quick: number; is_fresh: number }): boolean => {
+    if (r.is_quick === 1) return false;
     if (r.substrate !== 'sdk') return false;
     if (r.is_fresh !== 1) return false;
     if (!r.worktree_path || !existsSync(r.worktree_path)) return false;
@@ -279,6 +292,10 @@ export function recoverActiveStateOrphans(
   const failIds = forceFail.map((r) => r.id);
   const resumeIds = programmatic.map((r) => r.id);
   const orchestratedResumeIds = orchestratedToResume.map((r) => r.id);
+
+  // Review-item ids resolved INSIDE the transaction, emitted AFTER commit (an
+  // emit before commit could broadcast a row the transaction then rolls back).
+  const resolvedReviewItemIds: string[] = [];
 
   // Step 3: Single transaction for all UPDATEs (clean state if a crash recurs here).
   const tx = db.transaction(() => {
@@ -348,11 +365,46 @@ export function recoverActiveStateOrphans(
         )
         .run(...expireApprovalIds) as { changes: number };
       approvalsChanges = approvalsInfo.changes;
+
+      // Reconcile the folded inbox: the blocking permission review_items co-written
+      // with those approvals can never resolve (the canUseTool promise is gone), so
+      // resolve them too — otherwise a RESUMED run comes back alive with a phantom
+      // pending blocking gate (unanswerable: its approvals row is no longer
+      // 'pending'). Routed through the sanctioned sync helper (resolveReviewItemById)
+      // so the 'resolved' entity_events delta is written like the normal respond
+      // path; the helper does NOT open its own transaction, so it is safe inside
+      // this enclosing tx. Mirrors approvalRouter.recoverStaleAwaitingReview.
+      if (hasReviewItemsTable(db)) {
+        const now = new Date().toISOString();
+        const orphaned = db
+          .prepare(
+            `SELECT id, run_id AS runId FROM review_items
+              WHERE kind = 'permission' AND status = 'pending' AND run_id IN (${ph})`,
+          )
+          .all(...expireApprovalIds) as { id: string; runId: string | null }[];
+        for (const { id, runId } of orphaned) {
+          const resolved = resolveReviewItemById(db, id, 'system', 'app_restart', now, runId);
+          if (resolved) resolvedReviewItemIds.push(resolved);
+        }
+      }
     }
     return approvalsChanges;
   });
 
   const approvalsCanceled = tx();
+
+  // Fail-soft renderer emits AFTER commit (mirrors approvalRouter's boot
+  // recovery): at boot no renderer is listening yet — a harmless no-op — but a
+  // future non-boot call site gets incremental queue-chip updates for free.
+  for (const id of resolvedReviewItemIds) {
+    try {
+      emitReviewItemChangedById(db, id, 'resolved');
+    } catch (err) {
+      console.warn(
+        `[runRecovery] review-item emit failed for ${id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
   return {
     runningRecovered: runningIds.length,
     startingRecovered: startingIds.length,
