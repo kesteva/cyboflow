@@ -30,7 +30,8 @@
  *  - applyDelete: cascade idea -> epics -> tasks (deduped), entity_events
  *    purge, pre-delete snapshots on the 'deleted' emits (both channels),
  *    active-run guard over the cascade, leaf deletes leave siblings/parents
- *    intact, best-effort review_items dismissal (failures swallowed).
+ *    intact, best-effort review_items dismissal and artifact reap (failures
+ *    swallowed).
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
@@ -42,6 +43,7 @@ import {
   taskChangeEvents,
   taskProjectChannel,
 } from '../taskChangeRouter';
+import { ArtifactRouter } from '../artifactRouter';
 import { ReviewItemRouter } from '../reviewItemRouter';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import type { DatabaseLike } from '../types';
@@ -207,6 +209,7 @@ function seedRunWithSeedIdeas(
 describe('TaskChangeRouter (3-table entity model)', () => {
   afterEach(() => {
     TaskChangeRouter._resetForTesting();
+    ArtifactRouter._resetForTesting();
     ReviewItemRouter._resetForTesting();
     taskChangeEvents.removeAllListeners();
   });
@@ -1392,6 +1395,92 @@ describe('TaskChangeRouter (3-table entity model)', () => {
   });
 
   // -------------------------------------------------------------------------
+  // artifact reap lifecycle follow-ons
+  // -------------------------------------------------------------------------
+
+  describe('artifact reap lifecycle follow-ons', () => {
+    it("moving a task to Won't-do reaps every associated run post-commit", async () => {
+      const db = buildDb();
+      const adapter = dbAdapter(db);
+      const router = TaskChangeRouter.initialize(adapter);
+      const { taskId } = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'Retire me',
+      });
+      seedRunForTask(db, { taskId, runId: 'run-retired-task', status: 'completed' });
+      ArtifactRouter.initialize(adapter);
+      const reapForRun = vi
+        .spyOn(ArtifactRouter.getInstance(), 'reapForRun')
+        .mockResolvedValue({ deleted: [] });
+
+      await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        taskId,
+        stageId: stageId(10),
+      });
+
+      expect(reapForRun).toHaveBeenCalledTimes(1);
+      expect(reapForRun).toHaveBeenCalledWith(1, 'run-retired-task');
+      expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string }).stage_id)
+        .toBe(stageId(10));
+    });
+
+    it('archiving does not reap artifacts', async () => {
+      const db = buildDb();
+      const adapter = dbAdapter(db);
+      const router = TaskChangeRouter.initialize(adapter);
+      const { taskId } = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'Archive me',
+      });
+      seedRunForTask(db, { taskId, runId: 'run-archived-task', status: 'completed' });
+      ArtifactRouter.initialize(adapter);
+      const reapForRun = vi
+        .spyOn(ArtifactRouter.getInstance(), 'reapForRun')
+        .mockResolvedValue({ deleted: [] });
+
+      await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        taskId,
+        archived: true,
+      });
+
+      expect(reapForRun).not.toHaveBeenCalled();
+    });
+
+    it("a failing Won't-do reap is swallowed after the stage move commits", async () => {
+      const db = buildDb();
+      const adapter = dbAdapter(db);
+      const router = TaskChangeRouter.initialize(adapter);
+      const { taskId } = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'Retire despite cleanup failure',
+      });
+      seedRunForTask(db, { taskId, runId: 'run-reap-fails', status: 'completed' });
+      ArtifactRouter.initialize(adapter);
+      vi.spyOn(ArtifactRouter.getInstance(), 'reapForRun').mockRejectedValue(
+        new Error('reap unavailable'),
+      );
+
+      await expect(
+        router.applyChange(1, {
+          actor: 'user',
+          entityType: 'task',
+          taskId,
+          stageId: stageId(10),
+        }),
+      ).resolves.toBeDefined();
+      expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string }).stage_id)
+        .toBe(stageId(10));
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // applyDelete — hard delete + cascade
   // -------------------------------------------------------------------------
 
@@ -1478,6 +1567,33 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect(rowCount(db, 'tasks', epicTaskId)).toBe(0);
       expect(rowCount(db, 'ideas', ideaId)).toBe(1);
       expect(rowCount(db, 'tasks', directTaskId)).toBe(1);
+    });
+
+    it('hard-delete cascade reaps the runs resolved for every deleted entity', async () => {
+      const db = buildDb();
+      const adapter = dbAdapter(db);
+      const router = TaskChangeRouter.initialize(adapter);
+      const { ideaId, epicTaskId, directTaskId } = await seedFamily(router);
+      seedRunForTask(db, {
+        taskId: epicTaskId,
+        runId: 'run-epic-child',
+        status: 'completed',
+      });
+      seedRunForTask(db, {
+        taskId: directTaskId,
+        runId: 'run-direct-child',
+        status: 'completed',
+      });
+      ArtifactRouter.initialize(adapter);
+      const reapForRun = vi
+        .spyOn(ArtifactRouter.getInstance(), 'reapForRun')
+        .mockResolvedValue({ deleted: [] });
+
+      await router.applyDelete(1, { actor: 'user', entityType: 'idea', taskId: ideaId });
+
+      expect(reapForRun).toHaveBeenCalledTimes(2);
+      expect(reapForRun).toHaveBeenCalledWith(1, 'run-epic-child');
+      expect(reapForRun).toHaveBeenCalledWith(1, 'run-direct-child');
     });
 
     it('deleting a leaf task leaves siblings + parent epic intact', async () => {

@@ -15,7 +15,8 @@
  * entity keeps its current stage/column and visibility is a client concern.
  * Hard delete (applyDelete) cascades idea -> epics -> tasks (children first),
  * purges the entities' entity_events rows, and best-effort dismisses pending
- * review_items linked to the deleted entities via ReviewItemRouter.
+ * review_items linked to the deleted entities via ReviewItemRouter. Moving to
+ * Won't-do or hard-deleting also best-effort reaps associated run artifacts.
  *
  * ENTITY-AWARE (migration 015): the unified `tasks` table is split into three
  * tables — ideas / epics / tasks. Table identity IS the discriminator, so the
@@ -38,6 +39,8 @@
 import { EventEmitter } from 'node:events';
 import { randomBytes } from 'node:crypto';
 import PQueue from 'p-queue';
+import { ArtifactRouter } from './artifactRouter';
+import { listRunIdsForEntity } from './entityRunLinks';
 import { ReviewItemRouter } from './reviewItemRouter';
 import type { DatabaseLike } from './types';
 import type {
@@ -513,7 +516,15 @@ export class TaskChangeRouter {
       dependsOnTaskId?: string;
       event: { id: number; seq: number };
       previousParentEpicId?: string | null;
+      wontDoRunIds?: string[];
     };
+
+    // POST-COMMIT ARTIFACT FOLLOW-ON: parking an entity at Won't-do retires
+    // every run associated with it. The update has already committed; router
+    // lookup/reap failures are deliberately swallowed and never fail the move.
+    if (result.wontDoRunIds) {
+      await this.reapArtifactsForRunIds(projectId, result.wontDoRunIds);
+    }
 
     // POST-COMMIT FOLLOW-ON (re-entrant per-project-queue block): roll a parent
     // epic's DERIVED stage up after a child-task write settles. Each hook re-enters
@@ -616,7 +627,8 @@ export class TaskChangeRouter {
    * One transaction deletes each entity's entity_events rows then the entity
    * row, children first (no event row survives — the entity is gone). Post
    * commit: pending review_items linked to deleted entities are dismissed
-   * best-effort via ReviewItemRouter (ALL failures swallowed), then a
+   * best-effort via ReviewItemRouter and associated run artifacts are reaped
+   * through ArtifactRouter (ALL failures swallowed), then a
    * TaskChangedEvent { action: 'deleted', task: <pre-delete snapshot> } is
    * emitted per deleted entity on BOTH channels.
    *
@@ -632,7 +644,12 @@ export class TaskChangeRouter {
       taskId: string;
       deletedIds: string[];
       survivingParentEpicIds: string[];
+      artifactRunIds: string[];
     };
+
+    // The reverse associations were captured per cascade entity before those
+    // rows/events vanished. Reap only after the delete transaction committed.
+    await this.reapArtifactsForRunIds(projectId, result.artifactRunIds);
 
     // POST-COMMIT FOLLOW-ON (outside the queue task — see the applyChange seam):
     // deleting a child task changes its parent epic's rollup inputs; re-derive
@@ -1425,7 +1442,12 @@ export class TaskChangeRouter {
   private runUpdate(
     projectId: number,
     change: TaskChange,
-  ): { taskId: string; event: { id: number; seq: number }; previousParentEpicId?: string | null } {
+  ): {
+    taskId: string;
+    event: { id: number; seq: number };
+    previousParentEpicId?: string | null;
+    wontDoRunIds?: string[];
+  } {
     const taskId = change.taskId as string;
     const now = new Date().toISOString();
 
@@ -1437,6 +1459,7 @@ export class TaskChangeRouter {
     // the post-commit rollup hook can re-derive the epic the task LEFT (not just
     // the one it joined). Stays null when the change is not an actual re-parent.
     let previousParentEpicId: string | null = null;
+    let wontDoRunIds: string[] | undefined;
 
     const txn = this.db.transaction(() => {
       // Resolve the entity type: prefer the declared discriminator, else look up
@@ -1514,6 +1537,9 @@ export class TaskChangeRouter {
         params.push(change.stageId);
         deltas.push({ field: 'stage_id', from: current.stage_id, to: change.stageId });
         action = 'stageMoved';
+        if (targetStage.position === WONT_DO_POSITION) {
+          wontDoRunIds = listRunIdsForEntity(this.db, type, taskId);
+        }
 
         // RE-OPEN WINDOW (migration 067): a TASK moving FROM a terminal stage
         // (Done / Won't do) TO a non-terminal stage — by ANY actor — begins a new
@@ -1755,7 +1781,12 @@ export class TaskChangeRouter {
     (txn as () => void)();
 
     this.emitChange(projectId, resolvedType, taskId, action);
-    return { taskId, event: { id: eventId, seq: eventSeq }, previousParentEpicId };
+    return {
+      taskId,
+      event: { id: eventId, seq: eventSeq },
+      previousParentEpicId,
+      wontDoRunIds,
+    };
   }
 
   // --------------------------------------------------------------------------
@@ -1765,7 +1796,12 @@ export class TaskChangeRouter {
   private async runDelete(
     projectId: number,
     opts: { actor: TaskActor; taskId: string; entityType?: TaskType; runId?: string },
-  ): Promise<{ taskId: string; deletedIds: string[]; survivingParentEpicIds: string[] }> {
+  ): Promise<{
+    taskId: string;
+    deletedIds: string[];
+    survivingParentEpicIds: string[];
+    artifactRunIds: string[];
+  }> {
     const located = this.locateEntity(projectId, opts.taskId, opts.entityType);
     if (!located) {
       throw new TaskChangeError('not_found', `entity ${opts.taskId} not found for project ${projectId}`);
@@ -1791,6 +1827,16 @@ export class TaskChangeRouter {
       ...entity,
       snapshot: this.buildBacklogTaskItem(entity.type, entity.id),
     }));
+
+    // Resolve before the transaction purges entity_events and child rows. Each
+    // cascade entity contributes its reverse associations; the Set avoids
+    // reaping one run twice when several deleted entities point to it.
+    const artifactRunIds = new Set<string>();
+    for (const entity of cascade) {
+      for (const runId of listRunIdsForEntity(this.db, entity.type, entity.id)) {
+        artifactRunIds.add(runId);
+      }
+    }
 
     // Parent epics whose rollup inputs this delete changes: read BEFORE the
     // rows vanish, keep only parents that SURVIVE the cascade (a deleted parent
@@ -1835,7 +1881,19 @@ export class TaskChangeRouter {
       taskId: opts.taskId,
       deletedIds: cascade.map((e) => e.id),
       survivingParentEpicIds: [...survivingParentEpicIds],
+      artifactRunIds: [...artifactRunIds],
     };
+  }
+
+  /** Best-effort post-commit artifact reap; entity writes never report cleanup failures. */
+  private async reapArtifactsForRunIds(projectId: number, runIds: string[]): Promise<void> {
+    for (const runId of new Set(runIds)) {
+      try {
+        await ArtifactRouter.getInstance().reapForRun(projectId, runId);
+      } catch {
+        // Missing singleton or failed DB/fs cleanup never rolls back the entity write.
+      }
+    }
   }
 
   /**
