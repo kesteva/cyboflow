@@ -55,6 +55,9 @@ function buildDb(): Database.Database {
     '023_sprint_lane_step.sql',
     '025_sprint_lane_attempts.sql',
     '055_visual_verification.sql',
+    // Verification-agent dual-format columns (task_json/report_json/…) the
+    // loopback-feedback compose path reads. Additive; existing tests unaffected.
+    '078_verification_agent_requests.sql',
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }
@@ -413,5 +416,83 @@ describe('SchedulerVisualVerifyGate', () => {
     await expect(gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_b' })).resolves.toEqual({ kind: 'advance' });
     // Lane A itself still resolves the FAIL to a loopback.
     await expect(gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_a' })).resolves.toEqual({ kind: 'loopback', attempt: 2 });
+  });
+
+  // ── Loopback feedback composition (verification-agent redesign §5.3/C) ────────
+  // A FAIL loopback carries a `feedback` string composed from, in preference order,
+  // report_json → verdict_json → error_message; absent all three ⇒ no feedback.
+  describe('loopback feedback', () => {
+    /** Seed a FAILED request row with optional report/verdict/error/task JSON, then loop the lane back. */
+    function seedFailedRequestWithReport(opts: {
+      reportJson?: string | null;
+      verdictJson?: string | null;
+      errorMessage?: string | null;
+      taskJson?: string | null;
+    }): void {
+      const { batchId } = singleLaneParked('run-1');
+      db.prepare(
+        `INSERT INTO verification_requests
+           (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt,
+            report_json, verdict_json, error_message, task_json)
+         VALUES (?, 'run-1', 1, 'failed', 'static-render-snapshot', ?, '["capturePage"]', 0, ?, ?, ?, ?)`,
+      ).run(
+        'vr_fb',
+        JSON.stringify({ intent: 'looks right', taskRef: 'TASK-001' }),
+        opts.reportJson ?? null,
+        opts.verdictJson ?? null,
+        opts.errorMessage ?? null,
+        opts.taskJson ?? null,
+      );
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'running', currentStepId: 'implement', attempt: 2 });
+    }
+
+    it('composes feedback from report_json (failed behaviors + task description/expected + notes + feedback)', async () => {
+      const report = {
+        version: 1,
+        behaviors: [
+          { id: 'b1', result: 'fail', evidence: { screenshots: [], notes: 'button absent at load' } },
+          { id: 'b2', result: 'pass', evidence: { screenshots: [], notes: '' } },
+        ],
+        screenshots: [],
+        outcome: 'fail',
+        confidence: 0.9,
+        feedback: 'The submit flow is broken.',
+        issues: [],
+      };
+      const task = {
+        version: 1,
+        summary: 'Login',
+        behaviors: [{ id: 'b1', description: 'submit button appears', expected: 'button visible after load' }],
+      };
+      seedFailedRequestWithReport({ reportJson: JSON.stringify(report), taskJson: JSON.stringify(task) });
+
+      const outcome = await gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_a' });
+      expect(outcome.kind).toBe('loopback');
+      const fb = outcome.kind === 'loopback' ? outcome.feedback : undefined;
+      expect(fb).toContain('Behavior b1: submit button appears'); // description enriched from task
+      expect(fb).toContain('button visible after load'); // expected
+      expect(fb).toContain('button absent at load'); // observed notes
+      expect(fb).toContain('The submit flow is broken.'); // report feedback
+      // A PASSing behavior is not listed.
+      expect(fb).not.toContain('b2');
+    });
+
+    it('falls back to verdict_json feedback when report_json is absent', async () => {
+      seedFailedRequestWithReport({ verdictJson: JSON.stringify({ status: 'fail', feedback: 'legacy verdict feedback' }) });
+      const outcome = await gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_a' });
+      expect(outcome.kind === 'loopback' && outcome.feedback).toBe('legacy verdict feedback');
+    });
+
+    it('falls back to error_message when neither report nor verdict feedback exists', async () => {
+      seedFailedRequestWithReport({ errorMessage: 'ERR_CONNECTION_REFUSED on http://localhost:29260' });
+      const outcome = await gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_a' });
+      expect(outcome.kind === 'loopback' && outcome.feedback).toBe('ERR_CONNECTION_REFUSED on http://localhost:29260');
+    });
+
+    it('omits feedback entirely when report/verdict/error are all absent', async () => {
+      seedFailedRequestWithReport({});
+      const outcome = await gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_a' });
+      expect(outcome).toEqual({ kind: 'loopback', attempt: 2 }); // no feedback key
+    });
   });
 });

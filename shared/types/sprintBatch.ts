@@ -166,6 +166,16 @@ export const SPRINT_IMPLEMENT_STEP: SprintLaneStepId = 'implement';
 export const SPRINT_VISUAL_VERIFY_STEP: SprintLaneStepId = 'visual-verify';
 
 /**
+ * The lane step whose typed output composes the visual-verification task
+ * (verification-agent redesign §5.3). On `VERDICT: PASS` its result carries a
+ * `## Visual verification task` fence (or an explicit NOT-APPLICABLE line); the
+ * programmatic controller parses that off the step's captured result text to
+ * decide whether to enqueue the agentless visual-verify step. Named const (not a
+ * bare literal) so the controller, the parser, and the tests share one source.
+ */
+export const SPRINT_TASK_VERIFY_STEP: SprintLaneStepId = 'task-verify';
+
+/**
  * Read-model for a single task lane (SprintLaneStore.listLanes /
  * cyboflow.runs.listLanes). `ref`/`title` are resolved fail-soft from the
  * `tasks` table (NULL when the task row is missing).

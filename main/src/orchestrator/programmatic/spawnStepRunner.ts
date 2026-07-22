@@ -184,6 +184,12 @@ export class SpawnStepRunner implements StepRunner {
       ...(taskScope ? { taskScope } : {}),
       ...(runOwnedIdeaIds && runOwnedIdeaIds.length > 0 ? { runOwnedIdeaIds } : {}),
       ...(userGuidance ? { userGuidance } : {}),
+      // Per-attempt visual-verification threading (verification-agent redesign
+      // §5.3): a task-verify contract re-run and a visual-FAIL implement
+      // re-delegate carry their defect / report on the ctx; forward verbatim so
+      // composeStepPrompt renders the corresponding section. Absent ⇒ byte-identical.
+      ...(ctx.contractError ? { contractError: ctx.contractError } : {}),
+      ...(ctx.loopbackFeedback ? { loopbackFeedback: ctx.loopbackFeedback } : {}),
     });
     // A step-level runtime override also overrides the render context's
     // provider/runtime so a Codex step gets the compatibility adapter even inside

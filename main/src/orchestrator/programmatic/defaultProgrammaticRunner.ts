@@ -28,8 +28,10 @@ import { resolveWorkflowDefinition } from '../../../../shared/types/workflows';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 import type { ReasoningEffort } from '../../../../shared/types/reasoningEffort';
+import type { VerificationTaskV1 } from '../../../../shared/types/visualVerification';
 import type { ClaudeSpawnerLike, ProgrammaticRunner, ProgrammaticRunContext } from '../runExecutor';
-import type { LoggerLike } from '../types';
+import type { DatabaseLike, LoggerLike } from '../types';
+import { enqueueTaskVerification } from '../verify/enqueueFromTask';
 import type { FanOutDriver, StepReport, VisualVerifyGate } from './types';
 import { WorkflowController } from './workflowController';
 import { createRunDirectives } from './runDirectives';
@@ -126,6 +128,18 @@ export interface DefaultProgrammaticRunnerDeps {
    * active for the run; absent ⇒ the controller never parks (byte-identical to today).
    */
   visualGate?: VisualVerifyGate;
+  /**
+   * Read-only DB handle for the agentless visual-verify enqueue seam
+   * (verification-agent redesign §5.3/§5.4). When present (production wires
+   * `cyboflowDb`), the runner builds the host's `enqueueVisualVerification`
+   * capability — the controller's agentless visual-verify step calls it to enqueue
+   * the composed task on the singleton VerificationScheduler (reads the run's verify
+   * stamps + project id, captures the snapshot sha, dual-writes). Absent (tests /
+   * a host built without a DB) ⇒ the capability is not wired, so the controller's
+   * visual-verify step cleanly SKIPS (fail-open — no request, no park). The
+   * scheduler being a singleton is why no scheduler instance is threaded here.
+   */
+  db?: DatabaseLike;
   /**
    * Sprint task-scope provider (grounding fix, 2026-06-22). Called once per
    * sprint-style run (a non-empty `batch_id`) to resolve the `# Sprint tasks`
@@ -280,6 +294,27 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       return resolvedFanOutDriver;
     };
 
+    // Agentless visual-verify enqueue capability (verification-agent redesign
+    // §5.3/§5.4): built ONLY when a DB is wired. The controller calls it from the
+    // (agentless) visual-verify inner step with the task task-verify composed +
+    // the lane's authoritative ref/attempt; enqueueTaskVerification reads the run's
+    // verify stamps, captures the snapshot sha off ctx.worktreePath, dual-writes,
+    // and enqueues on the singleton scheduler. Absent DB ⇒ undefined ⇒ the
+    // controller's visual-verify step cleanly skips (fail-open).
+    const db = this.deps.db;
+    const enqueueVisualVerification = db
+      ? (args: { runId: string; task: VerificationTaskV1; laneTaskRef: string; attempt: number }) =>
+          enqueueTaskVerification({
+            db,
+            runId: args.runId,
+            task: args.task,
+            laneTaskRef: args.laneTaskRef,
+            attempt: args.attempt,
+            worktreePath: ctx.worktreePath,
+            ...(this.deps.logger ? { logger: this.deps.logger } : {}),
+          })
+      : undefined;
+
     const host = new ProgrammaticRunHost({
       runId: ctx.runId,
       projectId: ctx.run.project_id,
@@ -297,6 +332,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       // CONSTRUCTION TIME — under lazy resolution that may not happen until well
       // into the walk (see ProgrammaticRunHostArgs.visualGate's docblock).
       ...(this.deps.visualGate ? { visualGate: this.deps.visualGate } : {}),
+      ...(enqueueVisualVerification ? { enqueueVisualVerification } : {}),
       logger: this.deps.logger,
     });
 

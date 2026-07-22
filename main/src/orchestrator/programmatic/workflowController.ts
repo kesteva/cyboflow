@@ -29,8 +29,14 @@ import { HUMAN_GATE_AGENT } from '../../../../shared/types/agentIdentity';
 import {
   AWAITING_VERIFY_STEP,
   SPRINT_IMPLEMENT_STEP,
+  SPRINT_TASK_VERIFY_STEP,
   SPRINT_VISUAL_VERIFY_STEP,
 } from '../../../../shared/types/sprintBatch';
+import type { VerificationTaskV1 } from '../../../../shared/types/visualVerification';
+// Pure, shared-type-backed parser (no electron/DB/service deps) — importing it
+// keeps the controller unit-testable with no new mocks, honoring the spirit of
+// the standalone-typecheck invariant (heavy imports only).
+import { parseVisualTaskSection } from '../verify/visualTaskSection';
 import type {
   ControllerHost,
   ControllerResult,
@@ -42,6 +48,24 @@ import type {
 } from './types';
 import { FAN_OUT_LANE_ATTEMPT_CAP } from './types';
 import { createRunDirectives, type RunDirectives } from './runDirectives';
+
+/**
+ * Parse a task-verify agent's captured result text for its terminal verdict —
+ * the LAST line matching `VERDICT: PASS|FAIL` (verification-agent redesign §5.3).
+ * Returns null when no such line exists (the caller treats that as PASS for flow
+ * purposes but still enforces the §5.1 output contract). Line-oriented, not
+ * fence-aware: a `VERDICT:` line inside a code fence is vanishingly unlikely in a
+ * verdict result and the LAST-match rule already tolerates incidental mentions.
+ */
+function parseTaskVerifyVerdict(text: string): 'pass' | 'fail' | null {
+  const re = /^VERDICT:\s*(PASS|FAIL)\b/;
+  let verdict: 'pass' | 'fail' | null = null;
+  for (const line of text.split(/\r?\n/)) {
+    const m = re.exec(line);
+    if (m) verdict = m[1] === 'PASS' ? 'pass' : 'fail';
+  }
+  return verdict;
+}
 
 /**
  * Maximum number of intra-phase loopback JUMPS allowed per step id across a whole
@@ -639,6 +663,19 @@ export class WorkflowController {
       // Set when a loopback lands on a target. The target's lane write carries the
       // bumped attempt in the SAME transition that moves it back to that step.
       let loopbackAttemptStepIndex: number | undefined;
+      // The composed visual-verification task task-verify's typed output produced
+      // for THIS lane (§5.3). undefined ⇒ nothing to verify (NOT-APPLICABLE, a
+      // channel-unavailable substrate, or task-verify not yet run) → the agentless
+      // visual-verify step skips without parking.
+      let visualVerifyTask: VerificationTaskV1 | undefined;
+      // §5.1 output-contract re-run budget for THIS lane: task-verify gets exactly
+      // ONE re-delegation when its PASS result violates the fence/NOT-APPLICABLE
+      // contract; a second violation fails the lane.
+      let laneContractRetries = 0;
+      // One-shot per-attempt prompt sections consumed when the NEXT agent-step ctx
+      // is built (§5.3): a task-verify contract defect / a visual-FAIL report.
+      let pendingContractError: string | undefined;
+      let pendingLoopbackFeedback: string | undefined;
 
       for (let k = 0; k < inner.length; k++) {
         if (signal?.aborted) return 'aborted';
@@ -653,6 +690,98 @@ export class WorkflowController {
           );
           continue;
         }
+        // ── Agentless visual-verify step (verification-agent redesign §5.3/§5.7).
+        // The in-lane dispatcher subagent is RETIRED — this step spawns NO agent.
+        // When verification is active for the run AND task-verify composed a task,
+        // the controller enqueues it centrally and PARKS the lane at
+        // awaiting-verify; the async merge-gate verdict then advances / loops back /
+        // fails. Every skip case (verification inactive, nothing composed, or the
+        // scheduler declined) continues the chain WITHOUT parking — byte-identical
+        // to a verify-disabled lane. The lane vocabulary + park semantics are
+        // unchanged; only the in-lane agent turn is gone.
+        if (innerStep.id === SPRINT_VISUAL_VERIFY_STEP) {
+          if (!this.host.visualGate?.isActive(runId)) {
+            // Verification inactive for the run → skip (never park), as today.
+            continue;
+          }
+          if (visualVerifyTask === undefined) {
+            // NOT-APPLICABLE / channel-unavailable / task-verify operator-skipped ⇒
+            // nothing to verify: skip the step entirely (no request, no park).
+            this.host.log?.('info', `fan-out item '${itemId}': no visual task to verify; skipping visual-verify`);
+            continue;
+          }
+          const enqueueOutcome = this.host.enqueueVisualVerification
+            ? await this.host.enqueueVisualVerification({
+                runId,
+                task: visualVerifyTask,
+                laneTaskRef: itemId,
+                attempt: laneAttempt,
+              })
+            : ({ outcome: 'skipped', reason: 'no-enqueue-capability' } as const);
+          if (enqueueOutcome.outcome === 'skipped') {
+            // Verification disabled / scheduler unavailable ⇒ advance WITHOUT parking.
+            this.host.log?.(
+              'info',
+              `fan-out item '${itemId}': visual verification not enqueued (${enqueueOutcome.reason}); advancing`,
+            );
+            continue;
+          }
+          // Enqueued ⇒ park at awaiting-verify + await the async verdict (the
+          // merge-gate has already driven the lane by the time this resolves).
+          driver.driveLane({
+            runId,
+            itemId,
+            currentStepId: AWAITING_VERIFY_STEP,
+            allowedStepIds: parkAllowedStepIds,
+          });
+          const outcome = await this.host.visualGate.awaitVerdict({
+            runId,
+            itemId,
+            ...(signal ? { signal } : {}),
+          });
+          if (outcome.kind === 'aborted') return 'aborted';
+          if (outcome.kind === 'failed') {
+            driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
+            this.host.log?.('warn', `fan-out item '${itemId}': visual merge-gate FAILED; lane failed`);
+            return 'failed';
+          }
+          if (outcome.kind === 'loopback') {
+            visualLoopbacks += 1;
+            // Prefer a declared inner loopback target; retain the historical
+            // implement fallback for a custom chain that predates explicit data.
+            const declaredTargetIndex = loopbackIndex(innerStep);
+            const targetIndex =
+              declaredTargetIndex >= 0
+                ? declaredTargetIndex
+                : inner.findIndex((candidate) => candidate.id === SPRINT_IMPLEMENT_STEP);
+            if (
+              targetIndex < 0 ||
+              visualLoopbacks > MAX_VISUAL_LOOPBACKS ||
+              outcome.attempt <= laneAttempt ||
+              outcome.attempt > FAN_OUT_LANE_ATTEMPT_CAP
+            ) {
+              driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
+              this.host.log?.('warn', `fan-out item '${itemId}': visual merge-gate loopback exhausted; lane failed`);
+              return 'failed';
+            }
+            laneAttempt = outcome.attempt;
+            loopbackAttemptStepIndex = targetIndex;
+            // Thread the gate's failure report to the re-driven implement step so
+            // the re-implement agent sees what failed (§5.3), not just that a
+            // blocking finding exists. Consumed when the target step builds its ctx.
+            pendingLoopbackFeedback = outcome.feedback;
+            this.host.log?.(
+              'info',
+              `fan-out item '${itemId}': visual merge-gate FAIL → '${inner[targetIndex].id}' (attempt ${laneAttempt})`,
+            );
+            k = targetIndex - 1; // The loop's k++ lands on the target next.
+            continue;
+          }
+          // 'advance' → passed / advisory / skipped: fall through to the next inner
+          // step (or lane integration below).
+          continue;
+        }
+
         const writeAttempt = loopbackAttemptStepIndex === k ? laneAttempt : undefined;
         driver.driveLane({
           runId,
@@ -681,7 +810,14 @@ export class WorkflowController {
           // under a distinct key instead of serializing on the shared run
           // panelId (which deadlocks waiting lanes on the spawn mutex).
           spawnKey: `${runId}:${itemId}`,
+          // One-shot §5.3 sections, set by a prior task-verify contract defect / a
+          // visual-FAIL loopback and consumed by THIS (the re-driven) step, then
+          // cleared below so no later step inherits them.
+          ...(pendingContractError !== undefined ? { contractError: pendingContractError } : {}),
+          ...(pendingLoopbackFeedback !== undefined ? { loopbackFeedback: pendingLoopbackFeedback } : {}),
         };
+        pendingContractError = undefined;
+        pendingLoopbackFeedback = undefined;
         const result = await this.runner.runStep(synthesized, ctx);
 
         if (result.status === 'aborted') return 'aborted';
@@ -717,62 +853,89 @@ export class WorkflowController {
           return 'failed';
         }
 
-        // Visual MERGE-GATE actuation (programmatic): the visual-verify step only
-        // FIRES a fire-and-continue verification request — the verdict lands later.
-        // Park the lane at `awaiting-verify` and AWAIT it, then advance / loop back
-        // to implement / fail the lane. This closes the actuation gap so a
-        // programmatic run never leaves a FAILed lane parked. Skipped entirely when
-        // no gate is wired or verification is inactive for the run (byte-identical
-        // to today — the lane integrates straight after visual-verify).
-        if (innerStep.id === SPRINT_VISUAL_VERIFY_STEP && this.host.visualGate?.isActive(runId)) {
-          driver.driveLane({
-            runId,
-            itemId,
-            currentStepId: AWAITING_VERIFY_STEP,
-            allowedStepIds: parkAllowedStepIds,
-          });
-          const outcome = await this.host.visualGate.awaitVerdict({
-            runId,
-            itemId,
-            ...(signal ? { signal } : {}),
-          });
-          if (outcome.kind === 'aborted') return 'aborted';
-          if (outcome.kind === 'failed') {
-            driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
-            this.host.log?.('warn', `fan-out item '${itemId}': visual merge-gate FAILED; lane failed`);
-            return 'failed';
-          }
-          if (outcome.kind === 'loopback') {
-            visualLoopbacks += 1;
-            // The visual merge-gate historically loops to `implement` even in a
-            // custom chain that predates explicit inner loopback data. Prefer a
-            // declared target, but retain that compatibility fallback here only.
-            const declaredTargetIndex = loopbackIndex(innerStep);
-            const targetIndex = declaredTargetIndex >= 0
-              ? declaredTargetIndex
-              : inner.findIndex((candidate) => candidate.id === SPRINT_IMPLEMENT_STEP);
-            if (
-              targetIndex < 0 ||
-              visualLoopbacks > MAX_VISUAL_LOOPBACKS ||
-              outcome.attempt <= laneAttempt ||
-              outcome.attempt > FAN_OUT_LANE_ATTEMPT_CAP
-            ) {
-              // No declared target, an invalid attempt, or the backstop bound was
-              // hit (the merge-gate's own 3x cap should fail the lane first).
+        // Task-verify typed output (verification-agent redesign §5.3): on a clean
+        // task-verify turn, consume its captured result text to (a) route a
+        // VERDICT: FAIL back into the loopback path — a gap programmatic mode never
+        // saw before — and (b) compose the visual-verification task the agentless
+        // visual-verify step below will enqueue. Only meaningful when verification
+        // is active for the run; otherwise the text is ignored (byte-identical).
+        if (innerStep.id === SPRINT_TASK_VERIFY_STEP && this.host.visualGate?.isActive(runId)) {
+          const resultText = result.resultText;
+          if (resultText === null || resultText === undefined) {
+            // A substrate that cannot capture the step's final text (codex /
+            // interactive): visual verification is Claude-scoped v1, so fail OPEN —
+            // skip it for this lane (channel-unavailable).
+            this.host.log?.(
+              'warn',
+              `fan-out item '${itemId}': task-verify produced no result text; skipping visual verification (channel unavailable)`,
+            );
+            visualVerifyTask = undefined;
+          } else {
+            const verdict = parseTaskVerifyVerdict(resultText);
+            if (verdict === 'fail') {
+              // Route into the SAME non-systemic failure/loopback path a failed step
+              // result takes (declared loopback → laneAttempt bump → 3× cap → fail).
+              const targetIndex = loopbackIndex(innerStep);
+              if (targetIndex >= 0 && laneAttempt < FAN_OUT_LANE_ATTEMPT_CAP) {
+                laneAttempt += 1;
+                loopbackAttemptStepIndex = targetIndex;
+                this.host.log?.(
+                  'info',
+                  `fan-out item '${itemId}': task-verify VERDICT: FAIL; looping back to '${inner[targetIndex].id}' (attempt ${laneAttempt})`,
+                );
+                k = targetIndex - 1; // The loop's k++ lands on the target next.
+                continue;
+              }
               driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
-              this.host.log?.('warn', `fan-out item '${itemId}': visual merge-gate loopback exhausted; lane failed`);
+              this.host.log?.(
+                'warn',
+                `fan-out item '${itemId}': task-verify VERDICT: FAIL; lane failed${targetIndex >= 0 ? ' (attempt cap reached)' : ''}`,
+              );
               return 'failed';
             }
-            laneAttempt = outcome.attempt;
-            loopbackAttemptStepIndex = targetIndex;
-            this.host.log?.(
-              'info',
-              `fan-out item '${itemId}': visual merge-gate FAIL → '${inner[targetIndex].id}' (attempt ${laneAttempt})`,
-            );
-            k = targetIndex - 1; // The loop's k++ lands on the target next.
-            continue;
+            if (verdict === null) {
+              this.host.log?.(
+                'warn',
+                `fan-out item '${itemId}': task-verify result had no VERDICT line; treating as PASS`,
+              );
+            }
+            // PASS (or no explicit verdict): the §5.1 contract requires EXACTLY ONE
+            // of a `## Visual verification task` fence or a NOT-APPLICABLE line — a
+            // missing/malformed one is an output-contract failure, NEVER silently
+            // "nothing to verify" (a truncated response must not bypass the gate).
+            const section = parseVisualTaskSection(resultText);
+            if (section.kind === 'task') {
+              visualVerifyTask = section.task;
+            } else if (section.kind === 'not_applicable') {
+              visualVerifyTask = undefined;
+              this.host.log?.(
+                'info',
+                `fan-out item '${itemId}': visual verification NOT-APPLICABLE${section.reason ? ` (${section.reason})` : ''}`,
+              );
+            } else {
+              // 'missing' | 'contract_error' → re-run task-verify ONCE with the
+              // defect threaded; a SECOND violation fails the lane.
+              if (laneContractRetries >= 1) {
+                driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
+                this.host.log?.(
+                  'warn',
+                  `fan-out item '${itemId}': task-verify violated the visual-verification output contract twice; lane failed`,
+                );
+                return 'failed';
+              }
+              laneContractRetries += 1;
+              pendingContractError =
+                section.kind === 'contract_error'
+                  ? section.error
+                  : 'no "## Visual verification task" section and no VISUAL-VERIFICATION: NOT-APPLICABLE line';
+              this.host.log?.(
+                'warn',
+                `fan-out item '${itemId}': task-verify visual-verification contract defect; re-running task-verify`,
+              );
+              k = k - 1; // Re-run the SAME task-verify step (the loop's k++ lands on it).
+              continue;
+            }
           }
-          // 'advance' → fall through; the loop ends and the lane integrates below.
         }
       }
 

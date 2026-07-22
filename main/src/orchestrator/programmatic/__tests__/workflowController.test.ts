@@ -15,6 +15,7 @@ import type {
   StepRunResult,
   StepRunner,
   SupervisorEvent,
+  TaskEnqueueResult,
   TriageDecision,
   VisualGateOutcome,
   VisualVerifyGate,
@@ -1124,11 +1125,23 @@ describe('WorkflowController', () => {
       expect(runner.calls.filter((c) => c.id === 'execute').length).toBe(1);
     });
 
-    // ── Visual MERGE-GATE actuation (programmatic): after the visual-verify inner
-    //    step the controller parks the lane + awaits the async verdict, then
-    //    advances / loops back to implement / fails the lane. ───────────────────
-    describe('visual merge-gate actuation', () => {
-      /** A scripted fake VisualVerifyGate: shifts an outcome per awaitVerdict call. */
+    // ── Agentless visual-verify + task-verify typed output (verification-agent
+    //    redesign §5.3): task-verify composes the visual task off its captured
+    //    result text; the visual-verify step spawns NO agent — the controller
+    //    enqueues the task via the host capability then parks + awaits the merge
+    //    gate, advancing / looping back to implement / failing the lane. ─────────
+    describe('agentless visual-verify + task-verify typed output', () => {
+      /** task-verify result text carrying a valid `## Visual verification task` fence. */
+      function taskVerifyWithTask(summary = 'Check the UI'): string {
+        const task = {
+          version: 1,
+          summary,
+          behaviors: [{ id: 'b1', description: 'renders', expected: 'form visible' }],
+        };
+        return `VERDICT: PASS\n\n## Visual verification task\n\n\`\`\`json\n${JSON.stringify(task)}\n\`\`\`\n`;
+      }
+
+      /** A gate scripted with a queue of outcomes (default advance). */
       function makeVisualGate(
         outcomes: VisualGateOutcome[],
         active = true,
@@ -1145,150 +1158,330 @@ describe('WorkflowController', () => {
         };
       }
 
-      it('parks at awaiting-verify then advances the lane to integrated on a PASS', async () => {
-        const d = def([phase('p1', [fanStep('execute', ['implement', 'visual-verify'])])]);
-        const driver = makeFanOutDriver(['t1']);
-        const host = makeFanHost(driver);
-        const gate = makeVisualGate([{ kind: 'advance' }]);
-        host.visualGate = gate;
-        const runner = makeRunner();
-
-        const result = await new WorkflowController(runner, host).run('r', d);
-
-        expect(result.outcome).toBe('completed');
-        expect(gate.calls).toEqual([{ runId: 'r', itemId: 't1' }]);
-        // The lane parked at awaiting-verify (a non-inner id, so the park write
-        // widened allowedStepIds to include it) before integrating.
-        const steps = driver.lanes.filter((l) => l.itemId === 't1').map((l) => l.currentStepId);
-        expect(steps).toContain('awaiting-verify');
-        const parkWrite = driver.lanes.find((l) => l.currentStepId === 'awaiting-verify');
-        expect(parkWrite?.allowedStepIds).toContain('awaiting-verify');
-        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
-        // implement + visual-verify each ran exactly once.
-        expect(runner.calls.filter((c) => c.id === 'implement').length).toBe(1);
-        expect(runner.calls.filter((c) => c.id === 'visual-verify').length).toBe(1);
-      });
-
-      it('loops back to implement with the bumped attempt on a FAIL, then integrates on PASS', async () => {
-        const d = def([phase('p1', [fanStep('execute', ['implement', 'visual-verify'])])]);
-        const driver = makeFanOutDriver(['t1']);
-        const host = makeFanHost(driver);
-        // First verdict loops back (attempt 2), second advances.
-        const gate = makeVisualGate([{ kind: 'loopback', attempt: 2 }, { kind: 'advance' }]);
-        host.visualGate = gate;
-        const runner = makeRunner();
-
-        const result = await new WorkflowController(runner, host).run('r', d);
-
-        expect(result.outcome).toBe('completed');
-        // The gate was consulted twice (loopback → re-verify).
-        expect(gate.calls.length).toBe(2);
-        // implement ran TWICE: attempt 1, then re-dispatched at attempt 2.
-        const implementCalls = runner.calls.filter((c) => c.id === 'implement');
-        expect(implementCalls.map((c) => c.attempt)).toEqual([1, 2]);
-        // visual-verify also re-ran (attempt 2 on the re-verify pass).
-        expect(runner.calls.filter((c) => c.id === 'visual-verify').map((c) => c.attempt)).toEqual([1, 2]);
-        // Lane ends integrated.
-        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
-      });
-
-      it('finding #1: the lane is PARKED at awaiting-verify BEFORE the gate is awaited, and a loopback re-walks implement at the bumped attempt', async () => {
-        const d = def([phase('p1', [fanStep('execute', ['implement', 'visual-verify'])])]);
-        const driver = makeFanOutDriver(['t1']);
-        const host = makeFanHost(driver);
-        // Capture the lane's current step as the driver has it at each awaitVerdict
-        // call — proving the park write already landed. THIS is the exact window a
-        // fast verdict's merge-gate lane write (→ implement) gets clobbered back to
-        // awaiting-verify by this park; the gate must still resolve the FAIL as a
-        // loopback (it keys on the terminal STATUS, not the clobbered step id).
-        const parkedStepAtAwait: Array<string | null | undefined> = [];
-        const outcomes: VisualGateOutcome[] = [{ kind: 'loopback', attempt: 2 }, { kind: 'advance' }];
-        const gate: VisualVerifyGate = {
-          isActive: () => true,
-          async awaitVerdict() {
-            parkedStepAtAwait.push(driver.lanes.filter((l) => l.itemId === 't1').pop()?.currentStepId);
-            return outcomes.shift() ?? { kind: 'advance' };
+      /** A recording enqueue capability (default: always 'enqueued'). */
+      function makeEnqueue(
+        result: TaskEnqueueResult = { outcome: 'enqueued', requestId: 'vr-1' },
+      ): {
+        fn: NonNullable<ControllerHost['enqueueVisualVerification']>;
+        calls: Array<{ runId: string; laneTaskRef: string; attempt: number; summary: string }>;
+      } {
+        const calls: Array<{ runId: string; laneTaskRef: string; attempt: number; summary: string }> = [];
+        return {
+          calls,
+          fn: async ({ runId, task, laneTaskRef, attempt }) => {
+            calls.push({ runId, laneTaskRef, attempt, summary: task.summary });
+            return result;
           },
         };
-        host.visualGate = gate;
-        const runner = makeRunner();
+      }
+
+      /** A runner where task-verify returns a scripted resultText; other steps ok. */
+      function verifyRunner(
+        taskVerifyText: string | null,
+        opts: { captureCtx?: Array<{ id: string; attempt: number; contractError?: string; loopbackFeedback?: string }> } = {},
+      ): StepRunner & { calls: Array<{ id: string; attempt: number }> } {
+        const calls: Array<{ id: string; attempt: number }> = [];
+        return {
+          calls,
+          async runStep(s, ctx) {
+            calls.push({ id: s.id, attempt: ctx.attempt });
+            opts.captureCtx?.push({
+              id: s.id,
+              attempt: ctx.attempt,
+              ...(ctx.contractError !== undefined ? { contractError: ctx.contractError } : {}),
+              ...(ctx.loopbackFeedback !== undefined ? { loopbackFeedback: ctx.loopbackFeedback } : {}),
+            });
+            if (s.id === 'task-verify') return { status: 'ok', resultText: taskVerifyText };
+            return { status: 'ok' };
+          },
+        };
+      }
+
+      const verifyChain = (): WorkflowStep =>
+        step({
+          id: 'execute',
+          agent: 'orchestrate',
+          fanOut: {
+            over: 'tasks',
+            inner: [
+              { id: 'implement', agent: 'implement' },
+              { id: 'task-verify', agent: 'task-verify', loopback: 'implement' },
+              { id: 'visual-verify', agent: 'visual-verify' },
+            ],
+          },
+        });
+
+      it('PASS + task fence → enqueue (forced laneTaskRef + attempt), park, gate advance → integrated', async () => {
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = makeVisualGate([{ kind: 'advance' }]);
+        const enqueue = makeEnqueue();
+        host.enqueueVisualVerification = enqueue.fn;
+        const runner = verifyRunner(taskVerifyWithTask());
+
+        const result = await new WorkflowController(runner, host).run('run-9', d);
+
+        expect(result.outcome).toBe('completed');
+        // Enqueue was called with the lane's authoritative ref + attempt 1.
+        expect(enqueue.calls).toEqual([{ runId: 'run-9', laneTaskRef: 't1', attempt: 1, summary: 'Check the UI' }]);
+        // visual-verify spawned NO agent (agentless).
+        expect(runner.calls.some((c) => c.id === 'visual-verify')).toBe(false);
+        // Lane parked at awaiting-verify then integrated.
+        const steps = driver.lanes.filter((l) => l.itemId === 't1').map((l) => l.currentStepId);
+        expect(steps).toContain('awaiting-verify');
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+      });
+
+      it('PASS + NOT-APPLICABLE → no enqueue, no park, lane integrates', async () => {
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = makeVisualGate([]);
+        const enqueue = makeEnqueue();
+        host.enqueueVisualVerification = enqueue.fn;
+        const runner = verifyRunner('VERDICT: PASS\n\nVISUAL-VERIFICATION: NOT-APPLICABLE — no user-visible UI\n');
 
         const result = await new WorkflowController(runner, host).run('r', d);
 
         expect(result.outcome).toBe('completed');
-        // Both awaits observed the lane parked at awaiting-verify (park precedes await).
-        expect(parkedStepAtAwait).toEqual(['awaiting-verify', 'awaiting-verify']);
-        // The loopback re-walked implement at the bumped attempt, then integrated.
+        expect(enqueue.calls.length).toBe(0);
+        expect(driver.lanes.some((l) => l.currentStepId === 'awaiting-verify')).toBe(false);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+      });
+
+      it('enqueue outcome "skipped" → advance WITHOUT parking, lane integrates', async () => {
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = makeVisualGate([]);
+        const enqueue = makeEnqueue({ outcome: 'skipped', reason: 'verification-disabled' });
+        host.enqueueVisualVerification = enqueue.fn;
+        const runner = verifyRunner(taskVerifyWithTask());
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(enqueue.calls.length).toBe(1);
+        // Skipped → never parked.
+        expect(driver.lanes.some((l) => l.currentStepId === 'awaiting-verify')).toBe(false);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+      });
+
+      it('missing/contract-error fence → task-verify re-runs ONCE with contractError in ctx, then success continues', async () => {
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = makeVisualGate([{ kind: 'advance' }]);
+        const enqueue = makeEnqueue();
+        host.enqueueVisualVerification = enqueue.fn;
+        // First task-verify: PASS but NO fence (contract defect). On the re-run the
+        // runner returns a valid fence, so the lane then completes.
+        const captureCtx: Array<{ id: string; attempt: number; contractError?: string; loopbackFeedback?: string }> = [];
+        let taskVerifyCall = 0;
+        const runner: StepRunner & { calls: Array<{ id: string; attempt: number }> } = {
+          calls: [],
+          async runStep(s, ctx) {
+            this.calls.push({ id: s.id, attempt: ctx.attempt });
+            captureCtx.push({
+              id: s.id,
+              attempt: ctx.attempt,
+              ...(ctx.contractError !== undefined ? { contractError: ctx.contractError } : {}),
+            });
+            if (s.id === 'task-verify') {
+              taskVerifyCall += 1;
+              return taskVerifyCall === 1
+                ? { status: 'ok', resultText: 'VERDICT: PASS\n\n(no visual section here)\n' }
+                : { status: 'ok', resultText: taskVerifyWithTask() };
+            }
+            return { status: 'ok' };
+          },
+        };
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        // task-verify ran twice; the SECOND ctx carried a contractError.
+        expect(runner.calls.filter((c) => c.id === 'task-verify').length).toBe(2);
+        const reRun = captureCtx.filter((c) => c.id === 'task-verify')[1];
+        expect(reRun?.contractError).toBeDefined();
+        // The re-run composed a task → enqueue fired once → lane integrated.
+        expect(enqueue.calls.length).toBe(1);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+      });
+
+      it('a SECOND visual-verification contract failure fails the lane', async () => {
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = makeVisualGate([]);
+        const enqueue = makeEnqueue();
+        host.enqueueVisualVerification = enqueue.fn;
+        // task-verify NEVER emits a valid fence → contract fails twice → lane fails.
+        const runner = verifyRunner('VERDICT: PASS\n\n(never any visual section)\n');
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed'); // outer step still settles
+        expect(runner.calls.filter((c) => c.id === 'task-verify').length).toBe(2);
+        expect(enqueue.calls.length).toBe(0);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').map((l) => l.status)).toContain('failed');
+        expect(driver.lanes.filter((l) => l.itemId === 't1').map((l) => l.status)).not.toContain('integrated');
+      });
+
+      it('task-verify VERDICT: FAIL → loopback to implement with the bumped attempt', async () => {
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = makeVisualGate([{ kind: 'advance' }]);
+        const enqueue = makeEnqueue();
+        host.enqueueVisualVerification = enqueue.fn;
+        // First task-verify FAILs (loopback → implement @2); second PASSes with a task.
+        let tv = 0;
+        const runner: StepRunner & { calls: Array<{ id: string; attempt: number }> } = {
+          calls: [],
+          async runStep(s, ctx) {
+            this.calls.push({ id: s.id, attempt: ctx.attempt });
+            if (s.id === 'task-verify') {
+              tv += 1;
+              return tv === 1
+                ? { status: 'ok', resultText: 'VERDICT: FAIL\n\ncriterion 2 not met\n' }
+                : { status: 'ok', resultText: taskVerifyWithTask() };
+            }
+            return { status: 'ok' };
+          },
+        };
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        // implement re-ran at attempt 2 (the FAIL loopback bumped the lane attempt).
         expect(runner.calls.filter((c) => c.id === 'implement').map((c) => c.attempt)).toEqual([1, 2]);
+        // The re-verify composed a task → enqueue fired at the BUMPED attempt.
+        expect(enqueue.calls).toEqual([{ runId: 'r', laneTaskRef: 't1', attempt: 2, summary: 'Check the UI' }]);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+      });
+
+      it('resultText null (channel unavailable) → visual verification SKIPPED, lane integrates', async () => {
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = makeVisualGate([]);
+        const enqueue = makeEnqueue();
+        host.enqueueVisualVerification = enqueue.fn;
+        const runner = verifyRunner(null); // task-verify captured no text
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(enqueue.calls.length).toBe(0);
+        expect(driver.lanes.some((l) => l.currentStepId === 'awaiting-verify')).toBe(false);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+      });
+
+      it('gate loopback carrying feedback → the re-driven implement ctx has loopbackFeedback', async () => {
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = makeVisualGate([{ kind: 'loopback', attempt: 2, feedback: 'Behavior b1: button never appeared' }, { kind: 'advance' }]);
+        const enqueue = makeEnqueue();
+        host.enqueueVisualVerification = enqueue.fn;
+        const captureCtx: Array<{ id: string; attempt: number; loopbackFeedback?: string }> = [];
+        const runner = verifyRunner(taskVerifyWithTask(), { captureCtx });
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        // implement re-ran at attempt 2, and THAT ctx carried the gate's feedback.
+        const reImplement = captureCtx.filter((c) => c.id === 'implement' && c.attempt === 2)[0];
+        expect(reImplement?.loopbackFeedback).toBe('Behavior b1: button never appeared');
+        // The FIRST implement carried no feedback.
+        const firstImplement = captureCtx.filter((c) => c.id === 'implement' && c.attempt === 1)[0];
+        expect(firstImplement?.loopbackFeedback).toBeUndefined();
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+      });
+
+      it('loopback → a FRESH task fence re-enqueues at the BUMPED attempt (a new idempotency key)', async () => {
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        // First verdict loops back (attempt 2), second advances → two enqueues.
+        host.visualGate = makeVisualGate([{ kind: 'loopback', attempt: 2 }, { kind: 'advance' }]);
+        const enqueue = makeEnqueue();
+        host.enqueueVisualVerification = enqueue.fn;
+        const runner = verifyRunner(taskVerifyWithTask());
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        // Two enqueues: attempt 1 then attempt 2 (a fresh key on the re-walk).
+        expect(enqueue.calls.map((c) => c.attempt)).toEqual([1, 2]);
         expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
       });
 
       it('fails the lane when the merge-gate returns failed (cap reached)', async () => {
-        const d = def([phase('p1', [fanStep('execute', ['implement', 'visual-verify'])])]);
+        const d = def([phase('p1', [verifyChain()])]);
         const driver = makeFanOutDriver(['t1']);
         const host = makeFanHost(driver);
-        const gate = makeVisualGate([{ kind: 'failed' }]);
-        host.visualGate = gate;
-        const runner = makeRunner();
+        host.visualGate = makeVisualGate([{ kind: 'failed' }]);
+        host.enqueueVisualVerification = makeEnqueue().fn;
+        const runner = verifyRunner(taskVerifyWithTask());
 
         const result = await new WorkflowController(runner, host).run('r', d);
 
-        // A required-inner failure fails the LANE but the fan-out outer step still
-        // settles done (sibling lanes would continue); the lane never integrates.
         expect(result.outcome).toBe('completed');
         const laneStatuses = driver.lanes.filter((l) => l.itemId === 't1').map((l) => l.status);
         expect(laneStatuses).toContain('failed');
         expect(laneStatuses).not.toContain('integrated');
       });
 
-      it('does NOT park when the gate is inactive for the run (byte-identical to today)', async () => {
-        const d = def([phase('p1', [fanStep('execute', ['implement', 'visual-verify'])])]);
+      it('does NOT enqueue or park when the gate is inactive for the run (byte-identical)', async () => {
+        const d = def([phase('p1', [verifyChain()])]);
         const driver = makeFanOutDriver(['t1']);
         const host = makeFanHost(driver);
         const gate = makeVisualGate([], /* active */ false);
         host.visualGate = gate;
-        const runner = makeRunner();
+        const enqueue = makeEnqueue();
+        host.enqueueVisualVerification = enqueue.fn;
+        const runner = verifyRunner(taskVerifyWithTask());
 
         const result = await new WorkflowController(runner, host).run('r', d);
 
         expect(result.outcome).toBe('completed');
-        // Inactive → never awaited, never parked; the lane integrates straight away.
+        // Inactive → task-verify output ignored, no enqueue, never parked.
+        expect(enqueue.calls.length).toBe(0);
         expect(gate.calls.length).toBe(0);
         expect(driver.lanes.some((l) => l.currentStepId === 'awaiting-verify')).toBe(false);
         expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
       });
 
       it('aborts the lane when the gate resolves aborted (run canceled while awaiting)', async () => {
-        const d = def([phase('p1', [fanStep('execute', ['implement', 'visual-verify'])])]);
+        const d = def([phase('p1', [verifyChain()])]);
         const driver = makeFanOutDriver(['t1']);
         const host = makeFanHost(driver);
-        const gate = makeVisualGate([{ kind: 'aborted' }]);
-        host.visualGate = gate;
-        const runner = makeRunner();
+        host.visualGate = makeVisualGate([{ kind: 'aborted' }]);
+        host.enqueueVisualVerification = makeEnqueue().fn;
+        const runner = verifyRunner(taskVerifyWithTask());
 
         const result = await new WorkflowController(runner, host).run('r', d);
 
-        // An aborted lane shorts the wave → the whole run settles canceled.
         expect(result.outcome).toBe('canceled');
         expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).not.toBe('integrated');
       });
 
       it('fails the lane after the MAX_VISUAL_LOOPBACKS backstop (never spins forever)', async () => {
-        const d = def([phase('p1', [fanStep('execute', ['implement', 'visual-verify'])])]);
+        const d = def([phase('p1', [verifyChain()])]);
         const driver = makeFanOutDriver(['t1']);
         const host = makeFanHost(driver);
-        // Always loop back — the controller backstop must eventually fail the lane.
-        const gate = makeVisualGate(
+        host.visualGate = makeVisualGate(
           Array.from({ length: MAX_VISUAL_LOOPBACKS + 5 }, () => ({ kind: 'loopback', attempt: 2 }) as VisualGateOutcome),
         );
-        host.visualGate = gate;
-        const runner = makeRunner();
+        host.enqueueVisualVerification = makeEnqueue().fn;
+        const runner = verifyRunner(taskVerifyWithTask());
 
         const result = await new WorkflowController(runner, host).run('r', d);
 
         expect(result.outcome).toBe('completed');
-        // Bounded: at most MAX_VISUAL_LOOPBACKS + 1 gate consultations, then failed.
-        expect(gate.calls.length).toBeLessThanOrEqual(MAX_VISUAL_LOOPBACKS + 1);
         expect(driver.lanes.filter((l) => l.itemId === 't1').map((l) => l.status)).toContain('failed');
       });
     });

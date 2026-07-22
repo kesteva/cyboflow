@@ -95,6 +95,51 @@ describe('composeStepPrompt', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Visual-verification threading (verification-agent redesign §5.3): the
+  // task-verify contract re-run + the visual-FAIL implement re-delegate sections.
+  // -------------------------------------------------------------------------
+
+  it('renders the visual-verification output-contract section when contractError is present', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'task-verify', agent: 'task-verify' }),
+      workflowName: 'sprint',
+      attempt: 2,
+      contractError: 'duplicate "## Visual verification task" heading (more than one section present)',
+    });
+    expect(out).toContain('## Visual-verification output contract (fix required)');
+    // Quotes the exact defect and demands a compliant re-emit.
+    expect(out).toContain('duplicate "## Visual verification task" heading');
+    expect(out).toContain('EXACTLY ONE of');
+    expect(out).toContain('VISUAL-VERIFICATION: NOT-APPLICABLE');
+  });
+
+  it('renders the visual-verification-failed section when loopbackFeedback is present', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'implement', agent: 'implement' }),
+      workflowName: 'sprint',
+      attempt: 2,
+      loopbackFeedback: 'Failed behaviors:\n- Behavior b1: the submit button never appeared',
+    });
+    expect(out).toContain('## Visual verification failed (previous attempt)');
+    expect(out).toContain('the submit button never appeared');
+  });
+
+  it('omits both visual-verification sections (byte-identical) when neither field is set', () => {
+    const base = composeStepPrompt({ step: step({ id: 'a' }), workflowName: 'sprint', attempt: 1 });
+    const withEmpty = composeStepPrompt({
+      step: step({ id: 'a' }),
+      workflowName: 'sprint',
+      attempt: 1,
+      contractError: '   ',
+      loopbackFeedback: '',
+    });
+    expect(base).not.toContain('output contract (fix required)');
+    expect(base).not.toContain('Visual verification failed (previous attempt)');
+    // Empty/whitespace values render nothing — byte-identical to the base prompt.
+    expect(withEmpty).toBe(base);
+  });
+
+  // -------------------------------------------------------------------------
   // Grounding — the `taskScope` block (the linchpin fix for the dependency
   // analyzer concluding "No dependencies" because it never saw the tasks).
   // -------------------------------------------------------------------------

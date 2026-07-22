@@ -81,6 +81,24 @@ export interface ComposeStepPromptArgs {
    * unchanged). Unlike `taskScope`/`item` this is per-STEP, not per-run.
    */
   userGuidance?: string;
+  /**
+   * The §5.1 visual-verification output-contract defect quoted back to a
+   * RE-DELEGATED task-verify (verification-agent redesign §5.3). Set ONLY on the
+   * single contract re-run: the previous attempt's PASS result carried neither the
+   * `## Visual verification task` fence nor a NOT-APPLICABLE line (or an
+   * unparseable/duplicate one). Rendered as a section instructing the agent to
+   * re-emit its FULL result with exactly one of the two contract forms. Absent /
+   * empty ⇒ no section (output unchanged).
+   */
+  contractError?: string;
+  /**
+   * The visual merge-gate's failure report quoted VERBATIM to a re-delegated
+   * implement step (verification-agent redesign §5.3). Set ONLY on the step a
+   * visual-verify FAIL loopback re-drives, so the re-implement agent sees the
+   * failed behaviors + evidence rather than "a blocking finding exists". Absent /
+   * empty ⇒ no section (output unchanged).
+   */
+  loopbackFeedback?: string;
 }
 
 /**
@@ -175,6 +193,21 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
     args.userGuidance !== undefined && args.userGuidance.trim().length > 0
       ? `\n\n## Operator guidance\n\nThe operator added mid-run guidance for this step — follow it:\n\n${args.userGuidance.trim()}`
       : '';
+  // Visual-verification output-contract re-run (§5.1/§5.3): a task-verify PASS
+  // result MUST contain EXACTLY ONE of a `## Visual verification task` fence or a
+  // `VISUAL-VERIFICATION: NOT-APPLICABLE — <reason>` line. The previous attempt
+  // violated that, so quote the exact defect and demand a compliant re-emit.
+  const contractError =
+    args.contractError !== undefined && args.contractError.trim().length > 0
+      ? `\n\n## Visual-verification output contract (fix required)\n\nYour previous result violated the visual-verification output contract:\n\n> ${args.contractError.trim()}\n\nRe-emit your FULL result. On \`VERDICT: PASS\` it MUST contain EXACTLY ONE of:\n\n- a \`## Visual verification task\` section whose body is a single fenced \`\`\`json code block holding the \`VerificationTaskV1\` payload, or\n- a single line \`VISUAL-VERIFICATION: NOT-APPLICABLE — <one-line reason>\` when this task has no user-visible UI to verify.\n\nInclude exactly one of those forms (never both, never neither, never a duplicate).`
+      : '';
+  // Visual merge-gate FAIL loopback feedback (§5.3): the re-delegated implement
+  // agent is handed WHAT was tested, what failed, and why — verbatim — not merely
+  // "a blocking finding exists".
+  const loopbackFeedback =
+    args.loopbackFeedback !== undefined && args.loopbackFeedback.trim().length > 0
+      ? `\n\n## Visual verification failed (previous attempt)\n\nThe visual verification of your previous attempt FAILED. Fix the issues it reports before re-running — here is its report verbatim:\n\n${args.loopbackFeedback.trim()}`
+      : '';
 
   return `You are executing **one step** of the "${workflowName}" workflow in this git worktree.
 
@@ -186,5 +219,5 @@ Do ONLY this step:
 2. **Commit file changes atomically.** If this step changes repository files, make ONE git commit (\`<type>: <what changed>\`), staging only the files this step touched. For DB-only, analysis, review, or artifact-reporting work, do not make a git commit. Never create an empty commit.
 3. **Stop.** Do NOT start any other step — the host orchestrator sequences the workflow and will invoke the next step itself. Report a one-line summary of what this step produced, then end your turn.
 
-The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${compoundGuard}${artifactNote}${userGuidance}${retryNote}`;
+The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${compoundGuard}${artifactNote}${userGuidance}${contractError}${loopbackFeedback}${retryNote}`;
 }

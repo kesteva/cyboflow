@@ -23,6 +23,7 @@
  */
 import type { WorkflowStep, WorkflowStepReportStatus } from '../../../../shared/types/workflows';
 import type { SprintBatchTaskStatus } from '../../../../shared/types/sprintBatch';
+import type { VerificationTaskV1 } from '../../../../shared/types/visualVerification';
 
 /**
  * Terminal status of a single step-agent invocation.
@@ -102,6 +103,24 @@ export interface ControllerStepContext {
    * where the spawner defaults it to panelId (byte-identical behavior).
    */
   spawnKey?: string;
+  /**
+   * The §5.1 visual-verification output-contract defect quoted back to a
+   * RE-DELEGATED task-verify (verification-agent redesign §5.3). Set ONLY on the
+   * single contract re-run the controller performs when task-verify's PASS result
+   * carried neither a `## Visual verification task` fence nor a NOT-APPLICABLE
+   * line (or an unparseable/duplicate one); `composeStepPrompt` renders it as a
+   * section instructing the agent to re-emit its FULL result with exactly one of
+   * the two contract forms. Absent on every normal turn (output unchanged).
+   */
+  contractError?: string;
+  /**
+   * The visual merge-gate's failure report quoted VERBATIM to a re-delegated
+   * implement step (verification-agent redesign §5.3 "not just 'a blocking
+   * finding exists'"). Set ONLY on the step a visual-verify FAIL loopback
+   * re-drives, so the re-implement agent sees what was tested, what failed, and
+   * why. Absent on every normal turn (output unchanged).
+   */
+  loopbackFeedback?: string;
 }
 
 /**
@@ -246,9 +265,34 @@ export const FAN_OUT_LANE_ATTEMPT_CAP = 3;
  */
 export type VisualGateOutcome =
   | { kind: 'advance' }
-  | { kind: 'loopback'; attempt: number }
+  | {
+      kind: 'loopback';
+      attempt: number;
+      /**
+       * Human-readable report of what the visual verification FOUND (failed
+       * behaviors + evidence + feedback), composed by the gate from the terminal
+       * request row (verification-agent redesign §5.3/C). The controller threads
+       * it into the re-driven implement step's `ControllerStepContext.loopbackFeedback`
+       * so the re-implement agent sees the concrete failure, not just "a blocking
+       * finding exists". Absent when the terminal row carried no report/verdict/error
+       * to quote (defensive — the report column is written by a later slice).
+       */
+      feedback?: string;
+    }
   | { kind: 'failed' }
   | { kind: 'aborted' };
+
+/**
+ * Outcome of enqueuing a composed visual-verification task on the scheduler for
+ * one lane (verification-agent redesign §5.3/§5.4). 'enqueued' carries the
+ * scheduler request id; 'skipped' means the run has verification disabled or the
+ * scheduler was unavailable — the controller advances the lane WITHOUT parking
+ * (fail-open). The concrete implementation lives in verify/enqueueFromTask.ts;
+ * the controller only branches on the discriminant, staying DB/electron-free.
+ */
+export type TaskEnqueueResult =
+  | { outcome: 'enqueued'; requestId: string }
+  | { outcome: 'skipped'; reason: string };
 
 /**
  * Awaits the async visual merge-gate verdict for one lane so the PROGRAMMATIC
@@ -386,6 +430,27 @@ export interface ControllerHost {
    * integrates straight after visual-verify — today's behavior).
    */
   visualGate?: VisualVerifyGate;
+
+  /**
+   * Optional agentless visual-verify enqueue capability (verification-agent
+   * redesign §5.3/§5.4). Present ONLY on the programmatic host for a sprint-style
+   * run wired with a DB. The controller calls it from the (now agentless)
+   * visual-verify inner step with the task task-verify composed + the lane's
+   * authoritative ref/attempt; the host enqueues it on the central scheduler
+   * (snapshot capture, chain resolution, dual-write) and returns whether a request
+   * was created. 'enqueued' ⇒ the controller parks the lane at awaiting-verify and
+   * awaits the merge-gate verdict; 'skipped' (verification disabled / scheduler
+   * unavailable) ⇒ the controller advances WITHOUT parking (fail-open). Absent ⇒
+   * the controller never enqueues (the visual-verify step is a clean skip). Keeps
+   * the controller DB/electron-free — the real impl (verify/enqueueFromTask.ts) is
+   * injected by the host.
+   */
+  enqueueVisualVerification?(args: {
+    runId: string;
+    task: VerificationTaskV1;
+    laneTaskRef: string;
+    attempt: number;
+  }): Promise<TaskEnqueueResult>;
 
   /** Optional structured log sink; absent ⇒ the controller stays silent. */
   log?(level: 'info' | 'warn', message: string): void;

@@ -310,9 +310,180 @@ export class SchedulerVisualVerifyGate implements VisualVerifyGate {
     if (lane.status === 'integrated') return { kind: 'advance' };
     // FAIL under the cap: the merge-gate looped the lane back to implement with a
     // bumped attempt. Report that attempt (the merge-gate is the sole writer of
-    // lane.attempts, so its written value IS the loopback attempt).
+    // lane.attempts, so its written value IS the loopback attempt). Compose the
+    // failure report (§5.3/C) so the controller can quote it to the re-implement
+    // agent — verbatim behaviors + evidence, not just "a blocking finding exists".
     const attempt = Number.isInteger(lane.attempts) && lane.attempts >= 2 ? lane.attempts : 2;
-    return { kind: 'loopback', attempt };
+    const feedback = this.composeLoopbackFeedback(runId, itemId);
+    return { kind: 'loopback', attempt, ...(feedback !== undefined ? { feedback } : {}) };
+  }
+
+  /**
+   * Compose the human-readable failure report the controller threads into the
+   * re-driven implement step (§5.3/C). Reads the LATEST request row attributed to
+   * this lane (same strict attribution as {@link requestStatusForLane}) and builds
+   * feedback from, in preference order:
+   *   1. `report_json` (a VerificationReportV1, written by a later slice — may be
+   *      NULL): quote each FAILED behavior's id + (description/expected from the
+   *      composing task_json when present) + evidence notes, then the report's
+   *      `feedback`.
+   *   2. else `verdict_json` (legacy VerdictV1): its `feedback`.
+   *   3. else `error_message`.
+   * All defensive — a parse failure or absent column falls through to the next
+   * source; absent EVERYTHING ⇒ undefined (the loopback carries no feedback field).
+   */
+  private composeLoopbackFeedback(runId: string, itemId: string): string | undefined {
+    try {
+      const row = this.terminalRequestRowForLane(runId, itemId);
+      if (!row) return undefined;
+
+      // (1) Structured report (preferred).
+      const reportFeedback = this.feedbackFromReport(row.reportJson, row.taskJson);
+      if (reportFeedback !== undefined) return reportFeedback;
+
+      // (2) Legacy verdict feedback.
+      const verdictFeedback = this.feedbackFromVerdict(row.verdictJson);
+      if (verdictFeedback !== undefined) return verdictFeedback;
+
+      // (3) Raw error text.
+      if (typeof row.errorMessage === 'string' && row.errorMessage.trim().length > 0) {
+        return row.errorMessage.trim();
+      }
+      return undefined;
+    } catch (err) {
+      this.logger?.warn('[visualVerifyGate] loopback-feedback compose failed (fail-soft)', {
+        runId,
+        itemId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return undefined;
+    }
+  }
+
+  /**
+   * The LATEST request row (report_json / verdict_json / error_message / task_json)
+   * attributed to this lane by the SAME strict attribution requestStatusForLane
+   * uses, or null when none is attributable. Fail-soft → null.
+   */
+  private terminalRequestRowForLane(
+    runId: string,
+    itemId: string,
+  ): { reportJson: string | null; verdictJson: string | null; errorMessage: string | null; taskJson: string | null } | null {
+    const rows = this.db
+      .prepare(
+        `SELECT deliverable_json AS deliverableJson, report_json AS reportJson,
+                verdict_json AS verdictJson, error_message AS errorMessage, task_json AS taskJson
+           FROM verification_requests
+          WHERE run_id = ?
+          ORDER BY enqueued_at DESC, id DESC`,
+      )
+      .all(runId) as Array<{
+      deliverableJson: string;
+      reportJson: string | null;
+      verdictJson: string | null;
+      errorMessage: string | null;
+      taskJson: string | null;
+    }>;
+    if (rows.length === 0) return null;
+
+    const lane = this.resolveLane(runId, itemId);
+    for (const row of rows) {
+      const taskRef = this.parseTaskRef(row.deliverableJson);
+      if (lane && taskRef !== null && (taskRef === lane.taskId || taskRef === lane.ref)) {
+        return row;
+      }
+    }
+    // Sole-request fallback: unambiguous ONLY for a single-lane run.
+    if (rows.length === 1 && this.laneCountForRun(runId) === 1) return rows[0];
+    return null;
+  }
+
+  /**
+   * Build feedback from a VerificationReportV1 `report_json`, enriching each FAILED
+   * behavior with its description/expected from the composing `task_json` when the
+   * ids line up. Returns undefined when the JSON is absent/unparseable or carries
+   * no failed behavior AND no feedback text (so the caller can fall through).
+   */
+  private feedbackFromReport(reportJson: string | null, taskJson: string | null): string | undefined {
+    if (typeof reportJson !== 'string' || reportJson.trim().length === 0) return undefined;
+    let report: unknown;
+    try {
+      report = JSON.parse(reportJson);
+    } catch {
+      return undefined;
+    }
+    if (report === null || typeof report !== 'object') return undefined;
+    const behaviorsRaw = (report as { behaviors?: unknown }).behaviors;
+    const reportFeedback = (report as { feedback?: unknown }).feedback;
+
+    // Task behavior id → { description, expected } for enrichment (best-effort).
+    const taskById = this.taskBehaviorIndex(taskJson);
+
+    const lines: string[] = [];
+    if (Array.isArray(behaviorsRaw)) {
+      for (const b of behaviorsRaw) {
+        if (b === null || typeof b !== 'object') continue;
+        const rec = b as { id?: unknown; result?: unknown; evidence?: unknown };
+        if (rec.result !== 'fail') continue;
+        const id = typeof rec.id === 'string' ? rec.id : '(unknown)';
+        const meta = typeof rec.id === 'string' ? taskById.get(rec.id) : undefined;
+        const notes =
+          rec.evidence !== null && typeof rec.evidence === 'object'
+            ? (rec.evidence as { notes?: unknown }).notes
+            : undefined;
+        const parts = [`- Behavior ${id}${meta?.description ? `: ${meta.description}` : ''}`];
+        if (meta?.expected) parts.push(`  Expected: ${meta.expected}`);
+        if (typeof notes === 'string' && notes.trim().length > 0) parts.push(`  Observed: ${notes.trim()}`);
+        lines.push(parts.join('\n'));
+      }
+    }
+
+    const feedbackText = typeof reportFeedback === 'string' && reportFeedback.trim().length > 0 ? reportFeedback.trim() : '';
+    if (lines.length === 0 && feedbackText.length === 0) return undefined;
+
+    const sections: string[] = [];
+    if (lines.length > 0) sections.push(`Failed behaviors:\n${lines.join('\n')}`);
+    if (feedbackText.length > 0) sections.push(feedbackText);
+    return sections.join('\n\n');
+  }
+
+  /** Parse `task_json` into a behavior id → { description, expected } index (best-effort, empty on failure). */
+  private taskBehaviorIndex(taskJson: string | null): Map<string, { description?: string; expected?: string }> {
+    const index = new Map<string, { description?: string; expected?: string }>();
+    if (typeof taskJson !== 'string' || taskJson.trim().length === 0) return index;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(taskJson);
+    } catch {
+      return index;
+    }
+    const behaviors = parsed !== null && typeof parsed === 'object' ? (parsed as { behaviors?: unknown }).behaviors : undefined;
+    if (!Array.isArray(behaviors)) return index;
+    for (const b of behaviors) {
+      if (b === null || typeof b !== 'object') continue;
+      const rec = b as { id?: unknown; description?: unknown; expected?: unknown };
+      if (typeof rec.id !== 'string') continue;
+      index.set(rec.id, {
+        ...(typeof rec.description === 'string' ? { description: rec.description } : {}),
+        ...(typeof rec.expected === 'string' ? { expected: rec.expected } : {}),
+      });
+    }
+    return index;
+  }
+
+  /** Legacy VerdictV1 `verdict_json` → its `feedback` string, or undefined. */
+  private feedbackFromVerdict(verdictJson: string | null): string | undefined {
+    if (typeof verdictJson !== 'string' || verdictJson.trim().length === 0) return undefined;
+    try {
+      const parsed: unknown = JSON.parse(verdictJson);
+      if (parsed !== null && typeof parsed === 'object') {
+        const fb = (parsed as { feedback?: unknown }).feedback;
+        if (typeof fb === 'string' && fb.trim().length > 0) return fb.trim();
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /** Parse deliverable_json → its taskRef (the lane attribution), or null. */

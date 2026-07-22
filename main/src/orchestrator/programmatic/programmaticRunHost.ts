@@ -127,6 +127,16 @@ export interface ProgrammaticRunHostArgs {
    * the controller never parks (byte-identical).
    */
   visualGate?: VisualVerifyGate;
+  /**
+   * Optional agentless visual-verify enqueue capability (verification-agent
+   * redesign §5.3/§5.4). Exposed verbatim on the host's `enqueueVisualVerification`
+   * getter so the controller's agentless visual-verify step can enqueue the
+   * composed task on the central scheduler. Like `visualGate` it is wired
+   * unconditionally (the controller consults it only inside `runFanOut`, which runs
+   * only once a fan-out driver has resolved). Absent ⇒ the controller never
+   * enqueues (the visual-verify step is a clean skip — byte-identical).
+   */
+  enqueueVisualVerification?: ControllerHost['enqueueVisualVerification'];
   logger?: LoggerLike;
 }
 
@@ -310,6 +320,15 @@ export class ProgrammaticRunHost implements ControllerHost {
    */
   get visualGate(): VisualVerifyGate | undefined {
     return this.args.visualGate;
+  }
+
+  /**
+   * Agentless visual-verify enqueue capability (verification-agent redesign
+   * §5.3/§5.4). Optional so an absent capability (undefined) means the controller
+   * never enqueues a lane verification (the visual-verify step cleanly skips).
+   */
+  get enqueueVisualVerification(): ControllerHost['enqueueVisualVerification'] {
+    return this.args.enqueueVisualVerification;
   }
 
   log(level: 'info' | 'warn', message: string): void {

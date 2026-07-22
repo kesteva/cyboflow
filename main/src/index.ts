@@ -79,10 +79,16 @@ import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { SprintLaneStore } from './orchestrator/sprintLaneStore';
 import { VerificationScheduler, verificationEvents, verificationChannel } from './orchestrator/verify/verificationScheduler';
 import { createVerdictDelivery } from './orchestrator/verify/verdictDelivery';
+import { VerificationAgentRunner } from './orchestrator/verify/verificationAgentRunner';
+import { makeVerificationAgentQuery } from './orchestrator/verify/verificationAgentQuery';
 import { CapturePageBackend } from './services/visualVerify/capturePageBackend';
 import { PlaywrightBackend } from './services/visualVerify/playwrightBackend';
 import { PeekabooBackend } from './services/visualVerify/peekabooBackend';
-import { VlmJudgeImpl } from './services/visualVerify/vlmJudge';
+import { VlmJudgeImpl, DEFAULT_JUDGE_MODEL } from './services/visualVerify/vlmJudge';
+import { findNodeExecutable } from './utils/nodeFinder';
+import * as net from 'node:net';
+import type { AgentProvider } from '../../shared/types/agentRuntime';
+import { isAgentProvider } from '../../shared/types/agentRuntime';
 import { DevServerManager } from './services/visualVerify/devServerManager';
 import { StaticServerManager } from './services/visualVerify/staticServerManager';
 import { PrototypeServerReaper } from './services/prototypeServerReaper';
@@ -1522,6 +1528,63 @@ async function initializeServices() {
       match: false,
     };
   };
+  // Verification-AGENT engine (redesign §5.4). The runner deploys the workflow-
+  // defined 'visual-verify' agent per request; the scheduler routes a run stamped
+  // verify_chain=['agent'] to it (default engine) instead of the capture backends.
+  // The SDK boundary, the Claude-namespace agent/model resolvers, the node +
+  // compiled-driver paths, and a real port-free probe are wired HERE so the runner
+  // itself stays SDK/electron-free.
+  const verifyDriverCliPath = app.isPackaged
+    ? path.join(
+        process.resourcesPath,
+        'app.asar.unpacked/main/dist/main/src/orchestrator/verify/driver/driverCli.js',
+      )
+    : path.join(__dirname, 'orchestrator', 'verify', 'driver', 'driverCli.js');
+  const verificationAgentRunner = new VerificationAgentRunner({
+    query: makeVerificationAgentQuery(cyboflowLogger),
+    // The workflow-defined 'visual-verify' agent + the run's provider/model, for the
+    // Claude-namespace model rule (§5.4). Mirrors the resolveStepAgent thunk below
+    // but returns the FULL EffectiveAgent for 'visual-verify'.
+    resolveVerifyAgent: (runId: string) => {
+      const eff = resolveRunEffectiveAgents(databaseService.getDb(), runId);
+      const agent = eff.find((e) => e.agentKey === 'visual-verify');
+      if (!agent) return undefined;
+      const runRow = databaseService
+        .getDb()
+        .prepare('SELECT agent_provider AS provider, model FROM workflow_runs WHERE id = ?')
+        .get(runId) as { provider: string | null; model: string | null } | undefined;
+      const provider = runRow?.provider;
+      const runProvider: AgentProvider = isAgentProvider(provider) ? provider : 'claude';
+      return { agent, runProvider, runModel: runRow?.model ?? null };
+    },
+    // Alias→concrete Claude id, the SAME mechanism resolveStepAgent uses (bareModelId
+    // at the agent default window; strips any [1m] suffix).
+    resolveClaudeAlias: (alias) => bareModelId(alias, isModelUsable) ?? null,
+    // Validated Claude fallback for an unpinned agent on a non-Claude run — reuse the
+    // vision-judge default model source.
+    claudeDefaultModel: DEFAULT_JUDGE_MODEL,
+    resolveNode: findNodeExecutable,
+    driverCliPath: verifyDriverCliPath,
+    logger: cyboflowLogger,
+  });
+  // Real port-free probe (§5.4 step 6): a refused/timed-out TCP connect to
+  // 127.0.0.1:<port> means nothing is listening ⇒ the port is free; a successful
+  // connect means a leaked server ⇒ NOT free (quarantine the lease).
+  const verifyPortFreeProbe = (port: number): Promise<boolean> =>
+    new Promise((resolve) => {
+      const socket = net.connect({ host: '127.0.0.1', port });
+      let settled = false;
+      const done = (free: boolean): void => {
+        if (settled) return;
+        settled = true;
+        socket.destroy();
+        resolve(free);
+      };
+      socket.setTimeout(500);
+      socket.once('connect', () => done(false));
+      socket.once('timeout', () => done(true));
+      socket.once('error', () => done(true));
+    });
   VerificationScheduler.initialize({
     db: cyboflowDb,
     backends: {
@@ -1547,6 +1610,11 @@ async function initializeServices() {
     // inside the scheduler off its injected db; the per-RUN cap stays the
     // cappedVlmJudge decorator above.
     baselinePreDiff,
+    // Verification-AGENT engine (redesign §5.4): a run stamped verify_chain=['agent']
+    // routes to this runner instead of the capture backends above; the port probe
+    // decides release-vs-quarantine at agent teardown.
+    agentRunner: verificationAgentRunner,
+    portFreeProbe: verifyPortFreeProbe,
   });
 
   // Passive dynamic-workflow tracker (Workflow tool / ultracode detection).
@@ -2014,6 +2082,11 @@ async function initializeServices() {
   // on reviewItemChangeEvents. Default 'orchestrated' runs never touch this.
   const programmaticRunner = new DefaultProgrammaticRunner({
     spawner: substrateFacade,
+    // Enables the controller's agentless visual-verify enqueue capability
+    // (enqueueTaskVerification — verification-agent redesign §5.3): absent, the
+    // step cleanly skips (fail-open) and visual verification never fires on the
+    // programmatic plane.
+    db: rawDb,
     reporter: {
       report: (runId, stepId, status) =>
         void buildStepTransitionEvent(runId, stepId, status, cyboflowDb, cyboflowLogger),
