@@ -55,6 +55,8 @@ describe('getExecutionDiffStats', () => {
       stats_additions: 12,
       stats_deletions: 3,
       stats_files_changed: 2,
+      before_commit_hash: null,
+      after_commit_hash: null,
     });
     expect(rows[0]).not.toHaveProperty('git_diff');
   });
@@ -98,5 +100,21 @@ describe('getExecutionDiffStats', () => {
     });
 
     expect(db.getExecutionDiffStats(sessionId)).toEqual([]);
+  });
+
+  it('carries before_commit_hash/after_commit_hash through when set (TASK-086)', () => {
+    db.createExecutionDiff({
+      session_id: sessionId,
+      execution_sequence: 1,
+      stats_additions: 4,
+      stats_deletions: 0,
+      stats_files_changed: 1,
+      before_commit_hash: 'aaa111',
+      after_commit_hash: 'bbb222',
+    });
+
+    const rows = db.getExecutionDiffStats(sessionId);
+    expect(rows[0].before_commit_hash).toBe('aaa111');
+    expect(rows[0].after_commit_hash).toBe('bbb222');
   });
 });

@@ -55,12 +55,21 @@ interface ExecutionDiffStatsDbRow {
   stats_additions: number;
   stats_deletions: number;
   stats_files_changed: number;
+  before_commit_hash?: string;
+  after_commit_hash?: string;
 }
 
 /**
  * Return shape of getExecutionDiffStats — the stats-only projection of
  * execution_diffs for pollers (e.g. sessions:get-statistics) that don't need
  * the git_diff blob ExecutionDiff (models.ts) carries for diff-viewer callers.
+ *
+ * before_commit_hash/after_commit_hash are carried (nullable, same optionality
+ * convention as ExecutionDiff in models.ts / convertDbExecutionDiff below) so
+ * callers can dedup cumulative working-directory-diff rows: when a turn never
+ * commits, before_commit_hash === HEAD from the prior turn and each row's
+ * stats are a cumulative superset of the run, not a per-turn delta (see
+ * aggregateExecutionDiffTotals in ipc/session.ts).
  */
 export interface ExecutionDiffStats {
   execution_sequence: number;
@@ -68,6 +77,8 @@ export interface ExecutionDiffStats {
   stats_additions: number;
   stats_deletions: number;
   stats_files_changed: number;
+  before_commit_hash: string | null;
+  after_commit_hash: string | null;
 }
 
 /**
@@ -2930,7 +2941,8 @@ export class DatabaseService {
    */
   getExecutionDiffStats(sessionId: string): ExecutionDiffStats[] {
     const rows = this.db.prepare(`
-      SELECT execution_sequence, files_changed, stats_additions, stats_deletions, stats_files_changed
+      SELECT execution_sequence, files_changed, stats_additions, stats_deletions, stats_files_changed,
+        before_commit_hash, after_commit_hash
       FROM execution_diffs
       WHERE session_id = ?
       ORDER BY execution_sequence ASC
@@ -2942,6 +2954,8 @@ export class DatabaseService {
       stats_additions: row.stats_additions,
       stats_deletions: row.stats_deletions,
       stats_files_changed: row.stats_files_changed,
+      before_commit_hash: row.before_commit_hash ?? null,
+      after_commit_hash: row.after_commit_hash ?? null,
     }));
   }
 

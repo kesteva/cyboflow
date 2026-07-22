@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as fs from 'fs/promises';
 import { existsSync } from 'fs';
 import type { AppServices } from './types';
+import { aggregateExecutionDiffTotals } from './executionDiffAggregation';
 import type { CreateSessionRequest } from '../types/session';
 import { getCyboflowSubdirectory } from '../utils/cyboflowDirectory';
 import { convertDbFolderToFolder } from './folders';
@@ -2962,29 +2963,13 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // columns; see getExecutionDiffStats).
       const executionDiffs = databaseService.getExecutionDiffStats(sessionId);
       
-      // Calculate file statistics
-      let totalFilesChanged = 0;
-      let totalLinesAdded = 0;
-      let totalLinesDeleted = 0;
-      const filesModified = new Set<string>();
-      
-      executionDiffs.forEach(diff => {
-        totalFilesChanged += diff.stats_files_changed || 0;
-        totalLinesAdded += diff.stats_additions || 0;
-        totalLinesDeleted += diff.stats_deletions || 0;
-        
-        // Track unique files
-        if (diff.files_changed) {
-          try {
-            const files = Array.isArray(diff.files_changed) 
-              ? diff.files_changed 
-              : JSON.parse(diff.files_changed);
-            files.forEach((file: string) => filesModified.add(file));
-          } catch (e) {
-            // Ignore parse errors
-          }
-        }
-      });
+      // Calculate file statistics — dedups cumulative working-directory-diff
+      // rows (commit-disabled turns) so totals aren't multiplied by the
+      // number of uncommitted turns (TASK-086). See aggregateExecutionDiffTotals.
+      // totalFilesChanged is not read here — files.totalFilesChanged below uses
+      // filesModified.size (unique file count), matching pre-existing behavior.
+      const { totalLinesAdded, totalLinesDeleted, filesModified } =
+        aggregateExecutionDiffTotals(executionDiffs);
 
       // MIGRATION FIX: Get prompt count and messages using appropriate method
       const statsPanels = panelManager.getPanelsForSession(sessionId);
