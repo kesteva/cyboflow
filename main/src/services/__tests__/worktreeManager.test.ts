@@ -343,7 +343,11 @@ describe('WorktreeManager.mergeWorktreeToBranch (integration)', () => {
     });
   });
 
-  it('throws an identifiable MergeConflictError on a conflicting change and leaves the worktree clean', async () => {
+  // Generous timeout: this test forks ~15 git subprocesses across three
+  // worktrees — under full-suite CPU/fork contention it flakes at the 5s
+  // default while passing in isolation (recurring full-suite flake, see
+  // sprint-verify notes).
+  it('throws an identifiable MergeConflictError on a conflicting change and leaves the worktree clean', { timeout: 30_000 }, async () => {
     await withTempDir('worktree-merge-branch-conflict-', async (tmpDir) => {
       initRepo(tmpDir);
       const main = headBranch(tmpDir);
