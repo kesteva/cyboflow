@@ -752,7 +752,7 @@ describe('RunExecutor.execute — happy path (panelId/sessionId alignment)', () 
 
     // Capture spawnCliProcess call in the order array via a wrapper spy.
     const originalSpawn = spawner.spawnCliProcess.bind(spawner);
-    (spawner as { spawnCliProcess: (opts: ClaudeSpawnerOptions) => Promise<void> }).spawnCliProcess = vi.fn(
+    (spawner as { spawnCliProcess: ClaudeSpawnerLike['spawnCliProcess'] }).spawnCliProcess = vi.fn(
       async (opts: ClaudeSpawnerOptions) => {
         callOrder.push('spawnCliProcess');
         return originalSpawn(opts);

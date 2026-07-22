@@ -57,6 +57,7 @@ import { transitionToAwaitingReview, reviveQuickRunToRunning } from '../../cybof
 import type { TransitionToAwaitingReviewParams } from '../../cyboflow/transitions';
 import { resolveGateRunId } from '../../../orchestrator/chatSentinelProvider';
 import type { UserEvent } from '../../../../../shared/types/claudeStream';
+import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
 import type { ChatSentinelProvider } from '../../../orchestrator/chatSentinelProvider';
 import { DEFAULT_PERMISSION_MODE } from '../../../../../shared/types/permissionMode';
 import { isClaudeEffortLevel, type ReasoningEffort } from '../../../../../shared/types/reasoningEffort';
@@ -161,6 +162,21 @@ function resultErrorText(event: unknown): string | null {
   const e = event as { type?: unknown; is_error?: unknown; result?: unknown };
   if (e.type !== 'result' || e.is_error !== true) return null;
   return typeof e.result === 'string' ? e.result : '';
+}
+
+/**
+ * Extract the FINAL assistant result text from a SUCCESS `result` event (the
+ * typed step-output channel, §5.3), else null. A success `result` message carries
+ * the turn's final assistant text in its `result` field. Returns null for an
+ * error result (is_error true — `terminalError` owns that path) and for a result
+ * whose `result` is not a string. Structural narrowing (no `any`), the same shape
+ * the streamParser result schemas validate.
+ */
+function resultSuccessText(event: unknown): string | null {
+  if (typeof event !== 'object' || event === null) return null;
+  const e = event as { type?: unknown; is_error?: unknown; result?: unknown };
+  if (e.type !== 'result' || e.is_error === true) return null;
+  return typeof e.result === 'string' ? e.result : null;
 }
 
 /**
@@ -727,6 +743,15 @@ type ColdSpawnReason =
 interface SdkTurn {
   done: Deferred<void>;
   terminalError: string | null;
+  /**
+   * The turn's FINAL assistant result text, captured from its SUCCESS `result`
+   * event at the per-turn boundary (typed step-output channel, §5.3). Null until
+   * that boundary, and stays null on an error/aborted turn (`terminalError` owns
+   * the failure path). spawnCliProcess returns it in {@link CliSpawnOutcome} so
+   * the programmatic step runner can parse the step agent's output. Per-turn, so
+   * a warm session's next turn never inherits the previous turn's text.
+   */
+  resultText: string | null;
   path: 'cold' | 'warm';
   reason: ColdSpawnReason | null;
   submitTs: number;
@@ -1142,8 +1167,13 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
   /**
    * Override spawnCliProcess to run query() in-process instead of spawning a PTY.
+   *
+   * Resolves the turn's typed step-output ({@link CliSpawnOutcome}): `resultText`
+   * is the step agent's final assistant text captured at the per-turn boundary
+   * (§5.3), or null on an error/aborted turn or an early-return path (duplicate
+   * spawn). The programmatic step runner reads it on the `ok` path.
    */
-  override async spawnCliProcess(options: ClaudeSpawnOptions): Promise<void> {
+  override async spawnCliProcess(options: ClaudeSpawnOptions): Promise<CliSpawnOutcome> {
     // Additive per-lane identity. For a programmatic fan-out lane this is
     // `runId + ':' + itemId`; for every other path it DEFAULTS to panelId, so the
     // lock string, dup-guard, and per-spawn maps stay byte-identical to before.
@@ -1294,7 +1324,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
             finalPrompt,
             options,
           );
-          if (outcome.dispatched) return;
+          if (outcome.dispatched) return { resultText: outcome.resultText };
           // The push LOST a race to a concurrent close (abort / TTL / terminal-error
           // teardown that fired AFTER eligibility but BEFORE the push landed — the
           // spawn lock does not serialize abortCurrentRun). The message was NOT
@@ -1398,6 +1428,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       const firstTurn: SdkTurn = {
         done: createDeferred<void>(),
         terminalError: null,
+        resultText: null,
         path: 'cold',
         reason: coldReason,
         submitTs: Date.now(),
@@ -1481,6 +1512,12 @@ export class ClaudeCodeManager extends AbstractCliManager {
       if (firstTurn.terminalError !== null && runId === displayPanelId) {
         throw new SdkSessionTerminalError(firstTurn.terminalError);
       }
+      // Typed step-output channel (§5.3): resolve with the turn's captured final
+      // assistant text. For a lane spawn firstTurn IS the single-shot turn; for a
+      // non-lane cold turn it is this turn's record. Null on an errored/aborted
+      // turn (resultSuccessText left it null) or when the CLI emitted no result
+      // text.
+      return { resultText: firstTurn.resultText };
     });
   }
 
@@ -1597,6 +1634,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * the generator's wake is async: the pushed message cannot be processed before
    * the synchronous commit + emits below run.
    *
+   * On a dispatched turn, `resultText` carries that turn's captured final
+   * assistant text (typed step-output channel, §5.3) — read off THIS turn record,
+   * so a warm push never returns the previous turn's text.
+   *
    * Rejects with SdkSessionTerminalError for a flow run whose warm turn ends
    * terminally, matching the cold path's contract exactly.
    */
@@ -1608,7 +1649,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     runId: string,
     finalPrompt: string,
     options: ClaudeSpawnOptions,
-  ): Promise<{ dispatched: boolean }> {
+  ): Promise<{ dispatched: false } | { dispatched: true; resultText: string | null }> {
     const warm = run.warm;
     if (warm === null) return { dispatched: false }; // caller only reaches here for warm runs.
 
@@ -1617,6 +1658,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     const turn: SdkTurn = {
       done: createDeferred<void>(),
       terminalError: null,
+      resultText: null,
       path: 'warm',
       reason: null,
       submitTs: Date.now(),
@@ -1654,7 +1696,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     if (turn.terminalError !== null && runId === displayPanelId) {
       throw new SdkSessionTerminalError(turn.terminalError);
     }
-    return { dispatched: true };
+    return { dispatched: true, resultText: turn.resultText };
   }
 
   /**
@@ -1910,6 +1952,12 @@ export class ClaudeCodeManager extends AbstractCliManager {
             }
             if (isResultEvent(event)) {
               const aborted = abortController.signal.aborted;
+              // Typed step-output channel (§5.3): capture the SUCCESS result's final
+              // assistant text onto THIS turn record so spawnCliProcess can return it
+              // (per-spawnKey, so concurrent fan-out lanes never cross-attribute).
+              // resultSuccessText returns null for an error result — terminalError
+              // owns that path — so an errored turn's resultText stays null.
+              if (run.currentTurn) run.currentTurn.resultText = resultSuccessText(event);
               // Stash the steered flag BEFORE finishTurn (which resets it): a turn
               // that received a mid-turn operator steering message must close +
               // abort below so an unconsumed steering message can never be dequeued

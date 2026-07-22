@@ -10,6 +10,7 @@ import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
 import { captureSeamError } from '../../telemetry';
 import { classifyErrorPattern } from '../../../orchestrator/programmatic/systemicError';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
+import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
 
 interface CliProcess {
   process: pty.IPty;
@@ -135,9 +136,15 @@ export abstract class AbstractCliManager extends EventEmitter {
   // Common functionality that can be shared across CLI tools
 
   /**
-   * Spawn a CLI process for a specific panel
+   * Spawn a CLI process for a specific panel.
+   *
+   * Return type is widened to `CliSpawnOutcome | void` for the typed step-output
+   * channel (§5.3): the SDK subclass ({@link ClaudeCodeManager}) resolves the
+   * turn's captured result text, while this interactive/PTY base path resolves
+   * `void` (no per-turn result capture) — the union keeps the interactive sibling
+   * compiling unchanged.
    */
-  async spawnCliProcess(options: CliSpawnOptions): Promise<void> {
+  async spawnCliProcess(options: CliSpawnOptions): Promise<CliSpawnOutcome | void> {
     try {
       const { panelId, sessionId, worktreePath } = options;
       this.logger?.verbose(`Spawning ${this.getCliToolName()} for panel ${panelId} (session ${sessionId}) in ${worktreePath}`);

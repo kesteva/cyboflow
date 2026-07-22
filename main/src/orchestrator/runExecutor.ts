@@ -21,6 +21,7 @@ import type { WorkflowRow, WorkflowRunRow } from '../../../shared/types/workflow
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { AgentProvider, WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
+import type { CliSpawnOutcome } from '../../../shared/types/cliPanels';
 import { AgentInvocationStore } from './agentInvocationStore';
 import type { ClaudeStreamEvent } from '../../../shared/types/claudeStream';
 import type { RunEventBridge, BridgeEventsOptions } from './runEventBridge';
@@ -228,7 +229,13 @@ export interface ClaudeSpawnerOptions {
  * Matches the ClaudeManagerLike pattern in stuckDetector.ts:36.
  */
 export interface ClaudeSpawnerLike {
-  spawnCliProcess(options: ClaudeSpawnerOptions): Promise<void>;
+  /**
+   * Resolves the turn's typed step-output ({@link CliSpawnOutcome}) — the SDK
+   * substrate captures the step agent's final result text at the spawn seam; the
+   * interactive/codex substrates resolve `void` (no capture). The programmatic
+   * step runner reads `resultText` off this on the `ok` path (§5.3).
+   */
+  spawnCliProcess(options: ClaudeSpawnerOptions): Promise<CliSpawnOutcome | void>;
   abort(panelId: string): Promise<void>;
 }
 

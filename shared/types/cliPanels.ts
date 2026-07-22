@@ -1,6 +1,22 @@
 import { ToolPanel, ToolPanelState } from './panels';
 
 /**
+ * Resolved value of a CLI-manager `spawnCliProcess` turn — the typed step-output
+ * channel (verification-agent redesign §5.3). `resultText` is the step agent's
+ * FINAL assistant result text, captured at the spawn seam per-turn (per-spawnKey,
+ * so concurrent fan-out lanes never cross-attribute) and returned so the
+ * programmatic controller can parse a step's typed output. `null` on a failed /
+ * aborted turn and on substrates that do not capture it (interactive, codex).
+ * The abstract/interactive path resolves `void` (no capture); the SDK manager
+ * resolves this shape. Shared home so main-side spawner interfaces
+ * (ClaudeSpawnerLike, AbstractCliManager, SubstrateDispatchFacade) and the SDK
+ * manager all reference one declaration.
+ */
+export interface CliSpawnOutcome {
+  resultText: string | null;
+}
+
+/**
  * Base interface for all CLI panel types
  */
 export interface CliPanel extends ToolPanel {

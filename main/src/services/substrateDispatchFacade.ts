@@ -38,6 +38,7 @@ import type { AbstractCliManager } from './panels/cli/AbstractCliManager';
 import type { ClaudeSpawnerLike, ClaudeSpawnerOptions, WorkflowRegistryLike } from '../orchestrator/runExecutor';
 import type { LoggerLike } from '../orchestrator/types';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
+import type { CliSpawnOutcome } from '../../../shared/types/cliPanels';
 
 /**
  * Bound event handler signature — both managers emit 'output' and 'exit' payloads
@@ -316,7 +317,7 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    * per-call override — see resolveManagerForSpawn). Records the spawning manager
    * in panelOwners so abort() finds the same manager later.
    */
-  async spawnCliProcess(options: ClaudeSpawnerOptions): Promise<void> {
+  async spawnCliProcess(options: ClaudeSpawnerOptions): Promise<CliSpawnOutcome | void> {
     const { panelId } = options;
     const mgr = this.resolveManagerForSpawn(options);
     const substrate: CliSubstrate = mgr === this.interactiveManager ? 'interactive' : 'sdk';
@@ -328,8 +329,11 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     // the method to a ClaudeSpawnerLike-shaped reference narrows the parameter via the
     // same assignment-level variance the legacy single-manager spawnerAdapter relied on
     // (index.ts: defaultCliManager.spawnCliProcess.bind(...)), so no cast is needed.
+    // Forward the dispatched manager's resolved value UNCHANGED so the SDK
+    // manager's captured result text (§5.3) reaches the step runner; the
+    // interactive/codex managers resolve void, so this stays byte-identical there.
     const spawn: ClaudeSpawnerLike['spawnCliProcess'] = mgr.spawnCliProcess.bind(mgr);
-    await spawn(options);
+    return await spawn(options);
   }
 
   /**

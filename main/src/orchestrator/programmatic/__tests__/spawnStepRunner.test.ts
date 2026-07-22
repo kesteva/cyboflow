@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { SpawnStepRunner } from '../spawnStepRunner';
 import type { ClaudeSpawnerLike, ClaudeSpawnerOptions } from '../../runExecutor';
+import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
 import type { WorkflowStep } from '../../../../../shared/types/workflows';
 import type { ControllerStepContext } from '../types';
 
@@ -9,9 +10,11 @@ function step(p: Partial<WorkflowStep> & { id: string }): WorkflowStep {
 }
 const ctx: ControllerStepContext = { runId: 'r', phaseId: 'p', stepIndex: 0, attempt: 1 };
 
-function makeSpawner(impl?: () => Promise<void>): ClaudeSpawnerLike {
+function makeSpawner(impl?: () => Promise<CliSpawnOutcome | void>): ClaudeSpawnerLike {
   return {
-    spawnCliProcess: vi.fn<(o: ClaudeSpawnerOptions) => Promise<void>>(impl ?? (() => Promise.resolve())),
+    spawnCliProcess: vi.fn<(o: ClaudeSpawnerOptions) => Promise<CliSpawnOutcome | void>>(
+      impl ?? (() => Promise.resolve()),
+    ),
     abort: vi.fn<(p: string) => Promise<void>>().mockResolvedValue(undefined),
   };
 }
@@ -42,6 +45,58 @@ describe('SpawnStepRunner', () => {
     expect(passed.agentPermissionMode).toBe('auto');
     expect(passed.agentInvocationStepId).toBe('epics');
     expect(passed.prompt).toContain('`epics`'); // the step-scoped prompt
+  });
+
+  // ── typed step-output channel (§5.3) ──────────────────────────────────────
+  it('forwards the spawn seam result text into the ok result (typed step-output channel)', async () => {
+    const spawner = makeSpawner(() => Promise.resolve({ resultText: 'hello' }));
+    const runner = new SpawnStepRunner(spawner, opts);
+
+    const result = await runner.runStep(step({ id: 'task-verify', agent: 'task-verify' }), ctx);
+
+    expect(result).toEqual({ status: 'ok', resultText: 'hello' });
+  });
+
+  it('maps a void spawn resolution (substrate that does not capture) to resultText null on the ok path', async () => {
+    const spawner = makeSpawner(() => Promise.resolve()); // interactive/codex resolve void
+    const runner = new SpawnStepRunner(spawner, opts);
+
+    const result = await runner.runStep(step({ id: 'a' }), ctx);
+
+    expect(result).toEqual({ status: 'ok', resultText: null });
+  });
+
+  it('carries a null resultText through when the spawn seam captured no text', async () => {
+    const spawner = makeSpawner(() => Promise.resolve({ resultText: null }));
+    const runner = new SpawnStepRunner(spawner, opts);
+
+    const result = await runner.runStep(step({ id: 'a' }), ctx);
+
+    expect(result).toEqual({ status: 'ok', resultText: null });
+  });
+
+  it('does NOT attach resultText on a failed turn (the field stays absent)', async () => {
+    const spawner = makeSpawner(() => Promise.reject(new Error('boom')));
+    const runner = new SpawnStepRunner(spawner, opts);
+
+    const result = await runner.runStep(step({ id: 'a' }), ctx);
+
+    expect(result.status).toBe('failed');
+    expect('resultText' in result).toBe(false);
+  });
+
+  it('does NOT attach resultText on an aborted turn (the field stays absent)', async () => {
+    const ac = new AbortController();
+    const spawner = makeSpawner(() => {
+      ac.abort();
+      return Promise.resolve({ resultText: 'ignored — the run was canceled' });
+    });
+    const runner = new SpawnStepRunner(spawner, opts);
+
+    const result = await runner.runStep(step({ id: 'a' }), { ...ctx, signal: ac.signal });
+
+    expect(result.status).toBe('aborted');
+    expect('resultText' in result).toBe(false);
   });
 
   it('threads the run model into each step invocation', async () => {

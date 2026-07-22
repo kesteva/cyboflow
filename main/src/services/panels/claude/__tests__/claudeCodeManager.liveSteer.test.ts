@@ -158,7 +158,11 @@ async function waitForSpawn(mgr: ClaudeCodeManager, spawnKey: string, maxTicks =
 }
 
 /** Fire-and-forget a lane spawn (spawnKey ≠ runId ⇒ single-shot, warm === null). */
-function spawnLane(mgr: ClaudeCodeManager, runId: string, spawnKey: string): Promise<void> {
+function spawnLane(
+  mgr: ClaudeCodeManager,
+  runId: string,
+  spawnKey: string,
+): ReturnType<ClaudeCodeManager['spawnCliProcess']> {
   return mgr.spawnCliProcess({
     panelId: runId,
     sessionId: runId,

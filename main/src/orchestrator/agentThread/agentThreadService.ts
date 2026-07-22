@@ -34,6 +34,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentThread } from '../../../../shared/types/agentThread';
+import type { CliSpawnOutcome } from '../../../../shared/types/cliPanels';
 import type { ClaudeSpawnOptions } from '../../services/panels/claude/claudeCodeManager';
 import type { LoggerLike } from '../types';
 import type { AgentThreadDbStore } from './agentThreadDbStore';
@@ -94,7 +95,10 @@ export type AgentSpawnOptions = Pick<
  * session-id capture. Kept structural so tests inject a plain fake — no SDK.
  */
 export interface AgentSpawnManagerLike {
-  spawnCliProcess(options: AgentSpawnOptions): Promise<void>;
+  // Return widened to `CliSpawnOutcome | void` so ClaudeCodeManager (which now
+  // resolves the typed step-output channel, §5.3) still structurally satisfies
+  // this slice; the service awaits and ignores the resolved value.
+  spawnCliProcess(options: AgentSpawnOptions): Promise<CliSpawnOutcome | void>;
   on(event: 'output', listener: (payload: unknown) => void): unknown;
   off(event: 'output', listener: (payload: unknown) => void): unknown;
 }

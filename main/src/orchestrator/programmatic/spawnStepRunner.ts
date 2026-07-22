@@ -208,7 +208,7 @@ export class SpawnStepRunner implements StepRunner {
     // honored on the next step turn.
     const agentPermissionMode = this.opts.agentPermissionMode?.();
     try {
-      await this.spawner.spawnCliProcess({
+      const outcome = await this.spawner.spawnCliProcess({
         panelId: this.opts.panelId,
         sessionId: this.opts.sessionId,
         runId: this.opts.runId,
@@ -229,7 +229,10 @@ export class SpawnStepRunner implements StepRunner {
       // The SDK treats an aborted turn as a clean drain, so a resolved spawn after
       // a cancel is NOT a real success — consult the signal to tell them apart.
       if (ctx.signal?.aborted) return { status: 'aborted' };
-      return { status: 'ok' };
+      // Typed step-output channel (§5.3): forward the step agent's final result
+      // text captured at the spawn seam. `void` (a substrate that does not capture,
+      // e.g. interactive/codex) ⇒ null. The controller parses this on the `ok` path.
+      return { status: 'ok', resultText: outcome?.resultText ?? null };
     } catch (err) {
       // A rejection during/after a cancel is the cancel, not a genuine failure.
       if (ctx.signal?.aborted) return { status: 'aborted' };

@@ -53,6 +53,15 @@ export interface StepRunResult {
    * Absent/false ⇒ a normal step failure (today's behavior).
    */
   systemic?: boolean;
+  /**
+   * The step agent's FINAL result text captured at the spawn seam (per-spawnKey,
+   * so concurrent fan-out lanes never cross-attribute); consumed by the controller
+   * to parse typed step outputs (first consumer: the task-verify visual-
+   * verification contract, docs/proposals/verification-agent-redesign.md §5.3).
+   * Absent on failed/aborted turns and on substrates that do not capture it
+   * (interactive, codex).
+   */
+  resultText?: string | null;
 }
 
 /**

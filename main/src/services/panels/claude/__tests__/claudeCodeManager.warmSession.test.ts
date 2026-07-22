@@ -895,4 +895,87 @@ describe('ClaudeCodeManager — warm (persistent) SDK session', () => {
     // Restore so the afterEach teardown path settles cleanly.
     setClosing(mgr, panelId, false);
   });
+
+  // -------------------------------------------------------------------------
+  // Typed step-output channel (verification-agent redesign §5.3): spawnCliProcess
+  // resolves with the turn's captured SUCCESS result text.
+  //   (a) a clean cold turn resolves with the SDK result text;
+  //   (b) a warm SECOND turn resolves with ITS OWN text (per-turn capture, never
+  //       inheriting the first turn's);
+  //   (c) a terminal-error turn still REJECTS (the result-text path never swallows
+  //       the failure).
+  // -------------------------------------------------------------------------
+  it('(§5.3) resolves spawnCliProcess with the SUCCESS turn\'s final result text', async () => {
+    const panelId = 'p-out-clean';
+    fakeSdk.setScenario(
+      scenario()
+        .systemInit({ sessionId: SESSION_UUID })
+        .assistantText('working on it')
+        .resultSuccess({ result: 'the final answer' }),
+    );
+
+    const outcome = await mgr.spawnCliProcess({
+      panelId,
+      sessionId: panelId,
+      worktreePath: '/tmp/wt',
+      prompt: 'first',
+      permissionMode: 'ignore',
+    });
+
+    expect(outcome).toEqual({ resultText: 'the final answer' });
+  });
+
+  it('(§5.3) a warm second turn resolves with ITS OWN result text, not the first turn\'s', async () => {
+    const panelId = 'p-out-warm';
+    fakeSdk.setScenario(
+      scenario()
+        .systemInit({ sessionId: SESSION_UUID })
+        .assistantText('one')
+        .resultSuccess({ result: 'first-answer' })
+        .assistantText('two')
+        .resultSuccess({ result: 'second-answer' }),
+    );
+
+    // Turn 1 — cold spawn.
+    const first = await mgr.spawnCliProcess({
+      panelId,
+      sessionId: panelId,
+      worktreePath: '/tmp/wt',
+      prompt: 'first',
+      permissionMode: 'ignore',
+    });
+    expect(first).toEqual({ resultText: 'first-answer' });
+
+    // Turn 2 — resume continuation → warm push (NO respawn) resolves with the
+    // SECOND turn's text, proving the per-turn capture never leaks turn 1's.
+    const second = await mgr.spawnCliProcess({
+      panelId,
+      sessionId: panelId,
+      worktreePath: '/tmp/wt',
+      prompt: 'second',
+      permissionMode: 'ignore',
+      isResume: true,
+    });
+    expect(fakeSdk.calls).toHaveLength(1); // warm push, not a cold respawn
+    expect(second).toEqual({ resultText: 'second-answer' });
+  });
+
+  it('(§5.3) a terminal-error turn still REJECTS (the result-text path does not swallow it)', async () => {
+    const panelId = 'p-out-err';
+    // Default mock: getDbSession → undefined, so runId === panelId (a FLOW run) and
+    // a fatal is_error result REJECTS spawnCliProcess (the false-complete guard).
+    fakeSdk.setScenario(
+      scenario().systemInit({ sessionId: SESSION_UUID }).resultError({ subtype: 'error_during_execution' }),
+    );
+
+    await expect(
+      mgr.spawnCliProcess({
+        panelId,
+        sessionId: panelId,
+        worktreePath: '/tmp/wt',
+        prompt: 'first',
+        permissionMode: 'ignore',
+      }),
+    ).rejects.toThrow();
+  });
 });
