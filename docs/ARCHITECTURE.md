@@ -517,8 +517,9 @@ the type discriminator (no `type` column):
   execution; revert target).
 
 Each table carries its own columns plus a single markdown `body` column, a `priority`, a
-`version` (optimistic concurrency), and a `(board_id, stage_id)` placement onto **one shared
-board**. Migration `042_collapse_board` narrowed the board to **4 canonical stages** kept at
+`category` classification (`'feature' | 'bug' | 'chore'`, default `'feature'` — migration
+059, mirroring `priority`), a `version` (optimistic concurrency), and a
+`(board_id, stage_id)` placement onto **one shared board**. Migration `042_collapse_board` narrowed the board to **4 canonical stages** kept at
 their original positions (seeded by migration 042 and `seedDefaultBoard`); they form a union
 view across all three entity types:
 
