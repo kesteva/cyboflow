@@ -20,7 +20,19 @@
  * evalJury.parseFindings), so round-tripping is unaffected.
  *
  * Pure + non-mutating: returns freshly-built nodes and never touches the input
- * (the shared exported schema must stay intact for the Claude path).
+ * (the shared exported schema must stay intact for the Claude path). NOTE:
+ * untouched subtrees are shared by reference with the input — callers must not
+ * mutate the result in place (the eval path deep-copies via toJsonValue).
+ *
+ * SCOPE (adversarial-review caveats): general enough for the constructs the eval
+ * schema uses — type/properties/required/additionalProperties/items/enum, nested
+ * arbitrarily — but NOT a complete OpenAI-strict normalizer. Known gaps if reused
+ * elsewhere: a bare `{type:'object'}` WITHOUT `properties` is left without
+ * `additionalProperties:false` (strict mode still rejects it); OpenAI strict
+ * rejects `oneOf`/`allOf` outright (recursion into them here is best-effort, and
+ * strict-ifying `allOf` branches independently can make the conjunction
+ * unsatisfiable); an array without `items` is not repaired (strict requires
+ * `items`); boolean property schemas and `$ref`/`$defs` pass through untouched.
  */
 type JsonSchema = Record<string, unknown>;
 

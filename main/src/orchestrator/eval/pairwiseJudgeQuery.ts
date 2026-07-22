@@ -34,6 +34,9 @@ import type { LoggerLike } from '../types';
 import { resolveClaudeExecutablePath } from '../../services/panels/claude/claudeExecutablePath';
 
 /** Default per-sample deadline. A hung claude binary must not stall the worker. */
+// Deliberately NOT raised alongside EVAL_JUDGE_TIMEOUT_MS (300s): the pairwise
+// judge is diff-only with maxTurns 8 — no worktree exploration loop to budget
+// for — and its timer likewise starts only after lane admission. 180s is ample.
 export const PAIRWISE_JUDGE_TIMEOUT_MS = 180_000;
 
 /** Read-only tools the judge may use (diff-only grading needs none, kept for parity). */

@@ -69,6 +69,45 @@ describe('parseJudgeSample (defensive)', () => {
     expect(sample.verdicts[0].verdict).toBe('PASS');
   });
 
+  it('treats a STRICT-shaped sample (explicit nulls) identically to absent fields', () => {
+    // The Codex juror path strict-ifies JUDGE_OUTPUT_SCHEMA (strictOutputSchema):
+    // every property becomes required and originally-optional ones nullable, so
+    // Codex legally returns explicit nulls where Claude omits keys. This pins the
+    // null≡absent equivalence the transform's docstring relies on — if the parser
+    // ever tightens (e.g. `netNew === true`), this catches the semantic drift.
+    const strictShaped = {
+      verdicts: [{ id: 'COR-1', verdict: 'PASS', evidence: 'ok' }],
+      findings: [{
+        title: 'unguarded parse',
+        severity: 'warning',
+        subCheckId: null,
+        dimension: null,
+        body: null,
+        file: null,
+        line: null,
+        netNew: null,
+        catastrophic: null,
+      }],
+    };
+    const sample = parseJudgeSample(strictShaped);
+    expect(sample.findings).toHaveLength(1);
+    expect(sample.findings[0]).toEqual({
+      subCheckId: '',
+      dimension: 'correctness',
+      severity: 'warning',
+      title: 'unguarded parse',
+      body: '',
+      netNew: true, // null ≡ absent ⇒ default net-new
+      catastrophic: false, // null ≢ true
+    });
+    // Root `findings: null` (nullable array in the strict schema) parses as none.
+    const noFindings = parseJudgeSample({
+      verdicts: [{ id: 'COR-1', verdict: 'PASS', evidence: 'ok' }],
+      findings: null,
+    });
+    expect(noFindings.findings).toEqual([]);
+  });
+
   it('throws on a non-object', () => {
     expect(() => parseJudgeSample(null)).toThrow();
     expect(() => parseJudgeSample('nope')).toThrow();
