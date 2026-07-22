@@ -9,11 +9,13 @@ import { AgentThreadEventsSink } from './agentThreadEventsSink';
 import { getAgentSystemPrompt } from './agentThreadPrompt';
 import {
   AgentThreadService,
+  COMPACT_PROMPT,
   DIGEST_PROMPT,
   type AgentSpawnManagerLike,
   type AgentSpawnOptions,
 } from './agentThreadService';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
+import type { AssistantContextRetention } from '../../../../shared/types/agentThread';
 
 /** One local calendar day, in ms — advance the clock past it to re-fire the digest. */
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -36,6 +38,11 @@ const MIGRATION =
   '\n' +
   readFileSync(
     join(__dirname, '..', '..', 'database', 'migrations', '076_agent_thread_last_digest.sql'),
+    'utf-8',
+  ) +
+  '\n' +
+  readFileSync(
+    join(__dirname, '..', '..', 'database', 'migrations', '078_agent_thread_last_turn.sql'),
     'utf-8',
   );
 
@@ -114,6 +121,8 @@ interface Harness {
   clock: { value: number };
   /** Mutable enabled flag — flip `enabled.value` mid-test to exercise the kill switch. */
   enabled: { value: boolean };
+  /** Mutable retention strategy — flip `retention.value` mid-test to exercise each mode. */
+  retention: { value: AssistantContextRetention };
 }
 
 function makeHarness(): Harness {
@@ -124,16 +133,18 @@ function makeHarness(): Harness {
   const homeBase = mkdtempSync(join(tmpdir(), 'agent-home-'));
   const clock = { value: LOCAL_NOON_BASE };
   const enabled = { value: true };
+  const retention = { value: 'clear-daily' as AssistantContextRetention };
   const service = new AgentThreadService({
     store,
     manager,
     publish: (id, envelope) => published.push({ id, envelope }),
     defaultModel: () => 'claude-opus',
     enabled: () => enabled.value,
+    contextRetention: () => retention.value,
     homeDirBase: homeBase,
     now: () => clock.value,
   });
-  return { db, store, manager, service, published, homeBase, clock, enabled };
+  return { db, store, manager, service, published, homeBase, clock, enabled, retention };
 }
 
 describe('AgentThreadService', () => {
@@ -429,6 +440,160 @@ describe('AgentThreadService', () => {
       expect(after).toEqual({ triggered: true });
       expect(h.manager.calls).toHaveLength(1);
       expect(h.manager.calls[0].prompt).toBe(DIGEST_PROMPT);
+    });
+  });
+
+  describe('daily context retention', () => {
+    it('stamps last_turn_at on every turn (human and digest alike)', async () => {
+      const thread = h.service.ensureGlobalThread();
+
+      await h.service.sendMessage(thread.id, 'first');
+      expect(h.store.getLastTurnAt(thread.id)).toBe(h.clock.value);
+
+      h.clock.value += 60 * 60 * 1000;
+      await h.service.triggerDigest(thread.id);
+      expect(h.store.getLastTurnAt(thread.id)).toBe(h.clock.value);
+    });
+
+    it("clear-daily: same-day turns keep resuming; the next day's first turn drops the resume id and starts fresh, transcript intact", async () => {
+      h.retention.value = 'clear-daily';
+      const thread = h.service.ensureGlobalThread();
+
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'day one, first');
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'day one, second');
+      expect(h.manager.calls[1].resumeSessionId).toBe('sess-1');
+
+      // Next local day: the resume id is dropped BEFORE the turn — a fresh
+      // conversation cold-spawns and its new id is captured.
+      h.clock.value += ONE_DAY_MS;
+      h.manager.queueInit('sess-2');
+      await h.service.sendMessage(thread.id, 'day two');
+
+      expect(h.manager.calls).toHaveLength(3);
+      expect(h.manager.calls[2].prompt).toBe('day two');
+      expect(h.manager.calls[2].resumeSessionId).toBeUndefined();
+      expect(h.store.getThread(thread.id)?.claudeSessionId).toBe('sess-2');
+
+      // The durable UI transcript is untouched: all three human turns remain.
+      const userEvents = h.store.listEvents(thread.id).filter((r) => r.eventType === 'user');
+      expect(userEvents).toHaveLength(3);
+    });
+
+    it('clear-daily applies to the auto-digest too: a new day’s recap starts a fresh conversation', async () => {
+      h.retention.value = 'clear-daily';
+      const thread = h.service.ensureGlobalThread();
+
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'day one chat');
+
+      h.clock.value += ONE_DAY_MS;
+      h.manager.queueInit('sess-2');
+      await h.service.triggerDigest(thread.id);
+
+      expect(h.manager.calls).toHaveLength(2);
+      expect(h.manager.calls[1].prompt).toBe(DIGEST_PROMPT);
+      expect(h.manager.calls[1].resumeSessionId).toBeUndefined();
+    });
+
+    it("compact-daily: the next day's first turn fires a /compact turn on the stored conversation, then the real turn resumes it", async () => {
+      h.retention.value = 'compact-daily';
+      const thread = h.service.ensureGlobalThread();
+
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'day one');
+
+      h.clock.value += ONE_DAY_MS;
+      // Compaction rewrites the transcript in place under the same session id.
+      h.manager.queueInit('sess-1');
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'day two');
+
+      expect(h.manager.calls).toHaveLength(3);
+      expect(h.manager.calls[1].prompt).toBe(COMPACT_PROMPT);
+      expect(h.manager.calls[1].resumeSessionId).toBe('sess-1');
+      expect(h.manager.calls[2].prompt).toBe('day two');
+      expect(h.manager.calls[2].resumeSessionId).toBe('sess-1');
+
+      // The synthetic /compact prompt is never attributed to the human.
+      const userEvents = h.store.listEvents(thread.id).filter((r) => r.eventType === 'user');
+      expect(userEvents.map((r) => JSON.parse(r.payloadJson) as { text?: string })).not.toContainEqual(
+        expect.objectContaining({ text: COMPACT_PROMPT }),
+      );
+
+      // Same day, a further turn does NOT re-compact.
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'day two, second');
+      expect(h.manager.calls).toHaveLength(4);
+      expect(h.manager.calls[3].prompt).toBe('day two, second');
+    });
+
+    it('compact-daily: a stale resume during the compact clears the id and the real turn cold-spawns fresh', async () => {
+      h.retention.value = 'compact-daily';
+      const thread = h.service.ensureGlobalThread();
+
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'day one');
+
+      h.clock.value += ONE_DAY_MS;
+      h.manager.queueThrow('No conversation found with session ID sess-1');
+      h.manager.queueInit('sess-2');
+      await h.service.sendMessage(thread.id, 'day two');
+
+      expect(h.manager.calls).toHaveLength(3);
+      expect(h.manager.calls[1].prompt).toBe(COMPACT_PROMPT);
+      expect(h.manager.calls[2].prompt).toBe('day two');
+      expect(h.manager.calls[2].resumeSessionId).toBeUndefined();
+      expect(h.store.getThread(thread.id)?.claudeSessionId).toBe('sess-2');
+    });
+
+    it('compact-daily is fail-soft: a non-resume compact failure logs and the real turn proceeds uncompacted', async () => {
+      h.retention.value = 'compact-daily';
+      const thread = h.service.ensureGlobalThread();
+
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'day one');
+
+      h.clock.value += ONE_DAY_MS;
+      h.manager.queueThrow('API Error: 500 overloaded');
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'day two');
+
+      expect(h.manager.calls).toHaveLength(3);
+      expect(h.manager.calls[2].prompt).toBe('day two');
+      // The conversation survives — still resumed, just not compacted.
+      expect(h.manager.calls[2].resumeSessionId).toBe('sess-1');
+    });
+
+    it('auto-compact: a new day changes nothing — the conversation just keeps resuming', async () => {
+      h.retention.value = 'auto-compact';
+      const thread = h.service.ensureGlobalThread();
+
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'day one');
+
+      h.clock.value += ONE_DAY_MS;
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'day two');
+
+      expect(h.manager.calls).toHaveLength(2);
+      expect(h.manager.calls[1].resumeSessionId).toBe('sess-1');
+    });
+
+    it('upgrade path: a legacy thread with a stored conversation but NULL last_turn_at is treated as a new day', async () => {
+      h.retention.value = 'clear-daily';
+      const thread = h.service.ensureGlobalThread();
+      // Simulate a pre-078 thread: a live conversation id, no last_turn_at.
+      h.store.updateClaudeSessionId(thread.id, 'legacy-sess');
+      expect(h.store.getLastTurnAt(thread.id)).toBeNull();
+
+      h.manager.queueInit('sess-fresh');
+      await h.service.sendMessage(thread.id, 'first turn after upgrade');
+
+      expect(h.manager.calls).toHaveLength(1);
+      expect(h.manager.calls[0].resumeSessionId).toBeUndefined();
+      expect(h.store.getThread(thread.id)?.claudeSessionId).toBe('sess-fresh');
     });
   });
 });

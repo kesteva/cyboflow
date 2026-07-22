@@ -2667,6 +2667,7 @@ async function initializeServices() {
       },
       defaultModel: () => configManager.getAssistantModel() ?? configManager.getDefaultModel(),
       enabled: () => configManager.isAssistantEnabled(),
+      contextRetention: () => configManager.getAssistantContextRetention(),
       homeDirBase: getCyboflowSubdirectory('agent-home'),
       logger: cyboflowLogger,
     });

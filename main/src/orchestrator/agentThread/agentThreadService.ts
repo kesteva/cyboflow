@@ -23,6 +23,13 @@
  * captures the session id; it NEVER appends events (single-writer contract: the
  * sink owns durability).
  *
+ * Context retention: the standing conversation would otherwise grow forever
+ * (bounded only by SDK auto-compaction). On the first turn of each LOCAL
+ * calendar day, {@link applyDailyRetention} applies the configured
+ * `assistantContextRetention` strategy — start fresh ('clear-daily', the
+ * default), fire a `/compact` turn ('compact-daily'), or do nothing
+ * ('auto-compact') — keyed off `agent_threads.last_turn_at` (migration 078).
+ *
  * Every spawn also threads {@link getAgentSystemPrompt} (S1.4) as
  * `systemPromptAppend` — the role, the promptable contract, tool guidance,
  * digest format, and proposal-quality bar. `computeOptionsFingerprint`
@@ -33,7 +40,8 @@
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AgentThread } from '../../../../shared/types/agentThread';
+import type { AgentThread, AssistantContextRetention } from '../../../../shared/types/agentThread';
+import { DEFAULT_ASSISTANT_CONTEXT_RETENTION } from '../../../../shared/types/agentThread';
 import type { CliSpawnOutcome } from '../../../../shared/types/cliPanels';
 import type { ClaudeSpawnOptions } from '../../services/panels/claude/claudeCodeManager';
 import type { LoggerLike } from '../types';
@@ -59,6 +67,15 @@ export const DIGEST_PROMPT =
   '(2) what is in flight right now — running or paused sessions and runs, and ' +
   'where each one is; (3) what needs my input — every blocked run, pending gate, ' +
   'and open review item across all projects. Keep it tight.';
+
+/**
+ * Synthetic turn text for the 'compact-daily' retention strategy. `/compact`
+ * sent as a prompt string is an SDK input, not a CLI-only shortcut: the CLI
+ * runs conversation compaction server-side (emitting a system
+ * `compact_boundary` event) instead of handing the text to the model. See
+ * https://code.claude.com/docs/en/agent-sdk/slash-commands.
+ */
+export const COMPACT_PROMPT = '/compact';
 
 // ---------------------------------------------------------------------------
 // Narrow manager slice + spawn options
@@ -138,6 +155,14 @@ export interface AgentThreadServiceDeps {
    * stamping the throttle.
    */
   enabled: () => boolean;
+  /**
+   * Day-boundary context-retention strategy, checked on the first turn of each
+   * LOCAL calendar day (same anchor as the digest cap). The caller wires this
+   * to `configManager.getAssistantContextRetention()`, so a Settings change
+   * takes effect on the next turn with no restart. Absent ⇒
+   * DEFAULT_ASSISTANT_CONTEXT_RETENTION ('clear-daily').
+   */
+  contextRetention?: () => AssistantContextRetention;
   /** Base dir for per-thread neutral home dirs (`<base>/<threadId>/`). */
   homeDirBase: string;
   /** Injectable clock for the digest throttle (tests advance it). */
@@ -261,7 +286,7 @@ export class AgentThreadService {
     if (!this.deps.enabled()) {
       throw new Error('assistant is disabled in settings');
     }
-    const thread = this.deps.store.getThread(threadId);
+    let thread = this.deps.store.getThread(threadId);
     if (thread === null) {
       throw new Error(`AgentThreadService: unknown thread ${threadId}`);
     }
@@ -286,6 +311,15 @@ export class AgentThreadService {
     }
 
     const model = (thread.model ?? this.deps.defaultModel()) ?? undefined;
+
+    // Day-boundary context retention: on the first turn of a new local day,
+    // apply the configured strategy BEFORE this turn spawns. May clear the
+    // stored resume id (clear-daily) or run a /compact turn that recaptures it
+    // (compact-daily) — so re-read the thread afterwards; the stored id always
+    // reflects the live conversation.
+    await this.applyDailyRetention(thread, model);
+    thread = this.deps.store.getThread(threadId) ?? thread;
+
     const resumeSessionId = thread.claudeSessionId ?? undefined;
 
     try {
@@ -340,6 +374,70 @@ export class AgentThreadService {
       throw err;
     }
     return { triggered: true };
+  }
+
+  /**
+   * Apply the configured context-retention strategy at the LOCAL-day boundary,
+   * then stamp `last_turn_at` (every turn, so the stored instant always
+   * reflects the newest turn). A NULL stamp (fresh thread, or first turn after
+   * the migration-078 upgrade) counts as a new day — harmless for a fresh
+   * thread (no conversation to clear/compact) and correct for a legacy thread
+   * carrying months of history.
+   *
+   * Strategies (no-ops when there is no stored conversation):
+   *   - 'clear-daily'   — drop the resume id; the day's first turn cold-spawns a
+   *                       fresh conversation. The durable transcript
+   *                       (agent_thread_events) is untouched.
+   *   - 'compact-daily' — fire a synthetic `/compact` turn on the existing
+   *                       conversation. Fail-soft: a stale-resume failure clears
+   *                       the id (fresh start — the conversation is gone anyway);
+   *                       any other failure logs and lets the real turn proceed,
+   *                       though the day's boundary is then consumed (documented
+   *                       trade-off, mirroring "one recap a day").
+   *   - 'auto-compact'  — nothing; rely on the SDK's built-in auto-compaction.
+   *
+   * The stamp is written synchronously before the (awaited) compact spawn, so a
+   * concurrent same-tick turn sees a same-day stamp and cannot double-apply —
+   * the same better-sqlite3 synchronicity argument as the digest cap.
+   */
+  private async applyDailyRetention(thread: AgentThread, model: string | undefined): Promise<void> {
+    const now = this.nowMs();
+    const last = this.deps.store.getLastTurnAt(thread.id);
+    const sameDay = last !== null && isSameLocalDay(last, now);
+    this.deps.store.setLastTurnAt(thread.id, now);
+    if (sameDay) return;
+
+    const strategy = this.deps.contextRetention?.() ?? DEFAULT_ASSISTANT_CONTEXT_RETENTION;
+    if (strategy === 'auto-compact') return;
+    if (thread.claudeSessionId === null) return;
+
+    if (strategy === 'clear-daily') {
+      this.deps.logger?.info(
+        `[agentThreadService] clear-daily retention: starting thread ${thread.id} fresh for the new day`,
+      );
+      this.deps.store.updateClaudeSessionId(thread.id, null);
+      return;
+    }
+
+    // 'compact-daily'
+    try {
+      this.deps.logger?.info(
+        `[agentThreadService] compact-daily retention: compacting thread ${thread.id} for the new day`,
+      );
+      await this.spawn(thread.id, COMPACT_PROMPT, model, thread.claudeSessionId);
+    } catch (err) {
+      if (isResumeError(err)) {
+        this.deps.logger?.warn(
+          `[agentThreadService] stale resume during daily compact for thread ${thread.id}; starting fresh: ${errMessage(err)}`,
+        );
+        this.deps.store.updateClaudeSessionId(thread.id, null);
+        return;
+      }
+      // Fail-soft: the day's real turn must never be blocked by a failed compact.
+      this.deps.logger?.warn(
+        `[agentThreadService] daily compact failed for thread ${thread.id}; continuing uncompacted: ${errMessage(err)}`,
+      );
+    }
   }
 
   /** Tear down all live-tail bridges + the sink (app shutdown). */
