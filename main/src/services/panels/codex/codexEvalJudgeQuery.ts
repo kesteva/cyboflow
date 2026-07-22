@@ -28,7 +28,10 @@ import {
 } from './appServer/turnSession';
 import { toStrictOutputSchema } from './appServer/strictOutputSchema';
 
-export const CODEX_EVAL_JUDGE_TIMEOUT_MS = 180_000;
+// 5 min (was 3), matching the Claude juror deadline (EVAL_JUDGE_TIMEOUT_MS): the
+// Codex app-server juror can also miss a 3-min wall under host contention, and a
+// whole-eval failure needs EVERY juror to time out.
+export const CODEX_EVAL_JUDGE_TIMEOUT_MS = 300_000;
 
 export interface CodexEvalAppServerClient extends TurnSessionClient {
   start(): void;

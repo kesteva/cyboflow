@@ -167,7 +167,7 @@ describe('makeEvalJudgeQuery', () => {
     expect(removeSpy).toHaveBeenCalledWith('abort', expect.any(Function));
   });
 
-  it('exports the default per-sample deadline as 180_000ms', () => {
-    expect(EVAL_JUDGE_TIMEOUT_MS).toBe(180_000);
+  it('exports the default per-sample deadline as 300_000ms', () => {
+    expect(EVAL_JUDGE_TIMEOUT_MS).toBe(300_000);
   });
 });
