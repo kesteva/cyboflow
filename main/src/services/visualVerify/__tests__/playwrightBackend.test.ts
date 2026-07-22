@@ -427,6 +427,9 @@ describe('PlaywrightBackend — missing `playwright` module soft-fails (packagin
     vi.doUnmock('playwright');
   });
 
+  // Generous timeout: vi.resetModules() + fresh dynamic imports are CPU-contention
+  // sensitive — this test flakes at the 5s default under the full test:unit chain
+  // while passing in isolation (recurring full-suite flake, see sprint-verify notes).
   it('healthCheck()/ensureChromium() resolve false (no throw) when the module is absent', async () => {
     vi.resetModules();
     vi.doMock('playwright', () => {
@@ -442,7 +445,7 @@ describe('PlaywrightBackend — missing `playwright` module soft-fails (packagin
     // DEFAULT backend wired with that installer: healthCheck is false, never throws.
     const backend = new Backend({ installer });
     await expect(backend.healthCheck()).resolves.toBe(false);
-  });
+  }, 30_000);
 
   it('capture() with the DEFAULT browserFactory soft-fails (ok:false) when the module is absent', async () => {
     vi.resetModules();
@@ -478,5 +481,5 @@ describe('PlaywrightBackend — missing `playwright` module soft-fails (packagin
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 });
