@@ -66,6 +66,9 @@ describe('transitions', () => {
     // GATE_SCHEMA itself is untouched (its column-set parity test is unaffected).
     db.exec('ALTER TABLE workflow_runs ADD COLUMN current_step_id TEXT');
     db.exec('ALTER TABLE workflow_runs ADD COLUMN claude_session_id TEXT');
+    // Migration 014's outcome column: reviveQuickRunToRunning conditionally
+    // clears machine-stamped terminal outcomes on revival.
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN outcome TEXT');
     seedWorkflow(db);
   });
 
@@ -679,6 +682,41 @@ describe('transitions', () => {
         expect(readRun().status).toBe('running');
       },
     );
+
+    it.each(['interrupted', 'failed'])(
+      "clears a MACHINE-stamped outcome ('%s') on revival so later close-out writers can stamp",
+      (machineOutcome) => {
+        // App-restart boot recovery stamps outcome='interrupted' (or an earlier
+        // boot's backfill stamped 'failed'). A revived live run must not carry a
+        // terminal stamp — the session Merge/Dismiss writers are guarded
+        // `outcome IS NULL` and could never record the human decision.
+        seedQuickWorkflow();
+        seedQuickRun('failed', { error: 'app_restart', ended: '2026-06-29 00:00:00' });
+        db.prepare('UPDATE workflow_runs SET outcome = ? WHERE id = ?').run(machineOutcome, QUICK_RUN_ID);
+
+        const result = reviveQuickRunToRunning(db, QUICK_RUN_ID);
+
+        expect(result).toEqual({ revived: true, fromStatus: 'failed' });
+        const outcome = (db.prepare('SELECT outcome FROM workflow_runs WHERE id = ?').get(QUICK_RUN_ID) as {
+          outcome: string | null;
+        }).outcome;
+        expect(outcome).toBeNull();
+      },
+    );
+
+    it("PRESERVES a human decision outcome ('merged') on revival", () => {
+      seedQuickWorkflow();
+      seedQuickRun('failed', { error: 'app_restart', ended: '2026-06-29 00:00:00' });
+      db.prepare("UPDATE workflow_runs SET outcome = 'merged' WHERE id = ?").run(QUICK_RUN_ID);
+
+      const result = reviveQuickRunToRunning(db, QUICK_RUN_ID);
+
+      expect(result).toEqual({ revived: true, fromStatus: 'failed' });
+      const outcome = (db.prepare('SELECT outcome FROM workflow_runs WHERE id = ?').get(QUICK_RUN_ID) as {
+        outcome: string | null;
+      }).outcome;
+      expect(outcome).toBe('merged');
+    });
 
     it("is a no-op when the sentinel run is already 'running'", () => {
       seedQuickWorkflow();

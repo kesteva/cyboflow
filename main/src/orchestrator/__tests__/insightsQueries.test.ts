@@ -1698,6 +1698,23 @@ describe('selectWorkflowRevisionStats', () => {
     expect(selectWorkflowRevisionStats(dbAdapter(db), 'wf-1')).toEqual([]);
   });
 
+  it('excludes interrupted (app-restart) runs from the success-rate denominator', () => {
+    const spec = '{"v":1}';
+    const hash = computeSpecHash(spec);
+    seedWorkflow(db, { id: 'wf-1', specJson: spec });
+    seedRevision(db, { workflowId: 'wf-1', specHash: hash, specJson: spec, createdAt: '2026-06-01 00:00:00' });
+
+    // 1 merged + 1 app-restart interruption. The interruption's outcome IS NOT
+    // NULL, but it must not depress the revision's success rate: 1/1 = 100%.
+    seedRun(db, { id: 'r1', workflowId: 'wf-1', status: 'completed', outcome: 'merged', specHash: hash });
+    seedRun(db, { id: 'r2', workflowId: 'wf-1', status: 'failed', outcome: 'interrupted', specHash: hash });
+
+    const [rev] = selectWorkflowRevisionStats(dbAdapter(db), 'wf-1');
+    expect(rev.runs).toBe(2);
+    expect(rev.failedRuns).toBe(1); // honest status total still counts it
+    expect(rev.successRatePct).toBe(100); // 1 merged / 1 GENUINE outcome-bearing
+  });
+
   it('aggregates runs split across two revisions, newest revision first', () => {
     const oldSpec = '{"v":1}';
     const newSpec = '{"v":2}';

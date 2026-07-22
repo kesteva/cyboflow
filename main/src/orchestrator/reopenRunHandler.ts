@@ -151,11 +151,18 @@ export async function reopenRunHandler(
 
     // Guarded flip: failed -> running, clearing the failure stamp. Only succeeds
     // while still 'failed', so a concurrent transition loses cleanly (race).
+    // The MACHINE-stamped terminal outcomes ('failed' from backfillTerminalOutcomes,
+    // 'interrupted' from app-restart boot recovery) must be cleared too — every
+    // later outcome writer is guarded `outcome IS NULL`, so a stale stamp would
+    // survive onto the revived run and block the eventual human close-out
+    // decision. Human decisions ('merged'/'dismissed'/'pr_open') are preserved
+    // (stampSessionRunsOutcome can stamp them regardless of status).
     const flip = db.transaction(() => {
       return db
         .prepare(
           `UPDATE workflow_runs
               SET status = 'running', error_message = NULL, ended_at = NULL,
+                  outcome = CASE WHEN outcome IN ('failed', 'interrupted') THEN NULL ELSE outcome END,
                   updated_at = CURRENT_TIMESTAMP
             WHERE id = ? AND status = 'failed'`,
         )

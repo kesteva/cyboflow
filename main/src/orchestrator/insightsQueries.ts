@@ -1536,8 +1536,9 @@ interface WorkflowRevisionStatsRow {
  *   - failedRuns      = status='failed'.
  *   - successRatePct  = merged / (terminal runs with an outcome) * 100, 1dp in TS
  *                       (0 when no outcome-bearing run — avoids /0). "Terminal with
- *                       outcome" = outcome IS NOT NULL (merged|dismissed), matching
- *                       the shared type's denominator note.
+ *                       outcome" = outcome IS NOT NULL AND outcome != 'interrupted'
+ *                       (app-restart interruptions are infra noise, excluded from
+ *                       the denominator like selectVariantStats/RotationArmStats).
  *   - avgTotalTokens  = mean of the matched runs' materialized run_usage.total_tokens
  *                       (null when none materialized — historic/in-flight runs).
  *   - isCurrent       = the revision's hash equals computeSpecHash(workflows.spec_json)
@@ -1567,7 +1568,7 @@ export function selectWorkflowRevisionStats(
          COUNT(r.id) AS runs,
          SUM(CASE WHEN r.outcome = 'merged' THEN 1 ELSE 0 END) AS mergedRuns,
          SUM(CASE WHEN r.status = 'failed'  THEN 1 ELSE 0 END) AS failedRuns,
-         SUM(CASE WHEN r.outcome IS NOT NULL THEN 1 ELSE 0 END) AS outcomeRuns,
+         SUM(CASE WHEN r.outcome IS NOT NULL AND r.outcome != 'interrupted' THEN 1 ELSE 0 END) AS outcomeRuns,
          AVG(u.total_tokens) AS avgTotalTokens
        FROM workflow_revisions rev
        LEFT JOIN workflow_runs r

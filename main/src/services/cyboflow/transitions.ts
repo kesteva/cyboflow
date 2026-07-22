@@ -266,12 +266,19 @@ export function reviveQuickRunToRunning(
   // Already live → nothing to do (the common steady-state case).
   if (row.status === 'running') return { revived: false, fromStatus: 'running' };
 
+  // A quick sentinel force-failed by app-restart boot recovery carries a
+  // MACHINE-stamped terminal outcome ('interrupted', or 'failed' from
+  // backfillTerminalOutcomes). Clear it on revival — every later outcome writer
+  // (incl. the session Merge/Dismiss stamp) is guarded `outcome IS NULL`, so a
+  // stale stamp would survive onto the live run and block the human close-out
+  // decision. Human decisions ('merged'/'dismissed'/'pr_open') are preserved.
   const result = db
     .prepare(
       `UPDATE workflow_runs
           SET status = 'running',
               error_message = NULL,
               ended_at = NULL,
+              outcome = CASE WHEN outcome IN ('failed', 'interrupted') THEN NULL ELSE outcome END,
               started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
               updated_at = CURRENT_TIMESTAMP
         WHERE id = @runId AND status != 'running'`,

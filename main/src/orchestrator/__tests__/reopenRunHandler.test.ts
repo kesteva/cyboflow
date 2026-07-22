@@ -180,6 +180,46 @@ describe('reopenRunHandler — delivery', () => {
     db.close();
   });
 
+  it("clears a machine-stamped outcome ('interrupted') on the revival flip", async () => {
+    // An app-restart force-fail stamps outcome='interrupted'; reopening must not
+    // leave that terminal stamp on the live run (later outcome writers are
+    // guarded `outcome IS NULL` and could never record the human decision).
+    const db = makeDb();
+    const runId = seedFailedRun(db);
+    db.prepare("UPDATE workflow_runs SET error_message = 'app_restart', outcome = 'interrupted' WHERE id = ?").run(runId);
+    const executor = makeFakeExecutor();
+
+    const result = await reopenRunHandler(runId, 'pick it back up', makeDeps(dbAdapter(db), executor));
+
+    expect(result).toEqual({ delivered: true });
+    const row = db
+      .prepare('SELECT status, outcome FROM workflow_runs WHERE id = ?')
+      .get(runId) as { status: string; outcome: string | null };
+    expect(row.status).toBe('running');
+    expect(row.outcome).toBeNull();
+    db.close();
+  });
+
+  it("clears a backfilled outcome ('failed') but PRESERVES a human decision ('merged')", async () => {
+    const db = makeDb();
+    // Backfilled machine stamp → cleared.
+    const failedId = seedFailedRun(db);
+    db.prepare("UPDATE workflow_runs SET outcome = 'failed' WHERE id = ?").run(failedId);
+    // Session-level Merge stamped onto a run that later failed → preserved.
+    const mergedId = seedFailedRun(db);
+    db.prepare("UPDATE workflow_runs SET outcome = 'merged' WHERE id = ?").run(mergedId);
+    const executor = makeFakeExecutor();
+
+    await reopenRunHandler(failedId, 'go', makeDeps(dbAdapter(db), executor));
+    await reopenRunHandler(mergedId, 'go', makeDeps(dbAdapter(db), executor));
+
+    const outcome = (id: string) =>
+      (db.prepare('SELECT outcome FROM workflow_runs WHERE id = ?').get(id) as { outcome: string | null }).outcome;
+    expect(outcome(failedId)).toBeNull();
+    expect(outcome(mergedId)).toBe('merged');
+    db.close();
+  });
+
   it('queue-split: setPendingNudge + execute run OUTSIDE the held per-run PQueue', async () => {
     const db = makeDb();
     const runId = seedFailedRun(db);
