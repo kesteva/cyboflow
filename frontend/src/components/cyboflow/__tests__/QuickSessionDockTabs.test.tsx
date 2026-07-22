@@ -54,8 +54,8 @@ describe('QuickSessionDockTabs', () => {
     expect(unmounted).not.toHaveBeenCalled();
   });
 
-  it('renders the null-run placeholder without crashing before chatRunId is minted', () => {
-    render(
+  it('renders the null-run placeholder, then exposes Data Stream when chatRunId is minted', () => {
+    const { rerender } = render(
       <QuickSessionDockTabs
         runId={null}
         chatContent={<div>Chat content</div>}
@@ -65,5 +65,18 @@ describe('QuickSessionDockTabs', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Data Stream' }));
     expect(screen.getByText('No active run')).toBeInTheDocument();
     expect(screen.getByTestId('mock-run-view')).toHaveAttribute('data-run-id', '');
+
+    rerender(
+      <QuickSessionDockTabs
+        runId="newly-minted-chat-run"
+        chatContent={<div>Chat content</div>}
+      />,
+    );
+
+    expect(screen.getByText('Events for newly-minted-chat-run')).toBeInTheDocument();
+    expect(screen.getByTestId('mock-run-view')).toHaveAttribute(
+      'data-run-id',
+      'newly-minted-chat-run',
+    );
   });
 });
