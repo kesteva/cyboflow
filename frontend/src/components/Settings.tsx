@@ -482,7 +482,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
             >
               <SettingsSection
                 title="Anonymized Diagnostics"
-                description="Telemetry is fully anonymized — no source code, prompts, or file paths are ever sent."
+                description="Telemetry is fully anonymized — no source code, prompts, project or repository names, or file paths are ever sent."
                 icon={<ShieldCheck className="w-4 h-4" />}
               >
                 <Checkbox
