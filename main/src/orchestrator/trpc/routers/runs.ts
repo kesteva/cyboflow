@@ -2424,8 +2424,18 @@ export const runsRouter = router({
         throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
       }
 
+      // Select the SAME canonical row the UI displays (insightsQueries.getRunEval):
+      // (run_id, rubric_version) is a composite PK, so a run can carry several
+      // eval rows — without this ordering .get() would return an arbitrary row
+      // and the retry could target a different rubric_version than the failed
+      // evaluation the user is looking at.
       const row = ctx.db
-        .prepare('SELECT eval_status, rubric_version FROM run_evals WHERE run_id = ?')
+        .prepare(
+          `SELECT eval_status, rubric_version FROM run_evals
+            WHERE run_id = ?
+            ORDER BY human_influenced ASC, snapshot_at ASC
+            LIMIT 1`,
+        )
         .get(input.runId) as { eval_status: string; rubric_version: string } | undefined;
       if (!row) {
         throw new TRPCError({

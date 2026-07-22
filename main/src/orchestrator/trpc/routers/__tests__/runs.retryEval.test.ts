@@ -23,6 +23,8 @@ function createEvalDb(): Database.Database {
       run_id TEXT NOT NULL,
       rubric_version TEXT NOT NULL,
       eval_status TEXT NOT NULL,
+      human_influenced INTEGER NOT NULL DEFAULT 0,
+      snapshot_at TEXT NOT NULL DEFAULT '2026-07-01T00:00:00.000Z',
       error TEXT,
       updated_at TEXT NOT NULL,
       PRIMARY KEY (run_id, rubric_version)
@@ -35,11 +37,18 @@ function seedEval(
   db: Database.Database,
   status: 'pending' | 'running' | 'complete' | 'failed',
   runId = 'run-1',
+  opts: { rubricVersion?: string; humanInfluenced?: 0 | 1; snapshotAt?: string } = {},
 ): void {
   db.prepare(
-    `INSERT INTO run_evals (run_id, rubric_version, eval_status, error, updated_at)
-     VALUES (?, '1.1', ?, 'judge failed', '2026-07-01T00:00:00.000Z')`,
-  ).run(runId, status);
+    `INSERT INTO run_evals (run_id, rubric_version, eval_status, human_influenced, snapshot_at, error, updated_at)
+     VALUES (?, ?, ?, ?, ?, 'judge failed', '2026-07-01T00:00:00.000Z')`,
+  ).run(
+    runId,
+    opts.rubricVersion ?? '1.1',
+    status,
+    opts.humanInfluenced ?? 0,
+    opts.snapshotAt ?? '2026-07-01T00:00:00.000Z',
+  );
 }
 
 describe('cyboflow.runs.retryEval', () => {
@@ -68,6 +77,28 @@ describe('cyboflow.runs.retryEval', () => {
     expect(row.updated_at).not.toBe('2026-07-01T00:00:00.000Z');
     expect(evalWorkerMocks.enqueue).toHaveBeenCalledTimes(1);
     expect(evalWorkerMocks.enqueue).toHaveBeenCalledWith('run-1', '1.1');
+  });
+
+  it('targets the SAME canonical row getRunEval displays on a multi-rubric run', async () => {
+    // Canonical row (per insightsQueries.getRunEval's ORDER BY human_influenced
+    // ASC, snapshot_at ASC): the pristine earliest snapshot — rubric 1.0 here.
+    seedEval(db, 'failed', 'run-1', { rubricVersion: '1.0', humanInfluenced: 0, snapshotAt: '2026-07-01T00:00:00.000Z' });
+    seedEval(db, 'failed', 'run-1', { rubricVersion: '1.1', humanInfluenced: 1, snapshotAt: '2026-07-02T00:00:00.000Z' });
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+
+    await caller.cyboflow.runs.retryEval({ runId: 'run-1' });
+
+    // The displayed (canonical) row was updated + enqueued…
+    const canonical = db
+      .prepare("SELECT eval_status FROM run_evals WHERE run_id = 'run-1' AND rubric_version = '1.0'")
+      .get() as { eval_status: string };
+    expect(canonical.eval_status).toBe('pending');
+    expect(evalWorkerMocks.enqueue).toHaveBeenCalledWith('run-1', '1.0');
+    // …and the other rubric row was left untouched.
+    const other = db
+      .prepare("SELECT eval_status FROM run_evals WHERE run_id = 'run-1' AND rubric_version = '1.1'")
+      .get() as { eval_status: string };
+    expect(other.eval_status).toBe('failed');
   });
 
   it('throws NOT_FOUND and does not enqueue when the eval row is absent', async () => {
