@@ -13,9 +13,11 @@ import {
   MessagesSquare,
 } from 'lucide-react';
 import { trpc } from '../../trpc/client';
+import { useConfigStore } from '../../stores/configStore';
 import { useErrorStore } from '../../stores/errorStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { cn } from '../../utils/cn';
+import { computeSessionCostUsd } from '../../utils/modelPricing';
 import type { RunUsageRollup, RunEval } from '../../../../shared/types/insights';
 import type { ReviewItem } from '../../../../shared/types/reviews';
 import type { RunSummaryVariant } from '../../hooks/useRunSummaryVariant';
@@ -218,6 +220,9 @@ export function WorkflowSummaryPanel({
 }: WorkflowSummaryPanelProps): React.JSX.Element {
   const [usage, setUsage] = useState<RunUsageRollup | null>(null);
   const [loading, setLoading] = useState(true);
+  const computeCostFromRates = useConfigStore(
+    (state) => state.config?.computeCostFromRates ?? false,
+  );
 
   // A/B testing slice C: gate the "View comparison" CTA on whether a comparison
   // row exists yet (it is minted only once BOTH arms have settled). Poll while
@@ -269,6 +274,21 @@ export function WorkflowSummaryPanel({
   const isFailed = variant === 'failed';
   const isReview = variant === 'review';
   const isProgrammatic = executionModel === 'programmatic';
+
+  const displayedCost = useMemo(() => {
+    if (usage === null || !computeCostFromRates || usage.multiModel) {
+      return usage?.costUsd ?? null;
+    }
+    return computeSessionCostUsd(
+      {
+        input: usage.inputTokens,
+        output: usage.outputTokens,
+        cacheWrite: usage.cacheCreationTokens,
+        cacheRead: usage.cacheReadTokens,
+      },
+      usage.model,
+    );
+  }, [computeCostFromRates, usage]);
 
   useEffect(() => {
     let alive = true;
@@ -582,11 +602,16 @@ export function WorkflowSummaryPanel({
 
             {/* Meta line */}
             <div className="pt-1 text-xs text-text-secondary" data-testid="run-summary-meta">
-              cost {formatCost(usage?.costUsd ?? null)}
+              cost {formatCost(displayedCost)}
               {usage?.numTurns != null && <> · {usage.numTurns} turns</>}
               {usage != null && usage.assistantMessageCount > 0 && <> · {usage.assistantMessageCount} messages</>}
               {runtime !== null && <> · runtime {runtime}</>}
             </div>
+            {computeCostFromRates && usage?.multiModel === true && (
+              <p className="text-xs text-text-tertiary" data-testid="run-summary-mixed-model-cost-note">
+                mixed models — showing reported cost
+              </p>
+            )}
           </div>
         )}
       </div>

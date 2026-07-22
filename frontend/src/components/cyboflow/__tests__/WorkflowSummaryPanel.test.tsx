@@ -3,6 +3,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { ScoreSummary, WorkflowSummaryPanel } from '../WorkflowSummaryPanel';
 import type { RunUsageRollup, RunEval } from '../../../../../shared/types/insights';
+import { useConfigStore } from '../../../stores/configStore';
+import type { AppConfig } from '../../../types/config';
 
 const runUsageQuery = vi.fn();
 const runEvalQuery = vi.fn();
@@ -95,6 +97,7 @@ function makeEval(over: Partial<RunEval> = {}): RunEval {
 }
 
 beforeEach(() => {
+  useConfigStore.setState({ config: null, isLoading: false, error: null });
   runUsageQuery.mockReset();
   runUsageQuery.mockResolvedValue(ROLLUP);
   runEvalQuery.mockReset();
@@ -137,6 +140,51 @@ describe('WorkflowSummaryPanel', () => {
     expect(screen.getByTestId('run-summary-total')).toHaveTextContent('8.3m');
     expect(screen.getByTestId('run-summary-meta')).toHaveTextContent('cost $3.95');
     expect(screen.getByTestId('run-summary-meta')).toHaveTextContent('173 turns');
+  });
+
+  it('shows the provider-reported cost when computed cost is explicitly off', async () => {
+    useConfigStore.setState({
+      config: { computeCostFromRates: false } as AppConfig,
+    });
+    renderPanel();
+    expect(await screen.findByTestId('run-summary-meta')).toHaveTextContent('cost $3.95');
+    expect(screen.queryByTestId('run-summary-mixed-model-cost-note')).not.toBeInTheDocument();
+  });
+
+  it('shows the provider-reported cost when computed cost is unset by default', async () => {
+    renderPanel();
+    expect(await screen.findByTestId('run-summary-meta')).toHaveTextContent('cost $3.95');
+    expect(screen.queryByTestId('run-summary-mixed-model-cost-note')).not.toBeInTheDocument();
+  });
+
+  it('computes a single-model run cost from its token breakdown when enabled', async () => {
+    useConfigStore.setState({
+      config: { computeCostFromRates: true } as AppConfig,
+    });
+    renderPanel();
+    expect(await screen.findByTestId('run-summary-meta')).toHaveTextContent('cost $7.98');
+    expect(screen.queryByTestId('run-summary-mixed-model-cost-note')).not.toBeInTheDocument();
+  });
+
+  it('falls back to reported cost with a note for a mixed-model run', async () => {
+    useConfigStore.setState({
+      config: { computeCostFromRates: true } as AppConfig,
+    });
+    runUsageQuery.mockResolvedValue({ ...ROLLUP, model: null, multiModel: true });
+    renderPanel();
+    expect(await screen.findByTestId('run-summary-meta')).toHaveTextContent('cost $3.95');
+    expect(screen.getByTestId('run-summary-mixed-model-cost-note')).toHaveTextContent(
+      'mixed models — showing reported cost',
+    );
+  });
+
+  it('shows an em dash when an enabled single-model recompute has unknown pricing', async () => {
+    useConfigStore.setState({
+      config: { computeCostFromRates: true } as AppConfig,
+    });
+    runUsageQuery.mockResolvedValue({ ...ROLLUP, model: 'unknown-model' });
+    renderPanel();
+    expect(await screen.findByTestId('run-summary-meta')).toHaveTextContent('cost —');
   });
 
   it('fires onComplete when the primary CTA is clicked', async () => {
