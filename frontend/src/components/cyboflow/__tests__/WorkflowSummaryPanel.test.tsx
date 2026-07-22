@@ -244,6 +244,52 @@ describe('WorkflowSummaryPanel', () => {
     );
   });
 
+  it('pluralizes the partial-estimate note when 2+ models in the breakdown are unpriced', async () => {
+    useConfigStore.setState({
+      config: { computeCostFromRates: true } as AppConfig,
+    });
+    runUsageQuery.mockResolvedValue({
+      ...ROLLUP,
+      model: null,
+      multiModel: true,
+      perModelUsage: [
+        // opus: $7.50 (as above) — the only priced model, so it is the whole sum.
+        { model: 'claude-opus-4-5', inputTokens: 1_000_000, outputTokens: 100_000, cacheCreationTokens: 0, cacheReadTokens: 0 },
+        { model: 'some-unpriced-model-a', inputTokens: 5_000_000, outputTokens: 500_000, cacheCreationTokens: 0, cacheReadTokens: 0 },
+        { model: 'some-unpriced-model-b', inputTokens: 2_000_000, outputTokens: 200_000, cacheCreationTokens: 0, cacheReadTokens: 0 },
+      ],
+    });
+    renderPanel();
+    expect(await screen.findByTestId('run-summary-meta')).toHaveTextContent('cost $7.50');
+    expect(screen.getByTestId('run-summary-partial-model-cost-note')).toHaveTextContent(
+      'partial estimate — includes 2 unpriced models',
+    );
+  });
+
+  it('includes cache-write and cache-read tokens (not just input/output) in the per-model rate-card sum', async () => {
+    useConfigStore.setState({
+      config: { computeCostFromRates: true } as AppConfig,
+    });
+    runUsageQuery.mockResolvedValue({
+      ...ROLLUP,
+      model: null,
+      multiModel: true,
+      perModelUsage: [
+        // opus cache-write rate = 1.25 * $5/MTok = $6.25/MTok:
+        // 1,000,000 * $6.25/MTok = $6.25, input/output both zero.
+        { model: 'claude-opus-4-5', inputTokens: 0, outputTokens: 0, cacheCreationTokens: 1_000_000, cacheReadTokens: 0 },
+        // sonnet cache-read rate = 0.1 * $3/MTok = $0.30/MTok:
+        // 1,000,000 * $0.30/MTok = $0.30, input/output both zero.
+        { model: 'claude-sonnet-4-5', inputTokens: 0, outputTokens: 0, cacheCreationTokens: 0, cacheReadTokens: 1_000_000 },
+      ],
+    });
+    renderPanel();
+    // If cache tokens were dropped from the per-model sum this would render $0.00.
+    expect(await screen.findByTestId('run-summary-meta')).toHaveTextContent('cost $6.55');
+    expect(screen.queryByTestId('run-summary-mixed-model-cost-note')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('run-summary-partial-model-cost-note')).not.toBeInTheDocument();
+  });
+
   it('leaves the toggle-OFF behavior unchanged for a multi-model run (verbatim reported cost, no note)', async () => {
     useConfigStore.setState({
       config: { computeCostFromRates: false } as AppConfig,
