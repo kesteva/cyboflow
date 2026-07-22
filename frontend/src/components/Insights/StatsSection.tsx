@@ -76,6 +76,8 @@ interface WorkflowCardModel {
   totalRuns: number;
   errorRatePct: number;
   nullOutcomeRuns: number;
+  /** App-restart interruptions (infra noise) — already excluded from errorRatePct server-side. */
+  interruptedRuns: number;
   totalTokens: number | null;
   avgTotalTokens: number | null;
   /** cache_read + cache_creation — the re-fed context that drives most of the cost. */
@@ -113,6 +115,7 @@ function mergeWorkflowCards(
         totalRuns: s.totalRuns,
         errorRatePct: s.errorRatePct,
         nullOutcomeRuns: s.nullOutcomeRuns,
+        interruptedRuns: s.interruptedRuns,
         totalTokens: u?.totalTokens ?? null,
         avgTotalTokens: u?.avgTotalTokens ?? null,
         totalCacheTokens: u?.totalCacheTokens ?? null,
@@ -211,6 +214,15 @@ function WorkflowCard({
       )}
       <div className="mt-1 text-xs text-text-secondary" data-testid="stats-meta">
         error {card.errorRatePct}% · runs {card.totalRuns} · cost {formatCost(card.totalCostUsd)}
+        {card.interruptedRuns > 0 && (
+          <span
+            className="text-text-tertiary"
+            data-testid="stats-interrupted"
+            title="Runs interrupted by an app restart that could not auto-resume — infra noise, excluded from the error rate"
+          >
+            {' '}· {card.interruptedRuns} interrupted
+          </span>
+        )}
       </div>
       <div className="mt-3">
         <Sparkline points={trendPoints} strokeClass="text-interactive" />

@@ -122,6 +122,7 @@ function makeStats(overrides: Partial<WorkflowRunStats> & { workflowId: string }
     mergedRuns: overrides.mergedRuns ?? 0,
     dismissedRuns: overrides.dismissedRuns ?? 0,
     nullOutcomeRuns: overrides.nullOutcomeRuns ?? 0,
+    interruptedRuns: overrides.interruptedRuns ?? 0,
     errorRatePct: overrides.errorRatePct ?? 0,
     avgDurationMs: overrides.avgDurationMs ?? null,
     lastRunAt: overrides.lastRunAt ?? null,

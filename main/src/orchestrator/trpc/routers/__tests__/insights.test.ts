@@ -89,6 +89,7 @@ describe('cyboflow.insights.workflowStats', () => {
       mergedRuns: 1,
       dismissedRuns: 0,
       nullOutcomeRuns: 0,
+      interruptedRuns: 0,
       errorRatePct: 50,
       avgDurationMs: 1200,
       lastRunAt: '2026-06-11T00:00:00.000Z',

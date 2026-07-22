@@ -544,6 +544,35 @@ describe('selectWorkflowRunStats', () => {
     expect(stats.errorRatePct).toBe(33.3);
   });
 
+  it('breaks out interruptedRuns and excludes them from errorRatePct on BOTH sides', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    // 2 completed + 2 real failures + 2 app-restart interruptions. failedRuns
+    // stays the honest total (4); interruptedRuns breaks out the restart noise
+    // (2); errorRate = (4-2)/(6-2) = 50% — the rate among genuine terminals.
+    seedRun(db, { id: 'r1', workflowId: 'wf-1', status: 'completed', outcome: 'merged' });
+    seedRun(db, { id: 'r2', workflowId: 'wf-1', status: 'completed', outcome: 'merged' });
+    seedRun(db, { id: 'r3', workflowId: 'wf-1', status: 'failed', outcome: 'failed' });
+    seedRun(db, { id: 'r4', workflowId: 'wf-1', status: 'failed', outcome: 'failed' });
+    seedRun(db, { id: 'r5', workflowId: 'wf-1', status: 'failed', outcome: 'interrupted' });
+    seedRun(db, { id: 'r6', workflowId: 'wf-1', status: 'failed', outcome: 'interrupted' });
+
+    const [stats] = selectWorkflowRunStats(dbAdapter(db), null);
+    expect(stats.failedRuns).toBe(4);
+    expect(stats.interruptedRuns).toBe(2);
+    expect(stats.errorRatePct).toBe(50);
+  });
+
+  it('reports errorRatePct 0 when EVERY terminal run is an interruption (no genuine terminals)', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1', status: 'failed', outcome: 'interrupted' });
+    seedRun(db, { id: 'r2', workflowId: 'wf-1', status: 'failed', outcome: 'interrupted' });
+
+    const [stats] = selectWorkflowRunStats(dbAdapter(db), null);
+    expect(stats.failedRuns).toBe(2);
+    expect(stats.interruptedRuns).toBe(2);
+    expect(stats.errorRatePct).toBe(0); // denominator empty — not 100%
+  });
+
   it('reports errorRatePct 0 and avgDurationMs null when there are no terminal runs', () => {
     seedWorkflow(db, { id: 'wf-1' });
     seedRun(db, { id: 'r1', workflowId: 'wf-1', status: 'running' });

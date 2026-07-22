@@ -42,7 +42,18 @@ export interface WorkflowRunStats {
    * until the Phase-2 propagation lands).
    */
   nullOutcomeRuns: number;
-  /** failedRuns / (completed+failed+canceled) * 100, rounded to 1dp; 0 when no terminal runs. */
+  /**
+   * status='failed' AND outcome='interrupted' — runs an app restart orphaned that
+   * could not auto-resume. Infra interruptions, NOT agent/logic failures; a
+   * subset of failedRuns, excluded from errorRatePct on both sides.
+   */
+  interruptedRuns: number;
+  /**
+   * (failedRuns − interruptedRuns) / (completed+failed+canceled − interruptedRuns)
+   * * 100, rounded to 1dp; 0 when no genuine terminal runs. Interrupted
+   * (app-restart) runs leave BOTH sides — they are neither an error nor a fair
+   * trial — so the rate reflects genuine agent/logic failures only.
+   */
   errorRatePct: number;
   /** AVG(ended_at - started_at) ms over terminal runs with both stamps; null when none. */
   avgDurationMs: number | null;

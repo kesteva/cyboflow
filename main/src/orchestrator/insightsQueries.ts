@@ -163,6 +163,7 @@ interface WorkflowRunStatsRow {
   mergedRuns: number;
   dismissedRuns: number;
   nullOutcomeRuns: number;
+  interruptedRuns: number;
   /** AVG over terminal runs with both stamps; SQLite returns null when empty. */
   avgDurationMs: number | null;
   lastRunAt: string | null;
@@ -178,11 +179,16 @@ interface WorkflowRunStatsRow {
  *                awaiting_input/stuck/paused)
  * Outcome buckets: mergedRuns (outcome='merged'), dismissedRuns
  * (outcome='dismissed'). nullOutcomeRuns = terminal AND outcome IS NULL.
+ * interruptedRuns = failed AND outcome='interrupted' — app-restart interruptions
+ * that could not auto-resume (infra noise, NOT agent/logic failures).
  *
- * `errorRatePct` = failedRuns / terminalRuns * 100, rounded to 1dp in TS
- * (0 when there are no terminal runs — avoids a /0). `avgDurationMs` is
- * AVG((ended_at - started_at) ms) over terminal runs that carry both stamps.
- * `lastRunAt` is MAX(created_at), normalized to ISO.
+ * `errorRatePct` = (failedRuns − interruptedRuns) / (terminalRuns −
+ * interruptedRuns) * 100, rounded to 1dp in TS (0 when the denominator is 0 —
+ * avoids a /0): the error rate among runs that reached a GENUINE terminal state.
+ * Interrupted runs leave both sides — they are neither an error (numerator) nor
+ * a fair trial (denominator). `avgDurationMs` is AVG((ended_at - started_at) ms)
+ * over terminal runs that carry both stamps. `lastRunAt` is MAX(created_at),
+ * normalized to ISO.
  *
  * @param db        - Narrow DatabaseLike surface.
  * @param projectId - When non-null, restricts to that project; null = all.
@@ -213,6 +219,7 @@ export function selectWorkflowRunStats(
       SUM(CASE WHEN r.outcome = 'merged'    THEN 1 ELSE 0 END) AS mergedRuns,
       SUM(CASE WHEN r.outcome = 'dismissed' THEN 1 ELSE 0 END) AS dismissedRuns,
       SUM(CASE WHEN r.status IN (${TERMINAL_SQL}) AND r.outcome IS NULL THEN 1 ELSE 0 END) AS nullOutcomeRuns,
+      SUM(CASE WHEN r.status = 'failed' AND r.outcome = 'interrupted' THEN 1 ELSE 0 END) AS interruptedRuns,
       AVG(
         CASE
           WHEN r.status IN (${TERMINAL_SQL})
@@ -236,9 +243,14 @@ export function selectWorkflowRunStats(
   ) as WorkflowRunStatsRow[];
 
   return rows.map((row) => {
-    const terminalRuns = row.completedRuns + row.failedRuns + row.canceledRuns;
+    // Interrupted (app-restart, unresumable) runs leave BOTH sides of the error
+    // rate — not an error, not a fair trial (see the doc comment above).
+    const genuineTerminalRuns =
+      row.completedRuns + row.failedRuns + row.canceledRuns - row.interruptedRuns;
     const errorRatePct =
-      terminalRuns === 0 ? 0 : round1((row.failedRuns / terminalRuns) * 100);
+      genuineTerminalRuns <= 0
+        ? 0
+        : round1(((row.failedRuns - row.interruptedRuns) / genuineTerminalRuns) * 100);
     return {
       workflowId: row.workflowId,
       workflowName: row.workflowName,
@@ -251,6 +263,7 @@ export function selectWorkflowRunStats(
       mergedRuns: row.mergedRuns,
       dismissedRuns: row.dismissedRuns,
       nullOutcomeRuns: row.nullOutcomeRuns,
+      interruptedRuns: row.interruptedRuns,
       errorRatePct,
       // SQLite AVG over an empty set returns null — keep it null (no runs timed).
       avgDurationMs: row.avgDurationMs === null ? null : row.avgDurationMs,
@@ -1610,6 +1623,8 @@ interface VariantStatsBaseRow {
   mergedRuns: number;
   dismissedRuns: number;
   nullOutcomeRuns: number;
+  interruptedRuns: number;
+  /** Runs with a GENUINE recorded outcome — interrupted (app-restart noise) excluded. */
   outcomeRuns: number;
   avgDurationMs: number | null;
   avgTotalTokens: number | null;
@@ -1676,7 +1691,8 @@ export function selectVariantStats(
          SUM(CASE WHEN r.outcome = 'merged'    THEN 1 ELSE 0 END) AS mergedRuns,
          SUM(CASE WHEN r.outcome = 'dismissed' THEN 1 ELSE 0 END) AS dismissedRuns,
          SUM(CASE WHEN r.status IN (${TERMINAL_SQL}) AND r.outcome IS NULL THEN 1 ELSE 0 END) AS nullOutcomeRuns,
-         SUM(CASE WHEN r.outcome IS NOT NULL THEN 1 ELSE 0 END) AS outcomeRuns,
+         SUM(CASE WHEN r.status = 'failed' AND r.outcome = 'interrupted' THEN 1 ELSE 0 END) AS interruptedRuns,
+         SUM(CASE WHEN r.outcome IS NOT NULL AND r.outcome != 'interrupted' THEN 1 ELSE 0 END) AS outcomeRuns,
          AVG(CASE
                WHEN r.status IN (${TERMINAL_SQL})
                     AND r.started_at IS NOT NULL AND r.ended_at IS NOT NULL
@@ -1767,6 +1783,8 @@ export function selectVariantStats(
   );
 
   return baseRows.map((row): VariantStats => {
+    // outcomeRuns already excludes interrupted (app-restart noise), so restart
+    // interruptions can never depress a variant's success rate.
     const successRatePct =
       row.outcomeRuns === 0 ? 0 : round1((row.mergedRuns / row.outcomeRuns) * 100);
     return {
@@ -1782,6 +1800,7 @@ export function selectVariantStats(
       mergedRuns: row.mergedRuns,
       dismissedRuns: row.dismissedRuns,
       nullOutcomeRuns: row.nullOutcomeRuns,
+      interruptedRuns: row.interruptedRuns,
       successRatePct,
       avgDurationMs: row.avgDurationMs === null ? null : Math.round(row.avgDurationMs),
       avgTotalTokens: row.avgTotalTokens === null ? null : Math.round(row.avgTotalTokens),
@@ -1810,6 +1829,8 @@ interface RotationArmBaseRow {
   mergedRuns: number;
   dismissedRuns: number;
   nullOutcomeRuns: number;
+  interruptedRuns: number;
+  /** Runs with a GENUINE recorded outcome — interrupted (app-restart noise) excluded. */
   outcomeRuns: number;
   avgDurationMs: number | null;
   avgTotalTokens: number | null;
@@ -1842,6 +1863,7 @@ function buildRotationArmStats(
       mergedRuns: 0,
       dismissedRuns: 0,
       nullOutcomeRuns: 0,
+      interruptedRuns: 0,
       successRatePct: 0,
       avgDurationMs: null,
       avgTotalTokens: null,
@@ -1852,6 +1874,8 @@ function buildRotationArmStats(
       lowSample: true,
     };
   }
+  // outcomeRuns already excludes interrupted (app-restart noise), so restart
+  // interruptions can never bias an arm's success rate.
   const successRatePct =
     base.outcomeRuns === 0 ? 0 : round1((base.mergedRuns / base.outcomeRuns) * 100);
   return {
@@ -1865,6 +1889,7 @@ function buildRotationArmStats(
     mergedRuns: base.mergedRuns,
     dismissedRuns: base.dismissedRuns,
     nullOutcomeRuns: base.nullOutcomeRuns,
+    interruptedRuns: base.interruptedRuns,
     successRatePct,
     avgDurationMs: base.avgDurationMs === null ? null : Math.round(base.avgDurationMs),
     avgTotalTokens: base.avgTotalTokens === null ? null : Math.round(base.avgTotalTokens),
@@ -1917,7 +1942,8 @@ export function selectRotationArmStats(db: DatabaseLike, experimentId: string): 
          SUM(CASE WHEN r.outcome = 'merged'    THEN 1 ELSE 0 END) AS mergedRuns,
          SUM(CASE WHEN r.outcome = 'dismissed' THEN 1 ELSE 0 END) AS dismissedRuns,
          SUM(CASE WHEN r.status IN (${TERMINAL_SQL}) AND r.outcome IS NULL THEN 1 ELSE 0 END) AS nullOutcomeRuns,
-         SUM(CASE WHEN r.outcome IS NOT NULL THEN 1 ELSE 0 END) AS outcomeRuns,
+         SUM(CASE WHEN r.status = 'failed' AND r.outcome = 'interrupted' THEN 1 ELSE 0 END) AS interruptedRuns,
+         SUM(CASE WHEN r.outcome IS NOT NULL AND r.outcome != 'interrupted' THEN 1 ELSE 0 END) AS outcomeRuns,
          AVG(CASE
                WHEN r.status IN (${TERMINAL_SQL})
                     AND r.started_at IS NOT NULL AND r.ended_at IS NOT NULL

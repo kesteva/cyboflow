@@ -215,6 +215,22 @@ describe('selectRotationArmStats', () => {
     expect(variant.successRatePct).toBe(50); // 1 merged / 2 outcome-bearing
   });
 
+  it('excludes interrupted (app-restart) runs from the arm success-rate denominator', () => {
+    const raw = buildDb();
+    seedExperiment(raw, { id: 'exp-1' });
+    seedArm(raw, 'exp-1', 'v1', 'Variant One');
+    seedRun(raw, { id: 'r1', variantId: 'v1', rotationExperimentId: 'exp-1', status: 'completed', outcome: 'merged' });
+    seedRun(raw, { id: 'r2', variantId: 'v1', rotationExperimentId: 'exp-1', status: 'completed', outcome: 'dismissed' });
+    // App-restart interruption — outcome IS NOT NULL but must NOT count as
+    // outcome-bearing, or restart noise would bias the arm comparison.
+    seedRun(raw, { id: 'r3', variantId: 'v1', rotationExperimentId: 'exp-1', status: 'failed', outcome: 'interrupted' });
+
+    const variant = selectRotationArmStats(dbAdapter(raw), 'exp-1')[0];
+    expect(variant.interruptedRuns).toBe(1);
+    expect(variant.failedRuns).toBe(1); // honest status total still counts it
+    expect(variant.successRatePct).toBe(50); // 1 merged / 2 GENUINE outcome-bearing
+  });
+
   it('an aggregate row not present in the snapshot is appended defensively with a fallback label', () => {
     const raw = buildDb();
     seedExperiment(raw, { id: 'exp-1' });

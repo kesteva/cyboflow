@@ -88,6 +88,7 @@ function makeStats(over: Partial<RotationArmStats> = {}): RotationArmStats {
     mergedRuns: 5,
     dismissedRuns: 2,
     nullOutcomeRuns: 0,
+    interruptedRuns: 0,
     successRatePct: 87,
     avgDurationMs: 60_000,
     avgTotalTokens: 12_000,

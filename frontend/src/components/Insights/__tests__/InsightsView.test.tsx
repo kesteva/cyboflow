@@ -357,6 +357,7 @@ function buildRunStats(over: Partial<WorkflowRunStats> = {}): WorkflowRunStats {
     mergedRuns: 1,
     dismissedRuns: 0,
     nullOutcomeRuns: 0,
+    interruptedRuns: 0,
     errorRatePct: 0,
     avgDurationMs: null,
     lastRunAt: null,

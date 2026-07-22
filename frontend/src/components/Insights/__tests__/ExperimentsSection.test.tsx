@@ -86,6 +86,7 @@ function makeVariantStats(over: Partial<VariantStats> = {}): VariantStats {
     mergedRuns: 8,
     dismissedRuns: 1,
     nullOutcomeRuns: 0,
+    interruptedRuns: 0,
     successRatePct: 90,
     avgDurationMs: 120_000,
     avgTotalTokens: 15000,

@@ -101,6 +101,7 @@ function runStats(over: Partial<WorkflowRunStats> = {}): WorkflowRunStats {
     mergedRuns: 5,
     dismissedRuns: 0,
     nullOutcomeRuns: 0,
+    interruptedRuns: 0,
     errorRatePct: 0,
     avgDurationMs: 1000,
     lastRunAt: '2026-06-10T00:00:00.000Z',

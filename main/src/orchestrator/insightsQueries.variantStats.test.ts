@@ -86,6 +86,22 @@ describe('selectVariantStats', () => {
     expect(v.lowSample).toBe(true); // 2 < 5
   });
 
+  it('excludes interrupted (app-restart) runs from the success-rate denominator', () => {
+    const raw = buildDb();
+    raw.prepare("INSERT INTO workflow_variants VALUES ('v1','active',1)").run();
+    seedRun(raw, { id: 'r1', variantId: 'v1', status: 'completed', outcome: 'merged' });
+    seedRun(raw, { id: 'r2', variantId: 'v1', status: 'completed', outcome: 'dismissed' });
+    // Two app-restart interruptions — outcome IS NOT NULL but must NOT count as
+    // outcome-bearing, or restart noise would depress the variant's success rate.
+    seedRun(raw, { id: 'r3', variantId: 'v1', status: 'failed', outcome: 'interrupted' });
+    seedRun(raw, { id: 'r4', variantId: 'v1', status: 'failed', outcome: 'interrupted' });
+
+    const v = selectVariantStats(dbAdapter(raw), 'wf-1', null)[0];
+    expect(v.interruptedRuns).toBe(2);
+    expect(v.failedRuns).toBe(2); // honest status total still counts them
+    expect(v.successRatePct).toBe(50); // 1 merged / 2 GENUINE outcome-bearing
+  });
+
   it('a deleted variant still reports via denormalized label + null status', () => {
     const raw = buildDb();
     // No workflow_variants row for v-gone.

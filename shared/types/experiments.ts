@@ -368,6 +368,8 @@ export interface VariantStats {
   mergedRuns: number;
   dismissedRuns: number;
   nullOutcomeRuns: number;
+  /** failed AND outcome='interrupted' (app-restart, unresumable) — infra noise, excluded from successRatePct's denominator. */
+  interruptedRuns: number;
   successRatePct: number;
   avgDurationMs: number | null;
   avgTotalTokens: number | null;
@@ -489,6 +491,8 @@ export interface RotationArmStats {
   mergedRuns: number;
   dismissedRuns: number;
   nullOutcomeRuns: number;
+  /** failed AND outcome='interrupted' (app-restart, unresumable) — infra noise, excluded from successRatePct's denominator. */
+  interruptedRuns: number;
   successRatePct: number;
   avgDurationMs: number | null;
   avgTotalTokens: number | null;
