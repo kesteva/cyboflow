@@ -1,3 +1,4 @@
+import type { AssistantContextRetention } from '../../../shared/types/agentThread';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { PermissionMode } from '../../../shared/types/workflows';
@@ -20,6 +21,9 @@ export interface AppConfig {
   // Extra folders the cyboflow assistant may read, beyond the app's registered
   // project folders (which are always readable regardless of this list).
   assistantFolderAccess?: string[];
+  // How the assistant's standing conversation handles the local-day boundary
+  // ('clear-daily' | 'compact-daily' | 'auto-compact'). Absent ⇒ 'clear-daily'.
+  assistantContextRetention?: AssistantContextRetention;
   // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
   defaultSubstrate?: CliSubstrate;
   // Global hard lock: when true, every run/session is forced onto the interactive

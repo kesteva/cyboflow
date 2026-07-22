@@ -1,3 +1,4 @@
+import type { AssistantContextRetention } from '../../../shared/types/agentThread';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
@@ -59,6 +60,12 @@ export interface AppConfig {
   // seeded into constructor defaults, so existing config.json files stay
   // byte-identical for users who never grant extra folders.
   assistantFolderAccess?: string[];
+  // How the assistant's standing conversation handles the local-day boundary
+  // ('clear-daily' | 'compact-daily' | 'auto-compact'). Read via
+  // getAssistantContextRetention(), which floors absent/invalid values to
+  // 'clear-daily'. NOT seeded into constructor defaults (config.json stays
+  // byte-identical for users who never touch it).
+  assistantContextRetention?: AssistantContextRetention;
   // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
   defaultSubstrate?: CliSubstrate;
   // Global hard lock: when true, every run/session is forced onto the interactive
@@ -196,6 +203,8 @@ export interface UpdateConfigRequest {
   assistantEnabled?: boolean;
   // Extra folders the global assistant may read (see AppConfig.assistantFolderAccess).
   assistantFolderAccess?: string[];
+  // Assistant day-boundary context strategy (see AppConfig.assistantContextRetention).
+  assistantContextRetention?: AssistantContextRetention;
   // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
   defaultSubstrate?: CliSubstrate;
   // Global hard lock — force the interactive PTY substrate and disable the SDK

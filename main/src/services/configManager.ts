@@ -2,6 +2,11 @@ import { EventEmitter } from 'events';
 import { app } from 'electron';
 import type { AppConfig, ResolvedIdleSessionReviewConfig } from '../types/config';
 import { IDLE_SESSION_REVIEW_DEFAULTS } from '../types/config';
+import {
+  type AssistantContextRetention,
+  DEFAULT_ASSISTANT_CONTEXT_RETENTION,
+  isAssistantContextRetention,
+} from '../../../shared/types/agentThread';
 import { type CliSubstrate, DEFAULT_SUBSTRATE, isCliSubstrate } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import { type ExecutionModel, isExecutionModel } from '../../../shared/types/executionModel';
@@ -274,6 +279,19 @@ export class ConfigManager extends EventEmitter {
    */
   isAssistantEnabled(): boolean {
     return this.config.assistantEnabled !== false;
+  }
+
+  /**
+   * How the assistant's standing SDK conversation handles the local-day
+   * boundary, consumed by AgentThreadService per turn (a Settings change takes
+   * effect on the very next turn, no restart). Floors absent OR invalid stored
+   * values to DEFAULT_ASSISTANT_CONTEXT_RETENTION ('clear-daily'). Like the
+   * other assistant globals, NOT seeded into constructor defaults, so existing
+   * config.json files stay byte-identical for users who never touch it.
+   */
+  getAssistantContextRetention(): AssistantContextRetention {
+    const value = this.config.assistantContextRetention;
+    return isAssistantContextRetention(value) ? value : DEFAULT_ASSISTANT_CONTEXT_RETENTION;
   }
 
   /**

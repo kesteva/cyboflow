@@ -47,6 +47,35 @@ export type AgentProposalStatus = (typeof AGENT_PROPOSAL_STATUSES)[number];
 /** 'global' today; Stage 3 widens this to a run-scoped `'run:<runId>'` form. */
 export type AgentThreadScope = 'global';
 
+// ---------------------------------------------------------------------------
+// Context retention strategy
+// ---------------------------------------------------------------------------
+
+/**
+ * How the assistant's standing SDK conversation is treated at each LOCAL-day
+ * boundary (checked on the first turn of a new day, digest or human):
+ *   - 'clear-daily'   — start a fresh conversation (the stored resume id is
+ *                       dropped; the durable UI transcript in agent_thread_events
+ *                       is untouched). The default: each day starts clean.
+ *   - 'compact-daily' — keep the conversation but fire a `/compact` turn first,
+ *                       so each day starts from a compacted context.
+ *   - 'auto-compact'  — do nothing; rely on the SDK's built-in auto-compaction.
+ */
+export const ASSISTANT_CONTEXT_RETENTION_MODES = [
+  'clear-daily',
+  'compact-daily',
+  'auto-compact',
+] as const;
+
+export type AssistantContextRetention = (typeof ASSISTANT_CONTEXT_RETENTION_MODES)[number];
+
+/** Floor applied on read for an absent/invalid stored value. */
+export const DEFAULT_ASSISTANT_CONTEXT_RETENTION: AssistantContextRetention = 'clear-daily';
+
+export function isAssistantContextRetention(value: unknown): value is AssistantContextRetention {
+  return (ASSISTANT_CONTEXT_RETENTION_MODES as readonly unknown[]).includes(value);
+}
+
 export interface AgentThread {
   id: string;
   scope: AgentThreadScope;
