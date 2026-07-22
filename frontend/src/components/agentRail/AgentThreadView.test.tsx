@@ -155,9 +155,9 @@ describe('AgentThreadView — composer + chips wiring', () => {
     const AgentThreadView = await loadAgentThreadView();
     render(<AgentThreadView />);
 
-    fireEvent.click(screen.getByText('Where is everything?'));
+    fireEvent.click(screen.getByText('Status update'));
 
-    expect(mockSendMessage).toHaveBeenCalledWith('Where is everything?');
+    expect(mockSendMessage).toHaveBeenCalledWith('Status update');
   });
 
   it('disables the composer before the thread has loaded', async () => {
