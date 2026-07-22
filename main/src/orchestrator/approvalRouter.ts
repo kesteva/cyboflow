@@ -708,10 +708,14 @@ export class ApprovalRouter extends EventEmitter {
       if (staleRunIds.length === 0) return 0;
       const placeholders = staleRunIds.map(() => '?').join(',');
       const ids = staleRunIds.map(r => r.id);
+      // outcome='interrupted' pairs with the app_restart sentinel: an infra
+      // interruption (dead approval socket after restart), not an agent failure —
+      // insights + the assistant count it separately from real failures.
       this.db
         .prepare(`UPDATE workflow_runs
                      SET status = 'failed',
                          error_message = 'app_restart',
+                         outcome = 'interrupted',
                          ended_at = CURRENT_TIMESTAMP,
                          updated_at = CURRENT_TIMESTAMP
                    WHERE id IN (${placeholders})`)

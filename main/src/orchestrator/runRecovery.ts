@@ -15,7 +15,9 @@
  * All writes are in a single transaction so a crash mid-recovery leaves a
  * clean state.
  */
+import { existsSync } from 'fs';
 import { emitUsage } from './telemetrySink';
+import { AgentInvocationStore } from './agentInvocationStore';
 import { ReviewItemRouter } from './reviewItemRouter';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
@@ -140,6 +142,17 @@ export async function backfillArchivedSessionReviewItems(
   return dismissPendingReviewItemRows(rows, 'orchestrator', 'archived session boot backfill', logger);
 }
 
+/**
+ * Freshness cap (days) for boot-RESUME of an orchestrated orphan — mirrors
+ * questionRouter.ts's STALE_RESUMABLE_RECOVERY_DAYS. A provider's local
+ * session/thread data behind a `--resume` target plausibly still exists only if
+ * the run was updated recently; resuming a stale target would make the fresh turn
+ * fail for real, MOVING app-restart noise INTO the genuine-failure bucket (the
+ * opposite of the goal). Kept as a local copy to avoid an import cycle — keep the
+ * two constants in sync.
+ */
+const STALE_RESUMABLE_RECOVERY_DAYS = 7;
+
 export interface RecoveryResult {
   runningRecovered: number;
   startingRecovered: number;
@@ -152,6 +165,15 @@ export interface RecoveryResult {
    * the controller skips individually-completed steps.
    */
   programmaticToResume: Array<{ id: string; currentStepId: string | null; completedStepIds: string[] }>;
+  /**
+   * Orchestrated (single-conversation SDK) runs stranded 'running'/'starting' that
+   * were RESET to 'starting' for crash-safe `--resume` re-drive (NOT force-failed),
+   * because they captured a fresh Claude resume target and their worktree still
+   * exists. The caller (index boot) re-drives each via `setPendingResume` +
+   * fire-and-forget `execute` — one resumed turn drains to awaiting_review. No step
+   * pointers: the SDK conversation resumes itself from its external session id.
+   */
+  orchestratedToResume: Array<{ id: string }>;
 }
 
 export function recoverActiveStateOrphans(
@@ -168,15 +190,19 @@ export function recoverActiveStateOrphans(
   // survive a restart and is never force-failed here.
   const candidates = db
     .prepare(
-      `SELECT id, status, execution_model, current_step_id
+      `SELECT id, status, execution_model, current_step_id, substrate, worktree_path,
+              CASE WHEN julianday('now') - julianday(updated_at) <= ? THEN 1 ELSE 0 END AS is_fresh
          FROM workflow_runs
         WHERE status IN ('starting', 'running', 'awaiting_review')`,
     )
-    .all() as {
+    .all(STALE_RESUMABLE_RECOVERY_DAYS) as {
     id: string;
     status: 'running' | 'starting' | 'awaiting_review';
     execution_model: 'orchestrated' | 'programmatic' | null;
     current_step_id: string | null;
+    substrate: string | null;
+    worktree_path: string | null;
+    is_fresh: number;
   }[];
 
   // Step 2: Filter out live executor entries (defensive — at boot the registry
@@ -187,16 +213,48 @@ export function recoverActiveStateOrphans(
   //  - PROGRAMMATIC orphans (any of starting/running/awaiting_review) → RESET to
   //    'starting' and resume (host code re-walks from current_step_id; a gate
   //    re-attaches to its still-pending review item).
-  //  - NON-programmatic starting/running orphans → force-fail 'app_restart'
-  //    (unchanged — there is no in-process executor to re-drive an orchestrator turn).
+  //  - NON-programmatic starting/running orphans that are RESUMABLE (fresh Claude
+  //    SDK `--resume` target + surviving worktree) → RESET to 'starting' and resume
+  //    the single SDK conversation (one fresh turn drains to awaiting_review).
+  //  - NON-programmatic starting/running orphans that are NOT resumable → force-fail
+  //    'app_restart' + outcome='interrupted' (infra interruption, not an agent bug).
   //  - NON-programmatic awaiting_review orphans → leave untouched.
   const programmatic = orphans.filter((r) => r.execution_model === 'programmatic');
-  const forceFail = orphans.filter(
+  const nonProgActive = orphans.filter(
     (r) => r.execution_model !== 'programmatic' && (r.status === 'running' || r.status === 'starting'),
   );
 
-  if (orphans.length === 0 || (programmatic.length === 0 && forceFail.length === 0)) {
-    return { runningRecovered: 0, startingRecovered: 0, approvalsCanceled: 0, programmaticToResume: [] };
+  // Resumability predicate for an orchestrated orphan. Mirrors
+  // questionRouter.recoverStaleAwaitingInput's gate, plus a worktree-existence
+  // check: a resumed turn spawns an SDK subprocess into worktree_path, so a
+  // deleted worktree (e.g. an archived session recovered just ahead of this sweep,
+  // or a hand-deleted checkout) must NOT be resumed. Restricting to a Claude
+  // resume target excludes Codex orchestrated threads, whose boot-resume is
+  // unverified (the primary getLatestTopLevelResumeTarget query has no provider
+  // filter, so target.provider is the authoritative gate).
+  const invocationStore = new AgentInvocationStore(db);
+  const isResumable = (r: { id: string; substrate: string | null; worktree_path: string | null; is_fresh: number }): boolean => {
+    if (r.substrate !== 'sdk') return false;
+    if (r.is_fresh !== 1) return false;
+    if (!r.worktree_path || !existsSync(r.worktree_path)) return false;
+    const target = invocationStore.getLatestTopLevelResumeTarget(r.id);
+    return target !== null && target.provider === 'claude';
+  };
+  const resumeIdSet = new Set(nonProgActive.filter(isResumable).map((r) => r.id));
+  const orchestratedToResume = nonProgActive.filter((r) => resumeIdSet.has(r.id));
+  const forceFail = nonProgActive.filter((r) => !resumeIdSet.has(r.id));
+
+  if (
+    orphans.length === 0 ||
+    (programmatic.length === 0 && orchestratedToResume.length === 0 && forceFail.length === 0)
+  ) {
+    return {
+      runningRecovered: 0,
+      startingRecovered: 0,
+      approvalsCanceled: 0,
+      programmaticToResume: [],
+      orchestratedToResume: [],
+    };
   }
 
   // Read persisted per-step completion (migration 033) for the runs we'll resume,
@@ -220,14 +278,19 @@ export function recoverActiveStateOrphans(
   const startingIds = forceFail.filter((r) => r.status === 'starting').map((r) => r.id);
   const failIds = forceFail.map((r) => r.id);
   const resumeIds = programmatic.map((r) => r.id);
+  const orchestratedResumeIds = orchestratedToResume.map((r) => r.id);
 
   // Step 3: Single transaction for all UPDATEs (clean state if a crash recurs here).
   const tx = db.transaction(() => {
     if (failIds.length > 0) {
       const ph = failIds.map(() => '?').join(',');
+      // outcome='interrupted' is the structured why-category: the run died to an
+      // app restart and was not resumable. status='failed' stays honest (the run
+      // ended), while outcome lets insights + the assistant separate this infra
+      // interruption from a genuine agent/logic failure.
       db.prepare(
         `UPDATE workflow_runs
-            SET status = 'failed', error_message = 'app_restart',
+            SET status = 'failed', error_message = 'app_restart', outcome = 'interrupted',
                 ended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
           WHERE id IN (${ph}) AND status IN ('running', 'starting')`,
       ).run(...failIds);
@@ -235,7 +298,11 @@ export function recoverActiveStateOrphans(
 
     // Reset programmatic runs to 'starting' so the normal execute() lifecycle
     // (pre_spawn → running, guarded on 'starting') re-drives them cleanly; keep
-    // current_step_id as the resume pointer. Clear any prior terminal stamps.
+    // current_step_id as the resume pointer. Clear the in-flight failure fields but
+    // NOT `outcome` — a session-level Merge/Dismiss can have stamped a real outcome
+    // onto a still-running row (stampSessionRunsOutcome has no status guard), and
+    // clearing it would erase that human decision. A running/starting row can never
+    // legitimately carry 'failed'/'interrupted', so leaving outcome alone is safe.
     if (resumeIds.length > 0) {
       const ph = resumeIds.map(() => '?').join(',');
       db.prepare(
@@ -249,17 +316,37 @@ export function recoverActiveStateOrphans(
       }
     }
 
-    // Time out pending approvals only for the FORCE-FAILED runs (a resumed run's
-    // gate review_items must survive so the gate can re-attach).
+    // Reset orchestrated runs to 'starting' for a fresh SDK `--resume` turn. Same
+    // field discipline as the programmatic reset (outcome deliberately untouched).
+    if (orchestratedResumeIds.length > 0) {
+      const ph = orchestratedResumeIds.map(() => '?').join(',');
+      db.prepare(
+        `UPDATE workflow_runs
+            SET status = 'starting', error_message = NULL, ended_at = NULL,
+                updated_at = CURRENT_TIMESTAMP
+          WHERE id IN (${ph})`,
+      ).run(...orchestratedResumeIds);
+      for (let i = 0; i < orchestratedResumeIds.length; i++) {
+        emitUsage('workflow_run_reopened', { via: 'boot_recovery' });
+      }
+    }
+
+    // Time out pending approvals for the FORCE-FAILED runs AND the RESUMED
+    // ORCHESTRATED runs. A force-failed run is a dead end. A resumed orchestrated
+    // run re-drives as a FRESH `--resume` turn, so the dead process's canUseTool
+    // promise behind any pending approval is gone — the old gate could never be
+    // answered. Only PROGRAMMATIC resumes keep the survive-contract (they re-attach
+    // to the still-pending review item as they re-walk).
+    const expireApprovalIds = [...failIds, ...orchestratedResumeIds];
     let approvalsChanges = 0;
-    if (failIds.length > 0) {
-      const ph = failIds.map(() => '?').join(',');
+    if (expireApprovalIds.length > 0) {
+      const ph = expireApprovalIds.map(() => '?').join(',');
       const approvalsInfo = db
         .prepare(
           `UPDATE approvals SET status = 'timed_out', decided_at = CURRENT_TIMESTAMP, decided_by = 'system'
             WHERE run_id IN (${ph}) AND status = 'pending'`,
         )
-        .run(...failIds) as { changes: number };
+        .run(...expireApprovalIds) as { changes: number };
       approvalsChanges = approvalsInfo.changes;
     }
     return approvalsChanges;
@@ -275,6 +362,7 @@ export function recoverActiveStateOrphans(
       currentStepId: r.current_step_id,
       completedStepIds: completedFor(r.id),
     })),
+    orchestratedToResume: orchestratedResumeIds.map((id) => ({ id })),
   };
 }
 
@@ -380,13 +468,51 @@ export interface OutcomeBackfillResult {
  * so a pre-existing outcome (e.g. a 'dismissed' on a row that later failed) is
  * never overwritten.
  */
+/**
+ * Boot-time backfill that reclassifies historical app-restart force-fails as
+ * `outcome='interrupted'` (the structured infra-interruption why-category).
+ *
+ * Two reasons a row needs this rather than getting `interrupted` at the seam:
+ *  1. Rows force-failed BEFORE this feature shipped carry `outcome='failed'`
+ *     (backfillTerminalOutcomes stamped every historical `status='failed'` row on
+ *     an earlier boot) — so the guard must accept `outcome='failed'`, not only
+ *     `outcome IS NULL`, or it would match ~zero prod rows.
+ *  2. Any straggler seam that force-fails with the sentinel but skips the outcome.
+ *
+ * `error_message='app_restart'` is an exact sentinel written by ONLY the three
+ * boot-recovery seams (recoverActiveStateOrphans, approvalRouter, questionRouter);
+ * a genuine agent failure carries the SDK error text, never that literal — so
+ * reinterpreting `outcome='failed'` here is safe and never steals a real failure.
+ * Idempotent (re-running is a no-op once every sentinel row is 'interrupted').
+ *
+ * MUST run BEFORE {@link backfillTerminalOutcomes} at boot so the generic
+ * failed-stamp only sees the remaining real (non-app_restart) failures.
+ */
+export function backfillInterruptedOutcomes(db: DatabaseLike): number {
+  const info = db
+    .prepare(
+      `UPDATE workflow_runs
+          SET outcome = 'interrupted', updated_at = CURRENT_TIMESTAMP
+        WHERE status = 'failed'
+          AND error_message = 'app_restart'
+          AND (outcome IS NULL OR outcome = 'failed')`,
+    )
+    .run() as { changes: number };
+  return info.changes;
+}
+
 export function backfillTerminalOutcomes(db: DatabaseLike): OutcomeBackfillResult {
   const tx = db.transaction(() => {
+    // `error_message IS NOT 'app_restart'` (SQLite null-safe `IS NOT`) so an
+    // app-restart interruption is NEVER stamped the generic 'failed' outcome even
+    // if backfillInterruptedOutcomes has not run — the two backfills stay
+    // order-independent. app_restart rows are claimed by 'interrupted' only.
     const failed = db
       .prepare(
         `UPDATE workflow_runs
             SET outcome = 'failed', updated_at = CURRENT_TIMESTAMP
-          WHERE status = 'failed' AND outcome IS NULL`,
+          WHERE status = 'failed' AND outcome IS NULL
+            AND error_message IS NOT 'app_restart'`,
       )
       .run() as { changes: number };
 

@@ -1373,10 +1373,14 @@ export class QuestionRouter extends EventEmitter {
       }
       if (failedIds.length > 0) {
         const ph = failedIds.map(() => '?').join(',');
+        // outcome='interrupted' pairs with the app_restart sentinel: an infra
+        // interruption (dead SDK session, unresumable), not an agent failure —
+        // insights + the assistant count it separately from real failures.
         this.db
           .prepare(`UPDATE workflow_runs
                        SET status = 'failed',
                            error_message = 'app_restart',
+                           outcome = 'interrupted',
                            ended_at = CURRENT_TIMESTAMP,
                            updated_at = CURRENT_TIMESTAMP
                      WHERE id IN (${ph})`)

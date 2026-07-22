@@ -181,6 +181,7 @@ import {
   recoverActiveStateOrphans,
   recoverArchivedSessionRunOrphans,
   backfillArchivedSessionReviewItems,
+  backfillInterruptedOutcomes,
   backfillTerminalOutcomes,
   stampSessionRunsOutcome,
 } from './orchestrator/runRecovery';
@@ -2860,8 +2861,24 @@ app.whenReady().then(async () => {
       console.log(`[Main] Recovered ${recoveredCount} stale awaiting_review run(s) on boot`);
     }
 
+    // Boot recovery: runs orphaned by an archived (dismissed) session. Left
+    // non-terminal (e.g. 'stuck' from before the dismiss-cascade existed) they
+    // keep showing in the active-runs rail. Cancel them so the rail's
+    // terminal-status filter hides them — self-healing for any dismiss that
+    // failed to cancel a hosted run. Runs BEFORE recoverActiveStateOrphans so an
+    // archived-session orphan is already 'canceled' (off the candidate SELECT) and
+    // can never be picked for orchestrated resume — which would otherwise race this
+    // sweep and spawn an SDK subprocess into a deleted worktree.
+    const archivedOrphanRecovery = recoverArchivedSessionRunOrphans(db);
+    if (archivedOrphanRecovery.runsCanceled > 0) {
+      console.log(`[Main] Canceled ${archivedOrphanRecovery.runsCanceled} run(s) orphaned by archived sessions (approvals canceled: ${archivedOrphanRecovery.approvalsCanceled})`);
+    }
+
     // Boot recovery: any running/starting rows from a previous process have no live
-    // executor — the SDK iterator and PTY are gone. Transition them to failed.
+    // executor — the SDK iterator and PTY are gone. Resume the resumable ones
+    // (programmatic re-walk, or a fresh SDK `--resume` turn for orchestrated runs
+    // with a live worktree + fresh Claude resume target); force-fail the rest as
+    // interrupted (app_restart).
     const orphanRecovery = recoverActiveStateOrphans(db, runQueues);
     if (
       orphanRecovery.runningRecovered > 0 ||
@@ -2872,13 +2889,15 @@ app.whenReady().then(async () => {
     }
 
     // Report boot-recovery force-fails to Sentry as ONE aggregate event (these
-    // runs were force-failed with the synthetic 'app_restart' reason — the prior
-    // process crashed, so no per-run error object exists). Count is bucketed to
-    // keep tag cardinality low; a spike here signals frequent unclean shutdowns.
-    // Includes ALL three app_restart force-fail paths: stale awaiting_review
-    // (recoveredCount), active-state orphans, AND the FAILED (unresumable) subset
-    // of stale awaiting_input — but NOT the resumable awaiting_input runs, which
-    // are rested in awaiting_review rather than failed.
+    // runs were reclassified interrupted with the synthetic 'app_restart' reason —
+    // the prior process crashed, so no per-run error object exists). Count is
+    // bucketed to keep tag cardinality low; a spike here signals frequent unclean
+    // shutdowns. Includes ALL three app_restart force-fail paths: stale
+    // awaiting_review (recoveredCount), the UNRESUMABLE active-state orphans
+    // (runningRecovered/startingRecovered exclude the resumed programmatic AND
+    // orchestrated runs, which were reset — not failed), AND the FAILED
+    // (unresumable) subset of stale awaiting_input — but NOT the resumable
+    // awaiting_input runs, which are rested in awaiting_review rather than failed.
     const bootForceFailed =
       recoveredCount +
       orphanRecovery.runningRecovered +
@@ -2889,7 +2908,7 @@ app.whenReady().then(async () => {
         bootForceFailed === 1 ? '1' : bootForceFailed <= 5 ? '2-5' : bootForceFailed <= 20 ? '6-20' : '20+';
       captureSeamError(
         'boot-recovery-force-failed',
-        new Error(`${bootForceFailed} run(s) force-failed on boot recovery (app_restart)`),
+        new Error(`${bootForceFailed} run(s) reclassified interrupted on boot recovery (app_restart, unresumable)`),
         { errorClass: 'app-restart', recoveryReason: 'app_restart', countBucket },
       );
     }
@@ -2929,14 +2948,40 @@ app.whenReady().then(async () => {
       }
     }
 
-    // Boot recovery: runs orphaned by an archived (dismissed) session. Left
-    // non-terminal (e.g. 'stuck' from before the dismiss-cascade existed) they
-    // keep showing in the active-runs rail. Cancel them so the rail's
-    // terminal-status filter hides them — self-healing for any dismiss that
-    // failed to cancel a hosted run.
-    const archivedOrphanRecovery = recoverArchivedSessionRunOrphans(db);
-    if (archivedOrphanRecovery.runsCanceled > 0) {
-      console.log(`[Main] Canceled ${archivedOrphanRecovery.runsCanceled} run(s) orphaned by archived sessions (approvals canceled: ${archivedOrphanRecovery.approvalsCanceled})`);
+    // Crash-safe resume, ORCHESTRATED arm: re-drive single-conversation SDK runs
+    // the previous process left running/starting. recoverActiveStateOrphans reset
+    // them to 'starting' (NOT force-failed) after verifying a fresh Claude resume
+    // target + surviving worktree. setPendingResume makes execute() thread the
+    // captured external session id as `--resume` (mirrors resumeRunHandler's
+    // orchestrated arm); fire-and-forget — each is one cold SDK spawn whose turn
+    // drains to awaiting_review on its own.
+    if (orphanRecovery.orchestratedToResume.length > 0) {
+      console.log(`[Main] Resuming ${orphanRecovery.orchestratedToResume.length} orchestrated run(s) after restart`);
+      for (const { id } of orphanRecovery.orchestratedToResume) {
+        runExecutor.setPendingResume(id);
+        const queue = runQueues.getOrCreate(id);
+        void queue.add(async () => {
+          try {
+            await runExecutor.execute(id);
+          } catch (err) {
+            loggerLike.error('[Main] orchestrated resume re-drive failed', {
+              runId: id,
+              error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+            });
+          }
+        });
+      }
+    }
+
+    // Boot recovery: reclassify historical app_restart force-fails as
+    // outcome='interrupted' BEFORE the generic terminal-outcome backfill, so the
+    // failed-stamp below only sees the remaining real (non-app_restart) failures.
+    // Widened guard (outcome IS NULL OR 'failed') reclaims rows an earlier boot's
+    // backfillTerminalOutcomes already stamped 'failed' — safe because the
+    // app_restart sentinel is written only by the three boot-recovery seams.
+    const interruptedBackfilled = backfillInterruptedOutcomes(db);
+    if (interruptedBackfilled > 0) {
+      console.log(`[Main] Reclassified ${interruptedBackfilled} historical app_restart run(s) as outcome='interrupted'`);
     }
 
     // Boot backfill: older archived sessions may still own pending review items.

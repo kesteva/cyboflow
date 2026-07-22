@@ -118,10 +118,14 @@ export interface WorkflowRunRow {
    * DB-canonical close-out signal set on terminal close-out. NULL while the run
    * is in flight (migration 014). `'integrated'` (migration 022 / feat/parallel-sprint)
    * is the per-task close-out outcome: the run's branch was merged into the batch
-   * integration branch (not main). The plain TEXT column has no SQL CHECK, so this
-   * is a TypeScript-union-only addition.
+   * integration branch (not main). `'interrupted'` (app-restart boot recovery) is the
+   * why-category for a run that was force-failed because an app restart orphaned it and
+   * it could not be auto-resumed — it pairs with `status='failed'` + the
+   * `error_message='app_restart'` sentinel, and marks infrastructure interruption (NOT an
+   * agent/logic bug) so insights + the assistant can exclude it from the real-failure rate.
+   * The plain TEXT column has no SQL CHECK, so this is a TypeScript-union-only addition.
    */
-  outcome?: 'merged' | 'integrated' | 'pr_open' | 'dismissed' | 'failed' | 'canceled' | null;
+  outcome?: 'merged' | 'integrated' | 'pr_open' | 'dismissed' | 'failed' | 'canceled' | 'interrupted' | null;
   /** Base branch captured at launch — future git triage only, NOT a hot path (migration 014). */
   base_branch?: string | null;
   /** Base SHA captured at launch — future git triage only (migration 014). */

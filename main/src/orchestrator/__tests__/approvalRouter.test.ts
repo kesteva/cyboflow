@@ -746,7 +746,8 @@ describe('ApprovalRouter', () => {
   //   (d) the running row is unchanged.
   // -------------------------------------------------------------------------
   it("recoverStaleAwaitingReview fails only gate-blocked runs, sparing clean rests", () => {
-    const db = createTestDb();
+    // includeWorkflowRunTaskColumns: the recovery UPDATE stamps outcome='interrupted'.
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
     const adapter = dbAdapter(db);
     const router = ApprovalRouter.initialize(adapter);
 
@@ -790,7 +791,8 @@ describe('ApprovalRouter', () => {
   //     decided_by='system'.
   // -------------------------------------------------------------------------
   it("recoverStaleAwaitingReview cancels pending approvals for recovered runs", () => {
-    const db = createTestDb();
+    // includeWorkflowRunTaskColumns: the recovery UPDATE stamps outcome='interrupted'.
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
     const adapter = dbAdapter(db);
     const router = ApprovalRouter.initialize(adapter);
 

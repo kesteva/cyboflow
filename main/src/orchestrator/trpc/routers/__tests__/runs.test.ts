@@ -2524,7 +2524,8 @@ describe('boot-recovery live-state skip for persistent interactive runs (IDEA-03
   let db: Database.Database;
 
   beforeEach(() => {
-    db = createTestDb({ includeSubstrate: true });
+    // includeWorkflowRunTaskColumns: the recovery UPDATE stamps outcome='interrupted'.
+    db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     ApprovalRouter.initialize(dbAdapter(db));
   });
 

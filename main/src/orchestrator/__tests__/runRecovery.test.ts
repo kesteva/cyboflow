@@ -30,6 +30,7 @@ import {
   recoverArchivedSessionRunOrphans,
   dismissPendingReviewItemsForSession,
   backfillArchivedSessionReviewItems,
+  backfillInterruptedOutcomes,
   backfillTerminalOutcomes,
   stampSessionRunsOutcome,
   stampSessionRunsPrOpen,
@@ -48,7 +49,7 @@ describe('recoverActiveStateOrphans', () => {
   // Case A: "recovers running orphans"
   // -------------------------------------------------------------------------
   it('recovers running orphans', () => {
-    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     const adapter = dbAdapter(db);
     const runQueues = new RunQueueRegistry();
 
@@ -58,21 +59,23 @@ describe('recoverActiveStateOrphans', () => {
     const result = recoverActiveStateOrphans(adapter, runQueues);
 
     // Return value: 1 running recovered, nothing else.
-    expect(result).toEqual({ runningRecovered: 1, startingRecovered: 0, approvalsCanceled: 0, programmaticToResume: [] });
+    expect(result).toEqual({ runningRecovered: 1, startingRecovered: 0, approvalsCanceled: 0, programmaticToResume: [], orchestratedToResume: [] });
 
-    // The row must be transitioned to 'failed' with error_message='app_restart'.
+    // The row must be transitioned to 'failed' with error_message='app_restart'
+    // and the structured outcome='interrupted' why-category.
     const row = db
-      .prepare('SELECT status, error_message FROM workflow_runs WHERE id = ?')
-      .get(runId) as { status: string; error_message: string };
+      .prepare('SELECT status, error_message, outcome FROM workflow_runs WHERE id = ?')
+      .get(runId) as { status: string; error_message: string; outcome: string | null };
     expect(row.status).toBe('failed');
     expect(row.error_message).toBe('app_restart');
+    expect(row.outcome).toBe('interrupted');
   });
 
   // -------------------------------------------------------------------------
   // Case B: "recovers starting orphans"
   // -------------------------------------------------------------------------
   it('recovers starting orphans', () => {
-    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     const adapter = dbAdapter(db);
     const runQueues = new RunQueueRegistry();
 
@@ -82,21 +85,23 @@ describe('recoverActiveStateOrphans', () => {
     const result = recoverActiveStateOrphans(adapter, runQueues);
 
     // Return value: 1 starting recovered, nothing else.
-    expect(result).toEqual({ runningRecovered: 0, startingRecovered: 1, approvalsCanceled: 0, programmaticToResume: [] });
+    expect(result).toEqual({ runningRecovered: 0, startingRecovered: 1, approvalsCanceled: 0, programmaticToResume: [], orchestratedToResume: [] });
 
-    // The row must be transitioned to 'failed' with error_message='app_restart'.
+    // The row must be transitioned to 'failed' with error_message='app_restart'
+    // and the structured outcome='interrupted' why-category.
     const row = db
-      .prepare('SELECT status, error_message FROM workflow_runs WHERE id = ?')
-      .get(runId) as { status: string; error_message: string };
+      .prepare('SELECT status, error_message, outcome FROM workflow_runs WHERE id = ?')
+      .get(runId) as { status: string; error_message: string; outcome: string | null };
     expect(row.status).toBe('failed');
     expect(row.error_message).toBe('app_restart');
+    expect(row.outcome).toBe('interrupted');
   });
 
   // -------------------------------------------------------------------------
   // Case C: "skips live runs"
   // -------------------------------------------------------------------------
   it('skips live runs', () => {
-    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     const adapter = dbAdapter(db);
     const runQueues = new RunQueueRegistry();
 
@@ -110,7 +115,7 @@ describe('recoverActiveStateOrphans', () => {
     const result = recoverActiveStateOrphans(adapter, runQueues);
 
     // Nothing should be recovered.
-    expect(result).toEqual({ runningRecovered: 0, startingRecovered: 0, approvalsCanceled: 0, programmaticToResume: [] });
+    expect(result).toEqual({ runningRecovered: 0, startingRecovered: 0, approvalsCanceled: 0, programmaticToResume: [], orchestratedToResume: [] });
 
     // The row must remain 'running' — not touched.
     const row = db
@@ -123,7 +128,7 @@ describe('recoverActiveStateOrphans', () => {
   // Case D: "cancels pending approvals for recovered runs"
   // -------------------------------------------------------------------------
   it('cancels pending approvals for recovered runs', () => {
-    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     const adapter = dbAdapter(db);
     const runQueues = new RunQueueRegistry();
 
@@ -136,7 +141,7 @@ describe('recoverActiveStateOrphans', () => {
     const result = recoverActiveStateOrphans(adapter, runQueues);
 
     // 1 running recovered, 1 approval canceled.
-    expect(result).toEqual({ runningRecovered: 1, startingRecovered: 0, approvalsCanceled: 1, programmaticToResume: [] });
+    expect(result).toEqual({ runningRecovered: 1, startingRecovered: 0, approvalsCanceled: 1, programmaticToResume: [], orchestratedToResume: [] });
 
     // The approval row must be 'timed_out' with decided_at set and decided_by='system'.
     const approval = db
@@ -156,7 +161,7 @@ describe('recoverActiveStateOrphans', () => {
   // 'starting'/'running', so a paused row is left untouched.
   // -------------------------------------------------------------------------
   it('does NOT recover paused runs (they survive restart)', () => {
-    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     const adapter = dbAdapter(db);
     const runQueues = new RunQueueRegistry();
 
@@ -166,7 +171,7 @@ describe('recoverActiveStateOrphans', () => {
     const result = recoverActiveStateOrphans(adapter, runQueues);
 
     // Nothing recovered — paused is not in the sweep set.
-    expect(result).toEqual({ runningRecovered: 0, startingRecovered: 0, approvalsCanceled: 0, programmaticToResume: [] });
+    expect(result).toEqual({ runningRecovered: 0, startingRecovered: 0, approvalsCanceled: 0, programmaticToResume: [], orchestratedToResume: [] });
 
     // The row must remain 'paused' — not force-failed.
     const row = db
@@ -180,7 +185,7 @@ describe('recoverActiveStateOrphans', () => {
   // Case E: "ignores already-terminal rows"
   // -------------------------------------------------------------------------
   it('ignores already-terminal rows', () => {
-    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     const adapter = dbAdapter(db);
     const runQueues = new RunQueueRegistry();
 
@@ -190,7 +195,7 @@ describe('recoverActiveStateOrphans', () => {
     const result = recoverActiveStateOrphans(adapter, runQueues);
 
     // Nothing should be recovered.
-    expect(result).toEqual({ runningRecovered: 0, startingRecovered: 0, approvalsCanceled: 0, programmaticToResume: [] });
+    expect(result).toEqual({ runningRecovered: 0, startingRecovered: 0, approvalsCanceled: 0, programmaticToResume: [], orchestratedToResume: [] });
 
     // Both rows must remain untouched.
     const e1 = db
@@ -213,7 +218,7 @@ describe('recoverActiveStateOrphans', () => {
   };
 
   it('resets a stranded programmatic running run to starting and returns it for resume', () => {
-    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     const adapter = dbAdapter(db);
     const runQueues = new RunQueueRegistry();
 
@@ -233,7 +238,7 @@ describe('recoverActiveStateOrphans', () => {
   });
 
   it('resets a programmatic run parked at a gate (awaiting_review) for resume', () => {
-    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     const adapter = dbAdapter(db);
     const runQueues = new RunQueueRegistry();
 
@@ -247,7 +252,7 @@ describe('recoverActiveStateOrphans', () => {
   });
 
   it('returns persisted completed step ids for a resumed programmatic run (migration 033)', () => {
-    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     db.exec(`CREATE TABLE IF NOT EXISTS step_results (
       run_id TEXT NOT NULL, step_id TEXT NOT NULL, phase_id TEXT,
       outcome TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 1, summary TEXT, error TEXT,
@@ -271,7 +276,7 @@ describe('recoverActiveStateOrphans', () => {
   });
 
   it('leaves a NON-programmatic awaiting_review run untouched (not failed, not resumed)', () => {
-    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     const adapter = dbAdapter(db);
     const runQueues = new RunQueueRegistry();
 
@@ -284,7 +289,7 @@ describe('recoverActiveStateOrphans', () => {
   });
 
   it('skips a live programmatic run still in the executor registry', () => {
-    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     const adapter = dbAdapter(db);
     const runQueues = new RunQueueRegistry();
 
@@ -296,6 +301,180 @@ describe('recoverActiveStateOrphans', () => {
 
     expect(result.programmaticToResume).toEqual([]);
     expect((db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-P4') as { status: string }).status).toBe('running');
+  });
+
+  // -------------------------------------------------------------------------
+  // Orchestrated boot-resume: an ORCHESTRATED orphan with a fresh Claude resume
+  // target and a surviving worktree is RESET to 'starting' for a `--resume`
+  // turn instead of being force-failed. Every gate that disqualifies a run from
+  // resume (stale, interactive substrate, missing worktree, Codex provider, no
+  // captured session id) drops it back to the force-fail 'interrupted' path.
+  // -------------------------------------------------------------------------
+  /** Seed a running orchestrated orphan that PASSES every resume gate. */
+  const seedResumableOrchestrated = (db: ReturnType<typeof createTestDb>, id: string): void => {
+    // process.cwd() genuinely exists on disk — the worktree-existence gate passes.
+    seedRun(db, { id, status: 'running', worktreePath: process.cwd() });
+    // A captured claude_session_id is the legacy resume-target fallback
+    // (no agent_invocations table in the test schema → the store falls through).
+    db.prepare('UPDATE workflow_runs SET claude_session_id = ? WHERE id = ?').run('sess-ext-1', id);
+  };
+
+  it('resets a resumable orchestrated running orphan to starting (NOT failed) and returns it for resume', () => {
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+    const adapter = dbAdapter(db);
+    const runQueues = new RunQueueRegistry();
+
+    seedResumableOrchestrated(db, 'run-O1');
+
+    const result = recoverActiveStateOrphans(adapter, runQueues);
+
+    expect(result.runningRecovered).toBe(0); // NOT force-failed
+    expect(result.orchestratedToResume).toEqual([{ id: 'run-O1' }]);
+    const row = db
+      .prepare('SELECT status, error_message, ended_at, outcome FROM workflow_runs WHERE id = ?')
+      .get('run-O1') as { status: string; error_message: string | null; ended_at: string | null; outcome: string | null };
+    expect(row.status).toBe('starting'); // reset for a --resume re-drive
+    expect(row.error_message).toBeNull();
+    expect(row.ended_at).toBeNull();
+    expect(row.outcome).toBeNull(); // untouched, never stamped interrupted
+  });
+
+  it('leaves a pre-existing outcome (session-level stamp) intact on the orchestrated resume reset', () => {
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+    const adapter = dbAdapter(db);
+    const runQueues = new RunQueueRegistry();
+
+    seedResumableOrchestrated(db, 'run-O2');
+    // stampSessionRunsOutcome has no status guard — a human Merge can stamp a
+    // still-running row. The resume reset must NOT erase that decision.
+    db.prepare("UPDATE workflow_runs SET outcome = 'merged' WHERE id = ?").run('run-O2');
+
+    const result = recoverActiveStateOrphans(adapter, runQueues);
+
+    expect(result.orchestratedToResume).toEqual([{ id: 'run-O2' }]);
+    const row = db.prepare('SELECT status, outcome FROM workflow_runs WHERE id = ?').get('run-O2') as {
+      status: string;
+      outcome: string | null;
+    };
+    expect(row.status).toBe('starting');
+    expect(row.outcome).toBe('merged'); // human decision survives
+  });
+
+  it('expires pending approvals for a RESUMED orchestrated run (the dead canUseTool promise is gone)', () => {
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+    const adapter = dbAdapter(db);
+    const runQueues = new RunQueueRegistry();
+
+    seedResumableOrchestrated(db, 'run-O3');
+    seedApproval(db, { id: 'approval-O3', runId: 'run-O3' });
+
+    const result = recoverActiveStateOrphans(adapter, runQueues);
+
+    expect(result.orchestratedToResume).toEqual([{ id: 'run-O3' }]);
+    expect(result.approvalsCanceled).toBe(1);
+    const approval = db
+      .prepare('SELECT status, decided_by FROM approvals WHERE id = ?')
+      .get('approval-O3') as { status: string; decided_by: string };
+    expect(approval.status).toBe('timed_out');
+    expect(approval.decided_by).toBe('system');
+  });
+
+  it('keeps pending approvals for a resumed PROGRAMMATIC run (survive-contract: the gate re-attaches)', () => {
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+    const adapter = dbAdapter(db);
+    const runQueues = new RunQueueRegistry();
+
+    seedRun(db, { id: 'run-O4', status: 'awaiting_review' });
+    markProgrammatic(db, 'run-O4', 'approve-idea');
+    seedApproval(db, { id: 'approval-O4', runId: 'run-O4' });
+
+    const result = recoverActiveStateOrphans(adapter, runQueues);
+
+    expect(result.programmaticToResume).toHaveLength(1);
+    expect(result.approvalsCanceled).toBe(0);
+    const approval = db.prepare('SELECT status FROM approvals WHERE id = ?').get('approval-O4') as { status: string };
+    expect(approval.status).toBe('pending');
+  });
+
+  it('force-fails (interrupted) a STALE orchestrated orphan even with a resume target', () => {
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+    const adapter = dbAdapter(db);
+    const runQueues = new RunQueueRegistry();
+
+    seedResumableOrchestrated(db, 'run-O5');
+    // Older than STALE_RESUMABLE_RECOVERY_DAYS (7) — the provider's local session
+    // data has plausibly been pruned; resuming would fail for real.
+    db.prepare("UPDATE workflow_runs SET updated_at = datetime('now', '-30 days') WHERE id = ?").run('run-O5');
+
+    const result = recoverActiveStateOrphans(adapter, runQueues);
+
+    expect(result.orchestratedToResume).toEqual([]);
+    expect(result.runningRecovered).toBe(1);
+    const row = db.prepare('SELECT status, outcome FROM workflow_runs WHERE id = ?').get('run-O5') as {
+      status: string;
+      outcome: string | null;
+    };
+    expect(row.status).toBe('failed');
+    expect(row.outcome).toBe('interrupted');
+  });
+
+  it('force-fails (interrupted) an INTERACTIVE-substrate orphan even with a captured session id', () => {
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+    const adapter = dbAdapter(db);
+    const runQueues = new RunQueueRegistry();
+
+    seedResumableOrchestrated(db, 'run-O6');
+    db.prepare("UPDATE workflow_runs SET substrate = 'interactive' WHERE id = ?").run('run-O6');
+
+    const result = recoverActiveStateOrphans(adapter, runQueues);
+
+    expect(result.orchestratedToResume).toEqual([]);
+    const row = db.prepare('SELECT status, outcome FROM workflow_runs WHERE id = ?').get('run-O6') as {
+      status: string;
+      outcome: string | null;
+    };
+    expect(row.status).toBe('failed');
+    expect(row.outcome).toBe('interrupted');
+  });
+
+  it('force-fails (interrupted) an orchestrated orphan whose worktree no longer exists on disk', () => {
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+    const adapter = dbAdapter(db);
+    const runQueues = new RunQueueRegistry();
+
+    seedRun(db, { id: 'run-O7', status: 'running', worktreePath: '/nonexistent/deleted-worktree-xyz' });
+    db.prepare('UPDATE workflow_runs SET claude_session_id = ? WHERE id = ?').run('sess-ext-7', 'run-O7');
+
+    const result = recoverActiveStateOrphans(adapter, runQueues);
+
+    expect(result.orchestratedToResume).toEqual([]);
+    const row = db.prepare('SELECT status, outcome FROM workflow_runs WHERE id = ?').get('run-O7') as {
+      status: string;
+      outcome: string | null;
+    };
+    expect(row.status).toBe('failed');
+    expect(row.outcome).toBe('interrupted');
+  });
+
+  it('force-fails (interrupted) a CODEX-provider orchestrated orphan (boot-resume unverified for Codex)', () => {
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+    const adapter = dbAdapter(db);
+    const runQueues = new RunQueueRegistry();
+
+    seedResumableOrchestrated(db, 'run-O8');
+    db.prepare(
+      "UPDATE workflow_runs SET agent_provider = 'codex', agent_runtime = 'codex-sdk' WHERE id = ?",
+    ).run('run-O8');
+
+    const result = recoverActiveStateOrphans(adapter, runQueues);
+
+    expect(result.orchestratedToResume).toEqual([]);
+    const row = db.prepare('SELECT status, outcome FROM workflow_runs WHERE id = ?').get('run-O8') as {
+      status: string;
+      outcome: string | null;
+    };
+    expect(row.status).toBe('failed');
+    expect(row.outcome).toBe('interrupted');
   });
 });
 
@@ -568,7 +747,7 @@ describe('backfillTerminalOutcomes', () => {
   }
 
   it("stamps outcome='failed' on status='failed' rows with NULL outcome", () => {
-    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     seedRun(db, { id: 'run-bf-failed', status: 'failed' });
 
     const result = backfillTerminalOutcomes(dbAdapter(db));
@@ -578,7 +757,7 @@ describe('backfillTerminalOutcomes', () => {
   });
 
   it("stamps outcome='canceled' on status='canceled' rows with NULL outcome", () => {
-    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     seedRun(db, { id: 'run-bf-canceled', status: 'canceled' });
 
     const result = backfillTerminalOutcomes(dbAdapter(db));
@@ -588,7 +767,7 @@ describe('backfillTerminalOutcomes', () => {
   });
 
   it("leaves status='completed' rows with NULL outcome UNTOUCHED (awaiting close-out)", () => {
-    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     seedRun(db, { id: 'run-bf-completed', status: 'completed' });
 
     const result = backfillTerminalOutcomes(dbAdapter(db));
@@ -599,7 +778,7 @@ describe('backfillTerminalOutcomes', () => {
   });
 
   it('never clobbers a pre-existing outcome on a terminal row', () => {
-    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     // A run that failed AFTER it was already dismissed — the dismiss decision stands.
     seedRun(db, { id: 'run-bf-preexisting', status: 'failed' });
     db.prepare("UPDATE workflow_runs SET outcome = 'dismissed' WHERE id = ?").run('run-bf-preexisting');
@@ -611,7 +790,7 @@ describe('backfillTerminalOutcomes', () => {
   });
 
   it('backfills a mixed batch in one pass', () => {
-    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     seedRun(db, { id: 'run-mix-f1', status: 'failed' });
     seedRun(db, { id: 'run-mix-f2', status: 'failed' });
     seedRun(db, { id: 'run-mix-c1', status: 'canceled' });
@@ -628,6 +807,95 @@ describe('backfillTerminalOutcomes', () => {
     expect(readOutcome(db, 'run-mix-c1')).toBe('canceled');
     expect(readOutcome(db, 'run-mix-done')).toBeNull();
     expect(readOutcome(db, 'run-mix-stamped')).toBe('merged');
+  });
+
+  it("never stamps outcome='failed' on an app_restart row (claimed by 'interrupted' only)", () => {
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+    seedRun(db, { id: 'run-bf-restart', status: 'failed' });
+    db.prepare("UPDATE workflow_runs SET error_message = 'app_restart' WHERE id = ?").run('run-bf-restart');
+
+    const result = backfillTerminalOutcomes(dbAdapter(db));
+
+    // Order-independence guard: even when backfillInterruptedOutcomes has not run,
+    // the generic failed-stamp must skip the app_restart sentinel rows.
+    expect(result).toEqual({ failedBackfilled: 0, canceledBackfilled: 0 });
+    expect(readOutcome(db, 'run-bf-restart')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// backfillInterruptedOutcomes — reclassifies historical app_restart force-fails
+// as outcome='interrupted'. The widened guard (NULL OR 'failed') reclaims rows an
+// earlier boot's backfillTerminalOutcomes already stamped 'failed'; any other
+// pre-existing outcome (a real human decision) is never touched.
+// ---------------------------------------------------------------------------
+
+describe('backfillInterruptedOutcomes', () => {
+  function readOutcome(db: ReturnType<typeof createTestDb>, runId: string): string | null {
+    const row = db.prepare('SELECT outcome FROM workflow_runs WHERE id = ?').get(runId) as {
+      outcome: string | null;
+    };
+    return row.outcome;
+  }
+
+  function seedAppRestartFailed(db: ReturnType<typeof createTestDb>, id: string, outcome: string | null): void {
+    seedRun(db, { id, status: 'failed' });
+    db.prepare("UPDATE workflow_runs SET error_message = 'app_restart', outcome = ? WHERE id = ?").run(outcome, id);
+  }
+
+  it("stamps 'interrupted' on app_restart rows with NULL outcome", () => {
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+    seedAppRestartFailed(db, 'run-bi-null', null);
+
+    expect(backfillInterruptedOutcomes(dbAdapter(db))).toBe(1);
+    expect(readOutcome(db, 'run-bi-null')).toBe('interrupted');
+  });
+
+  it("RECLAIMS app_restart rows an earlier boot stamped outcome='failed' (widened guard)", () => {
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+    seedAppRestartFailed(db, 'run-bi-reclaim', 'failed');
+
+    expect(backfillInterruptedOutcomes(dbAdapter(db))).toBe(1);
+    expect(readOutcome(db, 'run-bi-reclaim')).toBe('interrupted');
+  });
+
+  it('never touches a real (non-app_restart) failure', () => {
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+    seedRun(db, { id: 'run-bi-real', status: 'failed' });
+    db.prepare("UPDATE workflow_runs SET error_message = 'SDK exploded', outcome = 'failed' WHERE id = ?").run('run-bi-real');
+
+    expect(backfillInterruptedOutcomes(dbAdapter(db))).toBe(0);
+    expect(readOutcome(db, 'run-bi-real')).toBe('failed');
+  });
+
+  it('never clobbers a human decision (dismissed) on an app_restart row', () => {
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+    seedAppRestartFailed(db, 'run-bi-dismissed', 'dismissed');
+
+    expect(backfillInterruptedOutcomes(dbAdapter(db))).toBe(0);
+    expect(readOutcome(db, 'run-bi-dismissed')).toBe('dismissed');
+  });
+
+  it('is idempotent (a second boot is a no-op)', () => {
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+    seedAppRestartFailed(db, 'run-bi-idem', null);
+
+    expect(backfillInterruptedOutcomes(dbAdapter(db))).toBe(1);
+    expect(backfillInterruptedOutcomes(dbAdapter(db))).toBe(0);
+    expect(readOutcome(db, 'run-bi-idem')).toBe('interrupted');
+  });
+
+  it('composes with backfillTerminalOutcomes in boot order: interrupted first, then real failures', () => {
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+    seedAppRestartFailed(db, 'run-bi-mix-restart', null);
+    seedRun(db, { id: 'run-bi-mix-real', status: 'failed' }); // real failure, NULL outcome
+
+    expect(backfillInterruptedOutcomes(dbAdapter(db))).toBe(1);
+    const terminal = backfillTerminalOutcomes(dbAdapter(db));
+
+    expect(terminal).toEqual({ failedBackfilled: 1, canceledBackfilled: 0 });
+    expect(readOutcome(db, 'run-bi-mix-restart')).toBe('interrupted');
+    expect(readOutcome(db, 'run-bi-mix-real')).toBe('failed');
   });
 });
 

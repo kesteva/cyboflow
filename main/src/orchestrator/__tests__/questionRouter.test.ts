@@ -714,12 +714,14 @@ describe('QuestionRouter', () => {
     expect(r1.error_message).toBeNull();
     expect(r1.claude_session_id).toBe('sess-abc');
 
-    // R2 had no captured session → genuinely unresumable → failed.
+    // R2 had no captured session → genuinely unresumable → failed, with the
+    // structured outcome='interrupted' why-category (infra, not an agent bug).
     const r2 = db
-      .prepare("SELECT status, error_message FROM workflow_runs WHERE id = ?")
-      .get('qrun-R2') as { status: string; error_message: string };
+      .prepare("SELECT status, error_message, outcome FROM workflow_runs WHERE id = ?")
+      .get('qrun-R2') as { status: string; error_message: string; outcome: string | null };
     expect(r2.status).toBe('failed');
     expect(r2.error_message).toBe('app_restart');
+    expect(r2.outcome).toBe('interrupted');
 
     // The running row is unchanged.
     const r3 = db
@@ -729,10 +731,11 @@ describe('QuestionRouter', () => {
 
     // R4 has a session but is past the age cap → failed (review queue stays lean).
     const r4 = db
-      .prepare("SELECT status, error_message FROM workflow_runs WHERE id = ?")
-      .get('qrun-R4') as { status: string; error_message: string };
+      .prepare("SELECT status, error_message, outcome FROM workflow_runs WHERE id = ?")
+      .get('qrun-R4') as { status: string; error_message: string; outcome: string | null };
     expect(r4.status).toBe('failed');
     expect(r4.error_message).toBe('app_restart');
+    expect(r4.outcome).toBe('interrupted');
   });
 });
 

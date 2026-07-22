@@ -50,13 +50,15 @@ describe('ApprovalRouter.recoverStaleAwaitingReview — review_items reconciliat
     const count = router.recoverStaleAwaitingReview();
     expect(count).toBe(1);
 
-    // Run + approval reconciled.
+    // Run + approval reconciled — outcome='interrupted' is the structured
+    // why-category (infra interruption, not an agent failure).
     expect(
-      (db.prepare('SELECT status, error_message FROM workflow_runs WHERE id = ?').get('run-G1') as {
+      (db.prepare('SELECT status, error_message, outcome FROM workflow_runs WHERE id = ?').get('run-G1') as {
         status: string;
         error_message: string | null;
+        outcome: string | null;
       }),
-    ).toMatchObject({ status: 'failed', error_message: 'app_restart' });
+    ).toMatchObject({ status: 'failed', error_message: 'app_restart', outcome: 'interrupted' });
     expect(
       (db.prepare('SELECT status FROM approvals WHERE id = ?').get('approval-G1') as { status: string }).status,
     ).toBe('timed_out');
