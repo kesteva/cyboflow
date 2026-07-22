@@ -26,7 +26,9 @@ vi.mock('../../../trpc/client', () => ({
 }));
 
 beforeEach(() => {
-  mockUpdate.mockReset().mockResolvedValue({ version: 2 });
+  // Matches the real tRPC contract: tasks.update returns { taskId } only (the
+  // component does not read the return — it bumps the version locally).
+  mockUpdate.mockReset().mockResolvedValue({ taskId: 'TASK-1' });
 });
 
 function makeTask(overrides: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
