@@ -192,7 +192,10 @@ export type McpQueryMessage =
       /** Full markdown body — the canonical rich detail (idea spec / task description + ACs). */
       body?: string;
       priority?: Priority;
-      /** Entity category — feature/bug/chore (migration 059). */
+      /**
+       * Entity CLASSIFICATION — feature/bug/chore (migration 059). Distinct from
+       * the free-text finding-grouping `category` on 'mcp-report-finding'.
+       */
       category?: EntityCategory;
       repo?: string;
       parentEpicId?: string;
@@ -219,7 +222,10 @@ export type McpQueryMessage =
       /** Full markdown body — the canonical rich detail (idea spec / task description + ACs). */
       body?: string;
       priority?: Priority;
-      /** Entity category — feature/bug/chore (migration 059). */
+      /**
+       * Entity CLASSIFICATION — feature/bug/chore (migration 059). Distinct from
+       * the free-text finding-grouping `category` on 'mcp-report-finding'.
+       */
       category?: EntityCategory;
       repo?: string;
       parentEpicId?: string;
@@ -331,6 +337,10 @@ export type McpQueryMessage =
        * Structured finding extras (camelCase wire). Each is `unknown` because the
        * MCP tool passes them through unvalidated; handleReportFinding unknown-guards
        * the shape and DROPS any malformed member rather than failing the write.
+       *
+       * NOTE: `category` here is the FREE-TEXT review-queue grouping tag (e.g.
+       * 'security'/'perf') — NOT the typed EntityCategory classification enum
+       * (feature|bug|chore) on the create/update-task messages above.
        */
       category?: unknown;
       locations?: unknown;
