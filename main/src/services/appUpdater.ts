@@ -25,6 +25,13 @@ const INITIAL_CHECK_DELAY_MS = 8_000;
  */
 export class AppUpdater {
   private wired = false;
+  // Set when Chromium's network service process dies mid-run. Electron's
+  // main-process `net` sessions (including electron-updater's cached
+  // "electron-updater" partition) stay bound to the dead network context, so
+  // every subsequent request fails with a bare net::ERR_FAILED until the app
+  // relaunches. Track the crash so we can surface an actionable message
+  // instead of that opaque error.
+  private networkStackLost = false;
 
   constructor(
     private readonly app: App,
@@ -41,6 +48,7 @@ export class AppUpdater {
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = false;
     this.wireEvents();
+    this.watchNetworkService();
 
     setTimeout(() => {
       void this.check().catch(() => {
@@ -65,7 +73,7 @@ export class AppUpdater {
       return { supported: true, currentVersion, updateAvailable, latestVersion };
     } catch (error) {
       this.logger?.error('[AppUpdater] check failed', error instanceof Error ? error : undefined);
-      this.emit({ kind: 'error', message: this.messageOf(error) });
+      this.emit(this.errorEventOf(error));
       return { supported: true, currentVersion, updateAvailable: false };
     }
   }
@@ -77,7 +85,7 @@ export class AppUpdater {
       await autoUpdater.downloadUpdate();
     } catch (error) {
       this.logger?.error('[AppUpdater] download failed', error instanceof Error ? error : undefined);
-      this.emit({ kind: 'error', message: this.messageOf(error) });
+      this.emit(this.errorEventOf(error));
     }
   }
 
@@ -116,9 +124,29 @@ export class AppUpdater {
     autoUpdater.on('update-downloaded', (info: UpdateInfo) =>
       this.emit({ kind: 'downloaded', version: info.version }),
     );
-    autoUpdater.on('error', (error: Error) =>
-      this.emit({ kind: 'error', message: this.messageOf(error) }),
-    );
+    autoUpdater.on('error', (error: Error) => this.emit(this.errorEventOf(error)));
+  }
+
+  /**
+   * Detect the Chromium network service dying mid-run. Once it's gone, every
+   * main-process net request (the updater included) fails with net::ERR_FAILED
+   * until relaunch — Chromium respawns the service but existing sessions stay
+   * bound to the dead network context. 'clean-exit' is excluded: that's normal
+   * shutdown, not a crash.
+   */
+  private watchNetworkService(): void {
+    this.app.on('child-process-gone', (_event, details) => {
+      if (
+        details.type === 'Utility' &&
+        details.serviceName === 'network.mojom.NetworkService' &&
+        details.reason !== 'clean-exit'
+      ) {
+        this.networkStackLost = true;
+        this.logger?.error(
+          `[AppUpdater] Chromium network service gone (reason=${details.reason}, exitCode=${details.exitCode}) — in-app network requests will fail until the app is relaunched`,
+        );
+      }
+    });
   }
 
   private emit(event: UpdaterEvent): void {
@@ -130,5 +158,23 @@ export class AppUpdater {
 
   private messageOf(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+  }
+
+  /**
+   * Build the error event for the renderer. After a network-service crash, a
+   * Chromium-level net:: failure is a symptom of the dead network stack, not
+   * of the update feed — swap in an actionable restart message. Non-net errors
+   * (HTTP statuses, checksum mismatches, …) keep their original text.
+   */
+  private errorEventOf(error: unknown): UpdaterEvent {
+    const message = this.messageOf(error);
+    if (this.networkStackLost && message.includes('net::ERR')) {
+      return {
+        kind: 'error',
+        message:
+          "The app's network process crashed earlier this session, so update checks can't reach the server. Quit and relaunch Cyboflow, then check again.",
+      };
+    }
+    return { kind: 'error', message };
   }
 }
