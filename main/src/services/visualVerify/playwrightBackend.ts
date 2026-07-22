@@ -33,6 +33,20 @@
  *  - lazy chromium: healthCheck() returns false when chromium is unavailable / the
  *    install fails ⇒ the resolver drops playwright from the chain (SKIP, never FAIL,
  *    never hang).
+ *
+ * @cyboflow-hidden: this backend is retired-in-place by the verification-agent
+ * redesign (docs/proposals/verification-agent-redesign.md §3/§5.8) — NOT dead
+ * code. It stays LIVE for two reachable paths only: (1) a pre-upgrade run whose
+ * `verify_chain` stamp still names a legacy backend (immutable per run, drained
+ * by VerificationScheduler until it finishes), and (2) any NEW run started with
+ * the `CYBOFLOW_VERIFY_LEGACY=1` rollback kill switch (§5.8), which stamps
+ * legacy chains going forward and boot-terminalizes any stranded agent-chain
+ * request. The default v1 engine (verify_chain=['agent']) never reaches this
+ * file — VerificationScheduler.processRow's isAgentStampedRun dispatch routes
+ * those requests to VerificationAgentRunner instead (the bundled driver CLI,
+ * driver/driverCore.ts, is the agent path's OWN playwright caller and does not
+ * import this backend). Re-enable as the default by reverting that dispatch
+ * (verificationScheduler.ts) or by leaving the kill switch set.
  */
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join, basename } from 'node:path';

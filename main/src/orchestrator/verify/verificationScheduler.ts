@@ -778,6 +778,18 @@ export interface VerificationSchedulerDeps {
    * value to exercise the boundary.
    */
   queuedAgeCeilingMs?: number;
+  /**
+   * §5.8 legacy kill-switch check — whether `CYBOFLOW_VERIFY_LEGACY` is active,
+   * read ONCE per `runRecovery()` pass (never inline `process.env`, and never
+   * re-read per row) so the boot terminalization below is deterministic within a
+   * single pass. INJECTED as a plain function (mirrors `now`/`portFreeProbe`) so
+   * tests can flip the posture without mutating global env; defaults to the same
+   * `process.env.CYBOFLOW_VERIFY_LEGACY === '1'` check `workflowRegistry.ts` uses
+   * to stamp NEW runs onto the legacy chain — this dep is the missing BOOT half of
+   * that rollback contract (existing in-flight AGENT-chain rows get terminalized
+   * too, not just future runs redirected).
+   */
+  legacyKillSwitch?: () => boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -827,6 +839,7 @@ export class VerificationScheduler {
   private readonly agentRequestCeilingMs: number;
   private readonly portFreeProbe: (port: number) => Promise<boolean>;
   private readonly queuedAgeCeilingMs: number;
+  private readonly legacyKillSwitch: () => boolean;
 
   /**
    * The single COALESCED fallback timer armed while any row is `queued` (§5.6). It
@@ -882,6 +895,7 @@ export class VerificationScheduler {
     this.agentRequestCeilingMs = deps.agentRequestCeilingMs ?? AGENT_REQUEST_TIMEOUT_CEILING_MS;
     this.portFreeProbe = deps.portFreeProbe ?? (async () => true);
     this.queuedAgeCeilingMs = deps.queuedAgeCeilingMs ?? this.config.queuedAgeCeilingMs;
+    this.legacyKillSwitch = deps.legacyKillSwitch ?? (() => process.env.CYBOFLOW_VERIFY_LEGACY === '1');
   }
 
   // --------------------------------------------------------------------------
@@ -939,6 +953,18 @@ export class VerificationScheduler {
    * Returns the number of rows re-drained. Idempotent: a second call finds none.
    */
   async runRecovery(): Promise<number> {
+    // §5.8 kill-switch boot terminalization — read the flag ONCE for this whole
+    // recovery pass (never per-row) and, when active, terminalize every
+    // queued/leased/running row whose RUN is agent-stamped BEFORE the generic
+    // orphan-timeout sweep below runs. Both that sweep and the queued-age sweep
+    // further down are status-guarded to `IN ('queued','leased','running')`
+    // (markTerminal), so a row this step already flipped to 'skipped' simply drops
+    // out of their SELECTs — no row is ever double-terminalized, and a
+    // legacy-stamped row is untouched by this step (isAgentStampedRun returns
+    // false for it, so it falls through to the pre-existing recovery behavior
+    // unchanged).
+    const killSwitchTerminalized = await this.terminalizeAgentRowsOnLegacyKillSwitch(this.legacyKillSwitch());
+
     const rows = this.db
       .prepare(
         `SELECT id, run_id, project_id, status, verify_type, deliverable_json,
@@ -990,7 +1016,55 @@ export class VerificationScheduler {
     // enqueue would otherwise nudge). No-op when the queue is empty.
     if (this.hasQueuedRequests()) this.nudge();
 
-    return recovered + expired + replayed;
+    return recovered + expired + replayed + killSwitchTerminalized;
+  }
+
+  /**
+   * §5.8 kill-switch boot terminalization (the missing "boot" half — the NEW-run
+   * stamping half already lives in `workflowRegistry.ts`). When `enabled`, every
+   * row still `queued`/`leased`/`running` whose RUN is stamped `verify_chain:
+   * ['agent']` (isAgentStampedRun) is terminalized 'skipped' through the normal
+   * `markTerminalAndDeliver` chokepoint — never a silent UPDATE — so a lane parked
+   * at `awaiting-verify` behind a now-disabled engine advances with a
+   * non-blocking finding instead of wedging forever. `captureOrigin: 'agent'` is
+   * stamped for the same human-facing provenance reason `expireOverAgeQueued`
+   * stamps it on an agent-stamped expiry. A legacy-stamped row is never selected
+   * by isAgentStampedRun and falls through completely untouched by this step.
+   * `enabled === false` (the default posture) is a pure no-op — byte-identical to
+   * pre-§5.8 recovery. Returns the count terminalized.
+   */
+  private async terminalizeAgentRowsOnLegacyKillSwitch(enabled: boolean): Promise<number> {
+    if (!enabled) return 0;
+    const rows = this.db
+      .prepare(
+        `SELECT id, run_id, project_id, status, verify_type, deliverable_json,
+                chain_json, current_backend, attempt, enqueued_at
+           FROM verification_requests
+          WHERE status IN ('queued', 'leased', 'running')
+          ORDER BY enqueued_at ASC, id ASC`,
+      )
+      .all() as VerificationRequestRow[];
+    let terminalized = 0;
+    for (const row of rows) {
+      if (!this.isAgentStampedRun(row.run_id)) continue;
+      const input = this.parseInput(row.deliverable_json) ?? undefined;
+      await this.markTerminalAndDeliver(
+        row,
+        'skipped',
+        { error: 'agent engine disabled (CYBOFLOW_VERIFY_LEGACY)', captureOrigin: 'agent' },
+        undefined,
+        [],
+        input,
+      );
+      terminalized += 1;
+    }
+    if (terminalized > 0) {
+      this.logger?.warn(
+        '[VerificationScheduler] terminalized in-flight agent-chain requests — CYBOFLOW_VERIFY_LEGACY kill switch active',
+        { terminalized },
+      );
+    }
+    return terminalized;
   }
 
   // --------------------------------------------------------------------------
@@ -2328,7 +2402,8 @@ export class VerificationScheduler {
       //      Otherwise fall through to the VLM with the resolved baselinePath.
       //
       //  (3) BUDGET / VLM — if no deterministic + no SSIM match, run the VLM, passing
-      //      the resolved baselinePath. The per-project judge-call budget is enforced
+      //      the resolved baselinePath. The per-project VERIFICATION budget (the SAME
+      //      counter runAgentChosen checks for an agent deployment, §5.8) is enforced
       //      HERE (before the call): exhausted ⇒ a non-blocking low_confidence verdict
       //      (the SAME human-review finding path, never a FAIL / fabricated pass) with
       //      NO vision call. A real VLM call increments this request's judge_calls_used
@@ -2794,13 +2869,20 @@ export class VerificationScheduler {
   }
 
   /**
-   * S5 — has this project reached its per-project judge-call budget cap? Reads
+   * S5 — has this project reached its per-project verification budget cap? Reads
    * projects.visual_verify_budget_calls (NULL = unlimited) + the cumulative
    * SUM(verification_requests.judge_calls_used) for the project via the injected
    * DatabaseLike. Returns true only when a budget is set AND the cumulative used
    * count is at/above it. Fail-soft: a thrown query (missing column / minimal test
    * DB) degrades to "not exhausted" so a budget-less deployment is byte-identical to
    * before this layer (the per-run cap still applies upstream at the capped judge).
+   *
+   * ONE counter, TWO engines (redesign §5.8): `maxPerRunJudgeCalls` /
+   * `visual_verify_budget_calls` generalized from a VLM-judge-call cap into a
+   * per-run VERIFICATION budget — this same check gates a verification-AGENT
+   * deployment on the default v1 engine (called from runAgentChosen) exactly as
+   * it gates a VlmJudge call on the legacy engine (called below, from
+   * runChosen). The column/field names predate the redesign and are unchanged.
    */
   private isProjectBudgetExhausted(projectId: number): boolean {
     try {
@@ -2830,6 +2912,11 @@ export class VerificationScheduler {
    * cost telemetry). A counter UPDATE on the request's OWN row, consistent with
    * markTerminal — not a router-owned table, so it stays within the no-direct-write
    * rules. Fail-soft (a minimal test DB without the column degrades silently).
+   *
+   * Despite the name, this counts a verification-AGENT deployment (the default
+   * v1 engine) exactly as it counts a legacy VlmJudge call — one shared budget
+   * counter across both engines (redesign §5.8); the column name predates the
+   * redesign and is unchanged.
    */
   private incrementJudgeCallsUsed(id: string): void {
     try {

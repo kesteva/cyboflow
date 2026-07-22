@@ -25,6 +25,15 @@
  * returns false, the resolver drops 'playwright' from the chain, and the request
  * falls forward / SKIPs per never-silently-pass (missing precondition ⇒ SKIPPED,
  * never FAIL, never hang).
+ *
+ * @cyboflow-hidden: retired-in-place alongside its sole consumer,
+ * playwrightBackend.ts (docs/proposals/verification-agent-redesign.md §3/§5.8)
+ * — NOT dead code. It is exercised only when playwrightBackend.ts is (a
+ * pre-upgrade run's legacy `verify_chain` stamp, or a NEW run started under the
+ * `CYBOFLOW_VERIFY_LEGACY=1` rollback kill switch, §5.8). The default v1 engine
+ * never needs a chromium binary provisioned this way — the agent path's own
+ * driver CLI (driver/driverCore.ts) resolves the bundled `playwright` prod
+ * dependency directly. Re-enable as the default alongside playwrightBackend.ts.
  */
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';

@@ -29,6 +29,21 @@
  *    hang. A missing TCC grant must NEVER wedge a sprint. EVERY error path
  *    soft-fails (capture errors ⇒ CaptureResult ok:false fall-forward; probes ⇒
  *    false), never throws.
+ *
+ * @cyboflow-hidden: this backend is retired-in-place by the verification-agent
+ * redesign (docs/proposals/verification-agent-redesign.md §3/§5.8) — NOT dead
+ * code. It stays LIVE for two reachable paths only: (1) a pre-upgrade run whose
+ * `verify_chain` stamp still names a legacy backend (immutable per run, drained
+ * by VerificationScheduler until it finishes), and (2) any NEW run started with
+ * the `CYBOFLOW_VERIFY_LEGACY=1` rollback kill switch (see §5.8), which stamps
+ * legacy chains going forward and boot-terminalizes any stranded agent-chain
+ * request. The default v1 engine (verify_chain=['agent']) never reaches this
+ * file — VerificationScheduler.processRow's isAgentStampedRun dispatch routes
+ * those requests to VerificationAgentRunner instead. `native-desktop`/
+ * `mobile-flow` verify types remain out of scope for the agent engine (§5.14),
+ * so this stays the only live backend for those types on the legacy chain.
+ * Re-enable as the default by reverting the isAgentStampedRun dispatch
+ * (verificationScheduler.ts) or by leaving the kill switch set.
  */
 import { mkdir } from 'node:fs/promises';
 import { join, basename } from 'node:path';

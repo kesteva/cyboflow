@@ -848,7 +848,18 @@ export interface VisualVerifyConfig {
   defaultType?: VerificationType;
   /** Below this confidence the VlmJudge verdict is forced to 'low_confidence'. Default 0.7. */
   vlmConfidenceThreshold?: number;
-  /** Per-run cap on VlmJudge (vision) calls — bounds 2026 Agent-SDK billing. Default 4. */
+  /**
+   * Per-run cap on VlmJudge (vision) calls — bounds 2026 Agent-SDK billing.
+   * Default 4. LEGACY-ENGINE ONLY (redesign §5.8): enforced by the in-memory
+   * `cappedVlmJudge` decorator (main/src/index.ts) around the capture-backend +
+   * VLM waterfall; the verification-AGENT deployment on the default v1 engine
+   * never calls VlmJudge and does not consume this cap. Do not confuse with the
+   * PERSISTED per-project verification budget
+   * (`projects.visual_verify_budget_calls` /
+   * `verification_requests.judge_calls_used`, migration 056), which DID
+   * generalize to cover an agent deployment exactly like a legacy judge call —
+   * see `VerificationScheduler.isProjectBudgetExhausted`.
+   */
   maxPerRunJudgeCalls?: number;
   /** Dev-server port pool the ResourceLeasePool serializes web captures over (verify:port:<p>). */
   devServerPorts?: number[];

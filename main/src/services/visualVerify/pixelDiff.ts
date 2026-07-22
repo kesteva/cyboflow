@@ -22,6 +22,20 @@
  * decoder) — it is the concrete half injected into the (electron-free) scheduler
  * as a narrow function. The scheduler never imports this; index.ts wires it in.
  * The PngDecoder seam keeps the math unit-testable on raw buffers with no Electron.
+ *
+ * @cyboflow-hidden: the golden-baseline feature is retired ENTIRELY, not merely
+ * behind the legacy kill switch (docs/proposals/verification-agent-redesign.md
+ * §3/§5.10, "the baseline feature is retired entirely... zero live usage: the
+ * button is removed and `baselineStore`/`pixelDiff` retire with the legacy
+ * path"). This is genuinely DORMANT, not kill-switch-reachable like the capture
+ * backends: the Accept-as-baseline UI button and its `artifacts.acceptAsBaseline`
+ * tRPC endpoint were withdrawn in an earlier redesign slice, so no baseline has
+ * ever been (or can now be) written through the live app — `comparePngFiles` is
+ * only ever called from the index.ts `baselinePreDiff` closure, which itself
+ * short-circuits to null before reaching this file (no accepted baseline exists
+ * to compare against). The index.ts wiring is left in place deliberately (inert;
+ * not removed here). Re-enable by restoring the Accept-as-baseline UI/tRPC
+ * surface and wiring an accept path again (§5.10).
  */
 import { nativeImage } from 'electron';
 

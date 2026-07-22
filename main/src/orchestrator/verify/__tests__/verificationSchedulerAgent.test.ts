@@ -296,6 +296,146 @@ describe("VerificationScheduler — ['agent'] stamp dispatch", () => {
   });
 });
 
+describe('VerificationScheduler — legacy kill-switch boot terminalization (§5.8)', () => {
+  /** Insert a row directly at `status`, attributed to `runId`, for boot-recovery tests. */
+  function insertRow(
+    dbX: Database.Database,
+    opts: { id: string; runId: string; status: 'queued' | 'leased' | 'running'; taskRef?: string },
+  ): void {
+    dbX
+      .prepare(
+        `INSERT INTO verification_requests
+           (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, enqueued_at)
+         VALUES (?, ?, 1, ?, 'static-render-snapshot', ?, '[]', 0, CURRENT_TIMESTAMP)`,
+      )
+      .run(
+        opts.id,
+        opts.runId,
+        opts.status,
+        JSON.stringify({ intent: 'x', ...(opts.taskRef ? { taskRef: opts.taskRef } : {}) }),
+      );
+  }
+
+  it('flag SET: terminalizes queued/leased/running agent-stamped rows as skipped + delivers, legacy-stamped rows untouched', async () => {
+    seedRun(db, 'run-agent', JSON.stringify(['agent']));
+    seedRun(db, 'run-legacy', JSON.stringify(['capturePage']));
+
+    insertRow(db, { id: 'vr_a_queued', runId: 'run-agent', status: 'queued', taskRef: 'TASK-1' });
+    insertRow(db, { id: 'vr_a_leased', runId: 'run-agent', status: 'leased' });
+    insertRow(db, { id: 'vr_a_running', runId: 'run-agent', status: 'running' });
+    insertRow(db, { id: 'vr_l_queued', runId: 'run-legacy', status: 'queued' });
+
+    const verdicts: Array<{ requestId: string; status: string }> = [];
+    const onVerdict: OnVerdict = (a) => void verdicts.push({ requestId: a.requestId, status: a.status });
+
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: CONFIG,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      onVerdict,
+      legacyKillSwitch: () => true,
+    });
+
+    const n = await scheduler.runRecovery();
+    expect(n).toBe(3); // the three agent-stamped rows
+
+    const agentRows = db
+      .prepare(`SELECT id, status, error_message AS error FROM verification_requests WHERE run_id = 'run-agent' ORDER BY id`)
+      .all() as Array<{ id: string; status: string; error: string | null }>;
+    for (const row of agentRows) {
+      expect(row.status).toBe('skipped');
+      expect(row.error).toContain('agent engine disabled');
+      expect(row.error).toContain('CYBOFLOW_VERIFY_LEGACY');
+    }
+
+    // legacy-stamped row is completely untouched by the kill switch — still queued
+    // (the pre-existing recovery only terminalizes leased/running orphans + stale
+    // queued rows past the age ceiling; a fresh queued row is left queued either way).
+    const legacyRow = db
+      .prepare(`SELECT status FROM verification_requests WHERE id = 'vr_l_queued'`)
+      .get() as { status: string };
+    expect(legacyRow.status).toBe('queued');
+
+    // The lane advanced through the normal delivery path (non-blocking finding raised).
+    expect(verdicts.sort((a, b) => a.requestId.localeCompare(b.requestId))).toEqual(
+      [
+        { requestId: 'vr_a_leased', status: 'skipped' },
+        { requestId: 'vr_a_queued', status: 'skipped' },
+        { requestId: 'vr_a_running', status: 'skipped' },
+      ].sort((a, b) => a.requestId.localeCompare(b.requestId)),
+    );
+  });
+
+  it('flag UNSET (default posture): byte-identical recovery — agent rows keep their pre-existing fate, not the kill-switch reason', async () => {
+    seedRun(db, 'run-agent', JSON.stringify(['agent']));
+    insertRow(db, { id: 'vr_a_queued', runId: 'run-agent', status: 'queued' });
+    insertRow(db, { id: 'vr_a_leased', runId: 'run-agent', status: 'leased' });
+
+    const verdicts: string[] = [];
+    const onVerdict: OnVerdict = (a) => void verdicts.push(a.status);
+
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: CONFIG,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      onVerdict,
+      legacyKillSwitch: () => false,
+    });
+
+    const n = await scheduler.runRecovery();
+    // Only the pre-existing orphan sweep fires (the leased row → timeout); the
+    // fresh queued row is untouched (not over the age ceiling).
+    expect(n).toBe(1);
+
+    const leased = db
+      .prepare(`SELECT status, error_message AS error FROM verification_requests WHERE id = 'vr_a_leased'`)
+      .get() as { status: string; error: string | null };
+    expect(leased.status).toBe('timeout');
+    expect(leased.error).toBe('orphaned by process restart');
+    expect(leased.error).not.toContain('CYBOFLOW_VERIFY_LEGACY');
+
+    const queued = db
+      .prepare(`SELECT status FROM verification_requests WHERE id = 'vr_a_queued'`)
+      .get() as { status: string };
+    expect(queued.status).toBe('queued');
+    expect(verdicts).toEqual(['timeout']);
+  });
+
+  it('defaults to reading process.env.CYBOFLOW_VERIFY_LEGACY when no legacyKillSwitch dep is injected', async () => {
+    seedRun(db, 'run-agent', JSON.stringify(['agent']));
+    insertRow(db, { id: 'vr_a_queued', runId: 'run-agent', status: 'queued' });
+
+    const prior = process.env.CYBOFLOW_VERIFY_LEGACY;
+    process.env.CYBOFLOW_VERIFY_LEGACY = '1';
+    try {
+      const scheduler = VerificationScheduler.initialize({
+        db: dbAdapter(db),
+        backends: {},
+        judge: fakeJudge,
+        artifactsDirResolver: () => '/artifacts',
+        config: CONFIG,
+        leasePool: new ResourceLeasePool(new Mutex()),
+        // no legacyKillSwitch injected — must fall back to process.env
+      });
+      const n = await scheduler.runRecovery();
+      expect(n).toBe(1);
+      const row = db
+        .prepare(`SELECT status FROM verification_requests WHERE id = 'vr_a_queued'`)
+        .get() as { status: string };
+      expect(row.status).toBe('skipped');
+    } finally {
+      if (prior === undefined) delete process.env.CYBOFLOW_VERIFY_LEGACY;
+      else process.env.CYBOFLOW_VERIFY_LEGACY = prior;
+    }
+  });
+});
+
 describe('ResourceLeasePool.quarantine (§5.4 step 6)', () => {
   it('holds a leaked lease until its re-probe reports the resource free', async () => {
     const pool = new ResourceLeasePool(new Mutex());

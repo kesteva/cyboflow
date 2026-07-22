@@ -1319,10 +1319,16 @@ async function initializeServices() {
     confidenceThreshold: visualVerifyConfig.vlmConfidenceThreshold,
     logger: cyboflowLogger,
   });
-  // Per-run judge-call cap (bounds 2026 Agent-SDK vision billing). The scheduler
-  // calls the judge per request; this decorator counts calls per run and, beyond
-  // maxPerRunJudgeCalls, returns a low_confidence verdict (a human review_item)
-  // instead of spending another vision call — never a fabricated pass/fail.
+  // Per-run judge-call cap (bounds 2026 Agent-SDK vision billing). LEGACY-ENGINE
+  // ONLY (redesign §5.8): the scheduler calls the judge per request only on the
+  // capture-backend + VLM waterfall (a pre-upgrade run's legacy `verify_chain`
+  // stamp, or CYBOFLOW_VERIFY_LEGACY); this decorator counts calls per run and,
+  // beyond maxPerRunJudgeCalls, returns a low_confidence verdict (a human
+  // review_item) instead of spending another vision call — never a fabricated
+  // pass/fail. The default v1 engine's verification-AGENT deployment never
+  // calls VlmJudge and is capped separately by the PERSISTED per-project
+  // verification budget shared with this engine (visual_verify_budget_calls /
+  // judge_calls_used, below).
   const judgeCallsByRun = new Map<string, number>();
   const cappedVlmJudge: VlmJudge = {
     judge: async (judgeArgs, signal) => {
@@ -1605,10 +1611,14 @@ async function initializeServices() {
     // S9 — scheduler-owned static file server for a built htmlPath (file:// CORS fix).
     staticServerProvider: staticServerManager,
     staticHtmlContextResolver,
-    // S5 — golden-baseline SSIM pre-diff gates the (paid) VLM. The per-project
-    // judge-call budget + judge_calls_used telemetry (migration 056) are enforced
-    // inside the scheduler off its injected db; the per-RUN cap stays the
-    // cappedVlmJudge decorator above.
+    // S5 — golden-baseline SSIM pre-diff gates the (paid) VLM (§5.10: the
+    // baseline feature itself is retired; this closure now always resolves
+    // null — see baselineStore.ts / pixelDiff.ts). The per-project
+    // VERIFICATION budget + judge_calls_used telemetry (migration 056;
+    // generalized §5.8 to also cover an agent deployment on the default v1
+    // engine, not just a legacy VLM call) is enforced inside the scheduler off
+    // its injected db (isProjectBudgetExhausted); the per-RUN, LEGACY-ONLY
+    // vision-call cap stays the cappedVlmJudge decorator above.
     baselinePreDiff,
     // Verification-AGENT engine (redesign §5.4): a run stamped verify_chain=['agent']
     // routes to this runner instead of the capture backends above; the port probe

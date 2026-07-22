@@ -34,6 +34,25 @@ import { resolveClaudeExecutablePath } from '../panels/claude/claudeExecutablePa
 /** Default vision-capable model for the judge (current Opus). */
 export const DEFAULT_JUDGE_MODEL = 'claude-opus-4-8';
 
+/**
+ * @cyboflow-hidden: everything below this line (the judge flow proper —
+ * VlmJudgeImpl, makeSdkVisionQuery, normalizeConfidence, parseModelVerdict,
+ * buildInstruction/buildPrompt, VERDICT_SCHEMA) is retired-in-place by the
+ * verification-agent redesign (docs/proposals/verification-agent-redesign.md
+ * §3/§5.8) — NOT dead code. `DEFAULT_JUDGE_MODEL` ABOVE stays LIVE and is
+ * imported by the agent path (main/src/index.ts `claudeDefaultModel:
+ * DEFAULT_JUDGE_MODEL` — the validated Claude fallback VerificationAgentRunner
+ * uses when an unpinned visual-verify agent inherits a non-Claude run's model,
+ * §5.4). The judge flow below it stays live only via the two reachable legacy
+ * paths: (1) a pre-upgrade run whose `verify_chain` stamp still names a legacy
+ * backend chain, or (2) a NEW run started under the `CYBOFLOW_VERIFY_LEGACY=1`
+ * rollback kill switch (§5.8). The default v1 engine judges via the deployed
+ * verification agent's own structured `VerificationReportV1`, never this VLM
+ * call. Re-enable as the default by reverting the isAgentStampedRun dispatch
+ * in VerificationScheduler.processRow (verificationScheduler.ts) or by leaving
+ * the kill switch set.
+ */
+
 /** Default confidence floor: below this, pass/fail is demoted to low_confidence. */
 const DEFAULT_CONFIDENCE_THRESHOLD = 0.7;
 

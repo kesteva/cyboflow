@@ -1,6 +1,8 @@
 # Verification Agent Redesign — from "handed a path" to "handed a task"
 
-Status: PROPOSAL v2 (post-adversarial-review; v1 findings dispositioned in §9)
+Status: IMPLEMENTED (slices 1-12 landed on branch `dawn-hill-20260722`;
+post-adversarial-review v2, v1 findings dispositioned in §9). Not yet merged to
+`main` / live-smoked — see the branch's commit series for the per-slice diffs.
 Supersedes the capture/judge core of `docs/proposals/visual-verification-design.md`
 (the scheduler spine, merge gate, and delivery chokepoints from that design are
 retained — see "What survives" below).

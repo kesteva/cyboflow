@@ -1,5 +1,31 @@
 # Visual Verification Setup (cyboflow)
 
+## Agent engine (current)
+
+cyboflow's **built-in** visual-verification feature — the `visual-verify` lane
+step that checks a Sprint/Ship task's UI deliverable — now runs on a
+**verification AGENT** by default (see
+`docs/proposals/verification-agent-redesign.md`): `task-verify` composes a
+`VerificationTaskV1` (build/serve/behaviors), the central
+`VerificationScheduler` deploys the workflow-defined `visual-verify` Claude
+agent into a snapshot worktree, and the agent builds, serves, drives the UI via
+a bundled driver CLI, and judges its own screenshots — no `.cyboflow/verify.json`
+prerequisite, no capture-backend/VLM waterfall. The OLD capture backends
+(`capturePageBackend`/`playwrightBackend`/`peekabooBackend`), the VLM judge,
+and the `.cyboflow/verify.json`-driven dev/static server spawners are retired
+**in place** (`@cyboflow-hidden`) — they stay reachable only for a pre-upgrade
+run's legacy `verify_chain` stamp or the `CYBOFLOW_VERIFY_LEGACY=1` rollback
+kill switch, never the default path.
+
+This is a **separate concern** from the rest of this document below, which
+covers verifying **cyboflow's own** renderer while an agent works ON this
+codebase (dogfooding) via the Playwright-MCP CDP attach and the `visual_macos`
+Peekaboo fallback — that guidance is engine-independent and remains fully
+current regardless of the section above. The exception is "Deliverable
+`htmlPath` capture" further down: it documents the now-LEGACY-ONLY
+`.cyboflow/verify.json` static-serve mechanics for cyboflow's built-in feature,
+not the dogfooding path.
+
 This project is an Electron app. The Vite renderer at `http://localhost:4521`
 depends on `preload`-injected `electronTRPC` and cannot bootstrap standalone,
 so a Playwright MCP that spawns its own Chromium would return an empty page
@@ -100,7 +126,15 @@ Security, then restart `pnpm dev`. Recurring failure across SPRINT-031..SPRINT-0
 
 cyboflow is desktop-only. `verification.visual_mobile=false`.
 
-## Deliverable `htmlPath` capture (product feature, for cyboflow's users)
+## Deliverable `htmlPath` capture (product feature, for cyboflow's users) — LEGACY ENGINE ONLY
+
+**This section describes the LEGACY visual-verification engine** (see "Agent
+engine (current)" above) — live only for a pre-upgrade run's legacy
+`verify_chain` stamp or the `CYBOFLOW_VERIFY_LEGACY=1` rollback kill switch.
+The default v1 engine's verification agent drives a built html deliverable
+directly via the bundled driver CLI and does not use `StaticServerManager` or
+`.cyboflow/verify.json` as a prerequisite (only as an optional hint during task
+composition).
 
 The sections above cover verifying **cyboflow's own** renderer while working ON
 this codebase. Separately, cyboflow's *built-in* layered visual verification

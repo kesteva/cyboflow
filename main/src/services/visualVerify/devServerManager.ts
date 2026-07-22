@@ -26,6 +26,19 @@
  *    fallback after a grace window (the killProcessTree shape, minus the pty path).
  *  - the per-request AbortSignal interrupts an in-flight build/start/readiness wait
  *    cleanly and tears down whatever was already spawned.
+ *
+ * @cyboflow-hidden: retired-in-place by the verification-agent redesign
+ * (docs/proposals/verification-agent-redesign.md §3/§5.8) — NOT dead code. It
+ * stays LIVE for two reachable paths only: (1) a pre-upgrade run whose
+ * `verify_chain` stamp still names a legacy backend (the S2 dev-server seam in
+ * VerificationScheduler.processRow only fires on that path), and (2) a NEW run
+ * started under the `CYBOFLOW_VERIFY_LEGACY=1` rollback kill switch (§5.8). The
+ * default v1 engine never spawns a dev server this way — the deployed
+ * verification agent runs its OWN composed `build`/`serve` steps directly via
+ * Bash inside its snapshot worktree (§5.4/§5.5), reading `.cyboflow/verify.json`
+ * only as an optional HINT during task composition, never through this spawner.
+ * Re-enable as the default by reverting the isAgentStampedRun dispatch
+ * (verificationScheduler.ts) or by leaving the kill switch set.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import type { DeliverableVerifyConfig } from '../../../../shared/types/visualVerification';

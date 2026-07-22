@@ -130,6 +130,41 @@ injected, no `electron` / `better-sqlite3` / `services/*` imports):
   `LiveCanvasEmbed`). Session-only artifacts are pruned on session dismiss (`artifactLifecycle`);
   committed ones persist.
 
+#### Visual verification (`main/src/orchestrator/verify/`)
+
+`VerificationScheduler` (`verificationScheduler.ts`) is the DB-backed
+`verification_requests` queue + `ResourceLeasePool` + drain loop a sprint/ship
+lane's `visual-verify` step fires into (fire-and-continue MCP seam,
+`cyboflow_request_verification`) and never blocks on. Since the
+verification-agent redesign (`docs/proposals/verification-agent-redesign.md`)
+the DEFAULT v1 engine dispatches every request to `VerificationAgentRunner`
+(`verificationAgentRunner.ts`): `task-verify` composes a `VerificationTaskV1`
+(build/serve commands + behaviors to check) on PASS, the scheduler provisions a
+temporary `git worktree` at a recorded snapshot sha, deploys the
+workflow-defined `visual-verify` Claude agent into it (Bash/Read/Grep/Glob
+only, zero MCP servers, hermetic SDK settings), and the agent builds, serves,
+drives the UI through a bundled Playwright-backed driver CLI
+(`verify/driver/`), and returns a structured `VerificationReportV1` judged
+against its own screenshots. `verdictDelivery.ts` merges the report into the
+run's `screenshots` artifact (`ArtifactRouter`), advances or loops back the
+sprint lane (`mergeGateLaneAdvance.ts`), and raises/supersedes a
+`review_items` finding carrying the real failure evidence.
+
+Dispatch keys on an IMMUTABLE per-run stamp
+(`workflow_runs.verify_chain=['agent']`), never a live flag, so an in-flight
+run always finishes on the engine it started on. The prior LEGACY engine
+(capture backends `capturePageBackend`/`playwrightBackend`/`peekabooBackend` +
+`VlmJudge`, plus the `.cyboflow/verify.json`-driven `DevServerManager`/
+`StaticServerManager` and the retired golden-baseline `pixelDiff`/
+`baselineStore`) is retired **in place** (`@cyboflow-hidden` — see
+`docs/CODE-PATTERNS.md`) under `main/src/services/visualVerify/`: it stays
+reachable only for a pre-upgrade run's legacy `verify_chain` stamp or the
+`CYBOFLOW_VERIFY_LEGACY=1` rollback kill switch, which also boot-terminalizes
+any agent-chain request stranded queued/leased/running when the switch flips
+(`VerificationScheduler.runRecovery`). Both engines share one per-project
+verification budget (`projects.visual_verify_budget_calls` /
+`verification_requests.judge_calls_used`, migration 056).
+
 ### Services (`main/src/services/`)
 
 Core business logic services. Key components:

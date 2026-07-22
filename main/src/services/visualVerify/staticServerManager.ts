@@ -60,6 +60,20 @@
  * binding 127.0.0.1:0 resolves as soon as the OS hands back a port, so this
  * service has no timing tunables; StaticServerManagerOptions carries only the
  * optional logger.
+ *
+ * @cyboflow-hidden: retired-in-place by the verification-agent redesign
+ * (docs/proposals/verification-agent-redesign.md §3/§5.8) — NOT dead code. It
+ * stays LIVE for two reachable paths only: (1) a pre-upgrade run whose
+ * `verify_chain` stamp still names a legacy backend (the S9 static-serve seam
+ * in VerificationScheduler.processRow only fires on that path), and (2) a NEW
+ * run started under the `CYBOFLOW_VERIFY_LEGACY=1` rollback kill switch (§5.8).
+ * The default v1 engine never needs this file://-CORS workaround — the deployed
+ * verification agent drives a built `htmlPath` deliverable directly through the
+ * bundled driver CLI (§5.4), which does its own navigation. This is NOT the
+ * same service as prototypeServerReaper.ts (the unrelated ui-prototype-artifact
+ * static server) — see that file's header. Re-enable as the default by
+ * reverting the isAgentStampedRun dispatch (verificationScheduler.ts) or by
+ * leaving the kill switch set.
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';

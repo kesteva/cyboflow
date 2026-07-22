@@ -21,6 +21,20 @@
  * path STEM (mirrors CapturePageBackend.viewportFileStem) before being joined, so a
  * crafted value like '../../etc' can NEVER escape the baselines dir — the separators
  * are stripped, not interpreted.
+ *
+ * @cyboflow-hidden: the golden-baseline feature is retired ENTIRELY, not merely
+ * behind the legacy kill switch (docs/proposals/verification-agent-redesign.md
+ * §3/§5.10, "the baseline feature is retired entirely... zero live usage: the
+ * button is removed and `baselineStore`/`pixelDiff` retire with the legacy
+ * path"). This is genuinely DORMANT, not kill-switch-reachable like the capture
+ * backends: the Accept-as-baseline UI button and its `artifacts.acceptAsBaseline`
+ * tRPC endpoint were withdrawn in an earlier redesign slice, so no baseline has
+ * ever been (or can now be) written through the live app — `read()` always
+ * resolves null in practice. The index.ts `FsBaselineStore`/`baselinePreDiff`
+ * wiring is left in place deliberately (inert without a stored baseline; not
+ * removed here). If deterministic screenshot-compare returns, it is a designed
+ * follow-up on the agent path (§5.10) — re-enable by restoring the
+ * Accept-as-baseline UI/tRPC surface and wiring an accept path again.
  */
 import { mkdir, copyFile, readdir, access } from 'node:fs/promises';
 import { join } from 'node:path';
