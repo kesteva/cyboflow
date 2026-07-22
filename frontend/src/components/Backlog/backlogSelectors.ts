@@ -210,6 +210,8 @@ export const READY_FOR_DEV_POSITION = 6;
 export const LAST_EXECUTION_POSITION = 6;
 /** Derived "In development" board position (migration 066). */
 export const IN_DEVELOPMENT_POSITION = 7;
+/** Terminal "Won't do" board position (hidden-by-default column). */
+export const WONT_DO_POSITION = 10;
 
 /**
  * The board column a top-level item belongs in. Normally its own
@@ -324,6 +326,28 @@ export function topLevelTasks(tasks: BacklogTaskItem[]): BacklogTaskItem[] {
   return tasks.filter(
     (t) => t.parent_epic_id === null && !isDecomposed(t) && !isPending(t),
   );
+}
+
+/**
+ * Count of ACTIVE (non-done) backlog items for the sidebar rail badge — defined
+ * so the chip always equals the sum of the board's visible non-Done columns
+ * (archived toggle off). Built on the board's own visibility helpers so badge
+ * and board cannot drift: `topLevelTasks` drops epic children, decomposed ideas
+ * and PENDING (unapproved) entities; on top of that we drop archived,
+ * experiment-sandboxed and "Won't do" items. A raw `!isDone` store filter is
+ * NOT equivalent — decomposed ideas keep their old stage (they retire via
+ * `decomposed_at`, never a move to Done), so each one passes `!isDone` while
+ * being invisible on the board, and a "Won't do" item is likewise `!isDone`
+ * (terminal position 10, not 9) but is retired work, not pending work.
+ */
+export function countActiveBacklogItems(tasks: BacklogTaskItem[]): number {
+  return topLevelTasks(tasks).filter(
+    (t) =>
+      !t.isDone &&
+      !isArchived(t) &&
+      !isExperimentSandboxed(t) &&
+      t.stage_position !== WONT_DO_POSITION,
+  ).length;
 }
 
 /**

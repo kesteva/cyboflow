@@ -36,6 +36,7 @@ import { useReviewQueueSlice } from './stores/reviewQueueSlice';
 import { useReviewQueueStore } from './stores/reviewQueueStore';
 import { useReviewItemsSlice } from './stores/reviewItemsSlice';
 import { useBacklogStore } from './stores/backlogStore';
+import { countActiveBacklogItems } from './components/Backlog/backlogSelectors';
 import { useActiveRunsStore } from './stores/activeRunsStore';
 import {
   useAggregatedBlockingFindings,
@@ -68,18 +69,13 @@ function App() {
   const aggregatedReviewItems = useAggregatedReviewItems();
   const aggregatedBlockingFindings = useAggregatedBlockingFindings();
   const reviewQueueCount = pendingApprovalsCount + aggregatedReviewItems.length + aggregatedBlockingFindings.length;
-  // Non-done, non-archived task count drives the backlog rail badge (mirrors the
-  // review count). Cross-project by design — the board is the overall view now.
-  // Experiment-arm tasks are EXCLUDED (experiment_id tag) so the badge matches the
-  // board, which hides them (filterTasks/isExperimentSandboxed): the full backlog
-  // sync omits tagged rows, but per-entity TaskChangedEvent deltas (e.g. an arm's
-  // approve-plan reveal) upsert them into the store, so the raw count must filter.
-  const backlogCount = useBacklogStore(
-    (s) =>
-      s.tasks.filter(
-        (t) => !t.isDone && t.archived_at === null && (t.experiment_id ?? null) === null,
-      ).length,
-  );
+  // Active backlog item count drives the backlog rail badge (mirrors the review
+  // count). Cross-project by design — the board is the overall view now. Uses
+  // the board's own visibility selector so the badge always equals the sum of
+  // the visible non-Done columns: a raw `!isDone` store filter also counted
+  // decomposed ideas (retired via `decomposed_at`, never a stage move to Done)
+  // and drifted arbitrarily far above the board — see countActiveBacklogItems.
+  const backlogCount = useBacklogStore((s) => countActiveBacklogItems(s.tasks));
   // Pending findings drive the Insights rail badge — derived from the SAME
   // source the review-queue findings partition uses (useReviewItemsSlice.items
   // filtered to kind='finding' + status='pending'; see ReviewQueueView), NOT the

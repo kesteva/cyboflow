@@ -16,6 +16,7 @@ import {
   isExperimentSandboxed,
   filterTasks,
   countArchived,
+  countActiveBacklogItems,
   unifiedStages,
   bucketByStage,
   effectiveBoardPosition,
@@ -574,6 +575,46 @@ describe('deriveCounts', () => {
       inFlow: 1,
       awaitingReview: 1,
     });
+  });
+});
+
+describe('countActiveBacklogItems', () => {
+  it('counts non-done visible top-level items (matches the board columns)', () => {
+    const tasks = [
+      item({ id: 'IDEA-1', type: 'idea', stage_position: 1 }),
+      item({ id: 'EPIC-1', type: 'epic', stage_position: 6 }),
+      item({ id: 'TASK-1', stage_position: 7 }),
+      item({ id: 'TASK-2', isDone: true, stage_position: 9 }),
+    ];
+    expect(countActiveBacklogItems(tasks)).toBe(3);
+  });
+
+  it('excludes decomposed ideas — retired via decomposed_at, they are !isDone yet off the board (the 43-vs-26 badge drift)', () => {
+    const tasks = [
+      item({ id: 'IDEA-1', type: 'idea', stage_position: 1 }),
+      item({ id: 'IDEA-2', type: 'idea', stage_position: 1, decomposed_at: '2026-07-01T00:00:00Z' }),
+    ];
+    expect(countActiveBacklogItems(tasks)).toBe(1);
+  });
+
+  it('excludes PENDING (unapproved) epics/tasks, archived and experiment-sandboxed items, like the board', () => {
+    const tasks = [
+      item({ id: 'TASK-1' }),
+      item({ id: 'TASK-2', approved_at: null }),
+      item({ id: 'TASK-3', archived_at: '2026-07-01T00:00:00Z' }),
+      item({ id: 'TASK-4', experiment_id: 'exp-1' }),
+    ];
+    expect(countActiveBacklogItems(tasks)).toBe(1);
+  });
+
+  it("excludes Won't-do items (terminal position 10, !isDone but retired) and nested epic children", () => {
+    const child = item({ id: 'TASK-C', parent_epic_id: 'EPIC-1' });
+    const tasks = [
+      item({ id: 'EPIC-1', type: 'epic', children: [child], childCount: 1, pendingTasks: 1 }),
+      item({ id: 'TASK-W', stage_position: 10 }),
+      child, // defensive: even if a child leaked to the top-level list it must not count
+    ];
+    expect(countActiveBacklogItems(tasks)).toBe(1);
   });
 });
 
