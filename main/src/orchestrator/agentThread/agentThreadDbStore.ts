@@ -142,6 +142,26 @@ export class AgentThreadDbStore {
       .run(atMs, threadId);
   }
 
+  /**
+   * Read the persisted last-turn timestamp (epoch ms), or null if the thread
+   * has never recorded a turn since migration 078 (or does not exist). Backs
+   * the day-boundary context-retention check — null is treated by the service
+   * as "a new day", so the first turn after upgrade applies the strategy.
+   */
+  getLastTurnAt(threadId: string): number | null {
+    const row = this.db
+      .prepare(`SELECT last_turn_at FROM agent_threads WHERE id = ?`)
+      .get(threadId) as { last_turn_at: number | null } | undefined;
+    return row?.last_turn_at ?? null;
+  }
+
+  /** Stamp the last-turn timestamp (epoch ms). No-op if the thread is gone. */
+  setLastTurnAt(threadId: string, atMs: number): void {
+    this.db
+      .prepare(`UPDATE agent_threads SET last_turn_at = ? WHERE id = ?`)
+      .run(atMs, threadId);
+  }
+
   private toThread(row: ThreadRow): AgentThread {
     return {
       id: row.id,

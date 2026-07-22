@@ -20,6 +20,11 @@ const MIGRATION =
   readFileSync(
     join(__dirname, '..', '..', 'database', 'migrations', '076_agent_thread_last_digest.sql'),
     'utf-8',
+  ) +
+  '\n' +
+  readFileSync(
+    join(__dirname, '..', '..', 'database', 'migrations', '078_agent_thread_last_turn.sql'),
+    'utf-8',
   );
 
 function buildDb(): Database.Database {
@@ -108,6 +113,23 @@ describe('AgentThreadDbStore', () => {
       // null restores/clears it — the rollback path when a recap send fails.
       store.setLastDigestAt('thread-1', null);
       expect(store.getLastDigestAt('thread-1')).toBeNull();
+    });
+
+    it('last_turn_at defaults to null and round-trips through set/get (migration 078)', () => {
+      const store = new AgentThreadDbStore(dbAdapter(db));
+      store.createThread({ id: 'thread-1' });
+
+      // No turn recorded since the column shipped → null ("new day" to the
+      // service). A missing thread also reads null (no row).
+      expect(store.getLastTurnAt('thread-1')).toBeNull();
+      expect(store.getLastTurnAt('missing')).toBeNull();
+
+      store.setLastTurnAt('thread-1', 1_700_000_000_000);
+      expect(store.getLastTurnAt('thread-1')).toBe(1_700_000_000_000);
+
+      // A later stamp overwrites — the column always reflects the newest turn.
+      store.setLastTurnAt('thread-1', 1_700_000_500_000);
+      expect(store.getLastTurnAt('thread-1')).toBe(1_700_000_500_000);
     });
   });
 

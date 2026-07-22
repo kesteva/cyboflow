@@ -1,0 +1,11 @@
+-- Migration 078: persist the global-agent last-turn timestamp.
+--
+-- Backs the assistant's day-boundary context-retention strategy
+-- (assistantContextRetention: 'clear-daily' | 'compact-daily' |
+-- 'auto-compact'). AgentThreadService stamps this column (epoch
+-- milliseconds) on every turn — human, chip, or auto-digest — and, on the
+-- FIRST turn of a new local calendar day, applies the configured strategy
+-- before the turn (drop the resume id / fire a /compact turn / nothing).
+-- NULL = no turn recorded since this column shipped, which is treated as a
+-- new day so the first turn after upgrade applies the strategy.
+ALTER TABLE agent_threads ADD COLUMN last_turn_at INTEGER;
