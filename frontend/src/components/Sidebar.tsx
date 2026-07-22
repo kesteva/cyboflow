@@ -89,7 +89,7 @@ export const Sidebar = memo(function Sidebar({
   const onboardingStep = useOnboardingStore((state) => state.step);
   const showResumeSetup =
     onboardingHydrated && (onboardingStatus === 'skipped' || onboardingStatus === 'pending');
-  const [settingsInitialTab, setSettingsInitialTab] = useState<'general' | 'ai' | 'integrations' | 'notifications' | 'updates'>('general');
+  const [settingsInitialTab, setSettingsInitialTab] = useState<'general' | 'ai' | 'assistant' | 'integrations' | 'notifications' | 'updates'>('general');
   const demoModeEnabled = useConfigStore((state) => state.config?.demoMode ?? false);
   const [showStatusGuide, setShowStatusGuide] = useState(false);
   const [version, setVersion] = useState<string>('');

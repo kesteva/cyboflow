@@ -41,7 +41,7 @@ interface SettingsProps {
   isOpen: boolean;
   onClose: () => void;
   /** Tab to show when the dialog opens (defaults to 'general'). */
-  initialTab?: 'general' | 'ai' | 'integrations' | 'notifications' | 'updates';
+  initialTab?: 'general' | 'ai' | 'assistant' | 'integrations' | 'notifications' | 'updates';
 }
 
 export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
@@ -123,7 +123,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'general' | 'ai' | 'integrations' | 'notifications' | 'updates'>(initialTab ?? 'general');
+  const [activeTab, setActiveTab] = useState<'general' | 'ai' | 'assistant' | 'integrations' | 'notifications' | 'updates'>(initialTab ?? 'general');
   const { updateSettings } = useNotifications();
   const { theme, setTheme } = useTheme();
   const { fetchConfig: refreshConfigStore } = useConfigStore();
@@ -342,6 +342,16 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
             }`}
           >
             AI
+          </button>
+          <button
+            onClick={() => setActiveTab('assistant')}
+            className={`px-4 py-3 text-sm font-medium transition-colors ${
+              activeTab === 'assistant'
+                ? 'text-interactive border-b-2 border-interactive bg-interactive/5'
+                : 'text-text-tertiary hover:text-text-primary hover:bg-surface-hover'
+            }`}
+          >
+            Assistant
           </button>
           <button
             onClick={() => setActiveTab('integrations')}
@@ -659,44 +669,6 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                 <p className="text-xs text-text-tertiary mt-1">
                   When enabled, commits made through Cyboflow will include a footer crediting Cyboflow. This helps others know you're using Cyboflow for AI-powered development.
                 </p>
-              </SettingsSection>
-
-              <SettingsSection
-                title="Assistant"
-                description="The cyboflow assistant in the rail. Unset uses the app default model."
-                icon={<Bot className="w-4 h-4" />}
-              >
-                <Checkbox
-                  label="Enable assistant"
-                  checked={assistantEnabled}
-                  onChange={(e) => setAssistantEnabled(e.target.checked)}
-                />
-                <p className="text-xs text-text-tertiary mt-1 mb-3">
-                  When off, the assistant rail is hidden and uses no tokens.
-                </p>
-                <div className={!assistantEnabled ? 'opacity-50 pointer-events-none' : undefined}>
-                  <ModelSelector
-                    id="assistant-model"
-                    label=""
-                    value={assistantModel}
-                    onChange={setAssistantModel}
-                    allowDefaultOption={{ label: 'App default' }}
-                  />
-                  <div className="mt-3">
-                    <label className="block text-xs font-medium text-text-secondary mb-1">
-                      Folder access
-                    </label>
-                    <Textarea
-                      label=""
-                      value={assistantFolderPathsText}
-                      onChange={(e) => setAssistantFolderPathsText(e.target.value)}
-                      placeholder="/path/to/extra/folder"
-                      rows={3}
-                      fullWidth
-                      helperText="Extra folders the assistant may read (one per line). Your project folders are always readable. Secret files (.env, keys) are always denied."
-                    />
-                  </div>
-                </div>
               </SettingsSection>
 
               <SettingsSection
@@ -1049,6 +1021,65 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
           </form>
         )}
 
+        {activeTab === 'assistant' && (
+          <form id="settings-form" onSubmit={handleSubmit} className="space-y-6">
+            <CollapsibleCard
+              title="Assistant"
+              subtitle="The cyboflow assistant in the rail"
+              icon={<Bot className="w-5 h-5" />}
+              defaultExpanded={true}
+            >
+              <SettingsSection
+                title="Assistant"
+                description="The cyboflow assistant in the rail. Unset uses the app default model."
+                icon={<Bot className="w-4 h-4" />}
+              >
+                <Checkbox
+                  label="Enable assistant"
+                  checked={assistantEnabled}
+                  onChange={(e) => setAssistantEnabled(e.target.checked)}
+                />
+                <p className="text-xs text-text-tertiary mt-1 mb-3">
+                  When off, the assistant rail is hidden and uses no tokens.
+                </p>
+                <div className={!assistantEnabled ? 'opacity-50 pointer-events-none' : undefined}>
+                  <ModelSelector
+                    id="assistant-model"
+                    label=""
+                    value={assistantModel}
+                    onChange={setAssistantModel}
+                    allowDefaultOption={{ label: 'App default' }}
+                  />
+                </div>
+              </SettingsSection>
+
+              <SettingsSection
+                title="Folder Access"
+                description="Extra folders the assistant may read"
+                icon={<FolderOpen className="w-4 h-4" />}
+              >
+                <div className={!assistantEnabled ? 'opacity-50 pointer-events-none' : undefined}>
+                  <Textarea
+                    label=""
+                    value={assistantFolderPathsText}
+                    onChange={(e) => setAssistantFolderPathsText(e.target.value)}
+                    placeholder="/path/to/extra/folder"
+                    rows={3}
+                    fullWidth
+                    helperText="Extra folders the assistant may read (one per line). Your project folders are always readable. Secret files (.env, keys) are always denied."
+                  />
+                </div>
+              </SettingsSection>
+            </CollapsibleCard>
+
+            {error && (
+              <div className="text-status-error text-sm bg-status-error/10 border border-status-error/30 rounded-lg p-4">
+                {error}
+              </div>
+            )}
+          </form>
+        )}
+
         {activeTab === 'integrations' && (
           <IntegrationsSettings />
         )}
@@ -1068,7 +1099,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       </ModalBody>
 
       {/* Footer */}
-      {(activeTab === 'general' || activeTab === 'ai' || activeTab === 'notifications') && (
+      {(activeTab === 'general' || activeTab === 'ai' || activeTab === 'assistant' || activeTab === 'notifications') && (
         <ModalFooter>
           <Button
             type="button"
@@ -1079,8 +1110,8 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
             Cancel
           </Button>
           <Button
-            type={activeTab === 'general' || activeTab === 'ai' ? 'submit' : 'button'}
-            form={activeTab === 'general' || activeTab === 'ai' ? 'settings-form' : undefined}
+            type={activeTab === 'general' || activeTab === 'ai' || activeTab === 'assistant' ? 'submit' : 'button'}
+            form={activeTab === 'general' || activeTab === 'ai' || activeTab === 'assistant' ? 'settings-form' : undefined}
             onClick={activeTab === 'notifications' ? (e) => handleSubmit(e as React.FormEvent) : undefined}
             disabled={isSubmitting}
             loading={isSubmitting}
