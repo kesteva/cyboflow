@@ -1,0 +1,17 @@
+-- Migration 079: soft-archive the `workflows` table (mirrors migration 024's
+-- entity `archived_at` pattern onto workflow flows).
+--
+-- Nullable TEXT stamp: NULL = active, an ISO timestamp = archived. Archiving a
+-- flow does NOT delete it, cascade to `workflow_runs` / `workflow_revisions`,
+-- or affect Insights history — it is a single UPDATE that hides the row from
+-- the default gallery view (WorkflowRegistry.listByProject's includeArchived
+-- flag / the tRPC workflows.list router's default-hide policy).
+--
+-- NOTE: No `IF NOT EXISTS` on the ALTER — SQLite ALTER TABLE does not support
+-- it. Re-running this file fails on this statement with 'duplicate column
+-- name: archived_at', which runFileBasedMigrations() treats as the
+-- idempotency signal (same mechanism as 013/017/018/024).
+--
+-- NOTE: No explicit BEGIN/COMMIT here — runFileBasedMigrations() in
+-- database.ts wraps every file in a this.transaction(...) call.
+ALTER TABLE workflows ADD COLUMN archived_at TEXT;

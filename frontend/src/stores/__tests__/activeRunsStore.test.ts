@@ -41,7 +41,7 @@ function makeRun(overrides: Partial<Run>): Run {
 // (workflowRegistry.listByProject filters `name != '__quick__'`), so the rows
 // resolver never has a name for a quick run — it must match the id suffix.
 const workflows: Wf[] = [
-  { id: 'wf-planner', project_id: 1, name: 'planner', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
+  { id: 'wf-planner', project_id: 1, name: 'planner', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '', archived_at: null },
 ];
 
 describe('buildActiveRunRows', () => {
@@ -262,7 +262,7 @@ vi.mock('../cyboflowStore', () => ({
 }));
 
 const activeWorkflows: Wf[] = [
-  { id: 'wf-planner', project_id: 1, name: 'planner', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
+  { id: 'wf-planner', project_id: 1, name: 'planner', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '', archived_at: null },
 ];
 
 /** A fully-populated run row, matching production shape field-for-field. */

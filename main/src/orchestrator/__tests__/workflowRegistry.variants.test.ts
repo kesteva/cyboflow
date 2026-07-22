@@ -18,7 +18,9 @@ import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 const WF_PLANNER = 'wf-global-planner';
 
 function setupDb(): Database.Database {
-  const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+  // includeWorkflowArchivedAt (migration 078): createVariantFromCurrent calls
+  // WorkflowRegistry.getById, which now SELECTs workflows.archived_at.
+  const db = createTestDb({ includeWorkflowRunTaskColumns: true, includeWorkflowArchivedAt: true });
   db.exec('ALTER TABLE workflow_runs ADD COLUMN spec_hash TEXT');
   db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
   db.exec(`

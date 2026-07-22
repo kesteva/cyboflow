@@ -68,6 +68,7 @@ function workflowRow(over: Partial<WorkflowRow> = {}): WorkflowRow {
     permission_mode: 'default',
     spec_json: '{}',
     created_at: '2026-07-14T00:00:00.000Z',
+    archived_at: null,
     ...over,
   };
 }

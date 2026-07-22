@@ -79,6 +79,7 @@ function ctxFor(runId: string): ProgrammaticRunContext {
     permission_mode: 'default',
     spec_json: '{}',
     created_at: 'now',
+    archived_at: null,
   };
   const run: WorkflowRunRow = {
     id: runId,
@@ -189,6 +190,7 @@ function fanOutCtx(runId: string, specJson: string, batchId: string | null): Pro
     permission_mode: 'default',
     spec_json: specJson,
     created_at: 'now',
+    archived_at: null,
   };
   const run: WorkflowRunRow = {
     id: runId,

@@ -29,6 +29,7 @@ function ctxFor(def: WorkflowDefinition, opts?: { batchId?: string | null }): Pr
     permission_mode: 'default',
     spec_json: JSON.stringify(def),
     created_at: 'now',
+    archived_at: null,
   };
   const run: WorkflowRunRow = {
     id: 'run-1',

@@ -473,7 +473,7 @@ describe('WorkflowPicker — Start Run double-submit guard', () => {
     // run first, leaving a planner/ship/sprint-only list here, so Start Run
     // would open a pre-launch modal instead of firing runs.start (0 calls).
     mockWorkflowsList.mockResolvedValue([
-      { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
+      { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '', archived_at: null },
     ]);
   });
 
@@ -500,7 +500,7 @@ describe('WorkflowPicker — agent runtime selector (IDEA-013 / TASK-812)', () =
     // double-submit guard's beforeEach for why (shuffle-order leakage from the
     // gated describes' shared-mock re-pointing).
     mockWorkflowsList.mockResolvedValue([
-      { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
+      { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '', archived_at: null },
     ]);
   });
 
@@ -673,7 +673,7 @@ describe('WorkflowPicker — agent permission selector (per-run override)', () =
     // model: runs.start({ taskIds })) — so neither would fire runs.start
     // synchronously on click.
     mockWorkflowsList.mockResolvedValue([
-      { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
+      { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '', archived_at: null },
     ]);
   });
 
@@ -790,7 +790,7 @@ describe('WorkflowPicker — Planner idea-selection gate (migration 017)', () =>
     mockRunStart.mockClear();
     // Override the list to a single Planner flow so "Start Run" hits the gate.
     mockWorkflowsList.mockResolvedValue([
-      { id: 'wf-planner', project_id: 1, name: 'planner', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
+      { id: 'wf-planner', project_id: 1, name: 'planner', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '', archived_at: null },
     ]);
     mockTasksList.mockResolvedValue([]);
   });
@@ -952,7 +952,7 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
     // Planner describe leaves the list mock pointed at a planner row, so re-point
     // it here.
     mockWorkflowsList.mockResolvedValue([
-      { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
+      { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '', archived_at: null },
     ]);
   });
 
@@ -1066,7 +1066,7 @@ describe('WorkflowPicker — Ship idea-selection gate (feat/ship-workflow)', () 
     // like the planner (NOT the sprint batch picker) — the executable task subset
     // is chosen later, at the in-run approve-plan gate.
     mockWorkflowsList.mockResolvedValue([
-      { id: 'wf-ship', project_id: 1, name: 'ship', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
+      { id: 'wf-ship', project_id: 1, name: 'ship', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '', archived_at: null },
     ]);
     mockTasksList.mockResolvedValue([]);
   });
@@ -1133,7 +1133,7 @@ describe('WorkflowPicker — Sprint parallel-batch gate (feat/parallel-sprint)',
     // A single Sprint flow so "Start Run" opens the batch picker (not the direct
     // launch path or the Planner idea gate).
     mockWorkflowsList.mockResolvedValue([
-      { id: 'wf-sprint', project_id: 1, name: 'sprint', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
+      { id: 'wf-sprint', project_id: 1, name: 'sprint', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '', archived_at: null },
     ]);
     // One eligible task so the picker's Launch button can enable.
     mockTasksList.mockResolvedValue([

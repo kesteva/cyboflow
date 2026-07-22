@@ -50,6 +50,7 @@ const SEED_ROW: WorkflowRow = {
   permission_mode: 'default',
   spec_json: '{}',
   created_at: '',
+  archived_at: null,
 };
 
 const NEW_CUSTOM_ROW: WorkflowRow = {
@@ -60,6 +61,7 @@ const NEW_CUSTOM_ROW: WorkflowRow = {
   permission_mode: 'default',
   spec_json: JSON.stringify(SEED_DEFINITION),
   created_at: '',
+  archived_at: null,
 };
 
 /** A project custom agent — must surface in the step inspector's agent picker. */

@@ -63,6 +63,9 @@ function createWorkflowTestDb(): Database.Database {
   // REGISTRY_SCHEMA — same convention as workflowRegistry.test.ts (the fixture
   // stays a frozen subset; tests layer what the code under test writes).
   db.exec('ALTER TABLE workflow_runs ADD COLUMN spec_hash TEXT');
+  // Migration 078: getById/listByProject/archiveWorkflow/unarchiveWorkflow now
+  // SELECT/UPDATE workflows.archived_at.
+  db.exec('ALTER TABLE workflows ADD COLUMN archived_at TEXT');
   db.exec(`
     CREATE TABLE workflow_revisions (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -207,6 +210,47 @@ describe('cyboflow.workflows.list', () => {
     ).rejects.toSatisfy(
       (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
     );
+  });
+
+  // -------------------------------------------------------------------------
+  // (f) includeArchived default-hide policy (migration 078)
+  // -------------------------------------------------------------------------
+  it('(f) hides an archived row by default (includeArchived omitted)', async () => {
+    const rawDb = createWorkflowTestDb();
+    const adapter = dbAdapter(rawDb);
+    const registry = new WorkflowRegistry(adapter, silentLogger);
+
+    rawDb
+      .prepare(
+        `INSERT INTO workflows (id, project_id, name, spec_json, workflow_path, permission_mode)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run('wf-1-custom-arch01', 1, 'Archived Custom', JSON.stringify(makeDefinition('archived-custom')), null, 'default');
+    registry.archiveWorkflow('wf-1-custom-arch01');
+
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+    const result = await caller.cyboflow.workflows.list({ projectId: 1 });
+
+    expect(result.map((r) => r.id)).not.toContain('wf-1-custom-arch01');
+  });
+
+  it('(f) returns an archived row when includeArchived: true', async () => {
+    const rawDb = createWorkflowTestDb();
+    const adapter = dbAdapter(rawDb);
+    const registry = new WorkflowRegistry(adapter, silentLogger);
+
+    rawDb
+      .prepare(
+        `INSERT INTO workflows (id, project_id, name, spec_json, workflow_path, permission_mode)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run('wf-1-custom-arch02', 1, 'Archived Custom 2', JSON.stringify(makeDefinition('archived-custom-2')), null, 'default');
+    registry.archiveWorkflow('wf-1-custom-arch02');
+
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+    const result = await caller.cyboflow.workflows.list({ projectId: 1, includeArchived: true });
+
+    expect(result.map((r) => r.id)).toContain('wf-1-custom-arch02');
   });
 });
 
@@ -677,6 +721,114 @@ describe('cyboflow.workflows.delete', () => {
     const caller = appRouter.createCaller(createContext());
     await expect(
       caller.cyboflow.workflows.delete({ workflowId: 'any' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED');
+  });
+});
+
+describe('cyboflow.workflows.archive', () => {
+  it('archives a custom workflow (even WITH run history) and returns { ok: true }', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    insertWorkflow(rawDb, 'wf-1-custom-arch01', 1, 'Archivable', JSON.stringify(makeDefinition('archivable')));
+    // Run history present — unlike delete, archive must still succeed (no CONFLICT branch).
+    rawDb
+      .prepare('INSERT INTO workflow_runs (id, workflow_id, project_id) VALUES (?, ?, ?)')
+      .run('run-arch-01', 'wf-1-custom-arch01', 1);
+
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+    const result = await caller.cyboflow.workflows.archive({ workflowId: 'wf-1-custom-arch01' });
+    expect(result).toEqual({ ok: true });
+
+    const row = registry.getById('wf-1-custom-arch01');
+    expect(row!.archived_at).not.toBeNull();
+
+    // Run history is untouched.
+    interface CountRow { count: number }
+    const { count } = rawDb
+      .prepare('SELECT COUNT(*) AS count FROM workflow_runs WHERE id = ?')
+      .get('run-arch-01') as CountRow;
+    expect(count).toBe(1);
+  });
+
+  it('maps a missing workflow id to NOT_FOUND', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+
+    await expect(
+      caller.cyboflow.workflows.archive({ workflowId: 'nope' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND');
+  });
+
+  it('maps a reserved GLOBAL built-in to BAD_REQUEST (no CONFLICT branch exists)', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    rawDb
+      .prepare(
+        `INSERT INTO workflows (id, project_id, name, spec_json, workflow_path, permission_mode)
+         VALUES ('wf-global-planner', NULL, 'planner', '{}', NULL, 'default')`,
+      )
+      .run();
+
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+    await expect(
+      caller.cyboflow.workflows.archive({ workflowId: 'wf-global-planner' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
+  });
+
+  it('throws PRECONDITION_FAILED when workflowRegistry is not wired', async () => {
+    const caller = appRouter.createCaller(createContext());
+    await expect(
+      caller.cyboflow.workflows.archive({ workflowId: 'any' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED');
+  });
+});
+
+describe('cyboflow.workflows.unarchive', () => {
+  it('reverses archive, clearing archived_at back to NULL, and returns { ok: true }', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    insertWorkflow(rawDb, 'wf-1-custom-unarch01', 1, 'Reversible', JSON.stringify(makeDefinition('reversible')));
+    registry.archiveWorkflow('wf-1-custom-unarch01');
+    expect(registry.getById('wf-1-custom-unarch01')!.archived_at).not.toBeNull();
+
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+    const result = await caller.cyboflow.workflows.unarchive({ workflowId: 'wf-1-custom-unarch01' });
+    expect(result).toEqual({ ok: true });
+
+    expect(registry.getById('wf-1-custom-unarch01')!.archived_at).toBeNull();
+  });
+
+  it('maps a missing workflow id to NOT_FOUND', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+
+    await expect(
+      caller.cyboflow.workflows.unarchive({ workflowId: 'nope' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND');
+  });
+
+  it('maps a reserved GLOBAL built-in to BAD_REQUEST (no CONFLICT branch exists)', async () => {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    rawDb
+      .prepare(
+        `INSERT INTO workflows (id, project_id, name, spec_json, workflow_path, permission_mode)
+         VALUES ('wf-global-planner', NULL, 'planner', '{}', NULL, 'default')`,
+      )
+      .run();
+
+    const caller = appRouter.createCaller(createContext({ workflowRegistry: registry }));
+    await expect(
+      caller.cyboflow.workflows.unarchive({ workflowId: 'wf-global-planner' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
+  });
+
+  it('throws PRECONDITION_FAILED when workflowRegistry is not wired', async () => {
+    const caller = appRouter.createCaller(createContext());
+    await expect(
+      caller.cyboflow.workflows.unarchive({ workflowId: 'any' }),
     ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED');
   });
 });

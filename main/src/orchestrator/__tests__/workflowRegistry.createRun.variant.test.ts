@@ -21,7 +21,9 @@ const SESSION = 'sess-1';
 const VARIANT_SPEC = '{"id":"variant-graph","phases":[]}';
 
 function setupDb(): Database.Database {
-  const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+  // includeWorkflowArchivedAt (migration 078): createRun calls
+  // WorkflowRegistry.getById, which now SELECTs workflows.archived_at.
+  const db = createTestDb({ includeWorkflowRunTaskColumns: true, includeWorkflowArchivedAt: true });
   db.exec("ALTER TABLE workflow_runs ADD COLUMN substrate TEXT NOT NULL DEFAULT 'sdk'");
   db.exec('ALTER TABLE workflow_runs ADD COLUMN spec_hash TEXT');
   db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');

@@ -188,6 +188,7 @@ const CUSTOM_WORKFLOW_ROW: WorkflowRow = {
   spec_json: '{}',
   permission_mode: 'default',
   created_at: '',
+  archived_at: null,
 };
 /** The Sprint built-in row (batch-gated). */
 const SPRINT_WORKFLOW_ROW: WorkflowRow = {
@@ -198,6 +199,7 @@ const SPRINT_WORKFLOW_ROW: WorkflowRow = {
   spec_json: '{}',
   permission_mode: 'default',
   created_at: '',
+  archived_at: null,
 };
 /** The Planner built-in row (idea-gated, multi-select-eligible — IDEA-009). */
 const PLANNER_WORKFLOW_ROW: WorkflowRow = {
@@ -208,6 +210,7 @@ const PLANNER_WORKFLOW_ROW: WorkflowRow = {
   spec_json: '{}',
   permission_mode: 'default',
   created_at: '',
+  archived_at: null,
 };
 /** The Ship built-in row (idea-gated, like the planner). */
 const SHIP_WORKFLOW_ROW: WorkflowRow = {
@@ -218,6 +221,7 @@ const SHIP_WORKFLOW_ROW: WorkflowRow = {
   spec_json: '{}',
   permission_mode: 'default',
   created_at: '',
+  archived_at: null,
 };
 /** The Compound built-in row (the Insights CTA preselect target). */
 const COMPOUND_WORKFLOW_ROW: WorkflowRow = {
@@ -228,6 +232,7 @@ const COMPOUND_WORKFLOW_ROW: WorkflowRow = {
   spec_json: '{}',
   permission_mode: 'default',
   created_at: '',
+  archived_at: null,
 };
 
 /** Render the wizard pinned to project 1 with quick offered, and wait for load. */

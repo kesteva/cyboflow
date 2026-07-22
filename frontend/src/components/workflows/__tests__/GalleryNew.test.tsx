@@ -39,6 +39,7 @@ function row(id: string, name: string): WorkflowRow {
     permission_mode: 'acceptEdits',
     spec_json: '{}',
     created_at: '2026-06-17T00:00:00.000Z',
+    archived_at: null,
   };
 }
 

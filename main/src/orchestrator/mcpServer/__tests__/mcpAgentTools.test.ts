@@ -99,6 +99,8 @@ function buildDb(): Database.Database {
   apply('057_entity_sort_order.sql');
   apply('059_entity_category.sql');
   apply('074_agent_threads.sql');
+  // readWorkflowRow / handleAgentWorkflows now SELECT workflows.archived_at.
+  apply('079_workflow_archived_at.sql');
 
   // sessions predates the numbered migrations (database.ts inline bootstrap) —
   // hand-rolled with only the columns cyboflow_overview's SELECT touches.

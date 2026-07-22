@@ -323,7 +323,7 @@ export class WorkflowRegistry {
    */
   getById(workflowId: string): WorkflowRow | null {
     const stmt = this.db.prepare(
-      'SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at FROM workflows WHERE id = ?',
+      'SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at, archived_at FROM workflows WHERE id = ?',
     );
     const row = stmt.get(workflowId) as WorkflowRow | undefined;
     return row ?? null;
@@ -824,6 +824,65 @@ export class WorkflowRegistry {
   }
 
   /**
+   * Soft-archive a workflow row (migration 078, mirrors the entity
+   * `archived_at` pattern from migration 024): stamps `archived_at` and
+   * leaves everything else untouched — NO cascade to `workflow_runs` /
+   * `workflow_revisions` / Insights history, and (unlike `deleteWorkflow`)
+   * SUCCEEDS even when the workflow has run history.
+   *
+   * Guards (each throws a distinguishable Error the router maps to a
+   * TRPCError), mirroring `deleteWorkflow`'s reserved-built-in check but
+   * WITHOUT its run-history guard:
+   *   - Missing row → message contains 'not found' (→ NOT_FOUND).
+   *   - A GLOBAL built-in (`project_id IS NULL` AND a `CyboflowWorkflowName`)
+   *     or the `__quick__` sentinel → message contains 'reserved'
+   *     (→ BAD_REQUEST): both re-seed on the next reconcile / quick session,
+   *     so archiving them is futile.
+   */
+  archiveWorkflow(workflowId: string): void {
+    const row = this.getById(workflowId);
+    if (!row) {
+      throw new Error(`WorkflowRegistry.archiveWorkflow: workflow ${workflowId} not found`);
+    }
+    if (
+      (row.project_id === null && isCyboflowWorkflowName(row.name)) ||
+      row.name === QUICK_WORKFLOW_NAME
+    ) {
+      throw new Error(
+        `WorkflowRegistry.archiveWorkflow: '${row.name}' is a reserved built-in and cannot be archived`,
+      );
+    }
+    const tx = this.db.transaction(() => {
+      this.db.prepare("UPDATE workflows SET archived_at = datetime('now') WHERE id = ?").run(workflowId);
+    });
+    tx();
+  }
+
+  /**
+   * Reverse `archiveWorkflow`: clears `archived_at` back to NULL. Same guards
+   * as `archiveWorkflow` (missing row / reserved built-in); unarchiving a
+   * never-archived row is a harmless no-op.
+   */
+  unarchiveWorkflow(workflowId: string): void {
+    const row = this.getById(workflowId);
+    if (!row) {
+      throw new Error(`WorkflowRegistry.unarchiveWorkflow: workflow ${workflowId} not found`);
+    }
+    if (
+      (row.project_id === null && isCyboflowWorkflowName(row.name)) ||
+      row.name === QUICK_WORKFLOW_NAME
+    ) {
+      throw new Error(
+        `WorkflowRegistry.unarchiveWorkflow: '${row.name}' is a reserved built-in and cannot be unarchived`,
+      );
+    }
+    const tx = this.db.transaction(() => {
+      this.db.prepare('UPDATE workflows SET archived_at = NULL WHERE id = ?').run(workflowId);
+    });
+    tx();
+  }
+
+  /**
    * List the workflows visible to a project: the GLOBAL set
    * (`project_id IS NULL` — built-ins + global customs, migration 030) UNIONed
    * with that project's own scoped rows (`project_id = ?` — project-copy customs
@@ -836,20 +895,28 @@ export class WorkflowRegistry {
    * resolve to a usable definition (empty/unknown spec) — e.g. foreign internal
    * flows leaked via the shared dev DB — so the picker never shows dead cards.
    *
+   * `includeArchived` (migration 078) defaults to `true` — the registry itself
+   * stays behavior-preserving for every existing caller that omits the
+   * parameter (byte-identical to pre-archive behavior). The default-HIDE
+   * policy lives one layer up, at the tRPC `workflows.list` router, which
+   * passes `includeArchived: false` unless the caller opts in. Pass `false`
+   * here to additionally exclude archived rows (`archived_at IS NOT NULL`).
+   *
    * Note: the global rows returned here repeat across every project's call, so
    * the renderer (workflowsStore) dedupes the cross-project fan-out by `row.id`.
    */
-  listByProject(projectId: number): WorkflowRow[] {
+  listByProject(projectId: number, includeArchived = true): WorkflowRow[] {
     // Exclude the __quick__ sentinel AND any dropped legacy built-ins
     // (soloflow/prune) that linger in a pre-refactor DB — they must
     // never appear in the user-facing picker. Filtered, not deleted, to
     // preserve the workflow_runs FK for historical runs.
     const excluded = [QUICK_WORKFLOW_NAME, ...LEGACY_DROPPED_WORKFLOW_NAMES];
     const placeholders = excluded.map(() => '?').join(', ');
+    const archivedClause = includeArchived ? '' : ' AND archived_at IS NULL';
     const stmt = this.db.prepare(
-      `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at
+      `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at, archived_at
        FROM workflows
-       WHERE (project_id = ? OR project_id IS NULL) AND name NOT IN (${placeholders})
+       WHERE (project_id = ? OR project_id IS NULL) AND name NOT IN (${placeholders})${archivedClause}
        ORDER BY name`,
     );
     const rows = stmt.all(projectId, ...excluded) as WorkflowRow[];

@@ -43,7 +43,10 @@ function makeConfig(substrate: CliSubstrate = 'sdk', mode: PermissionMode = 'def
 
 /** Layer the createRun-required columns + sessions table onto the gate fixture. */
 function buildDb(): Database.Database {
-  const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+  // includeWorkflowArchivedAt (migration 078): createRun (via ensureQuickWorkflow
+  // + createRun) calls WorkflowRegistry.getById, which now SELECTs
+  // workflows.archived_at.
+  const db = createTestDb({ includeWorkflowRunTaskColumns: true, includeWorkflowArchivedAt: true });
   db.exec(
     "ALTER TABLE workflow_runs ADD COLUMN substrate TEXT NOT NULL DEFAULT 'sdk' CHECK (substrate IN ('sdk','interactive'))",
   );

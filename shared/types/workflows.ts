@@ -70,6 +70,15 @@ export interface WorkflowRow {
    */
   spec_json: string;
   created_at: string;
+  /**
+   * Soft-archive stamp (migration 078, mirrors the entity `archived_at`
+   * pattern from migration 024): NULL = active, an ISO timestamp = archived.
+   * Archiving is a single UPDATE — no cascade to `workflow_runs` /
+   * `workflow_revisions` / Insights history. Required (not optional) so every
+   * `WorkflowRow`-producing SELECT must project it explicitly — an omitted
+   * column would otherwise silently resolve to `undefined` at runtime.
+   */
+  archived_at: string | null;
 }
 
 export interface WorkflowRunRow {

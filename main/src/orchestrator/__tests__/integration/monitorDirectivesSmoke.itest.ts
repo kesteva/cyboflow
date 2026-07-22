@@ -141,6 +141,7 @@ function registryFor(runId: string, workflowId: string, specJson: string): Workf
     permission_mode: 'default',
     spec_json: specJson,
     created_at: 'now',
+    archived_at: null,
   };
   return { getRunById: () => run, getById: () => workflow };
 }

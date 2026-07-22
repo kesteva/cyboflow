@@ -53,6 +53,9 @@ function createAgentsTestDb(): Database.Database {
   db.pragma('foreign_keys = ON');
   db.exec(REGISTRY_SCHEMA);
   db.exec('ALTER TABLE workflow_runs ADD COLUMN spec_hash TEXT');
+  // Migration 078: WorkflowRegistry.listByProject (called by computeProjectUsage)
+  // now SELECTs workflows.archived_at.
+  db.exec('ALTER TABLE workflows ADD COLUMN archived_at TEXT');
   db.exec(`
     CREATE TABLE workflow_revisions (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,

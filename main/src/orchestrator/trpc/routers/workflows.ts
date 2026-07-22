@@ -19,9 +19,23 @@ import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows
 import type { WorkflowRow, WorkflowDefinition } from '../../../../../shared/types/workflows';
 
 export const workflowsRouter = router({
-  /** List all workflows for a project, reconciling the in-repo built-ins first. */
+  /**
+   * List all workflows for a project, reconciling the in-repo built-ins first.
+   *
+   * `includeArchived` (migration 078) defaults to `false` here — the
+   * default-HIDE policy for archived flows lives at THIS layer: the registry's
+   * own `listByProject` defaults to `includeArchived=true` so every other
+   * caller (MCP, index.ts wrapper) stays behavior-preserving. Pass
+   * `includeArchived: true` to also see archived rows (e.g. an "Archived"
+   * gallery toggle).
+   */
   list: protectedProcedure
-    .input(z.object({ projectId: z.number().int().positive() }))
+    .input(
+      z.object({
+        projectId: z.number().int().positive(),
+        includeArchived: z.boolean().optional().default(false),
+      }),
+    )
     .query(async ({ ctx, input }): Promise<WorkflowRow[]> => {
       if (!ctx.workflowRegistry) {
         throw new TRPCError({
@@ -38,7 +52,7 @@ export const workflowsRouter = router({
       // are filtered out by listByProject. The global rows surface in this
       // project's list via the union in listByProject.
       ctx.workflowRegistry.ensureGlobalBuiltIns(buildBuiltInWorkflows());
-      return ctx.workflowRegistry.listByProject(input.projectId);
+      return ctx.workflowRegistry.listByProject(input.projectId, input.includeArchived);
     }),
 
   /** Get a single workflow by ID. */
@@ -215,6 +229,55 @@ export const workflowsRouter = router({
           : message.includes('run history')
             ? 'CONFLICT'
             : 'BAD_REQUEST';
+        throw new TRPCError({ code, message });
+      }
+      return { ok: true };
+    }),
+
+  /**
+   * Soft-archive a workflow (migration 078). Unlike `delete`, this succeeds
+   * even when the flow has run history — there is no CONFLICT branch here.
+   * Maps the registry's distinguishable guard errors:
+   *   - 'not found' → NOT_FOUND
+   *   - otherwise   → BAD_REQUEST (a reserved global built-in / __quick__ sentinel)
+   */
+  archive: protectedProcedure
+    .input(z.object({ workflowId: z.string().min(1) }))
+    .mutation(async ({ ctx, input }): Promise<{ ok: true }> => {
+      if (!ctx.workflowRegistry) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'workflowRegistry not wired into tRPC context',
+        });
+      }
+      try {
+        ctx.workflowRegistry.archiveWorkflow(input.workflowId);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const code = message.includes('not found') ? 'NOT_FOUND' : 'BAD_REQUEST';
+        throw new TRPCError({ code, message });
+      }
+      return { ok: true };
+    }),
+
+  /**
+   * Reverse `archive`. Same error mapping (no CONFLICT branch — there is no
+   * run-history conflict for archive/unarchive).
+   */
+  unarchive: protectedProcedure
+    .input(z.object({ workflowId: z.string().min(1) }))
+    .mutation(async ({ ctx, input }): Promise<{ ok: true }> => {
+      if (!ctx.workflowRegistry) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'workflowRegistry not wired into tRPC context',
+        });
+      }
+      try {
+        ctx.workflowRegistry.unarchiveWorkflow(input.workflowId);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const code = message.includes('not found') ? 'NOT_FOUND' : 'BAD_REQUEST';
         throw new TRPCError({ code, message });
       }
       return { ok: true };

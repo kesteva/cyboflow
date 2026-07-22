@@ -47,7 +47,12 @@ export interface AgentOverrideRouterLike {
  * invariant (no 'better-sqlite3' or fs imports pulled transitively).
  */
 export interface WorkflowRegistryLike {
-  listByProject(projectId: number): WorkflowRow[];
+  /**
+   * `includeArchived` (migration 078) defaults to `true` at the registry —
+   * the default-HIDE policy lives at the tRPC `workflows.list` procedure,
+   * which passes `false` unless the caller opts in.
+   */
+  listByProject(projectId: number, includeArchived?: boolean): WorkflowRow[];
   getById(workflowId: string): WorkflowRow | null;
   seed(projectId: number, descriptors: WorkflowDescriptor[]): void;
   /**
@@ -77,6 +82,14 @@ export interface WorkflowRegistryLike {
    * ('reserved'), or a flow with run history ('run history').
    */
   deleteWorkflow(workflowId: string): void;
+  /**
+   * Soft-archive a workflow row (migration 078). Same reserved-built-in guard
+   * as `deleteWorkflow` ('reserved') plus 'not found' for a missing row —
+   * WITHOUT a run-history guard (archiving succeeds regardless of run history).
+   */
+  archiveWorkflow(workflowId: string): void;
+  /** Reverse `archiveWorkflow`. Same guards; a no-op if never archived. */
+  unarchiveWorkflow(workflowId: string): void;
   // --- Workflow variants (A/B testing, migration 048) ---
   /** List a workflow's variants (newest-first). */
   listVariants(workflowId: string): WorkflowVariantRow[];

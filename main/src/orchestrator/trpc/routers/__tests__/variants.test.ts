@@ -27,6 +27,9 @@ function createVariantsTestDb(): Database.Database {
   // Migration 054 baseline columns (baseline is the champion — in rotation by default).
   db.exec('ALTER TABLE workflows ADD COLUMN baseline_in_rotation INTEGER NOT NULL DEFAULT 1');
   db.exec('ALTER TABLE workflows ADD COLUMN baseline_rotation_weight INTEGER NOT NULL DEFAULT 1');
+  // Migration 078: createVariantFromCurrent calls WorkflowRegistry.getById,
+  // which now SELECTs workflows.archived_at.
+  db.exec('ALTER TABLE workflows ADD COLUMN archived_at TEXT');
   db.exec(`
     CREATE TABLE workflow_variants (
       id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, label TEXT NOT NULL,

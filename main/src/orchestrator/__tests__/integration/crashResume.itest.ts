@@ -155,6 +155,7 @@ function ctxFor(
     permission_mode: 'default',
     spec_json: specJson,
     created_at: 'now',
+    archived_at: null,
   };
   const run: WorkflowRunRow = {
     id: runId,

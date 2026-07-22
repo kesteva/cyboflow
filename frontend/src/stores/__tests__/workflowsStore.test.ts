@@ -76,6 +76,7 @@ function globalRow(id: string, name: string): WorkflowRow {
     permission_mode: 'default',
     spec_json: '{}',
     created_at: '2026-06-01T00:00:00.000Z',
+    archived_at: null,
   };
 }
 
@@ -100,6 +101,7 @@ function projectRow(id: string, name: string, projectId: number): WorkflowRow {
       ],
     }),
     created_at: '2026-06-02T00:00:00.000Z',
+    archived_at: null,
   };
 }
 

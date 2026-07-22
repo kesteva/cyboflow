@@ -1180,7 +1180,12 @@ export interface McpQueryHandlerDeps {
  */
 export interface WorkflowConfigLike {
   getById(workflowId: string): WorkflowRow | null;
-  listByProject(projectId: number): WorkflowRow[];
+  /**
+   * `includeArchived` (migration 078) is optional and defaults to `true` at
+   * the registry — every existing caller here omits it, so behavior is
+   * unchanged (archived rows still surface over MCP for now).
+   */
+  listByProject(projectId: number, includeArchived?: boolean): WorkflowRow[];
   /** Reconcile the in-repo built-ins as global rows (mirrors the tRPC list). */
   ensureGlobalBuiltIns(): void;
   getBaselineRotation(workflowId: string): { inRotation: boolean; weight: number } | null;
@@ -4517,7 +4522,7 @@ export class McpQueryHandler {
   private readWorkflowRow(workflowId: string): WorkflowRow | null {
     const row = this.db
       .prepare(
-        `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at
+        `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at, archived_at
            FROM workflows WHERE id = ?`,
       )
       .get(workflowId) as WorkflowRow | undefined;
@@ -4795,7 +4800,7 @@ export class McpQueryHandler {
     }
     const rows = this.db
       .prepare(
-        `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at
+        `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, created_at, archived_at
            FROM workflows
           WHERE ${clauses.join(' AND ')}
           ORDER BY name`,

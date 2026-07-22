@@ -77,6 +77,18 @@ export interface CreateTestDbOptions {
    * this option twice on the same DB.
    */
   includeWorkflowRunTaskColumns?: boolean;
+  /**
+   * If true, additionally layer migration 078's `archived_at` column onto the
+   * `workflows` table (soft-archive stamp). Additive SQL on top of
+   * GATE_SCHEMA — must NOT mutate GATE_SCHEMA itself or the parity test in
+   * __tests__/orchestratorTestDb.test.ts will drift.
+   *
+   * Tests that exercise WorkflowRegistry.getById / listByProject / createRun /
+   * archiveWorkflow / unarchiveWorkflow (all of which now SELECT this column)
+   * must opt in via this flag. The ALTER statement does NOT use IF NOT EXISTS;
+   * do not pass this option twice on the same DB.
+   */
+  includeWorkflowArchivedAt?: boolean;
 }
 
 /**
@@ -291,6 +303,13 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     addAgentProviderRuntimeColumnsOnce();
     // Migration 075: runs.end stamps rail_dismissed_at on the completed run.
     addRailDismissedColumnOnce();
+  }
+  if (options?.includeWorkflowArchivedAt) {
+    // Migration 078: WorkflowRegistry.getById / listByProject SELECT this
+    // column, and archiveWorkflow / unarchiveWorkflow write it. On the
+    // `workflows` table (not `workflow_runs`), so it is its own top-level
+    // flag rather than folded into includeWorkflowRunTaskColumns / includeSubstrate.
+    db.exec('ALTER TABLE workflows ADD COLUMN archived_at TEXT');
   }
   return db;
 }

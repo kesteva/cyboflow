@@ -153,7 +153,9 @@ describe('WorkflowRegistry', () => {
   beforeEach(() => {
     // getRunById now SELECTs current_step_id + the migration-014 run->task
     // columns; opt the fixture into those columns so the projection resolves.
-    db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    // includeWorkflowArchivedAt (migration 078): getById/listByProject/createRun
+    // now SELECT workflows.archived_at.
+    db = createTestDb({ includeWorkflowRunTaskColumns: true, includeWorkflowArchivedAt: true });
     // createRun also stamps workflow_runs.substrate (IDEA-013 / TASK-806); layer
     // that additive ALTER on top so the in-memory fixture carries the column.
     db.exec(
@@ -2487,6 +2489,127 @@ describe('WorkflowRegistry', () => {
       ).run(JSON.stringify(makeDefinition('planner')));
       registry.deleteWorkflow('wf-1-planner');
       expect(registry.getById('wf-1-planner')).toBeNull();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // archiveWorkflow / unarchiveWorkflow (migration 078 soft-archive)
+  // -------------------------------------------------------------------------
+
+  describe('archiveWorkflow / unarchiveWorkflow', () => {
+    it('archives a workflow WITH run history without throwing or deleting the run', () => {
+      const row = registry.createCustom({
+        projectId: 1,
+        name: 'Has Runs (archivable)',
+        specJson: JSON.stringify(makeDefinition('has-runs-archivable')),
+      });
+      const { runId } = registry.createRun(row.id, undefined, TEST_SESSION_ID);
+
+      expect(() => registry.archiveWorkflow(row.id)).not.toThrow();
+
+      const archived = registry.getById(row.id);
+      expect(archived).not.toBeNull();
+      expect(archived!.archived_at).not.toBeNull();
+
+      // The run row survives untouched.
+      const runRow = db.prepare('SELECT id FROM workflow_runs WHERE id = ?').get(runId);
+      expect(runRow).toBeDefined();
+    });
+
+    it('unarchiveWorkflow clears archived_at back to NULL', () => {
+      const row = registry.createCustom({
+        projectId: 1,
+        name: 'Round Trip',
+        specJson: JSON.stringify(makeDefinition('round-trip')),
+      });
+      registry.archiveWorkflow(row.id);
+      expect(registry.getById(row.id)!.archived_at).not.toBeNull();
+
+      registry.unarchiveWorkflow(row.id);
+      expect(registry.getById(row.id)!.archived_at).toBeNull();
+    });
+
+    it("archiveWorkflow throws 'not found' for an unknown id", () => {
+      expect(() => registry.archiveWorkflow('nope')).toThrow(/not found/i);
+    });
+
+    it("unarchiveWorkflow throws 'not found' for an unknown id", () => {
+      expect(() => registry.unarchiveWorkflow('nope')).toThrow(/not found/i);
+    });
+
+    it("archiveWorkflow refuses ('reserved') a GLOBAL built-in, leaving the row unarchived", async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        registry.ensureGlobalBuiltIns(buildDescriptors(tmpDir));
+        expect(() => registry.archiveWorkflow('wf-global-planner')).toThrow(/reserved/i);
+        expect(registry.getById('wf-global-planner')!.archived_at).toBeNull();
+      });
+    });
+
+    it("unarchiveWorkflow refuses ('reserved') a GLOBAL built-in", async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        registry.ensureGlobalBuiltIns(buildDescriptors(tmpDir));
+        expect(() => registry.unarchiveWorkflow('wf-global-planner')).toThrow(/reserved/i);
+      });
+    });
+
+    it("archiveWorkflow refuses ('reserved') the __quick__ sentinel", () => {
+      const quickId = registry.ensureQuickWorkflow(1);
+      expect(() => registry.archiveWorkflow(quickId)).toThrow(/reserved/i);
+      expect(registry.getById(quickId)!.archived_at).toBeNull();
+    });
+
+    it("unarchiveWorkflow refuses ('reserved') the __quick__ sentinel", () => {
+      const quickId = registry.ensureQuickWorkflow(1);
+      expect(() => registry.unarchiveWorkflow(quickId)).toThrow(/reserved/i);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // listByProject includeArchived filtering (migration 078)
+  // -------------------------------------------------------------------------
+
+  describe('listByProject includeArchived filtering', () => {
+    it('defaults to includeArchived=true — an archived row still appears when the param is omitted', () => {
+      const row = registry.createCustom({
+        projectId: 1,
+        name: 'Archived Flow',
+        specJson: JSON.stringify(makeDefinition('archived-flow')),
+      });
+      registry.archiveWorkflow(row.id);
+
+      const rows = registry.listByProject(1);
+      expect(rows.map((r) => r.id)).toContain(row.id);
+    });
+
+    it('includeArchived=false excludes an archived row (archived_at IS NULL filter)', () => {
+      const active = registry.createCustom({
+        projectId: 1,
+        name: 'Still Active',
+        specJson: JSON.stringify(makeDefinition('still-active')),
+      });
+      const archived = registry.createCustom({
+        projectId: 1,
+        name: 'Now Archived',
+        specJson: JSON.stringify(makeDefinition('now-archived')),
+      });
+      registry.archiveWorkflow(archived.id);
+
+      const rows = registry.listByProject(1, false);
+      const ids = rows.map((r) => r.id);
+      expect(ids).toContain(active.id);
+      expect(ids).not.toContain(archived.id);
+    });
+
+    it('includeArchived=true explicitly includes an archived row', () => {
+      const row = registry.createCustom({
+        projectId: 1,
+        name: 'Explicit Include',
+        specJson: JSON.stringify(makeDefinition('explicit-include')),
+      });
+      registry.archiveWorkflow(row.id);
+
+      const rows = registry.listByProject(1, true);
+      expect(rows.map((r) => r.id)).toContain(row.id);
     });
   });
 });
