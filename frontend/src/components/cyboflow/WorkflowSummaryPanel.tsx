@@ -276,7 +276,11 @@ export function WorkflowSummaryPanel({
   const isProgrammatic = executionModel === 'programmatic';
 
   const displayedCost = useMemo(() => {
-    if (usage === null || !computeCostFromRates || usage.multiModel) {
+    // model === null with multiModel false means the model could not be
+    // resolved at all (e.g. a materialized run whose raw_events were pruned) —
+    // fall back to the durable reported cost rather than rendering an em dash
+    // for a run whose cost is actually known.
+    if (usage === null || !computeCostFromRates || usage.multiModel || usage.model === null) {
       return usage?.costUsd ?? null;
     }
     return computeSessionCostUsd(

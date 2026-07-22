@@ -178,6 +178,18 @@ describe('WorkflowSummaryPanel', () => {
     );
   });
 
+  it('falls back to reported cost when the model is unresolved (pruned raw_events), without the mixed note', async () => {
+    useConfigStore.setState({
+      config: { computeCostFromRates: true } as AppConfig,
+    });
+    // A materialized run whose raw_events were pruned: model null but NOT
+    // multiModel. The durable reported cost must win over an em dash.
+    runUsageQuery.mockResolvedValue({ ...ROLLUP, model: null, multiModel: false });
+    renderPanel();
+    expect(await screen.findByTestId('run-summary-meta')).toHaveTextContent('cost $3.95');
+    expect(screen.queryByTestId('run-summary-mixed-model-cost-note')).not.toBeInTheDocument();
+  });
+
   it('shows an em dash when an enabled single-model recompute has unknown pricing', async () => {
     useConfigStore.setState({
       config: { computeCostFromRates: true } as AppConfig,
