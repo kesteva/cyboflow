@@ -177,7 +177,9 @@ describe('ClaudeCodeManager — terminal turn-error propagation', () => {
         prompt: 'go',
         permissionMode: 'ignore',
       }),
-    ).resolves.toBeUndefined();
+      // Resolves (never rejects); the typed step-output channel (§5.3) resolves
+      // the outcome shape, with resultText null on an errored turn.
+    ).resolves.toEqual({ resultText: null });
   });
 
   // -------------------------------------------------------------------------
@@ -204,7 +206,9 @@ describe('ClaudeCodeManager — terminal turn-error propagation', () => {
         prompt: 'go',
         permissionMode: 'ignore',
       }),
-    ).resolves.toBeUndefined();
+      // Resolves (never rejects); resultText stays null on a fatal is_error
+      // result — terminalError owns the failure path (§5.3).
+    ).resolves.toEqual({ resultText: null });
 
     // The error result still flowed through as output (Session Error stays inline).
     const emittedErrorResults = outputs.filter(
