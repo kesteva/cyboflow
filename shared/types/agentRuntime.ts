@@ -74,3 +74,24 @@ export function claudeRuntimeFromSubstrate(
 export function providerForRuntime(runtime: WorkflowAgentRuntime): AgentProvider {
   return runtime === 'codex-sdk' ? 'codex' : 'claude';
 }
+
+/**
+ * Agent keys that always deploy on the Claude runtime, no matter what a
+ * workflow's `agentConfigs` overlay / project override / variant delta says
+ * (verification-agent redesign §5.4/§5.12). `visual-verify` names the
+ * centrally-deployed verification agent, which needs vision judging over its
+ * own screenshots plus a `VerificationReportV1` structured output — a Codex
+ * model can't be substituted in. Two consumers: the workflow editor
+ * (`AgentEditorForm.tsx` / `WorkflowStepInspector.tsx`) renders "Always runs on
+ * Claude" instead of a runtime select for a key in this set (UI communicates
+ * the invariant); the deploy seam (`resolveStepAgent`) enforces it server-side
+ * by dropping a `runtime: 'codex-sdk'` pin with a logged warning — because
+ * `agentConfigs` can also be written via the MCP workflow-config tools,
+ * bypassing the editor entirely.
+ */
+export const CLAUDE_ONLY_AGENT_KEYS: ReadonlySet<string> = new Set(['visual-verify']);
+
+/** True when `key` must always resolve in the Claude provider namespace. */
+export function isClaudeOnlyAgentKey(key: string): boolean {
+  return CLAUDE_ONLY_AGENT_KEYS.has(key);
+}

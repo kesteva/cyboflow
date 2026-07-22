@@ -150,6 +150,18 @@ export const REQUEST_STATUS: readonly RequestStatus[] = [
 export const VERIFY_PORT_ANY = 'verify:port:any';
 
 /**
+ * One capture viewport — a width/height pair plus an optional human label
+ * (e.g. "mobile" / "desktop"), driving `responsive-multi-viewport` and
+ * `VerificationTaskV1.viewports` (§5.1). Shared shape so a request's inline
+ * viewport array and a composed task's viewport array can never drift.
+ */
+export interface ViewportSpec {
+  width: number;
+  height: number;
+  label?: string;
+}
+
+/**
  * What a lane agent asks for. `intent` is the natural-language acceptance the
  * VLM judge is told to check. `typeOverride` is the agent-declared (highest
  * precedence) type. `url` / `htmlPath` point at the deliverable; `viewports`
@@ -161,7 +173,7 @@ export interface VerificationRequestInput {
   typeOverride?: VerificationType;
   url?: string;
   htmlPath?: string;
-  viewports?: Array<{ width: number; height: number; label?: string }>;
+  viewports?: ViewportSpec[];
   /**
    * The ordered DOM steps for an interactive check (navigate/click/type/wait).
    * Mirrors DeliverableVerifyConfig.interactions — the lane agent may pass them
@@ -253,6 +265,392 @@ export interface VerdictV1 {
   baselineKey?: string;
 }
 
+// ===========================================================================
+// VerificationTaskV1 / VerificationReportV1 — the composed task-verify → agent
+// contract (docs/proposals/verification-agent-redesign.md §5.1/§5.4). task-verify
+// COMPOSES a VerificationTaskV1 on PASS; the centrally-deployed verification
+// agent independently drives it and returns a VerificationReportV1. Both shapes
+// travel as JSON (a markdown fence in the task-verify step output; the agent's
+// `outputFormat: json_schema` result) so each ships a hand-rolled runtime
+// validator here — no external schema lib, `unknown` + narrowing only.
+// ===========================================================================
+
+/**
+ * The composed visual-verification task (§5.1). `behaviors` is the core
+ * payload — the acceptance-criteria-derived steps the verification agent
+ * independently drives and judges — and MAY be an empty array (a degenerate
+ * task built from a bare `intent`, §5.2, has no behaviors). `build`/`serve`
+ * are shell instructions run in the snapshot worktree (§5.5); `target` names a
+ * pre-live deliverable for the degenerate path. `viewports`/`timeoutMs` are
+ * capture/deadline knobs, both optional.
+ */
+export interface VerificationTaskV1 {
+  version: 1;
+  /** Lane attribution (unchanged semantics from VerificationRequestInput.taskRef). */
+  taskRef?: string;
+  /** Replaces the old one-sentence `intent` — a fuller task summary. */
+  summary: string;
+  /** Shell steps, run in the snapshot worktree, in order. */
+  build?: string[];
+  /** Optional long-running serve step. */
+  serve?: {
+    /** May reference `${PORT}`. */
+    cmd: string;
+    readyWhen?: { urlPath?: string; timeoutMs?: number };
+  };
+  /** Pre-live target (degenerate path — no build/serve). */
+  target?: { url?: string; htmlPath?: string };
+  behaviors: Array<{
+    /** Stable within the task, e.g. "b1". */
+    id: string;
+    /** What behavior, in user terms. */
+    description: string;
+    /** How to exercise it (navigate/click/type/…). */
+    steps?: string[];
+    /** What must be observed for PASS. */
+    expected: string;
+  }>;
+  viewports?: ViewportSpec[];
+  /** Capped by scheduler config. */
+  timeoutMs?: number;
+}
+
+/**
+ * The verification agent's structured result (§5.4/§5.9), returned via
+ * `outputFormat: json_schema` and re-validated harness-side (never trusted
+ * verbatim). `behaviors[].id` must echo the task's ids; `outcome: 'pass'` with
+ * any failing behavior is coerced to `'fail'` by {@link normalizeVerificationReportV1}
+ * — the structured verdict, not prose, drives the merge gate.
+ */
+export interface VerificationReportV1 {
+  version: 1;
+  behaviors: Array<{
+    id: string;
+    result: 'pass' | 'fail' | 'not_testable';
+    evidence: { screenshots: string[]; notes: string };
+  }>;
+  screenshots: Array<{ fileName: string; caption: string }>;
+  outcome: 'pass' | 'fail' | 'build_failed' | 'launch_failed';
+  /** Required when outcome is build_/launch_failed; see {@link normalizeVerificationReportV1}. */
+  buildLogExcerpt?: string;
+  /** 0..1; clamped by the normalizer. */
+  confidence: number;
+  /** Maps onto VerdictV1.feedback. */
+  feedback: string;
+  /** Reuses the existing VerdictV1 issue shape. */
+  issues: VerdictV1['issues'];
+}
+
+/** True for a plain, non-array, non-null object — the base narrow every field check below builds on. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** True for a non-empty (post-trim) string. */
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+/** True for a finite number strictly greater than zero (viewport dims, timeouts). */
+function isPositiveFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
+/** True for an array whose every element is a string (an empty array counts). */
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+/**
+ * Strict runtime validator for a `VerificationTaskV1` fence payload (§5.1
+ * contract). Rejects on the FIRST structural problem, naming the offending
+ * path (e.g. `"behaviors[2].expected: expected non-empty string"`) so a
+ * contract-error re-delegation can quote the exact defect. `behaviors` MAY be
+ * an empty array; every other required field (`version`/`summary`/behavior
+ * id·description·expected) must be a non-empty value of the right shape.
+ * Behavior ids must be unique within the task. Unknown extra keys anywhere in
+ * the payload are tolerated (forward compat) — this validator only checks the
+ * fields it knows about.
+ */
+export function parseVerificationTaskV1(
+  value: unknown,
+): { ok: true; task: VerificationTaskV1 } | { ok: false; error: string } {
+  if (!isRecord(value)) return { ok: false, error: 'root: expected an object' };
+  if (value.version !== 1) return { ok: false, error: 'version: expected literal 1' };
+  if (!isNonEmptyString(value.summary)) return { ok: false, error: 'summary: expected non-empty string' };
+  const summary = value.summary;
+
+  let taskRef: string | undefined;
+  if (value.taskRef !== undefined) {
+    if (!isNonEmptyString(value.taskRef)) return { ok: false, error: 'taskRef: expected non-empty string' };
+    taskRef = value.taskRef;
+  }
+
+  let build: string[] | undefined;
+  if (value.build !== undefined) {
+    if (!isStringArray(value.build)) return { ok: false, error: 'build: expected an array of strings' };
+    build = value.build;
+  }
+
+  let serve: VerificationTaskV1['serve'];
+  if (value.serve !== undefined) {
+    if (!isRecord(value.serve)) return { ok: false, error: 'serve: expected an object' };
+    if (!isNonEmptyString(value.serve.cmd)) return { ok: false, error: 'serve.cmd: expected non-empty string' };
+    const cmd = value.serve.cmd;
+    let readyWhen: NonNullable<VerificationTaskV1['serve']>['readyWhen'];
+    if (value.serve.readyWhen !== undefined) {
+      if (!isRecord(value.serve.readyWhen)) {
+        return { ok: false, error: 'serve.readyWhen: expected an object' };
+      }
+      const rw = value.serve.readyWhen;
+      if (rw.urlPath !== undefined && typeof rw.urlPath !== 'string') {
+        return { ok: false, error: 'serve.readyWhen.urlPath: expected string' };
+      }
+      if (rw.timeoutMs !== undefined && !isPositiveFiniteNumber(rw.timeoutMs)) {
+        return { ok: false, error: 'serve.readyWhen.timeoutMs: expected positive finite number' };
+      }
+      readyWhen = {
+        ...(rw.urlPath !== undefined ? { urlPath: rw.urlPath } : {}),
+        ...(rw.timeoutMs !== undefined ? { timeoutMs: rw.timeoutMs } : {}),
+      };
+    }
+    serve = { cmd, ...(readyWhen !== undefined ? { readyWhen } : {}) };
+  }
+
+  let target: VerificationTaskV1['target'];
+  if (value.target !== undefined) {
+    if (!isRecord(value.target)) return { ok: false, error: 'target: expected an object' };
+    if (value.target.url !== undefined && typeof value.target.url !== 'string') {
+      return { ok: false, error: 'target.url: expected string' };
+    }
+    if (value.target.htmlPath !== undefined && typeof value.target.htmlPath !== 'string') {
+      return { ok: false, error: 'target.htmlPath: expected string' };
+    }
+    target = {
+      ...(value.target.url !== undefined ? { url: value.target.url } : {}),
+      ...(value.target.htmlPath !== undefined ? { htmlPath: value.target.htmlPath } : {}),
+    };
+  }
+
+  if (!Array.isArray(value.behaviors)) return { ok: false, error: 'behaviors: expected an array' };
+  const seenBehaviorIds = new Set<string>();
+  const behaviors: VerificationTaskV1['behaviors'] = [];
+  for (let i = 0; i < value.behaviors.length; i++) {
+    const item = value.behaviors[i];
+    const path = `behaviors[${i}]`;
+    if (!isRecord(item)) return { ok: false, error: `${path}: expected an object` };
+    if (!isNonEmptyString(item.id)) return { ok: false, error: `${path}.id: expected non-empty string` };
+    if (seenBehaviorIds.has(item.id)) {
+      return { ok: false, error: `${path}.id: duplicate behavior id "${item.id}"` };
+    }
+    seenBehaviorIds.add(item.id);
+    if (!isNonEmptyString(item.description)) {
+      return { ok: false, error: `${path}.description: expected non-empty string` };
+    }
+    if (!isNonEmptyString(item.expected)) {
+      return { ok: false, error: `${path}.expected: expected non-empty string` };
+    }
+    if (item.steps !== undefined && !isStringArray(item.steps)) {
+      return { ok: false, error: `${path}.steps: expected an array of strings` };
+    }
+    behaviors.push({
+      id: item.id,
+      description: item.description,
+      expected: item.expected,
+      ...(item.steps !== undefined ? { steps: item.steps } : {}),
+    });
+  }
+
+  let viewports: ViewportSpec[] | undefined;
+  if (value.viewports !== undefined) {
+    if (!Array.isArray(value.viewports)) return { ok: false, error: 'viewports: expected an array' };
+    const parsed: ViewportSpec[] = [];
+    for (let i = 0; i < value.viewports.length; i++) {
+      const item = value.viewports[i];
+      const path = `viewports[${i}]`;
+      if (!isRecord(item)) return { ok: false, error: `${path}: expected an object` };
+      if (!isPositiveFiniteNumber(item.width)) {
+        return { ok: false, error: `${path}.width: expected positive finite number` };
+      }
+      if (!isPositiveFiniteNumber(item.height)) {
+        return { ok: false, error: `${path}.height: expected positive finite number` };
+      }
+      if (item.label !== undefined && typeof item.label !== 'string') {
+        return { ok: false, error: `${path}.label: expected string` };
+      }
+      parsed.push({
+        width: item.width,
+        height: item.height,
+        ...(item.label !== undefined ? { label: item.label } : {}),
+      });
+    }
+    viewports = parsed;
+  }
+
+  let timeoutMs: number | undefined;
+  if (value.timeoutMs !== undefined) {
+    if (!isPositiveFiniteNumber(value.timeoutMs)) {
+      return { ok: false, error: 'timeoutMs: expected positive finite number' };
+    }
+    timeoutMs = value.timeoutMs;
+  }
+
+  const task: VerificationTaskV1 = {
+    version: 1,
+    summary,
+    behaviors,
+    ...(taskRef !== undefined ? { taskRef } : {}),
+    ...(build !== undefined ? { build } : {}),
+    ...(serve !== undefined ? { serve } : {}),
+    ...(target !== undefined ? { target } : {}),
+    ...(viewports !== undefined ? { viewports } : {}),
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+  };
+  return { ok: true, task };
+}
+
+/**
+ * Strict runtime validator + normalizer for a `VerificationReportV1` result
+ * (§5.4 validation paragraph). `expectedBehaviorIds` is the composing task's
+ * behavior id set: every reported behavior id MUST be a member (an unknown id
+ * is a hard error) but the report need not cover every expected id — an
+ * uncovered id is the RUNNER's concern (treated as `not_testable` downstream),
+ * not this validator's. `confidence` is clamped to `[0,1]` (clamping alone
+ * does not set `coerced`). `buildLogExcerpt` is required (non-empty) exactly
+ * when `outcome` is `'build_failed'`/`'launch_failed'`.
+ *
+ * COERCION (the one place this function mutates the reported shape): an
+ * `outcome: 'pass'` alongside any `behaviors[].result === 'fail'` is coerced
+ * to `outcome: 'fail'` with `coerced: true` — the structured per-behavior
+ * verdict, not the agent's self-reported outcome, drives the merge gate.
+ */
+export function normalizeVerificationReportV1(
+  value: unknown,
+  expectedBehaviorIds: readonly string[],
+): { ok: true; report: VerificationReportV1; coerced: boolean } | { ok: false; error: string } {
+  if (!isRecord(value)) return { ok: false, error: 'root: expected an object' };
+  if (value.version !== 1) return { ok: false, error: 'version: expected literal 1' };
+
+  const expectedIds = new Set(expectedBehaviorIds);
+
+  if (!Array.isArray(value.behaviors)) return { ok: false, error: 'behaviors: expected an array' };
+  const behaviors: VerificationReportV1['behaviors'] = [];
+  let anyBehaviorFailed = false;
+  for (let i = 0; i < value.behaviors.length; i++) {
+    const item = value.behaviors[i];
+    const path = `behaviors[${i}]`;
+    if (!isRecord(item)) return { ok: false, error: `${path}: expected an object` };
+    if (!isNonEmptyString(item.id)) return { ok: false, error: `${path}.id: expected non-empty string` };
+    if (!expectedIds.has(item.id)) {
+      return { ok: false, error: `${path}.id: unknown behavior id "${item.id}"` };
+    }
+    if (item.result !== 'pass' && item.result !== 'fail' && item.result !== 'not_testable') {
+      return { ok: false, error: `${path}.result: expected 'pass' | 'fail' | 'not_testable'` };
+    }
+    if (item.result === 'fail') anyBehaviorFailed = true;
+    if (!isRecord(item.evidence)) return { ok: false, error: `${path}.evidence: expected an object` };
+    if (!isStringArray(item.evidence.screenshots)) {
+      return { ok: false, error: `${path}.evidence.screenshots: expected an array of strings` };
+    }
+    if (typeof item.evidence.notes !== 'string') {
+      return { ok: false, error: `${path}.evidence.notes: expected string` };
+    }
+    behaviors.push({
+      id: item.id,
+      result: item.result,
+      evidence: { screenshots: item.evidence.screenshots, notes: item.evidence.notes },
+    });
+  }
+
+  if (!Array.isArray(value.screenshots)) return { ok: false, error: 'screenshots: expected an array' };
+  const screenshots: VerificationReportV1['screenshots'] = [];
+  for (let i = 0; i < value.screenshots.length; i++) {
+    const item = value.screenshots[i];
+    const path = `screenshots[${i}]`;
+    if (!isRecord(item)) return { ok: false, error: `${path}: expected an object` };
+    if (!isNonEmptyString(item.fileName)) {
+      return { ok: false, error: `${path}.fileName: expected non-empty string` };
+    }
+    if (typeof item.caption !== 'string') return { ok: false, error: `${path}.caption: expected string` };
+    screenshots.push({ fileName: item.fileName, caption: item.caption });
+  }
+
+  if (
+    value.outcome !== 'pass' &&
+    value.outcome !== 'fail' &&
+    value.outcome !== 'build_failed' &&
+    value.outcome !== 'launch_failed'
+  ) {
+    return { ok: false, error: "outcome: expected 'pass' | 'fail' | 'build_failed' | 'launch_failed'" };
+  }
+  let outcome: VerificationReportV1['outcome'] = value.outcome;
+
+  const requiresBuildLog = outcome === 'build_failed' || outcome === 'launch_failed';
+  let buildLogExcerpt: string | undefined;
+  if (requiresBuildLog) {
+    if (!isNonEmptyString(value.buildLogExcerpt)) {
+      return {
+        ok: false,
+        error: 'buildLogExcerpt: required non-empty string when outcome is build_failed/launch_failed',
+      };
+    }
+    buildLogExcerpt = value.buildLogExcerpt;
+  } else if (value.buildLogExcerpt !== undefined) {
+    if (typeof value.buildLogExcerpt !== 'string') {
+      return { ok: false, error: 'buildLogExcerpt: expected string' };
+    }
+    buildLogExcerpt = value.buildLogExcerpt;
+  }
+
+  if (typeof value.confidence !== 'number' || !Number.isFinite(value.confidence)) {
+    return { ok: false, error: 'confidence: expected finite number' };
+  }
+  const confidence = Math.min(1, Math.max(0, value.confidence));
+
+  if (typeof value.feedback !== 'string') return { ok: false, error: 'feedback: expected string' };
+  const feedback = value.feedback;
+
+  if (!Array.isArray(value.issues)) return { ok: false, error: 'issues: expected an array' };
+  const issues: VerdictV1['issues'] = [];
+  for (let i = 0; i < value.issues.length; i++) {
+    const item = value.issues[i];
+    const path = `issues[${i}]`;
+    if (!isRecord(item)) return { ok: false, error: `${path}: expected an object` };
+    if (item.severity !== 'low' && item.severity !== 'medium' && item.severity !== 'high') {
+      return { ok: false, error: `${path}.severity: expected 'low' | 'medium' | 'high'` };
+    }
+    if (typeof item.description !== 'string') {
+      return { ok: false, error: `${path}.description: expected string` };
+    }
+    if (item.fileName !== undefined && typeof item.fileName !== 'string') {
+      return { ok: false, error: `${path}.fileName: expected string` };
+    }
+    issues.push({
+      severity: item.severity,
+      description: item.description,
+      ...(item.fileName !== undefined ? { fileName: item.fileName } : {}),
+    });
+  }
+
+  let coerced = false;
+  if (outcome === 'pass' && anyBehaviorFailed) {
+    outcome = 'fail';
+    coerced = true;
+  }
+
+  const report: VerificationReportV1 = {
+    version: 1,
+    behaviors,
+    screenshots,
+    outcome,
+    ...(buildLogExcerpt !== undefined ? { buildLogExcerpt } : {}),
+    confidence,
+    feedback,
+    issues,
+  };
+  return { ok: true, report, coerced };
+}
+
 /**
  * The immutable context a backend receives for one capture attempt. `artifactsDir`
  * is the run's $CYBOFLOW_RUN_ARTIFACTS_DIR — backends write PNGs there. `requestId`
@@ -270,13 +668,17 @@ export interface CaptureContext {
  * Where a request's capture was ultimately sourced from — stamped per attempt by
  * the scheduler as HUMAN-FACING provenance (S9). Purely additive metadata: it
  * never influences the verdict; it rides the onVerdict delivery into the review-
- * item finding body + the screenshots artifact payload. The four origins:
+ * item finding body + the screenshots artifact payload. The five origins:
  *   - 'dev-server'    — the S2 scheduler-owned dev server was stood up on a leased port.
  *   - 'static-server' — the S9 ephemeral loopback static server served a built htmlPath.
  *   - 'url'           — the agent passed a pre-existing running `url` (no server stood up).
  *   - 'file'          — the raw file:// htmlPath capture (no server, no url).
+ *   - 'agent'          — the verification-agent redesign's `VerificationAgentRunner`
+ *     (proposal `docs/proposals/verification-agent-redesign.md` §5.4/§5.9) drove
+ *     build/serve/capture itself inside a snapshot worktree — no scheduler-owned
+ *     dev/static server and no bare pre-existing `url`/`file` capture.
  */
-export type CaptureOrigin = 'dev-server' | 'static-server' | 'url' | 'file';
+export type CaptureOrigin = 'dev-server' | 'static-server' | 'url' | 'file' | 'agent';
 
 /**
  * The result of one backend capture attempt. `ok:false` (or an empty fileNames on

@@ -14,7 +14,7 @@
  * change events) is added to this same file when the artifacts backend lands
  * (migration 029) — keep this the single home for artifact types.
  */
-import type { CaptureOrigin, VerdictV1 } from './visualVerification';
+import type { CaptureOrigin, VerdictV1, VerificationReportV1 } from './visualVerification';
 
 /**
  * Artifact kinds. The bespoke (templated) types plus a `generic` fallback
@@ -412,6 +412,35 @@ export interface Artifact {
 }
 
 /**
+ * One task's verification-agent report entry (verification-agent redesign §5.9),
+ * folded into `ScreenshotsArtifactPayload.reports`. Denormalizes the composed
+ * task's `summary` + each behavior's `description`/`expected` alongside the
+ * agent's per-behavior `result`/evidence — so the screenshots tab's "Behaviors
+ * tested" table renders self-contained rows without re-fetching the task. Keyed
+ * for merge identity by `(taskRef, requestId)`; `attempt` disambiguates repeated
+ * verification of the same lane after a loopback.
+ */
+export interface TaskVerificationReportEntry {
+  /** The lane this report belongs to, or null for a non-lane-attributed request. */
+  taskRef: string | null;
+  /** Disambiguates; part of the merge identity alongside `taskRef`. */
+  requestId: string;
+  attempt: number;
+  /** The composed task's summary. */
+  summary: string;
+  behaviors: Array<{
+    id: string;
+    description: string;
+    expected: string;
+    result: 'pass' | 'fail' | 'not_testable';
+    screenshots: string[];
+    notes: string;
+  }>;
+  outcome: VerificationReportV1['outcome'];
+  completedAt: string;
+}
+
+/**
  * The parsed `payload_json` shape of a `screenshots` artifact. The producer
  * (visual-verify agent / safety-net scan) writes `{ fileNames }`; the verdict
  * delivery chokepoint (P8) ENRICHES the SAME artifact (idempotent UPSERT by
@@ -431,9 +460,17 @@ export interface ScreenshotsArtifactPayload {
    */
   verdict?: VerdictV1;
   /**
+   * Per-task verification-agent reports (verification-agent redesign §5.9),
+   * ATOMICALLY merged in by the ArtifactRouter merge operation, keyed by
+   * `(taskRef, requestId)` — the latest attempt per lane wins for the banner;
+   * older entries are retained (bounded, newest-N) for report history. Absent
+   * until at least one agent-engine report has been delivered.
+   */
+  reports?: TaskVerificationReportEntry[];
+  /**
    * HUMAN-FACING capture provenance (S9): how the judged deliverable was stood up
-   * ('dev-server' | 'static-server' | 'url' | 'file'). Written by the verdict-
-   * delivery hook alongside the verdict; absent for pre-S9 rows.
+   * ('dev-server' | 'static-server' | 'url' | 'file' | 'agent'). Written by the
+   * verdict-delivery hook alongside the verdict; absent for pre-S9 rows.
    */
   captureOrigin?: CaptureOrigin;
   /**
