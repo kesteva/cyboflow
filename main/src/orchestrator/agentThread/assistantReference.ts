@@ -282,6 +282,19 @@ The left rail lists your **active / open sessions** (it is a live view of what's
 running, not a historical log). The Sessions / Runs view is where per-run status
 lives.
 
+## Run outcomes
+
+A run's \`status\` is its current lifecycle state; \`outcome\` is the terminal
+disposition (merged / integrated / pr_open / dismissed / failed / canceled /
+interrupted). One pairing matters when reading failure data:
+\`outcome='interrupted'\` (always with \`status='failed'\` and
+\`error_message='app_restart'\`) means the run was orphaned by an app restart and
+could not auto-resume — an **infrastructure interruption, not an agent or logic
+bug**. Do not report interrupted runs as recurring failures or a problem to
+chase; count them separately from real failures (Insights already excludes them
+from error/success rates). Restart-orphaned runs that CAN resume are resumed
+automatically on boot and never fail at all.
+
 ## Quick sessions
 
 Alongside the scripted flows, cyboflow has **quick sessions** — ad-hoc chat / PTY
