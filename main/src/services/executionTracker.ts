@@ -4,9 +4,6 @@ import type { SessionManager } from './sessionManager';
 import { GitDiffManager, type GitDiffResult } from './gitDiffManager';
 import type { CreateExecutionDiffData, ExecutionDiff } from '../database/models';
 import { runGitAsync } from '../utils/runGit';
-import { formatForDisplay } from '../utils/timestampUtils';
-import { commitManager } from './commitManager';
-import type { CommitModeSettings } from '../../../shared/types';
 
 interface ExecutionContext {
   sessionId: string;
@@ -76,102 +73,9 @@ export class ExecutionTracker extends EventEmitter {
       }
 
       this.logger?.verbose(`Ending execution tracking for session ${sessionId}`);
-      
-      // Get session details for commit mode
-      const session = this.sessionManager.getSession(sessionId);
-      console.log(`[ExecutionTracker] Session details:`, {
-        found: !!session,
-        commitMode: session?.commitMode,
-        autoCommit: session?.autoCommit
-      });
-      this.logger?.verbose(`Retrieved session for ${sessionId}: ${session ? 'found' : 'not found'}`);
-      
-      // Determine commit mode - default to checkpoint for backwards compatibility
-      let commitMode: 'structured' | 'checkpoint' | 'disabled' = 'checkpoint';
-      let commitModeSettings: CommitModeSettings = {
-        mode: 'checkpoint',
-        checkpointPrefix: 'checkpoint: '
-      };
-      
-      if (session?.commitMode) {
-        commitMode = session.commitMode;
-        console.log(`[ExecutionTracker] Using session.commitMode: ${commitMode}`);
-        this.logger?.verbose(`Using session.commitMode: ${commitMode}`);
-        
-        // Update the commitModeSettings.mode to match the actual mode
-        commitModeSettings.mode = commitMode;
-        
-        if (session.commitModeSettings) {
-          try {
-            const parsedSettings = JSON.parse(session.commitModeSettings);
-            commitModeSettings = { ...commitModeSettings, ...parsedSettings, mode: commitMode };
-            this.logger?.verbose(`Parsed commit mode settings: ${JSON.stringify(commitModeSettings)}`);
-          } catch (e) {
-            this.logger?.error(`Failed to parse commit mode settings: ${e}`);
-          }
-        }
-      } else if (session?.autoCommit !== undefined) {
-        // Backwards compatibility: convert autoCommit boolean to commit mode
-        commitMode = session.autoCommit ? 'checkpoint' : 'disabled';
-        commitModeSettings.mode = commitMode;
-        this.logger?.verbose(`Using legacy autoCommit (${session.autoCommit}) -> commit mode: ${commitMode}`);
-      }
 
-      // Belt-and-braces: in-place sessions (migration 047) share the user's real
-      // checkout, so a checkpoint `git add -A` would commit their unrelated dirty
-      // files. create-quick already forces commitMode 'disabled' for them, but this
-      // backstops any later per-session commit-mode edit — an in-place session can
-      // NEVER auto-commit here.
-      if (session?.inPlace) {
-        commitMode = 'disabled';
-        commitModeSettings.mode = 'disabled';
-      }
-
-      console.log(`[ExecutionTracker] Final commit mode for session ${sessionId}: ${commitMode}`);
-      this.logger?.verbose(`Final commit mode for session ${sessionId}: ${commitMode}`);
-      
-      // Handle post-prompt commit based on mode
-      const commitResult = await commitManager.handlePostPromptCommit(
-        sessionId,
-        context.worktreePath,
-        commitModeSettings,
-        context.prompt,
-        context.executionSequence
-      );
-      
-      console.log(`[ExecutionTracker] Commit result:`, commitResult);
-      
-      if (!commitResult.success && commitResult.error) {
-        // Add error to session output so users can see what went wrong
-        const timestamp = formatForDisplay(new Date());
-        const errorMessage = `\r\n\x1b[36m[${timestamp}]\x1b[0m \x1b[1m\x1b[41m\x1b[37m ❌ GIT COMMIT FAILED \x1b[0m\r\n` +
-                           `\x1b[91mFailed to create commit during Claude Code execution.\x1b[0m\r\n` +
-                           `\x1b[91mError: ${commitResult.error}\x1b[0m\r\n\r\n` +
-                           `\x1b[93m⚠️  Changes remain uncommitted. You may need to fix the issues and commit manually.\x1b[0m\r\n\r\n`;
-        
-        this.sessionManager.addSessionOutput(sessionId, {
-          type: 'stderr',
-          data: errorMessage,
-          timestamp: new Date()
-        });
-      }
-      
-      // For structured mode, we may need to wait for Claude to create the commit
-      if (commitMode === 'structured') {
-        this.logger?.verbose(`Waiting for structured commit from Claude...`);
-        const structuredCommitResult = await commitManager.waitForStructuredCommit(
-          sessionId,
-          context.worktreePath,
-          5000, // 5 second timeout for now, can be adjusted
-          context.beforeCommitHash // pre-turn HEAD: the turn (and Claude's commit) already ran
-        );
-        
-        if (!structuredCommitResult.success) {
-          this.logger?.warn(`Structured commit not detected: ${structuredCommitResult.error}`);
-        }
-      }
-      
-      // Get the current commit hash after auto-commit
+      // Commit-mode machinery retired: the turn's own git state is captured
+      // as-is — no checkpoint auto-commit, no structured-commit wait.
       const afterCommitHash = await this.gitDiffManager.getCurrentCommitHash(context.worktreePath);
       
       let executionDiff: GitDiffResult;

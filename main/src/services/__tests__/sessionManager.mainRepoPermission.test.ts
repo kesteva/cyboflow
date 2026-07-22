@@ -76,7 +76,6 @@ function makeDbSession(permissionMode: 'approve' | 'ignore'): DbSession {
     permission_mode: permissionMode,
     is_main_repo: true,
     display_order: 0,
-    auto_commit: true,
   };
 }
 

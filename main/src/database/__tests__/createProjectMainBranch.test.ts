@@ -45,9 +45,6 @@ describe('createProject main_branch persistence', () => {
       undefined, // buildScript
       undefined, // defaultPermissionMode
       undefined, // openIdeCommand
-      undefined, // commitMode
-      undefined, // commitStructuredPromptTemplate
-      undefined, // commitCheckpointPrefix
       'develop', // mainBranch
     );
     expect(readMainBranch(svc, project.id)).toBe('develop');

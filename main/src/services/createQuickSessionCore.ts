@@ -46,10 +46,7 @@ export interface QuickSessionJobData {
   folderId?: string;
   baseBranch?: string;
   baseCommittish?: string;
-  autoCommit?: boolean;
   toolType?: 'claude' | 'none';
-  commitMode?: 'structured' | 'checkpoint' | 'disabled';
-  commitModeSettings?: string;
   agentProvider?: AgentProvider;
   agentRuntime?: SessionAgentRuntime;
   agentModel?: string | null;
@@ -91,10 +88,7 @@ export interface CreateQuickSessionCoreOptions {
   baseCommittish?: string;
   baseBranch?: string;
   folderId?: string;
-  autoCommit?: boolean;
   toolType?: 'claude' | 'none';
-  commitMode?: 'structured' | 'checkpoint' | 'disabled';
-  commitModeSettings?: string;
   /** Persist ownership on the initial session INSERT, before session-created fires. */
   agentProvider?: AgentProvider;
   agentRuntime?: SessionAgentRuntime;
@@ -106,9 +100,8 @@ export interface CreateQuickSessionCoreOptions {
   /**
    * Work directly in the project checkout — no dedicated worktree (migration 047,
    * quick handler only; A/B arms are always worktree-isolated so they never set
-   * this). Forces auto-commit off + commitMode disabled (an in-place `git add -A`
-   * would sweep the user's unrelated dirty files) and switches session matching to
-   * the NAME fallback (worktreePath === the project path, never `/${nameHint}`).
+   * this). Switches session matching to the NAME fallback (worktreePath === the
+   * project path, never `/${nameHint}`).
    */
   inPlace?: boolean;
   /** Await budget for the session-created event (default 30s). */
@@ -163,13 +156,7 @@ export async function createQuickSessionCore(
     folderId: opts.folderId,
     baseBranch: opts.baseBranch,
     baseCommittish: opts.baseCommittish,
-    // In-place sessions share the user's real checkout, so checkpoint auto-commit
-    // (a `git add -A` in the session cwd) must never run — force it off + disable
-    // commit mode (the request's own autoCommit/commitMode are ignored in-place).
-    autoCommit: inPlace ? false : opts.autoCommit,
     toolType: opts.toolType ?? 'claude',
-    commitMode: inPlace ? 'disabled' : opts.commitMode,
-    commitModeSettings: opts.commitModeSettings,
     agentProvider: opts.agentProvider,
     agentRuntime: opts.agentRuntime,
     agentModel: opts.agentModel,

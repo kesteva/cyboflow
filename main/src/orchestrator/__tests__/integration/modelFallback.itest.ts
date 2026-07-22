@@ -72,9 +72,6 @@ vi.mock('../../mcpServer/scriptPath', () => ({
 vi.mock('../../../utils/nodeFinder', () => ({
   findNodeExecutable: vi.fn(async () => 'node'),
 }));
-vi.mock('../../../utils/promptEnhancer', () => ({
-  enhancePromptForStructuredCommit: vi.fn((prompt: string) => prompt),
-}));
 vi.mock('../../../utils/sessionValidation', () => ({
   validatePanelSessionOwnership: vi.fn(() => ({ valid: true })),
   logValidationFailure: vi.fn(),

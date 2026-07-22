@@ -19,9 +19,6 @@ export interface Project {
   display_order?: number;
   worktree_folder?: string | null;
   lastUsedModel?: string;
-  commit_mode?: 'structured' | 'checkpoint' | 'disabled';
-  commit_structured_prompt_template?: string;
-  commit_checkpoint_prefix?: string;
 }
 
 export interface ProjectRunCommand {
@@ -73,12 +70,9 @@ export interface Session {
   is_main_repo?: boolean;
   display_order?: number;
   is_favorite?: boolean;
-  auto_commit?: boolean;
   tool_type?: 'claude' | 'none';
   base_commit?: string;
   base_branch?: string;
-  commit_mode?: 'structured' | 'checkpoint' | 'disabled';
-  commit_mode_settings?: string; // JSON string of CommitModeSettings
   skip_continue_next?: boolean;
   run_id?: string | null;
   /**
@@ -169,12 +163,9 @@ export interface CreateSessionData {
   agent_runtime?: SessionAgentRuntime;
   agent_model?: string | null;
   display_order?: number;
-  auto_commit?: boolean;
   tool_type?: 'claude' | 'none';
   base_commit?: string;
   base_branch?: string;
-  commit_mode?: 'structured' | 'checkpoint' | 'disabled';
-  commit_mode_settings?: string; // JSON string of CommitModeSettings
   run_id?: string | null;
 }
 
@@ -191,9 +182,6 @@ export interface UpdateSessionData {
   claude_session_id?: string | null;
   run_started_at?: string;
   is_favorite?: boolean;
-  auto_commit?: boolean;
-  commit_mode?: 'structured' | 'checkpoint' | 'disabled';
-  commit_mode_settings?: string; // JSON string of CommitModeSettings
   agent_permission_mode?: PermissionMode;
   agent_provider?: AgentProvider;
   agent_runtime?: SessionAgentRuntime;

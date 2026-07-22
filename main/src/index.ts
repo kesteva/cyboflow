@@ -13,7 +13,6 @@ import { RunCommandManager } from './services/runCommandManager';
 import { Logger } from './utils/logger';
 import { startPerfTracer } from './services/perfTracer';
 import { ArchiveProgressManager } from './services/archiveProgressManager';
-import { initializeCommitManager } from './services/commitManager';
 import { setCyboflowDirectory, getCyboflowSubdirectory, getCyboflowDirectory } from './utils/cyboflowDirectory';
 import { initTelemetry, trackUsage, captureSeamError } from './services/telemetry';
 import { setTelemetrySink, setSeamErrorSink } from './orchestrator/telemetrySink';
@@ -1008,9 +1007,6 @@ async function initializeServices() {
   // interval is unref'd, so no explicit stop is needed on quit.
   startPerfTracer(logger);
   
-  // Initialize commitManager with configManager
-  initializeCommitManager(configManager, logger);
-
   // Use the boot-resolved database path. The demo bootstrap decides ONCE per
   // process (at module load, before the services/database.ts singleton opens
   // its handle) whether this boot runs on the throwaway demo database — both

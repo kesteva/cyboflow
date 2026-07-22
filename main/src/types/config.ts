@@ -189,10 +189,6 @@ export interface AppConfig {
     };
     showAdvanced?: boolean;
     baseBranch?: string;
-    commitModeSettings?: {
-      mode?: 'checkpoint' | 'incremental' | 'single';
-      checkpointPrefix?: string;
-    };
   };
   // Cyboflow commit footer setting (enabled by default)
   enableCyboflowFooter?: boolean;
@@ -274,10 +270,6 @@ export interface UpdateConfigRequest {
     };
     showAdvanced?: boolean;
     baseBranch?: string;
-    commitModeSettings?: {
-      mode?: 'checkpoint' | 'incremental' | 'single';
-      checkpointPrefix?: string;
-    };
   };
   enableCyboflowFooter?: boolean;
 }

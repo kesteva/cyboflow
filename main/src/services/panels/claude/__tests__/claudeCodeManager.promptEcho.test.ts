@@ -50,10 +50,6 @@ vi.mock('../../../orchestrator/mcpServer/scriptPath', () => ({
 vi.mock('../../../utils/nodeFinder', () => ({
   findNodeExecutable: vi.fn(async () => 'node'),
 }));
-vi.mock('../../../utils/promptEnhancer', () => ({
-  // Divergent enhanced prompt proves the echo carries options.prompt, not finalPrompt.
-  enhancePromptForStructuredCommit: vi.fn((prompt: string) => `${prompt}\n\n<structured-commit boilerplate>`),
-}));
 vi.mock('../../../utils/sessionValidation', () => ({
   validatePanelSessionOwnership: vi.fn(() => ({ valid: true })),
   logValidationFailure: vi.fn(),
@@ -157,7 +153,7 @@ describe('ClaudeCodeManager — flow-run prompt echo (user turn)', () => {
 
     const persisted = persistedUserEvents(db, panelId);
     expect(persisted).toHaveLength(1);
-    // options.prompt verbatim — the structured-commit enhancement must NOT leak in.
+    // options.prompt verbatim.
     expect(persisted[0].text).toBe('can you confirm one thing I saw?');
     const raw = db
       .prepare(`SELECT payload_json AS p FROM raw_events WHERE run_id = ? AND event_type = 'user'`)

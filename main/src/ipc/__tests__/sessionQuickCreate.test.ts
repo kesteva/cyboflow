@@ -235,7 +235,7 @@ function makeServices(opts?: {
     getProject: (_id: number) => ({ id: 42, name: 'TestProject', path: '/proj' }),
     getDb: () => fakeDb,
     // sessions:input reads the db row for commit-mode + substrate routing.
-    getSession: vi.fn(() => ({ id: 'sess-001', commit_mode: undefined, substrate: undefined })),
+    getSession: vi.fn(() => ({ id: 'sess-001', substrate: undefined })),
     // sessions:input reads per-panel launch config (model + fast mode) to thread
     // into the respawn; create-quick (interactive) persists it. Empty by default.
     getPanelSettings: vi.fn(() => ({})),
@@ -844,9 +844,6 @@ describe('sessions:create-quick handler - worktree mode (migration 047)', () => 
     const callArg = (fakeTaskQueue.createSession as ReturnType<typeof vi.fn>).mock
       .calls[0][0] as Record<string, unknown>;
     expect(callArg.inPlace).toBe(true);
-    // Commit modes stay forced off regardless of substrate.
-    expect(callArg.autoCommit).toBe(false);
-    expect(callArg.commitMode).toBe('disabled');
   });
 
   it("honors an INHERITED in-place global default under the interactive substrate (no worktree fallback needed anymore)", async () => {
@@ -870,7 +867,7 @@ describe('sessions:create-quick handler - worktree mode (migration 047)', () => 
     expect(callArg.inPlace).toBe(true);
   });
 
-  it('threads inPlace + forces commit modes off for an inherited in-place SDK create', async () => {
+  it('threads inPlace for an inherited in-place SDK create', async () => {
     const { services, fakeTaskQueue } = makeServices();
     swapConfigManager(services, {
       isDemoMode: () => false,
@@ -882,18 +879,12 @@ describe('sessions:create-quick handler - worktree mode (migration 047)', () => 
     const result = (await invoke(handlers, 'sessions:create-quick', {
       projectId: 42,
       branchName: TEST_BRANCH,
-      autoCommit: true,
-      commitMode: 'checkpoint',
     })) as { success: boolean };
 
     expect(result.success).toBe(true);
     const callArg = (fakeTaskQueue.createSession as ReturnType<typeof vi.fn>).mock
       .calls[0][0] as Record<string, unknown>;
-    // In-place sessions share the user's real checkout: checkpoint auto-commit
-    // must be forced off no matter what the request asked for.
     expect(callArg.inPlace).toBe(true);
-    expect(callArg.autoCommit).toBe(false);
-    expect(callArg.commitMode).toBe('disabled');
   });
 });
 
@@ -909,7 +900,6 @@ describe('sessions:input handler - substrate routing', () => {
     const made = makeServices();
     (made.fakeDatabaseService.getSession as ReturnType<typeof vi.fn>).mockReturnValue({
       id: SESSION_ID,
-      commit_mode: undefined,
       substrate: opts.substrate,
       agent_runtime: opts.agentRuntime,
       run_id: opts.runId,

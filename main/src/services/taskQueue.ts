@@ -69,10 +69,7 @@ interface CreateSessionJob {
    * hard-errors if the branch already exists). Undefined = normal branch-tip base.
    */
   baseCommittish?: string;
-  autoCommit?: boolean;
   toolType?: 'claude' | 'none';
-  commitMode?: 'structured' | 'checkpoint' | 'disabled';
-  commitModeSettings?: string; // JSON string of CommitModeSettings
   agentProvider?: AgentProvider;
   agentRuntime?: SessionAgentRuntime;
   agentModel?: string | null;
@@ -154,7 +151,7 @@ export class TaskQueue {
     const sessionConcurrency = isLinux ? 1 : 5;
 
     this.sessionQueue.process(sessionConcurrency, async (job) => {
-      const { prompt, worktreeTemplate, index, permissionMode, projectId, baseBranch, baseCommittish, autoCommit, toolType, claudeConfig, inPlace } = job.data;
+      const { prompt, worktreeTemplate, index, permissionMode, projectId, baseBranch, baseCommittish, toolType, claudeConfig, inPlace } = job.data;
       const { sessionManager, worktreeManager } = this.options;
 
       // Processing session creation job - verbose debug logging removed
@@ -247,13 +244,10 @@ export class TaskQueue {
           permissionMode,
           targetProject.id,
           false, // isMainRepo = false for regular sessions
-          autoCommit,
           job.data.folderId,
           toolType,
           baseCommit,
           actualBaseBranch,
-          job.data.commitMode,
-          job.data.commitModeSettings,
           inPlace,
           job.data.agentProvider,
           job.data.agentRuntime,
@@ -461,10 +455,7 @@ export class TaskQueue {
     permissionMode?: 'approve' | 'ignore',
     projectId?: number,
     baseBranch?: string,
-    autoCommit?: boolean,
     toolType?: 'claude' | 'none',
-    commitMode?: 'structured' | 'checkpoint' | 'disabled',
-    commitModeSettings?: string,
     claudeConfig?: {
       model?: string;
       permissionMode?: 'approve' | 'ignore';
@@ -528,10 +519,7 @@ export class TaskQueue {
         projectId,
         folderId,
         baseBranch,
-        autoCommit,
         toolType,
-        commitMode,
-        commitModeSettings,
         claudeConfig,
         agentProvider,
         agentRuntime,

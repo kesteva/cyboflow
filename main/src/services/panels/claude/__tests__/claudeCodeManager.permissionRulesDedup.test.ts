@@ -41,9 +41,6 @@ vi.mock('../../../../orchestrator/mcpServer/scriptPath', () => ({
 vi.mock('../../../../utils/nodeFinder', () => ({
   findNodeExecutable: vi.fn(async () => 'node'),
 }));
-vi.mock('../../../../utils/promptEnhancer', () => ({
-  enhancePromptForStructuredCommit: vi.fn((prompt: string) => prompt),
-}));
 // Count the merged-rules loads while returning an empty rule set (no auto-allow),
 // so the spawn proceeds normally and the call count is the assertion surface.
 vi.mock('../../../../orchestrator/permissionRules', async (orig) => {

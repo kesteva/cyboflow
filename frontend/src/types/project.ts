@@ -12,9 +12,6 @@ export interface Project {
   displayOrder?: number;
   worktree_folder?: string | null;
   lastUsedModel?: string;
-  commit_mode?: 'structured' | 'checkpoint' | 'disabled';
-  commit_structured_prompt_template?: string;
-  commit_checkpoint_prefix?: string;
 }
 
 export interface ProjectRunCommand {
@@ -33,9 +30,6 @@ export interface CreateProjectRequest {
   runScript?: string;
   buildScript?: string;
   openIdeCommand?: string;
-  commitMode?: 'structured' | 'checkpoint' | 'disabled';
-  commitStructuredPromptTemplate?: string;
-  commitCheckpointPrefix?: string;
 }
 
 export interface UpdateProjectRequest {
@@ -48,7 +42,4 @@ export interface UpdateProjectRequest {
   open_ide_command?: string | null;
   worktree_folder?: string | null;
   lastUsedModel?: string;
-  commit_mode?: 'structured' | 'checkpoint' | 'disabled';
-  commit_structured_prompt_template?: string;
-  commit_checkpoint_prefix?: string;
 }

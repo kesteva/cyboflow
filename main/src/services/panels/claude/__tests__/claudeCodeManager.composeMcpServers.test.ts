@@ -58,9 +58,6 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   }),
 }));
 
-vi.mock('../../../../utils/promptEnhancer', () => ({
-  enhancePromptForStructuredCommit: vi.fn((prompt: string) => prompt),
-}));
 
 vi.mock('../../../../utils/sessionValidation', () => ({
   validatePanelSessionOwnership: vi.fn(() => ({ valid: true })),

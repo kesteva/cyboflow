@@ -31,7 +31,6 @@ class ClaudePanelHandler extends BaseAIPanelHandler {
     const { configManager } = this.services;
     return {
       model: settings.model || configManager.getDefaultModel() || 'auto',
-      commitMode: settings.commitMode ?? false,
       systemPrompt: settings.systemPrompt || null,
       maxTokens: settings.maxTokens || 4096,
       temperature: settings.temperature || 0.7,

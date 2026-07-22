@@ -69,7 +69,6 @@ function makeDbSession(overrides: Partial<DbSession> = {}): DbSession {
     permission_mode: 'approve',
     is_main_repo: false,
     display_order: 0,
-    auto_commit: false,
     ...overrides,
   };
 }

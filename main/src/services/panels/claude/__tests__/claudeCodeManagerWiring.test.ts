@@ -72,9 +72,6 @@ vi.mock('../../../orchestrator/mcpServer/scriptPath', () => ({
 vi.mock('../../../utils/nodeFinder', () => ({
   findNodeExecutable: vi.fn(async () => 'node'),
 }));
-vi.mock('../../../utils/promptEnhancer', () => ({
-  enhancePromptForStructuredCommit: vi.fn((prompt: string) => prompt),
-}));
 vi.mock('../../../utils/sessionValidation', () => ({
   validatePanelSessionOwnership: vi.fn(() => ({ valid: true })),
   logValidationFailure: vi.fn(),
@@ -262,8 +259,7 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
     expect(prompt).toBeDefined();
     expect(typeof prompt).not.toBe('string');
 
-    // Its FIRST yielded message carries the finalPrompt verbatim (promptEnhancer is
-    // mocked to identity in this file, so finalPrompt === the request prompt).
+    // Its FIRST yielded message carries the request prompt verbatim.
     const streamed = prompt as AsyncIterable<SDKUserMessage>;
     expect(await readInitialPromptText(streamed)).toBe('stream this prompt');
 

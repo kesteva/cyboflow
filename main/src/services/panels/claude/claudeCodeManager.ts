@@ -51,7 +51,6 @@ import { resolveRunEffectiveAgents } from './agentOverlayWriter';
 import { createStreamingPromptInput, createPersistentPromptInput } from './streamingPromptInput';
 import type { PersistentPromptInput, StreamingPromptInput } from './streamingPromptInput';
 import { withLock } from '../../../utils/mutex';
-import { enhancePromptForStructuredCommit } from '../../../utils/promptEnhancer';
 import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../streamParser';
 import { transitionToAwaitingReview, reviveQuickRunToRunning } from '../../cyboflow/transitions';
 import type { TransitionToAwaitingReviewParams } from '../../cyboflow/transitions';
@@ -1285,17 +1284,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
         );
       }
 
-      // Build the final prompt BEFORE any per-spawn / per-run resource is
-      // registered below. enhancePromptForStructuredCommit / getDbSession are the
-      // only synchronous throw points in the setup window; computing finalPrompt
-      // here means a throw leaks nothing — no bundle refcount, pipeline, tracker,
-      // or processes entry has been installed yet.
+      // getDbSession is the only synchronous throw point in the setup window;
+      // fetching it here means a throw leaks nothing — no bundle refcount,
+      // pipeline, tracker, or processes entry has been installed yet.
       const dbSession = this.sessionManager.getDbSession(sessionId);
-      const finalPrompt = enhancePromptForStructuredCommit(
-        options.prompt,
-        dbSession || { id: sessionId },
-        this.logger
-      );
+      const finalPrompt = options.prompt;
 
       // Build SDK options (uses runId for the approval-router hook). Built from
       // effectiveOptions so a lane spawn's stripped resume signals (M5(1)) reach

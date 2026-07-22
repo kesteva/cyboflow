@@ -1794,7 +1794,7 @@ export class DatabaseService {
   }
 
   // Project operations
-  createProject(name: string, path: string, systemPrompt?: string, runScript?: string, buildScript?: string, defaultPermissionMode?: 'approve' | 'ignore', openIdeCommand?: string, commitMode?: 'structured' | 'checkpoint' | 'disabled', commitStructuredPromptTemplate?: string, commitCheckpointPrefix?: string, mainBranch?: string): Project {
+  createProject(name: string, path: string, systemPrompt?: string, runScript?: string, buildScript?: string, defaultPermissionMode?: 'approve' | 'ignore', openIdeCommand?: string, mainBranch?: string): Project {
     // Get the max display_order for projects
     const maxOrderResult = this.db.prepare(`
       SELECT MAX(display_order) as max_order
@@ -1804,9 +1804,9 @@ export class DatabaseService {
     const displayOrder = (maxOrderResult?.max_order ?? -1) + 1;
 
     const result = this.db.prepare(`
-      INSERT INTO projects (name, path, system_prompt, run_script, build_script, default_permission_mode, open_ide_command, main_branch, display_order, commit_mode, commit_structured_prompt_template, commit_checkpoint_prefix)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(name, path, systemPrompt || null, runScript || null, buildScript || null, defaultPermissionMode || DEFAULT_PERMISSION_MODE, openIdeCommand || null, mainBranch || null, displayOrder, commitMode || 'checkpoint', commitStructuredPromptTemplate || null, commitCheckpointPrefix || 'checkpoint: ');
+      INSERT INTO projects (name, path, system_prompt, run_script, build_script, default_permission_mode, open_ide_command, main_branch, display_order)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(name, path, systemPrompt || null, runScript || null, buildScript || null, defaultPermissionMode || DEFAULT_PERMISSION_MODE, openIdeCommand || null, mainBranch || null, displayOrder);
     
     const project = this.getProject(result.lastInsertRowid as number);
     if (!project) {
@@ -1946,18 +1946,6 @@ export class DatabaseService {
     if (updates.active !== undefined) {
       fields.push('active = ?');
       values.push(updates.active ? 1 : 0);
-    }
-    if (updates.commit_mode !== undefined) {
-      fields.push('commit_mode = ?');
-      values.push(updates.commit_mode);
-    }
-    if (updates.commit_structured_prompt_template !== undefined) {
-      fields.push('commit_structured_prompt_template = ?');
-      values.push(updates.commit_structured_prompt_template);
-    }
-    if (updates.commit_checkpoint_prefix !== undefined) {
-      fields.push('commit_checkpoint_prefix = ?');
-      values.push(updates.commit_checkpoint_prefix);
     }
 
     if (fields.length === 0) {
@@ -2296,8 +2284,8 @@ export class DatabaseService {
       const displayOrder = maxOrder + 1;
       
       this.db.prepare(`
-        INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id, folder_id, permission_mode, is_main_repo, in_place, agent_provider, agent_runtime, agent_model, display_order, auto_commit, tool_type, base_commit, base_branch, commit_mode, commit_mode_settings, run_id)
-        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, status, project_id, folder_id, permission_mode, is_main_repo, in_place, agent_provider, agent_runtime, agent_model, display_order, tool_type, base_commit, base_branch, run_id)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         data.id,
         data.name,
@@ -2313,12 +2301,9 @@ export class DatabaseService {
         data.agent_runtime || 'claude-sdk',
         data.agent_model ?? null,
         displayOrder,
-        data.auto_commit !== undefined ? (data.auto_commit ? 1 : 0) : 1,
         data.tool_type || 'claude',
         data.base_commit || null,
         data.base_branch || null,
-        data.commit_mode || null,
-        data.commit_mode_settings || null,
         data.run_id ?? null
       );
       
@@ -2455,23 +2440,11 @@ export class DatabaseService {
       updates.push('is_favorite = ?');
       values.push(data.is_favorite ? 1 : 0);
     }
-    if (data.auto_commit !== undefined) {
-      updates.push('auto_commit = ?');
-      values.push(data.auto_commit ? 1 : 0);
-    }
     if (data.skip_continue_next !== undefined) {
       updates.push('skip_continue_next = ?');
       const boolValue = data.skip_continue_next ? 1 : 0;
       values.push(boolValue);
       console.log(`[Database] Setting skip_continue_next to ${boolValue} (from ${data.skip_continue_next}) for session ${id}`);
-    }
-    if (data.commit_mode !== undefined) {
-      updates.push('commit_mode = ?');
-      values.push(data.commit_mode);
-    }
-    if (data.commit_mode_settings !== undefined) {
-      updates.push('commit_mode_settings = ?');
-      values.push(data.commit_mode_settings);
     }
     if (data.agent_permission_mode !== undefined) {
       updates.push('agent_permission_mode = ?');
@@ -2502,9 +2475,9 @@ export class DatabaseService {
       return this.getSession(id);
     }
 
-    // Only update the updated_at timestamp if we're changing something other than is_favorite, auto_commit, skip_continue_next, commit_mode, or commit_mode_settings
+    // Only update the updated_at timestamp if we're changing something other than is_favorite or skip_continue_next
     // This prevents the session from showing as "unviewed" when just toggling these settings
-    const isOnlyToggleUpdate = updates.length === 1 && (updates[0] === 'is_favorite = ?' || updates[0] === 'auto_commit = ?' || updates[0] === 'skip_continue_next = ?' || updates[0] === 'commit_mode = ?' || updates[0] === 'commit_mode_settings = ?' || updates[0] === 'agent_permission_mode = ?' || updates[0] === 'agent_provider = ?' || updates[0] === 'agent_runtime = ?' || updates[0] === 'agent_model = ?' || updates[0] === 'disabled_mcp_servers_json = ?' || updates[0] === 'enabled_plugins_json = ?' || updates[0] === 'folder_id = ?');
+    const isOnlyToggleUpdate = updates.length === 1 && (updates[0] === 'is_favorite = ?' || updates[0] === 'skip_continue_next = ?' || updates[0] === 'agent_permission_mode = ?' || updates[0] === 'agent_provider = ?' || updates[0] === 'agent_runtime = ?' || updates[0] === 'agent_model = ?' || updates[0] === 'disabled_mcp_servers_json = ?' || updates[0] === 'enabled_plugins_json = ?' || updates[0] === 'folder_id = ?');
     if (!isOnlyToggleUpdate) {
       updates.push('updated_at = CURRENT_TIMESTAMP');
     }

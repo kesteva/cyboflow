@@ -119,11 +119,7 @@ export class ConfigManager extends EventEmitter {
           permissionMode: 'approve',
           ultrathink: false
         },
-        showAdvanced: false,
-        commitModeSettings: {
-          mode: 'checkpoint',
-          checkpointPrefix: 'checkpoint: '
-        }
+        showAdvanced: false
       }
     };
   }
@@ -158,10 +154,6 @@ export class ConfigManager extends EventEmitter {
           claudeConfig: {
             ...this.config.sessionCreationPreferences?.claudeConfig,
             ...loadedConfig.sessionCreationPreferences?.claudeConfig
-          },
-          commitModeSettings: {
-            ...this.config.sessionCreationPreferences?.commitModeSettings,
-            ...loadedConfig.sessionCreationPreferences?.commitModeSettings
           }
         }
       };
@@ -563,11 +555,7 @@ export class ConfigManager extends EventEmitter {
         permissionMode: 'approve',
         ultrathink: false
       },
-      showAdvanced: false,
-      commitModeSettings: {
-        mode: 'checkpoint',
-        checkpointPrefix: 'checkpoint: '
-      }
+      showAdvanced: false
     };
   }
 

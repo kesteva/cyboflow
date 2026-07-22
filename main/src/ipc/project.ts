@@ -139,9 +139,6 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
         projectData.buildScript,
         undefined, // default_permission_mode
         projectData.openIdeCommand,
-        projectData.commitMode,
-        projectData.commitStructuredPromptTemplate,
-        projectData.commitCheckpointPrefix,
         mainBranch
       );
 

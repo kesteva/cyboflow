@@ -282,7 +282,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getRemoteUrl: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:get-remote-url', sessionId),
     rename: (sessionId: string, newName: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:rename', sessionId, newName),
     toggleFavorite: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:toggle-favorite', sessionId),
-    toggleAutoCommit: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:toggle-auto-commit', sessionId),
     updateAgentPermissionMode: (sessionId: string, mode: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:update-agent-permission-mode', sessionId, mode),
     updateSessionMcps: (sessionId: string, disabledMcpServers: string[]): Promise<IPCResponse> => ipcRenderer.invoke('sessions:update-session-mcps', sessionId, disabledMcpServers),
     updateSessionPlugins: (sessionId: string, enabledPlugins: string[]): Promise<IPCResponse> => ipcRenderer.invoke('sessions:update-session-plugins', sessionId, enabledPlugins),

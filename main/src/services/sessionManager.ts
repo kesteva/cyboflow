@@ -195,14 +195,11 @@ export class SessionManager extends EventEmitter {
       folderId: dbSession.folder_id,
       displayOrder: dbSession.display_order, // Include displayOrder for proper sorting
       isFavorite: dbSession.is_favorite,
-      autoCommit: dbSession.auto_commit,
       // Model is now managed at panel level
       toolType: normalizedToolType,
       archived: dbSession.archived || false,
       baseCommit: dbSession.base_commit,
       baseBranch: dbSession.base_branch,
-      commitMode: dbSession.commit_mode,
-      commitModeSettings: dbSession.commit_mode_settings,
       runId: dbSession.run_id ?? null,
       // Persistent chat-sentinel gate vehicle (migration 038). DISTINCT from runId:
       // runId is the latest FLOW run (Role-D); chatRunId is the never-clobbered
@@ -283,13 +280,10 @@ export class SessionManager extends EventEmitter {
     permissionMode?: 'approve' | 'ignore',
     projectId?: number,
     isMainRepo?: boolean,
-    autoCommit?: boolean,
     folderId?: string,
     toolType?: 'claude' | 'none',
     baseCommit?: string,
     baseBranch?: string,
-    commitMode?: 'structured' | 'checkpoint' | 'disabled',
-    commitModeSettings?: string,
     inPlace?: boolean,
     agentProvider?: AgentProvider,
     agentRuntime?: SessionAgentRuntime,
@@ -305,13 +299,10 @@ export class SessionManager extends EventEmitter {
         permissionMode,
         projectId,
         isMainRepo,
-        autoCommit,
         folderId,
         toolType,
         baseCommit,
         baseBranch,
-        commitMode,
-        commitModeSettings,
         inPlace,
         agentProvider,
         agentRuntime,
@@ -329,13 +320,10 @@ export class SessionManager extends EventEmitter {
     permissionMode?: 'approve' | 'ignore',
     projectId?: number,
     isMainRepo?: boolean,
-    autoCommit?: boolean,
     folderId?: string,
     toolType?: 'claude' | 'none',
     baseCommit?: string,
     baseBranch?: string,
-    commitMode?: 'structured' | 'checkpoint' | 'disabled',
-    commitModeSettings?: string,
     inPlace?: boolean,
     agentProvider?: AgentProvider,
     agentRuntime?: SessionAgentRuntime,
@@ -382,13 +370,10 @@ export class SessionManager extends EventEmitter {
       agent_provider: agentProvider,
       agent_runtime: agentRuntime,
       agent_model: agentModel,
-      auto_commit: autoCommit,
       // Model is now managed at panel level
       base_commit: baseCommit,
       base_branch: baseBranch,
-      tool_type: toolType,
-      commit_mode: commitMode,
-      commit_mode_settings: commitModeSettings
+      tool_type: toolType
     };
 
     const dbSession = this.db.createSession(sessionData);
@@ -436,13 +421,10 @@ export class SessionManager extends EventEmitter {
         project.default_permission_mode || DEFAULT_PERMISSION_MODE,
         projectId,
         true, // isMainRepo = true
-        true, // autoCommit = true (default for main repo sessions)
         undefined, // folderId
         'claude', // tool_type
         undefined, // baseCommit
-        undefined, // baseBranch
-        project.commit_mode, // Use project's commit mode
-        undefined // commit_mode_settings - let it use project defaults
+        undefined // baseBranch
       );
       
       await panelManager.ensureDiffPanel(session.id);

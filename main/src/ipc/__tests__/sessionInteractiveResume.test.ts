@@ -111,7 +111,6 @@ function makeServices(opts: {
           substrate: opts.substrate ?? 'interactive',
           run_id: RUN_ID,
           worktree_path: opts.worktreePath === undefined ? WORKTREE : opts.worktreePath,
-          commit_mode: undefined,
         };
 
   // Variadic args so mock.calls[n][8] (the resumeSessionId positional) is indexable.
