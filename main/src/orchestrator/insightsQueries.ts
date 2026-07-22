@@ -374,6 +374,12 @@ function assistantEventModel(eventType: string, payload: Record<string, unknown>
  * Resolve model cardinality for materialized rollups. Token/cost values still
  * come exclusively from `run_usage`; only model identity is read from
  * assistant/provider raw events so no schema column or migration is required.
+ *
+ * Perf note: this is the ONE raw_events read the materialized fast path makes
+ * (a deliberate carve-out from "materialized hits never load raw_events").
+ * The query is a per-run INDEX SEARCH via idx_raw_events_run_id (run_id, id)
+ * — verified with EXPLAIN QUERY PLAN — with the ORDER BY served by the index;
+ * keep that index (006_cyboflow_schema.sql) if this query shape changes.
  */
 function fetchMaterializedRunModels(
   db: DatabaseLike,
