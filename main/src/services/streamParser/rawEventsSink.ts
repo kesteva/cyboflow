@@ -33,7 +33,6 @@
  * is a pure double-write.
  */
 
-import type Database from 'better-sqlite3';
 import type { EventRouter } from './eventRouter';
 import type { ILogger } from './types';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
@@ -42,11 +41,29 @@ import { derivePersistedEventType } from './derivers';
 import type { PersistableStreamEvent } from './derivers';
 import { perfBump } from '../perfTracer';
 
+/** The prepared-statement surface the sink uses — run() only, no reads. */
+interface RawEventsSinkStatement {
+  run(...params: unknown[]): unknown;
+}
+
+/**
+ * The NARROW database surface RawEventsSink actually needs: `prepare()` → `run()`.
+ * Structurally satisfied by both a real better-sqlite3 `Database.Database` and the
+ * orchestrator's `DatabaseLike`, so callers holding either construct the sink
+ * without casts (DynamicWorkflowTracker only has DatabaseLike). Widening what the
+ * sink calls on `db` MUST widen this type — never reach for the full
+ * better-sqlite3 handle here, or the DatabaseLike call site breaks at runtime
+ * while compiling clean.
+ */
+export interface RawEventsSinkDb {
+  prepare(sql: string): RawEventsSinkStatement;
+}
+
 export class RawEventsSink<TEvent extends PersistableStreamEvent = ClaudeStreamEvent> {
-  private readonly db: Database.Database;
+  private readonly db: RawEventsSinkDb;
   private readonly logger: Pick<ILogger, 'warn'> | undefined;
-  private readonly insertStmt: Database.Statement;
-  private upsertSubagentUsageStmt: Database.Statement | undefined;
+  private readonly insertStmt: RawEventsSinkStatement;
+  private upsertSubagentUsageStmt: RawEventsSinkStatement | undefined;
   private readonly skipEventTypes: ReadonlySet<string>;
 
   /**
@@ -56,7 +73,7 @@ export class RawEventsSink<TEvent extends PersistableStreamEvent = ClaudeStreamE
   private readonly teardowns = new Map<string, () => void>();
 
   constructor(
-    db: Database.Database,
+    db: RawEventsSinkDb,
     logger?: Pick<ILogger, 'warn'>,
     options?: { skipEventTypes?: readonly string[] },
   ) {

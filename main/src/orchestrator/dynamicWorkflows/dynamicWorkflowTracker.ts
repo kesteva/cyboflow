@@ -130,14 +130,11 @@ export class DynamicWorkflowTracker {
     }
 
     try {
-      // RawEventsSink only uses prepare() at runtime. DatabaseLike deliberately
-      // exposes that same narrow surface, but the sink's public constructor is
-      // still typed to better-sqlite3, so contain the structural bridge here.
-      const SinkConstructor = RawEventsSink as unknown as new (
-        db: DatabaseLike,
-        logger?: Pick<LoggerLike, 'warn'>,
-      ) => SubagentUsageSink;
-      this.rawEventsSink = new SinkConstructor(db, this.logger);
+      // RawEventsSink's constructor is typed to the narrow RawEventsSinkDb
+      // surface (prepare → run), which DatabaseLike satisfies structurally —
+      // no cast needed, and a future sink change that widens what it calls on
+      // `db` fails to compile here instead of at runtime.
+      this.rawEventsSink = new RawEventsSink(db, this.logger);
     } catch (err) {
       this.rawEventsSink = null;
       const message = err instanceof Error ? err.message : String(err);
