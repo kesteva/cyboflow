@@ -428,6 +428,28 @@ describe('WorkflowSummaryPanel', () => {
     expect(await screen.findByTestId('run-summary-eval-band')).toHaveTextContent('GOOD');
   });
 
+  it('re-enables the retry button when the retried eval fails again', async () => {
+    const failedEval = makeEval({ evalStatus: 'failed', band: null, overallScore: null, error: 'boom' });
+    // First poll: failed → retry → resumed poll returns failed AGAIN.
+    runEvalQuery
+      .mockResolvedValueOnce(failedEval)
+      .mockResolvedValueOnce(makeEval({ evalStatus: 'failed', band: null, overallScore: null, error: 'boom again' }));
+    retryEvalMutate.mockResolvedValue(undefined);
+    renderPanel();
+
+    fireEvent.click(await screen.findByTestId('run-summary-eval-retry'));
+    await waitFor(() => expect(retryEvalMutate).toHaveBeenCalledTimes(1));
+    // The resumed poll lands the second failure; the latch must have been
+    // released by the intermediate pending transition, so the button is
+    // enabled and can submit a second retry.
+    await waitFor(() => expect(runEvalQuery).toHaveBeenCalledTimes(2));
+    const retryButton = await screen.findByTestId('run-summary-eval-retry');
+    await waitFor(() => expect(retryButton).toBeEnabled());
+    expect(retryButton).toHaveTextContent('Retry quality assessment');
+    fireEvent.click(retryButton);
+    await waitFor(() => expect(retryEvalMutate).toHaveBeenCalledTimes(2));
+  });
+
   it('renders the band-first hero, gates and active-dimension count when complete', async () => {
     runEvalQuery.mockResolvedValue(makeEval());
     renderPanel();

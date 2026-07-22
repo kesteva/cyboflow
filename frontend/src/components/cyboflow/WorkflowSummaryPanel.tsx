@@ -816,6 +816,15 @@ export function ScoreSummary({
 }: ScoreSummaryProps): React.JSX.Element {
   const [retryingEval, setRetryingEval] = useState(false);
 
+  // Release the latch once the retried eval leaves 'failed' (the successful
+  // mutation flips it to pending/running via onRetrySuccess). Without this, a
+  // retry whose re-run ALSO fails would re-enter the failed branch with the
+  // original latch still true — permanently disabling the button. The latch
+  // only needs to guard double-submits within one failed render.
+  useEffect(() => {
+    if (runEval.evalStatus !== 'failed') setRetryingEval(false);
+  }, [runEval.evalStatus]);
+
   const handleRetryEval = async (): Promise<void> => {
     if (runId === undefined || retryingEval) return;
     setRetryingEval(true);
