@@ -139,6 +139,22 @@ export interface FindingPayload {
    * drops malformed members rather than failing the finding write.
    */
   impact?: { ranCount?: number; caughtRegressions?: number; tokenDelta?: number; note?: string };
+  /**
+   * Machine-readable correlation for a VISUAL-VERIFY finding (verification-agent
+   * redesign §5.7). Present only on findings raised by the verdict-delivery hook;
+   * lets a later terminal verdict for the same lane find + supersede prior
+   * unresolved findings at LOWER attempts, and makes finding creation idempotent
+   * by `requestId` on delivery-outbox replay. `taskRef` is null for a
+   * non-lane-attributed request; `attempt` is parsed from the request's
+   * enqueue_key (`${runId}:${taskRef}:${attempt}`), falling back to the lane's
+   * attempt counter, else 1.
+   */
+  visualVerify?: {
+    runId: string;
+    taskRef: string | null;
+    attempt: number;
+    requestId: string;
+  };
 }
 
 /**

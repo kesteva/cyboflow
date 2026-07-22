@@ -87,6 +87,7 @@ const CONFIG: ResolvedVisualVerifyConfig = {
   maxPerRunJudgeCalls: 4,
   devServerPorts: [29260, 29262],
   simulatorDevices: [],
+  queuedAgeCeilingMs: 15 * 60 * 1000,
 };
 
 const PASS_VERDICT: VerdictV1 = {

@@ -416,6 +416,7 @@ describe('VerificationScheduler', () => {
         maxPerRunJudgeCalls: 4,
         devServerPorts: [],
         simulatorDevices: [],
+        queuedAgeCeilingMs: 15 * 60 * 1000,
       },
       leasePool: new ResourceLeasePool(new Mutex()),
     });

@@ -40,6 +40,7 @@ const baseConfig: ResolvedVisualVerifyConfig = {
   maxPerRunJudgeCalls: 4,
   devServerPorts: [5173],
   simulatorDevices: [],
+  queuedAgeCeilingMs: 15 * 60 * 1000,
 };
 
 function buildDb(): Database.Database {

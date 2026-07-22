@@ -44,6 +44,7 @@ const MIGRATIONS = [
   '016_review_items.sql',
   '035_artifacts.sql',
   '055_visual_verification.sql',
+  '078_verification_agent_requests.sql',
 ];
 
 function buildDb(): Database.Database {
@@ -596,6 +597,7 @@ const SPRINT_MIGRATIONS = [
   '025_sprint_lane_attempts.sql',
   '035_artifacts.sql',
   '055_visual_verification.sql',
+  '078_verification_agent_requests.sql',
 ];
 
 function buildSprintDb(): Database.Database {
@@ -834,5 +836,230 @@ describe('verdictDelivery (P8b — merge-gate)', () => {
     expect(findings[0].source).toBe('visual-verify');
     expect(findings[0].title).toMatch(/did not run|skipped/i);
     expect(screenshotsRows(db, 'run-s5')).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §5.7 — report-carrying findings + correlation + supersession (slice 10b)
+// ---------------------------------------------------------------------------
+
+/** Seed a verification_requests row with the migration-078 agent columns populated. */
+function seedRequestFull(
+  db: Database.Database,
+  opts: {
+    id: string;
+    runId: string;
+    status: string;
+    reportJson?: string | null;
+    taskJson?: string | null;
+    enqueueKey?: string | null;
+    errorMessage?: string | null;
+  },
+): void {
+  db.prepare(
+    `INSERT INTO verification_requests
+       (id, run_id, project_id, status, verify_type, deliverable_json, report_json, task_json, enqueue_key, error_message)
+     VALUES (?, ?, 1, ?, 'static-render-snapshot', ?, ?, ?, ?, ?)`,
+  ).run(
+    opts.id,
+    opts.runId,
+    opts.status,
+    JSON.stringify({ intent: 'x', taskRef: 'TASK-1' }),
+    opts.reportJson ?? null,
+    opts.taskJson ?? null,
+    opts.enqueueKey ?? null,
+    opts.errorMessage ?? null,
+  );
+}
+
+/** Read every visual-verify finding for a run with its status + parsed correlation. */
+function visualFindings(
+  db: Database.Database,
+  runId: string,
+): Array<{ id: string; status: string; body: string; blocking: number; attempt: number | null; requestId: string | null }> {
+  const rows = db
+    .prepare(`SELECT id, status, body, blocking, payload_json AS p FROM review_items WHERE run_id = ? AND source = 'visual-verify'`)
+    .all(runId) as Array<{ id: string; status: string; body: string; blocking: number; p: string | null }>;
+  return rows.map((r) => {
+    let attempt: number | null = null;
+    let requestId: string | null = null;
+    try {
+      const vv = r.p ? (JSON.parse(r.p) as { visualVerify?: { attempt?: number; requestId?: string } }).visualVerify : undefined;
+      if (vv) {
+        attempt = typeof vv.attempt === 'number' ? vv.attempt : null;
+        requestId = typeof vv.requestId === 'string' ? vv.requestId : null;
+      }
+    } catch { /* ignore */ }
+    return { id: r.id, status: r.status, body: r.body, blocking: r.blocking, attempt, requestId };
+  });
+}
+
+async function seedPriorFinding(
+  runId: string,
+  taskRef: string | null,
+  attempt: number,
+  requestId: string,
+): Promise<void> {
+  await ReviewItemRouter.getInstance().applyReviewItem(1, {
+    op: 'create',
+    actor: 'orchestrator',
+    kind: 'finding',
+    title: `prior visual finding a${attempt}`,
+    body: 'x',
+    source: 'visual-verify',
+    blocking: true,
+    runId,
+    payload: { kind: 'finding', category: 'visual-regression', visualVerify: { runId, taskRef, attempt, requestId } },
+  });
+}
+
+describe('verdictDelivery (slice 10b — report findings + supersession)', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = buildDb();
+    ArtifactRouter._resetForTesting();
+    ReviewItemRouter._resetForTesting();
+    SprintLaneStore._resetForTesting();
+    ArtifactRouter.initialize(dbAdapter(db));
+    ReviewItemRouter.initialize(dbAdapter(db));
+  });
+
+  afterEach(() => {
+    ArtifactRouter._resetForTesting();
+    ReviewItemRouter._resetForTesting();
+    SprintLaneStore._resetForTesting();
+    db.close();
+  });
+
+  it('FAIL body carries the failed behaviors (id + description + expected + observed notes) and the report feedback', async () => {
+    seedRun(db, 'run-b1');
+    seedRequestFull(db, {
+      id: 'vr_b1',
+      runId: 'run-b1',
+      status: 'failed',
+      enqueueKey: 'run-b1:TASK-1:2',
+      taskJson: JSON.stringify({
+        version: 1,
+        summary: 'landing page',
+        behaviors: [{ id: 'b1', description: 'header renders', expected: 'header does not overlap the hero' }],
+      }),
+      reportJson: JSON.stringify({
+        version: 1,
+        behaviors: [{ id: 'b1', result: 'fail', evidence: { screenshots: ['s.png'], notes: 'header overlaps the hero text' } }],
+        screenshots: [{ fileName: 's.png', caption: 'home' }],
+        outcome: 'fail',
+        confidence: 0.9,
+        feedback: 'move the header out of the hero flow',
+        issues: [],
+      }),
+    });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    await deliver({ requestId: 'vr_b1', runId: 'run-b1', projectId: 1, type: 'static-render-snapshot', status: 'failed', verdict: undefined, fileNames: ['s.png'] });
+
+    const f = visualFindings(db, 'run-b1');
+    expect(f).toHaveLength(1);
+    expect(f[0].attempt).toBe(2);
+    expect(f[0].requestId).toBe('vr_b1');
+    expect(f[0].body).toMatch(/b1 \(header renders\)/);
+    expect(f[0].body).toMatch(/expected: header does not overlap the hero/);
+    expect(f[0].body).toMatch(/observed: header overlaps the hero text/);
+    expect(f[0].body).toMatch(/move the header out of the hero flow/);
+  });
+
+  it('build_failed body carries the build log excerpt prominently', async () => {
+    seedRun(db, 'run-b2');
+    seedRequestFull(db, {
+      id: 'vr_b2',
+      runId: 'run-b2',
+      status: 'failed',
+      enqueueKey: 'run-b2:TASK-1:1',
+      errorMessage: 'tsc: Cannot find module "./missing"',
+      reportJson: JSON.stringify({
+        version: 1,
+        behaviors: [],
+        screenshots: [],
+        outcome: 'build_failed',
+        buildLogExcerpt: 'ERROR in ./src/app.tsx\nCannot find module "./missing"',
+        confidence: 0,
+        feedback: 'the deliverable does not compile',
+        issues: [],
+      }),
+    });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    await deliver({ requestId: 'vr_b2', runId: 'run-b2', projectId: 1, type: 'static-render-snapshot', status: 'failed', verdict: undefined, fileNames: [] });
+
+    const f = visualFindings(db, 'run-b2');
+    expect(f).toHaveLength(1);
+    expect(f[0].body).toMatch(/could not build the deliverable/i);
+    expect(f[0].body).toMatch(/Build\/launch log excerpt/);
+    expect(f[0].body).toMatch(/Cannot find module "\.\/missing"/);
+  });
+
+  it('timeout / skipped bodies carry the concrete error_message reason', async () => {
+    seedRun(db, 'run-b3');
+    seedRequestFull(db, { id: 'vr_to', runId: 'run-b3', status: 'timeout', errorMessage: 'request timed out' });
+    seedRequestFull(db, { id: 'vr_sk', runId: 'run-b3', status: 'skipped', errorMessage: 'per-project visual-verify budget exhausted' });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    await deliver({ requestId: 'vr_to', runId: 'run-b3', projectId: 1, type: 'static-render-snapshot', status: 'timeout', verdict: undefined, fileNames: [] });
+    await deliver({ requestId: 'vr_sk', runId: 'run-b3', projectId: 1, type: 'static-render-snapshot', status: 'skipped', verdict: undefined, fileNames: [] });
+
+    const f = visualFindings(db, 'run-b3');
+    const timeout = f.find((x) => x.body.includes('timed out'));
+    const skipped = f.find((x) => x.body.includes('budget exhausted'));
+    expect(timeout?.body).toMatch(/Reason: request timed out/);
+    expect(skipped?.body).toMatch(/Reason: per-project visual-verify budget exhausted/);
+  });
+
+  it('supersession resolves prior LOWER-attempt findings only; a same-lane higher attempt stays live', async () => {
+    seedRun(db, 'run-b4');
+    await seedPriorFinding('run-b4', 'TASK-1', 1, 'vr_old1');
+    await seedPriorFinding('run-b4', 'TASK-1', 2, 'vr_old2');
+    // A verdict at attempt 3 supersedes attempts 1 & 2, and (FAIL) raises its own.
+    seedRequestFull(db, { id: 'vr_new3', runId: 'run-b4', status: 'failed', enqueueKey: 'run-b4:TASK-1:3' });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    await deliver({ requestId: 'vr_new3', runId: 'run-b4', projectId: 1, type: 'static-render-snapshot', status: 'failed', verdict: FAIL_VERDICT, fileNames: ['home.png'], input: { intent: 'x', taskRef: 'TASK-1' } });
+
+    const f = visualFindings(db, 'run-b4');
+    const a1 = f.find((x) => x.attempt === 1);
+    const a2 = f.find((x) => x.attempt === 2);
+    const a3 = f.find((x) => x.attempt === 3);
+    expect(a1?.status).toBe('resolved');
+    expect(a2?.status).toBe('resolved');
+    expect(a3?.status).toBe('pending'); // the new (highest) attempt stays live
+  });
+
+  it('a PASS resolves ALL prior findings for the lane and raises none of its own', async () => {
+    seedRun(db, 'run-b5');
+    await seedPriorFinding('run-b5', 'TASK-1', 1, 'vr_p1');
+    await seedPriorFinding('run-b5', 'TASK-1', 2, 'vr_p2');
+    seedRequestFull(db, { id: 'vr_pass3', runId: 'run-b5', status: 'passed', enqueueKey: 'run-b5:TASK-1:3' });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    await deliver({ requestId: 'vr_pass3', runId: 'run-b5', projectId: 1, type: 'static-render-snapshot', status: 'passed', verdict: PASS_VERDICT, fileNames: ['home.png'], input: { intent: 'x', taskRef: 'TASK-1' } });
+
+    const f = visualFindings(db, 'run-b5');
+    expect(f.filter((x) => x.status === 'pending')).toHaveLength(0); // no live blockers
+    expect(f.filter((x) => x.status === 'resolved')).toHaveLength(2);
+  });
+
+  it('a delivery-outbox REPLAY does not duplicate the finding (idempotent by requestId)', async () => {
+    seedRun(db, 'run-b6');
+    seedRequestFull(db, { id: 'vr_r', runId: 'run-b6', status: 'skipped', enqueueKey: 'run-b6:TASK-1:1', errorMessage: 'no backend' });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const args = { requestId: 'vr_r', runId: 'run-b6', projectId: 1, type: 'static-render-snapshot' as const, status: 'skipped' as const, verdict: undefined, fileNames: [] as string[], input: { intent: 'x', taskRef: 'TASK-1' } };
+    await deliver(args);
+    await deliver(args); // replay
+    expect(visualFindings(db, 'run-b6')).toHaveLength(1);
+  });
+
+  it('a malformed enqueue_key falls back to attempt 1 (no crash) and still correlates', async () => {
+    seedRun(db, 'run-b7');
+    seedRequestFull(db, { id: 'vr_bad', runId: 'run-b7', status: 'skipped', enqueueKey: 'garbage-no-colon', errorMessage: 'no backend' });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    await deliver({ requestId: 'vr_bad', runId: 'run-b7', projectId: 1, type: 'static-render-snapshot', status: 'skipped', verdict: undefined, fileNames: [], input: { intent: 'x', taskRef: 'TASK-1' } });
+    const f = visualFindings(db, 'run-b7');
+    expect(f).toHaveLength(1);
+    expect(f[0].attempt).toBe(1);
+    expect(f[0].requestId).toBe('vr_bad');
   });
 });

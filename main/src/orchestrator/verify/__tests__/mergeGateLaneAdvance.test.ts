@@ -30,6 +30,7 @@ import {
   decideMergeGate,
   applyMergeGateVerdict,
   isMergeGateBlocking,
+  resolveLaneAttempts,
   MERGE_GATE_ATTEMPT_CAP,
 } from '../mergeGateLaneAdvance';
 import type { VerdictV1 } from '../../../../../shared/types/visualVerification';
@@ -510,5 +511,68 @@ describe('applyMergeGateVerdict (lane write side)', () => {
       // Falls back to the literal 'implement' — NOT one of this chain's own ids.
       expect(readLane(batchId, 'tsk_a')).toEqual({ status: 'running', step: 'implement', attempts: 2 });
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §5.6/§5.7 — requestAttempt replay-safety guard + resolveLaneAttempts (slice 9b)
+// ---------------------------------------------------------------------------
+
+describe('applyMergeGateVerdict — requestAttempt replay guard', () => {
+  let db: Database.Database;
+  let store: SprintLaneStore;
+
+  beforeEach(() => {
+    db = buildDb();
+    store = SprintLaneStore.initialize(dbAdapter(db));
+  });
+  afterEach(() => {
+    SprintLaneStore._resetForTesting();
+    sprintLaneEvents.removeAllListeners();
+    db.close();
+  });
+
+  function readLane(batchId: string, taskId: string): { status: string; attempts: number } {
+    return db
+      .prepare('SELECT status, attempts FROM sprint_batch_tasks WHERE batch_id = ? AND task_id = ?')
+      .get(batchId, taskId) as { status: string; attempts: number };
+  }
+
+  it('a FAIL whose attempt < the lane attempts is a NO-OP (replay does not double-bump the loopback)', () => {
+    seedTask(db, 'tsk_a', 'TASK-001', 'A');
+    const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+    seedRun(db, 'run-1', batchId);
+    // Lane already looped back to attempt 2 (a prior FAIL delivery ran).
+    store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'running', currentStepId: 'implement', attempt: 2 });
+
+    // Re-delivering the SAME attempt-1 FAIL (boot replay) must not bump to 3.
+    const action = applyMergeGateVerdict({
+      db: dbAdapter(db), runId: 'run-1', status: 'failed', verdict: failVerdict(), requestAttempt: 1,
+    });
+    expect(action).toEqual({ kind: 'noop', reason: 'stale-or-replayed' });
+    expect(readLane(batchId, 'tsk_a')).toEqual({ status: 'running', attempts: 2 });
+  });
+
+  it('a FAIL whose attempt EQUALS the lane attempts still loops back (first, non-replay delivery)', () => {
+    seedTask(db, 'tsk_a', 'TASK-001', 'A');
+    const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+    seedRun(db, 'run-1', batchId);
+    store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'running', currentStepId: 'awaiting-verify', attempt: 1 });
+
+    const action = applyMergeGateVerdict({
+      db: dbAdapter(db), runId: 'run-1', status: 'failed', verdict: failVerdict(), requestAttempt: 1,
+    });
+    expect(action).toEqual({ kind: 'loopback-implement', nextAttempt: 2 });
+    expect(readLane(batchId, 'tsk_a')).toEqual({ status: 'running', attempts: 2 });
+  });
+
+  it('resolveLaneAttempts returns the lane attempts for an attributable lane, null otherwise', () => {
+    seedTask(db, 'tsk_a', 'TASK-001', 'A');
+    const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+    seedRun(db, 'run-1', batchId);
+    store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'running', currentStepId: 'awaiting-verify', attempt: 2 });
+    expect(resolveLaneAttempts(dbAdapter(db), 'run-1', 'TASK-001')).toBe(2);
+    // A non-sprint / unknown run has no lane → null.
+    expect(resolveLaneAttempts(dbAdapter(db), 'run-nope', undefined)).toBeNull();
   });
 });

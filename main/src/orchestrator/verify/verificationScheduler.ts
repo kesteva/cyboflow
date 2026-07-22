@@ -768,6 +768,16 @@ export interface VerificationSchedulerDeps {
    * index.ts. Injected as a plain function so the scheduler stays net/service-free.
    */
   portFreeProbe?: (port: number) => Promise<boolean>;
+  /**
+   * Enqueue-age ceiling (ms) covering a request's QUEUED + lease-wait time
+   * (redesign §5.6). A row whose `enqueued_at` is older than this at drain time —
+   * i.e. it never acquired a lease within the window — is terminalized 'skipped'
+   * (fail-open, concrete lease reason) through the normal delivery path so a
+   * merge-gate lane parked at awaiting-verify is never wedged behind a starved
+   * request. Defaults to config.queuedAgeCeilingMs (15 min). Tests pass a small
+   * value to exercise the boundary.
+   */
+  queuedAgeCeilingMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -785,6 +795,8 @@ interface VerificationRequestRow {
   chain_json: string | null;
   current_backend: string | null;
   attempt: number;
+  /** ISO enqueue time — the anchor for the queued-age deadline (§5.6). */
+  enqueued_at: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -814,6 +826,17 @@ export class VerificationScheduler {
   private readonly agentRequestTimeoutMs: number;
   private readonly agentRequestCeilingMs: number;
   private readonly portFreeProbe: (port: number) => Promise<boolean>;
+  private readonly queuedAgeCeilingMs: number;
+
+  /**
+   * The single COALESCED fallback timer armed while any row is `queued` (§5.6). It
+   * fires nudge() at the earliest queued-age expiry so a starved row is terminalized
+   * even when NO lease release / enqueue would otherwise wake the drain (the
+   * hasQueuedRequests re-nudge only fires when this pass leased in-flight work). One
+   * timer at a time — re-armed at the end of every drain pass, cleared when the
+   * queue empties. Never a second drain loop; it merely wakes the existing one.
+   */
+  private queuedAgeTimer: ReturnType<typeof setTimeout> | null = null;
 
   /**
    * Per-backend healthCheck memo (R2 #2): backend id → { ok, at } where `at` is the
@@ -858,6 +881,7 @@ export class VerificationScheduler {
     this.agentRequestTimeoutMs = deps.agentRequestTimeoutMs ?? DEFAULT_AGENT_REQUEST_TIMEOUT_MS;
     this.agentRequestCeilingMs = deps.agentRequestCeilingMs ?? AGENT_REQUEST_TIMEOUT_CEILING_MS;
     this.portFreeProbe = deps.portFreeProbe ?? (async () => true);
+    this.queuedAgeCeilingMs = deps.queuedAgeCeilingMs ?? this.config.queuedAgeCeilingMs;
   }
 
   // --------------------------------------------------------------------------
@@ -918,7 +942,7 @@ export class VerificationScheduler {
     const rows = this.db
       .prepare(
         `SELECT id, run_id, project_id, status, verify_type, deliverable_json,
-                chain_json, current_backend, attempt
+                chain_json, current_backend, attempt, enqueued_at
            FROM verification_requests
           WHERE status IN ('leased', 'running')
           ORDER BY enqueued_at ASC, id ASC`,
@@ -944,7 +968,29 @@ export class VerificationScheduler {
         timedOut: recovered,
       });
     }
-    return recovered;
+
+    // §5.6 boot sweep for STALE queued rows: a row left 'queued' by a prior process
+    // (no live worker to lease it, and — until the first post-boot enqueue — nothing
+    // to nudge the drain) whose enqueue-age already exceeds the ceiling is
+    // terminalized 'skipped' through the SAME delivery path so its parked lane is
+    // driven off awaiting-verify. Non-stale queued rows are LEFT queued; the closing
+    // nudge below arms the fallback timer for them.
+    const expired = await this.expireOverAgeQueued();
+
+    // §5.6 delivery-outbox boot replay: every TERMINAL row still marked
+    // delivery_state='pending' (its terminal status committed but a crash struck
+    // before/within the three verdict deliveries) is re-delivered through the same
+    // idempotent deliver() path, then stamped 'delivered'. Legacy rows (NULL
+    // delivery_state — pre-078 or terminalized by an old binary) are self-excluded
+    // by the WHERE clause and never replayed.
+    const replayed = await this.replayPendingDeliveries();
+
+    // Wake the drain once so any REMAINING (non-stale) queued rows are processed and
+    // the queued-age fallback timer is armed for them (runRecovery runs before any
+    // enqueue would otherwise nudge). No-op when the queue is empty.
+    if (this.hasQueuedRequests()) this.nudge();
+
+    return recovered + expired + replayed;
   }
 
   // --------------------------------------------------------------------------
@@ -1117,6 +1163,12 @@ export class VerificationScheduler {
    * settled world (freed leases) rather than re-racing in-flight work.
    */
   async drain(): Promise<void> {
+    // §5.6 queued-age deadline: BEFORE lease selection, terminalize any queued row
+    // whose enqueue-age exceeds the ceiling (it never leased in time). Runs every
+    // pass so a released-lease re-nudge OR the fallback timer both expire starved
+    // rows through the normal delivery path. Expired rows drop out of selectQueued.
+    await this.expireOverAgeQueued();
+
     const rows = this.selectQueued();
     const inFlight: Array<Promise<void>> = [];
     for (const row of rows) {
@@ -1143,6 +1195,87 @@ export class VerificationScheduler {
         this.nudge();
       }
     }
+
+    // §5.6 fallback timer: arm (or re-arm / clear) the single coalesced queued-age
+    // timer for whatever remains queued after this pass. This is the ONLY wake path
+    // for a row that is queued with NO in-flight work of ours to release a lease
+    // (e.g. an externally-held pool, or a lone request the health gate keeps
+    // skipping-not-leasing) — without it such a row could age past the ceiling
+    // unnoticed until the next unrelated enqueue.
+    this.armQueuedAgeTimer();
+  }
+
+  /**
+   * Terminalize every 'queued' row whose enqueue-age exceeds `queuedAgeCeilingMs`
+   * (§5.6) as 'skipped' (fail-open) with the concrete lease/queue reason, through
+   * the NORMAL markTerminalAndDeliver path (never a silent UPDATE) so its parked
+   * merge-gate lane is driven off awaiting-verify with a non-blocking finding.
+   * Returns the count expired. Fail-soft per row: a delivery throw is swallowed by
+   * markTerminalAndDeliver's own wrapper. The cancel-guarded markTerminal means a
+   * row swept concurrently to 'timeout' is a 0-change no-op (no double delivery).
+   */
+  private async expireOverAgeQueued(): Promise<number> {
+    const nowMs = this.now();
+    const rows = this.selectQueued();
+    let expired = 0;
+    for (const row of rows) {
+      const enqueuedMs = Date.parse(row.enqueued_at);
+      // An unparseable enqueued_at (should not happen — the column is a DB default
+      // ISO string) is treated as NOT expired so a clock/parse glitch never mass-
+      // skips the live backlog.
+      if (!Number.isFinite(enqueuedMs)) continue;
+      const ageMs = nowMs - enqueuedMs;
+      if (ageMs < this.queuedAgeCeilingMs) continue;
+      const input = this.parseInput(row.deliverable_json) ?? undefined;
+      const ageMin = Math.round(ageMs / 60000);
+      await this.markTerminalAndDeliver(
+        row,
+        'skipped',
+        {
+          error: `queued-age deadline exceeded — request never acquired a lease within ${ageMin} min (persistent resource contention or a wedged pool)`,
+          ...(this.isAgentStampedRun(row.run_id) ? { captureOrigin: 'agent' as const } : {}),
+        },
+        undefined,
+        [],
+        input,
+      );
+      expired += 1;
+    }
+    if (expired > 0) {
+      this.logger?.warn('[VerificationScheduler] expired over-age queued requests', { expired });
+    }
+    return expired;
+  }
+
+  /**
+   * Arm the single coalesced queued-age fallback timer at the EARLIEST remaining
+   * queued-age expiry, or clear it when nothing is queued (§5.6). Re-armed at the
+   * end of every drain pass — cheap (one min-scan + one setTimeout). On fire it
+   * calls nudge(), funneling into the EXISTING drain loop (no second loop); the
+   * next drain's expireOverAgeQueued does the terminalization. `unref`ed so it
+   * never keeps the process alive.
+   */
+  private armQueuedAgeTimer(): void {
+    if (this.queuedAgeTimer !== null) {
+      clearTimeout(this.queuedAgeTimer);
+      this.queuedAgeTimer = null;
+    }
+    const row = this.db
+      .prepare(`SELECT MIN(enqueued_at) AS earliest FROM verification_requests WHERE status = 'queued'`)
+      .get() as { earliest: string | null } | undefined;
+    const earliest = row?.earliest ?? null;
+    if (earliest === null) return; // nothing queued — no timer
+    const earliestMs = Date.parse(earliest);
+    if (!Number.isFinite(earliestMs)) return;
+    const delay = Math.max(0, earliestMs + this.queuedAgeCeilingMs - this.now());
+    const timer = setTimeout(() => {
+      this.queuedAgeTimer = null;
+      this.nudge();
+    }, delay);
+    if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
+      (timer as { unref: () => void }).unref();
+    }
+    this.queuedAgeTimer = timer;
   }
 
   /** True when at least one request row is still awaiting a drain ('queued'). */
@@ -1158,7 +1291,7 @@ export class VerificationScheduler {
     return this.db
       .prepare(
         `SELECT id, run_id, project_id, status, verify_type, deliverable_json,
-                chain_json, current_backend, attempt
+                chain_json, current_backend, attempt, enqueued_at
            FROM verification_requests
           WHERE status = 'queued'
           ORDER BY enqueued_at ASC, id ASC`,
@@ -2845,6 +2978,7 @@ export class VerificationScheduler {
                 verdict_json = ?,
                 report_json = COALESCE(?, report_json),
                 error_message = ?,
+                delivery_state = 'pending',
                 attempt = attempt + 1,
                 ended_at = ?
           WHERE id = ? AND status IN ('queued', 'leased', 'running')`,
@@ -2861,6 +2995,26 @@ export class VerificationScheduler {
         new Date().toISOString(),
         id,
       ).changes;
+  }
+
+  /**
+   * Delivery-outbox stamp (§5.6): flip `delivery_state` to 'delivered' AFTER all
+   * three verdict-delivery consumers (artifact / lane / finding) have run. Written
+   * only by markTerminalAndDeliver + the boot replay, once deliver() returns —
+   * markTerminal stamps 'pending' atomically with the terminal status, so a crash
+   * in the window between the two leaves 'pending' for boot replay to pick up. A
+   * legacy/pre-078 row (delivery_state NULL) never reaches here. Best-effort — a
+   * failed flip merely re-delivers once more (idempotently) at the next boot.
+   */
+  private markDelivered(id: string): void {
+    try {
+      this.db.prepare(`UPDATE verification_requests SET delivery_state = 'delivered' WHERE id = ?`).run(id);
+    } catch (err) {
+      this.logger?.debug('[VerificationScheduler] delivery_state=delivered stamp failed (fail-soft)', {
+        requestId: id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**
@@ -2911,6 +3065,122 @@ export class VerificationScheduler {
       });
     }
     await this.deliver(row, status, verdict, fileNames, input, extra);
+    // §5.6 delivery-outbox: only after all three deliveries have run do we flip the
+    // 'pending' stamp markTerminal wrote to 'delivered'. A crash anywhere before
+    // this line leaves the row terminal-but-'pending' for the boot replay to
+    // re-deliver (idempotently). deliver() is fail-soft, so a swallowed consumer
+    // error still stamps delivered — the outbox protects the crash-BETWEEN-status-
+    // and-delivery window, not within-deliver individual (idempotent) failures.
+    this.markDelivered(row.id);
+  }
+
+  /**
+   * §5.6 delivery-outbox boot replay: re-deliver every TERMINAL row still marked
+   * `delivery_state='pending'` (a crash struck after markTerminal committed the
+   * status but before/within the three verdict deliveries), then stamp 'delivered'.
+   * Runs once at boot from runRecovery. Reconstructs the deliver() args from the
+   * persisted columns; the load-bearing consumers (artifact merge keyed by
+   * (taskRef, requestId), the requestAttempt-guarded lane advance, the
+   * requestId-correlated finding) are all idempotent, so a double replay is a
+   * no-op. Legacy/pre-078 rows have NULL delivery_state and are self-excluded.
+   * fileNames / captureOrigin are best-effort (the agent path's captureOrigin is
+   * always 'agent'; diagnostics are not persisted and are omitted on replay).
+   */
+  private async replayPendingDeliveries(): Promise<number> {
+    let rows: Array<{
+      id: string;
+      run_id: string;
+      project_id: number;
+      status: string;
+      verify_type: string;
+      deliverable_json: string;
+      verdict_json: string | null;
+      report_json: string | null;
+    }>;
+    try {
+      rows = this.db
+        .prepare(
+          `SELECT id, run_id, project_id, status, verify_type, deliverable_json, verdict_json, report_json
+             FROM verification_requests
+            WHERE delivery_state = 'pending'
+              AND status IN ('passed', 'failed', 'low_confidence', 'skipped', 'timeout')
+            ORDER BY enqueued_at ASC, id ASC`,
+        )
+        .all() as typeof rows;
+    } catch (err) {
+      // A minimal DB lacking delivery_state (pre-078) has nothing to replay.
+      this.logger?.debug('[VerificationScheduler] delivery-outbox replay query failed (fail-soft)', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return 0;
+    }
+
+    let replayed = 0;
+    for (const row of rows) {
+      const input = this.parseInput(row.deliverable_json) ?? undefined;
+      const verdict = this.parseVerdict(row.verdict_json);
+      const fileNames = this.deriveReplayFileNames(row.report_json, verdict);
+      // A persisted report_json means the agent engine produced this terminal —
+      // its capture origin is always 'agent' (§5.9); the legacy path leaves it
+      // undefined on replay (diagnostics are not persisted either).
+      const extra: TerminalExtra = row.report_json ? { captureOrigin: 'agent' } : {};
+      const deliverRow: VerificationRequestRow = {
+        id: row.id,
+        run_id: row.run_id,
+        project_id: row.project_id,
+        status: row.status,
+        verify_type: row.verify_type,
+        deliverable_json: row.deliverable_json,
+        chain_json: null,
+        current_backend: null,
+        attempt: 0,
+        enqueued_at: '',
+      };
+      await this.deliver(deliverRow, row.status as RequestStatus, verdict, fileNames, input, extra);
+      this.markDelivered(row.id);
+      replayed += 1;
+    }
+    if (replayed > 0) {
+      this.logger?.info('[VerificationScheduler] replayed pending verdict deliveries on boot', { replayed });
+    }
+    return replayed;
+  }
+
+  /** Parse a persisted verdict_json into a VerdictV1; undefined on NULL/malformed. */
+  private parseVerdict(verdictJson: string | null): VerdictV1 | undefined {
+    if (typeof verdictJson !== 'string' || verdictJson.length === 0) return undefined;
+    try {
+      const parsed: unknown = JSON.parse(verdictJson);
+      return parsed !== null && typeof parsed === 'object' ? (parsed as VerdictV1) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Best-effort fileNames for a replayed delivery: the agent report's screenshot
+   * basenames when a report_json is present, else the verdict's judgedFileNames,
+   * else empty. Only feeds the artifact merge's fileNames union + the label — the
+   * load-bearing report entry is composed by verdictDelivery from report_json.
+   */
+  private deriveReplayFileNames(reportJson: string | null, verdict: VerdictV1 | undefined): string[] {
+    if (typeof reportJson === 'string' && reportJson.length > 0) {
+      try {
+        const parsed: unknown = JSON.parse(reportJson);
+        if (parsed !== null && typeof parsed === 'object') {
+          const shots = (parsed as { screenshots?: unknown }).screenshots;
+          if (Array.isArray(shots)) {
+            const names = shots
+              .map((s) => (s !== null && typeof s === 'object' ? (s as { fileName?: unknown }).fileName : undefined))
+              .filter((n): n is string => typeof n === 'string' && n.length > 0);
+            if (names.length > 0) return names;
+          }
+        }
+      } catch {
+        // fall through to verdict-derived names
+      }
+    }
+    return verdict?.judgedFileNames ?? [];
   }
 
   // --------------------------------------------------------------------------

@@ -9,38 +9,34 @@
  * THREE deliveries (P8b promotes the lane gate from advisory to the visual
  * MERGE-GATE — locked decision #2):
  *
- *  1. ArtifactRouter.apply(projectId, { op:'create', ... atype:'screenshots' })
- *     ENRICHES the SAME run-scoped 'screenshots' artifact (idempotent UPSERT by
- *     (runId, atype) — the producer/auto-mint already wrote `{ fileNames }`) with
- *     a `verdict` block. Done on EVERY judged outcome so the screenshots tab can
- *     render the verdict banner + per-image issues. This is the ONLY of the three
- *     deliveries gated on a PRESENT verdict — a skipped/timeout request and a
- *     verdict-LESS FAIL (capture-fail / judge-throw) enrich nothing, but the
- *     verdict-less FAIL STILL drives the merge-gate (#2) + raises a finding (#3) so
- *     a transient capture failure never silently wedges the lane.
+ *  1. ArtifactRouter.mergeScreenshots — ATOMICALLY merges into the SAME
+ *     run-scoped 'screenshots' artifact (§5.9): fileNames unioned, verdict banner
+ *     latest-wins, and (agent engine) a per-task `TaskVerificationReportEntry`
+ *     upserted by (taskRef, requestId). The read-merge-write happens inside the
+ *     router's per-project queue, so a concurrent auto-mint scan can never lose
+ *     this delivery's reports entry (the pre-§5.9 read-then-create race).
  *
  *  2. MERGE-GATE lane drive (applyMergeGateVerdict — P8b). For a SPRINT run (one
  *     with a batch + lanes), the verdict drives the lane off its `awaiting-verify`
  *     park step: PASS → integrated; FAIL under the 3× cap → back to `implement`
  *     with a bumped attempt (the loopback); FAIL at the cap → `failed`;
- *     low_confidence → advisory pass-through. A non-sprint run (no batch) is a
- *     no-op — the lane drive simply does nothing and only the finding informs.
- *     The action returned decides the finding's `blocking` flag below.
+ *     low_confidence → advisory pass-through. Threaded with the request's OWN
+ *     attempt so a delivery-outbox boot replay never double-bumps the loopback.
  *
- *  3. ReviewItemRouter.applyReviewItem(projectId, { op:'create', kind:'finding' })
- *     raises ONE finding on a FAIL, low_confidence, timeout, or skipped terminal
- *     verdict (PASS raises none). Severity is mapped from the worst issue; the
- *     finding is soft-linked to the run's task when one exists. In merge-gate mode
- *     a FAIL finding is BLOCKING (it holds this lane's integration until re-verified /
- *     escalated — isMergeGateBlocking); low_confidence stays NON-blocking (advisory
- *     human review, never an auto-loop); timeout AND skipped findings are NON-blocking
- *     too (advance-with-visibility — the lane advanced, but verification did not run).
- *     A `verification_requests` row only exists because a flow agent explicitly asked
- *     for verification of a deliverable, so a skip is never a no-op from the human's
- *     perspective — it means the check was requested but never ran (missing TCC grant,
- *     unhealthy dev-server backend, no usable backend in the chain, or an unparseable
- *     deliverable). This is called once per terminal verdict (the scheduler delivers a
- *     request's verdict exactly once), so it does not spam a finding per drain.
+ *  3. ReviewItemRouter finding (§5.7). A FAIL / low_confidence / timeout / skipped
+ *     terminal raises ONE finding (PASS raises none). A FAIL body now carries the
+ *     agent's REPORT (behaviors failed + evidence + feedback), or the build/launch
+ *     log excerpt for a verdict-less build failure; non-blocking findings carry the
+ *     CONCRETE reason (error_message threaded from the agent path). Every finding
+ *     persists a machine-readable (runId, taskRef, attempt, requestId) correlation
+ *     so creation is idempotent by requestId (replay-safe) and a later terminal
+ *     verdict can SUPERSEDE prior lower-attempt findings for the same lane.
+ *
+ * SUPERSESSION (§5.7): on EVERY terminal verdict for a lane (incl. PASS), prior
+ * UNRESOLVED visual-verify findings for the same (runId, taskRef) at LOWER
+ * attempts are resolved through ReviewItemRouter with a supersession note — a
+ * recovered lane leaves no stale blocking item, and repeated failures keep only
+ * the latest blocker live.
  *
  * Standalone-typecheck invariant: this file imports ONLY the electron-free
  * orchestrator routers + the merge-gate driver + shared types + the narrow
@@ -49,11 +45,18 @@
  */
 import { ArtifactRouter } from '../artifactRouter';
 import { ReviewItemRouter } from '../reviewItemRouter';
-import { applyMergeGateVerdict, isMergeGateBlocking } from './mergeGateLaneAdvance';
+import { applyMergeGateVerdict, isMergeGateBlocking, resolveLaneAttempts } from './mergeGateLaneAdvance';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type { OnVerdict } from './verificationScheduler';
-import type { CaptureOrigin, VerdictV1 } from '../../../../shared/types/visualVerification';
-import type { ScreenshotsArtifactPayload } from '../../../../shared/types/artifacts';
+import type {
+  CaptureOrigin,
+  VerdictV1,
+  VerificationReportV1,
+  VerificationRequestInput,
+  VerificationTaskV1,
+} from '../../../../shared/types/visualVerification';
+import { parseVerificationTaskV1 } from '../../../../shared/types/visualVerification';
+import type { TaskVerificationReportEntry } from '../../../../shared/types/artifacts';
 import type {
   FindingPayload,
   ReviewItemSeverity,
@@ -61,7 +64,7 @@ import type {
 
 /** Dependencies the verdict-delivery factory needs. */
 export interface VerdictDeliveryDeps {
-  /** Read-only DB surface — used to resolve the run's soft task link for the finding. */
+  /** Read-only DB surface — used to resolve the run's soft task link + persisted request columns. */
   db: DatabaseLike;
   logger?: LoggerLike;
 }
@@ -71,11 +74,89 @@ export interface VerdictDeliveryDeps {
  * `timeout` and `skipped` (R4, revised). Both timeout and skipped ADVANCE the lane
  * (an environment failure or missing precondition must never wedge a sprint) but each
  * raises a NON-blocking finding so a human sees that verification did not actually
- * run — advance-with-visibility. The blocking flag is still derived from the
- * merge-gate action (isMergeGateBlocking), which is false for both statuses'
- * advance-integrated / non-sprint noop — so these findings are always non-blocking.
+ * run — advance-with-visibility.
  */
 const FINDING_STATUSES: ReadonlySet<string> = new Set(['failed', 'low_confidence', 'timeout', 'skipped']);
+
+/** The persisted columns of a verification_requests row the delivery reads by requestId. */
+interface DeliveredRequestColumns {
+  reportJson: string | null;
+  taskJson: string | null;
+  enqueueKey: string | null;
+  errorMessage: string | null;
+}
+
+/**
+ * Read the persisted columns a delivery needs to compose its report entry + finding
+ * body (§5.6/§5.7). A plain read (not a chokepoint write) — the report/verdict were
+ * committed atomically by the scheduler's markTerminal, so this observes them for
+ * both the live delivery and the boot replay. Fail-soft: a minimal DB / read error
+ * yields all-nulls (the delivery degrades to the legacy generic body).
+ */
+function readRequestColumns(db: DatabaseLike, requestId: string, logger?: LoggerLike): DeliveredRequestColumns {
+  try {
+    const row = db
+      .prepare(
+        `SELECT report_json AS reportJson, task_json AS taskJson,
+                enqueue_key AS enqueueKey, error_message AS errorMessage
+           FROM verification_requests WHERE id = ?`,
+      )
+      .get(requestId) as Partial<DeliveredRequestColumns> | undefined;
+    return {
+      reportJson: row?.reportJson ?? null,
+      taskJson: row?.taskJson ?? null,
+      enqueueKey: row?.enqueueKey ?? null,
+      errorMessage: row?.errorMessage ?? null,
+    };
+  } catch (err) {
+    logger?.debug('[verdictDelivery] could not read request columns (fail-soft)', {
+      requestId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { reportJson: null, taskJson: null, enqueueKey: null, errorMessage: null };
+  }
+}
+
+/** Parse persisted report_json into a VerificationReportV1; null on absent/malformed. */
+function parseReport(reportJson: string | null): VerificationReportV1 | null {
+  if (typeof reportJson !== 'string' || reportJson.length === 0) return null;
+  try {
+    const parsed: unknown = JSON.parse(reportJson);
+    // Trust the scheduler's normalizer that wrote it — light shape check only.
+    if (parsed !== null && typeof parsed === 'object' && Array.isArray((parsed as { behaviors?: unknown }).behaviors)) {
+      return parsed as VerificationReportV1;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** Parse persisted task_json into a VerificationTaskV1 (via the strict validator); null otherwise. */
+function parseTask(taskJson: string | null): VerificationTaskV1 | null {
+  if (typeof taskJson !== 'string' || taskJson.length === 0) return null;
+  try {
+    const parsed = parseVerificationTaskV1(JSON.parse(taskJson));
+    return parsed.ok ? parsed.task : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Parse the attempt out of an enqueue_key (`${runId}:${taskRef}:${attempt}` — the
+ * attempt is the LAST colon-segment; runId/taskRef may themselves contain colons,
+ * §5.6). Returns null on an absent / malformed key so the caller falls back to the
+ * lane store's attempt, else 1.
+ */
+export function parseAttemptFromEnqueueKey(enqueueKey: string | null): number | null {
+  if (typeof enqueueKey !== 'string' || enqueueKey.length === 0) return null;
+  const lastColon = enqueueKey.lastIndexOf(':');
+  if (lastColon < 0) return null;
+  const tail = enqueueKey.slice(lastColon + 1);
+  const n = Number.parseInt(tail, 10);
+  return Number.isInteger(n) && n >= 0 && String(n) === tail.trim() ? n : null;
+}
 
 /**
  * Map a VlmJudge issue severity ('low'|'medium'|'high') to the review_items
@@ -94,7 +175,7 @@ const ISSUE_RANK: Record<'low' | 'medium' | 'high', number> = { low: 0, medium: 
 
 /**
  * Pick the worst (highest-rank) issue severity from a verdict, or undefined when
- * none. A verdict-LESS FAIL (capture-fail / judge-throw — `verdict` undefined) has
+ * none. A verdict-LESS FAIL (capture-fail / build-fail — `verdict` undefined) has
  * no issues to rank, so the caller falls back to the default 'warning' severity.
  */
 function worstIssueSeverity(verdict: VerdictV1 | undefined): 'low' | 'medium' | 'high' | undefined {
@@ -109,78 +190,137 @@ function worstIssueSeverity(verdict: VerdictV1 | undefined): 'low' | 'medium' | 
 }
 
 /**
- * Build the human-facing finding title + body from a terminal verdict. low_confidence
- * gets a "needs human visual review" framing (it is never an auto-loop); fail gets a
- * "visual verification failed" framing. The body threads the judge feedback +
- * per-issue lines so the review queue carries the actionable detail.
- *
- * Tolerates an ABSENT verdict (a capture-fail / judge-throw delivers status 'failed'
- * with `verdict` undefined): the title is still the FAIL framing and the body falls
- * back to a generic "no images were captured / judged" line so the review inbox
- * carries an actionable reason instead of an empty finding. (The concrete
- * capture/judge error is persisted on verification_requests.error_message by the
- * scheduler's markTerminal; it is not threaded to this hook, so the body stays
- * generic-but-actionable rather than re-reading that row.)
+ * Render the FAILED behaviors of an agent report as finding-body lines: each failed
+ * behavior's id + description + expected (from the composing task where ids match)
+ * + the evidence notes, so the re-delegated implement agent receives WHAT was
+ * tested, WHAT was expected, and WHY it failed (the loop the investigation flagged,
+ * §5.7). Behaviors that passed / were not testable are omitted from a FAIL body (the
+ * report entry on the screenshots tab carries the full set). Returns an empty array
+ * when the report has no failed behaviors.
  */
-function buildFindingText(
-  status: string,
-  verdict: VerdictV1 | undefined,
-  skipReason?: string | null,
-): { title: string; body: string } {
-  // R4: timeout is advance-with-visibility — the lane was ADVANCED (not looped back),
-  // and no visual check actually ran, so it gets its own environment-failure framing
-  // distinct from the FAIL body (which says "sent back to re-implement").
-  if (status === 'timeout') {
-    return {
-      title: 'Visual verification did not run (timed out)',
-      body: 'Visual verification timed out before producing a verdict (the dev server never became ready, capture/judge exceeded the deadline, or the request was orphaned by a process restart). The lane was advanced so the sprint is not wedged, but NO visual check actually ran — verify this deliverable manually or re-run verification.',
-    };
-  }
-  // R4 (revised): skipped is ALSO advance-with-visibility. A verification_requests
-  // row only exists because a flow agent explicitly asked for verification of a UI
-  // deliverable, so a skip always means "requested but never ran" — a missing
-  // precondition (no TCC grant, unhealthy/absent dev-server backend, no port-capable
-  // rung for the deliverable, or an unparseable deliverable), never a deliberate
-  // no-op. The lane was advanced so the sprint is not wedged, but the body should
-  // carry the concrete reason when one was persisted (see skipReason above).
-  if (status === 'skipped') {
-    const body = [
-      'Visual verification did not run (a missing precondition — an unhealthy or absent backend, no capable rung for this deliverable, or an unparseable deliverable — prevented it). The lane was advanced so the sprint is not wedged, but NO visual check actually ran — verify this deliverable manually or fix the environment and re-run verification.',
-      ...(skipReason ? [`Reason: ${skipReason}`] : []),
-    ].join('\n\n');
-    return { title: 'Visual verification did not run (skipped)', body };
-  }
-  const title =
-    status === 'low_confidence'
-      ? 'Visual verification needs human review (low confidence)'
-      : 'Visual verification failed';
-  if (!verdict) {
-    return {
-      title,
-      body: 'Visual verification could not produce a verdict (no screenshots were captured or judged). The lane was sent back to re-implement; investigate the capture/judge step (dev server reachable? selectors/URL valid?).',
-    };
+function renderFailedBehaviors(report: VerificationReportV1, task: VerificationTaskV1 | null): string[] {
+  const meta = new Map<string, { description: string; expected: string }>();
+  if (task) {
+    for (const b of task.behaviors) meta.set(b.id, { description: b.description, expected: b.expected });
   }
   const lines: string[] = [];
-  if (verdict.feedback) lines.push(verdict.feedback);
-  if (verdict.issues.length > 0) {
-    lines.push('');
-    for (const issue of verdict.issues) {
-      const where = issue.fileName ? ` (${issue.fileName})` : '';
-      lines.push(`- [${issue.severity}]${where} ${issue.description}`);
-    }
+  for (const b of report.behaviors) {
+    if (b.result !== 'fail') continue;
+    const m = meta.get(b.id);
+    const head = m?.description ? `${b.id} (${m.description})` : b.id;
+    const parts = [`- ${head}`];
+    if (m?.expected) parts.push(`expected: ${m.expected}`);
+    if (b.evidence.notes) parts.push(`observed: ${b.evidence.notes}`);
+    lines.push(parts.join(' — '));
   }
-  return { title, body: lines.join('\n') };
+  return lines;
+}
+
+/**
+ * Build the human-facing finding title + body (§5.7). The body composes, in order
+ * of specificity:
+ *   - build_failed / launch_failed (verdict-less FAIL): the build/launch log
+ *     excerpt PROMINENTLY (from report.buildLogExcerpt, else error_message) — a
+ *     deliverable that cannot build from its own committed state is a smoke FAIL,
+ *     frequently code-caused, so the excerpt is what re-implement needs.
+ *   - a behavior FAIL with a report: the failed behaviors (id + notes) + feedback.
+ *   - a FAIL with only a legacy verdict: verdict.feedback + per-issue lines.
+ *   - a verdict-less FAIL with neither: the generic capture/judge-failure text.
+ *   - low_confidence: "needs human review" + reason.
+ *   - timeout / skipped: advance-with-visibility framing + the CONCRETE reason.
+ */
+function buildFindingText(args: {
+  status: string;
+  verdict: VerdictV1 | undefined;
+  report: VerificationReportV1 | null;
+  task: VerificationTaskV1 | null;
+  errorMessage: string | null;
+}): { title: string; body: string } {
+  const { status, verdict, report, task, errorMessage } = args;
+
+  // ---- build/launch failure (verdict-less FAIL; report.outcome or error_message) ----
+  const buildFailed = report?.outcome === 'build_failed' || report?.outcome === 'launch_failed';
+  if (status === 'failed' && buildFailed) {
+    const kind = report?.outcome === 'launch_failed' ? 'launch' : 'build';
+    const excerpt = (report?.buildLogExcerpt ?? errorMessage ?? '').trim();
+    const parts = [
+      `Visual verification could not ${kind} the deliverable from its own committed state — a smoke FAIL (frequently code-caused). The lane was sent back to re-implement.`,
+    ];
+    if (excerpt) parts.push(['Build/launch log excerpt:', '```', excerpt, '```'].join('\n'));
+    if (report?.feedback) parts.push(report.feedback);
+    return { title: `Visual verification failed (${kind} error)`, body: parts.join('\n\n') };
+  }
+
+  // ---- timeout: advance-with-visibility (no visual check ran) ----
+  if (status === 'timeout') {
+    const parts = [
+      'Visual verification timed out before producing a verdict (the deployment never became ready, build/serve/drive/judge exceeded the deadline, or the request was orphaned by a process restart). The lane was advanced so the sprint is not wedged, but NO visual check actually ran — verify this deliverable manually or re-run verification.',
+    ];
+    if (errorMessage) parts.push(`Reason: ${errorMessage}`);
+    return { title: 'Visual verification did not run (timed out)', body: parts.join('\n\n') };
+  }
+
+  // ---- skipped: advance-with-visibility (missing precondition) ----
+  if (status === 'skipped') {
+    const parts = [
+      'Visual verification did not run (a missing precondition — an unhealthy or absent backend/agent engine, no capable rung for this deliverable, an exhausted budget, a queued-age deadline, or an unparseable deliverable — prevented it). The lane was advanced so the sprint is not wedged, but NO visual check actually ran — verify this deliverable manually or fix the environment and re-run verification.',
+    ];
+    if (errorMessage) parts.push(`Reason: ${errorMessage}`);
+    return { title: 'Visual verification did not run (skipped)', body: parts.join('\n\n') };
+  }
+
+  // ---- low_confidence: never an auto-loop — needs a human ----
+  if (status === 'low_confidence') {
+    const parts = ['Visual verification could not reach a confident verdict — a human should review the deliverable visually.'];
+    if (report) {
+      const untested = report.behaviors.filter((b) => b.result === 'not_testable').map((b) => `- ${b.id}: ${b.evidence.notes || 'not testable'}`);
+      if (untested.length > 0) parts.push(['Behaviors that could not be tested:', ...untested].join('\n'));
+    }
+    if (verdict?.feedback) parts.push(verdict.feedback);
+    if (!report && !verdict && errorMessage) parts.push(`Reason: ${errorMessage}`);
+    return { title: 'Visual verification needs human review (low confidence)', body: parts.join('\n\n') };
+  }
+
+  // ---- FAIL with a behavior report ----
+  if (status === 'failed' && report) {
+    const parts: string[] = [];
+    const failed = renderFailedBehaviors(report, task);
+    if (failed.length > 0) {
+      parts.push(['Behaviors that failed:', ...failed].join('\n'));
+    } else {
+      parts.push('Visual verification failed. The lane was sent back to re-implement.');
+    }
+    if (report.feedback) parts.push(report.feedback);
+    return { title: 'Visual verification failed', body: parts.join('\n\n') };
+  }
+
+  // ---- FAIL with only a legacy verdict (capture/judge path) ----
+  if (verdict) {
+    const lines: string[] = [];
+    if (verdict.feedback) lines.push(verdict.feedback);
+    if (verdict.issues.length > 0) {
+      lines.push('');
+      for (const issue of verdict.issues) {
+        const where = issue.fileName ? ` (${issue.fileName})` : '';
+        lines.push(`- [${issue.severity}]${where} ${issue.description}`);
+      }
+    }
+    return { title: 'Visual verification failed', body: lines.join('\n') };
+  }
+
+  // ---- verdict-less FAIL with neither report nor verdict ----
+  const parts = [
+    'Visual verification could not produce a verdict (no screenshots were captured or judged). The lane was sent back to re-implement; investigate the deploy/capture/judge step (deployment reachable? selectors/URL valid?).',
+  ];
+  if (errorMessage) parts.push(`Reason: ${errorMessage}`);
+  return { title: 'Visual verification failed', body: parts.join('\n\n') };
 }
 
 /**
  * Append the S9 capture-provenance section to a finding body: the capture origin
- * (one line) + the capped, UNTRUSTED page-console diagnostics. This is THE human
- * surface for the diagnostics breadcrumb (Codex finding 7) — a blank-shell FAIL's
- * review-queue finding now says "loaded over file:// — ES modules CORS-blocked"
- * (or shows the page's own console errors) instead of leaving the operator to
- * burn judge rounds guessing. The untrusted framing is deliberate and rendered:
- * page code controls the text, so a reader must never treat it as the verifier
- * speaking.
+ * (one line) + the capped, UNTRUSTED page-console diagnostics. The untrusted
+ * framing is deliberate and rendered: page code controls the text, so a reader must
+ * never treat it as the verifier speaking.
  */
 function appendProvenance(
   body: string,
@@ -203,11 +343,50 @@ function appendProvenance(
 }
 
 /**
+ * Compose the per-task `TaskVerificationReportEntry` merged into the screenshots
+ * artifact (§5.9). The report's per-behavior results are ENRICHED with the task's
+ * description/expected where the behavior ids match (the report carries only ids +
+ * result + evidence); the summary comes from the task, falling back to the legacy
+ * intent. `completedAt` is stamped now (delivery time).
+ */
+function composeReportEntry(args: {
+  requestId: string;
+  taskRef: string | null;
+  attempt: number;
+  report: VerificationReportV1;
+  task: VerificationTaskV1 | null;
+  input?: VerificationRequestInput;
+}): TaskVerificationReportEntry {
+  const { requestId, taskRef, attempt, report, task, input } = args;
+  const meta = new Map<string, { description: string; expected: string }>();
+  if (task) {
+    for (const b of task.behaviors) meta.set(b.id, { description: b.description, expected: b.expected });
+  }
+  return {
+    taskRef,
+    requestId,
+    attempt,
+    summary: task?.summary ?? input?.intent ?? '',
+    behaviors: report.behaviors.map((b) => {
+      const m = meta.get(b.id);
+      return {
+        id: b.id,
+        description: m?.description ?? '',
+        expected: m?.expected ?? '',
+        result: b.result,
+        screenshots: b.evidence.screenshots,
+        notes: b.evidence.notes,
+      };
+    }),
+    outcome: report.outcome,
+    completedAt: new Date().toISOString(),
+  };
+}
+
+/**
  * Resolve the run's soft task link (workflow_runs.task_id) so the finding can be
- * attached to the originating task. Returns null when the run has no task (e.g. a
- * planner / quick-session run) or the read fails — the finding is then run-scoped
- * only (entity link omitted, both entityType + entityId left null per the router's
- * "both set together or both omitted" rule).
+ * attached to the originating task. Returns null when the run has no task or the
+ * read fails — the finding is then run-scoped only.
  */
 function resolveRunTaskId(db: DatabaseLike, runId: string, logger?: LoggerLike): string | null {
   try {
@@ -224,84 +403,114 @@ function resolveRunTaskId(db: DatabaseLike, runId: string, logger?: LoggerLike):
   }
 }
 
+/** A prior visual-verify finding row, as the supersession/dedup scan reads it. */
+interface PriorVisualFinding {
+  id: string;
+  status: string;
+  correlation: { taskRef: string | null; attempt: number; requestId: string } | null;
+}
+
 /**
- * Read the concrete skip reason the scheduler persisted on
- * `verification_requests.error_message` (markTerminalAndDeliver callers pass
- * `{ error: skipReason ?? 'no usable backend' }` for every skip exit — see
- * verificationScheduler.ts). Fail-soft: a missing row or a read failure returns
- * null and the finding body falls back to its generic (but still actionable) text
- * rather than throwing or blocking the finding.
+ * Read this run's visual-verify findings (any status) with their parsed
+ * (taskRef, attempt, requestId) correlation, for the dedup + supersession passes.
+ * A read/parse failure yields [] (both passes then no-op — fail-open).
  */
-function resolveSkipReason(db: DatabaseLike, requestId: string, logger?: LoggerLike): string | null {
+function readPriorVisualFindings(db: DatabaseLike, runId: string, logger?: LoggerLike): PriorVisualFinding[] {
   try {
-    const row = db
-      .prepare('SELECT error_message FROM verification_requests WHERE id = ?')
-      .get(requestId) as { error_message: string | null } | undefined;
-    return row?.error_message ?? null;
+    const rows = db
+      .prepare(
+        `SELECT id, status, payload_json AS payloadJson
+           FROM review_items
+          WHERE run_id = ? AND kind = 'finding' AND source = 'visual-verify'`,
+      )
+      .all(runId) as Array<{ id: string; status: string; payloadJson: string | null }>;
+    return rows.map((r) => ({ id: r.id, status: r.status, correlation: parseCorrelation(r.payloadJson) }));
   } catch (err) {
-    logger?.warn('[verdictDelivery] could not resolve skip reason (fail-soft)', {
-      requestId,
+    logger?.debug('[verdictDelivery] could not read prior visual findings (fail-soft)', {
+      runId,
       error: err instanceof Error ? err.message : String(err),
     });
+    return [];
+  }
+}
+
+/** Parse a finding payload_json's `visualVerify` correlation block; null when absent/malformed. */
+function parseCorrelation(
+  payloadJson: string | null,
+): { taskRef: string | null; attempt: number; requestId: string } | null {
+  if (typeof payloadJson !== 'string' || payloadJson.length === 0) return null;
+  try {
+    const parsed: unknown = JSON.parse(payloadJson);
+    const vv = parsed !== null && typeof parsed === 'object' ? (parsed as { visualVerify?: unknown }).visualVerify : undefined;
+    if (vv === null || typeof vv !== 'object') return null;
+    const v = vv as { taskRef?: unknown; attempt?: unknown; requestId?: unknown };
+    if (typeof v.requestId !== 'string' || typeof v.attempt !== 'number') return null;
+    return {
+      taskRef: typeof v.taskRef === 'string' ? v.taskRef : null,
+      attempt: v.attempt,
+      requestId: v.requestId,
+    };
+  } catch {
     return null;
   }
 }
 
 /**
  * Build the concrete `OnVerdict` callback the scheduler fires after a terminal
- * outcome. Fail-soft end to end: a router error is logged and swallowed (the
- * scheduler's own deliver() wrapper also catches, but we never want a delivery
- * problem to wedge the drain loop or leave a half-applied state visible).
+ * outcome. Fail-soft end to end: a router error is logged and swallowed so a
+ * delivery problem never wedges the drain loop or leaves a half-applied state.
  */
 export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
   const { db, logger } = deps;
 
   return async ({ requestId, runId, projectId, status, verdict, fileNames, input, captureOrigin, diagnostics }) => {
-    // ---- 1. Enrich the SAME 'screenshots' artifact (idempotent UPSERT) ----
-    // Gated on a PRESENT verdict only: a judged outcome (passed/failed/low_confidence
-    // WITH a verdict) carries the verdict block to enrich. A verdict-LESS FAIL
-    // (capture-fail / judge-throw) and skipped/timeout have nothing to enrich — but
-    // a verdict-less FAIL STILL drives the merge-gate + raises a finding below (it
-    // must not wedge the lane), so the enrich is the ONLY part gated on `verdict`.
-    //
-    // op:'create' UPSERTs by (runId, atype); the producer/auto-mint already wrote
-    // `{ fileNames }`, so this re-derive refreshes the payload WITH the verdict
-    // block. isNew:false so an already-surfaced screenshots tab does not re-pulse
-    // its "new" dot just because a verdict arrived.
-    if (verdict) {
+    // Read the columns the scheduler committed atomically with the terminal status.
+    // Works identically for a live delivery and a delivery-outbox boot replay (both
+    // observe the persisted report_json / enqueue_key / error_message).
+    const cols = readRequestColumns(db, requestId, logger);
+    const report = parseReport(cols.reportJson);
+    const task = parseTask(cols.taskJson);
+    const taskRef = input?.taskRef ?? task?.taskRef ?? null;
+    // Attempt for correlation + supersession + the merge-gate replay guard: the
+    // request's enqueue_key attempt, else the lane's current attempt, else 1 (§5.7).
+    const attempt =
+      parseAttemptFromEnqueueKey(cols.enqueueKey) ??
+      resolveLaneAttempts(db, runId, input?.taskRef, logger) ??
+      1;
+
+    // ---- 1. ATOMIC merge into the SAME 'screenshots' artifact (§5.9) ----
+    // Route through mergeScreenshots so a concurrent auto-mint scan cannot lose this
+    // reports entry. Merge whenever there is something to add (verdict banner, a
+    // report entry, or captured fileNames) — a bare skip with nothing captured
+    // enriches nothing (never mints an empty artifact).
+    const reportEntry = report
+      ? composeReportEntry({ requestId, taskRef, attempt, report, task, input })
+      : undefined;
+    const hasFiles = Array.isArray(fileNames) && fileNames.length > 0;
+    if (verdict || reportEntry || hasFiles) {
       try {
-        // R7 (finding #1): thread the hydrated baselineKey THROUGH delivery so the
-        // screenshots-tab Accept-as-baseline button files accepted PNGs under the
-        // SAME stable key the SSIM pre-diff later resolves baselines by (input's
-        // baselineKey = deliverable.baselineKey ?? deliverable.id, hydrated by R2).
-        // Carried inside the verdict block. Omitted (not undefined-serialized) when
-        // the request carried no baselineKey — the button then disables rather than
-        // minting an orphan keyed by the opaque per-run artifact row id.
-        const enrichedVerdict: VerdictV1 =
-          input?.baselineKey !== undefined && input.baselineKey.length > 0
+        // R7: thread the hydrated baselineKey THROUGH delivery so the screenshots-tab
+        // Accept-as-baseline button files accepted PNGs under the SAME stable key the
+        // SSIM pre-diff later resolves baselines by. Omitted when the request carried
+        // no baselineKey.
+        const enrichedVerdict: VerdictV1 | undefined =
+          verdict && input?.baselineKey !== undefined && input.baselineKey.length > 0
             ? { ...verdict, baselineKey: input.baselineKey }
             : verdict;
-        // S9 provenance rides the same payload (display-only): the screenshots tab
-        // can show WHERE the judged pixels came from + the untrusted page-console
-        // diagnostics that explain a blank/broken render.
-        const payload: ScreenshotsArtifactPayload = {
-          fileNames,
-          verdict: enrichedVerdict,
+        await ArtifactRouter.getInstance().mergeScreenshots(projectId, {
+          op: 'merge-screenshots',
+          runId,
+          label: `${fileNames.length} screenshot${fileNames.length === 1 ? '' : 's'}`,
+          ...(hasFiles ? { fileNames } : {}),
+          ...(enrichedVerdict ? { verdict: enrichedVerdict } : {}),
+          ...(reportEntry ? { report: reportEntry } : {}),
           ...(captureOrigin ? { captureOrigin } : {}),
           ...(diagnostics && diagnostics.length > 0 ? { diagnostics } : {}),
-        };
-        await ArtifactRouter.getInstance().apply(projectId, {
-          op: 'create',
-          runId,
-          atype: 'screenshots',
-          label: `${fileNames.length} screenshot${fileNames.length === 1 ? '' : 's'}`,
-          payloadJson: JSON.stringify(payload),
-          stepOrigin: 'visual-verify',
           isNew: false,
           actor: 'orchestrator',
         });
       } catch (err) {
-        logger?.error('[verdictDelivery] artifact enrich failed (fail-soft)', {
+        logger?.error('[verdictDelivery] artifact merge failed (fail-soft)', {
           runId,
           projectId,
           error: err instanceof Error ? err.message : String(err),
@@ -310,33 +519,70 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
     }
 
     // ---- 2. MERGE-GATE: drive the sprint lane off `awaiting-verify` ----
-    // For a sprint run (batch + lanes) the verdict advances/loops-back/fails the
-    // lane through the SprintLaneStore chokepoint; the returned action also decides
-    // whether the finding below is blocking. A non-sprint run resolves to a noop.
-    // Fully fail-soft inside the driver — a lane problem never blocks the finding.
     const gateAction = applyMergeGateVerdict({
       db,
       runId,
       status,
       verdict,
       taskRef: input?.taskRef,
+      requestAttempt: attempt,
       logger,
     });
 
-    // ---- 3. Raise ONE finding ONLY on FAIL / low_confidence (PASS: none) ----
+    // ---- 2b. SUPERSESSION: resolve prior lower-attempt visual findings (§5.7) ----
+    // Runs for EVERY terminal verdict (incl. PASS): a recovered/passing lane leaves
+    // no stale blocking item, and repeated failures keep only the latest live.
+    const priorFindings = readPriorVisualFindings(db, runId, logger);
+    for (const prior of priorFindings) {
+      if (prior.status !== 'pending') continue;
+      const c = prior.correlation;
+      if (c === null) continue;
+      if (c.requestId === requestId) continue; // never supersede THIS request's own (yet-to-be-created) finding
+      if (c.taskRef !== taskRef) continue; // different lane
+      if (c.attempt >= attempt) continue; // only LOWER attempts are superseded
+      try {
+        await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
+          op: 'resolve',
+          actor: 'orchestrator',
+          reviewItemId: prior.id,
+          runId,
+          resolution: `superseded by visual verification attempt ${attempt}`,
+        });
+      } catch (err) {
+        logger?.warn('[verdictDelivery] supersession resolve failed (fail-soft)', {
+          runId,
+          reviewItemId: prior.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // ---- 3. Raise ONE finding ONLY on FAIL / low_confidence / timeout / skipped ----
     if (!FINDING_STATUSES.has(status)) return;
+
+    // IDEMPOTENT (§5.6 replay): a finding already exists for THIS requestId → skip.
+    if (priorFindings.some((p) => p.correlation?.requestId === requestId)) {
+      logger?.debug('[verdictDelivery] finding already exists for request (skip duplicate)', { runId, requestId });
+      return;
+    }
 
     try {
       const taskId = resolveRunTaskId(db, runId, logger);
       const severity = toReviewSeverity(worstIssueSeverity(verdict));
-      const skipReason = status === 'skipped' ? resolveSkipReason(db, requestId, logger) : null;
-      const { title, body: baseBody } = buildFindingText(status, verdict, skipReason);
-      // S9: the provenance section makes the finding self-diagnosing — origin +
-      // the capture's own (untrusted, capped) console breadcrumbs.
+      const { title, body: baseBody } = buildFindingText({
+        status,
+        verdict,
+        report,
+        task,
+        errorMessage: cols.errorMessage,
+      });
       const body = appendProvenance(baseBody, captureOrigin, diagnostics);
       const findingPayload: FindingPayload = {
         kind: 'finding',
         category: 'visual-regression',
+        // Machine-readable correlation (§5.7): lets a later verdict supersede this
+        // finding at a higher attempt, and makes creation idempotent by requestId.
+        visualVerify: { runId, taskRef, attempt, requestId },
       };
       await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
         op: 'create',
@@ -344,18 +590,9 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
         kind: 'finding',
         title,
         body,
-        // Merge-gate (locked decision #2): a FAIL finding BLOCKS — it holds this
-        // lane's integration (loopback re-implement, or terminal failure at the
-        // 3× cap) until re-verified / escalated. low_confidence stays NON-blocking
-        // (advisory human review; never an auto-loop). A timeout (R4) advances the
-        // lane (advance-integrated → isMergeGateBlocking false) so its finding is
-        // NON-blocking too. A non-sprint run (noop gateAction) also stays
-        // non-blocking — there is no lane to gate.
         blocking: isMergeGateBlocking(gateAction),
         severity,
         source: 'visual-verify',
-        // Soft-link to the run's task when one exists, else leave the link absent
-        // (both fields null) — the finding is still run-scoped via runId.
         entityType: taskId ? 'task' : null,
         entityId: taskId ?? null,
         runId,

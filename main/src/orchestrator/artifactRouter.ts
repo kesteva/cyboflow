@@ -81,7 +81,9 @@ import {
   type ArtifactRenderMode,
   type ArtifactType,
   type ScreenshotsArtifactPayload,
+  type TaskVerificationReportEntry,
 } from '../../../shared/types/artifacts';
+import type { CaptureOrigin, VerdictV1 } from '../../../shared/types/visualVerification';
 
 // ---------------------------------------------------------------------------
 // Public emitter + channel
@@ -203,6 +205,102 @@ export interface ArtifactAcceptBaseline {
   baselineKey: string;
   fileNames: string[];
   actor: ArtifactActor;
+}
+
+/**
+ * ATOMIC screenshots-payload merge (verification-agent redesign §5.9). A verdict
+ * delivery AND the auto-mint safety-net scan both enrich the SAME run-scoped
+ * 'screenshots' artifact; a read-then-`create` sequence outside the router is a
+ * lost-update race (two deliveries read the same payload; the second write drops
+ * the first's reports entry). This op reads → validates → merges → writes ALL
+ * inside ONE per-project queue task (concurrency-1, so no interleave) via
+ * {@link mergeScreenshotsPayload}. Not part of the `apply` union — like
+ * accept-baseline it has its own method (`mergeScreenshots`).
+ *
+ * Only the SUPPLIED members merge in (latest-wins for verdict/captureOrigin/
+ * diagnostics; fileNames union; a single `report` upserted by (taskRef,
+ * requestId)); omitted members leave the stored payload's value untouched — so a
+ * fileNames-only merge (auto-mint) never clobbers a prior verdict/reports, which
+ * is exactly what retires the auto-mint stale-read window.
+ */
+export interface ArtifactMergeScreenshots {
+  op: 'merge-screenshots';
+  runId: string;
+  label: string;
+  stepOrigin?: string | null;
+  /** Passed through to the UPSERT; a background merge (auto-mint) uses false. */
+  isNew?: boolean;
+  actor: ArtifactActor;
+  /** Basenames to UNION into the stored fileNames (dedup, stable order). */
+  fileNames?: string[];
+  /** Latest-wins verdict banner. */
+  verdict?: VerdictV1;
+  /** ONE report entry, upserted by (taskRef, requestId); older entries retained (newest ~20). */
+  report?: TaskVerificationReportEntry;
+  /** Latest-wins capture provenance. */
+  captureOrigin?: CaptureOrigin;
+  /** Latest-wins untrusted page-console diagnostics. */
+  diagnostics?: string[];
+}
+
+/** Max retained report entries in a screenshots payload (§5.9 — newest-N history). */
+export const SCREENSHOTS_REPORTS_CAP = 20;
+
+/** The (taskRef, requestId) merge identity for a report entry (§5.9). */
+function reportEntryKey(entry: Pick<TaskVerificationReportEntry, 'taskRef' | 'requestId'>): string {
+  return `${entry.taskRef ?? ''} ${entry.requestId}`;
+}
+
+/**
+ * PURE merge of an incoming screenshots enrichment onto the stored payload (§5.9).
+ * Exported so the merge semantics are unit-testable without a DB:
+ *   - fileNames: UNION (dedup, existing order first, then new) — never shrinks.
+ *   - verdict / captureOrigin / diagnostics: LATEST-WINS (incoming when supplied,
+ *     else the stored value is preserved).
+ *   - reports: keyed by (taskRef, requestId) — an incoming entry REPLACES the
+ *     same-key entry in place, else is APPENDED; the list is then bounded to the
+ *     newest {@link SCREENSHOTS_REPORTS_CAP} (drop oldest by position).
+ * Any extra keys on the stored payload are preserved (spread-through).
+ */
+export function mergeScreenshotsPayload(
+  existing: ScreenshotsArtifactPayload | null | undefined,
+  incoming: {
+    fileNames?: string[];
+    verdict?: VerdictV1;
+    report?: TaskVerificationReportEntry;
+    captureOrigin?: CaptureOrigin;
+    diagnostics?: string[];
+  },
+): ScreenshotsArtifactPayload {
+  const base: ScreenshotsArtifactPayload = existing ? { ...existing } : {};
+
+  // fileNames union (stable: stored order first, then new-not-seen).
+  const seen = new Set<string>();
+  const mergedFiles: string[] = [];
+  for (const name of [...(base.fileNames ?? []), ...(incoming.fileNames ?? [])]) {
+    if (!seen.has(name)) {
+      seen.add(name);
+      mergedFiles.push(name);
+    }
+  }
+  if (mergedFiles.length > 0) base.fileNames = mergedFiles;
+
+  // reports upsert by (taskRef, requestId), bounded newest-N.
+  if (incoming.report) {
+    const key = reportEntryKey(incoming.report);
+    const reports = [...(base.reports ?? [])];
+    const idx = reports.findIndex((e) => reportEntryKey(e) === key);
+    if (idx >= 0) reports[idx] = incoming.report;
+    else reports.push(incoming.report);
+    base.reports = reports.length > SCREENSHOTS_REPORTS_CAP ? reports.slice(-SCREENSHOTS_REPORTS_CAP) : reports;
+  }
+
+  // latest-wins scalars/arrays.
+  if (incoming.verdict !== undefined) base.verdict = incoming.verdict;
+  if (incoming.captureOrigin !== undefined) base.captureOrigin = incoming.captureOrigin;
+  if (incoming.diagnostics !== undefined) base.diagnostics = incoming.diagnostics;
+
+  return base;
 }
 
 export type ArtifactChange =
@@ -337,6 +435,65 @@ export class ArtifactRouter {
     return this.getProjectQueue(projectId).add(() =>
       this.runAcceptBaseline(projectId, change),
     ) as Promise<{ baselineKey: string }>;
+  }
+
+  /**
+   * §5.9 — ATOMIC merge of a screenshots enrichment. Reads the stored
+   * (runId, 'screenshots') payload, merges the supplied members via
+   * {@link mergeScreenshotsPayload}, and UPSERTs — all inside ONE per-project
+   * (concurrency-1) queue task, so two concurrent deliveries can never lost-update
+   * each other's reports entry (the read + the write are indivisible w.r.t. the
+   * project queue). The write reuses runCreate's idempotent (runId, atype) UPSERT
+   * (audit delta + emit), so a byte-identical re-merge records no delta. Both
+   * writers (verdictDelivery + autoMintArtifacts) route through here.
+   */
+  async mergeScreenshots(
+    projectId: number,
+    change: ArtifactMergeScreenshots,
+  ): Promise<{ artifactId: string; event: { id: number; seq: number } }> {
+    return this.getProjectQueue(projectId).add(() => {
+      const existing = this.readScreenshotsPayload(change.runId);
+      const merged = mergeScreenshotsPayload(existing, {
+        ...(change.fileNames !== undefined ? { fileNames: change.fileNames } : {}),
+        ...(change.verdict !== undefined ? { verdict: change.verdict } : {}),
+        ...(change.report !== undefined ? { report: change.report } : {}),
+        ...(change.captureOrigin !== undefined ? { captureOrigin: change.captureOrigin } : {}),
+        ...(change.diagnostics !== undefined ? { diagnostics: change.diagnostics } : {}),
+      });
+      return this.runCreate(projectId, {
+        op: 'create',
+        runId: change.runId,
+        atype: 'screenshots',
+        label: change.label,
+        payloadJson: JSON.stringify(merged),
+        stepOrigin: change.stepOrigin ?? null,
+        isNew: change.isNew ?? false,
+        actor: change.actor,
+      });
+    }) as Promise<{ artifactId: string; event: { id: number; seq: number } }>;
+  }
+
+  /**
+   * Read the stored (runId, 'screenshots') payload for the atomic merge. A plain
+   * read (not a chokepoint write) inside the queued merge task, so it observes the
+   * latest committed payload with no interleave before the paired UPSERT. Returns
+   * null when there is no row / a malformed payload (the merge then starts fresh).
+   */
+  private readScreenshotsPayload(runId: string): ScreenshotsArtifactPayload | null {
+    try {
+      const row = this.db
+        .prepare(`SELECT payload_json AS payloadJson FROM artifacts WHERE run_id = ? AND atype = 'screenshots'`)
+        .get(runId) as { payloadJson: string | null } | undefined;
+      if (!row || typeof row.payloadJson !== 'string' || row.payloadJson.length === 0) return null;
+      const parsed: unknown = JSON.parse(row.payloadJson);
+      return parsed !== null && typeof parsed === 'object' ? (parsed as ScreenshotsArtifactPayload) : null;
+    } catch (err) {
+      this.logger?.debug('[artifactRouter] could not read screenshots payload for merge (fail-soft)', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
   }
 
   /**

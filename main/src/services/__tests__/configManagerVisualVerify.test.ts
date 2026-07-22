@@ -140,6 +140,8 @@ describe('ConfigManager.getVisualVerifyConfig', () => {
       maxPerRunJudgeCalls: 8,
       devServerPorts: [1234, 5678],
       simulatorDevices: ['udid-A'],
+      // Not overridden above → floored to the default (§5.6 queued-age ceiling).
+      queuedAgeCeilingMs: 15 * 60 * 1000,
     });
   });
 

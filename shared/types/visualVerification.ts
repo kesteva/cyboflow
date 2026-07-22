@@ -854,6 +854,14 @@ export interface VisualVerifyConfig {
   devServerPorts?: number[];
   /** Simulator device ids for the maestro/mobile pool. Default [] (mobile inert until provisioned). */
   simulatorDevices?: string[];
+  /**
+   * Enqueue-age ceiling (ms) covering a request's QUEUED + lease-wait time,
+   * measured from `enqueued_at` (redesign §5.6). A row that has not acquired its
+   * lease within this window is terminalized 'skipped' (fail-open, concrete lease
+   * reason) instead of sitting `queued` forever while a merge-gate lane waits.
+   * Default 15 min ({@link DEFAULT_QUEUED_AGE_CEILING_MS}).
+   */
+  queuedAgeCeilingMs?: number;
 }
 
 /**
@@ -868,6 +876,7 @@ export interface ResolvedVisualVerifyConfig {
   maxPerRunJudgeCalls: number;
   devServerPorts: number[];
   simulatorDevices: string[];
+  queuedAgeCeilingMs: number;
 }
 
 /**
@@ -892,6 +901,15 @@ export interface ResolvedVisualVerifyConfig {
 export const DEFAULT_VERIFY_DEV_PORTS: readonly number[] = [29260, 29262, 29264, 29266, 29268] as const;
 
 /**
+ * The default enqueue-age ceiling — 15 minutes covering a request's QUEUED +
+ * lease-wait time (redesign §5.6). Sized above the 10-minute default agent
+ * deadline (a request that DID lease its slot may legitimately run ~10 min), so
+ * this ceiling only bites a row that never got a lease at all (persistent
+ * contention / a wedged pool) rather than one that is simply running long.
+ */
+export const DEFAULT_QUEUED_AGE_CEILING_MS = 15 * 60 * 1000;
+
+/**
  * The floors ConfigManager.getVisualVerifyConfig() applies when a member of the
  * persisted block is absent. `enabled` floors to false (master switch OFF by
  * default); the rest mirror the design doc (#7). Kept here so the contract +
@@ -904,6 +922,7 @@ export const VISUAL_VERIFY_DEFAULTS: ResolvedVisualVerifyConfig = {
   maxPerRunJudgeCalls: 4,
   devServerPorts: [...DEFAULT_VERIFY_DEV_PORTS],
   simulatorDevices: [],
+  queuedAgeCeilingMs: DEFAULT_QUEUED_AGE_CEILING_MS,
 };
 
 // ===========================================================================

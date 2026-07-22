@@ -33,7 +33,10 @@ import {
   ArtifactError,
   artifactChangeEvents,
   artifactProjectChannel,
+  mergeScreenshotsPayload,
+  SCREENSHOTS_REPORTS_CAP,
 } from '../artifactRouter';
+import type { TaskVerificationReportEntry } from '../../../../shared/types/artifacts';
 import {
   manifestPathFor,
   snapshotDirFor,
@@ -1175,6 +1178,126 @@ describe('ArtifactRouter', () => {
     } finally {
       rmSync(projectRoot, { recursive: true, force: true });
       rmSync(runArtifacts, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §5.9 — atomic screenshots merge (slice 10a)
+// ---------------------------------------------------------------------------
+
+function reportEntry(over: Partial<TaskVerificationReportEntry>): TaskVerificationReportEntry {
+  return {
+    taskRef: over.taskRef ?? 'TASK-1',
+    requestId: over.requestId ?? 'vr_1',
+    attempt: over.attempt ?? 1,
+    summary: over.summary ?? 'a task',
+    behaviors: over.behaviors ?? [],
+    outcome: over.outcome ?? 'pass',
+    completedAt: over.completedAt ?? '2026-07-22T00:00:00.000Z',
+  };
+}
+
+describe('mergeScreenshotsPayload (pure §5.9 merge)', () => {
+  it('unions fileNames (dedup, existing order first) and never shrinks', () => {
+    const merged = mergeScreenshotsPayload({ fileNames: ['a.png', 'b.png'] }, { fileNames: ['b.png', 'c.png'] });
+    expect(merged.fileNames).toEqual(['a.png', 'b.png', 'c.png']);
+  });
+
+  it('verdict / captureOrigin / diagnostics are latest-wins; omitted members preserve the stored value', () => {
+    const existing: ScreenshotsArtifactPayload = {
+      verdict: { status: 'pass', confidence: 1, issues: [], feedback: 'ok', judgedFileNames: [], baselineUsed: false, model: 'm' },
+      captureOrigin: 'agent',
+      diagnostics: ['old'],
+    };
+    // fileNames-only incoming preserves verdict + captureOrigin + diagnostics.
+    const preserved = mergeScreenshotsPayload(existing, { fileNames: ['x.png'] });
+    expect(preserved.verdict?.status).toBe('pass');
+    expect(preserved.captureOrigin).toBe('agent');
+    expect(preserved.diagnostics).toEqual(['old']);
+    // an incoming verdict replaces.
+    const replaced = mergeScreenshotsPayload(existing, {
+      verdict: { status: 'fail', confidence: 0.5, issues: [], feedback: 'no', judgedFileNames: [], baselineUsed: false, model: 'm' },
+    });
+    expect(replaced.verdict?.status).toBe('fail');
+  });
+
+  it('reports upsert by (taskRef, requestId): same key replaces in place, different key appends', () => {
+    const one = mergeScreenshotsPayload(null, { report: reportEntry({ requestId: 'vr_1', outcome: 'fail' }) });
+    expect(one.reports).toHaveLength(1);
+    // same (taskRef, requestId) → REPLACE (outcome updated), still length 1.
+    const replaced = mergeScreenshotsPayload(one, { report: reportEntry({ requestId: 'vr_1', outcome: 'pass' }) });
+    expect(replaced.reports).toHaveLength(1);
+    expect(replaced.reports?.[0].outcome).toBe('pass');
+    // different requestId → APPEND.
+    const two = mergeScreenshotsPayload(replaced, { report: reportEntry({ requestId: 'vr_2' }) });
+    expect(two.reports).toHaveLength(2);
+    // different taskRef, same requestId → distinct key → APPEND.
+    const three = mergeScreenshotsPayload(two, { report: reportEntry({ taskRef: 'TASK-2', requestId: 'vr_2' }) });
+    expect(three.reports).toHaveLength(3);
+  });
+
+  it('reports are bounded to the newest SCREENSHOTS_REPORTS_CAP (oldest dropped)', () => {
+    let payload: ScreenshotsArtifactPayload = {};
+    for (let i = 0; i < SCREENSHOTS_REPORTS_CAP + 5; i++) {
+      payload = mergeScreenshotsPayload(payload, { report: reportEntry({ requestId: `vr_${i}` }) });
+    }
+    expect(payload.reports).toHaveLength(SCREENSHOTS_REPORTS_CAP);
+    // The oldest 5 (vr_0..vr_4) were dropped; the newest is last.
+    expect(payload.reports?.[0].requestId).toBe('vr_5');
+    expect(payload.reports?.[SCREENSHOTS_REPORTS_CAP - 1].requestId).toBe(`vr_${SCREENSHOTS_REPORTS_CAP + 4}`);
+  });
+});
+
+describe('ArtifactRouter.mergeScreenshots (atomic §5.9)', () => {
+  afterEach(() => {
+    ArtifactRouter._resetForTesting();
+  });
+
+  it('two concurrent deliveries from different requests BOTH land their reports (no lost update)', async () => {
+    const db = buildDb();
+    try {
+      const router = ArtifactRouter.initialize(dbAdapter(db));
+      seedRun(db, 'run-1');
+      // Fire two merges concurrently — the pre-§5.9 read-then-create would drop one.
+      await Promise.all([
+        router.mergeScreenshots(1, {
+          op: 'merge-screenshots', runId: 'run-1', label: '1 screenshot', actor: 'orchestrator',
+          fileNames: ['a.png'], report: reportEntry({ requestId: 'vr_A', taskRef: 'TASK-A' }),
+        }),
+        router.mergeScreenshots(1, {
+          op: 'merge-screenshots', runId: 'run-1', label: '1 screenshot', actor: 'orchestrator',
+          fileNames: ['b.png'], report: reportEntry({ requestId: 'vr_B', taskRef: 'TASK-B' }),
+        }),
+      ]);
+      const row = db.prepare(`SELECT payload_json AS p FROM artifacts WHERE run_id = 'run-1' AND atype = 'screenshots'`).get() as { p: string };
+      const payload = JSON.parse(row.p) as ScreenshotsArtifactPayload;
+      expect(payload.reports?.map((r) => r.requestId).sort()).toEqual(['vr_A', 'vr_B']);
+      expect(payload.fileNames?.sort()).toEqual(['a.png', 'b.png']);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('a same-key redelivery replaces the stored report entry rather than duplicating', async () => {
+    const db = buildDb();
+    try {
+      const router = ArtifactRouter.initialize(dbAdapter(db));
+      seedRun(db, 'run-1');
+      await router.mergeScreenshots(1, {
+        op: 'merge-screenshots', runId: 'run-1', label: 'x', actor: 'orchestrator',
+        report: reportEntry({ requestId: 'vr_1', outcome: 'fail' }),
+      });
+      await router.mergeScreenshots(1, {
+        op: 'merge-screenshots', runId: 'run-1', label: 'x', actor: 'orchestrator',
+        report: reportEntry({ requestId: 'vr_1', outcome: 'pass' }),
+      });
+      const row = db.prepare(`SELECT payload_json AS p FROM artifacts WHERE run_id = 'run-1' AND atype = 'screenshots'`).get() as { p: string };
+      const payload = JSON.parse(row.p) as ScreenshotsArtifactPayload;
+      expect(payload.reports).toHaveLength(1);
+      expect(payload.reports?.[0].outcome).toBe('pass');
+    } finally {
+      db.close();
     }
   });
 });

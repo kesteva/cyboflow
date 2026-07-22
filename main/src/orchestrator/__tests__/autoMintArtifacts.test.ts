@@ -1991,8 +1991,10 @@ describe('autoMintArtifacts.handleVisualArtifactsScan', () => {
       fileNames: string[];
       verdict?: { status: string; baselineKey?: string };
     };
-    // Fresh fileNames win …
-    expect(payload.fileNames).toEqual(['detail.png', 'home.png']);
+    // fileNames are UNIONED (§5.9 atomic merge): the stored 'home.png' first, then
+    // the newly-seen 'detail.png' — the scan never shrinks the set, and the router
+    // reads+merges the stored payload inside its queue (no read-then-create race) …
+    expect(payload.fileNames).toEqual(['home.png', 'detail.png']);
     // … and the verdict block (banner + Accept button's baselineKey) SURVIVES.
     expect(payload.verdict?.status).toBe('pass');
     expect(payload.verdict?.baselineKey).toBe('landing-page');

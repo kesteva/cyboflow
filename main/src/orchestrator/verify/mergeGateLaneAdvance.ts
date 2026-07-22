@@ -294,9 +294,20 @@ export function applyMergeGateVerdict(args: {
   status: RequestStatus;
   verdict: VerdictV1 | undefined;
   taskRef?: string;
+  /**
+   * The delivered request's OWN attempt (parsed from its enqueue_key, §5.6/§5.7).
+   * When supplied it makes the write REPLAY-SAFE: a lane whose `attempts` already
+   * exceeds this verdict's attempt has moved past this fire (a prior delivery
+   * looped it back, or a newer attempt superseded it), so re-delivering the SAME
+   * verdict at boot must NOT bump the loopback a second time — it is a no-op. On
+   * the FIRST (non-replay) delivery `lane.attempts === requestAttempt`, so the
+   * guard is inert and the normal decision runs. Omitted (legacy callers/tests) ⇒
+   * no guard, byte-identical to the pre-outbox behavior.
+   */
+  requestAttempt?: number;
   logger?: LoggerLike;
 }): MergeGateAction {
-  const { db, runId, status, verdict, taskRef, logger } = args;
+  const { db, runId, status, verdict, taskRef, requestAttempt, logger } = args;
 
   // R4: skipped/timeout are NO LONGER short-circuited here — they flow through lane
   // resolution + the decision like a PASS so a parked lane is driven OFF
@@ -320,6 +331,21 @@ export function applyMergeGateVerdict(args: {
   // Never resurrect a terminal lane (parity with the dispatch-derive guard).
   if (lane.status === 'integrated' || lane.status === 'failed') {
     return { kind: 'noop', reason: `lane-terminal:${lane.status}` };
+  }
+
+  // REPLAY-SAFETY (§5.6 outbox): a lane whose attempts already exceeds this
+  // verdict's own attempt has moved past this fire (loopback already applied, or a
+  // newer attempt is in flight). Re-delivering the same verdict — the boot-replay
+  // case — must not bump the loopback again. On the first delivery the two are
+  // equal, so this never fires for live verdicts.
+  if (requestAttempt !== undefined && lane.attempts > requestAttempt) {
+    logger?.debug('[mergeGate] verdict superseded by a later lane attempt (skip)', {
+      runId,
+      taskId: lane.taskId,
+      laneAttempts: lane.attempts,
+      requestAttempt,
+    });
+    return { kind: 'noop', reason: 'stale-or-replayed' };
   }
 
   const action = decideMergeGate({ status, verdict, currentAttempts: lane.attempts });
@@ -406,6 +432,29 @@ export function applyMergeGateVerdict(args: {
  */
 export function isMergeGateBlocking(action: MergeGateAction): boolean {
   return action.kind === 'mark-failed' || action.kind === 'loopback-implement';
+}
+
+/**
+ * Resolve the CURRENT `attempts` counter of the lane a verdict applies to
+ * (run→batch→ref/single), or null when there is no attributable lane / the store
+ * is uninitialized. The verdict-delivery attempt fallback (§5.7) uses this when a
+ * request's enqueue_key is absent/malformed, before defaulting to 1. Fail-soft:
+ * any resolution failure returns null.
+ */
+export function resolveLaneAttempts(
+  db: DatabaseLike,
+  runId: string,
+  taskRef: string | undefined,
+  logger?: LoggerLike,
+): number | null {
+  let store: SprintLaneStore;
+  try {
+    store = SprintLaneStore.getInstance();
+  } catch {
+    return null;
+  }
+  const resolved = resolveLaneForVerdict(db, store, runId, taskRef, logger);
+  return resolved ? resolved.lane.attempts : null;
 }
 
 /** Re-export the step ids the driver writes, for callers/tests that assert them. */

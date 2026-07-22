@@ -33,11 +33,9 @@ import { resolveRunFrozenSpec } from './runFrozenSpec';
 import { extractArchDesignSection } from '../../../shared/types/artifacts';
 import { TERMINAL_RUN_STATUSES } from '../../../shared/types/cyboflow';
 import type {
-  ScreenshotsArtifactPayload,
   ApproveIdeasArtifactPayload,
   ApproveDesignsArtifactPayload,
 } from '../../../shared/types/artifacts';
-import type { VerdictV1 } from '../../../shared/types/visualVerification';
 
 // ---------------------------------------------------------------------------
 // Terminal-status gate (finding H-automint-1)
@@ -1106,46 +1104,6 @@ export async function handleEntityWrite(
 }
 
 /**
- * Read the existing (runId, 'screenshots') artifact's `verdict` block, if any, so
- * the safety-net scan can PRESERVE it when it re-mints (R7, finding #2). The scan
- * fires on every step 'running' transition and re-derives the payload from the PNGs
- * on disk; ArtifactRouter.runCreate replaces payload_json WHOLESALE, so without this
- * the verdict the verdict-delivery hook enriched (the banner + the Accept button's
- * baselineKey) would be erased on the next step transition after delivery.
- *
- * Reading the row directly via DatabaseLike is fine — only WRITES funnel through the
- * ArtifactRouter chokepoint; a projection read of the current payload does not. The
- * verdict block is carried forward opaquely (it records what WAS judged), so this
- * only lightly validates that it is a non-null object; a malformed/absent payload
- * yields undefined (the scan then mints the plain `{ fileNames }` payload as before,
- * byte-identical). Fully fail-soft — a parse/query error yields undefined.
- */
-function readExistingScreenshotsVerdict(
-  db: DatabaseLike,
-  runId: string,
-  logger?: LoggerLike,
-): VerdictV1 | undefined {
-  try {
-    const row = db
-      .prepare(`SELECT payload_json AS payloadJson FROM artifacts WHERE run_id = ? AND atype = 'screenshots'`)
-      .get(runId) as { payloadJson: unknown } | undefined;
-    const raw = row && typeof row.payloadJson === 'string' ? row.payloadJson : null;
-    if (raw === null) return undefined;
-    const parsed: unknown = JSON.parse(raw);
-    if (parsed === null || typeof parsed !== 'object') return undefined;
-    const verdict = (parsed as Record<string, unknown>).verdict;
-    if (verdict === null || typeof verdict !== 'object') return undefined;
-    return verdict as VerdictV1;
-  } catch (err) {
-    logger?.debug('[autoMintArtifacts] could not read existing screenshots verdict (fail-soft)', {
-      runId,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    return undefined;
-  }
-}
-
-/**
  * Scan the run's artifacts dir for screenshot images and mint/enrich a single
  * 'screenshots' artifact from whatever PNGs the visual-verify producer laid down.
  *
@@ -1217,25 +1175,18 @@ export async function handleVisualArtifactsScan(
       .sort((a, b) => a.localeCompare(b));
     if (fileNames.length === 0) return; // no image files → nothing to surface
 
-    // R7 (finding #2): PRESERVE an existing verdict block (with its baselineKey)
-    // across the wholesale payload_json replace. The verdict-delivery hook enriches
-    // the SAME artifact with `{ fileNames, verdict }` after a judged outcome; this
-    // safety-net scan re-fires on the NEXT step 'running' transition and would
-    // otherwise erase the verdict (banner + Accept button data) by writing plain
-    // `{ fileNames }`. Merge: fresh on-disk fileNames + the preserved verdict (the
-    // verdict records what WAS judged, so it is carried forward even if the fresh
-    // fileNames differ from verdict.judgedFileNames). No existing verdict → the
-    // payload is `{ fileNames }`, byte-identical to the pre-R7 behavior.
-    const preservedVerdict = readExistingScreenshotsVerdict(db, runId, logger);
-    const payload: ScreenshotsArtifactPayload = { fileNames };
-    if (preservedVerdict !== undefined) payload.verdict = preservedVerdict;
-
-    await ArtifactRouter.getInstance().apply(projectId, {
-      op: 'create',
+    // §5.9: route through the ATOMIC merge op instead of a read-then-create. The
+    // scan supplies ONLY the fresh on-disk fileNames — the router reads + merges
+    // the stored payload (verdict banner, per-task reports, captureOrigin) inside
+    // one per-project queue task, so a concurrent verdict delivery's reports entry
+    // can never be lost to this scan's write (the pre-§5.9 read-then-create had
+    // exactly that stale-read window). fileNames are UNIONED, so the scan never
+    // shrinks the set either.
+    await ArtifactRouter.getInstance().mergeScreenshots(projectId, {
+      op: 'merge-screenshots',
       runId,
-      atype: 'screenshots',
       label: pluralize(fileNames.length, 'screenshot'),
-      payloadJson: JSON.stringify(payload),
+      fileNames,
       stepOrigin: VISUAL_SCAN_STEP_ORIGIN[meta.workflowName] ?? null,
       isNew: false,
       actor: 'orchestrator',

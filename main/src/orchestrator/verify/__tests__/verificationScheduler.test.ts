@@ -140,6 +140,7 @@ const baseConfig: ResolvedVisualVerifyConfig = {
   maxPerRunJudgeCalls: 4,
   devServerPorts: [5173, 3000],
   simulatorDevices: [],
+  queuedAgeCeilingMs: 15 * 60 * 1000,
 };
 
 /** Insert one queued request and return its id. */
@@ -3080,5 +3081,241 @@ describe('VerificationScheduler — static file server seam (S9)', () => {
     expect(sinkB.ctx?.input.url).toBe('http://live-server'); // running url captured directly
     expect(sinkB.ctx?.input.htmlPath).toBeUndefined(); // htmlPath NOT back-filled (url present)
     expect(recordB.spawnArgs).toBeUndefined(); // no static serve
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §5.6 — queued-age deadline + delivery outbox (slices 9a/9b)
+// ---------------------------------------------------------------------------
+
+describe('VerificationScheduler — queued-age deadline (§5.6)', () => {
+  /** Insert a QUEUED row with an explicit enqueued_at (the age anchor). */
+  function insertQueuedAt(
+    dbX: Database.Database,
+    opts: { id: string; chain: VisualBackendId[]; enqueuedAt: string; url?: string },
+  ): void {
+    dbX
+      .prepare(
+        `INSERT INTO verification_requests
+           (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, enqueued_at)
+         VALUES (?, 'run-1', 1, 'queued', 'static-render-snapshot', ?, ?, 0, ?)`,
+      )
+      .run(
+        opts.id,
+        JSON.stringify({ intent: 'looks right', url: opts.url ?? 'http://x' }),
+        JSON.stringify(opts.chain),
+        opts.enqueuedAt,
+      );
+  }
+
+  it('expires an over-age queued row as skipped (through delivery), never capturing', async () => {
+    const captured = { n: 0 };
+    const backend: VisualBackend = {
+      id: 'capturePage',
+      rung: 0,
+      requiredLease: () => null,
+      healthCheck: async () => true,
+      capture: async (): Promise<CaptureResult> => {
+        captured.n += 1;
+        return { ok: true, fileNames: ['x.png'] };
+      },
+    };
+    const verdicts: Array<{ status: string; requestId: string }> = [];
+    const onVerdict: OnVerdict = async (a) => {
+      verdicts.push({ status: a.status, requestId: a.requestId });
+    };
+    let clock = 10_000_000;
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: { ...baseConfig, queuedAgeCeilingMs: 5_000 },
+      onVerdict,
+      now: () => clock,
+    });
+    // Enqueued 1h before the clock — far past the 5s ceiling.
+    insertQueuedAt(db, { id: 'vr_old', chain: ['capturePage'], enqueuedAt: new Date(clock - 3_600_000).toISOString() });
+    await sched.drain();
+
+    const row = rowStatus(db, 'vr_old');
+    expect(row.status).toBe('skipped');
+    expect(row.error).toMatch(/queued-age deadline exceeded/);
+    expect(captured.n).toBe(0); // expiry preceded any capture
+    expect(verdicts).toEqual([{ status: 'skipped', requestId: 'vr_old' }]);
+    // The terminal write also stamped the outbox marker as delivered.
+    const del = db.prepare('SELECT delivery_state AS d FROM verification_requests WHERE id = ?').get('vr_old') as { d: string | null };
+    expect(del.d).toBe('delivered');
+  });
+
+  it('does NOT expire a fresh queued row, but DOES on a later drain once it ages past the ceiling (lease-release / re-drain wake)', async () => {
+    // A backend that needs a lease we HOLD externally, so the row can never lease and
+    // stays queued across drains — the exact starvation the deadline guards.
+    const mutex = new Mutex();
+    const leasePool = new ResourceLeasePool(mutex);
+    const held = await leasePool.tryAcquire('verify:screen');
+    expect(held).not.toBeNull();
+    const backend: VisualBackend = {
+      id: 'peekaboo',
+      rung: 2,
+      requiredLease: () => 'verify:screen',
+      healthCheck: async () => true,
+      capture: async (): Promise<CaptureResult> => ({ ok: true, fileNames: ['x.png'] }),
+    };
+    const verdicts: string[] = [];
+    let clock = 20_000_000;
+    const base = clock;
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { peekaboo: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: { ...baseConfig, queuedAgeCeilingMs: 5_000 },
+      leasePool,
+      onVerdict: async (a) => void verdicts.push(a.status),
+      now: () => clock,
+    });
+    insertQueuedAt(db, { id: 'vr_wait', chain: ['peekaboo'], enqueuedAt: new Date(base).toISOString() });
+
+    // First drain within the window — row stays queued (lease held), NOT expired.
+    await sched.drain();
+    expect(rowStatus(db, 'vr_wait').status).toBe('queued');
+    expect(verdicts).toEqual([]);
+
+    // Advance past the ceiling; a subsequent drain (what a lease-release re-nudge or
+    // the fallback timer triggers) expires it.
+    clock = base + 6_000;
+    await sched.drain();
+    expect(rowStatus(db, 'vr_wait').status).toBe('skipped');
+    expect(verdicts).toEqual(['skipped']);
+    held?.release();
+  });
+
+  it('runRecovery boot-sweeps a STALE over-age queued row (§5.6 boot sweep)', async () => {
+    const verdicts: string[] = [];
+    let clock = 30_000_000;
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: { ...baseConfig, queuedAgeCeilingMs: 5_000 },
+      onVerdict: async (a) => void verdicts.push(a.status),
+      now: () => clock,
+    });
+    // A queued row left by a prior process, enqueued well before the ceiling.
+    insertQueuedAt(db, { id: 'vr_stale', chain: ['capturePage'], enqueuedAt: new Date(clock - 60_000).toISOString() });
+    const swept = await sched.runRecovery();
+    expect(swept).toBe(1);
+    expect(rowStatus(db, 'vr_stale').status).toBe('skipped');
+    expect(rowStatus(db, 'vr_stale').error).toMatch(/queued-age deadline exceeded/);
+    expect(verdicts).toEqual(['skipped']);
+  });
+});
+
+describe('VerificationScheduler — delivery outbox (§5.6)', () => {
+  /** Insert a TERMINAL row with an explicit delivery_state (the outbox marker). */
+  function insertTerminal(
+    dbX: Database.Database,
+    opts: {
+      id: string;
+      status: string;
+      deliveryState: string | null;
+      verdictJson?: string | null;
+      reportJson?: string | null;
+      errorMessage?: string | null;
+    },
+  ): void {
+    dbX
+      .prepare(
+        `INSERT INTO verification_requests
+           (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt,
+            verdict_json, report_json, delivery_state, error_message, enqueued_at)
+         VALUES (?, 'run-1', 1, ?, 'static-render-snapshot', ?, '[]', 1, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+      )
+      .run(
+        opts.id,
+        opts.status,
+        JSON.stringify({ intent: 'x', taskRef: 'TASK-1' }),
+        opts.verdictJson ?? null,
+        opts.reportJson ?? null,
+        opts.deliveryState,
+        opts.errorMessage ?? null,
+      );
+  }
+
+  function makeSched(onVerdict: OnVerdict): VerificationScheduler {
+    return VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      onVerdict,
+    });
+  }
+
+  it('boot replay re-delivers a terminal-but-pending row exactly once, then stamps delivered', async () => {
+    const calls: Array<{ requestId: string; status: string; verdictStatus?: string }> = [];
+    const sched = makeSched(async (a) => {
+      calls.push({ requestId: a.requestId, status: a.status, verdictStatus: a.verdict?.status });
+    });
+    const verdictJson = JSON.stringify({
+      status: 'fail',
+      confidence: 0.9,
+      issues: [],
+      feedback: 'nope',
+      judgedFileNames: ['a.png'],
+      baselineUsed: false,
+      model: 'fake',
+    });
+    insertTerminal(db, { id: 'vr_pending', status: 'failed', deliveryState: 'pending', verdictJson });
+
+    const n = await sched.runRecovery();
+    expect(n).toBe(1);
+    expect(calls).toEqual([{ requestId: 'vr_pending', status: 'failed', verdictStatus: 'fail' }]);
+    const del = db.prepare('SELECT delivery_state AS d FROM verification_requests WHERE id = ?').get('vr_pending') as { d: string | null };
+    expect(del.d).toBe('delivered');
+  });
+
+  it('a double boot replay does NOT re-deliver (delivered rows are not pending)', async () => {
+    const calls: string[] = [];
+    const sched = makeSched(async (a) => void calls.push(a.requestId));
+    insertTerminal(db, { id: 'vr_p', status: 'skipped', deliveryState: 'pending', errorMessage: 'no backend' });
+    await sched.runRecovery();
+    await sched.runRecovery();
+    expect(calls).toEqual(['vr_p']); // delivered exactly once across two boots
+  });
+
+  it('a legacy row (delivery_state NULL) is NEVER replayed', async () => {
+    const calls: string[] = [];
+    const sched = makeSched(async (a) => void calls.push(a.requestId));
+    insertTerminal(db, { id: 'vr_legacy', status: 'passed', deliveryState: null });
+    await sched.runRecovery();
+    expect(calls).toEqual([]);
+    const del = db.prepare('SELECT delivery_state AS d FROM verification_requests WHERE id = ?').get('vr_legacy') as { d: string | null };
+    expect(del.d).toBeNull(); // untouched
+  });
+
+  it('markTerminal stamps delivery_state=pending and markTerminalAndDeliver flips it to delivered', async () => {
+    // A live over-age expiry exercises the full terminal→deliver→delivered path.
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: { ...baseConfig, queuedAgeCeilingMs: 1 },
+      onVerdict: async () => {},
+      now: () => 40_000_000,
+    });
+    db.prepare(
+      `INSERT INTO verification_requests
+         (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, enqueued_at)
+       VALUES ('vr_flip', 'run-1', 1, 'queued', 'static-render-snapshot', ?, '[]', 0, ?)`,
+    ).run(JSON.stringify({ intent: 'x' }), new Date(40_000_000 - 10_000).toISOString());
+    await sched.drain();
+    const row = db.prepare('SELECT status, delivery_state AS d FROM verification_requests WHERE id = ?').get('vr_flip') as { status: string; d: string | null };
+    expect(row.status).toBe('skipped');
+    expect(row.d).toBe('delivered');
   });
 });
