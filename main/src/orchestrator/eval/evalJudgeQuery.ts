@@ -28,6 +28,7 @@
 import { loadSdkQuery } from '../../utils/lazyAgentSdk';
 import type { LoggerLike } from '../types';
 import { resolveClaudeExecutablePath } from '../../services/panels/claude/claudeExecutablePath';
+import { EvalJudgeMaxTurnsError, EvalJudgeTimeoutError } from './judgeErrors';
 
 /**
  * Default per-sample deadline. A hung claude binary must not stall the worker.
@@ -136,21 +137,39 @@ export function makeEvalJudgeQuery(
       });
 
       let structured: unknown = null;
+      let hitMaxTurns = false;
       for await (const msg of q) {
-        if (msg.type === 'result' && msg.subtype === 'success') {
-          structured = msg.structured_output ?? null;
+        if (msg.type === 'result') {
+          if (msg.subtype === 'success') {
+            structured = msg.structured_output ?? null;
+          } else if (msg.subtype === 'error_max_turns') {
+            hitMaxTurns = true;
+          }
         }
       }
-      if (didTimeOut()) throw new Error(`eval judge query timed out after ${timeoutMs}ms`);
+      if (didTimeOut()) throw new EvalJudgeTimeoutError(`eval judge query timed out after ${timeoutMs}ms`);
+      // Surface turn exhaustion as its OWN typed error: returning null here made
+      // it masquerade downstream as "judge sample is not an object" (a parse
+      // problem) and drew a guaranteed-wasted identical retry. The worker treats
+      // it as deterministic (no slot retry) — see judgeErrors.
+      if (structured === null && hitMaxTurns) {
+        throw new EvalJudgeMaxTurnsError(
+          `eval judge hit the ${JUDGE_MAX_TURNS}-turn budget before emitting structured output`,
+        );
+      }
       return structured;
     } catch (err) {
+      if (err instanceof EvalJudgeTimeoutError || err instanceof EvalJudgeMaxTurnsError) {
+        logger?.warn('[evalJudgeQuery] structured query failed', { error: err.message });
+        throw err; // keep the typed class — the worker's retry policy branches on it
+      }
       const message = didTimeOut()
         ? `eval judge query timed out after ${timeoutMs}ms`
         : err instanceof Error
           ? err.message
           : String(err);
       logger?.warn('[evalJudgeQuery] structured query failed', { error: message });
-      throw new Error(message);
+      throw didTimeOut() ? new EvalJudgeTimeoutError(message) : new Error(message);
     } finally {
       cleanup();
     }

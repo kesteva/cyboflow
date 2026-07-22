@@ -10,6 +10,7 @@ import { EvalWorker, type JurySlot } from './evalWorker';
 import type { DatabaseLike } from '../types';
 import type { JudgeClient, JudgeGradeInput } from './evalJury';
 import { CodexJurorUnavailableError } from './codexJudge';
+import { EvalJudgeMaxTurnsError, EvalJudgeTimeoutError } from './judgeErrors';
 import type { JudgeSample, JudgeFinding } from './scoring';
 import type { ReviewItemCreate } from '../reviewItemRouter';
 
@@ -286,6 +287,101 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     const failed = db.runs.find((r) => r.sql.includes("eval_status = 'failed'"));
     expect(failed).toBeTruthy();
     expect(String(failed?.params[0])).toMatch(/no valid sample/);
+  });
+
+  it('fails a timed-out slot on the FIRST try and skips the whole-eval retry when all slots are deterministic', async () => {
+    const db = noExistingFindings();
+    const timedOut = new FakeJudge(async () => {
+      throw new EvalJudgeTimeoutError('eval judge query timed out after 300000ms');
+    });
+    const worker = EvalWorker.initialize(db, undefined, {
+      gitDiff: vi.fn(),
+      jury: makeClaudeJury(timedOut),
+      reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      sleep: async () => {},
+    });
+    worker.enqueue('run-1', '1.1');
+    await worker._queue().onIdle();
+    // 3 slots × 1 try × 1 whole-eval attempt. Before the deterministic-failure
+    // policy this was 3 slots × 2 tries × 3 attempts = 18 full-deadline grades —
+    // the amplification the adversarial review flagged on the 300s bump.
+    expect(timedOut.calls).toBe(3);
+    const failed = db.runs.find((r) => r.sql.includes("eval_status = 'failed'"));
+    expect(failed).toBeTruthy();
+    expect(String(failed?.params[0])).toMatch(/deterministic/);
+    // Provenance records WHY each slot failed.
+    const jury = JSON.parse(failed?.params[1] as string) as Array<{
+      status: string;
+      errorCode?: string;
+    }>;
+    expect(jury).toHaveLength(3);
+    expect(jury.every((s) => s.status === 'failed' && s.errorCode === 'timeout')).toBe(true);
+  });
+
+  it('keeps the whole-eval retry when any failure is retryable; max-turns slots still skip the slot retry', async () => {
+    const db = noExistingFindings();
+    const maxTurns = new FakeJudge(async () => {
+      throw new EvalJudgeMaxTurnsError('eval judge hit the 20-turn budget before emitting structured output');
+    });
+    const malformed = new FakeJudge(async () => {
+      throw new Error('garbled sample');
+    });
+    const worker = EvalWorker.initialize(db, undefined, {
+      gitDiff: vi.fn(),
+      jury: [
+        ...makeClaudeJury(maxTurns, 1),
+        { slot: 'claude-2', provider: 'claude', model: 'claude-opus-4-8', judge: malformed },
+      ],
+      reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      maxRetries: 1,
+      sleep: async () => {},
+    });
+    worker.enqueue('run-1', '1.1');
+    await worker._queue().onIdle();
+    // max-turns: 1 try per attempt × 2 attempts; malformed (retryable): 2 tries × 2 attempts.
+    expect(maxTurns.calls).toBe(2);
+    expect(malformed.calls).toBe(4);
+    const failed = db.runs.find((r) => r.sql.includes("eval_status = 'failed'"));
+    expect(failed).toBeTruthy();
+    expect(String(failed?.params[0])).not.toMatch(/deterministic/);
+  });
+
+  it('a surviving sample still completes the eval when another slot times out (no wasted timeout retry)', async () => {
+    const db = noExistingFindings();
+    const good = new FakeJudge(async () => sampleAllPass(BROAD_PASS));
+    const timedOut = new FakeJudge(async () => {
+      throw new EvalJudgeTimeoutError('eval judge query timed out after 300000ms');
+    });
+    const worker = EvalWorker.initialize(db, undefined, {
+      gitDiff: vi.fn(),
+      jury: [
+        ...makeClaudeJury(good, 2),
+        { slot: 'claude-3', provider: 'claude', model: 'claude-opus-4-8', judge: timedOut },
+      ],
+      reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
+      appVersion: '0.1.11',
+      isEvalEnabled: () => true,
+      sleep: async () => {},
+    });
+    worker.enqueue('run-1', '1.1');
+    await worker._queue().onIdle();
+    expect(timedOut.calls).toBe(1); // deterministic — no second identical try
+    const complete = db.runs.find((r) => r.sql.includes("eval_status = 'complete'"));
+    expect(complete).toBeTruthy();
+    expect(complete?.params[11]).toBe(2); // the two good samples score
+    const jury = JSON.parse(complete?.params[10] as string) as Array<{
+      slot: string;
+      status: string;
+      errorCode?: string;
+    }>;
+    expect(jury.find((s) => s.slot === 'claude-3')).toMatchObject({
+      status: 'failed',
+      errorCode: 'timeout',
+    });
   });
 
   it('writes net-new findings blocking=false, catastrophic blocking=true, deduped against existing', async () => {

@@ -37,6 +37,7 @@ import {
 } from './scoring';
 import type { JudgeClient } from './evalJury';
 import { CodexJurorUnavailableError } from './codexJudge';
+import { EvalJudgeMaxTurnsError, isDeterministicJudgeFailure } from './judgeErrors';
 import { snapshotRunForEval } from './snapshotRunForEval';
 import { runJudgeGrade, type JudgeLane } from './judgeConcurrency';
 
@@ -114,6 +115,18 @@ interface EvalRunRow {
 }
 
 const defaultSleep = (ms: number): Promise<void> => new Promise((res) => setTimeout(res, ms));
+
+/**
+ * Thrown by process() when zero samples survived AND every slot failure was
+ * DETERMINISTIC (timeout / max-turns / unavailable) — re-running the whole eval
+ * would replay the identical wall-clock failures, compounding the per-sample
+ * deadline through the attempt loop into an hours-scale stall of the
+ * concurrency-1 queue. processWithRetries marks the eval failed immediately
+ * instead of retrying. Exported for tests.
+ */
+export class EvalNonRetryableError extends Error {
+  override readonly name = 'EvalNonRetryableError';
+}
 
 export class EvalWorker {
   private static instance: EvalWorker | null = null;
@@ -246,6 +259,10 @@ export class EvalWorker {
           attempt,
           error: err instanceof Error ? err.message : String(err),
         });
+        // Every slot failed deterministically (timeout/max-turns/unavailable) —
+        // another whole-eval attempt replays the same wall-clock failures and
+        // stalls the concurrency-1 queue. Go straight to markFailed.
+        if (err instanceof EvalNonRetryableError) break;
         if (attempt < this.maxRetries) {
           await this.sleep(500 * 2 ** attempt); // 500ms, 1s backoff
         }
@@ -303,7 +320,7 @@ export class EvalWorker {
     // the parallel 'normal' lane (see judgeConcurrency).
     const lane: JudgeLane = row.experiment_id ? 'ab' : 'normal';
 
-    const { samples, slots } = await this.collectSamples({
+    const { samples, slots, allFailuresDeterministic } = await this.collectSamples({
       diff,
       gateResults,
       diffStatsSummary,
@@ -312,7 +329,13 @@ export class EvalWorker {
     });
     this.collectedSlots.set(evalKey, slots);
     if (samples.length === 0) {
-      throw new Error('all jury samples were malformed/failed — no valid sample to score');
+      const message = 'all jury samples were malformed/failed — no valid sample to score';
+      if (allFailuresDeterministic) {
+        throw new EvalNonRetryableError(
+          `${message} (every failure was deterministic — timeout/max-turns/unavailable — so the eval is not re-attempted)`,
+        );
+      }
+      throw new Error(message);
     }
 
     const result = scoreSamples(samples, { gateResults });
@@ -345,12 +368,18 @@ export class EvalWorker {
     diffStatsSummary?: string;
     cwd?: string;
     lane: JudgeLane;
-  }): Promise<{ samples: JudgeSample[]; slots: JurySlotProvenance[] }> {
+  }): Promise<{
+    samples: JudgeSample[];
+    slots: JurySlotProvenance[];
+    /** True iff every non-ok slot failed deterministically (timeout/max-turns/unavailable). */
+    allFailuresDeterministic: boolean;
+  }> {
     const outcomes = await Promise.all(
       this.deps.jury.map((jurySlot) => this.gradeOnceWithRetry(jurySlot, input)),
     );
     const samples: JudgeSample[] = [];
     const slots: JurySlotProvenance[] = [];
+    let allFailuresDeterministic = true;
     this.deps.jury.forEach((jurySlot, i) => {
       const outcome = outcomes[i];
       if (outcome.status === 'ok') {
@@ -364,6 +393,7 @@ export class EvalWorker {
           sampleIndex,
         });
       } else {
+        if (outcome.status === 'failed' && outcome.retryable) allFailuresDeterministic = false;
         slots.push({
           slot: jurySlot.slot,
           provider: jurySlot.provider,
@@ -373,7 +403,7 @@ export class EvalWorker {
         });
       }
     });
-    return { samples, slots };
+    return { samples, slots, allFailuresDeterministic };
   }
 
   private async gradeOnceWithRetry(jurySlot: JurySlot, input: {
@@ -384,7 +414,8 @@ export class EvalWorker {
     lane: JudgeLane;
   }): Promise<
     | { status: 'ok'; sample: JudgeSample }
-    | { status: 'unavailable' | 'failed'; errorCode?: string }
+    | { status: 'unavailable'; errorCode?: string }
+    | { status: 'failed'; errorCode?: string; retryable: boolean }
   > {
     for (let tries = 0; tries < 2; tries++) {
       try {
@@ -415,9 +446,20 @@ export class EvalWorker {
           try: tries,
           error: err instanceof Error ? err.message : String(err),
         });
+        // A sample that burned its whole deadline or turn budget will do so
+        // again — an identical retry only doubles the stall (adversarial-review
+        // finding on the deadline bump). Fail the slot on the first occurrence,
+        // tagged so provenance and the whole-eval retry policy can see why.
+        if (isDeterministicJudgeFailure(err)) {
+          return {
+            status: 'failed',
+            retryable: false,
+            errorCode: err instanceof EvalJudgeMaxTurnsError ? 'max-turns' : 'timeout',
+          };
+        }
       }
     }
-    return { status: 'failed' };
+    return { status: 'failed', retryable: true };
   }
 
   // -------------------------------------------------------------------------

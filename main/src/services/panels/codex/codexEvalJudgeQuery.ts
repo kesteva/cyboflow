@@ -1,5 +1,6 @@
 import type { EvalStructuredQueryFn } from '../../../orchestrator/eval/evalJudgeQuery';
 import { CodexJurorUnavailableError } from '../../../orchestrator/eval/codexJudge';
+import { EvalJudgeTimeoutError } from '../../../orchestrator/eval/judgeErrors';
 import type { LoggerLike } from '../../../orchestrator/types';
 import {
   CODEX_EXECUTABLE_VERSION,
@@ -167,7 +168,9 @@ function makeDeadline(timeoutMs: number, signal?: AbortSignal): {
   void promise.catch(() => undefined);
   const timer = setTimeout(() => {
     timedOut = true;
-    rejectDeadline(new Error(`Codex eval judge query timed out after ${timeoutMs}ms`));
+    // Typed so EvalWorker classifies the timeout as DETERMINISTIC (no slot retry) —
+    // same contract as the Claude judge boundary (see judgeErrors).
+    rejectDeadline(new EvalJudgeTimeoutError(`Codex eval judge query timed out after ${timeoutMs}ms`));
   }, timeoutMs);
   const onAbort = (): void => {
     aborted = true;

@@ -14,9 +14,11 @@ import {
   makeBlockUntilAbortQuery,
   sdkAssistantText,
   sdkResultSuccess,
+  sdkResultError,
   type FakeQueryFn,
   type FakeQueryParams,
 } from '../../../test/fakes/fakeSdk';
+import { EvalJudgeMaxTurnsError, EvalJudgeTimeoutError } from '../judgeErrors';
 
 // The SDK `query` is mocked so the evalJudgeQuery boundary is unit-testable
 // without a real claude binary. Each test installs its own behavior via the shared
@@ -118,6 +120,26 @@ describe('makeEvalJudgeQuery', () => {
     install(makeBlockUntilAbortQuery());
     const fn = makeEvalJudgeQuery(undefined, 5);
     await expect(fn({ prompt: 'p', schema: {}, cwd: '/wt' })).rejects.toThrow(/timed out after 5ms/);
+  });
+
+  it('timeout rejects with the TYPED EvalJudgeTimeoutError (worker retry policy branches on it)', async () => {
+    install(makeBlockUntilAbortQuery());
+    const fn = makeEvalJudgeQuery(undefined, 5);
+    await expect(fn({ prompt: 'p', schema: {} })).rejects.toBeInstanceOf(EvalJudgeTimeoutError);
+  });
+
+  it('throws the distinct EvalJudgeMaxTurnsError when the judge exhausts maxTurns without structured output', async () => {
+    // Previously this drained to `return null` and masqueraded downstream as
+    // "judge sample is not an object" — a parse-shaped error that drew a
+    // guaranteed-wasted identical retry.
+    yieldsMessages([
+      sdkAssistantText('still exploring the worktree'),
+      sdkResultError({ subtype: 'error_max_turns' }),
+    ]);
+    const fn = makeEvalJudgeQuery();
+    const p = fn({ prompt: 'p', schema: {}, cwd: '/wt' });
+    await expect(p).rejects.toBeInstanceOf(EvalJudgeMaxTurnsError);
+    await expect(p).rejects.toThrow(/turn budget/);
   });
 
   it('surfaces the timeout message even when the timed-out generator resolves without throwing', async () => {
