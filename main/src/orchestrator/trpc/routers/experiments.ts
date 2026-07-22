@@ -70,7 +70,7 @@ import {
   setRotationLineage,
 } from '../../experimentStore';
 import { SPRINT_BATCH_MAX_TASKS } from '../../../../../shared/types/sprintBatch';
-import type { Priority } from '../../../../../shared/types/tasks';
+import type { EntityCategory, Priority } from '../../../../../shared/types/tasks';
 import { listRunCreatedEpicIds, listRunCreatedIdeaIds, listRunCreatedTaskIds } from '../../runEntityOwnership';
 import {
   selectRunUsageRollups,
@@ -296,6 +296,7 @@ interface SeedTaskFields {
   summary: string | null;
   body: string | null;
   priority: Priority;
+  category: EntityCategory;
   repo: string | null;
 }
 
@@ -373,7 +374,7 @@ function readSeedTask(db: DatabaseLike, taskId: string, projectId: number): Seed
   const row = db
     .prepare(
       `SELECT t.title AS title, t.summary AS summary, t.body AS body, t.priority AS priority,
-              t.repo AS repo, t.project_id AS project_id, t.experiment_id AS experiment_id,
+              t.category AS category, t.repo AS repo, t.project_id AS project_id, t.experiment_id AS experiment_id,
               t.approved_at AS approved_at, t.archived_at AS archived_at,
               bs.position AS stage_position, bs.is_terminal AS is_terminal
          FROM tasks t
@@ -386,6 +387,7 @@ function readSeedTask(db: DatabaseLike, taskId: string, projectId: number): Seed
         summary?: unknown;
         body?: unknown;
         priority?: unknown;
+        category?: unknown;
         repo?: unknown;
         project_id?: unknown;
         experiment_id?: unknown;
@@ -418,6 +420,7 @@ function readSeedTask(db: DatabaseLike, taskId: string, projectId: number): Seed
     summary: typeof row.summary === 'string' ? row.summary : null,
     body: typeof row.body === 'string' ? row.body : null,
     priority: (typeof row.priority === 'string' ? row.priority : 'P2') as Priority,
+    category: (typeof row.category === 'string' ? row.category : 'feature') as EntityCategory,
     repo: typeof row.repo === 'string' ? row.repo : null,
   };
 }
@@ -445,6 +448,7 @@ async function cloneSeedTask(
     summary: seed.summary,
     body: seed.body,
     priority: seed.priority,
+    category: seed.category,
     repo: seed.repo,
     experimentId,
     experimentArm: arm,
