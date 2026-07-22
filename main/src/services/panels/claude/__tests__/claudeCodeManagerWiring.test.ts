@@ -507,9 +507,13 @@ describe('TypedEventNarrowing convergence (TASK-730)', () => {
     for (const row of rows) {
       const parsed = JSON.parse(row.payload_json) as Record<string, unknown>;
       expect(parsed['kind']).not.toBe('__unknown__');
-      // The result event must carry the 'type' field directly.
-      expect(parsed['type']).toBe('result');
     }
+    // The persisted set is the flow-run prompt echo (a typed 'user' variant —
+    // maybeEchoPromptUserTurn) plus the SDK's result event, both carrying their
+    // 'type' field directly.
+    const types = rows.map((row) => (JSON.parse(row.payload_json) as Record<string, unknown>)['type']);
+    expect(types).toContain('result');
+    expect(types).toContain('user');
   });
 });
 

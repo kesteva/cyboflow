@@ -56,6 +56,7 @@ import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../streamPar
 import { transitionToAwaitingReview, reviveQuickRunToRunning } from '../../cyboflow/transitions';
 import type { TransitionToAwaitingReviewParams } from '../../cyboflow/transitions';
 import { resolveGateRunId } from '../../../orchestrator/chatSentinelProvider';
+import type { UserEvent } from '../../../../../shared/types/claudeStream';
 import type { ChatSentinelProvider } from '../../../orchestrator/chatSentinelProvider';
 import { DEFAULT_PERMISSION_MODE } from '../../../../../shared/types/permissionMode';
 import { isClaudeEffortLevel, type ReasoningEffort } from '../../../../../shared/types/reasoningEffort';
@@ -561,6 +562,19 @@ export interface ClaudeSpawnOptions {
   sessionId: string;
   worktreePath: string;
   prompt: string;
+  /**
+   * The prompt is orchestration plumbing, not a user-authored chat turn (wire
+   * parity with `ClaudeSpawnerOptions.hidePromptFromTranscript`). The Claude SDK
+   * never re-emits the prompt it was driven with, so — inverse of the Codex
+   * manager, which SUPPRESSES its app-server's native userMessage echo on this
+   * flag — this manager SYNTHESIZES the echo when the flag is absent/false:
+   * a flow-run turn's prompt (nudge / queued input / resume) is emitted as a
+   * parentless user event so it renders in the run chat and persists to
+   * raw_events (see maybeEchoPromptUserTurn). RunExecutor passes `true` for the
+   * launch turn (the workflow prompt) and programmatic lanes pass `true` for
+   * every step prompt; nudge/resume turns omit it.
+   */
+  hidePromptFromTranscript?: boolean;
   conversationHistory?: string[];
   isResume?: boolean;
   permissionMode?: 'approve' | 'ignore';
@@ -1439,6 +1453,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // Per-turn 'spawned' + session_info — events.ts keys the quick-session status
       // lifecycle on these, so a warm turn emits them exactly as a cold turn does.
       this.emitTurnStart(displayPanelId, sessionId, options);
+      this.maybeEchoPromptUserTurn(spawnKey, displayPanelId, sessionId, runId, options);
 
       this.logger?.info(`[ClaudeCodeManager] SDK query started for panel ${displayPanelId} (session ${sessionId})`);
 
@@ -1493,6 +1508,68 @@ export class ClaudeCodeManager extends AbstractCliManager {
       timestamp: new Date(),
     });
     this.emit('spawned', { panelId: displayPanelId, sessionId });
+  }
+
+  /**
+   * Echo this logical turn's prompt into the run transcript as a synthetic
+   * PARENTLESS user event — routed through the per-spawn EventRouter (so the
+   * built-in RawEventsSink persists it to raw_events, where
+   * selectRunUnifiedMessages projects it as a user turn) AND emitted on the live
+   * 'output' stream (so the renderer's streamEvents refetch picks it up and the
+   * pending-send 'SENDING' row reconciles away).
+   *
+   * Why synthesize: the Claude SDK never re-emits the prompt it was driven with
+   * (neither a cold `--resume` spawn nor a warm push), unlike the Codex
+   * app-server which natively echoes every turn input as a userMessage. Without
+   * this, a nudge/queued chat send reached the agent but never appeared in the
+   * flow-run chat history. Called once per LOGICAL turn, from the same two
+   * seams as emitTurnStart (cold spawn + warm push).
+   *
+   * Scope guards (all must hold):
+   *  - `hidePromptFromTranscript !== true` — orchestration plumbing (the
+   *    workflow launch prompt, programmatic lane step prompts) stays hidden;
+   *  - `runId === displayPanelId` — a FLOW-RUN spawn (RunExecutor invariant
+   *    panelId === runId; same discriminator as terminal-error propagation). A
+   *    quick CHAT turn resolves runId to the `__quick__` sentinel and already
+   *    persists its user turn via session_outputs — echoing would double-write;
+   *  - default sink only (`options.eventsSink` unset) — a custom-sink caller
+   *    (the global-agent thread transcript) owns its own user-turn persistence.
+   */
+  private maybeEchoPromptUserTurn(
+    spawnKey: string,
+    displayPanelId: string,
+    sessionId: string,
+    runId: string,
+    options: ClaudeSpawnOptions,
+  ): void {
+    if (options.hidePromptFromTranscript === true) return;
+    if (runId !== displayPanelId) return;
+    if (options.eventsSink !== undefined) return;
+    // Echo the caller's logical prompt (options.prompt), NOT finalPrompt — the
+    // structured-commit enhancement is spawn plumbing, not user-authored text.
+    const text = options.prompt.trim();
+    if (text === '') return;
+
+    const userEvent: UserEvent = {
+      type: 'user',
+      message: { role: 'user', content: [{ type: 'text', text }] },
+      parent_tool_use_id: null,
+    };
+
+    try {
+      this.pipelines.get(spawnKey)?.router.emitForRun(runId, userEvent);
+    } catch (err) {
+      this.logger?.warn(
+        `[ClaudeCodeManager] prompt-echo persist failed for run ${runId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    this.emit('output', {
+      panelId: displayPanelId,
+      sessionId,
+      type: 'json',
+      data: userEvent,
+      timestamp: new Date(),
+    });
   }
 
   /**
@@ -1569,6 +1646,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     }, SDK_FIRST_EVENT_TIMEOUT_MS);
 
     this.emitTurnStart(displayPanelId, sessionId, options);
+    this.maybeEchoPromptUserTurn(spawnKey, displayPanelId, sessionId, runId, options);
     this.logger?.info(`[ClaudeCodeManager] SDK warm turn pushed for panel ${displayPanelId} (session ${sessionId})`);
 
     await turn.done.promise;
