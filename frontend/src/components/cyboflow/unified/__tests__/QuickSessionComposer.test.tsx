@@ -86,11 +86,6 @@ vi.mock('../../../FilePathAutocomplete', () => ({
   ),
 }));
 
-// CommitModePill pulls in stores/IPC we don't need here — stub it.
-vi.mock('../../../CommitModeToggle', () => ({
-  CommitModePill: () => <div data-testid="commit-mode-pill" />,
-}));
-
 import { QuickSessionComposer } from '../QuickSessionComposer';
 import { usePendingSendStore } from '../../../../stores/pendingSendStore';
 import type { Session } from '../../../../types/session';

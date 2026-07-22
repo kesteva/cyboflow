@@ -120,10 +120,6 @@ export interface AppConfig {
     };
     showAdvanced?: boolean;
     baseBranch?: string;
-    commitModeSettings?: {
-      mode?: 'checkpoint' | 'incremental' | 'single';
-      checkpointPrefix?: string;
-    };
   };
   // Additional paths to add to PATH environment variable
   additionalPaths?: string[];

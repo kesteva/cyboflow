@@ -16,7 +16,7 @@ import { cn } from '../../../utils/cn';
  * (ChatInput, resolving the host session from activeRun.session_id) both persist
  * via `sessions:update-agent-permission-mode` IPC. In BOTH cases the new mode
  * takes effect on the NEXT turn (the SDK re-reads the stored mode on each spawn).
- * Mirrors the CommitModePill/ModelPill pattern (Dropdown + Pill + onChange so the
+ * Mirrors the ModelPill pattern (Dropdown + Pill + onChange so the
  * host mirrors it into its local state immediately).
  *
  * Single-sources its options from {@link PERMISSION_MODE_OPTIONS} (the same list

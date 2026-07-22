@@ -81,10 +81,7 @@ export interface UnifiedComposerProps {
    *  'ultracode', so it must not be gated on the SDK-only model affordance. */
   effortLabel?: string | null;
 
-  /** checkpoint / commit-mode control (quick) — host supplies the node. */
-  checkpointSlot?: React.ReactNode;
-  /** Opus-only fast-mode toggle (quick SDK) — host supplies the node, rendered
-   *  next to the checkpoint pill. */
+  /** Opus-only fast-mode toggle (quick SDK) — host supplies the node. */
   fastSlot?: React.ReactNode;
   /** interactive reasoning-effort selector (IDEA-029, quick SDK, idle) — host
    *  supplies the node, rendered next to the fast-mode toggle. */
@@ -118,7 +115,6 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
     modelSlot,
     permissionSlot,
     effortLabel,
-    checkpointSlot,
     fastSlot,
     effortSlot,
     compactSlot,
@@ -370,12 +366,10 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
         {permissionSlot}
         {effortLabel && <ReadonlyPill label={`effort: ${effortLabel}`} />}
 
-        {/* Opus-only fast-mode toggle (speed), reasoning-effort selector, then
-            checkpoint / commit-mode — order: model → permission → speed →
-            effort → checkpoint. */}
-        {visibility.showCheckpoint && fastSlot}
-        {visibility.showCheckpoint && effortSlot}
-        {visibility.showCheckpoint && checkpointSlot}
+        {/* Opus-only fast-mode toggle (speed), then reasoning-effort selector —
+            order: model → permission → speed → effort. */}
+        {visibility.showQuickPills && fastSlot}
+        {visibility.showQuickPills && effortSlot}
 
         {/* compact-context (SDK) */}
         {visibility.isSDK && compactSlot}

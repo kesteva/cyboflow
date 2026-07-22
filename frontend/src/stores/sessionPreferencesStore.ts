@@ -1,6 +1,5 @@
 import { create } from 'zustand';
 import { API } from '../utils/api';
-import type { CommitModeSettings } from '../../../shared/types';
 
 export interface SessionCreationPreferences {
   sessionCount: number;
@@ -15,7 +14,6 @@ export interface SessionCreationPreferences {
   };
   showAdvanced: boolean;
   baseBranch?: string;
-  commitModeSettings: CommitModeSettings;
 }
 
 const defaultPreferences: SessionCreationPreferences = {
@@ -29,11 +27,7 @@ const defaultPreferences: SessionCreationPreferences = {
     permissionMode: 'approve',
     ultrathink: false
   },
-  showAdvanced: false,
-  commitModeSettings: {
-    mode: 'checkpoint',
-    checkpointPrefix: 'checkpoint: '
-  }
+  showAdvanced: false
 };
 
 interface SessionPreferencesStore {
@@ -66,10 +60,6 @@ export const useSessionPreferencesStore = create<SessionPreferencesStore>((set, 
           claudeConfig: {
             ...defaultPreferences.claudeConfig,
             ...response.data.claudeConfig
-          },
-          commitModeSettings: {
-            ...defaultPreferences.commitModeSettings,
-            ...response.data.commitModeSettings
           }
         };
         mergedPreferences.sessionCount = defaultPreferences.sessionCount;
@@ -97,10 +87,6 @@ export const useSessionPreferencesStore = create<SessionPreferencesStore>((set, 
       claudeConfig: {
         ...currentPreferences.claudeConfig,
         ...(allowedUpdates.claudeConfig || {})
-      },
-      commitModeSettings: {
-        ...currentPreferences.commitModeSettings,
-        ...(allowedUpdates.commitModeSettings || {})
       },
       sessionCount: defaultPreferences.sessionCount
     };

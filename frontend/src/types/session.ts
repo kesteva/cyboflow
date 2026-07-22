@@ -104,14 +104,11 @@ export interface Session {
   inPlace?: boolean;
   displayOrder?: number;
   isFavorite?: boolean;
-  autoCommit?: boolean;
   toolType?: 'claude' | 'none';
   archived?: boolean;
   gitStatus?: GitStatus;
   baseCommit?: string;
   baseBranch?: string;
-  commitMode?: 'structured' | 'checkpoint' | 'disabled';
-  commitModeSettings?: string; // JSON string of CommitModeSettings
   runId?: string | null;
   /**
    * Persistent chat-sentinel gate vehicle (sessions.chat_run_id, migration 038),
@@ -261,10 +258,7 @@ export interface CreateSessionRequest {
   projectId?: number;
   folderId?: string;
   baseBranch?: string;
-  autoCommit?: boolean;
   toolType?: 'claude' | 'none';
-  commitMode?: 'structured' | 'checkpoint' | 'disabled';
-  commitModeSettings?: string; // JSON string of CommitModeSettings
   claudeConfig?: {
     model?: string;
     permissionMode?: 'approve' | 'ignore';

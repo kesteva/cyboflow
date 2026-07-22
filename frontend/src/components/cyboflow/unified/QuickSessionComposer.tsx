@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from 'react';
 import type { Session } from '../../../types/session';
 import { API } from '../../../utils/api';
 import { usePendingSendStore } from '../../../stores/pendingSendStore';
-import { CommitModePill } from '../../CommitModeToggle';
 import { ModelPill, isOpusModel, modelDisplayLabel, MODEL_OPTIONS } from './ModelPill';
 import { FastModePill } from './FastModePill';
 import { EffortPill } from './EffortPill';
@@ -311,10 +310,6 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
     ],
   );
 
-  const effectiveMode =
-    activeSession.commitMode ?? (activeSession.autoCommit === false ? 'disabled' : 'checkpoint');
-  const isAutoCommitEnabled = effectiveMode !== 'disabled';
-
   const placeholder = interactive
     ? 'Message the live session…  (⌘↵ to send)'
     : activeSession.status === 'waiting'
@@ -409,31 +404,6 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
   // composer (where the SDK-gated model pill never appears). null → no pill.
   const effortLabel = activeSession.effort === 'ultracode' ? 'ultracode' : null;
 
-  // No commit-mode pill for in-place sessions: they share the user's real
-  // checkout, so auto/structured commits are unavailable (creation forces
-  // 'disabled' and the commit-mode IPC rejects changes — hiding the pill keeps
-  // the UI from promising modes the backend refuses).
-  const checkpointSlot = !interactive && activeSession.inPlace !== true ? (
-    <CommitModePill
-      sessionId={activeSession.id}
-      currentMode={activeSession.commitMode}
-      currentSettings={activeSession.commitModeSettings}
-      autoCommit={activeSession.autoCommit}
-      projectId={activeSession.projectId}
-      isAutoCommitEnabled={isAutoCommitEnabled}
-      // The pill persists the change itself (commit-mode:update-session-settings);
-      // mirror it into the session store so the pill label reflects it immediately
-      // instead of staying stale until the session is re-fetched.
-      onModeChange={(mode, settings) =>
-        updateSession({
-          ...activeSession,
-          commitMode: mode,
-          commitModeSettings: JSON.stringify(settings),
-        })
-      }
-    />
-  ) : undefined;
-
   const compactSlot =
     !interactive && handleCompactContext && hasConversationHistory ? (
       <button
@@ -467,7 +437,6 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       modelSlot={modelSlot}
       permissionSlot={permissionSlot}
       effortLabel={effortLabel}
-      checkpointSlot={checkpointSlot}
       fastSlot={fastModeSlot}
       effortSlot={effortSlot}
       compactSlot={compactSlot}

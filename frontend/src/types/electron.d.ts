@@ -164,7 +164,6 @@ interface ElectronAPI {
     getRemoteUrl: (sessionId: string) => Promise<IPCDataResponse<{ remoteUrl: string; branchName: string }>>;
     rename: (sessionId: string, newName: string) => Promise<IPCResponse<void>>;
     toggleFavorite: (sessionId: string) => Promise<IPCResponse<void>>;
-    toggleAutoCommit: (sessionId: string) => Promise<IPCResponse<void>>;
     updateAgentPermissionMode: (sessionId: string, mode: PermissionMode) => Promise<IPCResponse<void>>;
     updateSessionMcps: (sessionId: string, disabledMcpServers: string[]) => Promise<IPCResponse<void>>;
     updateSessionPlugins: (sessionId: string, enabledPlugins: string[]) => Promise<IPCResponse<void>>;

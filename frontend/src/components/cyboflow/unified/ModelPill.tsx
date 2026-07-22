@@ -14,7 +14,7 @@ import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
  * Replaces the read-only "Sonnet 🔒" pill. Persists the choice via the existing
  * `claude-panels:set-model` IPC (panel settings), which takes effect on the NEXT
  * turn — each quick-SDK turn re-spawns the SDK process and reads the model — so
- * no respawn is needed here. Mirrors the CommitModePill pattern (Dropdown + Pill
+ * no respawn is needed here. Uses the shared pill pattern (Dropdown + Pill
  * + onChange callback so the host updates its local model state immediately).
  *
  * Only mounted for non-running quick SDK sessions (see QuickSessionComposer); a

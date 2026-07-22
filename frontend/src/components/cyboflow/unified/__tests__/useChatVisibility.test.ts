@@ -28,7 +28,7 @@ describe('resolveChatVisibility', () => {
       isSDK: true,
       isQuick: true,
       showRail: true,
-      showCheckpoint: true,
+      showQuickPills: true,
       showSettings: true,
       showModelEffort: true,
       modelEffortDisabled: false,
@@ -40,7 +40,7 @@ describe('resolveChatVisibility', () => {
   it('SDK · flow — rail + checkpoint gone, settings/model stay', () => {
     const v = resolveChatVisibility(make({ transport: 'sdk', mode: 'flow' }));
     expect(v.showRail).toBe(false); // rail is quick-only
-    expect(v.showCheckpoint).toBe(false); // checkpoint is quick-only
+    expect(v.showQuickPills).toBe(false); // quick pills are quick-only
     expect(v.showSettings).toBe(true);
     expect(v.showModelEffort).toBe(true);
     expect(v.inputVisible).toBe(true); // SDK input always visible
@@ -60,7 +60,7 @@ describe('resolveChatVisibility', () => {
     expect(closed.showSettingsToggles).toBe(false);
     expect(closed.showModelEffort).toBe(false);
     expect(closed.showRail).toBe(false); // rail needs SDK
-    expect(closed.showCheckpoint).toBe(true); // checkpoint is quick (any transport)
+    expect(closed.showQuickPills).toBe(true); // quick pills are quick (any transport)
 
     const open = resolveChatVisibility(make({ transport: 'interactive', mode: 'quick', ptyOpen: true }));
     expect(open.inputVisible).toBe(true); // ⌃G revealed
@@ -70,7 +70,7 @@ describe('resolveChatVisibility', () => {
     const closed = resolveChatVisibility(make({ transport: 'interactive', mode: 'flow', ptyOpen: false }));
     expect(closed.inputVisible).toBe(false);
     expect(closed.showRail).toBe(false);
-    expect(closed.showCheckpoint).toBe(false); // flow, not quick
+    expect(closed.showQuickPills).toBe(false); // flow, not quick
     expect(closed.showSettings).toBe(false);
 
     const open = resolveChatVisibility(make({ transport: 'interactive', mode: 'flow', ptyOpen: true }));

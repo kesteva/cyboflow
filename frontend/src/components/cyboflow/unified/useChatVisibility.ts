@@ -83,8 +83,8 @@ export interface ChatVisibility {
 
   /** prompt-history right rail — SDK + quick only. */
   showRail: boolean;
-  /** checkpoint-rewind control — quick only. */
-  showCheckpoint: boolean;
+  /** quick-session composer pills (fast-mode, effort) — quick only. */
+  showQuickPills: boolean;
   /** ⚙ display-settings popover — SDK only. */
   showSettings: boolean;
   /** model + effort selectors — SDK only (rendered read-only for v1). */
@@ -114,7 +114,7 @@ export function resolveChatVisibility(input: ChatVisibilityInput): ChatVisibilit
     isSDK,
     isQuick,
     showRail: isSDK && isQuick,
-    showCheckpoint: isQuick,
+    showQuickPills: isQuick,
     showSettings: isSDK,
     showModelEffort: isSDK,
     modelEffortDisabled: !isQuick && running,
