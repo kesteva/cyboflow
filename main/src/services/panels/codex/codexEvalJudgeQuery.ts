@@ -26,6 +26,7 @@ import {
   type TurnSessionClient,
   type TurnSessionEvent,
 } from './appServer/turnSession';
+import { toStrictOutputSchema } from './appServer/strictOutputSchema';
 
 export const CODEX_EVAL_JUDGE_TIMEOUT_MS = 180_000;
 
@@ -314,7 +315,12 @@ export function makeCodexEvalJudgeQuery(
       await raceDeadline(
         turnSession.startTurn(prompt, {
           model: resolvedModel,
-          outputSchema: toJsonValue(schema),
+          // Codex → OpenAI strict structured output rejects any object whose
+          // `required` omits a property. The shared JUDGE_OUTPUT_SCHEMA marks
+          // several finding fields optional (fine for the lenient Claude path),
+          // so strict-ify it HERE — else every Codex juror sample 400s with
+          // "Missing 'subCheckId'" and the juror fails 100% of evals.
+          outputSchema: toJsonValue(toStrictOutputSchema(schema)),
           sandboxPolicy: { type: 'readOnly' },
           approvalPolicy: 'never',
         }),

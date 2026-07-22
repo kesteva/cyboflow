@@ -126,7 +126,15 @@ describe('makeCodexEvalJudgeQuery', () => {
     const turn = client.requests.find((request) => request.method === 'turn/start');
     expect(turn?.params).toMatchObject({
       model: 'gpt-5.4',
-      outputSchema: schema,
+      // The schema is strict-ified for Codex/OpenAI structured output: every
+      // property is promoted to `required` and originally-optional ones become
+      // nullable (see strictOutputSchema). `verdicts` was optional here.
+      outputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['verdicts'],
+        properties: { verdicts: { type: ['array', 'null'] } },
+      },
       sandboxPolicy: { type: 'readOnly' },
       approvalPolicy: 'never',
     });
