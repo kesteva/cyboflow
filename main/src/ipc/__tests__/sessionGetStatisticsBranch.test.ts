@@ -26,11 +26,15 @@ vi.mock('electron', () => ({
   },
 }));
 
+const { mockGetPanelsForSession } = vi.hoisted(() => ({
+  mockGetPanelsForSession: vi.fn(() => [] as Array<{ id: string; type: string }>),
+}));
+
 vi.mock('../../services/panelManager', () => ({
   panelManager: {
     getPanel: vi.fn(),
     getAllPanels: vi.fn(() => []),
-    getPanelsForSession: vi.fn(() => []),
+    getPanelsForSession: mockGetPanelsForSession,
     createPanel: vi.fn(),
   },
 }));
@@ -142,6 +146,8 @@ function registerWith(services: AppServices) {
 describe('sessions:get-statistics — branch resolution', () => {
   beforeEach(() => {
     mockGetCurrentBranch.mockReset();
+    mockGetPanelsForSession.mockReset();
+    mockGetPanelsForSession.mockReturnValue([]);
   });
 
   it('uses the live worktree branch when getCurrentBranch resolves one', async () => {
@@ -187,5 +193,30 @@ describe('sessions:get-statistics — branch resolution', () => {
 
     expect(result.success).toBe(true);
     expect(result.data.session.branch).toBe('main');
+  });
+
+  it('resolves the branch once per session even when the session hosts multiple panels', async () => {
+    // Regression guard for the "worktree-level, not per-panel" resolution
+    // claim: simulate a session with several Claude panels (the loop the
+    // handler runs over for prompt/message counts and model resolution) and
+    // confirm getCurrentBranch is still invoked exactly once, not once per
+    // panel found via panelManager.getPanelsForSession.
+    mockGetPanelsForSession.mockReturnValue([
+      { id: 'panel-1', type: 'claude' },
+      { id: 'panel-2', type: 'claude' },
+      { id: 'panel-3', type: 'claude' },
+    ]);
+    mockGetCurrentBranch.mockReturnValue('feature/multi-panel');
+    const { services } = makeServices({ baseBranch: 'main', worktreePath: WORKTREE });
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, CHANNEL, SESSION_ID)) as {
+      success: boolean;
+      data: { session: { branch: string } };
+    };
+
+    expect(result.success).toBe(true);
+    expect(result.data.session.branch).toBe('feature/multi-panel');
+    expect(mockGetCurrentBranch).toHaveBeenCalledTimes(1);
   });
 });
