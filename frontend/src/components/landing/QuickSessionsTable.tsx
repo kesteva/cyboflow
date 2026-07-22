@@ -24,7 +24,7 @@
  * (a session rested < {@link QUIET_GRACE_MS} ago isn't "quiet" yet).
  *
  * Data + polling come from {@link useQuickSessionsStore}; this component owns the
- * grouping chrome, the board sort, and a shared 1s clock for the "quiet for N"
+ * grouping chrome, the board sort, and a shared 30s clock for the "quiet for N"
  * elapsed labels (one interval for the whole table, not one per row).
  */
 import React from 'react';
@@ -33,7 +33,7 @@ import { useActiveDynamicWorkflows } from '../../stores/dynamicWorkflowStore';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useSessionStore } from '../../stores/sessionStore';
-import { formatElapsed } from '../../utils/homeClassify';
+import { formatElapsedMinutes } from '../../utils/homeClassify';
 import type { QuickSessionRow, QuickSessionState } from '../../../../shared/types/quickSessions';
 
 /** Board sort weight — lower sorts first. Attention descends, running last. */
@@ -118,8 +118,9 @@ const STATE_CHIP: Record<QuickSessionState, { label: string; className: string }
 };
 
 /** Wall-clock refresh cadence for the "quiet for N" labels (shared across rows).
- *  1s so the counter climbs continuously (per-second) rather than in visible jumps. */
-const ELAPSED_TICK_MS = 1000;
+ *  The label is minutes-resolution ({@link formatElapsedMinutes}), so 30s keeps
+ *  it at most half a minute stale without a per-second interval. */
+const ELAPSED_TICK_MS = 30_000;
 
 /** Open a quick session AND mark it viewed, then refresh the board so its row updates promptly. */
 function openQuickSession(row: QuickSessionRow): void {
@@ -144,7 +145,7 @@ function StateChip({ state }: { state: QuickSessionState }): React.JSX.Element {
 }
 
 function QuickSessionRowView({ row, nowMs }: { row: QuickSessionRow; nowMs: number }): React.JSX.Element {
-  const quiet = row.state === 'idle' ? formatElapsed(row.idleSince, nowMs) : null;
+  const quiet = row.state === 'idle' ? formatElapsedMinutes(row.idleSince, nowMs) : null;
   const needsDot = row.state === 'blocked' || (row.state === 'idle' && row.unviewed);
   return (
     <button
@@ -188,11 +189,11 @@ export function QuickSessionsTable(): React.JSX.Element | null {
   // Join the polling feed while mounted (ref-counted in the store).
   React.useEffect(() => useQuickSessionsStore.getState().init(), []);
 
-  // One shared clock for every row's elapsed label. `formatElapsed` renders
-  // seconds for sub-minute durations ("quiet 12s"), so the cadence stays 1s
-  // while visible — it can't be coarsened. Pause the interval while the
-  // document is hidden (backgrounded/minimized window), mirroring the pattern
-  // in useSessionMetrics.ts: stop on hide, restart + immediate catch-up tick
+  // One shared clock for every row's elapsed label. `formatElapsedMinutes`
+  // renders minutes-resolution labels ("quiet 4m"), so a coarse cadence
+  // suffices. Pause the interval while the document is hidden
+  // (backgrounded/minimized window), mirroring the pattern in
+  // useSessionMetrics.ts: stop on hide, restart + immediate catch-up tick
   // on visible so the label isn't stale by however long the tab was hidden.
   const [nowMs, setNowMs] = React.useState<number>(() => Date.now());
   React.useEffect(() => {

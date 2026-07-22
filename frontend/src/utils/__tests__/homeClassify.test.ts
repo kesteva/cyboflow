@@ -5,6 +5,7 @@ import {
   classifyRun,
   deriveHomeState,
   formatElapsed,
+  formatElapsedMinutes,
   derivePhaseFill,
 } from '../homeClassify';
 
@@ -136,6 +137,50 @@ describe('formatElapsed', () => {
     const startedAt = '2024-01-01 00:00:00';
     const nowMs = new Date('2024-01-01T00:06:36.000Z').getTime();
     expect(formatElapsed(startedAt, nowMs)).toBe('6m 36s');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// formatElapsedMinutes — minutes-resolution variant
+// ---------------------------------------------------------------------------
+
+describe('formatElapsedMinutes', () => {
+  it('returns the em-dash placeholder when startedAt is null', () => {
+    expect(formatElapsedMinutes(null, 1_700_000_000_000)).toBe('—');
+  });
+
+  it('returns the placeholder when startedAt is unparseable', () => {
+    expect(formatElapsedMinutes('not-a-date', 1_700_000_000_000)).toBe('—');
+  });
+
+  it('formats a sub-minute delta as <1m (no seconds)', () => {
+    const startedAt = '2024-01-01T00:00:00.000Z';
+    const nowMs = new Date('2024-01-01T00:00:59.000Z').getTime();
+    expect(formatElapsedMinutes(startedAt, nowMs)).toBe('<1m');
+  });
+
+  it('floors a minutes-range delta to whole minutes (dropping seconds)', () => {
+    const startedAt = '2024-01-01T00:00:00.000Z';
+    const nowMs = new Date('2024-01-01T00:06:36.000Z').getTime();
+    expect(formatElapsedMinutes(startedAt, nowMs)).toBe('6m');
+  });
+
+  it('formats an hours+minutes delta', () => {
+    const startedAt = '2024-01-01T00:00:00.000Z';
+    const nowMs = new Date('2024-01-01T01:12:45.000Z').getTime();
+    expect(formatElapsedMinutes(startedAt, nowMs)).toBe('1h 12m');
+  });
+
+  it('clamps a negative delta to <1m', () => {
+    const startedAt = '2024-01-01T00:00:10.000Z';
+    const nowMs = new Date('2024-01-01T00:00:00.000Z').getTime();
+    expect(formatElapsedMinutes(startedAt, nowMs)).toBe('<1m');
+  });
+
+  it('reads a zone-less SQLite stamp as UTC, not the viewer local time', () => {
+    const startedAt = '2024-01-01 00:00:00';
+    const nowMs = new Date('2024-01-01T00:06:36.000Z').getTime();
+    expect(formatElapsedMinutes(startedAt, nowMs)).toBe('6m');
   });
 });
 

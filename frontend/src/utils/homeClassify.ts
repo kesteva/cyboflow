@@ -122,6 +122,30 @@ export function formatElapsed(startedAt: string | null, nowMs: number): string {
 }
 
 /**
+ * Minutes-resolution variant of {@link formatElapsed} for labels that don't
+ * need a live seconds counter (e.g. the quick-sessions board's "quiet Nm").
+ *
+ * Examples: `'<1m'`, `'4m'`, `'1h 12m'`. Same `null`/unparseable → `'—'` and
+ * UTC-normalization semantics as {@link formatElapsed}. Coarser output lets
+ * callers refresh far less often than once per second.
+ */
+export function formatElapsedMinutes(startedAt: string | null, nowMs: number): string {
+  if (startedAt === null) return '—';
+
+  const startMs = parseDbTimestampMs(startedAt);
+  if (Number.isNaN(startMs)) return '—';
+
+  const elapsedMs = Math.max(0, nowMs - startMs);
+  const totalMinutes = Math.floor(elapsedMs / 60_000);
+  const minutes = totalMinutes % 60;
+  const hours = Math.floor(totalMinutes / 60);
+
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (totalMinutes > 0) return `${totalMinutes}m`;
+  return '<1m';
+}
+
+/**
  * One fill segment of the phase stepper — a single phase rendered as a bar.
  *
  * `color` is the LITERAL phase hex from the workflow definition (consumers set
