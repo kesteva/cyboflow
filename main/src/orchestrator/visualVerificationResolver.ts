@@ -33,8 +33,10 @@
 import {
   type VerificationType,
   type VisualBackendId,
+  type VerifyChainEntry,
   type VerificationRequestInput,
   FALLBACK_CHAINS,
+  VERIFY_AGENT_CHAIN,
   isVerificationType,
 } from '../../../shared/types/visualVerification';
 
@@ -122,8 +124,22 @@ export interface VisualVerificationResolverInputs {
    * The backends whose host-deps are available on this host. The resolved chain
    * is intersected with this set. Defaults to MVP_AVAILABLE_BACKENDS (only
    * 'capturePage') so the standalone resolver never assumes a richer host.
+   *
+   * Consulted ONLY in the legacy engine (`legacyEngine: true`) — the default
+   * verification-AGENT engine stamps `['agent']` and never walks a
+   * host-capability chain, so `availableBackends` is inert there.
    */
   availableBackends?: readonly VisualBackendId[];
+
+  /**
+   * Route this run to the LEGACY capture-backend + VLM-judge engine (the kill
+   * switch, redesign §5.8). Wired from `CYBOFLOW_VERIFY_LEGACY=1` at the
+   * createRun stamp site. Absent/false (the production default) stamps the
+   * verification-AGENT chain `['agent']`; `true` keeps stamping the legacy
+   * host-capability chain exactly as before this redesign. Immutable per run
+   * either way (stamps never change mid-flight).
+   */
+  legacyEngine?: boolean;
 }
 
 /**
@@ -134,7 +150,13 @@ export interface VisualVerificationResolverInputs {
 export interface ResolvedVisualVerification {
   enabled: boolean;
   type: VerificationType | null;
-  chain: VisualBackendId[];
+  /**
+   * The stamped chain (redesign §5.8). In the default AGENT engine this is the
+   * single-member `['agent']` selector; in the legacy engine it is the
+   * host-capability `VisualBackendId[]` intersection. `VerifyChainEntry` is the
+   * union of both so the one field carries either stamp.
+   */
+  chain: VerifyChainEntry[];
 }
 
 /**
@@ -249,6 +271,18 @@ export function resolveVisualVerification(
   }
 
   const type = resolveType(inputs);
+
+  // Default engine (redesign §5.8): the verification AGENT. Stamp the single-member
+  // `['agent']` selector — the scheduler dispatches a run whose stamp equals it to
+  // the VerificationAgentRunner (which builds/serves/drives/judges the composed
+  // VerificationTaskV1 itself), so no host-capability chain is walked. The TYPE is
+  // still resolved (it rides the request + drives the agent's viewport handling).
+  if (!inputs.legacyEngine) {
+    return { enabled: true, type, chain: [...VERIFY_AGENT_CHAIN] };
+  }
+
+  // Legacy engine (CYBOFLOW_VERIFY_LEGACY=1): the capture-backend + VLM-judge
+  // waterfall. Stamp the host-capability chain exactly as before this redesign.
   const available = inputs.availableBackends ?? MVP_AVAILABLE_BACKENDS;
   // Preserve the easy→hard FALLBACK_CHAINS order through the intersection.
   const chain = FALLBACK_CHAINS[type].filter((backend) => available.includes(backend));

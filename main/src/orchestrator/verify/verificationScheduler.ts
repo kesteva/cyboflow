@@ -40,6 +40,7 @@ import type {
   RequestStatus,
   ResolvedVisualVerifyConfig,
   VerificationBackendRegistry,
+  VerificationReportV1,
   VerificationRequestInput,
   VerificationTaskV1,
   VerificationType,
@@ -48,7 +49,12 @@ import type {
   VisualBackendId,
   VlmJudge,
 } from '../../../../shared/types/visualVerification';
-import { VERIFY_PORT_ANY, VISUAL_VERIFY_DEFAULTS } from '../../../../shared/types/visualVerification';
+import {
+  VERIFY_PORT_ANY,
+  VISUAL_VERIFY_DEFAULTS,
+  parseVerificationTaskV1,
+} from '../../../../shared/types/visualVerification';
+import type { VerificationAgentRunnerLike, VerificationAgentRequest } from './verificationAgentRunner';
 
 // Re-exported for existing consumers — the type moved to shared so the
 // screenshots-artifact payload (shared/types/artifacts.ts) can carry it without a
@@ -100,6 +106,15 @@ export interface VerificationTerminalEvent {
 
 /** The single-display capture lease (Peekaboo / native-desktop). Count-1. */
 export const VERIFY_SCREEN_LEASE = 'verify:screen';
+
+/**
+ * The verification-AGENT deployment lease (redesign §5.4). Count-1: only ONE agent
+ * verification is deployed at a time app-wide — an agent deployment is far heavier
+ * than a single capture (it builds, serves, and drives a UI), so it is serialized
+ * exactly like the single-display screen lease. Composed over the SAME shared mutex
+ * as the port/screen leases, so it interlocks app-wide.
+ */
+export const VERIFY_AGENT_LEASE = 'verify:agent';
 
 /** Build the per-port lease name for one dev-server port. */
 export function verifyPortLease(port: number): string {
@@ -162,6 +177,36 @@ export class ResourceLeasePool {
   constructor(private readonly mutex: Mutex = globalMutex) {}
 
   /**
+   * QUARANTINED lease names (redesign §5.4 step 6): a lease whose underlying
+   * resource (a leaked verification port) would NOT free at teardown. The mutex
+   * slot is kept HELD (the retained `release` is stored, never called at
+   * quarantine time) so the next acquisition can never hand out a still-dirty
+   * port; each entry carries a `probeFree` re-check that `tryAcquireOneOf` runs
+   * before considering the slot, freeing it once the resource is genuinely free.
+   */
+  private readonly quarantined = new Map<
+    string,
+    { probeFree: () => Promise<boolean>; reason: string; release: () => void }
+  >();
+
+  /**
+   * Quarantine a held lease instead of releasing it (§5.4 step 6). The mutex slot
+   * stays HELD — `handle.release()` is retained, not called — so a leaked port can
+   * never collide with the next verification. `probeFree` is re-run on a later
+   * acquisition attempt for this exact name; when it reports the resource free the
+   * slot is released and re-enters normal rotation. A no-lease handle is a no-op.
+   */
+  quarantine(handle: LeaseHandle, probeFree: () => Promise<boolean>, reason: string): void {
+    if (handle.name === null) return;
+    this.quarantined.set(handle.name, { probeFree, reason, release: handle.release });
+  }
+
+  /** True when `name` is currently held in quarantine (test/observability helper). */
+  isQuarantined(name: string): boolean {
+    return this.quarantined.has(name);
+  }
+
+  /**
    * The underlying count-1 mutex this pool composes over. Exposed so the
    * scheduler can take a BLOCKING count-1 lock (the batch worktree-sync mutex,
    * `sprint-verify-<batchId>`) on the SAME mutex instance the port/screen leases
@@ -187,6 +232,18 @@ export class ResourceLeasePool {
    */
   async tryAcquireOneOf(candidates: readonly string[]): Promise<LeaseHandle | null> {
     for (const name of candidates) {
+      // A quarantined slot (§5.4 step 6) is re-probed before it can be handed out:
+      // if its resource freed, release the held quarantine (which frees the mutex
+      // slot) and fall through to the normal acquire; otherwise skip this candidate.
+      const q = this.quarantined.get(name);
+      if (q) {
+        if (await q.probeFree()) {
+          this.quarantined.delete(name);
+          q.release();
+        } else {
+          continue;
+        }
+      }
       if (!this.mutex.isLocked(name)) {
         const release = await this.mutex.acquire(name);
         let released = false;
@@ -446,6 +503,15 @@ export interface TerminalExtra {
   error?: string;
   captureOrigin?: CaptureOrigin;
   diagnostics?: string[];
+  /**
+   * The verification AGENT's normalized report (redesign §5.4/§5.6). Persisted to
+   * `verification_requests.report_json` in the SAME status-guarded terminal write as
+   * the status + verdict (markTerminal), so the report commits atomically with the
+   * terminal transition. Absent on the legacy capture/judge path (report_json stays
+   * NULL there). The delivery-outbox `delivery_state` marker is a later slice — not
+   * written here.
+   */
+  report?: VerificationReportV1;
 }
 
 // ---------------------------------------------------------------------------
@@ -548,6 +614,18 @@ export type OnVerdict = (args: {
  * row 'timeout' (releasing the lease). Tunable via VerificationSchedulerDeps.
  */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Default per-request deadline for an AGENT-engine row (redesign §5.4 step 6): 10
+ * minutes — an agent deployment builds, serves, drives, and judges, so it needs far
+ * longer than a single capture. `task.timeoutMs` may lower it; the ceiling below
+ * caps any value. Applied through the SAME per-request abort/raceWithAbort machinery
+ * as the legacy deadline.
+ */
+export const DEFAULT_AGENT_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
+
+/** Hard ceiling on an agent row's deadline — a task-supplied `timeoutMs` can never exceed this. */
+export const AGENT_REQUEST_TIMEOUT_CEILING_MS = 20 * 60 * 1000;
 
 /**
  * How long a backend's `healthCheck()` result is memoized (R2 #2). The health probe
@@ -664,6 +742,32 @@ export interface VerificationSchedulerDeps {
    * without a real 60s wait.
    */
   now?: () => number;
+  /**
+   * The verification-AGENT engine (redesign §5.4). When a run's stamped
+   * `verify_chain` is `['agent']`, the scheduler routes its requests to THIS runner
+   * (snapshot build → deploy the workflow-defined agent → validate → mutation-check
+   * → teardown) instead of the capture-backend + VLM waterfall. Absent ⇒ an
+   * agent-stamped row resolves 'skipped' (fail-open) — an old binary / a deployment
+   * wired without the runner never wedges. Injected at index.ts; the scheduler
+   * imports only the TYPE (standalone-typecheck invariant).
+   */
+  agentRunner?: VerificationAgentRunnerLike;
+  /**
+   * Per-request deadline for an agent row (default {@link DEFAULT_AGENT_REQUEST_TIMEOUT_MS},
+   * capped by {@link AGENT_REQUEST_TIMEOUT_CEILING_MS}). Tests pass a small value.
+   */
+  agentRequestTimeoutMs?: number;
+  /** Ceiling on an agent row's deadline (default {@link AGENT_REQUEST_TIMEOUT_CEILING_MS}). */
+  agentRequestCeilingMs?: number;
+  /**
+   * Probe whether a leased verification PORT is genuinely free (§5.4 step 6). Used
+   * at agent teardown to decide release-vs-quarantine, and re-run by the pool before
+   * a later acquisition of a quarantined slot. Returns true when the port is free.
+   * Default: always-free (so a deployment without a real net probe releases normally
+   * and never quarantines — safe in tests). The real net-connect probe is wired at
+   * index.ts. Injected as a plain function so the scheduler stays net/service-free.
+   */
+  portFreeProbe?: (port: number) => Promise<boolean>;
 }
 
 // ---------------------------------------------------------------------------
@@ -706,6 +810,10 @@ export class VerificationScheduler {
   private readonly baselinePreDiff?: BaselinePreDiffResolver;
   private readonly baselineMatchThreshold: number;
   private readonly now: () => number;
+  private readonly agentRunner?: VerificationAgentRunnerLike;
+  private readonly agentRequestTimeoutMs: number;
+  private readonly agentRequestCeilingMs: number;
+  private readonly portFreeProbe: (port: number) => Promise<boolean>;
 
   /**
    * Per-backend healthCheck memo (R2 #2): backend id → { ok, at } where `at` is the
@@ -746,6 +854,10 @@ export class VerificationScheduler {
     this.baselinePreDiff = deps.baselinePreDiff;
     this.baselineMatchThreshold = deps.baselineMatchThreshold ?? DEFAULT_SSIM_MATCH_THRESHOLD;
     this.now = deps.now ?? (() => Date.now());
+    this.agentRunner = deps.agentRunner;
+    this.agentRequestTimeoutMs = deps.agentRequestTimeoutMs ?? DEFAULT_AGENT_REQUEST_TIMEOUT_MS;
+    this.agentRequestCeilingMs = deps.agentRequestCeilingMs ?? AGENT_REQUEST_TIMEOUT_CEILING_MS;
+    this.portFreeProbe = deps.portFreeProbe ?? (async () => true);
   }
 
   // --------------------------------------------------------------------------
@@ -1081,6 +1193,16 @@ export class VerificationScheduler {
       return { work: null };
     }
 
+    // DISPATCH ON THE RUN STAMP (redesign §5.8): a run stamped `verify_chain:
+    // ['agent']` routes to the VerificationAgentRunner instead of the capture-
+    // backend + VLM waterfall below. Keying on the RUN stamp (not the request's
+    // chain_json — which the MCP handler leaves empty for an 'agent' stamp, §5.2)
+    // is what makes dispatch immune to which column happens to be populated. A
+    // legacy stamp (or an unreadable one — fail-soft) falls through byte-identically.
+    if (this.isAgentStampedRun(row.run_id)) {
+      return this.processAgentRow(row, parsed);
+    }
+
     // ROOT-CAUSE FIX (S8): hydrate the request input from the run's verify.json
     // deliverable recipe BEFORE lease selection, so a startable deliverable's
     // `start` is on `input` by the time the Rung-1 Playwright backend's
@@ -1161,6 +1283,391 @@ export class VerificationScheduler {
     }
     this.markRunning(row.id, chosen.id);
     return { work: this.runChosen(row, type, input, chosen, lease, resolved) };
+  }
+
+  // --------------------------------------------------------------------------
+  // Verification-AGENT engine (redesign §5.4/§5.7)
+  // --------------------------------------------------------------------------
+
+  /**
+   * True when the row's RUN is stamped `verify_chain: ['agent']` (the agent
+   * engine, §5.8). Parsed defensively — accepting the 'agent' member the legacy
+   * VisualBackendId parse would drop — and fail-soft to false (legacy path) when
+   * workflow_runs / the column is unavailable (a minimal test DB with only
+   * verification_requests) or the JSON is malformed. Read fresh per row from the
+   * injected db; the stamp is immutable per run, so there is no staleness concern.
+   */
+  private isAgentStampedRun(runId: string): boolean {
+    try {
+      const row = this.db
+        .prepare('SELECT verify_chain FROM workflow_runs WHERE id = ?')
+        .get(runId) as { verify_chain: string | null } | undefined;
+      const raw = row?.verify_chain;
+      if (typeof raw !== 'string') return false;
+      const parsed: unknown = JSON.parse(raw);
+      return Array.isArray(parsed) && parsed.length === 1 && parsed[0] === 'agent';
+    } catch {
+      return false;
+    }
+  }
+
+  /** Read `workflow_runs.worktree_path` for a run (the snapshot source / fallback cwd); null when unavailable. */
+  private worktreePathForRun(runId: string): string | null {
+    try {
+      const row = this.db
+        .prepare('SELECT worktree_path FROM workflow_runs WHERE id = ?')
+        .get(runId) as { worktree_path: string | null } | undefined;
+      const p = row?.worktree_path;
+      return typeof p === 'string' && p.trim().length > 0 ? p : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Read the request's `task_json` / `snapshot_sha` (migration 078); fail-soft to nulls. */
+  private agentColumnsForRow(id: string): { taskJson: string | null; snapshotSha: string | null } {
+    try {
+      const row = this.db
+        .prepare('SELECT task_json, snapshot_sha FROM verification_requests WHERE id = ?')
+        .get(id) as { task_json: string | null; snapshot_sha: string | null } | undefined;
+      return { taskJson: row?.task_json ?? null, snapshotSha: row?.snapshot_sha ?? null };
+    } catch {
+      return { taskJson: null, snapshotSha: null };
+    }
+  }
+
+  /**
+   * The composed task the agent runs: the persisted `task_json` when present + valid
+   * (dual-format contract §5.2), else a DEGENERATE task synthesized from the legacy
+   * input (a bare-intent request) — `summary = intent`, no build/behaviors, `target`
+   * carried from any url/htmlPath. This is why an 'agent'-stamped run enqueued the
+   * old way (intent only) still deploys the agent rather than erroring.
+   */
+  private taskForAgentRow(id: string, input: VerificationRequestInput): VerificationTaskV1 {
+    const { taskJson } = this.agentColumnsForRow(id);
+    if (taskJson) {
+      try {
+        const parsed = parseVerificationTaskV1(JSON.parse(taskJson));
+        if (parsed.ok) return parsed.task;
+        this.logger?.debug('[VerificationScheduler] task_json failed validation; using degenerate task', {
+          requestId: id,
+          error: parsed.error,
+        });
+      } catch (err) {
+        this.logger?.debug('[VerificationScheduler] task_json parse threw; using degenerate task', {
+          requestId: id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    const target: { url?: string; htmlPath?: string } = {};
+    if (typeof input.url === 'string' && input.url.trim().length > 0) target.url = input.url;
+    if (typeof input.htmlPath === 'string' && input.htmlPath.trim().length > 0) target.htmlPath = input.htmlPath;
+    return {
+      version: 1,
+      summary: input.intent,
+      behaviors: [],
+      ...(input.taskRef ? { taskRef: input.taskRef } : {}),
+      ...(Object.keys(target).length > 0 ? { target } : {}),
+      ...(input.viewports ? { viewports: input.viewports } : {}),
+    };
+  }
+
+  /**
+   * True when the task implies the agent must BIND a dev/preview server on the leased
+   * port (VERIFY_PORT rides only then). A `serve.cmd` means the agent stands one up;
+   * a localhost `target.url` names an already-running server it points at (no bind).
+   */
+  private taskImpliesServer(task: VerificationTaskV1): boolean {
+    if (task.serve && typeof task.serve.cmd === 'string' && task.serve.cmd.trim().length > 0) {
+      return true;
+    }
+    const url = task.target?.url;
+    return typeof url === 'string' && /^https?:\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0)([:/]|$)/i.test(url.trim());
+  }
+
+  /**
+   * Agent-engine sibling of processRow (§5.4). Acquires the count-1 `verify:agent`
+   * deployment lease + one pooled port (always — the bundled driver needs a CDP
+   * port even for a non-serving task; VERIFY_PORT is exported only when the task
+   * implies a server), transitions the row leased→running, and detaches the
+   * deployment work. Leaves the row 'queued' (LANE never blocks) when a lease is
+   * held, and resolves 'skipped' (fail-open) when the runner is not configured.
+   */
+  private async processAgentRow(
+    row: VerificationRequestRow,
+    input: VerificationRequestInput,
+  ): Promise<{ work: Promise<void> | null }> {
+    if (!this.agentRunner) {
+      await this.markTerminalAndDeliver(
+        row,
+        'skipped',
+        { error: 'verification agent engine not configured', captureOrigin: 'agent' },
+        undefined,
+        [],
+        input,
+      );
+      return { work: null };
+    }
+
+    const task = this.taskForAgentRow(row.id, input);
+    const servesPort = this.taskImpliesServer(task);
+
+    // (1) The count-1 agent-deployment lease. Held ⇒ leave 'queued' (retry next drain).
+    const agentLease = await this.leasePool.tryAcquire(VERIFY_AGENT_LEASE);
+    if (!agentLease) {
+      this.logger?.debug('[VerificationScheduler] no free agent slot; leaving queued', { requestId: row.id });
+      return { work: null };
+    }
+    // (2) One pooled port (VERIFY_PORT for a serve, and its +1 for the driver CDP).
+    const portLease = await this.leasePool.tryAcquireOneOf(
+      this.config.devServerPorts.map(verifyPortLease),
+    );
+    if (!portLease) {
+      agentLease.release();
+      this.logger?.debug('[VerificationScheduler] no free verify port; leaving queued', { requestId: row.id });
+      return { work: null };
+    }
+    const leasedPort = this.portFromLease(portLease.name);
+    if (leasedPort === null) {
+      portLease.release();
+      agentLease.release();
+      await this.markTerminalAndDeliver(
+        row,
+        'skipped',
+        { error: 'could not resolve leased verify port', captureOrigin: 'agent' },
+        undefined,
+        [],
+        input,
+      );
+      return { work: null };
+    }
+
+    // Cancel-safe transition (mirrors processRow's markLeased guard): a cancel sweep
+    // during the lease awaits above makes this a 0-change no-op → release + skip.
+    const leasedChanges = this.markAgentLeased(row.id);
+    if (leasedChanges === 0) {
+      portLease.release();
+      agentLease.release();
+      this.logger?.debug('[VerificationScheduler] agent row no longer queued at lease time; releasing', {
+        requestId: row.id,
+      });
+      return { work: null };
+    }
+    this.markAgentRunning(row.id);
+
+    const { snapshotSha } = this.agentColumnsForRow(row.id);
+    return {
+      work: this.runAgentChosen(row, input, task, agentLease, portLease, leasedPort, servesPort, snapshotSha),
+    };
+  }
+
+  /** queued → leased for an agent row (no VisualBackendId; current_backend left untouched). */
+  private markAgentLeased(id: string): number {
+    return this.db
+      .prepare(
+        `UPDATE verification_requests SET status = 'leased', leased_at = ? WHERE id = ? AND status = 'queued'`,
+      )
+      .run(new Date().toISOString(), id).changes;
+  }
+
+  /** leased → running for an agent row. */
+  private markAgentRunning(id: string): number {
+    return this.db
+      .prepare(`UPDATE verification_requests SET status = 'running' WHERE id = ? AND status = 'leased'`)
+      .run(id).changes;
+  }
+
+  /** The agent row's effective deadline: `task.timeoutMs` (when positive) capped by the ceiling, else the default. */
+  private agentDeadlineMs(task: VerificationTaskV1): number {
+    const requested =
+      typeof task.timeoutMs === 'number' && task.timeoutMs > 0 ? task.timeoutMs : this.agentRequestTimeoutMs;
+    return Math.min(requested, this.agentRequestCeilingMs);
+  }
+
+  /**
+   * The DETACHED agent-deployment work for a row already leased + 'running'. Acquires
+   * the same batch worktree-sync mutex the legacy path uses, enforces the per-run
+   * agent-deployment budget (reusing the judge-call counter), deploys the runner
+   * under the per-request deadline via the EXISTING raceWithAbort machinery, and
+   * persists the mapped verdict + `report_json` in one terminal write. Releases the
+   * agent + batch leases in finally, and RELEASES-OR-QUARANTINES the port lease based
+   * on a teardown port probe (§5.4 step 6). Outcome→status is the runner's (§5.7);
+   * an abort/deadline is a 'timeout', an unexpected throw a fail-open 'skipped'.
+   */
+  private async runAgentChosen(
+    row: VerificationRequestRow,
+    input: VerificationRequestInput,
+    task: VerificationTaskV1,
+    agentLease: LeaseHandle,
+    portLease: LeaseHandle,
+    leasedPort: number,
+    servesPort: boolean,
+    snapshotSha: string | null,
+  ): Promise<void> {
+    const controller = new AbortController();
+    this.inFlight.set(row.id, controller);
+
+    let timedOut = false;
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      this.logger?.warn('[VerificationScheduler] agent request timed out — aborting', {
+        requestId: row.id,
+        timeoutMs: this.agentDeadlineMs(task),
+      });
+      controller.abort();
+    }, this.agentDeadlineMs(task));
+    if (typeof deadline === 'object' && deadline !== null && 'unref' in deadline) {
+      (deadline as { unref: () => void }).unref();
+    }
+
+    let batchLease: LeaseHandle | null = null;
+    try {
+      // Per-run agent-deployment budget (reuses the judge-call counter, §5.8). An
+      // exhausted budget is a fail-open 'skipped' with NO deployment (never a FAIL).
+      if (this.isProjectBudgetExhausted(row.project_id)) {
+        await this.markTerminalAndDeliver(
+          row,
+          'skipped',
+          { error: 'per-project visual-verify budget exhausted', captureOrigin: 'agent' },
+          undefined,
+          [],
+          input,
+        );
+        return;
+      }
+
+      // The batch worktree-sync mutex (blocking) — serialize per batch exactly as the
+      // legacy path. Released in the SAME finally as the other leases.
+      batchLease = await this.acquireBatchMutex(row.run_id);
+      if (controller.signal.aborted) {
+        await this.markTerminalAndDeliver(
+          row,
+          'timeout',
+          { error: timedOut ? 'request timed out' : 'aborted', captureOrigin: 'agent' },
+          undefined,
+          [],
+          input,
+        );
+        return;
+      }
+
+      const worktreePath = this.worktreePathForRun(row.run_id);
+      if (!worktreePath) {
+        await this.markTerminalAndDeliver(
+          row,
+          'skipped',
+          { error: 'run worktree path unavailable', captureOrigin: 'agent' },
+          undefined,
+          [],
+          input,
+        );
+        return;
+      }
+
+      // Count this deployment against the budget BEFORE deploying (mirrors the VLM
+      // path's pre-call increment).
+      this.incrementJudgeCallsUsed(row.id);
+
+      const req: VerificationAgentRequest = {
+        runId: row.run_id,
+        requestId: row.id,
+        projectId: row.project_id,
+        task,
+        runWorktreePath: worktreePath,
+        snapshotSha,
+        artifactsDir: this.artifactsDirResolver(row.run_id),
+        verifyPort: servesPort ? leasedPort : null,
+        verifyDriverPort: leasedPort + 1,
+        signal: controller.signal,
+      };
+
+      // ABORT-BOUNDED (R1 #1a): a runner that never settles can no more hang the
+      // drain than a hung capture — race it against the deadline/cancel signal.
+      const result = await raceWithAbort(
+        this.agentRunner!.run(req),
+        controller.signal,
+        'agent',
+        this.logger,
+      );
+      if (controller.signal.aborted) {
+        await this.markTerminalAndDeliver(
+          row,
+          'timeout',
+          { error: timedOut ? 'request timed out' : 'aborted', captureOrigin: 'agent' },
+          undefined,
+          result.fileNames,
+          input,
+        );
+        return;
+      }
+
+      await this.markTerminalAndDeliver(
+        row,
+        result.status,
+        {
+          captureOrigin: 'agent',
+          ...(result.verdict ? { verdict: result.verdict } : {}),
+          ...(result.report ? { report: result.report } : {}),
+          ...(result.errorMessage ? { error: result.errorMessage } : {}),
+        },
+        result.verdict,
+        result.fileNames,
+        input,
+      );
+    } catch (err) {
+      const aborted = controller.signal.aborted;
+      controller.abort();
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger?.error('[VerificationScheduler] agent deployment error', {
+        requestId: row.id,
+        aborted,
+        error: message,
+      });
+      await this.markTerminalAndDeliver(
+        row,
+        aborted ? 'timeout' : 'skipped',
+        { error: aborted ? (timedOut ? 'request timed out' : 'aborted') : message, captureOrigin: 'agent' },
+        undefined,
+        [],
+        input,
+      );
+    } finally {
+      clearTimeout(deadline);
+      this.inFlight.delete(row.id);
+      if (batchLease) {
+        batchLease.release();
+      }
+      await this.releaseOrQuarantinePort(portLease, leasedPort);
+      agentLease.release();
+    }
+  }
+
+  /**
+   * Release the agent's port lease, OR quarantine it when the leased port or its
+   * driver CDP sidecar (leasedPort+1) will not free (a leaked dev server / browser,
+   * §5.4 step 6). Quarantining HOLDS the lease with a re-probe so a leaked port can
+   * never collide with the next deployment. With the default always-free probe (no
+   * real net probe injected) this always releases — safe in tests.
+   */
+  private async releaseOrQuarantinePort(portLease: LeaseHandle, leasedPort: number): Promise<void> {
+    const probeBothFree = async (): Promise<boolean> =>
+      (await this.portFreeProbe(leasedPort)) && (await this.portFreeProbe(leasedPort + 1));
+    let free: boolean;
+    try {
+      free = await probeBothFree();
+    } catch {
+      free = true; // a probe failure must never wedge teardown — release rather than leak the slot forever.
+    }
+    if (free) {
+      portLease.release();
+      return;
+    }
+    this.logger?.warn('[VerificationScheduler] verify port did not free after agent teardown; quarantining', {
+      leasedPort,
+      lease: portLease.name,
+    });
+    this.leasePool.quarantine(portLease, probeBothFree, `agent left port ${leasedPort} bound`);
   }
 
   /**
@@ -2336,6 +2843,7 @@ export class VerificationScheduler {
             SET status = ?,
                 current_backend = COALESCE(?, current_backend),
                 verdict_json = ?,
+                report_json = COALESCE(?, report_json),
                 error_message = ?,
                 attempt = attempt + 1,
                 ended_at = ?
@@ -2345,6 +2853,10 @@ export class VerificationScheduler {
         status,
         extra.backend ?? null,
         extra.verdict ? JSON.stringify(extra.verdict) : null,
+        // report_json (redesign §5.6): committed atomically with the terminal
+        // status. COALESCE(NULL, report_json) leaves the legacy path's report_json
+        // untouched (always NULL there); an agent row writes its normalized report.
+        extra.report ? JSON.stringify(extra.report) : null,
         extra.error ?? null,
         new Date().toISOString(),
         id,

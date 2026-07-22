@@ -58,6 +58,27 @@ export const VERIFICATION_TYPES: readonly VerificationType[] = [
 export type VisualBackendId = 'capturePage' | 'playwright' | 'peekaboo' | 'maestro';
 
 /**
+ * The verification-AGENT engine's stamp member (redesign §5.8). A run stamped
+ * `verify_chain: ['agent']` routes every request to the VerificationAgentRunner
+ * instead of the capture-backend waterfall — the agent builds/serves/drives/judges
+ * a `VerificationTaskV1` itself. `'agent'` is deliberately NOT a `VisualBackendId`
+ * (it is not a capture rung and never appears in `BACKEND_CAPABILITIES` /
+ * `FALLBACK_CHAINS`): it is a distinct engine selector that only ever occupies the
+ * STAMPED chain. The stamped-chain type therefore widens the backend-id union with
+ * this one member; the MCP handler's `parseStampedChain` drops unknown-to-it
+ * entries, so an `'agent'` stamp yields an empty per-request `chain_json` — harmless
+ * because dispatch keys on the RUN stamp, never on `chain_json`.
+ */
+export type VerifyChainEntry = VisualBackendId | 'agent';
+
+/**
+ * The single-member agent-engine stamp (`['agent']`). `resolveVisualVerification`
+ * stamps this for every NEW verify-enabled run (unless `CYBOFLOW_VERIFY_LEGACY=1`),
+ * and the scheduler dispatches a run whose stamp equals it to the agent runner.
+ */
+export const VERIFY_AGENT_CHAIN: readonly ['agent'] = ['agent'] as const;
+
+/**
  * Which VerificationType each backend can satisfy (the design-doc waterfall
  * table). This is the compile-time capability gap encoder: capturePage is
  * already absent from the interactive-web chain because it cannot click. The

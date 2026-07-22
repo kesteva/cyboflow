@@ -262,12 +262,52 @@ describe('resolveVisualVerification — type-ladder rung C (infer-from-deliverab
   });
 });
 
-describe('resolveVisualVerification — chain intersection with host-available backends', () => {
+describe('resolveVisualVerification — default AGENT engine stamp (redesign §5.8)', () => {
+  it("stamps the single-member ['agent'] chain for an enabled run by default", () => {
+    // The production default: no legacyEngine flag => the verification-AGENT engine.
+    // The chain is the engine selector, NOT a host-capability intersection —
+    // availableBackends is inert here.
+    const r = resolveVisualVerification({
+      globalDefaultEnabled: true,
+      globalDefaultType: 'static-render-snapshot',
+      availableBackends: ['capturePage', 'playwright', 'peekaboo'],
+    });
+    expect(r.enabled).toBe(true);
+    expect(r.type).toBe('static-render-snapshot');
+    expect(r.chain).toEqual(['agent']);
+  });
+
+  it("stamps ['agent'] regardless of type (interactive/native/mobile never collapse to [])", () => {
+    // In the legacy engine an interactive/native type could intersect to an empty
+    // chain; the agent engine builds/serves/drives itself, so the stamp is always
+    // ['agent'] and the type still rides along.
+    for (const type of [
+      'interactive-web-behavior',
+      'native-desktop',
+      'responsive-multi-viewport',
+    ] as const) {
+      const r = resolveVisualVerification({ globalDefaultEnabled: true, globalDefaultType: type });
+      expect(r.chain).toEqual(['agent']);
+      expect(r.type).toBe(type);
+    }
+  });
+
+  it('a disabled run stamps no chain even under the agent engine', () => {
+    expect(resolveVisualVerification({ globalDefaultEnabled: false })).toEqual({
+      enabled: false,
+      type: null,
+      chain: [],
+    });
+  });
+});
+
+describe('resolveVisualVerification — legacy chain intersection (CYBOFLOW_VERIFY_LEGACY)', () => {
   it("defaults to MVP availability (only 'capturePage') and collapses a render chain to it", () => {
     expect(MVP_AVAILABLE_BACKENDS).toEqual(['capturePage']);
     const r = resolveVisualVerification({
       globalDefaultEnabled: true,
       globalDefaultType: 'static-render-snapshot',
+      legacyEngine: true,
     });
     expect(r.chain).toEqual(['capturePage']);
   });
@@ -278,6 +318,7 @@ describe('resolveVisualVerification — chain intersection with host-available b
     const r = resolveVisualVerification({
       globalDefaultEnabled: true,
       globalDefaultType: 'interactive-web-behavior',
+      legacyEngine: true,
     });
     expect(r.enabled).toBe(true);
     expect(r.type).toBe('interactive-web-behavior');
@@ -288,6 +329,7 @@ describe('resolveVisualVerification — chain intersection with host-available b
     const r = resolveVisualVerification({
       globalDefaultEnabled: true,
       globalDefaultType: 'native-desktop',
+      legacyEngine: true,
     });
     expect(r.chain).toEqual([]);
   });
@@ -297,6 +339,7 @@ describe('resolveVisualVerification — chain intersection with host-available b
       globalDefaultEnabled: true,
       globalDefaultType: 'static-render-snapshot',
       availableBackends: ['peekaboo', 'capturePage', 'playwright'], // deliberately out of order
+      legacyEngine: true,
     });
     // Order must follow FALLBACK_CHAINS, NOT the availableBackends input order.
     expect(r.chain).toEqual(FALLBACK_CHAINS['static-render-snapshot']);
@@ -308,6 +351,7 @@ describe('resolveVisualVerification — chain intersection with host-available b
       globalDefaultEnabled: true,
       globalDefaultType: 'static-render-snapshot',
       availableBackends: ['capturePage', 'peekaboo'], // playwright absent
+      legacyEngine: true,
     });
     expect(r.chain).toEqual(['capturePage', 'peekaboo']);
   });

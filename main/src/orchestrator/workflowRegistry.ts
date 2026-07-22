@@ -1278,6 +1278,11 @@ export class WorkflowRegistry {
       globalDefaultType: visualVerifyConfig?.defaultType ?? null,
       deliverable: opts?.verifyDeliverable ?? null,
       availableBackends: SHIPPED_VERIFY_BACKENDS,
+      // Engine selector (redesign §5.8): the verification-AGENT engine is the
+      // default; `CYBOFLOW_VERIFY_LEGACY=1` opts a NEW run back onto the legacy
+      // capture/judge chain. Read once here at the (immutable) stamp — a pre-existing
+      // run keeps whatever chain it was stamped with.
+      legacyEngine: process.env.CYBOFLOW_VERIFY_LEGACY === '1',
     });
     const verifyEnabled = verify.enabled ? 1 : 0;
     const verifyType = verify.type;
