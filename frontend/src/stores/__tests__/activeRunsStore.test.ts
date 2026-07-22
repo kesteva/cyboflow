@@ -336,6 +336,16 @@ describe('activeRunsStore.refresh — byte-identical-refetch dedup', () => {
     expect(useActiveRunsStore.getState().runsByProject[1]).not.toBe(firstRows);
   });
 
+  it('(e) refresh() queries workflows.list with includeArchived: true so a running-but-archived flow stays resolvable', async () => {
+    mockRunsListQuery = vi.fn().mockResolvedValue([makeFullRun({})]);
+    mockWorkflowsListQuery = vi.fn().mockResolvedValue(activeWorkflows);
+
+    const { useActiveRunsStore } = await loadActiveRunsStore();
+    await useActiveRunsStore.getState().refresh(1);
+
+    expect(mockWorkflowsListQuery).toHaveBeenCalledWith({ projectId: 1, includeArchived: true });
+  });
+
   it('(c) a status change produces a new reference', async () => {
     mockRunsListQuery = vi.fn().mockResolvedValue([makeFullRun({ status: 'running' })]);
     mockWorkflowsListQuery = vi.fn().mockResolvedValue(activeWorkflows);
