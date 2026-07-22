@@ -19,7 +19,7 @@ import { useArtifactData, type ArtifactData } from '../../../hooks/useArtifactDa
 import { useArtifactImages, type UseArtifactImages } from '../../../hooks/useArtifactImages';
 import { useArtifactHtml, type UseArtifactHtml } from '../../../hooks/useArtifactHtml';
 import { useFeedback, type UseFeedbackResult } from '../../../hooks/useFeedback';
-import type { Artifact, ArtifactType } from '../../../../../shared/types/artifacts';
+import type { Artifact, ArtifactType, TaskVerificationReportEntry } from '../../../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../../../shared/types/tasks';
 import type { ReviewItem } from '../../../../../shared/types/reviews';
 import type { Question } from '../../../../../shared/types/questions';
@@ -73,7 +73,6 @@ vi.mock('../../MarkdownPreview', () => ({
 }));
 
 const commitMutate = vi.fn().mockResolvedValue({ artifactId: 'art-1' });
-const acceptBaselineMutate = vi.fn().mockResolvedValue({ baselineKey: 'IDEA-018' });
 const reviewItemsResolveMutate = vi.fn().mockResolvedValue({ reviewItemId: 'rvw_gate', resumed: true });
 // approve-plan (decomposed-stories live variant) answers the run's live
 // AskUserQuestion via questions.answer.
@@ -86,7 +85,6 @@ vi.mock('../../../trpc/client', () => ({
     cyboflow: {
       artifacts: {
         commit: { mutate: (...args: unknown[]) => commitMutate(...args) },
-        acceptAsBaseline: { mutate: (...args: unknown[]) => acceptBaselineMutate(...args) },
       },
       reviewItems: {
         resolve: { mutate: (...args: unknown[]) => reviewItemsResolveMutate(...args) },
@@ -199,6 +197,9 @@ describe('ArtifactTabRenderer', () => {
     mockImages.mockReset();
     mockHtml.mockReset();
     mockFeedback.mockReset();
+    // jsdom does not implement scrollIntoView; the behaviors-tested table's
+    // evidence links call it to jump to the matching gallery thumbnail.
+    HTMLElement.prototype.scrollIntoView = vi.fn();
     // Default: no resolved screenshot bytes (per-card fallback path).
     setImages({ images: {}, loading: false, error: null });
     // Default: no on-disk static mockup html (legacy url / placeholder paths).
@@ -206,7 +207,6 @@ describe('ArtifactTabRenderer', () => {
     // Default: no feedback comments/batches for any document.
     setFeedback();
     commitMutate.mockClear();
-    acceptBaselineMutate.mockClear();
     reviewItemsResolveMutate.mockClear();
     questionsAnswerMutate.mockClear();
     tasksListQuery.mockReset();
@@ -720,7 +720,9 @@ describe('ArtifactTabRenderer', () => {
     expect(screen.queryByTestId('artifact-verdict-issues')).not.toBeInTheDocument();
   });
 
-  it('R7: Accept-as-baseline uses verdict.baselineKey (NOT artifact.sourceRef) and calls the mutation', async () => {
+  it('renders NO Accept-as-baseline button — baseline retirement (§5.10)', () => {
+    // Accept-as-baseline + the SSIM pre-diff retired entirely (verification-agent
+    // redesign §5.10): the button never renders, on ANY verdict status, even PASS.
     setHook({
       loading: false,
       error: null,
@@ -736,97 +738,15 @@ describe('ArtifactTabRenderer', () => {
             judgedFileNames: ['home.png'],
             baselineUsed: false,
             model: 'claude-opus-4-8',
-            // R7: the hydrated stable key threaded through the verdict block. Note it
-            // is DELIBERATELY different from the artifact's sourceRef below to prove
-            // the button no longer falls back to sourceRef/id.
             baselineKey: 'landing-page',
           },
         },
       },
     });
-    render(
-      <ArtifactTabRenderer
-        artifact={makeArtifact({ atype: 'screenshots', mode: 'template', sourceRef: 'IDEA-018' })}
-        {...PROPS}
-      />,
-    );
-
-    const btn = screen.getByTestId('artifact-accept-baseline-button');
-    expect(btn).toHaveTextContent('Accept as baseline');
-    fireEvent.click(btn);
-
-    await waitFor(() =>
-      expect(acceptBaselineMutate).toHaveBeenCalledWith({
-        projectId: 1,
-        runId: 'run-1',
-        baselineKey: 'landing-page', // from verdict, NOT the 'IDEA-018' sourceRef
-        fileNames: ['home.png'],
-      }),
-    );
-    // After acceptance the button reflects the saved state.
-    await waitFor(() => expect(btn).toHaveTextContent('✓ Saved as baseline'));
-  });
-
-  it('R7: Accept-as-baseline is DISABLED (with a tooltip) when the verdict carries no baselineKey', () => {
-    setHook({
-      loading: false,
-      error: null,
-      data: {
-        kind: 'screenshots',
-        payload: {
-          fileNames: ['home.png'],
-          verdict: {
-            status: 'pass',
-            confidence: 0.9,
-            issues: [],
-            feedback: 'ok',
-            judgedFileNames: ['home.png'],
-            baselineUsed: false,
-            model: 'claude-opus-4-8',
-            // no baselineKey — no stable handle to file the baseline under.
-          },
-        },
-      },
-    });
-    render(
-      // sourceRef IS present, proving the button no longer falls back to it.
-      <ArtifactTabRenderer
-        artifact={makeArtifact({ atype: 'screenshots', mode: 'template', sourceRef: 'IDEA-018' })}
-        {...PROPS}
-      />,
-    );
-
-    const btn = screen.getByTestId('artifact-accept-baseline-button');
-    expect(btn).toBeDisabled();
-    expect(btn).toHaveAttribute('title', expect.stringContaining('verify.json'));
-
-    // Clicking a disabled button must NOT fire the mutation.
-    fireEvent.click(btn);
-    expect(acceptBaselineMutate).not.toHaveBeenCalled();
-  });
-
-  it('does NOT render the Accept-as-baseline button on a FAIL verdict', () => {
-    setHook({
-      loading: false,
-      error: null,
-      data: {
-        kind: 'screenshots',
-        payload: {
-          fileNames: ['home.png'],
-          verdict: {
-            status: 'fail',
-            confidence: 0.8,
-            issues: [{ severity: 'high', description: 'broken' }],
-            feedback: 'nope',
-            judgedFileNames: ['home.png'],
-            baselineUsed: false,
-            model: 'claude-opus-4-8',
-          },
-        },
-      },
-    });
     render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />);
+
     expect(screen.queryByTestId('artifact-accept-baseline-button')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('artifact-verdict-footer')).not.toBeInTheDocument();
   });
 
   it('renders the FAIL verdict banner with feedback + a per-issue list', () => {
@@ -916,6 +836,148 @@ describe('ArtifactTabRenderer', () => {
       render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />),
     ).not.toThrow();
     expect(screen.queryByTestId('artifact-verdict-banner')).not.toBeInTheDocument();
+  });
+
+  // --- screenshots "Behaviors tested" report table (§5.9) ------------------
+
+  function makeReportEntry(overrides: Partial<TaskVerificationReportEntry> = {}): TaskVerificationReportEntry {
+    return {
+      taskRef: 'TASK-001',
+      requestId: 'req-1',
+      attempt: 1,
+      summary: 'Login form renders and submits',
+      behaviors: [
+        {
+          id: 'b1',
+          description: 'Submitting valid credentials navigates to the dashboard',
+          expected: 'The dashboard header is visible after submit',
+          result: 'pass',
+          screenshots: ['home.png'],
+          notes: '',
+        },
+      ],
+      outcome: 'pass',
+      completedAt: '2026-07-22T10:00:00.000Z',
+      ...overrides,
+    };
+  }
+
+  it('renders nothing new when the payload carries no reports (legacy identical)', () => {
+    setHook({ loading: false, error: null, data: { kind: 'screenshots', payload: { fileNames: ['home.png'] } } });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />);
+    expect(screen.queryByTestId('artifact-behaviors-tested')).not.toBeInTheDocument();
+  });
+
+  it('renders a behaviors table with a result badge and expected text', () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: {
+        kind: 'screenshots',
+        payload: { fileNames: ['home.png'], reports: [makeReportEntry()] },
+      },
+    });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />);
+
+    expect(screen.getByTestId('artifact-behaviors-tested')).toHaveTextContent('Behaviors tested');
+    const group = screen.getByTestId('artifact-task-report');
+    expect(group).toHaveTextContent('TASK-001');
+    expect(group).toHaveTextContent('Login form renders and submits');
+    const row = screen.getByTestId('artifact-behavior-row');
+    expect(row).toHaveTextContent('Submitting valid credentials navigates to the dashboard');
+    expect(row).toHaveTextContent('The dashboard header is visible after submit');
+    expect(screen.getByTestId('artifact-behavior-result-badge')).toHaveTextContent('pass');
+  });
+
+  it('jumps to the matching gallery thumbnail when an evidence screenshot link is clicked', () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: {
+        kind: 'screenshots',
+        payload: { fileNames: ['home.png'], reports: [makeReportEntry()] },
+      },
+    });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />);
+
+    const link = screen.getByTestId('artifact-behavior-evidence-link');
+    expect(link).toHaveTextContent('home.png');
+    fireEvent.click(link);
+    expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalled();
+  });
+
+  it('renders an evidence filename NOT in fileNames as plain text, not a link', () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: {
+        kind: 'screenshots',
+        payload: {
+          fileNames: ['home.png'],
+          reports: [
+            makeReportEntry({
+              behaviors: [
+                {
+                  id: 'b1',
+                  description: 'Modal opens',
+                  expected: 'Modal is visible',
+                  result: 'fail',
+                  screenshots: ['gone.png'],
+                  notes: 'file was never captured',
+                },
+              ],
+            }),
+          ],
+        },
+      },
+    });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />);
+
+    expect(screen.queryByTestId('artifact-behavior-evidence-link')).not.toBeInTheDocument();
+    const missing = screen.getByTestId('artifact-behavior-evidence-missing');
+    expect(missing).toHaveTextContent('gone.png');
+  });
+
+  it('groups multiple attempts of the same lane, latest prominent + older collapsed', () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: {
+        kind: 'screenshots',
+        payload: {
+          fileNames: ['home.png'],
+          reports: [
+            makeReportEntry({ requestId: 'req-1', attempt: 1, outcome: 'fail', completedAt: '2026-07-22T09:00:00.000Z' }),
+            makeReportEntry({ requestId: 'req-2', attempt: 2, outcome: 'pass', completedAt: '2026-07-22T10:00:00.000Z' }),
+          ],
+        },
+      },
+    });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />);
+
+    // Exactly one group for the shared taskRef.
+    expect(screen.getAllByTestId('artifact-task-report')).toHaveLength(1);
+    // The latest attempt (attempt 2, pass) renders prominently.
+    expect(screen.getByTestId('artifact-task-report-outcome')).toHaveTextContent('pass');
+    expect(screen.queryByTestId('artifact-task-report-older')).not.toBeInTheDocument();
+
+    // The older attempt is collapsed behind a toggle.
+    const toggle = screen.getByTestId('artifact-task-report-toggle');
+    expect(toggle).toHaveTextContent('1 earlier attempt');
+    fireEvent.click(toggle);
+    expect(screen.getByTestId('artifact-task-report-older')).toHaveTextContent('attempt 1');
+  });
+
+  it('drops a malformed report entry without throwing', () => {
+    const malformed = {
+      kind: 'screenshots',
+      payload: { fileNames: ['home.png'], reports: [{ summary: 'no requestId or behaviors' }] },
+    } as unknown as ArtifactData['data'];
+    setHook({ loading: false, error: null, data: malformed });
+    expect(() =>
+      render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />),
+    ).not.toThrow();
+    expect(screen.queryByTestId('artifact-behaviors-tested')).not.toBeInTheDocument();
   });
 
   // --- ui-prototype / generic (live canvas) --------------------------------

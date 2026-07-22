@@ -1050,4 +1050,17 @@ export interface VerificationRequestRow {
   enqueued_at: string;
   leased_at: string | null;
   ended_at: string | null;
+  /**
+   * Migration-078 columns (verification-agent redesign §5.2/§5.6). All five are
+   * additive nullable — NULL on every pre-078 row and on the legacy engine path:
+   * `task_json` (the composed VerificationTaskV1), `report_json` (the agent's
+   * VerificationReportV1 at terminal), `delivery_state` (the delivery-outbox
+   * marker, 'pending' | 'delivered'), `snapshot_sha` (the §5.5 snapshot commit),
+   * `enqueue_key` (the §5.3 idempotency key `runId:taskRef:attempt`).
+   */
+  task_json: string | null;
+  report_json: string | null;
+  delivery_state: string | null;
+  snapshot_sha: string | null;
+  enqueue_key: string | null;
 }

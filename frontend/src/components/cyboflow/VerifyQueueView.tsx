@@ -4,14 +4,23 @@
  * A read-only, full-width observability view over the `verification_requests`
  * work queue. Live state comes from {@link useVerificationRequests} (the polling
  * list hook over `cyboflow.verificationRequests.list`). Per row it shows the
- * request id, the parsed intent + verify type, a status badge, the current
- * backend + attempt counter, and a short verdict summary (parsed from
- * `verdict_json` / falling back to `error_message`).
+ * request id, verify type, an engine-identity chip (agent vs legacy — see
+ * {@link isAgentEngineRow}), a status badge, the task summary, the current
+ * backend + attempt counter, and a lifecycle/verdict summary line.
  *
- * NO mutations originate here (Accept-as-baseline lives on the artifact verdict
- * banner, S6). The header carries a project filter — the list query is
- * project-scoped (no "all projects" option, unlike Insights, because the route
- * requires a positive projectId), defaulting to the active project.
+ * verification-agent redesign §5.11: an agent-engine row (migration 078
+ * `task_json` populated) carries a composed `VerificationTaskV1` instead of a
+ * bare intent, and its terminal state is a `VerificationReportV1` in
+ * `report_json` rather than a `VerdictV1` in `verdict_json` — a legacy-only
+ * reader showed blank summaries and stale "Capturing / judging…" copy for
+ * these rows. {@link taskSummary} / {@link statusSummary} branch on
+ * {@link isAgentEngineRow} so both row formats render correctly; a legacy row
+ * (`task_json === null`) renders byte-identical to before.
+ *
+ * NO mutations originate here (Accept-as-baseline was retired outright, §5.10).
+ * The header carries a project filter — the list query is project-scoped (no
+ * "all projects" option, unlike Insights, because the route requires a
+ * positive projectId), defaulting to the active project.
  *
  * Styling mirrors the existing cyboflow panel idiom (SprintLanesPanel status
  * pills + InsightsView header / card surfaces).
@@ -29,6 +38,8 @@ import type {
   RequestStatus,
   VerdictV1,
   VerificationRequestInput,
+  VerificationTaskV1,
+  VerificationReportV1,
 } from '../../../../shared/types/visualVerification';
 
 // ---------------------------------------------------------------------------
@@ -73,11 +84,86 @@ function parseVerdict(json: string | null): VerdictV1 | null {
   }
 }
 
+/** Parse the serialized composed VerificationTaskV1 (migration 078 `task_json`); null when absent/malformed. */
+function parseTask(json: string | null): VerificationTaskV1 | null {
+  if (json === null) return null;
+  try {
+    const parsed = JSON.parse(json) as { summary?: unknown };
+    return typeof parsed.summary === 'string' ? (parsed as VerificationTaskV1) : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * A one-line verdict summary for a row: the judged status + confidence + the
- * judge's feedback, else the last runtime error, else a lifecycle-derived note.
+ * Just the `outcome` member of a serialized `VerificationReportV1` (migration
+ * 078 `report_json`) — §5.11 asks for the report OUTCOME only, not the whole
+ * report (behaviors/evidence live on the screenshots artifact's "Behaviors
+ * tested" table, §5.9).
  */
-function verdictSummary(req: VerificationRequest): string {
+function parseReportOutcome(json: string | null): VerificationReportV1['outcome'] | null {
+  if (json === null) return null;
+  try {
+    const parsed = JSON.parse(json) as { outcome?: unknown };
+    const outcome = parsed.outcome;
+    return outcome === 'pass' || outcome === 'fail' || outcome === 'build_failed' || outcome === 'launch_failed'
+      ? outcome
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Terminal request statuses — a row past this point has a final report/verdict (or none, if it failed to produce one). */
+const TERMINAL_STATUSES: ReadonlySet<RequestStatus> = new Set([
+  'passed',
+  'failed',
+  'low_confidence',
+  'skipped',
+  'timeout',
+]);
+
+/**
+ * Engine identity: the CHEAPEST correct signal already on the row is
+ * `task_json` presence — the dual-write contract (§5.2) populates it for
+ * every request enqueued via the composed-task path (the agent engine), and
+ * leaves it NULL for every legacy capture/judge request. The alternative
+ * (joining the run's stamped `verify_chain`) needs a second read this
+ * observability panel has no reason to pay for.
+ */
+function isAgentEngineRow(req: VerificationRequest): boolean {
+  return req.task_json !== null;
+}
+
+/** The task summary line: the composed task's `summary` (agent rows), else the legacy `deliverable_json.intent`. */
+function taskSummary(req: VerificationRequest): string {
+  const task = parseTask(req.task_json);
+  if (task !== null) return task.summary.trim();
+  const deliverable = parseDeliverable(req.deliverable_json);
+  return deliverable?.intent?.trim() ?? '';
+}
+
+/** Agent-appropriate lifecycle copy for a non-terminal agent-engine row. */
+function agentLifecycleSummary(req: VerificationRequest): string {
+  if (req.status === 'queued' || req.status === 'leased') return 'Awaiting the verification agent';
+  if (req.status === 'running') return 'Agent building + driving the deliverable';
+  return 'No verdict yet';
+}
+
+/** Legacy capture/judge lifecycle copy for a non-terminal legacy-engine row (unchanged from pre-§5.11). */
+function legacyLifecycleSummary(req: VerificationRequest): string {
+  if (req.status === 'queued') return 'Awaiting a free capture slot';
+  if (req.status === 'leased' || req.status === 'running') return 'Capturing / judging…';
+  if (req.status === 'skipped') return 'No backend could satisfy this type';
+  return 'No verdict yet';
+}
+
+/**
+ * A one-line status summary for a row: the judged VerdictV1 (legacy terminal
+ * rows), else the report's `outcome` (agent terminal rows, §5.11), else the
+ * last runtime error, else lifecycle-derived copy branched on engine identity.
+ */
+function statusSummary(req: VerificationRequest, isAgent: boolean): string {
   const verdict = parseVerdict(req.verdict_json);
   if (verdict !== null) {
     const pct = Math.round(verdict.confidence * 100);
@@ -85,13 +171,14 @@ function verdictSummary(req: VerificationRequest): string {
     const head = `${verdict.status} · ${pct}%`;
     return feedback.length > 0 ? `${head} — ${feedback}` : head;
   }
+  if (TERMINAL_STATUSES.has(req.status)) {
+    const outcome = parseReportOutcome(req.report_json);
+    if (outcome !== null) return `report outcome: ${outcome.replace('_', ' ')}`;
+  }
   if (req.error_message !== null && req.error_message.trim().length > 0) {
     return req.error_message;
   }
-  if (req.status === 'queued') return 'Awaiting a free capture slot';
-  if (req.status === 'leased' || req.status === 'running') return 'Capturing / judging…';
-  if (req.status === 'skipped') return 'No backend could satisfy this type';
-  return 'No verdict yet';
+  return isAgent ? agentLifecycleSummary(req) : legacyLifecycleSummary(req);
 }
 
 // ---------------------------------------------------------------------------
@@ -99,8 +186,9 @@ function verdictSummary(req: VerificationRequest): string {
 // ---------------------------------------------------------------------------
 
 function VerifyQueueRow({ req }: { req: VerificationRequest }): ReactElement {
-  const deliverable = parseDeliverable(req.deliverable_json);
-  const intent = deliverable?.intent?.trim() ?? '';
+  const isAgent = isAgentEngineRow(req);
+  const summary = taskSummary(req);
+  const status = statusSummary(req, isAgent);
 
   return (
     <div
@@ -113,6 +201,13 @@ function VerifyQueueRow({ req }: { req: VerificationRequest }): ReactElement {
           {req.verify_type}
         </span>
         <span
+          data-testid={`verify-queue-engine-${req.id}`}
+          className="rounded-button bg-interactive/10 px-1.5 py-0.5 text-[10px] font-medium text-interactive"
+          title={isAgent ? 'Deployed as the centrally-run verification agent' : 'Legacy capture/judge backend'}
+        >
+          {isAgent ? 'agent' : 'legacy'}
+        </span>
+        <span
           data-testid={`verify-queue-status-${req.id}`}
           className={`ml-auto shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${STATUS_PILL_CLASS[req.status]}`}
         >
@@ -120,9 +215,9 @@ function VerifyQueueRow({ req }: { req: VerificationRequest }): ReactElement {
         </span>
       </div>
 
-      {intent.length > 0 && (
-        <span className="truncate text-xs text-text-primary" title={intent}>
-          {intent}
+      {summary.length > 0 && (
+        <span className="truncate text-xs text-text-primary" title={summary}>
+          {summary}
         </span>
       )}
 
@@ -132,8 +227,8 @@ function VerifyQueueRow({ req }: { req: VerificationRequest }): ReactElement {
         <span className="font-mono">{req.run_id}</span>
       </div>
 
-      <span className="truncate text-[11px] text-text-secondary" title={verdictSummary(req)}>
-        {verdictSummary(req)}
+      <span className="truncate text-[11px] text-text-secondary" title={status}>
+        {status}
       </span>
     </div>
   );

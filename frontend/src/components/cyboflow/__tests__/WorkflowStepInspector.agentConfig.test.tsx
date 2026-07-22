@@ -280,6 +280,77 @@ describe('AgentConfigSection — Codex model picker', () => {
   });
 });
 
+describe('AgentConfigSection — Claude-only agent key (visual-verify)', () => {
+  // verification-agent redesign §5.12: `visual-verify` always deploys on Claude
+  // regardless of agentConfigs / the run's provider — no runtime select, no
+  // Codex controls, but the Claude model pin stays fully editable.
+  function makeVisualVerifyDefinition(agentConfigs?: WorkflowDefinition['agentConfigs']): WorkflowDefinition {
+    return {
+      id: 'sprint',
+      phases: [
+        {
+          id: 'execute',
+          label: 'Execute',
+          color: '#c96442',
+          steps: [{ id: 'verify', name: 'Visual verify', agent: 'visual-verify', mcps: [], retries: 0 }],
+        },
+      ],
+      ...(agentConfigs ? { agentConfigs } : {}),
+    };
+  }
+
+  const visualVerifyEntry = () => makeEntry({ agentKey: 'visual-verify', name: 'cyboflow-visual-verify' });
+
+  it('renders a static "Always runs on Claude" line instead of a runtime select', () => {
+    renderInspector({
+      definition: makeVisualVerifyDefinition(),
+      selectedStepId: 'verify',
+      agentEntries: [visualVerifyEntry()],
+    });
+    openAgentTab();
+
+    expect(screen.getByTestId('inspector-agent-runtime-select-claude-only')).toHaveTextContent(
+      'Always runs on Claude',
+    );
+    expect(screen.queryByTestId('inspector-agent-runtime-select')).not.toBeInTheDocument();
+  });
+
+  it('never shows Codex controls, even when the run provider is codex', () => {
+    renderInspector({
+      definition: makeVisualVerifyDefinition(),
+      selectedStepId: 'verify',
+      agentEntries: [visualVerifyEntry()],
+      agentProvider: 'codex',
+    });
+    openAgentTab();
+
+    expect(screen.queryByTestId('inspector-codex-model-select')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('inspector-model-select-codex-note')).not.toBeInTheDocument();
+    expect(screen.getByTestId('inspector-model-select')).toBeInTheDocument();
+  });
+
+  it('keeps the Claude model select editable and dispatches SET_AGENT_MODEL', () => {
+    const { dispatch } = renderInspector({
+      definition: makeVisualVerifyDefinition(),
+      selectedStepId: 'verify',
+      agentEntries: [visualVerifyEntry()],
+    });
+    openAgentTab();
+
+    const select = screen.getByTestId('inspector-model-select') as HTMLSelectElement;
+    fireEvent.change(select, { target: { value: 'opus' } });
+    expect(dispatch).toHaveBeenCalledWith({ type: 'SET_AGENT_MODEL', agentKey: 'visual-verify', model: 'opus' });
+  });
+
+  it('leaves the full runtime select in place for a non-Claude-only agent (implement)', () => {
+    renderInspector({ definition: makeDefinition(), selectedStepId: 'impl' });
+    openAgentTab();
+
+    expect(screen.getByTestId('inspector-agent-runtime-select')).toBeInTheDocument();
+    expect(screen.queryByTestId('inspector-agent-runtime-select-claude-only')).not.toBeInTheDocument();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Read-only body + customize
 // ---------------------------------------------------------------------------

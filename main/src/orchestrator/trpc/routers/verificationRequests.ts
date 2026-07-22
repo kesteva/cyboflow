@@ -65,6 +65,12 @@ interface VerificationRequestDbRow {
   enqueued_at: string;
   leased_at: string | null;
   ended_at: string | null;
+  // Migration-078 columns (nullable on every pre-078 / legacy-engine row).
+  task_json: string | null;
+  report_json: string | null;
+  delivery_state: string | null;
+  snapshot_sha: string | null;
+  enqueue_key: string | null;
 }
 
 /**
@@ -90,6 +96,13 @@ function shapeRow(r: VerificationRequestDbRow): VerificationRequestRow {
     enqueued_at: r.enqueued_at,
     leased_at: r.leased_at,
     ended_at: r.ended_at,
+    // Migration-078 columns — `SELECT *` already fetches them; `?? null` keeps a
+    // pre-078 test DB (column absent ⇒ undefined) shaping to the declared null.
+    task_json: r.task_json ?? null,
+    report_json: r.report_json ?? null,
+    delivery_state: r.delivery_state ?? null,
+    snapshot_sha: r.snapshot_sha ?? null,
+    enqueue_key: r.enqueue_key ?? null,
   };
 }
 

@@ -31,6 +31,7 @@ import {
 import {
   WORKFLOW_AGENT_RUNTIMES,
   WORKFLOW_AGENT_RUNTIME_LABELS,
+  isClaudeOnlyAgentKey,
   type WorkflowAgentRuntime,
 } from '../../../../../shared/types/agentRuntime';
 import type { McpEntry } from '../../../../../shared/types/integrations';
@@ -46,6 +47,14 @@ export interface AgentEditorFormProps {
   isCustom: boolean;
   /** Client-side description error (e.g. empty or contains `cyboflow_`), or null. */
   descriptionError: string | null;
+  /**
+   * The bare agent key being edited (e.g. `'visual-verify'`), empty in create
+   * mode. Drives the {@link isClaudeOnlyAgentKey} check (verification-agent
+   * redesign §5.12): a Claude-only key gets no runtime select and no Codex
+   * controls — the invariant is server-enforced at the deploy seam, this only
+   * communicates it.
+   */
+  agentKey: string;
 }
 
 export function AgentEditorForm({
@@ -54,7 +63,9 @@ export function AgentEditorForm({
   mode,
   isCustom,
   descriptionError,
+  agentKey,
 }: AgentEditorFormProps): React.JSX.Element {
+  const claudeOnly = isClaudeOnlyAgentKey(agentKey);
   // Name is editable ONLY for a brand-new custom (create mode). Built-ins and
   // existing customs render the name read-only.
   const nameEditable = mode === 'create' && isCustom;
@@ -171,40 +182,56 @@ export function AgentEditorForm({
           <span>Runtime</span>
           <span className="flex-1 h-px bg-border-subtle" />
         </div>
-        <select
-          value={draft.runtime ?? ''}
-          onChange={(e) =>
-            dispatch({
-              type: 'SET_RUNTIME',
-              runtime: e.target.value === '' ? null : (e.target.value as WorkflowAgentRuntime),
-            })
-          }
-          aria-label="Agent runtime"
-          className="w-full max-w-[320px] rounded-input border border-border-subtle bg-surface-primary px-3 py-2 text-sm text-text-primary"
-          data-testid="agent-runtime-select"
-        >
-          <option value="">inherits run runtime</option>
-          {WORKFLOW_AGENT_RUNTIMES.map((runtime) => (
-            <option key={runtime} value={runtime}>
-              {WORKFLOW_AGENT_RUNTIME_LABELS[runtime]}
-            </option>
-          ))}
-        </select>
-        <p className="mt-1.5 text-[10px] text-text-tertiary">
-          {draft.runtime === null
-            ? 'This agent runs on whatever provider/runtime the run uses. Pin a runtime to choose a model.'
-            : `This agent always runs on ${WORKFLOW_AGENT_RUNTIME_LABELS[draft.runtime]}.`}
-        </p>
-        {draft.runtime === 'codex-sdk' && (
-          <p
-            className="mt-1.5 text-[10px] text-text-tertiary"
-            data-testid="agent-runtime-plane-note"
-          >
-            A per-agent <b className="font-semibold">Codex</b> runtime applies to{' '}
-            <b className="font-semibold">programmatic</b> runs, which spawn each step as its own
-            process. An orchestrated run shares one runtime for the whole flow, so a Codex pin
-            there is blocked at launch — switch the run to programmatic to use it.
+        {claudeOnly ? (
+          // Claude-only agent key (verification-agent redesign §5.12): no runtime
+          // select at all — a stray 'inherits run runtime' option would misstate
+          // the invariant (inheritance is provider-conditional server-side; this
+          // agent never resolves off the Claude namespace regardless of the run's
+          // provider). The resolver enforces this at the deploy seam; this note
+          // only communicates it.
+          <p className="text-[10px] text-text-tertiary" data-testid="agent-runtime-claude-only">
+            <b className="font-semibold text-text-primary">Always runs on Claude.</b>{' '}
+            Visual verification runs on Claude (vision judging + structured report). A Codex
+            runtime isn&apos;t available for this agent.
           </p>
+        ) : (
+          <>
+            <select
+              value={draft.runtime ?? ''}
+              onChange={(e) =>
+                dispatch({
+                  type: 'SET_RUNTIME',
+                  runtime: e.target.value === '' ? null : (e.target.value as WorkflowAgentRuntime),
+                })
+              }
+              aria-label="Agent runtime"
+              className="w-full max-w-[320px] rounded-input border border-border-subtle bg-surface-primary px-3 py-2 text-sm text-text-primary"
+              data-testid="agent-runtime-select"
+            >
+              <option value="">inherits run runtime</option>
+              {WORKFLOW_AGENT_RUNTIMES.map((runtime) => (
+                <option key={runtime} value={runtime}>
+                  {WORKFLOW_AGENT_RUNTIME_LABELS[runtime]}
+                </option>
+              ))}
+            </select>
+            <p className="mt-1.5 text-[10px] text-text-tertiary">
+              {draft.runtime === null
+                ? 'This agent runs on whatever provider/runtime the run uses. Pin a runtime to choose a model.'
+                : `This agent always runs on ${WORKFLOW_AGENT_RUNTIME_LABELS[draft.runtime]}.`}
+            </p>
+            {draft.runtime === 'codex-sdk' && (
+              <p
+                className="mt-1.5 text-[10px] text-text-tertiary"
+                data-testid="agent-runtime-plane-note"
+              >
+                A per-agent <b className="font-semibold">Codex</b> runtime applies to{' '}
+                <b className="font-semibold">programmatic</b> runs, which spawn each step as its
+                own process. An orchestrated run shares one runtime for the whole flow, so a
+                Codex pin there is blocked at launch — switch the run to programmatic to use it.
+              </p>
+            )}
+          </>
         )}
       </div>
 
@@ -212,8 +239,46 @@ export function AgentEditorForm({
           effective provider is whatever the run uses, so a model pin would be
           non-deterministic (and is dropped outright on a programmatic run) —
           the picker is hidden rather than offering a pin that may not apply.
-          Pinned Codex gets the Codex model picker, pinned Claude the alias. ─── */}
-      {draft.runtime === null ? (
+          Pinned Codex gets the Codex model picker, pinned Claude the alias.
+          A Claude-only agentKey (§5.12) always gets the plain Claude-alias
+          picker — there is no runtime pin to gate on, and Codex controls never
+          apply to this agent. ─── */}
+      {claudeOnly ? (
+        <div className="mt-6">
+          <div className="text-[9px] font-bold uppercase tracking-[0.18em] text-text-tertiary mb-3 flex items-center gap-2">
+            <span>Model</span>
+            <span className="flex-1 h-px bg-border-subtle" />
+          </div>
+          <select
+            value={draft.model ?? ''}
+            onChange={(e) =>
+              dispatch({
+                type: 'SET_MODEL',
+                model: e.target.value === '' ? null : (e.target.value as AgentModelAlias),
+              })
+            }
+            aria-label="Agent model"
+            className="w-full max-w-[320px] rounded-input border border-border-subtle bg-surface-primary px-3 py-2 text-sm text-text-primary"
+            data-testid="agent-model-select"
+          >
+            <option value="">{INHERIT_RUN_MODEL_LABEL}</option>
+            {AGENT_MODEL_ALIASES.map((alias) => {
+              const disabled = !isAliasUsable(alias);
+              return (
+                <option key={alias} value={alias} disabled={disabled}>
+                  {AGENT_MODEL_LABELS[alias]}
+                  {disabled ? ' (unavailable)' : ''}
+                </option>
+              );
+            })}
+          </select>
+          <p className="mt-1.5 text-[10px] text-text-tertiary">
+            {draft.model === null
+              ? 'This agent runs with whatever Claude model the run uses.'
+              : `This agent always runs on ${AGENT_MODEL_LABELS[draft.model]}, regardless of the run model.`}
+          </p>
+        </div>
+      ) : draft.runtime === null ? (
         <div className="mt-6">
           <div className="text-[9px] font-bold uppercase tracking-[0.18em] text-text-tertiary mb-3 flex items-center gap-2">
             <span>Model</span>

@@ -48,6 +48,13 @@ function row(id: string): VerificationRequest {
     enqueued_at: '2026-06-28T00:00:01.000Z',
     leased_at: null,
     ended_at: null,
+    // Migration-078 columns (verification-agent redesign §5.2/§5.6) — NULL on a
+    // legacy/pre-078 row like this fixture.
+    task_json: null,
+    report_json: null,
+    delivery_state: null,
+    snapshot_sha: null,
+    enqueue_key: null,
   };
 }
 
@@ -134,6 +141,40 @@ describe('useVerificationRequests', () => {
     expect(listQuerySpy).toHaveBeenCalledTimes(2);
     // Same reference — the unchanged-content poll should not have re-set state.
     expect(result.current.requests).toBe(requestsAfterFirstLoad);
+  });
+
+  it('updates the array reference when only migration-078 fields change (§5.11 stale-row fix)', async () => {
+    // The delivery-outbox pattern (§5.6) can flip `delivery_state` from
+    // 'pending' to 'delivered' on a LATER poll while every pre-078 field
+    // (including `status`) is already settled — the equality check must catch
+    // this or a just-delivered agent-engine row looks unchanged forever.
+    vi.useFakeTimers();
+    const terminalRow = (deliveryState: string): VerificationRequest => ({
+      ...row('vr-1'),
+      status: 'failed',
+      task_json: JSON.stringify({ version: 1, summary: 'Checks the dashboard', behaviors: [] }),
+      report_json: JSON.stringify({ outcome: 'fail' }),
+      delivery_state: deliveryState,
+    });
+    listQuerySpy.mockResolvedValue([terminalRow('pending')]);
+    const { result } = renderHook(() =>
+      useVerificationRequests({ projectId: 1, refetchIntervalMs: 1000 }),
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const requestsAfterFirstLoad = result.current.requests;
+    expect(requestsAfterFirstLoad[0].delivery_state).toBe('pending');
+
+    listQuerySpy.mockResolvedValue([terminalRow('delivered')]);
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+      await Promise.resolve();
+    });
+
+    expect(result.current.requests).not.toBe(requestsAfterFirstLoad);
+    expect(result.current.requests[0].delivery_state).toBe('delivered');
   });
 
   it('surfaces a query rejection as an Error', async () => {

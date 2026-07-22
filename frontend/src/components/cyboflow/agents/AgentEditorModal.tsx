@@ -393,6 +393,7 @@ export function AgentEditorModal({
                 mode={mode}
                 isCustom={isCustom}
                 descriptionError={descriptionError}
+                agentKey={agentKey}
               />
               {entry !== null && (
                 <AgentUsageInspector

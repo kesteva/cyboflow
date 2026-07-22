@@ -42,7 +42,12 @@ import { useReviewItemsSlice } from '../../stores/reviewItemsSlice';
 import { useFeedback } from '../../hooks/useFeedback';
 import { useQuestionStore } from '../../stores/questionStore';
 import { ARTIFACT_COLORS, extractArchDesignSection } from '../../../../shared/types/artifacts';
-import type { Artifact, ApproveIdeasArtifactPayload, ApproveDesignsArtifactPayload } from '../../../../shared/types/artifacts';
+import type {
+  Artifact,
+  ApproveIdeasArtifactPayload,
+  ApproveDesignsArtifactPayload,
+  TaskVerificationReportEntry,
+} from '../../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
 import type { VerdictV1 } from '../../../../shared/types/visualVerification';
 import type { IdeaVerdict, IdeaVerdictMap, ReviewItem } from '../../../../shared/types/reviews';
@@ -818,68 +823,11 @@ function severityColor(severity: VerdictV1['issues'][number]['severity']): strin
  * on the leading edge. PASS shows only the confidence; FAIL / low_confidence add
  * the feedback line and a per-issue list when present.
  */
-function VerdictBanner({
-  verdict,
-  projectId,
-  runId,
-  baselineKey,
-}: {
-  verdict: VerdictV1;
-  projectId: number;
-  runId: string;
-  /**
-   * The STABLE key the accepted baseline PNGs are filed under (R7): the delivered
-   * request's hydrated `input.baselineKey` (deliverable.baselineKey ?? deliverable.id),
-   * carried through the verdict block by the verdict-delivery chokepoint. `undefined`
-   * when the request declared no baseline key — the Accept button is then DISABLED
-   * (a baseline filed under an ad-hoc key the SSIM pre-diff never resolves would be
-   * orphaned git-committed junk).
-   */
-  baselineKey?: string;
-}): ReactElement {
+function VerdictBanner({ verdict }: { verdict: VerdictV1 }): ReactElement {
   const { accent, icon, label } = verdictPresentation(verdict.status);
   const confidencePct = Math.round((verdict.confidence ?? 0) * 100);
   const showDetail = verdict.status !== 'pass';
   const issues = Array.isArray(verdict.issues) ? verdict.issues : [];
-
-  // Accept-as-baseline (S5) — only offered on a PASS verdict. Sends the judged PNGs
-  // to the artifacts.acceptAsBaseline mutation (which copies them into the git-tracked
-  // baselines tree + commits). Local in-flight + done/error state; the button never
-  // optimistically mutates the verdict.
-  const [accepting, setAccepting] = useState(false);
-  const [accepted, setAccepted] = useState(false);
-  const [acceptError, setAcceptError] = useState<string | null>(null);
-  const judgedFileNames = Array.isArray(verdict.judgedFileNames)
-    ? verdict.judgedFileNames.filter((n): n is string => typeof n === 'string')
-    : [];
-  // Gated on a PRESENT baselineKey (R7): without a stable key the accepted PNGs
-  // would file under an ad-hoc namespace the SSIM pre-diff never resolves (orphaned
-  // git junk), so the button is disabled + explained via tooltip instead.
-  const hasBaselineKey = typeof baselineKey === 'string' && baselineKey.length > 0;
-  const canAccept =
-    verdict.status === 'pass' && judgedFileNames.length > 0 && hasBaselineKey && !accepted;
-
-  const onAcceptBaseline = (): void => {
-    // Narrow baselineKey to a non-empty string here so the mutation input (which
-    // requires a string key) type-checks — the button is already disabled when it
-    // is absent (canAccept), this is the defensive re-check.
-    if (accepting || !canAccept) return;
-    if (typeof baselineKey !== 'string' || baselineKey.length === 0) return;
-    setAccepting(true);
-    setAcceptError(null);
-    trpc.cyboflow.artifacts.acceptAsBaseline
-      .mutate({ projectId, runId, baselineKey, fileNames: judgedFileNames })
-      .then(
-        () => {
-          setAccepting(false);
-          setAccepted(true);
-        },
-        (err: unknown) => {
-          setAccepting(false);
-          setAcceptError(err instanceof Error ? err.message : 'Accept as baseline failed.');
-        },
-      );
-  };
 
   return (
     <div
@@ -959,51 +907,326 @@ function VerdictBanner({
           ))}
         </ul>
       )}
-      {/* Accept-as-baseline footer — ONLY on a PASS verdict (S5). Copies the judged
-          PNGs into the git-tracked baselines tree + commits them. */}
-      {verdict.status === 'pass' && (
-        <div
-          data-testid="artifact-verdict-footer"
-          style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// screenshots — "Behaviors tested" report table (verification-agent redesign
+// §5.9), rendered under the verdict banner when payload.reports is non-empty.
+// One block per task lane (grouped by taskRef; a null taskRef — a
+// non-lane-attributed request — forms its own singleton group keyed by
+// requestId): the LATEST attempt renders in full, older attempts collapse
+// behind a toggle. Each behavior row shows its description, a pass/fail/
+// not-testable badge, the expected text, and evidence screenshot links that
+// jump to the matching thumbnail already rendered in the gallery below — a
+// filename the gallery never resolved renders as plain text, not a link.
+// No reports ⇒ this section renders nothing (legacy artifacts unaffected).
+// ---------------------------------------------------------------------------
+
+type ReportBehavior = TaskVerificationReportEntry['behaviors'][number];
+
+/** Runtime guard for one payload.reports[] entry — a malformed entry is dropped, never thrown. */
+function isTaskVerificationReportEntry(v: unknown): v is TaskVerificationReportEntry {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return (
+    (o.taskRef === null || typeof o.taskRef === 'string') &&
+    typeof o.requestId === 'string' &&
+    o.requestId.length > 0 &&
+    typeof o.attempt === 'number' &&
+    typeof o.summary === 'string' &&
+    Array.isArray(o.behaviors) &&
+    typeof o.completedAt === 'string'
+  );
+}
+
+/** Runtime guard for one behavior row inside a report entry. */
+function isReportBehavior(v: unknown): v is ReportBehavior {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return (
+    typeof o.id === 'string' &&
+    typeof o.description === 'string' &&
+    typeof o.expected === 'string' &&
+    (o.result === 'pass' || o.result === 'fail' || o.result === 'not_testable') &&
+    Array.isArray(o.screenshots) &&
+    typeof o.notes === 'string'
+  );
+}
+
+/** Result-badge accent, mirroring the verdict-status palette (not_testable ~ low_confidence). */
+function behaviorResultAccent(result: ReportBehavior['result']): string {
+  switch (result) {
+    case 'pass':
+      return VERDICT_PASS;
+    case 'fail':
+      return VERDICT_FAIL;
+    case 'not_testable':
+      return VERDICT_LOW;
+    default:
+      void (result satisfies never);
+      return VERDICT_LOW;
+  }
+}
+
+/** One behavior row: description / result badge / expected / evidence links. */
+function BehaviorTableRow({
+  behavior,
+  availableFileNames,
+  onJumpToImage,
+}: {
+  behavior: ReportBehavior;
+  availableFileNames: Set<string>;
+  onJumpToImage: (fileName: string) => void;
+}): ReactElement {
+  const accent = behaviorResultAccent(behavior.result);
+  return (
+    <tr data-testid="artifact-behavior-row">
+      <td style={{ padding: '6px 10px 6px 0', fontSize: '11px', color: INK, verticalAlign: 'top' }}>
+        {behavior.description}
+      </td>
+      <td style={{ padding: '6px 10px', verticalAlign: 'top' }}>
+        <span
+          data-testid="artifact-behavior-result-badge"
+          style={{
+            display: 'inline-block',
+            fontSize: '8.5px',
+            fontWeight: 700,
+            letterSpacing: '.04em',
+            textTransform: 'uppercase',
+            color: accent,
+            border: `1px solid ${accent}`,
+            borderRadius: 2,
+            padding: '1px 5px',
+            whiteSpace: 'nowrap',
+          }}
         >
+          {behavior.result === 'not_testable' ? 'not testable' : behavior.result}
+        </span>
+      </td>
+      <td style={{ padding: '6px 10px', fontSize: '10.5px', color: MUTED, verticalAlign: 'top' }}>
+        {behavior.expected}
+      </td>
+      <td style={{ padding: '6px 0 6px 10px', verticalAlign: 'top' }}>
+        {behavior.screenshots.length === 0 ? (
+          <span style={{ fontSize: '10px', color: FAINT }}>—</span>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            {behavior.screenshots.map((name) =>
+              availableFileNames.has(name) ? (
+                <button
+                  key={name}
+                  type="button"
+                  data-testid="artifact-behavior-evidence-link"
+                  onClick={() => onJumpToImage(name)}
+                  style={{
+                    textAlign: 'left',
+                    background: 'none',
+                    border: 'none',
+                    padding: 0,
+                    font: 'inherit',
+                    fontSize: '10px',
+                    color: RUST,
+                    textDecoration: 'underline',
+                    cursor: 'pointer',
+                  }}
+                >
+                  {name}
+                </button>
+              ) : (
+                <span key={name} data-testid="artifact-behavior-evidence-missing" style={{ fontSize: '10px', color: FAINT }}>
+                  {name}
+                </span>
+              ),
+            )}
+          </div>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+/** One task lane's report block — latest attempt in full, older attempts collapsed. */
+function TaskReportGroup({
+  entries,
+  availableFileNames,
+  onJumpToImage,
+}: {
+  /** Newest-attempt-first; at least one entry. */
+  entries: TaskVerificationReportEntry[];
+  availableFileNames: Set<string>;
+  onJumpToImage: (fileName: string) => void;
+}): ReactElement {
+  const [expanded, setExpanded] = useState(false);
+  const [latest, ...older] = entries;
+  const outcomeAccent =
+    latest.outcome === 'pass' ? VERDICT_PASS : latest.outcome === 'fail' ? VERDICT_FAIL : VERDICT_LOW;
+
+  return (
+    <div
+      data-testid="artifact-task-report"
+      data-task-ref={latest.taskRef ?? ''}
+      style={{ border: `1px solid ${HAIRLINE}`, background: 'var(--color-surface-primary)', marginBottom: 10 }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '8px 12px',
+          background: HOVER_WASH,
+          borderBottom: `1px solid ${HAIRLINE}`,
+        }}
+      >
+        {latest.taskRef && (
+          <span style={{ fontSize: '9px', fontWeight: 700, color: FAINT, letterSpacing: '.04em' }}>
+            {latest.taskRef}
+          </span>
+        )}
+        <span style={{ fontSize: '11.5px', fontWeight: 600, color: INK }}>{latest.summary}</span>
+        <span style={{ flex: 1 }} />
+        <span
+          data-testid="artifact-task-report-outcome"
+          style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '.04em', textTransform: 'uppercase', color: outcomeAccent }}
+        >
+          {latest.outcome.replace('_', ' ')}
+        </span>
+      </div>
+      <div style={{ padding: '4px 12px 10px', overflowX: 'auto' }}>
+        <table data-testid="artifact-behaviors-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <thead>
+            <tr>
+              {['Behavior', 'Result', 'Expected', 'Evidence'].map((h) => (
+                <th
+                  key={h}
+                  style={{
+                    textAlign: 'left',
+                    fontSize: '8.5px',
+                    fontWeight: 700,
+                    letterSpacing: '.04em',
+                    textTransform: 'uppercase',
+                    color: FAINT,
+                    padding: h === 'Behavior' ? '4px 10px 4px 0' : '4px 10px',
+                    borderBottom: `1px solid ${SOFT}`,
+                  }}
+                >
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {latest.behaviors.filter(isReportBehavior).map((behavior) => (
+              <BehaviorTableRow
+                key={behavior.id}
+                behavior={behavior}
+                availableFileNames={availableFileNames}
+                onJumpToImage={onJumpToImage}
+              />
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {older.length > 0 && (
+        <div style={{ borderTop: `1px dotted ${SOFT}`, padding: '6px 12px' }}>
           <button
             type="button"
-            data-testid="artifact-accept-baseline-button"
-            onClick={onAcceptBaseline}
-            disabled={!canAccept || accepting}
-            title={
-              !hasBaselineKey
-                ? 'No stable baseline key — declare the deliverable in .cyboflow/verify.json'
-                : undefined
-            }
+            data-testid="artifact-task-report-toggle"
+            onClick={() => setExpanded((v) => !v)}
             style={{
+              background: 'none',
+              border: 'none',
+              padding: 0,
+              font: 'inherit',
               fontSize: '10px',
-              fontWeight: 700,
-              letterSpacing: '.02em',
-              padding: '4px 10px',
-              border: `1px solid ${accent}`,
-              background: 'transparent',
-              color: accent,
-              cursor: !canAccept || accepting ? 'default' : 'pointer',
-              opacity: !canAccept || accepting ? 0.55 : 1,
+              fontWeight: 600,
+              color: MUTED,
+              cursor: 'pointer',
             }}
           >
-            {accepted
-              ? '✓ Saved as baseline'
-              : accepting
-                ? 'Saving baseline…'
-                : 'Accept as baseline'}
+            {expanded ? '▾' : '▸'} {older.length} earlier attempt{older.length === 1 ? '' : 's'}
           </button>
-          {acceptError && (
-            <span
-              data-testid="artifact-accept-baseline-error"
-              style={{ fontSize: '10px', color: VERDICT_FAIL }}
-            >
-              {acceptError}
-            </span>
+          {expanded && (
+            <div data-testid="artifact-task-report-older-list" style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {older.map((entry) => (
+                <div key={entry.requestId} data-testid="artifact-task-report-older" style={{ opacity: 0.7 }}>
+                  <div style={{ fontSize: '10px', color: FAINT, marginBottom: 3 }}>
+                    attempt {entry.attempt} · {entry.outcome.replace('_', ' ')} · {entry.completedAt}
+                  </div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                    <tbody>
+                      {entry.behaviors.filter(isReportBehavior).map((behavior) => (
+                        <BehaviorTableRow
+                          key={behavior.id}
+                          behavior={behavior}
+                          availableFileNames={availableFileNames}
+                          onJumpToImage={onJumpToImage}
+                        />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ))}
+            </div>
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/** Groups valid report entries by lane (taskRef, or requestId when un-attributed). */
+function groupTaskReports(reports: TaskVerificationReportEntry[]): TaskVerificationReportEntry[][] {
+  const groups = new Map<string, TaskVerificationReportEntry[]>();
+  for (const entry of reports) {
+    const key = entry.taskRef ?? `__request_${entry.requestId}`;
+    const list = groups.get(key);
+    if (list) list.push(entry);
+    else groups.set(key, [entry]);
+  }
+  // Newest attempt first within a group; groups ordered by their newest entry's
+  // completedAt, most recent first.
+  const groupList = Array.from(groups.values()).map((entries) =>
+    [...entries].sort((a, b) => b.attempt - a.attempt || (a.completedAt < b.completedAt ? 1 : -1)),
+  );
+  groupList.sort((a, b) => (a[0].completedAt < b[0].completedAt ? 1 : -1));
+  return groupList;
+}
+
+/**
+ * Top-level "Behaviors tested" section. Absent/empty `reports` renders nothing
+ * (legacy screenshots artifacts are unaffected). `availableFileNames` gates
+ * whether an evidence screenshot renders as a clickable jump-to-image link.
+ */
+function BehaviorsTestedSection({
+  reports,
+  availableFileNames,
+  onJumpToImage,
+}: {
+  reports: unknown;
+  availableFileNames: Set<string>;
+  onJumpToImage: (fileName: string) => void;
+}): ReactElement | null {
+  const validReports = Array.isArray(reports) ? reports.filter(isTaskVerificationReportEntry) : [];
+  if (validReports.length === 0) return null;
+  const groups = groupTaskReports(validReports);
+
+  return (
+    <div data-testid="artifact-behaviors-tested" style={{ margin: '16px 20px 0' }}>
+      <div
+        style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '.16em', textTransform: 'uppercase', color: FAINT, marginBottom: 8 }}
+      >
+        Behaviors tested
+      </div>
+      {groups.map((entries) => (
+        <TaskReportGroup
+          key={entries[0].taskRef ?? entries[0].requestId}
+          entries={entries}
+          availableFileNames={availableFileNames}
+          onJumpToImage={onJumpToImage}
+        />
+      ))}
     </div>
   );
 }
@@ -1053,6 +1276,20 @@ function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectI
   // entry, so the card below shows its per-card fallback instead of an <img>.
   const { images } = useArtifactImages(artifact.runId, fileNames);
 
+  // The behaviors-tested report table (§5.9) links its evidence screenshots to
+  // the matching thumbnail rendered in the gallery below. `shotRefs` maps a
+  // basename to its rendered card so the click handler can scroll it into view;
+  // `availableFileNames` gates whether a link renders at all (a report can
+  // reference a filename the gallery never resolved).
+  const shotRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  // `fileNames` is already recomputed fresh every render (its own [] fallback
+  // is not memoized), so wrapping this Set in useMemo would key off a
+  // perpetually-new dependency and buy nothing — build it plain.
+  const availableFileNames = new Set(fileNames);
+  const scrollToShot = (name: string): void => {
+    shotRefs.current[name]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
+
   return (
     <Shell testid="artifact-screenshots">
       <ArtifactHeader
@@ -1064,21 +1301,14 @@ function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectI
       />
       {/* Verdict strip above the gallery — present whenever the payload carries a
           judged verdict, independent of whether bytes resolved. */}
-      {!loading && !error && verdict && (
-        <VerdictBanner
-          verdict={verdict}
-          projectId={projectId}
-          runId={artifact.runId}
-          // R7: the baseline key is the STABLE handle threaded through the verdict
-          // block by the verdict-delivery chokepoint (the request's hydrated
-          // input.baselineKey). It is the ONLY key the SSIM pre-diff later resolves
-          // baselines by — so accepting under the opaque per-run artifact id would
-          // orphan the baseline. Absent ⇒ the banner disables the Accept button.
-          baselineKey={
-            typeof verdict.baselineKey === 'string' && verdict.baselineKey.length > 0
-              ? verdict.baselineKey
-              : undefined
-          }
+      {!loading && !error && verdict && <VerdictBanner verdict={verdict} />}
+      {/* Behaviors-tested report table (§5.9) — present whenever the payload
+          carries at least one valid verification-agent report. */}
+      {!loading && !error && data?.kind === 'screenshots' && (
+        <BehaviorsTestedSection
+          reports={data.payload.reports}
+          availableFileNames={availableFileNames}
+          onJumpToImage={scrollToShot}
         />
       )}
       {loading ? (
@@ -1126,6 +1356,9 @@ function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectI
             return (
               <div
                 key={name}
+                ref={(el) => {
+                  shotRefs.current[name] = el;
+                }}
                 data-testid="artifact-shot-card"
                 style={{
                   border: `1px solid ${worstSeverity ? severityColor(worstSeverity) : HAIRLINE}`,

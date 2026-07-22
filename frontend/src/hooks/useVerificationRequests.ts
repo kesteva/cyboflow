@@ -67,7 +67,15 @@ function rowEqual(a: VerificationRequest, b: VerificationRequest): boolean {
     a.error_message === b.error_message &&
     a.enqueued_at === b.enqueued_at &&
     a.leased_at === b.leased_at &&
-    a.ended_at === b.ended_at
+    a.ended_at === b.ended_at &&
+    // Migration-078 columns (verification-agent redesign §5.11): a row can go
+    // terminal (report_json / delivery_state written) without any of the
+    // pre-078 fields above changing, so omitting these from the compare would
+    // let a just-delivered agent-engine row look identical to its prior
+    // in-flight snapshot and never re-render (the stale-row bug §5.11 flags).
+    a.task_json === b.task_json &&
+    a.report_json === b.report_json &&
+    a.delivery_state === b.delivery_state
   );
 }
 

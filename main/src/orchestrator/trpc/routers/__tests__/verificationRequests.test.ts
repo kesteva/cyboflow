@@ -238,6 +238,11 @@ describe('cyboflow.verificationRequests.list', () => {
       enqueued_at: '2026-06-28T00:00:01.000Z',
       leased_at: null,
       ended_at: null,
+      task_json: null,
+      report_json: null,
+      delivery_state: null,
+      snapshot_sha: null,
+      enqueue_key: null,
     });
     // chain_json is always a parseable VisualBackendId[] for the renderer.
     expect(() => JSON.parse(row.chain_json)).not.toThrow();

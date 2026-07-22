@@ -189,6 +189,11 @@ describe('visualVerification shared seam', () => {
         enqueued_at: '2026-01-01T00:00:00.000Z',
         leased_at: null,
         ended_at: null,
+        task_json: null,
+        report_json: null,
+        delivery_state: null,
+        snapshot_sha: null,
+        enqueue_key: null,
       };
 
       expect(isVerificationType(config.defaultType)).toBe(true);

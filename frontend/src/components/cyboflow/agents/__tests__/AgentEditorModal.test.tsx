@@ -466,6 +466,55 @@ describe('AgentEditorModal — model picker', () => {
   });
 });
 
+describe('AgentEditorModal — Claude-only agent key (visual-verify)', () => {
+  // verification-agent redesign §5.12: `visual-verify` always deploys on Claude,
+  // no matter what agentConfigs/project overrides say. The editor communicates
+  // this by NOT rendering a runtime select or any Codex controls for it — a
+  // static line replaces them — while the Claude model picker stays fully
+  // editable (this agent's model resolution is Claude-namespace-only, not
+  // gated on a runtime pin).
+  const VISUAL_VERIFY_ENTRY: AgentEntry = {
+    ...BUILTIN_ENTRY,
+    agentKey: 'visual-verify',
+    name: 'cyboflow-visual-verify',
+  };
+
+  it('renders a static "Always runs on Claude" line instead of a runtime select', async () => {
+    await renderModal({ entry: VISUAL_VERIFY_ENTRY, agentKey: 'visual-verify' });
+
+    expect(screen.getByTestId('agent-runtime-claude-only')).toHaveTextContent(
+      'Always runs on Claude',
+    );
+    expect(screen.queryByTestId('agent-runtime-select')).not.toBeInTheDocument();
+  });
+
+  it('never shows Codex model controls', async () => {
+    await renderModal({
+      entry: { ...VISUAL_VERIFY_ENTRY, runtime: 'codex-sdk' },
+      agentKey: 'visual-verify',
+    });
+
+    expect(screen.queryByTestId('agent-codex-model-select')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('agent-runtime-plane-note')).not.toBeInTheDocument();
+  });
+
+  it('keeps the Claude model picker editable', async () => {
+    await renderModal({ entry: VISUAL_VERIFY_ENTRY, agentKey: 'visual-verify' });
+
+    const select = screen.getByTestId('agent-model-select') as HTMLSelectElement;
+    expect(select.value).toBe(''); // '' = inherit the run model
+    fireEvent.change(select, { target: { value: 'haiku' } });
+    await waitFor(() => expect(screen.getByTestId('agent-editor-save-button')).not.toBeDisabled());
+  });
+
+  it('leaves the full runtime select in place for a non-Claude-only agent (implement)', async () => {
+    await renderModal(); // BUILTIN_KEY = 'implement'
+
+    expect(screen.getByTestId('agent-runtime-select')).toBeInTheDocument();
+    expect(screen.queryByTestId('agent-runtime-claude-only')).not.toBeInTheDocument();
+  });
+});
+
 describe('AgentEditorModal — dirty-close guard', () => {
   it('prompts a confirm on close when dirty', async () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);

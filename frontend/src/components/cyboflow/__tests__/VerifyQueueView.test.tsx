@@ -61,6 +61,14 @@ function baseRow(over: Partial<VerificationRequest> = {}): VerificationRequest {
     enqueued_at: '2026-06-28T00:00:01.000Z',
     leased_at: null,
     ended_at: null,
+    // Migration-078 columns (verification-agent redesign §5.2/§5.6) — NULL by
+    // default (a legacy row); individual tests override via `over` for an
+    // agent-engine row.
+    task_json: null,
+    report_json: null,
+    delivery_state: null,
+    snapshot_sha: null,
+    enqueue_key: null,
     ...over,
   };
 }
@@ -146,5 +154,120 @@ describe('VerifyQueueView', () => {
     const select = await screen.findByTestId('verify-queue-project-filter');
     await waitFor(() => expect(screen.getByRole('option', { name: 'ProjA' })).toBeInTheDocument());
     expect(select).toBeInTheDocument();
+  });
+
+  // --- engine identity + agent-row rendering (verification-agent redesign §5.11) ---
+
+  it('tags a legacy row (no task_json) with the "legacy" engine chip', async () => {
+    useVerificationRequestsSpy.mockReturnValue({
+      requests: [baseRow({ id: 'vr-1' })],
+      isLoading: false,
+      error: null,
+    });
+
+    render(<VerifyQueueView />);
+
+    expect(await screen.findByTestId('verify-queue-engine-vr-1')).toHaveTextContent('legacy');
+  });
+
+  it('tags an agent-engine row (task_json populated) with the "agent" chip and shows the task summary', async () => {
+    useVerificationRequestsSpy.mockReturnValue({
+      requests: [
+        baseRow({
+          id: 'vr-1',
+          status: 'queued',
+          task_json: JSON.stringify({
+            version: 1,
+            summary: 'Submitting the login form navigates to the dashboard',
+            behaviors: [],
+          }),
+        }),
+      ],
+      isLoading: false,
+      error: null,
+    });
+
+    render(<VerifyQueueView />);
+
+    expect(await screen.findByTestId('verify-queue-engine-vr-1')).toHaveTextContent('agent');
+    expect(screen.getByText('Submitting the login form navigates to the dashboard')).toBeInTheDocument();
+    expect(screen.getByText('Awaiting the verification agent')).toBeInTheDocument();
+  });
+
+  it('shows agent-appropriate lifecycle copy while running', async () => {
+    useVerificationRequestsSpy.mockReturnValue({
+      requests: [
+        baseRow({
+          id: 'vr-1',
+          status: 'running',
+          task_json: JSON.stringify({ version: 1, summary: 'Checks the dashboard', behaviors: [] }),
+        }),
+      ],
+      isLoading: false,
+      error: null,
+    });
+
+    render(<VerifyQueueView />);
+
+    expect(await screen.findByText('Agent building + driving the deliverable')).toBeInTheDocument();
+  });
+
+  it('shows the report outcome (outcome only) for a terminal agent row', async () => {
+    useVerificationRequestsSpy.mockReturnValue({
+      requests: [
+        baseRow({
+          id: 'vr-1',
+          status: 'failed',
+          task_json: JSON.stringify({ version: 1, summary: 'Checks the dashboard', behaviors: [] }),
+          report_json: JSON.stringify({
+            version: 1,
+            behaviors: [],
+            screenshots: [],
+            outcome: 'build_failed',
+            confidence: 0.9,
+            feedback: 'The build failed — should not render here.',
+            issues: [],
+          }),
+        }),
+      ],
+      isLoading: false,
+      error: null,
+    });
+
+    render(<VerifyQueueView />);
+
+    const row = await screen.findByTestId('verify-queue-row-vr-1');
+    expect(row).toHaveTextContent('report outcome: build failed');
+    // Only the outcome renders — not the report's feedback text.
+    expect(row).not.toHaveTextContent('should not render here');
+  });
+
+  it('a legacy row with a VerdictV1 still wins over any report_json (verdict takes precedence)', async () => {
+    useVerificationRequestsSpy.mockReturnValue({
+      requests: [
+        baseRow({
+          id: 'vr-2',
+          status: 'passed',
+          current_backend: 'capturePage',
+          attempt: 1,
+          verdict_json: JSON.stringify({
+            status: 'pass',
+            confidence: 0.92,
+            issues: [],
+            feedback: 'Looks correct',
+            judgedFileNames: ['shot.png'],
+            baselineUsed: false,
+            model: 'fake',
+          }),
+        }),
+      ],
+      isLoading: false,
+      error: null,
+    });
+
+    render(<VerifyQueueView />);
+
+    expect(await screen.findByTestId('verify-queue-engine-vr-2')).toHaveTextContent('legacy');
+    expect(screen.getByText(/pass · 92% — Looks correct/)).toBeInTheDocument();
   });
 });

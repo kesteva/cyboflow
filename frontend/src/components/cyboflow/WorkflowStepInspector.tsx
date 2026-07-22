@@ -27,7 +27,11 @@ import { SPRINT_BATCH_CAP } from '../../../../shared/types/sprintBatch';
 import { AGENT_MODEL_ALIASES, AGENT_MODEL_LABELS } from '../../../../shared/types/agents';
 import type { AgentEntry, AgentModelAlias } from '../../../../shared/types/agents';
 import type { AgentProvider, WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
-import { WORKFLOW_AGENT_RUNTIMES, WORKFLOW_AGENT_RUNTIME_LABELS } from '../../../../shared/types/agentRuntime';
+import {
+  WORKFLOW_AGENT_RUNTIMES,
+  WORKFLOW_AGENT_RUNTIME_LABELS,
+  isClaudeOnlyAgentKey,
+} from '../../../../shared/types/agentRuntime';
 import { effortLevelsForProvider, type ReasoningEffort } from '../../../../shared/types/reasoningEffort';
 import { HUMAN_GATE_AGENT, resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import { CLI_TOOLS } from '../../../../shared/types/cliTools';
@@ -1067,16 +1071,58 @@ function AgentConfigSection({
   const inheritSentence =
     pinLabel !== null ? `Inherits ${pinLabel} (agent setting).` : 'Inherits the run model.';
   const selectedRuntime: WorkflowAgentRuntime | '' = config?.runtime ?? '';
+  // Claude-only agent key (verification-agent redesign §5.12) — always runs on
+  // Claude regardless of the run's provider or any per-agent runtime pin. No
+  // runtime select, no Codex controls; the Claude model picker stays available.
+  const claudeOnly = isClaudeOnlyAgentKey(agentKey);
   // The effort scale is provider-specific: Codex when the base agent is a Codex
   // agent OR a per-agent `codex-sdk` runtime is pinned (Codex's none..xhigh),
   // else Claude's low..max. A stale cross-provider value is dropped at spawn.
-  const effortProvider: AgentProvider =
-    agentProvider === 'codex' || selectedRuntime === 'codex-sdk' ? 'codex' : 'claude';
+  // A Claude-only agent key always uses the Claude scale.
+  const effortProvider: AgentProvider = claudeOnly
+    ? 'claude'
+    : agentProvider === 'codex' || selectedRuntime === 'codex-sdk'
+      ? 'codex'
+      : 'claude';
 
   return (
     <div style={sectionContainerStyle} data-testid={sectionTestId}>
       {/* ── Model pin ─────────────────────────────────────────────────────── */}
-      {agentProvider === 'codex' ? (
+      {claudeOnly ? (
+        <>
+          <div>
+            <label style={labelStyle}>runtime</label>
+            <p style={hintStyle} data-testid={`${runtimeTestId}-claude-only`}>
+              <b>Always runs on Claude.</b> Visual verification runs on Claude (vision judging +
+              structured report). A Codex runtime isn&apos;t available for this agent.
+            </p>
+          </div>
+          <div>
+            <label style={labelStyle} htmlFor={modelId}>model</label>
+            <select
+              id={modelId}
+              value={selectedModel}
+              onChange={(e) =>
+                dispatch({
+                  type: 'SET_AGENT_MODEL',
+                  agentKey,
+                  model: e.target.value === '' ? null : (e.target.value as AgentModelAlias),
+                })
+              }
+              style={inputStyle}
+              data-testid={modelTestId}
+            >
+              <option value="">(inherit)</option>
+              {AGENT_MODEL_ALIASES.map((alias) => (
+                <option key={alias} value={alias}>{AGENT_MODEL_LABELS[alias]}</option>
+              ))}
+            </select>
+            <p style={hintStyle} data-testid={hintTestId}>
+              {inheriting ? `${inheritSentence} ` : ''}Applies to every step using <b>{agentKey}</b> in this flow.
+            </p>
+          </div>
+        </>
+      ) : agentProvider === 'codex' ? (
         // A Codex run is single-model (no per-agent model overlay), so a per-agent
         // pin could never apply — show the run-level guidance instead of a picker.
         <div>
