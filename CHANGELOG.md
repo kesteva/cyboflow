@@ -15,9 +15,11 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 - **Workflow archiving**: a `workflows.archived_at` soft-archive seam (registry + tRPC) with Archive/Unarchive actions and a "Show archived" toggle in the workflow gallery (migration 079).
 - Entity `category` on the Epic detail editor (alongside priority), reusing the canonical `CATEGORY_LABEL` map.
 - Multi-model run cost computed from the rate card by summing the per-model breakdown.
+- **Auto-handover to a full agent** when you chat at a programmatic run's final human gate (migration 081): the handover agent adopts the conversation, `ChatInput` exits monitor mode immediately on a handed-over send response, and `setPendingNudge` can hide a seeded turn from the transcript. Hardened per adversarial review.
 
 ### Changed
 
+- Retired the Crystal checkpoint / structured commit-mode machinery, including the commit-mode pill and its components in the quick-session UI.
 - Interrupted-run handling: resume restart-orphaned orchestrated runs and tag the unresumable as `outcome='interrupted'`; Insights break out interrupted runs and exclude restart noise from error/success rates.
 - Verification ownership is controller-owned on programmatic runs: MCP `cyboflow_request_verification` / `request_verification` are rejected on programmatic step turns, the controller adopts a pre-fired lane verification request, and task-verify turns relay the verdict as text rather than firing the request.
 - Session ordering simplified to a single `displayOrder` source (dropped the never-cleared `sessionOrderOverrides`), with a deterministic sort tiebreaker.
