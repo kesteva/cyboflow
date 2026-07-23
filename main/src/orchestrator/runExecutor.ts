@@ -222,6 +222,15 @@ export interface ClaudeSpawnerOptions {
    * (the Ultracode wizard mode), and this bag is passed to it structurally.
    */
   reasoningEffort?: ReasoningEffort;
+  /**
+   * Per-spawn SDK tool DENY list (verification-agent redesign, live-smoke fix
+   * 2026-07-22), forwarded verbatim to the Claude SDK manager's
+   * `ClaudeSpawnOptions.disallowedTools` (interactive/codex managers ignore it).
+   * The programmatic step runner passes the visual-verification enqueue tool on
+   * every step turn — on the programmatic plane the CONTROLLER owns the enqueue,
+   * so no step turn may fire `cyboflow_request_verification` itself.
+   */
+  disallowedTools?: string[];
 }
 
 /**

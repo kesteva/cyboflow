@@ -47,6 +47,21 @@ describe('SpawnStepRunner', () => {
     expect(passed.prompt).toContain('`epics`'); // the step-scoped prompt
   });
 
+  it('denies the visual-verification enqueue tool on every step turn (live-smoke fix 2026-07-22)', async () => {
+    // The controller owns the enqueue on the programmatic plane; a step turn
+    // firing cyboflow_request_verification itself hijacks the lane.
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, opts);
+
+    await runner.runStep(step({ id: 'task-verify', agent: 'task-verify' }), ctx);
+    await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+    const calls = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls;
+    for (const [passed] of calls as Array<[ClaudeSpawnerOptions]>) {
+      expect(passed.disallowedTools).toEqual(['mcp__cyboflow__cyboflow_request_verification']);
+    }
+  });
+
   // ── typed step-output channel (§5.3) ──────────────────────────────────────
   it('forwards the spawn seam result text into the ok result (typed step-output channel)', async () => {
     const spawner = makeSpawner(() => Promise.resolve({ resultText: 'hello' }));

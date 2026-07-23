@@ -40,6 +40,22 @@ import {
   type WorkflowPromptRenderContext,
 } from '../workflowPromptRenderer';
 
+/**
+ * SDK tools denied on EVERY programmatic step turn. On the programmatic plane
+ * the CONTROLLER owns the visual-verification enqueue (the agentless
+ * visual-verify step in workflowController.ts) — a step turn firing
+ * `cyboflow_request_verification` itself creates an unkeyed request the
+ * controller never made and races the merge-gate against the contract-retry
+ * loop (observed on the first live run, 2026-07-22: the task-verify turn fired
+ * the request, self-parked the lane, and the lane failed despite a delivered
+ * PASS). Constant across a run's turns so the warm-session options fingerprint
+ * never recycles over it. Orchestrated runs never pass through this runner, so
+ * the orchestrator's legitimate use of the tool is unaffected.
+ */
+export const PROGRAMMATIC_STEP_DISALLOWED_TOOLS: readonly string[] = [
+  'mcp__cyboflow__cyboflow_request_verification',
+];
+
 /** Per-run spawn parameters bound when the runner is constructed. */
 export interface SpawnStepRunnerOptions {
   panelId: string;
@@ -222,6 +238,12 @@ export class SpawnStepRunner implements StepRunner {
         prompt,
         hidePromptFromTranscript: true,
         agentInvocationStepId: step.id,
+        // On the programmatic plane the CONTROLLER owns the visual-verification
+        // enqueue (agentless visual-verify step), so NO step turn may fire the
+        // request itself — the first live run's task-verify turn did, hijacking
+        // the lane (2026-07-22). Denied on EVERY step turn (constant across the
+        // run, so warm lane sessions never recycle over the fingerprint).
+        disallowedTools: [...PROGRAMMATIC_STEP_DISALLOWED_TOOLS],
         ...(spawnModel ? { model: spawnModel } : {}),
         ...(stepProvider ? { agentProvider: stepProvider } : {}),
         ...(stepRuntime ? { agentRuntime: stepRuntime } : {}),

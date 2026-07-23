@@ -705,6 +705,21 @@ export interface ClaudeSpawnOptions {
    * byte-identical to before.
    */
   mcpScope?: 'global-agent';
+  /**
+   * Per-spawn SDK tool DENY list (verification-agent redesign, live-smoke fix
+   * 2026-07-22). Merged additively into `sdkOptions.disallowedTools` alongside
+   * the MCP deny-list guards, so the named tools are removed from the model's
+   * context for this spawn (subagent turns included). The programmatic step
+   * runner passes `['mcp__cyboflow__cyboflow_request_verification']` on every
+   * step turn: on the programmatic plane the CONTROLLER owns the
+   * visual-verification enqueue (agentless visual-verify step), so no step turn
+   * may fire the request — the first live run's task-verify turn did exactly
+   * that and broke its lane. Absent ⇒ byte-identical. Spawn-baked, so it joins
+   * the warm-session options fingerprint via the composed `sdkOptions`; it is
+   * CONSTANT across a run's step turns, so warm lane sessions never recycle
+   * over it.
+   */
+  disallowedTools?: string[];
 }
 
 /**
@@ -2736,6 +2751,15 @@ export class ClaudeCodeManager extends AbstractCliManager {
     //   2. disallowedTools — removes the server's tools from the model's context
     //      as defense-in-depth (never re-surfaced via ToolSearch). 'cyboflow' is
     //      never disable-able (orchestrator socket) and is excluded.
+    // Per-spawn tool deny list (see ClaudeSpawnOptions.disallowedTools): applied
+    // BEFORE the session-level MCP deny guards so both merge additively.
+    if (options.disallowedTools !== undefined && options.disallowedTools.length > 0) {
+      sdkOptions.disallowedTools = [
+        ...(sdkOptions.disallowedTools ?? []),
+        ...options.disallowedTools,
+      ];
+    }
+
     const denyGuards = mcpDenyListSdkGuards(this.resolveSessionDisabledMcps(options.sessionId));
     if (denyGuards.strictMcpConfig) {
       sdkOptions.strictMcpConfig = true;
