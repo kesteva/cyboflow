@@ -356,7 +356,18 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
           if (!result.delivered) {
             setPendingStatus(runId, id, 'failed');
             setSendError('The monitor is no longer active for this run.');
+            return;
           }
+          // A handedOver response means the server already disposed the monitor
+          // AND flipped execution_model as part of an automatic
+          // programmatic→orchestrated handover — the debounced activeRunsStore
+          // refetch will confirm this later, but leaving monitorActive stale-true
+          // until then would wedge the composer in workflow-monitor mode for a
+          // follow-up send. Flip it optimistically now, straight off the
+          // response. The user's raw text lands as a verbatim transcript turn
+          // (same as any monitor send), so the pending row above reconciles the
+          // same way it already does on a plain delivered:true.
+          if (result.handedOver) setMonitorActive(false);
         })
         .catch((err: unknown) => {
           setPendingStatus(runId, id, 'failed');

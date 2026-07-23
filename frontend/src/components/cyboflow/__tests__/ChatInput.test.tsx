@@ -903,6 +903,51 @@ describe('ChatInput — workflow-monitor composer (monitor-unify)', () => {
     expect(vi.mocked(trpc.cyboflow.monitor.send.mutate)).not.toHaveBeenCalled();
   });
 
+  it('LEAVES monitor mode immediately on a handedOver response, with no store/execution_model change', async () => {
+    // The auto handover (programmatic run parked at its final gate) can resolve
+    // monitor.send with { delivered: true, handedOver: true } — the server has
+    // ALREADY disposed the monitor and flipped execution_model, but the
+    // composer must not wait for the debounced activeRunsStore refetch to catch
+    // up. The flip is driven straight off the mutation response.
+    vi.mocked(trpc.cyboflow.monitor.isActive.query).mockResolvedValue({ active: true });
+    vi.mocked(trpc.cyboflow.monitor.send.mutate).mockResolvedValue({
+      delivered: true,
+      handedOver: true,
+    });
+    activate({ status: 'running', execution_model: 'programmatic' });
+    render(<ChatInput runId={RUN_ID} />);
+
+    await waitFor(() => {
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).placeholder).toBe(
+        'Ask the monitor about this run…',
+      );
+    });
+    const isActiveCallsBeforeSend = vi.mocked(trpc.cyboflow.monitor.isActive.query).mock.calls.length;
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'take it over' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.monitor.send.mutate)).toHaveBeenCalledWith({
+        runId: RUN_ID,
+        text: 'take it over',
+      });
+    });
+
+    // Composer leaves the monitor placeholder without any store/execution_model
+    // change — the run row (and its execution_model) is left exactly as it was.
+    await waitFor(() => {
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).placeholder).toBe(
+        'Queue a message for the agent — sent on its next turn…',
+      );
+    });
+    // No follow-up isActive probe was required to drive the swap — the flip came
+    // from the mutation response, not a re-probe of the store.
+    expect(vi.mocked(trpc.cyboflow.monitor.isActive.query).mock.calls.length).toBe(
+      isActiveCallsBeforeSend,
+    );
+  });
+
   it('does NOT probe the monitor for an interactive run (the live-PTY relay path is untouched)', async () => {
     act(() => {
       useCyboflowStore.getState().setActiveRun(RUN_ID);
