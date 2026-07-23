@@ -1,4 +1,4 @@
--- Migration 079: record when a run was converted programmatic -> orchestrated.
+-- Migration 081: record when a run was converted programmatic -> orchestrated.
 --
 -- handoverRunHandler (main/src/orchestrator/handoverRunHandler.ts) is the SINGLE,
 -- sanctioned, one-way writer of workflow_runs.execution_model (programmatic ->
@@ -19,7 +19,7 @@
 --                    insights/experiment integrity.
 --
 -- The guarded Phase-1 flip in handoverRunHandler is the SOLE writer; nothing else
--- sets or clears this column. A pre-079 reader never references it (pure metadata).
+-- sets or clears this column. A pre-081 reader never references it (pure metadata).
 --
 -- NOTE: No `IF NOT EXISTS` on the ALTER — SQLite ALTER TABLE does not support it.
 -- Re-running raises 'duplicate column name: handed_over_at', the idempotency signal

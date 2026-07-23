@@ -409,7 +409,7 @@ export async function handoverRunHandler(
     const flip = db.transaction(() => {
       return db
         .prepare(
-          // handed_over_at (migration 079) is stamped on EVERY handover — this
+          // handed_over_at (migration 081) is stamped on EVERY handover — this
           // guarded flip is its sole writer. A non-NULL value preserves the fact
           // that the run launched programmatic (lost otherwise, since the flip
           // overwrites execution_model in place). See the migration header.
@@ -563,7 +563,7 @@ export interface HandoverPromptInput {
   reason: string;
   /**
    * Present ONLY for a final-gate auto-handover (finalGateHandover module). When
-   * absent the composed brief is BYTE-IDENTICAL to the pre-079 output (monitor
+   * absent the composed brief is BYTE-IDENTICAL to the pre-081 output (monitor
    * switch_to_orchestrated). When present it inserts a "Where the run stands"
    * section and adjusts the closing directive per its kind.
    */
@@ -656,7 +656,7 @@ export function composeHandoverPrompt(input: HandoverPromptInput): string {
   const instructionsSection = `## Workflow instructions\n\n${instructionsBody}`;
 
   // ## Where the run stands — final-gate auto-handover only (absent = byte-identical
-  // to the pre-079 monitor-initiated brief). Sits between the preamble and
+  // to the pre-081 monitor-initiated brief). Sits between the preamble and
   // "## Completed so far", and re-words the closing directive of the request section.
   let standsSection: string | null = null;
   let closingLine = 'Address this request first, then continue the remaining workflow steps.';

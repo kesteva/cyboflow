@@ -599,7 +599,7 @@ describe('handoverRunHandler — delivery mechanics', () => {
 });
 
 // ---------------------------------------------------------------------------
-// handed_over_at stamp (migration 079)
+// handed_over_at stamp (migration 081)
 // ---------------------------------------------------------------------------
 
 function getHandedOverAt(db: Database.Database, runId: string): string | null {

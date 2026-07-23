@@ -139,7 +139,7 @@ interface FinalGateRunRow {
   status: string;
   execution_model: string | null;
   /**
-   * migration 079 handover stamp — non-null once the run was handed over. Selected
+   * migration 081 handover stamp — non-null once the run was handed over. Selected
    * directly off workflow_runs (no workflows JOIN) so the definition can be resolved
    * from the FROZEN spec (Fix 2) rather than the live workflow row.
    */
