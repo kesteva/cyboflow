@@ -315,6 +315,20 @@ export interface VisualVerifyGate {
    * `signal` (a canceled run resolves 'aborted', never hangs).
    */
   awaitVerdict(req: { runId: string; itemId: string; signal?: AbortSignal }): Promise<VisualGateOutcome>;
+  /**
+   * OPTIONAL adoption probe (live-smoke fix 2026-07-22): is there a LIVE
+   * (non-terminal: queued/leased/running) verification request already
+   * attributed to this lane? A misbehaving task-verify turn can FIRE the
+   * request itself instead of printing the fence (belt-and-suspenders behind
+   * the spawn-level tool denial — e.g. a Codex step turn that ignores
+   * disallowedTools). When true at contract-failure time, the controller ADOPTS
+   * that request — parking on it instead of re-running task-verify into the
+   * same defect — and the gate's awaitVerdict race-closer resolves it exactly
+   * like a controller-enqueued one. LIVE-only on purpose: a TERMINAL request
+   * found here is stale (a prior attempt's) and must not preempt the retry.
+   * Fail-soft → false. Absent (test fakes) ⇒ the controller never adopts.
+   */
+  hasLiveRequestForLane?(runId: string, itemId: string): boolean;
 }
 
 /**

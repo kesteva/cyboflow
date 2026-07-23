@@ -672,6 +672,12 @@ export class WorkflowController {
       // ONE re-delegation when its PASS result violates the fence/NOT-APPLICABLE
       // contract; a second violation fails the lane.
       let laneContractRetries = 0;
+      // Adoption flag (live-smoke fix 2026-07-22): set when a contract-failing
+      // task-verify turn is found to have FIRED the verification request itself
+      // (a LIVE lane-attributed request exists). The visual-verify step then
+      // parks on that request WITHOUT enqueuing. Reset whenever a fresh
+      // task-verify result is consumed.
+      let adoptedPreFiredRequest = false;
       // One-shot per-attempt prompt sections consumed when the NEXT agent-step ctx
       // is built (§5.3): a task-verify contract defect / a visual-FAIL report.
       let pendingContractError: string | undefined;
@@ -704,27 +710,38 @@ export class WorkflowController {
             // Verification inactive for the run → skip (never park), as today.
             continue;
           }
-          if (visualVerifyTask === undefined) {
+          if (visualVerifyTask === undefined && !adoptedPreFiredRequest) {
             // NOT-APPLICABLE / channel-unavailable / task-verify operator-skipped ⇒
             // nothing to verify: skip the step entirely (no request, no park).
             this.host.log?.('info', `fan-out item '${itemId}': no visual task to verify; skipping visual-verify`);
             continue;
           }
-          const enqueueOutcome = this.host.enqueueVisualVerification
-            ? await this.host.enqueueVisualVerification({
-                runId,
-                task: visualVerifyTask,
-                laneTaskRef: itemId,
-                attempt: laneAttempt,
-              })
-            : ({ outcome: 'skipped', reason: 'no-enqueue-capability' } as const);
-          if (enqueueOutcome.outcome === 'skipped') {
-            // Verification disabled / scheduler unavailable ⇒ advance WITHOUT parking.
+          if (visualVerifyTask !== undefined) {
+            const enqueueOutcome = this.host.enqueueVisualVerification
+              ? await this.host.enqueueVisualVerification({
+                  runId,
+                  task: visualVerifyTask,
+                  laneTaskRef: itemId,
+                  attempt: laneAttempt,
+                })
+              : ({ outcome: 'skipped', reason: 'no-enqueue-capability' } as const);
+            if (enqueueOutcome.outcome === 'skipped') {
+              // Verification disabled / scheduler unavailable ⇒ advance WITHOUT parking.
+              this.host.log?.(
+                'info',
+                `fan-out item '${itemId}': visual verification not enqueued (${enqueueOutcome.reason}); advancing`,
+              );
+              continue;
+            }
+          } else {
+            // Adopted pre-fired request (contract hijack, live-smoke fix
+            // 2026-07-22): the misbehaving task-verify turn already enqueued —
+            // park on ITS request instead of enqueuing a duplicate; the gate's
+            // race-closer resolves it like a controller-enqueued one.
             this.host.log?.(
-              'info',
-              `fan-out item '${itemId}': visual verification not enqueued (${enqueueOutcome.reason}); advancing`,
+              'warn',
+              `fan-out item '${itemId}': parking on adopted pre-fired verification request`,
             );
-            continue;
           }
           // Enqueued ⇒ park at awaiting-verify + await the async verdict (the
           // merge-gate has already driven the lane by the time this resolves).
@@ -860,6 +877,8 @@ export class WorkflowController {
         // visual-verify step below will enqueue. Only meaningful when verification
         // is active for the run; otherwise the text is ignored (byte-identical).
         if (innerStep.id === SPRINT_TASK_VERIFY_STEP && this.host.visualGate?.isActive(runId)) {
+          // Every fresh task-verify result supersedes a prior adoption decision.
+          adoptedPreFiredRequest = false;
           const resultText = result.resultText;
           if (resultText === null || resultText === undefined) {
             // A substrate that cannot capture the step's final text (codex /
@@ -911,6 +930,20 @@ export class WorkflowController {
               this.host.log?.(
                 'info',
                 `fan-out item '${itemId}': visual verification NOT-APPLICABLE${section.reason ? ` (${section.reason})` : ''}`,
+              );
+            } else if (this.host.visualGate?.hasLiveRequestForLane?.(runId, itemId) === true) {
+              // 'missing' | 'contract_error' BUT a LIVE lane-attributed request
+              // exists: the misbehaving turn FIRED the request itself instead of
+              // printing the fence (pre-fired hijack, observed live 2026-07-22 —
+              // belt-and-suspenders behind the spawn-level tool denial). The
+              // verification is already underway with this attempt's content, so
+              // adopt it — the visual-verify step parks on it — rather than
+              // re-running task-verify into the same defect and racing the
+              // merge-gate against the contract-retry loop.
+              adoptedPreFiredRequest = true;
+              this.host.log?.(
+                'warn',
+                `fan-out item '${itemId}': task-verify violated the output contract but a live lane-attributed verification request exists; adopting it`,
               );
             } else {
               // 'missing' | 'contract_error' → re-run task-verify ONCE with the

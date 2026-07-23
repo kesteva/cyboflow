@@ -1329,6 +1329,58 @@ describe('WorkflowController', () => {
         expect(driver.lanes.filter((l) => l.itemId === 't1').map((l) => l.status)).not.toContain('integrated');
       });
 
+      it('contract failure + LIVE lane request → ADOPTS it: no retry, no enqueue, parks, gate advance → integrated', async () => {
+        // Pre-fired hijack (live smoke 2026-07-22): the task-verify turn fired
+        // cyboflow_request_verification itself instead of printing the fence.
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        const probeCalls: Array<{ runId: string; itemId: string }> = [];
+        host.visualGate = {
+          ...makeVisualGate([{ kind: 'advance' }]),
+          hasLiveRequestForLane: (runId: string, itemId: string) => {
+            probeCalls.push({ runId, itemId });
+            return true;
+          },
+        };
+        const enqueue = makeEnqueue();
+        host.enqueueVisualVerification = enqueue.fn;
+        // PASS but NO fence and NO NOT-APPLICABLE line — the hijacker's summary.
+        const runner = verifyRunner('VERDICT: PASS\n\nFired async visual verification and parked the lane.\n');
+
+        const result = await new WorkflowController(runner, host).run('run-a', d);
+
+        expect(result.outcome).toBe('completed');
+        // Adopted: task-verify ran ONCE (no contract re-run), nothing enqueued.
+        expect(runner.calls.filter((c) => c.id === 'task-verify').length).toBe(1);
+        expect(enqueue.calls.length).toBe(0);
+        expect(probeCalls).toEqual([{ runId: 'run-a', itemId: 't1' }]);
+        // Parked on the adopted request, then the gate advanced → integrated.
+        const lanes = driver.lanes.filter((l) => l.itemId === 't1');
+        expect(lanes.map((l) => l.currentStepId)).toContain('awaiting-verify');
+        expect(lanes.pop()?.status).toBe('integrated');
+      });
+
+      it('contract failure with NO live request (probe false) → retries as before, never adopts', async () => {
+        // A terminal/stale request must not preempt the retry: the probe is
+        // LIVE-only, so false ⇒ the normal one-retry-then-fail path.
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = { ...makeVisualGate([]), hasLiveRequestForLane: () => false };
+        const enqueue = makeEnqueue();
+        host.enqueueVisualVerification = enqueue.fn;
+        const runner = verifyRunner('VERDICT: PASS\n\n(never any visual section)\n');
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(runner.calls.filter((c) => c.id === 'task-verify').length).toBe(2);
+        expect(enqueue.calls.length).toBe(0);
+        expect(driver.lanes.some((l) => l.currentStepId === 'awaiting-verify')).toBe(false);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').map((l) => l.status)).toContain('failed');
+      });
+
       it('task-verify VERDICT: FAIL → loopback to implement with the bumped attempt', async () => {
         const d = def([phase('p1', [verifyChain()])]);
         const driver = makeFanOutDriver(['t1']);

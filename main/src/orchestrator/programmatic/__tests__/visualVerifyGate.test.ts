@@ -135,6 +135,32 @@ describe('SchedulerVisualVerifyGate', () => {
     expect(g.isActive('missing')).toBe(false);
   });
 
+  describe('hasLiveRequestForLane (adoption probe — live-smoke fix 2026-07-22)', () => {
+    it('true for a lane-attributed NON-terminal request (queued/running)', () => {
+      singleLaneParked('run-1');
+      seedRequest(db, { id: 'vr1', runId: 'run-1', status: 'running', taskRef: 'TASK-001' });
+      expect(gate(db).hasLiveRequestForLane('run-1', 'tsk_a')).toBe(true);
+    });
+
+    it('false for a TERMINAL request (stale prior attempt must not preempt the retry)', () => {
+      singleLaneParked('run-1');
+      seedRequest(db, { id: 'vr1', runId: 'run-1', status: 'passed', taskRef: 'TASK-001' });
+      expect(gate(db).hasLiveRequestForLane('run-1', 'tsk_a')).toBe(false);
+    });
+
+    it('false when no request exists, and false for a sibling lane\'s request in a multi-lane batch', () => {
+      seedTask(db, 'tsk_a', 'TASK-001', 'A');
+      seedTask(db, 'tsk_b', 'TASK-002', 'B');
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a', 'tsk_b']);
+      seedRun(db, 'run-1', batchId, true);
+      expect(gate(db).hasLiveRequestForLane('run-1', 'tsk_a')).toBe(false);
+      // A LIVE request attributed to the OTHER lane never matches this one.
+      seedRequest(db, { id: 'vr1', runId: 'run-1', status: 'running', taskRef: 'TASK-002' });
+      expect(gate(db).hasLiveRequestForLane('run-1', 'tsk_a')).toBe(false);
+      expect(gate(db).hasLiveRequestForLane('run-1', 'tsk_b')).toBe(true);
+    });
+  });
+
   it('a disabled run advances immediately (never parks)', async () => {
     singleLaneParked('run-1', /* verifyEnabled */ false);
     await expect(gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_a' })).resolves.toEqual({ kind: 'advance' });

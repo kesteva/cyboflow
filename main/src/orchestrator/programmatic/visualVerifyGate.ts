@@ -166,6 +166,17 @@ export class SchedulerVisualVerifyGate implements VisualVerifyGate {
     });
   }
 
+  /**
+   * Adoption probe (see the interface doc): a LIVE (non-terminal) request
+   * already attributed to this lane by the SAME strict attribution the
+   * race-closer uses. LIVE-only — a terminal request found at contract-failure
+   * time is a stale prior attempt's, not a pre-fired hijack. Fail-soft → false.
+   */
+  hasLiveRequestForLane(runId: string, itemId: string): boolean {
+    const status = this.requestStatusForLane(runId, itemId);
+    return status !== null && !TERMINAL_REQUEST_STATUSES.has(status);
+  }
+
   // --------------------------------------------------------------------------
   // Lane + request resolution (read-only, fail-soft)
   // --------------------------------------------------------------------------
