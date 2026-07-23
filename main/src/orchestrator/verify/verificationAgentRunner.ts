@@ -44,7 +44,6 @@ import type { AgentProvider } from '../../../../shared/types/agentRuntime';
 import type { EffectiveAgent } from '../agents/effectiveAgents';
 import {
   provisionSnapshot,
-  isPathspecDirty as defaultIsPathspecDirty,
   SnapshotProvisionError,
   type SnapshotProvision,
   type ProvisionSnapshotOptions,
@@ -175,7 +174,6 @@ export interface VerificationAgentRunnerDeps {
   logger?: LoggerLike;
   // -- seams (real defaults; faked in tests) --
   provision?: (opts: ProvisionSnapshotOptions) => Promise<SnapshotProvision>;
-  isPathspecDirty?: (worktreePath: string, paths?: readonly string[]) => Promise<boolean>;
   /** `git diff --quiet HEAD` on the snapshot — true when the verifier mutated tracked sources. */
   checkSnapshotMutated?: (worktreePath: string) => Promise<boolean>;
   fileExists?: (absPath: string) => Promise<boolean>;
@@ -472,13 +470,18 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
     let env: Record<string, string> | null = null;
 
     try {
-      // (b) Provision — snapshot when a sha is present AND the run worktree is clean;
-      // else the dirty-worktree fallback runs in the live worktree (§5.5).
-      const isDirty = this.deps.isPathspecDirty ?? defaultIsPathspecDirty;
+      // (b) Provision — ALWAYS snapshot when a sha is present; the live-worktree
+      // fallback is reserved for a failed sha capture (req.snapshotSha === null).
+      // A whole-tree dirty check used to gate the snapshot here, but any sibling
+      // lane's mid-edit state in the shared sprint worktree tripped it and routed
+      // verification into the live worktree — the exact cross-lane contamination
+      // snapshots exist to prevent (adversarial-review fix 2026-07-23). The sprint
+      // chain commits per task before task-verify fires, so the recorded HEAD
+      // contains this lane's deliverable; an uncommitted lane diff fails closed in
+      // the snapshot with "not present in build" feedback instead (§5.5 amended).
       let cwd: string;
       let mode: 'snapshot' | 'fallback';
-      const wantSnapshot = req.snapshotSha !== null && !(await isDirty(req.runWorktreePath));
-      if (wantSnapshot && req.snapshotSha !== null) {
+      if (req.snapshotSha !== null) {
         const provision = this.deps.provision ?? provisionSnapshot;
         try {
           snapshot = await provision({

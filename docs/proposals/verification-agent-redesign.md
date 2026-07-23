@@ -405,11 +405,17 @@ against a **temporary `git worktree` at a recorded `snapshotSha`**.
 - **Precondition:** the lane's own diff must be committed before its
   visual-verify step fires. The sprint lane chain already commits per task in
   agent space; implementation must verify/enforce commit-before-verify
-  ordering in both modes (prose + controller). **Fallback:** when the lane's
-  files are still dirty at enqueue (ordering violated), the harness verifies
-  the live shared worktree instead and routes any build/launch failure to the
-  fail-open infra bucket — attribution is unprovable there, so it must not
-  consume the lane's retry budget.
+  ordering in both modes (prose + controller). **Fallback (amended
+  2026-07-23, adversarial-review fix):** a recorded `snapshotSha` ALWAYS
+  snapshots — the originally-specified dirty check was implemented
+  whole-tree, so any sibling lane's mid-edit state disabled isolation for
+  every concurrent lane; it has been removed. The live-worktree fallback now
+  exists only when the sha capture itself failed (`snapshotSha` null); there
+  the harness routes any build/launch failure to the fail-open infra bucket —
+  attribution is unprovable, so it must not consume the lane's retry budget.
+  A lane whose own diff was left uncommitted (ordering violated) now fails
+  closed in the snapshot with "not present in build" feedback, which is
+  actionable by the loopback implementer.
 - **Dependency dirs:** a fresh `git worktree` has no `node_modules`. The
   provisioner links untracked dependency roots (`node_modules`, and any
   project-declared equivalents) from the run worktree into the snapshot
@@ -445,7 +451,7 @@ fixed in v2 (v1-review findings 3 and 4):
 | All behaviors pass | `passed` | advance → integrated | none; **prior under-cap visual findings for this lane generation are auto-resolved (superseded)** |
 | Any behavior fails | `failed` (verdict) | **fail closed**: loopback ≤3× → failed | blocking; body = report (behaviors failed + evidence + feedback) |
 | `build_failed` / `launch_failed` in the snapshot | `failed` (verdict-less, `error_message` = buildLogExcerpt) | **fail closed** (a deliverable that cannot build from its own committed state is a smoke FAIL, and is frequently code-caused) | blocking; body **includes the build/launch log excerpt** |
-| Build/launch failure in the dirty-worktree fallback (§5.5) | `skipped` | fail open: advance | non-blocking, reason = unattributable shared-worktree build failure |
+| Build/launch failure in the live-worktree fallback (sha capture failed, §5.5) | `skipped` | fail open: advance | non-blocking, reason = unattributable shared-worktree build failure |
 | Agent spawn/SDK/API error, budget exhausted | `skipped` | fail open: advance | non-blocking, with the concrete reason |
 | Queued-age/lease-starvation expiry | `skipped` | fail open: advance | non-blocking, with the lease reason |
 | Deadline exceeded / orphaned by restart | `timeout` | fail open: advance | non-blocking |

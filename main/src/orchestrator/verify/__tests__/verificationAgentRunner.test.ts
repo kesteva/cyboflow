@@ -109,7 +109,6 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
     driverCliPath: '/app/driverCli.js',
     logger: { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() },
     provision,
-    isPathspecDirty: async () => false,
     checkSnapshotMutated: async () => false,
     fileExists: async () => true,
     writeDriverScript: async () => '/artifacts/.driver/verify-driver.sh',
@@ -309,17 +308,45 @@ describe('VerificationAgentRunner.run', () => {
     expect(result.errorMessage).toContain('bare filename');
   });
 
-  it('routes a snapshot build failure to failed; a dirty-fallback build failure to skipped', async () => {
+  it('routes a snapshot build failure to failed; a live-fallback build failure to skipped', async () => {
     const buildFail = async (): Promise<VerificationReportV1> =>
       validReport({ outcome: 'build_failed', buildLogExcerpt: 'boom', screenshots: [], behaviors: [] });
 
     const snap = makeRunner({ query: buildFail });
     expect((await snap.runner.run(makeReq())).status).toBe('failed');
 
-    // Dirty worktree ⇒ fallback ⇒ the same build failure is unattributable ⇒ skipped.
-    const fb = makeRunner({ query: buildFail, isPathspecDirty: async () => true });
-    const r = await fb.runner.run(makeReq());
+    // No sha (capture failed at enqueue) ⇒ fallback ⇒ the same build failure is
+    // unattributable in the shared worktree ⇒ skipped.
+    const fb = makeRunner({ query: buildFail });
+    const r = await fb.runner.run(makeReq({ snapshotSha: null }));
     expect(r.status).toBe('skipped');
+  });
+
+  it('a recorded sha ALWAYS snapshots — sibling-lane dirt cannot force the live-worktree fallback', async () => {
+    // Regression (adversarial-review fix 2026-07-23): the old whole-tree dirty
+    // check routed to the live worktree whenever ANY lane had uncommitted edits.
+    // The runner no longer consults worktree state at all: sha present ⇒ provision
+    // is called with that sha and the agent runs in the snapshot path.
+    const provision = vi.fn(
+      async (_opts: unknown): Promise<SnapshotProvision> => ({ worktreePath: '/snap', sha: 'abc123', dispose: vi.fn(async () => {}) }),
+    );
+    const { runner, query } = makeRunner({ provision });
+    const result = await runner.run(makeReq({ snapshotSha: 'abc123' }));
+    expect(result.status).toBe('passed');
+    expect(provision).toHaveBeenCalledTimes(1);
+    expect(provision.mock.calls[0][0]).toMatchObject({ snapshotSha: 'abc123' });
+    expect(query.mock.calls[0][0].cwd).toBe('/snap');
+  });
+
+  it('sha null skips provisioning entirely and runs in the live worktree', async () => {
+    const provision = vi.fn(
+      async (): Promise<SnapshotProvision> => ({ worktreePath: '/snap', sha: 'abc123', dispose: vi.fn(async () => {}) }),
+    );
+    const { runner, query } = makeRunner({ provision });
+    const result = await runner.run(makeReq({ snapshotSha: null }));
+    expect(result.status).toBe('passed');
+    expect(provision).not.toHaveBeenCalled();
+    expect(query.mock.calls[0][0].cwd).toBe('/live/worktree');
   });
 
   it('demotes to low_confidence when the post-run mutation check trips (snapshot mode)', async () => {
@@ -329,10 +356,10 @@ describe('VerificationAgentRunner.run', () => {
     expect(result.errorMessage).toContain('modified tracked sources');
   });
 
-  it('does NOT run the mutation check in the dirty-worktree fallback', async () => {
+  it('does NOT run the mutation check in the live-worktree fallback', async () => {
     const checkSnapshotMutated = vi.fn(async () => true);
-    const { runner } = makeRunner({ isPathspecDirty: async () => true, checkSnapshotMutated });
-    const result = await runner.run(makeReq());
+    const { runner } = makeRunner({ checkSnapshotMutated });
+    const result = await runner.run(makeReq({ snapshotSha: null }));
     // Fallback mode ⇒ a pass stays passed (the check is skipped, so no demotion).
     expect(result.status).toBe('passed');
     expect(checkSnapshotMutated).not.toHaveBeenCalled();

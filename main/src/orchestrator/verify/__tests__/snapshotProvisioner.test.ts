@@ -1,8 +1,8 @@
 /**
  * snapshotProvisioner tests — run against a REAL throwaway git repo fixture
- * (no DB, no Electron). Covers captureSnapshotSha, isPathspecDirty,
- * provisionSnapshot's exact-sha checkout + node_modules symlinking, the typed
- * bad-sha error, and dispose's unconditional/idempotent teardown.
+ * (no DB, no Electron). Covers captureSnapshotSha, provisionSnapshot's
+ * exact-sha checkout + node_modules symlinking, the typed bad-sha error, and
+ * dispose's unconditional/idempotent teardown.
  */
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';
@@ -11,7 +11,6 @@ import * as path from 'node:path';
 import { withTempDir } from '../../../__test_fixtures__/tmp';
 import {
   captureSnapshotSha,
-  isPathspecDirty,
   provisionSnapshot,
   findDependencyDirs,
   SnapshotProvisionError,
@@ -46,51 +45,6 @@ describe('snapshotProvisioner', () => {
     });
   });
 
-  describe('isPathspecDirty', () => {
-    it('is false on a clean tree', async () => {
-      await withTempDir('snapshot-provisioner-', async (dir) => {
-        await initFixtureRepo(dir);
-        await expect(isPathspecDirty(dir)).resolves.toBe(false);
-      });
-    });
-
-    it('is true when a tracked file is modified', async () => {
-      await withTempDir('snapshot-provisioner-', async (dir) => {
-        await initFixtureRepo(dir);
-        await fsPromises.writeFile(path.join(dir, 'README.md'), 'v2\n');
-
-        await expect(isPathspecDirty(dir)).resolves.toBe(true);
-      });
-    });
-
-    it('is true when an untracked file exists under the given path', async () => {
-      await withTempDir('snapshot-provisioner-', async (dir) => {
-        await initFixtureRepo(dir);
-        await fsPromises.mkdir(path.join(dir, 'sub'), { recursive: true });
-        await fsPromises.writeFile(path.join(dir, 'sub', 'new.txt'), 'new\n');
-
-        await expect(isPathspecDirty(dir, ['sub'])).resolves.toBe(true);
-      });
-    });
-
-    it('scopes to the given paths — dirt outside them is not reported', async () => {
-      await withTempDir('snapshot-provisioner-', async (dir) => {
-        await initFixtureRepo(dir);
-        await fsPromises.mkdir(path.join(dir, 'scoped'), { recursive: true });
-        await fsPromises.writeFile(path.join(dir, 'scoped', 'clean.txt'), 'clean\n');
-        git(dir, ['add', 'scoped/clean.txt']);
-        git(dir, ['commit', '-q', '-m', 'add scoped dir']);
-
-        // Dirty a file OUTSIDE the scoped path.
-        await fsPromises.writeFile(path.join(dir, 'README.md'), 'v2\n');
-
-        await expect(isPathspecDirty(dir, ['scoped'])).resolves.toBe(false);
-        // Sanity: the same tree IS dirty when checked unscoped.
-        await expect(isPathspecDirty(dir)).resolves.toBe(true);
-      });
-    });
-  });
-
   describe('provisionSnapshot', () => {
     it('checks out the exact recorded sha, not a later commit', async () => {
       await withTempDir('snapshot-provisioner-', async (dir) => {
@@ -107,6 +61,30 @@ describe('snapshotProvisioner', () => {
           expect(provision.sha).toBe(snapshotSha);
           const content = await fsPromises.readFile(path.join(provision.worktreePath, 'README.md'), 'utf8');
           expect(content).toBe('v1\n');
+        } finally {
+          await provision.dispose();
+        }
+      });
+    });
+
+    it('a dirty run worktree (concurrent-lane edits) still snapshots the recorded sha cleanly', async () => {
+      await withTempDir('snapshot-provisioner-', async (dir) => {
+        await initFixtureRepo(dir);
+        const snapshotSha = await captureSnapshotSha(dir);
+
+        // Simulate sibling lanes mid-edit in the shared worktree: an uncommitted
+        // tracked change AND an untracked file. Neither may leak into the snapshot.
+        await fsPromises.writeFile(path.join(dir, 'README.md'), 'sibling lane mid-edit\n');
+        await fsPromises.writeFile(path.join(dir, 'sibling-untracked.ts'), 'wip\n');
+
+        const provision = await provisionSnapshot({ runWorktreePath: dir, snapshotSha });
+        try {
+          expect(provision.sha).toBe(snapshotSha);
+          const content = await fsPromises.readFile(path.join(provision.worktreePath, 'README.md'), 'utf8');
+          expect(content).toBe('v1\n');
+          await expect(
+            fsPromises.access(path.join(provision.worktreePath, 'sibling-untracked.ts')),
+          ).rejects.toThrow();
         } finally {
           await provision.dispose();
         }

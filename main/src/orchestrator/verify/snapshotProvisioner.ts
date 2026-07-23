@@ -84,59 +84,21 @@ export class SnapshotProvisionError extends Error {
 }
 
 // ---------------------------------------------------------------------------
-// captureSnapshotSha / isPathspecDirty
+// captureSnapshotSha
 // ---------------------------------------------------------------------------
 
 /**
  * `git rev-parse HEAD` of the run worktree. Callers capture this AT ENQUEUE
  * TIME (the shared branch HEAD at the moment the visual-verify request is
  * fired) and pass it through as `snapshotSha` — this function does not decide
- * *when* to capture, only performs the capture.
+ * *when* to capture, only performs the capture. A recorded sha ALWAYS
+ * snapshots (§5.5 amended): the runner's old whole-tree dirty check routed to
+ * the live shared worktree whenever any sibling lane was mid-edit, so it was
+ * removed; the live-worktree fallback now exists only for a failed capture.
  */
 export async function captureSnapshotSha(runWorktreePath: string, gitExec: GitExec = defaultGitExec): Promise<string> {
   const out = await gitExec(['rev-parse', 'HEAD'], runWorktreePath);
   return out.trim();
-}
-
-/** `git diff --quiet` (and similar) exit with code 1 when differences are found — an expected, non-error signal. */
-function isDiffFoundExit(err: unknown): boolean {
-  if (!err || typeof err !== 'object') return false;
-  const code = (err as { code?: unknown }).code;
-  return code === 1;
-}
-
-/**
- * True when any of `paths` has uncommitted changes (staged, unstaged, or
- * untracked) in the run worktree. Empty/absent `paths` checks the whole tree.
- *
- * This is the commit-before-verify precondition check (§5.5): the sprint lane
- * chain commits per task before firing visual-verify; a dirty pathspec here
- * means that ordering was violated (or the check is being used for something
- * else entirely dirty), and callers should route to the dirty-worktree
- * fallback rather than snapshot the run worktree's HEAD.
- */
-export async function isPathspecDirty(
-  runWorktreePath: string,
-  paths?: readonly string[],
-  gitExec: GitExec = defaultGitExec,
-): Promise<boolean> {
-  const pathspec = paths && paths.length > 0 ? paths : undefined;
-
-  // `git diff HEAD` compares the working tree directly to HEAD, covering both
-  // staged and unstaged tracked changes in one call.
-  const diffArgs = ['diff', '--quiet', 'HEAD'];
-  if (pathspec) diffArgs.push('--', ...pathspec);
-  try {
-    await gitExec(diffArgs, runWorktreePath);
-  } catch (err) {
-    if (isDiffFoundExit(err)) return true;
-    throw err;
-  }
-
-  const untrackedArgs = ['ls-files', '--others', '--exclude-standard'];
-  if (pathspec) untrackedArgs.push('--', ...pathspec);
-  const untracked = await gitExec(untrackedArgs, runWorktreePath);
-  return untracked.trim().length > 0;
 }
 
 // ---------------------------------------------------------------------------
