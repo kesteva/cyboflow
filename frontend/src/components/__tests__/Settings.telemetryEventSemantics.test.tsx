@@ -16,12 +16,16 @@ const configGet = vi.fn();
 const configUpdate = vi.fn();
 const getVersionInfo = vi.fn();
 const trackEvent = vi.fn();
+const projectsGetAll = vi.fn();
 
 vi.mock('../../utils/api', () => ({
   API: {
     config: {
       get: (...a: unknown[]) => configGet(...a),
       update: (...a: unknown[]) => configUpdate(...a),
+    },
+    projects: {
+      getAll: (...a: unknown[]) => projectsGetAll(...a),
     },
     getVersionInfo: (...a: unknown[]) => getVersionInfo(...a),
   },
@@ -61,6 +65,7 @@ beforeEach(() => {
   configGet.mockReset().mockResolvedValue({ success: true, data: baseConfig() });
   configUpdate.mockReset().mockResolvedValue({ success: true });
   getVersionInfo.mockReset().mockResolvedValue({ success: true, data: { variant: 'dev' } });
+  projectsGetAll.mockReset().mockResolvedValue({ success: true, data: [] });
   trackEvent.mockReset();
 });
 
