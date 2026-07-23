@@ -542,6 +542,18 @@ export class RunExecutor {
   private pendingNudge = new Map<string, string>();
 
   /**
+   * Run ids whose CURRENT pending nudge must be HIDDEN from the transcript (not
+   * rendered as a user bubble). Set by setPendingNudge(runId, text, {
+   * hideFromTranscript: true }) — the final-gate auto-handover, whose raw user
+   * message + '▶' marker are already injected, so the giant handover brief must not
+   * double as a visible turn. Read at spawn (hidePromptFromTranscript). The flag
+   * belongs to the current pending nudge, NOT the run: a later setPendingNudge call
+   * without the flag CLEARS membership. Cleared alongside pendingNudge in
+   * teardownRun() so a subsequent fresh turn is never spuriously hidden.
+   */
+  private hiddenNudges = new Set<string>();
+
+  /**
    * Per-run RESUME flag (Phase 4b — SDK-only Pause/Resume). Set by
    * setPendingResume() before resumeRunHandler re-drives execute() on a run that
    * was PAUSED (status flipped paused -> running by the handler). It is the
@@ -830,7 +842,13 @@ export class RunExecutor {
           runId,
           worktreePath: run.worktree_path,
           prompt,
-          hidePromptFromTranscript: turnKind === 'launch',
+          // Hide the launch turn (the workflow prompt is not a chat message) OR a
+          // nudge explicitly flagged hidden — the final-gate handover brief, whose
+          // user message + '▶' marker are already in the transcript. turnKind is
+          // resolved from pendingNudge (above), which getPrompt does NOT delete, so
+          // both it and the hidden flag are still live here.
+          hidePromptFromTranscript:
+            turnKind === 'launch' || (turnKind === 'nudge' && this.hiddenNudges.has(runId)),
           ...renderedOverrides,
           ...(resumeSessionId ? { resumeSessionId } : {}),
         });
@@ -1260,8 +1278,15 @@ export class RunExecutor {
    * nudge is cleared by teardownRun() when that turn drains, so a later
    * execute() of the same run is a clean fresh turn.
    */
-  setPendingNudge(runId: string, text: string): void {
+  setPendingNudge(runId: string, text: string, opts?: { hideFromTranscript?: boolean }): void {
     this.pendingNudge.set(runId, text);
+    // The hide flag belongs to THIS nudge, not the run: opt-in sets membership,
+    // a plain call clears any stale flag from a prior nudge of the same run.
+    if (opts?.hideFromTranscript) {
+      this.hiddenNudges.add(runId);
+    } else {
+      this.hiddenNudges.delete(runId);
+    }
   }
 
   /**
@@ -1386,6 +1411,7 @@ export class RunExecutor {
     this.pendingCompletedSteps.delete(runId);
     this.pendingSystemPromptAppend.delete(runId);
     this.pendingNudge.delete(runId);
+    this.hiddenNudges.delete(runId);
     this.pendingResume.delete(runId);
     // Defensive: the drained REST seam already drains this buffer before resting
     // (drainQueuedInputAtRest), so it is normally empty here. Clear it anyway so a

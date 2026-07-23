@@ -697,6 +697,42 @@ describe('RunExecutor.execute — happy path (panelId/sessionId alignment)', () 
     expect(opts.prompt).toBe('test prompt');
   });
 
+  it('(e-hidden) a nudge flagged hidden reaches spawnCliProcess as hidePromptFromTranscript=true', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const executor = new TestableRunExecutor(spawner, registry, makeSpyLogger());
+
+    // A final-gate handover seeds a HIDDEN nudge — its brief must not render as a bubble.
+    executor.setPendingNudge(run.id, 'the handover brief', { hideFromTranscript: true });
+    await executor.execute(run.id);
+
+    const opts = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(opts.hidePromptFromTranscript).toBe(true);
+  });
+
+  it('(e-visible) a plain nudge reaches spawnCliProcess as hidePromptFromTranscript=false', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const executor = new TestableRunExecutor(spawner, registry, makeSpyLogger());
+
+    // A monitor-initiated (visible) nudge — rendered as a user turn.
+    executor.setPendingNudge(run.id, 'a visible nudge');
+    await executor.execute(run.id);
+
+    const opts = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(opts.hidePromptFromTranscript).toBe(false);
+  });
+
   it('(e1) logs a provider-neutral launch message with the Codex runtime identity', async () => {
     const run = makeWorkflowRunRow({
       worktree_path: '/my/worktree',
