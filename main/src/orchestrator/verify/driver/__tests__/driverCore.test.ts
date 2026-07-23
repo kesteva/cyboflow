@@ -408,13 +408,29 @@ describe('runDriverCommand — command execution', () => {
 // ---------------------------------------------------------------------------
 
 describe('runDriverCommand — stop', () => {
-  it('closes via CDP when reachable and never touches the pid kill path', async () => {
+  it('closes via CDP when reachable and skips the kill only when no pid is recorded', async () => {
     const calls = freshCalls();
     const deps = makeDeps(calls);
     const exitCode = await runDriverCommand(['stop'], ENV, deps);
     expect(exitCode).toBe(0);
     expect(deps.closeBrowser).toHaveBeenCalledTimes(1);
     expect(deps.killPid).not.toHaveBeenCalled();
+    expect(deps.removePidFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('SIGKILLs the recorded pid even when the CDP close succeeds (disconnect-only close leak)', async () => {
+    // Regression (live smoke 2026-07-22): playwright's close() on a
+    // connectOverCDP browser only disconnects, so a "successful" CDP close used
+    // to skip the pid kill and leak the spawned chromium + its bound port.
+    const calls = freshCalls();
+    const deps = makeDeps(calls, {
+      readPidFile: vi.fn(async () => 4242),
+      isProcessAlive: vi.fn(() => true),
+    });
+    const exitCode = await runDriverCommand(['stop'], ENV, deps);
+    expect(exitCode).toBe(0);
+    expect(deps.closeBrowser).toHaveBeenCalledTimes(1);
+    expect(deps.killPid).toHaveBeenCalledWith(4242, 'SIGKILL');
     expect(deps.removePidFile).toHaveBeenCalledTimes(1);
   });
 

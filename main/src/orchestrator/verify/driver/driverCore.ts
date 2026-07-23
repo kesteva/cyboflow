@@ -336,27 +336,30 @@ async function executeCommand(
 /**
  * `stop` is best-effort cleanup and ALWAYS exits 0 (§5.4 step 6 — the
  * harness's port probe + lease quarantine is the real backstop, this is just
- * hygiene). Closes the browser via CDP when the endpoint is still reachable;
- * otherwise SIGKILLs the recorded pid. Missing env / no pid file / an
- * already-gone process are all silently fine.
+ * hygiene). Attempts a graceful CDP close when the endpoint is reachable, then
+ * ALWAYS SIGKILLs the recorded pid: playwright's `close()` on a connectOverCDP
+ * browser only DISCONNECTS the client, so a "successful" CDP close can leave
+ * the spawned chromium alive and the port bound (observed live: leaked process
+ * + port quarantine). SIGKILL is uncatchable, so once issued the pid file is
+ * safe to remove. Missing env / no pid file / an already-gone process are all
+ * silently fine.
  */
 async function stopCommand(env: NodeJS.ProcessEnv, deps: DriverDeps): Promise<number> {
   const artifactsDir = env.VERIFY_ARTIFACTS_DIR;
   const portRaw = env.VERIFY_DRIVER_PORT;
   const port = portRaw ? Number.parseInt(portRaw, 10) : NaN;
 
-  let closedViaCdp = false;
+  // Graceful CDP close first — never trusted as the kill (see the doc above).
   if (Number.isFinite(port) && port > 0) {
     try {
       const browser = await deps.connectOverCDP(`http://127.0.0.1:${port}`);
       await deps.closeBrowser(browser);
-      closedViaCdp = true;
     } catch {
-      closedViaCdp = false;
+      // unreachable — the pid kill below is the real teardown.
     }
   }
 
-  if (!closedViaCdp && artifactsDir) {
+  if (artifactsDir) {
     try {
       const pid = await deps.readPidFile(pidFilePath(artifactsDir));
       if (pid !== null && deps.isProcessAlive(pid)) {
@@ -365,9 +368,6 @@ async function stopCommand(env: NodeJS.ProcessEnv, deps: DriverDeps): Promise<nu
     } catch {
       // best-effort — stop never fails the process.
     }
-  }
-
-  if (artifactsDir) {
     await deps.removePidFile(pidFilePath(artifactsDir)).catch(() => {});
   }
 
@@ -490,7 +490,18 @@ export function createDefaultDriverDeps(): DriverDeps {
     spawnDetachedChromium: defaultSpawnDetachedChromium,
     waitForCdpReady: defaultWaitForCdpReady,
     closeBrowser: async (browser) => {
-      await browser.close();
+      // `browser.close()` on a connectOverCDP browser only disconnects the
+      // client — the CDP protocol `Browser.close` command is what actually
+      // terminates the browser process. Send it first (chromium-only API, which
+      // is the only browser this driver ever spawns), then disconnect; either
+      // half failing falls through to stop's unconditional pid SIGKILL.
+      try {
+        const session = await browser.newBrowserCDPSession();
+        await session.send('Browser.close');
+      } catch {
+        // endpoint already gone or non-chromium — the disconnect below still runs.
+      }
+      await browser.close().catch(() => {});
     },
     readPidFile: defaultReadPidFile,
     writePidFile: defaultWritePidFile,
