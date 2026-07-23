@@ -3297,6 +3297,72 @@ describe('VerificationScheduler — delivery outbox (§5.6)', () => {
     expect(del.d).toBeNull(); // untouched
   });
 
+  // §5.6 amended (adversarial-review fix 2026-07-23): a failed required consumer
+  // must leave the row 'pending' for replay — never stamp 'delivered'.
+  it('a hook returning false leaves the row pending on replay; it delivers once the consumer recovers', async () => {
+    let consumerHealthy = false;
+    const calls: string[] = [];
+    const sched = makeSched(async (a) => {
+      calls.push(a.requestId);
+      return consumerHealthy;
+    });
+    insertTerminal(db, { id: 'vr_retry', status: 'failed', deliveryState: 'pending' });
+
+    expect(await sched.runRecovery()).toBe(0); // delivery failed → NOT counted as replayed
+    let del = db.prepare('SELECT delivery_state AS d FROM verification_requests WHERE id = ?').get('vr_retry') as { d: string | null };
+    expect(del.d).toBe('pending');
+
+    consumerHealthy = true;
+    expect(await sched.runRecovery()).toBe(1);
+    del = db.prepare('SELECT delivery_state AS d FROM verification_requests WHERE id = ?').get('vr_retry') as { d: string | null };
+    expect(del.d).toBe('delivered');
+    expect(calls).toEqual(['vr_retry', 'vr_retry']); // idempotent consumers make the re-run safe
+  });
+
+  it('a THROWING hook on a live terminal leaves the row pending (not delivered)', async () => {
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: { ...baseConfig, queuedAgeCeilingMs: 1 },
+      onVerdict: async () => {
+        throw new Error('router down');
+      },
+      now: () => 40_000_000,
+    });
+    db.prepare(
+      `INSERT INTO verification_requests
+         (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, enqueued_at)
+       VALUES ('vr_hookthrow', 'run-1', 1, 'queued', 'static-render-snapshot', ?, '[]', 0, ?)`,
+    ).run(JSON.stringify({ intent: 'x' }), new Date(40_000_000 - 10_000).toISOString());
+    await sched.drain();
+    const row = db.prepare('SELECT status, delivery_state AS d FROM verification_requests WHERE id = ?').get('vr_hookthrow') as { status: string; d: string | null };
+    expect(row.status).toBe('skipped'); // terminal status committed regardless
+    expect(row.d).toBe('pending'); // …but the outbox row awaits replay
+  });
+
+  it('a hook returning false on a live terminal leaves the row pending', async () => {
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: { ...baseConfig, queuedAgeCeilingMs: 1 },
+      onVerdict: async () => false,
+      now: () => 40_000_000,
+    });
+    db.prepare(
+      `INSERT INTO verification_requests
+         (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt, enqueued_at)
+       VALUES ('vr_hookfalse', 'run-1', 1, 'queued', 'static-render-snapshot', ?, '[]', 0, ?)`,
+    ).run(JSON.stringify({ intent: 'x' }), new Date(40_000_000 - 10_000).toISOString());
+    await sched.drain();
+    const row = db.prepare('SELECT status, delivery_state AS d FROM verification_requests WHERE id = ?').get('vr_hookfalse') as { status: string; d: string | null };
+    expect(row.status).toBe('skipped');
+    expect(row.d).toBe('pending');
+  });
+
   it('markTerminal stamps delivery_state=pending and markTerminalAndDeliver flips it to delivered', async () => {
     // A live over-age expiry exercises the full terminal→deliver→delivered path.
     const sched = VerificationScheduler.initialize({

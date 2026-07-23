@@ -442,7 +442,17 @@ fixed in v2 (v1-review findings 3 and 4):
   sweeps leased/running rows. v2 writes `delivery_state='pending'` atomically
   with the terminal status + `report_json`, makes all three consumers
   idempotent by requestId, replays every terminal-but-pending request at boot,
-  and stamps `delivered` only after all three effects commit.
+  and stamps `delivered` only after all three effects commit. **Amended
+  2026-07-23 (adversarial-review fix):** the delivery callback reports
+  per-consumer success, and a failed REQUIRED consumer (artifact merge /
+  merge-gate lane write / finding creation) also leaves the row `pending` —
+  previously a swallowed consumer error still stamped `delivered`,
+  permanently acking a delivery whose merge-gate write never happened. An
+  in-process backoff sweep (60s base, doubling to a 15-min cap) re-runs the
+  replay so recovery does not wait for the next boot; the terminal event
+  still fires independently so parked listeners always wake. Supersession
+  resolves stay advisory (a failure there is visible staleness, not data
+  loss).
 
 ### 5.7 Fail posture (amended) + finding supersession
 

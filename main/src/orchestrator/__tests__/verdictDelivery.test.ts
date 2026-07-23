@@ -578,6 +578,78 @@ describe('verdictDelivery (P8a)', () => {
     expect(bodyRow.body).not.toContain('Capture origin:');
     expect(bodyRow.body).not.toContain('Capture diagnostics');
   });
+
+  // -------------------------------------------------------------------------
+  // §5.6 amended (adversarial-review fix 2026-07-23): the callback RETURNS the
+  // outbox verdict — true only when every required consumer succeeded, so the
+  // scheduler leaves failed deliveries 'pending' for replay.
+  // -------------------------------------------------------------------------
+
+  it('returns true when every required consumer succeeds', async () => {
+    seedRun(db, 'run-ok', 'tsk_ok');
+    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const ok = await deliver({
+      requestId: 'vr_ok',
+      runId: 'run-ok',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'failed',
+      verdict: FAIL_VERDICT,
+      fileNames: ['home.png'],
+    });
+    expect(ok).toBe(true);
+    expect(findingRows(db, 'run-ok')).toHaveLength(1);
+  });
+
+  it('returns false when the artifact merge fails (router unavailable)', async () => {
+    seedRun(db, 'run-am', 'tsk_am');
+    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    ArtifactRouter._resetForTesting(); // getInstance() now throws inside the merge try-block
+    const ok = await deliver({
+      requestId: 'vr_am',
+      runId: 'run-am',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'passed',
+      verdict: PASS_VERDICT,
+      fileNames: ['home.png'],
+    });
+    expect(ok).toBe(false);
+  });
+
+  it('returns false when finding creation fails (router unavailable)', async () => {
+    seedRun(db, 'run-ff', 'tsk_ff');
+    seedVerificationRequest(db, 'vr_ff', 'run-ff', 'no backend');
+    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    ReviewItemRouter._resetForTesting();
+    // skipped with no verdict/files: the artifact merge is not attempted, so the
+    // ONLY required consumer is the finding — its failure must flip the verdict.
+    const ok = await deliver({
+      requestId: 'vr_ff',
+      runId: 'run-ff',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'skipped',
+      verdict: undefined,
+      fileNames: [],
+    });
+    expect(ok).toBe(false);
+  });
+
+  it('a PASS with nothing to merge and no finding returns true (no required consumers)', async () => {
+    seedRun(db, 'run-nm', 'tsk_nm');
+    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const ok = await deliver({
+      requestId: 'vr_nm',
+      runId: 'run-nm',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'passed',
+      verdict: undefined,
+      fileNames: [],
+    });
+    expect(ok).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------

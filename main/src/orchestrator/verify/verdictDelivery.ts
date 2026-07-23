@@ -459,11 +459,23 @@ function parseCorrelation(
  * Build the concrete `OnVerdict` callback the scheduler fires after a terminal
  * outcome. Fail-soft end to end: a router error is logged and swallowed so a
  * delivery problem never wedges the drain loop or leaves a half-applied state.
+ *
+ * RETURNS the outbox verdict (§5.6 amended, adversarial-review fix 2026-07-23):
+ * `true` when every REQUIRED consumer succeeded, `false` when any failed — the
+ * scheduler then leaves the row `delivery_state='pending'` so the retry sweep /
+ * boot replay re-delivers (every consumer is idempotent by requestId, so a
+ * partial re-run is safe). Required consumers: the artifact merge (when there is
+ * evidence to merge), the merge-gate lane write (when a lane action was decided
+ * but its write failed — `noop:lane-write-failed`), and the finding creation
+ * (when the status warrants one). Supersession resolves are ADVISORY: a failure
+ * there leaves a stale prior finding (visible, not data loss) and is logged only
+ * — requiring it could pin a row pending forever on one odd historical item.
  */
 export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
   const { db, logger } = deps;
 
   return async ({ requestId, runId, projectId, status, verdict, fileNames, input, captureOrigin, diagnostics }) => {
+    let allOk = true;
     // Read the columns the scheduler committed atomically with the terminal status.
     // Works identically for a live delivery and a delivery-outbox boot replay (both
     // observe the persisted report_json / enqueue_key / error_message).
@@ -510,6 +522,7 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
           actor: 'orchestrator',
         });
       } catch (err) {
+        allOk = false;
         logger?.error('[verdictDelivery] artifact merge failed (fail-soft)', {
           runId,
           projectId,
@@ -528,6 +541,13 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
       requestAttempt: attempt,
       logger,
     });
+    // A DECIDED lane action whose write failed (SprintLaneError / DB error) is a
+    // required-consumer failure — without it an orchestrated lane stays parked at
+    // awaiting-verify. Other noop reasons (no lane, terminal lane, stale replay,
+    // store-uninitialized) are legitimate non-actions, not failures.
+    if (gateAction.kind === 'noop' && gateAction.reason === 'lane-write-failed') {
+      allOk = false;
+    }
 
     // ---- 2b. SUPERSESSION: resolve prior lower-attempt visual findings (§5.7) ----
     // Runs for EVERY terminal verdict (incl. PASS): a recovered/passing lane leaves
@@ -558,12 +578,12 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
     }
 
     // ---- 3. Raise ONE finding ONLY on FAIL / low_confidence / timeout / skipped ----
-    if (!FINDING_STATUSES.has(status)) return;
+    if (!FINDING_STATUSES.has(status)) return allOk;
 
     // IDEMPOTENT (§5.6 replay): a finding already exists for THIS requestId → skip.
     if (priorFindings.some((p) => p.correlation?.requestId === requestId)) {
       logger?.debug('[verdictDelivery] finding already exists for request (skip duplicate)', { runId, requestId });
-      return;
+      return allOk;
     }
 
     try {
@@ -599,6 +619,7 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
         payload: findingPayload,
       });
     } catch (err) {
+      allOk = false;
       logger?.error('[verdictDelivery] finding creation failed (fail-soft)', {
         runId,
         projectId,
@@ -606,5 +627,6 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+    return allOk;
   };
 }

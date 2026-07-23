@@ -606,7 +606,13 @@ export type OnVerdict = (args: {
    * derive pass/fail.
    */
   diagnostics?: string[];
-}) => void | Promise<void>;
+}) => void | boolean | Promise<void | boolean>;
+// ^ Return contract (§5.6 amended, adversarial-review fix 2026-07-23): an
+// explicit `false` means at least one REQUIRED delivery consumer (artifact
+// merge / merge-gate lane write / finding creation) failed — the scheduler
+// then leaves the row `delivery_state='pending'` for replay instead of
+// stamping 'delivered'. `void`/`true` (and legacy hooks that return nothing)
+// count as fully delivered.
 
 /**
  * The default per-request deadline (5 minutes). When a capture+judge attempt runs
@@ -614,6 +620,16 @@ export type OnVerdict = (args: {
  * row 'timeout' (releasing the lease). Tunable via VerificationSchedulerDeps.
  */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Delivery-retry backoff (§5.6 amended): when a delivery leaves a terminal row
+ * `pending` (a required consumer failed), an in-process sweep re-runs
+ * replayPendingDeliveries after this base delay, doubling per consecutive failed
+ * sweep up to the cap — so recovery from a transient router/DB error does not
+ * have to wait for the next boot. Reset to the base once a sweep fully drains.
+ */
+export const DELIVERY_RETRY_BASE_MS = 60 * 1000;
+export const DELIVERY_RETRY_MAX_MS = 15 * 60 * 1000;
 
 /**
  * Default per-request deadline for an AGENT-engine row (redesign §5.4 step 6): 10
@@ -850,6 +866,16 @@ export class VerificationScheduler {
    * queue empties. Never a second drain loop; it merely wakes the existing one.
    */
   private queuedAgeTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * In-process delivery-retry sweep (§5.6 amended): armed when a delivery leaves a
+   * terminal row `pending` (a required consumer failed); fires
+   * replayPendingDeliveries after a backoff so recovery does not wait for the next
+   * boot. One timer at a time, `unref`ed like queuedAgeTimer.
+   */
+  private deliveryRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Current retry backoff — doubles per consecutive failed sweep, reset on a full drain. */
+  private deliveryRetryDelayMs = DELIVERY_RETRY_BASE_MS;
 
   /**
    * Per-backend healthCheck memo (R2 #2): backend id → { ok, at } where `at` is the
@@ -3086,12 +3112,13 @@ export class VerificationScheduler {
 
   /**
    * Delivery-outbox stamp (§5.6): flip `delivery_state` to 'delivered' AFTER all
-   * three verdict-delivery consumers (artifact / lane / finding) have run. Written
-   * only by markTerminalAndDeliver + the boot replay, once deliver() returns —
-   * markTerminal stamps 'pending' atomically with the terminal status, so a crash
-   * in the window between the two leaves 'pending' for boot replay to pick up. A
-   * legacy/pre-078 row (delivery_state NULL) never reaches here. Best-effort — a
-   * failed flip merely re-delivers once more (idempotently) at the next boot.
+   * three verdict-delivery consumers (artifact / lane / finding) have SUCCEEDED —
+   * written only by markTerminalAndDeliver + the replay sweeps, and only when
+   * deliver() reported success. markTerminal stamps 'pending' atomically with the
+   * terminal status, so both a crash in the window between the two AND a failed
+   * consumer leave 'pending' for replay to pick up. A legacy/pre-078 row
+   * (delivery_state NULL) never reaches here. Best-effort — a failed flip merely
+   * re-delivers once more (idempotently) at the next sweep/boot.
    */
   private markDelivered(id: string): void {
     try {
@@ -3151,21 +3178,32 @@ export class VerificationScheduler {
         errorClass: verifyErrorClass,
       });
     }
-    await this.deliver(row, status, verdict, fileNames, input, extra);
-    // §5.6 delivery-outbox: only after all three deliveries have run do we flip the
-    // 'pending' stamp markTerminal wrote to 'delivered'. A crash anywhere before
-    // this line leaves the row terminal-but-'pending' for the boot replay to
-    // re-deliver (idempotently). deliver() is fail-soft, so a swallowed consumer
-    // error still stamps delivered — the outbox protects the crash-BETWEEN-status-
-    // and-delivery window, not within-deliver individual (idempotent) failures.
-    this.markDelivered(row.id);
+    const deliveredOk = await this.deliver(row, status, verdict, fileNames, input, extra);
+    // §5.6 delivery-outbox (amended, adversarial-review fix 2026-07-23): flip the
+    // 'pending' stamp markTerminal wrote to 'delivered' ONLY when every required
+    // consumer succeeded. A crash before this line leaves the row
+    // terminal-but-'pending' for the boot replay — and now a swallowed consumer
+    // error does too: the row stays 'pending' and an in-process retry sweep
+    // re-delivers it (idempotently) without waiting for a reboot.
+    if (deliveredOk) {
+      this.markDelivered(row.id);
+    } else {
+      this.logger?.warn('[VerificationScheduler] delivery incomplete; leaving row pending for retry', {
+        requestId: row.id,
+        status,
+      });
+      this.armDeliveryRetryTimer();
+    }
   }
 
   /**
-   * §5.6 delivery-outbox boot replay: re-deliver every TERMINAL row still marked
+   * §5.6 delivery-outbox replay: re-deliver every TERMINAL row still marked
    * `delivery_state='pending'` (a crash struck after markTerminal committed the
-   * status but before/within the three verdict deliveries), then stamp 'delivered'.
-   * Runs once at boot from runRecovery. Reconstructs the deliver() args from the
+   * status but before/within the three verdict deliveries, OR a required consumer
+   * failed on a prior attempt), stamping 'delivered' only for rows whose delivery
+   * fully succeeds; the rest stay pending and re-arm the in-process retry sweep.
+   * Runs at boot from runRecovery AND from armDeliveryRetryTimer's backoff sweep.
+   * Reconstructs the deliver() args from the
    * persisted columns; the load-bearing consumers (artifact merge keyed by
    * (taskRef, requestId), the requestAttempt-guarded lane advance, the
    * requestId-correlated finding) are all idempotent, so a double replay is a
@@ -3203,6 +3241,7 @@ export class VerificationScheduler {
     }
 
     let replayed = 0;
+    let stillFailing = 0;
     for (const row of rows) {
       const input = this.parseInput(row.deliverable_json) ?? undefined;
       const verdict = this.parseVerdict(row.verdict_json);
@@ -3223,14 +3262,55 @@ export class VerificationScheduler {
         attempt: 0,
         enqueued_at: '',
       };
-      await this.deliver(deliverRow, row.status as RequestStatus, verdict, fileNames, input, extra);
-      this.markDelivered(row.id);
-      replayed += 1;
+      const ok = await this.deliver(deliverRow, row.status as RequestStatus, verdict, fileNames, input, extra);
+      if (ok) {
+        this.markDelivered(row.id);
+        replayed += 1;
+      } else {
+        stillFailing += 1;
+      }
     }
     if (replayed > 0) {
-      this.logger?.info('[VerificationScheduler] replayed pending verdict deliveries on boot', { replayed });
+      this.logger?.info('[VerificationScheduler] replayed pending verdict deliveries', { replayed });
+    }
+    if (stillFailing > 0) {
+      // A consumer failed again — keep the rows pending and re-arm the sweep with
+      // the doubled backoff. A permanently failing row retries at the capped
+      // cadence (cheap idempotent DB writes) and is still picked up at next boot.
+      this.logger?.warn('[VerificationScheduler] deliveries still failing; retry sweep re-armed', {
+        stillFailing,
+        nextDelayMs: this.deliveryRetryDelayMs,
+      });
+      this.armDeliveryRetryTimer();
+    } else {
+      this.deliveryRetryDelayMs = DELIVERY_RETRY_BASE_MS;
     }
     return replayed;
+  }
+
+  /**
+   * Arm the in-process delivery-retry sweep (§5.6 amended). One timer at a time;
+   * each arming consumes the current backoff and doubles it (capped) so a
+   * persistently failing consumer cannot hot-loop. `unref`ed so it never keeps the
+   * process alive; the sweep itself is replayPendingDeliveries, whose consumers
+   * are idempotent by requestId.
+   */
+  private armDeliveryRetryTimer(): void {
+    if (this.deliveryRetryTimer !== null) return;
+    const delay = this.deliveryRetryDelayMs;
+    this.deliveryRetryDelayMs = Math.min(this.deliveryRetryDelayMs * 2, DELIVERY_RETRY_MAX_MS);
+    const timer = setTimeout(() => {
+      this.deliveryRetryTimer = null;
+      void this.replayPendingDeliveries().catch((err: unknown) => {
+        this.logger?.warn('[VerificationScheduler] delivery-retry sweep failed (fail-soft)', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, delay);
+    if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
+      (timer as { unref: () => void }).unref();
+    }
+    this.deliveryRetryTimer = timer;
   }
 
   /** Parse a persisted verdict_json into a VerdictV1; undefined on NULL/malformed. */
@@ -3275,13 +3355,20 @@ export class VerificationScheduler {
   // --------------------------------------------------------------------------
 
   /**
-   * Fire the injected onVerdict hook (if any). For THIS slice the real
-   * side-effects (ArtifactRouter enrich + ReviewItemRouter finding +
-   * SprintLaneStore advance/loopback) are stubbed behind this callback; P8 wires
-   * the concrete one. Fail-soft: a throwing hook is logged, never propagated (it
-   * must not wedge the drain loop or leave the lease unreleased — release already
-   * ran in runChosen's finally before deliver here is reached for the judged path,
-   * and the skip/parse paths hold no lease).
+   * Fire the injected onVerdict hook (if any). The real side-effects
+   * (ArtifactRouter enrich + ReviewItemRouter finding + SprintLaneStore
+   * advance/loopback) live behind this callback (verdictDelivery.ts). Fail-soft:
+   * a throwing hook is logged, never propagated (it must not wedge the drain loop
+   * or leave the lease unreleased — release already ran in runChosen's finally
+   * before deliver here is reached for the judged path, and the skip/parse paths
+   * hold no lease).
+   *
+   * Returns TRUE when the hook fully delivered (or none is wired), FALSE when it
+   * threw or explicitly returned `false` (a required consumer failed) — the
+   * caller then leaves the outbox row 'pending' for replay (§5.6 amended). The
+   * terminal event fires REGARDLESS of the hook outcome and never affects the
+   * return value: it is a wake signal for in-process listeners, not a durable
+   * consumer, and a parked lane must always be woken.
    */
   private async deliver(
     row: VerificationRequestRow,
@@ -3290,10 +3377,11 @@ export class VerificationScheduler {
     fileNames: string[],
     input?: VerificationRequestInput,
     extra?: TerminalExtra,
-  ): Promise<void> {
+  ): Promise<boolean> {
+    let deliveredOk = true;
     if (this.onVerdict) {
       try {
-        await this.onVerdict({
+        const hookResult = await this.onVerdict({
           requestId: row.id,
           runId: row.run_id,
           projectId: row.project_id,
@@ -3310,7 +3398,9 @@ export class VerificationScheduler {
             ? { diagnostics: extra.diagnostics }
             : {}),
         });
+        if (hookResult === false) deliveredOk = false;
       } catch (err) {
+        deliveredOk = false;
         this.logger?.error('[VerificationScheduler] onVerdict hook threw', {
           requestId: row.id,
           error: err instanceof Error ? err.message : String(err),
@@ -3340,6 +3430,7 @@ export class VerificationScheduler {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+    return deliveredOk;
   }
 
   // --------------------------------------------------------------------------
