@@ -122,6 +122,41 @@ describe('parseVerificationTaskV1', () => {
     if (!result.ok) expect(result.error).toBe('serve.cmd: expected non-empty string');
   });
 
+  it('accepts and round-trips serve.attach: "cdp" (CDP-attach app target)', () => {
+    const task = {
+      ...VALID_TASK,
+      serve: {
+        cmd: './my-electron-app --remote-debugging-port=${PORT}',
+        readyWhen: { timeoutMs: 30000 },
+        attach: 'cdp',
+      },
+    };
+    const result = parseVerificationTaskV1(task);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.task.serve?.attach).toBe('cdp');
+      expect(result.task).toEqual(task);
+    }
+  });
+
+  it('rejects a serve.attach value other than "cdp"', () => {
+    const result = parseVerificationTaskV1({
+      ...VALID_TASK,
+      serve: { cmd: 'pnpm start', attach: 'tcp' },
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toMatch(/^serve\.attach:/);
+  });
+
+  it('leaves serve.attach absent when omitted (classic web serve)', () => {
+    const result = parseVerificationTaskV1({ ...VALID_TASK, serve: { cmd: 'pnpm dev --port ${PORT}' } });
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.task.serve).toEqual({ cmd: 'pnpm dev --port ${PORT}' });
+      expect('attach' in (result.task.serve ?? {})).toBe(false);
+    }
+  });
+
   it('rejects a non-positive timeoutMs', () => {
     const result = parseVerificationTaskV1({ ...VALID_TASK, timeoutMs: -1 });
     expect(result.ok).toBe(false);

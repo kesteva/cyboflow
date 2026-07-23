@@ -318,6 +318,17 @@ export interface VerificationTaskV1 {
     /** May reference `${PORT}`. */
     cmd: string;
     readyWhen?: { urlPath?: string; timeoutMs?: number };
+    /**
+     * When `'cdp'`, `cmd` launches the deliverable APP ITSELF exposing a
+     * Chrome-DevTools-Protocol endpoint on the driver port (env
+     * `VERIFY_DRIVER_PORT` — e.g. an Electron app passed
+     * `--remote-debugging-port="$VERIFY_DRIVER_PORT"`); the bundled driver then
+     * ATTACHES to that endpoint instead of launching its own headless chromium.
+     * Absent/omitted = classic web serve (driver launches chromium and `goto`s
+     * the served URL). Attach-mode still implies a serve (the app is launched by
+     * `cmd`), so the port lease still rides along.
+     */
+    attach?: 'cdp';
   };
   /** Pre-live target (degenerate path — no build/serve). */
   target?: { url?: string; htmlPath?: string };
@@ -435,7 +446,18 @@ export function parseVerificationTaskV1(
         ...(rw.timeoutMs !== undefined ? { timeoutMs: rw.timeoutMs } : {}),
       };
     }
-    serve = { cmd, ...(readyWhen !== undefined ? { readyWhen } : {}) };
+    let attach: 'cdp' | undefined;
+    if (value.serve.attach !== undefined) {
+      if (value.serve.attach !== 'cdp') {
+        return { ok: false, error: "serve.attach: expected the string 'cdp' when present" };
+      }
+      attach = value.serve.attach;
+    }
+    serve = {
+      cmd,
+      ...(readyWhen !== undefined ? { readyWhen } : {}),
+      ...(attach !== undefined ? { attach } : {}),
+    };
   }
 
   let target: VerificationTaskV1['target'];

@@ -102,6 +102,21 @@ Field rules:
   criteria you already verified do not belong here.
 - `viewports`: optional `[{ "width": 1280, "height": 800 }]` for responsive
   checks.
+- `serve.attach: "cdp"`: set this when the deliverable is an APP with a
+  debuggable web-view rather than a served web page. `serve.cmd` must then
+  launch the app ITSELF exposing a Chrome-DevTools-Protocol endpoint on the
+  driver port, and the verifier ATTACHES to it instead of launching its own
+  browser. Two recipes:
+  - **Electron**: `<app launch command> --remote-debugging-port="$VERIFY_DRIVER_PORT"`.
+    Wait for the window to open in the serve step. The driver attaches to the
+    app's own window, so `behaviors` use click/type/screenshot directly and
+    generally do NOT need a navigate/goto step or a `target`.
+  - **Expo / React-Native web**: prefer the PLAIN web serve
+    (`npx expo start --web --port ${PORT}` style) WITHOUT `attach` — attach is
+    only for targets whose UI lives in an app-hosted web-view exposing CDP.
+  General rule: if the environment can expose a CDP endpoint for its web-view,
+  launch it bound to the driver port and set `attach: "cdp"`; a non-web surface
+  with no debuggable web-view is Form B (NOT-APPLICABLE) instead.
 
 The verifier runs in a FRESH snapshot of the branch (committed state only),
 builds with your `build` steps, serves, drives your `behaviors`, screenshots,

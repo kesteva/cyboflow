@@ -359,6 +359,93 @@ describe('runDriverCommand — connect-first-then-launch', () => {
 });
 
 // ---------------------------------------------------------------------------
+// attach-only mode (VERIFY_DRIVER_ATTACH_ONLY=1) — connect-ONLY, never launch
+// ---------------------------------------------------------------------------
+
+const ATTACH_ENV = { ...ENV, VERIFY_DRIVER_ATTACH_ONLY: '1' };
+
+describe('runDriverCommand — attach-only mode', () => {
+  it('attaches to a listening CDP endpoint and never launches chromium', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls);
+    const exitCode = await runDriverCommand(['goto', 'https://example.com'], ATTACH_ENV, deps);
+    expect(exitCode).toBe(0);
+    expect(deps.connectOverCDP).toHaveBeenCalledTimes(1);
+    expect(deps.resolveChromiumExecutable).not.toHaveBeenCalled();
+    expect(deps.spawnDetachedChromium).not.toHaveBeenCalled();
+    expect(calls.gotos).toEqual(['https://example.com']);
+  });
+
+  it('fails with an attach-mode error (naming the port) when the endpoint is unreachable, never launching', async () => {
+    const calls = freshCalls();
+    const stderrLines: string[] = [];
+    const deps = makeDeps(calls, {
+      connectOverCDP: vi.fn(async () => {
+        throw new Error('ECONNREFUSED');
+      }),
+      stderr: (l) => stderrLines.push(l),
+    });
+    const exitCode = await runDriverCommand(['goto', 'https://example.com'], ATTACH_ENV, deps);
+    expect(exitCode).toBe(1);
+    expect(deps.resolveChromiumExecutable).not.toHaveBeenCalled();
+    expect(deps.spawnDetachedChromium).not.toHaveBeenCalled();
+    expect(deps.writePidFile).not.toHaveBeenCalled();
+    const err = stderrLines.join('\n');
+    expect(err).toMatch(/attach mode/);
+    expect(err).toContain('9333');
+  });
+
+  it('prefers the first NON-devtools page when attaching to an Electron target', async () => {
+    const gotos: string[] = [];
+    const makePage = (url: string) => ({
+      url: () => url,
+      async goto(u: string): Promise<{ ok: () => boolean; status: () => number }> {
+        gotos.push(`${url} => ${u}`);
+        return { ok: () => true, status: () => 200 };
+      },
+      locator: () => ({ async click(): Promise<void> {}, async fill(): Promise<void> {} }),
+      async setViewportSize(): Promise<void> {},
+      async screenshot(): Promise<Buffer> {
+        return Buffer.from('');
+      },
+    });
+    const devtools = makePage('devtools://devtools/bundled/inspector.html');
+    const app = makePage('http://localhost:3000/');
+    const context = {
+      pages: () => [devtools, app],
+      async newPage(): Promise<never> {
+        throw new Error('attach mode must reuse an existing page, not create one');
+      },
+    };
+    const browser = {
+      contexts: () => [context],
+      async newContext(): Promise<never> {
+        throw new Error('attach mode must reuse the existing context');
+      },
+      async close(): Promise<void> {},
+    };
+    const calls = freshCalls();
+    const deps = makeDeps(calls, {
+      connectOverCDP: vi.fn(async () => browser as unknown as Browser),
+    });
+    const exitCode = await runDriverCommand(['goto', 'https://example.com'], ATTACH_ENV, deps);
+    expect(exitCode).toBe(0);
+    // Only the app page's goto ran — the devtools:// page was filtered out.
+    expect(gotos).toEqual(['http://localhost:3000/ => https://example.com']);
+  });
+
+  it('stop in attach mode still closes via CDP and is harmless with no recorded pid', async () => {
+    const calls = freshCalls();
+    const deps = makeDeps(calls);
+    const exitCode = await runDriverCommand(['stop'], ATTACH_ENV, deps);
+    expect(exitCode).toBe(0);
+    expect(deps.closeBrowser).toHaveBeenCalledTimes(1);
+    expect(deps.killPid).not.toHaveBeenCalled();
+    expect(deps.removePidFile).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // command execution (goto / click / type / screenshot)
 // ---------------------------------------------------------------------------
 

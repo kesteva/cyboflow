@@ -411,6 +411,22 @@ describe('VerificationAgentRunner.run', () => {
     expect(env.VERIFY_DRIVER_PORT).toBe('29261');
   });
 
+  it('sets VERIFY_DRIVER_ATTACH_ONLY=1 exactly when the task serves in CDP-attach mode', async () => {
+    const attach = makeRunner();
+    await attach.runner.run(
+      makeReq({ task: makeTask({ serve: { cmd: 'electron . --remote-debugging-port="$VERIFY_DRIVER_PORT"', attach: 'cdp' } }) }),
+    );
+    expect(attach.query.mock.calls[0][0].env.VERIFY_DRIVER_ATTACH_ONLY).toBe('1');
+
+    const plain = makeRunner();
+    await plain.runner.run(makeReq({ task: makeTask({ serve: { cmd: 'npm run dev -- --port ${PORT}' } }) }));
+    expect(plain.query.mock.calls[0][0].env.VERIFY_DRIVER_ATTACH_ONLY).toBeUndefined();
+
+    const noServe = makeRunner();
+    await noServe.runner.run(makeReq());
+    expect(noServe.query.mock.calls[0][0].env.VERIFY_DRIVER_ATTACH_ONLY).toBeUndefined();
+  });
+
   // -------------------------------------------------------------------------
   // verifier-transcript capture — writeTranscript seam
   // -------------------------------------------------------------------------

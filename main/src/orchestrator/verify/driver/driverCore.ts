@@ -21,6 +21,15 @@
  *      real chromium process running (it was never owned by this process to
  *      begin with; we spawned it separately and detached it).
  *
+ * ATTACH-ONLY mode (`VERIFY_DRIVER_ATTACH_ONLY=1`): step 2's launch fallback is
+ * disabled — the driver connect-ONLY's, because the app under test (an Electron
+ * or other web-view host launched by the task's `serve.cmd` with
+ * `--remote-debugging-port="$VERIFY_DRIVER_PORT"`) IS the CDP endpoint. A failed
+ * connect is a hard, actionable error rather than a blank-chromium launch that
+ * would screenshot the wrong surface. No pid is ever recorded in this mode, so
+ * `stop`'s SIGKILL path is a natural no-op (the graceful CDP `Browser.close`
+ * still fires, closing the app the agent launched).
+ *
  * `stop` closes the browser via CDP when the endpoint is still reachable,
  * else SIGKILLs the recorded pid, and always exits 0 (best-effort cleanup —
  * the harness's own sweeper is the backstop, per §5.4 step 6's port-probe /
@@ -201,7 +210,9 @@ export function pidFilePath(artifactsDir: string): string {
 // Command execution
 // ---------------------------------------------------------------------------
 
-type EnvCheck = { ok: true; port: number; artifactsDir: string } | { ok: false; message: string };
+type EnvCheck =
+  | { ok: true; port: number; artifactsDir: string; attachOnly: boolean }
+  | { ok: false; message: string };
 
 /** Validates VERIFY_DRIVER_PORT + VERIFY_ARTIFACTS_DIR for the browser-touching commands. */
 function requireEnv(env: NodeJS.ProcessEnv): EnvCheck {
@@ -217,7 +228,12 @@ function requireEnv(env: NodeJS.ProcessEnv): EnvCheck {
   if (!artifactsDir || artifactsDir.trim().length === 0) {
     return { ok: false, message: 'VERIFY_ARTIFACTS_DIR is required but not set' };
   }
-  return { ok: true, port, artifactsDir };
+  // Attach-only (VERIFY_DRIVER_ATTACH_ONLY=1): the app under test is launched by
+  // the task's serve.cmd exposing CDP on VERIFY_DRIVER_PORT, so the connect-or-
+  // launch fallback becomes connect-ONLY — never launch a blank chromium (which
+  // would let the agent screenshot the WRONG surface and mis-judge).
+  const attachOnly = env.VERIFY_DRIVER_ATTACH_ONLY === '1';
+  return { ok: true, port, artifactsDir, attachOnly };
 }
 
 /**
@@ -248,7 +264,12 @@ export async function runDriverCommand(
   }
 
   try {
-    const page = await ensurePage(envResult.port, envResult.artifactsDir, deps);
+    const page = await ensurePage(
+      envResult.port,
+      envResult.artifactsDir,
+      envResult.attachOnly,
+      deps,
+    );
     return await executeCommand(parsed.command, page, envResult.artifactsDir, deps);
   } catch (err) {
     deps.stderr(err instanceof Error ? err.message : String(err));
@@ -256,21 +277,54 @@ export async function runDriverCommand(
   }
 }
 
-/** connect-first-then-launch: tries CDP reconnection before ever launching a browser. */
-async function ensurePage(port: number, artifactsDir: string, deps: DriverDeps): Promise<Page> {
+/**
+ * connect-first-then-launch: tries CDP reconnection before ever launching a
+ * browser. In `attachOnly` mode the launch fallback is DISABLED — a failed
+ * connect is a hard error (the app under test must already be listening on the
+ * driver port), because launching a blank chromium there would screenshot the
+ * wrong surface. Attach mode also prefers the first NON-devtools page: an
+ * Electron target's CDP endpoint commonly exposes `devtools://` inspector
+ * pages alongside the real app window.
+ */
+async function ensurePage(
+  port: number,
+  artifactsDir: string,
+  attachOnly: boolean,
+  deps: DriverDeps,
+): Promise<Page> {
   const cdpUrl = `http://127.0.0.1:${port}`;
   let browser: Browser;
   try {
     browser = await deps.connectOverCDP(cdpUrl);
   } catch {
+    if (attachOnly) {
+      throw new Error(
+        `CDP endpoint not reachable on port ${port} — in attach mode the app under test must already be listening (launch it with --remote-debugging-port="$VERIFY_DRIVER_PORT" and wait for it to boot)`,
+      );
+    }
     browser = await launchAndConnect(port, artifactsDir, deps);
   }
 
   const contexts = browser.contexts();
   const context = contexts.length > 0 ? contexts[0] : await browser.newContext();
   const pages = context.pages();
-  const page = pages.length > 0 ? pages[0] : await context.newPage();
+  const usablePages = attachOnly ? pages.filter((p) => !isDevtoolsPage(p)) : pages;
+  const page = usablePages.length > 0 ? usablePages[0] : await context.newPage();
   return page;
+}
+
+/**
+ * True for a `devtools://` inspector page. Guards on `url` being a callable
+ * (real Playwright `Page.url()`) so the test seam's fake page — which has no
+ * `url()` — is simply never treated as a devtools page.
+ */
+function isDevtoolsPage(page: Page): boolean {
+  if (typeof page.url !== 'function') return false;
+  try {
+    return page.url().startsWith('devtools://');
+  } catch {
+    return false;
+  }
 }
 
 async function launchAndConnect(port: number, artifactsDir: string, deps: DriverDeps): Promise<Browser> {

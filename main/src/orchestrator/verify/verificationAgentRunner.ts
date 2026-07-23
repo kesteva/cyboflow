@@ -247,6 +247,12 @@ Environment (already set for your Bash tool):
   All driver commands act on ONE persistent browser page across invocations.
 - VERIFY_PORT — when present, bind your dev/preview server to THIS port (the task's
   serve command references it). When absent, the task points at an already-live target.
+- CDP-attach mode — when the task's serve has "attach": "cdp", its serve command
+  launches the deliverable APP ITSELF exposing a DevTools endpoint on
+  VERIFY_DRIVER_PORT (e.g. --remote-debugging-port="$VERIFY_DRIVER_PORT"). Run that
+  command, wait for the app window to be up, then drive with the SAME driver
+  subcommands — the driver attaches to the app's own web-view (no separate browser,
+  and usually no goto: the app window is already the surface under test).
 
 Rules:
 - Use ONLY Bash, Read, Grep, Glob. You have NO Write/Edit and NO MCP tools. Do not
@@ -584,6 +590,11 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         VERIFY_DRIVER_PORT: String(req.verifyDriverPort),
         VERIFY_DRIVER: driverScriptPath,
         ...(req.verifyPort !== null ? { VERIFY_PORT: String(req.verifyPort) } : {}),
+        // CDP-attach mode (task.serve.attach === 'cdp'): the serve command
+        // launches the app under test exposing CDP on VERIFY_DRIVER_PORT, so the
+        // driver must ATTACH and never launch its own chromium (a blank chromium
+        // there would screenshot the wrong surface). driverCore honors this flag.
+        ...(req.task.serve?.attach === 'cdp' ? { VERIFY_DRIVER_ATTACH_ONLY: '1' } : {}),
       };
 
       if (controller.signal.aborted) {
