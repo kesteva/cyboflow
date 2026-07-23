@@ -6,6 +6,31 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.30] — 2026-07-23
+
+### Added
+
+- **Task-scoped visual verification agent**: a redesigned verification flow where `task-verify` composes a visual-verification task consumed by a central verification agent. Includes a `VerificationAgentRunner` with scheduler dispatch, an agentless visual-verify step, a bundled headless-browser driver CLI with a lane-consistent snapshot provisioner, CDP-attach verification targets (Electron and other web-view apps), a typed step-output channel (`spawnCliProcess` resolves the turn's final result text), `VerificationTaskV1` / `ReportV1` types + validators, a delivery outbox with atomic artifact merge + finding supersession, verifier transcripts captured onto the screenshots artifact, and frontend surfaces (editor, report table, queue, baseline retirement). Migration 078.
+- **Assistant context-retention**: a context-retention picker in a new top-level Assistant settings tab (`clear-daily` default), applied at the local-day boundary, plus a persisted agent-thread last-turn timestamp (migration 080) and a per-folder toggle to exclude project folders from the assistant's file access.
+- **Workflow archiving**: a `workflows.archived_at` soft-archive seam (registry + tRPC) with Archive/Unarchive actions and a "Show archived" toggle in the workflow gallery (migration 079).
+- Entity `category` on the Epic detail editor (alongside priority), reusing the canonical `CATEGORY_LABEL` map.
+- Multi-model run cost computed from the rate card by summing the per-model breakdown.
+
+### Changed
+
+- Interrupted-run handling: resume restart-orphaned orchestrated runs and tag the unresumable as `outcome='interrupted'`; Insights break out interrupted runs and exclude restart noise from error/success rates.
+- Verification ownership is controller-owned on programmatic runs: MCP `cyboflow_request_verification` / `request_verification` are rejected on programmatic step turns, the controller adopts a pre-fired lane verification request, and task-verify turns relay the verdict as text rather than firing the request.
+- Session ordering simplified to a single `displayOrder` source (dropped the never-cleared `sessionOrderOverrides`), with a deterministic sort tiebreaker.
+
+### Fixed
+
+- Eval jury robustness: strict-ify the Codex juror output schema so it stops 400ing every eval, give jurors headroom (300s deadline, 20-turn budget) under host contention, stop retrying deterministic judge failures (timeout/max-turns), and fix the retry latch + canonical-row selection.
+- Run cost/model resolution: fall back to reported cost for unresolved-model runs instead of an em dash, and ignore the `unknown` sentinel / blank model ids when folding model cardinality.
+- Quick sessions: never boot-resume `__quick__` sentinels and resolve orphaned permission review items.
+- Surface a restart-required updater error after a network-service crash.
+- The delivery outbox keeps failed deliveries pending with an in-process retry sweep; snapshots always record on a recorded sha (dropped the whole-tree dirty check).
+- The backlog rail badge counts board-visible items, not raw non-done rows; preserve entity category when cloning experiment seed tasks into arms.
+
 ## [0.1.29] — 2026-07-22
 
 ### Added
