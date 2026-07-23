@@ -25,6 +25,7 @@ import {
   composeHandoverPrompt,
   type HandoverRunExecutorLike,
   type HandoverRunDeps,
+  type FinalGateHandoverContext,
 } from '../handoverRunHandler';
 import type { DatabaseLike, PreparedStatement } from '../types';
 
@@ -124,7 +125,8 @@ function makeFakeExecutor(opts?: {
     .fn<(runId: string) => boolean>()
     .mockReturnValue(opts?.activeExecution ?? false);
   const requestProgrammaticCancel = vi.fn<(runId: string) => boolean>().mockReturnValue(true);
-  const setPendingNudge = vi.fn<(runId: string, text: string) => void>();
+  const setPendingNudge =
+    vi.fn<(runId: string, text: string, opts?: { hideFromTranscript?: boolean }) => void>();
   const execute = vi.fn<(runId: string) => Promise<void>>().mockImplementation(async () => {
     if (opts?.executeRejects) throw new Error('boom');
   });
@@ -513,6 +515,88 @@ describe('handoverRunHandler — delivery mechanics', () => {
 });
 
 // ---------------------------------------------------------------------------
+// handed_over_at stamp (migration 079)
+// ---------------------------------------------------------------------------
+
+function getHandedOverAt(db: Database.Database, runId: string): string | null {
+  return (
+    db.prepare('SELECT handed_over_at FROM workflow_runs WHERE id = ?').get(runId) as {
+      handed_over_at: string | null;
+    }
+  ).handed_over_at;
+}
+
+describe('handoverRunHandler — handed_over_at stamp', () => {
+  it('is NULL before the handover and non-null after the guarded flip', async () => {
+    const db = makeDb();
+    const runQueues = new RunQueueRegistry();
+    const { runId } = seedProgrammaticRun(db, { status: 'awaiting_review' });
+    expect(getHandedOverAt(db, runId)).toBeNull();
+
+    const executor = makeFakeExecutor();
+    const result = await handoverRunHandler(
+      runId,
+      'take over',
+      makeDeps(dbAdapter(db), executor, { runQueues }),
+    );
+
+    expect(result).toEqual({ delivered: true });
+    expect(getHandedOverAt(db, runId)).not.toBeNull();
+    await waitForRedrive(runQueues, runId);
+    db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// final-gate handover: hidden nudge + brief section
+// ---------------------------------------------------------------------------
+
+describe('handoverRunHandler — final-gate opts', () => {
+  const finalGate: FinalGateHandoverContext = {
+    kind: 'parked-at-final-gate',
+    stepId: 'step-b',
+    stepName: 'Step B',
+  };
+
+  it('a final-gate handover seeds the nudge with { hideFromTranscript: true }', async () => {
+    const db = makeDb();
+    const runQueues = new RunQueueRegistry();
+    const { runId } = seedProgrammaticRun(db, { status: 'awaiting_review' });
+    const executor = makeFakeExecutor();
+    const deps = makeDeps(dbAdapter(db), executor, { runQueues });
+
+    await handoverRunHandler(runId, 'one more tweak', deps, { finalGate });
+
+    expect(executor.setPendingNudge).toHaveBeenCalledTimes(1);
+    const [, promptArg, optsArg] = executor.setPendingNudge.mock.calls[0];
+    expect(optsArg).toEqual({ hideFromTranscript: true });
+    // The brief carries the "Where the run stands" section + the adjusted directive.
+    expect(promptArg).toContain('## Where the run stands');
+    expect(promptArg).toContain('re-open the final sign-off gate');
+    await waitForRedrive(runQueues, runId);
+    db.close();
+  });
+
+  it('a monitor-initiated handover (no opts) seeds the nudge WITHOUT the hide flag', async () => {
+    const db = makeDb();
+    const runQueues = new RunQueueRegistry();
+    const { runId } = seedProgrammaticRun(db, { status: 'awaiting_review' });
+    const executor = makeFakeExecutor();
+    const deps = makeDeps(dbAdapter(db), executor, { runQueues });
+
+    await handoverRunHandler(runId, 'pivot everything', deps);
+
+    expect(executor.setPendingNudge).toHaveBeenCalledTimes(1);
+    const call = executor.setPendingNudge.mock.calls[0];
+    // Called with just (runId, prompt) — no third opts argument.
+    expect(call[2]).toBeUndefined();
+    expect(call[1]).not.toContain('## Where the run stands');
+    await waitForRedrive(runQueues, runId);
+    db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // composeHandoverPrompt (pure)
 // ---------------------------------------------------------------------------
 
@@ -574,6 +658,56 @@ describe('composeHandoverPrompt', () => {
     expect(out).toContain('# Workflow handover');
     expect(out).toContain('run-9');
     expect(out).toContain('ship');
+  });
+
+  it('parked-at-final-gate: inserts the stands section + the re-open closing line', () => {
+    const out = composeHandoverPrompt({
+      runId: 'run-1',
+      workflowName: 'sprint',
+      promptBody: 'BODY',
+      steps: [{ id: 'human-review', name: 'Human review' }],
+      stepResults: [],
+      reason: 'add one more test',
+      finalGate: { kind: 'parked-at-final-gate', stepId: 'human-review', stepName: 'Human review' },
+    });
+    // The stands section sits between the preamble and Completed so far.
+    expect(out.indexOf('## Where the run stands')).toBeGreaterThan(out.indexOf('# Workflow handover'));
+    expect(out.indexOf('## Where the run stands')).toBeLessThan(out.indexOf('## Completed so far'));
+    expect(out).toContain('PARKED at its final human gate `human-review`');
+    expect(out).toContain('Do NOT self-approve');
+    expect(out).toContain(
+      "## The user's request that triggered this handover\n\nadd one more test\n\nAddress this request first, then re-open the final sign-off gate.",
+    );
+  });
+
+  it('drained-rest: inserts the resting section + the summarize-and-end closing line', () => {
+    const out = composeHandoverPrompt({
+      runId: 'run-2',
+      workflowName: 'ship',
+      promptBody: 'BODY',
+      steps: [{ id: 'human-review', name: 'Human review' }],
+      stepResults: [],
+      reason: 'tweak the copy',
+      finalGate: { kind: 'drained-rest', stepId: 'human-review', stepName: 'Human review' },
+    });
+    expect(out).toContain('## Where the run stands');
+    expect(out).toContain('RESTING awaiting merge');
+    expect(out).toContain(
+      "## The user's request that triggered this handover\n\ntweak the copy\n\nAddress this request, then summarize and end your turn.",
+    );
+  });
+
+  it('without a finalGate the brief has no stands section and keeps the legacy closing line', () => {
+    const out = composeHandoverPrompt({
+      runId: 'run-3',
+      workflowName: 'sprint',
+      promptBody: 'BODY',
+      steps: [{ id: 'step-a', name: 'Step A' }],
+      stepResults: [],
+      reason: 'do X',
+    });
+    expect(out).not.toContain('## Where the run stands');
+    expect(out).toContain('Address this request first, then continue the remaining workflow steps.');
   });
 
   it('truncates an over-long completed-so-far line to ~200 chars with an ellipsis', () => {

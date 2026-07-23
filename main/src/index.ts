@@ -107,7 +107,8 @@ import {
   setResolveVerdictNudgeDeps,
   resumeWouldStrandEndedWalk,
 } from './orchestrator/trpc/routers/reviewItems';
-import { setMonitorRehydrator } from './orchestrator/trpc/routers/monitor';
+import { setMonitorRehydrator, setFinalGateHandover } from './orchestrator/trpc/routers/monitor';
+import { createFinalGateHandover } from './orchestrator/finalGateHandover';
 import { createMonitorRehydrator } from './orchestrator/programmatic/monitorRehydration';
 import { resolveReviewItem as resolveReviewItemCore } from './orchestrator/resolveReviewItemHandler';
 import {
@@ -3438,6 +3439,26 @@ app.whenReady().then(async () => {
       return { ok: false, message: messages[result.reason] ?? `Handover refused (${result.reason}).` };
     };
     console.log('[Main] monitor switch_to_orchestrated action wired');
+
+    // Final-gate auto-handover: chatting with a programmatic run parked at its
+    // FINAL human gate (or resting for merge) converts it to a full orchestrated
+    // agent carrying the message as the agent's first request — no manual
+    // switch_to_orchestrated ceremony. Reuses the SAME handoverRunDepsBag (via
+    // handoverRunHandler with the finalGate context), the injected step-results
+    // source, and RunExecutor.ensureMonitorInjectBridge for the transcript inject.
+    // Consulted by cyboflow.monitor.send BEFORE the monitor path (fail-soft).
+    setFinalGateHandover(
+      createFinalGateHandover({
+        db,
+        isEnabled: () => configManager.getAutoHandoverAtFinalGateEnabled(),
+        listStepResults: (runId) => StepResultStore.tryGetInstance()?.listForRun(runId) ?? [],
+        getInjectEvent: (runId) => runExecutor.ensureMonitorInjectBridge(runId),
+        handover: (runId, reason, finalGate) =>
+          handoverRunHandler(runId, reason, handoverRunDepsBag, { finalGate }),
+        logger: loggerLike,
+      }),
+    );
+    console.log('[Main] monitor final-gate auto-handover wired');
 
     // Monitor steering actions (the 8 non-stopping backlog/step/review edits).
     // All route through chokepoints (TaskChangeRouter / SprintLaneStore /

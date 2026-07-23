@@ -19,7 +19,12 @@ import { appRouter } from '../../router';
 import { createContext } from '../../context';
 import { MonitorRegistry, type MonitorSession } from '../../../programmatic/monitor';
 import { StepResultStore } from '../../../stepResultStore';
-import { setMonitorRehydrator, _resetMonitorRehydratorForTesting } from '../monitor';
+import {
+  setMonitorRehydrator,
+  _resetMonitorRehydratorForTesting,
+  setFinalGateHandover,
+  _resetFinalGateHandoverForTesting,
+} from '../monitor';
 
 beforeEach(() => {
   MonitorRegistry._resetForTesting();
@@ -28,6 +33,7 @@ beforeEach(() => {
 
 afterEach(() => {
   _resetMonitorRehydratorForTesting();
+  _resetFinalGateHandoverForTesting();
 });
 
 /** A fully-faked monitor session (no SDK) with a `converse` that records its calls. */
@@ -98,6 +104,66 @@ describe('cyboflow.monitor.send', () => {
 
     expect(result).toEqual({ delivered: true });
     expect(session.answer).toHaveBeenCalledWith('ping');
+  });
+});
+
+describe('cyboflow.monitor.send — final-gate auto-handover pre-step', () => {
+  it('a handedOver result short-circuits: converse is NOT called and the result propagates', async () => {
+    const session = makeMonitorSession();
+    MonitorRegistry.getInstance().register('run-1', session);
+    setFinalGateHandover({
+      attempt: vi.fn().mockResolvedValue({ delivered: true, handedOver: true }),
+    });
+    const caller = appRouter.createCaller(createContext());
+
+    const result = await caller.cyboflow.monitor.send({ runId: 'run-1', text: 'one more tweak' });
+
+    expect(result).toEqual({ delivered: true, handedOver: true });
+    // The turn was consumed by the handover — the monitor never saw it.
+    expect(session.converse).not.toHaveBeenCalled();
+  });
+
+  it('a null result (not applicable) falls through to the monitor converse path', async () => {
+    const session = makeMonitorSession();
+    MonitorRegistry.getInstance().register('run-1', session);
+    const attempt = vi.fn().mockResolvedValue(null);
+    setFinalGateHandover({ attempt });
+    const caller = appRouter.createCaller(createContext());
+
+    const result = await caller.cyboflow.monitor.send({ runId: 'run-1', text: 'why did it fail?' });
+
+    expect(attempt).toHaveBeenCalledWith('run-1', 'why did it fail?');
+    expect(result).toEqual({ delivered: true });
+    expect(session.converse).toHaveBeenCalledWith('why did it fail?');
+  });
+
+  it('a throwing checker is fail-soft: logged and the monitor path still runs', async () => {
+    const session = makeMonitorSession();
+    MonitorRegistry.getInstance().register('run-1', session);
+    setFinalGateHandover({
+      attempt: vi.fn().mockRejectedValue(new Error('checker boom')),
+    });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const caller = appRouter.createCaller(createContext());
+
+    const result = await caller.cyboflow.monitor.send({ runId: 'run-1', text: 'ping' });
+
+    expect(result).toEqual({ delivered: true });
+    expect(session.converse).toHaveBeenCalledWith('ping');
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it('an unset checker preserves the legacy monitor path', async () => {
+    const session = makeMonitorSession();
+    MonitorRegistry.getInstance().register('run-1', session);
+    // No setFinalGateHandover — the seam stays null.
+    const caller = appRouter.createCaller(createContext());
+
+    const result = await caller.cyboflow.monitor.send({ runId: 'run-1', text: 'hello' });
+
+    expect(result).toEqual({ delivered: true });
+    expect(session.converse).toHaveBeenCalledWith('hello');
   });
 });
 

@@ -392,6 +392,18 @@ export class ConfigManager extends EventEmitter {
   }
 
   /**
+   * Kill switch for the final-gate auto-handover (chatting with a programmatic run
+   * at its FINAL human gate converts it to a full orchestrated agent). Floors to
+   * TRUE (enabled) when unset. Read at the seam via an injected `isEnabled` closure
+   * (finalGateHandover.ts stays free of concrete-service imports). Like
+   * `getCodeReviewEvalEnabled`, NOT seeded into the constructor defaults, so
+   * existing config.json files are not rewritten on launch.
+   */
+  getAutoHandoverAtFinalGateEnabled(): boolean {
+    return this.config.autoHandoverAtFinalGate !== false;
+  }
+
+  /**
    * Global run-summary cost display mode. Floors to FALSE when unset so existing
    * users continue to see the provider-reported cost until they explicitly opt
    * into computing cost from token usage and model pricing. Like

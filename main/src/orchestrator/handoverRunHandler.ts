@@ -121,8 +121,15 @@ export interface HandoverRunExecutorLike {
    * aborted signal. Returns true when a walk was actually signaled.
    */
   requestProgrammaticCancel(runId: string): boolean;
-  /** Stash the handover brief as the run's next (first, for a fresh convo) user turn. */
-  setPendingNudge(runId: string, text: string): void;
+  /**
+   * Stash the handover brief as the run's next (first, for a fresh convo) user turn.
+   * `hideFromTranscript` suppresses rendering the brief as a user bubble — set on a
+   * final-gate auto-handover, where the finalGateHandover module has ALREADY injected
+   * the user's raw message + the '▶' marker into the transcript, so re-rendering the
+   * giant brief would double the user's turn. A monitor-initiated handover omits it
+   * (the brief IS the visible turn, today's behavior).
+   */
+  setPendingNudge(runId: string, text: string, opts?: { hideFromTranscript?: boolean }): void;
   /** Re-drive the run — re-reads the row and forks the orchestrated conversation. */
   execute(runId: string): Promise<void>;
 }
@@ -196,6 +203,23 @@ export type HandoverNoOpReason = 'not_found' | 'not_programmatic' | 'not_switcha
 
 export type HandoverRunResult = { delivered: true } | { noOp: true; reason: HandoverNoOpReason };
 
+/**
+ * Context passed when the handover was triggered by a chat at the run's FINAL human
+ * gate (the finalGateHandover module), as opposed to a monitor-initiated
+ * switch_to_orchestrated. Drives the brief's "Where the run stands" section + the
+ * adjusted closing directive, and flags the seeded nudge as hidden from the
+ * transcript (the raw user message + '▶' marker are already injected).
+ *   - 'parked-at-final-gate' — the run was PARKED at its last human gate (a pending
+ *     gate item at the definition's last step) when the user chatted.
+ *   - 'drained-rest'         — every step (incl. any final gate) already completed;
+ *     the run was RESTING awaiting merge.
+ */
+export interface FinalGateHandoverContext {
+  kind: 'parked-at-final-gate' | 'drained-rest';
+  stepId: string;
+  stepName: string;
+}
+
 // ---------------------------------------------------------------------------
 // Internal row type
 // ---------------------------------------------------------------------------
@@ -243,6 +267,7 @@ export async function handoverRunHandler(
   runId: string,
   reason: string,
   deps: HandoverRunDeps,
+  opts?: { finalGate?: FinalGateHandoverContext },
 ): Promise<HandoverRunResult> {
   const {
     db,
@@ -333,9 +358,14 @@ export async function handoverRunHandler(
     const flip = db.transaction(() => {
       return db
         .prepare(
+          // handed_over_at (migration 079) is stamped on EVERY handover — this
+          // guarded flip is its sole writer. A non-NULL value preserves the fact
+          // that the run launched programmatic (lost otherwise, since the flip
+          // overwrites execution_model in place). See the migration header.
           `UPDATE workflow_runs
               SET execution_model = 'orchestrated', status = 'starting',
                   error_message = NULL, ended_at = NULL, outcome = NULL,
+                  handed_over_at = CURRENT_TIMESTAMP,
                   updated_at = CURRENT_TIMESTAMP
             WHERE id = ? AND execution_model = 'programmatic'
               AND status IN ('failed', 'awaiting_review', 'running')`,
@@ -404,9 +434,17 @@ export async function handoverRunHandler(
     steps,
     stepResults: listStepResults(runId),
     reason,
+    finalGate: opts?.finalGate,
   });
 
-  runExecutor.setPendingNudge(runId, prompt);
+  // A final-gate auto-handover has already injected the user's raw message + the
+  // '▶' marker (finalGateHandover module), so the giant brief must NOT re-render as
+  // a user bubble; hide it. A monitor-initiated handover keeps the brief visible.
+  if (opts?.finalGate) {
+    runExecutor.setPendingNudge(runId, prompt, { hideFromTranscript: true });
+  } else {
+    runExecutor.setPendingNudge(runId, prompt);
+  }
 
   // Tear down the run's on-demand monitor now that it is orchestrated: the fresh
   // orchestrated agent owns the chat from here, so the composer must stop routing
@@ -460,6 +498,13 @@ export interface HandoverPromptInput {
   stepResults: Array<{ stepId: string; outcome: string; summary?: string | null; error?: string | null }>;
   /** The user's request that triggered the handover, verbatim. */
   reason: string;
+  /**
+   * Present ONLY for a final-gate auto-handover (finalGateHandover module). When
+   * absent the composed brief is BYTE-IDENTICAL to the pre-079 output (monitor
+   * switch_to_orchestrated). When present it inserts a "Where the run stands"
+   * section and adjusts the closing directive per its kind.
+   */
+  finalGate?: FinalGateHandoverContext;
 }
 
 /** Per-line cap for the "Completed so far" digest (chars). */
@@ -484,7 +529,7 @@ function truncateLine(line: string, max = MAX_COMPLETED_LINE): string {
  *     the "address this first" directive.
  */
 export function composeHandoverPrompt(input: HandoverPromptInput): string {
-  const { runId, workflowName, promptBody, steps, stepResults, reason } = input;
+  const { runId, workflowName, promptBody, steps, stepResults, reason, finalGate } = input;
 
   // Map each step id → the outcome of its LAST recorded row (later attempts win),
   // so "done" detection and the previously-skipped/failed markers stay consistent.
@@ -547,10 +592,40 @@ export function composeHandoverPrompt(input: HandoverPromptInput): string {
       : 'The workflow prompt body was unavailable; proceed from the remaining step list above.';
   const instructionsSection = `## Workflow instructions\n\n${instructionsBody}`;
 
+  // ## Where the run stands — final-gate auto-handover only (absent = byte-identical
+  // to the pre-079 monitor-initiated brief). Sits between the preamble and
+  // "## Completed so far", and re-words the closing directive of the request section.
+  let standsSection: string | null = null;
+  let closingLine = 'Address this request first, then continue the remaining workflow steps.';
+  if (finalGate) {
+    if (finalGate.kind === 'parked-at-final-gate') {
+      standsSection =
+        `## Where the run stands\n\n` +
+        `All agent steps are complete. The run was PARKED at its final human gate ` +
+        `\`${finalGate.stepId}\` (${finalGate.stepName}), awaiting the user's sign-off, when the ` +
+        `user sent the request below. That pending gate item was dismissed as part of this ` +
+        `handover — YOU now own the gate. After addressing the user's request, re-open the ` +
+        `final sign-off yourself via AskUserQuestion exactly as the workflow instructions ` +
+        `describe for this step. Do NOT self-approve, and do NOT merge to main yourself.`;
+      closingLine = 'Address this request first, then re-open the final sign-off gate.';
+    } else {
+      standsSection =
+        `## Where the run stands\n\n` +
+        `Every workflow step (including any final human gate) already completed; the run was ` +
+        `RESTING awaiting merge when the user sent the request below. Address the request, post ` +
+        `a brief summary of what you did, and end your turn — the run rests again and the user ` +
+        `merges the session from the UI. Re-open a fresh AskUserQuestion sign-off only if your ` +
+        `changes are substantial enough to warrant one.`;
+      closingLine = 'Address this request, then summarize and end your turn.';
+    }
+  }
+
   // ## The user's request that triggered this handover — the reason verbatim.
   const requestSection =
-    `## The user's request that triggered this handover\n\n${reason}\n\n` +
-    `Address this request first, then continue the remaining workflow steps.`;
+    `## The user's request that triggered this handover\n\n${reason}\n\n${closingLine}`;
 
-  return [preamble, completedSection, remainingSection, instructionsSection, requestSection].join('\n\n');
+  const sections = [preamble];
+  if (standsSection) sections.push(standsSection);
+  sections.push(completedSection, remainingSection, instructionsSection, requestSection);
+  return sections.join('\n\n');
 }

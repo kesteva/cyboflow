@@ -217,6 +217,18 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN rail_dismissed_at DATETIME');
     railDismissedAdded = true;
   };
+  // Migration 079 (programmatic->orchestrated handover stamp): handoverRunHandler's
+  // guarded flip SETs handed_over_at, and getRunById projects it. Both the read-model
+  // surface (includeSubstrate) and the row-level readers (includeWorkflowRunTaskColumns)
+  // therefore need the column — folded in idempotently like the sibling stamps so
+  // passing both flags never double-ALTERs. Plain nullable TEXT; additive — never
+  // widens GATE_SCHEMA.
+  let handedOverAtAdded = false;
+  const addHandedOverAtColumnOnce = (): void => {
+    if (handedOverAtAdded) return;
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN handed_over_at TEXT');
+    handedOverAtAdded = true;
+  };
   if (options?.includeStuckDetectedAt) {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN stuck_detected_at INTEGER');
   }
@@ -254,6 +266,8 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     addAgentProviderRuntimeColumnsOnce();
     // Migration 075: listRunsHandler's SELECT projects rail_dismissed_at.
     addRailDismissedColumnOnce();
+    // Migration 079: getRunById projects handed_over_at (handover stamp).
+    addHandedOverAtColumnOnce();
   }
   if (options?.includeQuestionsTable) {
     // Migration 010 references stuck_detected_at (added in migration 007) in the
@@ -303,6 +317,8 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     addAgentProviderRuntimeColumnsOnce();
     // Migration 075: runs.end stamps rail_dismissed_at on the completed run.
     addRailDismissedColumnOnce();
+    // Migration 079: handoverRunHandler's flip stamps handed_over_at.
+    addHandedOverAtColumnOnce();
   }
   if (options?.includeWorkflowArchivedAt) {
     // Migration 078: WorkflowRegistry.getById / listByProject SELECT this

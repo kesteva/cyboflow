@@ -1,0 +1,31 @@
+-- Migration 079: record when a run was converted programmatic -> orchestrated.
+--
+-- handoverRunHandler (main/src/orchestrator/handoverRunHandler.ts) is the SINGLE,
+-- sanctioned, one-way writer of workflow_runs.execution_model (programmatic ->
+-- orchestrated, guarded so it can never flip back). That flip today OVERWRITES
+-- execution_model in place, silently losing the fact that the run LAUNCHED
+-- programmatic — an erasure that skews any insights/experiment aggregate keyed on
+-- the original execution model.
+--
+-- This ADDITIVE nullable column preserves that fact:
+--   handed_over_at — NULL: the run was NEVER handed over (its execution_model is
+--                    still the one it launched with). NON-NULL timestamp: this run
+--                    was converted programmatic -> orchestrated mid-run at that
+--                    time. Because the handover is the ONLY execution_model write
+--                    path AND is one-way from 'programmatic', a non-NULL
+--                    handed_over_at also IMPLIES the run originally launched
+--                    programmatic — so the pair (execution_model='orchestrated',
+--                    handed_over_at IS NOT NULL) recovers the original model for
+--                    insights/experiment integrity.
+--
+-- The guarded Phase-1 flip in handoverRunHandler is the SOLE writer; nothing else
+-- sets or clears this column. A pre-079 reader never references it (pure metadata).
+--
+-- NOTE: No `IF NOT EXISTS` on the ALTER — SQLite ALTER TABLE does not support it.
+-- Re-running raises 'duplicate column name: handed_over_at', the idempotency signal
+-- runFileBasedMigrations() in database.ts uses to skip an already-applied file.
+--
+-- NOTE: No explicit BEGIN/COMMIT — runFileBasedMigrations() wraps every file in a
+-- this.transaction(...) call.
+
+ALTER TABLE workflow_runs ADD COLUMN handed_over_at TEXT;

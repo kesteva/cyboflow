@@ -109,6 +109,13 @@ export interface AppConfig {
   // the trigger seam via configManager.getCodeReviewEvalEnabled(). NOT seeded into
   // constructor defaults, so existing config.json files stay byte-identical.
   codeReviewEvalEnabled?: boolean;
+  // Kill switch for the final-gate auto-handover: chatting with a programmatic run
+  // parked at its FINAL human gate (or resting for merge) auto-converts it to a
+  // full orchestrated agent carrying the message as the agent's first request.
+  // Absent/undefined = ENABLED (default true). Read via
+  // configManager.getAutoHandoverAtFinalGateEnabled(). NOT seeded into constructor
+  // defaults, so existing config.json files stay byte-identical.
+  autoHandoverAtFinalGate?: boolean;
   // Global on/off for computing the run-summary cost from the run's token
   // breakdown and model pricing instead of displaying the provider-reported
   // cost. Absent/undefined = DISABLED (reported cost, preserving today's
@@ -225,6 +232,8 @@ export interface UpdateConfigRequest {
   quickSessionDefaultSubstrate?: CliSubstrate;
   // Global on/off for the code-review eval (see AppConfig.codeReviewEvalEnabled).
   codeReviewEvalEnabled?: boolean;
+  // Final-gate auto-handover kill switch (see AppConfig.autoHandoverAtFinalGate).
+  autoHandoverAtFinalGate?: boolean;
   // Global run-summary computed-cost toggle (see AppConfig.computeCostFromRates).
   computeCostFromRates?: boolean;
   // Auto-grade variant & experiment runs sub-toggle (see AppConfig.autoGradeVariantRuns).

@@ -15,6 +15,17 @@
  * (the default review-queue mode, a terminal run) resolves fail-soft
  * (`{ delivered: false }` / `{ active: false }` / `[]`).
  *
+ * FINAL-GATE AUTO-HANDOVER (final-gate handover): `send` first consults an
+ * injectable `FinalGateHandoverAttempt` (wired via `setFinalGateHandover`, backed
+ * by finalGateHandover.ts) BEFORE the normal monitor path. When the run is a
+ * programmatic run resting at its FINAL human gate, chatting with it converts the
+ * run to a full orchestrated agent carrying the message as its first request
+ * (returns `{ delivered: true, handedOver: true }`); the agent — not the monitor —
+ * then owns the chat. When the checker returns null (not applicable — a mid-run
+ * gate, a systemic-pause, a non-programmatic/non-resting run, or the kill switch)
+ * `send` falls through to the normal monitor `converse` path unchanged. Fail-soft:
+ * a throwing checker is logged and treated as not-applicable, never breaking chat.
+ *
  * LAZY REHYDRATION (monitor lazy-rehydration): after an app restart the
  * MonitorRegistry is empty, so a registry MISS here does not necessarily mean the
  * run has no monitor — its session object simply did not survive the restart (the
@@ -66,6 +77,35 @@ export function _resetMonitorRehydratorForTesting(): void {
   monitorRehydrator = null;
 }
 
+// ---------------------------------------------------------------------------
+// Final-gate auto-handover seam
+// ---------------------------------------------------------------------------
+
+/**
+ * Structural view of the final-gate handover checker (implemented in
+ * finalGateHandover.ts, wired at boot by the composition root). Consulted by `send`
+ * BEFORE the monitor path; a non-null result means the message was consumed by an
+ * auto-handover and must NOT also reach the monitor. `null` = not applicable.
+ */
+export interface FinalGateHandoverAttempt {
+  attempt(runId: string, text: string): Promise<{ delivered: boolean; handedOver: boolean } | null>;
+}
+
+let finalGateHandover: FinalGateHandoverAttempt | null = null;
+
+/**
+ * Wire the final-gate handover checker at boot (composition root). Idempotent;
+ * tests install a fake per case and clear it via {@link _resetFinalGateHandoverForTesting}.
+ */
+export function setFinalGateHandover(h: FinalGateHandoverAttempt | null): void {
+  finalGateHandover = h;
+}
+
+/** Test-only: clear the wired checker so a case starts from the unset (legacy) state. */
+export function _resetFinalGateHandoverForTesting(): void {
+  finalGateHandover = null;
+}
+
 /**
  * Look up a run's monitor session, falling back to the lazy rehydrator on a
  * registry miss. Fail-soft: a throwing rehydrator is logged and treated as a
@@ -114,10 +154,29 @@ export const monitorRouter = router({
    * Fail-soft: `converse` (and `answer`) never throw, so this resolves cleanly even
    * when the monitor's query errors (the monitor injects an apologetic assistant
    * turn). A session predating `converse` falls back to a bare `answer` (no render).
+   *
+   * PRE-STEP (final-gate auto-handover): before consulting the monitor, a wired
+   * `FinalGateHandoverAttempt` gets first refusal. A non-null result means the turn
+   * was consumed by a programmatic->orchestrated handover (`{ delivered: true,
+   * handedOver: true }`) — return it WITHOUT touching the monitor. `null` (not
+   * applicable) falls through to the monitor path below. Fail-soft: a throwing
+   * checker is logged and treated as not-applicable — a broken checker must never
+   * break chat.
    */
   send: protectedProcedure
     .input(z.object({ runId: z.string(), text: z.string() }))
-    .mutation(async ({ input }): Promise<{ delivered: boolean }> => {
+    .mutation(async ({ input }): Promise<{ delivered: boolean; handedOver?: boolean }> => {
+      if (finalGateHandover) {
+        try {
+          const handedOver = await finalGateHandover.attempt(input.runId, input.text);
+          if (handedOver) return handedOver;
+        } catch (err) {
+          console.warn(
+            `[monitor.send] final-gate handover checker threw for run ${input.runId}; falling through to monitor:`,
+            err instanceof Error ? err.message : String(err),
+          );
+        }
+      }
       const session = lookupOrRehydrate(input.runId);
       if (!session) return { delivered: false };
       if (session.converse) {
