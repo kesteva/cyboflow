@@ -874,21 +874,29 @@ export class WorkflowController {
         // task-verify turn, consume its captured result text to (a) route a
         // VERDICT: FAIL back into the loopback path — a gap programmatic mode never
         // saw before — and (b) compose the visual-verification task the agentless
-        // visual-verify step below will enqueue. Only meaningful when verification
-        // is active for the run; otherwise the text is ignored (byte-identical).
-        if (innerStep.id === SPRINT_TASK_VERIFY_STEP && this.host.visualGate?.isActive(runId)) {
+        // visual-verify step below will enqueue. (a) runs UNCONDITIONALLY: the
+        // functional acceptance verdict is orthogonal to visual verification, so
+        // disabling the visual gate must not disable verdict enforcement. (b) —
+        // fence parsing, §5.1 contract enforcement, and pre-fired adoption — stays
+        // gated on the gate being active; a disabled run parses fences leniently
+        // (any fence text is simply ignored, never a contract failure).
+        if (innerStep.id === SPRINT_TASK_VERIFY_STEP) {
+          const visualActive = this.host.visualGate?.isActive(runId) === true;
           // Every fresh task-verify result supersedes a prior adoption decision.
           adoptedPreFiredRequest = false;
           const resultText = result.resultText;
           if (resultText === null || resultText === undefined) {
             // A substrate that cannot capture the step's final text (codex /
-            // interactive): visual verification is Claude-scoped v1, so fail OPEN —
-            // skip it for this lane (channel-unavailable).
-            this.host.log?.(
-              'warn',
-              `fan-out item '${itemId}': task-verify produced no result text; skipping visual verification (channel unavailable)`,
-            );
-            visualVerifyTask = undefined;
+            // interactive): no verdict channel exists, so FAIL routing stays
+            // unavailable there, and visual verification — Claude-scoped v1 —
+            // fails OPEN for this lane (channel-unavailable).
+            if (visualActive) {
+              this.host.log?.(
+                'warn',
+                `fan-out item '${itemId}': task-verify produced no result text; skipping visual verification (channel unavailable)`,
+              );
+              visualVerifyTask = undefined;
+            }
           } else {
             const verdict = parseTaskVerifyVerdict(resultText);
             if (verdict === 'fail') {
@@ -918,55 +926,62 @@ export class WorkflowController {
                 `fan-out item '${itemId}': task-verify result had no VERDICT line; treating as PASS`,
               );
             }
-            // PASS (or no explicit verdict): the §5.1 contract requires EXACTLY ONE
-            // of a `## Visual verification task` fence or a NOT-APPLICABLE line — a
-            // missing/malformed one is an output-contract failure, NEVER silently
-            // "nothing to verify" (a truncated response must not bypass the gate).
-            const section = parseVisualTaskSection(resultText);
-            if (section.kind === 'task') {
-              visualVerifyTask = section.task;
-            } else if (section.kind === 'not_applicable') {
-              visualVerifyTask = undefined;
-              this.host.log?.(
-                'info',
-                `fan-out item '${itemId}': visual verification NOT-APPLICABLE${section.reason ? ` (${section.reason})` : ''}`,
-              );
-            } else if (this.host.visualGate?.hasLiveRequestForLane?.(runId, itemId) === true) {
-              // 'missing' | 'contract_error' BUT a LIVE lane-attributed request
-              // exists: the misbehaving turn FIRED the request itself instead of
-              // printing the fence (pre-fired hijack, observed live 2026-07-22 —
-              // belt-and-suspenders behind the spawn-level tool denial). The
-              // verification is already underway with this attempt's content, so
-              // adopt it — the visual-verify step parks on it — rather than
-              // re-running task-verify into the same defect and racing the
-              // merge-gate against the contract-retry loop.
-              adoptedPreFiredRequest = true;
-              this.host.log?.(
-                'warn',
-                `fan-out item '${itemId}': task-verify violated the output contract but a live lane-attributed verification request exists; adopting it`,
-              );
-            } else {
-              // 'missing' | 'contract_error' → re-run task-verify ONCE with the
-              // defect threaded; a SECOND violation fails the lane.
-              if (laneContractRetries >= 1) {
-                driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
+            // Fence handling below is visual-gate-scoped: with the gate off there
+            // is no visual task to compose and the §5.1 fence contract is NOT
+            // enforced — a run that never asked for visual verification must not
+            // fail its lanes over a missing fence.
+            if (visualActive) {
+              // PASS (or no explicit verdict): the §5.1 contract requires EXACTLY
+              // ONE of a `## Visual verification task` fence or a NOT-APPLICABLE
+              // line — a missing/malformed one is an output-contract failure,
+              // NEVER silently "nothing to verify" (a truncated response must not
+              // bypass the gate).
+              const section = parseVisualTaskSection(resultText);
+              if (section.kind === 'task') {
+                visualVerifyTask = section.task;
+              } else if (section.kind === 'not_applicable') {
+                visualVerifyTask = undefined;
+                this.host.log?.(
+                  'info',
+                  `fan-out item '${itemId}': visual verification NOT-APPLICABLE${section.reason ? ` (${section.reason})` : ''}`,
+                );
+              } else if (this.host.visualGate?.hasLiveRequestForLane?.(runId, itemId) === true) {
+                // 'missing' | 'contract_error' BUT a LIVE lane-attributed request
+                // exists: the misbehaving turn FIRED the request itself instead of
+                // printing the fence (pre-fired hijack, observed live 2026-07-22 —
+                // belt-and-suspenders behind the spawn-level tool denial). The
+                // verification is already underway with this attempt's content, so
+                // adopt it — the visual-verify step parks on it — rather than
+                // re-running task-verify into the same defect and racing the
+                // merge-gate against the contract-retry loop.
+                adoptedPreFiredRequest = true;
                 this.host.log?.(
                   'warn',
-                  `fan-out item '${itemId}': task-verify violated the visual-verification output contract twice; lane failed`,
+                  `fan-out item '${itemId}': task-verify violated the output contract but a live lane-attributed verification request exists; adopting it`,
                 );
-                return 'failed';
+              } else {
+                // 'missing' | 'contract_error' → re-run task-verify ONCE with the
+                // defect threaded; a SECOND violation fails the lane.
+                if (laneContractRetries >= 1) {
+                  driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
+                  this.host.log?.(
+                    'warn',
+                    `fan-out item '${itemId}': task-verify violated the visual-verification output contract twice; lane failed`,
+                  );
+                  return 'failed';
+                }
+                laneContractRetries += 1;
+                pendingContractError =
+                  section.kind === 'contract_error'
+                    ? section.error
+                    : 'no "## Visual verification task" section and no VISUAL-VERIFICATION: NOT-APPLICABLE line';
+                this.host.log?.(
+                  'warn',
+                  `fan-out item '${itemId}': task-verify visual-verification contract defect; re-running task-verify`,
+                );
+                k = k - 1; // Re-run the SAME task-verify step (the loop's k++ lands on it).
+                continue;
               }
-              laneContractRetries += 1;
-              pendingContractError =
-                section.kind === 'contract_error'
-                  ? section.error
-                  : 'no "## Visual verification task" section and no VISUAL-VERIFICATION: NOT-APPLICABLE line';
-              this.host.log?.(
-                'warn',
-                `fan-out item '${itemId}': task-verify visual-verification contract defect; re-running task-verify`,
-              );
-              k = k - 1; // Re-run the SAME task-verify step (the loop's k++ lands on it).
-              continue;
             }
           }
         }

@@ -1431,6 +1431,76 @@ describe('WorkflowController', () => {
         expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
       });
 
+      // ── Disabled-run verdict enforcement: the functional VERDICT channel is
+      //    orthogonal to visual verification — turning the visual gate off must
+      //    not turn off the FAIL loopback (disabled-run FAIL-invisibility fix). ──
+      it('visual gate INACTIVE: VERDICT: FAIL still loops back to implement, then PASS integrates', async () => {
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = makeVisualGate([], false); // present but inactive
+        const enqueue = makeEnqueue();
+        host.enqueueVisualVerification = enqueue.fn;
+        let tv = 0;
+        const runner: StepRunner & { calls: Array<{ id: string; attempt: number }> } = {
+          calls: [],
+          async runStep(s, ctx) {
+            this.calls.push({ id: s.id, attempt: ctx.attempt });
+            if (s.id === 'task-verify') {
+              tv += 1;
+              return tv === 1
+                ? { status: 'ok', resultText: 'VERDICT: FAIL\n\ncriterion 2 not met\n' }
+                : { status: 'ok', resultText: 'VERDICT: PASS\n\nall criteria met\n' };
+            }
+            return { status: 'ok' };
+          },
+        };
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        // The FAIL loopback bumped the lane attempt exactly as on an active run.
+        expect(runner.calls.filter((c) => c.id === 'implement').map((c) => c.attempt)).toEqual([1, 2]);
+        // No visual machinery engaged: nothing enqueued, no awaiting-verify park.
+        expect(enqueue.calls.length).toBe(0);
+        expect(driver.lanes.some((l) => l.currentStepId === 'awaiting-verify')).toBe(false);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+      });
+
+      it('visual gate ABSENT: persistent VERDICT: FAIL exhausts the attempt cap and fails the lane', async () => {
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = undefined;
+        const runner = verifyRunner('VERDICT: FAIL\n\nnever meets criteria\n');
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        // A failed lane never fails the run (fan-out partial-success semantics).
+        expect(result.outcome).toBe('completed');
+        // Loopback re-ran implement until the attempt cap, then the lane failed.
+        expect(runner.calls.filter((c) => c.id === 'implement').map((c) => c.attempt)).toEqual([1, 2, 3]);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('failed');
+      });
+
+      it('visual gate INACTIVE: PASS with NO fence is lenient — no contract re-run, lane integrates', async () => {
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = makeVisualGate([], false);
+        const enqueue = makeEnqueue();
+        host.enqueueVisualVerification = enqueue.fn;
+        const runner = verifyRunner('VERDICT: PASS\n\n(no visual section here)\n');
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        // Exactly ONE task-verify turn — the §5.1 contract retry never engaged.
+        expect(runner.calls.filter((c) => c.id === 'task-verify').length).toBe(1);
+        expect(enqueue.calls.length).toBe(0);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+      });
+
       it('gate loopback carrying feedback → the re-driven implement ctx has loopbackFeedback', async () => {
         const d = def([phase('p1', [verifyChain()])]);
         const driver = makeFanOutDriver(['t1']);
