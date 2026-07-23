@@ -3429,6 +3429,28 @@ export class McpQueryHandler {
       return;
     }
 
+    // OWNERSHIP GUARD: on a programmatic run the workflow controller is the ONLY
+    // legitimate enqueuer, and it goes through its direct host capability
+    // (verify/enqueueFromTask.ts) — never this socket path. Any MCP-path call on
+    // a programmatic run is therefore a step turn firing the tool it was told
+    // not to (the per-spawn disallowedTools denial only reaches the Claude SDK
+    // manager; Codex and interactive turns ignore it), so reject it here —
+    // provider-independently — before a rogue keyless request can race the
+    // controller's own enqueue at the merge gate. Fail-soft read: a missing /
+    // pre-schema execution_model resolves null and falls through.
+    if (this.readExecutionModel(msg.runId) === 'programmatic') {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error:
+          'programmatic_run_verification_rejected: verification enqueues on a programmatic run are ' +
+          'controller-owned. Do not fire this tool — print the visual-verification contract as TEXT ' +
+          'in your final message and the controller will enqueue it.',
+      });
+      return;
+    }
+
     // Read the run's IMMUTABLE verify stamp (migration 055). Read defensively — a
     // pre-036 DB lacking the columns degrades to a disabled posture (skipped).
     let enabled = false;

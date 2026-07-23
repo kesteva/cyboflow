@@ -4543,6 +4543,83 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     expect((JSON.parse(row.deliverable_json) as { taskRef?: string }).taskRef).toBe('TASK-777');
     expect((JSON.parse(row.task_json) as { taskRef?: string }).taskRef).toBe('TASK-777');
   });
+
+  // Ownership guard: on a programmatic run the controller enqueues through its
+  // direct host capability, never this socket path — so ANY MCP-path call on a
+  // programmatic run is a rogue step turn, regardless of provider (the
+  // per-spawn disallowedTools denial only reaches the Claude SDK manager).
+  it('programmatic run → rejected provider-independently, no row enqueued', async () => {
+    seedVerifyRun(vdb, 'run-vprog', {
+      enabled: true,
+      type: 'static-render-snapshot',
+      chain: ['capturePage'],
+    });
+    vdb.prepare("UPDATE workflow_runs SET execution_model = 'programmatic' WHERE id = ?").run('run-vprog');
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-prog',
+        runId: 'run-vprog',
+        intent: 'the toggle renders',
+        url: 'http://localhost:5173',
+        taskRef: 'TASK-001',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toMatch(/^programmatic_run_verification_rejected:/);
+    const count = vdb.prepare('SELECT COUNT(*) AS n FROM verification_requests').get() as { n: number };
+    expect(count.n).toBe(0);
+  });
+
+  it('programmatic guard precedes the disabled-run skip (rejects even when verify is disabled)', async () => {
+    seedVerifyRun(vdb, 'run-vprog2', { enabled: false });
+    vdb.prepare("UPDATE workflow_runs SET execution_model = 'programmatic' WHERE id = ?").run('run-vprog2');
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-prog2',
+        runId: 'run-vprog2',
+        intent: 'anything',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toMatch(/^programmatic_run_verification_rejected:/);
+  });
+
+  it('orchestrated run is unaffected by the programmatic guard', async () => {
+    seedVerifyRun(vdb, 'run-vorch', {
+      enabled: true,
+      type: 'static-render-snapshot',
+      chain: ['capturePage'],
+    });
+    vdb.prepare("UPDATE workflow_runs SET execution_model = 'orchestrated' WHERE id = ?").run('run-vorch');
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-orch',
+        runId: 'run-vorch',
+        intent: 'the toggle renders',
+        url: 'http://localhost:5173',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    expect(typeof (response.data as { requestId?: string }).requestId).toBe('string');
+  });
 });
 
 // ---------------------------------------------------------------------------
