@@ -61,6 +61,12 @@ interface LoadImagesResult {
   error?: string;
 }
 
+interface LoadTextResult {
+  success: boolean;
+  data?: { text: string };
+  error?: string;
+}
+
 const RUN_ID = 'run-fu4';
 
 beforeEach(() => {
@@ -175,5 +181,112 @@ describe('registerArtifactImageHandlers — artifacts:load-images', () => {
 
     expect(res.success).toBe(true);
     expect(res.data?.images).toEqual([]);
+  });
+});
+
+describe('registerArtifactImageHandlers — artifacts:load-text', () => {
+  it('registers the channel', () => {
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerArtifactImageHandlers(
+      ipcMain as unknown as Parameters<typeof registerArtifactImageHandlers>[0],
+      makeServices(),
+    );
+    expect(handlers.has('artifacts:load-text')).toBe(true);
+  });
+
+  it('reads a .md file back verbatim from the run root', async () => {
+    const runDir = path.join(tmpRoot, 'artifacts', 'runs', RUN_ID);
+    await fs.mkdir(runDir, { recursive: true });
+    await fs.writeFile(path.join(runDir, 'transcript-vr_1.md'), '# transcript\nsome body text');
+
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerArtifactImageHandlers(
+      ipcMain as unknown as Parameters<typeof registerArtifactImageHandlers>[0],
+      makeServices(),
+    );
+
+    const res = (await invoke(handlers, 'artifacts:load-text', {
+      runId: RUN_ID,
+      fileName: 'transcript-vr_1.md',
+    })) as LoadTextResult;
+
+    expect(res.success).toBe(true);
+    expect(res.data?.text).toBe('# transcript\nsome body text');
+  });
+
+  it('REJECTS a traversal fileName via the containment guard (fail-soft, not fatal)', async () => {
+    const runDir = path.join(tmpRoot, 'artifacts', 'runs', RUN_ID);
+    await fs.mkdir(runDir, { recursive: true });
+
+    // Plant a readable .md file OUTSIDE the run root the traversal would target.
+    await fs.writeFile(path.join(tmpRoot, 'secret.md'), 'top secret');
+
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerArtifactImageHandlers(
+      ipcMain as unknown as Parameters<typeof registerArtifactImageHandlers>[0],
+      makeServices(),
+    );
+
+    const res = (await invoke(handlers, 'artifacts:load-text', {
+      runId: RUN_ID,
+      fileName: '../../secret.md',
+    })) as LoadTextResult;
+
+    expect(res.success).toBe(false);
+    expect(res.data).toBeUndefined();
+  });
+
+  it('rejects a disallowed extension (e.g. .ts)', async () => {
+    const runDir = path.join(tmpRoot, 'artifacts', 'runs', RUN_ID);
+    await fs.mkdir(runDir, { recursive: true });
+    await fs.writeFile(path.join(runDir, 'notes.ts'), 'export const x = 1;');
+
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerArtifactImageHandlers(
+      ipcMain as unknown as Parameters<typeof registerArtifactImageHandlers>[0],
+      makeServices(),
+    );
+
+    const res = (await invoke(handlers, 'artifacts:load-text', {
+      runId: RUN_ID,
+      fileName: 'notes.ts',
+    })) as LoadTextResult;
+
+    expect(res.success).toBe(false);
+  });
+
+  it('fail-soft: a missing file returns success:false, never throws', async () => {
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerArtifactImageHandlers(
+      ipcMain as unknown as Parameters<typeof registerArtifactImageHandlers>[0],
+      makeServices(),
+    );
+
+    const res = (await invoke(handlers, 'artifacts:load-text', {
+      runId: RUN_ID,
+      fileName: 'missing.md',
+    })) as LoadTextResult;
+
+    expect(res.success).toBe(false);
+    expect(res.error).toBeTruthy();
+  });
+
+  it('rejects a file over the 2 MiB size cap', async () => {
+    const runDir = path.join(tmpRoot, 'artifacts', 'runs', RUN_ID);
+    await fs.mkdir(runDir, { recursive: true });
+    await fs.writeFile(path.join(runDir, 'big.log'), 'z'.repeat(2 * 1024 * 1024 + 1));
+
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerArtifactImageHandlers(
+      ipcMain as unknown as Parameters<typeof registerArtifactImageHandlers>[0],
+      makeServices(),
+    );
+
+    const res = (await invoke(handlers, 'artifacts:load-text', {
+      runId: RUN_ID,
+      fileName: 'big.log',
+    })) as LoadTextResult;
+
+    expect(res.success).toBe(false);
   });
 });

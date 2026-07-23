@@ -39,6 +39,7 @@ import {
   type RequestStatus,
   normalizeVerificationReportV1,
 } from '../../../../shared/types/visualVerification';
+import { verifyTranscriptFileName } from '../../../../shared/types/artifacts';
 import type { AgentModelAlias } from '../../../../shared/types/agents';
 import type { AgentProvider } from '../../../../shared/types/agentRuntime';
 import type { EffectiveAgent } from '../agents/effectiveAgents';
@@ -83,14 +84,40 @@ export interface VerificationAgentQueryArgs {
 }
 
 /**
- * The SDK boundary: deploy ONE structured session and return the last
- * `structured_output` (or null on drain-without-result). The production impl
- * (verificationAgentQuery.ts) bakes in the hermetic sandbox (`settingSources: []`,
- * `strictMcpConfig`, `mcpServers: {}`, `outputFormat: json_schema`); this seam
- * carries only what the runner controls so the runner stays SDK-free + fakeable.
+ * The result of one deployed SDK session: the last `structured_output` (or null
+ * on drain-without-result) PLUS the harness-accumulated transcript (markdown),
+ * captured so a wrong verdict is auditable (verifier-transcript capture).
+ */
+export interface VerificationAgentQueryOutcome {
+  /** The last structured_output (or null on drain-without-result). */
+  structured: unknown;
+  /** Harness-accumulated transcript of the session (markdown), or null when nothing accumulated. */
+  transcript: string | null;
+}
+
+/**
+ * The SDK boundary: deploy ONE structured session and return the outcome
+ * (structured output + transcript). The production impl (verificationAgentQuery.ts)
+ * bakes in the hermetic sandbox (`settingSources: []`, `strictMcpConfig`,
+ * `mcpServers: {}`, `outputFormat: json_schema`); this seam carries only what the
+ * runner controls so the runner stays SDK-free + fakeable.
  */
 export interface VerificationAgentQueryFn {
-  (args: VerificationAgentQueryArgs): Promise<unknown>;
+  (args: VerificationAgentQueryArgs): Promise<VerificationAgentQueryOutcome>;
+}
+
+/**
+ * Thrown by the production query on failure/timeout so a partial transcript
+ * survives the throw (verifier-transcript capture) — the runner's catch writes it
+ * fail-soft before mapping the error to the usual skipped/timeout result.
+ */
+export class VerificationAgentQueryError extends Error {
+  readonly transcript: string | null;
+  constructor(message: string, transcript: string | null) {
+    super(message);
+    this.name = 'VerificationAgentQueryError';
+    this.transcript = transcript;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -183,6 +210,13 @@ export interface VerificationAgentRunnerDeps {
   stopDriver?: (driverScriptPath: string, env: Record<string, string>) => Promise<void>;
   /** Best-effort SIGKILL of the driver's recorded browser pid, if still alive. */
   reapBrowser?: (artifactsDir: string) => void;
+  /**
+   * Write the harness-captured transcript to `<artifactsDir>/<fileName>` (creating
+   * the directory as needed). Injected so tests can assert the call without
+   * touching disk; a failure here is ALWAYS fail-soft (logged, never changes the
+   * verdict path — see {@link VerificationAgentRunner.run}).
+   */
+  writeTranscript?: (artifactsDir: string, fileName: string, content: string) => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -399,6 +433,15 @@ const defaultStopDriver = async (
   }
 };
 
+const defaultWriteTranscript = async (
+  artifactsDir: string,
+  fileName: string,
+  content: string,
+): Promise<void> => {
+  await mkdir(artifactsDir, { recursive: true });
+  await writeFile(join(artifactsDir, fileName), content, 'utf8');
+};
+
 const defaultReapBrowser = (artifactsDir: string): void => {
   try {
     const raw = readFileSync(pidFilePath(artifactsDir), 'utf8');
@@ -428,6 +471,30 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
 
   constructor(deps: VerificationAgentRunnerDeps) {
     this.deps = deps;
+  }
+
+  /**
+   * Write the harness-captured transcript to the deterministic filename (§
+   * verifyTranscriptFileName), FAIL-SOFT: a write failure is logged at warn and
+   * NEVER propagates — it must never change the verdict path. A null/empty
+   * transcript is a no-op (nothing accumulated).
+   */
+  private async writeTranscriptFailSoft(
+    req: VerificationAgentRequest,
+    transcript: string | null,
+    logger: LoggerLike | undefined,
+  ): Promise<void> {
+    if (!transcript || transcript.length === 0) return;
+    const write = this.deps.writeTranscript ?? defaultWriteTranscript;
+    try {
+      await write(req.artifactsDir, verifyTranscriptFileName(req.requestId), transcript);
+    } catch (err) {
+      logger?.warn('[VerificationAgentRunner] transcript write failed (fail-soft)', {
+        runId: req.runId,
+        requestId: req.requestId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**
@@ -527,7 +594,7 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       const systemPrompt = `${resolved.agent.systemPrompt}\n\n${VERIFY_HARNESS_CONTRACT}`;
       let raw: unknown;
       try {
-        raw = await this.deps.query({
+        const outcome = await this.deps.query({
           prompt: composeVerifyUserPrompt(req.task),
           systemPrompt,
           cwd,
@@ -536,7 +603,15 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
           env,
           signal: controller.signal,
         });
+        // Write the transcript BEFORE report validation, so an invalid-report or
+        // skipped outcome still leaves the transcript on disk (fail-soft — never
+        // changes the verdict path).
+        await this.writeTranscriptFailSoft(req, outcome.transcript, logger);
+        raw = outcome.structured;
       } catch (err) {
+        if (err instanceof VerificationAgentQueryError) {
+          await this.writeTranscriptFailSoft(req, err.transcript, logger);
+        }
         if (controller.signal.aborted) {
           return { status: 'timeout', errorMessage: 'deadline exceeded during deploy', fileNames: [] };
         }

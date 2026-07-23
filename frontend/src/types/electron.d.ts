@@ -221,6 +221,13 @@ interface ElectronAPI {
     loadHtml: (
       req: LoadArtifactHtmlRequest,
     ) => Promise<IPCResponse<LoadArtifactHtmlResult>>;
+    // Verifier-transcript text loader (verifier-transcript capture) — reads an
+    // on-disk .md/.txt/.log file back verbatim from the run's artifacts root
+    // (same containment guard as loadImages). `success: false` on a missing/
+    // disallowed/oversized file (fail-soft, not an error).
+    loadText: (
+      req: { runId: string; fileName: string },
+    ) => Promise<IPCResponse<{ text: string }>>;
   };
 
   // Project management

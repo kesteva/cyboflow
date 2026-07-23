@@ -937,7 +937,10 @@ function isTaskVerificationReportEntry(v: unknown): v is TaskVerificationReportE
     typeof o.attempt === 'number' &&
     typeof o.summary === 'string' &&
     Array.isArray(o.behaviors) &&
-    typeof o.completedAt === 'string'
+    typeof o.completedAt === 'string' &&
+    // transcriptFileName (verifier-transcript capture) is OPTIONAL — tolerate its
+    // absence, but a present value must be a string or the entry is malformed.
+    (o.transcriptFileName === undefined || typeof o.transcriptFileName === 'string')
   );
 }
 
@@ -968,6 +971,97 @@ function behaviorResultAccent(result: ReportBehavior['result']): string {
       void (result satisfies never);
       return VERDICT_LOW;
   }
+}
+
+/**
+ * "View transcript" toggle for one report entry carrying a `transcriptFileName`
+ * (verifier-transcript capture — the harness-captured verifier session, so a
+ * wrong verdict is auditable). On first expand it loads the on-disk transcript
+ * via `window.electronAPI.artifacts.loadText` and CACHES the result in local
+ * state, so collapsing/re-expanding never re-fetches. Fail-soft: a missing
+ * Electron API or a load error renders a brief inline message, never throws.
+ */
+function TranscriptToggle({ runId, fileName }: { runId: string; fileName: string }): ReactElement {
+  const [expanded, setExpanded] = useState(false);
+  const [state, setState] = useState<
+    | { status: 'idle' }
+    | { status: 'loading' }
+    | { status: 'loaded'; text: string }
+    | { status: 'error'; error: string }
+  >({ status: 'idle' });
+
+  const handleToggle = (): void => {
+    setExpanded((v) => !v);
+    if (state.status !== 'idle') return; // already loaded/loading/errored — never re-fetch
+    const api = typeof window !== 'undefined' ? window.electronAPI : undefined;
+    if (!api) {
+      setState({ status: 'error', error: 'Electron API not available' });
+      return;
+    }
+    setState({ status: 'loading' });
+    api.artifacts.loadText({ runId, fileName }).then(
+      (res) => {
+        if (res.success && res.data) {
+          setState({ status: 'loaded', text: res.data.text });
+        } else {
+          setState({ status: 'error', error: res.error ?? 'Failed to load transcript.' });
+        }
+      },
+      (err: unknown) => {
+        setState({ status: 'error', error: err instanceof Error ? err.message : 'Failed to load transcript.' });
+      },
+    );
+  };
+
+  return (
+    <div>
+      <button
+        type="button"
+        data-testid="artifact-transcript-toggle"
+        onClick={handleToggle}
+        style={{
+          background: 'none',
+          border: 'none',
+          padding: 0,
+          font: 'inherit',
+          fontSize: '10px',
+          fontWeight: 600,
+          color: MUTED,
+          cursor: 'pointer',
+        }}
+      >
+        {expanded ? '▾' : '▸'} View transcript
+      </button>
+      {expanded && (
+        <div data-testid="artifact-transcript-body" style={{ marginTop: 4 }}>
+          {state.status === 'loading' && (
+            <span style={{ fontSize: '10px', color: FAINT }}>Loading transcript…</span>
+          )}
+          {state.status === 'error' && <span style={{ fontSize: '10px', color: RUST }}>{state.error}</span>}
+          {state.status === 'loaded' && (
+            <pre
+              style={{
+                maxHeight: 320,
+                overflow: 'auto',
+                margin: 0,
+                fontSize: '10px',
+                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                color: MUTED,
+                background: HOVER_WASH,
+                border: `1px solid ${HAIRLINE}`,
+                borderRadius: 2,
+                padding: '8px 10px',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+              }}
+            >
+              {state.text}
+            </pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /** One behavior row: description / result badge / expected / evidence links. */
@@ -1049,10 +1143,13 @@ function BehaviorTableRow({
 
 /** One task lane's report block — latest attempt in full, older attempts collapsed. */
 function TaskReportGroup({
+  runId,
   entries,
   availableFileNames,
   onJumpToImage,
 }: {
+  /** The run these reports belong to — needed to load an entry's transcript. */
+  runId: string;
   /** Newest-attempt-first; at least one entry. */
   entries: TaskVerificationReportEntry[];
   availableFileNames: Set<string>;
@@ -1092,6 +1189,7 @@ function TaskReportGroup({
         >
           {latest.outcome.replace('_', ' ')}
         </span>
+        {latest.transcriptFileName && <TranscriptToggle runId={runId} fileName={latest.transcriptFileName} />}
       </div>
       <div style={{ padding: '4px 12px 10px', overflowX: 'auto' }}>
         <table data-testid="artifact-behaviors-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -1151,8 +1249,11 @@ function TaskReportGroup({
             <div data-testid="artifact-task-report-older-list" style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
               {older.map((entry) => (
                 <div key={entry.requestId} data-testid="artifact-task-report-older" style={{ opacity: 0.7 }}>
-                  <div style={{ fontSize: '10px', color: FAINT, marginBottom: 3 }}>
-                    attempt {entry.attempt} · {entry.outcome.replace('_', ' ')} · {entry.completedAt}
+                  <div style={{ fontSize: '10px', color: FAINT, marginBottom: 3, display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span>
+                      attempt {entry.attempt} · {entry.outcome.replace('_', ' ')} · {entry.completedAt}
+                    </span>
+                    {entry.transcriptFileName && <TranscriptToggle runId={runId} fileName={entry.transcriptFileName} />}
                   </div>
                   <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                     <tbody>
@@ -1200,10 +1301,13 @@ function groupTaskReports(reports: TaskVerificationReportEntry[]): TaskVerificat
  * whether an evidence screenshot renders as a clickable jump-to-image link.
  */
 function BehaviorsTestedSection({
+  runId,
   reports,
   availableFileNames,
   onJumpToImage,
 }: {
+  /** The run these reports belong to — threaded down to each entry's transcript loader. */
+  runId: string;
   reports: unknown;
   availableFileNames: Set<string>;
   onJumpToImage: (fileName: string) => void;
@@ -1222,6 +1326,7 @@ function BehaviorsTestedSection({
       {groups.map((entries) => (
         <TaskReportGroup
           key={entries[0].taskRef ?? entries[0].requestId}
+          runId={runId}
           entries={entries}
           availableFileNames={availableFileNames}
           onJumpToImage={onJumpToImage}
@@ -1306,6 +1411,7 @@ function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectI
           carries at least one valid verification-agent report. */}
       {!loading && !error && data?.kind === 'screenshots' && (
         <BehaviorsTestedSection
+          runId={artifact.runId}
           reports={data.payload.reports}
           availableFileNames={availableFileNames}
           onJumpToImage={scrollToShot}

@@ -40,8 +40,11 @@
  *
  * Standalone-typecheck invariant: this file imports ONLY the electron-free
  * orchestrator routers + the merge-gate driver + shared types + the narrow
- * DatabaseLike / LoggerLike — no 'electron' / 'better-sqlite3' / 'fs' / services
- * import.
+ * DatabaseLike / LoggerLike — no 'electron' / 'better-sqlite3' / services import.
+ * EXCEPTION (verifier-transcript capture): `node:fs`'s `existsSync` is the
+ * DEFAULT (overridable) `fileExists` seam for the ADVISORY transcript-presence
+ * check below — a pure sync stat check, never electron/better-sqlite3, and
+ * injected so a test can swap it without touching real disk.
  */
 import { ArtifactRouter } from '../artifactRouter';
 import { ReviewItemRouter } from '../reviewItemRouter';
@@ -57,6 +60,9 @@ import type {
 } from '../../../../shared/types/visualVerification';
 import { parseVerificationTaskV1 } from '../../../../shared/types/visualVerification';
 import type { TaskVerificationReportEntry } from '../../../../shared/types/artifacts';
+import { verifyTranscriptFileName } from '../../../../shared/types/artifacts';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import type {
   FindingPayload,
   ReviewItemSeverity,
@@ -67,6 +73,19 @@ export interface VerdictDeliveryDeps {
   /** Read-only DB surface — used to resolve the run's soft task link + persisted request columns. */
   db: DatabaseLike;
   logger?: LoggerLike;
+  /**
+   * Resolve a run's on-disk artifacts dir — the SAME resolver the
+   * VerificationScheduler is constructed with (main/src/index.ts), so this
+   * delivery checks the identical path the runner wrote a transcript to.
+   */
+  artifactsDirResolver: (runId: string) => string;
+  /**
+   * Sync existence check for a resolved transcript path; defaults to
+   * `existsSync` (node:fs). ADVISORY ONLY: any error is caught, logged at
+   * debug, and treated as absent — never sets the delivery's return to false,
+   * never throws.
+   */
+  fileExists?: (absPath: string) => boolean;
 }
 
 /**
@@ -356,8 +375,10 @@ function composeReportEntry(args: {
   report: VerificationReportV1;
   task: VerificationTaskV1 | null;
   input?: VerificationRequestInput;
+  /** Present when the harness wrote a transcript for this request (advisory, see resolveTranscriptFileName). */
+  transcriptFileName?: string;
 }): TaskVerificationReportEntry {
-  const { requestId, taskRef, attempt, report, task, input } = args;
+  const { requestId, taskRef, attempt, report, task, input, transcriptFileName } = args;
   const meta = new Map<string, { description: string; expected: string }>();
   if (task) {
     for (const b of task.behaviors) meta.set(b.id, { description: b.description, expected: b.expected });
@@ -380,7 +401,38 @@ function composeReportEntry(args: {
     }),
     outcome: report.outcome,
     completedAt: new Date().toISOString(),
+    ...(transcriptFileName ? { transcriptFileName } : {}),
   };
+}
+
+/**
+ * ADVISORY: resolve the transcript filename for this request when the harness
+ * actually wrote one (§ verifier-transcript capture), by re-deriving the
+ * deterministic name (`verifyTranscriptFileName`) and checking it exists under
+ * the SAME artifacts dir the runner wrote to. Any failure (bad resolver, fs
+ * error) is caught, logged at debug, and treated as absent — this function
+ * NEVER throws and its result NEVER affects the delivery's required-consumer
+ * outcome.
+ */
+function resolveTranscriptFileName(
+  artifactsDirResolver: (runId: string) => string,
+  fileExists: (absPath: string) => boolean,
+  runId: string,
+  requestId: string,
+  logger?: LoggerLike,
+): string | undefined {
+  try {
+    const fileName = verifyTranscriptFileName(requestId);
+    const absPath = join(artifactsDirResolver(runId), fileName);
+    return fileExists(absPath) ? fileName : undefined;
+  } catch (err) {
+    logger?.debug('[verdictDelivery] transcript existence check failed (fail-soft, treated as absent)', {
+      runId,
+      requestId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return undefined;
+  }
 }
 
 /**
@@ -472,7 +524,7 @@ function parseCorrelation(
  * — requiring it could pin a row pending forever on one odd historical item.
  */
 export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
-  const { db, logger } = deps;
+  const { db, logger, artifactsDirResolver, fileExists = existsSync } = deps;
 
   return async ({ requestId, runId, projectId, status, verdict, fileNames, input, captureOrigin, diagnostics }) => {
     let allOk = true;
@@ -495,8 +547,19 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
     // reports entry. Merge whenever there is something to add (verdict banner, a
     // report entry, or captured fileNames) — a bare skip with nothing captured
     // enriches nothing (never mints an empty artifact).
+    const transcriptFileName = report
+      ? resolveTranscriptFileName(artifactsDirResolver, fileExists, runId, requestId, logger)
+      : undefined;
     const reportEntry = report
-      ? composeReportEntry({ requestId, taskRef, attempt, report, task, input })
+      ? composeReportEntry({
+          requestId,
+          taskRef,
+          attempt,
+          report,
+          task,
+          input,
+          ...(transcriptFileName ? { transcriptFileName } : {}),
+        })
       : undefined;
     const hasFiles = Array.isArray(fileNames) && fileNames.length > 0;
     if (verdict || reportEntry || hasFiles) {

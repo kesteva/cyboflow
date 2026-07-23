@@ -11,11 +11,13 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   VerificationAgentRunner,
+  VerificationAgentQueryError,
   resolveVerifyModel,
   mapReportToResult,
   type VerificationAgentRunnerDeps,
   type VerificationAgentRequest,
   type ResolvedVerifyAgent,
+  type VerificationAgentQueryOutcome,
 } from '../verificationAgentRunner';
 import { SnapshotProvisionError, type SnapshotProvision } from '../snapshotProvisioner';
 import { setSeamErrorSink } from '../../telemetrySink';
@@ -64,6 +66,14 @@ function validReport(overrides: Partial<VerificationReportV1> = {}): Verificatio
   };
 }
 
+/** Wrap a report in the query outcome shape (structured + transcript), defaulting transcript to null. */
+function makeOutcome(
+  report: VerificationReportV1,
+  transcript: string | null = null,
+): VerificationAgentQueryOutcome {
+  return { structured: report, transcript };
+}
+
 function makeReq(overrides: Partial<VerificationAgentRequest> = {}): VerificationAgentRequest {
   return {
     runId: 'run-1',
@@ -87,11 +97,13 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
   stopDriver: ReturnType<typeof vi.fn>;
   query: ReturnType<typeof vi.fn>;
   warn: ReturnType<typeof vi.fn>;
+  writeTranscript: ReturnType<typeof vi.fn>;
 } {
   const dispose = vi.fn(async () => {});
   const stopDriver = vi.fn(async () => {});
-  const query = vi.fn(async () => validReport());
+  const query = vi.fn(async () => makeOutcome(validReport()));
   const warn = vi.fn();
+  const writeTranscript = vi.fn(async () => {});
   const provision = vi.fn(
     async (): Promise<SnapshotProvision> => ({ worktreePath: '/snap', sha: 'abc123', dispose }),
   );
@@ -114,9 +126,10 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
     writeDriverScript: async () => '/artifacts/.driver/verify-driver.sh',
     stopDriver,
     reapBrowser: vi.fn(),
+    writeTranscript,
     ...overrides,
   };
-  return { runner: new VerificationAgentRunner(deps), dispose, stopDriver, query, warn };
+  return { runner: new VerificationAgentRunner(deps), dispose, stopDriver, query, warn, writeTranscript };
 }
 
 beforeEach(() => {
@@ -281,9 +294,11 @@ describe('VerificationAgentRunner.run', () => {
   it('skips when the report fails validation (unknown behavior id)', async () => {
     const { runner, dispose } = makeRunner({
       query: async () =>
-        validReport({
-          behaviors: [{ id: 'nope', result: 'pass', evidence: { screenshots: [], notes: '' } }],
-        }),
+        makeOutcome(
+          validReport({
+            behaviors: [{ id: 'nope', result: 'pass', evidence: { screenshots: [], notes: '' } }],
+          }),
+        ),
     });
     const result = await runner.run(makeReq());
     expect(result.status).toBe('skipped');
@@ -301,7 +316,7 @@ describe('VerificationAgentRunner.run', () => {
   it('skips when a reported screenshot is not a bare filename', async () => {
     const { runner } = makeRunner({
       query: async () =>
-        validReport({ screenshots: [{ fileName: '../escape.png', caption: 'x' }] }),
+        makeOutcome(validReport({ screenshots: [{ fileName: '../escape.png', caption: 'x' }] })),
     });
     const result = await runner.run(makeReq());
     expect(result.status).toBe('skipped');
@@ -309,8 +324,10 @@ describe('VerificationAgentRunner.run', () => {
   });
 
   it('routes a snapshot build failure to failed; a live-fallback build failure to skipped', async () => {
-    const buildFail = async (): Promise<VerificationReportV1> =>
-      validReport({ outcome: 'build_failed', buildLogExcerpt: 'boom', screenshots: [], behaviors: [] });
+    const buildFail = async (): Promise<VerificationAgentQueryOutcome> =>
+      makeOutcome(
+        validReport({ outcome: 'build_failed', buildLogExcerpt: 'boom', screenshots: [], behaviors: [] }),
+      );
 
     const snap = makeRunner({ query: buildFail });
     expect((await snap.runner.run(makeReq())).status).toBe('failed');
@@ -392,5 +409,59 @@ describe('VerificationAgentRunner.run', () => {
     const env = query.mock.calls[0][0].env;
     expect(env.VERIFY_PORT).toBeUndefined();
     expect(env.VERIFY_DRIVER_PORT).toBe('29261');
+  });
+
+  // -------------------------------------------------------------------------
+  // verifier-transcript capture — writeTranscript seam
+  // -------------------------------------------------------------------------
+
+  it('writes the transcript once with the deterministic filename when the query outcome carries one', async () => {
+    const { runner, writeTranscript } = makeRunner({
+      query: async () => makeOutcome(validReport(), '# transcript body'),
+    });
+    const req = makeReq({ requestId: 'vr-transcript-1', artifactsDir: '/artifacts' });
+    const result = await runner.run(req);
+    expect(result.status).toBe('passed');
+    expect(writeTranscript).toHaveBeenCalledTimes(1);
+    expect(writeTranscript).toHaveBeenCalledWith('/artifacts', 'transcript-vr-transcript-1.md', '# transcript body');
+  });
+
+  it('does not write a transcript when the query outcome carries none (null)', async () => {
+    const { runner, writeTranscript } = makeRunner({
+      query: async () => makeOutcome(validReport(), null),
+    });
+    await runner.run(makeReq());
+    expect(writeTranscript).not.toHaveBeenCalled();
+  });
+
+  it('writes the partial transcript from a thrown VerificationAgentQueryError, and still maps to the usual skipped/timeout result', async () => {
+    const { runner, writeTranscript } = makeRunner({
+      query: async () => {
+        throw new VerificationAgentQueryError('agent boom', 'partial transcript up to the failure');
+      },
+    });
+    const req = makeReq({ requestId: 'vr-transcript-2', artifactsDir: '/artifacts' });
+    const result = await runner.run(req);
+    expect(result.status).toBe('skipped');
+    expect(result.errorMessage).toContain('agent boom');
+    expect(writeTranscript).toHaveBeenCalledTimes(1);
+    expect(writeTranscript).toHaveBeenCalledWith(
+      '/artifacts',
+      'transcript-vr-transcript-2.md',
+      'partial transcript up to the failure',
+    );
+  });
+
+  it('a rejecting writeTranscript is fail-soft — the verdict path is unchanged', async () => {
+    const writeTranscript = vi.fn(async () => {
+      throw new Error('disk full');
+    });
+    const { runner } = makeRunner({
+      query: async () => makeOutcome(validReport(), 'some transcript'),
+      writeTranscript,
+    });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('passed'); // unaffected by the write failure
+    expect(writeTranscript).toHaveBeenCalledTimes(1);
   });
 });

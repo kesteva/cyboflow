@@ -181,7 +181,7 @@ describe('verdictDelivery (P8a)', () => {
 
   it('FAIL → screenshots artifact enriched WITH verdict + exactly 1 finding', async () => {
     seedRun(db, 'run-1', 'tsk_abc');
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
 
     await deliver({
       requestId: 'vr_1',
@@ -224,7 +224,7 @@ describe('verdictDelivery (P8a)', () => {
 
   it('PASS → screenshots artifact enriched WITH verdict + 0 findings', async () => {
     seedRun(db, 'run-2', 'tsk_pass');
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
 
     await deliver({
       requestId: 'vr_2',
@@ -248,7 +248,7 @@ describe('verdictDelivery (P8a)', () => {
 
   it('low_confidence → screenshots artifact enriched + exactly 1 finding', async () => {
     seedRun(db, 'run-3', 'tsk_lc');
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
 
     await deliver({
       requestId: 'vr_3',
@@ -278,7 +278,7 @@ describe('verdictDelivery (P8a)', () => {
     // ran" (missing precondition) — it must be visible, not silent, mirroring timeout.
     seedRun(db, 'run-4');
     seedVerificationRequest(db, 'vr_4', 'run-4');
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
 
     await deliver({
       requestId: 'vr_4',
@@ -304,7 +304,7 @@ describe('verdictDelivery (P8a)', () => {
   it('skipped → finding body threads the concrete skip reason from verification_requests.error_message', async () => {
     seedRun(db, 'run-4b');
     seedVerificationRequest(db, 'vr_4b', 'run-4b', 'no healthy backend for static-render-snapshot');
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
 
     await deliver({
       requestId: 'vr_4b',
@@ -329,7 +329,7 @@ describe('verdictDelivery (P8a)', () => {
     // (e.g. a fixture gap or FK cascade). resolveSkipReason must fail soft: no
     // 'Reason:' line, but the finding still fires with the generic body.
     seedRun(db, 'run-4c');
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
 
     await deliver({
       requestId: 'vr_missing',
@@ -357,7 +357,7 @@ describe('verdictDelivery (P8a)', () => {
     // nothing (no verdict to add to the screenshots artifact) but STILL raises a
     // finding so the failure is visible in the review inbox.
     seedRun(db, 'run-vlf', 'tsk_vlf');
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
 
     await deliver({
       requestId: 'vr_vlf',
@@ -391,7 +391,7 @@ describe('verdictDelivery (P8a)', () => {
 
   it('omits the entity link when the run has no task (both fields null)', async () => {
     seedRun(db, 'run-5'); // no task_id
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
 
     await deliver({
       requestId: 'vr_5',
@@ -411,7 +411,7 @@ describe('verdictDelivery (P8a)', () => {
 
   it('R7: enrich carries verdict.baselineKey from the request input (round-trip key for Accept-as-baseline)', async () => {
     seedRun(db, 'run-bk', 'tsk_bk');
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
 
     await deliver({
       requestId: 'vr_bk',
@@ -435,7 +435,7 @@ describe('verdictDelivery (P8a)', () => {
 
   it('R7: absent input.baselineKey → the verdict block has NO baselineKey field (not undefined-serialized)', async () => {
     seedRun(db, 'run-nobk', 'tsk_nobk');
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
 
     await deliver({
       requestId: 'vr_nobk',
@@ -458,7 +458,7 @@ describe('verdictDelivery (P8a)', () => {
 
   it('R7: no input at all → verdict enriched with no baselineKey (byte-safe)', async () => {
     seedRun(db, 'run-noinput', 'tsk_ni');
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
 
     await deliver({
       requestId: 'vr_ni',
@@ -493,7 +493,7 @@ describe('verdictDelivery (P8a)', () => {
     expect(before).toHaveLength(1);
     const originalId = before[0].id;
 
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
     await deliver({
       requestId: 'vr_6',
       runId: 'run-6',
@@ -517,7 +517,7 @@ describe('verdictDelivery (P8a)', () => {
     // it — the review-queue finding body and the screenshots artifact payload —
     // with the untrusted framing rendered.
     seedRun(db, 'run-7', 'tsk_prov');
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
 
     await deliver({
       requestId: 'vr_7',
@@ -553,7 +553,7 @@ describe('verdictDelivery (P8a)', () => {
 
   it('S9: a delivery WITHOUT provenance leaves the finding body + payload byte-identical to pre-S9', async () => {
     seedRun(db, 'run-8', 'tsk_noprov');
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
 
     await deliver({
       requestId: 'vr_8',
@@ -587,7 +587,7 @@ describe('verdictDelivery (P8a)', () => {
 
   it('returns true when every required consumer succeeds', async () => {
     seedRun(db, 'run-ok', 'tsk_ok');
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
     const ok = await deliver({
       requestId: 'vr_ok',
       runId: 'run-ok',
@@ -603,7 +603,7 @@ describe('verdictDelivery (P8a)', () => {
 
   it('returns false when the artifact merge fails (router unavailable)', async () => {
     seedRun(db, 'run-am', 'tsk_am');
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
     ArtifactRouter._resetForTesting(); // getInstance() now throws inside the merge try-block
     const ok = await deliver({
       requestId: 'vr_am',
@@ -620,7 +620,7 @@ describe('verdictDelivery (P8a)', () => {
   it('returns false when finding creation fails (router unavailable)', async () => {
     seedRun(db, 'run-ff', 'tsk_ff');
     seedVerificationRequest(db, 'vr_ff', 'run-ff', 'no backend');
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
     ReviewItemRouter._resetForTesting();
     // skipped with no verdict/files: the artifact merge is not attempted, so the
     // ONLY required consumer is the finding — its failure must flip the verdict.
@@ -638,7 +638,7 @@ describe('verdictDelivery (P8a)', () => {
 
   it('a PASS with nothing to merge and no finding returns true (no required consumers)', async () => {
     seedRun(db, 'run-nm', 'tsk_nm');
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
     const ok = await deliver({
       requestId: 'vr_nm',
       runId: 'run-nm',
@@ -731,7 +731,7 @@ describe('verdictDelivery (P8b — merge-gate)', () => {
     seedSprintRun(db, 'run-s1', batchId, 'tsk_a');
     store.updateLane({ runId: 'run-s1', batchId, taskId: 'tsk_a', status: 'running', currentStepId: 'awaiting-verify' });
 
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
     await deliver({
       requestId: 'vr_s1',
       runId: 'run-s1',
@@ -770,7 +770,7 @@ describe('verdictDelivery (P8b — merge-gate)', () => {
     seedSprintRun(db, 'run-s3', batchId, 'tsk_c');
     store.updateLane({ runId: 'run-s3', batchId, taskId: 'tsk_c', status: 'running', currentStepId: 'awaiting-verify' });
 
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
     await deliver({
       requestId: 'vr_s3',
       runId: 'run-s3',
@@ -809,7 +809,7 @@ describe('verdictDelivery (P8b — merge-gate)', () => {
     seedSprintRun(db, 'run-s2', batchId, 'tsk_b');
     store.updateLane({ runId: 'run-s2', batchId, taskId: 'tsk_b', status: 'running', currentStepId: 'awaiting-verify' });
 
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
     await deliver({
       requestId: 'vr_s2',
       runId: 'run-s2',
@@ -841,7 +841,7 @@ describe('verdictDelivery (P8b — merge-gate)', () => {
     seedSprintRun(db, 'run-s4', batchId, 'tsk_to');
     store.updateLane({ runId: 'run-s4', batchId, taskId: 'tsk_to', status: 'running', currentStepId: 'awaiting-verify' });
 
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
     await deliver({
       requestId: 'vr_s4',
       runId: 'run-s4',
@@ -884,7 +884,7 @@ describe('verdictDelivery (P8b — merge-gate)', () => {
     store.updateLane({ runId: 'run-s5', batchId, taskId: 'tsk_sk', status: 'running', currentStepId: 'awaiting-verify' });
     seedVerificationRequest(db, 'vr_s5', 'run-s5');
 
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
     await deliver({
       requestId: 'vr_s5',
       runId: 'run-s5',
@@ -1026,7 +1026,7 @@ describe('verdictDelivery (slice 10b — report findings + supersession)', () =>
         issues: [],
       }),
     });
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
     await deliver({ requestId: 'vr_b1', runId: 'run-b1', projectId: 1, type: 'static-render-snapshot', status: 'failed', verdict: undefined, fileNames: ['s.png'] });
 
     const f = visualFindings(db, 'run-b1');
@@ -1037,6 +1037,124 @@ describe('verdictDelivery (slice 10b — report findings + supersession)', () =>
     expect(f[0].body).toMatch(/expected: header does not overlap the hero/);
     expect(f[0].body).toMatch(/observed: header overlaps the hero text/);
     expect(f[0].body).toMatch(/move the header out of the hero flow/);
+  });
+
+  // -------------------------------------------------------------------------
+  // verifier-transcript capture — the ADVISORY transcriptFileName enrichment
+  // -------------------------------------------------------------------------
+
+  it('fileExists true → the merged screenshots report entry carries transcriptFileName', async () => {
+    seedRun(db, 'run-tr1');
+    seedRequestFull(db, {
+      id: 'vr_tr1',
+      runId: 'run-tr1',
+      status: 'failed',
+      enqueueKey: 'run-tr1:TASK-1:1',
+      reportJson: JSON.stringify({
+        version: 1,
+        behaviors: [{ id: 'b1', result: 'fail', evidence: { screenshots: ['s.png'], notes: 'x' } }],
+        screenshots: [{ fileName: 's.png', caption: 'home' }],
+        outcome: 'fail',
+        confidence: 0.9,
+        feedback: 'x',
+        issues: [],
+      }),
+    });
+    const deliver = createVerdictDelivery({
+      db: dbAdapter(db),
+      artifactsDirResolver: () => '/art/run-tr1',
+      fileExists: (absPath) => absPath === '/art/run-tr1/transcript-vr_tr1.md',
+    });
+    await deliver({
+      requestId: 'vr_tr1',
+      runId: 'run-tr1',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'failed',
+      verdict: undefined,
+      fileNames: ['s.png'],
+    });
+
+    const arts = screenshotsRows(db, 'run-tr1');
+    const payload = JSON.parse(arts[0].payload_json ?? '{}') as ScreenshotsArtifactPayload;
+    expect(payload.reports?.[0]?.transcriptFileName).toBe('transcript-vr_tr1.md');
+  });
+
+  it('fileExists false → the merged report entry omits transcriptFileName', async () => {
+    seedRun(db, 'run-tr2');
+    seedRequestFull(db, {
+      id: 'vr_tr2',
+      runId: 'run-tr2',
+      status: 'failed',
+      enqueueKey: 'run-tr2:TASK-1:1',
+      reportJson: JSON.stringify({
+        version: 1,
+        behaviors: [{ id: 'b1', result: 'fail', evidence: { screenshots: [], notes: 'x' } }],
+        screenshots: [],
+        outcome: 'fail',
+        confidence: 0.9,
+        feedback: 'x',
+        issues: [],
+      }),
+    });
+    const deliver = createVerdictDelivery({
+      db: dbAdapter(db),
+      artifactsDirResolver: () => '/art/run-tr2',
+      fileExists: () => false,
+    });
+    await deliver({
+      requestId: 'vr_tr2',
+      runId: 'run-tr2',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'failed',
+      verdict: undefined,
+      fileNames: [],
+    });
+
+    const arts = screenshotsRows(db, 'run-tr2');
+    const payload = JSON.parse(arts[0].payload_json ?? '{}') as ScreenshotsArtifactPayload;
+    expect(payload.reports?.[0]?.transcriptFileName).toBeUndefined();
+  });
+
+  it('fileExists throwing → transcriptFileName absent AND the delivery still returns true (advisory, never fails)', async () => {
+    seedRun(db, 'run-tr3');
+    seedRequestFull(db, {
+      id: 'vr_tr3',
+      runId: 'run-tr3',
+      status: 'failed',
+      enqueueKey: 'run-tr3:TASK-1:1',
+      reportJson: JSON.stringify({
+        version: 1,
+        behaviors: [{ id: 'b1', result: 'fail', evidence: { screenshots: [], notes: 'x' } }],
+        screenshots: [],
+        outcome: 'fail',
+        confidence: 0.9,
+        feedback: 'x',
+        issues: [],
+      }),
+    });
+    const deliver = createVerdictDelivery({
+      db: dbAdapter(db),
+      artifactsDirResolver: () => '/art/run-tr3',
+      fileExists: () => {
+        throw new Error('boom');
+      },
+    });
+    const ok = await deliver({
+      requestId: 'vr_tr3',
+      runId: 'run-tr3',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'failed',
+      verdict: undefined,
+      fileNames: [],
+    });
+    expect(ok).toBe(true);
+
+    const arts = screenshotsRows(db, 'run-tr3');
+    const payload = JSON.parse(arts[0].payload_json ?? '{}') as ScreenshotsArtifactPayload;
+    expect(payload.reports?.[0]?.transcriptFileName).toBeUndefined();
   });
 
   it('build_failed body carries the build log excerpt prominently', async () => {
@@ -1058,7 +1176,7 @@ describe('verdictDelivery (slice 10b — report findings + supersession)', () =>
         issues: [],
       }),
     });
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
     await deliver({ requestId: 'vr_b2', runId: 'run-b2', projectId: 1, type: 'static-render-snapshot', status: 'failed', verdict: undefined, fileNames: [] });
 
     const f = visualFindings(db, 'run-b2');
@@ -1072,7 +1190,7 @@ describe('verdictDelivery (slice 10b — report findings + supersession)', () =>
     seedRun(db, 'run-b3');
     seedRequestFull(db, { id: 'vr_to', runId: 'run-b3', status: 'timeout', errorMessage: 'request timed out' });
     seedRequestFull(db, { id: 'vr_sk', runId: 'run-b3', status: 'skipped', errorMessage: 'per-project visual-verify budget exhausted' });
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
     await deliver({ requestId: 'vr_to', runId: 'run-b3', projectId: 1, type: 'static-render-snapshot', status: 'timeout', verdict: undefined, fileNames: [] });
     await deliver({ requestId: 'vr_sk', runId: 'run-b3', projectId: 1, type: 'static-render-snapshot', status: 'skipped', verdict: undefined, fileNames: [] });
 
@@ -1089,7 +1207,7 @@ describe('verdictDelivery (slice 10b — report findings + supersession)', () =>
     await seedPriorFinding('run-b4', 'TASK-1', 2, 'vr_old2');
     // A verdict at attempt 3 supersedes attempts 1 & 2, and (FAIL) raises its own.
     seedRequestFull(db, { id: 'vr_new3', runId: 'run-b4', status: 'failed', enqueueKey: 'run-b4:TASK-1:3' });
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
     await deliver({ requestId: 'vr_new3', runId: 'run-b4', projectId: 1, type: 'static-render-snapshot', status: 'failed', verdict: FAIL_VERDICT, fileNames: ['home.png'], input: { intent: 'x', taskRef: 'TASK-1' } });
 
     const f = visualFindings(db, 'run-b4');
@@ -1106,7 +1224,7 @@ describe('verdictDelivery (slice 10b — report findings + supersession)', () =>
     await seedPriorFinding('run-b5', 'TASK-1', 1, 'vr_p1');
     await seedPriorFinding('run-b5', 'TASK-1', 2, 'vr_p2');
     seedRequestFull(db, { id: 'vr_pass3', runId: 'run-b5', status: 'passed', enqueueKey: 'run-b5:TASK-1:3' });
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
     await deliver({ requestId: 'vr_pass3', runId: 'run-b5', projectId: 1, type: 'static-render-snapshot', status: 'passed', verdict: PASS_VERDICT, fileNames: ['home.png'], input: { intent: 'x', taskRef: 'TASK-1' } });
 
     const f = visualFindings(db, 'run-b5');
@@ -1117,7 +1235,7 @@ describe('verdictDelivery (slice 10b — report findings + supersession)', () =>
   it('a delivery-outbox REPLAY does not duplicate the finding (idempotent by requestId)', async () => {
     seedRun(db, 'run-b6');
     seedRequestFull(db, { id: 'vr_r', runId: 'run-b6', status: 'skipped', enqueueKey: 'run-b6:TASK-1:1', errorMessage: 'no backend' });
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
     const args = { requestId: 'vr_r', runId: 'run-b6', projectId: 1, type: 'static-render-snapshot' as const, status: 'skipped' as const, verdict: undefined, fileNames: [] as string[], input: { intent: 'x', taskRef: 'TASK-1' } };
     await deliver(args);
     await deliver(args); // replay
@@ -1127,7 +1245,7 @@ describe('verdictDelivery (slice 10b — report findings + supersession)', () =>
   it('a malformed enqueue_key falls back to attempt 1 (no crash) and still correlates', async () => {
     seedRun(db, 'run-b7');
     seedRequestFull(db, { id: 'vr_bad', runId: 'run-b7', status: 'skipped', enqueueKey: 'garbage-no-colon', errorMessage: 'no backend' });
-    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    const deliver = createVerdictDelivery({ db: dbAdapter(db), artifactsDirResolver: () => '/tmp/does-not-matter', fileExists: () => false });
     await deliver({ requestId: 'vr_bad', runId: 'run-b7', projectId: 1, type: 'static-render-snapshot', status: 'skipped', verdict: undefined, fileNames: [], input: { intent: 'x', taskRef: 'TASK-1' } });
     const f = visualFindings(db, 'run-b7');
     expect(f).toHaveLength(1);

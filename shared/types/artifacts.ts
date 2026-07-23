@@ -438,6 +438,26 @@ export interface TaskVerificationReportEntry {
   }>;
   outcome: VerificationReportV1['outcome'];
   completedAt: string;
+  /**
+   * The harness-captured verifier transcript file (bare basename in the run
+   * artifacts dir), present when a transcript was written for this request;
+   * absent for legacy reports or a request whose engine produced none. The
+   * filename is DETERMINISTIC (see {@link verifyTranscriptFileName}) — never
+   * persisted, always re-derived from `requestId` at read time.
+   */
+  transcriptFileName?: string;
+}
+
+/**
+ * Deterministic transcript filename for a verification request, keyed by
+ * `requestId`. Pure by design: the runner (writer, at request-completion time)
+ * and the verdict-delivery chokepoint (reader — including a boot replay that
+ * never saw the live request) must agree on the filename WITHOUT persisting it
+ * anywhere, so both sides call this same function.
+ */
+export function verifyTranscriptFileName(requestId: string): string {
+  const safe = requestId.replace(/[^a-zA-Z0-9._-]/g, '-');
+  return `transcript-${safe.length > 0 ? safe : 'unknown'}.md`;
 }
 
 /**

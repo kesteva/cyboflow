@@ -1591,6 +1591,11 @@ async function initializeServices() {
       socket.once('timeout', () => done(true));
       socket.once('error', () => done(true));
     });
+  // Shared by the scheduler AND verdict delivery (verifier-transcript capture):
+  // both must resolve the SAME on-disk run-artifacts dir, so delivery's transcript
+  // existence check observes exactly where the runner wrote the transcript.
+  const verifyArtifactsDirResolver = (runId: string): string =>
+    getCyboflowSubdirectory('artifacts', 'runs', runId);
   VerificationScheduler.initialize({
     db: cyboflowDb,
     backends: {
@@ -1599,12 +1604,16 @@ async function initializeServices() {
       peekaboo: peekabooBackend,
     },
     judge: cappedVlmJudge,
-    artifactsDirResolver: (runId: string) => getCyboflowSubdirectory('artifacts', 'runs', runId),
+    artifactsDirResolver: verifyArtifactsDirResolver,
     logger: cyboflowLogger,
     config: visualVerifyConfig,
     // P8a — advisory verdict delivery through the existing router chokepoints
     // (artifact enrich on every judged outcome + a FAIL/low-confidence finding).
-    onVerdict: createVerdictDelivery({ db: cyboflowDb, logger: cyboflowLogger }),
+    onVerdict: createVerdictDelivery({
+      db: cyboflowDb,
+      logger: cyboflowLogger,
+      artifactsDirResolver: verifyArtifactsDirResolver,
+    }),
     // S2 — scheduler-owned dev server per verify.json build/start/readyWhen/${PORT}.
     devServerProvider: devServerManager,
     devServerContextResolver,

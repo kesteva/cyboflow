@@ -980,6 +980,54 @@ describe('ArtifactTabRenderer', () => {
     expect(screen.queryByTestId('artifact-behaviors-tested')).not.toBeInTheDocument();
   });
 
+  // --- verifier-transcript capture: transcriptFileName guard tolerance -----
+
+  it('renders a "View transcript" toggle for a report entry carrying transcriptFileName', () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: {
+        kind: 'screenshots',
+        payload: {
+          fileNames: ['home.png'],
+          reports: [makeReportEntry({ transcriptFileName: 'transcript-req-1.md' })],
+        },
+      },
+    });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />);
+
+    // The entry is still valid (transcriptFileName is OPTIONAL and tolerated).
+    expect(screen.getByTestId('artifact-behaviors-tested')).toBeInTheDocument();
+    expect(screen.getByTestId('artifact-transcript-toggle')).toHaveTextContent('View transcript');
+  });
+
+  it('renders no transcript toggle when transcriptFileName is absent (legacy report entry)', () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: { kind: 'screenshots', payload: { fileNames: ['home.png'], reports: [makeReportEntry()] } },
+    });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />);
+
+    expect(screen.getByTestId('artifact-behaviors-tested')).toBeInTheDocument();
+    expect(screen.queryByTestId('artifact-transcript-toggle')).not.toBeInTheDocument();
+  });
+
+  it('drops a report entry whose transcriptFileName is not a string (malformed, never thrown)', () => {
+    const malformed = {
+      kind: 'screenshots',
+      payload: {
+        fileNames: ['home.png'],
+        reports: [{ ...makeReportEntry(), transcriptFileName: 123 }],
+      },
+    } as unknown as ArtifactData['data'];
+    setHook({ loading: false, error: null, data: malformed });
+    expect(() =>
+      render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />),
+    ).not.toThrow();
+    expect(screen.queryByTestId('artifact-behaviors-tested')).not.toBeInTheDocument();
+  });
+
   // --- ui-prototype / generic (live canvas) --------------------------------
 
   it('embeds the ui-prototype live canvas (iframe) for a localhost url', () => {

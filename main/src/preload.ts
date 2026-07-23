@@ -333,6 +333,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       req: LoadArtifactHtmlRequest,
     ): Promise<IPCResponse<LoadArtifactHtmlResult>> =>
       ipcRenderer.invoke('artifacts:load-html', req),
+    // Verifier-transcript text loader (verifier-transcript capture) — reads an
+    // on-disk .md/.txt/.log file back verbatim from the run's artifacts root
+    // (same containment guard as loadImages).
+    loadText: (
+      req: { runId: string; fileName: string },
+    ): Promise<IPCResponse<{ text: string }>> =>
+      ipcRenderer.invoke('artifacts:load-text', req),
   },
 
   // Project management
