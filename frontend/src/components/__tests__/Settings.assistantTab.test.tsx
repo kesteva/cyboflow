@@ -17,12 +17,16 @@ import type { AppConfig } from '../../types/config';
 const configGet = vi.fn();
 const configUpdate = vi.fn();
 const getVersionInfo = vi.fn();
+const projectsGetAll = vi.fn();
 
 vi.mock('../../utils/api', () => ({
   API: {
     config: {
       get: (...a: unknown[]) => configGet(...a),
       update: (...a: unknown[]) => configUpdate(...a),
+    },
+    projects: {
+      getAll: (...a: unknown[]) => projectsGetAll(...a),
     },
     getVersionInfo: (...a: unknown[]) => getVersionInfo(...a),
   },
@@ -44,10 +48,23 @@ function baseConfig(over: Partial<AppConfig> = {}): AppConfig {
   };
 }
 
+function fakeProject(over: Record<string, unknown> = {}) {
+  return {
+    id: 1,
+    name: 'Acme',
+    path: '/repos/acme',
+    active: true,
+    created_at: '',
+    updated_at: '',
+    ...over,
+  };
+}
+
 beforeEach(() => {
   configGet.mockReset().mockResolvedValue({ success: true, data: baseConfig() });
   configUpdate.mockReset().mockResolvedValue({ success: true });
   getVersionInfo.mockReset().mockResolvedValue({ success: true, data: { variant: 'dev' } });
+  projectsGetAll.mockReset().mockResolvedValue({ success: true, data: [fakeProject()] });
 });
 
 describe('Settings — Assistant tab', () => {
@@ -108,5 +125,63 @@ describe('Settings — Assistant tab', () => {
         expect.objectContaining({ assistantContextRetention: 'clear-daily' }),
       ),
     );
+  });
+
+  describe('project folder access', () => {
+    it('lists each registered project with an access toggle, on by default', async () => {
+      render(<Settings isOpen onClose={vi.fn()} initialTab="assistant" />);
+
+      const toggle = await screen.findByLabelText('Assistant access to Acme');
+      expect(toggle).toBeChecked();
+      expect(screen.getByText('/repos/acme')).toBeInTheDocument();
+    });
+
+    it('reflects a stored exclusion as an off toggle', async () => {
+      configGet.mockResolvedValue({
+        success: true,
+        data: baseConfig({ assistantExcludedProjectPaths: ['/repos/acme'] }),
+      });
+      render(<Settings isOpen onClose={vi.fn()} initialTab="assistant" />);
+
+      const toggle = await screen.findByLabelText('Assistant access to Acme');
+      expect(toggle).not.toBeChecked();
+    });
+
+    it('toggling a project off and saving carries its path in assistantExcludedProjectPaths', async () => {
+      render(<Settings isOpen onClose={vi.fn()} initialTab="assistant" />);
+
+      const toggle = await screen.findByLabelText('Assistant access to Acme');
+      fireEvent.click(toggle);
+      expect(toggle).not.toBeChecked();
+
+      fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+      await waitFor(() =>
+        expect(configUpdate).toHaveBeenCalledWith(
+          expect.objectContaining({ assistantExcludedProjectPaths: ['/repos/acme'] }),
+        ),
+      );
+    });
+
+    it('re-enabling a previously-excluded project saves an empty exclusion list', async () => {
+      configGet.mockResolvedValue({
+        success: true,
+        data: baseConfig({ assistantExcludedProjectPaths: ['/repos/acme'] }),
+      });
+      render(<Settings isOpen onClose={vi.fn()} initialTab="assistant" />);
+
+      const toggle = await screen.findByLabelText('Assistant access to Acme');
+      expect(toggle).not.toBeChecked();
+      fireEvent.click(toggle);
+      expect(toggle).toBeChecked();
+
+      fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+      await waitFor(() =>
+        expect(configUpdate).toHaveBeenCalledWith(
+          expect.objectContaining({ assistantExcludedProjectPaths: [] }),
+        ),
+      );
+    });
   });
 });

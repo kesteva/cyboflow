@@ -1880,6 +1880,7 @@ async function initializeServices() {
       // folders only). The orchestrator handler realpath's + scope-checks every
       // access — this only widens the root set, never bypasses enforcement.
       getAssistantFolderAccess: () => configManager.getAssistantFolderAccess(),
+      getAssistantExcludedProjectPaths: () => configManager.getAssistantExcludedProjectPaths(),
       // Workflow/variant configuration tools (cyboflow_*_workflow / _variant):
       // forward the WorkflowRegistry as the narrow WorkflowConfigLike structural
       // surface so quick sessions can edit flows + variants over MCP without the

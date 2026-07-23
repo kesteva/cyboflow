@@ -66,6 +66,13 @@ export interface AppConfig {
   // 'clear-daily'. NOT seeded into constructor defaults (config.json stays
   // byte-identical for users who never touch it).
   assistantContextRetention?: AssistantContextRetention;
+  // Registered project folders the user has EXCLUDED from the assistant's
+  // read-only filesystem tools (each an exact `projects.path`). Absent/empty ⇒
+  // every project folder is readable (the default). Read via
+  // getAssistantExcludedProjectPaths() (trims, drops blanks, floors to []).
+  // NOT seeded into constructor defaults (config.json stays byte-identical for
+  // users who never exclude a folder).
+  assistantExcludedProjectPaths?: string[];
   // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
   defaultSubstrate?: CliSubstrate;
   // Global hard lock: when true, every run/session is forced onto the interactive
@@ -205,6 +212,8 @@ export interface UpdateConfigRequest {
   assistantFolderAccess?: string[];
   // Assistant day-boundary context strategy (see AppConfig.assistantContextRetention).
   assistantContextRetention?: AssistantContextRetention;
+  // Project folders excluded from the assistant's fs tools (see AppConfig.assistantExcludedProjectPaths).
+  assistantExcludedProjectPaths?: string[];
   // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
   defaultSubstrate?: CliSubstrate;
   // Global hard lock — force the interactive PTY substrate and disable the SDK

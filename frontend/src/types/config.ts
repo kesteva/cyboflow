@@ -24,6 +24,10 @@ export interface AppConfig {
   // How the assistant's standing conversation handles the local-day boundary
   // ('clear-daily' | 'compact-daily' | 'auto-compact'). Absent ⇒ 'clear-daily'.
   assistantContextRetention?: AssistantContextRetention;
+  // Registered project folders the user has excluded from the assistant's
+  // read-only filesystem tools (each an exact project path). Absent/empty ⇒
+  // every project folder is readable (the default).
+  assistantExcludedProjectPaths?: string[];
   // Default CLI substrate for new workflow runs ('sdk' | 'interactive'). IDEA-013 / TASK-806.
   defaultSubstrate?: CliSubstrate;
   // Global hard lock: when true, every run/session is forced onto the interactive

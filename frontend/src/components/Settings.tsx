@@ -5,6 +5,7 @@ import { useNotifications } from '../hooks/useNotifications';
 import { API } from '../utils/api';
 import { emitTelemetryChangeEvents, trackEvent } from '../utils/telemetry';
 import type { AppConfig } from '../types/config';
+import type { Project } from '../types/project';
 import type { AssistantContextRetention } from '../../../shared/types/agentThread';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { CliSubstrate } from '../../../shared/types/substrate';
@@ -74,6 +75,10 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // Extra folders (one per line) the assistant may read, beyond the app's
   // registered project folders (always readable regardless of this list).
   const [assistantFolderPathsText, setAssistantFolderPathsText] = useState('');
+  // Registered projects + the set of their paths the user has toggled OFF for
+  // the assistant's fs tools. Empty set = every project folder readable (default).
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [excludedProjectPaths, setExcludedProjectPaths] = useState<Set<string>>(new Set());
   // How the assistant's standing conversation handles each new local day:
   // start fresh (default), start with a /compact, or rely on SDK auto-compaction.
   const [assistantContextRetention, setAssistantContextRetention] =
@@ -138,6 +143,15 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   useEffect(() => {
     if (isOpen) {
       fetchConfig();
+      // Registered projects, so the Assistant tab can list each project folder
+      // with a per-folder access toggle. Non-fatal on failure (empty list).
+      API.projects.getAll()
+        .then((result) => {
+          if (result.success && Array.isArray(result.data)) setProjects(result.data);
+        })
+        .catch(() => {
+          // Non-fatal: leave the project-folder list empty.
+        });
       // Resolve the build channel so the stable DMG can hide dev-only toggles.
       API.getVersionInfo()
         .then((result) => {
@@ -171,6 +185,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setAssistantEnabled(data.assistantEnabled !== false);
       setAssistantFolderPathsText((data.assistantFolderAccess ?? []).join('\n'));
       setAssistantContextRetention(data.assistantContextRetention ?? 'clear-daily');
+      setExcludedProjectPaths(new Set(data.assistantExcludedProjectPaths ?? []));
       setDefaultAgentPermissionMode(data.defaultAgentPermissionMode ?? 'default');
       setInteractivePtyOnly(data.interactivePtyOnly ?? false);
       setDefaultExecutionModel(data.defaultExecutionModel ?? 'programmatic');
@@ -239,6 +254,11 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         // Always the explicit value — updateConfig merges partials, so sending
         // undefined for the default would fail to overwrite a stored override.
         assistantContextRetention,
+        // Explicit array (possibly empty) so re-enabling a folder clears the
+        // stored exclusion; only paths of still-registered projects are kept.
+        assistantExcludedProjectPaths: projects
+          .map((p) => p.path)
+          .filter((path) => excludedProjectPaths.has(path)),
         defaultAgentPermissionMode,
         interactivePtyOnly,
         defaultExecutionModel,
@@ -1067,10 +1087,58 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
 
               <SettingsSection
                 title="Folder Access"
-                description="Extra folders the assistant may read"
+                description="Which folders the assistant may read"
                 icon={<FolderOpen className="w-4 h-4" />}
               >
                 <div className={!assistantEnabled ? 'opacity-50 pointer-events-none' : undefined}>
+                  {projects.length > 0 && (
+                    <div className="mb-4">
+                      <label className="block text-xs font-medium text-text-secondary mb-2">
+                        Project folders
+                      </label>
+                      <div className="flex flex-col divide-y divide-border-secondary rounded-button border border-border-secondary">
+                        {projects.map((project) => {
+                          const allowed = !excludedProjectPaths.has(project.path);
+                          return (
+                            <div
+                              key={project.id}
+                              className="flex items-center justify-between gap-3 px-3 py-2"
+                            >
+                              <div className="min-w-0">
+                                <div className="text-sm text-text-primary font-medium truncate">
+                                  {project.name}
+                                </div>
+                                <div className="text-xs text-text-tertiary truncate">
+                                  {project.path}
+                                </div>
+                              </div>
+                              <Switch
+                                id={`assistant-project-${project.id}`}
+                                checked={allowed}
+                                onCheckedChange={(next) =>
+                                  setExcludedProjectPaths((prev) => {
+                                    const updated = new Set(prev);
+                                    if (next) updated.delete(project.path);
+                                    else updated.add(project.path);
+                                    return updated;
+                                  })
+                                }
+                                aria-label={`Assistant access to ${project.name}`}
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <p className="text-xs text-text-tertiary mt-2">
+                        Your registered project folders are readable by default. Turn one off to hide
+                        it from the assistant's file tools. Secret files (.env, keys) are always denied.
+                      </p>
+                    </div>
+                  )}
+
+                  <label className="block text-xs font-medium text-text-secondary mb-1">
+                    Extra folders
+                  </label>
                   <Textarea
                     label=""
                     value={assistantFolderPathsText}
@@ -1078,7 +1146,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                     placeholder="/path/to/extra/folder"
                     rows={3}
                     fullWidth
-                    helperText="Extra folders the assistant may read (one per line). Your project folders are always readable. Secret files (.env, keys) are always denied."
+                    helperText="Additional folders the assistant may read, one per line — beyond your project folders above."
                   />
                 </div>
               </SettingsSection>

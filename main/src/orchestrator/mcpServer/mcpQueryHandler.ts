@@ -1170,6 +1170,16 @@ export interface McpQueryHandlerDeps {
    * every entry and drops any that don't exist.
    */
   getAssistantFolderAccess?: () => string[];
+
+  /**
+   * Registered project folders the user has EXCLUDED from the fs tools (each an
+   * exact `projects.path`). Subtracted from the always-included project roots in
+   * resolveFsAllowedRoots, so a toggled-off project becomes unreadable. Wired in
+   * main/src/index.ts to `configManager.getAssistantExcludedProjectPaths()`.
+   * Absent (or returning []) ⇒ every project folder stays readable (the
+   * default). Only affects PROJECT roots — configured extras are never excluded.
+   */
+  getAssistantExcludedProjectPaths?: () => string[];
 }
 
 /**
@@ -5091,10 +5101,16 @@ export class McpQueryHandler {
    */
   private resolveFsAllowedRoots(): string[] {
     const raw = new Set<string>();
+    // Project folders the user toggled off — subtracted from the project roots
+    // below (compared by the raw stored path, exactly what the Settings UI
+    // toggles off). Extras are never excluded.
+    const excludedProjects = new Set(this.deps.getAssistantExcludedProjectPaths?.() ?? []);
     try {
       const rows = this.db.prepare('SELECT path FROM projects').all() as Array<{ path?: unknown }>;
       for (const row of rows) {
-        if (typeof row.path === 'string' && row.path.length > 0) raw.add(row.path);
+        if (typeof row.path === 'string' && row.path.length > 0 && !excludedProjects.has(row.path)) {
+          raw.add(row.path);
+        }
       }
     } catch {
       // A missing projects table (bare test fixture) simply yields no project

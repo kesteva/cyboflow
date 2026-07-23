@@ -382,3 +382,52 @@ describe('mcp-fs — config-extra root widens the allowed set', () => {
     expect((resp.data as { content: string }).content).toContain('extra folder');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Excluded project root
+// ---------------------------------------------------------------------------
+
+describe('mcp-fs — excluding a project folder narrows the allowed set', () => {
+  it('a project folder toggled off via getAssistantExcludedProjectPaths becomes unreadable', async () => {
+    // Baseline: the project folder is readable with no exclusion dep.
+    const baseline = makeSocketDouble();
+    await handler.handleMessage(
+      { type: 'mcp-fs-read', requestId: 'r', runId: AGENT_RUN_ID, path: join(projectDir, 'hello.txt') },
+      baseline.socket,
+    );
+    expect(parseLastWrite(baseline.writes).ok).toBe(true);
+
+    // Exclude that exact project path — the same folder now scope_denies.
+    const excludedHandler = new McpQueryHandler(dbAdapter(rawDb), undefined, {
+      getAssistantExcludedProjectPaths: () => [projectDir],
+    });
+    const denied = makeSocketDouble();
+    await excludedHandler.handleMessage(
+      { type: 'mcp-fs-read', requestId: 'r', runId: AGENT_RUN_ID, path: join(projectDir, 'hello.txt') },
+      denied.socket,
+    );
+    expect(parseLastWrite(denied.writes).error).toMatch(/^scope_denied/);
+  });
+
+  it('excluding a project folder does NOT exclude a configured extra folder', async () => {
+    // Both a project exclusion AND an extra grant: the extra stays readable.
+    const mixedHandler = new McpQueryHandler(dbAdapter(rawDb), undefined, {
+      getAssistantExcludedProjectPaths: () => [projectDir],
+      getAssistantFolderAccess: () => [extraDir],
+    });
+
+    const projectRead = makeSocketDouble();
+    await mixedHandler.handleMessage(
+      { type: 'mcp-fs-read', requestId: 'r', runId: AGENT_RUN_ID, path: join(projectDir, 'hello.txt') },
+      projectRead.socket,
+    );
+    expect(parseLastWrite(projectRead.writes).error).toMatch(/^scope_denied/);
+
+    const extraRead = makeSocketDouble();
+    await mixedHandler.handleMessage(
+      { type: 'mcp-fs-read', requestId: 'r', runId: AGENT_RUN_ID, path: join(extraDir, 'note.md') },
+      extraRead.socket,
+    );
+    expect(parseLastWrite(extraRead.writes).ok).toBe(true);
+  });
+});

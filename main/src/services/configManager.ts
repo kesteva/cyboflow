@@ -312,6 +312,25 @@ export class ConfigManager extends EventEmitter {
   }
 
   /**
+   * Registered project folders the user has EXCLUDED from the assistant's
+   * read-only filesystem tools (each an exact `projects.path`). The MCP query
+   * handler subtracts this set from the always-included project roots, so a
+   * toggled-off project folder becomes unreadable to the assistant (the extra
+   * folders in getAssistantFolderAccess() are unaffected). Trims each entry,
+   * drops blanks, and floors to [] when unset — so a user who never excludes a
+   * folder keeps full project access. Like the other assistant globals, NOT
+   * seeded into constructor defaults (config.json stays byte-identical).
+   */
+  getAssistantExcludedProjectPaths(): string[] {
+    const raw = this.config.assistantExcludedProjectPaths;
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter((entry): entry is string => typeof entry === 'string')
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+  }
+
+  /**
    * The global default CLI substrate for new workflow runs (IDEA-013 / TASK-806).
    *
    * Floors to DEFAULT_SUBSTRATE ('sdk') when unset. `defaultSubstrate` is
