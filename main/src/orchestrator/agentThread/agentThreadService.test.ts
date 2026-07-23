@@ -42,7 +42,7 @@ const MIGRATION =
   ) +
   '\n' +
   readFileSync(
-    join(__dirname, '..', '..', 'database', 'migrations', '078_agent_thread_last_turn.sql'),
+    join(__dirname, '..', '..', 'database', 'migrations', '080_agent_thread_last_turn.sql'),
     'utf-8',
   );
 
@@ -584,7 +584,7 @@ describe('AgentThreadService', () => {
     it('upgrade path: a legacy thread with a stored conversation but NULL last_turn_at is treated as a new day', async () => {
       h.retention.value = 'clear-daily';
       const thread = h.service.ensureGlobalThread();
-      // Simulate a pre-078 thread: a live conversation id, no last_turn_at.
+      // Simulate a pre-080 thread: a live conversation id, no last_turn_at.
       h.store.updateClaudeSessionId(thread.id, 'legacy-sess');
       expect(h.store.getLastTurnAt(thread.id)).toBeNull();
 

@@ -23,7 +23,7 @@ const MIGRATION =
   ) +
   '\n' +
   readFileSync(
-    join(__dirname, '..', '..', 'database', 'migrations', '078_agent_thread_last_turn.sql'),
+    join(__dirname, '..', '..', 'database', 'migrations', '080_agent_thread_last_turn.sql'),
     'utf-8',
   );
 
@@ -115,7 +115,7 @@ describe('AgentThreadDbStore', () => {
       expect(store.getLastDigestAt('thread-1')).toBeNull();
     });
 
-    it('last_turn_at defaults to null and round-trips through set/get (migration 078)', () => {
+    it('last_turn_at defaults to null and round-trips through set/get (migration 080)', () => {
       const store = new AgentThreadDbStore(dbAdapter(db));
       store.createThread({ id: 'thread-1' });
 

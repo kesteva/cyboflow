@@ -28,7 +28,7 @@
  * calendar day, {@link applyDailyRetention} applies the configured
  * `assistantContextRetention` strategy — start fresh ('clear-daily', the
  * default), fire a `/compact` turn ('compact-daily'), or do nothing
- * ('auto-compact') — keyed off `agent_threads.last_turn_at` (migration 078).
+ * ('auto-compact') — keyed off `agent_threads.last_turn_at` (migration 080).
  *
  * Every spawn also threads {@link getAgentSystemPrompt} (S1.4) as
  * `systemPromptAppend` — the role, the promptable contract, tool guidance,
@@ -380,7 +380,7 @@ export class AgentThreadService {
    * Apply the configured context-retention strategy at the LOCAL-day boundary,
    * then stamp `last_turn_at` (every turn, so the stored instant always
    * reflects the newest turn). A NULL stamp (fresh thread, or first turn after
-   * the migration-078 upgrade) counts as a new day — harmless for a fresh
+   * the migration-080 upgrade) counts as a new day — harmless for a fresh
    * thread (no conversation to clear/compact) and correct for a legacy thread
    * carrying months of history.
    *

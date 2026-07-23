@@ -1,4 +1,4 @@
--- Migration 078: persist the global-agent last-turn timestamp.
+-- Migration 080: persist the global-agent last-turn timestamp.
 --
 -- Backs the assistant's day-boundary context-retention strategy
 -- (assistantContextRetention: 'clear-daily' | 'compact-daily' |

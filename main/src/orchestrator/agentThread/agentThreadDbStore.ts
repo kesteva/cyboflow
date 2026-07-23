@@ -144,7 +144,7 @@ export class AgentThreadDbStore {
 
   /**
    * Read the persisted last-turn timestamp (epoch ms), or null if the thread
-   * has never recorded a turn since migration 078 (or does not exist). Backs
+   * has never recorded a turn since migration 080 (or does not exist). Backs
    * the day-boundary context-retention check — null is treated by the service
    * as "a new day", so the first turn after upgrade applies the strategy.
    */
