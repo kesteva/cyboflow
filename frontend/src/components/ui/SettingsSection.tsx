@@ -25,7 +25,7 @@ export function SettingsSection({
   };
 
   return (
-    <div className={cn('space-y-4', className)}>
+    <div className={cn('space-y-4 pb-2', className)}>
       <div className="flex items-start gap-3">
         {icon && (
           <div className="flex-shrink-0 mt-0.5 text-interactive">

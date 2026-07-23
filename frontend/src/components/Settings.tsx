@@ -29,6 +29,7 @@ import {
   History
 } from 'lucide-react';
 import { Textarea, Checkbox } from './ui/Input';
+import { Switch } from './ui/Switch';
 import { Button } from './ui/Button';
 import { useTheme } from '../contexts/ThemeContext';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';
@@ -1044,12 +1045,13 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                 description="The cyboflow assistant in the rail. Unset uses the app default model."
                 icon={<Bot className="w-4 h-4" />}
               >
-                <Checkbox
+                <Switch
+                  id="assistant-enabled"
                   label="Enable assistant"
                   checked={assistantEnabled}
-                  onChange={(e) => setAssistantEnabled(e.target.checked)}
+                  onCheckedChange={setAssistantEnabled}
                 />
-                <p className="text-xs text-text-tertiary mt-1 mb-3">
+                <p className="text-xs text-text-tertiary mt-2 mb-3">
                   When off, the assistant rail is hidden and uses no tokens.
                 </p>
                 <div className={!assistantEnabled ? 'opacity-50 pointer-events-none' : undefined}>
