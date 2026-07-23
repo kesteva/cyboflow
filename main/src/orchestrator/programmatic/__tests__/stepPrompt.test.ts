@@ -113,6 +113,50 @@ describe('composeStepPrompt', () => {
     expect(out).toContain('VISUAL-VERIFICATION: NOT-APPLICABLE');
   });
 
+  it('renders the task-verify relay contract for task-verify steps (live-smoke fix 2026-07-22)', () => {
+    // The generic wrapper prose ("one-line summary" + "persist every ACTION via
+    // cyboflow_* tools") made the step turn summarize the fence away AND fire
+    // cyboflow_request_verification itself on the first live run. The relay
+    // note overrides both for task-verify steps.
+    const out = composeStepPrompt({
+      step: step({ id: 'task-verify', agent: 'task-verify' }),
+      workflowName: 'sprint',
+      attempt: 1,
+    });
+    expect(out).toContain('## Final message contract (task-verify)');
+    expect(out).toContain('overrides steps 1 and 3');
+    expect(out).toContain('RELAY, do not summarize');
+    expect(out).toContain('copied byte-for-byte');
+    expect(out).toContain('do NOT call `cyboflow_request_verification`');
+    expect(out).toContain('do NOT set the lane to `awaiting-verify`');
+  });
+
+  it('keys the relay contract on the agent too, and omits it for every other step', () => {
+    const byAgent = composeStepPrompt({
+      step: step({ id: 'verify-task-custom', agent: 'task-verify' }),
+      workflowName: 'sprint',
+      attempt: 1,
+    });
+    expect(byAgent).toContain('## Final message contract (task-verify)');
+    const other = composeStepPrompt({
+      step: step({ id: 'implement', agent: 'implement' }),
+      workflowName: 'sprint',
+      attempt: 1,
+    });
+    expect(other).not.toContain('Final message contract (task-verify)');
+  });
+
+  it('contract re-run prose forbids firing the request in place of printing the contract', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'task-verify', agent: 'task-verify' }),
+      workflowName: 'sprint',
+      attempt: 2,
+      contractError: 'missing section',
+    });
+    expect(out).toContain('do NOT call `cyboflow_request_verification` or park the lane yourself');
+    expect(out).toContain('If a previous attempt already fired a request, still print the contract');
+  });
+
   it('renders the visual-verification-failed section when loopbackFeedback is present', () => {
     const out = composeStepPrompt({
       step: step({ id: 'implement', agent: 'implement' }),

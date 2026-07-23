@@ -174,6 +174,18 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
       ? `\n\n## Run-owned idea scope\n\nThis run owns only these idea ids: ${runOwnedIdeaIds.map((id) => `\`${id}\``).join(', ')}. This scope is authoritative for idea-specific work; do not inspect or select unrelated project ideas.`
       : '';
   const artifactNote = step.outputArtifact !== undefined ? artifactFollowUp(step.outputArtifact) : '';
+  // Task-verify relay contract (verification-agent redesign §5.1; live-smoke fix
+  // 2026-07-22): this step turn's FINAL MESSAGE is the typed step-output channel
+  // the controller parses for the VERDICT line + the visual-verification
+  // contract. The generic prose actively fights that — step 3 says "one-line
+  // summary" (which summarized the fence away) and step 1 says "persist every
+  // ACTION via cyboflow_* tools" (which turned the composed verification task
+  // into a live cyboflow_request_verification call + a self-parked lane). Both
+  // observed on the first live run. This note overrides them for task-verify.
+  const taskVerifyRelayNote =
+    step.agent === 'task-verify' || step.id === 'task-verify'
+      ? `\n\n## Final message contract (task-verify) — overrides steps 1 and 3 above\n\nYour final message IS the machine-read verdict channel for this lane; the controller parses it directly. After your \`cyboflow-task-verify\` subagent returns:\n\n- RELAY, do not summarize: end your final message with the subagent's literal \`VERDICT: PASS\` / \`VERDICT: FAIL\` line, and on PASS with EXACTLY ONE of the subagent's \`## Visual verification task\` section (its \`\`\`json fence copied byte-for-byte) or its bare \`VISUAL-VERIFICATION: NOT-APPLICABLE — <reason>\` line. Dropping or paraphrasing these is an output-contract failure that fails this lane after one retry.\n- The composed verification task is TEXT for the controller, NEVER an action for you: do NOT call \`cyboflow_request_verification\`, do NOT set the lane to \`awaiting-verify\` via \`cyboflow_update_sprint_task\`, and do NOT delegate to any visual-verify subagent. The controller fires the request from the fence you print and parks the lane itself.`
+      : '';
   const conditionalExecutionNote = conditionalExecution(step, runOwnedIdeaIds.length > 0);
   // Compound review-queue discipline — applies to EVERY compound step, not just
   // the one that reports the artifact. The compounder surfaces below-bar
@@ -199,7 +211,7 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
   // violated that, so quote the exact defect and demand a compliant re-emit.
   const contractError =
     args.contractError !== undefined && args.contractError.trim().length > 0
-      ? `\n\n## Visual-verification output contract (fix required)\n\nYour previous result violated the visual-verification output contract:\n\n> ${args.contractError.trim()}\n\nRe-emit your FULL result. On \`VERDICT: PASS\` it MUST contain EXACTLY ONE of:\n\n- a \`## Visual verification task\` section whose body is a single fenced \`\`\`json code block holding the \`VerificationTaskV1\` payload, or\n- a single line \`VISUAL-VERIFICATION: NOT-APPLICABLE — <one-line reason>\` when this task has no user-visible UI to verify.\n\nInclude exactly one of those forms (never both, never neither, never a duplicate).`
+      ? `\n\n## Visual-verification output contract (fix required)\n\nYour previous result violated the visual-verification output contract:\n\n> ${args.contractError.trim()}\n\nRe-emit your FULL result. On \`VERDICT: PASS\` it MUST contain EXACTLY ONE of:\n\n- a \`## Visual verification task\` section whose body is a single fenced \`\`\`json code block holding the \`VerificationTaskV1\` payload, or\n- a single line \`VISUAL-VERIFICATION: NOT-APPLICABLE — <one-line reason>\` when this task has no user-visible UI to verify.\n\nInclude exactly one of those forms (never both, never neither, never a duplicate). Print it as TEXT in your final message — do NOT call \`cyboflow_request_verification\` or park the lane yourself; the controller fires the request from what you print. If a previous attempt already fired a request, still print the contract — the controller reconciles.`
       : '';
   // Visual merge-gate FAIL loopback feedback (§5.3): the re-delegated implement
   // agent is handed WHAT was tested, what failed, and why — verbatim — not merely
@@ -219,5 +231,5 @@ Do ONLY this step:
 2. **Commit file changes atomically.** If this step changes repository files, make ONE git commit (\`<type>: <what changed>\`), staging only the files this step touched. For DB-only, analysis, review, or artifact-reporting work, do not make a git commit. Never create an empty commit.
 3. **Stop.** Do NOT start any other step — the host orchestrator sequences the workflow and will invoke the next step itself. Report a one-line summary of what this step produced, then end your turn.
 
-The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${compoundGuard}${artifactNote}${userGuidance}${contractError}${loopbackFeedback}${retryNote}`;
+The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${compoundGuard}${artifactNote}${taskVerifyRelayNote}${userGuidance}${contractError}${loopbackFeedback}${retryNote}`;
 }

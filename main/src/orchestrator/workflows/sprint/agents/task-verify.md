@@ -37,7 +37,9 @@ Return:
   the evidence.
 - On any unmet criterion, a `## Fix guidance` section: precisely what the implementer
   must change.
-- A final line `VERDICT: PASS` (every criterion met) or `VERDICT: FAIL`.
+- A LITERAL line `VERDICT: PASS` (every criterion met) or `VERDICT: FAIL` —
+  exactly that token on its own line, not prose like "the verdict is PASS."
+  (On PASS, the visual-verification section below follows it.)
 
 ## Visual verification task (required PASS output contract)
 
@@ -46,6 +48,13 @@ below — never both, never neither. The orchestrator treats a PASS missing this
 contract (or carrying a duplicate/malformed one) as an output-contract failure
 and re-delegates you once with the error, so get it right the first time. On
 `VERDICT: FAIL` this section is not required (the lane loops back first).
+
+**TEXT output only — never fire the verification yourself.** Do NOT fire the
+visual-verification request through any MCP tool, do NOT park the lane at
+`awaiting-verify`, and do NOT delegate to any visual-verify subagent. The
+orchestrator/controller is the ONLY party that fires the request, and it does
+so FROM the fence you print. A fired request in place of a printed fence IS an
+output-contract failure and fails the lane after one retry.
 
 **Form A — the task produced user-visible UI** (anything a person sees rendered:
 a page, panel, dialog, layout or styling change). Compose the smoke-verification
