@@ -109,6 +109,90 @@ function seedProgrammaticRun(
   return { runId, workflowId };
 }
 
+/**
+ * Minimal review_items surface for the final-gate re-validation query (Fix 1) — not
+ * part of GATE_SCHEMA; layered per-test only where a reviewItemId re-check is exercised.
+ */
+function addReviewItemsTable(db: Database.Database): void {
+  db.exec(
+    `CREATE TABLE review_items (
+       id TEXT PRIMARY KEY,
+       run_id TEXT,
+       kind TEXT,
+       status TEXT,
+       blocking INTEGER,
+       source TEXT
+     )`,
+  );
+}
+
+/** Seed one gate review-item in the given status; returns its id. */
+function seedReviewItem(
+  db: Database.Database,
+  runId: string,
+  status: 'pending' | 'approved' | 'rejected',
+  source = 'gate:human-step:step-b',
+): string {
+  const id = `ri-${Math.random().toString(36).slice(2)}`;
+  db.prepare(
+    `INSERT INTO review_items (id, run_id, kind, status, blocking, source)
+     VALUES (?, ?, 'decision', ?, 1, ?)`,
+  ).run(id, runId, status, source);
+  return id;
+}
+
+/**
+ * Frozen-spec resolution surface (migrations 026/048): spec_hash on workflow_runs +
+ * the workflow_revisions table. Layered per-test only where the frozen-vs-live Phase-2
+ * brief is exercised (Fix 2).
+ */
+function addFrozenSpecTables(db: Database.Database): void {
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN spec_hash TEXT');
+  db.exec(
+    `CREATE TABLE workflow_revisions (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       workflow_id TEXT NOT NULL,
+       spec_hash TEXT NOT NULL,
+       spec_json TEXT NOT NULL,
+       UNIQUE(workflow_id, spec_hash)
+     )`,
+  );
+}
+
+/** Freeze `specJson` as the run's revision so resolveRunFrozenSpec returns it over the live row. */
+function seedFrozenRevision(
+  db: Database.Database,
+  runId: string,
+  workflowId: string,
+  specJson: string,
+): void {
+  const hash = `hash-${Math.random().toString(36).slice(2)}`;
+  db.prepare('UPDATE workflow_runs SET spec_hash = ? WHERE id = ?').run(hash, runId);
+  db.prepare(
+    'INSERT INTO workflow_revisions (workflow_id, spec_hash, spec_json) VALUES (?, ?, ?)',
+  ).run(workflowId, hash, specJson);
+}
+
+/**
+ * FROZEN spec whose second step id ('frozen-only-step') does NOT appear in the live
+ * BASIC_SPEC — a discriminator proving the Phase-2 brief derives its step lists from
+ * the frozen graph, not the live workflow row (Fix 2).
+ */
+const FROZEN_SPEC = JSON.stringify({
+  id: 'test-wf',
+  phases: [
+    {
+      id: 'phase-1',
+      label: 'Phase 1',
+      color: '#111111',
+      steps: [
+        { id: 'step-a', name: 'Step A', agent: 'agent-a' },
+        { id: 'frozen-only-step', name: 'Frozen Only Step', agent: 'agent-b' },
+      ],
+    },
+  ],
+});
+
 type StepResult = { stepId: string; outcome: string; summary?: string | null; error?: string | null };
 
 /** A fake executor recording hasActiveExecution/requestProgrammaticCancel/setPendingNudge/execute. */
@@ -591,6 +675,122 @@ describe('handoverRunHandler — final-gate opts', () => {
     // Called with just (runId, prompt) — no third opts argument.
     expect(call[2]).toBeUndefined();
     expect(call[1]).not.toContain('## Where the run stands');
+    await waitForRedrive(runQueues, runId);
+    db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix 1 — final-gate claim re-validation across the flip
+// ---------------------------------------------------------------------------
+
+describe('handoverRunHandler — final-gate reviewItemId re-validation', () => {
+  const finalGateWith = (reviewItemId: string): FinalGateHandoverContext => ({
+    kind: 'parked-at-final-gate',
+    stepId: 'step-b',
+    stepName: 'Step B',
+    reviewItemId,
+  });
+
+  it('an already-resolved reviewItemId → { noOp: race }, no abort, no flip (user wins)', async () => {
+    const db = makeDb();
+    addReviewItemsTable(db);
+    const runQueues = new RunQueueRegistry();
+    const { runId } = seedProgrammaticRun(db, { status: 'awaiting_review' });
+    // The user Approved the gate between detection and here.
+    const reviewItemId = seedReviewItem(db, runId, 'approved');
+    // activeExecution:true proves the PRE-ABORT re-guard refuses BEFORE any abort.
+    const executor = makeFakeExecutor({ activeExecution: true });
+    const deps = makeDeps(dbAdapter(db), executor, { runQueues });
+
+    const result = await handoverRunHandler(runId, 'one more tweak', deps, {
+      finalGate: finalGateWith(reviewItemId),
+    });
+
+    expect(result).toEqual({ noOp: true, reason: 'race' });
+    // The parked walk is left untouched — no abort, no flip.
+    expect(executor.requestProgrammaticCancel).not.toHaveBeenCalled();
+    expect(executor.execute).not.toHaveBeenCalled();
+    const row = getRow(db, runId);
+    expect(row.execution_model).toBe('programmatic');
+    expect(row.status).toBe('awaiting_review');
+    expect(getHandedOverAt(db, runId)).toBeNull();
+    db.close();
+  });
+
+  it('an item resolved DURING the abort → Phase-1 re-guard refuses ({ noOp: race }, no flip)', async () => {
+    const db = makeDb();
+    addReviewItemsTable(db);
+    const runQueues = new RunQueueRegistry();
+    const { runId } = seedProgrammaticRun(db, { status: 'running' });
+    const reviewItemId = seedReviewItem(db, runId, 'pending');
+    const executor = makeFakeExecutor({ activeExecution: true });
+    // The abort's side effect settles the gate with the user's verdict (a concurrent
+    // resolve landing as the walk unwinds) — the Phase-1 re-guard must then refuse.
+    executor.requestProgrammaticCancel.mockImplementation(() => {
+      db.prepare("UPDATE review_items SET status = 'approved' WHERE id = ?").run(reviewItemId);
+      return true;
+    });
+    const deps = makeDeps(dbAdapter(db), executor, { runQueues });
+
+    const result = await handoverRunHandler(runId, 'tweak', deps, {
+      finalGate: finalGateWith(reviewItemId),
+    });
+
+    expect(result).toEqual({ noOp: true, reason: 'race' });
+    // The pre-abort check passed (item was pending), so the abort DID fire...
+    expect(executor.requestProgrammaticCancel).toHaveBeenCalledWith(runId);
+    // ...but the Phase-1 re-guard refused the flip once the item was no longer pending.
+    expect(executor.execute).not.toHaveBeenCalled();
+    const row = getRow(db, runId);
+    expect(row.execution_model).toBe('programmatic');
+    expect(row.status).toBe('running');
+    db.close();
+  });
+
+  it('a still-pending reviewItemId → the flip proceeds (happy path unchanged)', async () => {
+    const db = makeDb();
+    addReviewItemsTable(db);
+    const runQueues = new RunQueueRegistry();
+    const { runId } = seedProgrammaticRun(db, { status: 'awaiting_review' });
+    const reviewItemId = seedReviewItem(db, runId, 'pending');
+    const executor = makeFakeExecutor();
+    const deps = makeDeps(dbAdapter(db), executor, { runQueues });
+
+    const result = await handoverRunHandler(runId, 'one more tweak', deps, {
+      finalGate: finalGateWith(reviewItemId),
+    });
+
+    expect(result).toEqual({ delivered: true });
+    expect(getRow(db, runId)).toMatchObject({ status: 'starting', execution_model: 'orchestrated' });
+    await waitForRedrive(runQueues, runId);
+    db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix 2 — Phase-2 brief derives its step lists from the FROZEN spec
+// ---------------------------------------------------------------------------
+
+describe('handoverRunHandler — frozen-spec brief', () => {
+  it('derives the brief step lists from the FROZEN spec, not the live workflow row', async () => {
+    const db = makeDb();
+    addFrozenSpecTables(db);
+    const runQueues = new RunQueueRegistry();
+    // Live workflow row = BASIC_SPEC (has 'step-b' / "Step B"); frozen revision =
+    // FROZEN_SPEC (has 'frozen-only-step', NOT in the live graph).
+    const { runId, workflowId } = seedProgrammaticRun(db, { status: 'awaiting_review' });
+    seedFrozenRevision(db, runId, workflowId, FROZEN_SPEC);
+    const executor = makeFakeExecutor();
+    const deps = makeDeps(dbAdapter(db), executor, { runQueues });
+
+    const result = await handoverRunHandler(runId, 'take over', deps);
+
+    expect(result).toEqual({ delivered: true });
+    const [, promptArg] = executor.setPendingNudge.mock.calls[0];
+    // The FROZEN-only step is listed as remaining; the live-only "Step B" is NOT.
+    expect(promptArg).toContain('frozen-only-step — Frozen Only Step');
+    expect(promptArg).not.toContain('Step B');
     await waitForRedrive(runQueues, runId);
     db.close();
   });

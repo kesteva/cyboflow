@@ -123,6 +123,23 @@ describe('cyboflow.monitor.send — final-gate auto-handover pre-step', () => {
     expect(session.converse).not.toHaveBeenCalled();
   });
 
+  it('a { delivered: false, handedOver: false } result (stale post-handover send) is returned verbatim and the monitor is NOT consulted', async () => {
+    const session = makeMonitorSession();
+    MonitorRegistry.getInstance().register('run-1', session);
+    // Post-handover stale send (Fix 3): the run WAS handed over, so the checker reports
+    // an honest failure. The router must propagate it verbatim, NOT fall through to the
+    // still-registered-but-dying monitor (which would double-inject + answer).
+    setFinalGateHandover({
+      attempt: vi.fn().mockResolvedValue({ delivered: false, handedOver: false }),
+    });
+    const caller = appRouter.createCaller(createContext());
+
+    const result = await caller.cyboflow.monitor.send({ runId: 'run-1', text: 'stale tab send' });
+
+    expect(result).toEqual({ delivered: false, handedOver: false });
+    expect(session.converse).not.toHaveBeenCalled();
+  });
+
   it('a null result (not applicable) falls through to the monitor converse path', async () => {
     const session = makeMonitorSession();
     MonitorRegistry.getInstance().register('run-1', session);

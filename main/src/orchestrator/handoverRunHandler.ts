@@ -86,6 +86,7 @@
 import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
 import { resolveWorkflowDefinition } from '../../../shared/types/workflows';
+import { resolveRunFrozenSpec } from './runFrozenSpec';
 import {
   DEFAULT_WORKFLOW_AGENT_RUNTIME,
   isWorkflowAgentRuntime,
@@ -218,6 +219,14 @@ export interface FinalGateHandoverContext {
   kind: 'parked-at-final-gate' | 'drained-rest';
   stepId: string;
   stepName: string;
+  /**
+   * review_items.id (TEXT) of the pending final gate that was detected — set ONLY
+   * for 'parked-at-final-gate' (absent for 'drained-rest', which has no open gate
+   * row). Re-validated across the flip so a concurrent user Approve/Reject wins: if
+   * the item is no longer 'pending' by the time we go to abort/flip, the user's
+   * decision has settled the gate and the handover refuses as a race (Fix 1).
+   */
+  reviewItemId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -252,6 +261,20 @@ const RUN_SELECT_SQL = `SELECT r.status AS status, r.execution_model AS executio
          FROM workflow_runs r
          JOIN workflows w ON w.id = r.workflow_id
         WHERE r.id = ?`;
+
+/**
+ * Re-read a gate review-item's live status. Used to revalidate a final-gate
+ * handover claim (Fix 1): a concurrent user Approve/Reject settles the item to a
+ * non-'pending' status, and the handover must then refuse so the user's decision
+ * wins. Returns the status string, or null when the row is gone (also treated as
+ * "not pending" by the callers → refuse).
+ */
+function readReviewItemStatus(db: DatabaseLike, reviewItemId: string): string | null {
+  const row = db.prepare('SELECT status FROM review_items WHERE id = ?').get(reviewItemId) as
+    | { status?: unknown }
+    | undefined;
+  return typeof row?.status === 'string' ? row.status : null;
+}
 
 // ---------------------------------------------------------------------------
 // Handler
@@ -310,6 +333,19 @@ export async function handoverRunHandler(
     ? preflightRow.agent_runtime
     : DEFAULT_WORKFLOW_AGENT_RUNTIME;
 
+  // Fix 1 (PRE-ABORT re-guard): a final-gate handover carries the review_items.id of
+  // the pending gate it detected. If a concurrent user Approve/Reject settled that
+  // gate between detection and here, the user's decision wins — refuse the handover
+  // WITHOUT aborting the parked walk (an abort would tear down a walk the user is
+  // legitimately signing off). Absent reviewItemId (monitor-initiated switch, or a
+  // drained-rest final gate) skips this entirely.
+  if (opts?.finalGate?.reviewItemId) {
+    const status = readReviewItemStatus(db, opts.finalGate.reviewItemId);
+    if (status !== 'pending') {
+      return { noOp: true, reason: 'race' };
+    }
+  }
+
   // ABORT the live walk (OUTSIDE the queue, BEFORE enqueueing Phase 1). Only when
   // a live executor actually holds the run — a resting failed/awaiting_review run
   // has nothing to abort and its queue is already free. requestProgrammaticCancel
@@ -345,6 +381,21 @@ export async function handoverRunHandler(
     }
     if (!SWITCHABLE_STATUSES.has(row.status)) {
       return { ok: false, reason: 'not_switchable' };
+    }
+
+    // Fix 1 (PHASE-1 re-guard): re-validate the final-gate claim one last time,
+    // immediately before the flip. Our OWN clearPendingGateItems sweep runs AFTER
+    // the flip in this same queued task, so a non-'pending' status observed HERE can
+    // only be another actor (a user resolve, a concurrent cancel) — refusing the flip
+    // is always correct. If the user resolved between the pre-abort check and abort(),
+    // the gate settles with the user's verdict and the walk proceeds naturally; this
+    // re-guard then refuses the flip and the run continues its normal course — no
+    // flip, no sweep.
+    if (opts?.finalGate?.reviewItemId) {
+      const gateStatus = readReviewItemStatus(db, opts.finalGate.reviewItemId);
+      if (gateStatus !== 'pending') {
+        return { ok: false, reason: 'race' };
+      }
     }
 
     // The guarded flip — the SANCTIONED, one-way, programmatic->orchestrated
@@ -401,7 +452,19 @@ export async function handoverRunHandler(
 
   // Phase 2: compose the brief + seed the fresh conversation + re-drive, OUTSIDE
   // the queue guard (execute() re-enters the same run queue — see header note).
-  const definition = resolveWorkflowDefinition(workflowName, specJson);
+  // The brief's step lists MUST derive from the run's FROZEN spec (the exact graph
+  // the programmatic walk executed), NOT the live workflows.spec_json: a variant run
+  // or a mid-run workflow edit makes the live row a DIFFERENT graph, which would mis-
+  // describe "Completed so far" / "Remaining steps". resolveRunFrozenSpec degrades to
+  // the live spec internally for legacy/baseline runs; we fall back to the captured
+  // live name/spec only when it returns null (missing run row / minimal test DB). The
+  // workflow PROMPT body (readWorkflowPrompt by id) is unaffected — it is keyed by
+  // workflow id, not the frozen graph.
+  const frozen = resolveRunFrozenSpec(db, runId);
+  const definition = resolveWorkflowDefinition(
+    frozen?.workflowName ?? workflowName,
+    frozen?.specJson ?? specJson,
+  );
   const steps = definition
     ? definition.phases.flatMap((phase) => phase.steps).map((step) => ({ id: step.id, name: step.name }))
     : [];
