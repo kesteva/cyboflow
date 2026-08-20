@@ -8,6 +8,7 @@
 import type { RunQueueRegistry } from './RunQueueRegistry';
 import type { ClaudeManagerLike, PermissionServerLike } from './stuckDetector';
 import type { ReviewItemCreate, ReviewItemTriage } from './reviewItemRouter';
+import type { OmpControlPlaneAdapter } from '../../../shared/types/omp';
 
 // ---------------------------------------------------------------------------
 // DatabaseLike
@@ -93,6 +94,8 @@ export interface OrchestratorDeps {
     projectId: number,
     change: ReviewItemCreate | ReviewItemTriage,
   ) => Promise<{ reviewItemId: string; event: { id: number; seq: number } }>;
+  /** Read-only OMP fleet adapter. Optional (absent => no OMP awareness at the orchestrator layer). */
+  omp?: OmpControlPlaneAdapter;
 }
 
 // Re-export narrow interfaces so callers that only need the interface shapes

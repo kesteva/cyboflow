@@ -276,6 +276,11 @@ function probe(target, moduleDir) {
     // Electron-as-Node: same binary, same ABI, no window — so the probe measures
     // the ABI the real app will load with, without opening a UI.
     env = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
+    // The Electron binary rejects --openssl-legacy-provider in NODE_OPTIONS
+    // (even with ELECTRON_RUN_AS_NODE=1), so a host that exports it would make
+    // the probe fail spuriously and force the slow rebuild path on every launch.
+    // The probe only needs a bare ABI check — drop NODE_OPTIONS for this child.
+    delete env.NODE_OPTIONS;
   }
 
   const result = spawnSync(exec, ['-e', source], { cwd: repoRoot, encoding: 'utf8', env });

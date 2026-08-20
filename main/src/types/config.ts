@@ -200,6 +200,26 @@ export interface AppConfig {
   // exercised live. Mirrors the CYBOFLOW_DEV_FORCE_GATE_STREAM_CLOSED env var.
   // Floored to false when unset; never fires in a packaged release.
   forceAskUserQuestionGateFailure?: boolean;
+  /**
+   * Aria mode — which OMP flavor this install runs.
+   *
+   * OFF (default): the LOCAL OMP runtimes (`omp-sdk` / `omp-pty`) are offered
+   * and the fleet supervisor is hidden. ON: Cyboflow supervises a REMOTE OMP
+   * fleet over the Prime bridge (`omp-fleet`) and the local runtimes are hidden.
+   * The two are alternatives, not a stack — one panel is either a local OMP
+   * process or a remote worker, never both.
+   *
+   * This is also the GRANT of the `omp:supervise` capability: spawning and
+   * killing remote workers is authorized by the operator saying so here, not by
+   * the bridge merely being reachable. `CYBOFLOW_OMP_SUPERVISE` remains an
+   * override for headless/CI hosts that have no Settings UI.
+   *
+   * Read at boot when the fleet session manager is constructed, so a change
+   * takes effect on the next launch (like `additionalPaths`). Independent of
+   * the `omp` provider toggle in Settings -> Integrations, which still has to
+   * be on for ANY OMP runtime to appear.
+   */
+  ariaMode?: boolean;
   // Demo mode: boots the app against a throwaway demo database + sandbox repo
   // with scripted agent runs. Read ONCE at startup — toggling relaunches the app.
   demoMode?: boolean;
@@ -306,6 +326,8 @@ export interface UpdateConfigRequest {
   devMode?: boolean;
   // DEV-ONLY testing affordance (see AppConfig.forceAskUserQuestionGateFailure).
   forceAskUserQuestionGateFailure?: boolean;
+  // Aria mode (see AppConfig.ariaMode) — applied on next launch.
+  ariaMode?: boolean;
   // Demo mode (see AppConfig.demoMode) — applied on next launch.
   demoMode?: boolean;
   // Telemetry settings (see AppConfig.telemetry). Opt-OUT model: both flags default

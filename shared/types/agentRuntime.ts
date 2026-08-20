@@ -28,6 +28,11 @@ export type AgentProvider = (typeof AGENT_PROVIDERS)[number];
  * SESSION_AGENT_RUNTIMES / WORKFLOW_* this is the FULL set — it exists for
  * validating a runtime read back off a user-editable surface (config.json),
  * where the surface itself is not scoped to one launch kind.
+ *
+ * `omp-fleet` is the fleet-supervisor runtime (Cyboflow supervises a running
+ * OMP fleet through the bridge command adapter); `omp-sdk` and `omp-pty` are
+ * OMP-as-a-runtime sessions (SDK and terminal panels). All three belong to the
+ * `omp` provider via its `omp-` prefix.
  */
 export const ALL_AGENT_RUNTIMES = [
   'claude-sdk',
@@ -37,16 +42,19 @@ export const ALL_AGENT_RUNTIMES = [
   'codex-exec',
   'omp-sdk',
   'omp-pty',
+  'omp-fleet',
 ] as const;
 
 export type AgentRuntime = (typeof ALL_AGENT_RUNTIMES)[number];
 
 /**
  * Every runtime a chat SESSION may run on. Stated as an exclusion because
- * `codex-exec` is the sole runtime with no session manager behind it — both OMP
- * runtimes belong here (they are declared unreachable through
- * {@link AgentProviderDefinition.defaultEnabled} and the picker capability, not
- * by being kept out of the union).
+ * `codex-exec` is the sole runtime with no session manager behind it — every
+ * OMP runtime belongs here: `omp-sdk`/`omp-pty` are declared unreachable
+ * through {@link AgentProviderDefinition.defaultEnabled} and the picker
+ * capability rather than by being kept out of the union, and `omp-fleet` is
+ * the fleet-supervisor session runtime (dispatched to the fleet session
+ * manager, not a panel).
  */
 export type SessionAgentRuntime = Exclude<AgentRuntime, 'codex-exec'>;
 
@@ -57,17 +65,20 @@ export type SessionAgentRuntime = Exclude<AgentRuntime, 'codex-exec'>;
  *
  * Deliberately distinct from {@link WORKFLOW_LAUNCHABLE_RUNTIMES}: a runtime can
  * be storable (so a quick session keeps its identity on the sentinel row)
- * without yet being offered as a workflow launch target. The two sets COINCIDE
- * today — `omp-sdk` was the one divergence and joined the launchable set once
- * its programmatic per-step support landed — but they answer different
- * questions and must stay separately stated: the next provider declared ahead of
- * its workflow lane lands here first and only here, exactly as `omp-sdk` did.
+ * without yet being offered as a workflow launch target. `omp-sdk` was the one
+ * divergence and joined the launchable set once its programmatic per-step
+ * support landed; `omp-fleet` is the other — it mints sentinel rows for
+ * quick-launch fleet sessions, but a fleet supervisor is never a per-step
+ * workflow agent, so it stays out of the launchable set. The two sets answer
+ * different questions and must stay separately stated: the next provider
+ * declared ahead of its workflow lane lands here first and only here.
  */
 export const WORKFLOW_RUN_STORABLE_RUNTIMES = [
   'claude-sdk',
   'claude-interactive',
   'codex-sdk',
   'omp-sdk',
+  'omp-fleet',
 ] as const;
 
 export type WorkflowRunStorableRuntime = (typeof WORKFLOW_RUN_STORABLE_RUNTIMES)[number];
@@ -76,7 +87,9 @@ export type WorkflowRunStorableRuntime = (typeof WORKFLOW_RUN_STORABLE_RUNTIMES)
  * What the workflow pickers offer and `WorkflowRegistry.createRun` accepts for a
  * real (non-sentinel) run — i.e. the runtimes a workflow agent may deploy on.
  * `codex-pty` and `omp-pty` are excluded because workflows need structured
- * events/usage/MCP, which a TUI driven by keystrokes cannot supply.
+ * events/usage/MCP, which a TUI driven by keystrokes cannot supply; `omp-fleet`
+ * is excluded for the same structural reason — it supervises a fleet as a whole
+ * and has no per-step event stream.
  */
 export const WORKFLOW_LAUNCHABLE_RUNTIMES = [
   'claude-sdk',
@@ -113,6 +126,7 @@ export const SESSION_AGENT_RUNTIMES = [
   'codex-pty',
   'omp-sdk',
   'omp-pty',
+  'omp-fleet',
 ] as const;
 
 /** Human labels for the workflow-scoped runtime picker. Single source shared by
@@ -131,10 +145,11 @@ export const WORKFLOW_AGENT_RUNTIME_LABELS: Record<WorkflowLaunchableRuntime, st
  * sessions only"). Exhaustive over `SessionAgentRuntime` — unlike
  * {@link WORKFLOW_AGENT_RUNTIME_LABELS}, which is scoped to the
  * workflow-launchable subset and uses shorter labels for the agent-config
- * editors — so the two terminal-driven runtimes (`codex-pty`, `omp-pty`) are
- * covered too. Any summary echoing a launched runtime (e.g. the wizard's
- * launch-summary Runtime row) should read this instead of hand-rolling a
- * ternary that silently defaults an unhandled runtime to the wrong label.
+ * editors — so the two terminal-driven runtimes (`codex-pty`, `omp-pty`) and
+ * the fleet supervisor (`omp-fleet`) are covered too. Any summary echoing a
+ * launched runtime (e.g. the wizard's launch-summary Runtime row) should read
+ * this instead of hand-rolling a ternary that silently defaults an unhandled
+ * runtime to the wrong label.
  *
  * "(CLI)" — never "(PTY)" — is the user-facing word for a terminal-driven
  * runtime. PTY is the transport's implementation name and stays in code
@@ -148,6 +163,7 @@ export const AGENT_RUNTIME_LABELS: Record<SessionAgentRuntime, string> = {
   'codex-pty': 'Codex (CLI)',
   'omp-sdk': 'OMP',
   'omp-pty': 'OMP (CLI)',
+  'omp-fleet': 'OMP fleet',
 };
 
 // ---------------------------------------------------------------------------
@@ -195,7 +211,10 @@ export const AGENT_PROVIDER_REGISTRY: Readonly<Record<AgentProvider, AgentProvid
   // it takes the absent⇒DISABLED policy this field exists for: every install
   // that has never seen the OMP card in Settings → Integrations keeps OMP off,
   // and nothing about a claude/codex user's app changes because the provider
-  // was declared. See `AgentProviderDefinition.defaultEnabled`.
+  // was declared. This covers every omp- runtime, including the fleet
+  // supervisor (`omp-fleet`) — the fleet status-bar indicator and the
+  // fleet-session launch both respect the same toggle. See
+  // `AgentProviderDefinition.defaultEnabled`.
   omp: { runtimePrefix: 'omp-', defaultEnabled: false },
 };
 
@@ -297,8 +316,8 @@ export function providerForRuntimeIn<P extends string>(
  *
  * The discrimination is opt-IN on `development`/`test` rather than a
  * `!== 'production'` default because a packaged Electron app may leave NODE_ENV
- * unset (index.ts pairs it with `app.isPackaged` for exactly this reason), and a
- * bad persisted value must never take a user's app down. The literal
+ * unset (index.ts pairs it with `app.isPackaged` for exactly this reason), and
+ * a bad persisted value must never take a user's app down. The literal
  * `process.env.NODE_ENV` token is what Vite statically replaces in the renderer
  * bundle, so it has to appear verbatim; the main process reads the live value.
  *

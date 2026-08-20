@@ -1179,6 +1179,85 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     }
   });
 
+  // OMP fleet runtime (omp-phase4-coexistence-adr.md increment 4). A remote
+  // worker with no local child process: its raw text output is projected to the
+  // SAME JSON assistant-message shape the SDK transcript projects, so the
+  // unified chat renders it with no new frontend surface. The manager is
+  // optional (undefined when the bridge config did not resolve) — guard on it.
+  const ompSessionManager = services.ompSessionManager;
+  if (ompSessionManager) {
+    let ompOutputSeq = 0;
+    ompSessionManager.on(
+      'output',
+      async ({ panelId, sessionId, data }: { panelId: string; sessionId: string; data: string }) => {
+        if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;
+        // Project raw worker text to a structured assistant message so the
+        // existing projectStoredOutputs → MessageProjection path renders it.
+        ompOutputSeq += 1;
+        const messageId = `omp-${panelId}-${ompOutputSeq}`;
+        sessionManager.addPanelOutput(panelId, {
+          type: 'json',
+          data: {
+            type: 'assistant',
+            message: {
+              id: messageId,
+              model: 'omp-fleet',
+              role: 'assistant',
+              content: [{ type: 'text', text: data }],
+            },
+            session_id: sessionId,
+          },
+          timestamp: new Date(),
+        });
+        const mw = getMainWindow();
+        if (mw && !mw.isDestroyed()) {
+          mw.webContents.send('session:output', { panelId, sessionId, type: 'stdout', data });
+        }
+      },
+    );
+
+    ompSessionManager.on('spawned', async ({ panelId, sessionId }: { panelId: string; sessionId: string }) => {
+      if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;
+      await updateAIPanelStatus(panelId, 'running');
+      await sessionManager.updateSession(sessionId, { status: 'running' });
+    });
+
+    ompSessionManager.on(
+      'exit',
+      async ({ panelId, sessionId, exitCode }: { panelId: string; sessionId: string; exitCode: number | null }) => {
+        if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;
+        const isActive = isPanelActive(panelId, sessionId);
+        const panelStatusOnExit: PanelStatus = exitCode === 0 && !isActive ? 'completed_unviewed' : 'stopped';
+        await updateAIPanelStatus(panelId, panelStatusOnExit, exitCode === 0 && !isActive);
+        const dbSession = sessionManager.getDbSession(sessionId);
+        if (dbSession && dbSession.status === 'running') {
+          // Write the DB status raw, then re-fetch + emit 'session-updated' —
+          // the same shape as the SDK completion path. 'completed' has no
+          // app-level Session status: mapDbStatusToSessionStatus turns it into
+          // completed_unviewed when unviewed, so refreshSessionFromDatabase
+          // (convert + activeSessions.set + emit) surfaces the right status.
+          sessionManager.db.updateSession(sessionId, { status: exitCode === 0 ? 'completed' : 'stopped' });
+          sessionManager.refreshSessionFromDatabase(sessionId);
+        }
+      },
+    );
+
+    ompSessionManager.on(
+      'error',
+      async ({ panelId, sessionId, error, transient }: { panelId: string; sessionId: string; error: string; transient: boolean }) => {
+        if (isCyboflowRunId(panelId) || isCyboflowRunId(sessionId)) return;
+        console.error(`[Events] OMP worker error for panel ${panelId}: ${error}`);
+        // A TRANSIENT error leaves the worker live — one bridge blip must not
+        // park the panel in 'error' forever. Nothing ever clears that badge:
+        // 'spawned' fires once at spawn, so the panel would read as failed for
+        // the rest of a perfectly healthy run. Real termination arrives as
+        // 'exit' and is handled above.
+        if (transient) return;
+        await updateAIPanelStatus(panelId, 'error');
+      },
+    );
+  }
+
   // Listen for archive progress events
   if (archiveProgressManager) {
     archiveProgressManager.on('archive-progress', (progress) => {

@@ -10,6 +10,8 @@ import { IntegrationsSettings } from './IntegrationsSettings';
 const detectClaude = vi.fn();
 const detectCodex = vi.fn();
 const detectOmp = vi.fn();
+const { mockUseOmpAvailability } = vi.hoisted(() => ({ mockUseOmpAvailability: vi.fn() }));
+vi.mock('../../hooks/useOmpAvailability', () => ({ useOmpAvailability: mockUseOmpAvailability }));
 
 vi.mock('../../utils/api', () => ({
   API: {
@@ -64,6 +66,8 @@ beforeEach(() => {
   detectCodex.mockReset().mockResolvedValue({ success: true, data: CODEX_CONNECTED });
   detectOmp.mockReset().mockResolvedValue({ success: true, data: OMP_MISSING });
   updateConfig = vi.fn().mockResolvedValue(true);
+  // Default install: OMP runs locally, so the row reports the local binary.
+  mockUseOmpAvailability.mockReset().mockReturnValue({ launchable: false, ariaMode: false });
   useConfigStore.setState({ config: null, error: null, updateConfig });
 });
 
@@ -272,5 +276,50 @@ describe('IntegrationsSettings — OMP card', () => {
     expect(ompSwitch).toBeDisabled();
     fireEvent.click(ompSwitch);
     expect(updateConfig).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Aria mode changes what the OMP row is even ABOUT: it supervises a remote
+ * fleet and never launches the local binary, so reporting the binary there
+ * answers the wrong question — and would report "Detected" for an install that
+ * cannot launch anything.
+ */
+describe('IntegrationsSettings — OMP row under Aria mode', () => {
+  it('reports the FLEET, not the local binary, when Aria mode is on', async () => {
+    // A perfectly good local binary is present and must NOT be what the row claims.
+    detectOmp.mockResolvedValue({ success: true, data: OMP_DETECTED });
+    mockUseOmpAvailability.mockReturnValue({ launchable: true, ariaMode: true });
+
+    render(<IntegrationsSettings />);
+
+    expect(await screen.findByText('Fleet detected')).toBeInTheDocument();
+    // OMP_DETECTED carries version 17.3.3 and a binaryPath; neither may surface.
+    expect(screen.queryByText(/omp 17\.3\.3/i)).not.toBeInTheDocument();
+    expect(screen.queryByText('/usr/local/bin/omp')).not.toBeInTheDocument();
+    expect(screen.getByText(/the local omp binary is not used/i)).toBeInTheDocument();
+  });
+
+  it('says the fleet is missing, and how to fix it, when no bridge is configured', async () => {
+    detectOmp.mockResolvedValue({ success: true, data: OMP_DETECTED });
+    mockUseOmpAvailability.mockReturnValue({ launchable: false, ariaMode: true });
+
+    render(<IntegrationsSettings />);
+
+    expect(await screen.findByText('Fleet not detected')).toBeInTheDocument();
+    // Naming the env vars is the point — this is the state that otherwise reads
+    // as "OMP is broken" while the toggle still says it is on.
+    expect(screen.getByText(/OMP_BRIDGE_TOKEN_FILE/)).toBeInTheDocument();
+    expect(screen.getByText(/OMP_BRIDGE_SESSION_ID/)).toBeInTheDocument();
+  });
+
+  it('still reports the local binary when Aria mode is off', async () => {
+    detectOmp.mockResolvedValue({ success: true, data: OMP_DETECTED });
+    mockUseOmpAvailability.mockReturnValue({ launchable: false, ariaMode: false });
+
+    render(<IntegrationsSettings />);
+
+    expect(await screen.findByText('Detected')).toBeInTheDocument();
+    expect(screen.queryByText(/Fleet (not )?detected/i)).not.toBeInTheDocument();
   });
 });

@@ -82,6 +82,12 @@ export const RUNTIME_CAPABILITIES: Readonly<Record<AgentRuntime, AgentRuntimeCap
   // OMP analogue.
   'omp-sdk': { selectableInPickers: true, supportsEffort: true, supportsFastMode: false },
   'omp-pty': { selectableInPickers: true, supportsEffort: false, supportsFastMode: false },
+  // The fleet SUPERVISOR runtime (omp-phase4-coexistence-adr.md §3, §5): offered
+  // in the quick-session picker only, and only while the bridge availability
+  // probe reports configured (SubstrateSelector gates it further). The remote
+  // worker owns its model and thinking level (DEFAULT_OMP_MODEL), so effort and
+  // fast mode are both producer-side and hidden here.
+  'omp-fleet': { selectableInPickers: true, supportsEffort: false, supportsFastMode: false },
 };
 
 /**

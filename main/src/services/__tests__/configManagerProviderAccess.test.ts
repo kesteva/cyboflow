@@ -76,11 +76,11 @@ describe('ConfigManager.agentProviderAccess', () => {
     expect(mgr.getAgentProviderAccess()).toEqual({ claude: true, codex: false, omp: false });
   });
 
-  it('degrades an all-off map to both-enabled (never brick every launch seam)', async () => {
+  it('degrades an all-off map to all-enabled (never brick every launch seam)', async () => {
     const mgr = new ConfigManager('/tmp/test-git-path');
     await mgr.initialize();
     // Bypasses the IPC normalization (a hand-edited config.json can do this).
-    await mgr.updateConfig({ agentProviderAccess: { claude: false, codex: false } });
+    await mgr.updateConfig({ agentProviderAccess: { claude: false, codex: false, omp: false } });
 
     expect(mgr.getAgentProviderAccess()).toEqual({ claude: true, codex: true, omp: false });
     expect(mgr.isAgentProviderEnabled('claude')).toBe(true);

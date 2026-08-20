@@ -35,6 +35,7 @@ import { useDesignModeStore } from './stores/designModeStore';
 import { AgentRail, shouldShowAgentRail } from './components/agentRail/AgentRail';
 import { useAgentThreadStore } from './stores/agentThreadStore';
 import { useMcpHealthStore } from './stores/mcpHealthStore';
+import { useOmpFleetStore } from './stores/ompFleetStore';
 import { useReviewQueueSlice } from './stores/reviewQueueSlice';
 import { useReviewQueueStore } from './stores/reviewQueueStore';
 import { useReviewItemsSlice } from './stores/reviewItemsSlice';
@@ -129,6 +130,13 @@ function App() {
     const unsubscribe = subscribeToMcpHealth();
     return unsubscribe;
   }, [subscribeToMcpHealth]);
+
+  // Start the OMP fleet polling subscription on mount (read-only awareness).
+  const subscribeToOmpFleet = useOmpFleetStore((s) => s.subscribeToOmpFleet);
+  useEffect(() => {
+    const unsubscribe = subscribeToOmpFleet();
+    return unsubscribe;
+  }, [subscribeToOmpFleet]);
 
   // Subscribe to stuck-run events so RunStatusMap stays current for the lifetime
   // of the app shell (not just while ReviewQueueView is mounted).

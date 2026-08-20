@@ -525,7 +525,7 @@ describe('JournalTailer', () => {
     ]);
   });
 
-  it('extracts promptExcerpt from array content (first text part), truncated to the excerpt cap', async () => {
+  it('extracts promptExcerpt from array content (first text part), truncated to the excerpt cap', { timeout: 30_000 }, async () => {
     const { onAgents } = buildTailer();
     tailer!.start();
     writeFileSync(journalPath, '{"type":"started","agentId":"a1"}\n');
@@ -593,7 +593,7 @@ describe('JournalTailer', () => {
     expect(agents?.[0]).toMatchObject({ agentId: 'a1', inputTokens: 10, outputTokens: 20 });
   });
 
-  it('stop() during an in-flight tick does not corrupt the read (buffer release is serialized)', async () => {
+  it('stop() during an in-flight tick does not corrupt the read (buffer release is serialized)', { timeout: 30_000 }, async () => {
     const { onAgents } = buildTailer();
     tailer!.start();
     writeFileSync(

@@ -123,6 +123,12 @@ export interface AppConfig {
   // the durable recovery gate can be exercised live. Only takes effect in dev
   // (unpackaged) runs; never fires in a packaged release.
   forceAskUserQuestionGateFailure?: boolean;
+  // Aria mode: supervise a REMOTE OMP fleet (`omp-fleet`) over the Prime bridge
+  // instead of running the LOCAL OMP runtimes (`omp-sdk`/`omp-pty`). The two are
+  // alternatives — the runtime picker offers one or the other, never both. Also
+  // the grant of the `omp:supervise` capability. Read at boot when the fleet
+  // session manager is built, so a change takes effect on the next launch.
+  ariaMode?: boolean;
   // Demo mode: throwaway demo database + sandbox repo with scripted agent runs.
   // Read once at startup — toggling relaunches the app.
   demoMode?: boolean;

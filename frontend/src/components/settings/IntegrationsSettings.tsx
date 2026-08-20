@@ -5,6 +5,7 @@ import type { AgentProvider, AgentProviderAccess } from '../../../../shared/type
 import { AGENT_PROVIDERS, isAgentProviderEnabled } from '../../../../shared/types/agentRuntime';
 import type { ProviderDetectionResult } from '../../../../shared/types/onboarding';
 import { useAgentProviderAccess } from '../../hooks/useAgentProviderAccess';
+import { useOmpAvailability, type OmpAvailability } from '../../hooks/useOmpAvailability';
 import { useConfigStore } from '../../stores/configStore';
 import { API } from '../../utils/api';
 import { Button } from '../ui/Button';
@@ -221,10 +222,37 @@ function codexView(
   };
 }
 
+/**
+ * The OMP row's status.
+ *
+ * ARIA MODE CHANGES WHAT "DETECTED" MEANS. Off, OMP runs on THIS machine and
+ * the local binary is the thing to find. On, Cyboflow supervises a REMOTE fleet
+ * over the Prime bridge and never launches a local `omp` — so reporting the
+ * local binary there answers a question nobody asked, and reports "Detected"
+ * for an install that cannot actually launch anything. Under Aria mode the row
+ * reports the FLEET instead, which is the resource the runtime needs.
+ */
 function ompView(
   detection: ProviderDetectionResult<'omp'> | null,
   error: string | null,
+  omp: OmpAvailability,
 ): ProviderViewModel {
+  if (omp.ariaMode) {
+    return omp.launchable
+      ? {
+          status: 'connected',
+          label: 'Fleet detected',
+          detail: 'Supervising a remote OMP fleet over the Prime bridge.',
+          metadata: 'Aria mode · the local omp binary is not used',
+        }
+      : {
+          status: 'unavailable',
+          label: 'Fleet not detected',
+          detail:
+            'Aria mode is on, but no OMP Prime bridge was found. Set OMP_BRIDGE_TOKEN_FILE and OMP_BRIDGE_SESSION_ID, then restart Cyboflow.',
+          metadata: 'Aria mode · the local omp binary is not used',
+        };
+  }
   if (error) {
     return { status: 'unavailable', label: 'Check failed', detail: error };
   }
@@ -338,7 +366,8 @@ export function IntegrationsSettings(): React.JSX.Element {
 
   const claude = claudeView(claudeDetection, claudeError);
   const codex = codexView(codexDetection, codexError);
-  const omp = ompView(ompDetection, ompError);
+  const ompAvailability = useOmpAvailability();
+  const omp = ompView(ompDetection, ompError, ompAvailability);
 
   // Provider access — the toggles below write AppConfig.agentProviderAccess,
   // the same field the onboarding Connect step writes, so the two surfaces are
@@ -441,7 +470,7 @@ export function IntegrationsSettings(): React.JSX.Element {
             onToggle={(next) => void setProviderEnabled('omp', next)}
             toggleDisabledReason={toggleReason('omp', ompEnabled)}
             toggleTestId="provider-toggle-omp"
-            action={ompDetection?.state === 'unavailable' && ompDetection.binaryPath === null ? (
+            action={!ompAvailability.ariaMode && ompDetection?.state === 'unavailable' && ompDetection.binaryPath === null ? (
               <Button
                 type="button"
                 variant="secondary"

@@ -85,6 +85,16 @@ import { QuestionRouter } from './orchestrator/questionRouter';
 import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
 import { ReviewItemRouter, reviewItemChangeEvents, reviewItemProjectChannel } from './orchestrator/reviewItemRouter';
 import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
+import { FleetRegistryReader } from './orchestrator/omp/fleetRegistryReader';
+import { OmpBridgeCommandAdapter } from './orchestrator/omp/ompBridgeCommandAdapter';
+import { OmpBridgeHttpClient } from './orchestrator/omp/ompBridgeClient';
+import { resolveOmpBridgeCommandConfig } from './orchestrator/omp/ompBridgeConfig';
+import { resolveOmpPrincipal } from './orchestrator/omp/ompPrincipal';
+import { OmpCommandStub } from './orchestrator/omp/ompCommandStub';
+import type { OmpCommandAdapter, OmpPrincipal } from '../../shared/types/ompCommand';
+import { OmpSessionManager } from './orchestrator/omp/ompSessionManager';
+import { OmpSupervisedAdapter, type OmpSupervisedAuditEntry } from './orchestrator/omp/ompSupervisedAdapter';
+import { hasSupervise } from '../../shared/types/ompCommand';
 import { FeedbackRouter } from './orchestrator/feedbackRouter';
 import { IdeaComponentRouter } from './orchestrator/ideaComponents/ideaComponentRouter';
 import { setRevisionLauncher } from './orchestrator/sendFeedbackHandler';
@@ -357,6 +367,69 @@ function setAppTitle() {
 }
 let taskQueue: TaskQueue | null = null;
 let orchestrator: Orchestrator | null = null;
+// Read-only OMP fleet adapter — ONE module-scope instance shared by the
+// Orchestrator (dep bag) and the tRPC context, so both layers observe the same source.
+const fleetRegistryReader = new FleetRegistryReader();
+
+/**
+ * The OMP command principal and audit sink, at module scope so the tRPC context
+ * and the fleet session manager share ONE identity and ONE trail.
+ *
+ * Resolved lazily rather than as a module-scope const: the supervise capability
+ * comes from Aria mode (`configManager.getAriaMode()`), and configManager is not
+ * constructed at module-evaluation time.
+ *
+ * Every consumer takes this FUNCTION, never a snapshot of its result — the tRPC
+ * context calls it per request, and both `OmpSupervisedAdapter` instances hold
+ * the thunk and resolve per command. So flipping Aria mode takes effect on the
+ * next call in either direction, with no relaunch: granting it makes fleet
+ * sessions launchable, revoking it forbids the very next command.
+ */
+function currentOmpPrincipal(): OmpPrincipal {
+  // Guarded: a caller before initializeServices() gets the fail-closed answer
+  // rather than a crash.
+  let ariaMode = false;
+  try {
+    ariaMode = configManager.getAriaMode();
+  } catch {
+    ariaMode = false;
+  }
+  return resolveOmpPrincipal(ariaMode);
+}
+const auditOmp = (entry: OmpSupervisedAuditEntry): void => {
+  logger.info(
+    `omp:audit ${entry.outcome} ${entry.verb} op=${entry.operationId} by=${entry.principal} ${entry.detail}`,
+  );
+};
+
+/**
+ * Build the privileged OMP command adapter: a real bridge client when the
+ * bridge is configured, else the fail-closed stub. Always wrapped in
+ * `OmpSupervisedAdapter`, so the capability gate and the audit trail hold for
+ * every caller rather than only for the ones that remember to check.
+ */
+function buildOmpCommandAdapter(): OmpCommandAdapter {
+  const config = resolveOmpBridgeCommandConfig();
+  if (config === undefined) {
+    logger.info('omp:command adapter unconfigured — commands will return unavailable');
+    return new OmpCommandStub();
+  }
+  logger.info(`omp:command adapter configured for session ${config.sessionId}`);
+  return new OmpSupervisedAdapter(
+    new OmpBridgeCommandAdapter(new OmpBridgeHttpClient(config.url, config.token, config.sessionId)),
+    // The THUNK, not a snapshot: this adapter is built once per window attach
+    // and retained, so a captured principal would freeze the capability at
+    // whatever Aria mode was when the window opened.
+    currentOmpPrincipal,
+    auditOmp,
+  );
+}
+// OMP fleet runtime manager (omp-phase4-coexistence-adr.md increment 4). Built
+// fail-closed in initializeServices(): present ONLY when the bridge command
+// config resolved at boot; `undefined` means OMP is not launchable and both the
+// dispatch seams and the picker omit it (never a fallback to a local provider).
+let ompSessionManager: OmpSessionManager | undefined;
+
 let runQueues: RunQueueRegistry;
 let workflowRegistry: WorkflowRegistry;
 let runLauncher: RunLauncher;
@@ -766,6 +839,11 @@ let verifyRunbookStatus: VerifyRunbookStatusLike | undefined;
  */
 function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
   const db = makeDatabaseLike(databaseService);
+  // Privileged OMP commands: a real bridge adapter when configured, else the
+  // fail-closed stub — supervise-gated and audited either way by the wrapper
+  // buildOmpCommandAdapter applies. The capability is OFF unless the operator
+  // set CYBOFLOW_OMP_SUPERVISE, so every command is FORBIDDEN by default.
+  const ompCommand = buildOmpCommandAdapter();
   attachOrchestratorTrpc({
     window: win,
     router: appRouter,
@@ -776,6 +854,17 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         workflowRegistry,
         agentOverrideRouter: AgentOverrideRouter.getInstance(),
         getForcedSubstrate: () => configManager.getForcedSubstrate(),
+        omp: fleetRegistryReader,
+        ompCommand,
+        principal: currentOmpPrincipal(),
+        auditOmp,
+        // The manager exists iff the BRIDGE is configured — a boot-time,
+        // env-driven fact, so the picker asks whether it exists rather than
+        // re-deriving the config. The other half of `launchable` is the live
+        // `hasSupervise(ctx.principal)` check in the availability query, which
+        // is what makes the Aria toggle take effect without a relaunch.
+        ompFleetLaunchable: () => ompSessionManager !== undefined,
+        ompAriaMode: () => configManager.getAriaMode(),
         // Run-scoped Diff tab: closure over GitDiffManager keeps the standalone
         // runs router free of a services/* import. Narrow the GitDiffResult down
         // to the RunGitDiff wire shape (diff + stats + changedFiles).
@@ -1516,12 +1605,54 @@ async function initializeServices(): Promise<boolean> {
     getMainWindow: () => mainWindow
   });
 
+
   // ---------------------------------------------------------------------------
   // Cyboflow orchestrator collaborators — constructed here so they are eager
   // singletons assembled with the rest of AppServices (not lazy on first IPC).
   // ---------------------------------------------------------------------------
   const cyboflowLogger = makeLoggerLike(logger);
   const cyboflowDb = makeDatabaseLike(databaseService);
+  // OMP fleet runtime (omp-phase4-coexistence-adr.md §5): constructed ONLY when
+  // the bridge command config resolved at boot. Unresolved ⇒ undefined ⇒ the
+  // dispatch seams + picker omit OMP entirely — a half-configured bridge never
+  // silently authorizes a session.
+  {
+    const ompBridgeConfig = resolveOmpBridgeCommandConfig();
+    // TWO gates, both required. The bridge config says the fleet is REACHABLE;
+    // the supervise capability says this operator authorized Cyboflow to drive
+    // it. Spawning and killing remote workers is the same privileged surface
+    // the ompCommand router refuses without the capability, so the manager that
+    // drives it from the panel seams must refuse on the same terms — otherwise
+    // the product's actual path sits outside the authorization model.
+    if (ompBridgeConfig !== undefined && !hasSupervise(currentOmpPrincipal())) {
+      logger.info(
+        'omp:fleet bridge is configured but the supervise capability is absent ' +
+          '(turn on Aria mode in Settings → Advanced Options, or set CYBOFLOW_OMP_SUPERVISE ' +
+          'on a headless host) — fleet sessions stay unavailable until it is granted',
+      );
+    }
+    // Constructed on the BRIDGE CONFIG alone. The supervise capability is
+    // deliberately NOT a construction condition: it comes from Aria mode, which
+    // the user flips at runtime, and gating construction on it froze the answer
+    // at launch — granting Aria appeared to do nothing until a restart. The
+    // capability is enforced per call by OmpSupervisedAdapter instead, which is
+    // strictly stronger: revoking Aria now forbids the very next command rather
+    // than leaving an already-built manager authorized for the rest of the run.
+    ompSessionManager =
+      ompBridgeConfig !== undefined
+        ? new OmpSessionManager(
+            new OmpSupervisedAdapter(
+              new OmpBridgeCommandAdapter(
+                new OmpBridgeHttpClient(ompBridgeConfig.url, ompBridgeConfig.token, ompBridgeConfig.sessionId),
+              ),
+              currentOmpPrincipal,
+              auditOmp,
+            ),
+            cyboflowLogger,
+          )
+        : undefined;
+  }
+
   // Inject the global-config provider so createRun resolves the global default
   // agent permission mode + CLI substrate via the resolvers (ConfigManager
   // satisfies WorkflowConfigProvider structurally).
@@ -3569,6 +3700,7 @@ async function initializeServices(): Promise<boolean> {
     interactiveCliManager, // PTY substrate sibling (narrowed to the concrete class above)
     codexSdkManager: createdCodexSdkManager,
     codexPtyManager,
+    ompSessionManager,
     ompSdkManager: createdOmpSdkManager,
     ompPtyManager,
     claudeModelCatalogService: new ClaudeModelCatalogService(cyboflowLogger),
@@ -3841,6 +3973,7 @@ app.whenReady().then(async () => {
       db,
       logger: loggerLike,
       runQueues,
+      omp: fleetRegistryReader,
       // Review-item write chokepoint. Used at start to drain any LEGACY
       // idle-session review items (the mint was retired for the live
       // QuickSessionsTable — see Orchestrator.start / drainLegacyIdleReviewItems).
@@ -5725,6 +5858,20 @@ app.on('before-quit', async (event) => {
   // exactly the crash its boot ambiguous-recovery already handles.
   if (trackerSyncService) {
     trackerSyncService.stop();
+  }
+
+  // Kill every live OMP fleet worker. Unlike the other managers' children these
+  // are REMOTE processes: nothing about this app exiting stops them, so without
+  // an explicit fleet_kill they outlive the quit, keep burning producer budget
+  // and keep mutating worktrees no one is watching. Best-effort and awaited —
+  // stopAll never rejects (a failed kill is logged and the panel terminated
+  // locally), so this cannot wedge the quit.
+  if (ompSessionManager) {
+    try {
+      await ompSessionManager.stopAll();
+    } catch (err) {
+      console.warn('[Main] OMP fleet teardown on quit failed (workers may survive):', err);
+    }
   }
 
   // Stop the vitest-orphan sweep timer. Its handle is unref'd so it could never

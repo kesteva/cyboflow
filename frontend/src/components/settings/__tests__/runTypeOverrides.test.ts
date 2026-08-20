@@ -12,6 +12,8 @@ import {
   QUICK_RUN_TYPE_KEY,
   RUN_TYPE_FIELD_ORDER,
   agentRuntimeOptions,
+  agentRuntimePickerOptions,
+  runtimeUnavailableReason,
   baselineValueFor,
   buildRunTypeGroups,
   coerceDraftForModel,
@@ -363,6 +365,66 @@ describe('keys', () => {
     expect(isQuickRunTypeKey(QUICK_RUN_TYPE_KEY)).toBe(true);
     expect(workflowRunTypeKey('wf-1')).toBe('workflow:wf-1');
     expect(isQuickRunTypeKey(workflowRunTypeKey('quick'))).toBe(false);
+  });
+});
+
+const LOCAL_FLAVOR = { launchable: false, ariaMode: false };
+const ARIA_FLAVOR = { launchable: true, ariaMode: true };
+
+describe('agentRuntimePickerOptions', () => {
+  // The two OMP flavors are ALTERNATIVES — an install either supervises a
+  // remote fleet or runs OMP locally. Offering both would let Settings store a
+  // runtime the launch picker refuses to show.
+  it('offers the local OMP runtimes and hides the fleet supervisor by default', () => {
+    const offered = agentRuntimePickerOptions(QUICK_RUN_TYPE_KEY, LOCAL_FLAVOR);
+    expect(offered).toContain('omp-sdk');
+    expect(offered).toContain('omp-pty');
+    expect(offered).not.toContain('omp-fleet');
+  });
+
+  it('swaps to the fleet supervisor under Aria mode', () => {
+    const offered = agentRuntimePickerOptions(QUICK_RUN_TYPE_KEY, ARIA_FLAVOR);
+    expect(offered).toContain('omp-fleet');
+    expect(offered).not.toContain('omp-sdk');
+    expect(offered).not.toContain('omp-pty');
+  });
+
+  // Aria mode ALONE offers the row. Requiring `launchable` too used to leave an
+  // Aria install with no OMP row at all — the local runtimes are hidden
+  // precisely because Aria is on — so the setting silently lost its whole
+  // family. The caller renders it disabled with the reason instead.
+  it('offers the fleet supervisor under Aria mode even when nothing is launchable', () => {
+    expect(
+      agentRuntimePickerOptions(QUICK_RUN_TYPE_KEY, { launchable: false, ariaMode: true }),
+    ).toContain('omp-fleet');
+  });
+
+  it('names why an offered fleet row cannot be selected', () => {
+    expect(runtimeUnavailableReason('omp-fleet', { launchable: false, ariaMode: true })).toBe(
+      'bridge not configured',
+    );
+    expect(runtimeUnavailableReason('omp-fleet', { launchable: true, ariaMode: true })).toBeNull();
+    // Nothing else is ever gated this way.
+    expect(runtimeUnavailableReason('omp-sdk', { launchable: false, ariaMode: false })).toBeNull();
+  });
+
+  // Flipping the toggle changes what you can PICK, never what is stored: a
+  // <select> whose list omits its own value renders blank and would rewrite the
+  // override on the next save.
+  it('keeps the currently-stored runtime offered even when the flavor hides it', () => {
+    expect(agentRuntimePickerOptions(QUICK_RUN_TYPE_KEY, ARIA_FLAVOR, 'omp-sdk')).toContain('omp-sdk');
+    expect(agentRuntimePickerOptions(QUICK_RUN_TYPE_KEY, LOCAL_FLAVOR, 'omp-fleet')).toContain('omp-fleet');
+  });
+
+  // The flavor filter rides ON TOP of the launch-kind narrowing; it must not
+  // widen a workflow key into runtimes that key could never launch.
+  it('never widens the launch-kind set it filters', () => {
+    for (const flavor of [LOCAL_FLAVOR, ARIA_FLAVOR]) {
+      const base = agentRuntimeOptions('workflow:wf-1');
+      for (const runtime of agentRuntimePickerOptions('workflow:wf-1', flavor)) {
+        expect(base).toContain(runtime);
+      }
+    }
   });
 });
 

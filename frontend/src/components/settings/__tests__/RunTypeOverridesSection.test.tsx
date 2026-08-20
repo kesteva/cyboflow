@@ -90,11 +90,22 @@ function workflowsForProject(entries: WorkflowFixtureEntry[], projectId: number)
 // `config:*` IPC fake (real configStore, fake transport).
 // ---------------------------------------------------------------------------
 
+/**
+ * The OMP flavor probe the runtime picker reads (`useOmpAvailability`). Hoisted
+ * so the `vi.mock` factory can close over it and a test can swap the answer;
+ * `beforeEach` resets it to the local-OMP flavor (Aria off), which is what a
+ * default install reports.
+ */
+const { ompAvailabilityMock } = vi.hoisted(() => ({ ompAvailabilityMock: vi.fn() }));
+
 vi.mock('../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
       workflows: {
         list: { query: vi.fn() },
+      },
+      omp: {
+        availability: { query: () => ompAvailabilityMock() },
       },
     },
   },
@@ -245,6 +256,9 @@ beforeEach(() => {
   workflowsListQuery.mockReset();
   projectsGetAll.mockReset();
   forcedApplyError = null;
+  // Default install: OMP runs locally, no remote fleet.
+  ompAvailabilityMock.mockReset();
+  ompAvailabilityMock.mockResolvedValue({ launchable: false, ariaMode: false });
   useConfigStore.setState({ config: null, error: null, isLoading: false });
   useWorkflowsStore.setState({ projectFilter: null, workflows: [] });
 });
@@ -969,6 +983,10 @@ describe('RunTypeOverridesSection — detail screen', () => {
 
     const card = screen.getByTestId('knob-card-runtime');
     fireEvent.click(within(card).getByRole('switch'));
+    // The session-scope set for the LOCAL OMP flavor (Aria off, the default):
+    // every selectableInPickers runtime except the remote fleet supervisor. The
+    // two OMP flavors are alternatives, so `omp-fleet` is absent here — see the
+    // Aria-mode test below for the other half.
     expect(
       within(within(card).getByLabelText('Agent runtime')).getAllByRole('option').map((o) => o.textContent),
     ).toEqual([
@@ -980,6 +998,57 @@ describe('RunTypeOverridesSection — detail screen', () => {
       'OMP',
       'OMP (CLI)',
     ]);
+
+    // The stored value is untouched by the flavor filter: nothing was saved
+    // here, so the control still reads "Follow defaults" for the pick above.
+  });
+
+  // Aria mode is the ONE switch that decides which OMP this install runs, and it
+  // has to reach every surface that names a runtime — otherwise Settings offers
+  // a flavor the launch picker refuses.
+  it('swaps the local OMP runtimes for the fleet supervisor under Aria mode', async () => {
+    // ariaMode is the user's SETTING, so it rides the config store; the query
+    // only supplies `launchable` (whether a bridge is actually reachable).
+    ompAvailabilityMock.mockResolvedValue({ launchable: true, ariaMode: true });
+    await openDetail('Quick session', { ariaMode: true });
+
+    const card = screen.getByTestId('knob-card-runtime');
+    fireEvent.click(within(card).getByRole('switch'));
+
+    await waitFor(() =>
+      expect(
+        within(within(card).getByLabelText('Agent runtime')).getAllByRole('option').map((o) => o.textContent),
+      ).toEqual([
+        'Follow defaults',
+        'Claude SDK',
+        'Claude Interactive (CLI)',
+        'Codex SDK',
+        'Codex (CLI)',
+        'OMP fleet',
+      ]),
+    );
+  });
+
+  // Flipping the toggle changes what you can PICK, never what is already
+  // stored. A <select> whose list omits its own value renders blank and would
+  // rewrite the stored override on the next save of any other field.
+  it('keeps a stored runtime the flavor would hide in its own dropdown', async () => {
+    ompAvailabilityMock.mockResolvedValue({ launchable: true, ariaMode: true });
+    await openDetail('Quick session', {
+      ariaMode: true,
+      runTypeDefaults: { quick: { agentRuntime: 'omp-sdk' } },
+    });
+
+    const card = screen.getByTestId('knob-card-runtime');
+    await waitFor(() => {
+      const labels = within(within(card).getByLabelText('Agent runtime'))
+        .getAllByRole('option')
+        .map((o) => o.textContent);
+      // Both the flavor's runtime AND the stored one the flavor hides.
+      expect(labels).toContain('OMP fleet');
+      expect(labels).toContain('OMP');
+    });
+    expect(within(card).getByLabelText('Agent runtime')).toHaveValue('omp-sdk');
   });
 
   it('omits the session-only PTY runtimes on a workflow screen (the LAUNCHABLE set)', async () => {

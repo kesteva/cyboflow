@@ -354,6 +354,13 @@ export interface QuickSessionRuntimeStampInput {
   sessionAgentRuntime?: SessionAgentRuntime;
   /** Only stamped when explicitly chosen — undefined keeps the global default (NULL). */
   requestedAgentMode?: PermissionMode;
+  /**
+   * Explicit runtime override (OMP fleet). When present it wins over the
+   * substrate-derived Claude runtime — an omp-fleet session has no substrate
+   * axis, so the ordinary `claudeRuntimeFromSubstrate` derivation would stamp
+   * it back to 'claude-sdk' and the dispatch seams would never see omp-fleet.
+   */
+  agentRuntimeOverride?: SessionAgentRuntime;
 }
 
 /**
@@ -390,10 +397,16 @@ export function stampQuickSessionRuntimeConfig(
     );
   }
   const resolvedSessionAgentRuntime =
-    input.sessionAgentRuntime ?? claudeRuntimeFromSubstrate(input.resolvedSubstrate);
-  const resolvedSessionSubstrate = isPtyLane(resolvedSessionAgentRuntime)
-    ? 'interactive'
-    : input.resolvedSubstrate;
+    input.agentRuntimeOverride ??
+    input.sessionAgentRuntime ??
+    claudeRuntimeFromSubstrate(input.resolvedSubstrate);
+  // omp-fleet is NOT a PTY lane (it supervises a remote fleet, not a terminal):
+  // its substrate stays whatever the sentinel resolved, exactly as before the
+  // lane abstraction — isPtyLane covers the PTY-transport runtimes only.
+  const resolvedSessionSubstrate =
+    resolvedSessionAgentRuntime !== 'omp-fleet' && isPtyLane(resolvedSessionAgentRuntime)
+      ? 'interactive'
+      : input.resolvedSubstrate;
   db.prepare(
     `UPDATE sessions
         SET substrate = ?,

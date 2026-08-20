@@ -441,7 +441,11 @@ function commitFile(dir: string, rel: string, content: string, msg: string): voi
 // ---------------------------------------------------------------------------
 
 describe('WorktreeManager.squashAndMergeWorktreeToMain (integration)', () => {
-  it('squashes a clean multi-commit branch into ONE footer-stamped commit and fast-forwards main', async () => {
+  
+  // Same full-suite flake profile as the advanced-tip test below (see its
+  // comment): forks ~15 git subprocesses; 5s default flakes under full-suite
+  // CPU/fork contention while passing in isolation.
+  it('squashes a clean multi-commit branch into ONE footer-stamped commit and fast-forwards main', { timeout: 30_000 }, async () => {
     await withTempDir('worktree-squash-ok-', async (tmpDir) => {
       initRepo(tmpDir);
       const main = headBranch(tmpDir);
@@ -493,7 +497,10 @@ describe('WorktreeManager.squashAndMergeWorktreeToMain (integration)', () => {
     });
   });
 
-  it('squashes atop main\'s advanced tip when main moved past the fork point with a NON-conflicting commit', async () => {
+  // Same full-suite flake profile as the conflict test above (see its comment):
+  // fork ~15 git subprocesses across three worktrees; 5s default flakes under
+  // full-suite CPU/fork contention while passing in isolation.
+  it('squashes atop main\'s advanced tip when main moved past the fork point with a NON-conflicting commit', { timeout: 30_000 }, async () => {
     await withTempDir('worktree-squash-adv-ok-', async (tmpDir) => {
       initRepo(tmpDir);
       const main = headBranch(tmpDir);

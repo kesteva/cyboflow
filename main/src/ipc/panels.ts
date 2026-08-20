@@ -69,6 +69,18 @@ export function registerPanelHandlers(ipcMain: IpcMain, services: AppServices) {
       const panel = panelManager.getPanel(panelId);
       // Unregister Claude panels from ClaudePanelManager
       if (panel?.type === 'claude') {
+        // An omp-fleet panel is a 'claude' panel whose work lives on a REMOTE
+        // worker, so claudePanelManager.isPanelRunning is false for it and the
+        // stop below never fires. Closing the tab would leave the worker alive
+        // AND leave its poll timer emitting into a deleted panel, where
+        // addPanelOutput throws 'Panel not found' on every tick. stopPanel is a
+        // no-op for a panel the fleet manager doesn't track, so this is safe to
+        // call unconditionally — no runtime lookup needed.
+        try {
+          await services.ompSessionManager?.stopPanel(panelId);
+        } catch (err) {
+          console.warn('[Panels IPC] Failed to stop OMP fleet worker during delete:', err);
+        }
         try {
           const { claudePanelManager } = require('./claudePanel');
           if (claudePanelManager) {
