@@ -954,12 +954,22 @@ async function caseV() {
   await caseC();
   await caseD();
   await caseE();
-  await caseF();
-  await caseG();
-  await caseH();
-  await caseI();
-  await caseJ();
-  await caseK();
+  if (process.platform === 'darwin') {
+    // Cases F–K exercise REAL macOS `codesign`/`lipo` against Mach-O
+    // fixtures (and dlopen a host-ABI addon); on Linux CI they can only fail
+    // for platform reasons, which proves nothing about the verification
+    // logic they exist to pin.
+    await caseF();
+    await caseG();
+    await caseH();
+    await caseI();
+    await caseJ();
+    await caseK();
+  } else {
+    console.log(
+      `SKIP: cases F-K are darwin-only (host is ${process.platform}); codesign/lipo/Mach-O probes cannot run here.`,
+    );
+  }
   await caseL();
   await caseM();
   await caseN();
