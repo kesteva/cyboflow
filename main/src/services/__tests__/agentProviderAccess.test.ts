@@ -54,6 +54,7 @@ describe('providerForRuntime / isRuntimeProviderEnabled', () => {
     expect(providerForRuntime('codex-sdk')).toBe('codex');
     expect(providerForRuntime('codex-pty')).toBe('codex');
     expect(providerForRuntime('codex-exec')).toBe('codex');
+    expect(providerForRuntime('omp-fleet')).toBe('omp');
   });
 
   it('gates a runtime on its provider', () => {

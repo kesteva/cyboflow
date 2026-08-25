@@ -43,6 +43,7 @@ import {
 import { isRuntimeSelectableInPickers } from '../../../../shared/types/agentCapabilities';
 import { useAgentProviderAccess } from '../../hooks/useAgentProviderAccess';
 import { useForcedSubstrate } from '../../hooks/useForcedSubstrate';
+import { useOmpAvailability, type OmpAvailability } from '../../hooks/useOmpAvailability';
 import {
   workflowRuntimeForLaunch,
   type LaunchAgentRuntime,
@@ -109,10 +110,11 @@ interface SubstrateSelectorProps {
 const RUNTIME_SCOPE_SUFFIXES: Partial<Record<LaunchAgentRuntime, string>> = {
   'claude-sdk': ' (default)',
   'codex-pty': ' — quick sessions only',
+  'omp-fleet': ' — quick sessions only',
 };
 
 const RUNTIME_OPTIONS: readonly { runtime: LaunchAgentRuntime; label: string }[] = (
-  ['claude-sdk', 'claude-interactive', 'codex-sdk', 'codex-pty', 'omp-sdk', 'omp-pty'] as const
+  ['claude-sdk', 'claude-interactive', 'codex-sdk', 'codex-pty', 'omp-sdk', 'omp-pty', 'omp-fleet'] as const
 ).map((runtime) => ({
   runtime,
   label: `${AGENT_RUNTIME_LABELS[runtime]}${RUNTIME_SCOPE_SUFFIXES[runtime] ?? ''}`,
@@ -146,11 +148,55 @@ function isRuntimeDisabled(runtime: LaunchAgentRuntime, scope: NonNullable<Subst
   return false;
 }
 
-/** The options a picker may show, given the provider toggles. */
+/** The LOCAL OMP runtimes — an OMP process this machine runs. */
+const LOCAL_OMP_RUNTIMES: ReadonlySet<LaunchAgentRuntime> = new Set<LaunchAgentRuntime>(['omp-sdk', 'omp-pty']);
+
+/**
+ * The options a picker may show, given the provider toggles + OMP availability.
+ *
+ * The two OMP flavors are ALTERNATIVES, not a stack: a panel is either a local
+ * OMP process or a supervised remote worker. Aria mode picks which one this
+ * install runs, so exactly one of them is ever offered — showing both would
+ * imply a choice the runtime does not actually support, and `omp-fleet` needs a
+ * configured bridge the local runtimes do not.
+ */
+function flavorVisibleOptions(
+  omp: OmpAvailability,
+): readonly { runtime: LaunchAgentRuntime; label: string }[] {
+  return SELECTABLE_RUNTIME_OPTIONS.filter((o) => {
+    // Visible on ARIA MODE ALONE, not on availability. Hiding it when the
+    // bridge is missing removed the last OMP row from an Aria install — the
+    // local runtimes are hidden precisely BECAUSE Aria is on — so the picker
+    // showed no OMP at all while Settings → Integrations still read "on", with
+    // no note explaining it (the hidden-runtimes note counts against THIS
+    // list, so a row removed here is invisible by construction). It is offered
+    // and DISABLED instead: see unavailableReason.
+    if (o.runtime === 'omp-fleet') return omp.ariaMode;
+    if (LOCAL_OMP_RUNTIMES.has(o.runtime)) return !omp.ariaMode;
+    return true;
+  });
+}
+
+/**
+ * Why a VISIBLE runtime cannot be chosen right now, or null when it can.
+ *
+ * Distinct from {@link isRuntimeDisabled}, which is about SCOPE ("this launch
+ * surface can't run it"). This is about the machine's current configuration —
+ * the runtime is right for the surface, but something outside the picker has to
+ * be set up first. Rendering the reason beats removing the row: a user who
+ * turned Aria mode on needs to learn the bridge is missing, not watch OMP
+ * disappear from a picker whose provider toggle still says it is enabled.
+ */
+function unavailableReason(runtime: LaunchAgentRuntime, omp: OmpAvailability): string | null {
+  if (runtime === 'omp-fleet' && !omp.launchable) return 'bridge not configured';
+  return null;
+}
+
 function enabledRuntimeOptions(
   access: AgentProviderAccess,
+  omp: OmpAvailability,
 ): readonly { runtime: LaunchAgentRuntime; label: string }[] {
-  return SELECTABLE_RUNTIME_OPTIONS.filter((o) => isRuntimeProviderEnabled(access, o.runtime));
+  return flavorVisibleOptions(omp).filter((o) => isRuntimeProviderEnabled(access, o.runtime));
 }
 
 function scopeHelp(scope: NonNullable<SubstrateSelectorProps['runtimeScope']>): string {
@@ -200,12 +246,17 @@ export function SubstrateSelector({
 }: SubstrateSelectorProps): React.JSX.Element {
   // Global forced-substrate pin (see file header), mirroring the backend
   // precedence: demo → 'sdk', else interactivePtyOnly → 'interactive', else null.
-  // Reactive read so a config fetch resolving AFTER mount still locks the picker.
   const forced = useForcedSubstrate();
   // Provider toggles (Settings → Integrations / onboarding). A switched-off
   // provider's runtimes leave the picker entirely and can never be submitted.
   const providerAccess = useAgentProviderAccess();
-  const options = enabledRuntimeOptions(providerAccess);
+  const omp = useOmpAvailability();
+  const options = enabledRuntimeOptions(providerAccess, omp);
+  // Baseline for the "…are hidden" note: the rows this OMP FLAVOR can show, not
+  // every selectable runtime. Aria mode always hides one flavor, so counting
+  // against the full list would fire the note permanently and blame the provider
+  // toggles for a row the flavor removed.
+  const flavorOptionCount = flavorVisibleOptions(omp).length;
   const claudeEnabled = isRuntimeProviderEnabled(providerAccess, 'claude-sdk');
 
   // Under the interactive lock, keep the controlled value consistent so the
@@ -228,9 +279,9 @@ export function SubstrateSelector({
   // always name a provider the backend will accept.
   const fallbackRuntime = firstEnabledRuntime(
     providerAccess,
-    SELECTABLE_RUNTIME_OPTIONS.filter((o) => !isRuntimeDisabled(o.runtime, runtimeScope)).map(
-      (o) => o.runtime,
-    ),
+    SELECTABLE_RUNTIME_OPTIONS.filter(
+      (o) => !isRuntimeDisabled(o.runtime, runtimeScope) && unavailableReason(o.runtime, omp) === null,
+    ).map((o) => o.runtime),
   );
   useEffect(() => {
     if (isRuntimeProviderEnabled(providerAccess, value)) return;
@@ -292,6 +343,7 @@ export function SubstrateSelector({
           if (
             (isSessionAgentRuntime(next) || isWorkflowLaunchableRuntime(next)) &&
             !isRuntimeDisabled(next, runtimeScope) &&
+            unavailableReason(next, omp) === null &&
             isRuntimeProviderEnabled(providerAccess, next)
           ) {
             onChange(next);
@@ -300,18 +352,21 @@ export function SubstrateSelector({
         className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-text-primary"
         aria-label="Select agent runtime"
       >
-        {options.map(({ runtime, label: optionLabel }) => (
-          <option
-            key={runtime}
-            value={runtime}
-            disabled={isRuntimeDisabled(runtime, runtimeScope)}
-          >
-            {optionLabel}
-          </option>
-        ))}
+        {options.map(({ runtime, label: optionLabel }) => {
+          const reason = unavailableReason(runtime, omp);
+          return (
+            <option
+              key={runtime}
+              value={runtime}
+              disabled={isRuntimeDisabled(runtime, runtimeScope) || reason !== null}
+            >
+              {reason === null ? optionLabel : `${optionLabel} (${reason})`}
+            </option>
+          );
+        })}
       </select>
       <p className="text-xs text-text-tertiary">
-        {options.length === SELECTABLE_RUNTIME_OPTIONS.length
+        {options.length === flavorOptionCount
           ? scopeHelp(runtimeScope)
           : `${scopeHelp(runtimeScope)} Runtimes for providers turned off in Settings → Integrations are hidden.`}
       </p>

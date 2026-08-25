@@ -14,6 +14,8 @@ import type { NativeGrantProbe, VerificationModality } from '../../../../shared/
 import type { VerifyRunbookStatusDetail } from '../verify/runbookStore';
 import type { PermissionMode, WorkflowRow, WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
+import type { OmpControlPlaneAdapter } from '../../../../shared/types/omp';
+import type { OmpCommandAdapter, OmpPrincipal } from '../../../../shared/types/ompCommand';
 import type { SprintMaxTasksOverrides } from '../../../../shared/types/sprintBatch';
 import type { RunGitDiff } from '../../../../shared/types/runFiles';
 import type { WorkflowDescriptor } from '../workflowRegistry';
@@ -376,6 +378,28 @@ export interface ContextDeps {
    * reporting a host with nothing installed, which would be a lie).
    */
   verifyHostProbes?: VerifyHostProbesLike;
+  /** Read-only OMP fleet adapter (getFleetSnapshot). Absent => fleetSnapshot returns 'unavailable'. */
+  omp?: OmpControlPlaneAdapter;
+  /**
+   * The OMP command principal — a VALUE or a RESOLVER. Production passes the
+   * resolver (`currentOmpPrincipal`): the supervise capability comes from Aria
+   * mode, a setting flipped at runtime, and createContext resolves this per
+   * request so granting/revoking takes effect on the next call with no relaunch.
+   * A plain value stays accepted for tests that want a fixed identity.
+   */
+  principal?: OmpPrincipal | (() => OmpPrincipal);
+  /** Privileged command adapter. Absent => every ompCommand mutation returns 'unavailable'. */
+  ompCommand?: OmpCommandAdapter;
+  /** Redacted audit sink for OMP commands (attempted + completed). Injected as a closure like setDockBadge. */
+  auditOmp?: (entry: { verb: string; principal: string; outcome: 'attempted' | 'completed'; operationId: string; detail: string }) => void;
+  /**
+   * Whether the boot-built fleet session manager EXISTS. A closure rather than a
+   * boolean so the router reads the live wiring (like `getForcedSubstrate`), and
+   * so the standalone router keeps no services/* import. Absent ⇒ not launchable.
+   */
+  ompFleetLaunchable?: () => boolean;
+  /** Aria mode — remote fleet vs local OMP runtimes (see AppConfig.ariaMode). Absent ⇒ false. */
+  ompAriaMode?: () => boolean;
 
   /**
    * Resolve a (project, modality) runbook's status the way the ENGINE resolves
@@ -449,6 +473,13 @@ export function createContext(deps: ContextDeps = {}): {
   agentThreadStore?: AgentThreadStoreLike;
   agentProposalExecutor?: AgentProposalExecutorLike;
   verifyHostProbes?: VerifyHostProbesLike;
+  omp?: OmpControlPlaneAdapter;
+  /** Resolved per request from the deps value-or-resolver — never a boot-time snapshot. */
+  principal?: OmpPrincipal;
+  ompCommand?: OmpCommandAdapter;
+  auditOmp?: (entry: { verb: string; principal: string; outcome: 'attempted' | 'completed'; operationId: string; detail: string }) => void;
+  ompFleetLaunchable?: () => boolean;
+  ompAriaMode?: () => boolean;
   verifyRunbookStatus?: VerifyRunbookStatusLike;
 } {
   const {
@@ -463,8 +494,20 @@ export function createContext(deps: ContextDeps = {}): {
     agentThreadStore,
     agentProposalExecutor,
     verifyHostProbes,
+    omp,
+    principal,
+    ompCommand,
+    auditOmp,
+    ompFleetLaunchable,
+    ompAriaMode,
     verifyRunbookStatus,
   } = deps;
+  // Resolve the principal NOW, once per request. Accepting a resolver here is
+  // what makes an Aria-mode flip take effect on the next call in either
+  // direction: a frozen value captured at window-attach would leave
+  // `availability.launchable` and the ompCommand gate stale until relaunch.
+  const resolvedPrincipal =
+    typeof principal === 'function' ? principal() : principal;
   return {
     userId: 'local' as const,
     setDockBadge,
@@ -478,6 +521,12 @@ export function createContext(deps: ContextDeps = {}): {
     agentThreadStore,
     agentProposalExecutor,
     verifyHostProbes,
+    omp,
+    principal: resolvedPrincipal,
+    ompCommand,
+    auditOmp,
+    ompFleetLaunchable,
+    ompAriaMode,
     verifyRunbookStatus,
   };
 }

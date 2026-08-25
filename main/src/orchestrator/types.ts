@@ -9,6 +9,7 @@ import type { RunQueueRegistry } from './RunQueueRegistry';
 import type { ClaudeManagerLike } from './stuckDetector';
 import type { StuckDetectedEvent } from '../../../shared/types/stuckDetection';
 import type { ReviewItemCreate, ReviewItemTriage } from './reviewItemRouter';
+import type { OmpControlPlaneAdapter } from '../../../shared/types/omp';
 
 // ---------------------------------------------------------------------------
 // DatabaseLike
@@ -88,6 +89,8 @@ export interface OrchestratorDeps {
     projectId: number,
     change: ReviewItemCreate | ReviewItemTriage,
   ) => Promise<{ reviewItemId: string; event: { id: number; seq: number } }>;
+  /** Read-only OMP fleet adapter. Optional (absent => no OMP awareness at the orchestrator layer). */
+  omp?: OmpControlPlaneAdapter;
   /**
    * Optional: the main-process sink for stuck-run notifications (the tRPC
    * router's `stuckEvents`). StuckDetector emits 'runs:stuck' on its own

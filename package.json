@@ -28,8 +28,8 @@
   },
   "scripts": {
     "dev": "pnpm run electron-dev",
-    "electron-dev": "node scripts/ensure-sqlite-abi.mjs electron && concurrently \"pnpm run --filter frontend dev\" \"wait-on http://localhost:${CYBOFLOW_VITE_PORT:-4521} && electron . --remote-debugging-port=${CYBOFLOW_CDP_PORT:-9223}\"",
-    "electron-dev:custom": "node scripts/ensure-sqlite-abi.mjs electron && concurrently \"pnpm run --filter frontend dev\" \"wait-on http://localhost:${CYBOFLOW_VITE_PORT:-4521} && electron .\"",
+    "electron-dev": "node scripts/ensure-sqlite-abi.mjs electron && concurrently \"pnpm run --filter frontend dev\" \"wait-on http://localhost:${CYBOFLOW_VITE_PORT:-4521} && env -u NODE_OPTIONS electron . --remote-debugging-port=${CYBOFLOW_CDP_PORT:-9223}\"",
+    "electron-dev:custom": "node scripts/ensure-sqlite-abi.mjs electron && concurrently \"pnpm run --filter frontend dev\" \"wait-on http://localhost:${CYBOFLOW_VITE_PORT:-4521} && env -u NODE_OPTIONS electron .\"",
     "dev:perf": "node scripts/ensure-sqlite-abi.mjs electron && concurrently \"pnpm run --filter frontend dev\" \"wait-on http://localhost:${CYBOFLOW_VITE_PORT:-4521} && CYBOFLOW_PERF_TRACE=1 electron . --inspect=${CYBOFLOW_INSPECT_PORT:-9229} --remote-debugging-port=${CYBOFLOW_CDP_PORT:-9223}\"",
     "build": "pnpm run build:frontend && pnpm run build:main && pnpm run build:electron",
     "build:frontend": "pnpm run --filter frontend build",

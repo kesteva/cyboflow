@@ -38,6 +38,7 @@ import { useConfigStore } from '../../stores/configStore';
 import type { BacklogTaskItem, Board } from '../../../../shared/types/tasks';
 import type { PermissionMode } from '../../../../shared/types/workflows';
 import { effortLevelsForProvider, type ReasoningEffort } from '../../../../shared/types/reasoningEffort';
+import type { WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 import type { EpicTaskGroup } from './taskGrouping';
 import { flattenGroups, groupTasksByEpic } from './taskGrouping';
 import { EpicGroupedTaskList } from './EpicGroupedTaskList';
@@ -49,11 +50,7 @@ import { SubstrateSelector } from './SubstrateSelector';
 import { ModelSelector, DEFAULT_QUICK_MODEL, DEFAULT_CODEX_MODEL } from './ModelSelector';
 import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
 import { providerForRuntime, type LaunchAgentRuntime } from './agentRuntimeUi';
-import {
-  isWorkflowRunStorableRuntime,
-  type AgentProvider,
-  type WorkflowRunStorableRuntime,
-} from '../../../../shared/types/agentRuntime';
+import type { AgentProvider, WorkflowRunStorableRuntime } from '../../../../shared/types/agentRuntime';
 import { runtimeSupportsEffort } from '../../../../shared/types/agentCapabilities';
 
 /**
@@ -62,7 +59,7 @@ import { runtimeSupportsEffort } from '../../../../shared/types/agentCapabilitie
  * (substrate/agentProvider are DERIVED from `runtime`, not stored separately).
  */
 interface ArmQuickConfig {
-  runtime: LaunchAgentRuntime;
+  runtime: WorkflowAgentRuntime;
   model: string;
   reasoningEffort: ReasoningEffort | null;
   permissionMode: PermissionMode;
@@ -76,19 +73,25 @@ const DEFAULT_QUICK_ARM_CONFIG: ArmQuickConfig = {
 };
 
 /**
- * The wire-schema `agentRuntime` enum for an experiment quick arm is
- * {@link WORKFLOW_RUN_STORABLE_RUNTIMES} — an A/B arm mints a `workflow_runs`
- * row, so a runtime that row cannot carry (`codex-pty`) has to be clamped; see
- * `experimentArmQuickConfigSchema` in `experiments.ts`. `QuickArmConfigForm`'s
- * `SubstrateSelector` already disables those runtimes via
- * `runtimeScope="workflow"`, so this is unreachable through the UI; clamped here
- * anyway as defense-in-depth + to satisfy the narrower type.
+ * The modal's `ArmQuickConfig.runtime` is the workflow-LAUNCHABLE set — it
+ * excludes `codex-pty`/`omp-pty` (PTY transport, unreachable for a quick arm)
+ * and `omp-fleet` (v1 offers the fleet supervisor as a quick-session runtime
+ * only, never to A/B arms); the wire schema's `agentRuntime` enum is the wider
+ * STORABLE set (see the router's `experimentArmQuickConfigSchema`).
+ * `QuickArmConfigForm`'s `SubstrateSelector` uses `runtimeScope="workflow"`,
+ * so the disabled options can never be picked through the UI; this clamps
+ * anyway — each PTY transport to its provider's SDK equivalent, `omp-fleet`
+ * to the `claude-sdk` launch default — as defense-in-depth and to satisfy the
+ * narrower type.
  */
-function quickArmAgentRuntime(runtime: LaunchAgentRuntime): WorkflowRunStorableRuntime {
-  return isWorkflowRunStorableRuntime(runtime) ? runtime : 'codex-sdk';
+function quickArmAgentRuntime(runtime: LaunchAgentRuntime): WorkflowAgentRuntime {
+  if (runtime === 'codex-pty') return 'codex-sdk';
+  if (runtime === 'omp-pty') return 'omp-sdk';
+  if (runtime === 'omp-fleet') return 'claude-sdk';
+  return runtime;
 }
 
-function substrateForQuickArm(runtime: LaunchAgentRuntime): 'sdk' | 'interactive' | undefined {
+function substrateForQuickArm(runtime: WorkflowAgentRuntime): 'sdk' | 'interactive' | undefined {
   if (runtime === 'claude-sdk') return 'sdk';
   if (runtime === 'claude-interactive') return 'interactive';
   return undefined;
@@ -125,14 +128,15 @@ function applyQuickArmRuntimeChange(
   config: ArmQuickConfig,
   runtime: LaunchAgentRuntime,
 ): ArmQuickConfig {
-  if (runtime === config.runtime) return config;
-  if (providerForRuntime(runtime) === providerForRuntime(config.runtime)) {
-    return { ...config, runtime };
+  const armRuntime = quickArmAgentRuntime(runtime);
+  if (armRuntime === config.runtime) return config;
+  if (providerForRuntime(armRuntime) === providerForRuntime(config.runtime)) {
+    return { ...config, runtime: armRuntime };
   }
   return {
     ...config,
-    runtime,
-    model: QUICK_ARM_MODEL_RESET[providerForRuntime(runtime)],
+    runtime: armRuntime,
+    model: QUICK_ARM_MODEL_RESET[providerForRuntime(armRuntime)],
     reasoningEffort: null,
   };
 }
@@ -170,8 +174,8 @@ function QuickArmConfigForm({
       />
       {/* Reasoning-effort select — excluded for a runtime that drops the flag
           (RUNTIME_CAPABILITIES.supportsEffort; mirrors SessionStartWizard), moot
-          here since the runtime choice above already disables codex-pty for a
-          quick arm. */}
+          here since the runtime choice above already disables every effort-less
+          runtime for a quick arm. */}
       {runtimeSupportsEffort(config.runtime) && (
         <div className="flex flex-col gap-1">
           <label

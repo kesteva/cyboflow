@@ -526,6 +526,16 @@ export class ConfigManager extends EventEmitter {
   }
 
   /**
+   * Aria mode: this install supervises a REMOTE OMP fleet rather than running
+   * OMP locally (see `AppConfig.ariaMode`). Absent ⇒ false, so an install that
+   * never touched the toggle keeps the local runtimes and grants no supervise
+   * capability — the same absent⇒off policy `agentProviderAccess` uses.
+   */
+  getAriaMode(): boolean {
+    return this.config.ariaMode === true;
+  }
+
+  /**
    * True when `provider` may be used for a run/session. The authoritative read
    * for the launch seams (WorkflowRegistry.createRun, the quick-session IPC
    * handler, the per-step agent resolver) — the renderer's pickers mirror this

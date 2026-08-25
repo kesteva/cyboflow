@@ -11,6 +11,7 @@
  * bottom without shrinking the main content.
  */
 import { McpHealthIndicator } from './McpHealthIndicator';
+import { OmpFleetIndicator } from './OmpFleetIndicator';
 
 export function StatusBar() {
   return (
@@ -24,6 +25,7 @@ export function StatusBar() {
       {/* Right side: status indicators */}
       <div className="flex items-center gap-2">
         <McpHealthIndicator />
+        <OmpFleetIndicator />
       </div>
     </footer>
   );

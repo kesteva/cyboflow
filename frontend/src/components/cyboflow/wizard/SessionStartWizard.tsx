@@ -1760,22 +1760,27 @@ export default function SessionStartWizard(): React.JSX.Element {
                 (→ the claude panel / interactive eager spawn); workflow threads
                 it into runs.start ({ model }) → workflow_runs.model (migration
                 037). Ultracode defaults to Fable when available (the per-key
-                model seed). Fast mode stays QUICK-only. */}
-            <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.modelSelect }}>
-              <ModelSelector
-                value={model}
-                onChange={(m) => {
-                  // setByUser latches THIS key as touched, so reactive re-seeding
-                  // stops for it (and only for it).
-                  setModelByUser(m);
-                  // Fast mode is Opus-only; drop it when leaving Opus.
-                  if (!isOpusModel(m)) setFastMode(false);
-                }}
-                id="wizard-model"
-                agentProvider={effectiveProvider}
-                agentRuntime={effectiveRuntime}
-              />
-            </div>
+                model seed). Fast mode stays QUICK-only. OMP Fleet has no model
+                picker — it runs on the producer default (DEFAULT_OMP_MODEL), so
+                the control is hidden for that runtime rather than shown as a
+                lie. */}
+            {effectiveRuntime !== 'omp-fleet' && (
+              <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.modelSelect }}>
+                <ModelSelector
+                  value={model}
+                  onChange={(m) => {
+                    // setByUser latches THIS key as touched, so reactive re-seeding
+                    // stops for it (and only for it).
+                    setModelByUser(m);
+                    // Fast mode is Opus-only; drop it when leaving Opus.
+                    if (!isOpusModel(m)) setFastMode(false);
+                  }}
+                  id="wizard-model"
+                  agentProvider={effectiveProvider}
+                  agentRuntime={effectiveRuntime}
+                />
+              </div>
+            )}
             {/* Reasoning-effort select — QUICK, every effort-capable runtime.
                 Shown for Claude (SDK Options.effort / interactive --effort) AND
                 codex-sdk (startCodexSdkTurn → buildCodexAppServerTurnOptions maps
@@ -2161,10 +2166,12 @@ export default function SessionStartWizard(): React.JSX.Element {
               />
               <SummaryRow label="Permission" value={permissionLabel} />
               <SummaryRow label="Runtime" value={AGENT_RUNTIME_LABELS[effectiveRuntime]} />
-              <SummaryRow
-                label="Model"
-                value={effectiveProvider === 'codex' ? model : modelDisplayLabel(model)}
-              />
+              {effectiveRuntime !== 'omp-fleet' && (
+                <SummaryRow
+                  label="Model"
+                  value={effectiveProvider === 'codex' ? model : modelDisplayLabel(model)}
+                />
+              )}
 
               {selection.kind === 'quick' && runtimeSupportsFastMode(effectiveRuntime) && isOpusModel(model) && (
                 <SummaryRow label="Fast mode" value={fastMode ? 'On' : 'Off'} />

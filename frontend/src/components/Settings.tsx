@@ -60,6 +60,12 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // DEV-ONLY: forces the next AskUserQuestion gate to fail so the durable recovery
   // gate can be exercised live. Hidden in the stable DMG; inert in packaged builds.
   const [forceAskUserQuestionGateFailure, setForceAskUserQuestionGateFailure] = useState(false);
+  // Aria mode: supervise a REMOTE OMP fleet instead of running OMP locally.
+  // Enforced per command (OmpSupervisedAdapter holds the principal THUNK), so a
+  // change lands on the next call — no relaunch. Pickers read the flavor from
+  // the config store (useOmpAvailability), so they swap on save without a
+  // remount either.
+  const [ariaMode, setAriaMode] = useState(false);
   const [demoMode, setDemoMode] = useState(false);
   // demoMode is read once at app startup, so the saved value only takes effect
   // after a relaunch — track the loaded value to detect a toggle on save.
@@ -204,6 +210,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setClaudeExecutablePath(data.claudeExecutablePath || '');
       setDevMode(data.devMode || false);
       setForceAskUserQuestionGateFailure(data.forceAskUserQuestionGateFailure ?? false);
+      setAriaMode(data.ariaMode ?? false);
       setDemoMode(data.demoMode || false);
       setInitialDemoMode(data.demoMode || false);
       setEnableCyboflowFooter(data.enableCyboflowFooter !== false); // Default to true
@@ -276,6 +283,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         claudeExecutablePath,
         devMode,
         forceAskUserQuestionGateFailure,
+        // Explicit boolean, never undefined — updateConfig merges partials, so
+        // an undefined value would fail to overwrite a stored `true`.
+        ariaMode,
         demoMode,
         enableCyboflowFooter,
         // Empty ('App default') → undefined so getAssistantModel() floors to
@@ -651,6 +661,29 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                     </p>
                   </div>
                 )}
+              </SettingsSection>
+
+              <SettingsSection
+                title="OMP Runtime"
+                description="Choose how this machine runs OMP"
+                icon={<FileText className="w-4 h-4" />}
+              >
+                <Checkbox
+                  label="Aria mode"
+                  checked={ariaMode}
+                  onChange={(e) => setAriaMode(e.target.checked)}
+                />
+                <p className="text-xs text-text-tertiary mt-1">
+                  Supervise a remote OMP fleet over the Prime bridge instead of running OMP locally.
+                  On, the runtime picker offers <strong>OMP fleet</strong>; off, it offers <strong>OMP</strong> and{' '}
+                  <strong>OMP (CLI)</strong>. The two are alternatives, so only one appears at a time.
+                </p>
+                <p className="text-xs text-text-tertiary mt-1">
+                  Turning this on also authorizes Cyboflow to spawn and stop remote workers on your behalf.
+                  It needs the OMP provider enabled in Integrations and a configured bridge
+                  (<code>OMP_BRIDGE_TOKEN_FILE</code> and <code>OMP_BRIDGE_SESSION_ID</code>); without those,
+                  OMP fleet stays hidden. Changes take effect right away — no restart needed.
+                </p>
               </SettingsSection>
 
               <SettingsSection
