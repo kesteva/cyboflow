@@ -51,6 +51,14 @@ jobs:
       - name: Install Playwright (no browser download needed for Electron)
         run: pnpm exec playwright install-deps || true
 
+      # The launched app needs the ELECTRON ABI. postinstall normally leaves
+      # it there, but a restored pnpm store can carry a host-ABI
+      # better_sqlite3.node — then _electron.launch throws NMV 127-vs-136 on
+      # load and every spec times out in setup with no app-side error. Flip
+      # deterministically (cached file copy, no recompile).
+      - name: Ensure Electron ABI for better-sqlite3
+        run: node scripts/ensure-sqlite-abi.mjs electron
+
       # Blocking since 2026-08-14 (41/41 green nightlies). Drive the smoke tier
       # only — the 7-test minimal config with a proven CI track record.
       - name: Run smoke tier
