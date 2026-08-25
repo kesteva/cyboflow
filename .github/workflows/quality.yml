@@ -86,7 +86,10 @@ jobs:
       run: pnpm test:unit
       env:
         CI: true
-      timeout-minutes: 10
+      # The chain is main suite + frontend suite + schema parity + release
+      # scripts + ABI + build tests. On ubuntu runners the two vitest legs
+      # alone approach 10 minutes; 10 was a timeout, not a pass.
+      timeout-minutes: 25
 
   # Blocking mocked-SDK integration tier (Tier-3). Runs in PARALLEL with `test`
   # (both only need `quality-checks`), so the PR critical path stays at
