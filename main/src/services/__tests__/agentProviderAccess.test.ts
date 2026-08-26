@@ -79,11 +79,13 @@ describe('resolveAgentProviderAccess', () => {
       claude: true,
       codex: true,
       omp: false,
+      pi: false,
     });
     expect(resolveAgentProviderAccess({ codex: false })).toEqual({
       claude: true,
       codex: false,
       omp: false,
+      pi: false,
     });
   });
 
@@ -92,6 +94,7 @@ describe('resolveAgentProviderAccess', () => {
       claude: true,
       codex: true,
       omp: false,
+      pi: false,
     });
   });
 
@@ -102,6 +105,7 @@ describe('resolveAgentProviderAccess', () => {
       claude: true,
       codex: true,
       omp: true,
+      pi: false,
     });
   });
 });

@@ -87,6 +87,10 @@ const CATALOG_BRIDGE_FALLBACKS: {
   // discovered list — no pinned aliases to fall back on — so an empty catalog
   // would be a silently broken control rather than a degraded one.
   omp: null,
+  // OMP's answer for Pi's reason too: a Pi picker has nothing but the
+  // discovered `${provider}/${model}` list — no pinned aliases — so an empty
+  // catalog would be a silently broken control rather than a degraded one.
+  pi: null,
 };
 
 // Wrapper class for API calls that provides error handling and consistent interface

@@ -89,6 +89,11 @@ export const PROVIDER_MODEL_CATALOG_SLICES: {
   // (Phase 1, §5.1). `ensureStarted(enabled)` means nothing is fetched until a
   // picker actually shows OMP, which none does while the provider is off.
   omp: createCatalogSlice('omp'),
+  // Generic by construction, same as OMP's row: the slice needs no per-
+  // provider code, so Pi gets a working store the moment its
+  // `models:get-catalog` fetcher returns real rows. Nothing is fetched until
+  // a picker actually shows Pi.
+  pi: createCatalogSlice('pi'),
 };
 
 export interface ProviderModelCatalogHook<P extends AgentProvider> {

@@ -77,6 +77,9 @@ const PROVIDER_MODEL_FLOOR: Readonly<Record<AgentProvider, string>> = {
   claude: DEFAULT_WORKFLOW_MODEL,
   codex: DEFAULT_CODEX_MODEL,
   omp: '',
+  // Empty selection, for OMP's reason: pi has no "let the runtime pick"
+  // sentinel row.
+  pi: '',
 };
 
 /**

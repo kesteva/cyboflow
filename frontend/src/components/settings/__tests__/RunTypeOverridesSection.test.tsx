@@ -997,6 +997,8 @@ describe('RunTypeOverridesSection — detail screen', () => {
       'Codex (CLI)',
       'OMP',
       'OMP (CLI)',
+      'Pi',
+      'Pi (CLI)',
     ]);
 
     // The stored value is untouched by the flavor filter: nothing was saved
@@ -1025,6 +1027,8 @@ describe('RunTypeOverridesSection — detail screen', () => {
         'Codex SDK',
         'Codex (CLI)',
         'OMP fleet',
+        'Pi',
+        'Pi (CLI)',
       ]),
     );
   });
@@ -1060,7 +1064,7 @@ describe('RunTypeOverridesSection — detail screen', () => {
     // STRUCTURED runtime and no terminal one, which is the launchable set.
     expect(
       within(within(card).getByLabelText('Agent runtime')).getAllByRole('option').map((o) => o.textContent),
-    ).toEqual(['Follow defaults', 'Claude SDK', 'Claude Interactive (CLI)', 'Codex SDK', 'OMP']);
+    ).toEqual(['Follow defaults', 'Claude SDK', 'Claude Interactive (CLI)', 'Codex SDK', 'OMP', 'Pi']);
   });
 
   // AC 5 + AC 6 — a stale key is not just VISIBLE, it is operable: being able to

@@ -66,6 +66,12 @@ export const PROVIDER_PROMPT_ENVELOPES: Record<AgentProvider, string | null> = {
   // IDENTITY, and pasting Codex's envelope in would describe a contract OMP does
   // not implement. Authored in Phase 3, with T2.
   omp: null,
+  // Same rule as OMP: pi has not been taught the T2 orchestrator contract
+  // (AskUserQuestion redirection, subagent role mapping), so a pi step prompt
+  // renders IDENTITY only. Author an envelope in the phase that teaches it —
+  // never inherit Codex's, which would describe a contract pi does not
+  // implement.
+  pi: null,
 };
 
 export function renderWorkflowPromptForRuntime(

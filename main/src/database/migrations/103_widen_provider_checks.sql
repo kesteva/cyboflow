@@ -20,7 +20,13 @@
 -- already admitted on sessions but not on workflow runs:
 --   provider         + 'omp'                everywhere
 --   sessions         + 'omp-sdk','omp-pty'  (quick sessions can run the OMP TUI)
+--                    + 'omp-fleet'           (carried forward from 101: the fleet
+--                                             supervisor is a session runtime)
 --   workflow_runs    + 'omp-sdk'            (workflows need structured events)
+--                    + 'omp-fleet'           (the quick-session SENTINEL mints a
+--                                             workflow_runs row carrying the
+--                                             session's runtime identity — never
+--                                             a launch target, but storable)
 --   workflow_variants+ 'omp-sdk'            (a variant resolves to a workflow runtime)
 --   agent_invocations+ 'omp-sdk','omp-pty'  (an invocation row records what actually ran,
 --                                            including a PTY turn in a quick session)
@@ -77,7 +83,7 @@ UPDATE sessions SET agent_runtime_widen_103 = agent_runtime;
 ALTER TABLE sessions DROP COLUMN agent_runtime;
 ALTER TABLE sessions
   ADD COLUMN agent_runtime TEXT NOT NULL DEFAULT 'claude-sdk'
-    CHECK (agent_runtime IN ('claude-sdk','claude-interactive','codex-sdk','codex-pty','omp-sdk','omp-pty'));
+    CHECK (agent_runtime IN ('claude-sdk','claude-interactive','codex-sdk','codex-pty','omp-sdk','omp-pty','omp-fleet'));
 UPDATE sessions SET agent_runtime = COALESCE(agent_runtime_widen_103, 'claude-sdk');
 ALTER TABLE sessions DROP COLUMN agent_runtime_widen_103;
 
@@ -96,12 +102,16 @@ ALTER TABLE workflow_runs DROP COLUMN agent_provider_widen_103;
 
 -- omp-pty is absent for the same reason codex-pty is: a workflow run needs
 -- structured events, usage, MCP progress and review-queue integration.
+-- omp-fleet is admitted WITHOUT being launchable: it is storable-only (a fleet
+-- supervisor is never a per-step workflow agent), but the quick-session
+-- sentinel is a workflow_runs ROW and must carry the session's resolved
+-- runtime — the dispatch facade reads it back to pick the owning manager.
 ALTER TABLE workflow_runs ADD COLUMN agent_runtime_widen_103 TEXT;
 UPDATE workflow_runs SET agent_runtime_widen_103 = agent_runtime;
 ALTER TABLE workflow_runs DROP COLUMN agent_runtime;
 ALTER TABLE workflow_runs
   ADD COLUMN agent_runtime TEXT NOT NULL DEFAULT 'claude-sdk'
-    CHECK (agent_runtime IN ('claude-sdk','claude-interactive','codex-sdk','omp-sdk'));
+    CHECK (agent_runtime IN ('claude-sdk','claude-interactive','codex-sdk','omp-sdk','omp-fleet'));
 UPDATE workflow_runs SET agent_runtime = COALESCE(agent_runtime_widen_103, 'claude-sdk');
 ALTER TABLE workflow_runs DROP COLUMN agent_runtime_widen_103;
 

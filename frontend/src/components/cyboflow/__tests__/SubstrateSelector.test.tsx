@@ -183,7 +183,7 @@ describe('SubstrateSelector — provider access toggles', () => {
   });
 
   it('offers OMP Fleet when available and the omp provider is enabled', () => {
-    setProviderAccess({ claude: true, codex: true, omp: true });
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: true });
     mockUseOmpAvailability.mockReturnValue({ launchable: true, ariaMode: true });
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
 
@@ -196,7 +196,7 @@ describe('SubstrateSelector — provider access toggles', () => {
   // Aria install with no OMP row at all — and the hidden-runtimes note counts
   // against the flavor list, so nothing on screen said why.
   it('offers OMP Fleet DISABLED, naming the reason, when Aria is on but no bridge is configured', () => {
-    setProviderAccess({ claude: true, codex: true, omp: true });
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: true });
     mockUseOmpAvailability.mockReturnValue({ launchable: false, ariaMode: true });
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
 
@@ -209,7 +209,7 @@ describe('SubstrateSelector — provider access toggles', () => {
   });
 
   it('drops the reason once the bridge is configured', () => {
-    setProviderAccess({ claude: true, codex: true, omp: true });
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: true });
     mockUseOmpAvailability.mockReturnValue({ launchable: true, ariaMode: true });
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
 
@@ -278,7 +278,7 @@ describe('SubstrateSelector — offers exactly the picker-selectable runtimes', 
   // of both flavors instead: nothing selectable may be unreachable in both
   // modes, and nothing unselectable may appear in either.
   it('offers, across both OMP flavors, exactly the selectable runtimes', () => {
-    setProviderAccess({ claude: true, codex: true, omp: true });
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: true });
 
     mockUseOmpAvailability.mockReturnValue({ launchable: false, ariaMode: false });
     const local = render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
@@ -313,7 +313,7 @@ describe('SubstrateSelector — offers exactly the picker-selectable runtimes', 
     expect(offered).not.toContain('omp-pty');
     unmount();
 
-    setProviderAccess({ claude: true, codex: true, omp: true });
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: true });
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
     offered = screen.getAllByRole('option').map((option) => option.getAttribute('value'));
     expect(offered).toContain('omp-sdk');
@@ -326,7 +326,7 @@ describe('SubstrateSelector — offers exactly the picker-selectable runtimes', 
   // set actually reaches the workflow scope rather than the two OMP rows being
   // treated alike because they share a provider.
   it('enables omp-sdk but disables omp-pty on a workflow launch', () => {
-    setProviderAccess({ claude: true, codex: true, omp: true });
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: true });
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="workflow" />);
 
     expect(screen.getByRole('option', { name: 'OMP' })).not.toBeDisabled();
@@ -338,7 +338,7 @@ describe('SubstrateSelector — offers exactly the picker-selectable runtimes', 
   });
 
   it('leaves both OMP rows selectable on a quick session', () => {
-    setProviderAccess({ claude: true, codex: true, omp: true });
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: true });
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
 
     expect(screen.getByRole('option', { name: 'OMP' })).not.toBeDisabled();
@@ -353,7 +353,7 @@ describe('SubstrateSelector — offers exactly the picker-selectable runtimes', 
     // Availability probe ON — without it the selectable omp-fleet row would be
     // availability-hidden and spuriously read as a provider-toggle removal.
     mockUseOmpAvailability.mockReturnValue({ launchable: true, ariaMode: true });
-    setProviderAccess({ claude: true, codex: true, omp: true });
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: true });
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
 
     expect(screen.queryByText(/are hidden/i)).not.toBeInTheDocument();
@@ -363,7 +363,7 @@ describe('SubstrateSelector — offers exactly the picker-selectable runtimes', 
   // Aria mode always hides one OMP flavor, and counting that against the full
   // selectable list would fire the note permanently with the wrong explanation.
   it('does not claim runtimes are hidden merely because a flavor is inactive', () => {
-    setProviderAccess({ claude: true, codex: true, omp: true });
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: true });
 
     mockUseOmpAvailability.mockReturnValue({ launchable: false, ariaMode: false });
     const local = render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
@@ -383,7 +383,7 @@ describe('SubstrateSelector — offers exactly the picker-selectable runtimes', 
   // the reason, so the state is self-describing.
   it('offers the fleet row disabled, and still no local rows, when the fleet is not launchable', () => {
     mockUseOmpAvailability.mockReturnValue({ launchable: false, ariaMode: true });
-    setProviderAccess({ claude: true, codex: true, omp: true });
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: true });
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
 
     const offered = screen.getAllByRole('option').map((o) => o.getAttribute('value'));

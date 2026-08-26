@@ -10,6 +10,7 @@ import { IntegrationsSettings } from './IntegrationsSettings';
 const detectClaude = vi.fn();
 const detectCodex = vi.fn();
 const detectOmp = vi.fn();
+const detectPi = vi.fn();
 const { mockUseOmpAvailability } = vi.hoisted(() => ({ mockUseOmpAvailability: vi.fn() }));
 vi.mock('../../hooks/useOmpAvailability', () => ({ useOmpAvailability: mockUseOmpAvailability }));
 
@@ -17,7 +18,13 @@ vi.mock('../../utils/api', () => ({
   API: {
     providers: {
       detect: (provider: string) =>
-        provider === 'claude' ? detectClaude() : provider === 'codex' ? detectCodex() : detectOmp(),
+        provider === 'claude'
+          ? detectClaude()
+          : provider === 'codex'
+            ? detectCodex()
+            : provider === 'pi'
+              ? detectPi()
+              : detectOmp(),
     },
   },
 }));
@@ -53,6 +60,12 @@ const OMP_MISSING: ProviderDetectionResult<'omp'> = {
   version: null,
 };
 
+const PI_DETECTED: ProviderDetectionResult<'pi'> = {
+  state: 'detected',
+  binaryPath: '/usr/local/bin/pi',
+  version: '0.84.2',
+};
+
 const OMP_UNSUPPORTED_VERSION: ProviderDetectionResult<'omp'> = {
   state: 'unavailable',
   binaryPath: '/usr/local/bin/omp',
@@ -65,6 +78,7 @@ beforeEach(() => {
   detectClaude.mockReset().mockResolvedValue({ success: true, data: CLAUDE_CONNECTED });
   detectCodex.mockReset().mockResolvedValue({ success: true, data: CODEX_CONNECTED });
   detectOmp.mockReset().mockResolvedValue({ success: true, data: OMP_MISSING });
+  detectPi.mockReset().mockResolvedValue({ success: true, data: PI_DETECTED });
   updateConfig = vi.fn().mockResolvedValue(true);
   // Default install: OMP runs locally, so the row reports the local binary.
   mockUseOmpAvailability.mockReset().mockReturnValue({ launchable: false, ariaMode: false });
@@ -78,7 +92,7 @@ describe('IntegrationsSettings', () => {
     expect(await screen.findByText('claude@example.com')).toBeInTheDocument();
     expect(await screen.findByText('codex@example.com')).toBeInTheDocument();
     expect(screen.getByText(/ChatGPT plus · Codex 0\.144\.3/)).toBeInTheDocument();
-    expect(screen.getAllByText('Connected')).toHaveLength(2);
+    expect(screen.getAllByText('Connected')).toHaveLength(2); // pi's connected label is 'Detected'
   });
 
   it('keeps a connected provider usable when its sibling needs sign-in', async () => {
@@ -167,7 +181,7 @@ describe('IntegrationsSettings — provider access toggles', () => {
     // omp: true so ONLY the Claude row is disabled here — otherwise OMP's
     // own (identical) "hidden from every runtime picker" hint would collide
     // with Claude's and make findByText ambiguous.
-    setProviderAccess({ claude: false, codex: true, omp: true });
+    setProviderAccess({ claude: false, codex: true, omp: true, pi: true });
     render(<IntegrationsSettings />);
 
     expect(await screen.findByText(/hidden from every runtime picker/i)).toBeInTheDocument();
@@ -319,7 +333,9 @@ describe('IntegrationsSettings — OMP row under Aria mode', () => {
 
     render(<IntegrationsSettings />);
 
-    expect(await screen.findByText('Detected')).toBeInTheDocument();
+    // Pi's row uses the same 'Detected' label, so assert on the COLLECTION
+    // rather than a unique match.
+    expect((await screen.findAllByText('Detected')).length).toBeGreaterThanOrEqual(1);
     expect(screen.queryByText(/Fleet (not )?detected/i)).not.toBeInTheDocument();
   });
 });

@@ -108,6 +108,10 @@ describe('getTimeDifference is unaffected when BOTH sides share a format', () =>
     // A raw column compared against an already-zoned value skews by the offset.
     const offsetMs = new Date(UTC_INSTANT).getTimezoneOffset() * 60_000;
     const skew = getTimeDifference('2026-08-24 19:12:52', new Date(UTC_INSTANT));
-    expect(skew).toBe(-offsetMs);
+    // On a UTC runner offsetMs is 0, so -offsetMs is -0 — and toBe
+    // distinguishes -0 from +0. Accept either zero: the hazard this
+    // documents is the NONZERO skew, not the sign of zero.
+    const expected = offsetMs === 0 ? 0 : -offsetMs;
+    expect(skew).toBe(expected);
   });
 });

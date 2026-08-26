@@ -87,6 +87,22 @@ export const OMP_PTY_CAVEATS: readonly string[] = [
   'Approvals stay in the OMP CLI — no Cyboflow review-queue integration.',
 ];
 
+/**
+ * The v1 limits of the Pi structured (pi-sdk) lane. Headless and ungated:
+ * pi has no sandbox or approval-mode surface, so workflow steps run tools
+ * without a gate until the extension tool_call bridge ships.
+ */
+export const PI_SDK_CAVEATS: readonly string[] = [
+  'Tools run WITHOUT an approval gate in workflow steps (no sandbox yet) — run on worktrees you are watching.',
+  'No mid-turn steering: the next message queues until the current turn finishes.',
+  'Tool activity is not shown in the transcript; only final text per turn.',
+];
+
+/** The v1 limits of the Pi CLI (pi-pty) lane. */
+export const PI_PTY_CAVEATS: readonly string[] = [
+  'Approvals stay inside the pi TUI — no Cyboflow review-queue integration.',
+];
+
 interface SubstrateSelectorProps {
   value: LaunchAgentRuntime;
   onChange: (runtime: LaunchAgentRuntime) => void;
@@ -111,10 +127,21 @@ const RUNTIME_SCOPE_SUFFIXES: Partial<Record<LaunchAgentRuntime, string>> = {
   'claude-sdk': ' (default)',
   'codex-pty': ' — quick sessions only',
   'omp-fleet': ' — quick sessions only',
+  'pi-pty': ' — quick sessions only',
 };
 
 const RUNTIME_OPTIONS: readonly { runtime: LaunchAgentRuntime; label: string }[] = (
-  ['claude-sdk', 'claude-interactive', 'codex-sdk', 'codex-pty', 'omp-sdk', 'omp-pty', 'omp-fleet'] as const
+  [
+    'claude-sdk',
+    'claude-interactive',
+    'codex-sdk',
+    'codex-pty',
+    'omp-sdk',
+    'omp-pty',
+    'omp-fleet',
+    'pi-sdk',
+    'pi-pty',
+  ] as const
 ).map((runtime) => ({
   runtime,
   label: `${AGENT_RUNTIME_LABELS[runtime]}${RUNTIME_SCOPE_SUFFIXES[runtime] ?? ''}`,
@@ -379,6 +406,12 @@ export function SubstrateSelector({
       )}
       {value === 'omp-pty' && (
         <CaveatsPanel testId={caveatsTestId} title="OMP (CLI) — v1 limits" items={OMP_PTY_CAVEATS} />
+      )}
+      {value === 'pi-sdk' && (
+        <CaveatsPanel testId={caveatsTestId} title="Pi — v1 limits" items={PI_SDK_CAVEATS} />
+      )}
+      {value === 'pi-pty' && (
+        <CaveatsPanel testId={caveatsTestId} title="Pi (CLI) — v1 limits" items={PI_PTY_CAVEATS} />
       )}
     </div>
   );

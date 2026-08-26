@@ -88,7 +88,14 @@ export const RUNTIME_CAPABILITIES: Readonly<Record<AgentRuntime, AgentRuntimeCap
   // worker owns its model and thinking level (DEFAULT_OMP_MODEL), so effort and
   // fast mode are both producer-side and hidden here.
   'omp-fleet': { selectableInPickers: true, supportsEffort: false, supportsFastMode: false },
-};
+  // Pi lanes. pi-pty takes the codex/omp PTY answer: keystroke-driven TUI, no
+  // turn-options object to carry an effort level. pi-sdk spawns `pi --mode
+  // json`; its wire events carry usage and tool results but no per-turn
+  // thinking-level control surface yet, so effort stays false until the spawn
+  // side learns a flag for it. Fast mode remains the Claude-only opt-in.
+  'pi-sdk': { selectableInPickers: true, supportsEffort: false, supportsFastMode: false },
+  'pi-pty': { selectableInPickers: true, supportsEffort: false, supportsFastMode: false },
+ };
 
 /**
  * What an UNREGISTERED runtime is assumed to support: nothing. A runtime string

@@ -128,7 +128,7 @@ describe('lane helpers', () => {
     // a lane added to the union without a resolver arm — or left behind by a
     // rename — has to fail somewhere. Here.
     const resolved = new Set(
-      (['claude', 'codex', 'omp'] as const).flatMap((provider) =>
+      (['claude', 'codex', 'omp', 'pi'] as const).flatMap((provider) =>
         (['sdk', 'interactive'] as const).map((substrate) =>
           resolvePanelLane({ agent_runtime: `${provider}-sdk`, substrate }, {}),
         ),

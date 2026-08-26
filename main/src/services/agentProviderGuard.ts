@@ -44,6 +44,7 @@ import {
   type AgentProvider,
 } from '../../../shared/types/agentRuntime';
 
+
 /**
  * Thrown when a call is attempted against a provider the user switched off.
  * Carries `provider` so a caller can map it back onto a UI affordance without

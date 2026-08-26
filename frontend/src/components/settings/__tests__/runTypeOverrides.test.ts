@@ -871,6 +871,7 @@ describe('global-rung runtime-family coercion (Default Launch Model / Agent Runt
       'gpt-5',
       'anthropic/claude-opus-4-5',
       'openrouter/qwen3-coder',
+      'google/gemini-3-flash',
       '',
     ];
     for (const runtime of [undefined, ...SESSION_AGENT_RUNTIMES] as const) {
@@ -881,8 +882,9 @@ describe('global-rung runtime-family coercion (Default Launch Model / Agent Runt
         expect(
           provider === 'codex'
             ? isCodexModelSelection(coerced)
-            : provider === 'omp'
-              ? isOmpModelFamily(coerced)
+            : provider === 'omp' || provider === 'pi'
+              ? // Pi shares OMP's slashed-family rule (same predicate).
+                isOmpModelFamily(coerced)
               : !isCodexModelFamily(coerced) && !isOmpModelFamily(coerced),
         ).toBe(true);
         // Idempotent: re-coercing a coerced value changes nothing.

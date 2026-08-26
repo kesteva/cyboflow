@@ -88,6 +88,7 @@ function quickArmAgentRuntime(runtime: LaunchAgentRuntime): WorkflowAgentRuntime
   if (runtime === 'codex-pty') return 'codex-sdk';
   if (runtime === 'omp-pty') return 'omp-sdk';
   if (runtime === 'omp-fleet') return 'claude-sdk';
+  if (runtime === 'pi-pty') return 'pi-sdk';
   return runtime;
 }
 
@@ -111,6 +112,10 @@ const QUICK_ARM_MODEL_RESET: Readonly<Record<AgentProvider, string>> = {
   claude: DEFAULT_QUICK_MODEL,
   codex: DEFAULT_CODEX_MODEL,
   omp: '',
+  // Same no-pin rationale as OMP: pi's catalogue is concrete `provider/model`
+  // ids with no "let the runtime pick" sentinel, so the arm launches on the
+  // runtime's own default.
+  pi: '',
 };
 
 /**

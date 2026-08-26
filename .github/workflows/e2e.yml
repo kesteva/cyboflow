@@ -70,7 +70,6 @@ jobs:
         run: |
           node scripts/ensure-sqlite-abi.mjs host
           pnpm run test:build
-
       # The launched app needs the ELECTRON ABI. postinstall normally leaves
       # it there, but a restored pnpm store can carry a host-ABI
       # better_sqlite3.node — then _electron.launch throws NMV 127-vs-136 on

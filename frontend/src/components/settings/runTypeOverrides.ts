@@ -631,6 +631,14 @@ export function coerceModelForRuntime(
       if (isOmpModelFamily(model)) return model;
       return isOmpModelFamily(fallbackModel) ? fallbackModel : null;
     }
+    case 'pi': {
+      // Pi selections are `${provider}/${model}` pairs sharing OMP's slash
+      // rule (the predicates are deliberately the same function), so the
+      // coercion is OMP's verbatim.
+      if (model === null) return null;
+      if (isOmpModelFamily(model)) return model;
+      return isOmpModelFamily(fallbackModel) ? fallbackModel : null;
+    }
     case 'claude': {
       if (model === null) return null;
       if (isClaudeUsableModel(model)) return model;

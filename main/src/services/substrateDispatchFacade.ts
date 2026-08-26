@@ -149,6 +149,14 @@ const LANE_WIRING: Readonly<Record<PanelLane, LaneWiring>> = {
   // tail has to survive for a terminal that mounts afterwards.
   'omp-sdk': { output: true, spawned: true, turnEnd: false, retainBacklogOnFailedExit: false },
   'omp-pty': { output: true, spawned: true, turnEnd: true, retainBacklogOnFailedExit: true },
+  // Pi lanes take the row their TRANSPORT implies, same reasoning as the OMP
+  // pair above: the sdk lane (pi --mode json) forwards output + spawned and
+  // serves workflow runs; the pty lane adds turn-end and retains the backlog
+  // on failed exit because pi is a user-installed binary found by a discovery
+  // ladder — a failed startup's error tail has to survive for a terminal that
+  // mounts afterwards.
+  'pi-sdk': { output: true, spawned: true, turnEnd: false, retainBacklogOnFailedExit: false },
+  'pi-pty': { output: true, spawned: true, turnEnd: true, retainBacklogOnFailedExit: true },
 };
 
 /**

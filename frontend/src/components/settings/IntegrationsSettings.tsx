@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Bot, Code2, ExternalLink, RefreshCw, Boxes } from 'lucide-react';
+import { Bot, Code2, ExternalLink, RefreshCw, Boxes, Terminal } from 'lucide-react';
 import type { AgentProvider, AgentProviderAccess } from '../../../../shared/types/agentRuntime';
 import { AGENT_PROVIDERS, isAgentProviderEnabled } from '../../../../shared/types/agentRuntime';
 import type { ProviderDetectionResult } from '../../../../shared/types/onboarding';
@@ -292,13 +292,57 @@ function responseError(provider: string, error?: string): string {
   return error?.trim() || `Cyboflow could not check ${provider}.`;
 }
 
+
+/**
+ * The Pi row's status — OMP's local-binary branch verbatim (pi holds its own
+ * credentials, so binary presence + version is all Cyboflow can see), with an
+ * npm install hint instead of the omp.sh script.
+ */
+function piView(
+  detection: ProviderDetectionResult<'pi'> | null,
+  error: string | null,
+): ProviderViewModel {
+  if (error) {
+    return { status: 'unavailable', label: 'Check failed', detail: error };
+  }
+  if (!detection) {
+    return { status: 'checking', label: 'Checking', detail: 'Looking for a pi binary on this machine.' };
+  }
+  if (detection.state === 'unavailable') {
+    if (detection.binaryPath !== null) {
+      return {
+        status: 'unavailable',
+        label: 'Unsupported version',
+        detail: detection.version
+          ? `Found pi ${detection.version}, but this version isn't supported.`
+          : "Found a pi binary, but its version couldn't be verified.",
+        metadata: detection.binaryPath,
+      };
+    }
+    return {
+      status: 'unavailable',
+      label: 'Not available',
+      detail: 'pi was not found on this machine.',
+    };
+  }
+  return {
+    status: 'connected',
+    label: 'Detected',
+    detail: detection.version ? `pi ${detection.version}` : 'pi binary found',
+    metadata: detection.binaryPath ?? undefined,
+  };
+}
+
+
 export function IntegrationsSettings(): React.JSX.Element {
   const [claudeDetection, setClaudeDetection] = useState<ProviderDetectionResult<'claude'> | null>(null);
   const [codexDetection, setCodexDetection] = useState<ProviderDetectionResult<'codex'> | null>(null);
   const [ompDetection, setOmpDetection] = useState<ProviderDetectionResult<'omp'> | null>(null);
+  const [piDetection, setPiDetection] = useState<ProviderDetectionResult<'pi'> | null>(null);
   const [claudeError, setClaudeError] = useState<string | null>(null);
   const [codexError, setCodexError] = useState<string | null>(null);
   const [ompError, setOmpError] = useState<string | null>(null);
+  const [piError, setPiError] = useState<string | null>(null);
   const [checking, setChecking] = useState(true);
   const requestId = useRef(0);
 
@@ -308,11 +352,13 @@ export function IntegrationsSettings(): React.JSX.Element {
     setClaudeError(null);
     setCodexError(null);
     setOmpError(null);
+    setPiError(null);
 
-    const [claudeResult, codexResult, ompResult] = await Promise.allSettled([
+    const [claudeResult, codexResult, ompResult, piResult] = await Promise.allSettled([
       API.providers.detect('claude'),
       API.providers.detect('codex'),
       API.providers.detect('omp'),
+      API.providers.detect('pi'),
     ]);
     if (currentRequest !== requestId.current) return;
 
@@ -343,6 +389,15 @@ export function IntegrationsSettings(): React.JSX.Element {
       setOmpError(responseError('OMP', message));
     }
 
+    if (piResult.status === 'fulfilled' && piResult.value.success && piResult.value.data) {
+      setPiDetection(piResult.value.data);
+    } else {
+      const message = piResult.status === 'rejected'
+        ? piResult.reason instanceof Error ? piResult.reason.message : undefined
+        : piResult.value.error;
+      setPiError(responseError('Pi', message));
+    }
+
     setChecking(false);
   }, []);
 
@@ -368,6 +423,7 @@ export function IntegrationsSettings(): React.JSX.Element {
   const codex = codexView(codexDetection, codexError);
   const ompAvailability = useOmpAvailability();
   const omp = ompView(ompDetection, ompError, ompAvailability);
+  const pi = piView(piDetection, piError);
 
   // Provider access — the toggles below write AppConfig.agentProviderAccess,
   // the same field the onboarding Connect step writes, so the two surfaces are
@@ -381,10 +437,14 @@ export function IntegrationsSettings(): React.JSX.Element {
   // unlike claude/codex — isAgentProviderEnabled already applies that per-
   // provider default, so this reads correctly with no special-casing here.
   const ompEnabled = isAgentProviderEnabled(providerAccess, 'omp');
+  // Pi floors to DISABLED on an absent key, same as omp — the registry's
+  // defaultEnabled policy is applied inside isAgentProviderEnabled.
+  const piEnabled = isAgentProviderEnabled(providerAccess, 'pi');
   const enabledByProvider: Record<AgentProvider, boolean> = {
     claude: claudeEnabled,
     codex: codexEnabled,
     omp: ompEnabled,
+    pi: piEnabled,
   };
   const [savingProvider, setSavingProvider] = useState<AgentProvider | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -408,7 +468,7 @@ export function IntegrationsSettings(): React.JSX.Element {
       }
       setSavingProvider(null);
     },
-    [claudeEnabled, codexEnabled, ompEnabled],
+    [claudeEnabled, codexEnabled, ompEnabled, piEnabled],
   );
 
   // Guard rail mirroring onboarding's "enable at least one detected provider":
@@ -482,6 +542,16 @@ export function IntegrationsSettings(): React.JSX.Element {
               </Button>
             ) : undefined}
           />
+          <ProviderRow
+            name="Pi"
+            description="The terminal coding agent OMP forked from — multi-provider models via its own accounts; Cyboflow only detects the binary."
+            icon={<Terminal className="h-4 w-4" />}
+            view={pi}
+            enabled={piEnabled}
+            onToggle={(next) => void setProviderEnabled('pi', next)}
+            toggleDisabledReason={toggleReason('pi', piEnabled)}
+            toggleTestId="provider-toggle-pi"
+          />
         </div>
 
         {saveError && (
@@ -500,6 +570,14 @@ export function IntegrationsSettings(): React.JSX.Element {
             OMP is off by default — turn it on here once you've installed it and signed in
             (run <code className="border border-border-primary bg-bg-primary px-1">omp</code> in a
             terminal and <code className="border border-border-primary bg-bg-primary px-1">/login &lt;provider&gt;</code>).
+          </p>
+        )}
+        {!piEnabled && (
+          <p className="mt-3 text-xs leading-relaxed text-text-tertiary">
+            Pi is off by default — turn it on once you've installed it and signed in
+            (run <code className="border border-border-primary bg-bg-primary px-1">pi</code> in a
+            terminal and use <code className="border border-border-primary bg-bg-primary px-1">/login</code>{' '}
+            or <code className="border border-border-primary bg-bg-primary px-1">--api-key</code>).
           </p>
         )}
       </SettingsSection>

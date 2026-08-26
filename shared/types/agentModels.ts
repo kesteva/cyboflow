@@ -81,6 +81,16 @@ export interface OmpModelCatalog {
 }
 
 /**
+ * Pi fronts many vendors the same way OMP does (`pi --model provider/id`),
+ * so a Pi selection is the same slashed `provider/model` pair with the same
+ * bare-wire-id caveat. The catalog shape is therefore OMP's: rows compose the
+ * canonical selection from separate `provider` and `id` fields.
+ */
+export interface PiModelCatalog {
+  models: OmpModelOption[];
+}
+
+/**
  * Which catalog shape each provider advertises.
  *
  * The three are deliberately NOT flattened into one type: a Codex row carries
@@ -95,6 +105,7 @@ export interface ProviderModelCatalogs {
   claude: ClaudeModelCatalog;
   codex: CodexModelCatalog;
   omp: OmpModelCatalog;
+  pi: PiModelCatalog;
 }
 
 /**
@@ -147,6 +158,7 @@ export function isOmpModelFamily(model: string): boolean {
   return slash > 0 && slash < key.length - 1;
 }
 
+
 export function isCodexModelSelection(model: string): boolean {
   const key = model.toLowerCase().trim();
   return key === 'auto' || key === 'default' || isCodexModelFamily(key);
@@ -177,7 +189,27 @@ export const AGENT_MODEL_FAMILY_PREDICATES: Readonly<
   claude: isClaudeModelFamily,
   codex: isCodexModelFamily,
   omp: isOmpModelFamily,
+  // Pi model ids are `<vendor>/<model>` — pi's own discriminator in `--model`
+  // patterns — which is exactly OMP's slash rule, so the predicate is shared.
+  // If pi ever admits bare ids this becomes its own function.
+  pi: isOmpModelFamily,
 };
+/**
+ * Families that SHARE a shape are non-competing: omp and pi both use
+ * `<vendor>/<model>`, so a slashed id claimed by one must not be dropped
+ * because the other also claims it. Without this pair, adding pi made
+ * `normalizeAgentModelSelection('omp', 'anthropic/x')` return undefined.
+ */
+const COMPATIBLE_FAMILIES: ReadonlyArray<readonly [AgentProvider, AgentProvider]> = [
+  ['omp', 'pi'],
+];
+
+function familiesCompatible(a: AgentProvider, b: AgentProvider): boolean {
+  return COMPATIBLE_FAMILIES.some(
+    ([x, y]) => (a === x && b === y) || (a === y && b === x),
+  );
+}
+
 
 /**
  * Normalize a persisted picker value against the provider that owns it.
@@ -204,6 +236,7 @@ export function normalizeAgentModelSelection(
 
   for (const other of AGENT_PROVIDERS) {
     if (other === provider) continue;
+    if (familiesCompatible(provider, other)) continue;
     if (AGENT_MODEL_FAMILY_PREDICATES[other](key)) return undefined;
   }
   return value;

@@ -98,6 +98,10 @@ export interface ProviderDetectionStates {
   claude: 'detected' | 'loggedOut' | 'missing';
   codex: 'detected' | 'loggedOut' | 'unavailable';
   omp: 'detected' | 'unavailable';
+  // Pi mirrors OMP exactly: pi holds its own credentials (`~/.pi`, `/login`),
+  // so the only observable is binary presence + a successful `--version` at
+  // or above the floor. No 'loggedOut': nothing in main/ can see pi's auth.
+  pi: 'detected' | 'unavailable';
 }
 
 /** The evidence each provider's probe returns alongside its state. */
@@ -111,6 +115,10 @@ export interface ProviderDetectionPayloads {
     account: CodexAccountDetection;
   };
   omp: OmpBinaryDetection;
+  // Structurally identical evidence (binaryPath + version), so pi reuses
+  // OMP's shape rather than declaring a byte-for-byte twin interface. If the
+  // two ever diverge (e.g. pi gains an observable login), split it then.
+  pi: OmpBinaryDetection;
 }
 
 /**

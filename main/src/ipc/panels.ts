@@ -45,7 +45,9 @@ export function registerPanelHandlers(ipcMain: IpcMain, services: AppServices) {
       'codex-pty': services.codexPtyManager,
       'omp-sdk': services.ompSdkManager,
       'omp-pty': services.ompPtyManager,
-    });
+      'pi-sdk': services.piSdkManager,
+      'pi-pty': services.piPtyManager,
+     });
 
   // Panel CRUD operations
   ipcMain.handle('panels:create', async (_, request: CreatePanelRequest) => {
@@ -107,6 +109,7 @@ export function registerPanelHandlers(ipcMain: IpcMain, services: AppServices) {
         // addPanelOutput throws 'Panel not found' on every tick. stopPanel is a
         // no-op for a panel the fleet manager doesn't track, so this is safe to
         // call unconditionally — no runtime lookup needed.
+
         try {
           await services.ompSessionManager?.stopPanel(panelId);
         } catch (err) {

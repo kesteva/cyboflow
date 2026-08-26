@@ -9,6 +9,7 @@ import {
 import { probeClaudeDetection } from './claudeDetection';
 import { probeCodexDetection } from './codexDetection';
 import { detectOmpAvailability } from '../services/panels/omp/ompAvailability';
+import { detectPiAvailability } from '../services/panels/pi/piAvailability';
 import type { AppServices } from './types';
 
 /**
@@ -41,6 +42,10 @@ const PROVIDER_DETECTION_PROBES: { [P in AgentProvider]: ProviderDetectionProbe<
   // rather than `omp: detectOmpAvailability` keeps the registry entry's
   // signature visually aligned with its neighbors despite ignoring `services`.
   omp: () => detectOmpAvailability(),
+  // Same thinness rationale as OMP's entry: PATH discovery + version floor,
+  // no services dependency (no `piExecutablePath` config key yet, and pi owns
+  // its own provider credentials).
+  pi: () => detectPiAvailability(),
 };
 
 type DetectionResponse =

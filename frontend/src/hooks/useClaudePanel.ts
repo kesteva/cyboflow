@@ -30,9 +30,13 @@ export async function dispatchQuickSessionInput(
   // panel-scoped panels:continue. omp-pty mirrors codex-pty the same way for the
   // panel-substrate-override case.
   const isStructuredSdkPanel =
-    session.agentRuntime === 'codex-sdk' || session.agentRuntime === 'omp-sdk'
+    session.agentRuntime === 'codex-sdk' ||
+    session.agentRuntime === 'omp-sdk' ||
+    session.agentRuntime === 'pi-sdk'
       ? panelSubstrate !== 'interactive'
-      : (session.agentRuntime === 'codex-pty' || session.agentRuntime === 'omp-pty') &&
+      : (session.agentRuntime === 'codex-pty' ||
+           session.agentRuntime === 'omp-pty' ||
+           session.agentRuntime === 'pi-pty') &&
         panelSubstrate === 'sdk';
 
   if (isStructuredSdkPanel) {

@@ -88,6 +88,7 @@ const VARIANT_RUNTIME_LABELS: Record<WorkflowAgentRuntime, string> = {
   'claude-interactive': AGENT_RUNTIME_LABELS['claude-interactive'],
   'codex-sdk': AGENT_RUNTIME_LABELS['codex-sdk'],
   'omp-sdk': AGENT_RUNTIME_LABELS['omp-sdk'],
+  'pi-sdk': AGENT_RUNTIME_LABELS['pi-sdk'],
 };
 
 export function VariantEditorModal({

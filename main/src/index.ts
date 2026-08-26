@@ -59,9 +59,13 @@ import {
   isCodexPtyManagerLike,
   isCodexSdkManagerLike,
   isOmpPtyManagerLike,
+  isPiPtyManagerLike,
+  isPiSdkManagerLike,
   isOmpSdkManagerLike,
   type CodexPtyManagerLike,
   type OmpPtyManagerLike,
+  type PiPtyManagerLike,
+  type PiSdkManagerLike,
 } from './services/cliManagerFactory';
 import { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import { panelManager } from './services/panelManager';
@@ -585,6 +589,8 @@ let cliManagerFactory: CliManagerFactory;
 let defaultCliManager: AbstractCliManager;
 let codexPtyManager: CodexPtyManagerLike;
 let ompPtyManager: OmpPtyManagerLike;
+let piPtyManager: PiPtyManagerLike;
+let piSdkManager: PiSdkManagerLike;
 let gitDiffManager: GitDiffManager;
 let gitStatusManager: GitStatusManager;
 let executionTracker: ExecutionTracker;
@@ -1699,6 +1705,28 @@ async function initializeServices(): Promise<boolean> {
     throw new Error('[Main] cliManagerFactory returned a manager without the OMP PTY seams for omp-pty');
   }
   ompPtyManager = createdOmpPtyManager;
+
+  const createdPiPtyManager = await cliManagerFactory.createManager('pi-pty', {
+    sessionManager,
+    logger,
+    configManager,
+    skipValidation: true,
+  });
+  if (!isPiPtyManagerLike(createdPiPtyManager)) {
+    throw new Error('[Main] cliManagerFactory returned a manager without the Pi PTY seams for pi-pty');
+  }
+  piPtyManager = createdPiPtyManager;
+
+  const createdPiSdkManager = await cliManagerFactory.createManager('pi-sdk', {
+    sessionManager,
+    logger,
+    configManager,
+    skipValidation: true,
+  });
+  if (!isPiSdkManagerLike(createdPiSdkManager)) {
+    throw new Error('[Main] cliManagerFactory returned a manager without the Pi SDK seams for pi-sdk');
+  }
+  piSdkManager = createdPiSdkManager;
   gitDiffManager = new GitDiffManager(logger);
   gitStatusManager = new GitStatusManager(sessionManager, worktreeManager, gitDiffManager, logger);
   executionTracker = new ExecutionTracker(sessionManager, gitDiffManager);
@@ -3140,6 +3168,8 @@ async function initializeServices(): Promise<boolean> {
     { lane: 'codex-pty', manager: codexPtyManager },
     { lane: 'omp-sdk', manager: createdOmpSdkManager },
     { lane: 'omp-pty', manager: ompPtyManager },
+    { lane: 'pi-pty', manager: piPtyManager },
+    { lane: 'pi-sdk', manager: piSdkManager },
   ];
   const managerByLane = new Map<PanelLane, AbstractCliManager>(
     laneManagers.map(({ lane, manager }) => [lane, manager]),
@@ -4132,6 +4162,8 @@ async function initializeServices(): Promise<boolean> {
     ompSessionManager,
     ompSdkManager: createdOmpSdkManager,
     ompPtyManager,
+    piSdkManager: createdPiSdkManager,
+    piPtyManager,
     claudeModelCatalogService: new ClaudeModelCatalogService(cyboflowLogger),
     // Live-session close-out seams for quick sessions (IDEA-030): route the
     // session merge/rebase/dismiss handlers through the SubstrateDispatchFacade
@@ -4152,6 +4184,8 @@ async function initializeServices(): Promise<boolean> {
       substrateFacade.registerPtyPanel(runId, panelId, codexPtyManager),
     registerOmpPtyPanel: (runId: string, panelId: string) =>
       substrateFacade.registerPtyPanel(runId, panelId, ompPtyManager),
+    registerPiPtyPanel: (runId: string, panelId: string) =>
+      substrateFacade.registerPtyPanel(runId, panelId, piPtyManager),
     // The SAME provider the Claude managers were injected with above, handed to
     // the IPC layer for the CODEX lanes: those spawn from ipc/ with a
     // caller-supplied runId instead of resolving the gate inside the manager, so

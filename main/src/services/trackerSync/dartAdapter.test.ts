@@ -72,7 +72,7 @@ function scriptedFetch(handlers: RouteHandler[]): { fetchImpl: FetchLike; calls:
 const BOARD = 'Engineering/Sprint';
 const SELECTION: TrackerSourceSelection = { containerId: BOARD, narrowId: 'all', narrowKind: 'all' };
 /** An outbox client key, in the shape writeBack mints (randomUUID). */
-const CLIENT_KEY = '3f2504e0-4f89-11d3-9a0c-0305e82c3301';
+const CLIENT_KEY = '3f2504e0-4f89-11d3-9a0c-0305e82c3301'; // gitleaks:allow — RFC 4122 example UUID, randomUUID-shaped fixture
 
 const CONFIG = {
   dartboards: [BOARD, 'Design/Backlog'],

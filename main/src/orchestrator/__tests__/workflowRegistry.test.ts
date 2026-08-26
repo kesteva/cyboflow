@@ -1182,7 +1182,7 @@ describe('WorkflowRegistry', () => {
     const ompEnabledRegistry = (): WorkflowRegistry =>
       new WorkflowRegistry(dbAdapter(db), logger, {
         ...makeConfig('default'),
-        getAgentProviderAccess: () => ({ claude: true, codex: true, omp: true }),
+        getAgentProviderAccess: () => ({ claude: true, codex: true, omp: true, pi: true }),
       });
 
     it('STAMPS omp-sdk on a real workflow launch, projecting the sdk substrate', async () => {

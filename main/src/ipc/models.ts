@@ -2,6 +2,8 @@ import { IpcMain } from 'electron';
 import type { AppServices } from './types';
 import { ModelAvailabilityService } from '../services/modelAvailabilityService';
 import { getSharedOmpModelCatalogProbe } from '../services/panels/omp/ompModelCatalog';
+import { detectPiAvailability } from '../services/panels/pi/piAvailability';
+import { fetchPiModelCatalog } from '../services/panels/pi/piModelCatalog';
 import type { ModelAvailabilityMap } from '../../../shared/types/modelAvailability';
 import {
   AGENT_PROVIDERS,
@@ -41,6 +43,22 @@ const PROVIDER_CATALOG_FETCHERS: { [P in AgentProvider]: ProviderCatalogFetcher<
   // Settings before an OMP session has ever been started. `OmpSdkManager` holds
   // the same instance so a mid-flight probe is reaped at shutdown.
   omp: () => getSharedOmpModelCatalogProbe().getCatalog(),
+  // Pi's catalog comes from a short-lived `pi --list-models` child parsed
+  // into canonical `${provider}/${id}` rows (see PiModelCatalog). It goes
+  // through detectPiAvailability first so an absent/under-floor binary fails
+  // with the same "why" copy the Integrations card shows, instead of a raw
+  // spawn error.
+  pi: async () => {
+    const detection = await detectPiAvailability();
+    if (detection.state !== 'detected' || !detection.binaryPath) {
+      throw new Error(
+        detection.version
+          ? `pi ${detection.version} found but below the supported floor`
+          : 'pi binary not found on PATH',
+      );
+    }
+    return fetchPiModelCatalog(detection.binaryPath);
+  },
 };
 
 async function fetchCatalog<P extends AgentProvider>(

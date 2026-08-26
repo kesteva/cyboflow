@@ -40,6 +40,11 @@ export const OMP_EFFORT_LEVELS = [
 export type ClaudeEffortLevel = (typeof CLAUDE_EFFORT_LEVELS)[number];
 export type CodexEffortLevel = (typeof CODEX_EFFORT_LEVELS)[number];
 export type OmpEffortLevel = (typeof OMP_EFFORT_LEVELS)[number];
+// Pi shares OMP's named thinking-level scale (pi's `:<thinking>` model suffix
+// and setThinkingLevel use the same off/minimal/…/max rungs). Aliased, not
+// copied: the two scales stay in lockstep until one actually diverges.
+export const PI_EFFORT_LEVELS = OMP_EFFORT_LEVELS;
+export type PiEffortLevel = OmpEffortLevel;
 
 /** The union of every effort value any provider accepts. */
 export type ReasoningEffort = ClaudeEffortLevel | CodexEffortLevel | OmpEffortLevel;
@@ -71,6 +76,7 @@ export const ALL_EFFORT_LEVELS = [
 const CLAUDE_EFFORT_SET = new Set<string>(CLAUDE_EFFORT_LEVELS);
 const CODEX_EFFORT_SET = new Set<string>(CODEX_EFFORT_LEVELS);
 const OMP_EFFORT_SET = new Set<string>(OMP_EFFORT_LEVELS);
+const PI_EFFORT_SET = OMP_EFFORT_SET;
 const ALL_EFFORT_SET = new Set<string>(ALL_EFFORT_LEVELS);
 
 /** Each provider's own ordered scale, low-to-high. Exhaustive by construction. */
@@ -78,12 +84,14 @@ const EFFORT_LEVELS_BY_PROVIDER: Readonly<Record<AgentProvider, readonly Reasoni
   claude: CLAUDE_EFFORT_LEVELS,
   codex: CODEX_EFFORT_LEVELS,
   omp: OMP_EFFORT_LEVELS,
+  pi: PI_EFFORT_LEVELS,
 };
 
 const EFFORT_SETS_BY_PROVIDER: Readonly<Record<AgentProvider, ReadonlySet<string>>> = {
   claude: CLAUDE_EFFORT_SET,
   codex: CODEX_EFFORT_SET,
   omp: OMP_EFFORT_SET,
+  pi: PI_EFFORT_SET,
 };
 
 /** Narrow an arbitrary value to a known effort level (provider-agnostic). */

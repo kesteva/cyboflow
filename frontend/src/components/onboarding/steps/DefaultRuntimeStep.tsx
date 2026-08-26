@@ -32,6 +32,7 @@ const PROVIDER_BLURBS: Record<AgentProvider, string> = {
   claude: 'Structured SDK sessions with full approval routing and step tracking.',
   codex: 'ChatGPT-authenticated runtime, billed against your existing plan.',
   omp: 'Multi-provider runtime — see its v1 limits in the launch wizard.',
+  pi: 'The terminal coding agent OMP forked from — multi-provider models via its own accounts.',
 };
 
 export function DefaultRuntimeStep({
