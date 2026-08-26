@@ -104,12 +104,11 @@ export const WORKFLOW_LAUNCHABLE_RUNTIMES = [
   // do, so workflows may deploy on it. pi-pty stays excluded for the same
   // keystroke-TUI reason as codex-pty/omp-pty.
   //
-  // ACCEPTED LIMITATION, headless gating: pi has no sandbox and no
-  // approval-mode surface, so a workflow step on pi-sdk executes tools
-  // ungated. The extension-based tool_call bridge that will carry cyboflow's
-  // permission router is designed but not built; until it ships, treat a
-  // pi-sdk workflow step like an attended terminal — run it on a worktree
-  // you are watching.
+  // Gating note: an embedded tool_call extension enforces the session's
+  // permission mode inside the child (read-only passes under default/
+  // acceptEdits/auto; write-tier blocks with an actionable reason). What is
+  // NOT built yet is an interactive approval prompt — dontAsk remains the
+  // only way to run write-tier steps unattended.
   'pi-sdk',
 ] as const;
 

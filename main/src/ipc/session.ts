@@ -698,9 +698,9 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // No briefing: OMP's spawn has no `--append-system-prompt` equivalent, so
       // passing one would be silently dropped rather than delivered.
       createStructuredChatLane({ lane: 'omp-sdk', manager: ompSdkManager }),
-      // No briefing: pi's json-mode turn takes the prompt positionally; there
-      // is no system-prompt channel on this spawn shape, so passing one would
-      // be silently dropped rather than delivered.
+      // No briefing: pi's json-mode turn takes the prompt on stdin and has no
+      // system-prompt channel on this spawn shape, so passing one would be
+      // silently dropped rather than delivered.
       createStructuredChatLane({ lane: 'pi-sdk', manager: piSdkManager }),
     ].map((entry) => [entry.lane, entry]),
   );

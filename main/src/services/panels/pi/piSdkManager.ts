@@ -446,17 +446,21 @@ export class PiSdkManager extends AbstractCliManager {
         model: typeof options.model === 'string' ? options.model : undefined,
         cwd: options.worktreePath ?? process.cwd(),
         child: null,
-        // Workflow steps are HEADLESS: no TUI to approve in, so the fail-
-        // closed answer is 'gated' regardless of any run-level mode snapshot.
         gateMode: 'gated',
       };
       this.turns.set(panelId, state);
     } else {
-      // Workflow re-runs against an existing panel must pick up a CHANGED
-      // model or worktree, not ride the stale first-turn values.
+      // Workflow re-runs against an existing panel must pick up CHANGED
+      // model/worktree/permission values, not ride stale first-turn ones.
       if (typeof options.model === 'string') state.model = options.model;
       if (options.worktreePath) state.cwd = options.worktreePath;
     }
+    // The run's permission_mode_snapshot is authoritative per turn: an
+    // explicit dontAsk unlocks the yolo policy, anything else stays gated.
+    const runMode = options.agentPermissionMode;
+    state.gateMode = piGateModeForMode(
+      isPermissionMode(runMode) ? runMode : 'default',
+    );
     if (state.child && !state.child.killed) {
       throw new Error(`[PI] a turn is already running for panel ${panelId}`);
     }

@@ -88,12 +88,14 @@ export const OMP_PTY_CAVEATS: readonly string[] = [
 ];
 
 /**
- * The v1 limits of the Pi structured (pi-sdk) lane. Headless and ungated:
- * pi has no sandbox or approval-mode surface, so workflow steps run tools
- * without a gate until the extension tool_call bridge ships.
+ * The v1 limits of the Pi structured (pi-sdk) lane. A tool_call gate enforces
+ * the session's permission mode inside the spawned process (read-only tools
+ * pass under default/acceptEdits/auto; everything passes only in dontAsk),
+ * but there is no interactive approval prompt yet — gated writes are BLOCKED,
+ * not queued for review.
  */
 export const PI_SDK_CAVEATS: readonly string[] = [
-  'Tools run WITHOUT an approval gate in workflow steps (no sandbox yet) — run on worktrees you are watching.',
+  'Write-tier tools are blocked unless the session permission mode is dontAsk — no interactive approval prompt yet.',
   'No mid-turn steering: the next message queues until the current turn finishes.',
   'Tool activity is not shown in the transcript; only final text per turn.',
 ];
