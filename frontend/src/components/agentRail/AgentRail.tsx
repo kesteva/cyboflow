@@ -27,8 +27,9 @@ import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { AgentThreadView } from './AgentThreadView';
 import { useLayoutStore } from '../../stores/layoutStore';
 
-/** Default expanded rail width. */
-const RAIL_DEFAULT_WIDTH = 320;
+/** Default expanded rail width. Wide enough for the thread view's composer
+ * chrome on first run (users who drag it get their own persisted width). */
+const RAIL_DEFAULT_WIDTH = 360;
 /** Resize clamp: never shrink below a usable column. */
 const RAIL_MIN_WIDTH = 260;
 /** Resize clamp: cap at the smaller of an absolute ceiling or ~50% of viewport. */

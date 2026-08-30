@@ -120,16 +120,16 @@ describe('AgentRail — width resize', () => {
     fireEvent.mouseUp(document);
   }
 
-  it('defaults to 320px', () => {
+  it('defaults to 360px', () => {
     render(<AgentRail />);
-    expect(railWidth()).toBe(320);
+    expect(railWidth()).toBe(360);
   });
 
   it('grows the rail on a leftward drag and persists the width', () => {
     render(<AgentRail />);
     dragHandle(-100); // 100px LEFT → +100 width
-    expect(railWidth()).toBe(420);
-    expect(localStorage.getItem(WIDTH_KEY)).toBe('420');
+    expect(railWidth()).toBe(460);
+    expect(localStorage.getItem(WIDTH_KEY)).toBe('460');
   });
 
   it('clamps to the minimum on a large rightward drag', () => {

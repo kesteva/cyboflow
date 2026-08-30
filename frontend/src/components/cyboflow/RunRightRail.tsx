@@ -80,8 +80,9 @@ const TABS: Tab[] = [
   },
 ];
 
-/** Default expanded rail width (the former fixed Tailwind width). */
-const RAIL_DEFAULT_WIDTH = 296;
+/** Default expanded rail width. Wide enough for its tab headers on first run
+ * (users who drag it get their own persisted width instead). */
+const RAIL_DEFAULT_WIDTH = 360;
 /** Resize clamp: never shrink below a usable column. */
 const RAIL_MIN_WIDTH = 240;
 /** Resize clamp: cap at the smaller of an absolute ceiling or ~50% of viewport. */

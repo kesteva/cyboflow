@@ -8,6 +8,7 @@ import {
   app,
   BrowserWindow,
   ipcMain,
+  screen,
   shell,
   dialog,
   systemPreferences,
@@ -36,6 +37,13 @@ import { detectArchMismatch, formatArchMismatchLog, formatArchMismatchDialog } f
 import { setTelemetrySink, setSeamErrorSink } from './orchestrator/telemetrySink';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { installApplicationMenu } from './menu';
+import {
+  clampWindowBounds,
+  defaultWindowBounds,
+  loadWindowState,
+  saveWindowState,
+  type WindowRect,
+} from './utils/windowState';
 import { registerIpcHandlers } from './ipc';
 import { QUICK_PTY_BRIEFING } from './ipc/quickSessionBriefings';
 import { registerArtifactImageHandlers } from './ipc/artifactImages';
@@ -1170,9 +1178,30 @@ function runDeferredStartupWork(): void {
 }
 
 async function createWindow() {
+  // Window geometry (see utils/windowState.ts): restore the previous session's
+  // bounds from <userData>/window-state.json, or — when nothing trustworthy is
+  // saved (first run, corrupt file) — size to THIS display. Restored bounds are
+  // clamped against the work area of the display they last lived on, so a
+  // monitor unplug or resolution change can never resurrect an off-screen
+  // window. Any failure downgrades to first-run sizing, never a crash.
+  const windowStateDir = app.getPath('userData');
+  const savedWindowState = loadWindowState(windowStateDir);
+  let windowBounds: WindowRect;
+  if (savedWindowState) {
+    windowBounds = clampWindowBounds(
+      savedWindowState.bounds,
+      screen.getDisplayMatching(savedWindowState.bounds).workArea,
+    );
+  } else {
+    const workArea = screen.getPrimaryDisplay().workArea;
+    windowBounds = clampWindowBounds(defaultWindowBounds(workArea), workArea);
+  }
+
   mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
+    x: windowBounds.x,
+    y: windowBounds.y,
+    width: windowBounds.width,
+    height: windowBounds.height,
     icon: path.join(__dirname, '../assets/icon.png'),
     // First-paint: start hidden and paint the renderer's root background so the
     // window never flashes an empty white frame while the (heavy) renderer boots;
@@ -1204,6 +1233,44 @@ async function createWindow() {
   // Increase max listeners to prevent warning when many panels are active
   // Each panel can register multiple event listeners
   mainWindow.webContents.setMaxListeners(100);
+
+  // A maximized previous session comes back maximized — the restored x/y/w/h
+  // above are the window's NORMAL (restore) geometry, so un-maximizing later
+  // lands where the user left it.
+  if (savedWindowState?.maximized) {
+    mainWindow.maximize();
+  }
+
+  // Persist bounds so the next launch restores them. resize/move fire in a
+  // flood during interactive drags, so they only arm a 500ms debounce; close
+  // flushes immediately (and cancels the pending timer) so a quick open→close
+  // still records the final geometry. getNormalBounds() — NOT getBounds() —
+  // so a maximized window stores its restore size, not the maximized rect.
+  const WINDOW_STATE_SAVE_DEBOUNCE_MS = 500;
+  let windowStateSaveTimer: NodeJS.Timeout | null = null;
+  const persistWindowState = (): void => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    saveWindowState(windowStateDir, {
+      bounds: mainWindow.getNormalBounds(),
+      maximized: mainWindow.isMaximized(),
+    });
+  };
+  const scheduleWindowStateSave = (): void => {
+    if (windowStateSaveTimer) clearTimeout(windowStateSaveTimer);
+    windowStateSaveTimer = setTimeout(() => {
+      windowStateSaveTimer = null;
+      persistWindowState();
+    }, WINDOW_STATE_SAVE_DEBOUNCE_MS);
+  };
+  mainWindow.on('resize', scheduleWindowStateSave);
+  mainWindow.on('move', scheduleWindowStateSave);
+  mainWindow.on('close', () => {
+    if (windowStateSaveTimer) {
+      clearTimeout(windowStateSaveTimer);
+      windowStateSaveTimer = null;
+    }
+    persistWindowState();
+  });
 
   // Reveal the window only once the renderer has painted its first frame, and
   // kick off the deferrable startup work at that point. Registered BEFORE

@@ -196,8 +196,8 @@ describe('RunRightRail', () => {
     expect(screen.getByTestId('run-right-rail-workflow-progress-empty')).toBeInTheDocument();
 
     const root = screen.getByTestId('run-right-rail');
-    // Width is now an inline style (user-resizable), defaulting to 296px.
-    expect((root as HTMLElement).style.width).toBe('296px');
+    // Width is now an inline style (user-resizable), defaulting to 360px.
+    expect((root as HTMLElement).style.width).toBe('360px');
     expect(root).toHaveClass('shrink-0');
     expect(root).toHaveClass('border-l');
     // A left-edge drag handle is present for resizing.
@@ -461,10 +461,10 @@ describe('RunRightRail — width resize', () => {
 
   it('grows the rail on a leftward drag and persists the width', () => {
     renderRail(EMPTY_PHASE_STATE);
-    expect(railWidth()).toBe(296);
+    expect(railWidth()).toBe(360);
     dragHandle(-100); // 100px LEFT → +100 width
-    expect(railWidth()).toBe(396);
-    expect(localStorage.getItem(WIDTH_KEY)).toBe('396');
+    expect(railWidth()).toBe(460);
+    expect(localStorage.getItem(WIDTH_KEY)).toBe('460');
   });
 
   it('clamps to the minimum on a large rightward drag', () => {
