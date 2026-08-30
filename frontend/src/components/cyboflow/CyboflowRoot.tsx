@@ -403,8 +403,8 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
       {/* Main content area — two-column flex-row layout */}
       <div className="flex flex-row flex-1 overflow-hidden">
         {/* Left column — fluid; hosts empty-state CTA, RunBottomPane, or Canvas+RunBottomPane.
-            min-w floor: with the app sidebar at its clamped max and the fixed
-            296px right rail, an unfloored flex-1 column can collapse to ~0 on a
+            min-w floor: with the app sidebar at its clamped max and the
+            360px default right rail, an unfloored flex-1 column can collapse to ~0 on a
             narrow window (dead composer). Overflowing clips the rail instead —
             it has its own collapse affordance. */}
         <PerfProfiler id="center">
@@ -530,8 +530,9 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         </div>
         </PerfProfiler>
 
-        {/* Right rail — always rendered as layout shell (296px fixed, or a thin
-            collapsed strip). Collapse state is lifted here + persisted.
+        {/* Right rail — always rendered as layout shell (360px default,
+            user-resizable, or a thin collapsed strip). Collapse state is
+            lifted here + persisted.
             quickSessionProjectId lets the Artifacts tab work with no active flow
             run (mirroring the Diff tab's session fallback) — gated on
             !isMainRepo because the main-repo session has a panels-only layout

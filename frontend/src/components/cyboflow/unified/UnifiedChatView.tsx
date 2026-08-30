@@ -371,7 +371,7 @@ export function UnifiedChatView({
 
   // Auto-hide the fixed-width (230px) prompt rail when the chat host is too
   // narrow to fit it AND a usable transcript/composer. The host width depends on
-  // the window, the resizable app sidebar, and the 296px right rail, so this is
+  // the window, the resizable app sidebar, and the right rail, so this is
   // measured on the element (ResizeObserver), not a window breakpoint. Below the
   // threshold the rail would squeeze the main column toward 0 (dead composer).
   const rootRef = useRef<HTMLDivElement | null>(null);
