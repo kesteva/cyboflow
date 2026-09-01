@@ -138,38 +138,84 @@ function loadsInProcess(file) {
   }
 }
 
-/**
- * A better_sqlite3.node that the host `node` can actually load, if this
- * checkout has one. Either the installed artifact (when it currently carries
- * the host ABI) or a host-keyed entry banked in .abi-cache by
- * scripts/ensure-sqlite-abi.mjs.
- */
-function resolveHostLoadableAddon() {
-  const candidates = [];
+const HOST_ARCH = process.arch === 'x64' ? 'x64' : 'arm64';
+const OTHER_ARCH = HOST_ARCH === 'x64' ? 'arm64' : 'x64';
+
+/** Bundle-relative layouts (under app.asar.unpacked/node_modules) for a fixture addon. */
+const COMPILED_SQLITE_REL = path.join('better-sqlite3', 'build', 'Release', 'better_sqlite3.node');
+const prebuiltSqliteRel = (arch) => path.join('better-sqlite3', 'prebuilds', `darwin-${arch}.node`);
+
+function betterSqliteModuleDir() {
   try {
-    const moduleDir = path.dirname(
-      require.resolve('better-sqlite3/package.json', { paths: [repoRoot] })
-    );
-    candidates.push(path.join(moduleDir, 'build', 'Release', 'better_sqlite3.node'));
+    return path.dirname(require.resolve('better-sqlite3/package.json', { paths: [repoRoot] }));
   } catch (_err) {
-    // Not installed in (or above) this checkout.
+    return null; // Not installed in (or above) this checkout.
   }
-  for (const dir of abiCacheEntries('host-')) {
-    candidates.push(path.join(dir, 'better_sqlite3.node'));
-  }
-  return candidates.find((file) => fs.existsSync(file) && loadsInProcess(file)) || null;
 }
 
 /**
- * A better_sqlite3.node built for the ELECTRON ABI, if one is banked here.
- * Loading it under host `node` is a genuine NODE_MODULE_VERSION mismatch — the
- * exact third historical release failure. Absent on a checkout that has only
- * ever run the unit suite, hence opportunistic.
+ * A better-sqlite3 addon that the host `node` can actually load, if this
+ * checkout has one, with the bundle layout it belongs at. Preference order:
+ * the installed v13 N-API prebuild (`prebuilds/darwin-<arch>.node` — the shape
+ * every real build ships since the Electron 44 upgrade), then a compiled
+ * `build/Release` artifact carrying the host ABI, then a host-keyed entry banked
+ * in .abi-cache by scripts/ensure-sqlite-abi.mjs.
  */
-function resolveElectronAbiAddon() {
-  for (const dir of abiCacheEntries('electron-')) {
-    const file = path.join(dir, 'better_sqlite3.node');
-    if (fs.existsSync(file) && !loadsInProcess(file)) return file;
+function resolveHostLoadableAddon() {
+  const candidates = [];
+  const moduleDir = betterSqliteModuleDir();
+  if (moduleDir) {
+    candidates.push({
+      file: path.join(moduleDir, 'prebuilds', `darwin-${HOST_ARCH}.node`),
+      rel: prebuiltSqliteRel(HOST_ARCH),
+    });
+    candidates.push({
+      file: path.join(moduleDir, 'build', 'Release', 'better_sqlite3.node'),
+      rel: COMPILED_SQLITE_REL,
+    });
+  }
+  for (const dir of abiCacheEntries('host-')) {
+    candidates.push({ file: path.join(dir, 'better_sqlite3.node'), rel: COMPILED_SQLITE_REL });
+  }
+  return candidates.find((c) => fs.existsSync(c.file) && loadsInProcess(c.file)) || null;
+}
+
+/** The installed v13 prebuild for `arch`, or null (pre-v13 checkout). */
+function resolveInstalledPrebuild(arch) {
+  const moduleDir = betterSqliteModuleDir();
+  if (!moduleDir) return null;
+  const file = path.join(moduleDir, 'prebuilds', `darwin-${arch}.node`);
+  return fs.existsSync(file) ? file : null;
+}
+
+/**
+ * A native addon compiled for ONE specific NODE_MODULE_VERSION, if this checkout
+ * has one, and whether that ABI is the host's. Needed to reproduce the third
+ * historical release failure (a bundled addon the bundled Electron cannot
+ * dlopen). Every addon this app ships today is N-API (better-sqlite3 >= 13 and
+ * node-pty alike load under BOTH hosts), so none of them can exhibit the
+ * mismatch — only a classic per-ABI addon can, and the only ones left are the
+ * pre-v13 better_sqlite3.node builds banked in .abi-cache by
+ * scripts/ensure-sqlite-abi.mjs. Each candidate is PROVEN per-ABI by probing:
+ * it must load under exactly one of the two hosts and fail the other with a
+ * NODE_MODULE_VERSION error. A fresh checkout has none, hence opportunistic.
+ */
+function resolveAbiSpecificAddon() {
+  const { probeNativeModule } = helpers;
+  const electronBinary = resolveElectronBinary();
+  const candidates = [];
+  for (const dir of abiCacheEntries('host-')) candidates.push(path.join(dir, 'better_sqlite3.node'));
+  for (const dir of abiCacheEntries('electron-')) candidates.push(path.join(dir, 'better_sqlite3.node'));
+
+  const isAbiMismatch = (probe) => !probe.ok && probe.detail.includes('NODE_MODULE_VERSION');
+  for (const file of candidates.filter((f) => fs.existsSync(f))) {
+    const underHost = probeNativeModule(process.execPath, file);
+    if (!underHost.ok) {
+      if (isAbiMismatch(underHost)) return { file, loadsOnHost: false };
+      continue; // broken for some other reason (arch, corruption) — not a per-ABI proof
+    }
+    if (!electronBinary) continue; // cannot prove it is not N-API without the other host
+    if (isAbiMismatch(probeNativeModule(electronBinary, file))) return { file, loadsOnHost: true };
   }
   return null;
 }
@@ -241,19 +287,12 @@ function buildAppFixture(tmpDir, options = {}) {
     fs.symlinkSync(process.execPath, path.join(contents, 'MacOS', opts.executableName));
   }
 
-  const addons = opts.addons === undefined
-    ? [{ name: 'better_sqlite3.node', source: resolveHostLoadableAddon() || machOButNotAnAddon() }]
-    : opts.addons;
+  // An addon is placed by explicit `rel` (bundle layout under node_modules) or,
+  // classically, at <dep>/build/Release/<name>.
+  const addons = opts.addons === undefined ? [defaultSqliteAddon()] : opts.addons;
   for (const addon of addons) {
-    const dest = path.join(
-      resources,
-      'app.asar.unpacked',
-      'node_modules',
-      addon.dep || 'some-dep',
-      'build',
-      'Release',
-      addon.name
-    );
+    const rel = addon.rel || path.join(addon.dep || 'some-dep', 'build', 'Release', addon.name);
+    const dest = path.join(resources, 'app.asar.unpacked', 'node_modules', rel);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(addon.source, dest);
   }
@@ -268,6 +307,20 @@ function buildAppFixture(tmpDir, options = {}) {
   return appPath;
 }
 
+/** The healthy default better-sqlite3 addon for a fixture, at its real layout. */
+function defaultSqliteAddon() {
+  const loadable = resolveHostLoadableAddon();
+  return loadable
+    ? { source: loadable.file, rel: loadable.rel }
+    : { name: 'better_sqlite3.node', source: machOButNotAnAddon() };
+}
+
+/** The file name the default fixture's better-sqlite3 addon lands under. */
+function defaultSqliteBasename() {
+  const addon = defaultSqliteAddon();
+  return path.basename(addon.rel || addon.name);
+}
+
 async function withTmpDir(fn) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aftersign-test-'));
   try {
@@ -279,7 +332,7 @@ async function withTmpDir(fn) {
 
 /** The Arch ordinal matching the host, so a healthy fixture is expected to pass. */
 function hostArchOrdinal() {
-  return process.arch === 'x64' ? ARCH.x64 : ARCH.arm64;
+  return ARCH[HOST_ARCH];
 }
 
 // ---------------------------------------------------------------------------
@@ -412,7 +465,11 @@ async function caseE() {
 // ---------------------------------------------------------------------------
 async function caseF() {
   await withTmpDir(async (tmpDir) => {
-    buildAppFixture(tmpDir);
+    // Compiled layout on purpose: a prebuild for another arch is skipped by
+    // design (Case W), whereas a compiled addon of the wrong arch is a defect.
+    buildAppFixture(tmpDir, {
+      addons: [{ source: defaultSqliteAddon().source, rel: COMPILED_SQLITE_REL }]
+    });
     const { message } = await runCapturing(macArchContext(tmpDir, ARCH.ia32));
 
     assert(message !== '', 'Case F: a wrong-arch bundle throws');
@@ -438,13 +495,13 @@ async function caseG() {
   const addon = resolveHostLoadableAddon();
   if (!addon) {
     console.log(
-      'SKIP: Case G needs a host-ABI better_sqlite3.node ' +
-        '(run `node scripts/ensure-sqlite-abi.mjs host` to produce one)'
+      'SKIP: Case G needs a host-loadable better-sqlite3 addon ' +
+        '(a v13 prebuild, or `node scripts/ensure-sqlite-abi.mjs host`)'
     );
     return;
   }
   await withTmpDir(async (tmpDir) => {
-    buildAppFixture(tmpDir, { addons: [{ name: 'better_sqlite3.node', source: addon }] });
+    buildAppFixture(tmpDir, { addons: [{ source: addon.file, rel: addon.rel }] });
     const { message, warnings } = await runCapturing(macArchContext(tmpDir, hostArchOrdinal()));
     assert(message === '', `Case G: a healthy bundle does not throw (got: ${message})`);
     assert(warnings.length === 0, 'Case G: a healthy bundle emits no warnings');
@@ -465,7 +522,7 @@ async function caseH() {
 
     assert(message !== '', 'Case H: an unloadable native module throws');
     assert(
-      message.includes('cannot load the packaged better_sqlite3.node'),
+      message.includes('cannot load the packaged better-sqlite3 addon'),
       'Case H: the error identifies the ABI/load failure'
     );
     assert(
@@ -493,44 +550,54 @@ async function caseI() {
 
   const addon = resolveHostLoadableAddon();
   if (addon) {
-    const goodProbe = probeNativeModule(process.execPath, addon);
+    const goodProbe = probeNativeModule(process.execPath, addon.file);
     assert(
-      goodProbe.ok === loadsInProcess(addon),
+      goodProbe.ok === loadsInProcess(addon.file),
       'Case I: the probe agrees with an in-process require of the same module'
     );
     assert(goodProbe.ok === true, 'Case I: a loadable native module probes clean');
   } else {
-    console.log('SKIP: Case I positive probe needs a host-ABI better_sqlite3.node');
+    console.log('SKIP: Case I positive probe needs a host-loadable better-sqlite3 addon');
+  }
+
+  // The v13 N-API prebuild is the addon every real build ships, and its whole
+  // point is that ONE binary loads under both hosts. Pin that under the real
+  // Electron: a regression here (a compiled per-ABI artifact sneaking back in)
+  // is exactly what would resurrect the third historical release failure.
+  const electronBinary = resolveElectronBinary();
+  const prebuild = resolveInstalledPrebuild(HOST_ARCH);
+  if (electronBinary && prebuild) {
+    const underElectron = probeNativeModule(electronBinary, prebuild);
+    assert(
+      underElectron.ok === true,
+      `Case I: the N-API prebuild loads under Electron (got: ${underElectron.detail || 'ok'})`
+    );
+    assert(
+      probeNativeModule(process.execPath, prebuild).ok === true,
+      'Case I: the same N-API prebuild loads under host node'
+    );
+  } else {
+    console.log('SKIP: Case I N-API check needs Electron plus the installed v13 prebuild');
   }
 
   // A REAL NODE_MODULE_VERSION mismatch, reproduced without building anything:
-  // point the probe at the two hosts whose ABIs actually ping-pong in this repo.
-  // Electron loading a host-ABI module is precisely the failure that shipped.
-  const electronBinary = resolveElectronBinary();
-  if (electronBinary && addon) {
-    const mismatch = probeNativeModule(electronBinary, addon);
+  // a classic per-ABI addon probed under the host it was NOT compiled for.
+  // Electron loading a host-ABI module is precisely the failure that shipped;
+  // host node loading an Electron-ABI module is the same defect mirrored.
+  const abiSpecific = resolveAbiSpecificAddon();
+  if (abiSpecific && (abiSpecific.loadsOnHost ? electronBinary : true)) {
+    const wrongHost = abiSpecific.loadsOnHost ? electronBinary : process.execPath;
+    const mismatch = probeNativeModule(wrongHost, abiSpecific.file);
     assert(
       mismatch.ok === false,
-      'Case I: Electron refuses a host-ABI native module (real ABI mismatch)'
+      'Case I: a per-ABI native module is refused by the other host (real ABI mismatch)'
     );
     assert(
       mismatch.detail.includes('NODE_MODULE_VERSION'),
       `Case I: the failure reports the NODE_MODULE_VERSION mismatch verbatim (got: ${mismatch.detail})`
     );
   } else {
-    console.log('SKIP: Case I NODE_MODULE_VERSION check needs Electron plus a host-ABI module');
-  }
-
-  // A banked Electron-ABI artifact, if this checkout has one, is the same
-  // mismatch from the other direction.
-  const electronAbiAddon = resolveElectronAbiAddon();
-  if (electronAbiAddon) {
-    const reverse = probeNativeModule(process.execPath, electronAbiAddon);
-    assert(reverse.ok === false, 'Case I: an Electron-ABI module fails under host node');
-    assert(
-      reverse.detail.includes('NODE_MODULE_VERSION'),
-      'Case I: the reverse mismatch also names NODE_MODULE_VERSION'
-    );
+    console.log('SKIP: Case I NODE_MODULE_VERSION check needs a per-ABI addon (plus Electron if it is host-ABI)');
   }
 }
 
@@ -544,9 +611,9 @@ async function caseJ() {
     });
     const { message } = await runCapturing(macArchContext(tmpDir, hostArchOrdinal()));
 
-    assert(message !== '', 'Case J: a bundle without better_sqlite3.node throws');
+    assert(message !== '', 'Case J: a bundle without a better-sqlite3 addon throws');
     assert(
-      message.includes('better_sqlite3.node was not found'),
+      message.includes('no better-sqlite3 native addon was found'),
       'Case J: the error names the missing module'
     );
     assert(
@@ -624,7 +691,7 @@ async function caseN() {
 
     assert(message.includes('Info.plist is missing'), 'Case N: reports the missing Info.plist');
     assert(message.includes('no *.node native addons'), 'Case N: reports the missing addons');
-    assert(message.includes('better_sqlite3.node was not found'), 'Case N: reports the missing DB module');
+    assert(message.includes('no better-sqlite3 native addon was found'), 'Case N: reports the missing DB module');
     assert(message.includes('the packaged app is only'), 'Case N: reports the size floor');
     assert(message.includes('app.asar is missing'), 'Case N: reports the missing asar');
     assert(
@@ -783,23 +850,28 @@ async function caseR() {
 
 // ---------------------------------------------------------------------------
 // Case S: the third historical release failure, end to end.
-// The bundle's "Electron" is the real Electron binary and its
-// better_sqlite3.node carries the HOST ABI — the exact shape of the mismatch
-// that shipped. Nothing here is stubbed.
+// The bundle's better_sqlite3.node is a real per-ABI addon compiled for a
+// DIFFERENT host than the bundle's "Electron" — the exact shape of the mismatch
+// that shipped. Direction depends on which per-ABI addon this checkout has
+// banked: a host-ABI addon under the real Electron binary, or an Electron-ABI
+// addon under host node. Nothing is stubbed. Skips (honestly) on a checkout
+// with no pre-v13 artifact banked — every shipped addon is N-API now.
 // ---------------------------------------------------------------------------
 async function caseS() {
   const electronBinary = resolveElectronBinary();
-  const addon = resolveHostLoadableAddon();
-  if (!electronBinary || !addon) {
-    console.log('SKIP: Case S needs Electron plus a host-ABI better_sqlite3.node');
+  const abiSpecific = resolveAbiSpecificAddon();
+  if (!abiSpecific || (abiSpecific.loadsOnHost && !electronBinary)) {
+    console.log('SKIP: Case S needs a per-ABI native addon (plus Electron if it is host-ABI)');
     return;
   }
   await withTmpDir(async (tmpDir) => {
     const appPath = buildAppFixture(tmpDir, {
-      withExecutable: false,
-      addons: [{ name: 'better_sqlite3.node', source: addon }]
+      withExecutable: !abiSpecific.loadsOnHost,
+      addons: [{ source: abiSpecific.file, rel: COMPILED_SQLITE_REL }]
     });
-    fs.symlinkSync(electronBinary, path.join(appPath, 'Contents', 'MacOS', PRODUCT_NAME));
+    if (abiSpecific.loadsOnHost) {
+      fs.symlinkSync(electronBinary, path.join(appPath, 'Contents', 'MacOS', PRODUCT_NAME));
+    }
 
     const { message } = await runCapturing(macArchContext(tmpDir, hostArchOrdinal()));
     assert(message !== '', 'Case S: an ABI-mismatched bundle fails the build');
@@ -808,7 +880,7 @@ async function caseS() {
       'Case S: the build error carries the NODE_MODULE_VERSION diagnosis'
     );
     assert(
-      message.includes('cannot load the packaged better_sqlite3.node'),
+      message.includes('cannot load the packaged better-sqlite3 addon'),
       'Case S: the build error explains which module is at fault'
     );
     assert(
@@ -858,25 +930,26 @@ async function caseU() {
 
   await withTmpDir(async (tmpDir) => {
     const appPath = buildAppFixture(tmpDir);
+    const sqliteName = defaultSqliteBasename();
 
     const halfUniversal = verifyBundle({
       appPath,
       expectedArch: 'universal',
-      execFile: stubExecFile({ [PRODUCT_NAME]: 'x86_64', 'better_sqlite3.node': 'arm64' })
+      execFile: stubExecFile({ [PRODUCT_NAME]: 'x86_64', [sqliteName]: 'arm64' })
     });
     assert(
       halfUniversal.length === 1 && halfUniversal[0].includes(`MacOS/${PRODUCT_NAME}`),
       'Case U: a universal bundle whose main executable has one slice is rejected'
     );
     assert(
-      !halfUniversal[0].includes('better_sqlite3.node'),
+      !halfUniversal[0].includes(sqliteName),
       'Case U: a single-slice addon inside a universal bundle is allowed (x64ArchFiles)'
     );
 
     const fullyUniversal = verifyBundle({
       appPath,
       expectedArch: 'universal',
-      execFile: stubExecFile({ [PRODUCT_NAME]: 'x86_64 arm64', 'better_sqlite3.node': 'arm64' })
+      execFile: stubExecFile({ [PRODUCT_NAME]: 'x86_64 arm64', [sqliteName]: 'arm64' })
     });
     assert(fullyUniversal.length === 0, 'Case U: a genuinely universal bundle passes');
 
@@ -938,10 +1011,111 @@ async function caseV() {
     assert(!collected.includes('linux-arm') && !collected.includes('linux-x64') && !collected.includes('win32-x64'),
       'Case V: no foreign prebuild survives collection');
     assert(collected.includes('darwin-arm64') && collected.includes('darwin-x64'),
-      'Case V: both darwin prebuilds survive collection');
+      'Case V: both darwin prebuilds survive collection when no arch is expected');
+
+    const perArch = collectNodeAddons(root, 'arm64').map((f) => path.basename(path.dirname(f)));
+    assert(perArch.length === 2 && perArch.includes('darwin-arm64') && !perArch.includes('darwin-x64'),
+      `Case V: an arm64 build drops the darwin-x64 prebuild (got: ${perArch.join(', ')})`);
+    const universal = collectNodeAddons(root, 'universal');
+    assert(universal.length === 3, 'Case V: a universal build keeps both darwin prebuilds');
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Case W: better-sqlite3 v13's N-API prebuild layout.
+// Since v13 there is no build/Release/better_sqlite3.node at all — the addon is
+// `prebuilds/darwin-<arch>.node`, and a per-arch build carries BOTH darwin
+// prebuilds. The verifier must (a) recognise the prebuild as better-sqlite3,
+// (b) skip the other arch's prebuild instead of failing it, and (c) still probe
+// the right one. Pure layout assertions first; then the real thing end to end
+// against the installed prebuilds when this checkout has them.
+// ---------------------------------------------------------------------------
+async function caseW() {
+  const { isForeignPrebuild, isBetterSqliteAddon, findBetterSqliteAddon, parsePrebuildTarget } = helpers;
+  const p = (...segments) => path.join('root', ...segments);
+
+  const flat = parsePrebuildTarget(p('better-sqlite3', 'prebuilds', 'darwin-x64.node'));
+  assert(flat && flat.platform === 'darwin' && flat.arch === 'x64',
+    'Case W: the flat v13 prebuild layout parses to darwin/x64');
+  const nested = parsePrebuildTarget(p('node-pty', 'prebuilds', 'darwin-arm64', 'pty.node'));
+  assert(nested && nested.platform === 'darwin' && nested.arch === 'arm64',
+    'Case W: the nested node-pty prebuild layout parses to darwin/arm64');
+  assert(parsePrebuildTarget(p('better-sqlite3', 'build', 'Release', 'better_sqlite3.node')) === null,
+    'Case W: a compiled addon is not a prebuild');
+
+  assert(isForeignPrebuild(p('better-sqlite3', 'prebuilds', 'darwin-x64.node'), 'arm64'),
+    'Case W: the darwin-x64 prebuild is foreign to an arm64 build');
+  assert(!isForeignPrebuild(p('better-sqlite3', 'prebuilds', 'darwin-arm64.node'), 'arm64'),
+    'Case W: the darwin-arm64 prebuild is native to an arm64 build');
+  assert(isForeignPrebuild(p('node-pty', 'prebuilds', 'darwin-arm64', 'pty.node'), 'x64'),
+    'Case W: the nested darwin-arm64 prebuild is foreign to an x64 build');
+  assert(!isForeignPrebuild(p('better-sqlite3', 'prebuilds', 'darwin-x64.node'), 'universal'),
+    'Case W: a universal build keeps both darwin prebuilds');
+  assert(isForeignPrebuild(p('better-sqlite3', 'prebuilds', 'linuxmusl-x64.node'), 'x64'),
+    'Case W: a non-darwin prebuild is foreign regardless of arch');
+  assert(!isForeignPrebuild(p('better-sqlite3', 'build', 'Release', 'better_sqlite3.node'), 'arm64'),
+    'Case W: a compiled addon is never foreign');
+
+  assert(isBetterSqliteAddon(p('better-sqlite3', 'prebuilds', 'darwin-arm64.node')),
+    'Case W: the v13 prebuild is recognised as better-sqlite3');
+  assert(isBetterSqliteAddon(p('some-dep', 'build', 'Release', 'better_sqlite3.node')),
+    'Case W: the compiled better_sqlite3.node is still recognised');
+  assert(!isBetterSqliteAddon(p('node-pty', 'prebuilds', 'darwin-arm64', 'pty.node')),
+    'Case W: another package\'s darwin prebuild is not better-sqlite3');
+  assert(!isBetterSqliteAddon(p('better-sqlite3', 'prebuilds', 'linux-x64.node')),
+    'Case W: a non-darwin better-sqlite3 prebuild is not the addon this build loads');
+
+  const both = [
+    p('better-sqlite3', 'prebuilds', `darwin-${OTHER_ARCH}.node`),
+    p('better-sqlite3', 'prebuilds', `darwin-${HOST_ARCH}.node`),
+  ];
+  assert(findBetterSqliteAddon(both) === both[1],
+    'Case W: with both darwin prebuilds present, the host-arch one is probed');
+  assert(findBetterSqliteAddon([p('node-pty', 'build', 'Release', 'pty.node')]) === null,
+    'Case W: no better-sqlite3 addon among other addons resolves to null');
+
+  if (process.platform !== 'darwin') {
+    console.log('SKIP: Case W end-to-end is darwin-only (real lipo + probe)');
+    return;
+  }
+  const hostPrebuild = resolveInstalledPrebuild(HOST_ARCH);
+  const otherPrebuild = resolveInstalledPrebuild(OTHER_ARCH);
+  if (!hostPrebuild || !otherPrebuild) {
+    console.log('SKIP: Case W end-to-end needs the installed better-sqlite3 v13 prebuilds');
+    return;
+  }
+  await withTmpDir(async (tmpDir) => {
+    // Exactly what a per-arch build carries: both darwin prebuilds, no
+    // build/Release artifact anywhere.
+    buildAppFixture(tmpDir, {
+      addons: [
+        { source: hostPrebuild, rel: prebuiltSqliteRel(HOST_ARCH) },
+        { source: otherPrebuild, rel: prebuiltSqliteRel(OTHER_ARCH) },
+      ]
+    });
+    const { message, warnings } = await runCapturing(macArchContext(tmpDir, hostArchOrdinal()));
+    assert(message === '', `Case W: a v13-layout bundle passes every check (got: ${message})`);
+    assert(warnings.length === 0, 'Case W: a v13-layout bundle emits no warnings');
+  });
+  await withTmpDir(async (tmpDir) => {
+    // The same bundle judged for the OTHER arch: the other-arch prebuild is now
+    // the native one and must be probed; it cannot load on this host (a real
+    // cross-arch dlopen failure, or Rosetta-less arm64-on-x64), and the
+    // host-arch prebuild must be skipped rather than reported as wrong-arch.
+    buildAppFixture(tmpDir, {
+      addons: [
+        { source: hostPrebuild, rel: prebuiltSqliteRel(HOST_ARCH) },
+        { source: otherPrebuild, rel: prebuiltSqliteRel(OTHER_ARCH) },
+      ]
+    });
+    const { message } = await runCapturing(macArchContext(tmpDir, ARCH[OTHER_ARCH]));
+    assert(
+      !message.includes(`darwin-${HOST_ARCH}.node`),
+      `Case W: the host-arch prebuild is skipped on an ${OTHER_ARCH} build, not judged (got: ${message})`
+    );
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -981,6 +1155,7 @@ async function caseV() {
   await caseT();
   await caseU();
   await caseV();
+  await caseW();
 
   console.log(`\nResults: ${passed} passed, ${failed} failed`);
   process.exit(failed > 0 ? 1 : 0);

@@ -59,23 +59,27 @@ jobs:
       # 0.2.6's first build (foreign prebuilds fed to lipo; a stale arm64 ABI
       # bank leaking into the x64 package).
       #
-      # HOST ABI on purpose, and BEFORE the Electron flip below. Case G and Case
-      # I resolve a host-loadable better_sqlite3.node and soft-SKIP without one,
-      # so running this after the flip would silently drop the healthy-bundle
-      # case and half of the probe case — passing while proving less. Case I
-      # additionally asserts the mismatch in BOTH directions, which needs the
-      # Electron bank present too; ensure-sqlite-abi maintains both, and each
-      # flip is a cached file copy rather than a recompile.
+      # Cases G/I/W use the installed better-sqlite3 v13 N-API prebuild (one
+      # binary that loads under host Node AND Electron), so they no longer
+      # depend on an ABI flip. The NODE_MODULE_VERSION-mismatch cases (I, S)
+      # need a classic per-ABI addon; every addon shipped today is N-API, so on
+      # this runner they soft-SKIP (they still run on dev boxes with a pre-v13
+      # artifact banked in .abi-cache). `ensure-sqlite-abi host` is kept as a
+      # cheap guard for a checkout that somehow carries a compiled
+      # better-sqlite3 artifact (it is a no-op on the prebuild).
       - name: Verify packaging checks (darwin-only afterSign cases)
         run: |
           node scripts/ensure-sqlite-abi.mjs host
           pnpm run test:build
 
-      # The launched app needs the ELECTRON ABI. postinstall normally leaves
-      # it there, but a restored pnpm store can carry a host-ABI
-      # better_sqlite3.node — then _electron.launch throws NMV 127-vs-136 on
-      # load and every spec times out in setup with no app-side error. Flip
-      # deterministically (cached file copy, no recompile).
+      # Guard that the launched app can load better-sqlite3 under Electron.
+      # Since v13 the prebuild serves both ABIs, so this is normally a no-op —
+      # it exists for the compiled-artifact case (a restored pnpm store carrying
+      # a host-ABI build/Release), where _electron.launch would otherwise throw a
+      # NODE_MODULE_VERSION mismatch on load and every spec would time out in
+      # setup with no app-side error. It also triggers Electron's first-run
+      # binary download (Electron >= 42 downloads at first use, not postinstall)
+      # before Playwright needs it.
       - name: Ensure Electron ABI for better-sqlite3
         run: node scripts/ensure-sqlite-abi.mjs electron
 
