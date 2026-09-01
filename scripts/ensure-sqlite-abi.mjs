@@ -246,14 +246,20 @@ function cachePath(key) {
  */
 function probe(target, moduleDir) {
   const artifact = artifactPath(moduleDir);
-  if (!fs.existsSync(artifact)) return { ok: false, detail: `no artifact at ${artifact}` };
 
   if (FAKE) {
+    if (!fs.existsSync(artifact)) return { ok: false, detail: `no artifact at ${artifact}` };
     const stamp = fs.readFileSync(artifact, 'utf8');
     return stamp.startsWith(`abi:${target}`)
       ? { ok: true, info: { nodeModuleVersion: `fake-${target}`, arch: process.arch } }
       : { ok: false, detail: `fake artifact is not stamped abi:${target}` };
   }
+
+  // No build/Release artifact is NOT a failure by itself: better-sqlite3 >= 13
+  // is N-API and ships one runtime-agnostic prebuild per platform, which the
+  // module's own loader falls back to when nothing was locally compiled. The
+  // load test below (requiring the module in a child of the target host) is
+  // the real truth either way, so fall through and let it decide.
 
   const source = `
     const Database = require(${JSON.stringify(moduleDir)});
@@ -297,6 +303,9 @@ function probe(target, moduleDir) {
 /** Copy the current artifact into the cache under `key`, if not already banked. */
 function saveToCache(key, moduleDir) {
   if (!key) return false;
+  // Nothing compiled locally (the N-API prebuild is serving both hosts) —
+  // there is no per-ABI artifact to bank, and none is needed.
+  if (!fs.existsSync(artifactPath(moduleDir))) return false;
   const destination = cachePath(key);
   if (fs.existsSync(destination)) return false;
   installArtifact(artifactPath(moduleDir), destination);
