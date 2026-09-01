@@ -23,9 +23,15 @@
  *
  * Version is read from package.json. The primary `path`/`sha512` (legacy single-file
  * fallback) points at the first .zip listed; prefer passing the arm64 zip first.
+ *
+ * `minimumSystemVersion` is the macOS floor of the bundled Electron (read from
+ * Electron.app's LSMinimumSystemVersion; override with CYBOFLOW_MIN_MACOS). electron-updater
+ * honours it, so a Mac below the floor is told "no update" instead of auto-installing a build
+ * that cannot launch — Electron 44 raised the floor from macOS 11 to 13. Required on macOS
+ * (where releases are cut); omitted with a note elsewhere (Linux CI has no Electron.app).
  */
 
-import { createReadStream, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,6 +45,26 @@ const { version } = require('../package.json');
 function fail(message) {
   console.error(`\n✗ ${message}\n`);
   process.exit(1);
+}
+
+/** macOS floor of the Electron this release bundles, e.g. '13.0'; null when unknowable. */
+function resolveMinimumSystemVersion() {
+  const override = process.env.CYBOFLOW_MIN_MACOS;
+  if (override) {
+    if (!/^\d+(\.\d+){0,2}$/.test(override)) fail(`CYBOFLOW_MIN_MACOS is not a version: ${override}`);
+    return override;
+  }
+  let plist;
+  try {
+    const electronDir = dirname(require.resolve('electron/package.json'));
+    plist = join(electronDir, 'dist', 'Electron.app', 'Contents', 'Info.plist');
+  } catch {
+    return null;
+  }
+  if (!existsSync(plist)) return null;
+  const xml = readFileSync(plist, 'utf8');
+  const match = xml.match(/<key>LSMinimumSystemVersion<\/key>\s*<string>([^<]+)<\/string>/);
+  return match ? match[1].trim() : null;
 }
 
 const [outFile, ...artifacts] = process.argv.slice(2);
@@ -78,6 +104,17 @@ for (const name of artifacts) {
 const primary = files.find((f) => extname(f.url) === '.zip');
 if (!primary) fail('At least one .zip artifact is required (electron-updater downloads the zip).');
 
+const minimumSystemVersion = resolveMinimumSystemVersion();
+if (!minimumSystemVersion && process.platform === 'darwin') {
+  fail(
+    'Could not read LSMinimumSystemVersion from node_modules/electron/dist/Electron.app — ' +
+      'run `pnpm exec electron --version` to download Electron, or set CYBOFLOW_MIN_MACOS.'
+  );
+}
+if (!minimumSystemVersion) {
+  console.warn('Note: no Electron.app on this host — omitting minimumSystemVersion from the manifest.');
+}
+
 // Emit YAML in the exact shape electron-builder produces (validated by diffing
 // against a real generated manifest). Hand-built rather than via a YAML lib to
 // keep the dependency surface tiny and the output byte-predictable.
@@ -90,6 +127,7 @@ for (const f of files) {
 lines.push(`path: ${primary.url}`);
 lines.push(`sha512: ${primary.sha512}`);
 lines.push(`releaseDate: '${new Date().toISOString()}'`);
+if (minimumSystemVersion) lines.push(`minimumSystemVersion: '${minimumSystemVersion}'`);
 const yaml = lines.join('\n') + '\n';
 
 writeFileSync(outFile, yaml);

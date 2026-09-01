@@ -107,6 +107,39 @@ test('gen-mac-latest-yml emits the electron-updater manifest shape with correct 
 
     // Top-level fallback path/sha512 point at the primary (.zip).
     assert.match(yaml, new RegExp(`^sha512: ${escapeRe(zipSha)}$`, 'm'));
+
+    // The macOS floor of the bundled Electron, which electron-updater honours so
+    // a Mac below it is not auto-updated into a build that cannot launch. Read
+    // from Electron.app's Info.plist, so only assertable where that exists.
+    const electronPlist = path.join(
+      REPO_ROOT, 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'Info.plist',
+    );
+    if (fs.existsSync(electronPlist)) {
+      const floor = fs
+        .readFileSync(electronPlist, 'utf-8')
+        .match(/<key>LSMinimumSystemVersion<\/key>\s*<string>([^<]+)<\/string>/)[1];
+      assert.match(yaml, new RegExp(`^minimumSystemVersion: '${escapeRe(floor)}'$`, 'm'));
+    } else {
+      assert.doesNotMatch(yaml, /^minimumSystemVersion:/m, 'no Electron.app → no floor to claim');
+    }
+  } finally {
+    fs.rmSync(outFile, { force: true });
+    cleanup();
+  }
+});
+
+test('gen-mac-latest-yml honours CYBOFLOW_MIN_MACOS and rejects a non-version value', () => {
+  const zipName = '__test-fixture-floor.zip';
+  const cleanup = withDistFixtures({ [zipName]: Buffer.from('zip') });
+  const outFile = path.join(os.tmpdir(), `latest-mac-floor-${process.pid}.yml`);
+  try {
+    const ok = run('scripts/gen-mac-latest-yml.mjs', [outFile, zipName], { CYBOFLOW_MIN_MACOS: '14.2' });
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.match(fs.readFileSync(outFile, 'utf-8'), /^minimumSystemVersion: '14\.2'$/m);
+
+    const bad = run('scripts/gen-mac-latest-yml.mjs', [outFile, zipName], { CYBOFLOW_MIN_MACOS: 'ventura' });
+    assert.notEqual(bad.status, 0);
+    assert.match(bad.stderr, /CYBOFLOW_MIN_MACOS is not a version/);
   } finally {
     fs.rmSync(outFile, { force: true });
     cleanup();
