@@ -257,9 +257,10 @@ function probe(target, moduleDir) {
 
   // No build/Release artifact is NOT a failure by itself: better-sqlite3 >= 13
   // is N-API and ships one runtime-agnostic prebuild per platform, which the
-  // module's own loader falls back to when nothing was locally compiled. The
-  // load test below (requiring the module in a child of the target host) is
-  // the real truth either way, so fall through and let it decide.
+  // module's own loader checks FIRST (build/Debug and build/Release are only
+  // the fallback when no prebuild exists). The load test below (requiring the
+  // module in a child of the target host) is the real truth either way, so
+  // fall through and let it decide.
 
   const source = `
     const Database = require(${JSON.stringify(moduleDir)});
@@ -277,7 +278,15 @@ function probe(target, moduleDir) {
   let env = process.env;
   if (target === 'electron') {
     const binary = resolveElectronBinary();
-    if (!binary) return { ok: false, detail: 'electron is not installed; run pnpm install' };
+    if (!binary) {
+      // Electron >= 42 downloads its binary on FIRST USE (require('electron')
+      // above triggers it), not at install — so reaching here means the package
+      // is missing or that download failed.
+      return {
+        ok: false,
+        detail: 'electron binary is not available; run `pnpm install`, then `pnpm exec electron --version` to (re)download it',
+      };
+    }
     exec = binary;
     // Electron-as-Node: same binary, same ABI, no window — so the probe measures
     // the ABI the real app will load with, without opening a UI.

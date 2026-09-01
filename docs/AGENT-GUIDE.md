@@ -98,14 +98,16 @@ pnpm test:gate         # Day-gate integration; needs `claude` on PATH — manual
 node scripts/ensure-sqlite-abi.mjs <host|electron>   # better-sqlite3 ABI (normally automatic)
 ```
 
-**better-sqlite3 ABI.** One compiled `.node`, two hosts that load it: host Node/vitest (NMV
-127) and Electron (NMV 136). This is now handled automatically — `test:unit` /
-`test:integration` / `test:gate` ensure the host ABI, `pnpm dev` ensures the Electron ABI,
-and a flip is a cached file copy rather than a recompile. You only need to act when running
-vitest **directly** (`npx vitest run`, which bypasses pnpm scripts): if it dies on
-`NODE_MODULE_VERSION`, run `node scripts/ensure-sqlite-abi.mjs host`. Add `--check <target>`
-to diagnose without mutating anything. Details: `docs/ARCHITECTURE.md` → "The better-sqlite3
-ABI ping-pong".
+**better-sqlite3 ABI.** Since better-sqlite3 v13 (the Electron 44 upgrade) the addon is
+N-API: one prebuild loads under both host Node/vitest (NMV 127) and Electron (NMV 149), so
+there is normally nothing to flip. `test:unit` / `test:integration` / `test:gate` and
+`pnpm dev` still run `scripts/ensure-sqlite-abi.mjs` as a cheap guard — a no-op on the
+prebuild, a cached-copy swap only if a compiled `build/Release` artifact is ever present. If
+vitest dies on `NODE_MODULE_VERSION`, run `node scripts/ensure-sqlite-abi.mjs host`; add
+`--check <target>` to diagnose without mutating anything. If it dies on an **arch** mismatch
+in `pty.node` after an x64 packaging build, run
+`pnpm rebuild @homebridge/node-pty-prebuilt-multiarch`. Details: `docs/ARCHITECTURE.md` →
+"The better-sqlite3 ABI ping-pong".
 
 **Which tests to run when.** `pnpm test:unit` is the *final* gate, not the per-change gate.
 **Inside a sprint/ship lane** (an implement / write-tests / task-verify subagent) run only

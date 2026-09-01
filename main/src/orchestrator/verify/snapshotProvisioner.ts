@@ -239,7 +239,7 @@ export async function findDependencyDirs(root: string, maxDepth = NODE_MODULES_S
  *      `node_modules` an ALIAS, so anything the verification wrote into it
  *      landed in whatever the link pointed at: the shared sprint worktree every
  *      sibling lane is building against (root cause (c) — a host-Node
- *      better-sqlite3 under an Electron needing NMV 136 — and invisible to
+ *      better-sqlite3 under an Electron needing NMV 149 — and invisible to
  *      `checkSnapshotMutated` because `node_modules` is untracked), or the
  *      shared dep cache on the mirror path. A clone gives the snapshot its OWN
  *      copy, discarded with the snapshot, so no write inside a verification has
