@@ -105,9 +105,11 @@ committing** and **tag this commit** (§5) so the tag matches the artifacts.
 ## 3. Four signed builds
 
 Source signing creds into each build subprocess (`set -a; . ~/Developer/cyboflow/.envrc.local; set +a`).
-Each build recompiles `better-sqlite3` for the Electron ABI — order doesn't
+Each build recompiles the native modules for the Electron ABI — order doesn't
 matter, but **restore the host-Node ABI afterward** (§4) so tests/`pnpm dev`
-work.
+work. (Since better-sqlite3 v13 / Electron 44, better-sqlite3 is N-API and
+loads under both ABIs regardless — `node-pty` is the module the restore is
+actually for.)
 
 ```bash
 set -a; . ~/Developer/cyboflow/.envrc.local; set +a
@@ -287,8 +289,9 @@ mirror, but not the channel the app or website depends on).
 - **Never run `build:mac:universal`** — it fails on the agent binaries (see top).
 - **Don't launch the app while a `build:mac` is running** — a live app can grab a
   handle on the mounting DMG and wedge the eject. Quit installed apps first.
-- **ABI churn:** every mac build leaves `better-sqlite3` **and** `node-pty` on the
-  Electron ABI. Run `pnpm rebuild better-sqlite3 @homebridge/node-pty-prebuilt-multiarch`
+- **ABI churn:** every mac build leaves `node-pty` on the Electron ABI
+  (better-sqlite3 is N-API since v13 and loads under both). Run
+  `pnpm rebuild better-sqlite3 @homebridge/node-pty-prebuilt-multiarch`
   before vitest (a `pty.node` dlopen arch-mismatch fails 30+ test files even though
   every test that loads passes); `pnpm dev` self-heals via
   postinstall.

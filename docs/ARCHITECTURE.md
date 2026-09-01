@@ -1058,11 +1058,21 @@ report-only, while the minimal smoke tier (`test:ci:minimal`) is a blocking requ
 
 ### The better-sqlite3 ABI ping-pong
 
-`NODE_MODULE_VERSION` is a property of the **host binary**, not the module. There is exactly one
-compiled artifact — `node_modules/.../better-sqlite3/build/Release/better_sqlite3.node` — and two
-hosts that `dlopen` it: Electron (`pnpm dev`, e2e, packaging) and host Node (vitest). Whichever
-rebuilt last wins; the loser dies with a `NODE_MODULE_VERSION` mismatch far from its cause. There
-is no way to hold both without a second install tree.
+**Mostly retired since better-sqlite3 v13 (the Electron 44 upgrade).** v13 is N-API: it ships one
+runtime-agnostic prebuild per platform (`prebuilds/darwin-arm64.node`), and that single binary
+loads under host Node (ABI 127) **and** Electron (ABI 149). Steady state is now *no*
+`build/Release` artifact at all and every `ensure-sqlite-abi.mjs` call passing as a cheap no-op.
+The machinery below is retained because it still guards the compiled-artifact case — v13's loader
+**prefers** `build/Release` when something (e.g. `pnpm electron:rebuild`, `install-app-deps`)
+compiles one locally, and a locally-compiled v13 is also N-API so even that cannot re-introduce a
+flip — and because `node-pty` remains a classic per-ABI addon (rebuilt by `install-app-deps`, not
+covered by this script). The history below explains what the machine was for:
+
+`NODE_MODULE_VERSION` is a property of the **host binary**, not the module. Pre-v13 there was
+exactly one compiled artifact — `node_modules/.../better-sqlite3/build/Release/better_sqlite3.node`
+— and two hosts that `dlopen` it: Electron (`pnpm dev`, e2e, packaging) and host Node (vitest).
+Whichever rebuilt last wins; the loser dies with a `NODE_MODULE_VERSION` mismatch far from its
+cause. There was no way to hold both without a second install tree.
 
 **This is now automatic.** `scripts/ensure-sqlite-abi.mjs <host|electron>` fronts the entry points
 that care:
