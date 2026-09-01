@@ -479,6 +479,22 @@ describe('RunRightRail — width resize', () => {
     renderRail(EMPTY_PHASE_STATE);
     expect(railWidth()).toBe(420);
   });
+
+  // The width is written back to localStorage from an unconditional mount
+  // effect, so every install that ran a pre-360 build has the OLD default (296)
+  // stored — raising the default alone would never reach any of them.
+  it('lifts a stored legacy default (296) to the current default once', () => {
+    localStorage.setItem(WIDTH_KEY, '296');
+    renderRail(EMPTY_PHASE_STATE);
+    expect(railWidth()).toBe(360);
+    expect(localStorage.getItem(WIDTH_KEY)).toBe('360');
+  });
+
+  it('leaves a deliberately chosen width next to the legacy default alone', () => {
+    localStorage.setItem(WIDTH_KEY, '300');
+    renderRail(EMPTY_PHASE_STATE);
+    expect(railWidth()).toBe(300);
+  });
 });
 
 // ---------------------------------------------------------------------------

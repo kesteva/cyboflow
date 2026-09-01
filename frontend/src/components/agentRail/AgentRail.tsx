@@ -28,6 +28,15 @@ import { AgentThreadView } from './AgentThreadView';
 /** Default expanded rail width. Wide enough for the thread view's composer
  * chrome on first run (users who drag it get their own persisted width). */
 const RAIL_DEFAULT_WIDTH = 360;
+/**
+ * The pre-360 default this rail shipped with. Both rails write their width back
+ * to localStorage from an unconditional mount effect, so every install that ran
+ * an earlier build has the OLD default stored — raising RAIL_DEFAULT_WIDTH alone
+ * would never reach them. A stored width equal to the legacy default is that
+ * write-back, not a width the user chose, so it is lifted once. (A user who had
+ * dragged to exactly 320 px gets the new default and can drag back.)
+ */
+const RAIL_DEFAULT_WIDTH_LEGACY = 320;
 /** Resize clamp: never shrink below a usable column. */
 const RAIL_MIN_WIDTH = 260;
 /** Resize clamp: cap at the smaller of an absolute ceiling or ~50% of viewport. */
@@ -70,7 +79,8 @@ export function AgentRail() {
   const [width, setWidth] = useState<number>(() => {
     const saved = typeof localStorage !== 'undefined' ? localStorage.getItem(WIDTH_KEY) : null;
     const parsed = saved !== null ? parseInt(saved, 10) : NaN;
-    return clampAgentRailWidth(Number.isFinite(parsed) ? parsed : RAIL_DEFAULT_WIDTH);
+    const stored = Number.isFinite(parsed) ? parsed : RAIL_DEFAULT_WIDTH;
+    return clampAgentRailWidth(stored === RAIL_DEFAULT_WIDTH_LEGACY ? RAIL_DEFAULT_WIDTH : stored);
   });
   const [isResizing, setIsResizing] = useState(false);
   const startXRef = useRef<number>(0);

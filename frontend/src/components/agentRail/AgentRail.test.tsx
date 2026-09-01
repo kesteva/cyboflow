@@ -146,6 +146,22 @@ describe('AgentRail — width resize', () => {
     render(<AgentRail />);
     expect(railWidth()).toBe(560);
   });
+
+  // The width is written back to localStorage from an unconditional mount
+  // effect, so every install that ran a pre-360 build has the OLD default (320)
+  // stored — raising the default alone would never reach any of them.
+  it('lifts a stored legacy default (320) to the current default once', () => {
+    localStorage.setItem(WIDTH_KEY, '320');
+    render(<AgentRail />);
+    expect(railWidth()).toBe(360);
+    expect(localStorage.getItem(WIDTH_KEY)).toBe('360');
+  });
+
+  it('leaves a deliberately chosen width next to the legacy default alone', () => {
+    localStorage.setItem(WIDTH_KEY, '321');
+    render(<AgentRail />);
+    expect(railWidth()).toBe(321);
+  });
 });
 
 describe('clampAgentRailWidth', () => {

@@ -182,9 +182,13 @@ export const Sidebar = memo(function Sidebar({
         className="bg-surface-primary text-text-primary h-full flex flex-col pt-4 relative flex-shrink-0 border-r border-border-primary"
         // The persisted drag width (up to 600px) is set on a large window; on a
         // narrow one an unclamped 500px sidebar + the default-width right rail
-        // starve the center column to ~0 (composer collapses). Clamp to a
-        // viewport fraction so the center always keeps usable width.
-        style={{ width: `${width}px`, maxWidth: 'min(600px, 40vw)' }}
+        // starve the center column to ~0 (composer collapses) or push the rail
+        // off the edge. The cap is derived from what has to survive beside it,
+        // not a viewport fraction: 640px = CyboflowRoot's 280px center floor +
+        // the 360px default right rail. A flat 40vw was tuned for the old 296px
+        // rail and overflows the row by 25px at 1024px wide (the window the new
+        // display-aware first-run sizing opens on a 1280px screen).
+        style={{ width: `${width}px`, maxWidth: 'min(600px, calc(100vw - 640px))' }}
       >
         {/* Resize handle */}
         <div

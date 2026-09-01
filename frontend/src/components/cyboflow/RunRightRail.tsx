@@ -83,6 +83,15 @@ const TABS: Tab[] = [
 /** Default expanded rail width. Wide enough for its tab headers on first run
  * (users who drag it get their own persisted width instead). */
 const RAIL_DEFAULT_WIDTH = 360;
+/**
+ * The pre-360 default this rail shipped with. Both rails write their width back
+ * to localStorage from an unconditional mount effect, so every install that ran
+ * an earlier build has the OLD default stored — raising RAIL_DEFAULT_WIDTH alone
+ * would never reach them. A stored width equal to the legacy default is that
+ * write-back, not a width the user chose, so it is lifted once. (A user who had
+ * dragged to exactly 296 px gets the new default and can drag back.)
+ */
+const RAIL_DEFAULT_WIDTH_LEGACY = 296;
 /** Resize clamp: never shrink below a usable column. */
 const RAIL_MIN_WIDTH = 240;
 /** Resize clamp: cap at the smaller of an absolute ceiling or ~50% of viewport. */
@@ -155,7 +164,8 @@ export function RunRightRail({
     const saved =
       typeof localStorage !== 'undefined' ? localStorage.getItem(RAIL_WIDTH_KEY) : null;
     const parsed = saved !== null ? parseInt(saved, 10) : NaN;
-    return clampRailWidth(Number.isFinite(parsed) ? parsed : RAIL_DEFAULT_WIDTH);
+    const stored = Number.isFinite(parsed) ? parsed : RAIL_DEFAULT_WIDTH;
+    return clampRailWidth(stored === RAIL_DEFAULT_WIDTH_LEGACY ? RAIL_DEFAULT_WIDTH : stored);
   });
   const [isResizing, setIsResizing] = useState(false);
   const startXRef = useRef<number>(0);
