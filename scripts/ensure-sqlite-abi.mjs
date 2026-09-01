@@ -118,6 +118,11 @@ function artifactPath(moduleDir) {
   return path.join(moduleDir, 'build', 'Release', 'better_sqlite3.node');
 }
 
+/** better-sqlite3 >= 13's N-API prebuild for this platform — what its loader opens first. */
+function prebuildPath(moduleDir) {
+  return path.join(moduleDir, 'prebuilds', `${process.platform}-${process.arch}.node`);
+}
+
 /**
  * Put `bytes at sourcePath` in place at `destination` WITHOUT ever rewriting the
  * destination's existing inode.
@@ -248,9 +253,14 @@ function probe(target, moduleDir) {
   const artifact = artifactPath(moduleDir);
 
   if (FAKE) {
-    if (!fs.existsSync(artifact)) return { ok: false, detail: `no artifact at ${artifact}` };
-    const stamp = fs.readFileSync(artifact, 'utf8');
-    return stamp.startsWith(`abi:${target}`)
+    // Mirror the real loader's precedence: the N-API prebuild wins when present,
+    // build/Release is the fallback. A prebuild stamped `abi:any` "loads" under
+    // every target — that is the runtime-agnostic property v13 actually has.
+    const prebuild = prebuildPath(moduleDir);
+    const loaded = fs.existsSync(prebuild) ? prebuild : fs.existsSync(artifact) ? artifact : null;
+    if (!loaded) return { ok: false, detail: `no artifact at ${artifact} and no prebuild at ${prebuild}` };
+    const stamp = fs.readFileSync(loaded, 'utf8');
+    return stamp.startsWith(`abi:${target}`) || stamp.startsWith('abi:any')
       ? { ok: true, info: { nodeModuleVersion: `fake-${target}`, arch: process.arch } }
       : { ok: false, detail: `fake artifact is not stamped abi:${target}` };
   }
