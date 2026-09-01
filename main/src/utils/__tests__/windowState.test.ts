@@ -155,7 +155,8 @@ describe('clampWindowBounds', () => {
   it('shifts a window hanging off any edge back into the 120px visibility band', () => {
     const lt = clampWindowBounds({ x: -1500, y: -1400, width: 960, height: 640 }, WORK_AREA);
     expect(lt.x).toBe(-840);
-    expect(lt.y).toBe(-520);
+    // y floors at the top edge rather than the band — see the asymmetry test below.
+    expect(lt.y).toBe(0);
     expect(clampedIsVisible(lt)).toBe(true);
     const rb = clampWindowBounds({ x: 1900, y: 1070, width: 960, height: 640 }, WORK_AREA);
     expect(rb.x).toBe(WORK_AREA.width - 120);
@@ -163,7 +164,7 @@ describe('clampWindowBounds', () => {
     expect(clampedIsVisible(rb)).toBe(true);
   });
 
-  it('honors the 120px visibility band boundary: exactly 120px visible passes, 119 shifts', () => {
+  it('honors the 120px visibility band boundary on x: exactly 120px visible passes, 119 shifts', () => {
     // x = -840 → right edge at 120 → exactly MIN_VISIBLE_PX visible → preserved.
     expect(clampWindowBounds({ x: -840, y: 0, width: 960, height: 640 }, WORK_AREA).x).toBe(-840);
     // One pixel further out → shifted back to the band edge.
@@ -171,16 +172,57 @@ describe('clampWindowBounds', () => {
     // Right edge exactly at area-width - 120 → preserved; one further → shifted.
     expect(clampWindowBounds({ x: 1800, y: 0, width: 960, height: 640 }, WORK_AREA).x).toBe(1800);
     expect(clampWindowBounds({ x: 1801, y: 0, width: 960, height: 640 }, WORK_AREA).x).toBe(1800);
-    // Same band on the y axis (top edge and bottom edge).
-    expect(clampWindowBounds({ x: 0, y: -520, width: 960, height: 640 }, WORK_AREA).y).toBe(-520);
-    expect(clampWindowBounds({ x: 0, y: 961, width: 960, height: 640 }, WORK_AREA).y).toBe(960);
-    // One pixel past the top band edge → shifted back in.
-    expect(clampWindowBounds({ x: 0, y: -521, width: 960, height: 640 }, WORK_AREA).y).toBe(-520);
   });
 
-  it('pins a window larger than the work area to the work-area origin', () => {
+  it('floors y at the work area top — the band applies below, never above', () => {
+    // Below: the band holds. y = 960 leaves exactly 120px on screen; one more shifts back.
+    expect(clampWindowBounds({ x: 0, y: 960, width: 960, height: 640 }, WORK_AREA).y).toBe(960);
+    expect(clampWindowBounds({ x: 0, y: 961, width: 960, height: 640 }, WORK_AREA).y).toBe(960);
+    // Above: a symmetric band would allow y = -520, putting the whole title bar
+    // off-screen — an undraggable window on macOS. The top edge is a hard floor.
+    expect(clampWindowBounds({ x: 0, y: -1, width: 960, height: 640 }, WORK_AREA).y).toBe(0);
+    expect(clampWindowBounds({ x: 0, y: -520, width: 960, height: 640 }, WORK_AREA).y).toBe(0);
+    // The floor is the area's own top, not zero: a display stacked above the
+    // primary (unplugged between launches) restores at that area's top edge.
+    const stackedAbove: WindowRect = { x: 0, y: -1080, width: 1920, height: 1080 };
+    expect(
+      clampWindowBounds({ x: 0, y: -1600, width: 960, height: 640 }, stackedAbove).y,
+    ).toBe(-1080);
+  });
+
+  it('shrinks a window larger than the work area to fit it, pinned to the origin', () => {
+    // Saved on a 2560x1440 desktop monitor, restored on a 1920x1080 one. Raising
+    // to the minimums alone would leave it 2400x1500 with the far edges — and
+    // their resize handles — off the screen for good.
     const clamped = clampWindowBounds({ x: 300, y: 200, width: 2400, height: 1500 }, WORK_AREA);
-    expect(clamped).toEqual({ x: 0, y: 0, width: 2400, height: 1500 });
+    expect(clamped).toEqual({ x: 0, y: 0, width: 1920, height: 1080 });
+    const laptop: WindowRect = { x: 0, y: 0, width: 1440, height: 900 };
+    expect(clampWindowBounds({ x: 900, y: 400, width: 2800, height: 1300 }, laptop)).toEqual({
+      x: 0,
+      y: 0,
+      width: 1440,
+      height: 900,
+    });
+  });
+
+  it('lets the minimum yield when the work area is smaller than it', () => {
+    // An 800x600 work area cannot hold a 960x640 window; overflowing the screen
+    // is worse than a below-minimum window, so fitting the screen wins.
+    const tiny: WindowRect = { x: 0, y: 0, width: 800, height: 600 };
+    expect(clampWindowBounds({ x: 0, y: 0, width: 1400, height: 900 }, tiny)).toEqual({
+      x: 0,
+      y: 0,
+      width: 800,
+      height: 600,
+    });
+    // Same for the first-run path (index.ts clamps defaultWindowBounds too), which
+    // is what makes "the window now fits the screen on small displays" true.
+    expect(clampWindowBounds(defaultWindowBounds(tiny), tiny)).toEqual({
+      x: 0,
+      y: 0,
+      width: 800,
+      height: 600,
+    });
   });
 
   it('raises undersized dimensions to the minimums', () => {

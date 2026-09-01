@@ -1233,13 +1233,6 @@ async function createWindow() {
   // Each panel can register multiple event listeners
   mainWindow.webContents.setMaxListeners(100);
 
-  // A maximized previous session comes back maximized — the restored x/y/w/h
-  // above are the window's NORMAL (restore) geometry, so un-maximizing later
-  // lands where the user left it.
-  if (savedWindowState?.maximized) {
-    mainWindow.maximize();
-  }
-
   // Persist bounds so the next launch restores them. resize/move fire in a
   // flood during interactive drags, so they only arm a 500ms debounce; close
   // flushes immediately (and cancels the pending timer) so a quick open→close
@@ -1247,11 +1240,23 @@ async function createWindow() {
   // so a maximized window stores its restore size, not the maximized rect.
   const WINDOW_STATE_SAVE_DEBOUNCE_MS = 500;
   let windowStateSaveTimer: NodeJS.Timeout | null = null;
+  // isMaximized() reports FALSE while the window is minimized on Windows and
+  // Linux, so asking it at close time after a maximize→minimize→quit would
+  // persist maximized:false and reopen un-maximized. Track the last known
+  // maximize state from the events that actually change it, and trust that
+  // over the live query whenever the window is minimized.
+  let lastMaximized = savedWindowState?.maximized === true;
+  // Nothing before the reveal is a user action. The constructor's own layout
+  // pass — and the deferred maximize() below — emit resize/move while the
+  // window is still un-maximized, which would otherwise overwrite the saved
+  // state with pre-restore geometry.
+  let windowRevealed = false;
   const persistWindowState = (): void => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!mainWindow || mainWindow.isDestroyed() || !windowRevealed) return;
+    if (!mainWindow.isMinimized()) lastMaximized = mainWindow.isMaximized();
     saveWindowState(windowStateDir, {
       bounds: mainWindow.getNormalBounds(),
-      maximized: mainWindow.isMaximized(),
+      maximized: lastMaximized,
     });
   };
   const scheduleWindowStateSave = (): void => {
@@ -1263,6 +1268,8 @@ async function createWindow() {
   };
   mainWindow.on('resize', scheduleWindowStateSave);
   mainWindow.on('move', scheduleWindowStateSave);
+  mainWindow.on('maximize', scheduleWindowStateSave);
+  mainWindow.on('unmaximize', scheduleWindowStateSave);
   mainWindow.on('close', () => {
     if (windowStateSaveTimer) {
       clearTimeout(windowStateSaveTimer);
@@ -1275,6 +1282,14 @@ async function createWindow() {
   // kick off the deferrable startup work at that point. Registered BEFORE
   // loadURL/loadFile so the one-shot 'ready-to-show' is never missed.
   mainWindow.once('ready-to-show', () => {
+    windowRevealed = true;
+    // A maximized previous session comes back maximized — the restored x/y/w/h
+    // above are the window's NORMAL (restore) geometry, so un-maximizing later
+    // lands where the user left it. This has to happen HERE and not right after
+    // the constructor: maximize() shows a window that isn't displayed yet, which
+    // would defeat the show:false gate and reveal an empty frame for the whole
+    // renderer boot — exactly the flash this handler exists to prevent.
+    if (savedWindowState?.maximized) mainWindow?.maximize();
     mainWindow?.show();
     runDeferredStartupWork();
   });

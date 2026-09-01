@@ -118,30 +118,49 @@ export function defaultWindowBounds(workArea: WindowRect): WindowRect {
 }
 
 /**
- * Force a window rect onto a work area: dimensions at least the minimums, and
- * at least MIN_VISIBLE_PX of the window overlapping the work area at every
- * edge (shift x/y into range; a window larger than the work area on an axis
- * can't keep the visibility band on both edges, so it is pinned to the work
- * area's origin). Pure integer math — safe to feed straight to BrowserWindow.
+ * Force a window rect onto a work area: dimensions fitted to the area (never
+ * larger than it, never below the usable minimums), and at least MIN_VISIBLE_PX
+ * of the window overlapping the work area at every edge. Pure integer math —
+ * safe to feed straight to BrowserWindow.
  */
 export function clampWindowBounds(bounds: WindowRect, workArea: WindowRect): WindowRect {
-  const width = Math.max(MIN_WINDOW_WIDTH, Math.round(bounds.width));
-  const height = Math.max(MIN_WINDOW_HEIGHT, Math.round(bounds.height));
+  // Fit one dimension to the work area. Raising to the minimum is not enough on
+  // its own: a rect saved on a 2560-wide monitor and restored on a 1440-wide
+  // laptop would otherwise stay 2560 wide, hanging off the screen with no way to
+  // drag the far edge back. The floor yields when the work area itself is
+  // smaller than it (a 960-wide window on an 800-wide display is unusable in the
+  // other direction) — fitting the screen wins.
+  const fitToArea = (size: number, areaSize: number, minSize: number): number =>
+    Math.max(Math.min(minSize, areaSize), Math.min(Math.round(size), areaSize));
 
-  // One axis of the pin-and-band rule: keep at least MIN_VISIBLE_PX of the
-  // window past the area's leading edge AND MIN_VISIBLE_PX short of its far
-  // edge. A window larger than the area on this axis can't do both — pin to
-  // the area's origin instead.
-  const clampAxis = (pos: number, size: number, areaPos: number, areaSize: number): number => {
-    if (size > areaSize) return areaPos;
-    const min = areaPos + MIN_VISIBLE_PX - size;
-    const max = areaPos + areaSize - MIN_VISIBLE_PX;
+  const width = fitToArea(bounds.width, workArea.width, MIN_WINDOW_WIDTH);
+  const height = fitToArea(bounds.height, workArea.height, MIN_WINDOW_HEIGHT);
+
+  // The band rule on x: the window may hang off either side as long as
+  // MIN_VISIBLE_PX of it stays inside the area — enough to grab and drag back.
+  // A window filling the axis has exactly one fully-visible position, and after
+  // fitToArea that is also the "saved on a wider monitor" case, where the old
+  // x is meaningless anyway — pin it to the area's origin.
+  const clampX = (pos: number): number => {
+    if (width >= workArea.width) return workArea.x;
+    const min = workArea.x + MIN_VISIBLE_PX - width;
+    const max = workArea.x + workArea.width - MIN_VISIBLE_PX;
     return Math.max(min, Math.min(Math.round(pos), max));
   };
 
+  // y is deliberately NOT symmetric. A window pushed above the work area keeps
+  // MIN_VISIBLE_PX of its BOTTOM on screen, but its title bar is off-screen —
+  // and a window with no reachable title bar cannot be dragged back on macOS.
+  // So the area's top edge is a hard floor (the bottom keeps the band rule).
+  const clampY = (pos: number): number => {
+    if (height >= workArea.height) return workArea.y;
+    const max = workArea.y + workArea.height - MIN_VISIBLE_PX;
+    return Math.max(workArea.y, Math.min(Math.round(pos), max));
+  };
+
   return {
-    x: clampAxis(bounds.x, width, workArea.x, workArea.width),
-    y: clampAxis(bounds.y, height, workArea.y, workArea.height),
+    x: clampX(bounds.x),
+    y: clampY(bounds.y),
     width,
     height,
   };
