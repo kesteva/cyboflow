@@ -9,7 +9,8 @@
  *   Case A: CSC_DISABLE=true       → unsigned posture (hardenedRuntime false, notarize false, no entitlements)
  *   Case B: All Apple env vars set → signed posture (hardenedRuntime true, notarize truthy, entitlements set)
  *   Case C: BUILD_VARIANT=dev      → dev appId / productName / artifactName / publish URL overrides
- *   Case D: lean packaging plan    → every foreign Claude/Codex native package excluded
+ *   Case D: lean packaging plan    → every foreign Claude/Codex native package and
+ *                                    every non-target better-sqlite3 prebuild excluded
  *   Case E: BUILD_ARCH=<host arch> → generated config applies the tested plan
  *
  * Every case also asserts that package.json on disk is byte-for-byte UNCHANGED (the whole
@@ -202,6 +203,23 @@ try {
       !plan.exclusions.includes('!node_modules/@openai/codex/**'),
       'the portable Codex launcher must remain packaged'
     );
+    assert(
+      plan.exclusions.includes(`!node_modules/better-sqlite3/prebuilds/darwin-${otherArch}.node`),
+      `the foreign-arch better-sqlite3 prebuild should be excluded for ${targetArch}`
+    );
+    assert(
+      plan.exclusions.includes('!node_modules/better-sqlite3/prebuilds/linuxmusl-x64.node') &&
+        plan.exclusions.includes('!node_modules/better-sqlite3/prebuilds/win32-arm64.node'),
+      'foreign-platform better-sqlite3 prebuilds should be excluded'
+    );
+    assert(
+      !plan.exclusions.includes(`!node_modules/better-sqlite3/prebuilds/darwin-${targetArch}.node`),
+      'the target better-sqlite3 prebuild must not be excluded'
+    );
+    assert(
+      !plan.exclusions.some((entry) => entry.startsWith('!node_modules/better-sqlite3/prebuilds/') && entry.endsWith('/**')),
+      'better-sqlite3 exclusions must name files, never the whole prebuilds directory'
+    );
   }
   assert(getLeanPackagingPlan(undefined) === null, 'an unset architecture should preserve universal packaging');
   console.log('\nPASS: Case D (lean Claude/Codex packaging plans)');
@@ -249,6 +267,11 @@ try {
         assert(
           !config.files.includes(`!node_modules/@openai/codex-darwin-${hostArch}/**`),
           'files must not exclude the target Codex arch'
+        );
+        assert(
+          config.files.includes(`!node_modules/better-sqlite3/prebuilds/darwin-${otherArch}.node`) &&
+            !config.files.includes(`!node_modules/better-sqlite3/prebuilds/darwin-${hostArch}.node`),
+          'files should exclude only the non-target better-sqlite3 prebuild'
         );
       }
     );
