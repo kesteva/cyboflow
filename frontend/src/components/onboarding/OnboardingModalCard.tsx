@@ -1,6 +1,6 @@
-import cyboflowLogo from '../../assets/cyboflow-logo.svg';
 import { visibleStepNumber, visibleStepTotal } from '../../utils/onboarding';
 import { ONBOARDING_TITLES } from './copy';
+import { CyboflowMark } from './CyboflowMark';
 import { OnboardingDots } from './OnboardingDots';
 
 const NO_SKIPPED: ReadonlySet<number> = new Set<number>();
@@ -68,13 +68,7 @@ export function OnboardingModalCard({
         {/* Compact header — every modal step but 0, whose hero lives in the body. */}
         {!hero && (
           <div className="flex flex-shrink-0 items-center gap-2.5 bg-interactive px-5 py-[13px] text-text-on-interactive">
-            <img
-              src={cyboflowLogo}
-              alt=""
-              aria-hidden="true"
-              className="h-[18px] w-[18px] opacity-90"
-              style={{ filter: 'brightness(0) invert(1)' }}
-            />
+            <CyboflowMark size={18} className="flex-shrink-0 opacity-90" />
             <span className="flex-1 text-[15px] font-bold tracking-[-.01em]">{ONBOARDING_TITLES[step]}</span>
             <span className="text-[9px] tracking-[.14em] text-text-on-interactive/80">
               STEP {visibleStepNumber(step, visible)} / {visibleStepTotal(visible)}
