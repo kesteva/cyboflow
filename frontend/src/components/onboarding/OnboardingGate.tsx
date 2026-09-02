@@ -42,6 +42,7 @@ import { TelemetryStep, type TelemetryDraft } from './steps/TelemetryStep';
 import { DefaultRuntimeStep } from './steps/DefaultRuntimeStep';
 import { ModelStep } from './steps/ModelStep';
 import { HandoffStep } from './steps/HandoffStep';
+import { stageTourExit } from './guided/guidedFinish';
 
 /**
  * OnboardingGate — the single side-effect host around the pure onboardingStore,
@@ -677,11 +678,19 @@ export function OnboardingGate(): React.JSX.Element | null {
       break;
     case ONBOARDING_HANDOFF_STEP:
       // Both choices call next(); the store decides whether that walks into the
-      // guided set-up or completes the tour here.
+      // guided set-up or completes the tour here. "Finish" is a tour EXIT, so
+      // the rail/greeting side effects are staged first (the shell mounts on
+      // the very transition next() makes).
       primary = {
         label: handoffChoice === 'skip' ? 'Finish →' : 'Continue →',
         disabled: false,
-        onClick: next,
+        onClick:
+          handoffChoice === 'skip'
+            ? () => {
+                stageTourExit(null);
+                next();
+              }
+            : next,
       };
       break;
     default:

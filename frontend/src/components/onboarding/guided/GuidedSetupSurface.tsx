@@ -6,6 +6,7 @@ import {
 import { AddProjectChoice } from './AddProjectChoice';
 import { ExistingProjectPicker } from './ExistingProjectPicker';
 import { NewProjectForm } from './NewProjectForm';
+import { stageTourExit } from './guidedFinish';
 
 /**
  * The onboarding tour's second phase: full-window guided set-up.
@@ -18,7 +19,9 @@ import { NewProjectForm } from './NewProjectForm';
  * Step 7 asks which kind of project to start from; step 8 renders the screen
  * that choice selected. 'unsure' never reaches step 8 (the store completes the
  * tour from step 7's next()), so the branch here is a straight existing/new
- * split with 'existing' as the fallback.
+ * split with 'existing' as the fallback. Both no-project exits from step 7
+ * ('unsure' Next, and the Skip link) stage the shared finale side effects
+ * (rail open + greeting) before the store transition mounts the shell.
  */
 export function GuidedSetupSurface(): React.JSX.Element | null {
   const step = useOnboardingStore((s) => s.step);
@@ -34,8 +37,14 @@ export function GuidedSetupSurface(): React.JSX.Element | null {
       <AddProjectChoice
         value={projectChoice}
         onChange={setProjectChoice}
-        onNext={next}
-        onSkip={skip}
+        onNext={() => {
+          if (projectChoice === 'unsure') stageTourExit(null);
+          next();
+        }}
+        onSkip={() => {
+          stageTourExit(null);
+          skip();
+        }}
       />
     );
   } else if (step === ONBOARDING_PROJECT_DETAIL_STEP) {

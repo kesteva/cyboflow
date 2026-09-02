@@ -1,11 +1,12 @@
 /**
  * One-shot assistant greeting handed off by the onboarding finale.
  *
- * The guided set-up's last act (guided/guidedFinish.ts) primes a greeting for
- * the project it just added; the rail is UNMOUNTED at that moment (the tour
- * hides the shell), so the message cannot be pushed into React state — it is
- * parked in localStorage and picked up by AgentThreadView's first mount, which
- * prepends it as a synthetic transcript message. No SDK turn, no DB row.
+ * Every tour exit (guided/guidedFinish.ts) primes a greeting — naming the
+ * project when the guided set-up added one, generic otherwise; the rail is
+ * UNMOUNTED at that moment (the tour hides the shell), so the message cannot be
+ * pushed into React state — it is parked in localStorage and picked up by
+ * AgentThreadView's first mount, which prepends it as a synthetic transcript
+ * message. No SDK turn, no DB row.
  *
  * peek/clear are deliberately SEPARATE operations: the app runs under
  * <React.StrictMode>, whose double-invoked state initializers would consume a
@@ -16,13 +17,19 @@
 /** localStorage key holding the pending greeting. Brand-new key — no migration. */
 export const GREETING_KEY = 'cyboflow.agentRail.onboardingGreeting';
 
-/** Persisted payload — the project name only; the sentence is built on read. */
+/** Persisted payload — the project name (null = no project); the sentence is built on read. */
 interface StoredGreeting {
-  projectName: string;
+  projectName: string | null;
 }
 
-/** Park a greeting for the next AgentThreadView mount. Best-effort. */
-export function primeAssistantGreeting(projectName: string): void {
+const GREETING_TAIL = 'If you need more help, ask me questions at any time.';
+
+/**
+ * Park a greeting for the next AgentThreadView mount. `projectName` is the
+ * project the guided set-up just added, or null for the exits that add none
+ * (handoff "Finish", "Not sure yet", "Skip the set-up"). Best-effort.
+ */
+export function primeAssistantGreeting(projectName: string | null): void {
   const payload: StoredGreeting = { projectName };
   try {
     localStorage.setItem(GREETING_KEY, JSON.stringify(payload));
@@ -43,9 +50,11 @@ export function peekAssistantGreeting(): string | null {
     if (raw === null) return null;
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== 'object' || parsed === null) return null;
-    const name = (parsed as Partial<StoredGreeting>).projectName;
+    if (!('projectName' in parsed)) return null;
+    const name = (parsed as StoredGreeting).projectName;
+    if (name === null) return `You're set up. ${GREETING_TAIL}`;
     if (typeof name !== 'string' || name === '') return null;
-    return `${name} is set up. If you need more help, ask me questions at any time.`;
+    return `${name} is set up. ${GREETING_TAIL}`;
   } catch {
     // Unparseable or unreadable — treat exactly like "nothing parked".
     return null;

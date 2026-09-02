@@ -18,6 +18,7 @@ import { OnboardingGate } from './OnboardingGate';
 import { useOnboardingStore } from '../../stores/onboardingStore';
 import { useConfigStore } from '../../stores/configStore';
 import type { AppConfig } from '../../types/config';
+import { peekAssistantGreeting } from '../agentRail/onboardingGreeting';
 
 const projectsGetAll = vi.fn();
 const configGet = vi.fn();
@@ -142,6 +143,11 @@ describe('OnboardingGate — Handoff step (6)', () => {
 
     expect(useOnboardingStore.getState().status).toBe('completed');
     expect(useOnboardingStore.getState().step).toBe(6);
+    // Finishing here is a tour exit too: the rail opens with the generic greeting.
+    expect(peekAssistantGreeting()).toBe(
+      "You're set up. If you need more help, ask me questions at any time.",
+    );
+    expect(localStorage.getItem('cyboflow.agentRail.collapsed')).toBe('false');
   });
 
   it('switching back to Continue restores the continuing label and transition', async () => {

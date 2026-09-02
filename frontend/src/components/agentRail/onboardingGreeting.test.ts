@@ -30,6 +30,13 @@ describe('onboardingGreeting', () => {
     expect(peekAssistantGreeting()).toBeNull();
   });
 
+  it('a null project name yields the generic greeting (no-project exits)', () => {
+    primeAssistantGreeting(null);
+    expect(peekAssistantGreeting()).toBe(
+      "You're set up. If you need more help, ask me questions at any time.",
+    );
+  });
+
   it('returns null when nothing is primed', () => {
     expect(peekAssistantGreeting()).toBeNull();
   });

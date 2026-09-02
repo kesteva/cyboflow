@@ -7,10 +7,6 @@
  * `projects:create` payload, the 'project-created' broadcast, and the four
  * finale side effects that have to land BEFORE the shell mounts (rail expanded,
  * greeting primed, Human review opened, status completed).
- *
- * AgentThreadView is stubbed because guidedFinish reaches AgentRail for
- * expandAgentRail() — the rail's real body would drag the whole chat stack into
- * this spec for a localStorage write.
  */
 import '@testing-library/jest-dom';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -29,10 +25,6 @@ vi.mock('../../../utils/api', () => ({
 
 vi.mock('../../../utils/telemetry', () => ({
   trackEvent: (...a: unknown[]) => trackEvent(...a),
-}));
-
-vi.mock('../../agentRail/AgentThreadView', () => ({
-  AgentThreadView: () => <div data-testid="agent-thread-view-stub" />,
 }));
 
 import { GuidedSetupSurface } from './GuidedSetupSurface';
@@ -115,6 +107,11 @@ describe('GuidedSetupSurface — step 7 (add a project)', () => {
 
     expect(useOnboardingStore.getState().status).toBe('completed');
     expect(useOnboardingStore.getState().step).toBe(7);
+    // A no-project exit still opens the rail with the generic greeting.
+    expect(peekAssistantGreeting()).toBe(
+      "You're set up. If you need more help, ask me questions at any time.",
+    );
+    expect(localStorage.getItem(RAIL_COLLAPSED_KEY)).toBe('false');
   });
 
   it('the Skip link completes the tour outright (no Sidebar resume card)', () => {
@@ -124,6 +121,10 @@ describe('GuidedSetupSurface — step 7 (add a project)', () => {
     fireEvent.click(screen.getByTestId('onboarding-guided-skip'));
 
     expect(useOnboardingStore.getState().status).toBe('completed');
+    expect(peekAssistantGreeting()).toBe(
+      "You're set up. If you need more help, ask me questions at any time.",
+    );
+    expect(localStorage.getItem(RAIL_COLLAPSED_KEY)).toBe('false');
   });
 });
 
