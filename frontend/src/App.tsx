@@ -10,6 +10,9 @@ import { perfProbeStart } from './utils/perfProbe';
 import { TitleBar } from './components/TitleBar';
 import { CyboflowRoot } from './components/cyboflow/CyboflowRoot';
 import { OnboardingGate } from './components/onboarding/OnboardingGate';
+import { GuidedSetupSurface } from './components/onboarding/guided/GuidedSetupSurface';
+import { useOnboardingStore } from './stores/onboardingStore';
+import { isGuidedStep, isOnboardingShellHidden } from './utils/onboarding';
 import { AboutDialog } from './components/AboutDialog';
 import { MainProcessLogger } from './components/MainProcessLogger';
 import { ErrorDialog } from './components/ErrorDialog';
@@ -51,6 +54,22 @@ import {
   useAggregatedReviewItems,
   useLandingStore,
 } from './stores/landingStore';
+
+/**
+ * What stands in for the shell row while the first-run tour owns the window:
+ * bare paper where [sidebar | center | rail] + StatusBar would be. The MODAL
+ * tour steps render their card into a body portal over this (OnboardingGate,
+ * mounted below the swap); the GUIDED steps render here instead, inside the
+ * row, so the TitleBar above keeps its native drag region.
+ */
+function OnboardingShellSurface(): React.JSX.Element {
+  const step = useOnboardingStore((s) => s.step);
+  return (
+    <div className="flex flex-1 overflow-hidden bg-bg-primary" data-testid="onboarding-shell">
+      {isGuidedStep(step) ? <GuidedSetupSurface /> : null}
+    </div>
+  );
+}
 
 function App() {
   const [isAboutOpen, setIsAboutOpen] = useState(false);
@@ -110,6 +129,10 @@ function App() {
   // not a stacked overlay — guarantees only ONE chat view / canvas subscribes per
   // session, per design-mode.md's single-mount invariant). Never persisted.
   const activeDesignSessionId = useDesignModeStore((s) => s.activeDesignSessionId);
+  // First-run tour: the shell stays unmounted until the persisted snapshot read
+  // resolves (no rail flash on a pristine boot) and for as long as the tour is
+  // active — it owns the whole window (see utils/onboarding).
+  const onboardingShellHidden = useOnboardingStore((s) => isOnboardingShellHidden(s));
 
   // One-shot migration: move legacy crystal-sidebar-width → cyboflow-sidebar-width (mount only)
   useEffect(() => {
@@ -282,6 +305,8 @@ function App() {
         <DesignPlannerPrompt />
         {activeDesignSessionId !== null ? (
           <DesignModeSurface />
+        ) : onboardingShellHidden ? (
+          <OnboardingShellSurface />
         ) : (
         <>
         {/* Shell geometry: [agent rail | center]. Human review folds into the

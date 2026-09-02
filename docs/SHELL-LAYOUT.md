@@ -27,6 +27,20 @@ task Backlog — so treat the table as illustrative, not exhaustive; the branch 
 the "Center-surface state machine" comment in `App.tsx` is the current list (the comment
 itself enumerates only the main branches).
 
+**Onboarding shell state.** The whole row above (Sidebar, center surface, AgentRail) plus
+`StatusBar` is NOT mounted while the first-run tour owns the window. `App.tsx` reads
+`isOnboardingShellHidden(state)` (`frontend/src/utils/onboarding.ts`, true while the persisted
+snapshot read is unresolved or `status === 'active'`) and swaps the row for
+`OnboardingShellSurface` — a bare `bg-bg-primary` container (`data-testid="onboarding-shell"`)
+that renders `onboarding/guided/GuidedSetupSurface` on the guided steps (7-8) and nothing on the
+modal ones, whose card comes from `<OnboardingGate/>`'s body portal (mounted outside the swap, as
+are the dialog siblings). `TitleBar` stays mounted throughout, which is why the guided screens
+render inside the row rather than in the portal: the native drag region has to keep working. The
+tour's terminal transition (`onboarding/guided/guidedFinish.ts`) stages the shell's first frame
+before flipping the store to `completed` — AgentRail forced expanded, a one-shot assistant
+greeting primed, and `navigationStore.openHumanReview()` — because every one of those is read by
+a mount that only happens once the shell comes back.
+
 ## Assumption order
 
 1. The agent rail (Sidebar) is leftmost; the title bar (38px) spans above the row.

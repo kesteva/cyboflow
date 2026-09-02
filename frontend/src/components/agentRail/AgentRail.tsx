@@ -51,6 +51,22 @@ export function clampAgentRailWidth(w: number): number {
 }
 
 /**
+ * Force the rail EXPANDED on its next mount by writing the persisted collapse
+ * flag directly. The onboarding finale is the caller: the tour hides the whole
+ * shell, so <AgentRail/> is unmounted when the guided set-up finishes and there
+ * is no component state to set — but its `collapsed` initializer reads
+ * COLLAPSED_KEY on the mount that follows, which is exactly the mount the
+ * finale is about to trigger. Best-effort (storage can be unavailable).
+ */
+export function expandAgentRail(): void {
+  try {
+    localStorage.setItem(COLLAPSED_KEY, 'false');
+  } catch {
+    // localStorage unavailable — the rail keeps whatever state it had.
+  }
+}
+
+/**
  * Gate predicate for the App.tsx mount: the rail shows on every
  * landing-family surface — everywhere except the session workspace (which
  * keeps `RunRightRail`) and the new-flow wizard. Exported so the gating

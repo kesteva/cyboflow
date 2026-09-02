@@ -7,12 +7,14 @@
  * mounts above the suggestion chips/composer, keyed off
  * `useAgentThreadStore(s => s.proposals)`.
  */
-import { useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import type { UnifiedMessage } from '../../../../shared/types/unifiedMessage';
 import { UnifiedChatView } from '../cyboflow/unified/UnifiedChatView';
 import { useUnifiedAgentThreadMessages } from '../cyboflow/unified/useUnifiedAgentThreadMessages';
 import { useAgentThreadStore } from '../../stores/agentThreadStore';
 import { AgentComposer } from './AgentComposer';
 import { AgentSuggestionChips } from './AgentSuggestionChips';
+import { clearAssistantGreeting, peekAssistantGreeting } from './onboardingGreeting';
 import { ProposalCardList } from './ProposalCardList';
 
 /**
@@ -35,6 +37,30 @@ export function AgentThreadView(): React.ReactElement {
   const proposals = useAgentThreadStore((s) => s.proposals);
 
   const { messages, loadError } = useUnifiedAgentThreadMessages(thread?.id ?? null);
+
+  // One-shot onboarding greeting (see ./onboardingGreeting). Read once in a
+  // state initializer — NON-destructively, because StrictMode double-invokes
+  // initializers — and cleared by the mount effect below, so it shows on this
+  // mount only and never re-appears on a later rail remount. Purely synthetic:
+  // no SDK turn, no agent_messages row.
+  const [greeting] = useState<string | null>(() => peekAssistantGreeting());
+  const [greetingAt] = useState<string>(() => new Date().toISOString());
+  useEffect(() => {
+    clearAssistantGreeting();
+  }, []);
+
+  const messagesWithGreeting = useMemo<UnifiedMessage[]>(() => {
+    if (greeting === null) return messages;
+    return [
+      {
+        id: 'onboarding-greeting',
+        role: 'assistant',
+        timestamp: greetingAt,
+        segments: [{ type: 'text', content: greeting }],
+      },
+      ...messages,
+    ];
+  }, [greeting, greetingAt, messages]);
 
   // Auto-digest: gated on `thread` (not on mount) — init()'s getThread query
   // resolves asynchronously, and `thread` is Zustand state that survives
@@ -64,7 +90,7 @@ export function AgentThreadView(): React.ReactElement {
       transport="sdk"
       mode="agent"
       running={sending}
-      messages={messages}
+      messages={messagesWithGreeting}
       loadError={loadError}
       isWaitingForResponse={sending}
       folderLabel={null}
