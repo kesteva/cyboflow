@@ -522,6 +522,36 @@ export function InteractiveTerminalView({
       drainNext(pinned, token);
     };
 
+    // Geometry relay state (TASK-817), hoisted above ensureAttached so an attach
+    // can push the freshly-fitted geometry into the PTY itself.
+    let lastCols = -1;
+    let lastRows = -1;
+    let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+
+    // Relay the xterm's CURRENT cols/rows into the live PTY, deduped against the
+    // last relayed pair. `delayMs` debounces the flood during a drag; an attach
+    // passes 0 so the CLI repaints at the right width immediately.
+    const relayGeometry = (delayMs: number): void => {
+      if (detached) return;
+      const cols = term.cols;
+      const rows = term.rows;
+      if (cols <= 0 || rows <= 0) return;
+      if (cols === lastCols && rows === lastRows) return;
+      lastCols = cols;
+      lastRows = rows;
+      if (resizeTimer) clearTimeout(resizeTimer);
+      const send = (): void => {
+        if (detached) return;
+        void trpc.cyboflow.runs.relayResize.mutate({ runId, cols, rows });
+      };
+      if (delayMs <= 0) {
+        resizeTimer = undefined;
+        send();
+        return;
+      }
+      resizeTimer = setTimeout(send, delayMs);
+    };
+
     // Defer term.open() until the container has a non-zero layout box. xterm
     // measures the character cell at open() time; opening into a 0×0 box — which
     // a `flex-1` chat child is on its first React commit, before the layout
@@ -552,6 +582,13 @@ export function InteractiveTerminalView({
         return;
       }
       activeEntry.opened = true;
+      // The PTY is spawned at a fixed 80x30 (AbstractCliManager) and, before this
+      // call, geometry only ever reached it from a LATER ResizeObserver tick — so
+      // a resumed session whose container is already stable at mount produced
+      // exactly one tick (the attach driver, which returns early) and the CLI kept
+      // wrapping at 80 columns until the user resized the window. Push the
+      // just-fitted geometry now; the dedupe makes a redundant attach free.
+      relayGeometry(0);
       // Re-attach: drain everything buffered while detached (pre-open bytes on the
       // very first attach, or accumulated live bytes on a switch-back) into the
       // scrollback IN ORDER, then resume direct writes.
@@ -589,12 +626,9 @@ export function InteractiveTerminalView({
 
     // Resize relay (TASK-817). The ResizeObserver does double duty: its FIRST
     // non-zero tick drives the deferred open (ensureAttached opens + fits +
-    // flushes), and every tick thereafter re-flows the xterm via fit() (local
-    // geometry) AND relays the new cols/rows into the live PTY. Debounced lightly
-    // to avoid flooding the PTY during a drag.
-    let lastCols = -1;
-    let lastRows = -1;
-    let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+    // flushes + relays), and every tick thereafter re-flows the xterm via fit()
+    // (local geometry) AND relays the new cols/rows into the live PTY. Debounced
+    // lightly to avoid flooding the PTY during a drag.
     const resizeObserver = new ResizeObserver(() => {
       if (detached) return;
       // Drive (re-)attach whenever the xterm element is not parented in THIS
@@ -614,17 +648,7 @@ export function InteractiveTerminalView({
       } catch {
         return;
       }
-      const cols = term.cols;
-      const rows = term.rows;
-      if (cols === lastCols && rows === lastRows) return;
-      lastCols = cols;
-      lastRows = rows;
-      if (cols <= 0 || rows <= 0) return;
-      if (resizeTimer) clearTimeout(resizeTimer);
-      resizeTimer = setTimeout(() => {
-        if (detached) return;
-        void trpc.cyboflow.runs.relayResize.mutate({ runId, cols, rows });
-      }, 100);
+      relayGeometry(100);
     });
     resizeObserver.observe(container);
 

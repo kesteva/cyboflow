@@ -562,13 +562,31 @@ describe('InteractiveTerminalView — TASK-817 keystroke + resize relay', () => 
     expect(relayInputMutate).toHaveBeenCalledWith({ runId: 'run-relay-on', text: '\r' });
   });
 
+  it('relays the fitted geometry on attach, without waiting for a later resize', () => {
+    // Regression: the PTY spawns at a fixed 80x30 and geometry used to reach it
+    // only from a resize tick AFTER the attach. A resumed session mounts into an
+    // already-stable container, so exactly one tick fires — the attach driver,
+    // which returned early — and the CLI kept wrapping at 80 columns until the
+    // user resized the window.
+    termMock.cols = 213;
+    termMock.rows = 52;
+    render(<InteractiveTerminalView runId="run-attach-geometry" />);
+    makeRenderable();
+    expect(relayResizeMutate).toHaveBeenCalledWith({
+      runId: 'run-attach-geometry',
+      cols: 213,
+      rows: 52,
+    });
+  });
+
   it('relays a geometry change to runs.relayResize with the new cols/rows', () => {
     vi.useFakeTimers();
     try {
       render(<InteractiveTerminalView runId="run-resize" />);
-      // First observer tick only flips renderable (ensureRenderable returns
-      // without relaying); the tick AFTER the geometry change below is the relay.
+      // First observer tick attaches and relays the fitted geometry; the tick
+      // AFTER the geometry change below is the one asserted here.
       makeRenderable();
+      relayResizeMutate.mockClear();
 
       // Change the reported geometry, then fire the captured ResizeObserver cb.
       termMock.cols = 120;
