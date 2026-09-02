@@ -726,7 +726,12 @@ snapshot under `ONBOARDING_PREF_KEY` (`frontend/src/utils/onboarding.ts`) via
 `preferences:get`/`preferences:set` and only calls `useOnboardingStore.hydrate` once
 that read resolves — the store's `hydrated` flag is the no-flash gate consumers (e.g.
 Sidebar's "Resume setup" button) key off of, instead of a naive default-hidden boolean.
-Other consumers: `DiscordPopup`, `AnalyticsConsentDialog` (audit via
+The SAME `hydrated` flag also gates the app shell itself: `App.tsx` keeps Sidebar,
+the center surface, AgentRail, and StatusBar unmounted for `isOnboardingShellHidden`
+(`frontend/src/utils/onboarding.ts`) — `!hydrated || status === 'active'` — so a
+pristine boot never flashes the shell before the same snapshot read resolves, and the
+tour (modal steps or the guided full-window screens) owns the whole window while
+active. Other consumers: `DiscordPopup`, `AnalyticsConsentDialog` (audit via
 `grep -rln 'preferences:get' frontend/src`).
 
 ### Telemetry: scrub chokepoint + environment gating

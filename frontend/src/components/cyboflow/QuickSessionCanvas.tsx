@@ -34,8 +34,6 @@ import { IdeaPickerModal } from './IdeaPickerModal';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
 import { LaunchPromptModal } from './LaunchPromptModal';
 import { DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
-import { ONBOARDING_ANCHOR_ATTR, ONBOARDING_ANCHORS } from '../../utils/onboarding';
-import { useOnboardingStore } from '../../stores/onboardingStore';
 import {
   useDynamicWorkflowStore,
   useDynamicWorkflowsForSession,
@@ -128,7 +126,6 @@ function WorkflowCmdButton({
   disabled,
   onClick,
   testId,
-  onboardingAnchor,
   startHere = false,
 }: {
   label: string;
@@ -136,9 +133,7 @@ function WorkflowCmdButton({
   disabled: boolean;
   onClick: () => void;
   testId: string;
-  /** Onboarding coachmark anchor id (tour step 5 targets ONLY the /ship chip). */
-  onboardingAnchor?: string;
-  /** Tour step-5 treatment: rust inset bar + "Start here" tag (design packet step 5). */
+  /** Rust inset bar + "Start here" tag, for a chip that should draw the eye. */
   startHere?: boolean;
 }) {
   const [hovered, setHovered] = useState(false);
@@ -150,7 +145,6 @@ function WorkflowCmdButton({
       onClick={onClick}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      {...(onboardingAnchor !== undefined ? { [ONBOARDING_ANCHOR_ATTR]: onboardingAnchor } : {})}
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -267,16 +261,6 @@ export function QuickSessionCanvas({
   const { launch, isLaunching, error: launchError } = useLaunchWorkflow(projectId, {
     forceNew: isRawCheckout,
   });
-  // Tour step-8 accent on the /ship chip (design packet: rust inset bar +
-  // "Start here" tag while the coachmark points at it).
-  const onboardingShipStep = useOnboardingStore((s) => s.status === 'active' && s.step === 8);
-  // The idea-picker opened DURING the tour's /ship step (clicking the chip parks
-  // 'pending', so accept either). First-run users have no backlog, so the picker
-  // opens on "New idea" with the what's-an-idea explainer.
-  const onboardingIdeaGate = useOnboardingStore(
-    (s) => s.hydrated && (s.status === 'active' || s.status === 'pending') && s.step === 8,
-  );
-
   // Detected Claude Code dynamic workflows (the Workflow tool / `ultracode`)
   // launched by THIS session's agent — rendered prominently above the picker.
   // init() is the store's idempotent singleton bootstrap (the landing home
@@ -1002,8 +986,6 @@ export function QuickSessionCanvas({
                   dotColor={phaseDotColor(row)}
                   disabled={isLaunching}
                   onClick={() => handleWorkflowClick(row)}
-                  onboardingAnchor={row.name === 'ship' ? ONBOARDING_ANCHORS.shipChip : undefined}
-                  startHere={row.name === 'ship' && onboardingShipStep}
                 />
               ))}
             </div>
@@ -1049,8 +1031,6 @@ export function QuickSessionCanvas({
           projectId={projectId}
           onClose={() => setPlannerIdForGate(null)}
           onPicked={handleIdeaPicked}
-          defaultMode={onboardingIdeaGate ? 'new' : 'pick'}
-          showIdeaExplainer={onboardingIdeaGate}
           // Multi-select batch (IDEA-009) is a Planner-only affordance — Ship
           // stays single-select (it consumes exactly one idea per run).
           multi={workflows.find((w) => w.id === plannerIdForGate)?.name === 'planner'}

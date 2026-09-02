@@ -9,8 +9,10 @@ import {
  * Step 2 — "which agent should new sessions use by default?"
  *
  * CONDITIONAL: the gate only renders this step when the Connect step left more
- * than one provider activated (see onboardingStore.isStepSkipped), because with
- * a single agent there is nothing to choose.
+ * than one DEFAULT-ELIGIBLE provider activated (claude/codex — see
+ * onboardingStore.defaultAgentCandidates), because with a single agent there is
+ * nothing to choose. OMP is activatable on Connect but no launch picker offers
+ * its runtimes yet, so it is neither a row here nor a reason to show this step.
  *
  * The question is asked at PROVIDER level — the axis the user just answered on
  * the Connect step — and each row names the runtime the choice resolves to, so
@@ -20,20 +22,12 @@ import {
  * and stays overridable per launch and in Settings → Session settings.
  */
 interface DefaultRuntimeStepProps {
-  /** Providers the Connect step left activated, in registry order. */
-  providers: readonly AgentProvider[];
+  /** Default-eligible providers the Connect step left activated, in registry order. */
+  providers: ReadonlyArray<'claude' | 'codex'>;
   /** Current selection; null while the gate is still resolving the seed. */
   value: AgentProvider | null;
   onChange: (provider: AgentProvider) => void;
 }
-
-/** One-line reason to pick this agent, in the vocabulary the tour has used. */
-const PROVIDER_BLURBS: Record<AgentProvider, string> = {
-  claude: 'Structured SDK sessions with full approval routing and step tracking.',
-  codex: 'ChatGPT-authenticated runtime, billed against your existing plan.',
-  omp: 'Multi-provider runtime — see its v1 limits in the launch wizard.',
-  pi: 'The terminal coding agent OMP forked from — multi-provider models via its own accounts.',
-};
 
 export function DefaultRuntimeStep({
   providers,
@@ -43,8 +37,8 @@ export function DefaultRuntimeStep({
   return (
     <div className="px-6 pb-3 pt-5">
       <div className="mb-3 text-[12px] leading-[1.6] text-text-primary">
-        You connected more than one agent. Pick the one new sessions and flow runs should start on
-        — you can still change it per launch, or later in Settings → Session settings.
+        This will set your agent for the Cyboflow chat and your default for new sessions. You can
+        change it per launch or change your default in settings.
       </div>
 
       <div
@@ -75,13 +69,8 @@ export function DefaultRuntimeStep({
               >
                 {selected && <span className="h-[8px] w-[8px] rounded-full bg-interactive" />}
               </span>
-              <span className="min-w-0 flex-1">
-                <span className="block text-[12px] font-bold text-text-primary">
-                  {AGENT_PROVIDER_LABELS[provider]}
-                </span>
-                <span className="mt-px block text-[10px] leading-[1.5] text-text-tertiary">
-                  {PROVIDER_BLURBS[provider]}
-                </span>
+              <span className="min-w-0 flex-1 text-[12px] font-bold text-text-primary">
+                {AGENT_PROVIDER_LABELS[provider]}
               </span>
               <span className="flex-shrink-0 text-[10px] uppercase tracking-[.1em] text-text-secondary">
                 {AGENT_RUNTIME_LABELS[PROVIDER_DEFAULT_RUNTIME[provider]]}
@@ -91,10 +80,16 @@ export function DefaultRuntimeStep({
         })}
       </div>
 
-      <div className="mt-3 text-[10px] leading-[1.5] text-text-tertiary">
-        This sets the default runtime only. The interactive CLI runtimes stay available in the
-        launch wizard for quick sessions.
-      </div>
+      {/* The one caveat the copy above would otherwise state falsely: the chat
+          assistant is hard-wired to ClaudeCodeManager, so "your agent for the
+          Cyboflow chat" does not yet follow a Codex default. Shown only when
+          Codex is the highlighted choice — with Claude picked there is nothing
+          to qualify. */}
+      {value === 'codex' && (
+        <div className="mt-3 text-[10px] leading-[1.5] text-text-tertiary">
+          The Cyboflow chat assistant runs on Claude for now.
+        </div>
+      )}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { ONBOARDING_STEP_COUNT, visibleStepNumber } from '../../utils/onboarding';
+import { ONBOARDING_MODAL_STEPS, visibleStepNumber } from '../../utils/onboarding';
 
 /**
  * The progress dot row shared by the modal footer and the coach popover.
@@ -30,7 +30,7 @@ export function OnboardingDots({
 }: OnboardingDotsProps): React.JSX.Element {
   return (
     <div className="flex items-center gap-[5px]">
-      {Array.from({ length: ONBOARDING_STEP_COUNT }, (_, i) => i)
+      {ONBOARDING_MODAL_STEPS
         .filter((i) => !skippedSteps.has(i))
         .map((i) => {
         const done = i <= step;

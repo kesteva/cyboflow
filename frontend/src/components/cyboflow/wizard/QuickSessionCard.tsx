@@ -8,7 +8,6 @@
  * PTY) is chosen on the CONFIGURE step, so the card carries no substrate chip.
  * Selected → a stronger terracotta border.
  */
-import { ONBOARDING_ANCHOR_ATTR, ONBOARDING_ANCHORS } from '../../../utils/onboarding';
 
 interface QuickSessionCardProps {
   selected: boolean;
@@ -30,7 +29,6 @@ export function QuickSessionCard({
       type="button"
       onClick={onSelect}
       data-testid="quick-session-card"
-      {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.quickSessionCard }}
       aria-pressed={selected}
       className={`flex w-full flex-col overflow-hidden border bg-bg-secondary text-left transition-colors ${
         selected ? 'border-2 border-interactive' : 'border border-interactive'

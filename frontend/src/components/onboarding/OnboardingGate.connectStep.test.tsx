@@ -11,6 +11,12 @@
  * end: seeding from a SAVED setting on replay, a pristine install staying
  * opt-in, the full (never partial) persisted payload, and the non-fatal
  * failure path.
+ *
+ * Continue ALSO owns the single-candidate `defaultAgentRuntime` write: when the
+ * step leaves exactly one of {claude, codex} activated the conditional
+ * Default-agent step (2) is skipped, so this is the only place such an install
+ * can record which agent it launches on. Two candidates leave the field to
+ * step 2.
  */
 import '@testing-library/jest-dom';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -18,6 +24,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OnboardingGate } from './OnboardingGate';
 import { useOnboardingStore } from '../../stores/onboardingStore';
 import { useConfigStore } from '../../stores/configStore';
+import { resetProviderModelCatalogsForTests } from '../../stores/providerModelCatalogStore';
 import { PROVIDERS_DETECT_CHANNEL } from '../../../../shared/types/onboarding';
 import type { ProviderDetectionResult } from '../../../../shared/types/onboarding';
 import type { AgentProviderAccess } from '../../../../shared/types/agentRuntime';
@@ -26,6 +33,10 @@ import type { AppConfig } from '../../types/config';
 const projectsGetAll = vi.fn();
 const configGet = vi.fn();
 const configUpdate = vi.fn();
+const configApplyRunTypeDefault = vi.fn();
+// Continue can land the tour on the Model step (3), which discovers the Codex
+// catalog when Codex is the resolved default agent.
+const modelsGetCatalog = vi.fn();
 
 vi.mock('../../utils/api', () => ({
   API: {
@@ -33,7 +44,9 @@ vi.mock('../../utils/api', () => ({
     config: {
       get: (...a: unknown[]) => configGet(...a),
       update: (...a: unknown[]) => configUpdate(...a),
+      applyRunTypeDefault: (...a: unknown[]) => configApplyRunTypeDefault(...a),
     },
+    models: { getCatalog: (...a: unknown[]) => modelsGetCatalog(...a) },
     dialog: { openFile: vi.fn(), openDirectory: vi.fn() },
   },
 }));
@@ -78,6 +91,11 @@ const INITIAL_ONBOARDING_STATE = {
   permMode: 'auto' as const,
   defaultProvider: null,
   multiRuntime: true,
+  defaultModel: null,
+  defaultEffort: null,
+  modelPhase: 'model' as const,
+  handoffChoice: 'continue' as const,
+  projectChoice: 'existing' as const,
   hydrated: false,
 };
 
@@ -98,6 +116,11 @@ beforeEach(() => {
   projectsGetAll.mockReset().mockResolvedValue({ success: true, data: [] });
   configGet.mockReset().mockResolvedValue({ success: true, data: baseAppConfig() });
   configUpdate.mockReset().mockResolvedValue({ success: true });
+  configApplyRunTypeDefault.mockReset().mockResolvedValue({ success: true, data: {} });
+  modelsGetCatalog
+    .mockReset()
+    .mockResolvedValue({ success: true, data: { models: [], defaultModel: null } });
+  resetProviderModelCatalogsForTests();
   invoke.mockClear();
   (window as unknown as { electron: { invoke: typeof invoke } }).electron = { invoke };
   useOnboardingStore.setState(INITIAL_ONBOARDING_STATE);
@@ -159,14 +182,16 @@ describe('OnboardingGate — Connect step (1) provider access', () => {
     // Full object, never a partial patch: the provider the user left off must be
     // written as explicitly off, not merely omitted (omission floors to ON).
     // OMP rides along at its untouched default (false) — the same absent⇒
-    // disabled floor AGENT_PROVIDER_REGISTRY.omp itself uses.
+    // disabled floor AGENT_PROVIDER_REGISTRY.omp itself uses. Claude is the sole
+    // candidate, so the runtime rides along in the SAME write.
     await waitFor(() =>
       expect(configUpdate).toHaveBeenCalledWith({
         agentProviderAccess: { claude: true, codex: false, omp: false },
+        defaultAgentRuntime: 'claude-sdk',
       }),
     );
     // ONE activated provider, so the conditional Default-agent step (2) has no
-    // question to ask and Continue lands straight on Permission (3).
+    // question to ask and Continue lands straight on the Model step (3).
     await waitFor(() => expect(useOnboardingStore.getState().step).toBe(3));
     expect(useOnboardingStore.getState().multiRuntime).toBe(false);
   });
@@ -178,6 +203,8 @@ describe('OnboardingGate — Connect step (1) provider access', () => {
     fireEvent.click(screen.getByRole('switch', { name: 'Use Codex in Cyboflow' }));
     fireEvent.click(screen.getByRole('button', { name: /Continue/ }));
 
+    // TWO candidates: the runtime question belongs to step 2, so Continue must
+    // NOT pre-answer it here.
     await waitFor(() =>
       expect(configUpdate).toHaveBeenCalledWith({
         agentProviderAccess: { claude: true, codex: true, omp: false },
@@ -201,7 +228,7 @@ describe('OnboardingGate — Connect step (1) provider access', () => {
     );
   });
 
-  it('persists an explicit OMP opt-in alongside claude/codex, and never gates Continue on it', async () => {
+  it('persists an explicit OMP opt-in alongside claude, and never gates Continue on it', async () => {
     await mountAtConnectStep(baseAppConfig());
 
     fireEvent.click(screen.getByRole('switch', { name: 'Use Claude Code in Cyboflow' }));
@@ -214,11 +241,28 @@ describe('OnboardingGate — Connect step (1) provider access', () => {
     await waitFor(() =>
       expect(configUpdate).toHaveBeenCalledWith({
         agentProviderAccess: { claude: true, codex: false, omp: true },
+        defaultAgentRuntime: 'claude-sdk',
       }),
     );
-    // Claude + OMP both activated — OMP counts toward the Default-agent step
-    // even though it never counts toward the Continue gate.
-    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(2));
+    // Claude + OMP both activated, but OMP is not DEFAULT-eligible (no picker
+    // offers its runtimes), so this is still a single-candidate run: the
+    // Default-agent step is skipped and Continue lands on the Model step (3).
+    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(3));
+    expect(useOnboardingStore.getState().multiRuntime).toBe(false);
+  });
+
+  it('writes codex-sdk as the default runtime on a Codex-only install', async () => {
+    await mountAtConnectStep(baseAppConfig());
+
+    fireEvent.click(screen.getByRole('switch', { name: 'Use Codex in Cyboflow' }));
+    fireEvent.click(screen.getByRole('button', { name: /Continue/ }));
+
+    await waitFor(() =>
+      expect(configUpdate).toHaveBeenCalledWith({
+        agentProviderAccess: { claude: false, codex: true, omp: false },
+        defaultAgentRuntime: 'codex-sdk',
+      }),
+    );
   });
 
   it('seeds the OMP toggle from a saved setting, defaulting OFF when absent', async () => {

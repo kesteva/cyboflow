@@ -27,7 +27,6 @@ import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { ensureSessionForLaunch } from '../../utils/ensureSessionForLaunch';
 import { trackEvent } from '../../utils/telemetry';
-import { notifyWorkflowRunStarted } from '../../utils/onboarding';
 import {
   resolveRunTypeLaunchDefaults,
   workflowRunTypeKey,
@@ -131,7 +130,6 @@ export function useOverviewLaunch(): OverviewLaunchState {
           ...seed,
         });
         trackEvent('workflow_run_started', { launch_surface: 'backlog', flow: wantName });
-        notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'backlog' });
         useCyboflowStore.getState().setActiveRun(result.runId);
         useNavigationStore.getState().setActiveProjectId(projectId);
         useNavigationStore.getState().goToSession();
