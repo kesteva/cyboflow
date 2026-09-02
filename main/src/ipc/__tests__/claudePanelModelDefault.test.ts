@@ -304,6 +304,89 @@ describe('claude-panels model fallback sites resolve via getDefaultLaunchModel(\
     expect(result.success).toBe(true);
     expect(result.data).toBe('sonnet');
   });
+
+  // TASK-155 follow-up (onboarding restructure §0 "verified prerequisite"):
+  // onboarding's Model step (step 3) can now persist a Codex catalog id into
+  // the GLOBAL `defaultLaunchModel` when Codex is the chosen default runtime.
+  // Both fallback sites must normalize that candidate to the Claude family
+  // (falling back to DEFAULT_QUICK_MODEL, 'opus') before it ever reaches
+  // ClaudePanelManager.startPanel — which is ALWAYS the Claude CLI, whatever
+  // runtime the user picked as their default.
+  it("a Codex catalog id in the global launch model never reaches ClaudePanelManager.startPanel — 'opus' does", async () => {
+    await configManager.updateConfig({ defaultLaunchModel: 'gpt-5.2-codex' });
+    expect(configManager.getDefaultLaunchModel('quick')).toBe('gpt-5.2-codex');
+
+    const sdkManager = makeCliManager();
+    const interactiveManager = makeCliManager();
+    const services = makeServices(configManager, sdkManager, interactiveManager, {});
+    const { ipcMain, handlers } = makeHandlerCapture();
+
+    registerClaudePanelHandlers(
+      ipcMain as unknown as Parameters<typeof registerClaudePanelHandlers>[0],
+      services,
+    );
+    claudePanelManager.registerPanel('panel-1', 'session-1');
+
+    const result = (await invoke(handlers, 'claude-panels:start', 'panel-1', 'hello')) as { success: boolean };
+
+    expect(result.success).toBe(true);
+    expect(interactiveManager.startPanel).toHaveBeenCalledWith(
+      'panel-1',
+      'session-1',
+      '/tmp/session-1',
+      'hello',
+      undefined,
+      'opus',
+    );
+  });
+
+  it('a Codex catalog id in stored panel settings never reaches ClaudePanelManager.startPanel — opus does', async () => {
+    const sdkManager = makeCliManager();
+    const interactiveManager = makeCliManager();
+    // Panel settings hold a stale Codex id (e.g. carried over from a runtime
+    // switch) and no model arg is passed, so the panel-settings rung wins the
+    // precedence chain — it must still be normalized before spawn.
+    const services = makeServices(configManager, sdkManager, interactiveManager, { model: 'gpt-5.2-codex' });
+    const { ipcMain, handlers } = makeHandlerCapture();
+
+    registerClaudePanelHandlers(
+      ipcMain as unknown as Parameters<typeof registerClaudePanelHandlers>[0],
+      services,
+    );
+    claudePanelManager.registerPanel('panel-1', 'session-1');
+
+    const result = (await invoke(handlers, 'claude-panels:start', 'panel-1', 'hello')) as { success: boolean };
+
+    expect(result.success).toBe(true);
+    expect(interactiveManager.startPanel).toHaveBeenCalledWith(
+      'panel-1',
+      'session-1',
+      '/tmp/session-1',
+      'hello',
+      undefined,
+      'opus',
+    );
+  });
+
+  it('get-model normalizes a Codex catalog id in stored panel settings to opus', async () => {
+    const sdkManager = makeCliManager();
+    const interactiveManager = makeCliManager();
+    const services = makeServices(configManager, sdkManager, interactiveManager, { model: 'gpt-5.2-codex' });
+    const { ipcMain, handlers } = makeHandlerCapture();
+
+    registerClaudePanelHandlers(
+      ipcMain as unknown as Parameters<typeof registerClaudePanelHandlers>[0],
+      services,
+    );
+
+    const result = (await invoke(handlers, 'claude-panels:get-model', 'panel-1')) as {
+      success: boolean;
+      data: string;
+    };
+
+    expect(result.success).toBe(true);
+    expect(result.data).toBe('opus');
+  });
 });
 
 describe('claudePanel.ts source guard: getDefaultModel() must not reappear at either fallback site', () => {
