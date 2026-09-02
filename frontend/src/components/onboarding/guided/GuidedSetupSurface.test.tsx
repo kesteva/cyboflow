@@ -117,13 +117,13 @@ describe('GuidedSetupSurface — step 7 (add a project)', () => {
     expect(useOnboardingStore.getState().step).toBe(7);
   });
 
-  it('the Skip link skips the tour (resumable from the Sidebar)', () => {
+  it('the Skip link completes the tour outright (no Sidebar resume card)', () => {
     enterGuided(7, 'existing');
     render(<GuidedSetupSurface />);
 
     fireEvent.click(screen.getByTestId('onboarding-guided-skip'));
 
-    expect(useOnboardingStore.getState().status).toBe('skipped');
+    expect(useOnboardingStore.getState().status).toBe('completed');
   });
 });
 

@@ -12,7 +12,7 @@ import { useUpdater } from '../hooks/useUpdater';
 import { trackEvent } from '../utils/telemetry';
 import { skippedStepSet, useOnboardingStore } from '../stores/onboardingStore';
 import { useNavigationStore } from '../stores/navigationStore';
-import { isGuidedStep, visibleStepNumber, visibleStepTotal } from '../utils/onboarding';
+import { visibleStepNumber, visibleStepTotal } from '../utils/onboarding';
 
 interface SidebarProps {
   onAboutClick: () => void;
@@ -292,9 +292,9 @@ export const Sidebar = memo(function Sidebar({
               <span className="min-w-0 flex-1">
                 <span className="block text-[11.5px] font-bold leading-tight text-text-primary">Resume setup</span>
                 <span className="block text-[10px] text-text-secondary">
-                  {isGuidedStep(onboardingStep)
-                    ? 'Guided set-up'
-                    : `Step ${visibleStepNumber(onboardingStep, onboardingSkipped)} of ${visibleStepTotal(onboardingSkipped)}`}
+                  {/* Always a modal step: a tour parked on a guided screen completes
+                      instead of skipping (onboardingStore.skip / hydrate). */}
+                  Step {visibleStepNumber(onboardingStep, onboardingSkipped)} of {visibleStepTotal(onboardingSkipped)}
                 </span>
               </span>
               <span className="flex-shrink-0 text-interactive" aria-hidden="true">

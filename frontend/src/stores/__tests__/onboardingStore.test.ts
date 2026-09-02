@@ -109,11 +109,14 @@ describe('onboardingStore — hydrate', () => {
     expect(s().maxVisitedStep).toBe(5);
   });
 
-  it('a v4 snapshot on the last guided screen (8) resumes clamped to the branch choice (7)', () => {
-    s().hydrate({ version: 4, status: 'active', step: 8 }, 0);
-    expect(s().status).toBe('skipped');
-    expect(s().step).toBe(7);
-    expect(s().maxVisitedStep).toBe(7);
+  it('a snapshot parked on a guided screen (7 or 8) hydrates as completed — resume is for the modal piece only', () => {
+    for (const step of [7, 8]) {
+      for (const status of ['active', 'skipped'] as const) {
+        reset();
+        s().hydrate({ version: 4, status, step }, 0);
+        expect(s().status).toBe('completed');
+      }
+    }
   });
 
   it('a legacy pending snapshot hydrates as skipped', () => {
@@ -658,11 +661,12 @@ describe('onboardingStore — the guided set-up steps (7, 8)', () => {
     expect(s().step).toBe(6);
   });
 
-  it('skip() from a guided step leaves the resumable skipped state', () => {
-    useOnboardingStore.setState({ status: 'active', step: 8, maxVisitedStep: 8 });
-    s().skip();
-    expect(s().status).toBe('skipped');
-    expect(s().step).toBe(8);
+  it('skip() from a guided step completes the tour — no Sidebar resume card', () => {
+    for (const step of [7, 8]) {
+      useOnboardingStore.setState({ status: 'active', step, maxVisitedStep: step });
+      s().skip();
+      expect(s().status).toBe('completed');
+    }
   });
 });
 

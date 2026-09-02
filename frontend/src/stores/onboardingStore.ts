@@ -9,6 +9,7 @@ import {
   ONBOARDING_HANDOFF_STEP,
   ONBOARDING_PROJECT_DETAIL_STEP,
   ONBOARDING_STEP_COUNT,
+  isGuidedStep,
 } from '../utils/onboarding';
 
 /**
@@ -415,7 +416,16 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
       set({ status: 'completed', hydrated: true });
       return;
     }
-    // Any mid-tour state (active/skipped) resumes as skipped — the Sidebar's
+    // The resume affordance covers the MODAL piece only. A snapshot parked on a
+    // guided step means every modal answer was already persisted and the user
+    // walked away from the project screens — that is a finished tour, not one
+    // to re-open (the Sidebar card would otherwise nag "Resume setup" over an
+    // app that is fully usable; projects are added from the home screen).
+    if (isGuidedStep(migrated.step)) {
+      set({ status: 'completed', hydrated: true });
+      return;
+    }
+    // Any mid-modal state (active/skipped) resumes as skipped — the Sidebar's
     // Resume card re-enters at the clamped step, so a boot never drops the user
     // back into a half-built screen (or hides the shell behind a tour they did
     // not ask to re-open).
@@ -493,7 +503,11 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
   skip: () => {
     const s = get();
     if (s.status !== 'active') return;
-    set({ status: 'skipped' });
+    // "Skip the set-up" on a guided screen ends the tour outright: the modal
+    // answers are already saved and the shell is fully usable, so there is
+    // nothing worth a Sidebar "Resume setup" card (resume is for the modal
+    // piece only — see hydrate()).
+    set({ status: isGuidedStep(s.step) ? 'completed' : 'skipped' });
   },
 
   resume: () => {
