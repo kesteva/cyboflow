@@ -180,9 +180,11 @@ export function ModelStep({
         <div className={`${ROW_BASE} border border-border-emphasized`} role="radio" aria-checked="true">
           {radioCircle(true)}
           <span className="flex min-w-0 flex-1 items-baseline gap-2">
-            <span className="text-[11.5px] font-bold text-text-primary">{chosen.label}</span>
+            <span className="flex-shrink-0 whitespace-nowrap text-[11.5px] font-bold text-text-primary">
+              {chosen.label}
+            </span>
             {chosen.hint && (
-              <span className="flex-shrink-0 text-[9px] tracking-[.04em] text-text-tertiary">
+              <span className="min-w-0 truncate text-[9px] tracking-[.04em] text-text-tertiary">
                 {chosen.hint}
               </span>
             )}
@@ -218,9 +220,12 @@ export function ModelStep({
               >
                 {radioCircle(selected)}
                 <span className="flex min-w-0 flex-1 items-baseline gap-2">
-                  <span className="text-[11.5px] font-bold text-text-primary">{row.label}</span>
+                  {/* The id is the identity — it never wraps; the tagline gives way. */}
+                  <span className="flex-shrink-0 whitespace-nowrap text-[11.5px] font-bold text-text-primary">
+                    {row.label}
+                  </span>
                   {row.hint && (
-                    <span className="flex-shrink-0 text-[9px] tracking-[.04em] text-text-tertiary">
+                    <span className="min-w-0 truncate text-[9px] tracking-[.04em] text-text-tertiary">
                       {row.hint}
                     </span>
                   )}
