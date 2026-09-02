@@ -462,7 +462,7 @@ const FilePathAutocomplete: React.FC<FilePathAutocompleteProps> = ({
                 key={suggestion.path}
                 className={`flex items-center px-4 py-2.5 cursor-pointer min-w-0 transition-colors ${
                   index === selectedIndex
-                    ? 'bg-interactive text-on-interactive'
+                    ? 'bg-interactive text-text-on-interactive'
                     : 'text-text-secondary hover:bg-surface-hover'
                 }`}
                 onClick={() => selectSuggestion(suggestion)}

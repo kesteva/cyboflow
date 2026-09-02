@@ -71,7 +71,7 @@ export function HandoffStep({ value, onChange }: HandoffStepProps): React.JSX.El
                 <span className="flex items-center gap-2">
                   <span className="text-[12px] font-bold text-text-primary">{choice.title}</span>
                   {choice.tag && (
-                    <span className="bg-interactive px-1.5 py-0.5 text-[8px] font-bold tracking-[.1em] text-on-interactive">
+                    <span className="bg-interactive px-1.5 py-0.5 text-[8px] font-bold tracking-[.1em] text-text-on-interactive">
                       {choice.tag}
                     </span>
                   )}

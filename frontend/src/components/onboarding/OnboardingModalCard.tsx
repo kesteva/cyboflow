@@ -67,7 +67,7 @@ export function OnboardingModalCard({
       >
         {/* Compact header — every modal step but 0, whose hero lives in the body. */}
         {!hero && (
-          <div className="flex flex-shrink-0 items-center gap-2.5 bg-interactive px-5 py-[13px] text-on-interactive">
+          <div className="flex flex-shrink-0 items-center gap-2.5 bg-interactive px-5 py-[13px] text-text-on-interactive">
             <img
               src={cyboflowLogo}
               alt=""
@@ -76,7 +76,7 @@ export function OnboardingModalCard({
               style={{ filter: 'brightness(0) invert(1)' }}
             />
             <span className="flex-1 text-[15px] font-bold tracking-[-.01em]">{ONBOARDING_TITLES[step]}</span>
-            <span className="text-[9px] tracking-[.14em] text-on-interactive/80">
+            <span className="text-[9px] tracking-[.14em] text-text-on-interactive/80">
               STEP {visibleStepNumber(step, visible)} / {visibleStepTotal(visible)}
             </span>
           </div>

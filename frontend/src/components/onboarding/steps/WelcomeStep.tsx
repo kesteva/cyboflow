@@ -8,7 +8,7 @@ import { WELCOME_BULLETS } from '../copy';
 export function WelcomeStep(): React.JSX.Element {
   return (
     <div>
-      <div className="bg-interactive px-6 pb-5 pt-6 text-on-interactive">
+      <div className="bg-interactive px-6 pb-5 pt-6 text-text-on-interactive">
         <img
           src={cyboflowWordmark}
           alt="Cyboflow"
@@ -16,7 +16,7 @@ export function WelcomeStep(): React.JSX.Element {
           style={{ filter: 'brightness(0) invert(1)' }}
         />
         <div className="text-[21px] font-bold tracking-[-.01em]">Welcome to Cyboflow</div>
-        <div className="mt-[7px] text-[11.5px] leading-[1.55] text-on-interactive/80">
+        <div className="mt-[7px] text-[11.5px] leading-[1.55] text-text-on-interactive/80">
           Built to keep humans at the center — focused on what matters, not distracted by everything that doesn't.
         </div>
       </div>
