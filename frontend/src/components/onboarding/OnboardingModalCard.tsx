@@ -26,15 +26,20 @@ interface OnboardingModalCardProps {
   onBack: () => void;
   onSkip: () => void;
   onGoTo: (step: number) => void;
+  /**
+   * Scrim strength, 0–1 (default 1). During the spiral reveal the tan wrapper
+   * IS the backdrop, so the gate fades the scrim in with `revealFraction` as
+   * the surface underneath is exposed — dimming an intact wrapper would only
+   * dirty the tan toward grey.
+   */
+  scrimOpacity?: number;
 }
 
 /**
  * The 468×512 centered onboarding card (the modal steps). Fixed compact header
  * (terracotta) except step 0's hero, a scrolling body, and a fixed footer:
- * Skip · dots · Back · primary. The scrim is opaque from the first frame (the
- * shell underneath is unmounted for the tour's duration, so there is nothing to
- * fade in over) and captures pointer events but does NOT dismiss — onboarding is
- * gated, not click-away closable.
+ * Skip · dots · Back · primary. The scrim captures pointer events but does NOT
+ * dismiss — onboarding is gated, not click-away closable.
  */
 export function OnboardingModalCard({
   step,
@@ -46,12 +51,17 @@ export function OnboardingModalCard({
   onBack,
   onSkip,
   onGoTo,
+  scrimOpacity = 1,
 }: OnboardingModalCardProps): React.JSX.Element {
   const showBack = step > 0;
   const visible = skippedSteps ?? NO_SKIPPED;
   return (
     <div className="pointer-events-auto fixed inset-0 flex items-center justify-center p-6">
-      <div className="absolute inset-0 bg-modal-overlay" aria-hidden="true" />
+      <div
+        className="absolute inset-0 bg-modal-overlay"
+        aria-hidden="true"
+        style={{ opacity: scrimOpacity, transition: 'opacity 520ms ease-out' }}
+      />
       <div
         role="dialog"
         aria-modal="true"
