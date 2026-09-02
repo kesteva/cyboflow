@@ -155,7 +155,9 @@ describe('clampWindowBounds', () => {
   it('shifts a window hanging off any edge back into the 120px visibility band', () => {
     const lt = clampWindowBounds({ x: -1500, y: -1400, width: 960, height: 640 }, WORK_AREA);
     expect(lt.x).toBe(-840);
-    expect(lt.y).toBe(-520);
+    // y is floored at the work area's top rather than banded — see the
+    // title-bar test below.
+    expect(lt.y).toBe(0);
     expect(clampedIsVisible(lt)).toBe(true);
     const rb = clampWindowBounds({ x: 1900, y: 1070, width: 960, height: 640 }, WORK_AREA);
     expect(rb.x).toBe(WORK_AREA.width - 120);
@@ -171,11 +173,22 @@ describe('clampWindowBounds', () => {
     // Right edge exactly at area-width - 120 → preserved; one further → shifted.
     expect(clampWindowBounds({ x: 1800, y: 0, width: 960, height: 640 }, WORK_AREA).x).toBe(1800);
     expect(clampWindowBounds({ x: 1801, y: 0, width: 960, height: 640 }, WORK_AREA).x).toBe(1800);
-    // Same band on the y axis (top edge and bottom edge).
-    expect(clampWindowBounds({ x: 0, y: -520, width: 960, height: 640 }, WORK_AREA).y).toBe(-520);
+    // The bottom band applies on y too.
+    expect(clampWindowBounds({ x: 0, y: 960, width: 960, height: 640 }, WORK_AREA).y).toBe(960);
     expect(clampWindowBounds({ x: 0, y: 961, width: 960, height: 640 }, WORK_AREA).y).toBe(960);
-    // One pixel past the top band edge → shifted back in.
-    expect(clampWindowBounds({ x: 0, y: -521, width: 960, height: 640 }, WORK_AREA).y).toBe(-520);
+  });
+
+  it('never places the title bar above the work area', () => {
+    // A window whose top edge is off screen cannot be dragged back, so y is
+    // floored at the work area's top instead of being banded like x. Reachable
+    // whenever a saved position refers to a display that is no longer attached.
+    expect(clampWindowBounds({ x: 0, y: -1, width: 960, height: 640 }, WORK_AREA).y).toBe(0);
+    expect(clampWindowBounds({ x: 0, y: -520, width: 960, height: 640 }, WORK_AREA).y).toBe(0);
+    expect(clampWindowBounds({ x: 0, y: -5000, width: 960, height: 640 }, WORK_AREA).y).toBe(0);
+
+    // Same floor on a work area that does not start at the origin.
+    const area: WindowRect = { x: -1920, y: -1080, width: 1920, height: 1080 };
+    expect(clampWindowBounds({ x: -1000, y: -2000, width: 960, height: 640 }, area).y).toBe(-1080);
   });
 
   it('pins a window larger than the work area to the work-area origin', () => {

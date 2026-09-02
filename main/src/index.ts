@@ -1234,13 +1234,6 @@ async function createWindow() {
   // Each panel can register multiple event listeners
   mainWindow.webContents.setMaxListeners(100);
 
-  // A maximized previous session comes back maximized — the restored x/y/w/h
-  // above are the window's NORMAL (restore) geometry, so un-maximizing later
-  // lands where the user left it.
-  if (savedWindowState?.maximized) {
-    mainWindow.maximize();
-  }
-
   // Persist bounds so the next launch restores them. resize/move fire in a
   // flood during interactive drags, so they only arm a 500ms debounce; close
   // flushes immediately (and cancels the pending timer) so a quick open→close
@@ -1276,6 +1269,14 @@ async function createWindow() {
   // kick off the deferrable startup work at that point. Registered BEFORE
   // loadURL/loadFile so the one-shot 'ready-to-show' is never missed.
   mainWindow.once('ready-to-show', () => {
+    // A maximized previous session comes back maximized — the restored x/y/w/h
+    // are the window's NORMAL (restore) geometry, so un-maximizing later lands
+    // where the user left it. maximize() shows the window itself, so it belongs
+    // inside this gate: called earlier it reveals the unpainted frame the gate
+    // exists to hide.
+    if (savedWindowState?.maximized) {
+      mainWindow?.maximize();
+    }
     mainWindow?.show();
     runDeferredStartupWork();
   });

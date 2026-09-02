@@ -98,7 +98,7 @@ vi.mock('../../../hooks/useArtifactsList', () => ({
 }));
 
 // Import after mocks
-import { RunRightRail } from '../RunRightRail';
+import { RunRightRail, initialRunRightRailWidth } from '../RunRightRail';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { useCenterPaneStore } from '../../../stores/centerPaneStore';
 import type { UseWorkflowPhaseStateResult } from '../../../hooks/useWorkflowPhaseState';
@@ -465,6 +465,34 @@ describe('RunRightRail — width resize', () => {
     dragHandle(-100); // 100px LEFT → +100 width
     expect(railWidth()).toBe(460);
     expect(localStorage.getItem(WIDTH_KEY)).toBe('460');
+  });
+
+  it('does not write a width to localStorage until the user resizes', () => {
+    renderRail(EMPTY_PHASE_STATE);
+    // A mount write would stamp the current default into every install and
+    // stop any later default change from reaching anyone.
+    expect(localStorage.getItem(WIDTH_KEY)).toBeNull();
+    dragHandle(-40);
+    expect(localStorage.getItem(WIDTH_KEY)).toBe('400');
+  });
+
+  it('opens at the current default when storage holds the superseded 296', () => {
+    localStorage.setItem(WIDTH_KEY, '296');
+    renderRail(EMPTY_PHASE_STATE);
+    expect(railWidth()).toBe(360);
+  });
+
+  it('honours a width the user actually chose', () => {
+    localStorage.setItem(WIDTH_KEY, '420');
+    renderRail(EMPTY_PHASE_STATE);
+    expect(railWidth()).toBe(420);
+  });
+
+  it('initialRunRightRailWidth: stored wins, superseded default does not, junk falls back', () => {
+    expect(initialRunRightRailWidth('420')).toBe(420);
+    expect(initialRunRightRailWidth('296')).toBe(360);
+    expect(initialRunRightRailWidth(null)).toBe(360);
+    expect(initialRunRightRailWidth('not-a-number')).toBe(360);
   });
 
   it('clamps to the minimum on a large rightward drag', () => {

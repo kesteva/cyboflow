@@ -83,6 +83,10 @@ const TABS: Tab[] = [
 /** Default expanded rail width. Wide enough for its tab headers on first run
  * (users who drag it get their own persisted width instead). */
 const RAIL_DEFAULT_WIDTH = 360;
+/** The previous default. A stored width of exactly this was stamped by the
+ * mount write below, not chosen by anyone, so it does not outrank the current
+ * default. See initialRunRightRailWidth. */
+const SUPERSEDED_DEFAULT_WIDTH = 296;
 /** Resize clamp: never shrink below a usable column. */
 const RAIL_MIN_WIDTH = 240;
 /** Resize clamp: cap at the smaller of an absolute ceiling or ~50% of viewport. */
@@ -102,6 +106,16 @@ function maxRailWidth(): number {
 /** Clamp a candidate width into [min, max]. */
 function clampRailWidth(w: number): number {
   return Math.max(RAIL_MIN_WIDTH, Math.min(maxRailWidth(), w));
+}
+
+/** The width to open at: a stored width, unless it is the superseded default,
+ * which every existing install holds whether or not its user ever resized. */
+export function initialRunRightRailWidth(stored: string | null): number {
+  const parsed = stored !== null ? parseInt(stored, 10) : NaN;
+  if (!Number.isFinite(parsed) || parsed === SUPERSEDED_DEFAULT_WIDTH) {
+    return clampRailWidth(RAIL_DEFAULT_WIDTH);
+  }
+  return clampRailWidth(parsed);
 }
 
 /**
@@ -151,18 +165,24 @@ export function RunRightRail({
 
   // User-resizable width: seed from localStorage (default RAIL_DEFAULT_WIDTH),
   // always clamped. Mirrors TerminalDock's height-resize pattern, horizontal.
-  const [width, setWidth] = useState<number>(() => {
-    const saved =
-      typeof localStorage !== 'undefined' ? localStorage.getItem(RAIL_WIDTH_KEY) : null;
-    const parsed = saved !== null ? parseInt(saved, 10) : NaN;
-    return clampRailWidth(Number.isFinite(parsed) ? parsed : RAIL_DEFAULT_WIDTH);
-  });
+  const [width, setWidth] = useState<number>(() =>
+    initialRunRightRailWidth(
+      typeof localStorage !== 'undefined' ? localStorage.getItem(RAIL_WIDTH_KEY) : null,
+    ),
+  );
   const [isResizing, setIsResizing] = useState(false);
   const startXRef = useRef<number>(0);
   const startWidthRef = useRef<number>(0);
 
-  // Persist the chosen width. (Brand-new key — no migrateLocalStorageKey needed.)
+  // Persist the chosen width, but not on mount. The mount write stamped the
+  // current default into storage on every install, so a later default change
+  // reached nobody who had ever opened the app.
+  const widthPersistArmed = useRef(false);
   useEffect(() => {
+    if (!widthPersistArmed.current) {
+      widthPersistArmed.current = true;
+      return;
+    }
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(RAIL_WIDTH_KEY, width.toString());
     }

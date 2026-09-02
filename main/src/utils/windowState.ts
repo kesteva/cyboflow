@@ -119,29 +119,40 @@ export function defaultWindowBounds(workArea: WindowRect): WindowRect {
 
 /**
  * Force a window rect onto a work area: dimensions at least the minimums, and
- * at least MIN_VISIBLE_PX of the window overlapping the work area at every
- * edge (shift x/y into range; a window larger than the work area on an axis
- * can't keep the visibility band on both edges, so it is pinned to the work
- * area's origin). Pure integer math — safe to feed straight to BrowserWindow.
+ * at least MIN_VISIBLE_PX of the window overlapping the work area (shift x/y
+ * into range; a window larger than the work area on an axis can't keep the
+ * visibility band on both edges, so it is pinned to the work area's origin).
+ * Pure integer math — safe to feed straight to BrowserWindow.
+ *
+ * The two axes are not symmetric. x may sit either side of the area, but a
+ * negative y offset puts the title bar above the work area, and a window whose
+ * title bar is off screen cannot be dragged back.
  */
 export function clampWindowBounds(bounds: WindowRect, workArea: WindowRect): WindowRect {
   const width = Math.max(MIN_WINDOW_WIDTH, Math.round(bounds.width));
   const height = Math.max(MIN_WINDOW_HEIGHT, Math.round(bounds.height));
 
-  // One axis of the pin-and-band rule: keep at least MIN_VISIBLE_PX of the
-  // window past the area's leading edge AND MIN_VISIBLE_PX short of its far
-  // edge. A window larger than the area on this axis can't do both — pin to
-  // the area's origin instead.
-  const clampAxis = (pos: number, size: number, areaPos: number, areaSize: number): number => {
+  // Horizontal: keep at least MIN_VISIBLE_PX of the window past the area's
+  // leading edge AND MIN_VISIBLE_PX short of its far edge. A window wider than
+  // the area can't do both — pin to the area's origin instead.
+  const clampX = (pos: number, size: number, areaPos: number, areaSize: number): number => {
     if (size > areaSize) return areaPos;
     const min = areaPos + MIN_VISIBLE_PX - size;
     const max = areaPos + areaSize - MIN_VISIBLE_PX;
     return Math.max(min, Math.min(Math.round(pos), max));
   };
 
+  // Vertical: the far-edge band is the same, but the near edge is a floor at
+  // the top of the work area, not a band.
+  const clampY = (pos: number, size: number, areaPos: number, areaSize: number): number => {
+    if (size > areaSize) return areaPos;
+    const max = areaPos + areaSize - MIN_VISIBLE_PX;
+    return Math.max(areaPos, Math.min(Math.round(pos), max));
+  };
+
   return {
-    x: clampAxis(bounds.x, width, workArea.x, workArea.width),
-    y: clampAxis(bounds.y, height, workArea.y, workArea.height),
+    x: clampX(bounds.x, width, workArea.x, workArea.width),
+    y: clampY(bounds.y, height, workArea.y, workArea.height),
     width,
     height,
   };
