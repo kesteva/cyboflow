@@ -14,8 +14,11 @@ import { primeAssistantGreeting } from '../../agentRail/onboardingGreeting';
  *  1. `expandAgentRail()` — AgentRail's collapse state is a localStorage-seeded
  *     useState initializer, read on the mount that step 3 triggers.
  *  2. `primeAssistantGreeting(name)` — same story for AgentThreadView's one-shot
- *     greeting; and `openHumanReview()` so the shell lands on the review queue
- *     rather than the generic home surface.
+ *     greeting; `setActiveProjectId(project.id)` BEFORE `openHumanReview()`,
+ *     because the project tree's mount-time load auto-selects the first project
+ *     via `navigateToProject` whenever no project is active — and that opens the
+ *     project OVERVIEW, which would override the review queue we just asked
+ *     for. Stamping the id first makes that auto-select a no-op.
  *  3. `finish()` — flips the store to 'completed', which is what actually
  *     mounts the shell.
  *
@@ -26,7 +29,9 @@ export function finishGuidedSetup(project: Project | null): void {
   expandAgentRail();
   if (project !== null) {
     primeAssistantGreeting(project.name);
-    useNavigationStore.getState().openHumanReview();
+    const nav = useNavigationStore.getState();
+    nav.setActiveProjectId(project.id);
+    nav.openHumanReview();
   }
   useOnboardingStore.getState().finish();
 }

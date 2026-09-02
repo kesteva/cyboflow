@@ -74,7 +74,7 @@ beforeEach(() => {
   trackEvent.mockReset();
   localStorage.clear();
   act(() => {
-    useNavigationStore.setState({ view: 'home', humanReviewOpen: false });
+    useNavigationStore.setState({ view: 'home', humanReviewOpen: false, activeProjectId: null });
     useOnboardingStore.setState({
       status: 'idle',
       step: 0,
@@ -159,7 +159,12 @@ describe('GuidedSetupSurface — step 8, existing project', () => {
     });
     expect(trackEvent).toHaveBeenCalledWith('project_created', {});
     expect(broadcast).toHaveBeenCalledTimes(1);
-    // Finale side effects, all staged before the shell mounts.
+    // Finale side effects, all staged before the shell mounts. The active
+    // project is stamped so the project tree's mount-time auto-select (which
+    // opens the project OVERVIEW) cannot override the review queue.
+    const created = (await projectsCreate.mock.results[0]?.value) as { data?: { id: number } };
+    expect(useNavigationStore.getState().activeProjectId).toBe(created.data?.id);
+    expect(useNavigationStore.getState().activeProjectId).not.toBeNull();
     expect(useNavigationStore.getState().humanReviewOpen).toBe(true);
     expect(peekAssistantGreeting()).toBe(
       'dogwalkr is set up. If you need more help, ask me questions at any time.',
