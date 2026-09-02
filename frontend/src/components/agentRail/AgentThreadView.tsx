@@ -17,23 +17,10 @@ import { AgentSuggestionChips } from './AgentSuggestionChips';
 import { clearAssistantGreeting, peekAssistantGreeting } from './onboardingGreeting';
 import { ProposalCardList } from './ProposalCardList';
 
-/**
- * Module-scoped once-per-app-launch gate for the auto-digest trigger. A plain
- * `useEffect(..., [])` inside this component would re-fire every time AgentRail
- * remounts — it unmounts whenever the user leaves a landing-family view (see
- * `shouldShowAgentRail` in AgentRail.tsx) — so the guard must live OUTSIDE
- * React state/component lifecycle. The server-side cap
- * (AgentThreadService.triggerDigest, once per local calendar day, PERSISTED in
- * agent_threads.last_digest_at) is the real authority across launches; this is
- * just "don't re-ask on every navigation within one launch".
- */
-let digestTriggeredThisLaunch = false;
-
 export function AgentThreadView(): React.ReactElement {
   const thread = useAgentThreadStore((s) => s.thread);
   const sending = useAgentThreadStore((s) => s.sending);
   const sendMessage = useAgentThreadStore((s) => s.sendMessage);
-  const triggerDigest = useAgentThreadStore((s) => s.triggerDigest);
   const proposals = useAgentThreadStore((s) => s.proposals);
 
   const { messages, loadError } = useUnifiedAgentThreadMessages(thread?.id ?? null);
@@ -61,24 +48,6 @@ export function AgentThreadView(): React.ReactElement {
       ...messages,
     ];
   }, [greeting, greetingAt, messages]);
-
-  // Auto-digest: gated on `thread` (not on mount) — init()'s getThread query
-  // resolves asynchronously, and `thread` is Zustand state that survives
-  // AgentRail unmount/remount, so this fires exactly once per launch the
-  // first time a thread is available, however many times the rail toggles
-  // in and out of view before then. We set the gate OPTIMISTICALLY (before the
-  // await) so a concurrent remount can't double-fire, then REOPEN it if the
-  // attempt was non-consuming — assistant disabled, or the call failed before
-  // the backend stamped the day — so a later remount (e.g. after the user
-  // enables the assistant) can retry this launch. A 'consumed' outcome (sent,
-  // or the persisted once-per-day cap already fired today) keeps it closed.
-  useEffect(() => {
-    if (thread === null || digestTriggeredThisLaunch) return;
-    digestTriggeredThisLaunch = true;
-    void triggerDigest().then((outcome) => {
-      if (outcome === 'retry') digestTriggeredThisLaunch = false;
-    });
-  }, [thread, triggerDigest]);
 
   const handleSend = (text: string): void => {
     void sendMessage(text);

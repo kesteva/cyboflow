@@ -1,7 +1,7 @@
 /**
  * Unit tests for agentThreadStore — init() bootstrap/idempotency, the debounced
  * onThreadEvent → (liveTailTick bump + proposals refetch) path, the targeted
- * onProposalUpdate refetch, and the sendMessage/triggerDigest `sending` gate.
+ * onProposalUpdate refetch, and the sendMessage `sending` gate.
  *
  * The tRPC client is mocked at module level (mirrors backlogStore.test.ts /
  * reviewQueueStore.test.ts) so importing the store does not require a live
@@ -14,7 +14,6 @@ import type { AgentThread, AgentProposal } from '../../../../shared/types/agentT
 let mockGetThreadQuery: ReturnType<typeof vi.fn>;
 let mockListProposalsQuery: ReturnType<typeof vi.fn>;
 let mockSendMessageMutate: ReturnType<typeof vi.fn>;
-let mockTriggerDigestMutate: ReturnType<typeof vi.fn>;
 let mockConfirmProposalMutate: ReturnType<typeof vi.fn>;
 let mockDismissProposalMutate: ReturnType<typeof vi.fn>;
 let mockOnThreadEventSubscribe: ReturnType<typeof vi.fn>;
@@ -29,7 +28,6 @@ vi.mock('../../trpc/client', () => ({
         getThread: { get query() { return mockGetThreadQuery; } },
         listProposals: { get query() { return mockListProposalsQuery; } },
         sendMessage: { get mutate() { return mockSendMessageMutate; } },
-        triggerDigest: { get mutate() { return mockTriggerDigestMutate; } },
         confirmProposal: { get mutate() { return mockConfirmProposalMutate; } },
         dismissProposal: { get mutate() { return mockDismissProposalMutate; } },
         onThreadEvent: { get subscribe() { return mockOnThreadEventSubscribe; } },
@@ -82,7 +80,6 @@ beforeEach(() => {
   mockGetThreadQuery = vi.fn().mockResolvedValue(makeThread());
   mockListProposalsQuery = vi.fn().mockResolvedValue([]);
   mockSendMessageMutate = vi.fn().mockResolvedValue({ ok: true });
-  mockTriggerDigestMutate = vi.fn().mockResolvedValue({ triggered: true });
   mockConfirmProposalMutate = vi.fn().mockResolvedValue({ ok: true, dismissed: false });
   mockDismissProposalMutate = vi.fn().mockResolvedValue({ ok: true, dismissed: true });
   mockOnThreadEventUnsubscribe = vi.fn();
@@ -235,7 +232,7 @@ describe('onProposalUpdate', () => {
 });
 
 // ---------------------------------------------------------------------------
-// sendMessage / triggerDigest — the composer's `sending` gate
+// sendMessage — the composer's `sending` gate
 // ---------------------------------------------------------------------------
 
 describe('sendMessage', () => {
@@ -277,56 +274,6 @@ describe('sendMessage', () => {
 
     await useAgentThreadStore.getState().sendMessage('hello');
 
-    expect(useAgentThreadStore.getState().sending).toBe(false);
-    errSpy.mockRestore();
-  });
-});
-
-describe('triggerDigest', () => {
-  it('sets sending true while in flight, calls the mutation, and returns "consumed" when triggered', async () => {
-    useAgentThreadStore.setState({ thread: makeThread() });
-    let resolveDigest: (() => void) | undefined;
-    mockTriggerDigestMutate = vi.fn().mockReturnValue(
-      new Promise<{ triggered: true }>((resolve) => {
-        resolveDigest = () => resolve({ triggered: true });
-      }),
-    );
-
-    const promise = useAgentThreadStore.getState().triggerDigest();
-    expect(useAgentThreadStore.getState().sending).toBe(true);
-
-    resolveDigest?.();
-    const outcome = await promise;
-
-    expect(outcome).toBe('consumed');
-    expect(useAgentThreadStore.getState().sending).toBe(false);
-    expect(mockTriggerDigestMutate).toHaveBeenCalledTimes(1);
-    expect(mockTriggerDigestMutate).toHaveBeenCalledWith({ threadId: 'thread-1' });
-  });
-
-  it('returns "consumed" when the backend reports the day already fired (throttled)', async () => {
-    useAgentThreadStore.setState({ thread: makeThread() });
-    mockTriggerDigestMutate = vi.fn().mockResolvedValue({ triggered: false, reason: 'throttled' });
-
-    const outcome = await useAgentThreadStore.getState().triggerDigest();
-    expect(outcome).toBe('consumed');
-  });
-
-  it('returns "retry" when the assistant is disabled (nothing was stamped)', async () => {
-    useAgentThreadStore.setState({ thread: makeThread() });
-    mockTriggerDigestMutate = vi.fn().mockResolvedValue({ triggered: false, reason: 'disabled' });
-
-    const outcome = await useAgentThreadStore.getState().triggerDigest();
-    expect(outcome).toBe('retry');
-  });
-
-  it('returns "retry" and swallows the error when the mutation rejects', async () => {
-    useAgentThreadStore.setState({ thread: makeThread() });
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    mockTriggerDigestMutate = vi.fn().mockRejectedValue(new Error('ipc down'));
-
-    const outcome = await useAgentThreadStore.getState().triggerDigest();
-    expect(outcome).toBe('retry');
     expect(useAgentThreadStore.getState().sending).toBe(false);
     errSpy.mockRestore();
   });

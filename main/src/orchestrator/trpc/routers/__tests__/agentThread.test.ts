@@ -7,7 +7,7 @@
  * guarded on current status) so the open-session immediate-execute path is a real
  * transition, not a stub.
  *
- * Covers: getThread, sendMessage, triggerDigest, listProposals, listMessages,
+ * Covers: getThread, sendMessage, listProposals, listMessages,
  * the open-session Confirm (CAS-claim → finalize executed → navigation), the
  * executor delegation path, the superseded loopback-injection call, dismiss,
  * not-found, and that onProposalUpdate fires on every terminal transition.
@@ -108,12 +108,10 @@ class FakeStore implements AgentThreadStoreLike {
 function makeService(): AgentThreadServiceLike & {
   ensureGlobalThread: ReturnType<typeof vi.fn>;
   sendMessage: ReturnType<typeof vi.fn>;
-  triggerDigest: ReturnType<typeof vi.fn>;
 } {
   return {
     ensureGlobalThread: vi.fn(() => THREAD),
     sendMessage: vi.fn(async () => undefined),
-    triggerDigest: vi.fn(async () => ({ triggered: true as const })),
   };
 }
 
@@ -161,14 +159,6 @@ describe('cyboflow.agentThread read/simple procedures', () => {
     const result = await caller.cyboflow.agentThread.sendMessage({ threadId: 'thread-1', text: 'hi' });
     expect(result).toEqual({ ok: true });
     expect(service.sendMessage).toHaveBeenCalledWith('thread-1', 'hi');
-  });
-
-  it('triggerDigest returns the service throttle result', async () => {
-    const service = makeService();
-    service.triggerDigest.mockResolvedValueOnce({ triggered: false, reason: 'throttled' });
-    const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
-    const result = await caller.cyboflow.agentThread.triggerDigest({ threadId: 'thread-1' });
-    expect(result).toEqual({ triggered: false, reason: 'throttled' });
   });
 
   it('listProposals returns the store rows for the thread', async () => {

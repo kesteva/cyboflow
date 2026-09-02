@@ -6,7 +6,6 @@
  *   - getThread        : query    → AgentThread   (ensures the single 'global' thread exists)
  *   - listMessages     : query    → UnifiedMessage[] (projection over agent_thread_events)
  *   - sendMessage      : mutation → { ok: true }   (one agent turn)
- *   - triggerDigest    : mutation → DigestTriggerResult (server-throttled)
  *   - listProposals    : query    → AgentProposal[]
  *   - confirmProposal  : mutation → ConfirmProposalResult (the user's Confirm click)
  *   - dismissProposal  : mutation → { ok: true; dismissed }
@@ -185,24 +184,6 @@ export const agentThreadRouter = router({
       await requireService(ctx).sendMessage(input.threadId, input.text);
       return { ok: true };
     }),
-
-  /**
-   * Trigger a synthetic digest turn. Server-throttled (≥10 min per thread) — a
-   * throttled call returns { triggered: false, reason: 'throttled' } WITHOUT
-   * sending, so the frontend's first-open-per-launch trigger stays idempotent.
-   * When the global assistant kill switch is off, returns
-   * { triggered: false, reason: 'disabled' } WITHOUT stamping the throttle.
-   */
-  triggerDigest: protectedProcedure
-    .input(z.object({ threadId: z.string() }))
-    .mutation(
-      async ({
-        ctx,
-        input,
-      }): Promise<{ triggered: true } | { triggered: false; reason: 'throttled' | 'disabled' }> => {
-        return requireService(ctx).triggerDigest(input.threadId);
-      },
-    ),
 
   /** List a thread's proposals oldest-first (all statuses). */
   listProposals: protectedProcedure

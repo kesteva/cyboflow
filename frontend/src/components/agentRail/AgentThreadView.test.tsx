@@ -2,18 +2,13 @@
  * AgentThreadView tests (S1.2).
  *
  * UnifiedChatView and useUnifiedAgentThreadMessages are stubbed so this file
- * tests AgentThreadView's OWN wiring — mode/running passthrough, the
- * composer/chips → store.sendMessage plumbing, and the once-per-launch digest
- * gate — not UnifiedChatView's internals (covered by UnifiedChatView.test.tsx)
- * or the store's own subscription logic (covered by agentThreadStore.test.ts).
- *
- * The module-scoped `digestTriggeredThisLaunch` flag in AgentThreadView.tsx is
- * intentionally NOT React state (see its doc comment), so each test dynamically
- * re-imports the component after `vi.resetModules()` to get a fresh flag —
- * otherwise test order would leak the "already triggered" state across cases.
+ * tests AgentThreadView's OWN wiring — mode/running passthrough, and the
+ * composer/chips → store.sendMessage plumbing — not UnifiedChatView's
+ * internals (covered by UnifiedChatView.test.tsx) or the store's own
+ * subscription logic (covered by agentThreadStore.test.ts).
  */
 import '@testing-library/jest-dom';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ComponentType, ReactNode } from 'react';
 import type { AgentThread, AgentProposal } from '../../../../shared/types/agentThread';
@@ -49,9 +44,6 @@ vi.mock('./ProposalCardList', () => ({
 // -- agentThreadStore stub: a plain selector-applying function (not a real
 //    subscribing Zustand store), driven by the mutable fixture vars below. --
 const mockSendMessage = vi.fn().mockResolvedValue(undefined);
-// Default: the backend consumed the day's cap, so the once-per-launch gate stays
-// closed (mirrors the store's 'consumed' outcome for triggered/throttled).
-const mockTriggerDigest = vi.fn().mockResolvedValue('consumed');
 let mockThread: AgentThread | null = null;
 let mockSending = false;
 let mockProposals: AgentProposal[] = [];
@@ -60,7 +52,6 @@ interface FakeAgentThreadState {
   thread: AgentThread | null;
   sending: boolean;
   sendMessage: typeof mockSendMessage;
-  triggerDigest: typeof mockTriggerDigest;
   proposals: AgentProposal[];
 }
 
@@ -70,7 +61,6 @@ vi.mock('../../stores/agentThreadStore', () => ({
       thread: mockThread,
       sending: mockSending,
       sendMessage: mockSendMessage,
-      triggerDigest: mockTriggerDigest,
       proposals: mockProposals,
     }),
 }));
@@ -95,7 +85,6 @@ async function loadAgentThreadView(): Promise<ComponentType> {
 beforeEach(() => {
   vi.resetModules();
   mockSendMessage.mockClear();
-  mockTriggerDigest.mockClear();
   mockThread = null;
   mockSending = false;
   mockProposals = [];
@@ -168,62 +157,5 @@ describe('AgentThreadView — composer + chips wiring', () => {
     render(<AgentThreadView />);
 
     expect(screen.getByTestId('agent-composer-input')).toBeDisabled();
-  });
-});
-
-describe('AgentThreadView — auto-digest (once per launch)', () => {
-  it('does not trigger while the thread has not loaded', async () => {
-    mockThread = null;
-    const AgentThreadView = await loadAgentThreadView();
-    render(<AgentThreadView />);
-
-    await Promise.resolve();
-    expect(mockTriggerDigest).not.toHaveBeenCalled();
-  });
-
-  it('triggers exactly once when the thread becomes available, and not again on remount', async () => {
-    const AgentThreadView = await loadAgentThreadView();
-
-    // First mount: thread still loading.
-    mockThread = null;
-    const { rerender, unmount } = render(<AgentThreadView />);
-    await Promise.resolve();
-    expect(mockTriggerDigest).not.toHaveBeenCalled();
-
-    // The store's bootstrap resolves — thread becomes available.
-    mockThread = makeThread();
-    rerender(<AgentThreadView />);
-    await waitFor(() => expect(mockTriggerDigest).toHaveBeenCalledTimes(1));
-
-    // Unmount (rail toggles out of view) and remount (rail toggles back in,
-    // shouldShowAgentRail) — the module-scoped flag must survive: no second
-    // digest this launch. A genuinely fresh render() call (not `rerender`)
-    // mirrors AgentRail's real unmount/mount cycle most directly.
-    unmount();
-    render(<AgentThreadView />);
-    await Promise.resolve();
-    expect(mockTriggerDigest).toHaveBeenCalledTimes(1);
-  });
-
-  it('reopens the launch gate on a non-consuming (retry) outcome, so a remount re-fires this launch', async () => {
-    // e.g. the assistant was disabled on first render, or the call failed before
-    // the backend stamped the day — the gate must not stay closed.
-    mockTriggerDigest.mockResolvedValue('retry');
-    const AgentThreadView = await loadAgentThreadView();
-
-    mockThread = makeThread();
-    const { unmount } = render(<AgentThreadView />);
-    await waitFor(() => expect(mockTriggerDigest).toHaveBeenCalledTimes(1));
-    // Let the .then(outcome => reopen) microtask run before remounting.
-    await Promise.resolve();
-    await Promise.resolve();
-
-    unmount();
-    render(<AgentThreadView />);
-    await waitFor(() => expect(mockTriggerDigest).toHaveBeenCalledTimes(2));
-
-    // Restore the shared mock's default for any later test (mockClear in
-    // beforeEach resets calls, not the resolved value).
-    mockTriggerDigest.mockResolvedValue('consumed');
   });
 });

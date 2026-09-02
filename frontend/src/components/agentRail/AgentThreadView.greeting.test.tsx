@@ -48,7 +48,6 @@ vi.mock('../../stores/agentThreadStore', () => ({
       thread: null,
       sending: false,
       sendMessage: vi.fn(),
-      triggerDigest: vi.fn().mockResolvedValue('consumed'),
       proposals: [],
     }),
 }));
