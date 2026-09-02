@@ -4,7 +4,6 @@
  * Kept out of OnboardingSpiralReveal.tsx so that file exports a component and
  * nothing else (fast refresh degrades to a full reload otherwise, which is
  * exactly wrong for a surface whose whole point is motion you tune by eye).
- * OnboardingGate also reads revealFraction from here to drive the modal scrim.
  */
 import { ONBOARDING_HANDOFF_STEP } from './onboarding';
 

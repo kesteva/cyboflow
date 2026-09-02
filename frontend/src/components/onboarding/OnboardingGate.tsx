@@ -35,7 +35,6 @@ import { emitTelemetryChangeEvents, trackEvent } from '../../utils/telemetry';
 import { OnboardingOverlay } from './OnboardingOverlay';
 import { OnboardingModalCard, type PrimaryAction } from './OnboardingModalCard';
 import { OnboardingSpiralReveal } from './OnboardingSpiralReveal';
-import { revealFraction } from '../../utils/onboardingSpiral';
 import { WelcomeStep } from './steps/WelcomeStep';
 import { ConnectStep } from './steps/ConnectStep';
 import { PermissionStep } from './steps/PermissionStep';
@@ -804,7 +803,6 @@ export function OnboardingGate(): React.JSX.Element | null {
         onBack={back}
         onSkip={skip}
         onGoTo={goTo}
-        scrimOpacity={revealFraction(step)}
       >
         {body}
       </OnboardingModalCard>
