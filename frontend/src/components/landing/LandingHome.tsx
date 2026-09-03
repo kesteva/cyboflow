@@ -45,6 +45,7 @@ import {
   useLandingStore,
   useProjectsCount,
   useRunProjectMap,
+  useRunSessionMap,
 } from '../../stores/landingStore';
 import { useReviewQueueStore, useReviewQueueView } from '../../stores/reviewQueueStore';
 import { useActiveDynamicWorkflows, useDynamicWorkflowStore } from '../../stores/dynamicWorkflowStore';
@@ -146,6 +147,7 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
   const landingBlockingRunIds = useAggregatedBlockingRunIds();
   const runs = useAggregatedRuns();
   const runProjectMap = useRunProjectMap();
+  const runSessionMap = useRunSessionMap();
   const loadError = useLandingStore((s) => s.loadError);
   const retryLanding = useLandingStore((s) => s.retry);
 
@@ -637,6 +639,7 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
             approvals={approvals}
             projectNameById={projectNameById}
             runProjectMap={runProjectMap}
+            runSessionMap={runSessionMap}
             nowMs={nowMs}
             showWhenEmpty={showEmptyWells}
             flashing={flashing}

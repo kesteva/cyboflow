@@ -106,6 +106,7 @@ const baseProps = {
   approvals: [] as QueueItem[],
   projectNameById: { 1: 'proj-1' },
   runProjectMap: { 'run-1': 1 },
+  runSessionMap: {},
   nowMs: NOW,
   showWhenEmpty: false,
   flashing: false,
@@ -194,6 +195,32 @@ describe('NeedsInputSection', () => {
     });
     render(<NeedsInputSection {...baseProps} reviewItems={[item]} onOpenReviewItem={onOpenReviewItem} />);
     expect(screen.getByText('Idle session needs your attention')).toBeInTheDocument();
+  });
+
+  it('names the halted session on a review item, resolved from its run', () => {
+    // Two "Human gate: Human review" cards are otherwise distinguishable only by
+    // project; the item itself carries no session identity, so it comes from the
+    // run map.
+    const item = makeReviewItem({ run_id: 'run-7', title: 'Human gate: Human review' });
+    render(
+      <NeedsInputSection
+        {...baseProps}
+        reviewItems={[item]}
+        runSessionMap={{ 'run-7': { sessionName: 'onboarding redesign', branchName: 'hidden-comet-20260901' } }}
+      />,
+    );
+    expect(screen.getByText('onboarding redesign')).toBeInTheDocument();
+    expect(screen.getByText('⌥ hidden-comet-20260901')).toBeInTheDocument();
+  });
+
+  it('renders a review item with no identity when its run is not in the map', () => {
+    // A run outside `runsByProject` (or a manual item with run_id null) simply
+    // resolves to nothing — the card renders exactly as it did before.
+    const item = makeReviewItem({ run_id: 'run-unknown', title: 'Human gate: Human review' });
+    render(<NeedsInputSection {...baseProps} reviewItems={[item]} runSessionMap={{}} />);
+    const card = screen.getByTestId('rq-needs-input-row');
+    expect(within(card).getByText('Human gate: Human review')).toBeInTheDocument();
+    expect(within(card).queryByText(/^⌥ /)).not.toBeInTheDocument();
   });
 
   it('swaps the meta-row preview for the full body paragraph on Details toggle', async () => {
