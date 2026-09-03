@@ -175,7 +175,7 @@ export class AgentThreadEventsSink implements SpawnEventsSink {
     // `agent_unknown` — over a thousand per turn, none of them renderable.
     // The run-scoped built-in sink skips them too (RawEventsSink
     // skipEventTypes); the transcript is the projected stream only.
-    if (event.type === 'agent_unknown') return;
+    if ('type' in event && event.type === 'agent_unknown') return;
     try {
       const eventType = derivePersistedEventType(event);
       const payloadJson = JSON.stringify(event);
