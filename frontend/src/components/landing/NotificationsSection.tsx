@@ -12,6 +12,9 @@
  * "Details ▸": "Open →" jumps to the run that filed it, and "Dismiss" is the
  * only triage an FYI has (there is no follow-up to track).
  *
+ * It sits BELOW "Ready for review": finished work that still needs a verdict
+ * outranks a notice about work that has already been accounted for.
+ *
  * The section is omitted entirely when empty — an empty well would imply the
  * queue expects a backlog of notices, which it does not.
  */

@@ -663,14 +663,6 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
             onResolved={afterLifecycleAction}
           />
 
-          <NotificationsSection
-            items={notificationItems}
-            projectNameById={projectNameById}
-            nowMs={nowMs}
-            onOpen={openReviewItem}
-            onDismissed={afterLifecycleAction}
-          />
-
           <div ref={readyRef} className="scroll-mt-4">
             <ReadyForReviewSection
               rows={readyRows}
@@ -683,6 +675,14 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
               onDismissSession={setDismissTargetId}
             />
           </div>
+
+          <NotificationsSection
+            items={notificationItems}
+            projectNameById={projectNameById}
+            nowMs={nowMs}
+            onOpen={openReviewItem}
+            onDismissed={afterLifecycleAction}
+          />
         </>
       )}
 
