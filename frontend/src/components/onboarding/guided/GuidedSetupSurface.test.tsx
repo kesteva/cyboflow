@@ -27,10 +27,24 @@ vi.mock('../../../utils/telemetry', () => ({
   trackEvent: (...a: unknown[]) => trackEvent(...a),
 }));
 
+// The in-shell screens that reach the network (assistant thread, launchers)
+// are stubbed: this file tests the SURFACE's routing + exits, not the screens.
+vi.mock('./FirstIdeaStep', () => ({
+  FirstIdeaStep: () => <div data-testid="stub-first-idea" />,
+}));
+vi.mock('./IdeaProposalsStep', () => ({
+  IdeaProposalsStep: () => <div data-testid="stub-idea-proposals" />,
+}));
+vi.mock('./FirstSessionStep', () => ({
+  FirstSessionStep: () => <div data-testid="stub-first-session" />,
+}));
+vi.mock('../../../trpc/client', () => ({ trpc: {} }));
+
 import { GuidedSetupSurface } from './GuidedSetupSurface';
 import { useOnboardingStore } from '../../../stores/onboardingStore';
 import { useNavigationStore } from '../../../stores/navigationStore';
 import { peekAssistantGreeting } from '../../agentRail/onboardingGreeting';
+import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import type { Project } from '../../../types/project';
 
 const RAIL_COLLAPSED_KEY = 'cyboflow.agentRail.collapsed';
@@ -72,6 +86,9 @@ beforeEach(() => {
       step: 0,
       maxVisitedStep: 0,
       projectChoice: 'existing',
+      guidedProject: null,
+      assistantAvailable: true,
+      launched: null,
       hydrated: false,
     });
   });
@@ -262,5 +279,101 @@ describe('GuidedSetupSurface — non-guided steps', () => {
     const { container } = render(<GuidedSetupSurface />);
 
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+describe('GuidedSetupSurface — the in-shell steps (9-14)', () => {
+  const PROJECT = { id: 7, name: 'dogwalkr' };
+
+  function enterShell(step: number, extra: Record<string, unknown> = {}): void {
+    act(() => {
+      useOnboardingStore.setState({
+        status: 'active',
+        step,
+        maxVisitedStep: step,
+        guidedProject: PROJECT,
+        hydrated: true,
+        ...extra,
+      });
+      useNavigationStore.setState({ activeProjectId: PROJECT.id });
+    });
+  }
+
+  it('renders nothing on an in-shell step without a recorded project', () => {
+    enterShell(9, { guidedProject: null });
+    const { container } = render(<GuidedSetupSurface />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it('step 9 renders the project-home screen; Continue walks to the first-idea step', () => {
+    enterShell(9);
+    render(<GuidedSetupSurface />);
+    expect(screen.getByRole('heading', { name: 'Your project lives here' })).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('onboarding-project-home-continue'));
+    expect(useOnboardingStore.getState().step).toBe(10);
+    expect(screen.getByTestId('stub-first-idea')).toBeInTheDocument();
+  });
+
+  it('step 9 "Skip the set-up" runs the finale WITH the greeting (no conversation yet) and lands on Human review', () => {
+    enterShell(9);
+    render(<GuidedSetupSurface />);
+    fireEvent.click(screen.getByTestId('onboarding-guided-skip'));
+    expect(useOnboardingStore.getState().status).toBe('completed');
+    expect(useNavigationStore.getState().humanReviewOpen).toBe(true);
+    expect(useNavigationStore.getState().activeProjectId).toBe(PROJECT.id);
+    expect(peekAssistantGreeting()).toBe(
+      'dogwalkr is set up. If you need more help, ask me questions at any time.',
+    );
+    expect(localStorage.getItem(RAIL_COLLAPSED_KEY)).toBe('false');
+  });
+
+  it('step 12 "Skip the set-up" after the thread was used (maxVisited ≥ 11) skips the greeting', () => {
+    enterShell(12, { maxVisitedStep: 12 });
+    render(<GuidedSetupSurface />);
+    expect(screen.getByRole('heading', { name: 'Meet the Cyboflow assistant' })).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('onboarding-guided-skip'));
+    expect(useOnboardingStore.getState().status).toBe('completed');
+    expect(useNavigationStore.getState().humanReviewOpen).toBe(true);
+    expect(peekAssistantGreeting()).toBeNull();
+    expect(localStorage.getItem(RAIL_COLLAPSED_KEY)).toBe('false');
+  });
+
+  it('step 14 renders nothing until a launch is recorded, then the launching screen', () => {
+    enterShell(14, { launched: null });
+    const { container, rerender } = render(<GuidedSetupSurface />);
+    expect(container).toBeEmptyDOMElement();
+    act(() => {
+      useOnboardingStore.setState({ launched: { kind: 'planner', sessionId: 'sess-1', runId: 'run-1' } });
+    });
+    rerender(<GuidedSetupSurface />);
+    expect(screen.getByRole('heading', { name: 'Launching your session now' })).toBeInTheDocument();
+  });
+
+  it('step 14 "Open the session" selects the launched run, goes to the session view and completes — no Human review', () => {
+    enterShell(14, { launched: { kind: 'planner', sessionId: 'sess-1', runId: 'run-1' } });
+    // The real setActiveRun reaches the electron bridge (absent in jsdom) — the
+    // contract under test is that it is called with the launched run + host.
+    const setActiveRun = vi.fn();
+    const original = useCyboflowStore.getState().setActiveRun;
+    useCyboflowStore.setState({ setActiveRun });
+    try {
+      render(<GuidedSetupSurface />);
+      fireEvent.click(screen.getByTestId('onboarding-launching-open'));
+      expect(setActiveRun).toHaveBeenCalledWith('run-1', 'sess-1');
+      expect(useOnboardingStore.getState().status).toBe('completed');
+      expect(useNavigationStore.getState().view).toBe('session');
+      expect(useNavigationStore.getState().humanReviewOpen).toBe(false);
+      expect(peekAssistantGreeting()).toBeNull();
+    } finally {
+      useCyboflowStore.setState({ setActiveRun: original });
+    }
+  });
+
+  it('step 14 "Done — stay here" completes onto Human review', () => {
+    enterShell(14, { launched: { kind: 'quick', sessionId: 'sess-2', runId: null } });
+    render(<GuidedSetupSurface />);
+    fireEvent.click(screen.getByTestId('onboarding-launching-stay'));
+    expect(useOnboardingStore.getState().status).toBe('completed');
+    expect(useNavigationStore.getState().humanReviewOpen).toBe(true);
   });
 });

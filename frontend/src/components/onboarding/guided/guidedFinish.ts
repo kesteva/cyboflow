@@ -1,6 +1,7 @@
 import type { Project } from '../../../types/project';
+import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { useNavigationStore } from '../../../stores/navigationStore';
-import { useOnboardingStore } from '../../../stores/onboardingStore';
+import { useOnboardingStore, type LaunchedSession } from '../../../stores/onboardingStore';
 import { expandAgentRail } from '../../agentRail/railCollapsed';
 import { primeAssistantGreeting } from '../../agentRail/onboardingGreeting';
 
@@ -83,4 +84,26 @@ export function finishGuidedSetup(
 export function continueIntoShell(project: Pick<Project, 'id' | 'name'>): void {
   useNavigationStore.getState().setActiveProjectId(project.id);
   useOnboardingStore.getState().projectAdded({ id: project.id, name: project.name });
+}
+
+/**
+ * Step 14's "Open the session →": select what step 13 launched so the centre
+ * swaps to the session workspace — a flow run for planner/ship (the run is the
+ * workspace, like LandingHome's openRunSession), the quick session itself for
+ * 'quick' (like openQuickSession). Then the finale, keeping that view.
+ */
+export function openLaunchedSession(
+  project: Pick<Project, 'id' | 'name'>,
+  launched: LaunchedSession,
+): void {
+  const cyboflow = useCyboflowStore.getState();
+  if (launched.runId !== null) {
+    cyboflow.setActiveRun(launched.runId, launched.sessionId);
+  } else {
+    cyboflow.setActiveQuickSession(launched.sessionId, undefined);
+  }
+  const nav = useNavigationStore.getState();
+  nav.setActiveProjectId(project.id);
+  nav.goToSession();
+  finishGuidedSetup(project, { greet: false, keepView: true });
 }

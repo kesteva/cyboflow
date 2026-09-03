@@ -68,6 +68,10 @@ function reset(): void {
     modelPhase: 'model',
     handoffChoice: 'continue',
     projectChoice: 'existing',
+    guidedProject: null,
+    assistantAvailable: true,
+    sessionChoice: 'planner',
+    launched: null,
     hydrated: false,
   });
 }
@@ -810,5 +814,148 @@ describe('onboardingStore — step-group membership', () => {
     expect([...ONBOARDING_MODAL_STEPS, ...ONBOARDING_GUIDED_STEPS]).toEqual(
       Array.from({ length: ONBOARDING_STEP_COUNT }, (_, i) => i),
     );
+  });
+});
+
+describe('onboardingStore — the in-shell guided steps (9-14)', () => {
+  beforeEach(reset);
+
+  const PROJECT = { id: 7, name: 'dogwalkr' };
+
+  function activeAt(step: number, extra: Partial<ReturnType<typeof useOnboardingStore.getState>> = {}): void {
+    useOnboardingStore.setState({ status: 'active', step, maxVisitedStep: step, hydrated: true, ...extra });
+  }
+
+  it('projectAdded() records the project and moves 8 → 9 (the in-shell handover)', () => {
+    activeAt(8);
+    useOnboardingStore.getState().projectAdded(PROJECT);
+    const s = useOnboardingStore.getState();
+    expect(s.step).toBe(9);
+    expect(s.maxVisitedStep).toBe(9);
+    expect(s.status).toBe('active');
+    expect(s.guidedProject).toEqual(PROJECT);
+  });
+
+  it('projectAdded() is inert off step 8 or when the tour is not active', () => {
+    activeAt(7);
+    useOnboardingStore.getState().projectAdded(PROJECT);
+    expect(useOnboardingStore.getState().step).toBe(7);
+    expect(useOnboardingStore.getState().guidedProject).toBeNull();
+    useOnboardingStore.setState({ status: 'completed', step: 8 });
+    useOnboardingStore.getState().projectAdded(PROJECT);
+    expect(useOnboardingStore.getState().guidedProject).toBeNull();
+  });
+
+  it('next() walks 9 → 10 → 11 → 12 → 13 with the assistant available', () => {
+    activeAt(9);
+    for (const expected of [10, 11, 12, 13]) {
+      useOnboardingStore.getState().next();
+      expect(useOnboardingStore.getState().step).toBe(expected);
+    }
+  });
+
+  it('next() from 9 skips the three assistant steps when the assistant is off', () => {
+    activeAt(9, { assistantAvailable: false });
+    useOnboardingStore.getState().next();
+    expect(useOnboardingStore.getState().step).toBe(13);
+    expect(useOnboardingStore.getState().maxVisitedStep).toBe(13);
+  });
+
+  it('isStepSkipped / skippedStepSet cover the assistant steps, per the availability flag', () => {
+    expect(isStepSkipped(10, { multiRuntime: true, assistantAvailable: false })).toBe(true);
+    expect(isStepSkipped(11, { multiRuntime: true, assistantAvailable: false })).toBe(true);
+    expect(isStepSkipped(12, { multiRuntime: true, assistantAvailable: false })).toBe(true);
+    expect(isStepSkipped(13, { multiRuntime: true, assistantAvailable: false })).toBe(false);
+    expect(isStepSkipped(10, { multiRuntime: true, assistantAvailable: true })).toBe(false);
+    expect([...skippedStepSet({ multiRuntime: true, assistantAvailable: false })]).toEqual([10, 11, 12]);
+    expect([...skippedStepSet({ multiRuntime: false, assistantAvailable: false })]).toEqual([2, 10, 11, 12]);
+    expect([...skippedStepSet({ multiRuntime: false, assistantAvailable: true })]).toEqual([2]);
+    // Stable identities per combination.
+    expect(skippedStepSet({ multiRuntime: true, assistantAvailable: false })).toBe(
+      skippedStepSet({ multiRuntime: true, assistantAvailable: false }),
+    );
+  });
+
+  it('skipIdeas() jumps from 10 or 11 straight to the rail intro (12) — the tour continues', () => {
+    activeAt(10);
+    useOnboardingStore.getState().skipIdeas();
+    expect(useOnboardingStore.getState().step).toBe(12);
+    expect(useOnboardingStore.getState().status).toBe('active');
+    activeAt(11);
+    useOnboardingStore.getState().skipIdeas();
+    expect(useOnboardingStore.getState().step).toBe(12);
+  });
+
+  it('skipIdeas() is inert outside 9-11', () => {
+    for (const step of [8, 12, 13]) {
+      activeAt(step);
+      useOnboardingStore.getState().skipIdeas();
+      expect(useOnboardingStore.getState().step).toBe(step);
+    }
+  });
+
+  it('step 13 never advances via next(); sessionLaunched() records the launch and moves to 14', () => {
+    activeAt(13);
+    useOnboardingStore.getState().next();
+    expect(useOnboardingStore.getState().step).toBe(13);
+    const launched = { kind: 'planner' as const, sessionId: 'sess-1', runId: 'run-1' };
+    useOnboardingStore.getState().sessionLaunched(launched);
+    expect(useOnboardingStore.getState().step).toBe(14);
+    expect(useOnboardingStore.getState().launched).toEqual(launched);
+  });
+
+  it('sessionLaunched() is inert off step 13', () => {
+    activeAt(12);
+    useOnboardingStore.getState().sessionLaunched({ kind: 'quick', sessionId: 's', runId: null });
+    expect(useOnboardingStore.getState().step).toBe(12);
+    expect(useOnboardingStore.getState().launched).toBeNull();
+  });
+
+  it('step 14 is terminal: next() is inert, finish() completes', () => {
+    activeAt(14);
+    useOnboardingStore.getState().next();
+    expect(useOnboardingStore.getState().step).toBe(14);
+    expect(useOnboardingStore.getState().status).toBe('active');
+    useOnboardingStore.getState().finish();
+    expect(useOnboardingStore.getState().status).toBe('completed');
+  });
+
+  it('back() is inert from step 9 on (the project already exists)', () => {
+    for (const step of [9, 10, 11, 12, 13, 14]) {
+      activeAt(step);
+      useOnboardingStore.getState().back();
+      expect(useOnboardingStore.getState().step).toBe(step);
+    }
+    activeAt(8);
+    useOnboardingStore.getState().back();
+    expect(useOnboardingStore.getState().step).toBe(7);
+  });
+
+  it('skip() from an in-shell step completes the tour outright', () => {
+    activeAt(12);
+    useOnboardingStore.getState().skip();
+    expect(useOnboardingStore.getState().status).toBe('completed');
+  });
+
+  it('setSessionChoice / setAssistantAvailable record their values; begin() resets all of it', () => {
+    activeAt(13, { guidedProject: PROJECT, launched: { kind: 'quick', sessionId: 's', runId: null } });
+    useOnboardingStore.getState().setSessionChoice('ship');
+    useOnboardingStore.getState().setAssistantAvailable(false);
+    expect(useOnboardingStore.getState().sessionChoice).toBe('ship');
+    expect(useOnboardingStore.getState().assistantAvailable).toBe(false);
+    useOnboardingStore.getState().begin(true);
+    const s = useOnboardingStore.getState();
+    expect(s.guidedProject).toBeNull();
+    expect(s.launched).toBeNull();
+    expect(s.sessionChoice).toBe('planner');
+    expect(s.assistantAvailable).toBe(true);
+  });
+
+  it('a snapshot parked on any in-shell step (9-14) hydrates as completed', () => {
+    for (const step of [9, 11, 14]) {
+      reset();
+      useOnboardingStore.getState().hydrate({ version: 4, status: 'active', step }, 0);
+      expect(useOnboardingStore.getState().status).toBe('completed');
+    }
   });
 });

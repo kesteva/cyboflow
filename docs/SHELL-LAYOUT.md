@@ -27,19 +27,34 @@ task Backlog — so treat the table as illustrative, not exhaustive; the branch 
 the "Center-surface state machine" comment in `App.tsx` is the current list (the comment
 itself enumerates only the main branches).
 
-**Onboarding shell state.** The whole row above (Sidebar, center surface, AgentRail) plus
-`StatusBar` is NOT mounted while the first-run tour owns the window. `App.tsx` reads
-`isOnboardingShellHidden(state)` (`frontend/src/utils/onboarding.ts`, true while the persisted
-snapshot read is unresolved or `status === 'active'`) and swaps the row for
-`OnboardingShellSurface` — a bare `bg-bg-primary` container (`data-testid="onboarding-shell"`)
-that renders `onboarding/guided/GuidedSetupSurface` on the guided steps (7-8) and nothing on the
-modal ones, whose card comes from `<OnboardingGate/>`'s body portal (mounted outside the swap, as
-are the dialog siblings). `TitleBar` stays mounted throughout, which is why the guided screens
-render inside the row rather than in the portal: the native drag region has to keep working. The
-tour's terminal transition (`onboarding/guided/guidedFinish.ts`) stages the shell's first frame
-before flipping the store to `completed` — AgentRail forced expanded, a one-shot assistant
-greeting primed, and `navigationStore.openHumanReview()` — because every one of those is read by
-a mount that only happens once the shell comes back.
+**Onboarding shell states.** The first-run tour has three shell states, read by `App.tsx`
+from `frontend/src/utils/onboarding.ts`:
+
+1. *Hidden* (`isOnboardingShellHidden(state)` — true while the persisted snapshot read is
+   unresolved, or `status === 'active'` on a step before the project exists, 0-8). The whole
+   row above (Sidebar, center surface, AgentRail) plus `StatusBar` is NOT mounted; the row is
+   swapped for `OnboardingShellSurface` — a bare `bg-bg-primary` container
+   (`data-testid="onboarding-shell"`) that renders `onboarding/guided/GuidedSetupSurface` on
+   the two project screens (7-8) and nothing on the modal ones, whose card comes from
+   `<OnboardingGate/>`'s body portal (mounted outside the swap, as are the dialog siblings).
+   `TitleBar` stays mounted throughout, which is why the guided screens render inside the row
+   rather than in the portal: the native drag region has to keep working.
+2. *Sidebar* (`onboardingGuidedShell(state) === 'sidebar'`, steps 9-11): the project exists,
+   so the real shell mounts — the Sidebar (wrapped in a `display:contents` div that is `inert`
+   for the rest of the tour, `data-testid="shell-sidebar-slot"`), `GuidedSetupSurface` in the
+   CENTER slot in place of the view switch, no AgentRail, `StatusBar` below. Steps 10-11 host
+   the real global-assistant thread in that center column.
+3. *Full* (`'full'`, steps 12-14): as above plus the AgentRail — it mounts exactly at the "meet
+   the assistant" step over the same conversation and stays through the finale, so the tour →
+   shell transition never remounts it.
+
+Every exit from the in-shell steps runs `onboarding/guided/guidedFinish.ts`: stage the shell's
+first frame (AgentRail forced expanded; the one-shot assistant greeting primed only when the
+thread never held a conversation), stamp the active project, `navigationStore.openHumanReview()`
+(or the launched session for step 14's "Open the session"), then flip the store to `completed`.
+The bare-paper exits (7-8, "Not sure yet", "Skip the set-up") stage the same frame BEFORE the
+`completed` transition because every one of those values is read by a mount that only happens
+once the shell comes back.
 
 ## Assumption order
 
