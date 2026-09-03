@@ -106,6 +106,8 @@ function buildDb(): Database.Database {
   apply('057_entity_sort_order.sql');
   apply('059_entity_category.sql');
   apply('074_agent_threads.sql');
+  // 130 adds agent_threads.session_runtime, which AgentThreadDbStore SELECTs.
+  apply('130_agent_thread_session_runtime.sql');
   // ...and 125, which widens agent_proposals.kind to admit 'create-backlog-items'.
   apply('125_agent_proposal_create_backlog_kind.sql');
   // readWorkflowRow / handleAgentWorkflows now SELECT workflows.archived_at.
