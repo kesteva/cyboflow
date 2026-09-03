@@ -12,7 +12,8 @@ import { useUpdater } from '../hooks/useUpdater';
 import { trackEvent } from '../utils/telemetry';
 import { skippedStepSet, useOnboardingStore } from '../stores/onboardingStore';
 import { useNavigationStore } from '../stores/navigationStore';
-import { visibleStepNumber, visibleStepTotal } from '../utils/onboarding';
+import { visibleStepNumber, visibleStepTotal, ONBOARDING_LAUNCHING_STEP } from '../utils/onboarding';
+import { GuidedMarker, useGuidedMarkActive, GUIDED_RING_STYLE } from './onboarding/guided/GuidedMarker';
 
 interface SidebarProps {
   onAboutClick: () => void;
@@ -115,6 +116,9 @@ export const Sidebar = memo(function Sidebar({
   // what this run actually shows (skippedStepSet returns stable identities).
   const onboardingSkipped = useOnboardingStore((state) => skippedStepSet(state));
   const showResumeSetup = onboardingHydrated && onboardingStatus === 'skipped';
+  // Guided step 14 ("Launching your session now") pairs its callout with a
+  // marker on this rail item, ringed while the tour is on that step.
+  const launchingMark = useGuidedMarkActive(ONBOARDING_LAUNCHING_STEP);
   const demoModeEnabled = useConfigStore((state) => state.config?.demoMode ?? false);
   const [showStatusGuide, setShowStatusGuide] = useState(false);
   const [showBugReport, setShowBugReport] = useState(false);
@@ -328,7 +332,10 @@ export const Sidebar = memo(function Sidebar({
               ? 'border-border-emphasized bg-surface-primary'
               : 'border-border-primary bg-bg-primary hover:border-border-emphasized'
           }`}
-          style={humanReviewActive ? { boxShadow: 'inset 3px 0 0 var(--color-interactive-primary)' } : undefined}
+          style={{
+            ...(humanReviewActive ? { boxShadow: 'inset 3px 0 0 var(--color-interactive-primary)' } : {}),
+            ...(launchingMark ? GUIDED_RING_STYLE : {}),
+          }}
         >
           <span
             className="flex h-[22px] w-[22px] flex-shrink-0 items-center justify-center rounded-full text-white"
@@ -350,6 +357,7 @@ export const Sidebar = memo(function Sidebar({
           >
             {pendingReviewCount}
           </span>
+          <GuidedMarker step={ONBOARDING_LAUNCHING_STEP} n={1} testId="onboarding-marker-human-review" />
         </button>
 
         {/* Task backlog — primary rail item directly below Human review; opens
