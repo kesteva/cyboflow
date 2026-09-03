@@ -476,10 +476,15 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
         jumpToNeedsInput();
         return;
       case 'merge-clean': {
-        // One clean session has an unambiguous next click; several do not, so
-        // the card hands you the list instead of picking for you.
-        if (action.sessionIds.length === 1) requestMerge(action.sessionIds[0]);
-        else jumpToReady();
+        // One clean session has an unambiguous next click — open it so the work
+        // can actually be reviewed before merging; the merge dialog lives in the
+        // session workspace. Several sessions have no single target, so the card
+        // hands you the list instead of picking for you.
+        if (action.sessionIds.length === 1) {
+          const row = triage.readyForReview.find((r) => r.sessionId === action.sessionIds[0]);
+          if (row !== undefined) openQuickSession(row);
+          else jumpToReady();
+        } else jumpToReady();
         return;
       }
       case 'rebase-behind': {
