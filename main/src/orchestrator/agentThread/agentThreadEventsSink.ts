@@ -170,6 +170,12 @@ export class AgentThreadEventsSink implements SpawnEventsSink {
    * swallowed so it can never break the spawn.
    */
   private handleEvent(threadId: string, event: ClaudeStreamEvent | AgentStreamEvent): void {
+    // The Codex app-server routes EVERY raw notification it does not project
+    // (startup status, token-usage ticks, remote-control state …) as
+    // `agent_unknown` — over a thousand per turn, none of them renderable.
+    // The run-scoped built-in sink skips them too (RawEventsSink
+    // skipEventTypes); the transcript is the projected stream only.
+    if (event.type === 'agent_unknown') return;
     try {
       const eventType = derivePersistedEventType(event);
       const payloadJson = JSON.stringify(event);

@@ -20,15 +20,39 @@ export interface CodexAppServerMcpRuntimeConfig {
   nodeExecutablePath: string;
 }
 
+/**
+ * Per-spawn inputs to the HERMETIC isolation branch (`isolation: 'agent'`) that
+ * cannot be derived from the spawn options alone. Read by the manager at spawn
+ * time (userMcpServers.ts) and threaded into every builder that produces the
+ * thread configuration — the warm fingerprint included, so a change in the
+ * user's own MCP list busts a parked app-server.
+ */
+export interface CodexIsolationConfig {
+  /**
+   * The user's own `[mcp_servers.<id>]` entries from `$CODEX_HOME/config.toml`.
+   * The thread `config` override MERGES with that file (verified live), and
+   * Codex has no "disable all" key — so each one is disabled BY NAME with the
+   * documented `mcp_servers.<id>.enabled = false`.
+   */
+  disabledMcpServers: readonly string[];
+}
+
 type ThreadConfiguration = Omit<AppServerThreadStartParams, 'ephemeral' | 'experimentalRawEvents'>;
 
 function buildMcpConfig(
   runId: string,
   runtimeConfig: CodexAppServerMcpRuntimeConfig,
   mcpScope?: ClaudeSpawnerOptions['mcpScope'],
+  disabledMcpServers: readonly string[] = [],
 ): Record<string, AppServerJsonValue> {
+  const disabled: Record<string, AppServerJsonValue> = {};
+  for (const name of disabledMcpServers) {
+    if (name === 'cyboflow') continue;
+    disabled[name] = { enabled: false };
+  }
   return {
     mcp_servers: {
+      ...disabled,
       cyboflow: {
         command: runtimeConfig.nodeExecutablePath,
         args: [runtimeConfig.bridgeScriptPath],
@@ -116,6 +140,7 @@ export function buildCodexAppServerThreadConfiguration(
   runId: string,
   options: ClaudeSpawnerOptions,
   runtimeConfig: CodexAppServerMcpRuntimeConfig,
+  isolation?: CodexIsolationConfig,
 ): ThreadConfiguration {
   const model = resolveAgentModelAlias('codex', options.model);
   const instructions = options.systemPromptAppend
@@ -144,8 +169,24 @@ export function buildCodexAppServerThreadConfiguration(
       approvalPolicy: 'never',
       approvalsReviewer: 'user',
       config: {
-        ...buildMcpConfig(runId, runtimeConfig, options.mcpScope),
-        features: { shell_tool: false },
+        ...buildMcpConfig(runId, runtimeConfig, options.mcpScope, isolation?.disabledMcpServers ?? []),
+        // Every built-in surface a read-only sandbox does not already close,
+        // each by its documented key (Codex config reference):
+        //   shell_tool / unified_exec — the shell + the PTY-backed `exec` tool
+        //     (verified live: shell_tool alone still leaves `exec`);
+        //   multi_agent — spawn_agent / send_input / wait_agent … ;
+        //   apps + apps._default.enabled — ChatGPT app/connector tools, which
+        //     "are not controlled by the sandboxed-command network proxy";
+        //   remote_plugin — the remote plugin catalog (request_plugin_install).
+        features: {
+          shell_tool: false,
+          unified_exec: false,
+          multi_agent: false,
+          apps: false,
+          remote_plugin: false,
+        },
+        apps: { _default: { enabled: false } },
+        include_apply_patch_tool: false,
         web_search: 'disabled',
       },
       ...(model ? { model } : {}),
@@ -171,9 +212,10 @@ export function buildCodexAppServerThreadStartParams(
   runId: string,
   options: ClaudeSpawnerOptions,
   runtimeConfig: CodexAppServerMcpRuntimeConfig,
+  isolation?: CodexIsolationConfig,
 ): AppServerThreadStartParams {
   return {
-    ...buildCodexAppServerThreadConfiguration(runId, options, runtimeConfig),
+    ...buildCodexAppServerThreadConfiguration(runId, options, runtimeConfig, isolation),
     ephemeral: false,
     experimentalRawEvents: true,
   };
@@ -184,9 +226,10 @@ export function buildCodexAppServerThreadResumeParams(
   threadId: string,
   options: ClaudeSpawnerOptions,
   runtimeConfig: CodexAppServerMcpRuntimeConfig,
+  isolation?: CodexIsolationConfig,
 ): AppServerThreadResumeParams {
   return {
-    ...buildCodexAppServerThreadConfiguration(runId, options, runtimeConfig),
+    ...buildCodexAppServerThreadConfiguration(runId, options, runtimeConfig, isolation),
     threadId,
     excludeTurns: true,
   };

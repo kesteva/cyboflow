@@ -56,7 +56,9 @@ import {
   buildCodexAppServerThreadStartParams,
   buildCodexAppServerTurnOptions,
   type CodexAppServerMcpRuntimeConfig,
+  type CodexIsolationConfig,
 } from './appServer/runConfig';
+import { readUserMcpServerNames } from './appServer/userMcpServers';
 import type {
   AppServerInitializeParams,
   AppServerInitializeResponse,
@@ -164,6 +166,8 @@ interface WarmCodexEntry {
    * (thread-keyed), so the cold-entry sink is skipped entirely.
    */
   persistRawNotifications: boolean;
+  /** The isolation inputs this entry's thread was (or will be) opened with; undefined for a run-scoped spawn. */
+  isolationConfig: CodexIsolationConfig | undefined;
   command: string;
   threadId: string | null;
   initializeResponse: AppServerInitializeResponse | null;
@@ -604,7 +608,12 @@ export class CodexSdkManager extends AbstractCliManager {
 
     const runtimeConfig = this.requireMcpRuntimeConfig();
     const executable = this.getResolvedExecutable();
-    const fingerprint = this.computeWarmFingerprint(runId, options, runtimeConfig, executable);
+    // HERMETIC spawn only: the user's own MCP servers, read fresh each spawn so
+    // an edit to config.toml is honoured (and busts a parked entry via the
+    // fingerprint) without a restart.
+    const isolationConfig: CodexIsolationConfig | undefined =
+      options.isolation === 'agent' ? { disabledMcpServers: readUserMcpServerNames() } : undefined;
+    const fingerprint = this.computeWarmFingerprint(runId, options, runtimeConfig, executable, isolationConfig);
 
     // Warm reuse: a parked entry for this key whose thread + fingerprint match the
     // incoming resume-continuation absorbs the turn with NO cold app-server spawn.
@@ -622,7 +631,7 @@ export class CodexSdkManager extends AbstractCliManager {
       }
     }
 
-    const entry = this.buildColdEntry(options, runId, runtimeConfig, executable, fingerprint, warmEligible);
+    const entry = this.buildColdEntry(options, runId, runtimeConfig, executable, fingerprint, warmEligible, isolationConfig);
     if (warmEligible) this.warmCodexRuns.set(spawnKey, entry);
     await this.runOneTurnGuarded(entry, options, spawnKey, true);
   }
@@ -668,10 +677,11 @@ export class CodexSdkManager extends AbstractCliManager {
     options: ClaudeSpawnerOptions,
     runtimeConfig: CodexMcpRuntimeConfig,
     executable: ResolvedCodexExecutable,
+    isolationConfig: CodexIsolationConfig | undefined,
   ): string {
     return sha1(stableSerialize({
       env: buildCodexAppServerEnvironment(runId, runtimeConfig),
-      thread: buildCodexAppServerThreadConfiguration(runId, options, runtimeConfig),
+      thread: buildCodexAppServerThreadConfiguration(runId, options, runtimeConfig, isolationConfig),
       executablePath: executable.executablePath,
       executableVersion: executable.version,
       clientVersion: this.clientVersion,
@@ -711,6 +721,7 @@ export class CodexSdkManager extends AbstractCliManager {
     executable: ResolvedCodexExecutable,
     fingerprint: string,
     warmEligible: boolean,
+    isolationConfig: CodexIsolationConfig | undefined,
   ): WarmCodexEntry {
     // HERMETIC global-agent spawn. `options.isolation` is the ONE discriminator —
     // never an `agent:` id-prefix sniff. The client callbacks below are baked once
@@ -723,6 +734,7 @@ export class CodexSdkManager extends AbstractCliManager {
       turnSession: undefined as unknown as CodexAppServerTurnSession,
       rawNotificationSink: new CodexRawNotificationSink(this.db, this.logger),
       persistRawNotifications: !isolationSpawn,
+      isolationConfig,
       command: executable.executablePath,
       threadId: options.resumeSessionId ?? null,
       initializeResponse: null,
@@ -958,12 +970,15 @@ export class CodexSdkManager extends AbstractCliManager {
                 options.resumeSessionId,
                 options,
                 runtimeConfig,
+                entry.isolationConfig,
               )),
               APP_SERVER_REQUEST_TIMEOUT_MS,
               'Codex app-server thread resume',
             )
           : await withTimeout(
-              entry.turnSession.startThread(buildCodexAppServerThreadStartParams(runId, options, runtimeConfig)),
+              entry.turnSession.startThread(
+                buildCodexAppServerThreadStartParams(runId, options, runtimeConfig, entry.isolationConfig),
+              ),
               APP_SERVER_REQUEST_TIMEOUT_MS,
               'Codex app-server thread start',
             );

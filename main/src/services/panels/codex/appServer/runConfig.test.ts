@@ -293,12 +293,54 @@ describe('Codex app-server run configuration', () => {
             tool_timeout_sec: 7 * 24 * 60 * 60,
           },
         },
-        // The residual escapes from a read-only sandbox: the default shell tool
-        // and web search. Both are removed by documented Codex config keys.
-        features: { shell_tool: false },
+        // Every built-in surface a read-only sandbox does not already close,
+        // each by its documented Codex config key.
+        features: {
+          shell_tool: false,
+          unified_exec: false,
+          multi_agent: false,
+          apps: false,
+          remote_plugin: false,
+        },
+        apps: { _default: { enabled: false } },
+        include_apply_patch_tool: false,
         web_search: 'disabled',
       },
     });
+  });
+
+  it('disables the user\'s own MCP servers BY NAME (the thread config merges with config.toml)', () => {
+    const params = buildCodexAppServerThreadStartParams('agent:thread-1', {
+      panelId: 'agent:thread-1',
+      sessionId: 'agent:thread-1',
+      worktreePath: '/Users/me',
+      prompt: 'hi',
+      isolation: 'agent',
+      mcpScope: 'global-agent',
+    }, runtimeConfig, { disabledMcpServers: ['node_repl', 'cyboflow', 'browser'] });
+
+    const servers = (params.config as { mcp_servers: Record<string, unknown> }).mcp_servers;
+    expect(servers.node_repl).toEqual({ enabled: false });
+    expect(servers.browser).toEqual({ enabled: false });
+    // The injected entry is never disabled, whatever the caller lists.
+    expect(servers.cyboflow).toMatchObject({ required: true });
+    expect(Object.keys(servers).sort()).toEqual(['browser', 'cyboflow', 'node_repl']);
+  });
+
+  it('a run-scoped spawn ignores the isolation inputs entirely', () => {
+    const withIsolation = buildCodexAppServerThreadStartParams('run-1', {
+      panelId: 'run-1',
+      sessionId: 'run-1',
+      worktreePath: '/Users/me',
+      prompt: 'hi',
+    }, runtimeConfig, { disabledMcpServers: ['node_repl'] });
+    const without = buildCodexAppServerThreadStartParams('run-1', {
+      panelId: 'run-1',
+      sessionId: 'run-1',
+      worktreePath: '/Users/me',
+      prompt: 'hi',
+    }, runtimeConfig);
+    expect(withIsolation).toEqual(without);
   });
 
   it('leaves a resumed isolation thread under the same confinement', () => {
