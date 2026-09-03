@@ -136,6 +136,30 @@ describe('NeedsInputSection', () => {
     expect(screen.getByText('Which branch should I target?')).toBeInTheDocument();
   });
 
+  it('shows both the session name and its branch when the session has been renamed', () => {
+    const row = quickRow({ name: 'Tech debt cleanup', worktreeName: 'shiny-badger-20260902' });
+    render(<NeedsInputSection {...baseProps} quickRows={[row]} />);
+    expect(screen.getByText('Tech debt cleanup')).toBeInTheDocument();
+    expect(screen.getByText('⌥ shiny-badger-20260902')).toBeInTheDocument();
+  });
+
+  it('shows the branch only when the session name still equals its worktree', () => {
+    // An unrenamed session is named after its worktree; printing both would read
+    // as "shiny-badger-20260902 ⌥ shiny-badger-20260902".
+    const row = quickRow({ name: 'shiny-badger-20260902', worktreeName: 'shiny-badger-20260902' });
+    render(<NeedsInputSection {...baseProps} quickRows={[row]} />);
+    const card = screen.getByTestId('rq-needs-input-row');
+    expect(within(card).getByText('⌥ shiny-badger-20260902')).toBeInTheDocument();
+    expect(within(card).queryByText('shiny-badger-20260902')).not.toBeInTheDocument();
+  });
+
+  it('falls back to the session name alone when the row carries no worktree', () => {
+    const row = quickRow({ name: 'Tech debt cleanup', worktreeName: null });
+    render(<NeedsInputSection {...baseProps} quickRows={[row]} />);
+    expect(screen.getByText('Tech debt cleanup')).toBeInTheDocument();
+    expect(screen.queryByText(/^⌥ /)).not.toBeInTheDocument();
+  });
+
   it('clicking Answer on a quick session opens it via setActiveQuickSession, not setActiveRun', async () => {
     const user = userEvent.setup();
     const onOpenQuickSession = vi.fn();

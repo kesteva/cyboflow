@@ -11,8 +11,8 @@
  *      so they get Approve/Reject inline rather than an "Answer →" jump.
  *
  * Every row is one card: an "ASKED YOU" kicker + quiet clock, the ask itself as
- * the bold headline, then a metadata line (project · session · summary) with the
- * actions right-aligned.
+ * the bold headline, then a metadata line (project · session · branch · summary)
+ * with the actions right-aligned.
  */
 import React from 'react';
 import { trpc } from '../../trpc/client';
@@ -53,21 +53,40 @@ function Headline({ children }: { children: React.ReactNode }): React.JSX.Elemen
 function MetaRow({
   projectName,
   sessionName,
+  branchName,
   context,
   actions,
 }: {
   projectName: string | null;
-  /** Rendered with the green ⌥ prefix — the app's marker for a session branch. */
+  /** The session's display name (`sessions.name`) — what a rename actually changes. */
   sessionName: string | null;
+  /**
+   * The session's worktree branch, rendered with the green ⌥ prefix — the app's
+   * marker for a session branch.
+   *
+   * Kept SEPARATE from {@link sessionName} because the two only coincide until
+   * the session is renamed: an untouched session is named after its worktree, so
+   * showing one field looked complete, but after a rename the card showed the
+   * name and lost the branch (or, before this split, showed the branch and lost
+   * the name). Both are shown; when they are still identical the branch alone is
+   * rendered, so an unrenamed session does not read as "tidy-valley ⌥ tidy-valley".
+   */
+  branchName: string | null;
   context: string | null;
   actions: React.ReactNode;
 }): React.JSX.Element {
+  const showName = sessionName !== null && sessionName !== branchName;
   return (
     <div className="flex items-center gap-2.5 text-[11px]">
       {projectName !== null && <Chip title={projectName}>{projectName}</Chip>}
-      {sessionName !== null && (
-        <span className="shrink-0 truncate text-status-success" title={sessionName}>
-          ⌥ {sessionName}
+      {showName && (
+        <span className="shrink-0 truncate font-medium text-text-secondary" title={sessionName}>
+          {sessionName}
+        </span>
+      )}
+      {branchName !== null && (
+        <span className="shrink-0 truncate text-status-success" title={branchName}>
+          ⌥ {branchName}
         </span>
       )}
       {context !== null && (
@@ -102,6 +121,7 @@ function QuickSessionAsk({
       <MetaRow
         projectName={projectName}
         sessionName={row.name}
+        branchName={row.worktreeName}
         context={row.waitingOn !== null ? row.summary : null}
         actions={<PrimaryButton onClick={() => onOpen(row)}>Answer →</PrimaryButton>}
       />
@@ -129,6 +149,7 @@ function ReviewItemAsk({
       <MetaRow
         projectName={projectName}
         sessionName={null}
+        branchName={null}
         context={hasBody && !expanded ? item.body : null}
         actions={
           <>
@@ -238,6 +259,9 @@ function ApprovalAsk({
       <MetaRow
         projectName={projectName}
         sessionName={facts.sessionName}
+        // An approval row carries no worktree: `Approval` joins `sessions.name`
+        // only, so there is no branch to show rather than one being dropped.
+        branchName={null}
         context={facts.count > 1 ? `${facts.toolName} · ${facts.count} identical requests` : facts.toolName}
         actions={
           <>
