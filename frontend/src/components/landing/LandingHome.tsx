@@ -687,6 +687,7 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
 
       <WorkingSection
         rows={workingRows}
+        nowMs={nowMs}
         showWhenEmpty={showEmptyWells}
         onOpenQuickSession={openQuickSession}
         onOpenRun={(run) => openRunSession(run.id, run.project_id)}
