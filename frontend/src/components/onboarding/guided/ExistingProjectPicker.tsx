@@ -7,7 +7,7 @@ interface ExistingProjectPickerProps {
 }
 
 /**
- * Guided step 2 of 2 (tour step 8), 'existing' branch — point Cyboflow at a
+ * Guided step 2 of 8 (tour step 8), 'existing' branch — point Cyboflow at a
  * folder that already exists.
  *
  * The project NAME is derived from the folder, not asked for (Settings renames
@@ -39,7 +39,7 @@ export function ExistingProjectPicker({ onBack }: ExistingProjectPickerProps): R
       <div className="mb-[18px] flex items-center gap-2.5">
         <span className="text-[9px] font-bold tracking-[.14em] text-text-tertiary">GUIDED SET-UP</span>
         <span aria-hidden="true" className="flex-1 border-t border-dashed border-border-primary" />
-        <span className="text-[9px] tracking-[.14em] text-text-tertiary">STEP 2 OF 2</span>
+        <span className="text-[9px] tracking-[.14em] text-text-tertiary">STEP 2 OF 8</span>
       </div>
 
       <h1 className="text-[24px] font-extrabold tracking-[-.01em] text-text-primary">

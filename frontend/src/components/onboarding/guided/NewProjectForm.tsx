@@ -11,7 +11,7 @@ interface NewProjectFormProps {
 }
 
 /**
- * Guided step 2 of 2 (tour step 8), 'new' branch — name a project and pick the
+ * Guided step 2 of 8 (tour step 8), 'new' branch — name a project and pick the
  * parent directory; `projects:create` makes the folder and bootstraps git.
  *
  * The badges on the WILL CREATE card describe what that handler ATTEMPTS for a
@@ -50,7 +50,7 @@ export function NewProjectForm({ onBack }: NewProjectFormProps): React.JSX.Eleme
       <div className="mb-[18px] flex items-center gap-2.5">
         <span className="text-[9px] font-bold tracking-[.14em] text-text-tertiary">GUIDED SET-UP</span>
         <span aria-hidden="true" className="flex-1 border-t border-dashed border-border-primary" />
-        <span className="text-[9px] tracking-[.14em] text-text-tertiary">STEP 2 OF 2</span>
+        <span className="text-[9px] tracking-[.14em] text-text-tertiary">STEP 2 OF 8</span>
       </div>
 
       <h1 className="text-[24px] font-extrabold tracking-[-.01em] text-text-primary">

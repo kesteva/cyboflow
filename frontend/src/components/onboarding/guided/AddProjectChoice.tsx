@@ -40,7 +40,7 @@ interface AddProjectChoiceProps {
 }
 
 /**
- * Guided step 1 of 2 (tour step 7) — which kind of project to start from.
+ * Guided step 1 of 8 (tour step 7) — which kind of project to start from.
  *
  * 'existing' and 'new' pick which screen step 8 renders; 'unsure' is a terminal
  * branch the STORE owns (next() completes the tour from here), so this screen's

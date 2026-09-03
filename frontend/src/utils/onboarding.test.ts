@@ -8,17 +8,24 @@ import { describe, it, expect } from 'vitest';
 import type { OnboardingStatus } from '../stores/onboardingStore';
 import {
   ONBOARDING_ADD_PROJECT_STEP,
+  ONBOARDING_ASSISTANT_STEPS,
   ONBOARDING_DEFAULT_RUNTIME_STEP,
   ONBOARDING_EVENTS,
+  ONBOARDING_FIRST_SESSION_STEP,
   ONBOARDING_GUIDED_STEPS,
   ONBOARDING_HANDOFF_STEP,
+  ONBOARDING_LAUNCHING_STEP,
   ONBOARDING_MODAL_STEPS,
   ONBOARDING_MODEL_STEP,
   ONBOARDING_PREF_KEY,
   ONBOARDING_PROJECT_DETAIL_STEP,
+  ONBOARDING_PROJECT_HOME_STEP,
   ONBOARDING_STEP_COUNT,
+  guidedStepNumber,
+  guidedStepTotal,
   isGuidedStep,
   isOnboardingShellHidden,
+  onboardingGuidedShell,
   onboardingStepName,
   visibleStepNumber,
   visibleStepTotal,
@@ -31,23 +38,83 @@ const RUNTIME_SKIPPED: ReadonlySet<number> = new Set([ONBOARDING_DEFAULT_RUNTIME
 describe('isOnboardingShellHidden', () => {
   it('hides the shell until the persisted snapshot read resolves', () => {
     for (const status of ['idle', 'active', 'skipped', 'completed'] as const) {
-      expect(isOnboardingShellHidden({ hydrated: false, status })).toBe(true);
+      expect(isOnboardingShellHidden({ hydrated: false, status, step: 0 })).toBe(true);
+      expect(isOnboardingShellHidden({ hydrated: false, status, step: 12 })).toBe(true);
     }
   });
 
-  it('hides the shell while the tour is active (modal AND guided phases)', () => {
-    expect(isOnboardingShellHidden({ hydrated: true, status: 'active' })).toBe(true);
+  it('hides the shell while the tour is active on the modal steps and the two project screens (0-8)', () => {
+    for (let step = 0; step < ONBOARDING_PROJECT_HOME_STEP; step++) {
+      expect(isOnboardingShellHidden({ hydrated: true, status: 'active', step })).toBe(true);
+    }
+  });
+
+  it('mounts the shell for the in-shell guided steps (9-14) while the tour is still active', () => {
+    for (let step = ONBOARDING_PROJECT_HOME_STEP; step < ONBOARDING_STEP_COUNT; step++) {
+      expect(isOnboardingShellHidden({ hydrated: true, status: 'active', step })).toBe(false);
+    }
   });
 
   it('mounts the shell once the tour is skipped, completed, or never started', () => {
     for (const status of ['idle', 'skipped', 'completed'] as const) {
-      expect(isOnboardingShellHidden({ hydrated: true, status })).toBe(false);
+      expect(isOnboardingShellHidden({ hydrated: true, status, step: 3 })).toBe(false);
     }
   });
 
   it('accepts the store slice shape verbatim', () => {
-    const state: { hydrated: boolean; status: OnboardingStatus } = { hydrated: true, status: 'skipped' };
+    const state: { hydrated: boolean; status: OnboardingStatus; step: number } = {
+      hydrated: true,
+      status: 'skipped',
+      step: 4,
+    };
     expect(isOnboardingShellHidden(state)).toBe(false);
+  });
+});
+
+describe('onboardingGuidedShell', () => {
+  it("is 'none' unless the tour is active and hydrated", () => {
+    expect(onboardingGuidedShell({ hydrated: false, status: 'active', step: 12 })).toBe('none');
+    for (const status of ['idle', 'skipped', 'completed'] as const) {
+      expect(onboardingGuidedShell({ hydrated: true, status, step: 12 })).toBe('none');
+    }
+  });
+
+  it("is 'none' on the modal steps and the two bare-paper project screens", () => {
+    for (let step = 0; step < ONBOARDING_PROJECT_HOME_STEP; step++) {
+      expect(onboardingGuidedShell({ hydrated: true, status: 'active', step })).toBe('none');
+    }
+  });
+
+  it("is 'sidebar' for 9-11 and 'full' (sidebar + rail) for 12-14", () => {
+    for (const step of [9, 10, 11]) {
+      expect(onboardingGuidedShell({ hydrated: true, status: 'active', step })).toBe('sidebar');
+    }
+    for (const step of [12, 13, 14]) {
+      expect(onboardingGuidedShell({ hydrated: true, status: 'active', step })).toBe('full');
+    }
+  });
+});
+
+describe('guidedStepTotal / guidedStepNumber (guided screens only)', () => {
+  const ASSISTANT_SKIPPED: ReadonlySet<number> = new Set(ONBOARDING_ASSISTANT_STEPS);
+
+  it('numbers the eight guided screens 1-8 when the assistant is on', () => {
+    expect(guidedStepTotal(NONE)).toBe(8);
+    expect(guidedStepNumber(ONBOARDING_ADD_PROJECT_STEP, NONE)).toBe(1);
+    expect(guidedStepNumber(ONBOARDING_PROJECT_HOME_STEP, NONE)).toBe(3);
+    expect(guidedStepNumber(ONBOARDING_LAUNCHING_STEP, NONE)).toBe(8);
+  });
+
+  it('drops the three assistant screens when the assistant is off (5 screens)', () => {
+    expect(guidedStepTotal(ASSISTANT_SKIPPED)).toBe(5);
+    expect(guidedStepNumber(ONBOARDING_PROJECT_HOME_STEP, ASSISTANT_SKIPPED)).toBe(3);
+    expect(guidedStepNumber(ONBOARDING_FIRST_SESSION_STEP, ASSISTANT_SKIPPED)).toBe(4);
+    expect(guidedStepNumber(ONBOARDING_LAUNCHING_STEP, ASSISTANT_SKIPPED)).toBe(5);
+  });
+
+  it('the modal-only Default-agent skip does not touch the guided numbering', () => {
+    expect(guidedStepTotal(RUNTIME_SKIPPED)).toBe(8);
+    expect(guidedStepNumber(ONBOARDING_LAUNCHING_STEP, RUNTIME_SKIPPED)).toBe(8);
   });
 });
 
@@ -84,10 +151,11 @@ describe('visibleStepTotal / visibleStepNumber (modal cards only)', () => {
 });
 
 describe('isGuidedStep', () => {
-  it('is true for exactly the two full-window set-up screens', () => {
-    expect(isGuidedStep(ONBOARDING_ADD_PROJECT_STEP)).toBe(true);
-    expect(isGuidedStep(ONBOARDING_PROJECT_DETAIL_STEP)).toBe(true);
-    for (const step of [0, 1, 2, 3, 4, 5, ONBOARDING_HANDOFF_STEP, 9, -1]) {
+  it('is true for exactly the eight full-window set-up screens (7-14)', () => {
+    for (let step = ONBOARDING_ADD_PROJECT_STEP; step <= ONBOARDING_LAUNCHING_STEP; step++) {
+      expect(isGuidedStep(step)).toBe(true);
+    }
+    for (const step of [0, 1, 2, 3, 4, 5, ONBOARDING_HANDOFF_STEP, ONBOARDING_STEP_COUNT, -1]) {
       expect(isGuidedStep(step)).toBe(false);
     }
   });

@@ -2,7 +2,7 @@ import { useCallback, useRef, useState } from 'react';
 import { API } from '../../../utils/api';
 import { trackEvent } from '../../../utils/telemetry';
 import { ONBOARDING_EVENTS } from '../../../utils/onboarding';
-import { finishGuidedSetup } from './guidedFinish';
+import { continueIntoShell } from './guidedFinish';
 
 /** Trailing path segment, tolerant of either separator + trailing slashes. */
 export function basename(p: string): string {
@@ -51,11 +51,11 @@ export interface GuidedProjectCreate {
 }
 
 /**
- * The shared "add this project and end the tour" handler behind both guided
- * step-8 screens (the folder picker and the create form). Owns the in-flight
- * guard, the inline error, and the exact post-create choreography the app
- * expects — the same broadcast CreateProjectDialog makes, the same telemetry
- * event, then the finale's side effects (see ./guidedFinish).
+ * The shared "add this project and move into the shell" handler behind both
+ * guided step-8 screens (the folder picker and the create form). Owns the
+ * in-flight guard, the inline error, and the exact post-create choreography the
+ * app expects — the same broadcast CreateProjectDialog makes, the same telemetry
+ * event, then the step-9 transition (see ./guidedFinish continueIntoShell).
  */
 export function useGuidedProjectCreate(): GuidedProjectCreate {
   const [creating, setCreating] = useState(false);
@@ -79,11 +79,11 @@ export function useGuidedProjectCreate(): GuidedProjectCreate {
       const project = res.data;
       // Same broadcast CreateProjectDialog makes. The consumer that matters
       // here is App's landingStore listener (it resyncs the project list); the
-      // project tree is unmounted during the tour and discovers the project
+      // project tree is unmounted until step 9 and discovers the project
       // through its own getAll() on mount.
       window.dispatchEvent(new CustomEvent(ONBOARDING_EVENTS.projectCreated, { detail: project }));
       trackEvent('project_created', {});
-      finishGuidedSetup(project);
+      continueIntoShell(project);
     } catch (err: unknown) {
       setError(friendlyCreateError(err instanceof Error ? err.message : String(err)));
     } finally {

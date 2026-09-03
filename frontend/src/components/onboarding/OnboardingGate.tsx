@@ -98,6 +98,7 @@ export function OnboardingGate(): React.JSX.Element | null {
   const permMode = useOnboardingStore((s) => s.permMode);
   const defaultProvider = useOnboardingStore((s) => s.defaultProvider);
   const multiRuntime = useOnboardingStore((s) => s.multiRuntime);
+  const assistantAvailable = useOnboardingStore((s) => s.assistantAvailable);
   const defaultModel = useOnboardingStore((s) => s.defaultModel);
   const defaultEffort = useOnboardingStore((s) => s.defaultEffort);
   const modelPhase = useOnboardingStore((s) => s.modelPhase);
@@ -727,7 +728,7 @@ export function OnboardingGate(): React.JSX.Element | null {
 
   // The steps this run does NOT show, so the dots and "STEP n / N" counters
   // describe the tour the user actually walks.
-  const skippedSteps = skippedStepSet({ multiRuntime });
+  const skippedSteps = skippedStepSet({ multiRuntime, assistantAvailable });
 
   const body = ((): React.ReactNode => {
     switch (step) {

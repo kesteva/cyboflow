@@ -268,8 +268,10 @@ describe('onboardingStore — snapshot migration', () => {
     });
   });
 
-  it('clampResumeStep sends the last guided screen back to the branch choice', () => {
-    expect(clampResumeStep(8)).toBe(7);
+  it('clampResumeStep sends every guided screen past the branch choice (8-14) back to it', () => {
+    for (const step of [8, 9, 10, 11, 12, 13, 14]) {
+      expect(clampResumeStep(step)).toBe(7);
+    }
   });
 
   it('clampResumeStep passes every other in-window step through', () => {
@@ -278,9 +280,9 @@ describe('onboardingStore — snapshot migration', () => {
     }
   });
 
-  it('clampResumeStep clamps out-of-range values into the 0-8 window', () => {
+  it('clampResumeStep clamps out-of-range values into the 0-14 window', () => {
     expect(clampResumeStep(-1)).toBe(0);
-    expect(clampResumeStep(99)).toBe(8);
+    expect(clampResumeStep(99)).toBe(14);
   });
 });
 

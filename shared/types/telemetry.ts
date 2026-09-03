@@ -33,7 +33,13 @@ export type OnboardingStepName =
   | 'telemetry'
   | 'handoff'
   | 'add_project'
-  | 'project_detail';
+  | 'project_detail'
+  | 'project_home'
+  | 'first_idea'
+  | 'idea_proposals'
+  | 'assistant_rail'
+  | 'first_session'
+  | 'launching';
 
 export interface TelemetryEventMap {
   // ── Onboarding — first-run tour funnel ──────────────────────────────────────
@@ -54,7 +60,7 @@ export interface TelemetryEventMap {
   project_created: { source?: 'wizard' | 'dialog' };
   flow_selected: { flow: TelemetryFlow };
   workflow_run_started: {
-    launch_surface: 'wizard' | 'topbar' | 'backlog' | 'in_session';
+    launch_surface: 'wizard' | 'topbar' | 'backlog' | 'in_session' | 'onboarding';
     // Optional: some launch surfaces only have the workflow's DB id in scope, not
     // its canonical flow name. Emitted where the flow name is cheaply available.
     flow?: TelemetryFlow;

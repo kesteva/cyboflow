@@ -4,9 +4,9 @@
  * Drives the REAL onboardingStore + navigationStore (only the IPC/telemetry
  * layers are mocked) so the whole branch → pick → create → finale chain is
  * exercised end to end: which screen each choice renders, the exact
- * `projects:create` payload, the 'project-created' broadcast, and the four
- * finale side effects that have to land BEFORE the shell mounts (rail expanded,
- * greeting primed, Human review opened, status completed).
+ * `projects:create` payload, the 'project-created' broadcast, and the step-9
+ * handover (active project stamped BEFORE the Sidebar mounts, project recorded
+ * on the store). The in-shell screens (9-14) have their own tests.
  */
 import '@testing-library/jest-dom';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -129,7 +129,7 @@ describe('GuidedSetupSurface — step 7 (add a project)', () => {
 });
 
 describe('GuidedSetupSurface — step 8, existing project', () => {
-  it('browses, derives the name from the folder, creates, and runs the finale', async () => {
+  it('browses, derives the name from the folder, creates, and continues INTO the shell (step 9)', async () => {
     openDirectory.mockResolvedValue({ success: true, data: '/Users/me/Developer/dogwalkr' });
     projectsCreate.mockResolvedValue({ success: true, data: createdProject() });
     const broadcast = vi.fn();
@@ -152,7 +152,11 @@ describe('GuidedSetupSurface — step 8, existing project', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Add project/ }));
 
-    await waitFor(() => expect(useOnboardingStore.getState().status).toBe('completed'));
+    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(9));
+    // The tour is NOT over: the project screens hand over to the in-shell
+    // guided steps, which render around the project just created.
+    expect(useOnboardingStore.getState().status).toBe('active');
+    expect(useOnboardingStore.getState().guidedProject).toEqual({ id: 7, name: 'dogwalkr' });
     expect(projectsCreate).toHaveBeenCalledWith({
       name: 'dogwalkr',
       path: '/Users/me/Developer/dogwalkr',
@@ -160,17 +164,17 @@ describe('GuidedSetupSurface — step 8, existing project', () => {
     });
     expect(trackEvent).toHaveBeenCalledWith('project_created', {});
     expect(broadcast).toHaveBeenCalledTimes(1);
-    // Finale side effects, all staged before the shell mounts. The active
-    // project is stamped so the project tree's mount-time auto-select (which
-    // opens the project OVERVIEW) cannot override the review queue.
+    // The active project is stamped BEFORE the step-9 Sidebar mounts, so the
+    // project tree's mount-time auto-select (which opens the project OVERVIEW)
+    // has nothing to do.
     const created = (await projectsCreate.mock.results[0]?.value) as { data?: { id: number } };
     expect(useNavigationStore.getState().activeProjectId).toBe(created.data?.id);
     expect(useNavigationStore.getState().activeProjectId).not.toBeNull();
-    expect(useNavigationStore.getState().humanReviewOpen).toBe(true);
-    expect(peekAssistantGreeting()).toBe(
-      'dogwalkr is set up. If you need more help, ask me questions at any time.',
-    );
-    expect(localStorage.getItem(RAIL_COLLAPSED_KEY)).toBe('false');
+    // No finale yet: Human review is not opened and no greeting is parked —
+    // those belong to the exits from steps 9-14.
+    expect(useNavigationStore.getState().humanReviewOpen).toBe(false);
+    expect(peekAssistantGreeting()).toBeNull();
+    expect(localStorage.getItem(RAIL_COLLAPSED_KEY)).toBeNull();
 
     window.removeEventListener('project-created', broadcast);
   });
@@ -242,7 +246,8 @@ describe('GuidedSetupSurface — step 8, new project', () => {
 
     fireEvent.click(primary);
 
-    await waitFor(() => expect(useOnboardingStore.getState().status).toBe('completed'));
+    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(9));
+    expect(useOnboardingStore.getState().status).toBe('active');
     expect(projectsCreate).toHaveBeenCalledWith({
       name: 'dogwalkr',
       path: '/Users/me/Developer/dogwalkr',

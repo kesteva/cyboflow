@@ -21,13 +21,13 @@ function slice(over: Partial<OnboardingTelemetrySlice> = {}): OnboardingTelemetr
 }
 
 describe('onboardingTelemetry — step-name table', () => {
-  it('has exactly 9 entries, one stable slug per tour step', () => {
-    expect(ONBOARDING_STEP_COUNT).toBe(9);
-    expect(ONBOARDING_STEP_NAMES).toHaveLength(9);
+  it('has exactly 15 entries, one stable slug per tour step', () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(15);
+    expect(ONBOARDING_STEP_NAMES).toHaveLength(15);
     expect(new Set(ONBOARDING_STEP_NAMES).size).toBe(ONBOARDING_STEP_COUNT);
   });
 
-  it('matches the full stable 9-step order end to end', () => {
+  it('matches the full stable 15-step order end to end', () => {
     expect(ONBOARDING_STEP_NAMES).toEqual([
       'welcome', // 0
       'connect', // 1
@@ -38,6 +38,12 @@ describe('onboardingTelemetry — step-name table', () => {
       'handoff', // 6
       'add_project', // 7
       'project_detail', // 8
+      'project_home', // 9
+      'first_idea', // 10
+      'idea_proposals', // 11
+      'assistant_rail', // 12
+      'first_session', // 13
+      'launching', // 14
     ]);
   });
 
@@ -59,11 +65,11 @@ describe('onboardingTelemetry — step-group constants (modal/guided)', () => {
     expect(ONBOARDING_MODAL_STEPS).toEqual([0, 1, 2, 3, 4, 5, 6]);
   });
 
-  it('ONBOARDING_GUIDED_STEPS is exactly the two full-window set-up screens', () => {
-    expect(ONBOARDING_GUIDED_STEPS).toEqual([7, 8]);
+  it('ONBOARDING_GUIDED_STEPS is exactly the eight full-window set-up screens', () => {
+    expect(ONBOARDING_GUIDED_STEPS).toEqual([7, 8, 9, 10, 11, 12, 13, 14]);
   });
 
-  it('modal and guided sets partition the 9 steps with no overlap and no gaps', () => {
+  it('modal and guided sets partition the 15 steps with no overlap and no gaps', () => {
     const all = [...ONBOARDING_MODAL_STEPS, ...ONBOARDING_GUIDED_STEPS].sort((a, b) => a - b);
     expect(all).toEqual(Array.from({ length: ONBOARDING_STEP_COUNT }, (_, i) => i));
     expect(new Set(all).size).toBe(ONBOARDING_STEP_COUNT);

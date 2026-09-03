@@ -6,7 +6,7 @@
  *
  * Only genuinely SHARED copy lives here — a title the card chrome renders for a
  * step it knows nothing else about. Body copy belongs next to the step that
- * renders it (steps/*.tsx), and the guided set-up screens (7-8) own their own
+ * renders it (steps/*.tsx), and the guided set-up screens (7-14) own their own
  * headings entirely; their entries below exist only so the dialog's aria-label
  * and the telemetry slug have something index-aligned to read.
  *
@@ -25,6 +25,12 @@ export const ONBOARDING_TITLES: ReadonlyArray<string> = [
   "You're set up",
   'Add a project',
   'Add a project',
+  'Your project lives here',
+  'Build a backlog of ideas',
+  "Here's how I'd capture that",
+  'Meet the Cyboflow assistant',
+  'Launch your first session',
+  'Launching your session now',
 ];
 
 /** Step-0 hero bullets (swatch color is a phase-identity hex with no token). */
