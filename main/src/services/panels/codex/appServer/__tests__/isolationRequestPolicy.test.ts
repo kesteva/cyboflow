@@ -97,7 +97,7 @@ function questionDispatch(): { request: Dispatch<'item/tool/requestUserInput'>; 
           question: 'Which project?',
           isOther: false,
           isSecret: false,
-          options: [{ label: 'cyboflow', description: null }],
+          options: [{ label: 'cyboflow', description: 'the cyboflow repo' }],
         }],
       },
       respond,
