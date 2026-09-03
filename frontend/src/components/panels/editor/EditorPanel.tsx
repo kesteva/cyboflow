@@ -12,6 +12,7 @@ import { FileEditor } from './FileEditor';
 import { EditorPanelState, ToolPanel } from '../../../../../shared/types/panels';
 import { panelApi } from '../../../services/panelApi';
 import { debounce, type DebouncedFunction } from '../../../utils/debounce';
+import { pathBasename } from '../../../utils/pathBasename';
 import { usePanelStore } from '../../../stores/panelStore';
 
 interface EditorPanelProps {
@@ -151,7 +152,7 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
   // Update panel title when file changes
   const handleFileChange = useCallback((filePath: string | undefined, isDirty: boolean) => {
     if (filePath) {
-      const filename = filePath.split('/').pop() || 'Editor';
+      const filename = pathBasename(filePath) || 'Editor';
       const title = isDirty ? `${filename} *` : filename;
       panelApi.updatePanel(panel.id, { title });
       

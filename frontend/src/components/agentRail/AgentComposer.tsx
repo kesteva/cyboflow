@@ -12,6 +12,7 @@
  */
 import { useCallback, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { CornerDownLeft } from 'lucide-react';
+import { kbdHint } from '../../utils/platform';
 
 export interface AgentComposerProps {
   /** Send the trimmed text. Never called with an empty string. */
@@ -90,7 +91,7 @@ export function AgentComposer({ onSend, disabled }: AgentComposerProps): React.R
         disabled={!canSend}
         data-testid="agent-composer-send"
         aria-label="Send"
-        title="Send (⌘⏎)"
+        title={`Send (${kbdHint('mod', 'Enter')})`}
         className={
           // `self-stretch` makes the button's height track the composer's content
           // box — i.e. the auto-growing textarea — so it grows line-for-line with

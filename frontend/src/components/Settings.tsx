@@ -50,6 +50,24 @@ import { IntegrationsSettings } from './settings/IntegrationsSettings';
 import { FeatureControlsSettings } from './settings/FeatureControlsSettings';
 import { SessionSettings } from './settings/SessionSettings';
 import { KeyboardShortcutsSettings } from './settings/KeyboardShortcutsSettings';
+import { isApplePlatform } from '../utils/platform';
+
+/**
+ * Placeholder examples for the additional-PATH box, per host OS.
+ *
+ * The "\n" sequences are LITERAL backslash-n text, byte-identical to the
+ * JSX-attribute string they replace (JSX attribute strings do not process
+ * escapes, and this Textarea renders copy raw) — the Windows branch matches
+ * that encoding rather than "fixing" it here.
+ */
+const ADDITIONAL_PATHS_PLACEHOLDER = isApplePlatform()
+  ? '/opt/homebrew/bin\\n/usr/local/bin\\n~/bin\\n~/.cargo/bin'
+  : 'C:\\some\\bin\\nC:\\tools\\bin';
+
+/** Placeholder for the Claude-binary override, per host OS. */
+const CLAUDE_EXECUTABLE_PLACEHOLDER = isApplePlatform()
+  ? '/usr/local/bin/claude'
+  : 'C:\\Users\\you\\AppData\\Roaming\\npm\\claude.cmd';
 
 interface SettingsProps {
   isOpen: boolean;
@@ -744,7 +762,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                   label=""
                   value={additionalPathsText}
                   onChange={(e) => setAdditionalPathsText(e.target.value)}
-                  placeholder="/opt/homebrew/bin\n/usr/local/bin\n~/bin\n~/.cargo/bin"
+                  placeholder={ADDITIONAL_PATHS_PLACEHOLDER}
                   rows={4}
                   fullWidth
                   helperText="Enter one directory path per line. These will be added to PATH for all tools.\nUse forward slashes (/path). The tilde (~) expands to your home directory.\nNote: Changes require restarting Cyboflow to take full effect."
@@ -763,7 +781,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                     value={claudeExecutablePath}
                     onChange={(e) => setClaudeExecutablePath(e.target.value)}
                     className="flex-1 px-3 py-2 border border-border-primary rounded-md focus:outline-none focus:ring-2 focus:ring-interactive text-text-primary bg-surface-secondary"
-                    placeholder="/usr/local/bin/claude"
+                    placeholder={CLAUDE_EXECUTABLE_PLACEHOLDER}
                   />
                   <Button
                     type="button"

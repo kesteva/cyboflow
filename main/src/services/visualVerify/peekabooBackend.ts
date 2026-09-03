@@ -229,7 +229,7 @@ export class DefaultPeekabooClient implements PeekabooClient {
         reject(new Error('peekaboo capture aborted'));
         return;
       }
-      const child = spawn(cmd, cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = spawn(cmd, cmdArgs, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
       let stdout = '';
       let stderr = '';
       let settled = false;

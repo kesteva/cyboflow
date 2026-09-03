@@ -188,8 +188,9 @@ describe('Migration 089: interactive-prototype atype', () => {
 
   it('(f) the fresh-DB initialize() path includes interactive-prototype + the split indexes', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration084-'));
+    let svc: DatabaseService | undefined;
     try {
-      const svc = new DatabaseService(join(dir, 'test.db'));
+      svc = new DatabaseService(join(dir, 'test.db'));
       svc.setMigrationsDirForTesting(join(__dirname, '..', 'migrations'));
       svc.initialize();
       const db = svc.getDb();
@@ -224,6 +225,7 @@ describe('Migration 089: interactive-prototype atype', () => {
           .run(),
       ).toThrow(/CHECK/i);
     } finally {
+      try { svc?.close(); } catch { /* already closed */ }
       rmSync(dir, { recursive: true, force: true });
     }
   });

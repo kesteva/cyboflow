@@ -413,6 +413,13 @@ export class OrchSocketServer {
    * Sync and cheap (one stat), so it can be polled from a health snapshot.
    */
   isSocketPathIntact(): boolean {
+    // A Windows named pipe cannot be unlinked — there is no filesystem path
+    // to lose, so there is no inode to re-stat either (boundInode stays null
+    // there). The only way a new subprocess can fail to connect is the server
+    // having stopped listening, which is exactly what this reports.
+    if (process.platform === 'win32' && this.socketPath.startsWith('\\\\.\\pipe\\')) {
+      return this.server !== null && this.server.listening;
+    }
     if (!this.server || this.boundInode === null) return false;
     try {
       return fs.statSync(this.socketPath).ino === this.boundInode;

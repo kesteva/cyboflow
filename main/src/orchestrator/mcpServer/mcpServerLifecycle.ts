@@ -137,6 +137,7 @@ export class McpServerLifecycle {
 
     const child = spawn(nodePath, [scriptPath], {
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
       env,
     });
 

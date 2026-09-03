@@ -26,6 +26,9 @@ import * as os from 'os';
 import * as path from 'path';
 import {
   InteractiveSettingsWriter,
+  clearHookNodePathCache,
+  hookCommand,
+  type InteractiveSettingsWriteOptions,
   resolveInlineGatingHooks,
   resolveShellHookScriptPath,
   resolveStopHookScriptPath,
@@ -95,6 +98,11 @@ describe('resolveInlineGatingHooks', () => {
   const stopHookPath = resolveStopHookScriptPath(HOOK_DIR);
   const questionHookPath = resolveQuestionHookScriptPath(HOOK_DIR);
 
+  // Every fragment below is built with platform: 'posix-ish' pinned to 'darwin'
+  // so the expected command is a literal path, not whatever this host produces.
+  // The win32 shape has its own describe block at the end of the file.
+  const POSIX: InteractiveSettingsWriteOptions = { hookDirOverride: HOOK_DIR, platform: 'darwin' };
+
   /** The Stop entry every fragment carries, regardless of permissionMode. */
   function expectStopEntry(fragment: ReturnType<typeof resolveInlineGatingHooks>): void {
     expect(fragment.Stop).toHaveLength(1);
@@ -113,7 +121,7 @@ describe('resolveInlineGatingHooks', () => {
     'gating mode %s → a "*" PreToolUse entry (high timeout) PLUS the AskUserQuestion notify entry PLUS the Stop entry',
     (permissionMode) => {
       const fragment = resolveInlineGatingHooks(
-        { permissionMode, hookDirOverride: HOOK_DIR },
+        { ...POSIX, permissionMode },
         makeSpyLogger(),
       );
 
@@ -130,7 +138,7 @@ describe('resolveInlineGatingHooks', () => {
     'opt-out mode %s → the "*" gate is omitted, but the AskUserQuestion notify entry AND Stop are STILL present',
     (permissionMode) => {
       const fragment = resolveInlineGatingHooks(
-        { permissionMode, hookDirOverride: HOOK_DIR },
+        { ...POSIX, permissionMode },
         makeSpyLogger(),
       );
       // The wildcard gate is gone, but the question-notify entry remains so PTY
@@ -159,6 +167,41 @@ describe('resolveInlineGatingHooks', () => {
     expect(
       logger.calls.some((c) => c.level === 'debug' && c.message.includes('opts out of wildcard PreToolUse gating')),
     ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hookCommand — the registered command string, per platform
+// ---------------------------------------------------------------------------
+
+describe('hookCommand', () => {
+  const NODE = 'C:\\Program Files\\nodejs\\node.exe';
+
+  afterEach(() => clearHookNodePathCache());
+
+  it('POSIX registers the bare script path, run through its shebang', () => {
+    expect(hookCommand('/w/.cyboflow/hooks/gate.js', 'darwin')).toBe('/w/.cyboflow/hooks/gate.js');
+    expect(hookCommand('/w/.cyboflow/hooks/gate.js', 'linux')).toBe('/w/.cyboflow/hooks/gate.js');
+  });
+
+  it('win32 names the resolved node binary, both paths quoted', () => {
+    // A bare `node` would depend on the PATH Claude Code hands the hook. A
+    // PreToolUse hook that cannot start exits non-zero, which is NOT a block
+    // (only exit code 2 blocks), so the gate would fail open.
+    expect(hookCommand('C:\\w\\hooks\\gate.js', 'win32', NODE)).toBe(
+      `"${NODE}" "C:\\w\\hooks\\gate.js"`,
+    );
+  });
+
+  it('win32 fragments carry that same command on every entry', () => {
+    const fragment = resolveInlineGatingHooks(
+      { hookDirOverride: HOOK_DIR, platform: 'win32', nodePath: NODE, permissionMode: 'default' },
+      makeSpyLogger(),
+    );
+    const hookPathWin = resolveShellHookScriptPath(HOOK_DIR);
+    const stopPathWin = resolveStopHookScriptPath(HOOK_DIR);
+    expect(fragment.PreToolUse![0].hooks[0].command).toBe(`"${NODE}" "${hookPathWin}"`);
+    expect(fragment.Stop[0].hooks[0].command).toBe(`"${NODE}" "${stopPathWin}"`);
   });
 });
 

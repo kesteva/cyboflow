@@ -176,7 +176,7 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
       // Check if it's a git repository
       let isGitRepo = false;
       try {
-        nodeExecSync(`cd "${projectData.path}" && git rev-parse --is-inside-work-tree`, { encoding: 'utf-8' });
+        nodeExecSync(`cd "${projectData.path}" && git rev-parse --is-inside-work-tree`, { encoding: 'utf-8', windowsHide: true });
         isGitRepo = true;
         console.log('[Main] Directory is already a git repository');
       } catch (error) {
@@ -193,15 +193,15 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
           // Always use 'main' as the default branch name for new repos
           const branchName = 'main';
 
-          nodeExecSync(`cd "${projectData.path}" && git init`, { encoding: 'utf-8' });
+          nodeExecSync(`cd "${projectData.path}" && git init`, { encoding: 'utf-8', windowsHide: true });
           console.log('[Main] Git repository initialized successfully');
 
           // Create and checkout the main branch
-          nodeExecSync(`cd "${projectData.path}" && git checkout -b ${branchName}`, { encoding: 'utf-8' });
+          nodeExecSync(`cd "${projectData.path}" && git checkout -b ${branchName}`, { encoding: 'utf-8', windowsHide: true });
           console.log(`[Main] Created and checked out branch: ${branchName}`);
 
           // Create initial commit
-          nodeExecSync(`cd "${projectData.path}" && git commit -m "Initial commit" --allow-empty`, { encoding: 'utf-8' });
+          nodeExecSync(`cd "${projectData.path}" && git commit -m "Initial commit" --allow-empty`, { encoding: 'utf-8', windowsHide: true });
           console.log('[Main] Created initial empty commit');
 
           // git-init path deterministically checks out 'main' above.

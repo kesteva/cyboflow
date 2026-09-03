@@ -211,4 +211,69 @@ describe('RunQueueRegistry', () => {
     // Registry is cleared after drainAll
     expect(registry.stats().runs).toBe(0);
   });
+
+  // (e) a queue whose task cannot finish is skipped without waiting at all
+  it('drainAll() does not wait on a queue shouldWait rejects', async () => {
+    const registry = new RunQueueRegistry();
+
+    const neverSettles = deferred();
+    const q = registry.getOrCreate('run-S');
+    void q.add(() => neverSettles.promise);
+
+    // A cap long enough that waiting would be obvious. The drain must return
+    // without spending it, because this queue's task can never finish.
+    const started = Date.now();
+    await registry.drainAll({ capMs: 5_000, shouldWait: () => false });
+    const elapsed = Date.now() - started;
+
+    expect(elapsed).toBeLessThan(1_000);
+    expect(registry.stats().runs).toBe(0);
+
+    neverSettles.resolve();
+  });
+
+  it('drainAll() still waits on a queue shouldWait accepts', async () => {
+    const registry = new RunQueueRegistry();
+
+    const gate = deferred();
+    let finished = false;
+    const q = registry.getOrCreate('run-T');
+    void q.add(async () => {
+      await gate.promise;
+      finished = true;
+    });
+
+    const drain = registry.drainAll({ capMs: 5_000, shouldWait: () => true });
+    expect(finished).toBe(false);
+    gate.resolve();
+    await drain;
+
+    expect(finished).toBe(true);
+  });
+
+  // (f) a queue that never settles is abandoned, not waited out
+  it('drainAll() gives up on a busy queue at the cap and leaves the task running', async () => {
+    const registry = new RunQueueRegistry();
+
+    const neverSettles = deferred();
+    let taskFinished = false;
+
+    const q = registry.getOrCreate('run-R');
+    void q.add(async () => {
+      await neverSettles.promise;
+      taskFinished = true;
+    });
+
+    // The real cap is seconds; the behaviour under test is the same at 10ms.
+    await registry.drainAll({ capMs: 10 });
+
+    expect(taskFinished).toBe(false);
+    expect(registry.stats().runs).toBe(0);
+
+    // Nothing cancelled the task — the run keeps whatever status it holds, so
+    // boot recovery still sees it as resumable.
+    neverSettles.resolve();
+    await q.onIdle();
+    expect(taskFinished).toBe(true);
+  });
 });

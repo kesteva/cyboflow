@@ -26,6 +26,7 @@
  */
 import { spawn as nodeSpawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
+import { signalTree } from '../../../../utils/platformProcess';
 import type { EventEmitter } from 'node:events';
 import type { Readable, Writable } from 'node:stream';
 import { assertAgentProviderAllowed } from '../../../../../../shared/agents/agentProviderGuard';
@@ -183,8 +184,13 @@ const defaultSpawn: SpawnOmpRpcProcess = (command, args, options) => {
     env: options.env,
     stdio: ['pipe', 'pipe', 'pipe'],
     // Lead a fresh process group so teardown reaps OMP's own children (MCP
-    // servers, tool subprocesses) instead of orphaning them.
-    detached: true,
+    // servers, tool subprocesses) instead of orphaning them. On Windows the
+    // group does not exist (teardown is `taskkill /T`) and `detached`'s
+    // DETACHED_PROCESS makes the console-less app server allocate its own
+    // VISIBLE console — the black window flash — so the flag is
+    // win32-conditional (mirrors codex appServer/client.ts).
+    ...(process.platform === 'win32' ? {} : { detached: true }),
+    windowsHide: true,
   });
 };
 
@@ -939,23 +945,19 @@ export class OmpRpcClient {
   }
 
   /**
-   * Signal the child. When it leads its own process group (a real spawn), target
-   * the group via a negative pid so OMP's own children are reaped rather than
-   * orphaned; fall back to a direct signal when there is no pid (tests) or the
-   * group signal fails.
+   * Signal the child's whole tree, so OMP's own children are reaped rather
+   * than orphaned. The platform split lives in utils/platformProcess
+   * (signalTree). Falls back to a direct signal when there is no pid (tests)
+   * or the tree signal was rejected.
    */
   private killChild(signal: NodeJS.Signals): void {
     const child = this.child;
     if (!child) return;
     const pid = child.pid;
     if (typeof pid === 'number' && pid > 0) {
-      try {
-        process.kill(-pid, signal);
-        return;
-      } catch (error) {
-        // ESRCH: the group is already gone — nothing left to reap.
-        if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
-      }
+      // 'failed' is the only outcome with anything left to try: 'gone' means
+      // the group was already reaped.
+      if (signalTree(pid, signal) !== 'failed') return;
     }
     child.kill(signal);
   }

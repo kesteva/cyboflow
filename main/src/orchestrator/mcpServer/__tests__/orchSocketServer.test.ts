@@ -30,6 +30,7 @@ import * as os from 'os';
 import * as path from 'path';
 import type Database from 'better-sqlite3';
 import { OrchSocketServer } from '../orchSocketServer';
+import { orchSocketEndpoint } from '../orchSocketEndpoint';
 import { OrchTokenRegistry, ORCH_AUTH_KILL_SWITCH_ENV_VAR } from '../../orchAuthToken';
 import type { LoggerLike } from '../../types';
 import type { OrchSocketProvider } from '../../runLauncher';
@@ -66,9 +67,17 @@ function makeSpyLogger(): SpyLogger {
   };
 }
 
-/** A unique tmp socket path per call (short enough to stay under the OS limit). */
+/**
+ * A unique tmp socket path per call (short enough to stay under the OS limit).
+ * On Windows a plain fs path cannot host an AF_UNIX bind (EACCES without
+ * elevation), so the fixture routes the name through the production
+ * orchSocketEndpoint seam — exactly what index.ts does at boot — and binds a
+ * named pipe instead. The server code under test is unchanged.
+ */
 function makeTmpSocketPath(): string {
-  return path.join(os.tmpdir(), `orch-${process.pid}-${Math.random().toString(36).slice(2, 8)}.sock`);
+  return orchSocketEndpoint(
+    path.join(os.tmpdir(), `orch-${process.pid}-${Math.random().toString(36).slice(2, 8)}.sock`),
+  );
 }
 
 /**
@@ -314,7 +323,14 @@ describe('OrchSocketServer', () => {
   // 5. start() unlinks stale socket + creates dir; stop() closes the server
   // -------------------------------------------------------------------------
 
-  it('start() creates the sockets dir and unlinks a stale socket file; stop() closes the server', async () => {
+  // POSIX-only: staging a stale socket FILE (and asserting on the fs node the
+  // bind creates) presumes a unix socket is a real filesystem node. Windows
+  // named pipes have no stable fs node — statSync/existsSync race with EBUSY —
+  // and no stale node can occupy a pipe name; stop()-closes coverage is shared
+  // with the transport tests above.
+  it.skipIf(process.platform === 'win32')(
+    'start() creates the sockets dir and unlinks a stale socket file; stop() closes the server',
+    async () => {
     // Point at a nested, not-yet-existing sockets directory + a stale file.
     const dir = path.join(os.tmpdir(), `orch-dir-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
     socketPath = path.join(dir, 'orch.sock');
@@ -367,13 +383,19 @@ describe('OrchSocketServer', () => {
 
     // Reset so afterEach's stop() is a no-op (already stopped).
     fs.rmSync(dir, { recursive: true, force: true });
-  });
+    },
+  );
 
   // -------------------------------------------------------------------------
   // 6. start() recovers from EADDRINUSE (path in use at bind time)
   // -------------------------------------------------------------------------
 
-  it('recovers from EADDRINUSE by unlinking the in-use socket and retrying once', async () => {
+  // POSIX-only: a stale bind failure requires a unix-socket FILE left occupying
+  // the path. Windows named pipes vanish with their server, so no stale node can
+  // occupy a pipe name and the reclaim path is unreachable there.
+  it.skipIf(process.platform === 'win32')(
+    'recovers from EADDRINUSE by unlinking the in-use socket and retrying once',
+    async () => {
     // A leftover file occupies the socket path AND the pre-bind unlink is
     // suppressed for the first check, so listen() actually throws EADDRINUSE
     // (binding a unix socket fails when any file already occupies the path) —
@@ -399,7 +421,8 @@ describe('OrchSocketServer', () => {
     );
     const lines = await waitForLines(1);
     expect(parse(lines[0]).ok).toBe(true);
-  });
+    },
+  );
 
   // -------------------------------------------------------------------------
   // 7. start() refuses to clobber a LIVE peer's socket (two-instance guard)
@@ -409,7 +432,10 @@ describe('OrchSocketServer', () => {
     // Server A owns the path and is actively listening.
     server = new OrchSocketServer(socketPath, dbAdapter(db), logger, {}, tokens);
     await server.start();
-    expect(fs.existsSync(socketPath)).toBe(true);
+    // The bind's fs node is only inspectable on POSIX — Windows named pipes have
+    // no stable fs node (existsSync/statSync race with EBUSY). Live-ness is
+    // asserted below via the connect-probe and the real client round-trip.
+    if (process.platform !== 'win32') expect(fs.existsSync(socketPath)).toBe(true);
 
     // Server B targets the SAME path. Its start() must detect the live listener
     // via the connect-probe and reject, rather than unlink A's socket out from
@@ -460,7 +486,13 @@ describe('OrchSocketServer', () => {
   // 9. stop() refuses to unlink a socket file another instance now owns
   // -------------------------------------------------------------------------
 
-  it('stop() does NOT unlink the socket file when another instance has rebound the path', async () => {
+  // POSIX-only: the scenario hinges on unlinking a bound socket file by path and
+  // on inode-ownership checks — both unix-socket fs-node semantics. Windows named
+  // pipes have no stable fs node (rm/stat on a live pipe fail EBUSY) and the name
+  // cannot be force-replaced while a server holds it.
+  it.skipIf(process.platform === 'win32')(
+    'stop() does NOT unlink the socket file when another instance has rebound the path',
+    async () => {
     // Server A binds the path and records its inode.
     const serverA = new OrchSocketServer(socketPath, dbAdapter(db), logger, {}, tokens);
     await serverA.start();
@@ -498,7 +530,8 @@ describe('OrchSocketServer', () => {
 
     await serverB.stop();
     // afterEach's stop() targets `server`, which this test never assigned.
-  });
+    },
+  );
 
   // -------------------------------------------------------------------------
   // Structural interface conformance (compile-time assertions)

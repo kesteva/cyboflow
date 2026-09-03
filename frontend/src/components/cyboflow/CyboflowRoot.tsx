@@ -174,7 +174,8 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
 
   useAddQuickSessionShortcut(handleStartQuickSession, { enabled: projectId !== null });
 
-  // Blueprint editor — open for the active run's workflow (header button + ⌘E).
+  // Blueprint editor — open for the active run's workflow (header button or
+  // Cmd/Ctrl+E).
   // Only meaningful when a run with a resolvable workflow_id is active.
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const editWorkflowId = activeRun?.workflow_id ?? null;
@@ -367,7 +368,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         {/* The top-bar "Choose workflow" / "Quick Session" launchers and the
             "Edit flow" button were removed — those actions now live on their
             own surfaces (sidebar, backlog, the wizard, the in-session
-            "Add a workflow" affordance) and the keyboard shortcuts (⌘E to edit
+            "Add a workflow" affordance) and the keyboard shortcuts (Cmd/Ctrl+E to edit
             the active flow, the quick-session shortcut) still drive the same
             handlers, so nothing here is orphaned. */}
         <div className="flex-1" />
@@ -594,7 +595,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
       />
 
       {/* Workflow blueprint editor — opened from the "Edit flow" header button /
-          ⌘E for the active run's workflow. Only mounted when a run with a
+          Cmd/Ctrl+E for the active run's workflow. Only mounted when a run with a
           resolvable workflow_id is active. */}
       {projectId !== null && editWorkflowId !== null && (
         <WorkflowEditorModal

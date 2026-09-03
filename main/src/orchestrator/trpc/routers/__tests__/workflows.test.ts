@@ -989,3 +989,76 @@ describe('cyboflow.workflows.unarchive', () => {
     ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED');
   });
 });
+
+describe('cyboflow.workflows.createCustom name validation', () => {
+  // A flow name is embedded verbatim in git branch names
+  // (`cyboflow/<name>/<runId>`) and worktree directories
+  // (`.cyboflow/worktrees/<name>/`), so Windows-reserved names are rejected at
+  // the input boundary with an actionable message (BAD_REQUEST, not CONFLICT).
+  function makeCaller() {
+    const rawDb = createWorkflowTestDb();
+    const registry = new WorkflowRegistry(dbAdapter(rawDb), silentLogger);
+    return {
+      rawDb,
+      caller: appRouter.createCaller(createContext({ workflowRegistry: registry })),
+    };
+  }
+
+  const rejectsAsBadRequest = (err: unknown, fragment: string) =>
+    err instanceof TRPCError &&
+    err.code === 'BAD_REQUEST' &&
+    err.message.includes(fragment);
+
+  it('accepts letters, digits, dashes, underscores and inner spaces', async () => {
+    const { caller } = makeCaller();
+    const names = ['Code Review', 'code-review', 'code_review', 'Flow 2 Beta', 'Überflow'];
+    for (const [i, name] of names.entries()) {
+      const row = await caller.cyboflow.workflows.createCustom({
+        projectId: 1,
+        name,
+        definition: makeDefinition(`name-ok-${i}`),
+      });
+      expect(row.name).toBe(name);
+    }
+  });
+
+  it.each([
+    // Fragment notes: tRPC serializes the zod issues into the TRPCError
+    // message as JSON, so quotes/backslashes in the message arrive escaped —
+    // assert on fragments free of both.
+    ['a forbidden path character', 'a<b', 'cannot contain any of'],
+    ['a forbidden path character (slash)', 'a/b', 'cannot contain any of'],
+    ['a forbidden path character (pipe)', 'a|b', 'cannot contain any of'],
+    ['a control character', 'bad\x07name', 'cannot contain any of'],
+    ['a bare reserved device name', 'CON', 'reserved device name'],
+    ['a reserved device name with an extension', 'con.txt', 'reserved device name'],
+    ['a mixed-case reserved device name', 'Lpt3', 'reserved device name'],
+    ['a COM-port reserved name', 'com1', 'reserved device name'],
+    ['a trailing dot', 'Flow.', 'cannot end with a dot or a space'],
+    ['a trailing space', 'Flow ', 'cannot end with a dot or a space'],
+  ])('rejects %s with an actionable BAD_REQUEST', async (_kind, name, fragment) => {
+    const { caller } = makeCaller();
+    await expect(
+      caller.cyboflow.workflows.createCustom({
+        projectId: 1,
+        name,
+        definition: makeDefinition('any-id'),
+      }),
+    ).rejects.toSatisfy((err: unknown) => rejectsAsBadRequest(err, fragment));
+  });
+
+  it('still lets every built-in flow name past the input boundary (they CONFLICT in the registry, not BAD_REQUEST)', async () => {
+    const { caller } = makeCaller();
+    for (const name of CYBOFLOW_WORKFLOW_NAMES) {
+      await expect(
+        caller.cyboflow.workflows.createCustom({
+          projectId: 1,
+          name,
+          definition: makeDefinition(name),
+        }),
+      ).rejects.toSatisfy(
+        (err: unknown) => err instanceof TRPCError && err.code === 'CONFLICT',
+      );
+    }
+  });
+});

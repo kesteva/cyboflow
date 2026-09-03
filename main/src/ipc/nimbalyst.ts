@@ -43,7 +43,8 @@ export function registerNimbalystHandlers(ipcMain: IpcMain, services: AppService
 
       const child = spawn(NIMBALYST_PATH, args, {
         detached: true,
-        stdio: 'ignore'
+        stdio: 'ignore',
+        windowsHide: true
       });
 
       // Unref the child process so it can continue running independently

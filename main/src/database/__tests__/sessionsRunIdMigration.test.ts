@@ -12,6 +12,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { rmDbTestDir, sweepLeakedDbTestDirs } from './cleanupDbTestDir';
 import { DatabaseService } from '../database';
 
 // better-sqlite3 PRAGMA table_info row shape
@@ -34,7 +35,8 @@ describe('migration 009 — sessions.run_id column', () => {
   });
 
   afterEach(() => {
-    rmSync(dbDir, { recursive: true, force: true });
+    sweepLeakedDbTestDirs(tmpdir());
+    rmDbTestDir(dbDir);
   });
 
   it('adds a nullable TEXT run_id column to sessions after initialize()', () => {

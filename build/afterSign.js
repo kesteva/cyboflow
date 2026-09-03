@@ -37,6 +37,12 @@
  *    Missing signing credentials do NOT skip them — an unsigned dev build is
  *    still a build whose bundle can be wrong-arch or ABI-broken.
  *
+ *    Windows gets the same three checks against the win-unpacked layout
+ *    (`verifyWindowsBundle`): the PE machine type of `<productName>.exe`
+ *    read from the COFF header (there is no `lipo` on Windows), the same
+ *    ELECTRON_RUN_AS_NODE load probe of the packaged better_sqlite3.node, and
+ *    a size floor on the unpacked directory. The JAR tripwire stays mac-only.
+ *
  * Notarization is delegated to electron-builder's built-in hook (controlled
  * by build.mac.notarize in package.json). This script does NOT invoke the
  * notarization toolchain directly.
@@ -56,6 +62,8 @@ const { execFileSync } = require('child_process');
 const DEFAULT_MIN_APP_BYTES = 150 * 1024 * 1024;
 /** The asar carries main + frontend + node_modules; a stub is orders smaller. */
 const DEFAULT_MIN_ASAR_BYTES = 10 * 1024 * 1024;
+/** A real win-unpacked dir measures ~1.1 GB; near this floor is a stub. */
+const DEFAULT_MIN_WIN_UNPACKED_BYTES = 300 * 1024 * 1024;
 
 const SKIP_ENV_VAR = 'CYBOFLOW_SKIP_BUNDLE_CHECKS';
 
@@ -72,6 +80,13 @@ const SLICES_BY_ARCH = {
   x64: ['x86_64', 'x86_64h'],
   armv7l: ['armv7', 'armv7s'],
   arm64: ['arm64', 'arm64e'],
+};
+
+/** COFF machine types (PE header) that satisfy each arch on Windows. */
+const PE_MACHINE_BY_ARCH = {
+  ia32: 0x014c,
+  x64: 0x8664,
+  arm64: 0xaa64,
 };
 
 /** Default command runner; injectable so tests can stub command execution. */
@@ -132,6 +147,22 @@ function archMatches(slices, expectedArch, allowSingleSliceUniversal = false) {
   }
   const accepted = SLICES_BY_ARCH[expectedArch] || [];
   return accepted.some((slice) => slices.includes(slice));
+}
+
+/**
+ * Read the COFF machine type out of a PE image header (the Windows equivalent
+ * of asking `lipo` for the Mach-O slices). `buffer` must start with the DOS
+ * 'MZ' magic; the uint32 at 0x3C points at the 'PE\0\0' signature, whose
+ * COFF header carries the machine type as its first uint16. Returns null when
+ * the buffer is not a PE image or is truncated — never throws.
+ */
+function readPeMachineType(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 0x40) return null;
+  if (buffer.readUInt16LE(0) !== 0x5a4d) return null; // 'MZ'
+  const peOffset = buffer.readUInt32LE(0x3c);
+  if (peOffset + 6 > buffer.length) return null;
+  if (buffer.readUInt32LE(peOffset) !== 0x00004550) return null; // 'PE\0\0'
+  return buffer.readUInt16LE(peOffset + 4);
 }
 
 /**
@@ -201,6 +232,29 @@ function collectNodeAddons(dir, found = []) {
       collectNodeAddons(fullPath, found);
     } else if (entry.isFile() && entry.name.endsWith('.node')) {
       if (isForeignPrebuild(fullPath)) continue;
+      found.push(fullPath);
+    }
+  }
+  return found;
+}
+
+/**
+ * Collect every `*.node` under `dir` for a WINDOWS bundle. Same walk as the
+ * mac arm, but `prebuilds/` directories are skipped entirely instead of
+ * filtered per-file: node-pty-prebuilt-multiarch ships every platform's
+ * prebuild under `prebuilds/<platform>-<arch>/`, and on Windows none of them
+ * is the loadable addon (that lives in `build/Release`), so they are dead
+ * weight that must not reach the probe.
+ */
+function collectNodeAddonsForWindows(dir, found = []) {
+  if (!fs.existsSync(dir)) return found;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isSymbolicLink()) continue;
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === 'prebuilds') continue;
+      collectNodeAddonsForWindows(fullPath, found);
+    } else if (entry.isFile() && entry.name.endsWith('.node')) {
       found.push(fullPath);
     }
   }
@@ -429,6 +483,113 @@ function verifyBundle(options) {
   return failures;
 }
 
+/**
+ * The Windows counterpart of `verifyBundle`, sized for the win-unpacked
+ * layout electron-builder produces (`<appOutDir>/win-unpacked/`):
+ *   1. architecture — the PE machine type of the packaged `<productName>.exe`
+ *      (there is no `lipo` on Windows, so the COFF header is read directly),
+ *   2. a real runtime ABI probe of the packaged better_sqlite3.node, spawned
+ *      under the packaged executable with ELECTRON_RUN_AS_NODE=1 — the same
+ *      honest-load pattern as the mac arm,
+ *   3. a size floor on the unpacked directory (asar + unpacked natives ride
+ *      inside it, so one floor covers the stub cases).
+ * Returning the failures (rather than throwing) lets the caller report them
+ * all in ONE error, like the mac arm.
+ */
+function verifyWindowsBundle(options) {
+  const {
+    appOutDir,
+    productName,
+    expectedArch,
+    minDirBytes = DEFAULT_MIN_WIN_UNPACKED_BYTES,
+  } = options;
+
+  const failures = [];
+
+  // electron-builder's Windows appOutDir IS the win-unpacked directory
+  // (dist-electron/win-unpacked) — unlike the mac layout, there is no nested
+  // step. Accept a legacy/doubled nesting in case a caller passes the parent.
+  const nested = path.join(appOutDir, 'win-unpacked');
+  const appDir = fs.existsSync(nested) ? nested : appOutDir;
+  if (!fs.existsSync(appDir) || !fs.existsSync(path.join(appDir, `${productName}.exe`))) {
+    return [`the packaged app directory is missing entirely (expected ${productName}.exe under): ${appDir}`];
+  }
+
+  const executablePath = path.join(appDir, `${productName}.exe`);
+
+  // --- Check 1: architecture of the main executable (PE machine type) ---
+  if (!expectedArch) {
+    failures.push(
+      'could not determine the expected architecture from the electron-builder ' +
+        'context, so the bundle cannot be verified'
+    );
+  } else if (!PE_MACHINE_BY_ARCH[expectedArch]) {
+    failures.push(
+      `cannot verify a ${expectedArch} Windows bundle — no known PE machine ` +
+        `type for it (expected one of: ${Object.keys(PE_MACHINE_BY_ARCH).join(', ')})`
+    );
+  } else if (!fs.existsSync(executablePath)) {
+    failures.push(`the packaged executable is missing: ${executablePath}`);
+  } else {
+    let machine = null;
+    let readFailed = false;
+    try {
+      machine = readPeMachineType(fs.readFileSync(executablePath));
+    } catch (err) {
+      readFailed = true;
+      failures.push(`could not read the PE header of ${executablePath}: ${err.message}`);
+    }
+    if (!readFailed && machine === null) {
+      failures.push(
+        `${executablePath} has no readable PE header — it is not a Windows executable`
+      );
+    } else if (!readFailed && machine !== PE_MACHINE_BY_ARCH[expectedArch]) {
+      failures.push(
+        `${executablePath} is a PE machine 0x${machine.toString(16)} binary, ` +
+          `expected 0x${PE_MACHINE_BY_ARCH[expectedArch].toString(16)} (${expectedArch})`
+      );
+    }
+  }
+
+  // --- Check 2: runtime ABI probe of the packaged better_sqlite3.node ---
+  const unpackedRoot = path.join(appDir, 'resources', 'app.asar.unpacked');
+  const addons = collectNodeAddonsForWindows(unpackedRoot);
+  if (addons.length === 0) {
+    failures.push(
+      `no *.node native addons found under ${unpackedRoot} — the app ships ` +
+        'better-sqlite3, node-pty and others, so an empty set means native ' +
+        'modules were not unpacked and the app cannot boot'
+    );
+  }
+  const betterSqlite = addons.find((file) => path.basename(file) === 'better_sqlite3.node');
+  if (!betterSqlite) {
+    failures.push(
+      `better_sqlite3.node was not found under ${unpackedRoot} — the app stores ` +
+        'all of its state in SQLite and cannot start without it'
+    );
+  } else if (fs.existsSync(executablePath)) {
+    const probe = probeNativeModule(executablePath, betterSqlite);
+    if (!probe.ok) {
+      failures.push(
+        `the packaged Electron binary cannot load the packaged ` +
+          `better_sqlite3.node (ABI mismatch or broken addon):\n    ` +
+          `${betterSqlite}\n    ${probe.detail.split('\n').join('\n    ')}`
+      );
+    }
+  }
+
+  // --- Check 3: size floor on the unpacked directory ---
+  const dirBytes = computeDirectorySize(appDir);
+  if (dirBytes < minDirBytes) {
+    failures.push(
+      `the unpacked app is only ${formatBytes(dirBytes)} (floor is ` +
+        `${formatBytes(minDirBytes)}) — a real win-unpacked build is ~1.1 GB, so this is a stub`
+    );
+  }
+
+  return failures;
+}
+
 /** The warn-only JAR tripwire, unchanged in behavior. */
 function scanForJars(appPath) {
   const unpackedRoot = path.join(appPath, 'Contents/Resources/app.asar.unpacked');
@@ -463,7 +624,13 @@ function scanForJars(appPath) {
 exports.default = async function(context) {
   const { appOutDir, packager, arch } = context;
 
-  if (packager.platform.name !== 'mac') {
+  const platformName = packager.platform.name;
+  const isMac = platformName === 'mac';
+  // app-builder-lib's Platform.WINDOWS carries name "windows" (nodeName
+  // "win32", buildConfigurationKey "win"); accept both spellings so this does
+  // not depend on the electron-builder version.
+  const isWindows = platformName === 'windows' || platformName === 'win';
+  if (!isMac && !isWindows) {
     return;
   }
 
@@ -475,10 +642,11 @@ exports.default = async function(context) {
     console.log('AfterSign: No signing credentials found');
   }
 
-  console.log('AfterSign: notarization is handled by electron-builder built-in hook; this script only scans for JAR files');
-
-  const appPath = path.join(appOutDir, `${packager.appInfo.productName}.app`);
-  scanForJars(appPath);
+  if (isMac) {
+    console.log('AfterSign: notarization is handled by electron-builder built-in hook; this script only scans for JAR files');
+    const appPath = path.join(appOutDir, `${packager.appInfo.productName}.app`);
+    scanForJars(appPath);
+  }
 
   if (process.env[SKIP_ENV_VAR] === '1') {
     console.warn('AfterSign: ============================================================');
@@ -497,7 +665,17 @@ exports.default = async function(context) {
   }
 
   console.log('AfterSign: verifying the packaged bundle (arch, native-module ABI, size floors)');
-  const failures = verifyBundle({ appPath, expectedArch: resolveExpectedArch(arch) });
+  const expectedArch = resolveExpectedArch(arch);
+  const failures = isMac
+    ? verifyBundle({
+        appPath: path.join(appOutDir, `${packager.appInfo.productName}.app`),
+        expectedArch,
+      })
+    : verifyWindowsBundle({
+        appOutDir,
+        productName: packager.appInfo.productName,
+        expectedArch,
+      });
 
   if (failures.length > 0) {
     throw new Error(
@@ -513,16 +691,21 @@ exports.default = async function(context) {
 exports._helpers = {
   DEFAULT_MIN_APP_BYTES,
   DEFAULT_MIN_ASAR_BYTES,
+  DEFAULT_MIN_WIN_UNPACKED_BYTES,
   SKIP_ENV_VAR,
   ARCH_NAME_BY_ORDINAL,
+  PE_MACHINE_BY_ARCH,
   archMatches,
   collectNodeAddons,
+  collectNodeAddonsForWindows,
   isForeignPrebuild,
   computeDirectorySize,
   lipoArchs,
   probeNativeModule,
   readBundleExecutableName,
+  readPeMachineType,
   resolveExpectedArch,
   summarizeProbeStderr,
   verifyBundle,
+  verifyWindowsBundle,
 };

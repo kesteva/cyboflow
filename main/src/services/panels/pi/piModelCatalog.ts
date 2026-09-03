@@ -32,6 +32,7 @@ export async function fetchPiModelCatalog(
       const child = spawn(binaryPath, ['--list-models'], {
         env: { ...process.env },
         stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
       });
       let out = '';
       let err = '';

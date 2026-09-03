@@ -155,7 +155,14 @@ describe('file path guards (file:read / file:write)', () => {
   });
 });
 
-describe('realpath containment guard (symlink escape)', () => {
+  // POSIX-only: every case stages a symlinked FILE (escape, dangling, or
+  // in-worktree alias), and file symlinks need privileges/Developer Mode on
+  // win32 — there is no unprivileged stand-in (a junction can only name a
+  // directory). The realpath containment guard is exercised through DIRECTORY
+  // links (junctions) on win32 in fileProjectContainment.test.ts.
+  describe.skipIf(process.platform === 'win32')(
+    'realpath containment guard (symlink escape)',
+    () => {
   function opsForWorktree(worktree: string) {
     const session = { id: 's1', worktreePath: worktree } as unknown as Session;
     return createFileOps(servicesFor(session));

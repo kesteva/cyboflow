@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { rmDbTestDir, sweepLeakedDbTestDirs } from './cleanupDbTestDir';
 import { DatabaseService } from '../database';
 
 /**
@@ -31,7 +32,8 @@ describe('schema-version gate', () => {
   });
 
   afterEach(() => {
-    rmSync(dbDir, { recursive: true, force: true });
+    sweepLeakedDbTestDirs(tmpdir());
+    rmDbTestDir(dbDir);
   });
 
   it('stamps user_version to the highest migration prefix and reports not-too-new on a fresh DB', () => {

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import * as path from 'node:path';
 import {
   buildCodexAppServerEnvironment,
   buildCodexAppServerThreadResumeParams,
@@ -164,14 +165,18 @@ describe('Codex app-server run configuration', () => {
   });
 
   it('inherits the ChatGPT-authenticated CLI environment, enriches PATH with the login shell, and adds run correlation', () => {
+    // PATH entries are joined with the host delimiter (':' on POSIX, ';' on
+    // win32) — build the expectation the same way instead of hardcoding ':'.
+    const d = path.delimiter;
+    const shellPath = '/opt/homebrew/bin:/Users/me/.nvm/versions/node/v22/bin';
     expect(buildCodexAppServerEnvironment('run-1', runtimeConfig, {
       CODEX_HOME: '/home/user/.codex',
       PATH: '/usr/local/bin',
-    }, () => '/opt/homebrew/bin:/Users/me/.nvm/versions/node/v22/bin')).toEqual({
+    }, () => shellPath)).toEqual({
       CODEX_HOME: '/home/user/.codex',
       // Login-shell PATH is prepended so pnpm/node resolve for the gate; the
       // inherited entry is preserved after it.
-      PATH: '/opt/homebrew/bin:/Users/me/.nvm/versions/node/v22/bin:/usr/local/bin',
+      PATH: [shellPath, '/usr/local/bin'].join(d),
       CYBOFLOW_RUN_ID: 'run-1',
       CYBOFLOW_ORCH_SOCKET: '/tmp/cyboflow-orch.sock',
       CYBOFLOW_ORCH_TOKEN: expect.any(String),
@@ -202,15 +207,18 @@ describe('Codex app-server run configuration', () => {
   });
 
   it('recovers pnpm when the inherited PATH is the restricted launchd PATH (packaged-app symptom)', () => {
+    // Entries are delimited and deduped with the host delimiter — parameterize
+    // the fixture on path.delimiter so the dedupe property is verified on both.
+    const d = path.delimiter;
     const env = buildCodexAppServerEnvironment(
       'run-1',
       runtimeConfig,
-      { PATH: '/usr/bin:/bin:/usr/sbin:/sbin' },
-      () => '/opt/homebrew/bin:/usr/bin:/bin',
+      { PATH: ['/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(d) },
+      () => ['/opt/homebrew/bin', '/usr/bin', '/bin'].join(d),
     );
-    expect(env.PATH?.split(':')).toContain('/opt/homebrew/bin');
+    expect(env.PATH?.split(d)).toContain('/opt/homebrew/bin');
     // No duplicate entries even though the shell PATH and inherited PATH overlap.
-    expect(env.PATH).toBe('/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin');
+    expect(env.PATH).toBe(['/opt/homebrew/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(d));
   });
 
   it('creates PATH from the login shell when the inherited environment has none', () => {

@@ -28,22 +28,29 @@ import {
 } from '../ompGatePath';
 
 describe('toSourceDir', () => {
+  // Paths are assembled with path.join so the segment separators match the
+  // platform the module under test computes its dist/src segments on.
   it('maps a compiled dev directory back to the source tree', () => {
-    expect(toSourceDir('/repo/main/dist/main/src/services/panels/omp/gate')).toBe(
-      '/repo/main/src/services/panels/omp/gate',
-    );
+    expect(
+      toSourceDir(path.join('/repo', 'main', 'dist', 'main', 'src', 'services', 'panels', 'omp', 'gate')),
+    ).toBe(path.join('/repo', 'main', 'src', 'services', 'panels', 'omp', 'gate'));
   });
 
   it('leaves a path that is already source alone (the vitest case)', () => {
-    expect(toSourceDir('/repo/main/src/services/panels/omp/gate')).toBe(
-      '/repo/main/src/services/panels/omp/gate',
+    expect(toSourceDir(path.join('/repo', 'main', 'src', 'services', 'panels', 'omp', 'gate'))).toBe(
+      path.join('/repo', 'main', 'src', 'services', 'panels', 'omp', 'gate'),
     );
   });
 
   it('rewrites the LAST occurrence, so a repo path containing main/dist is safe', () => {
-    expect(toSourceDir('/main/dist/main/src/x/main/dist/main/src/services/panels/omp/gate')).toBe(
-      '/main/dist/main/src/x/main/src/services/panels/omp/gate',
-    );
+    expect(
+      toSourceDir(
+        path.join(
+          '/main/dist/main/src/x',
+          'main', 'dist', 'main', 'src', 'services', 'panels', 'omp', 'gate',
+        ),
+      ),
+    ).toBe(path.join('/main/dist/main/src/x', 'main', 'src', 'services', 'panels', 'omp', 'gate'));
   });
 });
 
@@ -51,19 +58,23 @@ describe('resolveOmpGateExtensionPath', () => {
   it('resolves the source file from a compiled dev directory', () => {
     const resolved = resolveOmpGateExtensionPath({
       isPackaged: false,
-      dirname: '/repo/main/dist/main/src/services/panels/omp/gate',
+      dirname: path.join('/repo', 'main', 'dist', 'main', 'src', 'services', 'panels', 'omp', 'gate'),
     });
 
-    expect(resolved).toBe('/repo/main/src/services/panels/omp/gate/ompGateExtension.ts');
+    expect(resolved).toBe(
+      path.join('/repo', 'main', 'src', 'services', 'panels', 'omp', 'gate', OMP_GATE_EXTENSION_FILENAME),
+    );
   });
 
   it('resolves next to this module when it is already running from source', () => {
     const resolved = resolveOmpGateExtensionPath({
       isPackaged: false,
-      dirname: '/repo/main/src/services/panels/omp/gate',
+      dirname: path.join('/repo', 'main', 'src', 'services', 'panels', 'omp', 'gate'),
     });
 
-    expect(resolved).toBe('/repo/main/src/services/panels/omp/gate/ompGateExtension.ts');
+    expect(resolved).toBe(
+      path.join('/repo', 'main', 'src', 'services', 'panels', 'omp', 'gate', OMP_GATE_EXTENSION_FILENAME),
+    );
   });
 
   it('defaults the directory to this module’s own location', () => {

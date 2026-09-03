@@ -181,6 +181,7 @@ function makeDeps(
     writeAttestFile: vi.fn(async (path: string, record: DriverAttestRecord) => {
       calls.attestWrites.push({ path, record });
     }),
+    platform: 'darwin',
     stdout: () => {},
     stderr: () => {},
     ...overrides,
@@ -1087,6 +1088,24 @@ describe('runDriverCommand — native-screenshot', () => {
     const failDeps = makeDeps(withoutDir);
     expect(await runDriverCommand(['native-screenshot', 'home'], { VERIFY_MODALITY: 'native-screen' }, failDeps)).toBe(1);
     expect(withoutDir.peekaboo).toEqual([]);
+  });
+
+  it('win32: captures via the PowerShell stand-in instead of peekaboo, notes the --app deviation', async () => {
+    const calls = freshCalls();
+    const captures: string[] = [];
+    const deps = makeDeps(calls, {
+      platform: 'win32',
+      runWindowsCapture: vi.fn(async (outPath: string) => {
+        captures.push(outPath);
+      }),
+    });
+
+    const exitCode = await runDriverCommand(['native-screenshot', 'home', '--app', 'Cyboflow'], NATIVE_ENV, deps);
+
+    expect(exitCode).toBe(0);
+    expect(captures).toEqual([join(ENV.VERIFY_ARTIFACTS_DIR, 'home.png')]);
+    // The macOS peekaboo ladder must NOT run.
+    expect(calls.peekaboo).toHaveLength(0);
   });
 });
 

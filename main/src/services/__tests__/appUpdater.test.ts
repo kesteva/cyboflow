@@ -98,7 +98,7 @@ function makeHarness(currentVersion = '0.1.28') {
     webContents: { send },
   } as unknown as BrowserWindow;
 
-  const updater = new AppUpdater(app as unknown as App, () => win);
+  const updater = new AppUpdater(app as unknown as App, () => win, undefined, 'darwin');
   updater.init();
 
   const lastEvent = () => send.mock.calls.at(-1)?.[1];
