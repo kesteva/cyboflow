@@ -37,8 +37,11 @@ import type { PermissionMode } from '../../../../shared/types/workflows';
  * defaults, then the global config default, then the floor. Reads the store's
  * LIVE state because `workflowId` is only known after the async workflows.list
  * lookup — a hook-level selector would be keyed wrong.
+ *
+ * Exported so `guided/launchFirstSession.ts` (the onboarding first-session
+ * launcher) can reuse the exact same ladder rather than reimplementing it.
  */
-function resolveLaunchDefaults(workflowId: string, globalPermissionMode: PermissionMode) {
+export function resolveLaunchDefaults(workflowId: string, globalPermissionMode: PermissionMode) {
   const config = useConfigStore.getState().config;
   const resolved = resolveRunTypeLaunchDefaults(
     workflowRunTypeKey(workflowId),
