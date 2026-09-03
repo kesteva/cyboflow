@@ -93,8 +93,10 @@ export function GuidedCallout({
   leaderTo,
 }: GuidedCalloutProps): React.JSX.Element {
   const chipRef = useRef<HTMLSpanElement>(null);
+  const cardRef = useRef<HTMLDivElement>(null);
   return (
     <div
+      ref={cardRef}
       className="flex items-start gap-[11px] border border-border-primary bg-surface-primary px-[15px] py-[13px] text-left"
       data-testid={testId}
     >
@@ -108,6 +110,7 @@ export function GuidedCallout({
       {leaderTo !== undefined && (
         <GuidedLeader
           from={chipRef}
+          card={cardRef}
           to={leaderTo}
           testId={testId !== undefined ? `${testId}-leader` : undefined}
         />

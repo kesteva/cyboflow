@@ -16,6 +16,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { UnifiedMessage } from '../../../../shared/types/unifiedMessage';
 import { UnifiedChatView } from '../cyboflow/unified/UnifiedChatView';
+import { GUIDED_TARGETS } from '../onboarding/guided/GuidedLeader';
 import { useUnifiedAgentThreadMessages } from '../cyboflow/unified/useUnifiedAgentThreadMessages';
 import { useAgentThreadStore } from '../../stores/agentThreadStore';
 import { AgentComposer } from './AgentComposer';
@@ -90,7 +91,10 @@ export function AgentThreadView({
       railId={thread?.id ?? 'agent'}
       hidePromptRail={variant === 'guided'}
       bottomSlot={
-        <div className="flex flex-col gap-2 border-t border-border-primary p-3">
+        <div
+          className="flex flex-col gap-2 border-t border-border-primary p-3"
+          data-guided-target={variant === 'rail' ? GUIDED_TARGETS.assistantComposer : undefined}
+        >
           <ProposalCardList proposals={proposals} />
           {variant === 'rail' && <AgentSuggestionChips onSend={handleSend} disabled={sending} />}
           <AgentComposer
