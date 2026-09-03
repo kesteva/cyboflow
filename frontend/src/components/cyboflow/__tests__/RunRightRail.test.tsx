@@ -31,6 +31,7 @@
  *      hasn't resolved yet never falls through to the quick-session arm.
  */
 import '@testing-library/jest-dom';
+import React from 'react';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -98,7 +99,7 @@ vi.mock('../../../hooks/useArtifactsList', () => ({
 }));
 
 // Import after mocks
-import { RunRightRail } from '../RunRightRail';
+import { RunRightRail, initialRunRightRailWidth } from '../RunRightRail';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { useCenterPaneStore } from '../../../stores/centerPaneStore';
 import type { UseWorkflowPhaseStateResult } from '../../../hooks/useWorkflowPhaseState';
@@ -196,8 +197,8 @@ describe('RunRightRail', () => {
     expect(screen.getByTestId('run-right-rail-workflow-progress-empty')).toBeInTheDocument();
 
     const root = screen.getByTestId('run-right-rail');
-    // Width is now an inline style (user-resizable), defaulting to 296px.
-    expect((root as HTMLElement).style.width).toBe('296px');
+    // Width is now an inline style (user-resizable), defaulting to 360px.
+    expect((root as HTMLElement).style.width).toBe('360px');
     expect(root).toHaveClass('shrink-0');
     expect(root).toHaveClass('border-l');
     // A left-edge drag handle is present for resizing.
@@ -461,10 +462,57 @@ describe('RunRightRail — width resize', () => {
 
   it('grows the rail on a leftward drag and persists the width', () => {
     renderRail(EMPTY_PHASE_STATE);
-    expect(railWidth()).toBe(296);
+    expect(railWidth()).toBe(360);
     dragHandle(-100); // 100px LEFT → +100 width
-    expect(railWidth()).toBe(396);
-    expect(localStorage.getItem(WIDTH_KEY)).toBe('396');
+    expect(railWidth()).toBe(460);
+    expect(localStorage.getItem(WIDTH_KEY)).toBe('460');
+  });
+
+  it('does not write a width to localStorage until the user resizes', () => {
+    renderRail(EMPTY_PHASE_STATE);
+    // A mount write would stamp the current default into every install and
+    // stop any later default change from reaching anyone.
+    expect(localStorage.getItem(WIDTH_KEY)).toBeNull();
+    dragHandle(-40);
+    expect(localStorage.getItem(WIDTH_KEY)).toBe('400');
+  });
+
+  it('does not write on mount even under React.StrictMode (double-invoked effects)', () => {
+    // renderRail() doesn't take a wrapper option, so render the same JSX it
+    // would render, ourselves, inside StrictMode.
+    render(
+      <React.StrictMode>
+        <RunRightRail
+          phaseState={EMPTY_PHASE_STATE}
+          collapsed={false}
+          onToggleCollapse={() => {}}
+        />
+      </React.StrictMode>,
+    );
+    // StrictMode double-invokes effects on mount; the write must still come
+    // only from the drag handler, never from a mount effect.
+    expect(localStorage.getItem(WIDTH_KEY)).toBeNull();
+    dragHandle(-40);
+    expect(localStorage.getItem(WIDTH_KEY)).toBe('400');
+  });
+
+  it('opens at the current default when storage holds the superseded 296', () => {
+    localStorage.setItem(WIDTH_KEY, '296');
+    renderRail(EMPTY_PHASE_STATE);
+    expect(railWidth()).toBe(360);
+  });
+
+  it('honours a width the user actually chose', () => {
+    localStorage.setItem(WIDTH_KEY, '420');
+    renderRail(EMPTY_PHASE_STATE);
+    expect(railWidth()).toBe(420);
+  });
+
+  it('initialRunRightRailWidth: stored wins, superseded default does not, junk falls back', () => {
+    expect(initialRunRightRailWidth('420')).toBe(420);
+    expect(initialRunRightRailWidth('296')).toBe(360);
+    expect(initialRunRightRailWidth(null)).toBe(360);
+    expect(initialRunRightRailWidth('not-a-number')).toBe(360);
   });
 
   it('clamps to the minimum on a large rightward drag', () => {

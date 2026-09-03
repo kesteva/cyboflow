@@ -17,6 +17,7 @@
  *      every non-session, non-wizard view and false for 'session'/'wizard'.
  */
 import '@testing-library/jest-dom';
+import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
@@ -24,7 +25,12 @@ vi.mock('./AgentThreadView', () => ({
   AgentThreadView: () => <div data-testid="agent-thread-view-stub">AgentThreadView</div>,
 }));
 
-import { AgentRail, clampAgentRailWidth, shouldShowAgentRail } from './AgentRail';
+import {
+  AgentRail,
+  clampAgentRailWidth,
+  initialAgentRailWidth,
+  shouldShowAgentRail,
+} from './AgentRail';
 import { useLayoutStore } from '../../stores/layoutStore';
 
 const WIDTH_KEY = 'cyboflow.agentRail.width';
@@ -107,6 +113,15 @@ describe('AgentRail — collapse', () => {
   });
 });
 
+describe('initialAgentRailWidth', () => {
+  it('takes a stored width, ignores the superseded default, and survives junk', () => {
+    expect(initialAgentRailWidth('420')).toBe(420);
+    expect(initialAgentRailWidth('320')).toBe(360);
+    expect(initialAgentRailWidth(null)).toBe(360);
+    expect(initialAgentRailWidth('not-a-number')).toBe(360);
+  });
+});
+
 describe('AgentRail — width resize', () => {
   function railWidth(): number {
     return parseInt((screen.getByTestId('agent-rail') as HTMLElement).style.width, 10);
@@ -120,16 +135,50 @@ describe('AgentRail — width resize', () => {
     fireEvent.mouseUp(document);
   }
 
-  it('defaults to 320px', () => {
+  it('defaults to 360px', () => {
     render(<AgentRail />);
-    expect(railWidth()).toBe(320);
+    expect(railWidth()).toBe(360);
+  });
+
+  it('does not write a width to localStorage until the user resizes', () => {
+    render(<AgentRail />);
+    // A mount write would stamp the current default into every install and
+    // stop any later default change from reaching anyone.
+    expect(localStorage.getItem(WIDTH_KEY)).toBeNull();
+    dragHandle(-40);
+    expect(localStorage.getItem(WIDTH_KEY)).toBe('400');
+  });
+
+  it('does not write on mount even under React.StrictMode (double-invoked effects)', () => {
+    render(
+      <React.StrictMode>
+        <AgentRail />
+      </React.StrictMode>,
+    );
+    // StrictMode double-invokes effects on mount; the write must still come
+    // only from the drag handler, never from a mount effect.
+    expect(localStorage.getItem(WIDTH_KEY)).toBeNull();
+    dragHandle(-40);
+    expect(localStorage.getItem(WIDTH_KEY)).toBe('400');
+  });
+
+  it('opens at the current default when storage holds the superseded 320', () => {
+    localStorage.setItem(WIDTH_KEY, '320');
+    render(<AgentRail />);
+    expect(railWidth()).toBe(360);
+  });
+
+  it('honours a width the user actually chose', () => {
+    localStorage.setItem(WIDTH_KEY, '420');
+    render(<AgentRail />);
+    expect(railWidth()).toBe(420);
   });
 
   it('grows the rail on a leftward drag and persists the width', () => {
     render(<AgentRail />);
     dragHandle(-100); // 100px LEFT → +100 width
-    expect(railWidth()).toBe(420);
-    expect(localStorage.getItem(WIDTH_KEY)).toBe('420');
+    expect(railWidth()).toBe(460);
+    expect(localStorage.getItem(WIDTH_KEY)).toBe('460');
   });
 
   it('clamps to the minimum on a large rightward drag', () => {

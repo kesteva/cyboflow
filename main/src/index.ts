@@ -8,6 +8,7 @@ import {
   app,
   BrowserWindow,
   ipcMain,
+  screen,
   shell,
   dialog,
   systemPreferences,
@@ -36,6 +37,14 @@ import { detectArchMismatch, formatArchMismatchLog, formatArchMismatchDialog } f
 import { setTelemetrySink, setSeamErrorSink } from './orchestrator/telemetrySink';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { installApplicationMenu } from './menu';
+import {
+  attachWindowStatePersistence,
+  clampWindowBounds,
+  defaultWindowBounds,
+  loadWindowState,
+  type WindowRect,
+  type WindowStatePersistence,
+} from './utils/windowState';
 import { registerIpcHandlers } from './ipc';
 import { QUICK_PTY_BRIEFING } from './ipc/quickSessionBriefings';
 import { registerArtifactImageHandlers } from './ipc/artifactImages';
@@ -349,6 +358,10 @@ import { setProjectPermissionTrustResolver } from './orchestrator/permissionRule
 setStreamParserPerfBump(perfBump);
 
 export let mainWindow: BrowserWindow | null = null;
+// Geometry persistence for the CURRENT main window (utils/windowState.ts).
+// Module-level so the 'Quit Anyway' app.exit() path can flush it; re-bound on
+// every createWindow (the previous controller disposes itself on 'closed').
+let windowStatePersistence: WindowStatePersistence | null = null;
 
 /**
  * Design-mode-FORK wording for each rung of the shared SDK-pinned pre-flight
@@ -877,6 +890,8 @@ function describeInstanceKind(dataDir: string): string {
 // honored. The only app code that reads app.getPath('userData') is the bug
 // reporter's offline queue, which WANTS to land under the kind's data dir, so
 // relocating it is side-effect-free beyond Electron's own state isolation.
+// (Window geometry deliberately does NOT go through userData — it resolves the
+// kind's data dir itself, so it stays isolated even if this setPath fails.)
 const kindDataDir = getCyboflowDirectory();
 try {
   const electronUserData = path.join(kindDataDir, 'electron');
@@ -1170,9 +1185,33 @@ function runDeferredStartupWork(): void {
 }
 
 async function createWindow() {
+  // Window geometry (see utils/windowState.ts): restore the previous session's
+  // bounds from <dataDir>/window-state.json, or — when nothing trustworthy is
+  // saved (first run, corrupt file) — size to the display the cursor is on.
+  // Restored bounds are clamped against the work area of the display they last
+  // lived on, so a monitor unplug or resolution change can never resurrect an
+  // off-screen (or oversized) window. Any failure downgrades to first-run
+  // sizing, never a crash. The dir is the kind's data dir straight from the
+  // resolver (NOT app.getPath('userData')), so --cyboflow-dir / CYBOFLOW_DIR /
+  // per-kind isolation hold even if the userData relocation above failed.
+  const windowStateDir = getCyboflowDirectory();
+  const savedWindowState = loadWindowState(windowStateDir);
+  let windowBounds: WindowRect;
+  if (savedWindowState) {
+    windowBounds = clampWindowBounds(
+      savedWindowState.bounds,
+      screen.getDisplayMatching(savedWindowState.bounds).workArea,
+    );
+  } else {
+    const workArea = screen.getDisplayNearestPoint(screen.getCursorScreenPoint()).workArea;
+    windowBounds = clampWindowBounds(defaultWindowBounds(workArea), workArea);
+  }
+
   mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
+    x: windowBounds.x,
+    y: windowBounds.y,
+    width: windowBounds.width,
+    height: windowBounds.height,
     icon: path.join(__dirname, '../assets/icon.png'),
     // First-paint: start hidden and paint the renderer's root background so the
     // window never flashes an empty white frame while the (heavy) renderer boots;
@@ -1205,10 +1244,30 @@ async function createWindow() {
   // Each panel can register multiple event listeners
   mainWindow.webContents.setMaxListeners(100);
 
+  // Persist bounds so the next launch restores them (debounced resize/move,
+  // flushed on close; the normal-vs-maximized bookkeeping and the macOS
+  // getNormalBounds caveat live with the controller). Bound to THIS window
+  // object, not the mutable `mainWindow` global, so a pending timer can never
+  // persist a later re-created window through the old controller. Seeded with
+  // the bounds the window was created at, so a close before any resize/move
+  // still writes a real rect.
+  windowStatePersistence = attachWindowStatePersistence(mainWindow, windowStateDir, {
+    bounds: windowBounds,
+    maximized: savedWindowState?.maximized ?? false,
+  });
+
   // Reveal the window only once the renderer has painted its first frame, and
   // kick off the deferrable startup work at that point. Registered BEFORE
   // loadURL/loadFile so the one-shot 'ready-to-show' is never missed.
   mainWindow.once('ready-to-show', () => {
+    // A maximized previous session comes back maximized — the restored x/y/w/h
+    // are the window's NORMAL (restore) geometry, so un-maximizing later lands
+    // where the user left it. maximize() shows the window itself, so it belongs
+    // inside this gate: called earlier it reveals the unpainted frame the gate
+    // exists to hide.
+    if (savedWindowState?.maximized) {
+      mainWindow?.maximize();
+    }
     mainWindow?.show();
     runDeferredStartupWork();
   });
@@ -6994,8 +7053,10 @@ app.on('before-quit', (event) => {
         });
     
     if (choice === 1) {
-      // User chose to quit anyway
+      // User chose to quit anyway. app.exit() skips the window 'close' event,
+      // so flush the geometry explicitly or the last ≤500ms of resize is lost.
       archiveProgressManager.clearAll();
+      windowStatePersistence?.flush();
       app.exit(0);
     }
     // Otherwise, the quit is cancelled and app continues
