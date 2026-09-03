@@ -5,7 +5,8 @@
  * Queries / mutations:
  *   - getThread        : query    → AgentThread   (ensures the single 'global' thread exists)
  *   - listMessages     : query    → UnifiedMessage[] (projection over agent_thread_events)
- *   - sendMessage      : mutation → { ok: true }   (one agent turn)
+ *   - sendMessage      : mutation → { ok: true }   (one agent turn; optional
+ *                        prompt-only `contextHint`, never persisted to the transcript)
  *   - listProposals    : query    → AgentProposal[]
  *   - confirmProposal  : mutation → ConfirmProposalResult (the user's Confirm click)
  *   - dismissProposal  : mutation → { ok: true; dismissed }
@@ -177,11 +178,13 @@ export const agentThreadRouter = router({
       return selectAgentThreadUnifiedMessages(ctx.db, input.threadId);
     }),
 
-  /** Send one agent turn (spawn / warm-continue). */
+  /** Send one agent turn (spawn / warm-continue). `contextHint` is optional
+   *  prompt-only priming text (e.g. onboarding context) — prepended to what
+   *  the model sees but never recorded in the transcript. */
   sendMessage: protectedProcedure
-    .input(z.object({ threadId: z.string(), text: z.string() }))
+    .input(z.object({ threadId: z.string(), text: z.string(), contextHint: z.string().max(4000).optional() }))
     .mutation(async ({ ctx, input }): Promise<{ ok: true }> => {
-      await requireService(ctx).sendMessage(input.threadId, input.text);
+      await requireService(ctx).sendMessage(input.threadId, input.text, input.contextHint);
       return { ok: true };
     }),
 

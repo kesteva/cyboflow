@@ -158,7 +158,19 @@ describe('cyboflow.agentThread read/simple procedures', () => {
     const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
     const result = await caller.cyboflow.agentThread.sendMessage({ threadId: 'thread-1', text: 'hi' });
     expect(result).toEqual({ ok: true });
-    expect(service.sendMessage).toHaveBeenCalledWith('thread-1', 'hi');
+    expect(service.sendMessage).toHaveBeenCalledWith('thread-1', 'hi', undefined);
+  });
+
+  it('sendMessage forwards an optional contextHint to the service', async () => {
+    const service = makeService();
+    const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
+    const result = await caller.cyboflow.agentThread.sendMessage({
+      threadId: 'thread-1',
+      text: 'hi',
+      contextHint: 'ctx',
+    });
+    expect(result).toEqual({ ok: true });
+    expect(service.sendMessage).toHaveBeenCalledWith('thread-1', 'hi', 'ctx');
   });
 
   it('listProposals returns the store rows for the thread', async () => {

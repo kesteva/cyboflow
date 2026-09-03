@@ -221,6 +221,25 @@ describe('AgentThreadService', () => {
       expect(h.store.getThread(thread.id)?.claudeSessionId).toBe('sess-1');
     });
 
+    it('an optional contextHint is prepended to the spawned prompt but never persisted to the transcript', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueInit('sess-1');
+
+      await h.service.sendMessage(thread.id, 'hello', 'HINT');
+
+      expect(h.manager.calls).toHaveLength(1);
+      expect(h.manager.calls[0].prompt).toBe('HINT\n\nhello');
+
+      // The recorded transcript turn stores the RAW text only — no hint.
+      const rows = h.store.listEvents(thread.id);
+      const userRow = rows.find((r) => r.eventType === 'user');
+      expect(userRow).toBeDefined();
+      const persisted = JSON.parse(userRow!.payloadJson) as {
+        message: { content: Array<{ type: string; text: string }> };
+      };
+      expect(persisted.message.content).toEqual([{ type: 'text', text: 'hello' }]);
+    });
+
     it('warm continuation threads the stored session id as resumeSessionId on turn 2', async () => {
       const thread = h.service.ensureGlobalThread();
       h.manager.queueInit('sess-1');

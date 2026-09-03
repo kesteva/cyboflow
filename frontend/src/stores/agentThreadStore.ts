@@ -71,8 +71,11 @@ export interface AgentThreadState {
   init: () => (() => void);
 
   /** Send one turn on the global thread. Swallows failures (console.error) —
-   *  the composer has no dedicated error-surfacing slot yet (S1.5 polish). */
-  sendMessage: (text: string) => Promise<void>;
+   *  the composer has no dedicated error-surfacing slot yet (S1.5 polish).
+   *  `opts.contextHint` is optional prompt-only priming text (e.g. onboarding
+   *  context) prepended to what the model sees — never part of the recorded
+   *  transcript turn. */
+  sendMessage: (text: string, opts?: { contextHint?: string }) => Promise<void>;
   /** The user's Confirm click (S1.3 consumes this) — propagates failures so
    *  the proposal card can render them, and refreshes `proposals` afterward. */
   confirmProposal: (proposalId: string) => Promise<ConfirmProposalResult>;
@@ -169,7 +172,7 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
       return unsubscribe;
     },
 
-    sendMessage: async (text: string) => {
+    sendMessage: async (text: string, opts?: { contextHint?: string }) => {
       const threadId = get().thread?.id;
       if (threadId === undefined) {
         console.warn('[agentThreadStore] sendMessage called before the thread loaded — dropped');
@@ -177,7 +180,11 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
       }
       set({ sending: true });
       try {
-        await trpc.cyboflow.agentThread.sendMessage.mutate({ threadId, text });
+        await trpc.cyboflow.agentThread.sendMessage.mutate({
+          threadId,
+          text,
+          ...(opts?.contextHint !== undefined ? { contextHint: opts.contextHint } : {}),
+        });
       } catch (err: unknown) {
         console.error('[agentThreadStore] sendMessage failed:', err);
       } finally {

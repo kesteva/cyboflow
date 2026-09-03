@@ -249,9 +249,12 @@ export class AgentThreadService {
    * ONCE fresh (the bridge re-captures the new id from the fresh turn's init).
    * Persists + publishes the human's own turn (a `role:'user'` transcript entry)
    * before spawning, so it renders immediately rather than only once the
-   * assistant's first event lands.
+   * assistant's first event lands. An optional `contextHint` is prepended to
+   * the prompt the model sees (e.g. onboarding priming a proposal) but is
+   * never recorded in the transcript — `recordUserTurn` always stores the raw
+   * `text` the human actually typed.
    */
-  async sendMessage(threadId: string, text: string): Promise<void> {
+  async sendMessage(threadId: string, text: string, contextHint?: string): Promise<void> {
     if (!this.deps.enabled()) {
       throw new Error('assistant is disabled in settings');
     }
@@ -289,15 +292,20 @@ export class AgentThreadService {
 
     const resumeSessionId = thread.claudeSessionId ?? undefined;
 
+    const prompt =
+      contextHint !== undefined && contextHint.trim() !== ''
+        ? `${contextHint.trim()}\n\n${text}`
+        : text;
+
     try {
-      await this.spawn(threadId, text, model, resumeSessionId);
+      await this.spawn(threadId, prompt, model, resumeSessionId);
     } catch (err) {
       if (resumeSessionId !== undefined && isResumeError(err)) {
         this.deps.logger?.warn(
           `[agentThreadService] stale resume for thread ${threadId}; retrying fresh: ${errMessage(err)}`,
         );
         this.deps.store.updateClaudeSessionId(threadId, null);
-        await this.spawn(threadId, text, model, undefined);
+        await this.spawn(threadId, prompt, model, undefined);
         return;
       }
       throw err;
