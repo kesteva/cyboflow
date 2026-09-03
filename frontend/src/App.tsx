@@ -10,6 +10,10 @@ import { perfProbeStart } from './utils/perfProbe';
 import { TitleBar } from './components/TitleBar';
 import { CyboflowRoot } from './components/cyboflow/CyboflowRoot';
 import { OnboardingGate } from './components/onboarding/OnboardingGate';
+import { GuidedSetupSurface } from './components/onboarding/guided/GuidedSetupSurface';
+import { installGuidedNavPause } from './components/onboarding/guided/guidedNavPause';
+import { useOnboardingStore } from './stores/onboardingStore';
+import { isGuidedStep, isOnboardingShellHidden, onboardingGuidedShell } from './utils/onboarding';
 import { AboutDialog } from './components/AboutDialog';
 import { MainProcessLogger } from './components/MainProcessLogger';
 import { ErrorDialog } from './components/ErrorDialog';
@@ -51,6 +55,22 @@ import {
   useAggregatedReviewItems,
   useLandingStore,
 } from './stores/landingStore';
+
+/**
+ * What stands in for the shell row while the first-run tour owns the window:
+ * bare paper where [sidebar | center | rail] + StatusBar would be. The MODAL
+ * tour steps render their card into a body portal over this (OnboardingGate,
+ * mounted below the swap); the GUIDED steps render here instead, inside the
+ * row, so the TitleBar above keeps its native drag region.
+ */
+function OnboardingShellSurface(): React.JSX.Element {
+  const step = useOnboardingStore((s) => s.step);
+  return (
+    <div className="flex flex-1 overflow-hidden bg-bg-primary" data-testid="onboarding-shell">
+      {isGuidedStep(step) ? <GuidedSetupSurface /> : null}
+    </div>
+  );
+}
 
 function App() {
   const [isAboutOpen, setIsAboutOpen] = useState(false);
@@ -110,6 +130,18 @@ function App() {
   // not a stacked overlay — guarantees only ONE chat view / canvas subscribes per
   // session, per design-mode.md's single-mount invariant). Never persisted.
   const activeDesignSessionId = useDesignModeStore((s) => s.activeDesignSessionId);
+  // First-run tour: the shell stays unmounted until the persisted snapshot read
+  // resolves (no rail flash on a pristine boot) and while the tour is on a step
+  // BEFORE the project exists (0-8) — it owns the whole window (see
+  // utils/onboarding). From step 9 the real shell mounts around the guided
+  // column: `guidedShell` says whether the Sidebar alone ('sidebar', 9-11) or
+  // Sidebar + AgentRail ('full', 12-14) frame it; the Sidebar is inert (display
+  // only) until the tour ends, and the centre slot shows GuidedSetupSurface in
+  // place of the view switch.
+  const onboardingShellHidden = useOnboardingStore((s) => isOnboardingShellHidden(s));
+  const guidedShell = useOnboardingStore((s) => onboardingGuidedShell(s));
+  // Sidebar navigation during the in-shell guided steps parks the tour.
+  useEffect(() => installGuidedNavPause(), []);
 
   // One-shot migration: move legacy crystal-sidebar-width → cyboflow-sidebar-width (mount only)
   useEffect(() => {
@@ -282,6 +314,8 @@ function App() {
         <DesignPlannerPrompt />
         {activeDesignSessionId !== null ? (
           <DesignModeSurface />
+        ) : onboardingShellHidden ? (
+          <OnboardingShellSurface />
         ) : (
         <>
         {/* Shell geometry: [agent rail | center]. Human review folds into the
@@ -295,6 +329,11 @@ function App() {
               only — Sidebar also renders the Settings / bug-report / status-guide
               dialogs as siblings, and a display:none wrapper here would hide
               those too (Settings is openable from surfaces far outside the rail). */}
+          {/* A display:contents wrapper keeps the flex geometry and the Sidebar
+              mounted across the tour → shell transition. The Sidebar stays
+              CLICKABLE during the in-shell guided steps — navigating through it
+              parks the tour (guidedNavPause, installed above). */}
+          <div className="contents" data-testid="shell-sidebar-slot">
           <PerfProfiler id="sidebar">
             <Sidebar
               onAboutClick={handleAboutClick}
@@ -317,6 +356,7 @@ function App() {
               onToggleVerifyQueue={toggleVerifyQueue}
             />
           </PerfProfiler>
+          </div>
           {/* Collapsed left rail — a thin strip with only a re-expand chevron,
               deliberately the same 28px geometry + affordance as RunRightRail's
               collapsed strip (mirrored horizontally). */}
@@ -339,7 +379,9 @@ function App() {
               </button>
             </aside>
           )}
-          {/* Center-surface state machine, keyed off navigationStore.view:
+          {/* Center-surface state machine, keyed off navigationStore.view
+                (pre-empted by the guided set-up column while the in-shell tour
+                steps 9-14 run — see `guidedShell` above):
                 • 'session' → CyboflowRoot (the active run/session workspace, the
                   only mount point for the run surface; legacy SessionView retired
                   in TASK-690).
@@ -353,7 +395,9 @@ function App() {
                   LandingHome to its review queue when the user arrived from the
                   human-review rail affordance. */}
           <div className="flex flex-col flex-1 overflow-hidden">
-            {view === 'session' ? (
+            {guidedShell !== 'none' ? (
+              <GuidedSetupSurface />
+            ) : view === 'session' ? (
               <CyboflowRoot projectId={activeProjectId} />
             ) : view === 'wizard' ? (
               <ErrorBoundary fallback={(error) => (
@@ -446,8 +490,11 @@ function App() {
             )}
           </div>
           {/* Global "cyboflow assistant" rail — every landing-family surface
-              except the session workspace (RunRightRail) and the wizard. */}
-          {shouldShowAgentRail(view) && assistantEnabled && <AgentRail />}
+              except the session workspace (RunRightRail) and the wizard. During
+              the in-shell tour it appears exactly at step 12 ("meet the
+              assistant") and stays. */}
+          {(guidedShell === 'none' ? shouldShowAgentRail(view) : guidedShell === 'full') &&
+            assistantEnabled && <AgentRail />}
         </div>
         {/* Persistent status bar at the bottom of the app shell */}
         <StatusBar />

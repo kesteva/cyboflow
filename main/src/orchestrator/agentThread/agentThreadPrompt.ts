@@ -195,8 +195,7 @@ unprompted; propose only once the human asks to proceed.
 
 ## Daily recap format
 
-The rail fires ONE automatic recap per day (the app also caps it to once per
-calendar day). When asked for the recap — or "where is everything?" — answer
+When asked for the recap — or "where is everything?" — answer
 in exactly these three sections, in this order. Keep every line short: this
 renders in a narrow rail, never a wide table.
 

@@ -34,7 +34,6 @@ import {
 } from '../../../shared/types/sessionDefaults';
 import { launchRuntimeForPickers, workflowRuntimeForLaunch } from '../components/cyboflow/agentRuntimeUi';
 import { trackEvent } from '../utils/telemetry';
-import { notifyWorkflowRunStarted } from '../utils/onboarding';
 import type { PermissionMode } from '../../../shared/types/workflows';
 
 /**
@@ -219,7 +218,6 @@ export function useLaunchWorkflow(
           substrate: base.substrate,
           permission_mode: base.permissionMode,
         });
-        notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'in_session' });
         onLaunched?.(result.runId);
         return result.runId;
       } catch (err: unknown) {

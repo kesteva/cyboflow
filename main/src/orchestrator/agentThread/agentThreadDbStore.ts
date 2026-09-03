@@ -119,30 +119,6 @@ export class AgentThreadDbStore {
   }
 
   /**
-   * Read the persisted auto-digest timestamp (epoch ms), or null if the thread
-   * has never auto-digested (or does not exist). Backs the once-per-day throttle
-   * across restarts (migration 076).
-   */
-  getLastDigestAt(threadId: string): number | null {
-    const row = this.db
-      .prepare(`SELECT last_digest_at FROM agent_threads WHERE id = ?`)
-      .get(threadId) as { last_digest_at: number | null } | undefined;
-    return row?.last_digest_at ?? null;
-  }
-
-  /**
-   * Stamp the auto-digest timestamp (epoch ms), or restore/clear it with a
-   * prior value. The service passes the PREVIOUS value (possibly null) back to
-   * ROLL BACK a speculative stamp when the recap send fails, keeping that day
-   * retryable on the next boot. No-op if the thread is gone.
-   */
-  setLastDigestAt(threadId: string, atMs: number | null): void {
-    this.db
-      .prepare(`UPDATE agent_threads SET last_digest_at = ? WHERE id = ?`)
-      .run(atMs, threadId);
-  }
-
-  /**
    * Read the persisted last-turn timestamp (epoch ms), or null if the thread
    * has never recorded a turn since migration 080 (or does not exist). Backs
    * the day-boundary context-retention check — null is treated by the service

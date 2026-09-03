@@ -5,6 +5,10 @@ import { useNavigationStore } from '../stores/navigationStore';
 import { useCyboflowStore } from '../stores/cyboflowStore';
 import { isTerminalRunStatus, useActiveRunsStore, type ActiveRunRow } from '../stores/activeRunsStore';
 import { useSessionStore } from '../stores/sessionStore';
+import { useOnboardingStore } from '../stores/onboardingStore';
+import { ONBOARDING_PROJECT_HOME_STEP } from '../utils/onboarding';
+import { GuidedMarker, useGuidedMarkActive, GUIDED_RING_STYLE } from './onboarding/guided/GuidedMarker';
+import { GUIDED_TARGETS } from './onboarding/guided/GuidedLeader';
 import ProjectSettings from './ProjectSettings';
 import { EmptyState } from './EmptyState';
 import { LoadingSpinner } from './LoadingSpinner';
@@ -545,6 +549,13 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
   const activeRunId = useCyboflowStore((state) => state.activeRunId);
   const runsByProject = useActiveRunsStore((state) => state.runsByProject);
   const refreshActiveRuns = useActiveRunsStore((state) => state.refresh);
+  // Guided step 9 ("Your project lives here") pairs its callouts with markers on
+  // the guided project's row and its "Start new session" button below.
+  const guidedProjectId = useOnboardingStore((s) => s.guidedProject?.id ?? null);
+  const projectHomeMark = useGuidedMarkActive(ONBOARDING_PROJECT_HOME_STEP);
+  // The "Not sure yet" branch reaches step 9 with no project: its first callout
+  // points at the empty state's Add Project button instead.
+  const addProjectMarked = projectHomeMark && guidedProjectId === null;
   const { menuState, openMenu, closeMenu, isMenuOpen } = useContextMenu();
 
   // A/B experiment group rows: per-project experiments + summaries for the rail.
@@ -1680,7 +1691,14 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
             icon={FolderIcon}
             title="No Projects Yet"
             description="Add your first project to start managing workflow runs."
-            action={{ label: 'Add Project', onClick: () => setShowAddProjectDialog(true) }}
+            action={{
+              label: 'Add Project',
+              onClick: () => setShowAddProjectDialog(true),
+              // Ring only — the guided callout draws its leader arrow onto the
+              // button instead of a numbered chip cluttering the primary CTA.
+              style: addProjectMarked ? GUIDED_RING_STYLE : undefined,
+              guidedTarget: GUIDED_TARGETS.addProject,
+            }}
             className="py-8"
           />
         ) : (
@@ -1773,6 +1791,7 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                 sessionCount > 0 || runCount > 0 || folderCount > 0 || railGroups.length > 0;
               const isDraggingOver = dragState.overType === 'project' && dragState.overProjectId === project.id;
               const isActiveProject = activeProjectId === project.id;
+              const isProjectHomeMarked = projectHomeMark && project.id === guidedProjectId;
 
               return (
                 <div key={project.id} className="mb-1">
@@ -1784,6 +1803,8 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                         ? 'bg-interactive/20'
                         : 'bg-surface-secondary/50 hover:bg-surface-hover'
                     }`}
+                    style={isProjectHomeMarked ? GUIDED_RING_STYLE : undefined}
+                    data-guided-target={isProjectHomeMarked ? GUIDED_TARGETS.projectRow : undefined}
                     draggable
                     onDragStart={(e) => handleProjectDragStart(e, project)}
                     onDragEnd={handleDragEnd}
@@ -1822,6 +1843,13 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                       <span className="text-sm font-semibold text-text-primary truncate text-left" title={project.name}>
                         {project.name}
                       </span>
+                      {isProjectHomeMarked && (
+                        <GuidedMarker
+                          step={ONBOARDING_PROJECT_HOME_STEP}
+                          n={1}
+                          testId="onboarding-marker-project"
+                        />
+                      )}
                     </div>
 
                     <button
@@ -1880,9 +1908,18 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                         useNavigationStore.getState().goToWizard({ lockProjectId: project.id, allowQuick: true });
                       }}
                       className="w-full px-2 py-1 text-xs text-text-secondary hover:text-text-primary hover:bg-surface-hover rounded transition-colors flex items-center space-x-1 disabled:opacity-60 disabled:cursor-wait"
+                      style={isProjectHomeMarked ? GUIDED_RING_STYLE : undefined}
+                      data-guided-target={isProjectHomeMarked ? GUIDED_TARGETS.startSession : undefined}
                     >
                       <Plus className="w-3 h-3" />
                       <span>Start new session</span>
+                      {isProjectHomeMarked && (
+                        <GuidedMarker
+                          step={ONBOARDING_PROJECT_HOME_STEP}
+                          n={2}
+                          testId="onboarding-marker-new-session"
+                        />
+                      )}
                     </button>
                   </div>
 

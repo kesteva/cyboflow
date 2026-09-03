@@ -1,33 +1,36 @@
 /**
- * Onboarding copy-of-record — strings & small data arrays shared by the modal
- * card, coachmark, and step bodies. Copy is transcribed from the design packet's
- * `Onboarding Carousel.dc.html` (the copy-of-record where it drifts from the
- * README), with the two deliberate deviations noted at their call sites:
- *   - step 1 drops the "Max plan" tier claim (main/ cannot introspect billing;
- *     see shared/types/onboarding.ts).
- *   - the rail-map step adds the Verify Queue row (six rows, not the
- *     prototype's five).
- * The wizard-Configure pointer steps (7-9) are a post-design addition with no
- * packet counterpart; their copy lives in Coachmark.tsx alongside the other
- * coach bodies. The conditional Default-agent step (2) is likewise a later
- * addition; its body lives in steps/DefaultRuntimeStep.tsx.
+ * Onboarding copy-of-record — the strings and small data arrays shared by the
+ * modal card chrome and the step bodies. Transcribed from the "Onboarding
+ * Restructure" design canvas (`*.dc.html` artboards), which is the copy-of-record
+ * wherever it drifts from prose elsewhere in the repo.
+ *
+ * Only genuinely SHARED copy lives here — a title the card chrome renders for a
+ * step it knows nothing else about. Body copy belongs next to the step that
+ * renders it (steps/*.tsx), and the guided set-up screens (7-14) own their own
+ * headings entirely; their entries below exist only so the dialog's aria-label
+ * and the telemetry slug have something index-aligned to read.
+ *
+ * One deliberate deviation from the design: step 1 drops the "Max plan" tier
+ * claim (main/ cannot introspect billing — see shared/types/onboarding.ts).
  */
 
-/** Header/popover title per step (index === step). Step 0 uses the hero, not this. */
+/** Header/dialog title per step (index === step). Step 0 uses the hero, not this. */
 export const ONBOARDING_TITLES: ReadonlyArray<string> = [
   'Welcome to Cyboflow',
   'Connect an agent',
   'Pick your default agent',
+  'Pick a model',
   'Set your permission mode',
   'Choose what to share',
+  "You're set up",
   'Add a project',
-  'Start your first session',
-  'Choose a runtime',
-  'Session permission',
-  'Pick a model',
-  'Run your first flow',
-  'Watch it in Human review',
-  'Find your way around',
+  'Add a project',
+  'Your project lives here',
+  'Build a backlog of ideas',
+  "Here's how I'd capture that",
+  'Meet the Cyboflow assistant',
+  'Launch your first session',
+  'Launching your session now',
 ];
 
 /** Step-0 hero bullets (swatch color is a phase-identity hex with no token). */

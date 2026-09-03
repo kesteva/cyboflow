@@ -55,8 +55,7 @@ export interface AppConfig {
   assistantModel?: string;
   // Global assistant on/off; absent ⇒ enabled. When false the assistant spawns
   // no turns (zero tokens) — enforced authoritatively by AgentThreadService via
-  // ConfigManager.isAssistantEnabled(), and the renderer hides the agent rail
-  // (so the auto-digest, which lives inside the rail, cannot fire either).
+  // ConfigManager.isAssistantEnabled(), and the renderer hides the agent rail.
   assistantEnabled?: boolean;
   // Extra folders the global cyboflow assistant may read via its scoped
   // filesystem tools (cyboflow_fs_read / _list / _grep), BEYOND the registered

@@ -55,7 +55,7 @@ export interface WizardOpts {
   selectedFindingIds?: string[];
 }
 
-interface NavigationState {
+export interface NavigationState {
   /**
    * Which center surface is showing. The home view hosts the rail-driven
    * overlays (`humanReviewOpen` / `backlogOpen`); the wizard hosts the new-flow

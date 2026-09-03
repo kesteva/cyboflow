@@ -62,7 +62,6 @@ import {
 } from './agentRuntimeUi';
 import { trackEvent } from '../../utils/telemetry';
 import type { TelemetryFlow } from '../../../../shared/types/telemetry';
-import { notifyWorkflowRunStarted } from '../../utils/onboarding';
 
 /**
  * The model this picker falls back to when the current selection belongs to
@@ -503,7 +502,6 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           ...(launchSubstrate ? { substrate: launchSubstrate } : {}),
           permission_mode: permissionMode,
         });
-        notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'topbar' });
         onWorkflowStarted?.(result.runId);
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to start run');
@@ -563,7 +561,6 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           ...(launchSubstrate ? { substrate: launchSubstrate } : {}),
           permission_mode: permissionMode,
         });
-        notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'topbar' });
         onWorkflowStarted?.(result.runId);
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to start sprint run');

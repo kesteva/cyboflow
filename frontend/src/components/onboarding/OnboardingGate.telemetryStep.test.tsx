@@ -1,5 +1,5 @@
 /**
- * OnboardingGate — step 4 (Telemetry) integration coverage (TASK-066). Drives
+ * OnboardingGate — step 5 (Telemetry) integration coverage (TASK-066). Drives
  * the real onboardingStore + configStore (only the API layer is mocked) so the
  * gate's resolve/submit/error wiring is exercised end to end: resolved
  * initialization from AppConfig.telemetry (never a hardcoded default), replay
@@ -9,13 +9,12 @@
  * covers this step's participation in the shared modal chrome (dialog title +
  * "STEP n / total" progress, Back, Skip) — the chrome itself is generic
  * (OnboardingModalCard, no dedicated test file of its own), so these assert
- * step 4 wires into it correctly rather than re-testing the chrome's mechanics.
+ * step 5 wires into it correctly rather than re-testing the chrome's mechanics.
  *
- * Steps 1-3 are skipped by jumping the store directly to step 4 after boot
- * hydration resolves — this file is scoped to step 4's behavior, not the full
- * tour walkthrough (Back/Skip/goTo store-level mechanics for step 4 are
- * covered by onboardingStore.test.ts's "Telemetry step (4)" and "goTo / skip /
- * resume" describe blocks; onboardingTelemetry.test.ts covers the emitted
+ * Steps 1-4 are skipped by jumping the store directly to step 5 after boot
+ * hydration resolves — this file is scoped to step 5's behavior, not the full
+ * tour walkthrough (Back/Skip/goTo store-level mechanics live in
+ * onboardingStore.test.ts; onboardingTelemetry.test.ts covers the emitted
  * onboarding_* usage-telemetry events).
  */
 import '@testing-library/jest-dom';
@@ -76,6 +75,11 @@ const INITIAL_ONBOARDING_STATE = {
   permMode: 'auto' as const,
   defaultProvider: null,
   multiRuntime: true,
+  defaultModel: null,
+  defaultEffort: null,
+  modelPhase: 'model' as const,
+  handoffChoice: 'continue' as const,
+  projectChoice: 'existing' as const,
   hydrated: false,
 };
 
@@ -88,17 +92,17 @@ beforeEach(() => {
   useConfigStore.setState({ config: null, isLoading: false, error: null });
 });
 
-/** Renders the gate, waits for boot hydration, then jumps directly to step 4. */
+/** Renders the gate, waits for boot hydration, then jumps directly to step 5. */
 async function mountAtTelemetryStep(config: AppConfig | null): Promise<void> {
   render(<OnboardingGate />);
   await waitFor(() => expect(useOnboardingStore.getState().hydrated).toBe(true));
   act(() => {
     if (config) useConfigStore.setState({ config });
-    useOnboardingStore.setState({ status: 'active', step: 4, maxVisitedStep: 3 });
+    useOnboardingStore.setState({ status: 'active', step: 5, maxVisitedStep: 4 });
   });
 }
 
-describe('OnboardingGate — Telemetry step (4)', () => {
+describe('OnboardingGate — Telemetry step (5)', () => {
   it('resolves the draft from AppConfig.telemetry, not a hardcoded default', async () => {
     await mountAtTelemetryStep(
       baseAppConfig({ telemetry: { installId: 'inst-2', errorReportingEnabled: true, usageMetricsEnabled: false } }),
@@ -126,7 +130,7 @@ describe('OnboardingGate — Telemetry step (4)', () => {
       useConfigStore.setState({
         config: baseAppConfig({ telemetry: { installId: 'inst-3', errorReportingEnabled: false, usageMetricsEnabled: false } }),
       });
-      useOnboardingStore.setState({ step: 4 });
+      useOnboardingStore.setState({ step: 5 });
     });
 
     await waitFor(() => {
@@ -148,7 +152,7 @@ describe('OnboardingGate — Telemetry step (4)', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Next →' }));
 
-    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(5));
+    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(6));
     expect(configUpdate).toHaveBeenCalledWith({
       telemetry: { installId: 'inst-1', errorReportingEnabled: false, usageMetricsEnabled: false },
     });
@@ -160,7 +164,7 @@ describe('OnboardingGate — Telemetry step (4)', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Next →' }));
 
-    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(5));
+    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(6));
     expect(configUpdate).toHaveBeenCalledWith({
       telemetry: { installId: 'inst-1', errorReportingEnabled: false, usageMetricsEnabled: true },
     });
@@ -172,7 +176,7 @@ describe('OnboardingGate — Telemetry step (4)', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Next →' }));
 
-    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(5));
+    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(6));
     expect(configUpdate).toHaveBeenCalledWith({
       telemetry: { installId: 'inst-1', errorReportingEnabled: true, usageMetricsEnabled: false },
     });
@@ -189,7 +193,7 @@ describe('OnboardingGate — Telemetry step (4)', () => {
         telemetry: { installId: 'inst-1', errorReportingEnabled: true, usageMetricsEnabled: true },
       }),
     );
-    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(5));
+    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(6));
   });
 
   it('emits telemetry_opt_out_changed only for the channel that actually changed', async () => {
@@ -197,7 +201,7 @@ describe('OnboardingGate — Telemetry step (4)', () => {
     fireEvent.click(await screen.findByRole('switch', { name: 'Send anonymized crash & error reports' }));
     fireEvent.click(screen.getByRole('button', { name: 'Next →' }));
 
-    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(5));
+    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(6));
     expect(trackEvent).toHaveBeenCalledWith('telemetry_opt_out_changed', { channel: 'errors', enabled: false });
     expect(trackEvent).not.toHaveBeenCalledWith('telemetry_opt_out_changed', { channel: 'usage', enabled: true });
   });
@@ -206,7 +210,7 @@ describe('OnboardingGate — Telemetry step (4)', () => {
     await mountAtTelemetryStep(baseAppConfig());
     fireEvent.click(await screen.findByRole('button', { name: 'Next →' }));
 
-    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(5));
+    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(6));
     expect(trackEvent).not.toHaveBeenCalledWith('telemetry_opt_out_changed', expect.anything());
   });
 
@@ -227,7 +231,7 @@ describe('OnboardingGate — Telemetry step (4)', () => {
       configGet.mockResolvedValue({ success: true, data: baseAppConfig() });
       await Promise.resolve();
     });
-    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(5));
+    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(6));
     expect(configUpdate).toHaveBeenCalledTimes(1);
   });
 
@@ -239,7 +243,7 @@ describe('OnboardingGate — Telemetry step (4)', () => {
 
     await screen.findByRole('alert');
     expect(screen.getByRole('alert')).toHaveTextContent('disk full');
-    expect(useOnboardingStore.getState().step).toBe(4);
+    expect(useOnboardingStore.getState().step).toBe(5);
     expect(useOnboardingStore.getState().status).toBe('active');
   });
 
@@ -254,36 +258,36 @@ describe('OnboardingGate — Telemetry step (4)', () => {
     configUpdate.mockResolvedValueOnce({ success: true });
     fireEvent.click(screen.getByRole('button', { name: 'Next →' }));
 
-    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(5));
+    await waitFor(() => expect(useOnboardingStore.getState().step).toBe(6));
     expect(configUpdate).toHaveBeenCalledTimes(2);
   });
 
   // Card chrome (title, "STEP n / total" progress, Back/Skip) is rendered by
   // the shared OnboardingModalCard, driven by the real (unmocked)
-  // onboardingStore — these assert THIS step (4) actually wires up to it
+  // onboardingStore — these assert THIS step (5) actually wires up to it
   // correctly, not the chrome's own generic mechanics.
-  it('renders the dialog title and progress indicator for step 4', async () => {
+  it('renders the dialog title and progress indicator for step 5', async () => {
     await mountAtTelemetryStep(baseAppConfig());
     await screen.findByRole('switch', { name: 'Send anonymized crash & error reports' });
 
     expect(screen.getByRole('dialog', { name: 'Choose what to share' })).toBeInTheDocument();
-    expect(screen.getByText('STEP 5 / 13')).toBeInTheDocument();
+    expect(screen.getByText('STEP 6 / 7')).toBeInTheDocument();
   });
 
-  it('Back from step 4 returns to the Permission step (3) and unmounts the telemetry toggles', async () => {
+  it('Back from step 5 returns to the Permission step (4) and unmounts the telemetry toggles', async () => {
     await mountAtTelemetryStep(baseAppConfig());
     await screen.findByRole('switch', { name: 'Send anonymized crash & error reports' });
 
     fireEvent.click(screen.getByRole('button', { name: '← Back' }));
 
-    expect(useOnboardingStore.getState().step).toBe(3);
+    expect(useOnboardingStore.getState().step).toBe(4);
     await waitFor(() =>
       expect(screen.queryByRole('switch', { name: 'Send anonymized crash & error reports' })).not.toBeInTheDocument(),
     );
     expect(screen.getByRole('dialog', { name: 'Set your permission mode' })).toBeInTheDocument();
   });
 
-  it('Skip from step 4 exits the tour (status → skipped) without persisting telemetry', async () => {
+  it('Skip from step 5 exits the tour (status → skipped) without persisting telemetry', async () => {
     await mountAtTelemetryStep(baseAppConfig());
     await screen.findByRole('switch', { name: 'Send anonymized crash & error reports' });
 

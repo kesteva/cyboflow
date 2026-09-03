@@ -3,7 +3,8 @@
  * the usage events it should emit. Kept out of both the store (which must stay
  * side-effect free) and OnboardingGate (a thin subscription shell) so the funnel
  * logic is synchronously unit-testable. Every step the user actually SEES emits
- * `onboarding_step_viewed`; the lifecycle events bracket the run.
+ * `onboarding_step_viewed` — the seven modal cards (0-6) and the two guided
+ * set-up screens (7-8) alike; the lifecycle events bracket the run.
  *
  * Design notes tied to the store's transition semantics
  * (see stores/onboardingStore.ts):
@@ -11,10 +12,11 @@
  *   'active' (a pristine first-run auto-start). A completed/skipped resolve is an
  *   existing install or a clamped mid-tour resume that never showed a step.
  * - begin()/restart() (Settings → Replay walkthrough) resets to step 0 with
- *   maxVisited 0 → distinguishable from a Sidebar resume(), which keeps the step.
- * - realEvent() advancing out of 'pending' (7→8, 8→9) moves the step, so it reads
- *   as a normal step view, NOT a resume.
- * - active → pending (a coach step parking for a real action) is silent.
+ *   maxVisited 0 → distinguishable from a Sidebar resume(), which keeps the step
+ *   (possibly clamped) and is the only other way back into 'active'.
+ * - Both early exits (handoff "Skip the set-up", add-project "Not sure yet") and
+ *   the project finale land 'completed' from 'active', so all three read as a
+ *   completion; only a Sidebar dismiss reaches 'completed' from 'skipped'.
  */
 import type { TelemetryEventMap } from '../../../shared/types/telemetry';
 import { onboardingStepName } from '../utils/onboarding';
@@ -44,7 +46,7 @@ function stepViewed(step: number): OnboardingTelemetryEvent {
 
 /**
  * Map one store transition to the usage events to emit. Pure — returns [] for
- * transitions that carry no analytics meaning (idle, no-op, parking).
+ * transitions that carry no analytics meaning (idle, no-op).
  */
 export function onboardingTelemetryEvents(
   prev: OnboardingTelemetrySlice,
@@ -69,30 +71,30 @@ export function onboardingTelemetryEvents(
       if (next.replay && next.step === 0 && next.maxVisitedStep === 0) {
         return [{ name: 'onboarding_started', props: { trigger: 'replay' } }, stepViewed(0)];
       }
-      // 'skipped' → active is always the Sidebar resume — log it as a resume even
-      // when it clamps the step back to 4. 'pending' → active is a realEvent
-      // advance when the step moved, else a resume in place.
+      // 'skipped' → active is the Sidebar resume — log it as a resume even when
+      // it clamps the step back from the last guided screen.
       if (prev.status === 'skipped') return [{ name: 'onboarding_resumed', props: { step: next.step } }];
-      if (stepChanged) return [stepViewed(next.step)];
-      return [{ name: 'onboarding_resumed', props: { step: next.step } }];
+      // No other transition into 'active' exists today; report the step the user
+      // is looking at rather than dropping the entry silently.
+      return [stepViewed(next.step)];
     }
     if (next.status === 'skipped') {
       return [{ name: 'onboarding_skipped', props: { step: next.step, name: onboardingStepName(next.step) } }];
     }
     if (next.status === 'completed') {
-      // A real completion only ever lands from 'active' (next()/forceNext at the
-      // last step). A completed target from 'skipped'/'pending' is the Sidebar
-      // "Resume setup" card's permanent dismiss — a distinct funnel signal.
+      // A real completion always lands from 'active' — the handoff's "Skip the
+      // set-up", the add-project "Not sure yet", or finish() after the guided
+      // project create. A completed target from 'skipped' is the Sidebar "Resume
+      // setup" card's permanent dismiss — a distinct funnel signal.
       if (prev.status === 'active') {
         return [{ name: 'onboarding_completed', props: { furthest_step: next.maxVisitedStep } }];
       }
       return [{ name: 'onboarding_dismissed', props: { step: next.step, name: onboardingStepName(next.step) } }];
     }
-    // active → pending (parking for a real action) is silent.
     return [];
   }
 
-  // Same status: a step move within the active tour (next/back/goTo/realEvent).
+  // Same status: a step move within the active tour (next/back/goTo).
   if (next.status === 'active' && stepChanged) return [stepViewed(next.step)];
   return [];
 }

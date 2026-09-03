@@ -32,7 +32,7 @@
  *
  * Every spawn also threads {@link getAgentSystemPrompt} (S1.4) as
  * `systemPromptAppend` — the role, the promptable contract, tool guidance,
- * digest format, and proposal-quality bar. `computeOptionsFingerprint`
+ * recap format, and proposal-quality bar. `computeOptionsFingerprint`
  * (claudeCodeManager.ts) hashes the full composed `systemPrompt` object, so an
  * edit to `agentThreadPrompt.ts` changes the append text on the next turn and
  * correctly busts the warm persistent SDK process rather than reusing a
@@ -50,23 +50,8 @@ import { AgentThreadEventsSink, agentSpawnIdentity } from './agentThreadEventsSi
 import { getAgentSystemPrompt } from './agentThreadPrompt';
 
 // ---------------------------------------------------------------------------
-// Digest trigger prompt
+// Retention prompts
 // ---------------------------------------------------------------------------
-
-/**
- * Synthetic turn text sent for the auto-digest — a once-per-day **daily
- * recap**. Deliberately a short, plain ask naming the three sections; the
- * concrete FORMAT (ordering, refs, "Needs your attention" shortlist) lives in
- * {@link getAgentSystemPrompt}'s system-prompt append (S1.4), not in this
- * per-turn text, so it stays in effect no matter how the recap is triggered
- * (this synthetic prompt, or the human just asking "what's my recap?").
- */
-export const DIGEST_PROMPT =
-  'Give me my daily recap, in three sections: (1) what was completed in the ' +
-  'last day — runs and sessions that finished, tasks integrated, ideas planned; ' +
-  '(2) what is in flight right now — running or paused sessions and runs, and ' +
-  'where each one is; (3) what needs my input — every blocked run, pending gate, ' +
-  'and open review item across all projects. Keep it tight.';
 
 /**
  * Synthetic turn text for the 'compact-daily' retention strategy. `/compact`
@@ -129,11 +114,6 @@ interface AgentOutputPayload {
   timestamp: Date | string;
 }
 
-/** Discriminated result of a digest trigger — throttled/disabled calls do NOT send. */
-export type DigestTriggerResult =
-  | { triggered: true }
-  | { triggered: false; reason: 'throttled' | 'disabled' };
-
 export interface AgentThreadServiceDeps {
   store: AgentThreadDbStore;
   manager: AgentSpawnManagerLike;
@@ -150,22 +130,20 @@ export interface AgentThreadServiceDeps {
    * Authoritative kill switch for the global assistant, checked per turn. The
    * caller wires this to `configManager.isAssistantEnabled()`, so a Settings
    * "Enable assistant" toggle takes effect on the very next call with no
-   * restart. When false, `sendMessage` throws before any spawn/bridge work and
-   * `triggerDigest` returns `{triggered:false, reason:'disabled'}` without
-   * stamping the throttle.
+   * restart. When false, `sendMessage` throws before any spawn/bridge work.
    */
   enabled: () => boolean;
   /**
    * Day-boundary context-retention strategy, checked on the first turn of each
-   * LOCAL calendar day (same anchor as the digest cap). The caller wires this
-   * to `configManager.getAssistantContextRetention()`, so a Settings change
+   * LOCAL calendar day. The caller wires this to
+   * `configManager.getAssistantContextRetention()`, so a Settings change
    * takes effect on the next turn with no restart. Absent ⇒
    * DEFAULT_ASSISTANT_CONTEXT_RETENTION ('clear-daily').
    */
   contextRetention?: () => AssistantContextRetention;
   /** Base dir for per-thread neutral home dirs (`<base>/<threadId>/`). */
   homeDirBase: string;
-  /** Injectable clock for the digest throttle (tests advance it). */
+  /** Injectable clock for the day-boundary context-retention check (tests advance it). */
   now?: () => number;
   logger?: LoggerLike;
 }
@@ -212,15 +190,14 @@ function errMessage(err: unknown): string {
 
 /**
  * True when two epoch-ms instants fall on the same LOCAL calendar day. The
- * once-per-day digest cap is a human-facing "one recap a day" notion, so it is
- * anchored to the machine's local day (a boot at 00:30 is a new day's recap),
- * not a rolling 24h window — a rolling window would also creep the recap later
- * every day (a 9am recap blocks tomorrow's 8:30am boot). DST inside one
- * timezone is handled by the local getters; a machine-TIMEZONE change between
- * two same-day boots can shift which named day the stored instant lands on
- * (accepted: rare, self-corrects the next day, worst case one extra or one
- * suppressed recap). A non-finite stored value is never "the same day" — the
- * digest fires, the safe default.
+ * day-boundary context-retention check is a human-facing "once per day" notion,
+ * so it is anchored to the machine's local day (a boot at 00:30 is a new day),
+ * not a rolling 24h window — a rolling window would also creep later every day
+ * (a 9am boundary blocks tomorrow's 8:30am boot). DST inside one timezone is
+ * handled by the local getters; a machine-TIMEZONE change between two
+ * same-day boots can shift which named day the stored instant lands on
+ * (accepted: rare, self-corrects the next day). A non-finite stored value is
+ * never "the same day" — retention applies, the safe default.
  */
 function isSameLocalDay(aMs: number, bMs: number): boolean {
   if (!Number.isFinite(aMs) || !Number.isFinite(bMs)) return false;
@@ -270,19 +247,14 @@ export class AgentThreadService {
    * contract, threading the stored `claude_session_id` as `resumeSessionId` on
    * every continuation turn. On a stale-resume failure, clears the id and retries
    * ONCE fresh (the bridge re-captures the new id from the fresh turn's init).
+   * Persists + publishes the human's own turn (a `role:'user'` transcript entry)
+   * before spawning, so it renders immediately rather than only once the
+   * assistant's first event lands. An optional `contextHint` is prepended to
+   * the prompt the model sees (e.g. onboarding priming a proposal) but is
+   * never recorded in the transcript — `recordUserTurn` always stores the raw
+   * `text` the human actually typed.
    */
-  async sendMessage(threadId: string, text: string): Promise<void> {
-    return this.sendTurn(threadId, text, true);
-  }
-
-  /**
-   * Shared turn body. `recordUserTurn` distinguishes a human-authored message
-   * (persisted + live-published as a `role:'user'` turn, so it appears in the
-   * transcript the same way it does in a run's chat) from the AUTO-fired digest,
-   * whose synthetic prompt nobody typed — rendering that as a "You" bubble would
-   * attribute a machine-triggered turn to the person.
-   */
-  private async sendTurn(threadId: string, text: string, recordUserTurn: boolean): Promise<void> {
+  async sendMessage(threadId: string, text: string, contextHint?: string): Promise<void> {
     if (!this.deps.enabled()) {
       throw new Error('assistant is disabled in settings');
     }
@@ -298,16 +270,14 @@ export class AgentThreadService {
     // Persist + publish the human's own turn BEFORE the spawn, so it renders
     // immediately rather than only once the assistant's first event lands. Never
     // repeated on the stale-resume retry below (which re-enters `spawn`, not this).
-    if (recordUserTurn) {
-      try {
-        const userEvent = this.sink.recordUserTurn(threadId, text);
-        this.deps.publish(threadId, this.toEnvelope(userEvent));
-      } catch (err) {
-        // Fail-soft: a transcript-echo failure must never block the actual turn.
-        this.deps.logger?.warn(
-          `[agentThreadService] user-turn record failed for thread ${threadId}: ${errMessage(err)}`,
-        );
-      }
+    try {
+      const userEvent = this.sink.recordUserTurn(threadId, text);
+      this.deps.publish(threadId, this.toEnvelope(userEvent));
+    } catch (err) {
+      // Fail-soft: a transcript-echo failure must never block the actual turn.
+      this.deps.logger?.warn(
+        `[agentThreadService] user-turn record failed for thread ${threadId}: ${errMessage(err)}`,
+      );
     }
 
     const model = (thread.model ?? this.deps.defaultModel()) ?? undefined;
@@ -322,58 +292,24 @@ export class AgentThreadService {
 
     const resumeSessionId = thread.claudeSessionId ?? undefined;
 
+    const prompt =
+      contextHint !== undefined && contextHint.trim() !== ''
+        ? `${contextHint.trim()}\n\n${text}`
+        : text;
+
     try {
-      await this.spawn(threadId, text, model, resumeSessionId);
+      await this.spawn(threadId, prompt, model, resumeSessionId);
     } catch (err) {
       if (resumeSessionId !== undefined && isResumeError(err)) {
         this.deps.logger?.warn(
           `[agentThreadService] stale resume for thread ${threadId}; retrying fresh: ${errMessage(err)}`,
         );
         this.deps.store.updateClaudeSessionId(threadId, null);
-        await this.spawn(threadId, text, model, undefined);
+        await this.spawn(threadId, prompt, model, undefined);
         return;
       }
       throw err;
     }
-  }
-
-  /**
-   * Trigger the AUTO daily-recap turn, capped to at most ONE per local calendar
-   * day per thread. The last-fire instant is read from — and stamped to —
-   * persistent storage (agent_threads.last_digest_at, migration 076) so the cap
-   * survives an app restart (the frontend fires this once per launch; the old
-   * in-memory throttle reset every restart, re-firing on multi-boot days). A
-   * capped call returns `{triggered:false, reason:'throttled'}` WITHOUT
-   * sending. Only the AUTO path is gated — a user asking for a status update
-   * (chip / typed message) goes through `sendMessage` and is never throttled.
-   */
-  async triggerDigest(threadId: string): Promise<DigestTriggerResult> {
-    if (!this.deps.enabled()) {
-      return { triggered: false, reason: 'disabled' };
-    }
-    const now = this.nowMs();
-    const last = this.deps.store.getLastDigestAt(threadId);
-    if (last !== null && isSameLocalDay(last, now)) {
-      return { triggered: false, reason: 'throttled' };
-    }
-    // Stamp SYNCHRONOUSLY before the awaited send: better-sqlite3 is sync and
-    // there is no await between the read above and this write, so a concurrent
-    // same-launch trigger sees the fresh stamp and is throttled (no
-    // double-fire, no in-memory shadow needed). But the send can still fail for
-    // transient boot-time reasons (offline, auth, model unavailable, a
-    // stale-resume whose one fresh retry also fails) — so ROLL BACK to the
-    // prior value on throw, or a failed first boot of the day would consume the
-    // whole day's allowance and suppress the recap until tomorrow. Restoring
-    // keeps the day retryable on the next boot while preserving the synchronous
-    // double-fire guard.
-    this.deps.store.setLastDigestAt(threadId, now);
-    try {
-      await this.sendTurn(threadId, DIGEST_PROMPT, false);
-    } catch (err) {
-      this.deps.store.setLastDigestAt(threadId, last);
-      throw err;
-    }
-    return { triggered: true };
   }
 
   /**
@@ -393,12 +329,13 @@ export class AgentThreadService {
    *                       the id (fresh start — the conversation is gone anyway);
    *                       any other failure logs and lets the real turn proceed,
    *                       though the day's boundary is then consumed (documented
-   *                       trade-off, mirroring "one recap a day").
+   *                       trade-off).
    *   - 'auto-compact'  — nothing; rely on the SDK's built-in auto-compaction.
    *
    * The stamp is written synchronously before the (awaited) compact spawn, so a
    * concurrent same-tick turn sees a same-day stamp and cannot double-apply —
-   * the same better-sqlite3 synchronicity argument as the digest cap.
+   * better-sqlite3 is synchronous, so there is no await between the read and
+   * the write for a concurrent call to race through.
    */
   private async applyDailyRetention(thread: AgentThread, model: string | undefined): Promise<void> {
     const now = this.nowMs();

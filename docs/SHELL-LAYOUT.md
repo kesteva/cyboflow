@@ -27,6 +27,47 @@ task Backlog — so treat the table as illustrative, not exhaustive; the branch 
 the "Center-surface state machine" comment in `App.tsx` is the current list (the comment
 itself enumerates only the main branches).
 
+**Onboarding shell states.** The first-run tour has three shell states, read by `App.tsx`
+from `frontend/src/utils/onboarding.ts`:
+
+1. *Hidden* (`isOnboardingShellHidden(state)` — true while the persisted snapshot read is
+   unresolved, or `status === 'active'` on a step before the project exists, 0-8). The whole
+   row above (Sidebar, center surface, AgentRail) plus `StatusBar` is NOT mounted; the row is
+   swapped for `OnboardingShellSurface` — a bare `bg-bg-primary` container
+   (`data-testid="onboarding-shell"`) that renders `onboarding/guided/GuidedSetupSurface` on
+   the two project screens (7-8) and nothing on the modal ones, whose card comes from
+   `<OnboardingGate/>`'s body portal (mounted outside the swap, as are the dialog siblings).
+   `TitleBar` stays mounted throughout, which is why the guided screens render inside the row
+   rather than in the portal: the native drag region has to keep working.
+2. *Sidebar* (`onboardingGuidedShell(state) === 'sidebar'`, steps 9-11): the project exists,
+   so the real shell mounts — the Sidebar (wrapped in a `display:contents` div,
+   `data-testid="shell-sidebar-slot"`; it stays CLICKABLE, and navigating through it parks the
+   tour via `onboarding/guided/guidedNavPause.ts` — resumable from the Sidebar "Resume setup"
+   card), `GuidedSetupSurface` in the CENTER slot in place of the view switch, no AgentRail,
+   `StatusBar` below. Steps 10-11 host
+   the real global-assistant thread in that center column.
+3. *Full* (`'full'`, steps 12-14): as above plus the AgentRail — it mounts exactly at the "meet
+   the assistant" step over the same conversation and stays through the finale, so the tour →
+   shell transition never remounts it.
+
+"Skip the set-up" on an in-shell step PARKS the tour (`leaveGuidedSetup` → store `skip()`, status
+`skipped`) with the same shell frame and landing as the finale; the Sidebar "Resume setup" card
+brings it back at the same step (warm `resume()`). Every completing exit runs
+`onboarding/guided/guidedFinish.ts`: stage the shell's
+first frame (AgentRail forced expanded; the one-shot assistant greeting primed only when the
+thread never held a conversation), stamp the active project, `navigationStore.openHumanReview()`
+(or the launched session for step 14's "Open the session"), then flip the store to `completed`.
+The bare-paper exits (7-8 "Skip the set-up") stage the same frame BEFORE the `completed`
+transition because every one of those values is read by a mount that only happens once the
+shell comes back.
+
+"Not sure yet" on step 7 is NOT an exit: the store skips step 8 and walks into the same in-shell
+states with `guidedProject` null, and the screens render their no-project variants ("Your
+projects will live here", "What do you want to get done with Cyboflow?", "Here's how Cyboflow
+can help", a read-only preview of the session types whose only exit is "Finish set-up"). The
+finale then has no project to stamp or navigate to, so it lands on LandingHome's empty state;
+step 14 is never reached on that branch.
+
 ## Assumption order
 
 1. The agent rail (Sidebar) is leftmost; the title bar (38px) spans above the row.

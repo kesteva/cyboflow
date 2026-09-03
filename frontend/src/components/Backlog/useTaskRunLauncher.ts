@@ -31,15 +31,17 @@ import {
 import { launchRuntimeForPickers, workflowRuntimeForLaunch } from '../cyboflow/agentRuntimeUi';
 import type { TaskType } from '../../../../shared/types/tasks';
 import type { PermissionMode } from '../../../../shared/types/workflows';
-import { notifyWorkflowRunStarted } from '../../utils/onboarding';
 
 /**
  * The launch settings for a resolved workflow: the saved `workflow:<id>`
  * defaults, then the global config default, then the floor. Reads the store's
  * LIVE state because `workflowId` is only known after the async workflows.list
  * lookup — a hook-level selector would be keyed wrong.
+ *
+ * Exported so `guided/launchFirstSession.ts` (the onboarding first-session
+ * launcher) can reuse the exact same ladder rather than reimplementing it.
  */
-function resolveLaunchDefaults(workflowId: string, globalPermissionMode: PermissionMode) {
+export function resolveLaunchDefaults(workflowId: string, globalPermissionMode: PermissionMode) {
   const config = useConfigStore.getState().config;
   const resolved = resolveRunTypeLaunchDefaults(
     workflowRunTypeKey(workflowId),
@@ -153,7 +155,6 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
           ...seed,
         });
         trackEvent('workflow_run_started', { launch_surface: 'backlog', flow: wantName });
-        notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'backlog' });
         return result.runId;
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to launch run');
@@ -190,7 +191,6 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
           ...resolveLaunchDefaults(workflowId, globalPermissionMode),
         });
         trackEvent('workflow_run_started', { launch_surface: 'backlog', flow: 'sprint' });
-        notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'backlog' });
         return result.runId;
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to launch sprint');
@@ -229,7 +229,6 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
           ...resolveLaunchDefaults(workflowId, globalPermissionMode),
         });
         trackEvent('workflow_run_started', { launch_surface: 'backlog', flow: 'planner' });
-        notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'backlog' });
         return result.runId;
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to launch planner');

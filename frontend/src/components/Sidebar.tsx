@@ -13,11 +13,15 @@ import { trackEvent } from '../utils/telemetry';
 import { skippedStepSet, useOnboardingStore } from '../stores/onboardingStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import {
-  ONBOARDING_ANCHOR_ATTR,
-  ONBOARDING_ANCHORS,
+  guidedStepNumber,
+  guidedStepTotal,
+  isGuidedStep,
   visibleStepNumber,
   visibleStepTotal,
+  ONBOARDING_LAUNCHING_STEP,
 } from '../utils/onboarding';
+import { GuidedMarker, useGuidedMarkActive, GUIDED_RING_STYLE } from './onboarding/guided/GuidedMarker';
+import { GUIDED_TARGETS } from './onboarding/guided/GuidedLeader';
 
 interface SidebarProps {
   onAboutClick: () => void;
@@ -119,8 +123,10 @@ export const Sidebar = memo(function Sidebar({
   // The tour may skip its one conditional step, so "Step n of N" has to count
   // what this run actually shows (skippedStepSet returns stable identities).
   const onboardingSkipped = useOnboardingStore((state) => skippedStepSet(state));
-  const showResumeSetup =
-    onboardingHydrated && (onboardingStatus === 'skipped' || onboardingStatus === 'pending');
+  const showResumeSetup = onboardingHydrated && onboardingStatus === 'skipped';
+  // Guided step 14 ("Launching your session now") pairs its callout with a
+  // marker on this rail item, ringed while the tour is on that step.
+  const launchingMark = useGuidedMarkActive(ONBOARDING_LAUNCHING_STEP);
   const demoModeEnabled = useConfigStore((state) => state.config?.demoMode ?? false);
   const [showStatusGuide, setShowStatusGuide] = useState(false);
   const [showBugReport, setShowBugReport] = useState(false);
@@ -298,8 +304,9 @@ export const Sidebar = memo(function Sidebar({
               <span className="min-w-0 flex-1">
                 <span className="block text-[11.5px] font-bold leading-tight text-text-primary">Resume setup</span>
                 <span className="block text-[10px] text-text-secondary">
-                  Step {visibleStepNumber(onboardingStep, onboardingSkipped)} of{' '}
-                  {visibleStepTotal(onboardingSkipped)}
+                  {isGuidedStep(onboardingStep)
+                    ? `Guided set-up · step ${guidedStepNumber(onboardingStep, onboardingSkipped)} of ${guidedStepTotal(onboardingSkipped)}`
+                    : `Step ${visibleStepNumber(onboardingStep, onboardingSkipped)} of ${visibleStepTotal(onboardingSkipped)}`}
                 </span>
               </span>
               <span className="flex-shrink-0 text-interactive" aria-hidden="true">
@@ -328,13 +335,16 @@ export const Sidebar = memo(function Sidebar({
           onClick={onToggleHumanReview}
           aria-pressed={humanReviewActive}
           data-testid="human-review-rail-item"
-          {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.humanReview }}
           className={`mx-2 mt-2 flex items-center gap-2.5 border px-3 py-2.5 text-left transition-colors ${
             humanReviewActive
               ? 'border-border-emphasized bg-surface-primary'
               : 'border-border-primary bg-bg-primary hover:border-border-emphasized'
           }`}
-          style={humanReviewActive ? { boxShadow: 'inset 3px 0 0 var(--color-interactive-primary)' } : undefined}
+          style={{
+            ...(humanReviewActive ? { boxShadow: 'inset 3px 0 0 var(--color-interactive-primary)' } : {}),
+            ...(launchingMark ? GUIDED_RING_STYLE : {}),
+          }}
+          data-guided-target={GUIDED_TARGETS.humanReview}
         >
           <span
             className="flex h-[22px] w-[22px] flex-shrink-0 items-center justify-center rounded-full text-white"
@@ -356,6 +366,7 @@ export const Sidebar = memo(function Sidebar({
           >
             {pendingReviewCount}
           </span>
+          <GuidedMarker step={ONBOARDING_LAUNCHING_STEP} n={1} testId="onboarding-marker-human-review" />
         </button>
 
         {/* Task backlog — primary rail item directly below Human review; opens

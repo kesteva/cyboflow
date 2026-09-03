@@ -8,6 +8,25 @@ import { ClaudePanelState } from '../../../shared/types/panels';
 import type { SessionOutput } from '../database/models';
 import { isAnyEffortLevel, type ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import { isCliSubstrate, type CliSubstrate } from '../../../shared/types/substrate';
+import { normalizeAgentModelSelection } from '../../../shared/types/agentModels';
+import { DEFAULT_QUICK_MODEL } from '../../../shared/types/sessionDefaults';
+
+/**
+ * Normalize a resolved Claude-panel model candidate to the Claude family,
+ * falling back to DEFAULT_QUICK_MODEL ('opus') for anything another
+ * provider's family claims. Onboarding's Model step (step 3) can persist a
+ * Codex catalog id into the GLOBAL `defaultLaunchModel` when Codex is the
+ * chosen default runtime, and a per-panel setting can independently carry a
+ * stale cross-provider id — either would otherwise flow straight into
+ * ClaudePanelManager.startPanel, which is ALWAYS the Claude CLI. Applied to
+ * the fully-resolved candidate (explicit arg / panel setting / global
+ * default alike) at both `applySettingsDefaults` and `claude-panels:start`,
+ * so neither fallback site has to duplicate the normalize-or-floor logic.
+ */
+function resolveClaudeQuickModel(candidate: unknown): string {
+  const value = typeof candidate === 'string' ? candidate : undefined;
+  return normalizeAgentModelSelection('claude', value) ?? DEFAULT_QUICK_MODEL;
+}
 
 let claudePanelManager: ClaudePanelManager;
 
@@ -37,12 +56,17 @@ class ClaudePanelHandler extends BaseAIPanelHandler {
    */
   protected applySettingsDefaults(settings: Record<string, unknown>): Record<string, unknown> {
     const { configManager } = this.services;
+    const modelCandidate = settings.model || configManager.getDefaultLaunchModel('quick');
     return {
-      model: settings.model || configManager.getDefaultLaunchModel('quick') || 'auto',
       systemPrompt: settings.systemPrompt || null,
       maxTokens: settings.maxTokens || 4096,
       temperature: settings.temperature || 0.7,
-      ...settings
+      ...settings,
+      // AFTER the spread: `settings.model` (when present) would otherwise win
+      // back over the normalized value below, defeating it for exactly the
+      // case it exists to guard (a stale/cross-provider id already stored in
+      // panel settings).
+      model: resolveClaudeQuickModel(modelCandidate),
     };
   }
 
@@ -72,6 +96,11 @@ class ClaudePanelHandler extends BaseAIPanelHandler {
           const settings = databaseService.getPanelSettings(panelId);
           modelToUse = (typeof settings?.model === 'string' ? settings.model : null) || configManager.getDefaultLaunchModel('quick') || 'auto';
         }
+        // Normalize the fully-resolved candidate to the Claude family — see
+        // resolveClaudeQuickModel's doc comment. Applied last so an explicit
+        // arg, a stored panel setting, and the global default are all guarded
+        // the same way before reaching ClaudePanelManager.startPanel.
+        modelToUse = resolveClaudeQuickModel(modelToUse);
 
         // Start Claude via the panel manager
         await (this.panelManager as ClaudePanelManager).startPanel(

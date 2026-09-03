@@ -3,13 +3,14 @@
  *
  * The two invariants that make the wrapper safe to ship live here, not in the
  * render path: the peel order really is a clockwise-from-top-left spiral (the
- * whole metaphor rests on it), and the reveal is complete at step 6 — the first
- * coachmark step, which anchors to live UI and so cannot tolerate a surviving
- * tile or any residual blur. The component's DOM is deliberately not asserted;
- * it is presentational and its motion is CSS-transition-driven.
+ * whole metaphor rests on it), and the reveal completes exactly on the handoff
+ * step — the last modal card — so the guided steps never mount under a
+ * surviving tile. The component's DOM is deliberately not asserted; it is
+ * presentational and its motion is CSS-transition-driven.
  */
 import { describe, it, expect } from 'vitest';
-import { hiddenTileCount, revealFraction, spiralRanks } from './onboardingSpiral';
+import { hiddenTileCount, revealFraction, REVEAL_COMPLETE_STEP, spiralRanks } from './onboardingSpiral';
+import { ONBOARDING_GUIDED_STEPS, ONBOARDING_HANDOFF_STEP } from './onboarding';
 
 describe('spiralRanks', () => {
   it('walks a 4x4 grid clockwise from the top-left, winding inward', () => {
@@ -42,9 +43,10 @@ describe('spiralRanks', () => {
 });
 
 describe('revealFraction', () => {
-  it('is fully wrapped at the welcome step and fully open at the first coach step', () => {
+  it('completes on the handoff step — the last modal card', () => {
+    expect(REVEAL_COMPLETE_STEP).toBe(ONBOARDING_HANDOFF_STEP);
     expect(revealFraction(0)).toBe(0);
-    expect(revealFraction(6)).toBe(1);
+    expect(revealFraction(ONBOARDING_HANDOFF_STEP)).toBe(1);
   });
 
   it('opens one even band per modal-step advance', () => {
@@ -55,16 +57,16 @@ describe('revealFraction', () => {
     expect(revealFraction(5)).toBeCloseTo(5 / 6);
   });
 
-  it('stays clamped past the coach steps and the closing rail-map card', () => {
-    for (const step of [7, 10, 11, 12, 99]) expect(revealFraction(step)).toBe(1);
+  it('stays clamped across the guided steps and beyond', () => {
+    for (const step of [...ONBOARDING_GUIDED_STEPS, 12, 99]) expect(revealFraction(step)).toBe(1);
     expect(revealFraction(-3)).toBe(0);
   });
 });
 
 describe('hiddenTileCount', () => {
-  it('leaves the wrapper intact at step 0 and fully gone by step 6', () => {
+  it('leaves the wrapper intact at step 0 and fully gone by the handoff step', () => {
     expect(hiddenTileCount(0)).toBe(0);
-    expect(hiddenTileCount(6)).toBe(36);
+    expect(hiddenTileCount(ONBOARDING_HANDOFF_STEP)).toBe(36);
   });
 
   it('never regresses as the tour advances', () => {

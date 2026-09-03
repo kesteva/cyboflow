@@ -1,6 +1,6 @@
-import cyboflowLogo from '../../assets/cyboflow-logo.svg';
 import { visibleStepNumber, visibleStepTotal } from '../../utils/onboarding';
 import { ONBOARDING_TITLES } from './copy';
+import { CyboflowMark } from './CyboflowMark';
 import { OnboardingDots } from './OnboardingDots';
 
 const NO_SKIPPED: ReadonlySet<number> = new Set<number>();
@@ -26,20 +26,16 @@ interface OnboardingModalCardProps {
   onBack: () => void;
   onSkip: () => void;
   onGoTo: (step: number) => void;
-  /**
-   * Scrim strength, 0–1 (default 1). During the spiral reveal the cream wrapper
-   * is itself the backdrop, so the scrim starts fully transparent and fades in
-   * as the app underneath is exposed — dimming an intact wrapper would only
-   * dirty the cream toward grey.
-   */
-  scrimOpacity?: number;
 }
 
 /**
  * The 468×512 centered onboarding card (the modal steps). Fixed compact header
  * (terracotta) except step 0's hero, a scrolling body, and a fixed footer:
- * Skip · dots · Back · primary. The scrim captures pointer events but does NOT
- * dismiss — onboarding is gated, not click-away closable.
+ * Skip · dots · Back · primary. The full-screen wrapper captures pointer events
+ * but does NOT dismiss — onboarding is gated, not click-away closable. It has no
+ * darkening scrim: the shell is unmounted for the tour's duration, so the only
+ * thing behind the card is the spiral wrapper peeling off bare paper, and a
+ * dimming layer on top of that reads as a second, competing fade.
  */
 export function OnboardingModalCard({
   step,
@@ -51,17 +47,11 @@ export function OnboardingModalCard({
   onBack,
   onSkip,
   onGoTo,
-  scrimOpacity = 1,
 }: OnboardingModalCardProps): React.JSX.Element {
   const showBack = step > 0;
   const visible = skippedSteps ?? NO_SKIPPED;
   return (
     <div className="pointer-events-auto fixed inset-0 flex items-center justify-center p-6">
-      <div
-        className="absolute inset-0 bg-modal-overlay"
-        aria-hidden="true"
-        style={{ opacity: scrimOpacity, transition: 'opacity 520ms ease-out' }}
-      />
       <div
         role="dialog"
         aria-modal="true"
@@ -77,16 +67,10 @@ export function OnboardingModalCard({
       >
         {/* Compact header — every modal step but 0, whose hero lives in the body. */}
         {!hero && (
-          <div className="flex flex-shrink-0 items-center gap-2.5 bg-interactive px-5 py-[13px] text-on-interactive">
-            <img
-              src={cyboflowLogo}
-              alt=""
-              aria-hidden="true"
-              className="h-[18px] w-[18px] opacity-90"
-              style={{ filter: 'brightness(0) invert(1)' }}
-            />
+          <div className="flex flex-shrink-0 items-center gap-2.5 bg-interactive px-5 py-[13px] text-text-on-interactive">
+            <CyboflowMark size={18} className="flex-shrink-0 opacity-90" />
             <span className="flex-1 text-[15px] font-bold tracking-[-.01em]">{ONBOARDING_TITLES[step]}</span>
-            <span className="text-[9px] tracking-[.14em] text-on-interactive/80">
+            <span className="text-[9px] tracking-[.14em] text-text-on-interactive/80">
               STEP {visibleStepNumber(step, visible)} / {visibleStepTotal(visible)}
             </span>
           </div>

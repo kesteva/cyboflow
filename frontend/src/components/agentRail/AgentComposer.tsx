@@ -18,6 +18,9 @@ export interface AgentComposerProps {
   onSend: (text: string) => void;
   /** Disabled while a turn is in flight, or before the thread has loaded. */
   disabled: boolean;
+  /** Overrides the default placeholder (e.g. the onboarding guided host's
+   *  follow-up prompt). Defaults to {@link PLACEHOLDER}. */
+  placeholder?: string;
 }
 
 const PLACEHOLDER = 'Ask, or run /plan /approve /triage…';
@@ -28,7 +31,11 @@ const COMPOSER_MAX_LINES = 4;
 const COMPOSER_LINE_HEIGHT_PX = 16;
 const COMPOSER_MAX_PX = COMPOSER_MAX_LINES * COMPOSER_LINE_HEIGHT_PX;
 
-export function AgentComposer({ onSend, disabled }: AgentComposerProps): React.ReactElement {
+export function AgentComposer({
+  onSend,
+  disabled,
+  placeholder = PLACEHOLDER,
+}: AgentComposerProps): React.ReactElement {
   const [value, setValue] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -80,7 +87,7 @@ export function AgentComposer({ onSend, disabled }: AgentComposerProps): React.R
         onKeyDown={handleKeyDown}
         disabled={disabled}
         rows={1}
-        placeholder={PLACEHOLDER}
+        placeholder={placeholder}
         data-testid="agent-composer-input"
         className="max-h-16 min-h-[18px] flex-1 resize-none overflow-y-auto bg-transparent text-[11px] leading-4 text-text-primary outline-none placeholder:italic placeholder:text-text-tertiary disabled:cursor-not-allowed"
       />

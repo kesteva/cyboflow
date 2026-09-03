@@ -1,68 +1,95 @@
 import { create } from 'zustand';
 import type { AgentProvider } from '../../../shared/types/agentRuntime';
 import type { ProviderDetectionResult } from '../../../shared/types/onboarding';
+import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import {
-  ONBOARDING_COACH_STEPS,
+  ONBOARDING_ADD_PROJECT_STEP,
+  ONBOARDING_ASSISTANT_RAIL_STEP,
+  ONBOARDING_ASSISTANT_STEPS,
   ONBOARDING_DEFAULT_RUNTIME_STEP,
-  ONBOARDING_POINTER_STEPS,
+  ONBOARDING_FIRST_SESSION_STEP,
+  ONBOARDING_HANDOFF_STEP,
+  ONBOARDING_LAUNCHING_STEP,
+  ONBOARDING_PROJECT_DETAIL_STEP,
+  ONBOARDING_PROJECT_HOME_STEP,
   ONBOARDING_STEP_COUNT,
 } from '../utils/onboarding';
 
 /**
- * onboardingStore — the 13-step first-run tour's state machine.
+ * onboardingStore — the 15-step first-run tour's state machine, in three phases.
  *
- * Steps: 0 welcome · 1 connect an agent provider (the only gated step) · 2 default agent
- * (CONDITIONAL — shown only when step 1 left 2+ providers activated) · 3 permission
- * mode · 4 telemetry consent · 5 add project · 6 quick-session coachmark (wizard Quick
- * Session card) · 7-9 wizard-Configure pointers (runtime / session permission / model) ·
- * 10 /ship coachmark (session canvas chip) · 11 Human-review coachmark ·
- * 12 rail map.
+ * Modal-card steps (the app shell is unmounted; a card sits over bare paper):
+ *   0 welcome · 1 connect an agent provider (the only gated step) · 2 default
+ *   agent (CONDITIONAL — shown only when step 1 left 2+ of {claude, codex}
+ *   activated) · 3 model + reasoning effort · 4 permission mode · 5 telemetry
+ *   consent · 6 handoff ("You're set up" — continue, or finish here).
+ * Guided set-up, bare paper (full-window surface inside the shell row):
+ *   7 add a project (existing / new / not sure yet) · 8 the folder picker or the
+ *   create form, per the step-7 choice.
+ * Guided set-up, IN the shell (the project now exists; the Sidebar is mounted
+ * and inert beside the guided column, the AgentRail joins at 12):
+ *   9 "your project lives here" · 10 first idea composer (CONDITIONAL, assistant
+ *   on) · 11 the assistant's idea proposals (CONDITIONAL) · 12 meet the assistant
+ *   rail (CONDITIONAL) · 13 launch your first session (planner / ship / quick) ·
+ *   14 "launching your session now" — every exit lands on Human review.
  *
  * The machine is PURE — all persistence (user_preferences JSON snapshot),
- * detection fetches, window-event subscriptions, keyboard handling, and
- * precondition navigation (ensuring the wizard is open when step 6 begins)
- * live in components/onboarding/OnboardingGate. Keep it that way: every
- * transition here must stay synchronously testable.
+ * detection fetches, config writes, keyboard handling, and the project-create
+ * IPC live in components/onboarding (OnboardingGate for the modal steps,
+ * guided/ for the set-up surface). Keep it that way: every transition here must
+ * stay synchronously testable.
  *
- * Advancement rules (the tour is completed by DOING, not clicking through):
- * - Modal steps (0,1,2,3,4,5,12) advance via next(); step 1 refuses until the
- *   Claude or Codex probe says 'detected' AND its consent toggle is on; step 5
- *   normally advances via the real 'project-created' event (its primary
- *   button creates the project), falling back to next() when projects
- *   already exist (replay / resumed installs). Step 4 (telemetry) advances
- *   like any other modal step via next() — the actual consent UI is owned by
- *   its own step component, not this store.
+ * Advancement rules:
+ * - Every step advances via next() (there are no advance-by-doing coach steps
+ *   and no 'pending' park any more — both were removed with the coachmark tour).
+ *   Step 1 refuses until the Claude or Codex probe says 'detected' AND its
+ *   consent toggle is on.
  * - Step 2 (default agent) is the one CONDITIONAL step: it only has a question
- *   to ask when step 1 left more than one provider activated, so next()/back()/
- *   forceNext() step OVER it otherwise (see isStepSkipped) and goTo() refuses to
- *   land on it. The decision is recomputed on every departure from step 1, so
+ *   to ask when step 1 left more than one of {claude, codex} activated, so
+ *   next()/back() step OVER it otherwise (see isStepSkipped) and goTo() refuses
+ *   to land on it. The decision is recomputed on every departure from step 1, so
  *   flipping a second provider on and pressing Continue brings the step back.
- * - Pointer steps (7-9, the Configure trio) are informational: they advance
- *   via next() (the popover's Next button); interacting with the anchored
- *   control never advances them. Next on the LAST pointer (9) parks 'pending'
- *   — the next tour beat (the /ship chip) only exists once the session
- *   launches, and 'quick-session-created' fires from ANY of steps 6-9 (the
- *   user may hit Start before Next-ing through every pointer), landing 10.
- * - Do-steps advance ONLY via the real action: step 6's card click flips the
- *   wizard to Configure where step 7's anchor mounts, so it advances directly;
- *   step 10's /ship click parks 'pending' while the idea modal runs and
- *   'workflow-run-started' lands 11; step 11 advances directly on its click.
- * - Dots/keyboard may only revisit steps already reached (maxVisitedStep),
- *   so neither can bypass the step-1 gate or the coach preconditions.
- * - forceNext() is the anchor-lost escape (see its interface doc): the only way
- *   to move a do-step forward when its target has unmounted.
+ *   OMP never counts toward it — it is activatable on Connect but no picker
+ *   offers its runtimes (see defaultAgentCandidates).
+ * - One branch terminates the tour early from next(): the handoff step with
+ *   handoffChoice 'skip' lands 'completed', which mounts the shell on
+ *   LandingHome.
+ * - The add-project step with projectChoice 'unsure' skips step 8 and walks
+ *   straight into the in-shell screens (9+) with guidedProject still null —
+ *   the surface renders their no-project variants ("your projects will live
+ *   here", "what do you want to get done with Cyboflow?").
+ * - Step 8 never advances via next() — the guided create handler calls
+ *   projectAdded() after the project lands (it also has side effects the store
+ *   must not own), which records the project and moves to step 9.
+ * - Steps 10-12 are CONDITIONAL on the global assistant being enabled
+ *   (assistantAvailable); with it off, next() from 9 lands on 13.
+ * - "Skip — I'll add ideas later" on 10/11 is skipIdeas(): straight to 12, the
+ *   tour continues. Step 13 advances only via sessionLaunched() (the launch
+ *   handler owns the async work); step 14 exits via finish() alone.
+ * - back() is inert from step 9 on: the project exists, there is nothing to
+ *   walk back into (the screens carry no Back button).
+ * - skip() parks the tour ('skipped') from ANY step — the Sidebar "Resume
+ *   setup" card brings it back at the same step (resume(), warm). From step 9
+ *   on the Sidebar is clickable: navigating away also parks it (see
+ *   guided/guidedNavPause.ts).
+ * - Dots/keyboard may only revisit steps already reached (maxVisitedStep), and
+ *   dots exist only on the modal steps; the guided screens carry their own Back.
  */
 
-export type OnboardingStatus = 'idle' | 'active' | 'pending' | 'skipped' | 'completed';
+export type OnboardingStatus = 'idle' | 'active' | 'skipped' | 'completed';
 
-/** Real-world signals the coach steps wait on (see utils/onboarding.ts events). */
-export type OnboardingRealEvent = 'project-created' | 'quick-session-created' | 'workflow-run-started';
+/**
+ * The statuses a PRE-v4 snapshot could carry. 'pending' was the coachmark tour's
+ * park state (a do-step waiting on a real-world action); the coach steps are
+ * gone, so v4 has no such status and the migration folds it into 'skipped'.
+ */
+type LegacyPersistedStatus = Exclude<OnboardingStatus, 'idle'> | 'pending';
 
 /** JSON shape persisted under ONBOARDING_PREF_KEY — version 1 (pre-Telemetry-step). */
 export interface PersistedOnboardingV1 {
   version: 1;
-  status: Exclude<OnboardingStatus, 'idle'>;
+  status: LegacyPersistedStatus;
   step: number;
 }
 
@@ -74,7 +101,7 @@ export interface PersistedOnboardingV1 {
  */
 export interface PersistedOnboardingV2 {
   version: 2;
-  status: Exclude<OnboardingStatus, 'idle'>;
+  status: LegacyPersistedStatus;
   step: number;
 }
 
@@ -87,6 +114,18 @@ export interface PersistedOnboardingV2 {
  */
 export interface PersistedOnboardingV3 {
   version: 3;
+  status: LegacyPersistedStatus;
+  step: number;
+}
+
+/**
+ * JSON shape persisted under ONBOARDING_PREF_KEY — version 4 (current). The
+ * restructure replaced the six coachmark steps + the rail map with the Model
+ * step (new index 3), the handoff step, and the two guided set-up screens; the
+ * 13-step tour became 9. Status 'pending' no longer exists.
+ */
+export interface PersistedOnboardingV4 {
+  version: 4;
   status: Exclude<OnboardingStatus, 'idle'>;
   step: number;
 }
@@ -95,7 +134,8 @@ export interface PersistedOnboardingV3 {
 export type PersistedOnboarding =
   | PersistedOnboardingV1
   | PersistedOnboardingV2
-  | PersistedOnboardingV3;
+  | PersistedOnboardingV3
+  | PersistedOnboardingV4;
 
 /**
  * Version-1 → version-2 step-index remap: the Telemetry step was inserted at
@@ -117,43 +157,86 @@ export function migrateV2StepIndex(step: number): number {
 }
 
 /**
- * Normalizes a persisted snapshot to the current (version 3) shape.
- * - version 3 snapshots pass through unchanged (already-current schema).
+ * Version-3 → version-4 step-index remap. Unlike the two before it this is not a
+ * shift: the Model step took index 3 (pushing Permission and Telemetry forward
+ * by one), and everything from the old Add-project step onward — the old
+ * add-project modal, the six coachmark steps, the rail map — was deleted
+ * outright. Those positions have no v4 counterpart, so they all land on the
+ * handoff step (6): the last modal card, from which the user can either walk
+ * into the guided set-up or finish.
+ */
+export function migrateV3StepIndex(step: number): number {
+  if (step <= 2) return step; // welcome / connect / default agent — unmoved
+  if (step === 3) return 4; // v3 permission → v4 permission
+  if (step === 4) return 5; // v3 telemetry → v4 telemetry
+  return ONBOARDING_HANDOFF_STEP; // v3 add-project (5) through rail map (12)
+}
+
+/**
+ * Normalizes a persisted snapshot to the current (version 4) shape.
+ * - version 4 snapshots pass through unchanged (already-current schema).
  * - snapshots with status 'completed' keep their step as-is — a completed
  *   onboarding's step index carries no further navigational meaning (hydrate
  *   short-circuits on status alone), so remapping it would be a no-op at best
  *   and is skipped entirely to avoid ever "breaking" a completed snapshot.
  * - older snapshots in any other status are walked forward one version at a
- *   time (v1 → v2 → v3) before the store ever sees them.
+ *   time (v1 → v2 → v3 → v4) before the store ever sees them, and the retired
+ *   'pending' status folds into 'skipped' (the Sidebar resume card's state).
  */
-export function migratePersistedOnboarding(persisted: PersistedOnboarding): PersistedOnboardingV3 {
-  if (persisted.version === 3) return persisted;
-  if (persisted.status === 'completed') {
-    return { version: 3, status: 'completed', step: persisted.step };
+export function migratePersistedOnboarding(persisted: PersistedOnboarding): PersistedOnboardingV4 {
+  if (persisted.version === 4) return persisted;
+  const status = persisted.status === 'pending' ? 'skipped' : persisted.status;
+  if (status === 'completed') {
+    return { version: 4, status: 'completed', step: persisted.step };
   }
-  const v2Step = persisted.version === 1 ? migrateV1StepIndex(persisted.step) : persisted.step;
-  return { version: 3, status: persisted.status, step: migrateV2StepIndex(v2Step) };
+  let step = persisted.step;
+  if (persisted.version === 1) step = migrateV1StepIndex(step);
+  if (persisted.version <= 2) step = migrateV2StepIndex(step);
+  step = migrateV3StepIndex(step);
+  return { version: 4, status, step };
 }
 
 /**
- * Boot clamp for a restart mid-tour: coach steps whose real-world context is
- * gone resume at the nearest step that can rebuild it. Steps 7-9 anchor the
- * wizard's Configure page and step 10 the session canvas — neither survives a
- * restart — so they re-run step 6, which rebuilds its own precondition (the
- * gate reopens the wizard). Step 11's rail anchor always exists.
+ * Boot clamp for a restart mid-tour. Every guided screen past the branch choice
+ * needs one: step 8 renders the picker or the create form per a branch choice
+ * (projectChoice) that is deliberately NOT persisted, and steps 9-14 render
+ * around a project (guidedProject) that is not persisted either — so a cold
+ * re-entry there has nothing to render and resumes at step 7, where the choice
+ * is made. Everything else keeps its step; out-of-range values clamp into the
+ * tour's window.
  */
 export function clampResumeStep(step: number): number {
-  if (step >= 7 && step <= 10) return 6;
+  if (step >= ONBOARDING_PROJECT_DETAIL_STEP && step < ONBOARDING_STEP_COUNT) {
+    return ONBOARDING_ADD_PROJECT_STEP;
+  }
   return Math.min(Math.max(step, 0), ONBOARDING_STEP_COUNT - 1);
+}
+
+/** Step-13 radio — which first session to launch. */
+export type SessionChoice = 'planner' | 'ship' | 'quick';
+
+/** The project the guided set-up added (steps 9-14 render around it). */
+export interface GuidedProject {
+  id: number;
+  name: string;
+}
+
+/** What step 13 launched — step 14 renders its status and can open it. */
+export interface LaunchedSession {
+  kind: SessionChoice;
+  /** The host session (quick session, or the flow run's host). */
+  sessionId: string;
+  /** The workflow run id for planner/ship; null for a quick session. */
+  runId: string | null;
 }
 
 interface OnboardingState {
   status: OnboardingStatus;
-  /** Current step, 0..12 — meaningful whenever status !== 'idle'. */
+  /** Current step, 0..8 — meaningful whenever status !== 'idle'. */
   step: number;
   /** Highest step ever reached this run; dots/goTo may only jump ≤ this. */
   maxVisitedStep: number;
-  /** True when launched from Settings → Replay walkthrough (step 5 shows the existing-project state). */
+  /** True when launched from Settings → Replay walkthrough. */
   replay: boolean;
   /** Latest providers:detect('claude') result; null = probe not yet run (step 1 shows loading). */
   detection: ProviderDetectionResult<'claude'> | null;
@@ -179,22 +262,57 @@ interface OnboardingState {
    * leave off.
    */
   ompConnected: boolean;
-  /** Step-3 selection; 'auto' preselected per design, persisted to config on step-3 next(). */
+  /** Step-4 selection; 'auto' preselected per design, persisted to config on step-4 next(). */
   permMode: PermissionMode;
   /**
    * Step-2 selection — which ACTIVATED provider new sessions should default to.
    * null = not yet resolved (the gate seeds it from the persisted
-   * `defaultAgentRuntime`, else the first activated provider, on entry).
+   * `defaultAgentRuntime`, else the single candidate, on entry).
    */
   defaultProvider: AgentProvider | null;
   /**
    * Whether step 2 (default agent) is part of THIS run of the tour. Recomputed
    * every time the user leaves the Connect step: the question only exists when
-   * more than one provider came out of it activated. Starts true so the early
-   * steps show the full tour and the count only ever shrinks on an explicit
+   * more than one of {claude, codex} came out of it activated. Starts true so the
+   * early steps show the full tour and the count only ever shrinks on an explicit
    * action, never mid-probe.
    */
   multiRuntime: boolean;
+  /**
+   * Step-3 model selection, in the effective provider's own id space (a Claude
+   * alias like 'opus', or a Codex catalog id / 'auto'). null = not yet seeded.
+   */
+  defaultModel: string | null;
+  /** Step-3 reasoning-effort selection, on the effective provider's scale. */
+  defaultEffort: ReasoningEffort | null;
+  /**
+   * Step 3 asks two questions on one card: the model list first, then the effort
+   * list once a model is picked ('effort' also renders the chosen model as a
+   * single row with a CHANGE affordance back to 'model').
+   */
+  modelPhase: 'model' | 'effort';
+  /** Step-6 radio: walk into the guided set-up, or finish the tour here. */
+  handoffChoice: 'continue' | 'skip';
+  /** Step-7 radio: which step-8 screen to render, or continue without a project. */
+  projectChoice: 'existing' | 'new' | 'unsure';
+  /**
+   * The project step 8 created — set by projectAdded(), read by every screen
+   * from 9 on (copy names it; step 13 seeds its backlog; every exit navigates to
+   * it). Stays null on the 'unsure' branch, where the same screens render their
+   * no-project variants. NOT persisted: a cold boot never resumes past step 7
+   * (clampResumeStep).
+   */
+  guidedProject: GuidedProject | null;
+  /**
+   * Whether the global assistant is enabled (Settings → Assistant) and so
+   * whether steps 10-12 are part of THIS run. Seeded true; the guided surface
+   * stamps the real value from config on entry to step 9.
+   */
+  assistantAvailable: boolean;
+  /** Step-13 radio: which first session to launch. */
+  sessionChoice: SessionChoice;
+  /** What step 13 launched; set by sessionLaunched(), rendered by step 14. */
+  launched: LaunchedSession | null;
   /** Boot gate resolved — render nothing until true (no-flash rule, docs/CODE-PATTERNS.md). */
   hydrated: boolean;
 
@@ -202,33 +320,57 @@ interface OnboardingState {
    * Resolve the boot gate. `persisted` is the parsed pref snapshot (null on a
    * pristine install); `projectsCount` decides the pristine branch: existing
    * installs (projects > 0) are marked completed without ever seeing the tour.
+   * It is consulted ONLY when `persisted === null`, so the caller may pass 0
+   * without fetching the project list whenever a snapshot exists.
    */
   hydrate: (persisted: PersistedOnboarding | null, projectsCount: number) => void;
   /** Start (or restart) the tour at step 0. */
   begin: (replay: boolean) => void;
   next: () => void;
-  /**
-   * Anchor-lost escape: force a plain step+1 advance, bypassing the
-   * advance-by-doing guard. Wired ONLY to the Coachmark's anchor-lost fallback —
-   * a do-step (6/10/11) whose target has unmounted (e.g. Back into step 6 after the
-   * wizard left the Quick Session card) has no other way forward, since next()
-   * no-ops on do-steps.
-   */
-  forceNext: () => void;
   back: () => void;
   /** Dot navigation — only to steps already visited. */
   goTo: (step: number) => void;
   skip: () => void;
-  /** Skipped/pending → active at the current (clamped) step. */
+  /** Skipped → active at the current (clamped) step. */
   resume: () => void;
   /**
-   * Permanent dismiss from the Sidebar "Resume setup" card: skipped/pending →
+   * Permanent dismiss from the Sidebar "Resume setup" card: skipped →
    * completed. Unlike skip() (which leaves the resume affordance standing),
    * dismiss() closes the tour for good — the completed snapshot persists, so it
    * never reappears on future boots. Recoverable only via Settings → Replay
    * walkthrough (restart()).
    */
   dismiss: () => void;
+  /**
+   * Step 8's exit: the project landed. Records it and moves to step 9 (the
+   * first in-shell screen). The create handler is the one caller (step 8 has
+   * no next()); it stamps the active project in navigationStore FIRST, so the
+   * Sidebar the step-9 shell mounts never auto-selects a different view.
+   */
+  projectAdded: (project: GuidedProject) => void;
+  /**
+   * The "Not sure yet" branch caught up: a project was created (Sidebar "Add
+   * Project") while the in-shell screens were running without one. Records it
+   * so the remaining screens switch to their with-project variants; the step
+   * does not move. No-op when a project is already recorded or before step 9.
+   */
+  projectAdopted: (project: GuidedProject) => void;
+  /**
+   * "Skip — I'll add ideas later" on steps 10/11: jump to the rail intro (12).
+   * The tour continues (unlike skip(), which ends it) — the user only declined
+   * the idea capture, not the rest of the set-up.
+   */
+  skipIdeas: () => void;
+  /**
+   * Step 13's exit: the launch handler resolved. Records what launched and moves
+   * to step 14, which renders its status. Step 13 has no next().
+   */
+  sessionLaunched: (launched: LaunchedSession) => void;
+  /**
+   * Terminal completion. Every exit from steps 9-14 (skip links, "Finish
+   * without launching", the two step-14 buttons) reaches it — after the
+   * caller staged the shell side effects (see guided/guidedFinish.ts).
+   */
   finish: () => void;
   /** Settings → Replay walkthrough. */
   restart: () => void;
@@ -240,10 +382,13 @@ interface OnboardingState {
   setOmpConnected: (connected: boolean) => void;
   setPermMode: (mode: PermissionMode) => void;
   setDefaultProvider: (provider: AgentProvider | null) => void;
-  /** The user clicked the highlighted coachmark target (capture-phase listener). */
-  anchorActioned: () => void;
-  /** A real-action window event landed (OnboardingGate forwards them here). */
-  realEvent: (kind: OnboardingRealEvent) => void;
+  setDefaultModel: (model: string | null) => void;
+  setDefaultEffort: (effort: ReasoningEffort | null) => void;
+  setModelPhase: (phase: 'model' | 'effort') => void;
+  setHandoffChoice: (choice: 'continue' | 'skip') => void;
+  setProjectChoice: (choice: 'existing' | 'new' | 'unsure') => void;
+  setAssistantAvailable: (available: boolean) => void;
+  setSessionChoice: (choice: SessionChoice) => void;
 }
 
 /** Step 1 refuses to advance until the probe is green and consent is given. */
@@ -259,6 +404,12 @@ export function isNextGateBlocked(
   return !claudeReady && !codexReady;
 }
 
+/** The state slice the provider helpers below read. */
+type ProviderSlice = Pick<
+  OnboardingState,
+  'detection' | 'connected' | 'codexDetection' | 'codexConnected' | 'ompDetection' | 'ompConnected'
+>;
+
 /**
  * The providers the Connect step left ACTIVATED — probe green AND consent
  * toggle on. Deliberately stricter than the access map the step persists (which
@@ -267,17 +418,7 @@ export function isNextGateBlocked(
  * "your default agent". Returned in AGENT_PROVIDERS order so the step's rows and
  * the fallback selection agree.
  */
-export function activatedProviders(
-  state: Pick<
-    OnboardingState,
-    | 'detection'
-    | 'connected'
-    | 'codexDetection'
-    | 'codexConnected'
-    | 'ompDetection'
-    | 'ompConnected'
-  >,
-): AgentProvider[] {
+export function activatedProviders(state: ProviderSlice): AgentProvider[] {
   const out: AgentProvider[] = [];
   if (state.detection?.state === 'detected' && state.connected) out.push('claude');
   if (state.codexDetection?.state === 'detected' && state.codexConnected) out.push('codex');
@@ -286,42 +427,61 @@ export function activatedProviders(
 }
 
 /**
- * Whether `step` is skipped for this run. Only the conditional Default-agent
- * step ever is — a single activated provider leaves it with no question to ask,
- * so every navigation path steps over it and the progress numbering drops it.
+ * The activated providers that can actually BE a default agent — claude and
+ * codex only. OMP is activatable on Connect (its access-map key is written) but
+ * no launch picker offers its runtimes yet, so it is neither a row on the
+ * Default-agent step nor a reason to show that step at all. This is the list the
+ * step renders and the count `multiRuntime` is decided from.
  */
-export function isStepSkipped(step: number, state: Pick<OnboardingState, 'multiRuntime'>): boolean {
-  return step === ONBOARDING_DEFAULT_RUNTIME_STEP && !state.multiRuntime;
+export function defaultAgentCandidates(state: ProviderSlice): Array<'claude' | 'codex'> {
+  return activatedProviders(state).filter(
+    (p): p is 'claude' | 'codex' => p === 'claude' || p === 'codex',
+  );
+}
+
+/** The state slice the skip helpers read. */
+type SkipSlice = Pick<OnboardingState, 'multiRuntime' | 'assistantAvailable'>;
+
+/**
+ * Whether `step` is skipped for this run. Two conditional groups: the
+ * Default-agent step (a single activated candidate leaves it with no question
+ * to ask) and the three assistant steps (10-12, meaningless with the global
+ * assistant disabled). Every navigation path steps over a skipped step and the
+ * progress numbering drops it.
+ */
+export function isStepSkipped(step: number, state: SkipSlice): boolean {
+  if (step === ONBOARDING_DEFAULT_RUNTIME_STEP) return !state.multiRuntime;
+  if (ONBOARDING_ASSISTANT_STEPS.includes(step)) return !state.assistantAvailable;
+  return false;
 }
 
 // Stable identities: the gate feeds these straight into React props, so a fresh
-// Set per render would re-run every memo downstream.
+// Set per render would re-run every memo downstream. One constant per
+// combination of the two conditions.
 const EMPTY_SKIPPED: ReadonlySet<number> = new Set<number>();
 const DEFAULT_RUNTIME_SKIPPED: ReadonlySet<number> = new Set([ONBOARDING_DEFAULT_RUNTIME_STEP]);
+const ASSISTANT_SKIPPED: ReadonlySet<number> = new Set(ONBOARDING_ASSISTANT_STEPS);
+const BOTH_SKIPPED: ReadonlySet<number> = new Set([
+  ONBOARDING_DEFAULT_RUNTIME_STEP,
+  ...ONBOARDING_ASSISTANT_STEPS,
+]);
 
 /** The set of skipped indices, for the progress-numbering helpers. */
-export function skippedStepSet(state: Pick<OnboardingState, 'multiRuntime'>): ReadonlySet<number> {
-  return state.multiRuntime ? EMPTY_SKIPPED : DEFAULT_RUNTIME_SKIPPED;
+export function skippedStepSet(state: SkipSlice): ReadonlySet<number> {
+  if (state.multiRuntime) return state.assistantAvailable ? EMPTY_SKIPPED : ASSISTANT_SKIPPED;
+  return state.assistantAvailable ? DEFAULT_RUNTIME_SKIPPED : BOTH_SKIPPED;
 }
 
 /**
  * The next/previous index that is not skipped, or null when the walk runs off
  * the end of the tour. `dir` is +1 or -1.
  */
-function stepAfter(
-  step: number,
-  dir: 1 | -1,
-  state: Pick<OnboardingState, 'multiRuntime'>,
-): number | null {
+function stepAfter(step: number, dir: 1 | -1, state: SkipSlice): number | null {
   for (let i = step + dir; i >= 0 && i < ONBOARDING_STEP_COUNT; i += dir) {
     if (!isStepSkipped(i, state)) return i;
   }
   return null;
 }
-
-/** Advance-by-doing coach steps (6, 10, 11) — coach steps that are NOT pointers. */
-const isDoStep = (step: number): boolean =>
-  ONBOARDING_COACH_STEPS.includes(step) && !ONBOARDING_POINTER_STEPS.includes(step);
 
 export const useOnboardingStore = create<OnboardingState>((set, get) => ({
   status: 'idle',
@@ -337,6 +497,15 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
   permMode: 'auto',
   defaultProvider: null,
   multiRuntime: true,
+  defaultModel: null,
+  defaultEffort: null,
+  modelPhase: 'model',
+  handoffChoice: 'continue',
+  projectChoice: 'existing',
+  guidedProject: null,
+  assistantAvailable: true,
+  sessionChoice: 'planner',
+  launched: null,
   hydrated: false,
 
   hydrate: (persisted, projectsCount) => {
@@ -354,10 +523,11 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
       set({ status: 'completed', hydrated: true });
       return;
     }
-    // Any mid-tour state (active/pending/skipped) resumes as skipped — the
-    // rail's Resume button re-enters at the clamped step, letting the gate
-    // rebuild coach preconditions instead of dropping a coachmark on a stale
-    // anchor.
+    // Any unfinished state (active/skipped, modal OR guided) resumes as skipped
+    // — the Sidebar's Resume card re-enters at the clamped step (a guided step
+    // past the branch choice clamps to 7: the branch/project/launch it needs
+    // were never persisted), so a boot never drops the user back into a
+    // half-built screen or hides the shell behind a tour they did not re-open.
     const step = clampResumeStep(migrated.step);
     set({ status: 'skipped', step, maxVisitedStep: step, replay: false, hydrated: true });
   },
@@ -376,20 +546,47 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
     permMode: 'auto',
     defaultProvider: null,
     multiRuntime: true,
+    defaultModel: null,
+    defaultEffort: null,
+    modelPhase: 'model',
+    handoffChoice: 'continue',
+    projectChoice: 'existing',
+    guidedProject: null,
+    assistantAvailable: true,
+    sessionChoice: 'planner',
+    launched: null,
     hydrated: true,
   }),
 
   next: () => {
     const s = get();
     if (s.status !== 'active') return;
-    if (isDoStep(s.step)) return; // do-steps advance by doing, never by next()
     if (isNextGateBlocked(s)) return;
-    // Next on the last Configure pointer parks quiet: step 10's anchor (the
-    // /ship chip) only exists once the session launches, so the tour waits for
-    // 'quick-session-created' — unless the session already exists (revisiting
-    // via dots/Back), where a plain advance is safe.
-    if (s.step === 9 && s.maxVisitedStep < 10) {
-      set({ status: 'pending' });
+    // Three steps never advance via next(): step 8 moves on through
+    // projectAdded() (the create handler owns the async work and the
+    // navigation side effects that must land BEFORE the Sidebar mounts), step
+    // 13 through sessionLaunched() (same shape — the launch is async), and step
+    // 14 only exits, via finish().
+    if (
+      s.step === ONBOARDING_PROJECT_DETAIL_STEP ||
+      s.step === ONBOARDING_FIRST_SESSION_STEP ||
+      s.step === ONBOARDING_LAUNCHING_STEP
+    ) {
+      return;
+    }
+    // The one early exit: leaves the tour on LandingHome with no project.
+    if (s.step === ONBOARDING_HANDOFF_STEP && s.handoffChoice === 'skip') {
+      set({ status: 'completed' });
+      return;
+    }
+    // "Not sure yet" has no project to detail: skip step 8 and continue into
+    // the shell with guidedProject null (the screens render their no-project
+    // variants).
+    if (s.step === ONBOARDING_ADD_PROJECT_STEP && s.projectChoice === 'unsure') {
+      set({
+        step: ONBOARDING_PROJECT_HOME_STEP,
+        maxVisitedStep: Math.max(s.maxVisitedStep, ONBOARDING_PROJECT_HOME_STEP),
+      });
       return;
     }
     // Leaving Connect re-decides whether the conditional Default-agent step is
@@ -397,8 +594,8 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
     // target, or a user who just enabled a second provider would be stepped
     // straight over the question they now qualify for.
     const multiRuntime =
-      s.step === 1 ? activatedProviders(s).length >= 2 : s.multiRuntime;
-    const step = stepAfter(s.step, 1, { multiRuntime });
+      s.step === 1 ? defaultAgentCandidates(s).length >= 2 : s.multiRuntime;
+    const step = stepAfter(s.step, 1, { multiRuntime, assistantAvailable: s.assistantAvailable });
     if (step === null) {
       set({ multiRuntime, status: 'completed' });
       return;
@@ -406,21 +603,12 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
     set({ multiRuntime, step, maxVisitedStep: Math.max(s.maxVisitedStep, step) });
   },
 
-  forceNext: () => {
-    const s = get();
-    if (s.status !== 'active') return;
-    if (isNextGateBlocked(s)) return; // defensive — coach steps are never the step-1 gate
-    const step = stepAfter(s.step, 1, s);
-    if (step === null) {
-      set({ status: 'completed' });
-      return;
-    }
-    set({ step, maxVisitedStep: Math.max(s.maxVisitedStep, step) });
-  },
-
   back: () => {
     const s = get();
     if (s.status !== 'active') return;
+    // The in-shell screens (9+) have no Back: the project already exists and
+    // step 8 would offer to create it again.
+    if (s.step >= ONBOARDING_PROJECT_HOME_STEP) return;
     set({ step: stepAfter(s.step, -1, s) ?? 0 });
   },
 
@@ -434,36 +622,67 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
 
   skip: () => {
     const s = get();
-    if (s.status !== 'active' && s.status !== 'pending') return;
+    if (s.status !== 'active') return;
+    // Parks the tour at its current step — modal card OR guided screen — so the
+    // Sidebar "Resume setup" card can bring it back. Every exit that is not a
+    // deliberate completion (Skip links, clicking away into the Sidebar) goes
+    // through here; finish() is the terminal one.
     set({ status: 'skipped' });
   },
 
   resume: () => {
     const s = get();
-    if (s.status !== 'skipped' && s.status !== 'pending') return;
-    // The Sidebar "Resume setup" button is the only caller, so a resume is a
-    // COLD re-entry after the user skipped/parked and moved on. The wizard-
-    // Configure pointer steps (7-9) anchor the session-start screen, which is
-    // the first thing gone once the wizard closes — resuming onto a vanished
-    // anchor renders a disconnected, floating coachmark. Rebuild like the boot
-    // path: fall back to step 6 (its precondition reopens the wizard) and reset
-    // maxVisited so dots can't jump straight back onto the still-missing
-    // anchors. Steps 10-11 keep their step (the /ship coachmark's Continue escape
-    // and the always-present rail anchor cover a missing target), and modal
-    // steps never disconnect.
-    if (s.step >= 7 && s.step <= 9) {
-      set({ status: 'active', step: 6, maxVisitedStep: 6 });
-      return;
-    }
-    set({ status: 'active', step: s.step });
+    if (s.status !== 'skipped') return;
+    // WARM re-entry from the Sidebar card: everything a guided step needs
+    // (projectChoice, guidedProject, launched) is still in memory, so the tour
+    // picks up exactly where it was parked. A COLD re-entry (boot) was already
+    // clamped by hydrate() — the persisted snapshot never carries that state.
+    set({ status: 'active' });
   },
 
   dismiss: () => {
     const s = get();
-    if (s.status !== 'skipped' && s.status !== 'pending') return;
+    if (s.status !== 'skipped') return;
     // Keep the step so the persisted snapshot + telemetry record where the user
     // walked away; completed short-circuits hydrate regardless of step.
     set({ status: 'completed' });
+  },
+
+  projectAdopted: (project) => {
+    const s = get();
+    if (s.status !== 'active' || s.guidedProject !== null) return;
+    if (s.step < ONBOARDING_PROJECT_HOME_STEP) return;
+    set({ guidedProject: project });
+  },
+
+  projectAdded: (project) => {
+    const s = get();
+    if (s.status !== 'active' || s.step !== ONBOARDING_PROJECT_DETAIL_STEP) return;
+    set({
+      guidedProject: project,
+      step: ONBOARDING_PROJECT_HOME_STEP,
+      maxVisitedStep: Math.max(s.maxVisitedStep, ONBOARDING_PROJECT_HOME_STEP),
+    });
+  },
+
+  skipIdeas: () => {
+    const s = get();
+    if (s.status !== 'active') return;
+    if (s.step < ONBOARDING_PROJECT_HOME_STEP || s.step >= ONBOARDING_ASSISTANT_RAIL_STEP) return;
+    set({
+      step: ONBOARDING_ASSISTANT_RAIL_STEP,
+      maxVisitedStep: Math.max(s.maxVisitedStep, ONBOARDING_ASSISTANT_RAIL_STEP),
+    });
+  },
+
+  sessionLaunched: (launched) => {
+    const s = get();
+    if (s.status !== 'active' || s.step !== ONBOARDING_FIRST_SESSION_STEP) return;
+    set({
+      launched,
+      step: ONBOARDING_LAUNCHING_STEP,
+      maxVisitedStep: Math.max(s.maxVisitedStep, ONBOARDING_LAUNCHING_STEP),
+    });
   },
 
   finish: () => set({ status: 'completed' }),
@@ -478,35 +697,11 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
   setOmpConnected: (ompConnected) => set({ ompConnected }),
   setPermMode: (permMode) => set({ permMode }),
   setDefaultProvider: (defaultProvider) => set({ defaultProvider }),
-
-  anchorActioned: () => {
-    const s = get();
-    if (s.status !== 'active' || !isDoStep(s.step)) return;
-    if (s.step === 6) {
-      // The card click flips the wizard to Configure, where step 7's anchor
-      // (the runtime selector) mounts — advance directly.
-      set({ step: 7, maxVisitedStep: Math.max(s.maxVisitedStep, 7) });
-      return;
-    }
-    if (s.step === 11) {
-      // Human review opens immediately on the click — straight to the rail map.
-      set({ step: 12, maxVisitedStep: Math.max(s.maxVisitedStep, 12) });
-      return;
-    }
-    // Step 10: the /ship click hands control to the idea modal; the overlay
-    // goes quiet until 'workflow-run-started' lands.
-    set({ status: 'pending' });
-  },
-
-  realEvent: (kind) => {
-    const s = get();
-    if (s.status !== 'active' && s.status !== 'pending') return;
-    const advanceTo = (step: number): void =>
-      set({ status: 'active', step, maxVisitedStep: Math.max(s.maxVisitedStep, step) });
-    if (kind === 'project-created' && s.step === 5) advanceTo(6);
-    // The launch may fire from ANY Configure-page step — the user can hit
-    // Start quick session before Next-ing through every pointer.
-    else if (kind === 'quick-session-created' && s.step >= 6 && s.step <= 9) advanceTo(10);
-    else if (kind === 'workflow-run-started' && s.step === 10) advanceTo(11);
-  },
+  setDefaultModel: (defaultModel) => set({ defaultModel }),
+  setDefaultEffort: (defaultEffort) => set({ defaultEffort }),
+  setModelPhase: (modelPhase) => set({ modelPhase }),
+  setHandoffChoice: (handoffChoice) => set({ handoffChoice }),
+  setProjectChoice: (projectChoice) => set({ projectChoice }),
+  setAssistantAvailable: (assistantAvailable) => set({ assistantAvailable }),
+  setSessionChoice: (sessionChoice) => set({ sessionChoice }),
 }));

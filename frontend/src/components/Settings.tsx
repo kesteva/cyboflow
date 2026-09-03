@@ -105,7 +105,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // follow the app's default model (defaultModel / getDefaultModel()).
   const [assistantModel, setAssistantModel] = useState('');
   // Global assistant on/off (default ON). Off hides the agent rail and blocks
-  // the server-side kill switch, so no turn (including the auto-digest) spawns.
+  // the server-side kill switch, so no turn spawns.
   const [assistantEnabled, setAssistantEnabled] = useState(true);
   // Extra folders (one per line) the assistant may read, beyond the app's
   // registered project folders (always readable regardless of this list).

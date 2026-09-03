@@ -21,6 +21,7 @@
  * layoutStore (same key it always persisted under) so the global ⌘] shortcut
  * can toggle it; width stays local — nothing else needs it.
  */
+import { GUIDED_TARGETS } from '../onboarding/guided/GuidedLeader';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { AgentThreadView } from './AgentThreadView';
@@ -160,7 +161,10 @@ export function AgentRail() {
       />
 
       {/* Header: collapse chevron, glyph mark, title/subtitle, GLOBAL chip. */}
-      <div className="flex items-center gap-2 border-b border-border-primary p-3">
+      <div
+        className="flex items-center gap-2 border-b border-border-primary p-3"
+        data-guided-target={GUIDED_TARGETS.assistantHeader}
+      >
         <button
           type="button"
           data-testid="agent-rail-collapse"

@@ -10,23 +10,22 @@ import { getAgentSystemPrompt } from './agentThreadPrompt';
 import {
   AgentThreadService,
   COMPACT_PROMPT,
-  DIGEST_PROMPT,
   type AgentSpawnManagerLike,
   type AgentSpawnOptions,
 } from './agentThreadService';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import type { AssistantContextRetention } from '../../../../shared/types/agentThread';
 
-/** One local calendar day, in ms — advance the clock past it to re-fire the digest. */
+/** One local calendar day, in ms — advance the clock past it to cross the retention day boundary. */
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Base clock pinned to LOCAL noon of a fixed date. The digest cap keys off the
- * local calendar day, so the fixture must start mid-local-day: a base near local
- * midnight would flip calendar day under a small `+1h` advance on some machine
- * timezones, making the same-day-throttle assertion timezone-fragile. Local noon
- * + fixed advances (`+1h` stays same day, `+ONE_DAY_MS` lands next day) is
- * deterministic in every timezone.
+ * Base clock pinned to LOCAL noon of a fixed date. The day-boundary retention
+ * check keys off the local calendar day, so the fixture must start mid-local-day:
+ * a base near local midnight would flip calendar day under a small `+1h` advance
+ * on some machine timezones, making the same-day assertions timezone-fragile.
+ * Local noon + fixed advances (`+1h` stays same day, `+ONE_DAY_MS` lands next
+ * day) is deterministic in every timezone.
  */
 const LOCAL_NOON_BASE = new Date(2026, 5, 15, 12, 0, 0, 0).getTime();
 
@@ -222,6 +221,25 @@ describe('AgentThreadService', () => {
       expect(h.store.getThread(thread.id)?.claudeSessionId).toBe('sess-1');
     });
 
+    it('an optional contextHint is prepended to the spawned prompt but never persisted to the transcript', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueInit('sess-1');
+
+      await h.service.sendMessage(thread.id, 'hello', 'HINT');
+
+      expect(h.manager.calls).toHaveLength(1);
+      expect(h.manager.calls[0].prompt).toBe('HINT\n\nhello');
+
+      // The recorded transcript turn stores the RAW text only — no hint.
+      const rows = h.store.listEvents(thread.id);
+      const userRow = rows.find((r) => r.eventType === 'user');
+      expect(userRow).toBeDefined();
+      const persisted = JSON.parse(userRow!.payloadJson) as {
+        message: { content: Array<{ type: string; text: string }> };
+      };
+      expect(persisted.message.content).toEqual([{ type: 'text', text: 'hello' }]);
+    });
+
     it('warm continuation threads the stored session id as resumeSessionId on turn 2', async () => {
       const thread = h.service.ensureGlobalThread();
       h.manager.queueInit('sess-1');
@@ -338,120 +356,17 @@ describe('AgentThreadService', () => {
     });
   });
 
-  describe('triggerDigest', () => {
-    it('does NOT record the synthetic digest prompt as a human turn', async () => {
-      const thread = h.service.ensureGlobalThread();
-
-      await h.service.triggerDigest(thread.id);
-
-      // The digest is auto-fired (first open per launch); nobody typed
-      // DIGEST_PROMPT, so attributing it to the user would be a false "You" bubble.
-      expect(h.store.listEvents(thread.id).some((r) => r.eventType === 'user')).toBe(false);
-    });
-
-    it('first triggers, a later same-day call is capped, and it fires again the next day', async () => {
-      const thread = h.service.ensureGlobalThread();
-
-      const first = await h.service.triggerDigest(thread.id);
-      expect(first).toEqual({ triggered: true });
-      expect(h.manager.calls).toHaveLength(1);
-      expect(h.manager.calls[0].prompt).toBe(DIGEST_PROMPT);
-
-      // Later the SAME calendar day (e.g. a second boot an hour later) — capped,
-      // no new spawn. This is the multi-boot case the persisted cap fixes.
-      h.clock.value += 60 * 60 * 1000;
-      const second = await h.service.triggerDigest(thread.id);
-      expect(second).toEqual({ triggered: false, reason: 'throttled' });
-      expect(h.manager.calls).toHaveLength(1);
-
-      // Next calendar day — the daily recap fires again.
-      h.clock.value += ONE_DAY_MS;
-      const third = await h.service.triggerDigest(thread.id);
-      expect(third).toEqual({ triggered: true });
-      expect(h.manager.calls).toHaveLength(2);
-    });
-
-    it('persists the last-digest time so the cap survives a restart (new service, same store)', async () => {
-      const thread = h.service.ensureGlobalThread();
-
-      const first = await h.service.triggerDigest(thread.id);
-      expect(first).toEqual({ triggered: true });
-      expect(h.store.getLastDigestAt(thread.id)).toBe(h.clock.value);
-
-      // Simulate an app restart: a fresh service over the SAME store (all
-      // in-memory state gone). A launch-time digest an hour later the same day
-      // must still be capped off the persisted value.
-      const restartClock = { value: h.clock.value + 60 * 60 * 1000 };
-      const restarted = new AgentThreadService({
-        store: h.store,
-        manager: h.manager,
-        publish: () => {},
-        defaultModel: () => 'claude-opus',
-        enabled: () => true,
-        homeDirBase: h.homeBase,
-        now: () => restartClock.value,
-      });
-
-      const afterRestart = await restarted.triggerDigest(thread.id);
-      expect(afterRestart).toEqual({ triggered: false, reason: 'throttled' });
-      expect(h.manager.calls).toHaveLength(1);
-
-      // The next calendar day, the restarted service digests again.
-      restartClock.value = h.clock.value + ONE_DAY_MS;
-      const nextDay = await restarted.triggerDigest(thread.id);
-      expect(nextDay).toEqual({ triggered: true });
-      expect(h.manager.calls).toHaveLength(2);
-      restarted.dispose();
-    });
-
-    it('a failed send rolls back the stamp so the day stays retryable (not silently burned)', async () => {
-      const thread = h.service.ensureGlobalThread();
-
-      // First trigger's send throws (e.g. offline / auth failure at boot). No
-      // resumeSessionId yet, so this is a clean throw, not a stale-resume retry.
-      h.manager.queueThrow('spawn failed');
-      await expect(h.service.triggerDigest(thread.id)).rejects.toThrow('spawn failed');
-      // The speculative stamp must have been rolled back.
-      expect(h.store.getLastDigestAt(thread.id)).toBeNull();
-
-      // Same calendar day, next boot — the recap must still fire (the failure did
-      // NOT consume the day's allowance). Default behavior sends successfully.
-      const retry = await h.service.triggerDigest(thread.id);
-      expect(retry).toEqual({ triggered: true });
-      expect(h.manager.calls.at(-1)?.prompt).toBe(DIGEST_PROMPT);
-      // Now it IS stamped, so a further same-day trigger is throttled.
-      expect(h.store.getLastDigestAt(thread.id)).toBe(h.clock.value);
-      const third = await h.service.triggerDigest(thread.id);
-      expect(third).toEqual({ triggered: false, reason: 'throttled' });
-    });
-
-    it('returns {triggered:false, reason:"disabled"} without sending or stamping the throttle when the kill switch is off, and sends once re-enabled', async () => {
-      const thread = h.service.ensureGlobalThread();
-      h.enabled.value = false;
-
-      const result = await h.service.triggerDigest(thread.id);
-      expect(result).toEqual({ triggered: false, reason: 'disabled' });
-      expect(h.manager.calls).toHaveLength(0);
-
-      // Re-enabling immediately (no elapsed clock) still sends — proof the
-      // disabled call above did NOT stamp the throttle.
-      h.enabled.value = true;
-      const after = await h.service.triggerDigest(thread.id);
-      expect(after).toEqual({ triggered: true });
-      expect(h.manager.calls).toHaveLength(1);
-      expect(h.manager.calls[0].prompt).toBe(DIGEST_PROMPT);
-    });
-  });
-
   describe('daily context retention', () => {
-    it('stamps last_turn_at on every turn (human and digest alike)', async () => {
+    it('stamps last_turn_at on every turn', async () => {
       const thread = h.service.ensureGlobalThread();
 
+      h.manager.queueInit('sess-1');
       await h.service.sendMessage(thread.id, 'first');
       expect(h.store.getLastTurnAt(thread.id)).toBe(h.clock.value);
 
       h.clock.value += 60 * 60 * 1000;
-      await h.service.triggerDigest(thread.id);
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'second');
       expect(h.store.getLastTurnAt(thread.id)).toBe(h.clock.value);
     });
 
@@ -481,7 +396,7 @@ describe('AgentThreadService', () => {
       expect(userEvents).toHaveLength(3);
     });
 
-    it('clear-daily applies to the auto-digest too: a new day’s recap starts a fresh conversation', async () => {
+    it('clear-daily: a new day’s turn starts a fresh conversation with no resume id', async () => {
       h.retention.value = 'clear-daily';
       const thread = h.service.ensureGlobalThread();
 
@@ -490,10 +405,9 @@ describe('AgentThreadService', () => {
 
       h.clock.value += ONE_DAY_MS;
       h.manager.queueInit('sess-2');
-      await h.service.triggerDigest(thread.id);
+      await h.service.sendMessage(thread.id, 'day two chat');
 
       expect(h.manager.calls).toHaveLength(2);
-      expect(h.manager.calls[1].prompt).toBe(DIGEST_PROMPT);
       expect(h.manager.calls[1].resumeSessionId).toBeUndefined();
     });
 

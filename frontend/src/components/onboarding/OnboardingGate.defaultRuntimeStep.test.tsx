@@ -1,8 +1,9 @@
 /**
  * OnboardingGate — step 2 (Default agent) integration coverage.
  *
- * The step is CONDITIONAL (rendered only when the Connect step left 2+ providers
- * activated) and its answer is not tour-local: Next persists the chosen
+ * The step is CONDITIONAL (rendered only when the Connect step left 2+
+ * DEFAULT-ELIGIBLE providers activated — claude/codex; OMP is activatable but no
+ * picker offers its runtimes) and its answer is not tour-local: Next persists the chosen
  * provider's structured runtime into AppConfig.defaultAgentRuntime — the middle
  * rung of resolveRunTypeLaunchDefaults, which quick sessions and flow runs both
  * resolve through. These tests drive the real onboardingStore + configStore
@@ -19,6 +20,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { OnboardingGate } from './OnboardingGate';
 import { useOnboardingStore } from '../../stores/onboardingStore';
 import { useConfigStore } from '../../stores/configStore';
+import { resetProviderModelCatalogsForTests } from '../../stores/providerModelCatalogStore';
 import { PROVIDERS_DETECT_CHANNEL } from '../../../../shared/types/onboarding';
 import type { ProviderDetectionResult } from '../../../../shared/types/onboarding';
 import type { AppConfig } from '../../types/config';
@@ -26,6 +28,10 @@ import type { AppConfig } from '../../types/config';
 const projectsGetAll = vi.fn();
 const configGet = vi.fn();
 const configUpdate = vi.fn();
+const configApplyRunTypeDefault = vi.fn();
+// Next lands on the Model step (3), which discovers the Codex catalog whenever
+// Codex is the resolved default agent.
+const modelsGetCatalog = vi.fn();
 
 vi.mock('../../utils/api', () => ({
   API: {
@@ -33,7 +39,9 @@ vi.mock('../../utils/api', () => ({
     config: {
       get: (...a: unknown[]) => configGet(...a),
       update: (...a: unknown[]) => configUpdate(...a),
+      applyRunTypeDefault: (...a: unknown[]) => configApplyRunTypeDefault(...a),
     },
+    models: { getCatalog: (...a: unknown[]) => modelsGetCatalog(...a) },
     dialog: { openFile: vi.fn(), openDirectory: vi.fn() },
   },
 }));
@@ -78,6 +86,11 @@ const INITIAL_ONBOARDING_STATE = {
   permMode: 'auto' as const,
   defaultProvider: null,
   multiRuntime: true,
+  defaultModel: null,
+  defaultEffort: null,
+  modelPhase: 'model' as const,
+  handoffChoice: 'continue' as const,
+  projectChoice: 'existing' as const,
   hydrated: false,
 };
 
@@ -94,6 +107,11 @@ beforeEach(() => {
   projectsGetAll.mockReset().mockResolvedValue({ success: true, data: [] });
   configGet.mockReset().mockResolvedValue({ success: true, data: baseAppConfig() });
   configUpdate.mockReset().mockResolvedValue({ success: true });
+  configApplyRunTypeDefault.mockReset().mockResolvedValue({ success: true, data: {} });
+  modelsGetCatalog
+    .mockReset()
+    .mockResolvedValue({ success: true, data: { models: [], defaultModel: null } });
+  resetProviderModelCatalogsForTests();
   invoke.mockClear();
   (window as unknown as { electron: { invoke: typeof invoke } }).electron = { invoke };
   useOnboardingStore.setState(INITIAL_ONBOARDING_STATE);
@@ -145,10 +163,32 @@ describe('OnboardingGate — Default agent step (2)', () => {
     expect(screen.getByRole('radio', { name: /Codex/ })).toHaveTextContent('Codex SDK');
   });
 
-  it('includes OMP when it is activated too', async () => {
+  it('still excludes OMP when it is activated too — it is not default-eligible', async () => {
     await mountAtDefaultRuntimeStep(baseAppConfig(), { claude: true, codex: true, omp: true });
-    expect(screen.getAllByRole('radio')).toHaveLength(3);
-    expect(screen.getByRole('radio', { name: /OMP/ })).toHaveTextContent('OMP');
+    expect(screen.getAllByRole('radio')).toHaveLength(2);
+    expect(screen.queryByRole('radio', { name: /OMP/ })).not.toBeInTheDocument();
+  });
+
+  it('shows no blurbs — just the provider name and the runtime it resolves to', async () => {
+    await mountAtDefaultRuntimeStep(baseAppConfig(), { claude: true, codex: true });
+
+    expect(screen.getByRole('radio', { name: /Claude/ })).toHaveTextContent(/^ClaudeClaude SDK$/);
+    expect(screen.getByRole('radio', { name: /Codex/ })).toHaveTextContent(/^CodexCodex SDK$/);
+  });
+
+  it('qualifies the Cyboflow-chat claim only while Codex is the highlighted pick', async () => {
+    await mountAtDefaultRuntimeStep(baseAppConfig(), { claude: true, codex: true });
+
+    // Claude preselected — nothing to qualify.
+    expect(
+      screen.queryByText('The Cyboflow chat assistant runs on Claude for now.'),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('radio', { name: /Codex/ }));
+
+    expect(
+      await screen.findByText('The Cyboflow chat assistant runs on Claude for now.'),
+    ).toBeInTheDocument();
   });
 
   it('preselects the first activated provider on a pristine install', async () => {
@@ -171,7 +211,7 @@ describe('OnboardingGate — Default agent step (2)', () => {
     );
   });
 
-  it('falls back to the first activated provider when the saved default is no longer activated', async () => {
+  it('falls back to the first candidate when the saved default is no longer activated', async () => {
     // Saved default names Codex, but this run left only Claude + OMP on — the
     // step must never preselect a provider the Connect step did not activate.
     await mountAtDefaultRuntimeStep(baseAppConfig({ defaultAgentRuntime: 'codex-sdk' }), {
@@ -184,7 +224,7 @@ describe('OnboardingGate — Default agent step (2)', () => {
     );
   });
 
-  it('persists the picked provider’s structured runtime on Next, then advances to Permission (3)', async () => {
+  it('persists the picked provider’s structured runtime on Next, then advances to the Model step (3)', async () => {
     await mountAtDefaultRuntimeStep(baseAppConfig(), { claude: true, codex: true });
 
     fireEvent.click(screen.getByRole('radio', { name: /Codex/ }));
@@ -206,15 +246,6 @@ describe('OnboardingGate — Default agent step (2)', () => {
     );
   });
 
-  it('maps an OMP pick to omp-sdk', async () => {
-    await mountAtDefaultRuntimeStep(baseAppConfig(), { claude: true, omp: true });
-
-    fireEvent.click(screen.getByRole('radio', { name: /OMP/ }));
-    fireEvent.click(screen.getByRole('button', { name: 'Next →' }));
-
-    await waitFor(() => expect(configUpdate).toHaveBeenCalledWith({ defaultAgentRuntime: 'omp-sdk' }));
-  });
-
   it('advances anyway when the config write fails (non-fatal — Settings still owns the default)', async () => {
     configUpdate.mockRejectedValue(new Error('disk full'));
     await mountAtDefaultRuntimeStep(baseAppConfig(), { claude: true, codex: true });
@@ -228,11 +259,11 @@ describe('OnboardingGate — Default agent step (2)', () => {
     await mountAtDefaultRuntimeStep(baseAppConfig(), { claude: true, codex: true });
 
     expect(screen.getByRole('dialog', { name: 'Pick your default agent' })).toBeInTheDocument();
-    expect(screen.getByText('STEP 3 / 13')).toBeInTheDocument();
+    expect(screen.getByText('STEP 3 / 7')).toBeInTheDocument();
   });
 
   it('drops this step from the progress counter on a single-provider run', async () => {
-    // Same chrome, multiRuntime off: the run shows 12 steps, and the step the
+    // Same chrome, multiRuntime off: the run shows 8 steps, and the step the
     // user is standing on renumbers accordingly.
     render(<OnboardingGate />);
     await waitFor(() => expect(useOnboardingStore.getState().hydrated).toBe(true));
@@ -246,10 +277,10 @@ describe('OnboardingGate — Default agent step (2)', () => {
       });
     });
 
-    expect(await screen.findByText('STEP 3 / 12')).toBeInTheDocument();
+    expect(await screen.findByText('STEP 3 / 6')).toBeInTheDocument();
   });
 
-  it('Back from Permission (3) returns here when the step is part of the run', async () => {
+  it('Back from the Model step (3) returns here when the step is part of the run', async () => {
     await mountAtDefaultRuntimeStep(baseAppConfig(), { claude: true, codex: true });
 
     fireEvent.click(screen.getByRole('button', { name: 'Next →' }));

@@ -1,14 +1,14 @@
 /**
- * onboardingStore — the pure 13-step tour machine. Covers boot hydration (all
- * four branches) including the version-1 → version-2 → version-3 snapshot
- * migrations (the Telemetry step's insertion at index 3, then the Default-agent
- * step's at index 2), the step-1 credential gate, the CONDITIONAL Default-agent
- * step (shown only when step 1 left 2+ providers activated), coach-step
- * advance-by-doing rules (anchorActioned / realEvent), the Configure pointer
- * steps (7-9: next() advances, the last pointer parks pending), dot/goTo
+ * onboardingStore — the pure 9-step tour machine (7 modal cards + 2 guided
+ * set-up screens). Covers boot hydration (all branches) including the
+ * version-1 → 2 → 3 → 4 snapshot migrations, the step-1 credential gate, the
+ * CONDITIONAL Default-agent step (shown only when Connect left 2+ of
+ * {claude, codex} activated — OMP never counts), the step-3 model/effort
+ * selections, both early exits (handoff "Skip the set-up", add-project "Not sure
+ * yet"), the guided step-8 rules (next() is inert; finish() completes), dot/goTo
  * maxVisited clamping, and the skip↔resume round trip. All transitions are
- * synchronous — the async side effects live in OnboardingGate and are not
- * exercised here.
+ * synchronous — the async side effects live in OnboardingGate and the guided
+ * surface, and are not exercised here.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import type {
@@ -19,11 +19,13 @@ import type {
 import {
   useOnboardingStore,
   activatedProviders,
+  defaultAgentCandidates,
   isNextGateBlocked,
   isStepSkipped,
   migratePersistedOnboarding,
   migrateV1StepIndex,
   migrateV2StepIndex,
+  migrateV3StepIndex,
   skippedStepSet,
   clampResumeStep,
 } from '../onboardingStore';
@@ -61,6 +63,15 @@ function reset(): void {
     permMode: 'auto',
     defaultProvider: null,
     multiRuntime: true,
+    defaultModel: null,
+    defaultEffort: null,
+    modelPhase: 'model',
+    handoffChoice: 'continue',
+    projectChoice: 'existing',
+    guidedProject: null,
+    assistantAvailable: true,
+    sessionChoice: 'planner',
+    launched: null,
     hydrated: false,
   });
 }
@@ -84,186 +95,206 @@ describe('onboardingStore — hydrate', () => {
     expect(s().hydrated).toBe(true);
   });
 
-  it('a completed snapshot stays completed', () => {
+  it('a completed snapshot stays completed (the project count is never consulted)', () => {
+    s().hydrate({ version: 4, status: 'completed', step: 8 }, 0);
+    expect(s().status).toBe('completed');
+    expect(s().hydrated).toBe(true);
+  });
+
+  it('a completed v1 snapshot stays completed', () => {
     s().hydrate({ version: 1, status: 'completed', step: 10 }, 0);
     expect(s().status).toBe('completed');
   });
 
-  it('v1 snapshots on the old context-bound coach steps (5-8, migrating to new 7-10) resume clamped to 6', () => {
-    for (const step of [5, 6, 7, 8]) {
-      reset();
-      s().hydrate({ version: 1, status: 'active', step }, 1);
-      expect(s().status).toBe('skipped');
-      expect(s().step).toBe(6);
-      expect(s().maxVisitedStep).toBe(6);
-    }
-  });
-
-  it('a mid-tour v1 snapshot on old step 9 (rail anchor always exists) keeps that step', () => {
-    s().hydrate({ version: 1, status: 'active', step: 9 }, 1);
-    expect(s().status).toBe('skipped');
-    expect(s().step).toBe(11);
-  });
-
-  it('a mid-tour snapshot on a modal step keeps that step', () => {
-    s().hydrate({ version: 1, status: 'pending', step: 3 }, 0);
-    expect(s().status).toBe('skipped');
-    expect(s().step).toBe(5);
-  });
-});
-
-describe('onboardingStore — snapshot migration', () => {
-  beforeEach(reset);
-
-  it('migrateV1StepIndex leaves the unmoved prefix (0-2) unchanged', () => {
-    expect(migrateV1StepIndex(0)).toBe(0);
-    expect(migrateV1StepIndex(1)).toBe(1);
-    expect(migrateV1StepIndex(2)).toBe(2);
-  });
-
-  it('migrateV1StepIndex shifts old index 3 onward forward by one', () => {
-    expect(migrateV1StepIndex(3)).toBe(4); // old Add project → v2 Add project
-    expect(migrateV1StepIndex(10)).toBe(11); // old Rail map → v2 Rail map
-  });
-
-  it('migrateV1StepIndex shifts a value past the valid v1 domain (10) the same way', () => {
-    // v1 only ever persisted 0-10; this documents that the shift rule has no
-    // special-cased upper bound of its own — anything ≥ 3 shifts by one, and
-    // out-of-range values are left for clampResumeStep to clamp downstream.
-    expect(migrateV1StepIndex(11)).toBe(12);
-  });
-
-  it('migrateV2StepIndex leaves the unmoved prefix (0-1) unchanged and shifts index 2 onward', () => {
-    expect(migrateV2StepIndex(0)).toBe(0);
-    expect(migrateV2StepIndex(1)).toBe(1);
-    expect(migrateV2StepIndex(2)).toBe(3); // v2 Permission → v3 Permission
-    expect(migrateV2StepIndex(11)).toBe(12); // v2 Rail map → v3 Rail map
-  });
-
-  it('migratePersistedOnboarding is a no-op for an already-v3 snapshot', () => {
-    const v3 = { version: 3 as const, status: 'active' as const, step: 4 };
-    expect(migratePersistedOnboarding(v3)).toEqual(v3);
-  });
-
-  it('migratePersistedOnboarding leaves a completed snapshot completed, step untouched', () => {
-    expect(migratePersistedOnboarding({ version: 1, status: 'completed', step: 10 })).toEqual({
-      version: 3,
-      status: 'completed',
-      step: 10,
-    });
-    expect(migratePersistedOnboarding({ version: 2, status: 'completed', step: 4 })).toEqual({
-      version: 3,
-      status: 'completed',
-      step: 4,
-    });
-  });
-
-  it('migratePersistedOnboarding leaves a v1 completed snapshot untouched right at the shift boundary (step 3)', () => {
-    // A completed snapshot skips the step remaps entirely — confirm that holds
-    // even when the raw step sits exactly on the old shift boundary, where a
-    // regression to "always remap" would be most likely to surface.
-    const migrated = migratePersistedOnboarding({ version: 1, status: 'completed', step: 3 });
-    expect(migrated).toEqual({ version: 3, status: 'completed', step: 3 });
-  });
-
-  it('migratePersistedOnboarding leaves a v1 completed snapshot untouched just below the shift boundary (step 2)', () => {
-    const migrated = migratePersistedOnboarding({ version: 1, status: 'completed', step: 2 });
-    expect(migrated).toEqual({ version: 3, status: 'completed', step: 2 });
-  });
-
-  it('migratePersistedOnboarding composes BOTH remaps for a v1 active/pending/skipped snapshot', () => {
-    // 0 and 1 predate both insertions; 2 is untouched by v1→v2 but shifted by
-    // v2→v3; 3 is shifted by both.
-    expect(migratePersistedOnboarding({ version: 1, status: 'active', step: 0 })).toEqual({
-      version: 3,
-      status: 'active',
-      step: 0,
-    });
-    expect(migratePersistedOnboarding({ version: 1, status: 'active', step: 1 })).toEqual({
-      version: 3,
-      status: 'active',
-      step: 1,
-    });
-    expect(migratePersistedOnboarding({ version: 1, status: 'active', step: 2 })).toEqual({
-      version: 3,
-      status: 'active',
-      step: 3,
-    });
-    expect(migratePersistedOnboarding({ version: 1, status: 'pending', step: 3 })).toEqual({
-      version: 3,
-      status: 'pending',
-      step: 5,
-    });
-  });
-
-  it('migratePersistedOnboarding remaps a v1 snapshot at index 10 (old Rail map → new index 12)', () => {
-    const migrated = migratePersistedOnboarding({ version: 1, status: 'skipped', step: 10 });
-    expect(migrated).toEqual({ version: 3, status: 'skipped', step: 12 });
-  });
-
-  it('migratePersistedOnboarding applies ONLY the v2→v3 remap to a v2 snapshot', () => {
-    expect(migratePersistedOnboarding({ version: 2, status: 'active', step: 4 })).toEqual({
-      version: 3,
-      status: 'active',
-      step: 5,
-    });
-    expect(migratePersistedOnboarding({ version: 2, status: 'active', step: 1 })).toEqual({
-      version: 3,
-      status: 'active',
-      step: 1,
-    });
-  });
-
-  it('hydrate migrates a v1 snapshot end-to-end before clamping (old step 3 → new 5, kept)', () => {
-    s().hydrate({ version: 1, status: 'active', step: 3 }, 1);
+  it('a mid-tour v4 snapshot resumes as skipped at the same step', () => {
+    s().hydrate({ version: 4, status: 'active', step: 5 }, 1);
     expect(s().status).toBe('skipped');
     expect(s().step).toBe(5);
     expect(s().maxVisitedStep).toBe(5);
   });
 
-  it('hydrate migrates a v1 snapshot on an old context-bound coach step (old 7 → new 9, clamped to 6)', () => {
-    // old step 7 (last Configure pointer) → new step 9, which falls inside the
-    // 7-10 context-bound clamp range and resumes at 6.
-    s().hydrate({ version: 1, status: 'active', step: 7 }, 1);
+  it('a snapshot parked on a guided screen hydrates as skipped at the clamped step (resumable)', () => {
+    for (const [step, expected] of [[7, 7], [8, 7], [12, 7], [14, 7]] as const) {
+      for (const status of ['active', 'skipped'] as const) {
+        reset();
+        s().hydrate({ version: 4, status, step }, 0);
+        expect(s().status).toBe('skipped');
+        expect(s().step).toBe(expected);
+      }
+    }
+  });
+
+  it('a legacy pending snapshot hydrates as skipped', () => {
+    s().hydrate({ version: 3, status: 'pending', step: 4 }, 0);
+    expect(s().status).toBe('skipped');
+    expect(s().step).toBe(5); // v3 telemetry (4) → v4 telemetry (5)
+  });
+
+  it('a v1 mid-tour snapshot migrates end to end before clamping (old 3 → new 6)', () => {
+    // v1 step 3 (Add project) → v2 4 → v3 5 → v4 6 (the handoff step).
+    s().hydrate({ version: 1, status: 'active', step: 3 }, 1);
     expect(s().status).toBe('skipped');
     expect(s().step).toBe(6);
     expect(s().maxVisitedStep).toBe(6);
   });
 
-  it('hydrate migrates a v1 snapshot on old step 10 (rail map, unaffected by the clamp) to new 12', () => {
-    s().hydrate({ version: 1, status: 'active', step: 10 }, 1);
-    expect(s().status).toBe('skipped');
-    expect(s().step).toBe(12);
+  it('hydrate marks the boot gate resolved on every branch', () => {
+    for (const call of [
+      () => s().hydrate(null, 0),
+      () => s().hydrate(null, 2),
+      () => s().hydrate({ version: 4, status: 'completed', step: 3 }, 0),
+      () => s().hydrate({ version: 4, status: 'skipped', step: 3 }, 0),
+    ]) {
+      reset();
+      call();
+      expect(s().hydrated).toBe(true);
+    }
+  });
+});
+
+describe('onboardingStore — snapshot migration', () => {
+  it('migrateV1StepIndex leaves the unmoved prefix (0-2) unchanged and shifts 3 onward', () => {
+    expect(migrateV1StepIndex(0)).toBe(0);
+    expect(migrateV1StepIndex(2)).toBe(2);
+    expect(migrateV1StepIndex(3)).toBe(4);
+    expect(migrateV1StepIndex(10)).toBe(11);
   });
 
-  it('clampResumeStep still clamps out-of-range values to the valid 0-12 window', () => {
+  it('migrateV2StepIndex leaves the unmoved prefix (0-1) unchanged and shifts 2 onward', () => {
+    expect(migrateV2StepIndex(0)).toBe(0);
+    expect(migrateV2StepIndex(1)).toBe(1);
+    expect(migrateV2StepIndex(2)).toBe(3);
+    expect(migrateV2StepIndex(11)).toBe(12);
+  });
+
+  it('migrateV3StepIndex keeps 0-2, shifts permission/telemetry, and folds everything else onto the handoff step', () => {
+    expect(migrateV3StepIndex(0)).toBe(0);
+    expect(migrateV3StepIndex(1)).toBe(1);
+    expect(migrateV3StepIndex(2)).toBe(2);
+    expect(migrateV3StepIndex(3)).toBe(4); // permission
+    expect(migrateV3StepIndex(4)).toBe(5); // telemetry
+    expect(migrateV3StepIndex(5)).toBe(6); // old add-project modal
+    expect(migrateV3StepIndex(9)).toBe(6); // old model coachmark
+    expect(migrateV3StepIndex(12)).toBe(6); // old rail map
+  });
+
+  it('migratePersistedOnboarding is a no-op for an already-v4 snapshot', () => {
+    const v4 = { version: 4 as const, status: 'active' as const, step: 5 };
+    expect(migratePersistedOnboarding(v4)).toEqual(v4);
+  });
+
+  it('migratePersistedOnboarding walks a v1 snapshot through every remap', () => {
+    // 0/1 predate all three insertions. v1 2 (Permission) is shifted by v2→v3 to
+    // 3, then by v3→v4 to 4. v1 3 (Add project) is shifted by v1→v2 to 4 and by
+    // v2→v3 to 5, which v3→v4 folds onto the handoff step.
+    expect(migratePersistedOnboarding({ version: 1, status: 'active', step: 0 })).toEqual({
+      version: 4,
+      status: 'active',
+      step: 0,
+    });
+    expect(migratePersistedOnboarding({ version: 1, status: 'active', step: 2 })).toEqual({
+      version: 4,
+      status: 'active',
+      step: 4,
+    });
+    expect(migratePersistedOnboarding({ version: 1, status: 'active', step: 3 })).toEqual({
+      version: 4,
+      status: 'active',
+      step: 6,
+    });
+  });
+
+  it('migratePersistedOnboarding applies only the v3→v4 remap to a v3 snapshot', () => {
+    const table: ReadonlyArray<readonly [number, number]> = [
+      [0, 0],
+      [1, 1],
+      [2, 2],
+      [3, 4],
+      [4, 5],
+      [5, 6],
+      [9, 6],
+      [12, 6],
+    ];
+    for (const [from, to] of table) {
+      expect(migratePersistedOnboarding({ version: 3, status: 'skipped', step: from })).toEqual({
+        version: 4,
+        status: 'skipped',
+        step: to,
+      });
+    }
+  });
+
+  it('migratePersistedOnboarding applies both later remaps to a v2 snapshot', () => {
+    // v2 1 → v3 1 → v4 1; v2 2 → v3 3 → v4 4 (permission).
+    expect(migratePersistedOnboarding({ version: 2, status: 'active', step: 1 })).toEqual({
+      version: 4,
+      status: 'active',
+      step: 1,
+    });
+    expect(migratePersistedOnboarding({ version: 2, status: 'active', step: 2 })).toEqual({
+      version: 4,
+      status: 'active',
+      step: 4,
+    });
+  });
+
+  it('migratePersistedOnboarding folds the retired pending status into skipped', () => {
+    expect(migratePersistedOnboarding({ version: 3, status: 'pending', step: 9 })).toEqual({
+      version: 4,
+      status: 'skipped',
+      step: 6,
+    });
+    expect(migratePersistedOnboarding({ version: 1, status: 'pending', step: 3 })).toEqual({
+      version: 4,
+      status: 'skipped',
+      step: 6,
+    });
+  });
+
+  it('migratePersistedOnboarding leaves a completed snapshot completed, step UNTOUCHED', () => {
+    for (const version of [1, 2, 3] as const) {
+      expect(migratePersistedOnboarding({ version, status: 'completed', step: 12 })).toEqual({
+        version: 4,
+        status: 'completed',
+        step: 12,
+      });
+    }
+    // Right on (and just below) an old shift boundary, where a regression to
+    // "always remap" would surface first.
+    expect(migratePersistedOnboarding({ version: 1, status: 'completed', step: 3 })).toEqual({
+      version: 4,
+      status: 'completed',
+      step: 3,
+    });
+    expect(migratePersistedOnboarding({ version: 1, status: 'completed', step: 2 })).toEqual({
+      version: 4,
+      status: 'completed',
+      step: 2,
+    });
+  });
+
+  it('clampResumeStep sends every guided screen past the branch choice (8-14) back to it', () => {
+    for (const step of [8, 9, 10, 11, 12, 13, 14]) {
+      expect(clampResumeStep(step)).toBe(7);
+    }
+  });
+
+  it('clampResumeStep passes every other in-window step through', () => {
+    for (const step of [0, 1, 2, 3, 4, 5, 6, 7]) {
+      expect(clampResumeStep(step)).toBe(step);
+    }
+  });
+
+  it('clampResumeStep clamps out-of-range values into the 0-14 window', () => {
     expect(clampResumeStep(-1)).toBe(0);
-    expect(clampResumeStep(99)).toBe(12);
-  });
-
-  it('clampResumeStep passes through the valid-window edges (0 and 12) unchanged', () => {
-    expect(clampResumeStep(0)).toBe(0);
-    expect(clampResumeStep(12)).toBe(12);
-  });
-
-  it('clampResumeStep maps exactly the context-bound band (7-10) to 6, leaving its neighbors (6, 11) untouched', () => {
-    expect(clampResumeStep(6)).toBe(6); // just below the band
-    expect(clampResumeStep(7)).toBe(6); // band start
-    expect(clampResumeStep(10)).toBe(6); // band end
-    expect(clampResumeStep(11)).toBe(11); // just above the band
-  });
-
-  it('hydrate accepts a v3 snapshot directly, applying only the clamp (no step shift)', () => {
-    s().hydrate({ version: 3, status: 'active', step: 4 }, 1);
-    expect(s().status).toBe('skipped');
-    expect(s().step).toBe(4); // NOT shifted again — already the new-schema index
+    expect(clampResumeStep(99)).toBe(14);
   });
 });
 
 describe('onboardingStore — step-1 gate', () => {
   beforeEach(reset);
 
-  it('isNextGateBlocked accepts either detected and enabled provider', () => {
+  it('isNextGateBlocked accepts either detected AND enabled provider', () => {
     expect(isNextGateBlocked({
       step: 1,
       detection: null,
@@ -303,12 +334,18 @@ describe('onboardingStore — step-1 gate', () => {
   });
 
   it('next() is a no-op on step 1 while the gate is closed, and advances once open', () => {
-    useOnboardingStore.setState({ status: 'active', step: 1, maxVisitedStep: 1, detection: DETECTED, connected: false });
+    useOnboardingStore.setState({
+      status: 'active',
+      step: 1,
+      maxVisitedStep: 1,
+      detection: DETECTED,
+      connected: false,
+    });
     s().next();
     expect(s().step).toBe(1);
     s().setConnected(true);
     s().next();
-    // One activated provider ⇒ the Default-agent step (2) is skipped entirely.
+    // One candidate ⇒ the Default-agent step (2) is skipped; Model (3) is next.
     expect(s().step).toBe(3);
     expect(s().maxVisitedStep).toBe(3);
   });
@@ -349,7 +386,11 @@ describe('onboardingStore — the conditional Default-agent step (2)', () => {
       activatedProviders({
         detection: DETECTED,
         connected: true,
-        codexDetection: { state: 'unavailable', runtime: { found: false, path: null, version: null }, account: { found: false, email: null, planType: null } },
+        codexDetection: {
+          state: 'unavailable',
+          runtime: { found: false, path: null, version: null },
+          account: { found: false, email: null, planType: null },
+        },
         codexConnected: true,
         ompDetection: null,
         ompConnected: false,
@@ -369,7 +410,31 @@ describe('onboardingStore — the conditional Default-agent step (2)', () => {
     ).toEqual(['codex']);
   });
 
-  it('next() from Connect lands on step 2 when two providers are activated', () => {
+  it('defaultAgentCandidates drops OMP from the activated list', () => {
+    expect(
+      defaultAgentCandidates({
+        detection: DETECTED,
+        connected: true,
+        codexDetection: CODEX_DETECTED,
+        codexConnected: true,
+        ompDetection: OMP_DETECTED,
+        ompConnected: true,
+      }),
+    ).toEqual(['claude', 'codex']);
+
+    expect(
+      defaultAgentCandidates({
+        detection: DETECTED,
+        connected: true,
+        codexDetection: null,
+        codexConnected: false,
+        ompDetection: OMP_DETECTED,
+        ompConnected: true,
+      }),
+    ).toEqual(['claude']);
+  });
+
+  it('next() from Connect lands on step 2 when BOTH claude and codex are activated', () => {
     useOnboardingStore.setState({
       status: 'active',
       step: 1,
@@ -386,6 +451,23 @@ describe('onboardingStore — the conditional Default-agent step (2)', () => {
     expect(s().step).toBe(3);
   });
 
+  it('multiRuntime IGNORES OMP — claude + omp is a single-candidate run', () => {
+    useOnboardingStore.setState({
+      status: 'active',
+      step: 1,
+      maxVisitedStep: 1,
+      detection: DETECTED,
+      connected: true,
+      ompDetection: OMP_DETECTED,
+      ompConnected: true,
+      multiRuntime: true,
+    });
+    s().next();
+    expect(s().multiRuntime).toBe(false);
+    expect(s().step).toBe(3); // stepped straight over the Default-agent question
+    expect(isStepSkipped(2, s())).toBe(true);
+  });
+
   it('next() from Connect steps OVER step 2 with a single activated provider', () => {
     useOnboardingStore.setState({
       status: 'active',
@@ -399,22 +481,21 @@ describe('onboardingStore — the conditional Default-agent step (2)', () => {
     s().next();
     expect(s().step).toBe(3);
     expect(s().multiRuntime).toBe(false);
-    expect(isStepSkipped(2, s())).toBe(true);
   });
 
-  it('back() from Permission steps over a skipped step 2 and lands on Connect', () => {
+  it('back() from Model steps over a skipped step 2 and lands on Connect', () => {
     useOnboardingStore.setState({ status: 'active', step: 3, maxVisitedStep: 3, multiRuntime: false });
     s().back();
     expect(s().step).toBe(1);
   });
 
-  it('back() from Permission lands on step 2 when it IS part of this run', () => {
+  it('back() from Model lands on step 2 when it IS part of this run', () => {
     useOnboardingStore.setState({ status: 'active', step: 3, maxVisitedStep: 3, multiRuntime: true });
     s().back();
     expect(s().step).toBe(2);
   });
 
-  it('goTo refuses a skipped step even inside maxVisited', () => {
+  it('goTo refuses the skipped step 2 even inside maxVisited', () => {
     useOnboardingStore.setState({ status: 'active', step: 4, maxVisitedStep: 4, multiRuntime: false });
     s().goTo(2);
     expect(s().step).toBe(4);
@@ -422,13 +503,7 @@ describe('onboardingStore — the conditional Default-agent step (2)', () => {
     expect(s().step).toBe(1);
   });
 
-  it('forceNext also steps over a skipped step 2', () => {
-    useOnboardingStore.setState({ status: 'active', step: 1, maxVisitedStep: 1, multiRuntime: false, detection: DETECTED, connected: true });
-    s().forceNext();
-    expect(s().step).toBe(3);
-  });
-
-  it('the decision is re-made every time Connect is left, so enabling a second provider brings the step back', () => {
+  it('the decision is re-made every time Connect is left, so enabling Codex brings the step back', () => {
     useOnboardingStore.setState({
       status: 'active',
       step: 1,
@@ -463,160 +538,155 @@ describe('onboardingStore — the conditional Default-agent step (2)', () => {
     s().setDefaultProvider(null);
     expect(s().defaultProvider).toBeNull();
   });
+});
 
-  it('is included in ONBOARDING_MODAL_STEPS, not the coach/pointer sets', async () => {
-    const { ONBOARDING_MODAL_STEPS, ONBOARDING_COACH_STEPS, ONBOARDING_POINTER_STEPS } = await import('../../utils/onboarding');
-    expect(ONBOARDING_MODAL_STEPS).toContain(2);
-    expect(ONBOARDING_COACH_STEPS).not.toContain(2);
-    expect(ONBOARDING_POINTER_STEPS).not.toContain(2);
+describe('onboardingStore — the Model step (3)', () => {
+  beforeEach(reset);
+
+  it('records the model, the effort, and the two-phase card state', () => {
+    expect(s().defaultModel).toBeNull();
+    expect(s().defaultEffort).toBeNull();
+    expect(s().modelPhase).toBe('model');
+
+    s().setDefaultModel('opus');
+    s().setModelPhase('effort');
+    s().setDefaultEffort('high');
+    expect(s().defaultModel).toBe('opus');
+    expect(s().modelPhase).toBe('effort');
+    expect(s().defaultEffort).toBe('high');
+
+    // CHANGE goes back to the model list; a Codex catalog id and its own scale
+    // live in the same fields.
+    s().setModelPhase('model');
+    s().setDefaultModel('gpt-5.4-codex');
+    s().setDefaultEffort('minimal');
+    expect(s().modelPhase).toBe('model');
+    expect(s().defaultModel).toBe('gpt-5.4-codex');
+    expect(s().defaultEffort).toBe('minimal');
+  });
+
+  it('advances Model → Permission → Telemetry → Handoff like any other modal step', () => {
+    useOnboardingStore.setState({ status: 'active', step: 3, maxVisitedStep: 3 });
+    s().next();
+    expect(s().step).toBe(4);
+    s().next();
+    expect(s().step).toBe(5);
+    s().next();
+    expect(s().step).toBe(6);
+    expect(s().maxVisitedStep).toBe(6);
+  });
+
+  it('back() from Permission returns to Model', () => {
+    useOnboardingStore.setState({ status: 'active', step: 4, maxVisitedStep: 4 });
+    s().back();
+    expect(s().step).toBe(3);
   });
 });
 
-describe('onboardingStore — coach steps advance by doing', () => {
+describe('onboardingStore — the handoff step (6)', () => {
   beforeEach(reset);
 
-  it('next() never advances a do-step (6, 10, 11)', () => {
-    for (const step of [6, 10, 11]) {
-      useOnboardingStore.setState({ status: 'active', step, maxVisitedStep: step });
-      s().next();
-      expect(s().step).toBe(step);
-      expect(s().status).toBe('active');
-    }
-  });
-
-  it('anchorActioned on step 6 advances straight to the first Configure pointer (7)', () => {
-    useOnboardingStore.setState({ status: 'active', step: 6, maxVisitedStep: 6 });
-    s().anchorActioned();
+  it("'continue' walks into the guided set-up (step 7)", () => {
+    useOnboardingStore.setState({ status: 'active', step: 6, maxVisitedStep: 6, handoffChoice: 'continue' });
+    s().next();
     expect(s().status).toBe('active');
     expect(s().step).toBe(7);
     expect(s().maxVisitedStep).toBe(7);
   });
 
-  it('anchorActioned on step 10 parks pending', () => {
-    useOnboardingStore.setState({ status: 'active', step: 10, maxVisitedStep: 10 });
-    s().anchorActioned();
-    expect(s().status).toBe('pending');
-    expect(s().step).toBe(10);
-  });
-
-  it('anchorActioned on step 11 jumps straight to the rail map (step 12)', () => {
-    useOnboardingStore.setState({ status: 'active', step: 11, maxVisitedStep: 11 });
-    s().anchorActioned();
-    expect(s().status).toBe('active');
-    expect(s().step).toBe(12);
-    expect(s().maxVisitedStep).toBe(12);
-  });
-
-  it('anchorActioned is a no-op on pointer steps', () => {
-    useOnboardingStore.setState({ status: 'active', step: 7, maxVisitedStep: 7 });
-    s().anchorActioned();
-    expect(s().status).toBe('active');
-    expect(s().step).toBe(7);
-  });
-
-  it('realEvent lands the matching next step from pending', () => {
-    useOnboardingStore.setState({ status: 'pending', step: 9, maxVisitedStep: 9 });
-    s().realEvent('quick-session-created');
-    expect(s().status).toBe('active');
-    expect(s().step).toBe(10);
-
-    useOnboardingStore.setState({ status: 'pending', step: 10, maxVisitedStep: 10 });
-    s().realEvent('workflow-run-started');
-    expect(s().step).toBe(11);
-
-    useOnboardingStore.setState({ status: 'active', step: 5, maxVisitedStep: 5 });
-    s().realEvent('project-created');
+  it("'skip' completes the tour without touching the step", () => {
+    useOnboardingStore.setState({ status: 'active', step: 6, maxVisitedStep: 6, handoffChoice: 'skip' });
+    s().next();
+    expect(s().status).toBe('completed');
     expect(s().step).toBe(6);
   });
 
-  it('quick-session-created advances from ANY Configure-page step (6-9)', () => {
-    for (const step of [6, 7, 8, 9]) {
-      useOnboardingStore.setState({ status: 'active', step, maxVisitedStep: step });
-      s().realEvent('quick-session-created');
-      expect(s().status).toBe('active');
-      expect(s().step).toBe(10);
-    }
+  it('setHandoffChoice flips the branch', () => {
+    expect(s().handoffChoice).toBe('continue');
+    s().setHandoffChoice('skip');
+    expect(s().handoffChoice).toBe('skip');
   });
 
-  it('realEvent ignores wrong-step / wrong-kind signals', () => {
+  it('back() from the handoff step returns to Telemetry', () => {
     useOnboardingStore.setState({ status: 'active', step: 6, maxVisitedStep: 6 });
-    s().realEvent('workflow-run-started'); // wrong kind for step 6
-    expect(s().step).toBe(6);
-
-    useOnboardingStore.setState({ status: 'skipped', step: 6, maxVisitedStep: 6 });
-    s().realEvent('quick-session-created'); // not active/pending
-    expect(s().step).toBe(6);
-    expect(s().status).toBe('skipped');
+    s().back();
+    expect(s().step).toBe(5);
   });
 });
 
-describe('onboardingStore — Configure pointer steps (7-9)', () => {
+describe('onboardingStore — the guided set-up steps (7, 8)', () => {
   beforeEach(reset);
 
-  it('next() advances pointer steps 7 → 8 → 9', () => {
-    useOnboardingStore.setState({ status: 'active', step: 7, maxVisitedStep: 7 });
+  it("'existing' and 'new' advance to the detail screen (8)", () => {
+    for (const choice of ['existing', 'new'] as const) {
+      reset();
+      useOnboardingStore.setState({ status: 'active', step: 7, maxVisitedStep: 7, projectChoice: choice });
+      s().next();
+      expect(s().status).toBe('active');
+      expect(s().step).toBe(8);
+      expect(s().maxVisitedStep).toBe(8);
+    }
+  });
+
+  it("'unsure' skips the detail step and continues into the shell with no project", () => {
+    useOnboardingStore.setState({ status: 'active', step: 7, maxVisitedStep: 7, projectChoice: 'unsure' });
     s().next();
-    expect(s().step).toBe(8);
-    s().next();
+    expect(s().status).toBe('active');
     expect(s().step).toBe(9);
     expect(s().maxVisitedStep).toBe(9);
-  });
-
-  it('next() on the last pointer (9) parks pending until the session launches', () => {
-    useOnboardingStore.setState({ status: 'active', step: 9, maxVisitedStep: 9 });
+    expect(s().guidedProject).toBeNull();
+    // From there the walk is the ordinary one: 10-12 with the assistant, 13 without.
     s().next();
-    expect(s().status).toBe('pending');
-    expect(s().step).toBe(9);
-    s().realEvent('quick-session-created');
-    expect(s().status).toBe('active');
     expect(s().step).toBe(10);
-  });
-
-  it('next() on step 9 advances normally when step 10 was already reached (revisit)', () => {
-    useOnboardingStore.setState({ status: 'active', step: 9, maxVisitedStep: 11 });
+    useOnboardingStore.setState({ step: 9, assistantAvailable: false });
     s().next();
-    expect(s().status).toBe('active');
-    expect(s().step).toBe(10);
-  });
-});
-
-describe('onboardingStore — forceNext (anchor-lost escape)', () => {
-  beforeEach(reset);
-
-  it('force-advances a do-step that next() refuses (6 → 7)', () => {
-    useOnboardingStore.setState({ status: 'active', step: 6, maxVisitedStep: 6 });
-    s().next();
-    expect(s().step).toBe(6); // next() is a no-op on the do-step
-    s().forceNext();
-    expect(s().step).toBe(7);
-    expect(s().maxVisitedStep).toBe(7);
+    expect(s().step).toBe(13);
   });
 
-  it('force-advances the later do-steps (10 → 11, 11 → 12)', () => {
-    useOnboardingStore.setState({ status: 'active', step: 10, maxVisitedStep: 10 });
-    s().forceNext();
-    expect(s().step).toBe(11);
-    useOnboardingStore.setState({ status: 'active', step: 11, maxVisitedStep: 11 });
-    s().forceNext();
-    expect(s().step).toBe(12);
-    expect(s().maxVisitedStep).toBe(12);
+  it('setProjectChoice records the branch', () => {
+    expect(s().projectChoice).toBe('existing');
+    s().setProjectChoice('new');
+    expect(s().projectChoice).toBe('new');
+    s().setProjectChoice('unsure');
+    expect(s().projectChoice).toBe('unsure');
   });
 
-  it('is a no-op unless active', () => {
-    useOnboardingStore.setState({ status: 'pending', step: 10, maxVisitedStep: 10 });
-    s().forceNext();
-    expect(s().step).toBe(10);
-    expect(s().status).toBe('pending');
+  it('next() on step 8 is inert — the create handler completes the tour via finish()', () => {
+    for (const choice of ['existing', 'new', 'unsure'] as const) {
+      reset();
+      useOnboardingStore.setState({ status: 'active', step: 8, maxVisitedStep: 8, projectChoice: choice });
+      s().next();
+      expect(s().status).toBe('active');
+      expect(s().step).toBe(8);
+    }
   });
 
-  it('completes from the last step', () => {
-    useOnboardingStore.setState({ status: 'active', step: 12, maxVisitedStep: 12 });
-    s().forceNext();
+  it('finish() completes from the detail screen', () => {
+    useOnboardingStore.setState({ status: 'active', step: 8, maxVisitedStep: 8 });
+    s().finish();
     expect(s().status).toBe('completed');
+    expect(s().step).toBe(8);
+  });
+
+  it('back() walks the guided screens back into the modal phase (8 → 7 → 6)', () => {
+    useOnboardingStore.setState({ status: 'active', step: 8, maxVisitedStep: 8 });
+    s().back();
+    expect(s().step).toBe(7);
+    s().back();
+    expect(s().step).toBe(6);
+  });
+
+  it('skip() from a guided step parks the tour at that step (Sidebar resume card)', () => {
+    for (const step of [7, 8]) {
+      useOnboardingStore.setState({ status: 'active', step, maxVisitedStep: step });
+      s().skip();
+      expect(s().status).toBe('skipped');
+      expect(s().step).toBe(step);
+    }
   });
 });
 
-describe('onboardingStore — goTo / skip / resume', () => {
+describe('onboardingStore — goTo / skip / resume / dismiss', () => {
   beforeEach(reset);
 
   it('goTo only revisits steps within maxVisited and ignores the current step', () => {
@@ -629,59 +699,57 @@ describe('onboardingStore — goTo / skip / resume', () => {
     expect(s().step).toBe(1);
   });
 
-  it('skip then resume round-trips to the same step', () => {
-    useOnboardingStore.setState({ status: 'active', step: 3, maxVisitedStep: 3 });
+  it('skip then resume round-trips to the same modal step', () => {
+    useOnboardingStore.setState({ status: 'active', step: 5, maxVisitedStep: 5 });
     s().skip();
     expect(s().status).toBe('skipped');
     s().resume();
     expect(s().status).toBe('active');
-    expect(s().step).toBe(3);
+    expect(s().step).toBe(5);
   });
 
-  it('skip then resume round-trips on the Telemetry step (4)', () => {
-    useOnboardingStore.setState({ status: 'active', step: 4, maxVisitedStep: 4 });
-    s().skip();
+  it('resume is WARM: a tour parked on a guided screen comes back at the same step', () => {
+    useOnboardingStore.setState({ status: 'skipped', step: 8, maxVisitedStep: 8, projectChoice: 'new' });
+    s().resume();
+    expect(s().status).toBe('active');
+    expect(s().step).toBe(8);
+    expect(s().projectChoice).toBe('new');
+  });
+
+  it('a COLD boot still clamps a parked guided step to the branch choice (hydrate)', () => {
+    useOnboardingStore.setState({ status: 'idle', hydrated: false });
+    s().hydrate({ version: 4, status: 'skipped', step: 12 }, 1);
     expect(s().status).toBe('skipped');
-    s().resume();
-    expect(s().status).toBe('active');
-    expect(s().step).toBe(4); // modal step, never disconnects — no clamp
+    expect(s().step).toBe(7);
   });
 
-  it('resume from a live coach pending step returns to the SAME step (steps 10-11 keep place)', () => {
-    useOnboardingStore.setState({ status: 'pending', step: 10, maxVisitedStep: 10 });
-    s().resume();
-    expect(s().status).toBe('active');
-    expect(s().step).toBe(10);
-  });
-
-  it('resume from a Configure pointer (7-9) clamps to step 6 to rebuild the wizard', () => {
-    for (const step of [7, 8, 9]) {
+  it('skip() is a no-op unless the tour is active', () => {
+    for (const status of ['idle', 'skipped', 'completed'] as const) {
       reset();
-      useOnboardingStore.setState({ status: 'skipped', step, maxVisitedStep: 9 });
-      s().resume();
-      expect(s().status).toBe('active');
-      expect(s().step).toBe(6);
-      expect(s().maxVisitedStep).toBe(6); // reset so dots can't jump back onto missing anchors
+      useOnboardingStore.setState({ status, step: 4, maxVisitedStep: 4 });
+      s().skip();
+      expect(s().status).toBe(status);
     }
   });
 
-  it('resume clamps a Configure pointer from pending too', () => {
-    useOnboardingStore.setState({ status: 'pending', step: 8, maxVisitedStep: 8 });
-    s().resume();
-    expect(s().step).toBe(6);
-  });
-
-  it('dismiss permanently completes the tour from skipped or pending', () => {
-    for (const status of ['skipped', 'pending'] as const) {
+  it('resume() is a no-op unless the tour is skipped', () => {
+    for (const status of ['idle', 'active', 'completed'] as const) {
       reset();
       useOnboardingStore.setState({ status, step: 8, maxVisitedStep: 8 });
-      s().dismiss();
-      expect(s().status).toBe('completed');
-      expect(s().step).toBe(8); // step kept for the persisted snapshot + telemetry
+      s().resume();
+      expect(s().status).toBe(status);
+      expect(s().step).toBe(8); // no clamp either
     }
   });
 
-  it('dismiss is a no-op unless skipped/pending (never from an active tour)', () => {
+  it('dismiss permanently completes the tour from skipped, keeping the step', () => {
+    useOnboardingStore.setState({ status: 'skipped', step: 5, maxVisitedStep: 5 });
+    s().dismiss();
+    expect(s().status).toBe('completed');
+    expect(s().step).toBe(5); // step kept for the persisted snapshot + telemetry
+  });
+
+  it('dismiss is a no-op unless skipped (never from an active tour)', () => {
     for (const status of ['active', 'idle', 'completed'] as const) {
       reset();
       useOnboardingStore.setState({ status, step: 6, maxVisitedStep: 6 });
@@ -690,10 +758,23 @@ describe('onboardingStore — goTo / skip / resume', () => {
     }
   });
 
-  it('begin resets provider detection + consent for a clean replay', () => {
+  it('next()/back()/goTo() are inert unless the tour is active', () => {
+    for (const status of ['idle', 'skipped', 'completed'] as const) {
+      reset();
+      useOnboardingStore.setState({ status, step: 4, maxVisitedStep: 8 });
+      s().next();
+      s().back();
+      s().goTo(2);
+      expect(s().status).toBe(status);
+      expect(s().step).toBe(4);
+    }
+  });
+
+  it('begin resets detection, consent, and every step-3/6/7 answer for a clean replay', () => {
     useOnboardingStore.setState({
       status: 'skipped',
-      step: 11,
+      step: 8,
+      maxVisitedStep: 8,
       detection: DETECTED,
       connected: true,
       codexDetection: CODEX_DETECTED,
@@ -703,10 +784,16 @@ describe('onboardingStore — goTo / skip / resume', () => {
       permMode: 'dontAsk',
       defaultProvider: 'codex',
       multiRuntime: false,
+      defaultModel: 'gpt-5.4-codex',
+      defaultEffort: 'minimal',
+      modelPhase: 'effort',
+      handoffChoice: 'skip',
+      projectChoice: 'unsure',
     });
     s().begin(true);
     expect(s().status).toBe('active');
     expect(s().step).toBe(0);
+    expect(s().maxVisitedStep).toBe(0);
     expect(s().replay).toBe(true);
     expect(s().detection).toBeNull();
     expect(s().connected).toBe(false);
@@ -717,37 +804,200 @@ describe('onboardingStore — goTo / skip / resume', () => {
     expect(s().permMode).toBe('auto');
     expect(s().defaultProvider).toBeNull();
     expect(s().multiRuntime).toBe(true);
+    expect(s().defaultModel).toBeNull();
+    expect(s().defaultEffort).toBeNull();
+    expect(s().modelPhase).toBe('model');
+    expect(s().handoffChoice).toBe('continue');
+    expect(s().projectChoice).toBe('existing');
+    expect(s().hydrated).toBe(true);
+  });
+
+  it('restart() is begin(true)', () => {
+    useOnboardingStore.setState({ status: 'completed', step: 6, replay: false });
+    s().restart();
+    expect(s().status).toBe('active');
+    expect(s().step).toBe(0);
+    expect(s().replay).toBe(true);
   });
 });
 
-describe('onboardingStore — Telemetry step (4)', () => {
+describe('onboardingStore — step-group membership', () => {
+  it('the modal and guided sets partition the tour, with the conditional step in the modal half', async () => {
+    const { ONBOARDING_MODAL_STEPS, ONBOARDING_GUIDED_STEPS, ONBOARDING_STEP_COUNT } = await import(
+      '../../utils/onboarding'
+    );
+    expect(ONBOARDING_MODAL_STEPS).toContain(2);
+    expect(ONBOARDING_MODAL_STEPS).toContain(3);
+    expect(ONBOARDING_GUIDED_STEPS).not.toContain(2);
+    expect([...ONBOARDING_MODAL_STEPS, ...ONBOARDING_GUIDED_STEPS]).toEqual(
+      Array.from({ length: ONBOARDING_STEP_COUNT }, (_, i) => i),
+    );
+  });
+});
+
+describe('onboardingStore — the in-shell guided steps (9-14)', () => {
   beforeEach(reset);
 
-  it('next() advances Permission → Telemetry → Add project like any other modal step', () => {
-    useOnboardingStore.setState({ status: 'active', step: 3, maxVisitedStep: 3 });
-    s().next();
-    expect(s().step).toBe(4);
-    s().next();
-    expect(s().step).toBe(5);
-    expect(s().maxVisitedStep).toBe(5);
+  const PROJECT = { id: 7, name: 'dogwalkr' };
+
+  function activeAt(step: number, extra: Partial<ReturnType<typeof useOnboardingStore.getState>> = {}): void {
+    useOnboardingStore.setState({ status: 'active', step, maxVisitedStep: step, hydrated: true, ...extra });
+  }
+
+  it('projectAdded() records the project and moves 8 → 9 (the in-shell handover)', () => {
+    activeAt(8);
+    useOnboardingStore.getState().projectAdded(PROJECT);
+    const s = useOnboardingStore.getState();
+    expect(s.step).toBe(9);
+    expect(s.maxVisitedStep).toBe(9);
+    expect(s.status).toBe('active');
+    expect(s.guidedProject).toEqual(PROJECT);
   });
 
-  it('back() from Telemetry (4) returns to Permission (3)', () => {
-    useOnboardingStore.setState({ status: 'active', step: 4, maxVisitedStep: 4 });
-    s().back();
-    expect(s().step).toBe(3);
+  it('projectAdded() is inert off step 8 or when the tour is not active', () => {
+    activeAt(7);
+    useOnboardingStore.getState().projectAdded(PROJECT);
+    expect(useOnboardingStore.getState().step).toBe(7);
+    expect(useOnboardingStore.getState().guidedProject).toBeNull();
+    useOnboardingStore.setState({ status: 'completed', step: 8 });
+    useOnboardingStore.getState().projectAdded(PROJECT);
+    expect(useOnboardingStore.getState().guidedProject).toBeNull();
   });
 
-  it('goTo reaches the Telemetry step once visited', () => {
-    useOnboardingStore.setState({ status: 'active', step: 5, maxVisitedStep: 5 });
-    s().goTo(4);
-    expect(s().step).toBe(4);
+  it('next() walks 9 → 10 → 11 → 12 → 13 with the assistant available', () => {
+    activeAt(9);
+    for (const expected of [10, 11, 12, 13]) {
+      useOnboardingStore.getState().next();
+      expect(useOnboardingStore.getState().step).toBe(expected);
+    }
   });
 
-  it('is included in ONBOARDING_MODAL_STEPS, not the coach/pointer sets', async () => {
-    const { ONBOARDING_MODAL_STEPS, ONBOARDING_COACH_STEPS, ONBOARDING_POINTER_STEPS } = await import('../../utils/onboarding');
-    expect(ONBOARDING_MODAL_STEPS).toContain(4);
-    expect(ONBOARDING_COACH_STEPS).not.toContain(4);
-    expect(ONBOARDING_POINTER_STEPS).not.toContain(4);
+  it('next() from 9 skips the three assistant steps when the assistant is off', () => {
+    activeAt(9, { assistantAvailable: false });
+    useOnboardingStore.getState().next();
+    expect(useOnboardingStore.getState().step).toBe(13);
+    expect(useOnboardingStore.getState().maxVisitedStep).toBe(13);
+  });
+
+  it('isStepSkipped / skippedStepSet cover the assistant steps, per the availability flag', () => {
+    expect(isStepSkipped(10, { multiRuntime: true, assistantAvailable: false })).toBe(true);
+    expect(isStepSkipped(11, { multiRuntime: true, assistantAvailable: false })).toBe(true);
+    expect(isStepSkipped(12, { multiRuntime: true, assistantAvailable: false })).toBe(true);
+    expect(isStepSkipped(13, { multiRuntime: true, assistantAvailable: false })).toBe(false);
+    expect(isStepSkipped(10, { multiRuntime: true, assistantAvailable: true })).toBe(false);
+    expect([...skippedStepSet({ multiRuntime: true, assistantAvailable: false })]).toEqual([10, 11, 12]);
+    expect([...skippedStepSet({ multiRuntime: false, assistantAvailable: false })]).toEqual([2, 10, 11, 12]);
+    expect([...skippedStepSet({ multiRuntime: false, assistantAvailable: true })]).toEqual([2]);
+    // Stable identities per combination.
+    expect(skippedStepSet({ multiRuntime: true, assistantAvailable: false })).toBe(
+      skippedStepSet({ multiRuntime: true, assistantAvailable: false }),
+    );
+  });
+
+  it('skipIdeas() jumps from 10 or 11 straight to the rail intro (12) — the tour continues', () => {
+    activeAt(10);
+    useOnboardingStore.getState().skipIdeas();
+    expect(useOnboardingStore.getState().step).toBe(12);
+    expect(useOnboardingStore.getState().status).toBe('active');
+    activeAt(11);
+    useOnboardingStore.getState().skipIdeas();
+    expect(useOnboardingStore.getState().step).toBe(12);
+  });
+
+  it('skipIdeas() is inert outside 9-11', () => {
+    for (const step of [8, 12, 13]) {
+      activeAt(step);
+      useOnboardingStore.getState().skipIdeas();
+      expect(useOnboardingStore.getState().step).toBe(step);
+    }
+  });
+
+  it('step 13 never advances via next(); sessionLaunched() records the launch and moves to 14', () => {
+    activeAt(13);
+    useOnboardingStore.getState().next();
+    expect(useOnboardingStore.getState().step).toBe(13);
+    const launched = { kind: 'planner' as const, sessionId: 'sess-1', runId: 'run-1' };
+    useOnboardingStore.getState().sessionLaunched(launched);
+    expect(useOnboardingStore.getState().step).toBe(14);
+    expect(useOnboardingStore.getState().launched).toEqual(launched);
+  });
+
+  it('sessionLaunched() is inert off step 13', () => {
+    activeAt(12);
+    useOnboardingStore.getState().sessionLaunched({ kind: 'quick', sessionId: 's', runId: null });
+    expect(useOnboardingStore.getState().step).toBe(12);
+    expect(useOnboardingStore.getState().launched).toBeNull();
+  });
+
+  it('step 14 is terminal: next() is inert, finish() completes', () => {
+    activeAt(14);
+    useOnboardingStore.getState().next();
+    expect(useOnboardingStore.getState().step).toBe(14);
+    expect(useOnboardingStore.getState().status).toBe('active');
+    useOnboardingStore.getState().finish();
+    expect(useOnboardingStore.getState().status).toBe('completed');
+  });
+
+  it('back() is inert from step 9 on (the project already exists)', () => {
+    for (const step of [9, 10, 11, 12, 13, 14]) {
+      activeAt(step);
+      useOnboardingStore.getState().back();
+      expect(useOnboardingStore.getState().step).toBe(step);
+    }
+    activeAt(8);
+    useOnboardingStore.getState().back();
+    expect(useOnboardingStore.getState().step).toBe(7);
+  });
+
+  it('skip() from an in-shell step parks the tour; resume() returns to the same step with its project', () => {
+    activeAt(12, { guidedProject: PROJECT });
+    useOnboardingStore.getState().skip();
+    expect(useOnboardingStore.getState().status).toBe('skipped');
+    expect(useOnboardingStore.getState().step).toBe(12);
+    useOnboardingStore.getState().resume();
+    expect(useOnboardingStore.getState().status).toBe('active');
+    expect(useOnboardingStore.getState().step).toBe(12);
+    expect(useOnboardingStore.getState().guidedProject).toEqual(PROJECT);
+  });
+
+  it('projectAdopted records a project on the no-project branch without moving the step', () => {
+    activeAt(10, { guidedProject: null });
+    useOnboardingStore.getState().projectAdopted(PROJECT);
+    expect(useOnboardingStore.getState().guidedProject).toEqual(PROJECT);
+    expect(useOnboardingStore.getState().step).toBe(10);
+    // Never overwrites a recorded project, never before step 9, never when parked.
+    useOnboardingStore.getState().projectAdopted({ id: 99, name: 'other' });
+    expect(useOnboardingStore.getState().guidedProject).toEqual(PROJECT);
+    activeAt(8, { guidedProject: null });
+    useOnboardingStore.getState().projectAdopted(PROJECT);
+    expect(useOnboardingStore.getState().guidedProject).toBeNull();
+    activeAt(9, { guidedProject: null, status: 'skipped' });
+    useOnboardingStore.getState().projectAdopted(PROJECT);
+    expect(useOnboardingStore.getState().guidedProject).toBeNull();
+  });
+
+  it('setSessionChoice / setAssistantAvailable record their values; begin() resets all of it', () => {
+    activeAt(13, { guidedProject: PROJECT, launched: { kind: 'quick', sessionId: 's', runId: null } });
+    useOnboardingStore.getState().setSessionChoice('ship');
+    useOnboardingStore.getState().setAssistantAvailable(false);
+    expect(useOnboardingStore.getState().sessionChoice).toBe('ship');
+    expect(useOnboardingStore.getState().assistantAvailable).toBe(false);
+    useOnboardingStore.getState().begin(true);
+    const s = useOnboardingStore.getState();
+    expect(s.guidedProject).toBeNull();
+    expect(s.launched).toBeNull();
+    expect(s.sessionChoice).toBe('planner');
+    expect(s.assistantAvailable).toBe(true);
+  });
+
+  it('a snapshot parked on any in-shell step (9-14) hydrates as skipped at the branch choice', () => {
+    for (const step of [9, 10, 11, 12, 13, 14]) {
+      for (const status of ['active', 'skipped'] as const) {
+        useOnboardingStore.setState({ status: 'idle', hydrated: false });
+        useOnboardingStore.getState().hydrate({ version: 4, status, step }, 1);
+        expect(useOnboardingStore.getState().status).toBe('skipped');
+        expect(useOnboardingStore.getState().step).toBe(7);
+      }
+    }
   });
 });

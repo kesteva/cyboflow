@@ -179,12 +179,6 @@ import {
   type PermissionMode,
 } from '../../../../../shared/types/workflows';
 import type { TelemetryFlow } from '../../../../../shared/types/telemetry';
-import {
-  notifyQuickSessionCreated,
-  notifyWorkflowRunStarted,
-  ONBOARDING_ANCHOR_ATTR,
-  ONBOARDING_ANCHORS,
-} from '../../../utils/onboarding';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -953,7 +947,6 @@ export default function SessionStartWizard(): React.JSX.Element {
     projectId: allowQuick ? selectedProjectId : null,
     onSuccess: () => {
       setToast(`Starting quick session on ${banner.name}`);
-      notifyQuickSessionCreated({ projectId: selectedProjectId });
       // CyboflowRoot reads navigationStore.activeProjectId as its `projectId`
       // prop, and gates the WHOLE quick-session surface on it being non-null
       // (QuickSessionCanvas + TerminalDock + dock tabs). Nothing on the way into
@@ -1261,7 +1254,6 @@ export default function SessionStartWizard(): React.JSX.Element {
           ...(launchSubstrate ? { substrate: launchSubstrate } : {}),
           permission_mode: permissionMode,
         });
-        notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'wizard' });
         useNavigationStore.getState().goToSession();
       } catch (err: unknown) {
         if (isMixedProviderOrchestratedError(err)) {
@@ -1364,7 +1356,6 @@ export default function SessionStartWizard(): React.JSX.Element {
         const slash = meta?.slashCommand ?? '/sprint';
         setToast(`Launching ${slash} (${taskIds.length} tasks) on ${banner.name} ⌥ ${result.branchName}`);
 
-        notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'wizard' });
         useNavigationStore.getState().goToSession();
       } catch (err: unknown) {
         if (isMixedProviderOrchestratedError(err)) {
@@ -1415,7 +1406,6 @@ export default function SessionStartWizard(): React.JSX.Element {
         // doc comment.
         onSuccess: () => {
           setToast(`Starting quick session on ${banner.name}`);
-          notifyQuickSessionCreated({ projectId: selectedProjectId });
           useNavigationStore.getState().setActiveProjectId(selectedProjectId);
           useNavigationStore.getState().goToSession();
         },
@@ -2074,20 +2064,18 @@ export default function SessionStartWizard(): React.JSX.Element {
                 the MCP scope mechanism that limits a design session's toolset
                 exists only on the SDK path). */}
             {selection.kind !== 'ultracode' && selection.kind !== 'design' && (
-              <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.substrateSelect }}>
-                <SubstrateSelector
-                  value={agentRuntime}
-                  // A real per-launch pick — latches THIS key touched, so the
-                  // card's stored/global default stops re-seeding it (and only
-                  // it). It picks the run's ORCHESTRATOR and leaves the runtime
-                  // mix alone; the two dials are orthogonal (see
-                  // handleRuntimeMixChange).
-                  onChange={setAgentRuntimeByUser}
-                  id="wizard-substrate"
-                  caveatsTestId="wizard-substrate-caveats"
-                  runtimeScope={selection.kind === 'quick' ? 'session' : 'workflow'}
-                />
-              </div>
+              <SubstrateSelector
+                value={agentRuntime}
+                // A real per-launch pick — latches THIS key touched, so the
+                // card's stored/global default stops re-seeding it (and only
+                // it). It picks the run's ORCHESTRATOR and leaves the runtime
+                // mix alone; the two dials are orthogonal (see
+                // handleRuntimeMixChange).
+                onChange={setAgentRuntimeByUser}
+                id="wizard-substrate"
+                caveatsTestId="wizard-substrate-caveats"
+                runtimeScope={selection.kind === 'quick' ? 'session' : 'workflow'}
+              />
             )}
 
             {/* Model picker — shown for ALL launch kinds and scoped to the selected
@@ -2100,22 +2088,20 @@ export default function SessionStartWizard(): React.JSX.Element {
                 the control is hidden for that runtime rather than shown as a
                 lie. */}
             {effectiveRuntime !== 'omp-fleet' && (
-              <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.modelSelect }}>
-                <ModelSelector
-                  value={model}
-                  onChange={(m) => {
-                    // setByUser latches THIS key as touched, so reactive re-seeding
-                    // stops for it (and only for it).
-                    setModelByUser(m);
-                    // Fast mode is Opus-only; drop it when leaving Opus.
-                    if (!isOpusModel(m)) setFastMode(false);
-                  }}
-                  id="wizard-model"
-                  label={selection.kind === 'workflow' ? 'Default model' : 'Model'}
-                  agentProvider={effectiveProvider}
-                  agentRuntime={effectiveRuntime}
-                />
-              </div>
+              <ModelSelector
+                value={model}
+                onChange={(m) => {
+                  // setByUser latches THIS key as touched, so reactive re-seeding
+                  // stops for it (and only for it).
+                  setModelByUser(m);
+                  // Fast mode is Opus-only; drop it when leaving Opus.
+                  if (!isOpusModel(m)) setFastMode(false);
+                }}
+                id="wizard-model"
+                label={selection.kind === 'workflow' ? 'Default model' : 'Model'}
+                agentProvider={effectiveProvider}
+                agentRuntime={effectiveRuntime}
+              />
             )}
             {/* Reasoning-effort select — QUICK, every effort-capable runtime.
                 Shown for Claude (SDK Options.effort / interactive --effort) AND
@@ -2225,14 +2211,12 @@ export default function SessionStartWizard(): React.JSX.Element {
                 explicit choice writes the host session's agent_permission_mode (the
                 sole execution authority) for either launch kind. Provider-specific
                 copy stays below runtime because runtime controls the provider. */}
-            <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.sessionPermission }}>
-              <AgentPermissionModeSelector
-                value={permissionMode}
-                onChange={setPermissionModeByUser}
-                agentProvider={effectiveProvider}
-                agentRuntime={effectiveRuntime}
-              />
-            </div>
+            <AgentPermissionModeSelector
+              value={permissionMode}
+              onChange={setPermissionModeByUser}
+              agentProvider={effectiveProvider}
+              agentRuntime={effectiveRuntime}
+            />
             {/* Advanced (QUICK + ULTRACODE): workspace plus Claude-only MCP/plugin
                 selection. These are a session-START decision — the deny-list is
                 enforced at the first spawn, so toggling mid-conversation was

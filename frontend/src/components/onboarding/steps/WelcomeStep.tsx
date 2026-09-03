@@ -1,4 +1,4 @@
-import cyboflowWordmark from '../../../assets/cyboflow-wordmark.svg';
+import { CyboflowMark } from '../CyboflowMark';
 import { WELCOME_BULLETS } from '../copy';
 
 /**
@@ -8,15 +8,15 @@ import { WELCOME_BULLETS } from '../copy';
 export function WelcomeStep(): React.JSX.Element {
   return (
     <div>
-      <div className="bg-interactive px-6 pb-5 pt-6 text-on-interactive">
-        <img
-          src={cyboflowWordmark}
-          alt="Cyboflow"
-          className="mb-3.5 h-7 w-auto opacity-95"
-          style={{ filter: 'brightness(0) invert(1)' }}
-        />
+      <div className="bg-interactive px-6 pb-5 pt-6 text-text-on-interactive">
+        {/* Wordmark, drawn inline so the mark keeps its chevron on terracotta
+            (see CyboflowMark). Mirrors cyboflow-wordmark.svg's proportions. */}
+        <div className="mb-3.5 flex items-center gap-2.5 opacity-95" role="img" aria-label="Cyboflow">
+          <CyboflowMark size={28} className="flex-shrink-0" />
+          <span className="text-[22px] font-bold tracking-[-.02em]">cyboflow</span>
+        </div>
         <div className="text-[21px] font-bold tracking-[-.01em]">Welcome to Cyboflow</div>
-        <div className="mt-[7px] text-[11.5px] leading-[1.55] text-on-interactive/80">
+        <div className="mt-[7px] text-[11.5px] leading-[1.55] text-text-on-interactive/80">
           Built to keep humans at the center — focused on what matters, not distracted by everything that doesn't.
         </div>
       </div>

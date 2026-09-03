@@ -28,21 +28,24 @@ export type OnboardingStepName =
   | 'welcome'
   | 'connect'
   | 'default_runtime'
+  | 'model'
   | 'permission'
   | 'telemetry'
+  | 'handoff'
   | 'add_project'
-  | 'quick_session'
-  | 'session_permission'
-  | 'model'
-  | 'substrate'
-  | 'ship'
-  | 'human_review'
-  | 'rail_map';
+  | 'project_detail'
+  | 'project_home'
+  | 'first_idea'
+  | 'idea_proposals'
+  | 'assistant_rail'
+  | 'first_session'
+  | 'launching';
 
 export interface TelemetryEventMap {
   // ── Onboarding — first-run tour funnel ──────────────────────────────────────
-  // Every step (modal + coachmark) emits `onboarding_step_viewed`; the lifecycle
-  // events bracket it (entry / abandon / resume-from-Sidebar / finish / dismiss).
+  // Every step (modal card + guided set-up screen) emits `onboarding_step_viewed`;
+  // the lifecycle events bracket it (entry / abandon / resume-from-Sidebar /
+  // finish / dismiss).
   // `onboarding_skipped` is a soft abandon (the Sidebar Resume card persists);
   // `onboarding_dismissed` is the hard one — the user cleared that card for good.
   onboarding_started: { trigger: 'first_run' | 'replay' };
@@ -57,7 +60,7 @@ export interface TelemetryEventMap {
   project_created: { source?: 'wizard' | 'dialog' };
   flow_selected: { flow: TelemetryFlow };
   workflow_run_started: {
-    launch_surface: 'wizard' | 'topbar' | 'backlog' | 'in_session';
+    launch_surface: 'wizard' | 'topbar' | 'backlog' | 'in_session' | 'onboarding';
     // Optional: some launch surfaces only have the workflow's DB id in scope, not
     // its canonical flow name. Emitted where the flow name is cheaply available.
     flow?: TelemetryFlow;

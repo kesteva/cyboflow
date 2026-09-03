@@ -2,91 +2,154 @@
  * First-run onboarding — renderer-side shared constants.
  *
  * Neutral module (importable by stores, components, and integration touch
- * points alike) so the onboarding overlay, the Sidebar resume button, and the
- * real-action dispatch sites never drift on key/event/anchor names.
+ * points alike) so the onboarding overlay, the Sidebar resume button, the
+ * guided set-up surface, and App's shell gate never drift on key/event names or
+ * step arithmetic.
  */
 
 import type { OnboardingStepName } from '../../../shared/types/telemetry';
+import type { OnboardingStatus } from '../stores/onboardingStore';
 
 /**
  * Single user_preferences key holding the persisted tour snapshot as JSON
  * (see PersistedOnboarding in stores/onboardingStore.ts). Read/write via the
  * raw `preferences:get` / `preferences:set` IPC channels — the established
  * pattern for one-shot UI flags (docs/CODE-PATTERNS.md "IPC preference-backed
- * component visibility").
+ * component visibility"). The key name is FROZEN at `_v1`; the schema version
+ * lives inside the JSON payload and is migrated by
+ * `migratePersistedOnboarding`.
  */
 export const ONBOARDING_PREF_KEY = 'cyboflow_onboarding_state_v1';
 
 /**
- * Window CustomEvents that advance the tour's coach steps. `projectCreated`
- * is the app's PRE-EXISTING event (dispatched by CreateProjectDialog and any
- * onboarding-embedded create path); the other two are dispatched at the
- * real-action success sites (quick-session creation, runs.start success).
+ * Window CustomEvents the onboarding paths participate in. `projectCreated` is
+ * the app's PRE-EXISTING event (dispatched by CreateProjectDialog and by the
+ * guided set-up's create handler); `landingStore` is the consumer that matters
+ * — it resyncs the project list when one lands.
  */
 export const ONBOARDING_EVENTS = {
   projectCreated: 'project-created',
-  quickSessionCreated: 'cyboflow:quick-session-created',
-  workflowRunStarted: 'cyboflow:workflow-run-started',
 } as const;
 
-/**
- * Coachmark anchor ids, rendered as `data-onboarding="<id>"` on the real
- * target elements. The Coachmark component resolves targets exclusively via
- * this attribute — never by class name or test id.
- */
-export const ONBOARDING_ANCHOR_ATTR = 'data-onboarding';
-export const ONBOARDING_ANCHORS = {
-  /** SessionStartWizard step-② Quick Session card (tour step 6). */
-  quickSessionCard: 'quick-session-card',
-  /** Wizard Configure — Session permission selector (tour step 8). */
-  sessionPermission: 'session-permission',
-  /** Wizard Configure — Model picker (tour step 9). */
-  modelSelect: 'model-select',
-  /** Wizard Configure — agent runtime selector (tour step 7). */
-  substrateSelect: 'substrate-select',
-  /** QuickSessionCanvas "/ship" workflow chip (tour step 10). */
-  shipChip: 'ship-chip',
-  /** Sidebar "Human review" rail item (tour step 11). */
-  humanReview: 'human-review',
-} as const;
+/** Total tour steps: 7 modal cards (0-6) + 8 guided full-window screens (7-14). */
+export const ONBOARDING_STEP_COUNT = 15;
 
-export const ONBOARDING_STEP_COUNT = 13;
-
-/** Steps rendered as the centered modal card. */
-export const ONBOARDING_MODAL_STEPS: ReadonlyArray<number> = [0, 1, 2, 3, 4, 5, 12];
-/** Steps rendered as an anchored coachmark over the live UI. */
-export const ONBOARDING_COACH_STEPS: ReadonlyArray<number> = [6, 7, 8, 9, 10, 11];
+/** Steps rendered as the centered modal card over a bare paper shell. */
+export const ONBOARDING_MODAL_STEPS: ReadonlyArray<number> = [0, 1, 2, 3, 4, 5, 6];
 /**
- * The coach steps that are informational POINTERS (the wizard-Configure trio:
- * runtime / permission / model). Unlike the advance-by-doing steps (6, 10, 11)
- * they carry a Next button on the popover and advance via store.next();
- * interacting with the anchored control never advances them.
+ * Steps rendered as the full-window guided set-up surface (inside the shell row,
+ * NOT the body portal, so the TitleBar drag region keeps working).
  */
-export const ONBOARDING_POINTER_STEPS: ReadonlyArray<number> = [7, 8, 9];
+export const ONBOARDING_GUIDED_STEPS: ReadonlyArray<number> = [7, 8, 9, 10, 11, 12, 13, 14];
 
 /**
  * The one CONDITIONAL step: "which agent should be your default?" only has a
- * question to ask when the Connect step left more than one provider activated.
- * The store decides (onboardingStore.isStepSkipped) — this constant just names
- * the index so the numbering helpers below and the store agree on which one it
- * is.
+ * question to ask when the Connect step left more than one of {claude, codex}
+ * activated. The store decides (onboardingStore.isStepSkipped) — this constant
+ * just names the index so the numbering helpers below and the store agree on
+ * which one it is.
  */
 export const ONBOARDING_DEFAULT_RUNTIME_STEP = 2;
+/** Model + reasoning-effort picker; follows the effective default agent. */
+export const ONBOARDING_MODEL_STEP = 3;
+/** "You're set up" — continue into the guided set-up, or finish here. */
+export const ONBOARDING_HANDOFF_STEP = 6;
+/** Guided: existing project / new project / not sure yet. */
+export const ONBOARDING_ADD_PROJECT_STEP = 7;
+/** Guided: the folder picker or the create form, per the step-7 choice. */
+export const ONBOARDING_PROJECT_DETAIL_STEP = 8;
+/**
+ * Guided, IN the shell: from here on the Sidebar is mounted beside the guided
+ * column (it shows the project the user just added). "Your project lives here".
+ */
+export const ONBOARDING_PROJECT_HOME_STEP = 9;
+/** Guided: backlog intro + the "what's next?" composer (sends to the assistant). */
+export const ONBOARDING_FIRST_IDEA_STEP = 10;
+/** Guided: the assistant thread hosted in the centre — its idea proposals. */
+export const ONBOARDING_IDEA_PROPOSALS_STEP = 11;
+/** Guided: the AgentRail mounts; the centre points at it. */
+export const ONBOARDING_ASSISTANT_RAIL_STEP = 12;
+/** Guided: pick the first session to launch (planner / ship / quick). */
+export const ONBOARDING_FIRST_SESSION_STEP = 13;
+/** Guided: "launching your session now" — points back at Human review. */
+export const ONBOARDING_LAUNCHING_STEP = 14;
 
 /**
- * Progress numbering that EXCLUDES the steps this run skips, so a single-
- * provider install reads "STEP 3 / 12" rather than "STEP 4 / 13" with a dot
- * nobody can reach. Both helpers take the live skipped set (the gate derives it
- * from the store) rather than importing the store, keeping this module neutral.
+ * The guided steps that only make sense with the global assistant ENABLED
+ * (Settings → Assistant): the idea composer, its proposals, and the rail intro.
+ * The store skips them (isStepSkipped) when the assistant is off.
  */
-export function visibleStepTotal(skipped: ReadonlySet<number>): number {
-  return ONBOARDING_STEP_COUNT - skipped.size;
+export const ONBOARDING_ASSISTANT_STEPS: ReadonlyArray<number> = [
+  ONBOARDING_FIRST_IDEA_STEP,
+  ONBOARDING_IDEA_PROPOSALS_STEP,
+  ONBOARDING_ASSISTANT_RAIL_STEP,
+];
+
+/** True when `step` is one of the full-window guided set-up screens. */
+export function isGuidedStep(step: number): boolean {
+  return ONBOARDING_GUIDED_STEPS.includes(step);
 }
 
-/** 1-based position of `step` among the steps this run actually shows. */
+/**
+ * Which shell chrome a guided step renders beside the guided column:
+ *   - 'none'    — steps 7-8 (and every modal step): bare paper, no shell.
+ *   - 'sidebar' — steps 9-11: the Sidebar is mounted (inert), the centre is the
+ *                 guided column, no AgentRail yet.
+ *   - 'full'    — steps 12-14: Sidebar + AgentRail, guided column in the centre.
+ * Returns 'none' whenever the tour is not active.
+ */
+export type OnboardingGuidedShell = 'none' | 'sidebar' | 'full';
+
+export function onboardingGuidedShell(state: {
+  hydrated: boolean;
+  status: OnboardingStatus;
+  step: number;
+}): OnboardingGuidedShell {
+  if (!state.hydrated || state.status !== 'active') return 'none';
+  if (state.step >= ONBOARDING_ASSISTANT_RAIL_STEP) return 'full';
+  if (state.step >= ONBOARDING_PROJECT_HOME_STEP) return 'sidebar';
+  return 'none';
+}
+
+/**
+ * Guided-screen progress eyebrow ("Guided set-up · step n of N"): 1-based
+ * position of `step` among the guided screens this run shows, and that total.
+ * Both exclude the skipped assistant steps (assistant disabled ⇒ 5 screens,
+ * not 8). A non-guided step reports position 1.
+ */
+export function guidedStepTotal(skipped: ReadonlySet<number>): number {
+  return ONBOARDING_GUIDED_STEPS.filter((i) => !skipped.has(i)).length;
+}
+
+export function guidedStepNumber(step: number, skipped: ReadonlySet<number>): number {
+  let n = 0;
+  for (const i of ONBOARDING_GUIDED_STEPS) {
+    if (i > step) break;
+    if (!skipped.has(i)) n++;
+  }
+  return Math.max(n, 1);
+}
+
+/**
+ * Progress numbering for the MODAL cards ("STEP n / N" + the dot rail). It
+ * counts modal steps only — the guided screens carry their own "STEP n OF 2"
+ * eyebrow — and EXCLUDES the steps this run skips, so a single-provider install
+ * reads "STEP 3 / 6" rather than "STEP 4 / 7" with a dot nobody can reach. Both
+ * helpers take the live skipped set (the gate derives it from the store) rather
+ * than importing the store, keeping this module neutral.
+ */
+export function visibleStepTotal(skipped: ReadonlySet<number>): number {
+  return ONBOARDING_MODAL_STEPS.filter((i) => !skipped.has(i)).length;
+}
+
+/**
+ * 1-based position of `step` among the modal steps this run actually shows. A
+ * guided step reports the last modal position (it is past the card rail).
+ */
 export function visibleStepNumber(step: number, skipped: ReadonlySet<number>): number {
   let n = 0;
-  for (let i = 0; i <= step && i < ONBOARDING_STEP_COUNT; i++) {
+  for (const i of ONBOARDING_MODAL_STEPS) {
+    if (i > step) break;
     if (!skipped.has(i)) n++;
   }
   // A skipped step is never rendered, but Back/goTo race a toggle change; report
@@ -99,26 +162,29 @@ export function visibleStepNumber(step: number, skipped: ReadonlySet<number>): n
  * index-aligned with the tour's step order and ONBOARDING_STEP_COUNT. Used only
  * for the `onboarding_*` usage events — never for control flow.
  *
- * `telemetry` was inserted at index 3 (after Permission, before Add project) and
- * `default_runtime` later at index 2 (after Connect) — each time, every step at
- * or after the insertion point shifted forward by one. Do NOT append new
- * entries at the end without checking whether they belong earlier in the tour's
- * actual order.
+ * The order is load-bearing for the persisted-snapshot migrations: every past
+ * insertion shifted every step at or after its index forward by one (see
+ * migrateV1StepIndex / migrateV2StepIndex / migrateV3StepIndex in
+ * stores/onboardingStore.ts). Do NOT append a new entry at the end without
+ * checking whether it belongs earlier in the tour's actual order — and add the
+ * matching remap when it does.
  */
 export const ONBOARDING_STEP_NAMES: readonly OnboardingStepName[] = [
   'welcome',
   'connect',
   'default_runtime',
+  'model',
   'permission',
   'telemetry',
+  'handoff',
   'add_project',
-  'quick_session',
-  'substrate',
-  'session_permission',
-  'model',
-  'ship',
-  'human_review',
-  'rail_map',
+  'project_detail',
+  'project_home',
+  'first_idea',
+  'idea_proposals',
+  'assistant_rail',
+  'first_session',
+  'launching',
 ];
 
 /** Step index → analytics slug; out-of-range indices fall back to 'welcome'. */
@@ -127,16 +193,25 @@ export function onboardingStepName(step: number): OnboardingStepName {
 }
 
 /**
- * Real-action dispatch helpers — call these at the SUCCESS point of the
- * corresponding launch path (never on error paths). OnboardingGate is the
- * sole listener; these just fire the window CustomEvents it forwards into
- * `useOnboardingStore.realEvent`, so integration call sites never need to
- * import the store directly.
+ * Whether the app shell (Sidebar, center surface, AgentRail, StatusBar) must
+ * stay unmounted. Two reasons, both no-flash rules:
+ * - `!hydrated`: the persisted snapshot read has not resolved, so we do not yet
+ *   know whether this boot owes the user a tour (docs/CODE-PATTERNS.md "IPC
+ *   preference-backed component visibility").
+ * - `status === 'active'` on a step BEFORE the project exists (0-8): the tour
+ *   owns the whole window — modal steps render a card over bare paper, the two
+ *   project screens render the set-up surface in the shell row.
+ *
+ * From ONBOARDING_PROJECT_HOME_STEP on, the shell IS mounted around the guided
+ * column (see onboardingGuidedShell). 'skipped' and 'completed' both mount the
+ * shell (a skipped tour is resumable from the Sidebar card, which only exists
+ * once the shell is there).
  */
-export function notifyQuickSessionCreated(detail?: unknown): void {
-  window.dispatchEvent(new CustomEvent(ONBOARDING_EVENTS.quickSessionCreated, { detail }));
-}
-
-export function notifyWorkflowRunStarted(detail?: unknown): void {
-  window.dispatchEvent(new CustomEvent(ONBOARDING_EVENTS.workflowRunStarted, { detail }));
+export function isOnboardingShellHidden(state: {
+  hydrated: boolean;
+  status: OnboardingStatus;
+  step: number;
+}): boolean {
+  if (!state.hydrated) return true;
+  return state.status === 'active' && state.step < ONBOARDING_PROJECT_HOME_STEP;
 }

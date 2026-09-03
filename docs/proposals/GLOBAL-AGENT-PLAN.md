@@ -365,8 +365,7 @@ justifying-comment convention).
 `useUnifiedAgentThreadMessages`; `ChatMode` `'agent'` variant + identity-strip branch;
 `AgentComposer` (send mutation, model chip from thread row, italic placeholder); suggestion
 chips (static Stage-1 set: `Where is everything?`, `Triage the backlog`, `Kick off top
-tasks`, `Modify a workflow`) that send canned prompts. Auto-digest trigger on first
-landing-view open per app launch (calls `triggerDigest`; server throttle is authoritative).
+tasks`, `Modify a workflow`) that send canned prompts.
 
 **S1.3 (L) Proposal cards.** `ProposalCard` renderer keyed by kind, per packet card anatomy
 (dark head bar / needs-confirm / body / rust-primary + ghost buttons / resolved row states,

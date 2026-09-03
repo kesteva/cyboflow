@@ -42,20 +42,6 @@ type RouterOutputs = inferRouterOutputs<AppRouter>;
  *  shared/types, so they are pulled in via inference rather than a hand
  *  mirror (CODE-PATTERNS.md IPC rule). */
 export type ConfirmProposalResult = RouterOutputs['cyboflow']['agentThread']['confirmProposal'];
-export type DigestTriggerResult = RouterOutputs['cyboflow']['agentThread']['triggerDigest'];
-
-/**
- * Outcome of a {@link AgentThreadState.triggerDigest} call, from the caller's
- * once-per-launch-gate perspective:
- * - `'consumed'` — the backend owns the day's cap now (it either sent the recap,
- *   `triggered`, or the persisted once-per-day cap already fired today,
- *   `throttled`). The launch gate should stay closed.
- * - `'retry'` — nothing was consumed: the assistant was `disabled`, or the
- *   mutation failed before the backend stamped the cap. The launch gate should
- *   reopen so a later rail remount (e.g. after the user enables the assistant)
- *   can try again this launch.
- */
-export type DigestLaunchOutcome = 'consumed' | 'retry';
 
 /** Debounce window for the onThreadEvent-driven refetch (messages signal + proposals). */
 const LIVE_TAIL_DEBOUNCE_MS = 150;
@@ -67,7 +53,7 @@ export interface AgentThreadState {
   proposals: AgentProposal[];
   /** True while the initial bootstrap (getThread + listProposals) is in flight. */
   loading: boolean;
-  /** True while a turn (sendMessage/triggerDigest) is in flight — the composer's disable signal. */
+  /** True while a turn (sendMessage) is in flight — the composer's disable signal. */
   sending: boolean;
   /**
    * Bumped on every debounced onThreadEvent tick. {@link useUnifiedAgentThreadMessages}
@@ -85,12 +71,11 @@ export interface AgentThreadState {
   init: () => (() => void);
 
   /** Send one turn on the global thread. Swallows failures (console.error) —
-   *  the composer has no dedicated error-surfacing slot yet (S1.5 polish). */
-  sendMessage: (text: string) => Promise<void>;
-  /** Trigger the once-per-day recap turn. Swallows failures like sendMessage,
-   *  but returns a {@link DigestLaunchOutcome} so the caller's launch gate can
-   *  tell a consumed cap from a retryable disabled/failed attempt. */
-  triggerDigest: () => Promise<DigestLaunchOutcome>;
+   *  the composer has no dedicated error-surfacing slot yet (S1.5 polish).
+   *  `opts.contextHint` is optional prompt-only priming text (e.g. onboarding
+   *  context) prepended to what the model sees — never part of the recorded
+   *  transcript turn. */
+  sendMessage: (text: string, opts?: { contextHint?: string }) => Promise<void>;
   /** The user's Confirm click (S1.3 consumes this) — propagates failures so
    *  the proposal card can render them, and refreshes `proposals` afterward. */
   confirmProposal: (proposalId: string) => Promise<ConfirmProposalResult>;
@@ -187,7 +172,7 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
       return unsubscribe;
     },
 
-    sendMessage: async (text: string) => {
+    sendMessage: async (text: string, opts?: { contextHint?: string }) => {
       const threadId = get().thread?.id;
       if (threadId === undefined) {
         console.warn('[agentThreadStore] sendMessage called before the thread loaded — dropped');
@@ -195,30 +180,13 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
       }
       set({ sending: true });
       try {
-        await trpc.cyboflow.agentThread.sendMessage.mutate({ threadId, text });
+        await trpc.cyboflow.agentThread.sendMessage.mutate({
+          threadId,
+          text,
+          ...(opts?.contextHint !== undefined ? { contextHint: opts.contextHint } : {}),
+        });
       } catch (err: unknown) {
         console.error('[agentThreadStore] sendMessage failed:', err);
-      } finally {
-        set({ sending: false });
-      }
-    },
-
-    triggerDigest: async (): Promise<DigestLaunchOutcome> => {
-      const threadId = get().thread?.id;
-      if (threadId === undefined) {
-        console.warn('[agentThreadStore] triggerDigest called before the thread loaded — dropped');
-        return 'retry';
-      }
-      set({ sending: true });
-      try {
-        const result = await trpc.cyboflow.agentThread.triggerDigest.mutate({ threadId });
-        // 'triggered' (sent) and 'throttled' (already fired today) both mean the
-        // backend now owns the day's cap; 'disabled' stamped nothing, so allow a
-        // retry once the assistant is re-enabled.
-        return result.triggered || result.reason === 'throttled' ? 'consumed' : 'retry';
-      } catch (err: unknown) {
-        console.error('[agentThreadStore] triggerDigest failed:', err);
-        return 'retry';
       } finally {
         set({ sending: false });
       }

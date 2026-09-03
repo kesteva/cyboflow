@@ -45,6 +45,22 @@ export function useCodexModelCatalog(enabled = true): CodexModelCatalogHook {
   };
 }
 
+/**
+ * Re-run Codex discovery after a failure, for a surface that offers an explicit
+ * Retry (the onboarding Model step's unreachable-catalog well).
+ *
+ * A failed `load()` already releases the one-shot latch, so a LATER MOUNT
+ * retries on its own — but the mount that failed is still standing, and its
+ * `ensureStarted` has already run for this mount. Clearing the slice first is
+ * what makes the retry visible: it drops the stale `error` and re-arms the
+ * latch, so `ensureStarted(true)` starts a fresh fetch and the picker returns to
+ * its loading state instead of sitting on the old failure.
+ */
+export function retryCodexModelCatalog(): void {
+  PROVIDER_MODEL_CATALOG_SLICES.codex.reset();
+  PROVIDER_MODEL_CATALOG_SLICES.codex.ensureStarted(true);
+}
+
 export const codexModelCatalogStoreForTests = PROVIDER_MODEL_CATALOG_SLICES.codex.store;
 
 export function resetCodexModelCatalogStoreForTests(): void {

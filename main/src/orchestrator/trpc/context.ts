@@ -185,16 +185,9 @@ export interface WorkflowRegistryLike {
 export interface AgentThreadServiceLike {
   /** Load-or-create the single 'global' thread + ensure its neutral home dir. */
   ensureGlobalThread(): AgentThread;
-  /** Send one turn (spawn/warm-continue). Also used to inject executor loopback turns. */
-  sendMessage(threadId: string, text: string): Promise<void>;
-  /**
-   * Trigger a synthetic digest turn, server-throttled (throttled ⇒
-   * triggered:false) and gated by the global assistant kill switch
-   * (disabled ⇒ triggered:false, reason:'disabled').
-   */
-  triggerDigest(
-    threadId: string,
-  ): Promise<{ triggered: true } | { triggered: false; reason: 'throttled' | 'disabled' }>;
+  /** Send one turn (spawn/warm-continue). Also used to inject executor loopback turns.
+   *  Optional `contextHint` is prompt-only priming text, never persisted to the transcript. */
+  sendMessage(threadId: string, text: string, contextHint?: string): Promise<void>;
 }
 
 /**

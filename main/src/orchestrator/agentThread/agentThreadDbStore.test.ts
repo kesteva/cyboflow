@@ -95,26 +95,6 @@ describe('AgentThreadDbStore', () => {
       expect(store.getThread('thread-1')?.claudeSessionId).toBeNull();
     });
 
-    it('last_digest_at defaults to null and round-trips through set/get (migration 076)', () => {
-      const store = new AgentThreadDbStore(dbAdapter(db));
-      store.createThread({ id: 'thread-1' });
-
-      // Never digested → null. A missing thread also reads null (no row).
-      expect(store.getLastDigestAt('thread-1')).toBeNull();
-      expect(store.getLastDigestAt('missing')).toBeNull();
-
-      store.setLastDigestAt('thread-1', 1_700_000_000_000);
-      expect(store.getLastDigestAt('thread-1')).toBe(1_700_000_000_000);
-
-      // A later stamp overwrites.
-      store.setLastDigestAt('thread-1', 1_700_000_500_000);
-      expect(store.getLastDigestAt('thread-1')).toBe(1_700_000_500_000);
-
-      // null restores/clears it — the rollback path when a recap send fails.
-      store.setLastDigestAt('thread-1', null);
-      expect(store.getLastDigestAt('thread-1')).toBeNull();
-    });
-
     it('last_turn_at defaults to null and round-trips through set/get (migration 080)', () => {
       const store = new AgentThreadDbStore(dbAdapter(db));
       store.createThread({ id: 'thread-1' });
