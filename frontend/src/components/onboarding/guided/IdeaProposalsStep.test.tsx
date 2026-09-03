@@ -16,12 +16,17 @@ import { useOnboardingStore } from '../../../stores/onboardingStore';
 
 interface UnifiedChatViewStubProps {
   mode: string;
+  hidePromptRail?: boolean;
   bottomSlot?: ReactNode;
 }
 
 vi.mock('../../cyboflow/unified/UnifiedChatView', () => ({
-  UnifiedChatView: ({ mode, bottomSlot }: UnifiedChatViewStubProps) => (
-    <div data-testid="unified-chat-view-stub" data-mode={mode}>
+  UnifiedChatView: ({ mode, bottomSlot, hidePromptRail }: UnifiedChatViewStubProps) => (
+    <div
+      data-testid="unified-chat-view-stub"
+      data-mode={mode}
+      data-hide-prompt-rail={hidePromptRail === true ? 'true' : 'false'}
+    >
       {bottomSlot}
     </div>
   ),
@@ -91,6 +96,8 @@ describe('IdeaProposalsStep', () => {
     render(<IdeaProposalsStep project={PROJECT} onContinue={vi.fn()} onSkip={vi.fn()} />);
 
     expect(screen.queryByTestId('agent-suggestion-chips')).not.toBeInTheDocument();
+    // The guided box needs its full 620px for the transcript — no prompt-history rail.
+    expect(screen.getByTestId('unified-chat-view-stub')).toHaveAttribute('data-hide-prompt-rail', 'true');
     expect(
       screen.getByPlaceholderText('Not quite? Tell me what to change…'),
     ).toBeInTheDocument();

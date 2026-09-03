@@ -25,7 +25,8 @@ import { ProposalCardList } from './ProposalCardList';
 
 export interface AgentThreadViewProps {
   /** 'rail' (default) — the AgentRail host: onboarding greeting + suggestion
-   *  chips. 'guided' — the onboarding tour's guided column (step 11): neither. */
+   *  chips. 'guided' — the onboarding tour's guided column (step 11): neither,
+   *  and no prompt-history rail (the 620px box needs the width for the transcript). */
   variant?: 'rail' | 'guided';
   /** Overrides the composer's default placeholder — used by the guided host. */
   composerPlaceholder?: string;
@@ -87,6 +88,7 @@ export function AgentThreadView({
       branchName={null}
       contextUsage={null}
       railId={thread?.id ?? 'agent'}
+      hidePromptRail={variant === 'guided'}
       bottomSlot={
         <div className="flex flex-col gap-2 border-t border-border-primary p-3">
           <ProposalCardList proposals={proposals} />
