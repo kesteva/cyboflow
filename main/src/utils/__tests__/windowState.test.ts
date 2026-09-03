@@ -4,22 +4,31 @@
  * mocks. Every rejection path of sanitizeWindowState, the clamp/ceiling/center
  * math of the geometry helpers, and the fs round-trip incl. its failure modes
  * (missing file, corrupt JSON, wrong shape) read as first-run defaults, never
- * a crash.
+ * a crash. The BrowserWindow persistence controller is driven through a fake
+ * window (EventEmitter + state flags) under fake timers, so the debounce,
+ * close flush, and the normal-vs-maximized-vs-fullscreen bookkeeping are
+ * exercised without electron.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
+import { EventEmitter } from 'events';
+
 import {
   MIN_WINDOW_HEIGHT,
   MIN_WINDOW_WIDTH,
+  WINDOW_STATE_SAVE_DEBOUNCE_MS,
+  attachWindowStatePersistence,
   clampWindowBounds,
   defaultWindowBounds,
   loadWindowState,
   saveWindowState,
   sanitizeWindowState,
   windowStateFilePath,
+  type PersistableWindow,
+  type SavedWindowState,
   type WindowRect,
 } from '../windowState';
 
@@ -83,7 +92,7 @@ describe('sanitizeWindowState', () => {
   it('rejects a sliver rect (width or height below 200) and accepts exactly 200', () => {
     expect(sanitizeWindowState({ bounds: { x: 0, y: 0, width: 199, height: 600 } })).toBeNull();
     expect(sanitizeWindowState({ bounds: { x: 0, y: 0, width: 800, height: 199 } })).toBeNull();
-    expect(sanitizeWindowState({ bounds: { x: 0, y: 0, width: 200, height: 200 } })).not.toBeNull();
+    expect(sanitizeWindowState({ bounds: { x: 0, y: 0, width: 200, height: 200 }, maximized: false })).not.toBeNull();
   });
 
   it('rejects absurd dimensions (corruption, not a real display)', () => {
@@ -95,17 +104,19 @@ describe('sanitizeWindowState', () => {
   it('rejects absurd coordinates but accepts the 100000 boundary', () => {
     expect(sanitizeWindowState({ bounds: { x: 100_001, y: 0, width: 800, height: 600 } })).toBeNull();
     expect(sanitizeWindowState({ bounds: { x: 0, y: -100_001, width: 800, height: 600 } })).toBeNull();
-    const ok = sanitizeWindowState({ bounds: { x: 100_000, y: -100_000, width: 800, height: 600 } });
+    const ok = sanitizeWindowState({
+      bounds: { x: 100_000, y: -100_000, width: 800, height: 600 },
+      maximized: false,
+    });
     expect(ok?.bounds).toEqual({ x: 100_000, y: -100_000, width: 800, height: 600 });
   });
 
-  it('treats maximized as a strict boolean (anything but true is false)', () => {
-    expect(
-      sanitizeWindowState({ bounds: { x: 0, y: 0, width: 800, height: 600 }, maximized: 'yes' }),
-    ).toEqual({ bounds: { x: 0, y: 0, width: 800, height: 600 }, maximized: false });
-    expect(sanitizeWindowState({ bounds: { x: 0, y: 0, width: 800, height: 600 } })?.maximized).toBe(
-      false,
-    );
+  it('rejects a non-boolean maximized (garbage file = first run, bounds included)', () => {
+    const bounds = { x: 0, y: 0, width: 800, height: 600 };
+    expect(sanitizeWindowState({ bounds, maximized: 'yes' })).toBeNull();
+    expect(sanitizeWindowState({ bounds, maximized: 1 })).toBeNull();
+    expect(sanitizeWindowState({ bounds })).toBeNull();
+    expect(sanitizeWindowState({ bounds, maximized: false })?.maximized).toBe(false);
   });
 });
 
@@ -191,9 +202,17 @@ describe('clampWindowBounds', () => {
     expect(clampWindowBounds({ x: -1000, y: -2000, width: 960, height: 640 }, area).y).toBe(-1080);
   });
 
-  it('pins a window larger than the work area to the work-area origin', () => {
-    const clamped = clampWindowBounds({ x: 300, y: 200, width: 2400, height: 1500 }, WORK_AREA);
-    expect(clamped).toEqual({ x: 0, y: 0, width: 2400, height: 1500 });
+  it('shrinks a window larger than the work area to fit it (ultrawide → laptop)', () => {
+    const laptop: WindowRect = { x: 0, y: 25, width: 1440, height: 875 };
+    const clamped = clampWindowBounds({ x: 300, y: 200, width: 3000, height: 1300 }, laptop);
+    expect(clamped).toEqual({ x: 0, y: 25, width: 1440, height: 875 });
+    expect(clampedIsVisible(clamped, laptop)).toBe(true);
+  });
+
+  it('pins to the origin when the work area is below the minimums (window stays at minimum)', () => {
+    const tiny: WindowRect = { x: 0, y: 0, width: 800, height: 500 };
+    const clamped = clampWindowBounds({ x: 300, y: 200, width: 2400, height: 1500 }, tiny);
+    expect(clamped).toEqual({ x: 0, y: 0, width: MIN_WINDOW_WIDTH, height: MIN_WINDOW_HEIGHT });
   });
 
   it('raises undersized dimensions to the minimums', () => {
@@ -254,5 +273,203 @@ describe('loadWindowState / saveWindowState', () => {
       ),
     ).not.toThrow();
     expect(errSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('writes via a temp file + rename, leaving no temp file behind', () => {
+    saveWindowState(dir, { bounds: { x: 0, y: 0, width: 1000, height: 700 }, maximized: false });
+    expect(fs.readdirSync(dir)).toEqual(['window-state.json']);
+  });
+
+  it('keeps the previous state when the write fails (target is never truncated)', () => {
+    const good = { bounds: { x: 1, y: 2, width: 1000, height: 700 }, maximized: false };
+    saveWindowState(dir, good);
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // Occupy the temp path with a directory so the staged write fails.
+    fs.mkdirSync(`${windowStateFilePath(dir)}.${process.pid}.tmp`);
+    saveWindowState(dir, { bounds: { x: 9, y: 9, width: 1000, height: 700 }, maximized: true });
+    expect(errSpy).toHaveBeenCalledTimes(1);
+    expect(loadWindowState(dir)).toEqual(good);
+  });
+});
+
+// -- attachWindowStatePersistence (BrowserWindow wiring, fake window) ---------
+
+/** A BrowserWindow stand-in: an EventEmitter plus settable state flags. */
+class FakeWindow extends EventEmitter implements PersistableWindow {
+  bounds: WindowRect = { x: 100, y: 100, width: 1400, height: 900 };
+  maximized = false;
+  minimized = false;
+  fullScreen = false;
+  destroyed = false;
+  isDestroyed(): boolean {
+    return this.destroyed;
+  }
+  isMaximized(): boolean {
+    return this.maximized;
+  }
+  isMinimized(): boolean {
+    return this.minimized;
+  }
+  isFullScreen(): boolean {
+    return this.fullScreen;
+  }
+  getBounds(): WindowRect {
+    return { ...this.bounds };
+  }
+}
+
+describe('attachWindowStatePersistence', () => {
+  let dir: string;
+  let win: FakeWindow;
+  const INITIAL: SavedWindowState = {
+    bounds: { x: 100, y: 100, width: 1400, height: 900 },
+    maximized: false,
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'window-state-ctl-'));
+    win = new FakeWindow();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    fs.rmSync(dir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  function moveTo(x: number, y: number, width = win.bounds.width, height = win.bounds.height) {
+    win.bounds = { x, y, width, height };
+  }
+
+  /** Snapshot of the state file: null when absent. */
+  function fileState(): SavedWindowState | null {
+    return loadWindowState(dir);
+  }
+
+  it('debounces a flood of resize/move into one write of the settled bounds', () => {
+    attachWindowStatePersistence(win, dir, INITIAL);
+    for (let i = 1; i <= 10; i++) {
+      moveTo(100 + i, 100 + i, 1400 + i, 900 + i);
+      win.emit('resize');
+      vi.advanceTimersByTime(WINDOW_STATE_SAVE_DEBOUNCE_MS - 1);
+    }
+    expect(fileState()).toBeNull();
+    vi.advanceTimersByTime(1);
+    expect(fileState()).toEqual({
+      bounds: { x: 110, y: 110, width: 1410, height: 910 },
+      maximized: false,
+    });
+  });
+
+  it('close flushes immediately, cancelling the pending timer', () => {
+    attachWindowStatePersistence(win, dir, INITIAL);
+    moveTo(50, 60);
+    win.emit('move');
+    win.emit('close');
+    expect(fileState()?.bounds).toEqual({ x: 50, y: 60, width: 1400, height: 900 });
+    // Had the timer survived, it would sample these post-close bounds.
+    moveTo(1, 1);
+    vi.advanceTimersByTime(WINDOW_STATE_SAVE_DEBOUNCE_MS * 2);
+    expect(fileState()?.bounds).toEqual({ x: 50, y: 60, width: 1400, height: 900 });
+  });
+
+  it('a close before any resize/move writes the seeded (creation) bounds', () => {
+    attachWindowStatePersistence(win, dir, { ...INITIAL, maximized: true });
+    win.maximized = true;
+    win.emit('close');
+    expect(loadWindowState(dir)).toEqual({ ...INITIAL, maximized: true });
+  });
+
+  it('maximizing keeps the last NORMAL bounds and records maximized:true', () => {
+    attachWindowStatePersistence(win, dir, INITIAL);
+    moveTo(200, 150, 1500, 950);
+    win.emit('move');
+    vi.advanceTimersByTime(WINDOW_STATE_SAVE_DEBOUNCE_MS);
+    // Maximize: the window now reports the full work area as its bounds.
+    win.maximized = true;
+    moveTo(0, 0, 2560, 1415);
+    win.emit('resize');
+    vi.advanceTimersByTime(WINDOW_STATE_SAVE_DEBOUNCE_MS);
+    expect(loadWindowState(dir)).toEqual({
+      bounds: { x: 200, y: 150, width: 1500, height: 950 },
+      maximized: true,
+    });
+    // Un-maximize lands back on the normal rect and clears the flag.
+    win.maximized = false;
+    moveTo(200, 150, 1500, 950);
+    win.emit('resize');
+    vi.advanceTimersByTime(WINDOW_STATE_SAVE_DEBOUNCE_MS);
+    expect(loadWindowState(dir)?.maximized).toBe(false);
+  });
+
+  it('macOS: a drag followed by fullscreen persists the DRAGGED bounds, not a stale frame', () => {
+    // Regression for getNormalBounds() returning Electron's launch-time
+    // original_frame_ on macOS — user drags never refresh it.
+    attachWindowStatePersistence(win, dir, INITIAL);
+    moveTo(400, 300, 1600, 1000);
+    win.emit('move');
+    vi.advanceTimersByTime(WINDOW_STATE_SAVE_DEBOUNCE_MS);
+    // Green button: fullscreen fires a resize with the screen rect.
+    win.fullScreen = true;
+    moveTo(0, 0, 2560, 1440);
+    win.emit('resize');
+    vi.advanceTimersByTime(WINDOW_STATE_SAVE_DEBOUNCE_MS);
+    // Cmd+Q from fullscreen.
+    win.emit('close');
+    expect(loadWindowState(dir)).toEqual({
+      bounds: { x: 400, y: 300, width: 1600, height: 1000 },
+      maximized: false,
+    });
+  });
+
+  it('fullscreen never clobbers a maximized flag (quit from fullscreen reopens maximized)', () => {
+    attachWindowStatePersistence(win, dir, INITIAL);
+    win.maximized = true;
+    moveTo(0, 0, 2560, 1415);
+    win.emit('resize');
+    vi.advanceTimersByTime(WINDOW_STATE_SAVE_DEBOUNCE_MS);
+    win.maximized = false;
+    win.fullScreen = true;
+    moveTo(0, 0, 2560, 1440);
+    win.emit('resize');
+    win.emit('close');
+    expect(loadWindowState(dir)).toEqual({ ...INITIAL, maximized: true });
+  });
+
+  it('Windows: closing while minimized-from-maximized still records maximized:true', () => {
+    attachWindowStatePersistence(win, dir, INITIAL);
+    win.maximized = true;
+    win.emit('resize');
+    vi.advanceTimersByTime(WINDOW_STATE_SAVE_DEBOUNCE_MS);
+    // Minimized: Windows reports isMaximized()=false and a -32000 offscreen rect.
+    win.maximized = false;
+    win.minimized = true;
+    moveTo(-32000, -32000, 160, 28);
+    win.emit('resize');
+    win.emit('close');
+    expect(loadWindowState(dir)).toEqual({ ...INITIAL, maximized: true });
+  });
+
+  it('closed cancels a pending timer so nothing fires into a destroyed window', () => {
+    attachWindowStatePersistence(win, dir, INITIAL);
+    win.emit('move');
+    win.emit('closed');
+    win.destroyed = true;
+    vi.advanceTimersByTime(WINDOW_STATE_SAVE_DEBOUNCE_MS * 2);
+    expect(fileState()).toBeNull();
+  });
+
+  it('flush() writes now and is inert after dispose()', () => {
+    const ctl = attachWindowStatePersistence(win, dir, INITIAL);
+    moveTo(10, 20);
+    ctl.flush();
+    expect(fileState()?.bounds).toEqual({ x: 10, y: 20, width: 1400, height: 900 });
+    ctl.dispose();
+    moveTo(30, 40);
+    win.emit('move');
+    vi.advanceTimersByTime(WINDOW_STATE_SAVE_DEBOUNCE_MS);
+    ctl.flush();
+    expect(fileState()?.bounds).toEqual({ x: 10, y: 20, width: 1400, height: 900 });
   });
 });
