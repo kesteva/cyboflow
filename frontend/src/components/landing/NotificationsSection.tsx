@@ -9,8 +9,8 @@
  * notification, so this section is informational by construction.
  *
  * Rows mirror HumanTasksSection's single-line chrome with the body behind
- * "Details ▸": "Open →" jumps to the run that filed it, and "Dismiss" is the
- * only triage an FYI has (there is no follow-up to track).
+ * "Details ▸", and "Dismiss" is the ONLY action: an FYI reports work that is
+ * already done, so there is nothing to open into and no follow-up to track.
  *
  * It sits BELOW "Ready for review": finished work that still needs a verdict
  * outranks a notice about work that has already been accounted for.
@@ -21,20 +21,18 @@
 import React from 'react';
 import type { ReviewItem } from '../../../../shared/types/reviews';
 import { useReviewItemActions } from '../../hooks/useReviewItemActions';
-import { Chip, GhostButton, PrimaryButton, SecondaryButton, SectionHeader } from './QueuePrimitives';
+import { Chip, GhostButton, SecondaryButton, SectionHeader } from './QueuePrimitives';
 import { compactAge } from './queueSelectors';
 
 function NotificationRow({
   item,
   projectName,
   nowMs,
-  onOpen,
   onDismissed,
 }: {
   item: ReviewItem;
   projectName: string | null;
   nowMs: number;
-  onOpen: (item: ReviewItem) => void;
   onDismissed: () => void;
 }): React.JSX.Element {
   const [expanded, setExpanded] = React.useState(false);
@@ -75,7 +73,6 @@ function NotificationRow({
               Details {expanded ? '▾' : '▸'}
             </GhostButton>
           )}
-          {item.run_id !== null && <PrimaryButton onClick={() => onOpen(item)}>Open →</PrimaryButton>}
           <SecondaryButton onClick={acknowledge} disabled={busy}>
             {busy ? 'Dismissing…' : 'Dismiss'}
           </SecondaryButton>
@@ -94,8 +91,6 @@ export interface NotificationsSectionProps {
   items: ReviewItem[];
   projectNameById: Record<number, string>;
   nowMs: number;
-  /** Jump to whatever filed the notice (the run's session workspace). */
-  onOpen: (item: ReviewItem) => void;
   /** Called after a successful dismiss so the page can re-derive its counts. */
   onDismissed: () => void;
 }
@@ -105,7 +100,6 @@ export function NotificationsSection({
   items,
   projectNameById,
   nowMs,
-  onOpen,
   onDismissed,
 }: NotificationsSectionProps): React.JSX.Element | null {
   if (items.length === 0) return null;
@@ -118,7 +112,6 @@ export function NotificationsSection({
           item={item}
           projectName={projectNameById[item.project_id] ?? null}
           nowMs={nowMs}
-          onOpen={onOpen}
           onDismissed={onDismissed}
         />
       ))}

@@ -680,7 +680,6 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
             items={notificationItems}
             projectNameById={projectNameById}
             nowMs={nowMs}
-            onOpen={openReviewItem}
             onDismissed={afterLifecycleAction}
           />
         </>

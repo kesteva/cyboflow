@@ -1,10 +1,11 @@
 /**
  * NotificationsSection — the grey FYI band. Covers the kicker/verbs that make it
- * distinct from the red "Needs your input" band (an FYI is never "Asked you" and
- * never offers "Answer →"), the Details toggle, and the Dismiss wiring.
+ * distinct from the red "Needs your input" band (an FYI is never "Asked you",
+ * and Dismiss is its ONLY action — no "Answer →", no "Open →"), the Details
+ * toggle, and the Dismiss wiring.
  */
 import '@testing-library/jest-dom';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ReviewItem } from '../../../../../shared/types/reviews';
@@ -50,7 +51,6 @@ const baseProps = {
   items: [] as ReviewItem[],
   projectNameById: { 1: 'cyboflow' },
   nowMs: NOW,
-  onOpen: vi.fn(),
   onDismissed: vi.fn(),
 };
 
@@ -69,24 +69,15 @@ describe('NotificationsSection', () => {
     expect(screen.getByText('FYI')).toBeInTheDocument();
     expect(screen.queryByText('Asked you')).not.toBeInTheDocument();
     expect(screen.queryByText('Answer →')).not.toBeInTheDocument();
+    expect(screen.queryByText('Open →')).not.toBeInTheDocument();
     expect(screen.getByText('Dynamic workflow finished: onboarding-impl-recon')).toBeInTheDocument();
     expect(screen.getByText('cyboflow')).toBeInTheDocument();
   });
 
-  it('opens the filing run via onOpen', async () => {
-    const user = userEvent.setup();
-    const onOpen = vi.fn();
-    const item = makeNotification();
-    render(<NotificationsSection {...baseProps} items={[item]} onOpen={onOpen} />);
-
-    await user.click(screen.getByText('Open →'));
-    expect(onOpen).toHaveBeenCalledWith(item);
-  });
-
-  it('omits Open for a notification with no run to jump to', () => {
+  it('offers Dismiss as the only action, run-bound or not', () => {
     render(<NotificationsSection {...baseProps} items={[makeNotification({ run_id: null })]} />);
-    expect(screen.queryByText('Open →')).not.toBeInTheDocument();
-    expect(screen.getByText('Dismiss')).toBeInTheDocument();
+    const row = screen.getByTestId('rq-notification-row');
+    expect(within(row).getAllByRole('button').map((b) => b.textContent)).toEqual(['Dismiss']);
   });
 
   it('dismisses through the review-item chokepoint and reports back', async () => {
