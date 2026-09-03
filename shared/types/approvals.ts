@@ -53,6 +53,22 @@ export interface Approval {
    */
   sessionName: string | null;
   /**
+   * The worktree branch of the session the asking agent is running in, or null
+   * when the run is not session-hosted (or the schema predates the link).
+   *
+   * WHY IT IS NOT REDUNDANT WITH {@link sessionName}: a session is BORN named
+   * after its worktree, so for an untouched session the two strings are equal
+   * and one of them looks sufficient. A rename changes only `sessionName`, and
+   * from then on a surface showing one field is missing the other — the name
+   * with no branch to locate the work, or the branch with no name to recognize
+   * it. Both are carried; a surface that shows them together is expected to
+   * collapse them when they are still identical.
+   *
+   * Derived read-side from the same session join as `sessionName`; there is no
+   * column on `approvals` and nothing new is written at approval time.
+   */
+  worktreeName: string | null;
+  /**
    * Which provider is asking (`claude` / `codex` / `omp`), or null when the run
    * predates the provider axis.
    *

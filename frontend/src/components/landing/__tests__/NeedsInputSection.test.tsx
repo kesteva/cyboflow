@@ -91,6 +91,7 @@ function makeApproval(overrides: Partial<Approval> = {}): Approval {
     createdAt: '2026-07-06T00:00:00.000Z',
     status: 'pending',
     sessionName: 'busy-otter',
+    worktreeName: 'busy-otter-20260706',
     agentProvider: null,
     awaited: true,
     ...overrides,
@@ -231,6 +232,15 @@ describe('NeedsInputSection', () => {
     await user.click(approveBtn);
     expect(approveMock).toHaveBeenCalledWith({ approvalId: 'appr-1' });
     await vi.waitFor(() => expect(onApprovalDecided).toHaveBeenCalled());
+  });
+
+  it('shows the session name and branch on an approval card', () => {
+    // Approvals carry the same two identity fields as a quick session, joined
+    // read-side from the run's session.
+    const item: QueueItem = { kind: 'single', approval: makeApproval(), isBlocking: true };
+    render(<NeedsInputSection {...baseProps} approvals={[item]} />);
+    expect(screen.getByText('busy-otter')).toBeInTheDocument();
+    expect(screen.getByText('⌥ busy-otter-20260706')).toBeInTheDocument();
   });
 
   it('rejects a single approval via the reject mutation', async () => {

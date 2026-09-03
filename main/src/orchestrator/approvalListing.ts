@@ -34,6 +34,8 @@ interface DbApprovalRow {
   awaited: number;
   /** `sessions.name` via LEFT JOIN; null when the join was not made or the row is gone. */
   sessionName: string | null;
+  /** `sessions.worktree_name` via the same LEFT JOIN; null on the same conditions. */
+  worktreeName: string | null;
   /** `workflow_runs.agent_runtime`; null when the column is absent on an old schema. */
   agentRuntime: string | null;
 }
@@ -78,8 +80,16 @@ function columnExists(db: DatabaseLike, table: string, column: string): boolean 
 /** The identity half of an {@link Approval}: who is asking. */
 export interface ApprovalAttribution {
   sessionName: string | null;
+  worktreeName: string | null;
   agentProvider: string | null;
 }
+
+/** The all-null attribution every degradation path returns. */
+const EMPTY_ATTRIBUTION: ApprovalAttribution = {
+  sessionName: null,
+  worktreeName: null,
+  agentProvider: null,
+};
 
 /**
  * Coerce one run's raw session name + runtime into the shape the UI reads.
@@ -92,10 +102,15 @@ export interface ApprovalAttribution {
 export function toApprovalAttribution(
   sessionName: unknown,
   agentRuntime: unknown,
+  worktreeName: unknown = null,
 ): ApprovalAttribution {
   return {
     sessionName:
       typeof sessionName === 'string' && sessionName.length > 0 ? sessionName : null,
+    // Same empty-string-is-absent rule as the name: a session row can carry ''
+    // for a worktree it never got, and rendering a bare ⌥ is worse than nothing.
+    worktreeName:
+      typeof worktreeName === 'string' && worktreeName.length > 0 ? worktreeName : null,
     // A NULL runtime floors to the Claude default inside providerForRuntimeValue,
     // which would be a guess rather than a reading — so it stays null here and
     // the UI shows no provider at all.
@@ -114,24 +129,31 @@ export function toApprovalAttribution(
 export function selectApprovalAttribution(db: DatabaseLike, runId: string): ApprovalAttribution {
   const hasSession =
     columnExists(db, 'workflow_runs', 'session_id') && columnExists(db, 'sessions', 'name');
+  // Probed independently of `name`: a fixture (or an old schema) can have one
+  // without the other, and the join must degrade per-column rather than all-or-
+  // nothing.
+  const hasWorktree = hasSession && columnExists(db, 'sessions', 'worktree_name');
   const hasRuntime = columnExists(db, 'workflow_runs', 'agent_runtime');
-  if (!hasSession && !hasRuntime) return { sessionName: null, agentProvider: null };
+  if (!hasSession && !hasRuntime) return EMPTY_ATTRIBUTION;
 
   try {
     const row = db
       .prepare(
         `SELECT
            ${hasSession ? 's.name' : 'NULL'} AS sessionName,
+           ${hasWorktree ? 's.worktree_name' : 'NULL'} AS worktreeName,
            ${hasRuntime ? 'r.agent_runtime' : 'NULL'} AS agentRuntime
          FROM workflow_runs r
          ${hasSession ? 'LEFT JOIN sessions s ON s.id = r.session_id' : ''}
          WHERE r.id = ?`,
       )
-      .get(runId) as { sessionName?: unknown; agentRuntime?: unknown } | undefined;
-    if (!row) return { sessionName: null, agentProvider: null };
-    return toApprovalAttribution(row.sessionName, row.agentRuntime);
+      .get(runId) as
+      | { sessionName?: unknown; worktreeName?: unknown; agentRuntime?: unknown }
+      | undefined;
+    if (!row) return EMPTY_ATTRIBUTION;
+    return toApprovalAttribution(row.sessionName, row.agentRuntime, row.worktreeName);
   } catch {
-    return { sessionName: null, agentProvider: null };
+    return EMPTY_ATTRIBUTION;
   }
 }
 
@@ -148,6 +170,7 @@ export function selectApprovalAttribution(db: DatabaseLike, runId: string): Appr
 export function selectPendingApprovals(db: DatabaseLike): Approval[] {
   const hasSession =
     columnExists(db, 'workflow_runs', 'session_id') && columnExists(db, 'sessions', 'name');
+  const hasWorktree = hasSession && columnExists(db, 'sessions', 'worktree_name');
   const hasRuntime = columnExists(db, 'workflow_runs', 'agent_runtime');
 
   const rows = db.prepare(
@@ -162,6 +185,7 @@ export function selectPendingApprovals(db: DatabaseLike): Approval[] {
        a.status      AS status,
        a.awaited     AS awaited,
        ${hasSession ? 's.name' : 'NULL'} AS sessionName,
+       ${hasWorktree ? 's.worktree_name' : 'NULL'} AS worktreeName,
        ${hasRuntime ? 'r.agent_runtime' : 'NULL'} AS agentRuntime
      FROM approvals a
      JOIN workflow_runs r ON r.id = a.run_id
@@ -183,6 +207,6 @@ export function selectPendingApprovals(db: DatabaseLike): Approval[] {
     // Migration 111 backfills 1, so a row written before it (or by any transport
     // that never touches the column) reads as awaited — the honest default.
     awaited: row.awaited !== 0,
-    ...toApprovalAttribution(row.sessionName, row.agentRuntime),
+    ...toApprovalAttribution(row.sessionName, row.agentRuntime, row.worktreeName),
   }));
 }

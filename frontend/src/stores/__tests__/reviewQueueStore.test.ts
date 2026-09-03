@@ -96,6 +96,7 @@ function makeApproval(overrides: Partial<Approval> & { id: string }): Approval {
     status: overrides.status ?? 'pending',
     awaited: overrides.awaited ?? true,
     sessionName: overrides.sessionName ?? null,
+    worktreeName: overrides.worktreeName ?? null,
     agentProvider: overrides.agentProvider ?? null,
   };
 }

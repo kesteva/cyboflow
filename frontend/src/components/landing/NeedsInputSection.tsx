@@ -178,6 +178,7 @@ function approvalFacts(item: QueueItem): {
   toolName: string;
   preview: string;
   sessionName: string | null;
+  worktreeName: string | null;
   createdAt: string;
   count: number;
 } {
@@ -189,6 +190,7 @@ function approvalFacts(item: QueueItem): {
       toolName: a.toolName,
       preview: a.payloadPreview,
       sessionName: a.sessionName,
+      worktreeName: a.worktreeName,
       createdAt: a.createdAt,
       count: 1,
     };
@@ -200,6 +202,7 @@ function approvalFacts(item: QueueItem): {
     toolName: item.toolName,
     preview: first.payloadPreview,
     sessionName: first.sessionName,
+    worktreeName: first.worktreeName,
     createdAt: first.createdAt,
     count: item.items.length,
   };
@@ -259,9 +262,7 @@ function ApprovalAsk({
       <MetaRow
         projectName={projectName}
         sessionName={facts.sessionName}
-        // An approval row carries no worktree: `Approval` joins `sessions.name`
-        // only, so there is no branch to show rather than one being dropped.
-        branchName={null}
+        branchName={facts.worktreeName}
         context={facts.count > 1 ? `${facts.toolName} · ${facts.count} identical requests` : facts.toolName}
         actions={
           <>

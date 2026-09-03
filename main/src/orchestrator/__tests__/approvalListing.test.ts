@@ -127,7 +127,55 @@ describe('selectPendingApprovals — attribution', () => {
 
     const [approval] = selectPendingApprovals(adapter);
     expect(approval.sessionName).toBeNull();
+    expect(approval.worktreeName).toBeNull();
     expect(approval.agentProvider).toBeNull();
+  });
+
+  it('projects the session name AND its worktree branch when the join is available', () => {
+    // The two are separate fields because a rename moves only `name`: an
+    // approval card that showed one would lose the other for every renamed
+    // session.
+    const db = createTestDb({ includeSubstrate: true });
+    db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT, worktree_name TEXT)');
+    db.prepare('INSERT INTO sessions (id, name, worktree_name) VALUES (?, ?, ?)').run(
+      'sess-1',
+      'Tech debt cleanup',
+      'shiny-badger-20260902',
+    );
+    seedRun(db, { id: 'run-wt' });
+    db.prepare('UPDATE workflow_runs SET session_id = ? WHERE id = ?').run('sess-1', 'run-wt');
+    seedApproval(db, {
+      id: 'approval-wt',
+      runId: 'run-wt',
+      toolName: 'Bash',
+      toolInputJson: '{}',
+      createdAt: '2026-01-01T00:00:00Z',
+    });
+
+    const [approval] = selectPendingApprovals(dbAdapter(db));
+    expect(approval.sessionName).toBe('Tech debt cleanup');
+    expect(approval.worktreeName).toBe('shiny-badger-20260902');
+  });
+
+  it('degrades worktreeName alone when sessions has a name but no worktree_name', () => {
+    // The two columns are probed independently: a schema with one and not the
+    // other must still yield the name rather than erroring the whole query.
+    const db = createTestDb({ includeSubstrate: true });
+    db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT)');
+    db.prepare('INSERT INTO sessions (id, name) VALUES (?, ?)').run('sess-2', 'busy-otter');
+    seedRun(db, { id: 'run-nowt' });
+    db.prepare('UPDATE workflow_runs SET session_id = ? WHERE id = ?').run('sess-2', 'run-nowt');
+    seedApproval(db, {
+      id: 'approval-nowt',
+      runId: 'run-nowt',
+      toolName: 'Bash',
+      toolInputJson: '{}',
+      createdAt: '2026-01-01T00:00:00Z',
+    });
+
+    const [approval] = selectPendingApprovals(dbAdapter(db));
+    expect(approval.sessionName).toBe('busy-otter');
+    expect(approval.worktreeName).toBeNull();
   });
 });
 
@@ -135,6 +183,7 @@ describe('toApprovalAttribution', () => {
   it('reads a runtime into its provider', () => {
     expect(toApprovalAttribution('sess', 'omp-sdk')).toEqual({
       sessionName: 'sess',
+      worktreeName: null,
       agentProvider: 'omp',
     });
     expect(toApprovalAttribution(null, 'claude-interactive').agentProvider).toBe('claude');
@@ -151,5 +200,13 @@ describe('toApprovalAttribution', () => {
   it('treats an empty session name as absent', () => {
     expect(toApprovalAttribution('', 'omp-sdk').sessionName).toBeNull();
     expect(toApprovalAttribution(42, 'omp-sdk').sessionName).toBeNull();
+  });
+
+  it('treats an empty or non-string worktree as absent', () => {
+    // A bare "⌥ " is worse than showing no branch at all.
+    expect(toApprovalAttribution('sess', null, 'tidy-valley').worktreeName).toBe('tidy-valley');
+    expect(toApprovalAttribution('sess', null, '').worktreeName).toBeNull();
+    expect(toApprovalAttribution('sess', null, 42).worktreeName).toBeNull();
+    expect(toApprovalAttribution('sess', null).worktreeName).toBeNull();
   });
 });
