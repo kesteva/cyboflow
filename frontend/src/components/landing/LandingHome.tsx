@@ -77,6 +77,7 @@ import { AddIdeaModal } from './AddIdeaModal';
 import { QueueHeader } from './QueueHeader';
 import { RecommendedActionsSection } from './RecommendedActionsSection';
 import { NeedsInputSection } from './NeedsInputSection';
+import { NotificationsSection } from './NotificationsSection';
 import { HumanTasksSection } from './HumanTasksSection';
 import { ReadyForReviewSection, type ReadyRow } from './ReadyForReviewSection';
 import { WorkingSection, type WorkingRow } from './WorkingSection';
@@ -237,8 +238,15 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
   );
   const attentionQuickCount = React.useMemo(() => quickRows.filter(needsAttention).length, [quickRows]);
 
-  const decisionAndNotificationItems = React.useMemo(
-    () => reviewItems.filter((it) => it.kind === 'decision' || it.kind === 'notification'),
+  // Decisions are asks (red band); notifications are FYIs (grey band). They were
+  // one list until a finished dynamic workflow started reading as "Asked you —
+  // Answer →", claiming a reply nobody was waiting for.
+  const decisionItems = React.useMemo(
+    () => reviewItems.filter((it) => it.kind === 'decision'),
+    [reviewItems],
+  );
+  const notificationItems = React.useMemo(
+    () => reviewItems.filter((it) => it.kind === 'notification'),
     [reviewItems],
   );
   const humanTaskItems = React.useMemo(
@@ -635,7 +643,7 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
           <NeedsInputSection
             ref={needsInputRef}
             quickRows={triage.needsInput}
-            reviewItems={decisionAndNotificationItems}
+            reviewItems={decisionItems}
             approvals={approvals}
             projectNameById={projectNameById}
             runProjectMap={runProjectMap}
@@ -653,6 +661,14 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
             projectNameById={projectNameById}
             nowMs={nowMs}
             onResolved={afterLifecycleAction}
+          />
+
+          <NotificationsSection
+            items={notificationItems}
+            projectNameById={projectNameById}
+            nowMs={nowMs}
+            onOpen={openReviewItem}
+            onDismissed={afterLifecycleAction}
           />
 
           <div ref={readyRef} className="scroll-mt-4">
