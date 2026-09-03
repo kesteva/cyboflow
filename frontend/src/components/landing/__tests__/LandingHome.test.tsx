@@ -131,6 +131,18 @@ vi.mock('../../../trpc/client', () => ({
   },
 }));
 
+// WorkingSection's run rows open a live phase subscription per active flow run;
+// the phase graph is not what these page-state tests are about.
+vi.mock('../../../hooks/useWorkflowPhaseState', () => ({
+  useWorkflowPhaseState: () => ({
+    definition: null,
+    currentStepId: null,
+    stepStates: [],
+    isLoading: false,
+    error: null,
+  }),
+}));
+
 // Leaf components with their own heavy store/trpc wiring, unrelated to page-state
 // derivation — stubbed the same way the retired test stubbed EmptyState/SubHeader.
 vi.mock('../../ReviewQueue/ProviderUsageCards', () => ({ ProviderUsageCards: () => null }));
@@ -455,5 +467,35 @@ describe('LandingHome — page states', () => {
     expect(count.className).toMatch(/text-interactive/);
     // approvals(0) + reviewItems(1) + awaiting_review runs(1) + attention quick rows(2) = 4.
     expect(count).toHaveTextContent('4');
+  });
+  it('working: a flow run absorbs its hosting session row instead of listing both', async () => {
+    // A run and the session it runs in are one running thing. Before the dedupe
+    // the page listed `planner ⌥ faint-harbor` AND a bare `faint-harbor`.
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockQuickRows = [
+      quickRow({ sessionId: 'sess-run', name: 'faint-harbor-20260903', state: 'running', idleSince: null }),
+      quickRow({ sessionId: 'sess-solo', name: 'quiet-mesa', state: 'running', idleSince: null }),
+    ];
+    mockRuns = [
+      makeRun({
+        id: 'run-a',
+        status: 'running',
+        workflowName: 'planner',
+        branch_name: 'faint-harbor-20260903',
+        session_id: 'sess-run',
+      }),
+    ];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    const working = screen.getByTestId('rq-working-section');
+    // The run row + the unrelated quick session — not three rows.
+    expect(within(working).getAllByTestId('rq-working-row')).toHaveLength(2);
+    expect(within(working).getByText('planner')).toBeInTheDocument();
+    expect(within(working).getByText('quiet-mesa')).toBeInTheDocument();
+    expect(within(working).queryByText('faint-harbor-20260903')).not.toBeInTheDocument();
   });
 });

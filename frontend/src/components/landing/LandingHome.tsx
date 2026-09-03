@@ -228,10 +228,6 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
     return map;
   }, [projects]);
 
-  const activeRunCount = React.useMemo(
-    () => runs.filter((run) => classifyRun(run.status) === 'active').length,
-    [runs],
-  );
   const readyToReviewCount = React.useMemo(
     () => runs.filter((run) => run.status === 'awaiting_review').length,
     [runs],
@@ -257,13 +253,41 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
     [reviewItems],
   );
 
+  // Working rows — the three sources, deduped down to one row per running thing.
+  const workingRows = React.useMemo<WorkingRow[]>(() => {
+    const activeRuns = runs.filter((run) => classifyRun(run.status) === 'active');
+    // A flow run and the session hosting it are ONE running thing. The run row is
+    // the richer of the two (phase bars, current step), so the session's own quick
+    // row drops out — otherwise `planner ⌥ faint-harbor` and a bare `faint-harbor`
+    // both render and the second says nothing the first doesn't.
+    const runSessionIds = new Set(
+      activeRuns
+        .map((run) => run.session_id)
+        .filter((id): id is string => typeof id === 'string' && id !== ''),
+    );
+    const quickSessionIds = new Set(quickRows.map((r) => r.sessionId));
+    return [
+      ...activeRuns.map((run) => ({ kind: 'run' as const, id: run.id, run })),
+      ...triage.working
+        .filter((row) => !runSessionIds.has(row.sessionId))
+        .map((row) => ({ kind: 'quick' as const, id: row.sessionId, row })),
+      // A dynamic workflow on a known quick session is already represented by
+      // that session's row (the triage promotes it to `running`), so only
+      // orphans — a workflow on a session the board doesn't list — appear here.
+      ...activeDynamicWorkflows
+        .filter((w) => !quickSessionIds.has(w.sessionId))
+        .map((workflow) => ({ kind: 'dynamic' as const, id: workflow.wfRunId, workflow })),
+    ];
+  }, [runs, triage.working, activeDynamicWorkflows, quickRows]);
+
   const waitingCount =
     approvalsCount + reviewItems.length + readyToReviewCount + attentionQuickCount;
   const blockedCount =
     countApprovals(blockingApprovalItems) +
     reviewItems.filter((it) => it.blocking).length +
     quickRows.filter((r) => r.state === 'blocked').length;
-  const workingCount = activeRunCount + activeDynamicWorkflows.length + triage.working.length;
+  // The deduped row count, not the raw sum — a flow run and its session are one row.
+  const workingCount = workingRows.length;
   const sessionsCount =
     quickRows.length + runs.filter((run) => classifyRun(run.status) !== 'terminal').length;
 
@@ -362,25 +386,6 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
     }
     return guarded;
   }, [triage.readyForReview, experiments]);
-
-  // -------------------------------------------------------------------------
-  // Working rows
-  // -------------------------------------------------------------------------
-  const workingRows = React.useMemo<WorkingRow[]>(() => {
-    const quickSessionIds = new Set(quickRows.map((r) => r.sessionId));
-    return [
-      ...runs
-        .filter((run) => classifyRun(run.status) === 'active')
-        .map((run) => ({ kind: 'run' as const, id: run.id, run })),
-      ...triage.working.map((row) => ({ kind: 'quick' as const, id: row.sessionId, row })),
-      // A dynamic workflow on a known quick session is already represented by
-      // that session's row (the triage promotes it to `running`), so only
-      // orphans — a workflow on a session the board doesn't list — appear here.
-      ...activeDynamicWorkflows
-        .filter((w) => !quickSessionIds.has(w.sessionId))
-        .map((workflow) => ({ kind: 'dynamic' as const, id: workflow.wfRunId, workflow })),
-    ];
-  }, [runs, triage.working, activeDynamicWorkflows, quickRows]);
 
   // -------------------------------------------------------------------------
   // Section refs, focus + flash
