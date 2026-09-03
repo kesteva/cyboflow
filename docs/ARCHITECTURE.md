@@ -480,10 +480,13 @@ resolved per turn by `resolveAssistantRuntime` (shared/types/agentThread.ts): th
 from onboarding carries over), else `claude-sdk`. `AgentThreadService` holds both managers and
 spawns with the same hermetic contract on either — `isolation: 'agent'`, `mcpScope:
 'global-agent'`, an injected transcript sink, no run row. On Codex that contract is honoured by
-the app-server manager's isolation branch: read-only sandbox, `approvalPolicy: never`, the shell
-tool and web search disabled through the thread config, no `agent_invocations`/`raw_events`
-bookkeeping, and a local fail-closed policy that accepts only `cyboflow_*` MCP elicitations
-(nothing reaches the approval/question routers, which need a running `workflow_runs` row). The
+the app-server manager's isolation branch: read-only sandbox, `approvalPolicy: never`, the shell,
+plugins, apps/connectors and web search disabled through the thread config, the user's own
+`config.toml` MCP servers disabled by name (the thread config MERGES with that file), no
+`agent_invocations`/`raw_events` bookkeeping, and a local fail-closed policy that accepts only
+`cyboflow_*` MCP elicitations (nothing reaches the approval/question routers, which need a
+running `workflow_runs` row). Known residual on Codex 0.144.3: multi-agent spawn cannot be
+switched off by config; sub-agents inherit the same confinement. The
 stored resume id is provider-bound (`agent_threads.session_runtime`); switching runtimes
 cold-starts the conversation. Plan + review log: `docs/proposals/ASSISTANT-CODEX-RUNTIME.md`.
 

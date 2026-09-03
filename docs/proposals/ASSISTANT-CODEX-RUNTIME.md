@@ -154,14 +154,21 @@ createdCodexSdkManager }` and `runtime: () => configManager.getAssistantRuntime(
 
 ## Decisions needed
 
-- **A. Isolation parity on Codex.** With `features.shell_tool=false`, `web_search="disabled"`,
-  `sandbox: read-only`, `approvalPolicy: never` and the local fail-closed request policy, the
-  Codex assistant is confined to the cyboflow MCP family — EXCEPT for MCP servers the user
-  configured in `~/.codex/config.toml`, if the thread config merges rather than replaces
-  them. Recommend: ship v1 with the confinement above, verify merge-vs-replace on the first
-  smoke, and if it merges, disable those servers' tools via `enabled_tools = []`. Settings →
-  Assistant shows a one-line note on Codex ("Folder access rules apply to the Claude
-  assistant; the Codex assistant has no shell or file tools"). Explicit sign-off wanted.
+- **A. Isolation parity on Codex — RESOLVED by live smoke (2026-09-03, Codex 0.144.3).**
+  The thread `config` override MERGES with `~/.codex/config.toml` (the user's `node_repl`
+  and the bundled Computer Use plugin's `cua_repl` were callable, as were the ChatGPT app
+  connectors). Shipped confinement, each verified by a direct tool probe:
+  `sandbox: read-only`, `approvalPolicy: never`, `features.{shell_tool,unified_exec}=false`
+  (shell gone), `features.plugins=false` (plugin MCP gone), `features.apps=false` +
+  `apps._default.enabled=false` (connectors gone), `features.remote_plugin=false`,
+  `web_search="disabled"`, `include_apply_patch_tool=false` (apply_patch is blocked by the
+  sandbox anyway), and `mcp_servers.<id>.enabled=false` for every server named in
+  `config.toml` (read per spawn, fingerprinted). Disabling a PLUGIN server by name is not
+  possible — the override has no transport to merge into and the app-server rejects the
+  thread ("invalid transport in `mcp_servers.cua_repl`"). Residual: `collaboration.spawn_agent`
+  survives every multi-agent flag spelling on this build; sub-agents inherit the same
+  confinement, and the developer instructions forbid spawning. Settings → Assistant shows the
+  Codex folder-access note.
 - **B. Default behaviour.** Recommend: follow `defaultAgentRuntime` automatically
   (fixes the reported bug with zero extra clicks). Alternative: explicit opt-in only.
 - **C. Error surfacing** in the rail is in scope as a prerequisite (Codex auth /
@@ -185,3 +192,13 @@ createdCodexSdkManager }` and `runtime: () => configManager.getAssistantRuntime(
    the local policy row.
 6. **Medium (accepted):** the isolation thread config is a new branch, not a flag swap —
    made explicit.
+
+## Live smoke (2026-09-03, fresh data dir, `defaultAgentRuntime: codex-sdk`, no explicit pick)
+
+- Assistant turn spawned through the Codex app-server; `agent_threads.session_runtime =
+  codex-sdk`; `cyboflow_overview` succeeded; zero `raw_events` / `agent_invocations` rows.
+- Transcript sink initially stored 1174 `agent_unknown` rows per turn (every unprojected
+  app-server notification) — now skipped, matching the run-scoped sink.
+- A thread-start failure (the plugin-name experiment) surfaced in the rail as a system error
+  message — the error-surfacing path works.
+- Merge-vs-replace and the tool confinement: see Decision A.
