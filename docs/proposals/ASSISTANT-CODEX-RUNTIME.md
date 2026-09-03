@@ -1,6 +1,7 @@
 # Global assistant on Codex — plan
 
-Status: PROPOSAL (2026-09-03). Follow-on to `GLOBAL-AGENT-PLAN.md` (Stages 0–1 shipped).
+Status: PROPOSAL (2026-09-03), Codex-adversarial-reviewed (6 findings, all incorporated — see
+"Review round 1" at the end). Follow-on to `GLOBAL-AGENT-PLAN.md` (Stages 0–1 shipped).
 
 ## Problem
 
@@ -89,13 +90,15 @@ Claude alias floors to `undefined` = Codex app-server default). No second model 
 
 | Gap | Today | Change |
 | --- | --- | --- |
-| `eventsSink` | Ignored; `RawEventsSink` + `CodexRawNotificationSink` write `raw_events` keyed by run_id (FK → `workflow_runs`; fail-soft drop **with a WARN per event**) | When `options.eventsSink` is set, attach it to the turn's `EventRouter` and skip both built-in sinks. `AgentThreadEventsSink` stores the `agent_*` event verbatim — `derivePersistedEventType` already handles `agent_*`, and `agentThreadUnifiedMessagesListing` already runs `agentStreamEventToClaudeStreamEvent`, so the transcript needs no change. Widen the sink's handler type to `ClaudeStreamEvent \| AgentStreamEvent`. |
-| `agent_invocations` INSERT | `createInvocation(runId)` — FK to `workflow_runs`, `foreign_keys=ON` ⇒ **throws** for `agent:<threadId>` and kills the spawn | Skip `createInvocation` + `captureInvocationCodexThreadId` when `isAgentThreadSpawnId(runId)` (or when `eventsSink` is injected). |
+| Option visibility | `isolation` / `eventsSink` / `mcpScope` / `tools` exist only on `ClaudeSpawnOptions` (claudeCodeManager.ts); the Codex manager is typed on `ClaudeSpawnerOptions` (runExecutor.ts) and cannot read them | Add `isolation`, `mcpScope`, `eventsSink` to `ClaudeSpawnerOptions` (type-only import of `SpawnEventsSink`). `services/panels/claude/` stays untouched. `options.isolation === 'agent'` is the ONE discriminator every Codex change below keys on — never id-sniffing. |
+| `eventsSink` | Ignored; the per-turn `RawEventsSink` AND the cold-entry `CodexRawNotificationSink` (`onNotification` closure in `buildColdEntry`, codexSdkManager.ts:731) both write `raw_events` keyed by run_id (FK → `workflow_runs`; fail-soft drop **with a WARN per notification** — dozens per turn) | When `options.eventsSink` is set, attach it to the turn's `EventRouter` instead of `RawEventsSink`, and carry `persistRawNotifications: false` on `WarmCodexEntry` so the cold-entry notification sink is skipped too. `AgentThreadEventsSink` stores the `agent_*` event verbatim — `derivePersistedEventType` already handles `agent_*`, and `agentThreadUnifiedMessagesListing` already runs `agentStreamEventToClaudeStreamEvent`, so the transcript needs no change. Widen the sink's handler type to `ClaudeStreamEvent \| AgentStreamEvent`. |
+| `agent_invocations` INSERT | `createInvocation(runId)` — FK to `workflow_runs`, `foreign_keys=ON` ⇒ **throws** for `agent:<threadId>` and kills the spawn | Skip `createInvocation` + `captureInvocationCodexThreadId` for isolation spawns. |
 | `mcpScope` | `buildMcpConfig` never stamps `CYBOFLOW_MCP_SCOPE` ⇒ the assistant would get the **run-scoped** tool family (most tools fail for a non-run id) and not the global-agent read/propose family | Thread `options.mcpScope` into `buildMcpConfig` env exactly as `composeMcpServers` does. `orchTokenEnv(runId)` / `CYBOFLOW_RUN_ID = agent:<threadId>` already match the Claude path. |
-| `isolation: 'agent'` | No equivalent | In `buildCodexAppServerThreadConfiguration`: `sandbox: 'read-only'`, `approvalPolicy: 'never'` (mandatory — `ApprovalRouter.requestApproval` requires a *running* `workflow_runs` row and would throw), `developerInstructions` = `getAgentSystemPrompt()` (already wired via `systemPromptAppend`), plus config to disable web search / apply_patch (verify the key names against the pinned Codex version's config schema). |
-| `tools: []` | Codex thread config has no tool allow-list | Cannot be enforced server-side. Residual: **Codex can still run read-only shell commands anywhere the sandbox permits**, so Settings → Assistant "Folder access" / excluded projects (enforced inside the MCP fs tools) does not bind a Codex assistant, and the user's own `~/.codex/config.toml` MCP servers are inherited. See Decision A. |
+| Approval / question bridges | Both `CodexAppServerApprovalBridge` and `CodexAppServerQuestionBridge` route to `ApprovalRouter` / `QuestionRouter`, which do a guarded `UPDATE workflow_runs … WHERE status='running'` and throw `RunNotRunningError` for a run-less id. The bridges CATCH that and answer decline / cancel — so a turn does not crash, it silently loses the request. MCP tool calls themselves are pre-approved (`default_tools_approval_mode: 'approve'` = "auto-approve MCP tool calls without prompting", Codex config reference) — the same setting every Codex lane relies on — so they never elicit in the first place. | For isolation spawns install a **local fail-closed policy** in place of the routers, mirroring Claude's isolation PreToolUse hook: an `mcp_tool_call` elicitation for a `cyboflow_*` tool → approve locally; every other server request (command / fileChange / permissions / other MCP / user-input question) → decline locally, logged at WARN. Nothing reaches the routers. |
+| `isolation: 'agent'` thread config | No equivalent — `buildCodexAppServerThreadConfiguration` never consults `options.isolation`; none of the four `codexPermissionFlagsForMode` branches yields `{read-only, never}` | A NEW isolation branch that bypasses `codexPermissionFlagsForMode` / `agentPermissionMode` entirely (mirrors `composeHookOptions` special-casing `isolation==='agent'` before the ordinary ladder): `sandbox: 'read-only'`, `approvalPolicy: 'never'`, `approvalsReviewer: 'user'`, `developerInstructions` = `getAgentSystemPrompt()` (already wired via `systemPromptAppend`), and config `features.shell_tool = false` + `web_search = "disabled"` (both documented in the Codex config reference: `features.shell_tool` "Enable the default shell tool for running commands", `web_search = "disabled"` "Remove the tool"). |
+| `tools: []` / hermetic MCP map | Claude gets an EXCLUSIVE `mcpServers` map + `settingSources: []`; Codex inherits `~/.codex/config.toml`, whose own `mcp_servers` may MERGE with the thread `config.mcp_servers` | With the shell tool and web search off, the only residual escape is a user-configured MCP server. Verify empirically on the first live smoke (the `agent_init` / `mcp/list` surface) whether the thread `config.mcp_servers` table REPLACES or MERGES the user's file; if it merges, pass the user's server names with `enabled_tools = []` (documented allow-list) or accept and document. See Decision A. |
 | Provider gate | `assertProviderEnabled` throws if Codex is switched off in Integrations | Handled upstream by the resolver's fallback to Claude; keep the throw as belt-and-braces. |
-| Warm reuse | `spawnKey === panelId` ⇒ warm-eligible; fingerprint covers `developerInstructions` | Works as-is: a prompt edit busts the warm app-server, same as Claude. |
+| Warm reuse | `spawnKey === panelId` ⇒ warm-eligible; fingerprint covers `developerInstructions` and the thread config | Works as-is: a prompt edit or an isolation-config change busts the warm app-server, same as Claude. |
 
 `index.ts`: pass `managers: { 'claude-sdk': defaultCliManager, 'codex-sdk':
 createdCodexSdkManager }` and `runtime: () => configManager.getAssistantRuntime()`.
@@ -151,10 +154,34 @@ createdCodexSdkManager }` and `runtime: () => configManager.getAssistantRuntime(
 
 ## Decisions needed
 
-- **A. Folder-access semantics on Codex.** Recommend: accept the read-only sandbox for
-  v1 and say so in Settings. Alternative: refuse `codex-sdk` for the assistant while any
-  folder restriction is configured (blocks the feature for exactly the users who care).
+- **A. Isolation parity on Codex.** With `features.shell_tool=false`, `web_search="disabled"`,
+  `sandbox: read-only`, `approvalPolicy: never` and the local fail-closed request policy, the
+  Codex assistant is confined to the cyboflow MCP family — EXCEPT for MCP servers the user
+  configured in `~/.codex/config.toml`, if the thread config merges rather than replaces
+  them. Recommend: ship v1 with the confinement above, verify merge-vs-replace on the first
+  smoke, and if it merges, disable those servers' tools via `enabled_tools = []`. Settings →
+  Assistant shows a one-line note on Codex ("Folder access rules apply to the Claude
+  assistant; the Codex assistant has no shell or file tools"). Explicit sign-off wanted.
 - **B. Default behaviour.** Recommend: follow `defaultAgentRuntime` automatically
   (fixes the reported bug with zero extra clicks). Alternative: explicit opt-in only.
-- **C. Error surfacing** in the rail is in scope (Codex auth / not-installed would
-  otherwise fail silently).
+- **C. Error surfacing** in the rail is in scope as a prerequisite (Codex auth /
+  not-installed would otherwise fail silently).
+
+## Review round 1 (Codex adversarial, 2026-09-03)
+
+1. **Critical (mechanism refuted, mitigation adopted):** "`default_tools_approval_mode:
+   'approve'` makes every cyboflow tool call elicit, and the run-less id gets it auto-declined".
+   The Codex config reference defines `"approve"` as "auto-approve MCP tool calls without
+   prompting" (the other values are `auto` / `prompt` / `writes`), and every Codex lane
+   already depends on exactly that. Adopted anyway: the local fail-closed request policy for
+   isolation spawns, so a residual elicitation can never reach `ApprovalRouter`.
+2. **High (accepted):** `CodexRawNotificationSink` is a cold-entry closure, not the per-turn
+   sink — gate it on the entry (`persistRawNotifications`).
+3. **High (accepted, strengthened):** isolation parity promoted to Decision A; shell tool and
+   web search are now disabled via documented config keys, closing most of the gap.
+4. **Medium (accepted):** the bridges catch `RunNotRunningError` and decline — corrected the
+   "would throw" wording; `approvalPolicy: 'never'` stays.
+5. **Medium (accepted):** the question bridge has the same run-row dependency — covered by
+   the local policy row.
+6. **Medium (accepted):** the isolation thread config is a new branch, not a flag swap —
+   made explicit.
