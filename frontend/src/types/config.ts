@@ -1,5 +1,5 @@
 import type { AgentProviderAccess, AgentRuntime } from '../../../shared/types/agentRuntime';
-import type { AssistantContextRetention } from '../../../shared/types/agentThread';
+import type { AssistantContextRetention, AssistantRuntime } from '../../../shared/types/agentThread';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { FanOutDispatch } from '../../../shared/types/fanOutDispatch';
@@ -30,6 +30,10 @@ export interface AppConfig {
   // Model alias for the global cyboflow assistant (the agent-rail chat), e.g.
   // 'sonnet' | 'opus' | 'fable'. Unset ⇒ falls back to the app's default model.
   assistantModel?: string;
+  // Explicit Settings → Assistant runtime pick ('claude-sdk' | 'codex-sdk').
+  // Absent ⇒ follow the default launch runtime (see
+  // shared/types/agentThread.ts resolveAssistantRuntime).
+  assistantRuntime?: AssistantRuntime;
   // Global assistant on/off; absent ⇒ enabled. When false the assistant spawns
   // no turns (zero tokens) and the rail is hidden.
   assistantEnabled?: boolean;

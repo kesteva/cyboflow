@@ -8,10 +8,18 @@ import type { AppConfig } from '../types/config';
 import type { Project } from '../types/project';
 import {
   applyAriaProviderGate,
+  isAgentProviderEnabled,
   resolveAgentProviderAccess,
   type AgentRuntime,
 } from '../../../shared/types/agentRuntime';
-import type { AssistantContextRetention } from '../../../shared/types/agentThread';
+import {
+  assistantRuntimeProvider,
+  isAssistantRuntime,
+  resolveAssistantRuntime,
+  type AssistantContextRetention,
+  type AssistantRuntime,
+} from '../../../shared/types/agentThread';
+import { useCodexModelCatalog } from '../stores/codexModelCatalogStore';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import {
@@ -78,6 +86,12 @@ interface SettingsProps {
 
 export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   const [_config, setConfig] = useState<AppConfig | null>(null);
+  // Explicit Settings → Assistant runtime pick. '' = follow the default launch
+  // runtime (config.defaultAgentRuntime, via resolveAssistantRuntime) — the
+  // same "no floor, resolved elsewhere" idiom as defaultLaunchModel. Declared
+  // here (ahead of the memos below that read it) rather than beside the other
+  // assistant state further down.
+  const [assistantRuntimeChoice, setAssistantRuntimeChoice] = useState<AssistantRuntime | ''>('');
   /**
    * The ARIA-GATED access map handed to the runtime pickers below.
    *
@@ -97,6 +111,35 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       ),
     [_config?.agentProviderAccess, _config?.ariaMode],
   );
+  /**
+   * What "Follow default runtime" resolves to RIGHT NOW — shown as the hint
+   * under that option so picking it isn't a leap of faith. Always computed
+   * with NO explicit assistantRuntime, independent of the user's current pick.
+   */
+  const followDefaultAssistantRuntime = useMemo(
+    () =>
+      resolveAssistantRuntime({
+        defaultAgentRuntime: _config?.defaultAgentRuntime,
+        isProviderEnabled: (provider) => isAgentProviderEnabled(agentProviderAccess, provider),
+      }),
+    [_config?.defaultAgentRuntime, agentProviderAccess],
+  );
+  /** The EFFECTIVE assistant runtime under the current (possibly unsaved) pick. */
+  const resolvedAssistantRuntime = useMemo(
+    () =>
+      resolveAssistantRuntime({
+        assistantRuntime: assistantRuntimeChoice || undefined,
+        defaultAgentRuntime: _config?.defaultAgentRuntime,
+        isProviderEnabled: (provider) => isAgentProviderEnabled(agentProviderAccess, provider),
+      }),
+    [assistantRuntimeChoice, _config?.defaultAgentRuntime, agentProviderAccess],
+  );
+  const resolvedAssistantProvider = assistantRuntimeProvider(resolvedAssistantRuntime);
+  const assistantUsesCodex = resolvedAssistantProvider === 'codex';
+  const {
+    loading: assistantCodexCatalogLoading,
+    error: assistantCodexCatalogError,
+  } = useCodexModelCatalog(assistantUsesCodex);
   const [verbose, setVerbose] = useState(false);
   const [globalSystemPrompt, setGlobalSystemPrompt] = useState('');
   const [claudeExecutablePath, setClaudeExecutablePath] = useState('');
@@ -264,6 +307,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setInitialDemoMode(data.demoMode || false);
       setEnableCyboflowFooter(data.enableCyboflowFooter !== false); // Default to true
       setAssistantModel(data.assistantModel ?? '');
+      setAssistantRuntimeChoice(isAssistantRuntime(data.assistantRuntime) ? data.assistantRuntime : '');
       setAssistantEnabled(data.assistantEnabled !== false);
       setAssistantFolderPathsText((data.assistantFolderAccess ?? []).join('\n'));
       setAssistantContextRetention(data.assistantContextRetention ?? 'clear-daily');
@@ -341,6 +385,10 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         // Empty ('App default') → undefined so getAssistantModel() floors to
         // getDefaultModel() and config.json stays free of the key.
         assistantModel: assistantModel.trim() ? assistantModel.trim() : undefined,
+        // '' ("Follow default runtime") → undefined, same idiom as
+        // assistantModel/defaultLaunchModel: the resolver treats an absent key
+        // as "follow the default launch runtime", not a stored preference.
+        assistantRuntime: assistantRuntimeChoice || undefined,
         // Explicit boolean, never undefined — updateConfig merges partials, so
         // an undefined value would fail to overwrite a stored `false`.
         assistantEnabled: assistantEnabled,
@@ -916,13 +964,68 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                   When off, the assistant rail is hidden and uses no tokens.
                 </p>
                 <div className={!assistantEnabled ? 'opacity-50 pointer-events-none' : undefined}>
+                  <label className="block text-xs font-medium text-text-secondary mb-1.5">
+                    Runtime
+                  </label>
+                  <div className="flex flex-col gap-1.5 mb-4">
+                    {(
+                      [
+                        {
+                          value: '' as const,
+                          label: 'Follow default runtime',
+                          hint: `Currently ${followDefaultAssistantRuntime === 'codex-sdk' ? 'Codex' : 'Claude'} — matches your default agent runtime`,
+                        },
+                        { value: 'claude-sdk' as const, label: 'Claude', hint: 'Always run the assistant on Claude' },
+                        ...(agentProviderAccess.codex
+                          ? [{ value: 'codex-sdk' as const, label: 'Codex', hint: 'Always run the assistant on Codex' }]
+                          : []),
+                      ]
+                    ).map(({ value, label, hint }) => (
+                      <button
+                        key={value || 'follow-default'}
+                        type="button"
+                        data-testid={`assistant-runtime-${value || 'follow-default'}`}
+                        onClick={() => {
+                          const nextResolved = resolveAssistantRuntime({
+                            assistantRuntime: value || undefined,
+                            defaultAgentRuntime: _config?.defaultAgentRuntime,
+                            isProviderEnabled: (provider) => isAgentProviderEnabled(agentProviderAccess, provider),
+                          });
+                          if (assistantRuntimeProvider(nextResolved) !== resolvedAssistantProvider) {
+                            setAssistantModel('');
+                          }
+                          setAssistantRuntimeChoice(value);
+                        }}
+                        aria-pressed={assistantRuntimeChoice === value}
+                        className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
+                          assistantRuntimeChoice === value
+                            ? 'border-interactive bg-interactive-surface'
+                            : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
+                        }`}
+                      >
+                        <span className="text-text-primary font-medium text-sm">{label}</span>
+                        <span className="text-xs text-text-tertiary">{hint}</span>
+                      </button>
+                    ))}
+                  </div>
                   <ModelSelector
                     id="assistant-model"
                     label=""
                     value={assistantModel}
                     onChange={setAssistantModel}
+                    agentProvider={resolvedAssistantProvider}
+                    agentRuntime={resolvedAssistantRuntime}
                     allowDefaultOption={{ label: 'App default' }}
                   />
+                  {assistantUsesCodex && assistantCodexCatalogLoading && (
+                    <p className="text-xs text-text-tertiary mt-1">Loading Codex models…</p>
+                  )}
+                  {assistantUsesCodex && assistantCodexCatalogError !== null && (
+                    <p className="text-xs text-status-warning mt-1" role="alert">
+                      Couldn't load the Codex model list ({assistantCodexCatalogError}). Only Auto/default is
+                      available until it loads.
+                    </p>
+                  )}
                 </div>
               </SettingsSection>
 
@@ -932,6 +1035,12 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                 icon={<FolderOpen className="w-4 h-4" />}
               >
                 <div className={!assistantEnabled ? 'opacity-50 pointer-events-none' : undefined}>
+                  {assistantUsesCodex && (
+                    <p className="text-xs text-text-tertiary mb-3" data-testid="assistant-folder-access-codex-note">
+                      Folder access applies to the Claude assistant. The Codex assistant has no shell or
+                      file tools and reads only through cyboflow.
+                    </p>
+                  )}
                   {projects.length > 0 && (
                     <div className="mb-4">
                       <label className="block text-xs font-medium text-text-secondary mb-2">

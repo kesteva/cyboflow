@@ -8,9 +8,11 @@
  *
  * What the writes must look like, and why:
  * - `defaultLaunchModel` is the global model rung every launch resolves through;
- *   `assistantModel` follows only a CLAUDE pick (the chat assistant is hard-wired
- *   to ClaudeCodeManager, so a Codex id there would name a model its runtime
- *   cannot serve) and never for 'auto' (which means "no explicit model").
+ *   `assistantModel` follows a pick only when its family matches the RESOLVED
+ *   assistant runtime (resolveAssistantRuntimeFromConfig, which follows
+ *   `defaultAgentRuntime` — already persisted by step 2 — unless an explicit
+ *   Settings → Assistant runtime override says otherwise) and never for 'auto'
+ *   (which means "no explicit model").
  * - the effort goes to the quick run type as a MERGE op — `replace` would drop
  *   whatever else the user stores under that key (model, permission mode,
  *   substrate, runtime).
@@ -385,11 +387,44 @@ describe('OnboardingGate — Model step (3), Codex', () => {
     await waitFor(() =>
       expect(configUpdate).toHaveBeenCalledWith({ defaultLaunchModel: 'auto' }),
     );
-    // assistantModel is Claude-only — a Codex run must never pin it.
+    // 'auto' means "no explicit model" — never worth pinning onto the assistant.
     expect(configUpdate).not.toHaveBeenCalledWith(
       expect.objectContaining({ assistantModel: expect.anything() }),
     );
     await waitFor(() => expect(useOnboardingStore.getState().step).toBe(4));
+  });
+
+  it('does not pin the assistant model when the assistant still resolves to Claude (no defaultAgentRuntime persisted)', async () => {
+    // No `defaultAgentRuntime` in config — resolveAssistantRuntimeFromConfig
+    // floors to Claude, so a Codex pick here does not match its provider.
+    await mountAtModelStep(baseAppConfig(), 'codex');
+    // Picking a model auto-advances modelPhase to 'effort' (see the Claude
+    // "picking a model reveals the effort list" case above), so a single
+    // further Next click commits with the seeded default effort.
+    fireEvent.click(await screen.findByRole('radio', { name: /^gpt-5\.2-codex/ }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next →' }));
+
+    await waitFor(() =>
+      expect(configUpdate).toHaveBeenCalledWith({ defaultLaunchModel: 'gpt-5.2-codex' }),
+    );
+    expect(configUpdate).not.toHaveBeenCalledWith(
+      expect.objectContaining({ assistantModel: expect.anything() }),
+    );
+  });
+
+  it('pins the assistant model onto a Codex pick once the assistant resolves to Codex (defaultAgentRuntime already persisted)', async () => {
+    await mountAtModelStep(baseAppConfig({ defaultAgentRuntime: 'codex-sdk' }), 'codex');
+    fireEvent.click(await screen.findByRole('radio', { name: /^gpt-5\.2-codex/ }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next →' }));
+
+    await waitFor(() =>
+      expect(configUpdate).toHaveBeenCalledWith({
+        defaultLaunchModel: 'gpt-5.2-codex',
+        assistantModel: 'gpt-5.2-codex',
+      }),
+    );
   });
 
   it('Retry re-runs discovery and puts the model question back on the table', async () => {

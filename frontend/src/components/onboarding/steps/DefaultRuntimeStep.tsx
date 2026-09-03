@@ -79,17 +79,6 @@ export function DefaultRuntimeStep({
           );
         })}
       </div>
-
-      {/* The one caveat the copy above would otherwise state falsely: the chat
-          assistant is hard-wired to ClaudeCodeManager, so "your agent for the
-          Cyboflow chat" does not yet follow a Codex default. Shown only when
-          Codex is the highlighted choice — with Claude picked there is nothing
-          to qualify. */}
-      {value === 'codex' && (
-        <div className="mt-3 text-[10px] leading-[1.5] text-text-tertiary">
-          The Cyboflow chat assistant runs on Claude for now.
-        </div>
-      )}
     </div>
   );
 }
