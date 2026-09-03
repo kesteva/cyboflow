@@ -19,7 +19,9 @@ import type {
   AgentThread,
   AgentThreadEvent,
   AgentThreadScope,
+  AssistantRuntime,
 } from '../../../../shared/types/agentThread';
+import { isAssistantRuntime } from '../../../../shared/types/agentThread';
 
 export type AgentThreadIdFactory = () => string;
 
@@ -28,6 +30,7 @@ interface ThreadRow {
   scope: AgentThreadScope;
   model: string | null;
   claude_session_id: string | null;
+  session_runtime: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -83,7 +86,7 @@ export class AgentThreadDbStore {
   getThread(id: string): AgentThread | null {
     const row = this.db
       .prepare(
-        `SELECT id, scope, model, claude_session_id, created_at, updated_at
+        `SELECT id, scope, model, claude_session_id, session_runtime, created_at, updated_at
            FROM agent_threads
           WHERE id = ?`,
       )
@@ -95,7 +98,7 @@ export class AgentThreadDbStore {
   findLatestThreadByScope(scope: AgentThreadScope): AgentThread | null {
     const row = this.db
       .prepare(
-        `SELECT id, scope, model, claude_session_id, created_at, updated_at
+        `SELECT id, scope, model, claude_session_id, session_runtime, created_at, updated_at
            FROM agent_threads
           WHERE scope = ?
           ORDER BY created_at DESC, id DESC
@@ -105,16 +108,27 @@ export class AgentThreadDbStore {
     return row ? this.toThread(row) : null;
   }
 
-  /** One-time-per-turn capture of the provider-owned warm-resume session id. */
-  updateClaudeSessionId(threadId: string, claudeSessionId: string | null): boolean {
+  /**
+   * One-time-per-turn capture of the provider-owned warm-resume session id,
+   * together with the runtime it was captured under (migration 130) — the two
+   * are written as ONE row update because a stored id without its provider is
+   * un-resumable: neither manager can safely be handed the other's id.
+   * Clearing the id (null) therefore clears the runtime too.
+   */
+  updateClaudeSessionId(
+    threadId: string,
+    claudeSessionId: string | null,
+    runtime?: AssistantRuntime,
+  ): boolean {
     const result = this.db
       .prepare(
         `UPDATE agent_threads
             SET claude_session_id = ?,
+                session_runtime = ?,
                 updated_at = CURRENT_TIMESTAMP
           WHERE id = ?`,
       )
-      .run(claudeSessionId, threadId);
+      .run(claudeSessionId, claudeSessionId === null ? null : runtime ?? null, threadId);
     return result.changes === 1;
   }
 
@@ -144,6 +158,10 @@ export class AgentThreadDbStore {
       scope: row.scope,
       model: row.model,
       claudeSessionId: row.claude_session_id,
+      // config.json-adjacent columns are not the only user-editable surface: a
+      // hand-edited DB (or a value written by a future runtime this build does
+      // not know) must read as "unrecorded", not corrupt the union.
+      sessionRuntime: isAssistantRuntime(row.session_runtime) ? row.session_runtime : null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };

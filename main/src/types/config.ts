@@ -1,5 +1,5 @@
 import type { AgentProviderAccess, AgentRuntime } from '../../../shared/types/agentRuntime';
-import type { AssistantContextRetention } from '../../../shared/types/agentThread';
+import type { AssistantContextRetention, AssistantRuntime } from '../../../shared/types/agentThread';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { SprintMaxTasksOverrides } from '../../../shared/types/sprintBatch';
 import type { KeyboardShortcutOverrides } from '../../../shared/types/keyboardShortcuts';
@@ -53,6 +53,16 @@ export interface AppConfig {
   // Model alias for the global cyboflow assistant (the agent-rail chat), e.g.
   // 'sonnet' | 'opus' | 'fable'. Unset ⇒ falls back to defaultModel.
   assistantModel?: string;
+  // Which runtime hosts the global assistant ('claude-sdk' | 'codex-sdk') — the
+  // explicit Settings → Assistant pick. Absent ⇒ the assistant FOLLOWS
+  // `defaultAgentRuntime`'s provider (so the onboarding "Codex is my default"
+  // choice reaches the assistant with no extra UI), floored to 'claude-sdk'.
+  // Read via getAssistantRuntime(), which routes through the shared
+  // resolveAssistantRuntime resolver so main and the renderer cannot disagree,
+  // and never resolves a provider the user switched off. NOT seeded into
+  // constructor defaults (config.json stays byte-identical for users who never
+  // touch it).
+  assistantRuntime?: AssistantRuntime;
   // Global assistant on/off; absent ⇒ enabled. When false the assistant spawns
   // no turns (zero tokens) — enforced authoritatively by AgentThreadService via
   // ConfigManager.isAssistantEnabled(), and the renderer hides the agent rail.
@@ -298,6 +308,8 @@ export interface UpdateConfigRequest {
   defaultModel?: string;
   // Model alias for the global cyboflow assistant (see AppConfig.assistantModel).
   assistantModel?: string;
+  // Runtime hosting the global assistant (see AppConfig.assistantRuntime).
+  assistantRuntime?: AssistantRuntime;
   // Global assistant on/off (see AppConfig.assistantEnabled).
   assistantEnabled?: boolean;
   // Extra folders the global assistant may read (see AppConfig.assistantFolderAccess).

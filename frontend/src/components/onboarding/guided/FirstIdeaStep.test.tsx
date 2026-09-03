@@ -33,6 +33,7 @@ function makeThread(): AgentThread {
     scope: 'global',
     model: null,
     claudeSessionId: null,
+    sessionRuntime: null,
     createdAt: '2026-07-17T00:00:00.000Z',
     updatedAt: '2026-07-17T00:00:00.000Z',
   };

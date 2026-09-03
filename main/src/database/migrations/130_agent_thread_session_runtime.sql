@@ -1,0 +1,20 @@
+-- Migration 130: bind the global-agent thread's stored conversation id to the
+-- PROVIDER it belongs to.
+--
+-- Design: docs/proposals/ASSISTANT-CODEX-RUNTIME.md §2. The assistant can now be
+-- hosted on Claude OR Codex (config `assistantRuntime`), and the two providers'
+-- conversation ids are not interchangeable: handing a Claude session id to the
+-- Codex app-server's thread/resume (or the reverse) fails the turn. The column
+-- `claude_session_id` is FROZEN under its original name (074) — this records
+-- which runtime the id in it was captured under, so AgentThreadService can clear
+-- it and cold-start when the resolved runtime changes.
+--
+-- NULL = no runtime recorded, which is exactly the state of every thread that
+-- predates this column. AgentThreadService treats NULL as "no mismatch" — such a
+-- thread was necessarily captured on Claude (the only runtime that existed), and
+-- the first turn on either provider re-stamps it.
+--
+-- 129 is the latest landed prefix, so 130 is the next free one. Idempotent per
+-- statement: a re-applied file raises `duplicate column name`, which the runner
+-- tolerates.
+ALTER TABLE agent_threads ADD COLUMN session_runtime TEXT;

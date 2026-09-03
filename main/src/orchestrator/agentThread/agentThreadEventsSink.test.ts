@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EventRouter } from '../../../../shared/streamParser/eventRouter';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
+import type { AgentStreamEvent } from '../../../../shared/types/agentStream';
 import { AgentThreadDbStore } from './agentThreadDbStore';
 import {
   AgentThreadEventsSink,
@@ -20,6 +21,11 @@ const MIGRATION =
   '\n' +
   readFileSync(
     join(__dirname, '..', '..', 'database', 'migrations', '076_agent_thread_last_digest.sql'),
+    'utf-8',
+  ) +
+  '\n' +
+  readFileSync(
+    join(__dirname, '..', '..', 'database', 'migrations', '130_agent_thread_session_runtime.sql'),
     'utf-8',
   );
 
@@ -162,6 +168,78 @@ describe('AgentThreadEventsSink', () => {
 
     expect(store.listEvents('thread-1')).toHaveLength(0);
     expect(store.listEvents('thread-2')).toHaveLength(0);
+  });
+
+  it('persists Codex agent_* events VERBATIM under their agent_* persisted types', () => {
+    const sink = new AgentThreadEventsSink(store);
+    // The Codex app-server substrate routes the provider-neutral shape, so the
+    // ONE injected sink has to serve an EventRouter<AgentStreamEvent> too.
+    const router = new EventRouter<AgentStreamEvent>();
+    sink.attachToRouter(router, agentSpawnIdentity('thread-1'));
+
+    const init: AgentStreamEvent = {
+      type: 'agent_init',
+      provider: 'codex',
+      external_session_id: 'codex-thread-9',
+      cwd: '/tmp/agent-home',
+      model: 'gpt-5.3-codex',
+      tools: [],
+      mcp_servers: [],
+      permission_mode: 'never',
+    };
+    const message: AgentStreamEvent = {
+      type: 'agent_message',
+      provider: 'codex',
+      role: 'assistant',
+      id: 'msg-1',
+      model: 'gpt-5.3-codex',
+      content: [{ type: 'text', text: 'here are your sessions' }],
+    };
+    router.emitForRun('agent:thread-1', init);
+    router.emitForRun('agent:thread-1', message);
+
+    const rows = store.listEvents('thread-1');
+    // agent_* keeps its OWN persisted namespace — storage never implies a Codex
+    // event came from Claude (derivePersistedEventType).
+    expect(rows.map((r) => r.eventType)).toEqual(['agent_system', 'agent_assistant']);
+    // Verbatim: the listing projection converts the agent_* payload on READ, so
+    // the sink must not normalize the shape on the way in.
+    expect(rows[0].payloadJson).toBe(JSON.stringify(init));
+    expect(rows[1].payloadJson).toBe(JSON.stringify(message));
+    expect(rows[0].threadId).toBe('thread-1');
+  });
+
+  it('recordAssistantError persists a terminal error result the transcript can render', () => {
+    const sink = new AgentThreadEventsSink(store);
+    const event = sink.recordAssistantError('thread-1', 'Codex is not installed');
+
+    const rows = store.listEvents('thread-1');
+    expect(rows).toHaveLength(1);
+    expect(rows[0].eventType).toBe('result');
+    const persisted = JSON.parse(rows[0].payloadJson) as {
+      type: string;
+      subtype: string;
+      is_error: boolean;
+      result: string;
+    };
+    expect(persisted.type).toBe('result');
+    expect(persisted.subtype).toBe('error_during_execution');
+    expect(persisted.is_error).toBe(true);
+    expect(persisted.result).toBe('Codex is not installed');
+    expect(event).toEqual(persisted);
+  });
+
+  it('recordAssistantError is fail-soft: an unknown thread warns instead of throwing', () => {
+    const warn = vi.fn();
+    const sink = new AgentThreadEventsSink(store, {
+      info: vi.fn(),
+      warn,
+      error: vi.fn(),
+      debug: vi.fn(),
+    });
+    // It must never throw OVER the original spawn failure the caller rethrows.
+    expect(() => sink.recordAssistantError('ghost', 'boom')).not.toThrow();
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 
   it('recordUserTurn persists the human turn as a projectable user-text event', () => {

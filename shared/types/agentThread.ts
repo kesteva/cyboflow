@@ -156,7 +156,23 @@ export interface AgentThread {
   id: string;
   scope: AgentThreadScope;
   model: string | null;
+  /**
+   * The provider-owned conversation id threaded back as the warm-resume handle.
+   * The column name `claude_session_id` is FROZEN (migration 074) and the field
+   * keeps it, but the id is no longer necessarily Claude's — see
+   * {@link AgentThread.sessionRuntime}.
+   */
   claudeSessionId: string | null;
+  /**
+   * Which runtime {@link AgentThread.claudeSessionId} was captured under
+   * (migration 130). The two providers' conversation ids are NOT interchangeable
+   * — handing a Claude session id to Codex's `thread/resume`, or the reverse,
+   * fails the turn — so AgentThreadService clears the stored id and cold-starts
+   * whenever the resolved assistant runtime differs from this. NULL means no
+   * runtime was recorded (every thread predating the column, all of which were
+   * necessarily Claude), and is treated as "no mismatch".
+   */
+  sessionRuntime: AssistantRuntime | null;
   createdAt: string;
   updatedAt: string;
 }

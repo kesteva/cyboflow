@@ -25,6 +25,11 @@ const MIGRATION =
   readFileSync(
     join(__dirname, '..', '..', 'database', 'migrations', '080_agent_thread_last_turn.sql'),
     'utf-8',
+  ) +
+  '\n' +
+  readFileSync(
+    join(__dirname, '..', '..', 'database', 'migrations', '130_agent_thread_session_runtime.sql'),
+    'utf-8',
   );
 
 function buildDb(): Database.Database {
@@ -93,6 +98,40 @@ describe('AgentThreadDbStore', () => {
 
       expect(store.updateClaudeSessionId('thread-1', null)).toBe(true);
       expect(store.getThread('thread-1')?.claudeSessionId).toBeNull();
+    });
+
+    it('session_runtime defaults to null and is written ALONGSIDE the id it belongs to (migration 130)', () => {
+      const store = new AgentThreadDbStore(dbAdapter(db));
+      const created = store.createThread({ id: 'thread-1' });
+      // A fresh thread has no conversation, so no runtime either.
+      expect(created.sessionRuntime).toBeNull();
+
+      store.updateClaudeSessionId('thread-1', 'codex-thread-9', 'codex-sdk');
+      expect(store.getThread('thread-1')?.claudeSessionId).toBe('codex-thread-9');
+      expect(store.getThread('thread-1')?.sessionRuntime).toBe('codex-sdk');
+
+      // Re-capture on the other provider replaces BOTH halves — a stale runtime
+      // beside a fresh id would send the wrong manager's resume handle.
+      store.updateClaudeSessionId('thread-1', 'sess-1', 'claude-sdk');
+      expect(store.getThread('thread-1')?.sessionRuntime).toBe('claude-sdk');
+
+      // Clearing the id clears the runtime: an orphan runtime is meaningless.
+      store.updateClaudeSessionId('thread-1', null);
+      expect(store.getThread('thread-1')?.claudeSessionId).toBeNull();
+      expect(store.getThread('thread-1')?.sessionRuntime).toBeNull();
+    });
+
+    it('reads a legacy row (id captured before migration 130) as an unrecorded runtime, and an unknown stored value too', () => {
+      const store = new AgentThreadDbStore(dbAdapter(db));
+      store.createThread({ id: 'thread-1' });
+      // Exactly the pre-130 shape: an id with no runtime beside it.
+      db.prepare(`UPDATE agent_threads SET claude_session_id = ? WHERE id = ?`).run('legacy-sess', 'thread-1');
+      expect(store.getThread('thread-1')?.sessionRuntime).toBeNull();
+
+      // A value outside the AssistantRuntime union (hand-edited DB, or a
+      // provider a future build knows about) must not corrupt the union.
+      db.prepare(`UPDATE agent_threads SET session_runtime = ? WHERE id = ?`).run('omp-sdk', 'thread-1');
+      expect(store.getThread('thread-1')?.sessionRuntime).toBeNull();
     });
 
     it('last_turn_at defaults to null and round-trips through set/get (migration 080)', () => {

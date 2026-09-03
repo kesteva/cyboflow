@@ -14,6 +14,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import type { ClaudeCodeManager } from '../../services/panels/claude/claudeCodeManager';
+import type { CodexSdkManager } from '../../services/panels/codex/codexSdkManager';
 import type { AgentSpawnManagerLike } from './agentThreadService';
 
 // If ClaudeCodeManager stops satisfying the narrow manager slice, this alias
@@ -28,9 +29,29 @@ const _parity: ClaudeCodeManagerSatisfiesManagerLike = true;
 type _AssignableWitness = (mgr: ClaudeCodeManager) => AgentSpawnManagerLike;
 const _assignable: _AssignableWitness = (mgr) => mgr;
 
+// The SAME pair of witnesses for the Codex app-server manager, which now hosts
+// the assistant whenever the resolved runtime is 'codex-sdk'. Its spawn options
+// are typed on ClaudeSpawnerOptions rather than ClaudeSpawnOptions, so this is
+// the guard that the two option shapes stay compatible where the service's
+// AgentSpawnOptions Pick touches them — a drift there (an isolation/mcpScope/
+// eventsSink/hidePromptFromTranscript field typed differently on the two sides)
+// fails `tsc` here rather than at a live Codex assistant turn.
+type CodexSdkManagerSatisfiesManagerLike =
+  CodexSdkManager extends AgentSpawnManagerLike ? true : never;
+
+const _codexParity: CodexSdkManagerSatisfiesManagerLike = true;
+
+type _CodexAssignableWitness = (mgr: CodexSdkManager) => AgentSpawnManagerLike;
+const _codexAssignable: _CodexAssignableWitness = (mgr) => mgr;
+
 describe('AgentThreadService manager parity', () => {
   it('ClaudeCodeManager satisfies AgentSpawnManagerLike (compile-time)', () => {
     expect(_parity).toBe(true);
     expect(typeof _assignable).toBe('function');
+  });
+
+  it('CodexSdkManager satisfies AgentSpawnManagerLike (compile-time)', () => {
+    expect(_codexParity).toBe(true);
+    expect(typeof _codexAssignable).toBe('function');
   });
 });

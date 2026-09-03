@@ -4282,7 +4282,9 @@ async function initializeServices(): Promise<boolean> {
     // AgentThreadEventsSink as the single durable transcript writer. It needs the
     // CONCRETE ClaudeCodeManager (the isolation/tools/mcpScope/eventsSink spawn
     // fields live on ClaudeSpawnOptions, and warm reuse rides its 'output' stream),
-    // hence construction under this instanceof narrowing. The `publish` closure
+    // hence construction under this instanceof narrowing. The Codex app-server
+    // manager is wired alongside it: which of the two hosts a turn is resolved
+    // per turn from ConfigManager.getAssistantRuntime(). The `publish` closure
     // does BOTH the raw cyboflow:stream:<threadId> IPC send AND an emit on
     // agentThreadEvents so the tRPC onThreadEvent subscription can live-tail too.
     // Model default follows ConfigManager (open question §5); the neutral home base
@@ -4290,7 +4292,14 @@ async function initializeServices(): Promise<boolean> {
     // getCyboflowSubdirectory).
     agentThreadService = new AgentThreadService({
       store: agentThreadStore,
-      manager: defaultCliManager,
+      // One manager per assistant runtime; the service picks per turn from
+      // `runtime()` below. Both are bridged for live-tail from the first turn,
+      // so switching providers mid-life needs no restart.
+      managers: {
+        'claude-sdk': defaultCliManager,
+        'codex-sdk': createdCodexSdkManager,
+      },
+      runtime: () => configManager.getAssistantRuntime(),
       publish: (id, envelope) => {
         // The service builds `{ type, payload, timestamp }` envelopes; the publish
         // dep types them `unknown` to stay decoupled from the concrete discriminated
@@ -4299,7 +4308,7 @@ async function initializeServices(): Promise<boolean> {
         cyboflowPublisher.publish(id, envelope as StreamEnvelope);
         agentThreadEvents.emit('message', { threadId: id, envelope });
       },
-      defaultModel: () => configManager.getAssistantModel() ?? configManager.getDefaultModel(),
+      defaultModel: (runtime) => configManager.getAssistantModelFor(runtime),
       enabled: () => configManager.isAssistantEnabled(),
       contextRetention: () => configManager.getAssistantContextRetention(),
       homeDirBase: getCyboflowSubdirectory('agent-home'),

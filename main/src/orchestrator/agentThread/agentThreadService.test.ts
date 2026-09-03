@@ -14,7 +14,10 @@ import {
   type AgentSpawnOptions,
 } from './agentThreadService';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
-import type { AssistantContextRetention } from '../../../../shared/types/agentThread';
+import type {
+  AssistantContextRetention,
+  AssistantRuntime,
+} from '../../../../shared/types/agentThread';
 
 /** One local calendar day, in ms — advance the clock past it to cross the retention day boundary. */
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -42,6 +45,11 @@ const MIGRATION =
   '\n' +
   readFileSync(
     join(__dirname, '..', '..', 'database', 'migrations', '080_agent_thread_last_turn.sql'),
+    'utf-8',
+  ) +
+  '\n' +
+  readFileSync(
+    join(__dirname, '..', '..', 'database', 'migrations', '130_agent_thread_session_runtime.sql'),
     'utf-8',
   );
 
@@ -99,6 +107,20 @@ class FakeManager implements AgentSpawnManagerLike {
     });
   }
 
+  /**
+   * Emit a bare system/init on this manager's 'output' stream WITHOUT a spawn —
+   * used to prove a listener is (or is no longer) attached.
+   */
+  emitInit(panelId: string, sessionId: string): void {
+    this.emitter.emit('output', {
+      panelId,
+      sessionId: panelId,
+      type: 'json',
+      data: { type: 'system', subtype: 'init', session_id: sessionId },
+      timestamp: new Date(),
+    });
+  }
+
   on(event: 'output', listener: (payload: unknown) => void): unknown {
     this.emitter.on(event, listener);
     return this;
@@ -113,7 +135,10 @@ class FakeManager implements AgentSpawnManagerLike {
 interface Harness {
   db: Database.Database;
   store: AgentThreadDbStore;
+  /** The Claude manager — the default runtime, so most tests drive this one. */
   manager: FakeManager;
+  /** The Codex manager, selected when `runtime.value` is 'codex-sdk'. */
+  codexManager: FakeManager;
   service: AgentThreadService;
   published: Array<{ id: string; envelope: unknown }>;
   homeBase: string;
@@ -122,28 +147,52 @@ interface Harness {
   enabled: { value: boolean };
   /** Mutable retention strategy — flip `retention.value` mid-test to exercise each mode. */
   retention: { value: AssistantContextRetention };
+  /** Mutable assistant runtime — flip `runtime.value` mid-test to exercise a provider switch. */
+  runtime: { value: AssistantRuntime };
+  /** Per-runtime model resolution, mirroring ConfigManager.getAssistantModelFor. */
+  models: Record<AssistantRuntime, string | null>;
 }
 
 function makeHarness(): Harness {
   const db = buildDb();
   const store = new AgentThreadDbStore(dbAdapter(db));
   const manager = new FakeManager();
+  const codexManager = new FakeManager();
   const published: Array<{ id: string; envelope: unknown }> = [];
   const homeBase = mkdtempSync(join(tmpdir(), 'agent-home-'));
   const clock = { value: LOCAL_NOON_BASE };
   const enabled = { value: true };
   const retention = { value: 'clear-daily' as AssistantContextRetention };
+  const runtime = { value: 'claude-sdk' as AssistantRuntime };
+  const models: Record<AssistantRuntime, string | null> = {
+    'claude-sdk': 'claude-opus',
+    'codex-sdk': 'gpt-5.3-codex',
+  };
   const service = new AgentThreadService({
     store,
-    manager,
+    managers: { 'claude-sdk': manager, 'codex-sdk': codexManager },
+    runtime: () => runtime.value,
     publish: (id, envelope) => published.push({ id, envelope }),
-    defaultModel: () => 'claude-opus',
+    defaultModel: (rt) => models[rt],
     enabled: () => enabled.value,
     contextRetention: () => retention.value,
     homeDirBase: homeBase,
     now: () => clock.value,
   });
-  return { db, store, manager, service, published, homeBase, clock, enabled, retention };
+  return {
+    db,
+    store,
+    manager,
+    codexManager,
+    service,
+    published,
+    homeBase,
+    clock,
+    enabled,
+    retention,
+    runtime,
+    models,
+  };
 }
 
 describe('AgentThreadService', () => {
@@ -299,13 +348,45 @@ describe('AgentThreadService', () => {
       expect(first.payload.type).toBe('user');
     });
 
-    it('a turn that fails to spawn still leaves the human turn in the transcript', async () => {
+    it('a turn that fails to spawn leaves the human turn AND a terminal error in the transcript', async () => {
       const thread = h.service.ensureGlobalThread();
       h.manager.queueThrow('API Error: 401 unauthorized');
 
       await expect(h.service.sendMessage(thread.id, 'hello')).rejects.toThrow(/401/);
 
-      expect(h.store.listEvents(thread.id).map((r) => r.eventType)).toEqual(['user']);
+      // The rail has no dedicated error slot, so the failure has to reach the
+      // transcript or the user sees their own message and then silence.
+      const rows = h.store.listEvents(thread.id);
+      expect(rows.map((r) => r.eventType)).toEqual(['user', 'result']);
+      const persisted = JSON.parse(rows[1].payloadJson) as {
+        subtype: string;
+        is_error: boolean;
+        result: string;
+      };
+      expect(persisted.subtype).toBe('error_during_execution');
+      expect(persisted.is_error).toBe(true);
+      expect(persisted.result).toContain('401');
+
+      // Published too, so the LIVE rail updates without waiting on a refetch.
+      const last = h.published[h.published.length - 1].envelope as { type: string };
+      expect(last.type).toBe('result');
+    });
+
+    it('a stale-resume retry that ALSO fails surfaces the error event and still rejects', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'first');
+
+      // The resume fails (recoverable), then the FRESH retry fails too.
+      h.manager.queueThrow('No conversation found with session ID sess-1');
+      h.manager.queueThrow('Claude Code is not installed');
+      await expect(h.service.sendMessage(thread.id, 'second')).rejects.toThrow(/not installed/);
+
+      const rows = h.store.listEvents(thread.id);
+      // Exactly ONE error row — the recovered first failure is not surfaced.
+      const errors = rows.filter((r) => r.eventType === 'result');
+      expect(errors).toHaveLength(1);
+      expect(JSON.parse(errors[0].payloadJson).result).toContain('not installed');
     });
 
     it('publishes live-tail envelopes to the thread id (not the spawn identity)', async () => {
@@ -352,6 +433,192 @@ describe('AgentThreadService', () => {
 
       // Only the failed spawn — no fresh retry — and the id survives.
       expect(h.manager.calls).toHaveLength(2);
+      expect(h.store.getThread(thread.id)?.claudeSessionId).toBe('sess-1');
+    });
+  });
+
+  describe('runtime selection', () => {
+    it('spawns through the manager for the RESOLVED runtime, and never the other one', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.runtime.value = 'codex-sdk';
+      h.codexManager.queueInit('codex-thread-1');
+
+      await h.service.sendMessage(thread.id, 'hello');
+
+      expect(h.codexManager.calls).toHaveLength(1);
+      expect(h.manager.calls).toHaveLength(0);
+    });
+
+    it('a Codex turn carries the full isolation contract plus the prompt-echo suppression', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.runtime.value = 'codex-sdk';
+      h.codexManager.queueInit('codex-thread-1');
+
+      await h.service.sendMessage(thread.id, 'hello');
+
+      const opts = h.codexManager.calls[0];
+      expect(opts.isolation).toBe('agent');
+      expect(opts.tools).toEqual([]);
+      expect(opts.mcpScope).toBe('global-agent');
+      expect(opts.eventsSink).toBeInstanceOf(AgentThreadEventsSink);
+      // Codex's app-server echoes the input natively and the service already
+      // recorded the human turn, so the echo must be suppressed — otherwise the
+      // transcript double-renders the turn AND leaks any contextHint.
+      expect(opts.hidePromptFromTranscript).toBe(true);
+      // The model comes from the per-runtime resolver, not the Claude alias.
+      expect(opts.model).toBe('gpt-5.3-codex');
+    });
+
+    it('a Claude turn leaves hidePromptFromTranscript unset (its manager suppresses its own echo)', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueInit('sess-1');
+
+      await h.service.sendMessage(thread.id, 'hello');
+
+      expect(h.manager.calls[0].hidePromptFromTranscript).toBeUndefined();
+    });
+
+    it('a null per-runtime model leaves the spawn model unset (the provider default)', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.runtime.value = 'codex-sdk';
+      // A stale Claude alias floors to null in ConfigManager.getAssistantModelFor.
+      h.models['codex-sdk'] = null;
+      h.codexManager.queueInit('codex-thread-1');
+
+      await h.service.sendMessage(thread.id, 'hello');
+
+      expect(h.codexManager.calls[0].model).toBeUndefined();
+    });
+
+    it('captures the session id WITH the runtime it was minted under', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.runtime.value = 'codex-sdk';
+      h.codexManager.queueInit('codex-thread-1');
+
+      await h.service.sendMessage(thread.id, 'hello');
+
+      const stored = h.store.getThread(thread.id);
+      expect(stored?.claudeSessionId).toBe('codex-thread-1');
+      expect(stored?.sessionRuntime).toBe('codex-sdk');
+    });
+
+    it('a runtime switch clears the stored id, cold-starts on the new provider, and re-stamps the pair', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'on claude');
+      expect(h.store.getThread(thread.id)?.sessionRuntime).toBe('claude-sdk');
+
+      // The user switches the assistant to Codex in Settings.
+      h.runtime.value = 'codex-sdk';
+      h.codexManager.queueInit('codex-thread-1');
+      await h.service.sendMessage(thread.id, 'on codex');
+
+      // A Claude session id must NEVER reach Codex's thread/resume.
+      expect(h.codexManager.calls).toHaveLength(1);
+      expect(h.codexManager.calls[0].resumeSessionId).toBeUndefined();
+      const stored = h.store.getThread(thread.id);
+      expect(stored?.claudeSessionId).toBe('codex-thread-1');
+      expect(stored?.sessionRuntime).toBe('codex-sdk');
+
+      // The durable transcript is untouched by the switch: both turns survive.
+      const userEvents = h.store.listEvents(thread.id).filter((r) => r.eventType === 'user');
+      expect(userEvents).toHaveLength(2);
+    });
+
+    it('switching BACK cold-starts again rather than resuming the Claude id still on file', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'on claude');
+
+      h.runtime.value = 'codex-sdk';
+      h.codexManager.queueInit('codex-thread-1');
+      await h.service.sendMessage(thread.id, 'on codex');
+
+      h.runtime.value = 'claude-sdk';
+      h.manager.queueInit('sess-2');
+      await h.service.sendMessage(thread.id, 'back on claude');
+
+      expect(h.manager.calls).toHaveLength(2);
+      expect(h.manager.calls[1].resumeSessionId).toBeUndefined();
+      expect(h.store.getThread(thread.id)?.claudeSessionId).toBe('sess-2');
+      expect(h.store.getThread(thread.id)?.sessionRuntime).toBe('claude-sdk');
+    });
+
+    it('staying on one runtime still warm-resumes (the switch check is not a blanket clear)', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.runtime.value = 'codex-sdk';
+      h.codexManager.queueInit('codex-thread-1');
+      await h.service.sendMessage(thread.id, 'first');
+      h.codexManager.queueInit('codex-thread-1');
+      await h.service.sendMessage(thread.id, 'second');
+
+      expect(h.codexManager.calls[1].resumeSessionId).toBe('codex-thread-1');
+    });
+
+    it('a legacy thread with an id but NO recorded runtime resumes rather than cold-starting', async () => {
+      const thread = h.service.ensureGlobalThread();
+      // Exactly the pre-130 shape: an id captured before the column existed.
+      h.db
+        .prepare('UPDATE agent_threads SET claude_session_id = ? WHERE id = ?')
+        .run('legacy-sess', thread.id);
+      // Keep the day-boundary from clearing it, so the resume is what is tested.
+      h.store.setLastTurnAt(thread.id, h.clock.value);
+      expect(h.store.getThread(thread.id)?.sessionRuntime).toBeNull();
+
+      h.manager.queueInit('legacy-sess');
+      await h.service.sendMessage(thread.id, 'hello');
+
+      expect(h.manager.calls[0].resumeSessionId).toBe('legacy-sess');
+    });
+
+    it('a legacy id with NO recorded runtime is a CLAUDE id: the first Codex turn cold-starts', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.db
+        .prepare('UPDATE agent_threads SET claude_session_id = ? WHERE id = ?')
+        .run('legacy-sess', thread.id);
+      h.store.setLastTurnAt(thread.id, h.clock.value);
+
+      h.runtime.value = 'codex-sdk';
+      h.codexManager.queueInit('codex-thread-1');
+      await h.service.sendMessage(thread.id, 'hello');
+
+      expect(h.codexManager.calls).toHaveLength(1);
+      expect(h.codexManager.calls[0].resumeSessionId).toBeUndefined();
+      expect(h.store.getThread(thread.id)?.claudeSessionId).toBe('codex-thread-1');
+      expect(h.store.getThread(thread.id)?.sessionRuntime).toBe('codex-sdk');
+    });
+
+    it('bridges BOTH managers, so a turn on either provider live-tails and captures', async () => {
+      const thread = h.service.ensureGlobalThread();
+      // First turn attaches the bridges — on Claude only, historically.
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'on claude');
+      const afterClaude = h.published.length;
+
+      // Without a Codex-side bridge this turn would publish nothing and capture
+      // no id, leaving every following turn cold-starting.
+      h.runtime.value = 'codex-sdk';
+      h.codexManager.queueInit('codex-thread-1');
+      await h.service.sendMessage(thread.id, 'on codex');
+
+      expect(h.published.length).toBeGreaterThan(afterClaude + 1);
+      expect(h.published.every((p) => p.id === thread.id)).toBe(true);
+      expect(h.store.getThread(thread.id)?.claudeSessionId).toBe('codex-thread-1');
+    });
+
+    it('dispose detaches BOTH managers listeners', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'hello');
+
+      h.service.dispose();
+      const before = h.published.length;
+
+      // Emitting on either manager after dispose must publish nothing.
+      h.manager.emitInit(`agent:${thread.id}`, 'ghost-claude');
+      h.codexManager.emitInit(`agent:${thread.id}`, 'ghost-codex');
+
+      expect(h.published.length).toBe(before);
       expect(h.store.getThread(thread.id)?.claudeSessionId).toBe('sess-1');
     });
   });
@@ -493,6 +760,46 @@ describe('AgentThreadService', () => {
 
       expect(h.manager.calls).toHaveLength(2);
       expect(h.manager.calls[1].resumeSessionId).toBe('sess-1');
+    });
+
+    it('compact-daily degrades to clear-daily on Codex: no /compact turn, the day starts fresh', async () => {
+      h.retention.value = 'compact-daily';
+      h.runtime.value = 'codex-sdk';
+      const thread = h.service.ensureGlobalThread();
+
+      h.codexManager.queueInit('codex-thread-1');
+      await h.service.sendMessage(thread.id, 'day one');
+
+      h.clock.value += ONE_DAY_MS;
+      h.codexManager.queueInit('codex-thread-2');
+      await h.service.sendMessage(thread.id, 'day two');
+
+      // Only the two real turns — Codex's app-server has no compaction RPC, and
+      // '/compact' sent as prompt text would land as a literal user message.
+      expect(h.codexManager.calls).toHaveLength(2);
+      expect(h.codexManager.calls.map((c) => c.prompt)).toEqual(['day one', 'day two']);
+      // The user's intent (do not carry yesterday's context) is still honoured.
+      expect(h.codexManager.calls[1].resumeSessionId).toBeUndefined();
+      expect(h.store.getThread(thread.id)?.claudeSessionId).toBe('codex-thread-2');
+    });
+
+    it('compact-daily still fires the /compact turn on Claude (the degrade is Codex-only)', async () => {
+      h.retention.value = 'compact-daily';
+      const thread = h.service.ensureGlobalThread();
+
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'day one');
+
+      h.clock.value += ONE_DAY_MS;
+      h.manager.queueInit('sess-1');
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'day two');
+
+      expect(h.manager.calls.map((c) => c.prompt)).toEqual([
+        'day one',
+        COMPACT_PROMPT,
+        'day two',
+      ]);
     });
 
     it('upgrade path: a legacy thread with a stored conversation but NULL last_turn_at is treated as a new day', async () => {
