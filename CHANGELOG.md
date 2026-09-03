@@ -6,6 +6,47 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-09-03
+
+### Added
+
+- **Guided set-up replaces the old tour.** Onboarding is now seven modal steps followed by eight
+  guided screens that run *inside* the real shell: add a project (existing / new / "not sure
+  yet"), project home, a first idea composed into assistant proposals in the centre column, the
+  assistant-rail introduction, choosing a first session (Planner / Ship / Quick), and a launching
+  finale that lands on Human review. Callouts draw leader arrows to the actual controls they
+  describe, and the "not sure yet" branch adopts whatever project you add from the Sidebar.
+- **The Sidebar stays clickable during set-up.** Navigating away parks the tour instead of
+  destroying it, and a "Resume setup" card brings it back where you left off.
+- **The window remembers where you left it.** Size, position, and maximized state persist across
+  quits, with a display-aware first run that opens sensibly on the current monitor and clamps a
+  restore that no longer fits.
+- An optional prompt-only `contextHint` on the assistant's `sendMessage` seam.
+
+### Changed
+
+- Rails open at usable 360px defaults, and rail widths persist as you drag them.
+- The guided thread box grows with the window, and model ids stay on one line in the model step.
+- Tour cards sit on the bare surface — no modal scrim behind them.
+
+### Removed
+
+- **The assistant's automatic daily recap.** It spent a real turn on every boot; the assistant now
+  speaks when spoken to.
+- The prompt-history rail inside the guided thread box.
+
+### Fixed
+
+- **Window bounds no longer drift on macOS.** `getNormalBounds` returns a stale cache after a
+  maximize, so normal bounds are now tracked in JS and written atomically — a restore can't be
+  corrupted by a crash mid-write.
+- A maximized window is shown only once it has painted, keeping the title bar reachable instead of
+  flashing an unpositioned frame.
+- Claude-panel model fallbacks normalize to the Claude family rather than falling through to an
+  unrelated provider's default.
+- The day-gate canary no longer flakes: it baselines the stream at the moment the gate opens and
+  polls for growth instead of sleeping a fixed interval.
+
 ## [0.2.11] — 2026-09-02
 
 ### Added
