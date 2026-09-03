@@ -1,8 +1,9 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  parsePluginMcpServerNames,
   parseUserMcpServerNames,
   readUserMcpServerNames,
   resolveCodexHome,
@@ -52,9 +53,32 @@ describe('readUserMcpServerNames', () => {
     expect(readUserMcpServerNames(home)).toEqual(['repl']);
   });
 
+  it('also collects servers declared by installed plugins (plugins/cache/**/.mcp.json)', () => {
+    home = mkdtempSync(join(tmpdir(), 'codex-home-'));
+    writeFileSync(join(home, 'config.toml'), '[mcp_servers.node_repl]\ncommand = "x"\n');
+    const plugin = join(home, 'plugins', 'cache', 'openai-bundled', 'unified-computer-use', '1.0');
+    mkdirSync(plugin, { recursive: true });
+    writeFileSync(
+      join(plugin, '.mcp.json'),
+      JSON.stringify({ mcpServers: { cua_repl: { command: '/bin/node', enabled: true } } }),
+    );
+    const broken = join(home, 'plugins', 'cache', 'other', 'p', '2.0');
+    mkdirSync(broken, { recursive: true });
+    writeFileSync(join(broken, '.mcp.json'), '{ not json');
+    expect(readUserMcpServerNames(home)).toEqual(['node_repl', 'cua_repl']);
+  });
+
   it('is fail-soft: a missing config yields nothing to disable', () => {
     home = mkdtempSync(join(tmpdir(), 'codex-home-'));
     expect(readUserMcpServerNames(home)).toEqual([]);
+  });
+});
+
+describe('parsePluginMcpServerNames', () => {
+  it('returns the mcpServers keys and tolerates malformed input', () => {
+    expect(parsePluginMcpServerNames('{"mcpServers":{"a":{},"b":{}}}')).toEqual(['a', 'b']);
+    expect(parsePluginMcpServerNames('{"mcpServers":[]}')).toEqual([]);
+    expect(parsePluginMcpServerNames('nope')).toEqual([]);
   });
 });
 

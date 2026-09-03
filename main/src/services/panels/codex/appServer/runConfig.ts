@@ -178,12 +178,19 @@ export function buildCodexAppServerThreadConfiguration(
         //   apps + apps._default.enabled — ChatGPT app/connector tools, which
         //     "are not controlled by the sandboxed-command network proxy";
         //   remote_plugin — the remote plugin catalog (request_plugin_install).
+        // Two spellings where the pinned build (0.144.3) predates the current
+        // docs: `collab` is what it calls multi-agent, `plugins`/`imagegen` are
+        // its plugin-catalog and image-generation flags. Unknown keys are
+        // ignored by the app-server (verified live), so both spellings ride.
         features: {
           shell_tool: false,
           unified_exec: false,
           multi_agent: false,
+          collab: false,
           apps: false,
           remote_plugin: false,
+          plugins: false,
+          imagegen: false,
         },
         apps: { _default: { enabled: false } },
         include_apply_patch_tool: false,

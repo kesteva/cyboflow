@@ -15,13 +15,16 @@
  * an unreadable file yields an empty list (nothing to disable), never a throw
  * into the spawn path.
  *
- * Servers that reach Codex by OTHER routes (bundled plugins, ChatGPT apps) are
- * not in this file; the isolation branch turns those off with the
- * `features.apps` / `apps._default.enabled` / `features.remote_plugin` keys.
+ * Servers also reach Codex through INSTALLED PLUGINS: every
+ * `$CODEX_HOME/plugins/cache/<marketplace>/<plugin>/<version>/.mcp.json`
+ * declares an `mcpServers` map (verified live: the bundled Computer Use plugin's
+ * `cua_repl` was callable from a hermetic thread). Those are read here too,
+ * so they can be disabled by the same per-name key. ChatGPT apps/connectors are
+ * a third route, closed by `features.apps` / `apps._default.enabled` instead.
  */
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 const MCP_SERVER_HEADER = /^\s*\[\s*mcp_servers\.(?:"([^"]+)"|'([^']+)'|([^\].\s"']+))(?:\.[^\]]*)?\s*\]/;
 
@@ -43,19 +46,62 @@ export function parseUserMcpServerNames(toml: string): string[] {
   return names;
 }
 
+/** Pure: the server names a plugin `.mcp.json` declares (`{ "mcpServers": { <name>: … } }`). */
+export function parsePluginMcpServerNames(json: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (typeof parsed !== 'object' || parsed === null) return [];
+    const servers = (parsed as { mcpServers?: unknown }).mcpServers;
+    if (typeof servers !== 'object' || servers === null || Array.isArray(servers)) return [];
+    return Object.keys(servers);
+  } catch {
+    return [];
+  }
+}
+
+/** Every plugin `.mcp.json` under `<codexHome>/plugins/cache`, any depth. Fail-soft. */
+function readPluginMcpServerNames(codexHome: string): string[] {
+  const names: string[] = [];
+  let entries: string[];
+  try {
+    entries = readdirSync(join(codexHome, 'plugins', 'cache'), { recursive: true, encoding: 'utf8' });
+  } catch {
+    return names;
+  }
+  for (const relative of entries) {
+    if (basename(relative) !== '.mcp.json') continue;
+    let json: string;
+    try {
+      json = readFileSync(join(codexHome, 'plugins', 'cache', relative), 'utf8');
+    } catch {
+      continue;
+    }
+    for (const name of parsePluginMcpServerNames(json)) {
+      if (!names.includes(name)) names.push(name);
+    }
+  }
+  return names;
+}
+
 /**
- * Read + parse the user's config.toml. `except` drops names the caller injects
- * itself (the 'cyboflow' entry must never be disabled).
+ * Every MCP server name the user's Codex home would bring into a thread —
+ * config.toml headers plus installed-plugin manifests. `except` drops names the
+ * caller injects itself (the 'cyboflow' entry must never be disabled).
  */
 export function readUserMcpServerNames(
   codexHome: string = resolveCodexHome(),
   except: readonly string[] = ['cyboflow'],
 ): string[] {
-  let toml: string;
+  const names: string[] = [];
   try {
-    toml = readFileSync(join(codexHome, 'config.toml'), 'utf8');
+    for (const name of parseUserMcpServerNames(readFileSync(join(codexHome, 'config.toml'), 'utf8'))) {
+      if (!names.includes(name)) names.push(name);
+    }
   } catch {
-    return [];
+    // no config.toml — nothing user-authored to disable
   }
-  return parseUserMcpServerNames(toml).filter((name) => !except.includes(name));
+  for (const name of readPluginMcpServerNames(codexHome)) {
+    if (!names.includes(name)) names.push(name);
+  }
+  return names.filter((name) => !except.includes(name));
 }
