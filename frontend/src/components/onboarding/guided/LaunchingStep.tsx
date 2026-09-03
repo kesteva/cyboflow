@@ -9,6 +9,7 @@
  * its own.
  */
 import { GuidedCallout, GuidedFooter, GuidedScreen } from './GuidedScreen';
+import { GUIDED_TARGETS } from './GuidedLeader';
 import { ONBOARDING_LAUNCHING_STEP } from '../../../utils/onboarding';
 import type { LaunchedSession } from '../../../stores/onboardingStore';
 import { useActiveRunsStore } from '../../../stores/activeRunsStore';
@@ -93,6 +94,7 @@ export function LaunchingStep({
       <div className="flex flex-col gap-2">
         <GuidedCallout
           n={1}
+          leaderTo={GUIDED_TARGETS.humanReview}
           title="Human review is your home screen"
           body="Everything waiting on you, what’s running, and what to start next — across every project."
         />

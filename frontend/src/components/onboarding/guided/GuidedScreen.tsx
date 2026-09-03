@@ -9,6 +9,8 @@
  * Numbering reads the store directly (the current step + the skipped set), so a
  * screen only says WHICH step it is; an assistant-off run renumbers itself.
  */
+import { useRef } from 'react';
+import { GuidedLeader, type GuidedTarget } from './GuidedLeader';
 import cyboflowLogo from '../../../assets/cyboflow-logo.svg';
 import { skippedStepSet, useOnboardingStore } from '../../../stores/onboardingStore';
 import { guidedStepNumber, guidedStepTotal } from '../../../utils/onboarding';
@@ -72,46 +74,44 @@ export interface GuidedCalloutProps {
   body: React.ReactNode;
   testId?: string;
   /**
-   * Draw a dashed leader from the card's left edge out toward the Sidebar,
-   * for a callout whose shell element carries a ring but no numbered marker
-   * (e.g. a primary button the chip would clutter).
+   * Draw the design's dashed, curved arrow from this chip to a shell element
+   * (see {@link GuidedLeader} / GUIDED_TARGETS).
    */
-  pointsLeft?: boolean;
+  leaderTo?: GuidedTarget;
 }
 
 /**
  * A numbered explanation card ("① Click the project to get an overview of it").
  * The number pairs with a GuidedMarker of the same value placed on the shell
- * element it describes.
+ * element it describes; `leaderTo` additionally draws the arrow to it.
  */
 export function GuidedCallout({
   n,
   title,
   body,
   testId,
-  pointsLeft = false,
+  leaderTo,
 }: GuidedCalloutProps): React.JSX.Element {
+  const chipRef = useRef<HTMLSpanElement>(null);
   return (
     <div
-      className="relative flex items-start gap-[11px] border border-border-primary bg-surface-primary px-[15px] py-[13px] text-left"
+      className="flex items-start gap-[11px] border border-border-primary bg-surface-primary px-[15px] py-[13px] text-left"
       data-testid={testId}
     >
-      {pointsLeft && (
-        <span
-          aria-hidden="true"
-          data-testid={testId !== undefined ? `${testId}-leader` : undefined}
-          className="pointer-events-none absolute right-full top-1/2 flex w-[88px] -translate-y-1/2 items-center text-interactive"
-        >
-          <span className="-mr-px text-[11px] leading-none">◀</span>
-          <span className="h-0 flex-1 border-t border-dashed border-interactive" />
-        </span>
-      )}
       <span
+        ref={chipRef}
         aria-hidden="true"
         className="flex h-[17px] w-[17px] flex-shrink-0 items-center justify-center bg-interactive text-[9px] font-bold text-[var(--paper)]"
       >
         {n}
       </span>
+      {leaderTo !== undefined && (
+        <GuidedLeader
+          from={chipRef}
+          to={leaderTo}
+          testId={testId !== undefined ? `${testId}-leader` : undefined}
+        />
+      )}
       <span className="min-w-0 flex-1">
         <span className="block text-[12px] font-bold text-text-primary">{title}</span>
         <span className="mt-[3px] block text-[10px] leading-[1.55] text-text-tertiary">{body}</span>

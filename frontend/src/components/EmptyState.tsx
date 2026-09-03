@@ -12,6 +12,8 @@ interface EmptyStateProps {
     onClick: () => void;
     /** Inline style for the action button (e.g. an onboarding ring). */
     style?: CSSProperties;
+    /** `data-guided-target` for the onboarding leader arrow (see GuidedLeader). */
+    guidedTarget?: string;
   };
   className?: string;
 }
@@ -25,7 +27,12 @@ export function EmptyState({ icon: Icon, title, description, action, className }
       <h3 className="text-lg font-semibold text-text-primary mb-2">{title}</h3>
       <p className="text-sm text-text-secondary max-w-sm mb-6">{description}</p>
       {action && (
-        <Button onClick={action.onClick} variant="primary" style={action.style}>
+        <Button
+          onClick={action.onClick}
+          variant="primary"
+          style={action.style}
+          data-guided-target={action.guidedTarget}
+        >
           {action.label}
         </Button>
       )}

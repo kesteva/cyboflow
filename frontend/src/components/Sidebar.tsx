@@ -14,6 +14,7 @@ import { skippedStepSet, useOnboardingStore } from '../stores/onboardingStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import { visibleStepNumber, visibleStepTotal, ONBOARDING_LAUNCHING_STEP } from '../utils/onboarding';
 import { GuidedMarker, useGuidedMarkActive, GUIDED_RING_STYLE } from './onboarding/guided/GuidedMarker';
+import { GUIDED_TARGETS } from './onboarding/guided/GuidedLeader';
 
 interface SidebarProps {
   onAboutClick: () => void;
@@ -336,6 +337,7 @@ export const Sidebar = memo(function Sidebar({
             ...(humanReviewActive ? { boxShadow: 'inset 3px 0 0 var(--color-interactive-primary)' } : {}),
             ...(launchingMark ? GUIDED_RING_STYLE : {}),
           }}
+          data-guided-target={GUIDED_TARGETS.humanReview}
         >
           <span
             className="flex h-[22px] w-[22px] flex-shrink-0 items-center justify-center rounded-full text-white"

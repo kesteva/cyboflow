@@ -8,6 +8,7 @@ import { useSessionStore } from '../stores/sessionStore';
 import { useOnboardingStore } from '../stores/onboardingStore';
 import { ONBOARDING_PROJECT_HOME_STEP } from '../utils/onboarding';
 import { GuidedMarker, useGuidedMarkActive, GUIDED_RING_STYLE } from './onboarding/guided/GuidedMarker';
+import { GUIDED_TARGETS } from './onboarding/guided/GuidedLeader';
 import ProjectSettings from './ProjectSettings';
 import { EmptyState } from './EmptyState';
 import { LoadingSpinner } from './LoadingSpinner';
@@ -1693,9 +1694,10 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
             action={{
               label: 'Add Project',
               onClick: () => setShowAddProjectDialog(true),
-              // Ring only — the guided callout draws a leader toward it instead of
-              // a numbered chip cluttering the primary button.
+              // Ring only — the guided callout draws its leader arrow onto the
+              // button instead of a numbered chip cluttering the primary CTA.
               style: addProjectMarked ? GUIDED_RING_STYLE : undefined,
+              guidedTarget: GUIDED_TARGETS.addProject,
             }}
             className="py-8"
           />
@@ -1802,6 +1804,7 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                         : 'bg-surface-secondary/50 hover:bg-surface-hover'
                     }`}
                     style={isProjectHomeMarked ? GUIDED_RING_STYLE : undefined}
+                    data-guided-target={isProjectHomeMarked ? GUIDED_TARGETS.projectRow : undefined}
                     draggable
                     onDragStart={(e) => handleProjectDragStart(e, project)}
                     onDragEnd={handleDragEnd}
@@ -1906,6 +1909,7 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                       }}
                       className="w-full px-2 py-1 text-xs text-text-secondary hover:text-text-primary hover:bg-surface-hover rounded transition-colors flex items-center space-x-1 disabled:opacity-60 disabled:cursor-wait"
                       style={isProjectHomeMarked ? GUIDED_RING_STYLE : undefined}
+                      data-guided-target={isProjectHomeMarked ? GUIDED_TARGETS.startSession : undefined}
                     >
                       <Plus className="w-3 h-3" />
                       <span>Start new session</span>
