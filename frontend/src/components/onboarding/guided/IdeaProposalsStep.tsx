@@ -53,7 +53,10 @@ export function IdeaProposalsStep({
     >
       <div
         data-testid="onboarding-idea-thread"
-        className="flex h-[440px] flex-col overflow-hidden border border-border-primary bg-bg-secondary"
+        className="flex flex-col overflow-hidden border border-border-primary bg-bg-secondary"
+        // Tall enough that a proposal card in the bottom slot leaves the
+        // transcript readable: grow with the window, never below 440px.
+        style={{ height: 'clamp(440px, calc(100vh - 320px), 760px)' }}
       >
         <div className="flex flex-1 flex-col overflow-hidden">
           <AgentThreadView
