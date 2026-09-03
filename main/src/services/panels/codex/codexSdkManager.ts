@@ -38,6 +38,7 @@ import {
   type QuestionRouterPort,
 } from './appServer/questionBridge';
 import { CodexRawNotificationSink } from './appServer/rawNotificationSink';
+import { handleIsolationRequest } from './appServer/isolationRequestPolicy';
 import {
   CodexChatGptAuthRequiredError,
   requireCodexChatGptAccount,
@@ -102,6 +103,15 @@ interface ActiveCodexRun {
 }
 
 /**
+ * The only member the turn lifecycle calls on its events sink. Both the built-in
+ * {@link RawEventsSink} and an injected {@link SpawnEventsSink} (global-agent
+ * thread) satisfy it, so the two paths share one field.
+ */
+interface TurnEventsSink {
+  dispose(runId?: string): void;
+}
+
+/**
  * Per-LOGICAL-TURN mutable state. The client callbacks and the turnSession
  * `onEvent` are baked once at cold spawn, so every one dispatches through the
  * warm entry's `currentContext` (this object) — bound before `startTurn`, cleared
@@ -115,7 +125,13 @@ interface CodexTurnContext {
   abortController: AbortController;
   terminal: Deferred<void>;
   router: EventRouter<AgentStreamEvent>;
-  sink: RawEventsSink<AgentStreamEvent>;
+  /**
+   * The per-turn events sink. Either the built-in run-keyed
+   * {@link RawEventsSink} or, for a hermetic global-agent spawn, the injected
+   * {@link ClaudeSpawnerOptions.eventsSink} — narrowed to the only member this
+   * context uses so both shapes bind here.
+   */
+  sink: TurnEventsSink;
   usageAccumulator: CodexTurnUsageAccumulator;
   approvalBridge: CodexAppServerApprovalBridge;
   questionBridge: CodexAppServerQuestionBridge;
@@ -139,6 +155,15 @@ interface WarmCodexEntry {
   // entry's stable runId) — persists every frame, including inter-turn frames
   // that arrive while parked (currentContext is null).
   rawNotificationSink: CodexRawNotificationSink;
+  /**
+   * false for a hermetic global-agent spawn. `rawNotificationSink` writes
+   * `raw_events` keyed by the entry's runId, which for that spawn is the
+   * run-less `agent:<threadId>`: with `foreign_keys=ON` every INSERT fails the
+   * FK to `workflow_runs` and is fail-soft dropped WITH a WARN — dozens per
+   * turn. The transcript for those spawns is owned by the injected eventsSink
+   * (thread-keyed), so the cold-entry sink is skipped entirely.
+   */
+  persistRawNotifications: boolean;
   command: string;
   threadId: string | null;
   initializeResponse: AppServerInitializeResponse | null;
@@ -687,10 +712,17 @@ export class CodexSdkManager extends AbstractCliManager {
     fingerprint: string,
     warmEligible: boolean,
   ): WarmCodexEntry {
+    // HERMETIC global-agent spawn. `options.isolation` is the ONE discriminator —
+    // never an `agent:` id-prefix sniff. The client callbacks below are baked once
+    // per cold entry, and the thread configuration (which differs for isolation)
+    // is part of the warm fingerprint, so a parked entry can never serve a spawn
+    // of the other kind.
+    const isolationSpawn = options.isolation === 'agent';
     const entry: WarmCodexEntry = {
       client: undefined as unknown as CodexAppServerClientLike,
       turnSession: undefined as unknown as CodexAppServerTurnSession,
       rawNotificationSink: new CodexRawNotificationSink(this.db, this.logger),
+      persistRawNotifications: !isolationSpawn,
       command: executable.executablePath,
       threadId: options.resumeSessionId ?? null,
       initializeResponse: null,
@@ -713,6 +745,15 @@ export class CodexSdkManager extends AbstractCliManager {
         executable.pathDir,
       ),
       onServerRequest: (request) => {
+        if (isolationSpawn) {
+          // Fail-closed and LOCAL: never the approval/question routers, which
+          // need a running `workflow_runs` row this identity has no row in (they
+          // would answer decline anyway, silently). Answered even while parked —
+          // a hanging request is worse than a refused one.
+          const decision = handleIsolationRequest(request);
+          if (decision.warning) this.logger?.warn(`[CodexSdkManager] ${decision.warning}`);
+          return;
+        }
         const ctx = entry.currentContext;
         if (!ctx) {
           // A server request with no active turn cannot be routed to a bridge —
@@ -729,7 +770,9 @@ export class CodexSdkManager extends AbstractCliManager {
         // Persist every notification for the process lifetime — including
         // inter-turn frames that arrive while parked (currentContext null) —
         // under the entry's stable runId, mirroring pre-warm behavior.
-        entry.rawNotificationSink.persist(entry.runId, notification);
+        if (entry.persistRawNotifications) {
+          entry.rawNotificationSink.persist(entry.runId, notification);
+        }
         entry.turnSession.handleNotification(notification);
         // Usage telemetry LAST, and never allowed to throw: an exception
         // escaping this handler reaches CodexAppServerClient.fail(), which
@@ -787,6 +830,10 @@ export class CodexSdkManager extends AbstractCliManager {
   ): Promise<void> {
     const displayPanelId = options.panelId;
     const runId = options.runId ?? options.panelId;
+    // HERMETIC global-agent spawn — see buildColdEntry. `options.isolation` is
+    // the ONE discriminator; the run-less `agent:<threadId>` identity is never
+    // sniffed from the id.
+    const isolationSpawn = options.isolation === 'agent';
     const agentInvocationId = randomUUID();
     const abortController = new AbortController();
     const terminal = createDeferred<void>();
@@ -794,13 +841,25 @@ export class CodexSdkManager extends AbstractCliManager {
     // Observe immediately while preserving rejection for the later await.
     void terminal.promise.catch(() => undefined);
     const router = new EventRouter<AgentStreamEvent>();
-    // CodexRawNotificationSink already persists the raw app-server notification
-    // payload verbatim — skip the generic 'agent_unknown' wrap here to kill the
-    // double-write.
-    const sink = new RawEventsSink<AgentStreamEvent>(this.db, this.logger, {
-      skipEventTypes: ['agent_unknown'],
-    });
-    sink.attachToRouter(router, runId);
+    // A caller-injected sink REPLACES the built-in one (single-writer contract):
+    // the global-agent thread persists this same narrowed stream thread-keyed
+    // into `agent_thread_events`, because `raw_events.run_id` is FK'd to
+    // `workflow_runs` and its `agent:<threadId>` identity has no row there.
+    // Absent ⇒ the built-in run-keyed sink, byte-identical to before.
+    // (CodexRawNotificationSink already persists the raw app-server notification
+    // payload verbatim, so the built-in sink skips the generic 'agent_unknown'
+    // wrap to kill the double-write.)
+    let sink: TurnEventsSink;
+    if (options.eventsSink) {
+      options.eventsSink.attachToRouter(router, runId);
+      sink = options.eventsSink;
+    } else {
+      const rawSink = new RawEventsSink<AgentStreamEvent>(this.db, this.logger, {
+        skipEventTypes: ['agent_unknown'],
+      });
+      rawSink.attachToRouter(router, runId);
+      sink = rawSink;
+    }
     const usageAccumulator = new CodexTurnUsageAccumulator();
 
     const approvalBridge = new CodexAppServerApprovalBridge({
@@ -915,21 +974,28 @@ export class CodexSdkManager extends AbstractCliManager {
         throw new Error('Codex warm entry missing thread/init state before turn start');
       }
 
-      new AgentInvocationStore(this.db).createInvocation({
-        agentInvocationId,
-        runId,
-        stepId: options.agentInvocationStepId,
-        provider: 'codex',
-        runtime: 'codex-sdk',
-        model: resolveAgentModelAlias('codex', options.model),
-        // Stamp the owning chat panel so a per-panel resume lookup can tell this
-        // panel's Codex thread from a sibling chat panel's. For workflow runs
-        // panelId === runId, so this is redundant-but-harmless there; for a quick
-        // session the runId is the SESSION-shared chat sentinel and this column
-        // is the only thing that distinguishes two chats (TASK-103 Add-chat).
-        panelId: displayPanelId,
-      });
-      this.captureInvocationCodexThreadId(runId, agentInvocationId, entry.threadId);
+      // A hermetic global-agent spawn has NO `workflow_runs` row: `createInvocation`
+      // INSERTs an FK to it and THROWS for the run-less `agent:<threadId>` id,
+      // killing the spawn. Nothing reads an invocation row for that identity
+      // (the thread's own store owns its transcript and resume id), so both this
+      // and the thread-id capture below are skipped outright.
+      if (!isolationSpawn) {
+        new AgentInvocationStore(this.db).createInvocation({
+          agentInvocationId,
+          runId,
+          stepId: options.agentInvocationStepId,
+          provider: 'codex',
+          runtime: 'codex-sdk',
+          model: resolveAgentModelAlias('codex', options.model),
+          // Stamp the owning chat panel so a per-panel resume lookup can tell this
+          // panel's Codex thread from a sibling chat panel's. For workflow runs
+          // panelId === runId, so this is redundant-but-harmless there; for a quick
+          // session the runId is the SESSION-shared chat sentinel and this column
+          // is the only thing that distinguishes two chats (TASK-103 Add-chat).
+          panelId: displayPanelId,
+        });
+        this.captureInvocationCodexThreadId(runId, agentInvocationId, entry.threadId);
+      }
       this.emitProjected(
         router,
         runId,

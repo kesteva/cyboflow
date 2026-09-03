@@ -25,6 +25,7 @@ type ThreadConfiguration = Omit<AppServerThreadStartParams, 'ephemeral' | 'exper
 function buildMcpConfig(
   runId: string,
   runtimeConfig: CodexAppServerMcpRuntimeConfig,
+  mcpScope?: ClaudeSpawnerOptions['mcpScope'],
 ): Record<string, AppServerJsonValue> {
   return {
     mcp_servers: {
@@ -38,6 +39,13 @@ function buildMcpConfig(
           // refuses to bind the runId without it. This config is sent over the
           // app-server JSON-RPC channel, never written to disk.
           ...orchTokenEnv(runId),
+          // Tag the server's advertised tool scope so cyboflowMcpServer surfaces
+          // the matching scoped family (and gates out the run-scoped tools):
+          // 'global-agent' → the global-agent read/propose family; 'design' → the
+          // minimal design toolset. Mirrors composeMcpServers in
+          // claudeCodeManager.ts. Absent ⇒ no scope env, run-scoped and
+          // byte-identical to before.
+          ...(mcpScope ? { CYBOFLOW_MCP_SCOPE: mcpScope } : {}),
           // Guard: nodeExecutablePath may resolve to the Electron app binary for a
           // packaged app with no standalone node on PATH — without this flag,
           // messaging Codex boots a whole new Cyboflow app. See electronNodeGuard.
@@ -109,20 +117,53 @@ export function buildCodexAppServerThreadConfiguration(
   options: ClaudeSpawnerOptions,
   runtimeConfig: CodexAppServerMcpRuntimeConfig,
 ): ThreadConfiguration {
+  const model = resolveAgentModelAlias('codex', options.model);
+  const instructions = options.systemPromptAppend
+    ? { developerInstructions: options.systemPromptAppend }
+    : {};
+
+  // HERMETIC global-agent isolation (ClaudeSpawnerOptions.isolation) — a
+  // DEDICATED branch, not a flag swap: none of codexPermissionFlagsForMode's four
+  // modes yields {read-only, never}, and the global agent has no permission mode
+  // to resolve (it is run-less). Mirrors the Claude manager, which special-cases
+  // isolation before its ordinary permission ladder.
+  //
+  // The confinement is the whole point: the assistant reads and proposes through
+  // the scoped cyboflow MCP family and nothing else.
+  //   - sandbox 'read-only' + approvalPolicy 'never' — no writes, and no human
+  //     prompt to route (there is no workflow_runs row for a router to gate on).
+  //   - features.shell_tool false — "Enable the default shell tool for running
+  //     commands" (Codex config reference), so the agent gets no shell at all.
+  //   - web_search 'disabled' — "Remove the tool" (same reference).
+  // The warm fingerprint already hashes this whole configuration, so an isolation
+  // change busts a parked app-server on its own.
+  if (options.isolation === 'agent') {
+    return {
+      cwd: options.worktreePath,
+      sandbox: 'read-only',
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user',
+      config: {
+        ...buildMcpConfig(runId, runtimeConfig, options.mcpScope),
+        features: { shell_tool: false },
+        web_search: 'disabled',
+      },
+      ...(model ? { model } : {}),
+      ...instructions,
+    };
+  }
+
   const permissionMode: PermissionMode = options.agentPermissionMode ?? 'default';
   const permissionFlags = codexPermissionFlagsForMode(permissionMode);
-  const model = resolveAgentModelAlias('codex', options.model);
 
   return {
     cwd: options.worktreePath,
     sandbox: permissionFlags.sandbox,
     approvalPolicy: permissionFlags.approval,
     approvalsReviewer: permissionMode === 'auto' ? 'auto_review' : 'user',
-    config: buildMcpConfig(runId, runtimeConfig),
+    config: buildMcpConfig(runId, runtimeConfig, options.mcpScope),
     ...(model ? { model } : {}),
-    ...(options.systemPromptAppend
-      ? { developerInstructions: options.systemPromptAppend }
-      : {}),
+    ...instructions,
   };
 }
 

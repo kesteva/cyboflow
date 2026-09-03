@@ -56,6 +56,8 @@ import { createStreamingPromptInput, createPersistentPromptInput } from './strea
 import type { PersistentPromptInput, StreamingPromptInput } from './streamingPromptInput';
 import { withLock } from '../../../utils/mutex';
 import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../../../../shared/streamParser';
+import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream';
+import type { AgentStreamEvent } from '../../../../../shared/types/agentStream';
 import { LIVE_TASK_STATUSES } from '../../../../../shared/streamParser/taskLifecycle';
 import { transitionToAwaitingReview, reviveQuickRunToRunning } from '../../cyboflow/transitions';
 import type { TransitionToAwaitingReviewParams } from '../../cyboflow/transitions';
@@ -696,7 +698,19 @@ function resolveLinkedIdeaLine(db: Database.Database, ideaId: string): string {
  * (the same public streamParser router the built-in sink subscribes to).
  */
 export interface SpawnEventsSink {
-  attachToRouter(router: EventRouter, runId: string): void;
+  /**
+   * The router is provider-shaped: the Claude SDK substrate routes
+   * `EventRouter<ClaudeStreamEvent>` (the default), the Codex app-server
+   * substrate routes `EventRouter<AgentStreamEvent>`. Both are accepted so ONE
+   * injected sink can serve a global-agent thread on either runtime; a sink that
+   * only handles the Claude shape still satisfies this interface (method
+   * parameters are compared bivariantly), so the built-in {@link RawEventsSink}
+   * is unaffected.
+   */
+  attachToRouter(
+    router: EventRouter<ClaudeStreamEvent> | EventRouter<AgentStreamEvent>,
+    runId: string,
+  ): void;
   dispose(runId?: string): void;
 }
 

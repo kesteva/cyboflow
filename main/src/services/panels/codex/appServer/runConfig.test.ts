@@ -230,4 +230,92 @@ describe('Codex app-server run configuration', () => {
     );
     expect(env.PATH).toBe('/opt/homebrew/bin');
   });
+  it('stamps the MCP scope into the bridge env ONLY when a scope is set', () => {
+    const base = {
+      panelId: 'run-1',
+      sessionId: 'run-1',
+      worktreePath: '/tmp/worktree',
+      prompt: 'ship it',
+    };
+    const scoped = buildCodexAppServerThreadStartParams(
+      'run-1',
+      { ...base, mcpScope: 'global-agent' as const },
+      runtimeConfig,
+    );
+    const unscoped = buildCodexAppServerThreadStartParams('run-1', base, runtimeConfig);
+
+    const envOf = (params: { config?: unknown }): Record<string, string> =>
+      (params.config as { mcp_servers: { cyboflow: { env: Record<string, string> } } })
+        .mcp_servers.cyboflow.env;
+    // Without it the assistant would be served the RUN-scoped tool family, most
+    // of which fail for a run-less identity.
+    expect(envOf(scoped).CYBOFLOW_MCP_SCOPE).toBe('global-agent');
+    expect(envOf(unscoped)).not.toHaveProperty('CYBOFLOW_MCP_SCOPE');
+  });
+
+  it('confines a hermetic global-agent spawn regardless of the permission mode', () => {
+    const params = buildCodexAppServerThreadStartParams('agent:thread-1', {
+      panelId: 'agent:thread-1',
+      sessionId: 'agent:thread-1',
+      worktreePath: '/Users/me',
+      prompt: 'what changed today?',
+      systemPromptAppend: 'You are the Cyboflow assistant.',
+      // The isolation branch bypasses codexPermissionFlagsForMode entirely —
+      // dontAsk would otherwise map to danger-full-access.
+      agentPermissionMode: 'dontAsk',
+      isolation: 'agent',
+      mcpScope: 'global-agent',
+      model: 'gpt-5.5',
+    }, runtimeConfig);
+
+    expect(params).toEqual({
+      cwd: '/Users/me',
+      sandbox: 'read-only',
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user',
+      model: 'gpt-5.5',
+      developerInstructions: 'You are the Cyboflow assistant.',
+      ephemeral: false,
+      experimentalRawEvents: true,
+      config: {
+        mcp_servers: {
+          cyboflow: {
+            command: '/usr/local/bin/node',
+            args: ['/app/cyboflowMcpServer.js'],
+            env: {
+              CYBOFLOW_RUN_ID: 'agent:thread-1',
+              CYBOFLOW_ORCH_SOCKET: '/tmp/cyboflow-orch.sock',
+              CYBOFLOW_ORCH_TOKEN: expect.any(String),
+              CYBOFLOW_MCP_SCOPE: 'global-agent',
+            },
+            required: true,
+            default_tools_approval_mode: 'approve',
+            tool_timeout_sec: 7 * 24 * 60 * 60,
+          },
+        },
+        // The residual escapes from a read-only sandbox: the default shell tool
+        // and web search. Both are removed by documented Codex config keys.
+        features: { shell_tool: false },
+        web_search: 'disabled',
+      },
+    });
+  });
+
+  it('leaves a resumed isolation thread under the same confinement', () => {
+    const params = buildCodexAppServerThreadResumeParams('agent:thread-1', 'codex-thread-1', {
+      panelId: 'agent:thread-1',
+      sessionId: 'agent:thread-1',
+      worktreePath: '/Users/me',
+      prompt: 'and yesterday?',
+      isolation: 'agent',
+      mcpScope: 'global-agent',
+    }, runtimeConfig);
+
+    expect(params).toMatchObject({
+      threadId: 'codex-thread-1',
+      excludeTurns: true,
+      sandbox: 'read-only',
+      approvalPolicy: 'never',
+    });
+  });
 });

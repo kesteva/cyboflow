@@ -29,6 +29,11 @@ import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import type { CliSpawnOutcome } from '../../../shared/types/cliPanels';
 import { AgentInvocationStore } from './agentInvocationStore';
 import type { ClaudeStreamEvent } from '../../../shared/types/claudeStream';
+// Type-only (erased by tsc) — the standalone-typecheck invariant above forbids a
+// RUNTIME import of a services/* module, not a `import type` alias. This is the
+// one shape ClaudeSpawnerOptions cannot restate structurally without drifting
+// from the interface the Claude manager actually implements.
+import type { SpawnEventsSink } from '../services/panels/claude/claudeCodeManager';
 import type { RunEventBridge, BridgeEventsOptions } from './runEventBridge';
 import { bridgeEvents as bridgeEventsImpl } from './runEventBridge';
 import type { StreamEventPublisher } from './runLauncher';
@@ -248,6 +253,44 @@ export interface ClaudeSpawnerOptions {
    * so no step turn may fire `cyboflow_request_verification` itself.
    */
   disallowedTools?: string[];
+  /**
+   * HERMETIC global-agent isolation — the spawner-side twin of
+   * {@link ClaudeSpawnOptions.isolation} (claudeCodeManager.ts). Set ONLY by the
+   * global-agent thread, whose synthetic identity (`agent:<threadId>` for
+   * panelId === sessionId === runId) has NO `workflow_runs` row.
+   *
+   * `options.isolation === 'agent'` is the ONE discriminator every substrate
+   * keys its hermetic behavior on — never an `agent:` id-prefix sniff:
+   *   - Claude SDK: `settingSources: []`, an exclusive cyboflow MCP map, no
+   *     plugins, and a fail-closed PreToolUse hook.
+   *   - Codex app-server: a dedicated thread-configuration branch that bypasses
+   *     `codexPermissionFlagsForMode` (`read-only` sandbox, `never` approvals,
+   *     shell tool + web search off), a local fail-closed server-request policy
+   *     in place of the approval/question routers, and run-keyed bookkeeping
+   *     (`agent_invocations`, `raw_events`) skipped.
+   * Absent ⇒ byte-identical to a run-scoped spawn.
+   */
+  isolation?: 'agent';
+  /**
+   * MCP scope tag — the spawner-side twin of {@link ClaudeSpawnOptions.mcpScope}.
+   * Stamped as `CYBOFLOW_MCP_SCOPE` into the injected 'cyboflow' MCP server env
+   * so the server advertises the matching scoped tool family instead of the
+   * run-scoped one (most of which fail for a run-less identity):
+   *   - 'global-agent' — the cross-project global-agent read + propose family;
+   *   - 'design'       — the Design Mode v0 minimal toolset.
+   * Absent ⇒ no scope env, byte-identical to a run-scoped spawn.
+   */
+  mcpScope?: 'global-agent' | 'design';
+  /**
+   * Per-spawn events sink — the spawner-side twin of
+   * {@link ClaudeSpawnOptions.eventsSink}. When set, the substrate's built-in
+   * run-keyed `raw_events` sink is SUPPRESSED and the SAME narrowed event stream
+   * is routed into this sink instead (single-writer contract for the global-agent
+   * transcript, which is thread-keyed in `agent_thread_events` because
+   * `raw_events.run_id` is FK'd to `workflow_runs`). Absent ⇒ the built-in sink
+   * persists as before.
+   */
+  eventsSink?: SpawnEventsSink;
 }
 
 /**
