@@ -6,8 +6,10 @@
  * DraggableProjectTreeView.tsx.
  *
  * `projectName === null` is the "Not sure yet" branch: the Sidebar shows its
- * empty state, so the screen becomes "Your projects will live here" — same
- * two callouts, in the future tense, no markers to pair with.
+ * empty state, so the screen becomes "Your projects will live here" — callout
+ * 1 pairs with a marker on the empty state's Add Project button (see
+ * DraggableProjectTreeView.tsx), and the two project callouts follow unmarked
+ * (there is no row yet), in the future tense.
  */
 import { GuidedCallout, GuidedFooter, GuidedScreen } from './GuidedScreen';
 import { ONBOARDING_PROJECT_HOME_STEP } from '../../../utils/onboarding';
@@ -43,8 +45,7 @@ export function ProjectHomeStep({
           <>
             Once you add a project, it shows up in the left rail under{' '}
             <strong className="font-semibold text-text-primary">Projects &amp; Sessions</strong>.
-            Everything an agent does for a project hangs off its row — you can add one any time
-            from the home screen or the sidebar.
+            Everything an agent does for a project hangs off its row.
           </>
         )
       }
@@ -60,8 +61,15 @@ export function ProjectHomeStep({
       }
     >
       <div className="flex flex-col gap-2">
+        {!hasProject && (
+          <GuidedCallout
+            n={1}
+            title="Click Add Project to add your first one at any time"
+            body="Point Cyboflow at an existing folder or create a new project from scratch. Everything else on this tour waits for you here."
+          />
+        )}
         <GuidedCallout
-          n={1}
+          n={hasProject ? 1 : 2}
           title={
             hasProject
               ? 'Click the project to get an overview of it'
@@ -70,7 +78,7 @@ export function ProjectHomeStep({
           body="Branches, sessions, running flows, your backlog, next steps. You can see everything going on in your project here."
         />
         <GuidedCallout
-          n={2}
+          n={hasProject ? 2 : 3}
           title="Start a new agent session within the project"
           body="Every session opens in its own git worktree, so agents work in parallel without stepping on each other or on you."
         />

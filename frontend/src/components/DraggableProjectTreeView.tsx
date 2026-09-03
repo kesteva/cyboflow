@@ -552,6 +552,9 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
   // the guided project's row and its "Start new session" button below.
   const guidedProjectId = useOnboardingStore((s) => s.guidedProject?.id ?? null);
   const projectHomeMark = useGuidedMarkActive(ONBOARDING_PROJECT_HOME_STEP);
+  // The "Not sure yet" branch reaches step 9 with no project: its first callout
+  // points at the empty state's Add Project button instead.
+  const addProjectMarked = projectHomeMark && guidedProjectId === null;
   const { menuState, openMenu, closeMenu, isMenuOpen } = useContextMenu();
 
   // A/B experiment group rows: per-project experiments + summaries for the rail.
@@ -1687,7 +1690,18 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
             icon={FolderIcon}
             title="No Projects Yet"
             description="Add your first project to start managing workflow runs."
-            action={{ label: 'Add Project', onClick: () => setShowAddProjectDialog(true) }}
+            action={{
+              label: 'Add Project',
+              onClick: () => setShowAddProjectDialog(true),
+              style: addProjectMarked ? GUIDED_RING_STYLE : undefined,
+              trailing: addProjectMarked ? (
+                <GuidedMarker
+                  step={ONBOARDING_PROJECT_HOME_STEP}
+                  n={1}
+                  testId="onboarding-marker-add-project"
+                />
+              ) : undefined,
+            }}
             className="py-8"
           />
         ) : (
