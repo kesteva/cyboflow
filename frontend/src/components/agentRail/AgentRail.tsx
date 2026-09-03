@@ -88,20 +88,10 @@ export function AgentRail() {
   const startXRef = useRef<number>(0);
   const startWidthRef = useRef<number>(0);
 
-  // Persist the chosen width, but not on mount. The mount write stamped the
-  // current default into storage on every install, so a later default change
-  // reached nobody who had ever opened the app.
-  const widthPersistArmed = useRef(false);
-  useEffect(() => {
-    if (!widthPersistArmed.current) {
-      widthPersistArmed.current = true;
-      return;
-    }
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(WIDTH_KEY, width.toString());
-    }
-  }, [width]);
-
+  // The width is written to storage only from the drag handler below, never
+  // from an effect on [width] — a mount, a React.StrictMode double-mount, or
+  // a viewport change can never stamp the default (or anything else) into
+  // storage; only an actual user drag does.
   const handleResizeDown = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
@@ -116,7 +106,11 @@ export function AgentRail() {
     // The rail sits on the right, so dragging its LEFT edge leftward (smaller
     // clientX) grows it.
     const deltaX = startXRef.current - e.clientX;
-    setWidth(clampAgentRailWidth(startWidthRef.current + deltaX));
+    const next = clampAgentRailWidth(startWidthRef.current + deltaX);
+    setWidth(next);
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(WIDTH_KEY, String(next));
+    }
   }, []);
 
   const handleResizeUp = useCallback(() => {

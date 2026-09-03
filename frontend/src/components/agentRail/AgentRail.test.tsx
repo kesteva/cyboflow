@@ -17,6 +17,7 @@
  *      every non-session, non-wizard view and false for 'session'/'wizard'.
  */
 import '@testing-library/jest-dom';
+import React from 'react';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
@@ -143,6 +144,19 @@ describe('AgentRail — width resize', () => {
     render(<AgentRail />);
     // A mount write would stamp the current default into every install and
     // stop any later default change from reaching anyone.
+    expect(localStorage.getItem(WIDTH_KEY)).toBeNull();
+    dragHandle(-40);
+    expect(localStorage.getItem(WIDTH_KEY)).toBe('400');
+  });
+
+  it('does not write on mount even under React.StrictMode (double-invoked effects)', () => {
+    render(
+      <React.StrictMode>
+        <AgentRail />
+      </React.StrictMode>,
+    );
+    // StrictMode double-invokes effects on mount; the write must still come
+    // only from the drag handler, never from a mount effect.
     expect(localStorage.getItem(WIDTH_KEY)).toBeNull();
     dragHandle(-40);
     expect(localStorage.getItem(WIDTH_KEY)).toBe('400');

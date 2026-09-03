@@ -31,6 +31,7 @@
  *      hasn't resolved yet never falls through to the quick-session arm.
  */
 import '@testing-library/jest-dom';
+import React from 'react';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -471,6 +472,25 @@ describe('RunRightRail — width resize', () => {
     renderRail(EMPTY_PHASE_STATE);
     // A mount write would stamp the current default into every install and
     // stop any later default change from reaching anyone.
+    expect(localStorage.getItem(WIDTH_KEY)).toBeNull();
+    dragHandle(-40);
+    expect(localStorage.getItem(WIDTH_KEY)).toBe('400');
+  });
+
+  it('does not write on mount even under React.StrictMode (double-invoked effects)', () => {
+    // renderRail() doesn't take a wrapper option, so render the same JSX it
+    // would render, ourselves, inside StrictMode.
+    render(
+      <React.StrictMode>
+        <RunRightRail
+          phaseState={EMPTY_PHASE_STATE}
+          collapsed={false}
+          onToggleCollapse={() => {}}
+        />
+      </React.StrictMode>,
+    );
+    // StrictMode double-invokes effects on mount; the write must still come
+    // only from the drag handler, never from a mount effect.
     expect(localStorage.getItem(WIDTH_KEY)).toBeNull();
     dragHandle(-40);
     expect(localStorage.getItem(WIDTH_KEY)).toBe('400');

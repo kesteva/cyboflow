@@ -174,20 +174,10 @@ export function RunRightRail({
   const startXRef = useRef<number>(0);
   const startWidthRef = useRef<number>(0);
 
-  // Persist the chosen width, but not on mount. The mount write stamped the
-  // current default into storage on every install, so a later default change
-  // reached nobody who had ever opened the app.
-  const widthPersistArmed = useRef(false);
-  useEffect(() => {
-    if (!widthPersistArmed.current) {
-      widthPersistArmed.current = true;
-      return;
-    }
-    if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(RAIL_WIDTH_KEY, width.toString());
-    }
-  }, [width]);
-
+  // The width is written to storage only from the drag handler below, never
+  // from an effect on [width] — a mount, a React.StrictMode double-mount, or
+  // a viewport change can never stamp the default (or anything else) into
+  // storage; only an actual user drag does.
   const handleResizeDown = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
@@ -202,7 +192,11 @@ export function RunRightRail({
     // The rail sits on the right, so dragging its LEFT edge leftward (smaller
     // clientX) grows it.
     const deltaX = startXRef.current - e.clientX;
-    setWidth(clampRailWidth(startWidthRef.current + deltaX));
+    const next = clampRailWidth(startWidthRef.current + deltaX);
+    setWidth(next);
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(RAIL_WIDTH_KEY, String(next));
+    }
   }, []);
 
   const handleResizeUp = useCallback(() => {
