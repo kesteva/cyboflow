@@ -178,15 +178,23 @@ export function buildCodexAppServerThreadConfiguration(
         //   apps + apps._default.enabled — ChatGPT app/connector tools, which
         //     "are not controlled by the sandboxed-command network proxy";
         //   remote_plugin — the remote plugin catalog (request_plugin_install).
-        // Two spellings where the pinned build (0.144.3) predates the current
-        // docs: `collab` is what it calls multi-agent, `plugins`/`imagegen` are
-        // its plugin-catalog and image-generation flags. Unknown keys are
-        // ignored by the app-server (verified live), so both spellings ride.
+        // Spellings where the pinned build (0.144.3) predates the current docs:
+        // `plugins` (verified live — it is what removed the bundled Computer Use
+        // plugin's MCP server) and `imagegen`; `collab` / `collaboration` are
+        // its multi-agent names. Unknown keys are ignored by the app-server
+        // (verified live), so every spelling rides.
+        //
+        // KNOWN RESIDUAL (0.144.3): none of multi_agent / collab / collaboration
+        // removed `collaboration.spawn_agent` in the live probe. A spawned
+        // sub-agent inherits this same thread configuration (no shell, no
+        // foreign MCP, read-only sandbox), so it is a cost surface, not a data
+        // escape; the developer instructions forbid it as well.
         features: {
           shell_tool: false,
           unified_exec: false,
           multi_agent: false,
           collab: false,
+          collaboration: false,
           apps: false,
           remote_plugin: false,
           plugins: false,

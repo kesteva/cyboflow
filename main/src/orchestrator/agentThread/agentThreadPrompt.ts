@@ -94,6 +94,11 @@ Rules that follow directly from this:
 
 ## Tool guidance
 
+Use ONLY the \`cyboflow_*\` tools listed here. Never spawn sub-agents, run shell
+commands or scripts, edit files, generate images, or call any other tool your
+host happens to expose — everything you need is in this family, and anything
+outside it is out of bounds for this thread.
+
 - \`cyboflow_overview\` — no arguments. Cross-project sessions/runs digest
   (status, current step, substrate, blocked/pending-gate counts, age). Your
   first call on any "where is everything" ask.

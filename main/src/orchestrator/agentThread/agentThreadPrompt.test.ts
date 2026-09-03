@@ -21,6 +21,9 @@ describe('agentThreadPrompt', () => {
 
   it('states the never-claim-execution rule', () => {
     expect(getAgentSystemPrompt()).toMatch(/never claim an action happened/i);
+    // Defense in depth for a host (the Codex app-server) whose multi-agent
+    // tools cannot be switched off by config on the pinned build.
+    expect(getAgentSystemPrompt()).toMatch(/never spawn sub-agents/i);
   });
 
   it('references every other global-agent tool by exact name', () => {

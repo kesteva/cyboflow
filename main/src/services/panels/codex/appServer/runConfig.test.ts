@@ -300,6 +300,7 @@ describe('Codex app-server run configuration', () => {
           unified_exec: false,
           multi_agent: false,
           collab: false,
+          collaboration: false,
           apps: false,
           remote_plugin: false,
           plugins: false,
