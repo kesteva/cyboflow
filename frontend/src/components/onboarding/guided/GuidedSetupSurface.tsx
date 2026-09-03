@@ -1,7 +1,9 @@
 import { useEffect } from 'react';
+import type { Project } from '../../../types/project';
 import { useConfigStore } from '../../../stores/configStore';
 import { useOnboardingStore } from '../../../stores/onboardingStore';
 import {
+  ONBOARDING_EVENTS,
   ONBOARDING_ADD_PROJECT_STEP,
   ONBOARDING_ASSISTANT_RAIL_STEP,
   ONBOARDING_FIRST_IDEA_STEP,
@@ -21,7 +23,13 @@ import { LaunchingStep } from './LaunchingStep';
 import { NewProjectForm } from './NewProjectForm';
 import { ProjectHomeStep } from './ProjectHomeStep';
 import { SessionTypesPreviewStep } from './SessionTypesPreviewStep';
-import { finishGuidedSetup, openLaunchedSession, stageTourExit } from './guidedFinish';
+import {
+  adoptProjectIntoTour,
+  finishGuidedSetup,
+  leaveGuidedSetup,
+  openLaunchedSession,
+  stageTourExit,
+} from './guidedFinish';
 
 /**
  * The onboarding tour's second phase: full-window guided set-up (steps 7-14).
@@ -40,8 +48,11 @@ import { finishGuidedSetup, openLaunchedSession, stageTourExit } from './guidedF
  *    (inert) beside this surface in the CENTRE slot, the AgentRail from step
  *    12 — see utils/onboarding.onboardingGuidedShell. With a project the
  *    screens render around `guidedProject` and every exit runs the finale
- *    (guidedFinish) onto Human review. Without one (the "Not sure yet"
- *    branch) the same steps render their no-project variants — "your projects
+ *    (guidedFinish) onto Human review; "Skip the set-up" parks it instead
+ *    (leaveGuidedSetup → Sidebar "Resume setup"). The Sidebar is clickable
+ *    throughout — navigating through it parks the tour too
+ *    (guidedNavPause). Without a project (the "Not sure yet" branch) the same
+ *    steps render their no-project variants — "your projects
  *    will live here", "what do you want to get done with Cyboflow?", a
  *    read-only preview of the session types — and exit to LandingHome; step
  *    14 is never reached.
@@ -76,6 +87,23 @@ export function GuidedSetupSurface(): React.JSX.Element | null {
   // 11 was reached the thread has real turns, so the in-shell exits skip it.
   const greet = maxVisitedStep < ONBOARDING_IDEA_PROPOSALS_STEP;
   const exitTour = (): void => finishGuidedSetup(guidedProject, { greet });
+  // "Skip the set-up" parks the tour (Sidebar "Resume setup" card) instead.
+  const leaveTour = (): void => leaveGuidedSetup(guidedProject, { greet });
+
+  // The no-project branch: the Sidebar is clickable from step 9, and step 9's
+  // first callout points at its Add Project button — when that lands, adopt the
+  // project so the remaining screens switch to their with-project variants.
+  const adopting = step >= ONBOARDING_PROJECT_HOME_STEP && guidedProject === null;
+  useEffect(() => {
+    if (!adopting) return;
+    const onCreated = (event: Event): void => {
+      const project = (event as CustomEvent<Project | undefined>).detail;
+      if (project === undefined || project === null) return;
+      adoptProjectIntoTour(project);
+    };
+    window.addEventListener(ONBOARDING_EVENTS.projectCreated, onCreated);
+    return () => window.removeEventListener(ONBOARDING_EVENTS.projectCreated, onCreated);
+  }, [adopting]);
 
   let screen: React.JSX.Element | null = null;
   if (step === ONBOARDING_ADD_PROJECT_STEP) {
@@ -102,7 +130,7 @@ export function GuidedSetupSurface(): React.JSX.Element | null {
       <ProjectHomeStep
         projectName={guidedProject?.name ?? null}
         onContinue={next}
-        onSkip={exitTour}
+        onSkip={leaveTour}
       />
     );
   } else if (step === ONBOARDING_FIRST_IDEA_STEP) {
@@ -110,7 +138,7 @@ export function GuidedSetupSurface(): React.JSX.Element | null {
   } else if (step === ONBOARDING_IDEA_PROPOSALS_STEP) {
     screen = <IdeaProposalsStep project={guidedProject} onContinue={next} onSkip={skipIdeas} />;
   } else if (step === ONBOARDING_ASSISTANT_RAIL_STEP) {
-    screen = <AssistantRailStep onContinue={next} onSkip={exitTour} />;
+    screen = <AssistantRailStep onContinue={next} onSkip={leaveTour} />;
   } else if (step === ONBOARDING_FIRST_SESSION_STEP) {
     screen =
       guidedProject !== null ? (

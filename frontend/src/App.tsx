@@ -11,6 +11,7 @@ import { TitleBar } from './components/TitleBar';
 import { CyboflowRoot } from './components/cyboflow/CyboflowRoot';
 import { OnboardingGate } from './components/onboarding/OnboardingGate';
 import { GuidedSetupSurface } from './components/onboarding/guided/GuidedSetupSurface';
+import { installGuidedNavPause } from './components/onboarding/guided/guidedNavPause';
 import { useOnboardingStore } from './stores/onboardingStore';
 import { isGuidedStep, isOnboardingShellHidden, onboardingGuidedShell } from './utils/onboarding';
 import { AboutDialog } from './components/AboutDialog';
@@ -139,6 +140,8 @@ function App() {
   // place of the view switch.
   const onboardingShellHidden = useOnboardingStore((s) => isOnboardingShellHidden(s));
   const guidedShell = useOnboardingStore((s) => onboardingGuidedShell(s));
+  // Sidebar navigation during the in-shell guided steps parks the tour.
+  useEffect(() => installGuidedNavPause(), []);
 
   // One-shot migration: move legacy crystal-sidebar-width → cyboflow-sidebar-width (mount only)
   useEffect(() => {
@@ -326,16 +329,11 @@ function App() {
               only — Sidebar also renders the Settings / bug-report / status-guide
               dialogs as siblings, and a display:none wrapper here would hide
               those too (Settings is openable from surfaces far outside the rail). */}
-          {/* `inert` while the in-shell guided steps run: the Sidebar is on
-              screen to be pointed at (project row, Human review), not used. A
-              display:contents wrapper keeps the flex geometry and the Sidebar
-              mounted across the tour → shell transition. */}
-          <div
-            className="contents"
-            inert={guidedShell !== 'none'}
-            data-testid="shell-sidebar-slot"
-            data-onboarding-inert={guidedShell !== 'none' ? 'true' : undefined}
-          >
+          {/* A display:contents wrapper keeps the flex geometry and the Sidebar
+              mounted across the tour → shell transition. The Sidebar stays
+              CLICKABLE during the in-shell guided steps — navigating through it
+              parks the tour (guidedNavPause, installed above). */}
+          <div className="contents" data-testid="shell-sidebar-slot">
           <PerfProfiler id="sidebar">
             <Sidebar
               onAboutClick={handleAboutClick}

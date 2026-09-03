@@ -131,13 +131,14 @@ describe('GuidedSetupSurface — step 7 (add a project)', () => {
     expect(screen.getByRole('heading', { name: 'Your projects will live here' })).toBeInTheDocument();
   });
 
-  it('the Skip link completes the tour outright (no Sidebar resume card)', () => {
+  it('the Skip link parks the tour (Sidebar resume card) and stages the shell frame', () => {
     enterGuided(7, 'existing');
     render(<GuidedSetupSurface />);
 
     fireEvent.click(screen.getByTestId('onboarding-guided-skip'));
 
-    expect(useOnboardingStore.getState().status).toBe('completed');
+    expect(useOnboardingStore.getState().status).toBe('skipped');
+    expect(useOnboardingStore.getState().step).toBe(7);
     expect(peekAssistantGreeting()).toBe(
       "You're set up. If you need more help, ask me questions at any time.",
     );
@@ -308,11 +309,12 @@ describe('GuidedSetupSurface — the in-shell steps (9-14)', () => {
     expect(screen.getByTestId('stub-first-idea')).toBeInTheDocument();
   });
 
-  it('step 9 "Skip the set-up" runs the finale WITH the greeting (no conversation yet) and lands on Human review', () => {
+  it('step 9 "Skip the set-up" PARKS the tour WITH the greeting (no conversation yet) and lands on Human review', () => {
     enterShell(9);
     render(<GuidedSetupSurface />);
     fireEvent.click(screen.getByTestId('onboarding-guided-skip'));
-    expect(useOnboardingStore.getState().status).toBe('completed');
+    expect(useOnboardingStore.getState().status).toBe('skipped');
+    expect(useOnboardingStore.getState().step).toBe(9);
     expect(useNavigationStore.getState().humanReviewOpen).toBe(true);
     expect(useNavigationStore.getState().activeProjectId).toBe(PROJECT.id);
     expect(peekAssistantGreeting()).toBe(
@@ -326,7 +328,7 @@ describe('GuidedSetupSurface — the in-shell steps (9-14)', () => {
     render(<GuidedSetupSurface />);
     expect(screen.getByRole('heading', { name: 'Meet the Cyboflow assistant' })).toBeInTheDocument();
     fireEvent.click(screen.getByTestId('onboarding-guided-skip'));
-    expect(useOnboardingStore.getState().status).toBe('completed');
+    expect(useOnboardingStore.getState().status).toBe('skipped');
     expect(useNavigationStore.getState().humanReviewOpen).toBe(true);
     expect(peekAssistantGreeting()).toBeNull();
     expect(localStorage.getItem(RAIL_COLLAPSED_KEY)).toBe('false');
@@ -423,14 +425,30 @@ describe('GuidedSetupSurface — the no-project branch ("Not sure yet")', () => 
     expect(peekAssistantGreeting()).toBeNull();
   });
 
-  it('step 9 "Skip the set-up" without a project parks the generic greeting', () => {
+  it('step 9 "Skip the set-up" without a project parks the tour with the generic greeting', () => {
     enterNoProject(9);
     render(<GuidedSetupSurface />);
     fireEvent.click(screen.getByTestId('onboarding-guided-skip'));
-    expect(useOnboardingStore.getState().status).toBe('completed');
+    expect(useOnboardingStore.getState().status).toBe('skipped');
     expect(peekAssistantGreeting()).toBe(
       "You're set up. If you need more help, ask me questions at any time.",
     );
+  });
+
+  it('adopts a project created from the Sidebar: active project stamped, screens switch variant', () => {
+    enterNoProject(9);
+    render(<GuidedSetupSurface />);
+    expect(screen.getByRole('heading', { name: 'Your projects will live here' })).toBeInTheDocument();
+
+    act(() => {
+      window.dispatchEvent(new CustomEvent('project-created', { detail: createdProject() }));
+    });
+
+    expect(useOnboardingStore.getState().guidedProject).toEqual({ id: 7, name: 'dogwalkr' });
+    expect(useOnboardingStore.getState().step).toBe(9);
+    expect(useOnboardingStore.getState().status).toBe('active');
+    expect(useNavigationStore.getState().activeProjectId).toBe(7);
+    expect(screen.getByRole('heading', { name: 'Your project lives here' })).toBeInTheDocument();
   });
 
   it('step 14 never renders without a project', () => {

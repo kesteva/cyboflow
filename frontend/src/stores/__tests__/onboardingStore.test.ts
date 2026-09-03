@@ -113,12 +113,13 @@ describe('onboardingStore — hydrate', () => {
     expect(s().maxVisitedStep).toBe(5);
   });
 
-  it('a snapshot parked on a guided screen (7 or 8) hydrates as completed — resume is for the modal piece only', () => {
-    for (const step of [7, 8]) {
+  it('a snapshot parked on a guided screen hydrates as skipped at the clamped step (resumable)', () => {
+    for (const [step, expected] of [[7, 7], [8, 7], [12, 7], [14, 7]] as const) {
       for (const status of ['active', 'skipped'] as const) {
         reset();
         s().hydrate({ version: 4, status, step }, 0);
-        expect(s().status).toBe('completed');
+        expect(s().status).toBe('skipped');
+        expect(s().step).toBe(expected);
       }
     }
   });
@@ -675,11 +676,12 @@ describe('onboardingStore — the guided set-up steps (7, 8)', () => {
     expect(s().step).toBe(6);
   });
 
-  it('skip() from a guided step completes the tour — no Sidebar resume card', () => {
+  it('skip() from a guided step parks the tour at that step (Sidebar resume card)', () => {
     for (const step of [7, 8]) {
       useOnboardingStore.setState({ status: 'active', step, maxVisitedStep: step });
       s().skip();
-      expect(s().status).toBe('completed');
+      expect(s().status).toBe('skipped');
+      expect(s().step).toBe(step);
     }
   });
 });
@@ -706,10 +708,18 @@ describe('onboardingStore — goTo / skip / resume / dismiss', () => {
     expect(s().step).toBe(5);
   });
 
-  it('resume from the last guided screen clamps back to the branch choice (8 → 7)', () => {
-    useOnboardingStore.setState({ status: 'skipped', step: 8, maxVisitedStep: 8 });
+  it('resume is WARM: a tour parked on a guided screen comes back at the same step', () => {
+    useOnboardingStore.setState({ status: 'skipped', step: 8, maxVisitedStep: 8, projectChoice: 'new' });
     s().resume();
     expect(s().status).toBe('active');
+    expect(s().step).toBe(8);
+    expect(s().projectChoice).toBe('new');
+  });
+
+  it('a COLD boot still clamps a parked guided step to the branch choice (hydrate)', () => {
+    useOnboardingStore.setState({ status: 'idle', hydrated: false });
+    s().hydrate({ version: 4, status: 'skipped', step: 12 }, 1);
+    expect(s().status).toBe('skipped');
     expect(s().step).toBe(7);
   });
 
@@ -939,10 +949,31 @@ describe('onboardingStore — the in-shell guided steps (9-14)', () => {
     expect(useOnboardingStore.getState().step).toBe(7);
   });
 
-  it('skip() from an in-shell step completes the tour outright', () => {
-    activeAt(12);
+  it('skip() from an in-shell step parks the tour; resume() returns to the same step with its project', () => {
+    activeAt(12, { guidedProject: PROJECT });
     useOnboardingStore.getState().skip();
-    expect(useOnboardingStore.getState().status).toBe('completed');
+    expect(useOnboardingStore.getState().status).toBe('skipped');
+    expect(useOnboardingStore.getState().step).toBe(12);
+    useOnboardingStore.getState().resume();
+    expect(useOnboardingStore.getState().status).toBe('active');
+    expect(useOnboardingStore.getState().step).toBe(12);
+    expect(useOnboardingStore.getState().guidedProject).toEqual(PROJECT);
+  });
+
+  it('projectAdopted records a project on the no-project branch without moving the step', () => {
+    activeAt(10, { guidedProject: null });
+    useOnboardingStore.getState().projectAdopted(PROJECT);
+    expect(useOnboardingStore.getState().guidedProject).toEqual(PROJECT);
+    expect(useOnboardingStore.getState().step).toBe(10);
+    // Never overwrites a recorded project, never before step 9, never when parked.
+    useOnboardingStore.getState().projectAdopted({ id: 99, name: 'other' });
+    expect(useOnboardingStore.getState().guidedProject).toEqual(PROJECT);
+    activeAt(8, { guidedProject: null });
+    useOnboardingStore.getState().projectAdopted(PROJECT);
+    expect(useOnboardingStore.getState().guidedProject).toBeNull();
+    activeAt(9, { guidedProject: null, status: 'skipped' });
+    useOnboardingStore.getState().projectAdopted(PROJECT);
+    expect(useOnboardingStore.getState().guidedProject).toBeNull();
   });
 
   it('setSessionChoice / setAssistantAvailable record their values; begin() resets all of it', () => {
@@ -959,11 +990,14 @@ describe('onboardingStore — the in-shell guided steps (9-14)', () => {
     expect(s.assistantAvailable).toBe(true);
   });
 
-  it('a snapshot parked on any in-shell step (9-14) hydrates as completed', () => {
-    for (const step of [9, 11, 14]) {
-      reset();
-      useOnboardingStore.getState().hydrate({ version: 4, status: 'active', step }, 0);
-      expect(useOnboardingStore.getState().status).toBe('completed');
+  it('a snapshot parked on any in-shell step (9-14) hydrates as skipped at the branch choice', () => {
+    for (const step of [9, 10, 11, 12, 13, 14]) {
+      for (const status of ['active', 'skipped'] as const) {
+        useOnboardingStore.setState({ status: 'idle', hydrated: false });
+        useOnboardingStore.getState().hydrate({ version: 4, status, step }, 1);
+        expect(useOnboardingStore.getState().status).toBe('skipped');
+        expect(useOnboardingStore.getState().step).toBe(7);
+      }
     }
   });
 });

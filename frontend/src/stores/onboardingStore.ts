@@ -14,7 +14,6 @@ import {
   ONBOARDING_PROJECT_DETAIL_STEP,
   ONBOARDING_PROJECT_HOME_STEP,
   ONBOARDING_STEP_COUNT,
-  isGuidedStep,
 } from '../utils/onboarding';
 
 /**
@@ -70,6 +69,10 @@ import {
  *   handler owns the async work); step 14 exits via finish() alone.
  * - back() is inert from step 9 on: the project exists, there is nothing to
  *   walk back into (the screens carry no Back button).
+ * - skip() parks the tour ('skipped') from ANY step — the Sidebar "Resume
+ *   setup" card brings it back at the same step (resume(), warm). From step 9
+ *   on the Sidebar is clickable: navigating away also parks it (see
+ *   guided/guidedNavPause.ts).
  * - Dots/keyboard may only revisit steps already reached (maxVisitedStep), and
  *   dots exist only on the modal steps; the guided screens carry their own Back.
  */
@@ -346,6 +349,13 @@ interface OnboardingState {
    */
   projectAdded: (project: GuidedProject) => void;
   /**
+   * The "Not sure yet" branch caught up: a project was created (Sidebar "Add
+   * Project") while the in-shell screens were running without one. Records it
+   * so the remaining screens switch to their with-project variants; the step
+   * does not move. No-op when a project is already recorded or before step 9.
+   */
+  projectAdopted: (project: GuidedProject) => void;
+  /**
    * "Skip — I'll add ideas later" on steps 10/11: jump to the rail intro (12).
    * The tour continues (unlike skip(), which ends it) — the user only declined
    * the idea capture, not the rest of the set-up.
@@ -513,19 +523,11 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
       set({ status: 'completed', hydrated: true });
       return;
     }
-    // The resume affordance covers the MODAL piece only. A snapshot parked on a
-    // guided step means every modal answer was already persisted and the user
-    // walked away from the project screens — that is a finished tour, not one
-    // to re-open (the Sidebar card would otherwise nag "Resume setup" over an
-    // app that is fully usable; projects are added from the home screen).
-    if (isGuidedStep(migrated.step)) {
-      set({ status: 'completed', hydrated: true });
-      return;
-    }
-    // Any mid-modal state (active/skipped) resumes as skipped — the Sidebar's
-    // Resume card re-enters at the clamped step, so a boot never drops the user
-    // back into a half-built screen (or hides the shell behind a tour they did
-    // not ask to re-open).
+    // Any unfinished state (active/skipped, modal OR guided) resumes as skipped
+    // — the Sidebar's Resume card re-enters at the clamped step (a guided step
+    // past the branch choice clamps to 7: the branch/project/launch it needs
+    // were never persisted), so a boot never drops the user back into a
+    // half-built screen or hides the shell behind a tour they did not re-open.
     const step = clampResumeStep(migrated.step);
     set({ status: 'skipped', step, maxVisitedStep: step, replay: false, hydrated: true });
   },
@@ -621,20 +623,21 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
   skip: () => {
     const s = get();
     if (s.status !== 'active') return;
-    // "Skip the set-up" on a guided screen ends the tour outright: the modal
-    // answers are already saved and the shell is fully usable, so there is
-    // nothing worth a Sidebar "Resume setup" card (resume is for the modal
-    // piece only — see hydrate()).
-    set({ status: isGuidedStep(s.step) ? 'completed' : 'skipped' });
+    // Parks the tour at its current step — modal card OR guided screen — so the
+    // Sidebar "Resume setup" card can bring it back. Every exit that is not a
+    // deliberate completion (Skip links, clicking away into the Sidebar) goes
+    // through here; finish() is the terminal one.
+    set({ status: 'skipped' });
   },
 
   resume: () => {
     const s = get();
     if (s.status !== 'skipped') return;
-    // The Sidebar "Resume setup" button is the only caller, so a resume is a
-    // COLD re-entry after the user skipped and moved on — same clamp the boot
-    // path applies (step 8's branch choice was never persisted).
-    set({ status: 'active', step: clampResumeStep(s.step) });
+    // WARM re-entry from the Sidebar card: everything a guided step needs
+    // (projectChoice, guidedProject, launched) is still in memory, so the tour
+    // picks up exactly where it was parked. A COLD re-entry (boot) was already
+    // clamped by hydrate() — the persisted snapshot never carries that state.
+    set({ status: 'active' });
   },
 
   dismiss: () => {
@@ -643,6 +646,13 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
     // Keep the step so the persisted snapshot + telemetry record where the user
     // walked away; completed short-circuits hydrate regardless of step.
     set({ status: 'completed' });
+  },
+
+  projectAdopted: (project) => {
+    const s = get();
+    if (s.status !== 'active' || s.guidedProject !== null) return;
+    if (s.step < ONBOARDING_PROJECT_HOME_STEP) return;
+    set({ guidedProject: project });
   },
 
   projectAdded: (project) => {

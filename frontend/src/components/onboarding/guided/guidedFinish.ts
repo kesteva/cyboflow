@@ -4,6 +4,7 @@ import { useNavigationStore } from '../../../stores/navigationStore';
 import { useOnboardingStore, type LaunchedSession } from '../../../stores/onboardingStore';
 import { expandAgentRail } from '../../agentRail/railCollapsed';
 import { primeAssistantGreeting } from '../../agentRail/onboardingGreeting';
+import { tourNavigation } from './guidedNavPause';
 
 /**
  * The guided set-up's terminal side effects, in the ONE order that works.
@@ -68,11 +69,38 @@ export function finishGuidedSetup(
     expandAgentRail();
   }
   if (project !== null) {
-    const nav = useNavigationStore.getState();
-    nav.setActiveProjectId(project.id);
-    if (!opts.keepView) nav.openHumanReview();
+    tourNavigation(() => {
+      const nav = useNavigationStore.getState();
+      nav.setActiveProjectId(project.id);
+      if (!opts.keepView) nav.openHumanReview();
+    });
   }
   useOnboardingStore.getState().finish();
+}
+
+/**
+ * "Skip the set-up" on an in-shell screen: the same shell frame + landing as
+ * the finale (rail open, Human review when there is a project) but the tour is
+ * PARKED, not completed — the Sidebar "Resume setup" card brings it back at
+ * this step. Pass `greet` exactly as for finishGuidedSetup.
+ */
+export function leaveGuidedSetup(
+  project: Pick<Project, 'id' | 'name'> | null,
+  opts: Pick<FinishGuidedSetupOptions, 'greet'> = {},
+): void {
+  if (opts.greet ?? true) {
+    stageTourExit(project?.name ?? null);
+  } else {
+    expandAgentRail();
+  }
+  if (project !== null) {
+    tourNavigation(() => {
+      const nav = useNavigationStore.getState();
+      nav.setActiveProjectId(project.id);
+      nav.openHumanReview();
+    });
+  }
+  useOnboardingStore.getState().skip();
 }
 
 /**
@@ -82,8 +110,18 @@ export function finishGuidedSetup(
  * project on the store, which is the step-9 transition.
  */
 export function continueIntoShell(project: Pick<Project, 'id' | 'name'>): void {
-  useNavigationStore.getState().setActiveProjectId(project.id);
+  tourNavigation(() => useNavigationStore.getState().setActiveProjectId(project.id));
   useOnboardingStore.getState().projectAdded({ id: project.id, name: project.name });
+}
+
+/**
+ * The no-project branch caught up: a project was created from the Sidebar
+ * while steps 9-13 ran without one. Stamp it active (same auto-select hazard)
+ * and record it on the store so the remaining screens switch variants.
+ */
+export function adoptProjectIntoTour(project: Pick<Project, 'id' | 'name'>): void {
+  tourNavigation(() => useNavigationStore.getState().setActiveProjectId(project.id));
+  useOnboardingStore.getState().projectAdopted({ id: project.id, name: project.name });
 }
 
 /**
@@ -102,8 +140,10 @@ export function openLaunchedSession(
   } else {
     cyboflow.setActiveQuickSession(launched.sessionId, undefined);
   }
-  const nav = useNavigationStore.getState();
-  nav.setActiveProjectId(project.id);
-  nav.goToSession();
+  tourNavigation(() => {
+    const nav = useNavigationStore.getState();
+    nav.setActiveProjectId(project.id);
+    nav.goToSession();
+  });
   finishGuidedSetup(project, { greet: false, keepView: true });
 }

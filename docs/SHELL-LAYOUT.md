@@ -40,15 +40,20 @@ from `frontend/src/utils/onboarding.ts`:
    `TitleBar` stays mounted throughout, which is why the guided screens render inside the row
    rather than in the portal: the native drag region has to keep working.
 2. *Sidebar* (`onboardingGuidedShell(state) === 'sidebar'`, steps 9-11): the project exists,
-   so the real shell mounts — the Sidebar (wrapped in a `display:contents` div that is `inert`
-   for the rest of the tour, `data-testid="shell-sidebar-slot"`), `GuidedSetupSurface` in the
-   CENTER slot in place of the view switch, no AgentRail, `StatusBar` below. Steps 10-11 host
+   so the real shell mounts — the Sidebar (wrapped in a `display:contents` div,
+   `data-testid="shell-sidebar-slot"`; it stays CLICKABLE, and navigating through it parks the
+   tour via `onboarding/guided/guidedNavPause.ts` — resumable from the Sidebar "Resume setup"
+   card), `GuidedSetupSurface` in the CENTER slot in place of the view switch, no AgentRail,
+   `StatusBar` below. Steps 10-11 host
    the real global-assistant thread in that center column.
 3. *Full* (`'full'`, steps 12-14): as above plus the AgentRail — it mounts exactly at the "meet
    the assistant" step over the same conversation and stays through the finale, so the tour →
    shell transition never remounts it.
 
-Every exit from the in-shell steps runs `onboarding/guided/guidedFinish.ts`: stage the shell's
+"Skip the set-up" on an in-shell step PARKS the tour (`leaveGuidedSetup` → store `skip()`, status
+`skipped`) with the same shell frame and landing as the finale; the Sidebar "Resume setup" card
+brings it back at the same step (warm `resume()`). Every completing exit runs
+`onboarding/guided/guidedFinish.ts`: stage the shell's
 first frame (AgentRail forced expanded; the one-shot assistant greeting primed only when the
 thread never held a conversation), stamp the active project, `navigationStore.openHumanReview()`
 (or the launched session for step 14's "Open the session"), then flip the store to `completed`.

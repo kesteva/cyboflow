@@ -12,7 +12,14 @@ import { useUpdater } from '../hooks/useUpdater';
 import { trackEvent } from '../utils/telemetry';
 import { skippedStepSet, useOnboardingStore } from '../stores/onboardingStore';
 import { useNavigationStore } from '../stores/navigationStore';
-import { visibleStepNumber, visibleStepTotal, ONBOARDING_LAUNCHING_STEP } from '../utils/onboarding';
+import {
+  guidedStepNumber,
+  guidedStepTotal,
+  isGuidedStep,
+  visibleStepNumber,
+  visibleStepTotal,
+  ONBOARDING_LAUNCHING_STEP,
+} from '../utils/onboarding';
 import { GuidedMarker, useGuidedMarkActive, GUIDED_RING_STYLE } from './onboarding/guided/GuidedMarker';
 import { GUIDED_TARGETS } from './onboarding/guided/GuidedLeader';
 
@@ -297,9 +304,9 @@ export const Sidebar = memo(function Sidebar({
               <span className="min-w-0 flex-1">
                 <span className="block text-[11.5px] font-bold leading-tight text-text-primary">Resume setup</span>
                 <span className="block text-[10px] text-text-secondary">
-                  {/* Always a modal step: a tour parked on a guided screen completes
-                      instead of skipping (onboardingStore.skip / hydrate). */}
-                  Step {visibleStepNumber(onboardingStep, onboardingSkipped)} of {visibleStepTotal(onboardingSkipped)}
+                  {isGuidedStep(onboardingStep)
+                    ? `Guided set-up · step ${guidedStepNumber(onboardingStep, onboardingSkipped)} of ${guidedStepTotal(onboardingSkipped)}`
+                    : `Step ${visibleStepNumber(onboardingStep, onboardingSkipped)} of ${visibleStepTotal(onboardingSkipped)}`}
                 </span>
               </span>
               <span className="flex-shrink-0 text-interactive" aria-hidden="true">
