@@ -113,7 +113,7 @@ describe('GuidedSetupSurface — step 7 (add a project)', () => {
     expect(useOnboardingStore.getState().status).toBe('active');
   });
 
-  it('"Not sure yet" completes the tour instead of advancing', () => {
+  it('"Not sure yet" continues into the shell (step 9) with no project and no finale', () => {
     enterGuided(7, 'existing');
     render(<GuidedSetupSurface />);
 
@@ -122,13 +122,13 @@ describe('GuidedSetupSurface — step 7 (add a project)', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Next/ }));
 
-    expect(useOnboardingStore.getState().status).toBe('completed');
-    expect(useOnboardingStore.getState().step).toBe(7);
-    // A no-project exit still opens the rail with the generic greeting.
-    expect(peekAssistantGreeting()).toBe(
-      "You're set up. If you need more help, ask me questions at any time.",
-    );
-    expect(localStorage.getItem(RAIL_COLLAPSED_KEY)).toBe('false');
+    expect(useOnboardingStore.getState().status).toBe('active');
+    expect(useOnboardingStore.getState().step).toBe(9);
+    expect(useOnboardingStore.getState().guidedProject).toBeNull();
+    expect(peekAssistantGreeting()).toBeNull();
+    expect(localStorage.getItem(RAIL_COLLAPSED_KEY)).toBeNull();
+    // The no-project variant of step 9.
+    expect(screen.getByRole('heading', { name: 'Your projects will live here' })).toBeInTheDocument();
   });
 
   it('the Skip link completes the tour outright (no Sidebar resume card)', () => {
@@ -299,12 +299,6 @@ describe('GuidedSetupSurface — the in-shell steps (9-14)', () => {
     });
   }
 
-  it('renders nothing on an in-shell step without a recorded project', () => {
-    enterShell(9, { guidedProject: null });
-    const { container } = render(<GuidedSetupSurface />);
-    expect(container).toBeEmptyDOMElement();
-  });
-
   it('step 9 renders the project-home screen; Continue walks to the first-idea step', () => {
     enterShell(9);
     render(<GuidedSetupSurface />);
@@ -375,5 +369,73 @@ describe('GuidedSetupSurface — the in-shell steps (9-14)', () => {
     fireEvent.click(screen.getByTestId('onboarding-launching-stay'));
     expect(useOnboardingStore.getState().status).toBe('completed');
     expect(useNavigationStore.getState().humanReviewOpen).toBe(true);
+  });
+});
+
+describe('GuidedSetupSurface — the no-project branch ("Not sure yet")', () => {
+  function enterNoProject(step: number, extra: Record<string, unknown> = {}): void {
+    act(() => {
+      useOnboardingStore.setState({
+        status: 'active',
+        step,
+        maxVisitedStep: step,
+        projectChoice: 'unsure',
+        guidedProject: null,
+        hydrated: true,
+        ...extra,
+      });
+    });
+  }
+
+  it('step 9 renders the future-tense home screen and walks on to the first-idea step', () => {
+    enterNoProject(9);
+    render(<GuidedSetupSurface />);
+    expect(screen.getByRole('heading', { name: 'Your projects will live here' })).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('onboarding-project-home-continue'));
+    expect(useOnboardingStore.getState().step).toBe(10);
+    expect(screen.getByTestId('stub-first-idea')).toBeInTheDocument();
+  });
+
+  it('steps 10-12 render (the assistant screens take a null project)', () => {
+    enterNoProject(11);
+    const { rerender } = render(<GuidedSetupSurface />);
+    expect(screen.getByTestId('stub-idea-proposals')).toBeInTheDocument();
+    enterNoProject(12);
+    rerender(<GuidedSetupSurface />);
+    expect(screen.getByRole('heading', { name: 'Meet the Cyboflow assistant' })).toBeInTheDocument();
+  });
+
+  it('step 13 is the read-only session preview; "Finish set-up" completes with no navigation', () => {
+    enterNoProject(13);
+    render(<GuidedSetupSurface />);
+    expect(screen.getByRole('heading', { name: 'Sessions you can launch' })).toBeInTheDocument();
+    expect(screen.queryByTestId('stub-first-session')).toBeNull();
+    expect(screen.queryByTestId('onboarding-guided-skip')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('onboarding-session-preview-finish'));
+
+    expect(useOnboardingStore.getState().status).toBe('completed');
+    // No project: nothing to stamp, no Human review — LandingHome's empty state.
+    expect(useNavigationStore.getState().activeProjectId).toBeNull();
+    expect(useNavigationStore.getState().humanReviewOpen).toBe(false);
+    expect(localStorage.getItem(RAIL_COLLAPSED_KEY)).toBe('false');
+    // The thread was used (maxVisited ≥ 11), so no parked greeting.
+    expect(peekAssistantGreeting()).toBeNull();
+  });
+
+  it('step 9 "Skip the set-up" without a project parks the generic greeting', () => {
+    enterNoProject(9);
+    render(<GuidedSetupSurface />);
+    fireEvent.click(screen.getByTestId('onboarding-guided-skip'));
+    expect(useOnboardingStore.getState().status).toBe('completed');
+    expect(peekAssistantGreeting()).toBe(
+      "You're set up. If you need more help, ask me questions at any time.",
+    );
+  });
+
+  it('step 14 never renders without a project', () => {
+    enterNoProject(14, { launched: { kind: 'quick', sessionId: 's', runId: null } });
+    const { container } = render(<GuidedSetupSurface />);
+    expect(container).toBeEmptyDOMElement();
   });
 });

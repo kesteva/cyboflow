@@ -4,12 +4,17 @@
  * user just added. Two callouts pair with GuidedMarkers on the Sidebar's
  * project row (n=1) and its "Start new session" button (n=2) — see
  * DraggableProjectTreeView.tsx.
+ *
+ * `projectName === null` is the "Not sure yet" branch: the Sidebar shows its
+ * empty state, so the screen becomes "Your projects will live here" — same
+ * two callouts, in the future tense, no markers to pair with.
  */
 import { GuidedCallout, GuidedFooter, GuidedScreen } from './GuidedScreen';
 import { ONBOARDING_PROJECT_HOME_STEP } from '../../../utils/onboarding';
 
 export interface ProjectHomeStepProps {
-  projectName: string;
+  /** The guided project's name, or null when the user has not added one. */
+  projectName: string | null;
   onContinue: () => void;
   onSkip: () => void;
 }
@@ -19,19 +24,29 @@ export function ProjectHomeStep({
   onContinue,
   onSkip,
 }: ProjectHomeStepProps): React.JSX.Element {
+  const hasProject = projectName !== null;
   return (
     <GuidedScreen
       step={ONBOARDING_PROJECT_HOME_STEP}
       centered
-      title="Your project lives here"
+      title={hasProject ? 'Your project lives here' : 'Your projects will live here'}
       intro={
-        <>
-          Now that you’ve added your first project, you can find it in the left rail under{' '}
-          <strong className="font-semibold text-text-primary">Projects &amp; Sessions</strong>.
-          Everything an agent does for{' '}
-          <strong className="font-semibold text-text-primary">{projectName}</strong> hangs off
-          this row.
-        </>
+        hasProject ? (
+          <>
+            Now that you’ve added your first project, you can find it in the left rail under{' '}
+            <strong className="font-semibold text-text-primary">Projects &amp; Sessions</strong>.
+            Everything an agent does for{' '}
+            <strong className="font-semibold text-text-primary">{projectName}</strong> hangs off
+            this row.
+          </>
+        ) : (
+          <>
+            Once you add a project, it shows up in the left rail under{' '}
+            <strong className="font-semibold text-text-primary">Projects &amp; Sessions</strong>.
+            Everything an agent does for a project hangs off its row — you can add one any time
+            from the home screen or the sidebar.
+          </>
+        )
       }
       footer={
         <GuidedFooter
@@ -47,7 +62,11 @@ export function ProjectHomeStep({
       <div className="flex flex-col gap-2">
         <GuidedCallout
           n={1}
-          title="Click the project to get an overview of it"
+          title={
+            hasProject
+              ? 'Click the project to get an overview of it'
+              : 'Click a project to get an overview of it'
+          }
           body="Branches, sessions, running flows, your backlog, next steps. You can see everything going on in your project here."
         />
         <GuidedCallout

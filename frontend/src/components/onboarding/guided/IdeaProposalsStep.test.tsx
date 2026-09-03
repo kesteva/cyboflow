@@ -52,7 +52,7 @@ vi.mock('../../../stores/agentThreadStore', () => ({
 }));
 
 async function loadIdeaProposalsStep(): Promise<ComponentType<{
-  project: { id: number; name: string };
+  project: { id: number; name: string } | null;
   onContinue: () => void;
   onSkip: () => void;
 }>> {
@@ -121,5 +121,19 @@ describe('IdeaProposalsStep', () => {
     render(<IdeaProposalsStep project={PROJECT} onContinue={vi.fn()} onSkip={vi.fn()} />);
 
     expect(screen.getByTestId('guided-step-eyebrow')).toHaveTextContent('STEP 5 OF 8');
+  });
+});
+
+describe('IdeaProposalsStep — no project ("Not sure yet")', () => {
+  it('renders the explanatory variant with no skip link', async () => {
+    const IdeaProposalsStep = await loadIdeaProposalsStep();
+    const onContinue = vi.fn();
+    render(<IdeaProposalsStep project={null} onContinue={onContinue} onSkip={vi.fn()} />);
+
+    expect(screen.getByRole('heading', { name: 'Here’s how Cyboflow can help' })).toBeInTheDocument();
+    expect(screen.getByTestId('onboarding-idea-thread')).toBeInTheDocument();
+    expect(screen.queryByTestId('onboarding-guided-skip-ideas')).toBeNull();
+    fireEvent.click(screen.getByTestId('onboarding-idea-proposals-continue'));
+    expect(onContinue).toHaveBeenCalledTimes(1);
   });
 });

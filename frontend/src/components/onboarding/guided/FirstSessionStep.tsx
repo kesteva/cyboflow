@@ -19,6 +19,7 @@
 import { useMemo, useState } from 'react';
 import { GuidedFooter, GuidedScreen } from './GuidedScreen';
 import { launchFirstFlow, MAX_PLANNER_SEED_IDEAS } from './launchFirstSession';
+import { SESSION_CHOICES } from './sessionChoices';
 import {
   useOnboardingStore,
   type GuidedProject,
@@ -36,38 +37,6 @@ export interface FirstSessionStepProps {
   onLaunched: (launched: LaunchedSession) => void;
   onFinishWithoutLaunching: () => void;
 }
-
-interface ChoiceRow {
-  value: SessionChoice;
-  key: string;
-  tag: string;
-  title: string;
-  body: string;
-}
-
-const CHOICES: readonly ChoiceRow[] = [
-  {
-    value: 'planner',
-    key: '1',
-    tag: 'Planner flow',
-    title: 'Planning session',
-    body: 'Turns your backlog of ideas into specific tasks — a spec, acceptance criteria and a plan you approve before anything is built.',
-  },
-  {
-    value: 'ship',
-    key: '2',
-    tag: 'Ship flow',
-    title: 'Ship session',
-    body: 'Plans and builds one of your ideas from the backlog end to end, with review gates along the way.',
-  },
-  {
-    value: 'quick',
-    key: '3',
-    tag: 'Chat · CLI',
-    title: 'Quick session',
-    body: 'A regular chat or CLI session, just like the one you’re already used to. One agent, one worktree, no flow.',
-  },
-];
 
 const PRIMARY_LABEL: Record<SessionChoice, string> = {
   planner: 'Launch planner →',
@@ -166,7 +135,7 @@ export function FirstSessionStep({
       }
     >
       <div role="radiogroup" aria-label="First session" className="flex w-full flex-col gap-2 text-left">
-        {CHOICES.map((choice) => {
+        {SESSION_CHOICES.map((choice) => {
           const selected = sessionChoice === choice.value;
           return (
             <button

@@ -28,7 +28,7 @@ const CHOICES: readonly ChoiceRow[] = [
     value: 'unsure',
     key: '3',
     title: 'Not sure yet',
-    body: 'Skip for now — add a project any time from the home screen or the sidebar.',
+    body: 'Keep going without one — add a project any time from the home screen or the sidebar.',
   },
 ];
 
@@ -42,9 +42,10 @@ interface AddProjectChoiceProps {
 /**
  * Guided step 1 of 8 (tour step 7) — which kind of project to start from.
  *
- * 'existing' and 'new' pick which screen step 8 renders; 'unsure' is a terminal
- * branch the STORE owns (next() completes the tour from here), so this screen's
- * primary is an unconditional next() in all three cases.
+ * 'existing' and 'new' pick which screen step 8 renders; 'unsure' is a branch
+ * the STORE owns (next() skips step 8 and continues into the shell with no
+ * project), so this screen's primary is an unconditional next() in all three
+ * cases.
  */
 export function AddProjectChoice({
   value,

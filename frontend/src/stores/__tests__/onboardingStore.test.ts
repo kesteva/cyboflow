@@ -627,11 +627,19 @@ describe('onboardingStore — the guided set-up steps (7, 8)', () => {
     }
   });
 
-  it("'unsure' completes the tour from the add-project step", () => {
+  it("'unsure' skips the detail step and continues into the shell with no project", () => {
     useOnboardingStore.setState({ status: 'active', step: 7, maxVisitedStep: 7, projectChoice: 'unsure' });
     s().next();
-    expect(s().status).toBe('completed');
-    expect(s().step).toBe(7);
+    expect(s().status).toBe('active');
+    expect(s().step).toBe(9);
+    expect(s().maxVisitedStep).toBe(9);
+    expect(s().guidedProject).toBeNull();
+    // From there the walk is the ordinary one: 10-12 with the assistant, 13 without.
+    s().next();
+    expect(s().step).toBe(10);
+    useOnboardingStore.setState({ step: 9, assistantAvailable: false });
+    s().next();
+    expect(s().step).toBe(13);
   });
 
   it('setProjectChoice records the branch', () => {

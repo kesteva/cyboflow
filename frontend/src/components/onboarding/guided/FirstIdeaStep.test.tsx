@@ -57,6 +57,13 @@ describe('buildFirstIdeaContextHint', () => {
     expect(hint).toContain('dogwalkr');
     expect(hint).toContain('create-backlog-items');
   });
+
+  it('with no project asks about Cyboflow itself and forbids proposals', () => {
+    const hint = buildFirstIdeaContextHint(null);
+    expect(hint).toContain('What do you want to get done with Cyboflow?');
+    expect(hint).toContain('Do NOT propose any action');
+    expect(hint).not.toContain('project_id');
+  });
 });
 
 describe('FirstIdeaStep', () => {
@@ -124,5 +131,26 @@ describe('FirstIdeaStep', () => {
     render(<FirstIdeaStep project={PROJECT} onSent={vi.fn()} onSkip={vi.fn()} />);
 
     expect(screen.getByTestId('guided-step-eyebrow')).toHaveTextContent('STEP 4 OF 8');
+  });
+});
+
+describe('FirstIdeaStep — no project ("Not sure yet")', () => {
+  it('asks what the user wants to get done with Cyboflow and sends with the no-project hint', () => {
+    mockThread = makeThread();
+    const onSent = vi.fn();
+    render(<FirstIdeaStep project={null} onSent={onSent} onSkip={vi.fn()} />);
+
+    expect(screen.getByText('What do you want to get done with Cyboflow?')).toBeInTheDocument();
+    expect(screen.queryByText(/next thing you want to get done in/)).toBeNull();
+
+    fireEvent.change(screen.getByLabelText('What you want to get done'), {
+      target: { value: 'ship my side project faster' },
+    });
+    fireEvent.click(screen.getByTestId('onboarding-first-idea-send'));
+
+    expect(mockSendMessage).toHaveBeenCalledWith('ship my side project faster', {
+      contextHint: buildFirstIdeaContextHint(null),
+    });
+    expect(onSent).toHaveBeenCalledTimes(1);
   });
 });

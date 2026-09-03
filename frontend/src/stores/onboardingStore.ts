@@ -53,9 +53,13 @@ import {
  *   flipping a second provider on and pressing Continue brings the step back.
  *   OMP never counts toward it — it is activatable on Connect but no picker
  *   offers its runtimes (see defaultAgentCandidates).
- * - Two branches terminate the tour early, both from next(): the handoff step
- *   with handoffChoice 'skip', and the add-project step with projectChoice
- *   'unsure'. Both land 'completed', which mounts the shell on LandingHome.
+ * - One branch terminates the tour early from next(): the handoff step with
+ *   handoffChoice 'skip' lands 'completed', which mounts the shell on
+ *   LandingHome.
+ * - The add-project step with projectChoice 'unsure' skips step 8 and walks
+ *   straight into the in-shell screens (9+) with guidedProject still null —
+ *   the surface renders their no-project variants ("your projects will live
+ *   here", "what do you want to get done with Cyboflow?").
  * - Step 8 never advances via next() — the guided create handler calls
  *   projectAdded() after the project lands (it also has side effects the store
  *   must not own), which records the project and moves to step 9.
@@ -286,12 +290,14 @@ interface OnboardingState {
   modelPhase: 'model' | 'effort';
   /** Step-6 radio: walk into the guided set-up, or finish the tour here. */
   handoffChoice: 'continue' | 'skip';
-  /** Step-7 radio: which step-8 screen to render, or leave without a project. */
+  /** Step-7 radio: which step-8 screen to render, or continue without a project. */
   projectChoice: 'existing' | 'new' | 'unsure';
   /**
    * The project step 8 created — set by projectAdded(), read by every screen
    * from 9 on (copy names it; step 13 seeds its backlog; every exit navigates to
-   * it). NOT persisted: a cold boot never resumes past step 7 (clampResumeStep).
+   * it). Stays null on the 'unsure' branch, where the same screens render their
+   * no-project variants. NOT persisted: a cold boot never resumes past step 7
+   * (clampResumeStep).
    */
   guidedProject: GuidedProject | null;
   /**
@@ -566,13 +572,19 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
     ) {
       return;
     }
-    // The two early exits. Both leave the tour on LandingHome with no project.
+    // The one early exit: leaves the tour on LandingHome with no project.
     if (s.step === ONBOARDING_HANDOFF_STEP && s.handoffChoice === 'skip') {
       set({ status: 'completed' });
       return;
     }
+    // "Not sure yet" has no project to detail: skip step 8 and continue into
+    // the shell with guidedProject null (the screens render their no-project
+    // variants).
     if (s.step === ONBOARDING_ADD_PROJECT_STEP && s.projectChoice === 'unsure') {
-      set({ status: 'completed' });
+      set({
+        step: ONBOARDING_PROJECT_HOME_STEP,
+        maxVisitedStep: Math.max(s.maxVisitedStep, ONBOARDING_PROJECT_HOME_STEP),
+      });
       return;
     }
     // Leaving Connect re-decides whether the conditional Default-agent step is

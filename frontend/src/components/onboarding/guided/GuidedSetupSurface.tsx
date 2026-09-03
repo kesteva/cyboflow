@@ -20,6 +20,7 @@ import { IdeaProposalsStep } from './IdeaProposalsStep';
 import { LaunchingStep } from './LaunchingStep';
 import { NewProjectForm } from './NewProjectForm';
 import { ProjectHomeStep } from './ProjectHomeStep';
+import { SessionTypesPreviewStep } from './SessionTypesPreviewStep';
 import { finishGuidedSetup, openLaunchedSession, stageTourExit } from './guidedFinish';
 
 /**
@@ -32,14 +33,18 @@ import { finishGuidedSetup, openLaunchedSession, stageTourExit } from './guidedF
  *  - Steps 7-8 (bare paper): App.tsx swaps the whole [sidebar | center | rail]
  *    row for a paper container holding only this surface. Step 7 asks which
  *    kind of project to start from; step 8 renders the screen that choice
- *    selected. 'unsure' never reaches step 8 (the store completes the tour from
- *    step 7's next()). Step 8's create handler hands over to step 9 via
+ *    selected. 'unsure' skips step 8 (the store walks straight to 9 with
+ *    `guidedProject` null). Step 8's create handler hands over to step 9 via
  *    guidedFinish.continueIntoShell.
- *  - Steps 9-14 (in the shell): the project exists, so App.tsx mounts the real
- *    shell — Sidebar (inert) beside this surface in the CENTRE slot, the
- *    AgentRail from step 12 — see utils/onboarding.onboardingGuidedShell. The
- *    screens render around `guidedProject`; every exit here runs the finale
- *    (guidedFinish) and lands on Human review.
+ *  - Steps 9-14 (in the shell): App.tsx mounts the real shell — Sidebar
+ *    (inert) beside this surface in the CENTRE slot, the AgentRail from step
+ *    12 — see utils/onboarding.onboardingGuidedShell. With a project the
+ *    screens render around `guidedProject` and every exit runs the finale
+ *    (guidedFinish) onto Human review. Without one (the "Not sure yet"
+ *    branch) the same steps render their no-project variants — "your projects
+ *    will live here", "what do you want to get done with Cyboflow?", a
+ *    read-only preview of the session types — and exit to LandingHome; step
+ *    14 is never reached.
  *
  * Steps 10-12 need the global assistant: the surface stamps the Settings flag
  * onto the store (`assistantAvailable`) so next() steps over them when it is
@@ -78,10 +83,7 @@ export function GuidedSetupSurface(): React.JSX.Element | null {
       <AddProjectChoice
         value={projectChoice}
         onChange={setProjectChoice}
-        onNext={() => {
-          if (projectChoice === 'unsure') stageTourExit(null);
-          next();
-        }}
+        onNext={next}
         onSkip={() => {
           stageTourExit(null);
           skip();
@@ -95,34 +97,41 @@ export function GuidedSetupSurface(): React.JSX.Element | null {
       ) : (
         <ExistingProjectPicker onBack={back} />
       );
-  } else if (guidedProject !== null) {
-    if (step === ONBOARDING_PROJECT_HOME_STEP) {
-      screen = <ProjectHomeStep projectName={guidedProject.name} onContinue={next} onSkip={exitTour} />;
-    } else if (step === ONBOARDING_FIRST_IDEA_STEP) {
-      screen = <FirstIdeaStep project={guidedProject} onSent={next} onSkip={skipIdeas} />;
-    } else if (step === ONBOARDING_IDEA_PROPOSALS_STEP) {
-      screen = <IdeaProposalsStep project={guidedProject} onContinue={next} onSkip={skipIdeas} />;
-    } else if (step === ONBOARDING_ASSISTANT_RAIL_STEP) {
-      screen = <AssistantRailStep onContinue={next} onSkip={exitTour} />;
-    } else if (step === ONBOARDING_FIRST_SESSION_STEP) {
-      screen = (
+  } else if (step === ONBOARDING_PROJECT_HOME_STEP) {
+    screen = (
+      <ProjectHomeStep
+        projectName={guidedProject?.name ?? null}
+        onContinue={next}
+        onSkip={exitTour}
+      />
+    );
+  } else if (step === ONBOARDING_FIRST_IDEA_STEP) {
+    screen = <FirstIdeaStep project={guidedProject} onSent={next} onSkip={skipIdeas} />;
+  } else if (step === ONBOARDING_IDEA_PROPOSALS_STEP) {
+    screen = <IdeaProposalsStep project={guidedProject} onContinue={next} onSkip={skipIdeas} />;
+  } else if (step === ONBOARDING_ASSISTANT_RAIL_STEP) {
+    screen = <AssistantRailStep onContinue={next} onSkip={exitTour} />;
+  } else if (step === ONBOARDING_FIRST_SESSION_STEP) {
+    screen =
+      guidedProject !== null ? (
         <FirstSessionStep
           project={guidedProject}
           onLaunched={sessionLaunched}
           onFinishWithoutLaunching={exitTour}
         />
+      ) : (
+        <SessionTypesPreviewStep onFinish={exitTour} />
       );
-    } else if (step === ONBOARDING_LAUNCHING_STEP && launched !== null) {
-      screen = (
-        <LaunchingStep
-          projectId={guidedProject.id}
-          projectName={guidedProject.name}
-          launched={launched}
-          onStay={exitTour}
-          onOpenSession={() => openLaunchedSession(guidedProject, launched)}
-        />
-      );
-    }
+  } else if (step === ONBOARDING_LAUNCHING_STEP && guidedProject !== null && launched !== null) {
+    screen = (
+      <LaunchingStep
+        projectId={guidedProject.id}
+        projectName={guidedProject.name}
+        launched={launched}
+        onStay={exitTour}
+        onOpenSession={() => openLaunchedSession(guidedProject, launched)}
+      />
+    );
   }
 
   if (screen === null) return null;

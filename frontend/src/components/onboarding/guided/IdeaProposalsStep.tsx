@@ -7,6 +7,11 @@
  * keep talking, before moving on. Continue is always enabled: the user may
  * leave whether or not a proposal was confirmed — step 13 copes with an
  * empty backlog.
+ *
+ * `project === null` is the "Not sure yet" branch: the thread holds the
+ * assistant's answer to "what do you want to get done with Cyboflow?" — an
+ * explanation, not a proposal — so the copy reads "Here’s how Cyboflow can
+ * help" and Continue is the only way on.
  */
 import type { GuidedProject } from '../../../stores/onboardingStore';
 import { ONBOARDING_IDEA_PROPOSALS_STEP } from '../../../utils/onboarding';
@@ -14,26 +19,32 @@ import { AgentThreadView } from '../../agentRail/AgentThreadView';
 import { GuidedFooter, GuidedScreen } from './GuidedScreen';
 
 export interface IdeaProposalsStepProps {
-  project: GuidedProject;
+  /** The guided project, or null on the no-project branch. */
+  project: GuidedProject | null;
   onContinue: () => void;
   onSkip: () => void;
 }
 
 export function IdeaProposalsStep({
-  project: _project,
+  project,
   onContinue,
   onSkip,
 }: IdeaProposalsStepProps): React.JSX.Element {
+  const hasProject = project !== null;
   return (
     <GuidedScreen
       step={ONBOARDING_IDEA_PROPOSALS_STEP}
-      title="Here’s how I’d capture that"
-      intro="The assistant read what you wrote and proposes backlog items. Confirm to create them, or tell it what to change first — nothing is written until you confirm."
+      title={hasProject ? 'Here’s how I’d capture that' : 'Here’s how Cyboflow can help'}
+      intro={
+        hasProject
+          ? 'The assistant read what you wrote and proposes backlog items. Confirm to create them, or tell it what to change first — nothing is written until you confirm.'
+          : 'The assistant read what you’re after and explains where to start. Keep asking if anything is unclear — once you add a project, it can turn this into a backlog for you.'
+      }
       footer={
         <GuidedFooter
-          skipLabel="Skip — I’ll add ideas later"
-          onSkip={onSkip}
-          skipTestId="onboarding-guided-skip-ideas"
+          {...(hasProject
+            ? { skipLabel: 'Skip — I’ll add ideas later', onSkip, skipTestId: 'onboarding-guided-skip-ideas' }
+            : {})}
           primaryLabel="Continue →"
           onPrimary={onContinue}
           primaryTestId="onboarding-idea-proposals-continue"
@@ -47,7 +58,7 @@ export function IdeaProposalsStep({
         <div className="flex flex-1 flex-col overflow-hidden">
           <AgentThreadView
             variant="guided"
-            composerPlaceholder="Not quite? Tell me what to change…"
+            composerPlaceholder={hasProject ? 'Not quite? Tell me what to change…' : 'Ask a follow-up…'}
           />
         </div>
       </div>

@@ -9,6 +9,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 import { ProjectHomeStep } from './ProjectHomeStep';
+import { SessionTypesPreviewStep } from './SessionTypesPreviewStep';
 import { AssistantRailStep } from './AssistantRailStep';
 import { LaunchingStep } from './LaunchingStep';
 import { GuidedMarker } from './GuidedMarker';
@@ -227,5 +228,38 @@ describe('GuidedMarker', () => {
     seedStore(ONBOARDING_PROJECT_HOME_STEP);
     render(<GuidedMarker step={ONBOARDING_LAUNCHING_STEP} n={1} testId="marker-under-test" />);
     expect(screen.queryByTestId('marker-under-test')).not.toBeInTheDocument();
+  });
+});
+
+describe('ProjectHomeStep — no project ("Not sure yet")', () => {
+  it('renders the future-tense variant with both callouts', () => {
+    seedStore(ONBOARDING_PROJECT_HOME_STEP);
+    act(() => useOnboardingStore.setState({ guidedProject: null }));
+    render(<ProjectHomeStep projectName={null} onContinue={vi.fn()} onSkip={vi.fn()} />);
+    expect(screen.getByRole('heading', { name: 'Your projects will live here' })).toBeInTheDocument();
+    expect(screen.getByText('Click a project to get an overview of it')).toBeInTheDocument();
+    expect(screen.getByText('Start a new agent session within the project')).toBeInTheDocument();
+    expect(screen.getByTestId('onboarding-project-home-continue')).toBeInTheDocument();
+  });
+});
+
+describe('SessionTypesPreviewStep (tour step 13, no project)', () => {
+  it('lists the three session types read-only and offers only Finish set-up', () => {
+    seedStore(13);
+    act(() => useOnboardingStore.setState({ guidedProject: null }));
+    const onFinish = vi.fn();
+    render(<SessionTypesPreviewStep onFinish={onFinish} />);
+
+    expect(screen.getByRole('heading', { name: 'Sessions you can launch' })).toBeInTheDocument();
+    const items = screen.getAllByRole('listitem');
+    expect(items).toHaveLength(3);
+    expect(screen.getByText('Planning session')).toBeInTheDocument();
+    expect(screen.getByText('Ship session')).toBeInTheDocument();
+    expect(screen.getByText('Quick session')).toBeInTheDocument();
+    expect(screen.queryByRole('radio')).toBeNull();
+    expect(screen.queryByTestId('onboarding-guided-skip')).toBeNull();
+
+    fireEvent.click(screen.getByTestId('onboarding-session-preview-finish'));
+    expect(onFinish).toHaveBeenCalledTimes(1);
   });
 });

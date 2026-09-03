@@ -52,9 +52,16 @@ Every exit from the in-shell steps runs `onboarding/guided/guidedFinish.ts`: sta
 first frame (AgentRail forced expanded; the one-shot assistant greeting primed only when the
 thread never held a conversation), stamp the active project, `navigationStore.openHumanReview()`
 (or the launched session for step 14's "Open the session"), then flip the store to `completed`.
-The bare-paper exits (7-8, "Not sure yet", "Skip the set-up") stage the same frame BEFORE the
-`completed` transition because every one of those values is read by a mount that only happens
-once the shell comes back.
+The bare-paper exits (7-8 "Skip the set-up") stage the same frame BEFORE the `completed`
+transition because every one of those values is read by a mount that only happens once the
+shell comes back.
+
+"Not sure yet" on step 7 is NOT an exit: the store skips step 8 and walks into the same in-shell
+states with `guidedProject` null, and the screens render their no-project variants ("Your
+projects will live here", "What do you want to get done with Cyboflow?", "Here's how Cyboflow
+can help", a read-only preview of the session types whose only exit is "Finish set-up"). The
+finale then has no project to stamp or navigate to, so it lands on LandingHome's empty state;
+step 14 is never reached on that branch.
 
 ## Assumption order
 
