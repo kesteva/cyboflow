@@ -1693,14 +1693,9 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
             action={{
               label: 'Add Project',
               onClick: () => setShowAddProjectDialog(true),
+              // Ring only — the guided callout draws a leader toward it instead of
+              // a numbered chip cluttering the primary button.
               style: addProjectMarked ? GUIDED_RING_STYLE : undefined,
-              trailing: addProjectMarked ? (
-                <GuidedMarker
-                  step={ONBOARDING_PROJECT_HOME_STEP}
-                  n={1}
-                  testId="onboarding-marker-add-project"
-                />
-              ) : undefined,
             }}
             className="py-8"
           />

@@ -71,6 +71,12 @@ export interface GuidedCalloutProps {
   title: string;
   body: React.ReactNode;
   testId?: string;
+  /**
+   * Draw a dashed leader from the card's left edge out toward the Sidebar,
+   * for a callout whose shell element carries a ring but no numbered marker
+   * (e.g. a primary button the chip would clutter).
+   */
+  pointsLeft?: boolean;
 }
 
 /**
@@ -78,12 +84,28 @@ export interface GuidedCalloutProps {
  * The number pairs with a GuidedMarker of the same value placed on the shell
  * element it describes.
  */
-export function GuidedCallout({ n, title, body, testId }: GuidedCalloutProps): React.JSX.Element {
+export function GuidedCallout({
+  n,
+  title,
+  body,
+  testId,
+  pointsLeft = false,
+}: GuidedCalloutProps): React.JSX.Element {
   return (
     <div
-      className="flex items-start gap-[11px] border border-border-primary bg-surface-primary px-[15px] py-[13px] text-left"
+      className="relative flex items-start gap-[11px] border border-border-primary bg-surface-primary px-[15px] py-[13px] text-left"
       data-testid={testId}
     >
+      {pointsLeft && (
+        <span
+          aria-hidden="true"
+          data-testid={testId !== undefined ? `${testId}-leader` : undefined}
+          className="pointer-events-none absolute right-full top-1/2 flex w-[88px] -translate-y-1/2 items-center text-interactive"
+        >
+          <span className="-mr-px text-[11px] leading-none">◀</span>
+          <span className="h-0 flex-1 border-t border-dashed border-interactive" />
+        </span>
+      )}
       <span
         aria-hidden="true"
         className="flex h-[17px] w-[17px] flex-shrink-0 items-center justify-center bg-interactive text-[9px] font-bold text-[var(--paper)]"

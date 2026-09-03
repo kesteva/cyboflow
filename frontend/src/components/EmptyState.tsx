@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactNode } from 'react';
+import type { CSSProperties } from 'react';
 import { LucideIcon } from 'lucide-react';
 import { Button } from './ui/Button';
 import { cn } from '../utils/cn';
@@ -12,8 +12,6 @@ interface EmptyStateProps {
     onClick: () => void;
     /** Inline style for the action button (e.g. an onboarding ring). */
     style?: CSSProperties;
-    /** Rendered after the label inside the button (e.g. an onboarding marker). */
-    trailing?: ReactNode;
   };
   className?: string;
 }
@@ -29,7 +27,6 @@ export function EmptyState({ icon: Icon, title, description, action, className }
       {action && (
         <Button onClick={action.onClick} variant="primary" style={action.style}>
           {action.label}
-          {action.trailing}
         </Button>
       )}
     </div>

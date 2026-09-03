@@ -7,7 +7,7 @@
  *
  * `projectName === null` is the "Not sure yet" branch: the Sidebar shows its
  * empty state, so the screen becomes "Your projects will live here" — callout
- * 1 pairs with a marker on the empty state's Add Project button (see
+ * 1 points (dashed leader) at the empty state's ringed Add Project button (see
  * DraggableProjectTreeView.tsx), and the two project callouts follow unmarked
  * (there is no row yet), in the future tense.
  */
@@ -64,6 +64,8 @@ export function ProjectHomeStep({
         {!hasProject && (
           <GuidedCallout
             n={1}
+            pointsLeft
+            testId="onboarding-callout-add-project"
             title="Click Add Project to add your first one at any time"
             body="Point Cyboflow at an existing folder or create a new project from scratch. Everything else on this tour waits for you here."
           />

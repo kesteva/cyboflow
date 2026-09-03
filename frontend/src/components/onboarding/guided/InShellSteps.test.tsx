@@ -238,6 +238,7 @@ describe('ProjectHomeStep — no project ("Not sure yet")', () => {
     render(<ProjectHomeStep projectName={null} onContinue={vi.fn()} onSkip={vi.fn()} />);
     expect(screen.getByRole('heading', { name: 'Your projects will live here' })).toBeInTheDocument();
     expect(screen.getByText('Click Add Project to add your first one at any time')).toBeInTheDocument();
+    expect(screen.getByTestId('onboarding-callout-add-project-leader')).toBeInTheDocument();
     expect(screen.getByText('Click a project to get an overview of it')).toBeInTheDocument();
     expect(screen.getByText('Start a new agent session within the project')).toBeInTheDocument();
     expect(screen.getByTestId('onboarding-project-home-continue')).toBeInTheDocument();
