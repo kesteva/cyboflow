@@ -679,7 +679,7 @@ describe('composeStepPrompt', () => {
     });
     expect(out).toContain('## Idea persistence contract');
     expect(out).toContain('BUILD_ORDER');
-    expect(out).toContain('INITIAL_BUILD');
+    expect(out).not.toContain('INITIAL_BUILD');
     expect(out).toContain('VERBATIM');
     // The brief-carried architecture folds into the foundation idea here.
     expect(out).toContain('## Architecture design');

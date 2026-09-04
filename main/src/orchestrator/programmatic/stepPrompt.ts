@@ -242,7 +242,7 @@ function artifactFollowUp(
  * Idea-flag persistence contract for the steps that CREATE or REWRITE idea
  * bodies. The conditional design steps below (ui-prototype / architecture) and
  * the flow's build ordering key on flag lines (`SCOPE:` / `UI_PROTOTYPE:` /
- * `ARCH_DESIGN:` / `BUILD_ORDER:` / `INITIAL_BUILD:`) PERSISTED in each idea's
+ * `ARCH_DESIGN:` / `BUILD_ORDER:`) PERSISTED in each idea's
  * body — the long-form flow prose spells this out for the orchestrated plane,
  * but a scoped step turn never sees that prose. Without the contract inlined
  * here, the launch `ideas` step persisted stubs WITHOUT the subagent's flag
@@ -254,9 +254,9 @@ function artifactFollowUp(
 function ideaFlagContract(step: WorkflowStep): string {
   switch (step.id) {
     case 'ideas':
-      return `\n\n## Idea persistence contract\n\nYour subagent returns each idea with flag lines — \`SCOPE:\`, \`BUILD_ORDER:\`, \`INITIAL_BUILD:\`. When you persist an idea via \`cyboflow_create_task\`, its \`body\` MUST include those flag lines VERBATIM (keep them at the end of the stub), and pass \`scope\` as the entity field too. Later steps read the flags off the persisted body — an idea saved without them loses its build ordering and initial-build tier. Additionally: when the \`# Project brief\` section above carries an \`## Architecture design\` section, fold that section into the LOWEST \`BUILD_ORDER\` initial-build idea's body via \`cyboflow_update_task\` after creating it (replace any existing section, never stack a second copy) — the foundation idea carries the project's architecture from here on, and its arch-design tab derives from it automatically.`;
+      return `\n\n## Idea persistence contract\n\nYour subagent returns each idea with flag lines — \`SCOPE:\`, \`BUILD_ORDER:\`. When you persist an idea via \`cyboflow_create_task\`, its \`body\` MUST include those flag lines VERBATIM (keep them at the end of the stub), and pass \`scope\` as the entity field too. Later steps read the flags off the persisted body — an idea saved without them loses its build ordering. Additionally: when the \`# Project brief\` section above carries an \`## Architecture design\` section, fold that section into the LOWEST \`BUILD_ORDER\` idea's body via \`cyboflow_update_task\` after creating it (replace any existing section, never stack a second copy) — the foundation idea carries the project's architecture from here on, and its arch-design tab derives from it automatically.`;
     case 'expand-spec':
-      return `\n\n## Idea persistence contract\n\nIf an idea's current body carries flag lines (e.g. \`SCOPE:\` / \`BUILD_ORDER:\` / \`INITIAL_BUILD:\` / \`UI_PROTOTYPE:\` / \`ARCH_DESIGN:\`) or an \`## Architecture design\` section, the expanded body you write back via \`cyboflow_update_task\` MUST preserve those VERBATIM. Downstream steps read them off the persisted body — dropping them during expansion silently breaks design conditioning and build ordering.`;
+      return `\n\n## Idea persistence contract\n\nIf an idea's current body carries flag lines (e.g. \`SCOPE:\` / \`BUILD_ORDER:\` / \`UI_PROTOTYPE:\` / \`ARCH_DESIGN:\`) or an \`## Architecture design\` section, the expanded body you write back via \`cyboflow_update_task\` MUST preserve those VERBATIM. Downstream steps read them off the persisted body — dropping them during expansion silently breaks design conditioning and build ordering.`;
     default:
       return '';
   }
