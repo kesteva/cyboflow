@@ -465,8 +465,12 @@ export function createFileOps(
           // separators — on Windows, path.normalize emits native backslashes
           // that git treats as literal filename characters, so the spec never
           // matches. Only remap on win32: on POSIX a backslash is a legitimate
-          // (literal) filename character and must be preserved.
-          const gitObjectPath = normalizePathSeparators(normalizedPath);
+          // (literal) filename character in a tracked path, and remapping it
+          // unconditionally would ask git for a path it never tracked (empty
+          // content via the "does not exist" branch below, silently).
+          const gitObjectPath = process.platform === 'win32'
+            ? normalizePathSeparators(normalizedPath)
+            : normalizedPath;
           const { stdout } = await runGitCapture(session.worktreePath, [
             'show',
             END_OF_OPTIONS,

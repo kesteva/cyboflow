@@ -41,6 +41,12 @@ export function rmDbTestDir(dir: string | undefined | null): void {
 
 /** Best-effort removal of earlier `.dbtest-leak-` dirs under `parent`. */
 export function sweepLeakedDbTestDirs(parent: string): void {
+  // The `.dbtest-leak-` marker this sweeps for is only ever written by the
+  // win32 rename fallback above — on POSIX, rmDbTestDir's plain rmSync either
+  // succeeds or throws, so no marker can exist to find. Without this gate,
+  // every afterEach in ~20 suites pays a readdirSync of the whole $TMPDIR on
+  // macOS/Linux for a marker that never appears.
+  if (process.platform !== 'win32') return;
   let entries: string[];
   try {
     entries = readdirSync(parent);

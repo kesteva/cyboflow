@@ -345,4 +345,34 @@ describe('file:readAtRevision', () => {
     expect(result.success).toBe(false);
     expect(!result.success && result.error).toBeTruthy();
   });
+
+  // POSIX-only: a literal backslash in a filename is legal there but is a
+  // path separator on win32 — this exercises the platform branch that must
+  // leave a POSIX path untouched before building the `<rev>:<path>` spec.
+  it.skipIf(process.platform === 'win32')(
+    'preserves a literal backslash in the filename when building the git object spec (POSIX)',
+    async () => {
+      const worktree = path.join(tmpRoot, 'wt');
+      fs.mkdirSync(worktree);
+      git(worktree, 'init', '-q');
+      git(worktree, 'config', 'user.email', 'test@cyboflow.dev');
+      git(worktree, 'config', 'user.name', 'Test');
+      git(worktree, 'config', 'commit.gpgsign', 'false');
+      // A single path segment whose name literally contains '\' — legal on
+      // POSIX, where it is not a separator. Blindly remapping '\' to '/'
+      // before asking git for it would name a path that was never tracked.
+      const weirdName = 'weird\\name.txt';
+      fs.writeFileSync(path.join(worktree, weirdName), 'BACKSLASH CONTENT\n');
+      git(worktree, 'add', '-A');
+      git(worktree, 'commit', '-q', '-m', 'add weird name');
+
+      const session = { id: 's1', worktreePath: worktree } as unknown as Session;
+      const ops = createFileOps(servicesFor(session));
+
+      const result = await ops.readAtRevision({ sessionId: 's1', filePath: weirdName, revision: 'HEAD' });
+
+      expect(result.success).toBe(true);
+      expect(result.success && result.content).toBe('BACKSLASH CONTENT\n');
+    },
+  );
 });

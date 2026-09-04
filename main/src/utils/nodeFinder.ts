@@ -76,7 +76,12 @@ async function resolveNodeExecutable(): Promise<string> {
     // directory level and keep whatever trails it as the suffix.
     if (nodePath.includes('*')) {
       const starIdx = nodePath.indexOf('*');
-      const baseDir = path.dirname(nodePath.slice(0, starIdx));
+      // The text before '*' already IS the directory to list (e.g.
+      // '.../node/*/bin/node' -> '.../node/') — only its trailing separator(s)
+      // need stripping. path.dirname() here would additionally strip the last
+      // real segment ('node'), landing one directory too high ('.../versions')
+      // and making every joined candidate below a path that never exists.
+      const baseDir = nodePath.slice(0, starIdx).replace(/[\\/]+$/, '');
       const suffix = nodePath.slice(starIdx + 1);
       if (fs.existsSync(baseDir)) {
         try {

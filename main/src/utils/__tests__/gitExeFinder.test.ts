@@ -4,8 +4,13 @@
  * test touches the host filesystem or PATH — the win32 candidate table is
  * exercised via the injected `platform` seam on any host.
  *
- * Every expected path is built with the host's path.join/path.delimiter, the
- * same primitives the finder uses, so the assertions are host-independent.
+ * Every expected path is built with the host's path.join, the same primitive
+ * the finder uses, so the assertions are host-independent. PATH-list fixtures
+ * are joined with the injected `pathDelimiter` (';' for a simulated win32
+ * target, ':' otherwise) rather than the host's own `path.delimiter` — a
+ * POSIX test host's `path.delimiter` is ':' even while simulating a win32
+ * PATH, and the finder itself now splits on the injected delimiter, not the
+ * host one.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import * as path from 'node:path';
@@ -19,6 +24,8 @@ import {
 
 interface DepsOptions {
   platform: NodeJS.Platform;
+  /** Defaults to ';' for win32, ':' otherwise — override to test a mismatch. */
+  pathDelimiter?: string;
   shellPath?: string | null;
   pathEnv?: string;
   /** Paths existsSync reports as present. */
@@ -49,6 +56,7 @@ function makeDeps(opts: DepsOptions): GitFinderDependencies & { existsCalls: str
     : (opts.envRecord ?? {});
   const deps: GitFinderDependencies = {
     platform: opts.platform,
+    pathDelimiter: opts.pathDelimiter ?? (opts.platform === 'win32' ? ';' : ':'),
     existsSync: (p) => {
       existsCalls.push(p);
       return existing.has(p);
@@ -156,7 +164,10 @@ describe('resolveGitCommand — win32 candidate table', () => {
     setGitFinderDependenciesForTest(makeDeps({
       platform: 'win32',
       shellPath: null,
-      pathEnv: [binDir, 'C:\\Windows'].join(path.delimiter),
+      // Joined with the simulated target's ';', not the host's path.delimiter
+      // (':' on this POSIX test host) — the finder now splits PATH on the
+      // injected pathDelimiter, so the fixture must match that, not the host.
+      pathEnv: [binDir, 'C:\\Windows'].join(';'),
       existing: [onPath],
     }));
     expect(resolveGitCommand()).toBe(onPath);
@@ -168,7 +179,9 @@ describe('resolveGitCommand — POSIX', () => {
     const gitInPath = path.join('/usr/bin', 'git');
     setGitFinderDependenciesForTest(makeDeps({
       platform: 'linux',
-      shellPath: ['/usr/local/bin', '/usr/bin'].join(path.delimiter),
+      // ':' (the target's own delimiter), not the host's path.delimiter — see
+      // the file header.
+      shellPath: ['/usr/local/bin', '/usr/bin'].join(':'),
       existing: [gitInPath],
     }));
     expect(resolveGitCommand()).toBe(gitInPath);
@@ -177,7 +190,8 @@ describe('resolveGitCommand — POSIX', () => {
   it('never consults the win32 candidate table or where off win32', () => {
     const deps = makeDeps({
       platform: 'darwin',
-      shellPath: ['/usr/bin', '/bin'].join(path.delimiter),
+      // ':' (the target's own delimiter), not the host's path.delimiter.
+      shellPath: ['/usr/bin', '/bin'].join(':'),
       whereGit: path.join('/should', 'not', 'be', 'consulted'),
     });
     setGitFinderDependenciesForTest(deps);

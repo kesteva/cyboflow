@@ -22,6 +22,14 @@ const GIT_FALLBACK = 'git';
 export interface GitFinderDependencies {
   /** Host platform the resolution runs against (process.platform in production). */
   platform: NodeJS.Platform;
+  /**
+   * PATH-list delimiter for {@link platform} (';' on win32, ':' elsewhere).
+   * Injected rather than read off the host's `path.delimiter`: this module can
+   * resolve a win32 PATH string on a POSIX CI host (the injected-`platform`
+   * seam other defaults already follow), and the host's own delimiter would be
+   * wrong for that — splitting `'E:/tools'` on POSIX `:` yields `['E', '/tools']`.
+   */
+  pathDelimiter: string;
   existsSync(path: string): boolean;
   accessSync(path: string, mode: number): void;
   /**
@@ -55,6 +63,7 @@ export function setGitFinderDependenciesForTest(deps: Partial<GitFinderDependenc
 function defaultDependencies(platform: NodeJS.Platform): GitFinderDependencies {
   return {
     platform,
+    pathDelimiter: platform === 'win32' ? ';' : ':',
     existsSync: (p) => fs.existsSync(p),
     accessSync: (p, mode) => {
       fs.accessSync(p, mode);
@@ -133,7 +142,7 @@ function resolveGitCommandUncached(deps: GitFinderDependencies): string {
 /** Rung 1 of the ladder in the module header: walk the resolved PATH. */
 function probePathForGit(deps: GitFinderDependencies): string | null {
   const searchPath = deps.shellPath() ?? deps.env('PATH') ?? '';
-  const directories = searchPath.split(path.delimiter).filter((dir) => dir.length > 0);
+  const directories = searchPath.split(deps.pathDelimiter).filter((dir) => dir.length > 0);
   const names = deps.platform === 'win32' ? ['git.exe'] : ['git'];
 
   for (const dir of directories) {

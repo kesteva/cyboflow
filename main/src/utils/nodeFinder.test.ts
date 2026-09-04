@@ -7,6 +7,8 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 
 vi.mock('./shellPath', () => ({ findExecutableInPath: vi.fn() }));
 vi.mock('electron', () => ({ app: { isPackaged: false } }));
@@ -15,7 +17,12 @@ vi.mock('child_process', () => ({ execSync: vi.fn() }));
 // directly — wrap the real implementations in vi.fn() instead (see shellPath.test.ts).
 vi.mock('fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs')>();
-  return { ...actual, existsSync: vi.fn(actual.existsSync), accessSync: vi.fn(actual.accessSync) };
+  return {
+    ...actual,
+    existsSync: vi.fn(actual.existsSync),
+    accessSync: vi.fn(actual.accessSync),
+    readdirSync: vi.fn(actual.readdirSync),
+  };
 });
 
 import { execSync } from 'child_process';
@@ -113,6 +120,32 @@ describe('findNodeExecutable', () => {
       const resolved = await findNodeExecutable();
       expect(mockExecSync).toHaveBeenCalledWith('where node', { encoding: 'utf8', windowsHide: true });
       expect(resolved).toBe(firstHit);
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform, writable: true });
+    }
+  });
+
+  it('resolves an nvm-style glob candidate (baseDir must be the version-parent dir, not one level higher)', async () => {
+    // Regression for the baseDir bug: path.dirname(nodePath.slice(0, starIdx))
+    // stripped BOTH the trailing separator before '*' AND the real 'node'
+    // segment, landing on '.../versions' instead of '.../versions/node' — so
+    // readdirSync never saw the version directories and no candidate resolved.
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'linux', writable: true });
+    try {
+      const baseDir = path.join(os.homedir(), '.nvm', 'versions', 'node');
+      const versionDir = 'v22.0.0';
+      const expected = path.join(baseDir, versionDir, 'bin', 'node');
+
+      mockFindExecutableInPath.mockReturnValue(null);
+      // Only the real nvm layout exists: every earlier fixed-path candidate
+      // (/usr/local/bin/node, etc.) misses, so resolution reaches the glob.
+      vi.mocked(fs.existsSync).mockImplementation((p) => p === baseDir || p === expected);
+      vi.mocked(fs.readdirSync).mockImplementation(((p: fs.PathLike) =>
+        p === baseDir ? [versionDir] : []) as typeof fs.readdirSync);
+
+      const resolved = await findNodeExecutable();
+      expect(resolved).toBe(expected);
     } finally {
       Object.defineProperty(process, 'platform', { value: originalPlatform, writable: true });
     }
