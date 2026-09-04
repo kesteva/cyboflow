@@ -26,7 +26,17 @@ gone:
   both host Node (`NODE_MODULE_VERSION` 127) and Electron 44
   (`NODE_MODULE_VERSION` 149), so `node scripts/ensure-sqlite-abi.mjs
   electron` is a cheap no-op against it (see docs/ARCHITECTURE.md → "The
-  better-sqlite3 ABI ping-pong").
+  better-sqlite3 ABI ping-pong"). One thing to keep that way: better-sqlite3
+  is deliberately NOT in `pnpm.onlyBuiltDependencies` (root `package.json`).
+  The package sets `gypfile: false`, but pnpm 10.11 ignores that and — when
+  the package is allow-listed — runs npm's implicit `node-gyp rebuild` at
+  install, whose *configure* step needs a Visual Studio node-gyp recognises
+  before `binding.gyp` ever gets to skip the compile. That is what made a
+  plain `pnpm install` fail on a VS-less (or VS 2026) Windows host. Off the
+  list, pnpm runs nothing for it on any platform and the bundled prebuild is
+  used as-is; `electron-builder install-app-deps` still visits it through
+  @electron/rebuild's own node-gyp 12, which does know VS 2026, and finds
+  nothing to compile.
 - **node-pty-prebuilt-multiarch 0.14.1** is N-API-stable too (one binary
   loads under both Node and Electron), but `@electron/rebuild` only
   recognizes a prebuild named `node.napi.node` inside

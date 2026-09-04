@@ -1074,6 +1074,12 @@ even loaded, and `pnpm electron:rebuild`, postinstall's `install-app-deps` and C
 compile outright when a prebuild is present). Steady state is therefore *no* `build/Release`
 artifact at all and every `ensure-sqlite-abi.mjs` call passing as a cheap no-op. The machinery
 below is retained as a guard for a platform without a prebuild or a future non-N-API addon.
+better-sqlite3 is also kept OUT of `pnpm.onlyBuiltDependencies`: pnpm 10.11 ignores the package's
+`gypfile: false` and, for an allow-listed package, runs npm's implicit `node-gyp rebuild` at
+install — harmless where a toolchain exists, but node-gyp's configure step needs a recognised
+Visual Studio on Windows before `binding.gyp` can skip anything, which broke `pnpm install` on
+`windows-latest` (VS 2026, unknown to pnpm's bundled node-gyp 11). `pnpm rebuild better-sqlite3`
+stays a no-op that exits 0, so `rebuild-better-sqlite3-host.mjs` is unaffected.
 `node-pty` is N-API as well and loads under both ABIs; the one post-packaging restore that
 remains is an **arch** one, not an ABI one — the x64 mac builds compile an x64 `pty.node` that an
 arm64 host cannot dlopen (see `docs/RELEASE-RUNBOOK.md`). The history below explains what the
