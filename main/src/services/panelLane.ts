@@ -58,6 +58,8 @@ export const ALL_PANEL_LANES = [
   'omp-pty',
   'pi-sdk',
   'pi-pty',
+  'agy-sdk',
+  'agy-pty',
 ] as const;
 
 export type PanelLane = (typeof ALL_PANEL_LANES)[number];
@@ -75,6 +77,7 @@ const PROVIDER_LANES: Readonly<
   codex: { sdk: 'codex-sdk', interactive: 'codex-pty' },
   omp: { sdk: 'omp-sdk', interactive: 'omp-pty' },
   pi: { sdk: 'pi-sdk', interactive: 'pi-pty' },
+  agy: { sdk: 'agy-sdk', interactive: 'agy-pty' },
 };
 
 /** The lanes served by a PTY manager — each provider's interactive lane. */
@@ -186,6 +189,8 @@ export function nonClaudeLaneOwner<M>(
     case 'omp-pty':
     case 'pi-sdk':
     case 'pi-pty':
+    case 'agy-sdk':
+    case 'agy-pty':
       return owners[lane];
     default:
       return undefined;

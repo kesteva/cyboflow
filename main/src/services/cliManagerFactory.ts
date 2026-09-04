@@ -11,6 +11,8 @@ import { OmpPtyManager } from './panels/omp/ompPtyManager';
 import { OmpSdkManager } from './panels/omp/ompSdkManager';
 import { PiPtyManager } from './panels/pi/piPtyManager';
 import { PiSdkManager } from './panels/pi/piSdkManager';
+import { AgyPtyManager } from './panels/agy/agyPtyManager';
+import { AgySdkManager } from './panels/agy/agySdkManager';
 import {
   CliToolRegistry,
   CliToolDefinition,
@@ -142,6 +144,25 @@ export function isPiSdkManagerLike(manager: AbstractCliManager): manager is PiSd
   void manager;
   return true;
 }
+
+/** The Antigravity PTY seams — identical shape to the Pi/OMP/Codex PTY pair. */
+type AgyPtySeams = Pick<AgyPtyManager, 'startPanel' | 'relayUserTurn'>;
+
+/** The Antigravity SDK seams: the lifecycle is on AbstractCliManager in v1. */
+type AgySdkSeams = Record<string, never>;
+
+export type AgyPtyManagerLike = AbstractCliManager & AgyPtySeams;
+export type AgySdkManagerLike = AbstractCliManager & AgySdkSeams;
+
+export function isAgyPtyManagerLike(manager: AbstractCliManager): manager is AgyPtyManagerLike {
+  const seams = manager as Partial<AgyPtySeams>;
+  return typeof seams.startPanel === 'function' && typeof seams.relayUserTurn === 'function';
+}
+
+export function isAgySdkManagerLike(manager: AbstractCliManager): manager is AgySdkManagerLike {
+  void manager;
+  return true;
+}
 /** Does this manager expose the OMP SDK seams? */
 export function isOmpSdkManagerLike(manager: AbstractCliManager): manager is OmpSdkManagerLike {
   const seams = manager as Partial<OmpSdkSeams>;
@@ -208,6 +229,10 @@ function ompPtyDemoSeams(): Omit<OmpPtySeams, 'startPanel'> {
   return { relayUserTurn: () => {} };
 }
 
+function agyPtyDemoSeams(): Omit<AgyPtySeams, 'startPanel'> {
+  return { relayUserTurn: () => {} };
+}
+
 /**
  * The per-tool demo seam overlays, keyed by tool id. A Record rather than the
  * ternary chain it replaces: each provider adds a row instead of another
@@ -219,6 +244,7 @@ const DEMO_SEAM_OVERLAYS: Readonly<Record<string, () => object>> = {
   'codex-pty': codexPtyDemoSeams,
   'omp-sdk': ompSdkDemoSeams,
   'omp-pty': ompPtyDemoSeams,
+  'agy-pty': agyPtyDemoSeams,
 };
 
 /**
@@ -436,6 +462,10 @@ export class CliManagerFactory {
     // arrival; the provider toggle gates reachability anyway.
     this.registerPiPtyTool();
     this.registerPiSdkTool();
+
+    // Register Antigravity (agy) CLI runtimes.
+    this.registerAgyPtyTool();
+    this.registerAgySdkTool();
 
     // this.registerAiderTool();
     // this.registerContinueTool();
@@ -877,6 +907,105 @@ export class CliManagerFactory {
 
     this.registry.registerTool(piSdkDefinition, {
       priority: 26,
+      validateOnRegister: false,
+    });
+  }
+
+  private registerAgyPtyTool(): void {
+    const agyPtyManagerFactory: ManagerFactoryFunction = (
+      sessionManager: unknown,
+      logger?: Logger,
+      configManager?: ConfigManager,
+    ) => {
+      return new AgyPtyManager(
+        sessionManager as SessionManager,
+        logger,
+        configManager,
+      );
+    };
+
+    const agyPtyDefinition: CliToolDefinition = {
+      id: 'agy-pty',
+      name: 'Antigravity (PTY)',
+      description: 'Antigravity (agy) running as an interactive PTY quick-session runtime',
+      version: '1.0.0',
+      capabilities: {
+        supportsResume: true,
+        supportsMultipleModels: true,
+        supportsPermissions: false,
+        supportsFileOperations: true,
+        supportsGitIntegration: true,
+        supportsSystemPrompts: false,
+        supportsStructuredOutput: false,
+        outputFormats: [
+          CLI_OUTPUT_FORMATS.TEXT,
+        ],
+        supportedPanelTypes: ['claude'],
+      },
+      config: {
+        requiredEnvVars: [],
+        optionalEnvVars: [],
+        requiredConfigKeys: [],
+        optionalConfigKeys: [],
+        defaultExecutable: 'agy',
+        alternativeExecutables: ['agy'],
+        minimumVersion: undefined,
+      },
+      managerFactory: agyPtyManagerFactory,
+    };
+
+    this.registry.registerTool(agyPtyDefinition, {
+      priority: 27,
+      validateOnRegister: false,
+    });
+  }
+
+  private registerAgySdkTool(): void {
+    const agySdkManagerFactory: ManagerFactoryFunction = (
+      sessionManager: unknown,
+      logger?: Logger,
+      configManager?: ConfigManager,
+    ) => {
+      return new AgySdkManager(
+        sessionManager as SessionManager,
+        logger,
+        configManager,
+      );
+    };
+
+    const agySdkDefinition: CliToolDefinition = {
+      id: 'agy-sdk',
+      name: 'Antigravity',
+      description: 'Antigravity (agy) structured stream-json runtime (turn-spawn, --conversation resume)',
+      version: '1.0.0',
+      capabilities: {
+        supportsResume: true,
+        supportsMultipleModels: true,
+        supportsPermissions: false,
+        supportsFileOperations: true,
+        supportsGitIntegration: true,
+        supportsSystemPrompts: false,
+        supportsStructuredOutput: true,
+        outputFormats: [
+          CLI_OUTPUT_FORMATS.JSON,
+          CLI_OUTPUT_FORMATS.TEXT,
+        ],
+        supportedPanelTypes: ['claude'],
+      },
+      config: {
+        requiredEnvVars: [],
+        optionalEnvVars: [],
+        requiredConfigKeys: [],
+        optionalConfigKeys: [],
+        defaultExecutable: 'agy',
+        alternativeExecutables: ['agy'],
+        minimumVersion: undefined,
+      },
+      managerFactory: agySdkManagerFactory,
+    };
+
+    this.registry.registerTool(agySdkDefinition, {
+      priority: 28,
       validateOnRegister: false,
     });
   }

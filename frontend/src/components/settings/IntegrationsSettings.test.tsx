@@ -11,6 +11,7 @@ const detectClaude = vi.fn();
 const detectCodex = vi.fn();
 const detectOmp = vi.fn();
 const detectPi = vi.fn();
+const detectAgy = vi.fn();
 const { mockUseOmpAvailability } = vi.hoisted(() => ({ mockUseOmpAvailability: vi.fn() }));
 vi.mock('../../hooks/useOmpAvailability', () => ({ useOmpAvailability: mockUseOmpAvailability }));
 
@@ -24,7 +25,9 @@ vi.mock('../../utils/api', () => ({
             ? detectCodex()
             : provider === 'pi'
               ? detectPi()
-              : detectOmp(),
+              : provider === 'agy'
+                ? detectAgy()
+                : detectOmp(),
     },
   },
 }));
@@ -69,6 +72,12 @@ const PI_DETECTED: ProviderDetectionResult<'pi'> = {
   version: '0.84.2',
 };
 
+const AGY_DETECTED: ProviderDetectionResult<'agy'> = {
+  state: 'detected',
+  binaryPath: '/usr/local/bin/agy',
+  version: '1.1.25',
+};
+
 const OMP_UNSUPPORTED_VERSION: ProviderDetectionResult<'omp'> = {
   state: 'unavailable',
   binaryPath: '/usr/local/bin/omp',
@@ -82,6 +91,7 @@ beforeEach(() => {
   detectCodex.mockReset().mockResolvedValue({ success: true, data: CODEX_CONNECTED });
   detectOmp.mockReset().mockResolvedValue({ success: true, data: OMP_MISSING });
   detectPi.mockReset().mockResolvedValue({ success: true, data: PI_DETECTED });
+  detectAgy.mockReset().mockResolvedValue({ success: true, data: AGY_DETECTED });
   updateConfig = vi.fn().mockResolvedValue(true);
   // Default install: OMP runs locally, so the row reports the local binary.
   mockUseOmpAvailability.mockReset().mockReturnValue({ launchable: false, ariaMode: false });
@@ -145,10 +155,10 @@ describe('IntegrationsSettings — provider access toggles', () => {
     fireEvent.click(await screen.findByRole('switch', { name: 'Use Codex in Cyboflow' }));
 
     // Full object, never a partial patch — the siblings must not be dropped.
-    // OMP and Pi ride along at their untouched defaults (absent ⇒ off).
+    // OMP, Pi, and Antigravity ride along at their untouched defaults (absent ⇒ off).
     await waitFor(() =>
       expect(updateConfig).toHaveBeenCalledWith({
-        agentProviderAccess: { claude: true, codex: false, omp: false, pi: false },
+        agentProviderAccess: { claude: true, codex: false, omp: false, pi: false, agy: false },
       }),
     );
   });
@@ -163,7 +173,22 @@ describe('IntegrationsSettings — provider access toggles', () => {
     fireEvent.click(codexSwitch);
     await waitFor(() =>
       expect(updateConfig).toHaveBeenCalledWith({
-        agentProviderAccess: { claude: true, codex: true, omp: false, pi: false },
+        agentProviderAccess: { claude: true, codex: true, omp: false, pi: false, agy: false },
+      }),
+    );
+  });
+
+  it('switches Antigravity on from the off state', async () => {
+    setProviderAccess(undefined);
+    render(<IntegrationsSettings />);
+
+    const agySwitch = await screen.findByRole('switch', { name: 'Use Antigravity in Cyboflow' });
+    expect(agySwitch).not.toBeChecked();
+
+    fireEvent.click(agySwitch);
+    await waitFor(() =>
+      expect(updateConfig).toHaveBeenCalledWith({
+        agentProviderAccess: { claude: true, codex: true, omp: false, pi: false, agy: true },
       }),
     );
   });
@@ -181,10 +206,10 @@ describe('IntegrationsSettings — provider access toggles', () => {
   });
 
   it('explains what a disabled provider means, and warns about the Claude-only surfaces', async () => {
-    // omp: true so ONLY the Claude row is disabled here — otherwise OMP's
-    // own (identical) "hidden from every runtime picker" hint would collide
+    // omp: true and agy: true so ONLY the Claude row is disabled here — otherwise other
+    // providers' "hidden from every runtime picker" hint would collide
     // with Claude's and make findByText ambiguous.
-    setProviderAccess({ claude: false, codex: true, omp: true, pi: true });
+    setProviderAccess({ claude: false, codex: true, omp: true, pi: true, agy: true });
     render(<IntegrationsSettings />);
 
     expect(await screen.findByText(/hidden from every runtime picker/i)).toBeInTheDocument();
@@ -258,7 +283,7 @@ describe('IntegrationsSettings — OMP card', () => {
 
     await waitFor(() =>
       expect(updateConfig).toHaveBeenCalledWith({
-        agentProviderAccess: { claude: true, codex: true, omp: true, pi: false },
+        agentProviderAccess: { claude: true, codex: true, omp: true, pi: false, agy: false },
       }),
     );
   });
@@ -280,7 +305,7 @@ describe('IntegrationsSettings — OMP card', () => {
 
     await waitFor(() =>
       expect(updateConfig).toHaveBeenCalledWith({
-        agentProviderAccess: { claude: true, codex: true, omp: false, pi: false },
+        agentProviderAccess: { claude: true, codex: true, omp: false, pi: false, agy: false },
       }),
     );
   });
@@ -382,7 +407,7 @@ describe('IntegrationsSettings — the Aria gate on Pi', () => {
 
     await waitFor(() =>
       expect(updateConfig).toHaveBeenCalledWith({
-        agentProviderAccess: { claude: true, codex: true, omp: true, pi: true },
+        agentProviderAccess: { claude: true, codex: true, omp: true, pi: true, agy: false },
       }),
     );
   });
@@ -406,7 +431,7 @@ describe('IntegrationsSettings — the Aria gate on Pi', () => {
 
     await waitFor(() =>
       expect(updateConfig).toHaveBeenCalledWith({
-        agentProviderAccess: { claude: true, codex: true, omp: true, pi: true },
+        agentProviderAccess: { claude: true, codex: true, omp: true, pi: true, agy: false },
       }),
     );
   });

@@ -296,11 +296,14 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     ompPtyManager, // OMP PTY quick-session runtime
     piPtyManager, // Pi PTY quick-session runtime
     piSdkManager, // Pi structured runtime (quick sessions + workflow runs)
+    agyPtyManager, // Antigravity PTY quick-session runtime
+    agySdkManager, // Antigravity structured runtime (quick sessions + workflow runs)
     killLiveSession, // hard-kill seam for a dismissed PTY quick session's REPL
     registerLivePanel, // at-spawn runId→panelId seed for the facade's relay translation
     registerCodexPtyPanel, // at-spawn runId→panelId seed for Codex PTY quick sessions
     registerOmpPtyPanel, // the OMP twin of registerCodexPtyPanel
     registerPiPtyPanel, // the Pi twin of registerOmpPtyPanel
+    registerAgyPtyPanel, // the Antigravity twin of registerPiPtyPanel
     gitStatusManager,
     archiveProgressManager,
     configManager, // demo-mode probe — gates the real interactive PTY spawn/relay
@@ -691,6 +694,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // system-prompt channel on this spawn shape, so passing one would be
       // silently dropped rather than delivered.
       createStructuredChatLane({ lane: 'pi-sdk', manager: piSdkManager }),
+      createStructuredChatLane({ lane: 'agy-sdk', manager: agySdkManager }),
     ].map((entry) => [entry.lane, entry]),
   );
 
@@ -789,6 +793,26 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         briefing: QUICK_PI_PTY_BRIEFING,
       },
     ],
+    [
+      'agy-pty',
+      {
+        label: AGENT_PROVIDER_LABELS.agy,
+        isPanelRunning: (panelId) => agyPtyManager.isPanelRunning(panelId),
+        relayUserTurn: (panelId, input) => agyPtyManager.relayUserTurn(panelId, input),
+        registerPanel: registerAgyPtyPanel,
+        startPanel: (o) =>
+          agyPtyManager.startPanel(
+            o.panelId,
+            o.sessionId,
+            o.worktreePath,
+            o.prompt,
+            o.permissionMode,
+            o.model,
+            o.runId,
+          ),
+        briefing: 'You are Antigravity CLI in interactive session mode.',
+      },
+    ],
   ]);
 
   /**
@@ -803,6 +827,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       'omp-pty': ompPtyManager,
       'pi-sdk': piSdkManager,
       'pi-pty': piPtyManager,
+      'agy-sdk': agySdkManager,
+      'agy-pty': agyPtyManager,
     });
 
   /**
@@ -830,6 +856,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     ['codex-pty', codexPtyManager],
     ['omp-pty', ompPtyManager],
     ['pi-pty', piPtyManager],
+    ['agy-pty', agyPtyManager],
   ] as const) {
     manager?.on?.('exit', (payload: { panelId?: string; sessionId?: string; exitCode?: number }) => {
       handlePtyLaneExit(ptyLane, payload);

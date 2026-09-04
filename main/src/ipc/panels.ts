@@ -47,6 +47,8 @@ export function registerPanelHandlers(ipcMain: IpcMain, services: AppServices) {
       'omp-pty': services.ompPtyManager,
       'pi-sdk': services.piSdkManager,
       'pi-pty': services.piPtyManager,
+      'agy-sdk': services.agySdkManager,
+      'agy-pty': services.agyPtyManager,
      });
 
   // Panel CRUD operations

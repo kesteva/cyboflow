@@ -94,6 +94,7 @@ export const PROVIDER_MODEL_CATALOG_SLICES: {
   // `models:get-catalog` fetcher returns real rows. Nothing is fetched until
   // a picker actually shows Pi.
   pi: createCatalogSlice('pi'),
+  agy: createCatalogSlice('agy'),
 };
 
 export interface ProviderModelCatalogHook<P extends AgentProvider> {

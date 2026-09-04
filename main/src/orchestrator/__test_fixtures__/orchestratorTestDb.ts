@@ -198,17 +198,17 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
   let agentProviderRuntimeAdded = false;
   const addAgentProviderRuntimeColumnsOnce = (): void => {
     if (agentProviderRuntimeAdded) return;
-    // CHECK lists mirror migration 123 (the current widening). A fixture that
+    // CHECK lists mirror migration 130 (the current widening). A fixture that
     // lags a widening does not fail loudly — it rejects the stamp the app now
     // makes legitimately, which reads as a bug in the code under test.
     db.exec(
-      "ALTER TABLE workflow_runs ADD COLUMN agent_provider TEXT NOT NULL DEFAULT 'claude' CHECK (agent_provider IN ('claude','codex','omp','pi'))",
+      "ALTER TABLE workflow_runs ADD COLUMN agent_provider TEXT NOT NULL DEFAULT 'claude' CHECK (agent_provider IN ('claude','codex','omp','pi','agy'))",
     );
     // The pty runtimes are absent for the reason migration 103's own comment
     // gives — a workflow run needs structured events, usage and MCP progress,
     // which a keystroke-driven TUI cannot supply.
     db.exec(
-      "ALTER TABLE workflow_runs ADD COLUMN agent_runtime TEXT NOT NULL DEFAULT 'claude-sdk' CHECK (agent_runtime IN ('claude-sdk','claude-interactive','codex-sdk','omp-sdk','omp-fleet','pi-sdk'))",
+      "ALTER TABLE workflow_runs ADD COLUMN agent_runtime TEXT NOT NULL DEFAULT 'claude-sdk' CHECK (agent_runtime IN ('claude-sdk','claude-interactive','codex-sdk','omp-sdk','omp-fleet','pi-sdk','agy-sdk'))",
     );
     agentProviderRuntimeAdded = true;
   };

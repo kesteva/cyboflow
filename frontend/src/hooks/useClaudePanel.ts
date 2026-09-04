@@ -32,11 +32,13 @@ export async function dispatchQuickSessionInput(
   const isStructuredSdkPanel =
     session.agentRuntime === 'codex-sdk' ||
     session.agentRuntime === 'omp-sdk' ||
-    session.agentRuntime === 'pi-sdk'
+    session.agentRuntime === 'pi-sdk' ||
+    session.agentRuntime === 'agy-sdk'
       ? panelSubstrate !== 'interactive'
       : (session.agentRuntime === 'codex-pty' ||
            session.agentRuntime === 'omp-pty' ||
-           session.agentRuntime === 'pi-pty') &&
+           session.agentRuntime === 'pi-pty' ||
+           session.agentRuntime === 'agy-pty') &&
         panelSubstrate === 'sdk';
 
   if (isStructuredSdkPanel) {

@@ -19,7 +19,7 @@ import type { CliSubstrate } from './substrate';
  * because `z.enum` needs a non-empty readonly tuple of string literals; the
  * `AgentProvider` union is derived FROM it so the two cannot drift.
  */
-export const AGENT_PROVIDERS = ['claude', 'codex', 'omp', 'pi'] as const;
+export const AGENT_PROVIDERS = ['claude', 'codex', 'omp', 'pi', 'agy'] as const;
 
 export type AgentProvider = (typeof AGENT_PROVIDERS)[number];
 
@@ -45,6 +45,8 @@ export const ALL_AGENT_RUNTIMES = [
   'omp-fleet',
   'pi-sdk',
   'pi-pty',
+  'agy-sdk',
+  'agy-pty',
 ] as const;
 
 export type AgentRuntime = (typeof ALL_AGENT_RUNTIMES)[number];
@@ -82,6 +84,7 @@ export const WORKFLOW_RUN_STORABLE_RUNTIMES = [
   'omp-sdk',
   'omp-fleet',
   'pi-sdk',
+  'agy-sdk',
 ] as const;
 
 export type WorkflowRunStorableRuntime = (typeof WORKFLOW_RUN_STORABLE_RUNTIMES)[number];
@@ -110,6 +113,10 @@ export const WORKFLOW_LAUNCHABLE_RUNTIMES = [
   // NOT built yet is an interactive approval prompt — dontAsk remains the
   // only way to run write-tier steps unattended.
   'pi-sdk',
+  // Structured JSON-events lane for Antigravity (agy --output-format stream-json):
+  // per-step events, usage and tool results reach Cyboflow like the other SDK
+  // lanes. agy-pty stays excluded for the keystroke-TUI reason.
+  'agy-sdk',
 ] as const;
 
 export type WorkflowLaunchableRuntime = (typeof WORKFLOW_LAUNCHABLE_RUNTIMES)[number];
@@ -146,6 +153,7 @@ export const PROVIDER_DEFAULT_RUNTIME: Readonly<Record<AgentProvider, WorkflowLa
   codex: 'codex-sdk',
   omp: 'omp-sdk',
   pi: 'pi-sdk',
+  agy: 'agy-sdk',
 };
 
 export const DEFAULT_SESSION_AGENT_RUNTIME: SessionAgentRuntime = 'claude-sdk';
@@ -161,6 +169,8 @@ export const SESSION_AGENT_RUNTIMES = [
   'omp-fleet',
   'pi-sdk',
   'pi-pty',
+  'agy-sdk',
+  'agy-pty',
 ] as const;
 
 /** Human labels for the workflow-scoped runtime picker. Single source shared by
@@ -171,6 +181,7 @@ export const WORKFLOW_AGENT_RUNTIME_LABELS: Record<WorkflowLaunchableRuntime, st
   'codex-sdk': 'Codex SDK',
   'omp-sdk': 'OMP',
   'pi-sdk': 'Pi',
+  'agy-sdk': 'Antigravity',
 };
 
 /**
@@ -201,6 +212,8 @@ export const AGENT_RUNTIME_LABELS: Record<SessionAgentRuntime, string> = {
   'omp-fleet': 'OMP fleet',
   'pi-sdk': 'Pi',
   'pi-pty': 'Pi (CLI)',
+  'agy-sdk': 'Antigravity SDK',
+  'agy-pty': 'Antigravity (CLI)',
 };
 
 // ---------------------------------------------------------------------------
@@ -312,6 +325,13 @@ export const AGENT_PROVIDER_REGISTRY: Readonly<Record<AgentProvider, AgentProvid
     defaultEnabled: false,
     requiresAriaMode: true,
   },
+  // Antigravity (agy) — agent CLI platform.
+  agy: {
+    runtimePrefix: 'agy-',
+    sdkRuntime: 'agy-sdk',
+    defaultEnabled: false,
+    requiresAriaMode: false,
+  },
 };
 
 /**
@@ -326,6 +346,7 @@ export const AGENT_PROVIDER_LABELS: Record<AgentProvider, string> = {
   codex: 'Codex',
   omp: 'OMP',
   pi: 'Pi',
+  agy: 'Antigravity',
 };
 
 export const AGENT_PROVIDER_TABLE: AgentProviderTable<AgentProvider> = {

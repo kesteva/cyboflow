@@ -4,6 +4,8 @@ import { ModelAvailabilityService } from '../services/modelAvailabilityService';
 import { getSharedOmpModelCatalogProbe } from '../services/panels/omp/ompModelCatalog';
 import { detectPiAvailability } from '../services/panels/pi/piAvailability';
 import { fetchPiModelCatalog } from '../services/panels/pi/piModelCatalog';
+import { detectAgyAvailability } from '../services/panels/agy/agyAvailability';
+import { fetchAgyModelCatalog } from '../services/panels/agy/agyModelCatalog';
 import type { ModelAvailabilityMap } from '../../../shared/types/modelAvailability';
 import {
   AGENT_PROVIDERS,
@@ -58,6 +60,17 @@ const PROVIDER_CATALOG_FETCHERS: { [P in AgentProvider]: ProviderCatalogFetcher<
       );
     }
     return fetchPiModelCatalog(detection.binaryPath);
+  },
+  agy: async () => {
+    const detection = await detectAgyAvailability();
+    if (detection.state !== 'detected' || !detection.binaryPath) {
+      throw new Error(
+        detection.version
+          ? `agy ${detection.version} found but below the supported floor`
+          : 'agy binary not found on PATH',
+      );
+    }
+    return fetchAgyModelCatalog(detection.binaryPath);
   },
 };
 

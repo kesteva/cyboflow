@@ -166,6 +166,8 @@ const LANE_WIRING: Readonly<Record<PanelLane, LaneWiring>> = {
   // mounts afterwards.
   'pi-sdk': { output: true, spawned: true, turnEnd: false, retainBacklogOnFailedExit: false },
   'pi-pty': { output: true, spawned: true, turnEnd: true, retainBacklogOnFailedExit: true },
+  'agy-sdk': { output: true, spawned: true, turnEnd: false, retainBacklogOnFailedExit: false },
+  'agy-pty': { output: true, spawned: true, turnEnd: true, retainBacklogOnFailedExit: true },
 };
 
 /**

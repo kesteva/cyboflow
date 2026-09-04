@@ -90,6 +90,17 @@ export interface PiModelCatalog {
   models: OmpModelOption[];
 }
 
+/** Renderer-safe projection of one entry returned by `agy models`. */
+export interface AgyModelOption {
+  id: string;
+  label: string;
+}
+
+export interface AgyModelCatalog {
+  models: AgyModelOption[];
+  defaultModel: string | null;
+}
+
 /**
  * Which catalog shape each provider advertises.
  *
@@ -106,6 +117,7 @@ export interface ProviderModelCatalogs {
   codex: CodexModelCatalog;
   omp: OmpModelCatalog;
   pi: PiModelCatalog;
+  agy: AgyModelCatalog;
 }
 
 /**
@@ -175,6 +187,18 @@ export function isCodexModelSelection(model: string): boolean {
  */
 export const DEFAULT_CODEX_MODEL = 'auto';
 
+export function isAgyModelFamily(model: string): boolean {
+  const normalized = model.toLowerCase().trim();
+  return (
+    normalized.startsWith('gemini-') ||
+    normalized.startsWith('gpt-oss-') ||
+    normalized === 'claude-sonnet-4-6' ||
+    normalized === 'claude-opus-4-6-thinking'
+  );
+}
+
+export const DEFAULT_AGY_MODEL = 'gemini-3.8-flash-high';
+
 /**
  * Which provider owns a model id, one predicate per provider. Adding a provider
  * is one entry here (the Record is exhaustive over `AgentProvider`, so the
@@ -193,6 +217,7 @@ export const AGENT_MODEL_FAMILY_PREDICATES: Readonly<
   // patterns — which is exactly OMP's slash rule, so the predicate is shared.
   // If pi ever admits bare ids this becomes its own function.
   pi: isOmpModelFamily,
+  agy: isAgyModelFamily,
 };
 /**
  * Families that SHARE a shape are non-competing: omp and pi both use
@@ -233,6 +258,11 @@ export function normalizeAgentModelSelection(
 
   const key = value.toLowerCase();
   if (key === 'default') return undefined;
+
+  // If this provider's own family explicitly claims this model, keep it!
+  if (AGENT_MODEL_FAMILY_PREDICATES[provider](key)) {
+    return value;
+  }
 
   for (const other of AGENT_PROVIDERS) {
     if (other === provider) continue;

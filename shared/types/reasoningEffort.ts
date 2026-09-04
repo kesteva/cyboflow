@@ -46,8 +46,11 @@ export type OmpEffortLevel = (typeof OMP_EFFORT_LEVELS)[number];
 export const PI_EFFORT_LEVELS = OMP_EFFORT_LEVELS;
 export type PiEffortLevel = OmpEffortLevel;
 
+export const AGY_EFFORT_LEVELS = ['low', 'medium', 'high'] as const;
+export type AgyEffortLevel = (typeof AGY_EFFORT_LEVELS)[number];
+
 /** The union of every effort value any provider accepts. */
-export type ReasoningEffort = ClaudeEffortLevel | CodexEffortLevel | OmpEffortLevel;
+export type ReasoningEffort = ClaudeEffortLevel | CodexEffortLevel | OmpEffortLevel | AgyEffortLevel;
 
 /**
  * Every effort value across every provider, de-duplicated, for the wire schema.
@@ -77,6 +80,7 @@ const CLAUDE_EFFORT_SET = new Set<string>(CLAUDE_EFFORT_LEVELS);
 const CODEX_EFFORT_SET = new Set<string>(CODEX_EFFORT_LEVELS);
 const OMP_EFFORT_SET = new Set<string>(OMP_EFFORT_LEVELS);
 const PI_EFFORT_SET = OMP_EFFORT_SET;
+const AGY_EFFORT_SET = new Set<string>(AGY_EFFORT_LEVELS);
 const ALL_EFFORT_SET = new Set<string>(ALL_EFFORT_LEVELS);
 
 /** Each provider's own ordered scale, low-to-high. Exhaustive by construction. */
@@ -85,6 +89,7 @@ const EFFORT_LEVELS_BY_PROVIDER: Readonly<Record<AgentProvider, readonly Reasoni
   codex: CODEX_EFFORT_LEVELS,
   omp: OMP_EFFORT_LEVELS,
   pi: PI_EFFORT_LEVELS,
+  agy: AGY_EFFORT_LEVELS,
 };
 
 const EFFORT_SETS_BY_PROVIDER: Readonly<Record<AgentProvider, ReadonlySet<string>>> = {
@@ -92,6 +97,7 @@ const EFFORT_SETS_BY_PROVIDER: Readonly<Record<AgentProvider, ReadonlySet<string
   codex: CODEX_EFFORT_SET,
   omp: OMP_EFFORT_SET,
   pi: PI_EFFORT_SET,
+  agy: AGY_EFFORT_SET,
 };
 
 /** Narrow an arbitrary value to a known effort level (provider-agnostic). */
