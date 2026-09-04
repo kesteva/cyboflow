@@ -76,6 +76,7 @@ import { SessionDismissDialog } from '../cyboflow/SessionDismissDialog';
 import { AddIdeaModal } from './AddIdeaModal';
 import { QueueHeader } from './QueueHeader';
 import { RecommendedActionsSection } from './RecommendedActionsSection';
+import { BlockedRunsSection } from './BlockedRunsSection';
 import { NeedsInputSection } from './NeedsInputSection';
 import { NotificationsSection } from './NotificationsSection';
 import { HumanTasksSection } from './HumanTasksSection';
@@ -285,12 +286,41 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
     ];
   }, [runs, triage.working, activeDynamicWorkflows, quickRows]);
 
+  // Blocked runs — the halted runs NOTHING else on this page speaks for. A run
+  // parked at a gate has a decision item (red band) and a cleanly drained one is
+  // in Ready for review; the remainder — stuck, or paused with nothing filed —
+  // had no home at all once its session's quick row stopped standing in for it.
+  const blockedRunRows = React.useMemo(() => {
+    const readyRunIds = new Set(
+      selectReadyToReviewRuns(runs, reviewItems, approvals, landingBlockingRunIds).map((r) => r.id),
+    );
+    // An item that actually ASKS for this run already represents it. A
+    // notification does not — it reports something finished.
+    const askedFor = new Set(
+      reviewItems
+        .filter((it) => it.kind === 'decision' || it.kind === 'human_task')
+        .map((it) => it.run_id)
+        .filter((id): id is string => id !== null),
+    );
+    return runs.filter(
+      (run) =>
+        classifyRun(run.status) === 'blocked' && !readyRunIds.has(run.id) && !askedFor.has(run.id),
+    );
+  }, [runs, reviewItems, approvals, landingBlockingRunIds]);
+
   const waitingCount =
-    approvalsCount + reviewItems.length + readyToReviewCount + attentionQuickCount;
+    approvalsCount +
+    reviewItems.length +
+    readyToReviewCount +
+    attentionQuickCount +
+    blockedRunRows.length;
   const blockedCount =
     countApprovals(blockingApprovalItems) +
     reviewItems.filter((it) => it.blocking).length +
-    quickRows.filter((r) => r.state === 'blocked').length;
+    quickRows.filter((r) => r.state === 'blocked').length +
+    // A stuck/paused run is a blocked thing too — without this a page holding
+    // only those reads as 'all-idle' and hides the band that names them.
+    blockedRunRows.length;
   // The deduped row count, not the raw sum — a flow run and its session are one row.
   const workingCount = workingRows.length;
   const sessionsCount =
@@ -664,6 +694,13 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
             onOpenQuickSession={openQuickSession}
             onOpenReviewItem={openReviewItem}
             onApprovalDecided={afterLifecycleAction}
+          />
+
+          <BlockedRunsSection
+            runs={blockedRunRows}
+            projectNameById={projectNameById}
+            nowMs={nowMs}
+            onOpenRun={(run) => openRunSession(run.id, run.project_id)}
           />
 
           <HumanTasksSection

@@ -525,6 +525,64 @@ describe('LandingHome — page states', () => {
     expect(screen.queryByTestId('rq-working-row')).not.toBeInTheDocument();
   });
 
+  it('blocked: a stuck run nothing else speaks for gets its own row', async () => {
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockQuickRows = [
+      quickRow({ sessionId: 'sess-run', name: 'faint-harbor-20260903', state: 'running', idleSince: null }),
+    ];
+    mockRuns = [
+      makeRun({
+        id: 'run-a',
+        status: 'stuck',
+        workflowName: 'planner',
+        branch_name: 'faint-harbor-20260903',
+        session_id: 'sess-run',
+        stuck_reason: 'No step transition in 40m',
+      }),
+    ];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    const blocked = screen.getByTestId('rq-blocked-runs-section');
+    expect(within(blocked).getByText('planner')).toBeInTheDocument();
+    expect(within(blocked).getByText('No step transition in 40m')).toBeInTheDocument();
+    // It is NOT also claiming to run.
+    expect(screen.queryByTestId('rq-working-row')).not.toBeInTheDocument();
+  });
+
+  it('blocked: a run whose gate already asks for it stays out of the band', async () => {
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockRuns = [makeRun({ id: 'run-a', status: 'awaiting_input', workflowName: 'planner' })];
+    mockReviewItems = [
+      makeReviewItem({ id: 'rvw-gate', kind: 'decision', run_id: 'run-a', title: 'Approve the plan', blocking: true }),
+    ];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    expect(screen.queryByTestId('rq-blocked-runs-section')).not.toBeInTheDocument();
+    const needsInput = screen.getByTestId('rq-needs-input-section');
+    expect(within(needsInput).getByText('Approve the plan')).toBeInTheDocument();
+  });
+
+  it('blocked: an awaiting_review run stays in Ready for review, not the Blocked band', async () => {
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockRuns = [makeRun({ id: 'run-a', status: 'awaiting_review', workflowName: 'Ship' })];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    expect(screen.queryByTestId('rq-blocked-runs-section')).not.toBeInTheDocument();
+    expect(within(screen.getByTestId('rq-ready-section')).getByText('Ship')).toBeInTheDocument();
+  });
+
   it('working: a terminal run gives its session back to its own row', async () => {
     mockProviderAccess = CONNECTED_ACCESS;
     mockProjectsCount = 1;
