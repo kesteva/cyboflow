@@ -16,6 +16,12 @@ on:
         description: 'Also package the NSIS installer (pnpm build:win)'
         type: boolean
         default: true
+  # workflow_dispatch only resolves files on the default branch, so a branch
+  # that edits this file runs it on push — the only way to exercise a change
+  # here before it reaches main. Both jobs run on that path.
+  push:
+    branches-ignore: [ main ]
+    paths: [ '.github/workflows/windows.yml' ]
 
 jobs:
   unit:
@@ -66,7 +72,7 @@ jobs:
   installer:
     name: Installer (pnpm build:win)
     runs-on: windows-latest
-    if: ${{ inputs.build_installer }}
+    if: ${{ github.event_name == 'push' || inputs.build_installer }}
     timeout-minutes: 45
 
     steps:
