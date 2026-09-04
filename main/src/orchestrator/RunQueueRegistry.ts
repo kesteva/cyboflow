@@ -68,8 +68,8 @@ export class RunQueueRegistry {
   }
 
   /**
-   * Waits for every tracked queue to become idle, then clears the registry.
-   * Intended for clean shutdown.
+   * Waits for every tracked queue to become idle and drops the ones that made
+   * it. Intended for clean shutdown.
    *
    * Two kinds of queue reach this point.
    *
@@ -87,6 +87,13 @@ export class RunQueueRegistry {
    * at the cap, is logged and abandoned. Its run row keeps whatever
    * non-terminal status it holds, which is what boot recovery looks for, so the
    * run resumes on the next launch.
+   *
+   * Only queues that actually went idle are UNREGISTERED. An abandoned queue
+   * still owns a running task, and clearing it would let a later
+   * getOrCreate(runId) mint a SECOND queue for the same run — two concurrency-1
+   * queues racing each other is exactly the serialization this class exists to
+   * provide. The registry dies with the process moments later anyway, so
+   * keeping the abandoned entries leaks nothing.
    */
   async drainAll(opts?: {
     capMs?: number;
@@ -118,10 +125,13 @@ export class RunQueueRegistry {
           console.warn(
             `[RunQueueRegistry] run ${runId} was still busy at shutdown — abandoning its queue`,
           );
+          return;
         }
+        // Idle and flushed — safe to unregister (see the note above on why the
+        // skipped/abandoned queues deliberately stay).
+        this.queues.delete(runId);
       }),
     );
-    this.queues.clear();
   }
 
   /** Returns a snapshot of queue depth across all tracked runs. */

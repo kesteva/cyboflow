@@ -4262,3 +4262,144 @@ describe('RunExecutor.queueInput — buffer + drain-at-rest delivery', () => {
     expect(deliverer.deliver).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Quit-drain latch (beginShutdown)
+// ---------------------------------------------------------------------------
+//
+// At quit, drainOnQuit kills every agent process. That kill reaches a live
+// execute() as its spawn SETTLING — the Claude SDK manager reports an
+// intentional abort as a clean exit (resolve), the interactive PTY manager
+// surfaces it as a rejection. Untreated, the first arm rests a cut-off turn in
+// awaiting_review and the second writes a terminal `failed`; boot recovery
+// revives neither, so the run is stranded. beginShutdown() is the latch that
+// keeps the row non-terminal for the next launch.
+describe('RunExecutor.beginShutdown — quit-drain latch', () => {
+  function makeRegistry(run: WorkflowRunRow, workflow: WorkflowRow): WorkflowRegistryLike {
+    return {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+  }
+
+  it('a spawn that RESOLVES after beginShutdown() does not rest the run in awaiting_review', async () => {
+    const { mock: lt, restAwaitingReview, failed } = makeLifecycleTransitions();
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const spawner = makeSpawner(); // resolves — the SDK "intentional abort is a clean exit" shape
+
+    const executor = new TestableRunExecutor(spawner, makeRegistry(run, workflow), makeSpyLogger(), undefined, lt);
+    executor.beginShutdown();
+    await executor.execute(run.id);
+
+    expect(restAwaitingReview).not.toHaveBeenCalled();
+    expect(failed).not.toHaveBeenCalled();
+  });
+
+  it('a spawn that REJECTS after beginShutdown() neither fails the run nor re-throws', async () => {
+    const { mock: lt, restAwaitingReview, failed } = makeLifecycleTransitions();
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const spawner = makeSpawner();
+    // The interactive PTY manager's shape: killing the pty rejects the spawn.
+    vi.mocked(spawner.spawnCliProcess).mockRejectedValueOnce(
+      new Error('Interactive Claude exited with code 143'),
+    );
+
+    const executor = new TestableRunExecutor(spawner, makeRegistry(run, workflow), makeSpyLogger(), undefined, lt);
+    executor.beginShutdown();
+    // Swallowed deliberately: runLauncher's queue.add only logs, and at quit
+    // that log would read as a real run failure.
+    await expect(executor.execute(run.id)).resolves.toBeUndefined();
+
+    expect(failed).not.toHaveBeenCalled();
+    expect(restAwaitingReview).not.toHaveBeenCalled();
+  });
+
+  it('WITHOUT beginShutdown() the drained and failed arms are unchanged', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+
+    const rest = makeLifecycleTransitions();
+    await new TestableRunExecutor(
+      makeSpawner(),
+      makeRegistry(run, workflow),
+      makeSpyLogger(),
+      undefined,
+      rest.mock,
+    ).execute(run.id);
+    expect(rest.restAwaitingReview).toHaveBeenCalledWith(run.id);
+
+    const fail = makeLifecycleTransitions();
+    const rejectingSpawner = makeSpawner();
+    vi.mocked(rejectingSpawner.spawnCliProcess).mockRejectedValueOnce(new Error('spawn boom'));
+    const failing = new TestableRunExecutor(
+      rejectingSpawner,
+      makeRegistry(run, workflow),
+      makeSpyLogger(),
+      undefined,
+      fail.mock,
+    );
+    await expect(failing.execute(run.id)).rejects.toThrow('spawn boom');
+    expect(fail.failed).toHaveBeenCalledWith(run.id, 'running', 'spawn boom');
+  });
+
+  // The programmatic path has the same two arms, driven by the injected runner
+  // instead of the spawner.
+  function makeProgrammaticExecutor(
+    registry: WorkflowRegistryLike,
+    runner: ProgrammaticRunner,
+    lifecycle: LifecycleTransitionsLike,
+  ): TestableRunExecutor {
+    return new TestableRunExecutor(
+      makeSpawner(),
+      registry,
+      makeSpyLogger(),
+      undefined, // promptReader
+      lifecycle,
+      undefined, // publisher
+      undefined, // db
+      undefined, // source
+      undefined, // stepEmitter
+      undefined, // taskStageDeriver
+      undefined, // ideaBodyReader
+      undefined, // sprintLaneTaskIds
+      runner, // programmaticRunner (slot 13)
+    );
+  }
+
+  it('a programmatic walk that returns after beginShutdown() does not rest the run', async () => {
+    const { mock: lt, restAwaitingReview, failed } = makeLifecycleTransitions();
+    const run = makeWorkflowRunRow({ worktree_path: '/wt', execution_model: 'programmatic' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const runner: ProgrammaticRunner = {
+      run: vi.fn<(ctx: ProgrammaticRunContext) => Promise<void>>().mockResolvedValue(undefined),
+    };
+
+    const executor = makeProgrammaticExecutor(makeRegistry(run, workflow), runner, lt);
+    executor.beginShutdown();
+    await executor.execute(run.id);
+
+    expect(runner.run).toHaveBeenCalledOnce();
+    expect(restAwaitingReview).not.toHaveBeenCalled();
+    expect(failed).not.toHaveBeenCalled();
+  });
+
+  it('a programmatic walk that throws after beginShutdown() neither fails the run nor re-throws', async () => {
+    const { mock: lt, restAwaitingReview, failed } = makeLifecycleTransitions();
+    const run = makeWorkflowRunRow({ worktree_path: '/wt', execution_model: 'programmatic' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const runner: ProgrammaticRunner = {
+      run: vi
+        .fn<(ctx: ProgrammaticRunContext) => Promise<void>>()
+        .mockRejectedValue(new Error('step agent killed at quit')),
+    };
+
+    const executor = makeProgrammaticExecutor(makeRegistry(run, workflow), runner, lt);
+    executor.beginShutdown();
+    await expect(executor.execute(run.id)).resolves.toBeUndefined();
+
+    expect(failed).not.toHaveBeenCalled();
+    expect(restAwaitingReview).not.toHaveBeenCalled();
+  });
+});

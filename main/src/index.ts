@@ -6893,23 +6893,27 @@ async function drainOnQuit(): Promise<void> {
   // this is cleanup for tidiness rather than a shutdown-correctness requirement.
   databaseBackupService?.stop();
 
-  // Cleanup all sessions and terminate child processes BEFORE the queue drain:
-  // the queued run-executor tasks settle only when their sessions end, so
-  // draining first would wait (until the quit-drain timeout) on tasks that the
-  // very next step would have settled. The same cleanup-first ordering
-  // applies on macOS, where the drain also completes immediately for the
-  // common case.
-  if (sessionManager) {
-    console.log('[Main] Cleaning up sessions and terminating child processes...');
-    await sessionManager.cleanup();
-    console.log('[Main] Session cleanup complete');
-  }
+  // Latch the run executor into shutdown mode BEFORE anything below kills an
+  // agent. cliManagerFactory.shutdown() (further down) aborts every live agent
+  // process, and a live execute() sees that abort as its spawn settling: the
+  // Claude SDK manager reports an intentional abort as a CLEAN exit (the spawn
+  // RESOLVES), while the interactive PTY manager surfaces the kill as a
+  // rejection. Without this latch the first would rest a cut-off run in
+  // awaiting_review and the second would mark it `failed` — both statuses boot
+  // recovery refuses to revive. Latched, both arms skip the transition and the
+  // row stays running/starting, which is precisely what runRecovery.ts looks
+  // for on the next launch (resume, or an honest app_restart/interrupted
+  // force-fail). See RunExecutor.beginShutdown.
+  runExecutor?.beginShutdown();
 
   // Stop orchestrator (drains run queues). A run with a live execution holds
-  // its queue with a task that settles only when its session ends, so at quit
-  // it never will — waiting on one flushes nothing. Skip those and wait only
-  // for queues that can still go idle. Nothing is transitioned either way: the
-  // run keeps its status and boot recovery picks it up on the next launch.
+  // the head of its concurrency-1 queue with a task that settles only when its
+  // session ends, so at quit it never will — waiting on one flushes nothing and
+  // only spends the quit budget, which is what once left the database close and
+  // the MCP stop unrun. `shouldWait` skips exactly those queues so the state
+  // mutations queued behind ordinary runs still flush. The skipped run is not
+  // transitioned (beginShutdown above is what keeps that true once its agent is
+  // killed below); its non-terminal row is boot recovery's job.
   if (orchestrator) {
     console.log('[Main] Stopping orchestrator...');
     await orchestrator.stop((runId) => !runExecutor?.hasActiveExecution(runId));
@@ -6934,6 +6938,17 @@ async function drainOnQuit(): Promise<void> {
     console.log('[Main] Stopping pairwise judge worker...');
     await pairwiseWorker.stop();
     console.log('[Main] Pairwise judge worker stopped');
+  }
+
+  // Cleanup all sessions and terminate child processes. Deliberately AFTER the
+  // queue drain above: cleanup() settles no run-executor task (it stops the
+  // project run script and the terminal-panel PTYs), so running it first buys
+  // the drain nothing and its per-pty exit grace polls eat the 10s quit ceiling
+  // in services/quitDrain.ts ahead of the database flush.
+  if (sessionManager) {
+    console.log('[Main] Cleaning up sessions and terminating child processes...');
+    await sessionManager.cleanup();
+    console.log('[Main] Session cleanup complete');
   }
 
   // Stop all run commands
