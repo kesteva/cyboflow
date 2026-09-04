@@ -498,4 +498,54 @@ describe('LandingHome — page states', () => {
     expect(within(working).getByText('quiet-mesa')).toBeInTheDocument();
     expect(within(working).queryByText('faint-harbor-20260903')).not.toBeInTheDocument();
   });
+
+  it('working: a session whose run parked at a gate is not handed back as "Running"', async () => {
+    // The run leaves Working when it stops being active, but it still speaks for
+    // its session from whichever band it moved to — so the session must NOT
+    // reappear here claiming to run. Only a TERMINAL run gives the session back.
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockQuickRows = [
+      quickRow({ sessionId: 'sess-run', name: 'faint-harbor-20260903', state: 'running', idleSince: null }),
+    ];
+    mockRuns = [
+      makeRun({
+        id: 'run-a',
+        status: 'awaiting_input',
+        workflowName: 'planner',
+        branch_name: 'faint-harbor-20260903',
+        session_id: 'sess-run',
+      }),
+    ];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    expect(screen.queryByTestId('rq-working-row')).not.toBeInTheDocument();
+  });
+
+  it('working: a terminal run gives its session back to its own row', async () => {
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockQuickRows = [
+      quickRow({ sessionId: 'sess-run', name: 'faint-harbor-20260903', state: 'running', idleSince: null }),
+    ];
+    mockRuns = [
+      makeRun({
+        id: 'run-a',
+        status: 'completed',
+        workflowName: 'planner',
+        branch_name: 'faint-harbor-20260903',
+        session_id: 'sess-run',
+      }),
+    ];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    const working = screen.getByTestId('rq-working-section');
+    expect(within(working).getByText('faint-harbor-20260903')).toBeInTheDocument();
+  });
 });

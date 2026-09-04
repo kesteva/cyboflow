@@ -256,12 +256,17 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
   // Working rows — the three sources, deduped down to one row per running thing.
   const workingRows = React.useMemo<WorkingRow[]>(() => {
     const activeRuns = runs.filter((run) => classifyRun(run.status) === 'active');
-    // A flow run and the session hosting it are ONE running thing. The run row is
-    // the richer of the two (phase bars, current step), so the session's own quick
-    // row drops out — otherwise `planner ⌥ faint-harbor` and a bare `faint-harbor`
-    // both render and the second says nothing the first doesn't.
+    // A flow run and the session hosting it are ONE thing, and the RUN is what
+    // represents it — as a row here while it is active, and from the band it
+    // belongs to (Needs your input / Ready for review) once it is not. So the
+    // session's own quick row drops out for every NON-TERMINAL run, not just the
+    // active ones: scoping this to active runs meant a run parking at a gate
+    // handed the session straight back to Working, which then reported a blocked
+    // session as "Running". Only once the run is terminal does the session speak
+    // for itself again.
     const runSessionIds = new Set(
-      activeRuns
+      runs
+        .filter((run) => classifyRun(run.status) !== 'terminal')
         .map((run) => run.session_id)
         .filter((id): id is string => typeof id === 'string' && id !== ''),
     );
