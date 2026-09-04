@@ -10,13 +10,15 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { rmDbTestDir, sweepLeakedDbTestDirs } from './cleanupDbTestDir';
 import { DatabaseService } from '../database';
 
 describe('createProject main_branch persistence', () => {
   let tmpDbDir: string;
 
   afterEach(() => {
-    if (tmpDbDir) rmSync(tmpDbDir, { recursive: true, force: true });
+    sweepLeakedDbTestDirs(tmpdir());
+    rmDbTestDir(tmpDbDir);
   });
 
   function newService(): DatabaseService {

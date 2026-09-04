@@ -5,9 +5,9 @@ import type { DatabaseService } from '../database/database';
 import type { ProjectRunCommand } from '../database/models';
 import { getShellPath } from '../utils/shellPath';
 import { ShellDetector } from '../utils/shellDetector';
-import { escapeShellArg } from '../utils/shellEscape';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { collectDescendantPidsAsync, forceKillPids, killTree } from '../utils/platformProcess';
 
 interface RunProcess {
   process: pty.IPty;
@@ -17,6 +17,11 @@ interface RunProcess {
 
 export class RunCommandManager extends EventEmitter {
   private processes: Map<string, RunProcess[]> = new Map();
+
+  // Wrapped (rather than a bare promisify(exec)) so every kill-ladder call
+  // passes windowsHide — a packaged Windows app must never flash a conhost.
+  private readonly execAsync = async (command: string): Promise<{ stdout: string; stderr: string }> =>
+    promisify(exec)(command, { windowsHide: true });
 
   constructor(
     private databaseService: DatabaseService,
@@ -75,9 +80,17 @@ export class RunCommandManager extends EventEmitter {
             const shellInfo = ShellDetector.getDefaultShell();
             this.logger?.verbose(`Using shell: ${shellInfo.path} (${shellInfo.name})`);
             
-            // Prepare command with environment variable — use escapeShellArg to safely quote
-            // the worktree path and prevent shell injection from adversarial directory names.
-            const commandWithEnv = `export WORKTREE_PATH=${escapeShellArg(worktreePath)} && ${commandLine}`;
+            // Prepare command with environment variable, in the dialect
+            // getShellCommandArgs routes to: POSIX sets it via `export` joined
+            // with `&&`; PowerShell (the win32 shell) has no `export` and, on
+            // the PS 5.1 every Windows host ships, cannot parse `&&`. The
+            // quoting still prevents shell injection from adversarial
+            // directory names — escapeShellArg on POSIX, PS single-quote
+            // doubling on win32.
+            const commandWithEnv = ShellDetector.buildCommandString(
+              { WORKTREE_PATH: worktreePath },
+              [commandLine]
+            );
             
             // Get shell command arguments
             const { shell, args: shellArgs } = ShellDetector.getShellCommandArgs(commandWithEnv);
@@ -236,139 +249,59 @@ export class RunCommandManager extends EventEmitter {
   /**
    * Get all descendant PIDs of a parent process recursively
    * This is critical for ensuring all child processes are killed
+   *
+   * The per-platform enumeration strategy (PowerShell (pid, ppid) table on
+   * win32, per-level `ps --ppid` recursion on POSIX) lives in
+   * utils/platformProcess.ts; this site contributes only its warning logging.
    */
-  private getAllDescendantPids(parentPid: number): number[] {
-    const descendants: number[] = [];
-
-    try {
-      const result = require('child_process').execSync(
-        `ps -o pid= --ppid ${parentPid} 2>/dev/null || true`,
-        { encoding: 'utf8' }
-      );
-
-      const pids = result.split('\n')
-        .map((line: string) => parseInt(line.trim()))
-        .filter((pid: number) => !isNaN(pid) && pid !== parentPid);
-
-      for (const pid of pids) {
-        descendants.push(pid);
-        descendants.push(...this.getAllDescendantPids(pid));
-      }
-    } catch (error) {
-      this.logger?.warn(`Error getting descendant PIDs for ${parentPid}:`, error as Error);
-    }
-
-    return [...new Set(descendants)];
+  private getAllDescendantPids(parentPid: number): Promise<number[]> {
+    return collectDescendantPidsAsync(parentPid, {
+      onWalkError: (error) => this.logger?.warn(`Error getting descendant PIDs for ${parentPid}:`, error as Error),
+    });
   }
 
   /**
-   * Kill a process and all its descendants
-   * Returns true if successful, false if zombie processes remain
+   * Kill a process and all its descendants. Returns true if successful, false
+   * if zombie processes remain.
+   *
+   * Both platform ladders live in utils/platformProcess.ts (killTree); this
+   * site contributes its seams (execCommand / the zombie-event reporting) and
+   * its ladder timings: a fixed, non-probed grace window on both platforms
+   * (2s on Windows, the historical 10s on POSIX), and — POSIX — the
+   * pre-signal pgid resolution that sweeps in group members the up-front tree
+   * walk missed (posixGroupMode 'enumerate').
    */
   private async killProcessTree(pid: number, commandName: string): Promise<boolean> {
-    const execAsync = promisify(exec);
-
     // First, get all descendant PIDs before we start killing
-    const descendantPids = this.getAllDescendantPids(pid);
+    const descendantPids = await this.getAllDescendantPids(pid);
     this.logger?.info(`Found ${descendantPids.length} descendant processes for PID ${pid}: ${descendantPids.join(', ')}`);
 
-    // Find the process group ID and kill all processes in that group
-    let pgid: number | null = null;
-    try {
-      const result = await execAsync(`ps -o pgid= -p ${pid}`);
-      pgid = parseInt(result.stdout.trim());
-      if (!isNaN(pgid) && pgid !== pid) {
-        this.logger?.info(`Process ${pid} is in process group ${pgid}`);
-        const pgResult = await execAsync(`ps -o pid= -g ${pgid} 2>/dev/null || true`);
-        const pgPids = pgResult.stdout.split('\n')
-          .map(line => parseInt(line.trim()))
-          .filter(p => !isNaN(p) && p !== pid && !descendantPids.includes(p));
-        if (pgPids.length > 0) {
-          this.logger?.info(`Found ${pgPids.length} additional processes in process group ${pgid}: ${pgPids.join(', ')}`);
-          descendantPids.push(...pgPids);
-        }
-      }
-    } catch (error) {
-      this.logger?.warn(`Error getting process group: ${error}`);
-    }
-
-    let success = true;
-
-    try {
-      // macOS/Unix: First, try SIGTERM for graceful shutdown
-      try {
-        process.kill(pid, 'SIGTERM');
-      } catch (error) {
-        this.logger?.warn('SIGTERM failed:', error as Error);
-      }
-
-      // Kill the entire process group using negative PID
-      // Use the actual process group ID if we found it, otherwise use the PID
-      const killGroupId = pgid || pid;
-      try {
-        await execAsync(`kill -TERM -${killGroupId}`);
-        this.logger?.info(`Sent SIGTERM to process group ${killGroupId}`);
-      } catch (error) {
-        this.logger?.warn(`Error sending SIGTERM to process group ${killGroupId}: ${error}`);
-      }
-
-      // Give processes 10 seconds to clean up gracefully
-      this.logger?.info(`Waiting 10 seconds for graceful shutdown of process ${pid}...`);
-      await new Promise(resolve => setTimeout(resolve, 10000));
-
-      // Now forcefully kill the main process
-      try {
-        process.kill(pid, 'SIGKILL');
-      } catch (error) {
-        // Process might already be dead
-      }
-
-      // Kill the process group with SIGKILL
-      try {
-        await execAsync(`kill -9 -${killGroupId}`);
-        this.logger?.info(`Sent SIGKILL to process group ${killGroupId}`);
-      } catch (error) {
-        this.logger?.warn(`Error sending SIGKILL to process group ${killGroupId}: ${error}`);
-      }
-
-      // Kill all known descendants individually to be sure
-      for (const childPid of descendantPids) {
-        try {
-          await execAsync(`kill -9 ${childPid}`);
-          this.logger?.verbose(`Killed descendant process ${childPid}`);
-        } catch (error) {
-          this.logger?.verbose(`Process ${childPid} already terminated`);
-        }
-      }
-
-      // Final cleanup attempt using pkill
-      try {
-        await execAsync(`pkill -9 -P ${pid}`);
-      } catch (error) {
-        // Ignore errors - processes might already be dead
-      }
-
-      // Verify all processes are actually dead
-      await new Promise(resolve => setTimeout(resolve, 500));
-      const remainingPids = this.getAllDescendantPids(pid);
-      
-      if (remainingPids.length > 0) {
+    return killTree(pid, {
+      descendantPids,
+      logger: {
+        info: (message) => this.logger?.info(`[${commandName}] ${message}`),
+        warn: (message, error) => this.logger?.warn(`[${commandName}] ${message}`, error as Error),
+      },
+      execCommand: (command) => this.execAsync(command),
+      // This ladder historically slept the grace window unconditionally (no
+      // probe) on both platforms — preserved exactly via the fixed grace mode.
+      graceMode: 'fixed',
+      graceMs: process.platform === 'win32' ? 2000 : 10_000,
+      posixGroupMode: 'enumerate',
+      listDescendants: () => this.getAllDescendantPids(pid),
+      onGracefulError: (error) => {
+        this.logger?.verbose(`Graceful taskkill for ${pid} did not settle (expected for console apps): ${error}`);
+      },
+      onSurvivors: (remainingPids) => {
         this.logger?.error(`WARNING: ${remainingPids.length} zombie processes remain: ${remainingPids.join(', ')}`);
-        success = false;
-        
-        // Emit error event so UI can show warning
         this.emit('zombie-processes-detected', {
           commandName,
           pids: remainingPids,
           message: `Failed to terminate ${remainingPids.length} child processes from command "${commandName}". Please manually kill PIDs: ${remainingPids.join(', ')}`
         });
-      }
-    } catch (error) {
-      this.logger?.error('Error in killProcessTree:', error as Error);
-      success = false;
-    }
-    
-    return success;
+      },
+      onError: (error) => this.logger?.error('Error in killProcessTree:', error as Error),
+    });
   }
 
   /**
@@ -376,31 +309,26 @@ export class RunCommandManager extends EventEmitter {
    * This can happen when a shell exits but its children continue running
    */
   private async killEscapedProcesses(sessionId: string, knownPids: number[]): Promise<void> {
-    const execAsync = promisify(exec);
-    
     try {
-      // Find all processes that have any of our known PIDs as ancestors
-      // This is a more aggressive approach to catch processes that might have been orphaned
+      // Every process that still has one of our known pids as an ancestor.
       const allDescendants: number[] = [];
-      
+
       for (const pid of knownPids) {
-        // Get all descendants, including orphaned ones
-        const descendants = this.getAllDescendantPids(pid);
-        allDescendants.push(...descendants);
-        
-        // Also check for processes that might have been reparented to init (PID 1)
-        // by looking for processes with the same process group
+        allDescendants.push(...(await this.getAllDescendantPids(pid)));
+
+        // POSIX only, and the one place this file reads the platform: a
+        // process reparented to init has left the tree the walk above covers,
+        // but it is still in the group. Windows has no process groups, and its
+        // taskkill walk is the whole story there.
+        if (process.platform === 'win32') continue;
         try {
-          const pgidResult = await execAsync(`ps -o pgid= -p ${pid} 2>/dev/null || echo ""`);
+          const pgidResult = await this.execAsync(`ps -o pgid= -p ${pid} 2>/dev/null || echo ""`);
           const pgid = parseInt(pgidResult.stdout.trim());
-          
           if (!isNaN(pgid)) {
-            // Find all processes in this process group
-            const pgResult = await execAsync(`ps -o pid= -g ${pgid} 2>/dev/null || true`);
+            const pgResult = await this.execAsync(`ps -o pid= -g ${pgid} 2>/dev/null || true`);
             const pgPids = pgResult.stdout.split('\n')
               .map(line => parseInt(line.trim()))
               .filter(p => !isNaN(p) && !knownPids.includes(p));
-            
             if (pgPids.length > 0) {
               this.logger?.warn(`Found ${pgPids.length} orphaned processes in process group ${pgid}: ${pgPids.join(', ')}`);
               allDescendants.push(...pgPids);
@@ -410,28 +338,21 @@ export class RunCommandManager extends EventEmitter {
           // Process might be gone already
         }
       }
-      
-      // Remove duplicates and kill any remaining processes
-      const uniquePids = [...new Set(allDescendants)];
-      if (uniquePids.length > 0) {
-        this.logger?.warn(`Killing ${uniquePids.length} escaped processes: ${uniquePids.join(', ')}`);
-        
-        for (const pid of uniquePids) {
-          try {
-            await execAsync(`kill -9 ${pid}`);
-            this.logger?.info(`Killed escaped process ${pid}`);
-          } catch (error) {
-            // Process might already be dead
-          }
-        }
-        
-        // Emit warning about escaped processes
-        this.emit('zombie-processes-detected', {
-          sessionId,
-          pids: uniquePids,
-          message: `Detected and killed ${uniquePids.length} processes that escaped normal termination`
-        });
-      }
+
+      const escapees = [...new Set(allDescendants)];
+      if (escapees.length === 0) return;
+
+      this.logger?.warn(`Killing ${escapees.length} escaped processes: ${escapees.join(', ')}`);
+      await forceKillPids(escapees, {
+        execCommand: (command) => this.execAsync(command),
+        onKilled: (pid) => this.logger?.info(`Killed escaped process ${pid}`),
+      });
+
+      this.emit('zombie-processes-detected', {
+        sessionId,
+        pids: escapees,
+        message: `Detected and killed ${escapees.length} processes that escaped normal termination`
+      });
     } catch (error) {
       this.logger?.error('Error killing escaped processes:', error as Error);
     }

@@ -33,6 +33,7 @@ import BetterSqlite3 from 'better-sqlite3';
 import type Database from 'better-sqlite3';
 import { McpQueryHandler, type McpQueryResponse } from '../mcpQueryHandler';
 import { OrchSocketServer } from '../orchSocketServer';
+import { orchSocketEndpoint } from '../orchSocketEndpoint';
 import { OrchTokenRegistry } from '../../orchAuthToken';
 import { ApprovalRouter } from '../../approvalRouter';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
@@ -149,6 +150,9 @@ describe('shell-approval-request handler branch', () => {
   // it at an empty temp dir so the developer's real ~/.claude allow-list (which
   // grants e.g. Bash(ls:*)) cannot leak into the gate decision under test.
   let realHome: string | undefined;
+  // os.homedir() reads USERPROFILE (not HOME) on Windows — fake both so the
+  // user-level settings file is resolved to the fake home on every platform.
+  let realUserProfile: string | undefined;
   let fakeHome: string;
 
   beforeEach(() => {
@@ -161,8 +165,10 @@ describe('shell-approval-request handler branch', () => {
     ApprovalRouter.initialize(dbAdapter(db));
     handler = new McpQueryHandler(dbAdapter(db), makeSpyLogger());
     realHome = process.env.HOME;
+    realUserProfile = process.env.USERPROFILE;
     fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), `cyboflow-home-${process.pid}-`));
     process.env.HOME = fakeHome;
+    process.env.USERPROFILE = fakeHome;
   });
 
   afterEach(() => {
@@ -171,6 +177,8 @@ describe('shell-approval-request handler branch', () => {
     for (const w of worktrees.splice(0)) fs.rmSync(w, { recursive: true, force: true });
     if (realHome === undefined) delete process.env.HOME;
     else process.env.HOME = realHome;
+    if (realUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = realUserProfile;
     fs.rmSync(fakeHome, { recursive: true, force: true });
   });
 
@@ -603,6 +611,9 @@ describe('shell-approval-request review_item fold (P4, socket still held)', () =
   let handler: McpQueryHandler;
   const worktrees: string[] = [];
   let realHome: string | undefined;
+  // os.homedir() reads USERPROFILE (not HOME) on Windows — fake both so the
+  // user-level settings file is resolved to the fake home on every platform.
+  let realUserProfile: string | undefined;
   let fakeHome: string;
 
   function buildReviewDb(): Database.Database {
@@ -654,8 +665,10 @@ describe('shell-approval-request review_item fold (P4, socket still held)', () =
     ApprovalRouter.initialize(dbAdapter(db));
     handler = new McpQueryHandler(dbAdapter(db), makeSpyLogger());
     realHome = process.env.HOME;
+    realUserProfile = process.env.USERPROFILE;
     fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), `cyboflow-home-${process.pid}-`));
     process.env.HOME = fakeHome;
+    process.env.USERPROFILE = fakeHome;
   });
 
   afterEach(() => {
@@ -664,6 +677,8 @@ describe('shell-approval-request review_item fold (P4, socket still held)', () =
     for (const w of worktrees.splice(0)) fs.rmSync(w, { recursive: true, force: true });
     if (realHome === undefined) delete process.env.HOME;
     else process.env.HOME = realHome;
+    if (realUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = realUserProfile;
     fs.rmSync(fakeHome, { recursive: true, force: true });
   });
 
@@ -722,6 +737,9 @@ describe('shell-approval-request over a live OrchSocketServer (held-open socket)
   const openClients: net.Socket[] = [];
   const worktrees: string[] = [];
   let realHome: string | undefined;
+  // os.homedir() reads USERPROFILE (not HOME) on Windows — fake both so the
+  // user-level settings file is resolved to the fake home on every platform.
+  let realUserProfile: string | undefined;
   let fakeHome: string;
 
   beforeEach(async () => {
@@ -732,9 +750,15 @@ describe('shell-approval-request over a live OrchSocketServer (held-open socket)
     db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, agent_permission_mode TEXT)');
     ApprovalRouter.initialize(dbAdapter(db));
     realHome = process.env.HOME;
+    realUserProfile = process.env.USERPROFILE;
     fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), `cyboflow-home-${process.pid}-`));
     process.env.HOME = fakeHome;
-    socketPath = path.join(os.tmpdir(), `shell-appr-${process.pid}-${Math.random().toString(36).slice(2, 8)}.sock`);
+    process.env.USERPROFILE = fakeHome;
+    // On Windows, bind the endpoint as a named pipe via the production seam —
+    // a plain fs path cannot host the AF_UNIX bind without elevation.
+    socketPath = orchSocketEndpoint(
+      path.join(os.tmpdir(), `shell-appr-${process.pid}-${Math.random().toString(36).slice(2, 8)}.sock`),
+    );
     // A suite-local token registry: the server now refuses to bind a
     // self-declared runId without that run's bearer token, and this keeps the
     // check real here (rather than stubbed) without touching global state.
@@ -751,6 +775,8 @@ describe('shell-approval-request over a live OrchSocketServer (held-open socket)
     for (const w of worktrees.splice(0)) fs.rmSync(w, { recursive: true, force: true });
     if (realHome === undefined) delete process.env.HOME;
     else process.env.HOME = realHome;
+    if (realUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = realUserProfile;
     fs.rmSync(fakeHome, { recursive: true, force: true });
   });
 

@@ -14,6 +14,7 @@ import Database from 'better-sqlite3';
 import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { rmDbTestDir, sweepLeakedDbTestDirs } from './cleanupDbTestDir';
 import { DatabaseService } from '../database';
 
 interface StageRow {
@@ -68,7 +69,8 @@ describe('seedDefaultBoard <-> migrated (014+015+024+042+066) seed parity', () =
   let tmpDbDir: string;
 
   afterEach(() => {
-    if (tmpDbDir) rmSync(tmpDbDir, { recursive: true, force: true });
+    sweepLeakedDbTestDirs(tmpdir());
+    rmDbTestDir(tmpDbDir);
   });
 
   it('createProject seeds the SAME 5 stages as the 014+015+024+042+066 migration seed', () => {

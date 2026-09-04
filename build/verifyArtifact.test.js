@@ -54,6 +54,18 @@ function macArtifact(file) {
   return { file, arch: 3, packager: { platform: { name: 'mac' } } };
 }
 
+// electron-builder passes Platform.WINDOWS, whose `name` is 'windows'. The
+// fixture said 'win' — its buildConfigurationKey — so the size floor this
+// suite covers never actually ran on a real Windows build.
+function winArtifact(file) {
+  return { file, arch: 1, packager: { platform: { name: 'windows' } } };
+}
+
+/** The same artifact under the other spelling electron-builder uses. */
+function winArtifactLegacyName(file) {
+  return { file, arch: 1, packager: { platform: { name: 'win' } } };
+}
+
 function writeSparseFile(file, bytes) {
   const fd = fs.openSync(file, 'w');
   try {
@@ -79,6 +91,10 @@ async function caseA() {
   const { shouldVerifyArtifact } = helpers;
   assert(shouldVerifyArtifact('/out/Cyboflow-1.0.0-macOS-arm64.dmg'), 'Case A: .dmg is checked');
   assert(shouldVerifyArtifact('/out/Cyboflow-1.0.0-macOS-arm64.zip'), 'Case A: .zip is checked');
+  assert(
+    shouldVerifyArtifact('/out/Cyboflow-1.0.0-Windows-x64.exe'),
+    'Case A: .exe (NSIS installer) is checked'
+  );
   assert(shouldVerifyArtifact('/out/APP.DMG'), 'Case A: the extension match is case-insensitive');
   assert(
     !shouldVerifyArtifact('/out/Cyboflow-1.0.0-macOS-arm64.zip.blockmap'),
@@ -213,6 +229,47 @@ async function caseH() {
 }
 
 // ---------------------------------------------------------------------------
+// Case I: Windows NSIS .exe artifacts get their own (lower) floor
+// ---------------------------------------------------------------------------
+async function caseI() {
+  await withTmpDir(async (tmpDir) => {
+    const stubExe = path.join(tmpDir, 'Cyboflow-9.9.9-Windows-x64.exe');
+    writeSparseFile(stubExe, 215 * 1024);
+
+    const stubResult = await runCapturing(winArtifact(stubExe));
+    assert(stubResult.message !== '', 'Case I: a 215K .exe throws');
+    assert(
+      stubResult.message.includes('floor is 50.0 MB'),
+      'Case I: the win floor is 50 MB (NSIS compresses harder than a DMG)'
+    );
+
+    const realExe = path.join(tmpDir, 'Cyboflow-9.9.9-Windows-x64-real.exe');
+    writeSparseFile(realExe, 60 * 1024 * 1024);
+    const realResult = await runCapturing(winArtifact(realExe));
+    assert(realResult.error === null, 'Case I: a 60 MB .exe passes the win floor');
+
+    // Both spellings electron-builder uses reach the same floor.
+    const legacyResult = await runCapturing(winArtifactLegacyName(stubExe));
+    assert(
+      legacyResult.message.includes('floor is 50.0 MB'),
+      'Case I: the legacy "win" spelling reaches the same floor'
+    );
+
+    // A mac-context .exe (there is none in practice) must still use the mac
+    // floor — the floor follows the PLATFORM, not the extension.
+    await withTmpDir(async (tmpDir2) => {
+      const macExe = path.join(tmpDir2, 'odd.exe');
+      writeSparseFile(macExe, 60 * 1024 * 1024);
+      const macResult = await runCapturing(macArtifact(macExe));
+      assert(
+        macResult.message.includes('floor is 100.0 MB'),
+        'Case I: a .exe judged under the mac platform uses the 100 MB floor'
+      );
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 (async () => {
@@ -225,6 +282,7 @@ async function caseH() {
   await caseF();
   await caseG();
   await caseH();
+  await caseI();
 
   console.log(`\nResults: ${passed} passed, ${failed} failed`);
   process.exit(failed > 0 ? 1 : 0);

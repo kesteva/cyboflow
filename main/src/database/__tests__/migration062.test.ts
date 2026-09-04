@@ -160,8 +160,9 @@ describe('Migration 062: approve-ideas artifact atype', () => {
 
   it('(e) the fresh-DB initialize() path includes approve-ideas in the atype CHECK', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration062-'));
+    let svc: DatabaseService | undefined;
     try {
-      const svc = new DatabaseService(join(dir, 'test.db'));
+      svc = new DatabaseService(join(dir, 'test.db'));
       svc.setMigrationsDirForTesting(join(__dirname, '..', 'migrations'));
       svc.initialize();
       const db = svc.getDb();
@@ -196,6 +197,7 @@ describe('Migration 062: approve-ideas artifact atype', () => {
           .run(),
       ).toThrow(/CHECK/i);
     } finally {
+      try { svc?.close(); } catch { /* already closed */ }
       rmSync(dir, { recursive: true, force: true });
     }
   });

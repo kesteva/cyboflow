@@ -128,10 +128,13 @@ export class Orchestrator {
    * Stop the orchestrator.
    *
    * Drains all per-run queues via RunQueueRegistry.drainAll() before
-   * resolving, ensuring in-flight state mutations complete cleanly.
-   * If not running, returns immediately.
+   * resolving, so in-flight state mutations complete cleanly. If not running,
+   * returns immediately.
+   *
+   * `shouldWaitForQueue` is passed straight through: it answers false for a run
+   * whose queued task cannot finish, so the drain does not wait on it.
    */
-  async stop(): Promise<void> {
+  async stop(shouldWaitForQueue?: (runId: string) => boolean): Promise<void> {
     if (!this.running) {
       return;
     }
@@ -150,7 +153,7 @@ export class Orchestrator {
     this.detectorEvents = undefined;
     this.onDetectorStuck = undefined;
 
-    await this.deps.runQueues.drainAll();
+    await this.deps.runQueues.drainAll({ shouldWait: shouldWaitForQueue });
     this.deps.logger.info('orchestrator.stop.complete');
   }
 

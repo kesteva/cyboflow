@@ -33,6 +33,7 @@ class CommandExecutor {
     const { silent: _silent, ...cleanOptions } = extendedOptions || {};
     const enhancedOptions = {
       ...cleanOptions,
+      windowsHide: true,
       env: {
         ...process.env,
         ...cleanOptions?.env,
@@ -79,6 +80,7 @@ class CommandExecutor {
     const enhancedOptions: ExecOptions = {
       ...options,
       timeout,
+      windowsHide: true,
       env: {
         ...process.env,
         ...options?.env,

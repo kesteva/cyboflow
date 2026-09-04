@@ -175,8 +175,9 @@ describe('Migration 063: one idea-spec per idea (split identity)', () => {
 
   it('(g) the fresh-DB initialize() path lands the split identity rule', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration063-'));
+    let svc: DatabaseService | undefined;
     try {
-      const svc = new DatabaseService(join(dir, 'test.db'));
+      svc = new DatabaseService(join(dir, 'test.db'));
       svc.setMigrationsDirForTesting(join(__dirname, '..', 'migrations'));
       svc.initialize();
       const db = svc.getDb();
@@ -214,6 +215,7 @@ describe('Migration 063: one idea-spec per idea (split identity)', () => {
           .run(),
       ).toThrow(/UNIQUE/i);
     } finally {
+      try { svc?.close(); } catch { /* already closed */ }
       rmSync(dir, { recursive: true, force: true });
     }
   });

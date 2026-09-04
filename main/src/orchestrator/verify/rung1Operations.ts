@@ -35,6 +35,7 @@
  */
 import type { Rung1Operation } from './runbookDraft';
 import { targetFileForOperation } from './runbookDraft';
+import { normalizePathSeparators } from '../../utils/posixPath';
 
 /**
  * Paths a rung-1 operation may NEVER touch, whatever shape it claims.
@@ -89,7 +90,7 @@ export type Rung1ApplyResult = { ok: true; content: string } | { ok: false; erro
  * bugs live.
  */
 export function normalizeRung1Path(file: string): { ok: true; path: string } | { ok: false; error: string } {
-  const raw = file.trim().replace(/\\/g, '/');
+  const raw = normalizePathSeparators(file.trim());
   if (raw.length === 0) return { ok: false, error: 'operation target path is empty' };
   if (raw.startsWith('/') || /^[A-Za-z]:\//.test(raw)) {
     return { ok: false, error: `operation target must be repo-relative, not absolute: ${file}` };

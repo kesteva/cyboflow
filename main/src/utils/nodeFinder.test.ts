@@ -38,23 +38,31 @@ describe('findNodeExecutable', () => {
   it('memoizes the resolved path: a second call does not re-probe fs.accessSync or PATH', async () => {
     // Not found in PATH, so resolution falls through to the common-locations
     // list, which probes fs.accessSync on candidates that fs.existsSync reports.
-    mockFindExecutableInPath.mockReturnValue(null);
-    vi.mocked(fs.existsSync).mockImplementation((p) => p === '/usr/local/bin/node');
-    vi.mocked(fs.accessSync).mockImplementation((p) => {
-      if (p === '/usr/local/bin/node') return undefined;
-      throw new Error('EACCES');
-    });
+    // Pin the POSIX list so the probed candidate is the same literal string on
+    // every host (the win32 list would make this test Windows-host-dependent).
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'linux', writable: true });
+    try {
+      mockFindExecutableInPath.mockReturnValue(null);
+      vi.mocked(fs.existsSync).mockImplementation((p) => p === '/usr/local/bin/node');
+      vi.mocked(fs.accessSync).mockImplementation((p) => {
+        if (p === '/usr/local/bin/node') return undefined;
+        throw new Error('EACCES');
+      });
 
-    const first = await findNodeExecutable();
-    expect(first).toBe('/usr/local/bin/node');
-    expect(fs.accessSync).toHaveBeenCalledTimes(1);
-    expect(mockFindExecutableInPath).toHaveBeenCalledTimes(1);
+      const first = await findNodeExecutable();
+      expect(first).toBe('/usr/local/bin/node');
+      expect(fs.accessSync).toHaveBeenCalledTimes(1);
+      expect(mockFindExecutableInPath).toHaveBeenCalledTimes(1);
 
-    const second = await findNodeExecutable();
-    expect(second).toBe('/usr/local/bin/node');
-    // Cached — neither probe ran again.
-    expect(fs.accessSync).toHaveBeenCalledTimes(1);
-    expect(mockFindExecutableInPath).toHaveBeenCalledTimes(1);
+      const second = await findNodeExecutable();
+      expect(second).toBe('/usr/local/bin/node');
+      // Cached — neither probe ran again.
+      expect(fs.accessSync).toHaveBeenCalledTimes(1);
+      expect(mockFindExecutableInPath).toHaveBeenCalledTimes(1);
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform, writable: true });
+    }
   });
 
   it('does not cache a resolution failure — a later call retries', async () => {
@@ -85,5 +93,28 @@ describe('findNodeExecutable', () => {
     const second = await findNodeExecutable();
     expect(second).toBe('/usr/local/bin/node');
     expect(mockFindExecutableInPath).toHaveBeenCalledTimes(2);
+  });
+
+  it('strips CR from `where node` output on win32 — a CRLF first line must still resolve', async () => {
+    // `where` emits CRLF; the old `.trim().split('\n')[0]` only trimmed the
+    // FINAL line, leaving `...node.exe\r` — which fs.existsSync rejects. The
+    // resolved path is deliberately NOT a common-install-location candidate
+    // (those are probed before `where` on every host), so resolution can only
+    // succeed through the `where` output.
+    const originalPlatform = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32', writable: true });
+    try {
+      const firstHit = 'D:\\tools\\node-lts\\node.exe';
+      mockFindExecutableInPath.mockReturnValue(null);
+      // No common install location exists, so resolution reaches the `where` probe.
+      vi.mocked(fs.existsSync).mockImplementation((p) => p === firstHit);
+      mockExecSync.mockReturnValue(`${firstHit}\r\nD:\\elsewhere\\node.exe\r\n`);
+
+      const resolved = await findNodeExecutable();
+      expect(mockExecSync).toHaveBeenCalledWith('where node', { encoding: 'utf8', windowsHide: true });
+      expect(resolved).toBe(firstHit);
+    } finally {
+      Object.defineProperty(process, 'platform', { value: originalPlatform, writable: true });
+    }
   });
 });

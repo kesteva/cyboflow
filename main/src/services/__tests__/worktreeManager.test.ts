@@ -12,7 +12,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { execSync } from 'child_process';
-import { writeFileSync, existsSync, mkdirSync } from 'fs';
+import { writeFileSync, existsSync, mkdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { WorktreeManager, MergeConflictError, isMergeConflictError } from '../worktreeManager';
 import { withTempDir } from '../../__test_fixtures__/tmp';
@@ -330,7 +330,8 @@ describe('WorktreeManager.mergeWorktreeToBranch (integration)', () => {
 
       // Second task is cut off the ADVANCED integration tip → sees a.txt → no conflict.
       const wtB = (await manager.createDeterministicWorktree(tmpDir, 'task', 'b'.repeat(32), integ)).worktreePath;
-      expect(execSync('cat a.txt', { cwd: wtB }).toString().trim()).toBe('A'); // prereq visible
+      // (fs read, not `cat` — a POSIX binary absent from the Windows PATH.)
+      expect(readFileSync(join(wtB, 'a.txt'), 'utf8').trim()).toBe('A'); // prereq visible
       execSync('git config user.email "t@e.com"', { cwd: wtB, stdio: 'pipe' });
       execSync('git config user.name "T"', { cwd: wtB, stdio: 'pipe' });
       execSync('echo B > b.txt && git add -A && git commit -m b', { cwd: wtB, stdio: 'pipe' });
@@ -520,7 +521,9 @@ describe('WorktreeManager.squashAndMergeWorktreeToMain (integration)', () => {
       // Exactly one new commit landed on main, directly atop its previous tip.
       const count = execSync(`git rev-list --count ${mainBefore}..${main}`, { cwd: tmpDir }).toString().trim();
       expect(count).toBe('1');
-      expect(shaOf(tmpDir, `${main}^`)).toBe(mainBefore); // squash is a child of the advanced tip
+      // (`~1` rather than `^`: cmd.exe strips a trailing caret, so `rev-parse
+      // <branch>^` silently resolves to <branch> itself on Windows.)
+      expect(shaOf(tmpDir, `${main}~1`)).toBe(mainBefore); // squash is a child of the advanced tip
 
       // The tree contains BOTH main's advanced file and the branch's files.
       expect(execSync(`git show ${main}:m.txt`, { cwd: tmpDir }).toString().trim()).toBe('main-adv');

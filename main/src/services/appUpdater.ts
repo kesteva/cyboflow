@@ -97,12 +97,25 @@ export class AppUpdater {
     private readonly app: App,
     private readonly getMainWindow: () => BrowserWindow | null,
     private readonly logger?: Logger,
+    /**
+     * Test seam: the host platform gates the updater (a feed exists for
+     * macOS only today), and tests must be deterministic on every host.
+     */
+    private readonly platform: NodeJS.Platform = process.platform,
   ) {}
 
   /** Wire events + kick off a delayed first check. Safe to call once at boot. */
   init(): void {
     if (!this.app.isPackaged) {
       this.logger?.verbose('[AppUpdater] dev build — auto-updater disabled');
+      return;
+    }
+    if (this.platform !== 'darwin') {
+      // No update feed exists for non-macOS platforms yet (the R2 feed only
+      // carries macOS artifacts, and electron-updater would log a hard ENOENT
+      // for the missing app-update.yml on every interval). Log once, disable.
+      // Revisit when a Windows feed (latest.yml) ships.
+      this.logger?.verbose('[AppUpdater] no update feed for this platform — auto-updater disabled');
       return;
     }
     autoUpdater.autoDownload = false;
@@ -124,7 +137,9 @@ export class AppUpdater {
    */
   async check(): Promise<UpdateCheckResult> {
     const currentVersion = this.app.getVersion();
-    if (!this.app.isPackaged) {
+    if (!this.app.isPackaged || this.platform !== 'darwin') {
+      // Mirrors init(): no feed exists for non-macOS platforms (yet), so an
+      // updater verdict there is not "no update" but "not supported".
       return { supported: false, currentVersion, updateAvailable: false };
     }
     try {

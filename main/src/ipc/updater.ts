@@ -3,6 +3,7 @@ import type { AppServices } from './types';
 import * as fs from 'fs';
 import * as path from 'path';
 import { commandExecutor } from '../utils/commandExecutor';
+import { quoteForShellString, resolveGitCommand } from '../utils/gitExeFinder';
 import { getCurrentWorktreeName } from '../utils/worktreeUtils';
 import { getCyboflowDirectory } from '../utils/cyboflowDirectory';
 import { AppUpdater } from '../services/appUpdater';
@@ -72,11 +73,13 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices)
       if (!app.isPackaged) {
         console.log('[Version Debug] Development mode detected, getting git info...');
         try {
-          const gitHash = commandExecutor.execSync('git rev-parse --short HEAD', { 
+          // gitExeFinder: a dev launch may still have git off the inherited PATH.
+          const gitCommand = quoteForShellString(resolveGitCommand());
+          const gitHash = commandExecutor.execSync(`${gitCommand} rev-parse --short HEAD`, {
             encoding: 'utf8',
             cwd: process.cwd()
           }).trim();
-          
+
           // Check if the working directory is clean (no uncommitted changes)
           try {
             interface ExtendedExecOptions {
@@ -84,7 +87,7 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices)
               cwd: string;
               silent?: boolean;
             }
-            commandExecutor.execSync('git diff-index --quiet HEAD --', { 
+            commandExecutor.execSync(`${gitCommand} diff-index --quiet HEAD --`, {
               encoding: 'utf8',
               cwd: process.cwd(),
               silent: true

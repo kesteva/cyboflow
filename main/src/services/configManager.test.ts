@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import * as path from 'node:path';
 
 // Mock electron before importing modules that depend on it
 vi.mock('electron', () => ({
@@ -40,7 +41,9 @@ vi.mock('fs/promises', () => ({
 let ConfigManager: typeof import('./configManager').ConfigManager;
 
 describe('ConfigManager migration: enableCrystalFooter → enableCyboflowFooter', () => {
-  const CONFIG_PATH = '/mock/cyboflow/config.json';
+  // Built with path.join: ConfigManager joins the mocked cyboflow dir with the
+  // host separator, so on win32 the key is '\mock\cyboflow\config.json'.
+  const CONFIG_PATH = path.join('/mock/cyboflow', 'config.json');
 
   beforeEach(async () => {
     vi.resetModules();

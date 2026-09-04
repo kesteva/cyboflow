@@ -32,6 +32,7 @@ import {
   MAX_VIEWABLE_BYTES,
 } from '../runFileExplorer';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
+import { createDirSymlink, fileSymlinksNeedPrivilege } from '../../__test_fixtures__/symlink';
 import { createTestDb, seedRun } from '../__test_fixtures__/orchestratorTestDb';
 
 const RUN_ID = 'run-fe-001';
@@ -179,13 +180,16 @@ describe('runFileExplorer', () => {
   });
 
   it('rejects a symlink that points outside the worktree', async () => {
-    // A secret file OUTSIDE the worktree, with a symlink to it INSIDE.
+    // A secret OUTSIDE the worktree, reached through a DIRECTORY link inside it
+    // (a junction on win32, where file symlinks need privileges). The escape
+    // shape — realpath resolving outside — is what's under test, not the link kind.
     const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-outside-'));
-    const secret = path.join(outsideDir, 'secret.txt');
-    fs.writeFileSync(secret, 'top secret');
+    fs.writeFileSync(path.join(outsideDir, 'secret.txt'), 'top secret');
     try {
-      fs.symlinkSync(secret, path.join(worktree, 'link.txt'));
-      await expect(readRunFile(dbAdapter(db), RUN_ID, 'link.txt')).rejects.toMatchObject({
+      createDirSymlink(outsideDir, path.join(worktree, 'linkdir'));
+      await expect(
+        readRunFile(dbAdapter(db), RUN_ID, path.join('linkdir', 'secret.txt')),
+      ).rejects.toMatchObject({
         reason: 'invalid-path',
       });
     } finally {
@@ -209,7 +213,12 @@ describe('runFileExplorer', () => {
     });
   });
 
-  it('does not leak the size/type of a symlink whose target is OUTSIDE the worktree', async () => {
+  // POSIX-only fixture: a symlinked FILE needs privileges on win32 (a junction
+  // cannot point at a file); the out-of-scope escape is covered above through a
+  // directory link on win32.
+  it.skipIf(fileSymlinksNeedPrivilege)(
+    'does not leak the size/type of a symlink whose target is OUTSIDE the worktree',
+    async () => {
     const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-outside-'));
     const secret = path.join(outsideDir, 'secret.txt');
     fs.writeFileSync(secret, 'top secret payload'); // 18 bytes — must NOT surface
@@ -224,9 +233,14 @@ describe('runFileExplorer', () => {
     } finally {
       fs.rmSync(outsideDir, { recursive: true, force: true });
     }
-  });
+    },
+  );
 
-  it('follows an IN-worktree symlink for type and size', async () => {
+  // POSIX-only fixture: the FILE half of the follow check needs a file symlink,
+  // which needs privileges on win32.
+  it.skipIf(fileSymlinksNeedPrivilege)(
+    'follows an IN-worktree symlink for type and size',
+    async () => {
     fs.mkdirSync(path.join(worktree, 'realdir'));
     fs.writeFileSync(path.join(worktree, 'realfile.txt'), 'hello in-tree'); // 13 bytes
     fs.symlinkSync(path.join(worktree, 'realfile.txt'), path.join(worktree, 'linkfile'));
@@ -239,10 +253,13 @@ describe('runFileExplorer', () => {
     expect(linkfile).toMatchObject({ isDirectory: false });
     expect(linkfile?.size).toBe(Buffer.byteLength('hello in-tree'));
     expect(linkdir).toMatchObject({ isDirectory: true });
-  });
+    },
+  );
 
   it('lists a broken (dangling) symlink as a leaf rather than dropping or throwing', async () => {
-    fs.symlinkSync(path.join(worktree, 'does-not-exist'), path.join(worktree, 'dangling'));
+    // A dangling DIRECTORY link (junction on win32) — both platforms lstat it as
+    // a link whose target does not resolve, which is the shape under test.
+    createDirSymlink(path.join(worktree, 'does-not-exist'), path.join(worktree, 'dangling'));
     fs.writeFileSync(path.join(worktree, 'keep.txt'), 'x');
     const entries = await listRunFiles(dbAdapter(db), RUN_ID);
     const dangling = entries.find((e) => e.name === 'dangling');
@@ -282,8 +299,12 @@ describe('runFileExplorer', () => {
     fs.writeFileSync(path.join(sibling, 'secret.txt'), 'sibling secret');
     seedRun(db, { id: 'run-prefix', projectId: 1, worktreePath: wt });
     try {
-      fs.symlinkSync(path.join(sibling, 'secret.txt'), path.join(wt, 'link'));
-      await expect(readRunFile(dbAdapter(db), 'run-prefix', 'link')).rejects.toMatchObject({
+      // A DIRECTORY link (junction on win32) to the sibling; the read goes
+      // through it, so realpath lands in base/wt-evil — the prefix-safety shape.
+      createDirSymlink(sibling, path.join(wt, 'link'));
+      await expect(
+        readRunFile(dbAdapter(db), 'run-prefix', path.join('link', 'secret.txt')),
+      ).rejects.toMatchObject({
         reason: 'invalid-path',
       });
     } finally {

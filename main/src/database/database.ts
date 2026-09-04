@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { readFileSync, mkdirSync, readdirSync } from 'fs';
-import { join, dirname } from 'path';
+import { join, dirname, basename } from 'path';
 import type { Project, ProjectRunCommand, Folder, Session, SessionOutput, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, CreatePanelExecutionDiffData, SessionSummary, SessionSummaryEntry } from './models';
 import type { ToolPanel, ToolPanelType, ToolPanelState, ToolPanelMetadata } from '../../../shared/types/panels';
 import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
@@ -572,7 +572,10 @@ export class DatabaseService {
           const gitRepoPath = configManager.getGitRepoPath();
           
           if (gitRepoPath) {
-            const projectName = gitRepoPath.split('/').pop() || 'Default Project';
+            // basename, not split('/'): on Windows the repo path is
+            // backslash-separated, so splitting on '/' would name the project
+            // after the entire path.
+            const projectName = basename(gitRepoPath) || 'Default Project';
             const result = this.db.prepare(`
               INSERT INTO projects (name, path, active)
               VALUES (?, ?, 1)

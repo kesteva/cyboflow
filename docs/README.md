@@ -18,6 +18,7 @@ no nested agent-guide files.
 | [`CODE-PATTERNS.md`](CODE-PATTERNS.md) | Canonical code patterns: write chokepoints, type parity, test conventions |
 | [`RELEASE-RUNBOOK.md`](RELEASE-RUNBOOK.md) | The release procedure: gate → 4 signed per-arch DMGs → R2 feeds → GitHub |
 | [`UPDATES.md`](UPDATES.md) | R2 update channel, feed mechanics, per-variant data-dir resolution |
+| [`WINDOWS-BUILD.md`](WINDOWS-BUILD.md) | Building for Windows, and the platform decisions behind the port |
 | [`BACKUP-RESTORE.md`](BACKUP-RESTORE.md) | sessions.db snapshots, raw_events shard archive, restore procedure |
 | [`VISUAL-VERIFICATION-SETUP.md`](VISUAL-VERIFICATION-SETUP.md) | Seeing/driving the UI: CDP on :9223, Peekaboo fallback |
 | [`SHELL-LAYOUT.md`](SHELL-LAYOUT.md) | Renderer shell geometry and navigation state |

@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "tsc -w",
     "build": "rimraf dist && tsc && npm run copy:assets && node scripts/mark-hooks-executable.js",
-    "copy:assets": "mkdirp dist/main/src/database/migrations dist/main/src/orchestrator/workflows && cp src/database/*.sql dist/main/src/database/ && cp src/database/migrations/*.sql dist/main/src/database/migrations/ && node scripts/copy-workflow-assets.js",
+    "copy:assets": "node scripts/copy-assets.js && node scripts/copy-workflow-assets.js",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
@@ -18,7 +18,7 @@
     "@anthropic-ai/claude-agent-sdk": "^0.3.257",
     "@anthropic-ai/sdk": "^0.110.0",
     "@aptabase/electron": "^0.3.1",
-    "@homebridge/node-pty-prebuilt-multiarch": "^0.12.0",
+    "@homebridge/node-pty-prebuilt-multiarch": "^0.14.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@openai/codex": "0.144.3",
     "@sentry/electron": "^7.13.0",

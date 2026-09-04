@@ -12,6 +12,11 @@
  *   Case D: lean packaging plan    → every foreign Claude/Codex native package and
  *                                    every non-target better-sqlite3 prebuild excluded
  *   Case E: BUILD_ARCH=<host arch> → generated config applies the tested plan
+ *   Case F: BUILD_PLATFORM=win     → npmRebuild false + the Electron-ABI guard passes
+ *                                    (probe stubbed via __setAbiProbeForTesting — no native
+ *                                    artifact needed on the test host)
+ *   Case F2: probe reports wrong ABI → hard exit(1) with the fix-it command
+ *   Case F3: CYBOFLOW_WIN_NPM_REBUILD=1 → the ABI probe is skipped entirely
  *
  * Every case also asserts that package.json on disk is byte-for-byte UNCHANGED (the whole
  * point of the generated-config approach) and that the on-disk generated file matches the
@@ -34,7 +39,7 @@ function assert(condition, message) {
   }
 }
 
-function runCase(label, envOverrides, assertFn) {
+function runCase(label, envOverrides, assertFn, preConfigure) {
   console.log('\n--- ' + label + ' ---');
 
   // Snapshot package.json bytes to prove it is never mutated
@@ -52,6 +57,7 @@ function runCase(label, envOverrides, assertFn) {
     'APPLE_APP_PASSWORD',
     'BUILD_VARIANT',
     'BUILD_ARCH',
+    'BUILD_PLATFORM',
   ];
 
   for (const key of managedKeys) {
@@ -70,8 +76,13 @@ function runCase(label, envOverrides, assertFn) {
     // Invalidate require cache so configure-build.js re-reads package.json fresh
     const cbPath = require.resolve('./configure-build.js');
     delete require.cache[cbPath];
-    const { configureBuild, GENERATED_CONFIG_PATH } = require('./configure-build.js');
+    const mod = require('./configure-build.js');
+    const { configureBuild, GENERATED_CONFIG_PATH } = mod;
     generatedPath = GENERATED_CONFIG_PATH;
+
+    // Test seam: let a case inject a stub ABI probe (or otherwise touch the
+    // fresh module) BEFORE configureBuild() runs.
+    if (preConfigure) preConfigure(mod);
 
     const config = configureBuild();
 
@@ -229,6 +240,53 @@ try {
 }
 
 try {
+  // Case D2 is pure: exercises the Windows lean-packaging plan on every host
+  // regardless of which optional agent packages are installed there.
+  const { getWinPackagingPlan } = require('./configure-build.js');
+  for (const targetArch of ['x64', 'arm64']) {
+    const otherArch = targetArch === 'x64' ? 'arm64' : 'x64';
+    const plan = getWinPackagingPlan(targetArch);
+    assert(plan !== null, `a ${targetArch} win lean-packaging plan should exist`);
+    assert(plan.requiredBinaries.length === 2, 'both agent binaries should be required');
+    assert(
+      plan.requiredBinaries.some(
+        (entry) => entry.packageName === `@anthropic-ai/claude-agent-sdk-win32-${targetArch}` &&
+          entry.relativePath.endsWith('claude.exe')
+      ),
+      `the ${targetArch} Windows Claude binary (claude.exe) should be required`
+    );
+    const codexTriple = targetArch === 'x64' ? 'x86_64-pc-windows-msvc' : 'aarch64-pc-windows-msvc';
+    assert(
+      plan.requiredBinaries.some((entry) =>
+        entry.relativePath.includes(`codex-win32-${targetArch}`) &&
+        entry.relativePath.includes(`vendor${path.sep}${codexTriple}${path.sep}bin${path.sep}codex.exe`)
+      ),
+      `the ${targetArch} Windows Codex binary (codex.exe, ${codexTriple}) should be required`
+    );
+    assert(
+      plan.exclusions.includes(`!node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/**`) &&
+        plan.exclusions.includes(`!node_modules/@anthropic-ai/claude-agent-sdk-win32-${otherArch}/**`),
+      `foreign Claude packages (darwin, other win32 arch) should be excluded for ${targetArch}`
+    );
+    assert(
+      plan.exclusions.includes(`!node_modules/@openai/codex-linux-x64/**`) &&
+        plan.exclusions.includes(`!node_modules/@openai/codex-darwin-x64/**`),
+      'foreign Codex operating-system packages should be excluded'
+    );
+    assert(
+      !plan.exclusions.includes(`!node_modules/@openai/codex-win32-${targetArch}/**`) &&
+        !plan.exclusions.includes(`!node_modules/@anthropic-ai/claude-agent-sdk-win32-${targetArch}/**`),
+      'the target win32 packages must not be excluded'
+    );
+  }
+  assert(getWinPackagingPlan(undefined) === null, 'an unset architecture should preserve win packaging');
+  console.log('\nPASS: Case D2 (win Claude/Codex packaging plans)');
+} catch (err) {
+  console.error('FAIL: Case D2 — ' + err.message);
+  failed = true;
+}
+
+try {
   // Case E applies the plan to the generated config. The preflight requires both
   // TARGET binaries on disk, so only run when this darwin host has both packages.
   const hostArch = process.arch === 'x64' ? 'x64' : 'arm64';
@@ -280,6 +338,139 @@ try {
   }
 } catch (err) {
   console.error('FAIL: Case E — ' + err.message);
+  failed = true;
+}
+
+try {
+  // Case F: a full Windows configureBuild run. Like Case E, the preflight
+  // requires the TARGET win32 binaries on disk, so only run on a host that
+  // actually installed them (a Windows dev box).
+  const claudeWinBinary = path.join(
+    __dirname, '..', 'node_modules', '@anthropic-ai', 'claude-agent-sdk-win32-x64', 'claude.exe'
+  );
+  const codexWinBinary = path.join(
+    __dirname, '..', 'node_modules', '@openai', 'codex-win32-x64',
+    'vendor', 'x86_64-pc-windows-msvc', 'bin', 'codex.exe'
+  );
+  if (fs.existsSync(claudeWinBinary) && fs.existsSync(codexWinBinary)) {
+    runCase(
+      'Case F: BUILD_PLATFORM=win (Windows packaging posture)',
+      { BUILD_PLATFORM: 'win', BUILD_ARCH: 'x64' },
+      function (config) {
+        assert(config.npmRebuild === false, 'win build must package the prebuilt .node files, not rebuild');
+        assert(
+          config.win && config.win.artifactName === '${productName}-${version}-Windows-${arch}.${ext}',
+          'the win artifactName should be the stable-variant convention'
+        );
+        assert(config.appId === 'com.cyboflow.app', 'win stable build keeps the stable appId');
+        assert(
+          Array.isArray(config.files) && config.files.includes('!node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/**'),
+          'win files should exclude the darwin Claude package'
+        );
+        assert(
+          !config.files.includes('!node_modules/@anthropic-ai/claude-agent-sdk-win32-x64/**'),
+          'win files must not exclude the target win32-x64 Claude package'
+        );
+        // The Apple signing posture must be left untouched for a win build.
+        assert(config.mac.notarize === true, 'win build should not mutate the mac notarize field');
+      },
+      // The ABI probe spawns a real child Electron against the installed
+      // better-sqlite3, which this host cannot guarantee (--ignore-scripts
+      // checkouts have no native artifact). Stub it — the probe's own
+      // branches are covered by Cases F2/F3.
+      function (mod) {
+        mod.__setAbiProbeForTesting(function () {
+          return { ok: true, output: 'stub: artifact loads under the electron ABI' };
+        });
+      }
+    );
+  } else {
+    console.log('\n--- Case F: skipped (win32 agent binaries are not installed on this host) ---');
+  }
+} catch (err) {
+  console.error('FAIL: Case F — ' + err.message);
+  failed = true;
+}
+
+try {
+  // Case F2: with npmRebuild off, a probe that reports the installed
+  // better-sqlite3 does NOT load under the Electron ABI must hard-exit(1)
+  // before electron-builder runs — packaged as-is it would crash at runtime.
+  const savedBuildPlatform = process.env.BUILD_PLATFORM;
+  process.env.BUILD_PLATFORM = 'win';
+
+  const packageJsonBefore = fs.readFileSync(PACKAGE_JSON, 'utf8');
+  const cbPath = require.resolve('./configure-build.js');
+  delete require.cache[cbPath];
+  const mod = require('./configure-build.js');
+  mod.__setAbiProbeForTesting(function () {
+    return { ok: false, output: 'stub: artifact does NOT load under the electron ABI' };
+  });
+
+  const realExit = process.exit;
+  let exitCode = null;
+  process.exit = function (code) {
+    exitCode = code;
+    throw new Error('PROCESS_EXIT');
+  };
+  try {
+    mod.configureBuild();
+    throw new Error('configureBuild should have exited on the failed ABI probe');
+  } catch (err) {
+    if (err.message !== 'PROCESS_EXIT') throw err;
+  } finally {
+    process.exit = realExit;
+    if (fs.existsSync(mod.GENERATED_CONFIG_PATH)) fs.unlinkSync(mod.GENERATED_CONFIG_PATH);
+    if (savedBuildPlatform === undefined) delete process.env.BUILD_PLATFORM;
+    else process.env.BUILD_PLATFORM = savedBuildPlatform;
+  }
+
+  assert(exitCode === 1, 'the failed ABI probe must exit with code 1');
+  assert(
+    fs.readFileSync(PACKAGE_JSON, 'utf8') === packageJsonBefore,
+    'package.json must not be mutated on the ABI-guard failure path'
+  );
+  console.log('\nPASS: Case F2 (win ABI-guard hard failure)');
+} catch (err) {
+  console.error('FAIL: Case F2 — ' + err.message);
+  failed = true;
+}
+
+try {
+  // Case F3: CYBOFLOW_WIN_NPM_REBUILD=1 restores electron-builder's own
+  // rebuild step, which puts better-sqlite3 on the Electron ABI itself — so
+  // the prebuilt artifact's ABI is irrelevant and the probe must not run.
+  const savedBuildPlatform = process.env.BUILD_PLATFORM;
+  const savedNpmRebuild = process.env.CYBOFLOW_WIN_NPM_REBUILD;
+  process.env.BUILD_PLATFORM = 'win';
+  // BUILD_ARCH deliberately unset: the lean-packaging preflight needs the
+  // win32 agent binaries on disk, so a universal build skips it — this case
+  // is host-independent.
+  process.env.CYBOFLOW_WIN_NPM_REBUILD = '1';
+
+  const cbPath = require.resolve('./configure-build.js');
+  delete require.cache[cbPath];
+  const mod = require('./configure-build.js');
+  let probeCalls = 0;
+  mod.__setAbiProbeForTesting(function () {
+    probeCalls++;
+    return { ok: false, output: 'stub: must not be consulted' };
+  });
+
+  try {
+    const config = mod.configureBuild();
+    assert(config.npmRebuild === true, 'CYBOFLOW_WIN_NPM_REBUILD=1 must re-enable npmRebuild');
+    assert(probeCalls === 0, 'the ABI probe must be skipped when electron-builder will rebuild');
+  } finally {
+    if (fs.existsSync(mod.GENERATED_CONFIG_PATH)) fs.unlinkSync(mod.GENERATED_CONFIG_PATH);
+    if (savedBuildPlatform === undefined) delete process.env.BUILD_PLATFORM;
+    else process.env.BUILD_PLATFORM = savedBuildPlatform;
+    if (savedNpmRebuild === undefined) delete process.env.CYBOFLOW_WIN_NPM_REBUILD;
+    else process.env.CYBOFLOW_WIN_NPM_REBUILD = savedNpmRebuild;
+  }
+  console.log('\nPASS: Case F3 (CYBOFLOW_WIN_NPM_REBUILD=1 skips the ABI probe)');
+} catch (err) {
+  console.error('FAIL: Case F3 — ' + err.message);
   failed = true;
 }
 

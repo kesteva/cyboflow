@@ -14,6 +14,7 @@ import type { Session, GitStatus } from '../types/session';
 import { useContextMenu } from '../contexts/ContextMenuContext';
 import { IconButton } from './ui/IconButton';
 import { cn } from '../utils/cn';
+import { pathBasename } from '../utils/pathBasename';
 
 interface SessionListItemProps {
   session: Session;
@@ -586,7 +587,7 @@ export const SessionListItem = memo(function SessionListItem({ session, isNested
         onClose={() => setShowArchiveConfirm(false)}
         onConfirm={handleConfirmArchive}
         title={`Archive Session`}
-        message={`Archive session "${session.name}"? This will:\n\n• Move the session to the archived sessions list\n• Preserve all session history and outputs\n${session.isMainRepo ? '• Close the active Claude Code connection' : session.inPlace ? '• Work directly in your project checkout — no worktree will be removed' : `• Remove the git worktree locally (${session.worktreePath?.split('/').pop() || 'worktree'})`}`}
+        message={`Archive session "${session.name}"? This will:\n\n• Move the session to the archived sessions list\n• Preserve all session history and outputs\n${session.isMainRepo ? '• Close the active Claude Code connection' : session.inPlace ? '• Work directly in your project checkout — no worktree will be removed' : `• Remove the git worktree locally (${(session.worktreePath ? pathBasename(session.worktreePath) : '') || 'worktree'})`}`}
         confirmText="Archive"
         confirmButtonClass="bg-status-warning hover:bg-status-warning-hover text-white"
         icon={<Archive className="w-6 h-6 text-status-warning flex-shrink-0" />}

@@ -3,8 +3,9 @@
  *
  * Prefer argv-based execution (main/src/utils/runGit.ts, execFile/spawn) for new
  * code — these string builders exist only for the remaining `/bin/sh` callers
- * (currently runCommandManager). The git-command-string builders were removed
- * once every git call site migrated to runGit.
+ * (currently ShellDetector.buildCommandString's POSIX arm, on behalf of
+ * runCommandManager and sessionManager). The git-command-string builders were
+ * removed once every git call site migrated to runGit.
  */
 
 /**

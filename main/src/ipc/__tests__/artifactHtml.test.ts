@@ -237,7 +237,11 @@ describe('registerArtifactHtmlHandlers — artifacts:load-html', () => {
     expect(res.data?.html).toBeNull();
   });
 
-  it('rejects a symlinked index.html (fail-soft null)', async () => {
+  // POSIX-only fixture: staging a symlinked FILE requires privileges on win32
+  // (no unprivileged stand-in — a junction cannot point at a file).
+  it.skipIf(process.platform === 'win32')(
+    'rejects a symlinked index.html (fail-soft null)',
+    async () => {
     const outside = path.join(tmpRoot, 'evil.html');
     await fs.writeFile(outside, '<html><body>evil</body></html>', 'utf-8');
     const file = runProtoFile(RUN_ID);
@@ -251,7 +255,8 @@ describe('registerArtifactHtmlHandlers — artifacts:load-html', () => {
     const res = await invoke(handlers, 'artifacts:load-html', { runId: RUN_ID, atype: 'ui-prototype' });
     expect(res.success).toBe(true);
     expect(res.data?.html).toBeNull();
-  });
+    },
+  );
 
   it('rejects an oversized prototype (fail-soft null)', async () => {
     await writeRunProto(RUN_ID, 'x'.repeat(MAX_PROTOTYPE_HTML_BYTES + 1));
