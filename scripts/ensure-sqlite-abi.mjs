@@ -118,6 +118,11 @@ function artifactPath(moduleDir) {
   return path.join(moduleDir, 'build', 'Release', 'better_sqlite3.node');
 }
 
+/** better-sqlite3 >= 13's N-API prebuild for this platform — what its loader opens first. */
+function prebuildPath(moduleDir) {
+  return path.join(moduleDir, 'prebuilds', `${process.platform}-${process.arch}.node`);
+}
+
 /**
  * Put `bytes at sourcePath` in place at `destination` WITHOUT ever rewriting the
  * destination's existing inode.
@@ -246,14 +251,26 @@ function cachePath(key) {
  */
 function probe(target, moduleDir) {
   const artifact = artifactPath(moduleDir);
-  if (!fs.existsSync(artifact)) return { ok: false, detail: `no artifact at ${artifact}` };
 
   if (FAKE) {
-    const stamp = fs.readFileSync(artifact, 'utf8');
-    return stamp.startsWith(`abi:${target}`)
+    // Mirror the real loader's precedence: the N-API prebuild wins when present,
+    // build/Release is the fallback. A prebuild stamped `abi:any` "loads" under
+    // every target — that is the runtime-agnostic property v13 actually has.
+    const prebuild = prebuildPath(moduleDir);
+    const loaded = fs.existsSync(prebuild) ? prebuild : fs.existsSync(artifact) ? artifact : null;
+    if (!loaded) return { ok: false, detail: `no artifact at ${artifact} and no prebuild at ${prebuild}` };
+    const stamp = fs.readFileSync(loaded, 'utf8');
+    return stamp.startsWith(`abi:${target}`) || stamp.startsWith('abi:any')
       ? { ok: true, info: { nodeModuleVersion: `fake-${target}`, arch: process.arch } }
       : { ok: false, detail: `fake artifact is not stamped abi:${target}` };
   }
+
+  // No build/Release artifact is NOT a failure by itself: better-sqlite3 >= 13
+  // is N-API and ships one runtime-agnostic prebuild per platform, which the
+  // module's own loader checks FIRST (build/Debug and build/Release are only
+  // the fallback when no prebuild exists). The load test below (requiring the
+  // module in a child of the target host) is the real truth either way, so
+  // fall through and let it decide.
 
   const source = `
     const Database = require(${JSON.stringify(moduleDir)});
@@ -271,7 +288,15 @@ function probe(target, moduleDir) {
   let env = process.env;
   if (target === 'electron') {
     const binary = resolveElectronBinary();
-    if (!binary) return { ok: false, detail: 'electron is not installed; run pnpm install' };
+    if (!binary) {
+      // Electron >= 42 downloads its binary on FIRST USE (require('electron')
+      // above triggers it), not at install — so reaching here means the package
+      // is missing or that download failed.
+      return {
+        ok: false,
+        detail: 'electron binary is not available; run `pnpm install`, then `pnpm exec electron --version` to (re)download it',
+      };
+    }
     exec = binary;
     // Electron-as-Node: same binary, same ABI, no window — so the probe measures
     // the ABI the real app will load with, without opening a UI.
@@ -297,6 +322,9 @@ function probe(target, moduleDir) {
 /** Copy the current artifact into the cache under `key`, if not already banked. */
 function saveToCache(key, moduleDir) {
   if (!key) return false;
+  // Nothing compiled locally (the N-API prebuild is serving both hosts) —
+  // there is no per-ABI artifact to bank, and none is needed.
+  if (!fs.existsSync(artifactPath(moduleDir))) return false;
   const destination = cachePath(key);
   if (fs.existsSync(destination)) return false;
   installArtifact(artifactPath(moduleDir), destination);

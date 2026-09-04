@@ -105,9 +105,11 @@ committing** and **tag this commit** (§5) so the tag matches the artifacts.
 ## 3. Four signed builds
 
 Source signing creds into each build subprocess (`set -a; . ~/Developer/cyboflow/.envrc.local; set +a`).
-Each build recompiles `better-sqlite3` for the Electron ABI — order doesn't
-matter, but **restore the host-Node ABI afterward** (§4) so tests/`pnpm dev`
-work.
+Both native addons are N-API (better-sqlite3 ≥ 13, node-pty), so no ABI flip is
+involved any more. What the builds DO leave behind is an **arch** problem: the
+x64 builds compile an x64 `pty.node` that the arm64 host cannot dlopen
+(better-sqlite3's prebuilds are never recompiled). **Restore host-arch node-pty
+afterward** (§4) so tests/`pnpm dev` work.
 
 ```bash
 set -a; . ~/Developer/cyboflow/.envrc.local; set +a
@@ -147,7 +149,7 @@ for arch in arm64 x64; do
   xcrun stapler validate "$mnt/Cyboflow.app"; spctl -a -vvv "$mnt/Cyboflow.app"
   hdiutil detach "$mnt" -quiet
 done
-cd .. && pnpm rebuild better-sqlite3 @homebridge/node-pty-prebuilt-multiarch   # restore host-Node ABI (BOTH)
+cd .. && pnpm rebuild @homebridge/node-pty-prebuilt-multiarch   # restore host-arch pty.node after the x64 builds
 ```
 
 - **Size is a stub-check, not a leak-check.** ~300M is correct (bundles Claude +
@@ -287,8 +289,9 @@ mirror, but not the channel the app or website depends on).
 - **Never run `build:mac:universal`** — it fails on the agent binaries (see top).
 - **Don't launch the app while a `build:mac` is running** — a live app can grab a
   handle on the mounting DMG and wedge the eject. Quit installed apps first.
-- **ABI churn:** every mac build leaves `better-sqlite3` **and** `node-pty` on the
-  Electron ABI. Run `pnpm rebuild better-sqlite3 @homebridge/node-pty-prebuilt-multiarch`
-  before vitest (a `pty.node` dlopen arch-mismatch fails 30+ test files even though
-  every test that loads passes); `pnpm dev` self-heals via
-  postinstall.
+- **Arch churn:** the x64 mac builds leave `node-pty` compiled for x64 (both
+  addons are N-API, so this is an arch problem, not an ABI one; better-sqlite3's
+  prebuilds are never recompiled). Run
+  `pnpm rebuild @homebridge/node-pty-prebuilt-multiarch` before vitest (a
+  `pty.node` dlopen arch-mismatch fails 30+ test files even though every test
+  that loads passes); `pnpm dev` self-heals via postinstall.

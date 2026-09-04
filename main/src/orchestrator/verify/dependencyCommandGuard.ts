@@ -21,7 +21,7 @@
  * `pnpm install` is still a task that will burn minutes of a bounded deadline
  * reinstalling a tree it was handed, and — for an Electron project — will leave
  * the snapshot's better-sqlite3 on the host-Node ABI (NMV 127) under an Electron
- * that needs NMV 136 (§1 root cause (c)), producing a confusing launch failure
+ * that needs NMV 149 (§1 root cause (c)), producing a confusing launch failure
  * the agent has no reason to attribute to its own build step. Rejecting it at
  * ENQUEUE turns that into a structured error naming the offending command, while
  * the composer still has the context to recompose. The rule it enforces is a

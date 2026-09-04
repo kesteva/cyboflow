@@ -27,7 +27,14 @@
  *        could not dlopen the native module it shipped with).
  *    Each was found by hand, after release. The checks below fail the BUILD
  *    instead: bundle architecture, a real runtime ABI probe of the packaged
- *    better_sqlite3.node, and size floors on the .app and its asar.
+ *    better-sqlite3 addon, and size floors on the .app and its asar.
+ *
+ *    better-sqlite3 layouts: <= v12 compiled `build/Release/better_sqlite3.node`
+ *    per host ABI; >= v13 is N-API and ships one prebuild per platform as
+ *    `prebuilds/<platform>-<arch>.node` (flat files — node-pty's prebuilds are
+ *    `prebuilds/<platform>-<arch>/<name>.node` directories). Both are recognised.
+ *    A per-arch build only carries the addon for its own arch, so prebuilds for
+ *    the OTHER darwin arch are skipped by the arch check rather than judged.
  *
  *    Every failure is collected and reported in ONE error, so a release
  *    engineer sees everything that is wrong in a single pass rather than
@@ -170,41 +177,88 @@ function readBundleExecutableName(appPath, execFile = defaultExecFile) {
 }
 
 /**
- * Is this `.node` a prebuilt binary for a non-macOS platform?
- *
- * node-pty-prebuilt-multiarch ships prebuilds for every platform it supports
- * under `prebuilds/<platform>-<arch>/` (linux, win32, android, …), and they all
- * ride along in the asar even on a macOS build. Those are ELF/PE, not Mach-O, so
- * `lipo -archs` cannot read them — feeding them to the arch check produces dozens
- * of spurious "could not read the architecture" failures. Only `darwin`
- * prebuilds are Mach-O and worth verifying; the rest are dead weight on macOS and
- * must be skipped, not judged.
+ * Parse the `<platform>-<arch>` a prebuilt `.node` was built for, from its
+ * path under a `prebuilds/` directory. Handles both layouts in the bundle:
+ * node-pty's `prebuilds/<platform>-<arch>/<name>.node` and better-sqlite3 v13's
+ * flat `prebuilds/<platform>-<arch>.node`. Returns null for a non-prebuild.
  */
-function isForeignPrebuild(file) {
+function parsePrebuildTarget(file) {
   const segments = file.split(path.sep);
   const idx = segments.lastIndexOf('prebuilds');
-  if (idx === -1 || idx + 1 >= segments.length) return false;
-  const platform = segments[idx + 1].split('-')[0];
-  return platform !== 'darwin';
+  if (idx === -1 || idx + 1 >= segments.length) return null;
+  const label = segments[idx + 1].replace(/\.node$/, '');
+  const dash = label.indexOf('-');
+  if (dash === -1) return { platform: label, arch: null };
+  return { platform: label.slice(0, dash), arch: label.slice(dash + 1) };
+}
+
+/**
+ * Is this `.node` a prebuilt binary this macOS build does not ship for?
+ *
+ * Two kinds. (1) Non-macOS platforms: node-pty-prebuilt-multiarch and
+ * better-sqlite3 ship prebuilds for every platform they support (linux, win32,
+ * …), and they ride along in the asar even on a macOS build. Those are ELF/PE,
+ * not Mach-O, so `lipo -archs` cannot read them — feeding them to the arch check
+ * produces dozens of spurious "could not read the architecture" failures.
+ * (2) The OTHER darwin arch: a per-arch build carries `darwin-x64` and
+ * `darwin-arm64` prebuilds alike, and the off-target one legitimately fails the
+ * arch check. Neither is a defect in the bundle, so both are skipped, not judged.
+ * (`expectedArch` universal or unknown keeps every darwin prebuild.)
+ */
+function isForeignPrebuild(file, expectedArch = null) {
+  const target = parsePrebuildTarget(file);
+  if (!target) return false;
+  if (target.platform !== 'darwin') return true;
+  if (!expectedArch || expectedArch === 'universal' || !target.arch) return false;
+  return target.arch !== expectedArch;
 }
 
 /**
  * Collect every macOS `*.node` under `dir`, ignoring symlinks and the bundled
- * foreign-platform prebuilds (see `isForeignPrebuild`).
+ * foreign prebuilds (see `isForeignPrebuild`).
  */
-function collectNodeAddons(dir, found = []) {
+function collectNodeAddons(dir, expectedArch = null, found = []) {
   if (!fs.existsSync(dir)) return found;
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     if (entry.isSymbolicLink()) continue;
     const fullPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      collectNodeAddons(fullPath, found);
+      collectNodeAddons(fullPath, expectedArch, found);
     } else if (entry.isFile() && entry.name.endsWith('.node')) {
-      if (isForeignPrebuild(fullPath)) continue;
+      if (isForeignPrebuild(fullPath, expectedArch)) continue;
       found.push(fullPath);
     }
   }
   return found;
+}
+
+/**
+ * Is this addon better-sqlite3's? Either the classic compiled
+ * `build/Release/better_sqlite3.node` (any package dir — the historical fixture
+ * shape), or a v13 N-API prebuild `prebuilds/darwin-<arch>.node` living under a
+ * `better-sqlite3` package directory.
+ */
+function isBetterSqliteAddon(file) {
+  const segments = file.split(path.sep);
+  if (segments[segments.length - 1] === 'better_sqlite3.node') return true;
+  const target = parsePrebuildTarget(file);
+  if (!target || target.platform !== 'darwin') return false;
+  const idx = segments.lastIndexOf('prebuilds');
+  return idx > 0 && segments[idx - 1] === 'better-sqlite3';
+}
+
+/**
+ * The better-sqlite3 addon the packaged app will load, or null. When more than
+ * one survives collection (a universal build keeps both darwin prebuilds), the
+ * one matching the host arch is the one this host can honestly probe.
+ */
+function findBetterSqliteAddon(addons) {
+  const candidates = addons.filter(isBetterSqliteAddon);
+  if (candidates.length <= 1) return candidates[0] || null;
+  const hostArch = process.arch === 'x64' ? 'x64' : 'arm64';
+  return (
+    candidates.find((file) => parsePrebuildTarget(file)?.arch === hostArch) || candidates[0]
+  );
 }
 
 /**
@@ -350,7 +404,7 @@ function verifyBundle(options) {
   }
 
   const unpackedRoot = path.join(appPath, 'Contents', 'Resources', 'app.asar.unpacked');
-  const addons = collectNodeAddons(unpackedRoot);
+  const addons = collectNodeAddons(unpackedRoot, expectedArch);
   if (addons.length === 0) {
     failures.push(
       `no *.node native addons found under ${unpackedRoot} — the app ships ` +
@@ -386,19 +440,20 @@ function verifyBundle(options) {
     }
   }
 
-  // --- Check 2: runtime ABI probe of the packaged better_sqlite3.node ---
-  const betterSqlite = addons.find((file) => path.basename(file) === 'better_sqlite3.node');
+  // --- Check 2: runtime ABI probe of the packaged better-sqlite3 addon ---
+  const betterSqlite = findBetterSqliteAddon(addons);
   if (!betterSqlite) {
     failures.push(
-      `better_sqlite3.node was not found under ${unpackedRoot} — the app stores ` +
-        'all of its state in SQLite and cannot start without it'
+      `no better-sqlite3 native addon was found under ${unpackedRoot} (expected ` +
+        `build/Release/better_sqlite3.node or prebuilds/darwin-<arch>.node) — the app ` +
+        'stores all of its state in SQLite and cannot start without it'
     );
   } else if (executablePath) {
     const probe = probeNativeModule(executablePath, betterSqlite, execFile);
     if (!probe.ok) {
       failures.push(
         `the packaged Electron binary cannot load the packaged ` +
-          `better_sqlite3.node (ABI mismatch or broken addon):\n    ` +
+          `better-sqlite3 addon (ABI mismatch or broken addon):\n    ` +
           `${betterSqlite}\n    ${probe.detail.split('\n').join('\n    ')}`
       );
     }
@@ -518,6 +573,9 @@ exports._helpers = {
   archMatches,
   collectNodeAddons,
   isForeignPrebuild,
+  isBetterSqliteAddon,
+  findBetterSqliteAddon,
+  parsePrebuildTarget,
   computeDirectorySize,
   lipoArchs,
   probeNativeModule,

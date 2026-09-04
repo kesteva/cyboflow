@@ -33,6 +33,16 @@ const CODEX_NATIVE_SUFFIXES = [
   'linux-x64', 'linux-arm64',
   'win32-x64', 'win32-arm64',
 ];
+// better-sqlite3 >= 13 is N-API and ships one prebuild per platform as
+// `prebuilds/<platform>-<arch>.node` (~2 MB each). Its loader picks exactly
+// `prebuilds/<process.platform>-<process.arch>.node`, so a per-arch macOS build
+// needs only the matching darwin file; the other seven are dead weight in the
+// asar and the off-target darwin one would otherwise be the wrong arch.
+const BETTER_SQLITE_PREBUILD_SUFFIXES = [
+  'darwin-arm64', 'darwin-x64',
+  'linux-arm64', 'linux-x64', 'linuxmusl-arm64', 'linuxmusl-x64',
+  'win32-arm64', 'win32-x64',
+];
 
 function getLeanPackagingPlan(targetArch) {
   if (targetArch !== 'arm64' && targetArch !== 'x64') {
@@ -69,6 +79,9 @@ function getLeanPackagingPlan(targetArch) {
       ...CODEX_NATIVE_SUFFIXES
         .filter((suffix) => suffix !== targetSuffix)
         .map((suffix) => `!node_modules/@openai/codex-${suffix}/**`),
+      ...BETTER_SQLITE_PREBUILD_SUFFIXES
+        .filter((suffix) => suffix !== targetSuffix)
+        .map((suffix) => `!node_modules/better-sqlite3/prebuilds/${suffix}.node`),
     ],
   };
 }

@@ -42,7 +42,7 @@ const ARTIFACT_REL = path.join('build', 'Release', 'better_sqlite3.node');
  * Build a throwaway workspace: a fixture better-sqlite3 package dir (optionally
  * carrying a stamped artifact) plus an empty cache dir.
  */
-function makeWorkspace({ stamp } = {}) {
+function makeWorkspace({ stamp, prebuildStamp } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ensure-abi-'));
   const moduleDir = path.join(root, 'better-sqlite3');
   const cacheDir = path.join(root, 'cache');
@@ -53,11 +53,17 @@ function makeWorkspace({ stamp } = {}) {
     JSON.stringify({ name: 'better-sqlite3', version: '11.10.0' })
   );
   if (stamp) fs.writeFileSync(path.join(moduleDir, ARTIFACT_REL), stamp);
+  const prebuild = path.join(moduleDir, 'prebuilds', `${process.platform}-${process.arch}.node`);
+  if (prebuildStamp) {
+    fs.mkdirSync(path.dirname(prebuild), { recursive: true });
+    fs.writeFileSync(prebuild, prebuildStamp);
+  }
 
   return {
     root,
     moduleDir,
     cacheDir,
+    prebuild,
     artifact: path.join(moduleDir, ARTIFACT_REL),
     readArtifact: () => fs.readFileSync(path.join(moduleDir, ARTIFACT_REL), 'utf8'),
     cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
@@ -181,6 +187,45 @@ test('a missing artifact is rebuilt rather than treated as correct', () => {
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /cache miss — rebuilding/);
     assert.match(ws.readArtifact(), /^abi:host/);
+  } finally {
+    ws.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// better-sqlite3 >= 13: an N-API prebuild that loads under BOTH hosts, and no
+// compiled artifact at all. This is the steady state since the Electron 44
+// upgrade, so the guard must be a no-op for either target and must not try to
+// bank, restore or rebuild anything.
+// ---------------------------------------------------------------------------
+
+test('N-API prebuild, no compiled artifact: both targets pass as a no-op, nothing is banked', () => {
+  const ws = makeWorkspace({ prebuildStamp: 'abi:any\nprebuild-bytes' });
+  try {
+    for (const target of ['host', 'electron']) {
+      const result = run([target], ws);
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, new RegExp(`already on the ${target} ABI`));
+      assert.doesNotMatch(result.stdout, /rebuilding|restored|banked/);
+    }
+    assert.equal(fs.existsSync(ws.artifact), false, 'no build/Release artifact may be conjured');
+    assert.equal(fs.readFileSync(ws.prebuild, 'utf8'), 'abi:any\nprebuild-bytes');
+    assert.deepEqual(cacheKeys(ws), [], 'there is no per-ABI artifact to bank');
+  } finally {
+    ws.cleanup();
+  }
+});
+
+test('N-API prebuild shadows a stale compiled artifact, as the real loader does', () => {
+  // A leftover build/Release from a pre-v13 install must not make the guard
+  // believe the module is on the wrong ABI — the loader never opens it.
+  const ws = makeWorkspace({ stamp: 'abi:electron\nstale-bytes', prebuildStamp: 'abi:any\n' });
+  try {
+    const result = run(['host'], ws);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /already on the host ABI/);
+    assert.doesNotMatch(result.stdout, /rebuilding|restored/);
+    assert.equal(ws.readArtifact(), 'abi:electron\nstale-bytes', 'the stale artifact is left alone');
   } finally {
     ws.cleanup();
   }

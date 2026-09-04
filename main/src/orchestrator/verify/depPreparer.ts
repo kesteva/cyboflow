@@ -19,7 +19,7 @@
  *  - THE ELECTRON-ABI REBUILD, once, outside every snapshot, where §7.2 says it
  *    belongs ("the electron-ABI rebuild lives here, never in runbook commands").
  *    Cloning the live tree straight into a snapshot would carry the developer's
- *    host-Node better-sqlite3 (NMV 127) under an Electron that needs NMV 136 —
+ *    host-Node better-sqlite3 (NMV 127) under an Electron that needs NMV 149 —
  *    §1 root cause (c), unfixed. The mirror is where that gets corrected, once
  *    per key rather than once per verification.
  *  - WARMTH. A published set is reused across runs and branches, so the
