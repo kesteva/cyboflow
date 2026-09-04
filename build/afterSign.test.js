@@ -6,8 +6,10 @@
  * Cases A-D cover the warn-only JAR tripwire. Cases E onward cover the hard
  * checks that fail a release build: bundle architecture, the native-module ABI
  * probe, and the .app / app.asar size floors. Cases W-AA cover the Windows arm
- * (win-unpacked layout: PE machine check, load probe, unpacked size floor) and
- * run only on a win32 host.
+ * (win-unpacked layout: PE machine check, load probe, unpacked size floor);
+ * only Y-AA (the end-to-end hook runs) need a win32 host — W, X and AC are
+ * pure-function coverage of the addon-collection contract and run everywhere,
+ * which is what gives macOS CI a signal on the Windows arm of afterSign.
  *
  * Where a check can be exercised honestly without building an app, it is:
  * `lipo` really runs against a real Mach-O binary, and the ABI probe really
@@ -1150,10 +1152,27 @@ async function caseW() {
   }
 }
 
-// Case X: Windows addon collection skips prebuilds/ dirs ENTIRELY (every
-// platform's prebuild rides along and none of them is the loadable addon).
+// Case X: Windows addon collection WALKS prebuilds/ (the old contract skipped
+// them ENTIRELY, which was the bug: better-sqlite3 v13's only Windows addon is
+// `prebuilds/win32-<arch>.node` — a build with no build/Release artifact would
+// find NO better-sqlite3 addon at all and fail every packaged Windows build).
+// A prebuild foreign to (win32, expectedArch) — another platform's, or the
+// OTHER Windows arch — is dropped rather than judged, same reasoning as the
+// mac arm's `isForeignPrebuild` (Case V): those are ELF/Mach-O/off-arch PE and
+// must not reach the PE-header read or the arch check.
 async function caseX() {
-  const { collectNodeAddonsForWindows } = helpers;
+  const { collectNodeAddonsForWindows, isForeignPrebuild } = helpers;
+
+  assert(isForeignPrebuild('root/better-sqlite3/prebuilds/win32-x64.node', 'x64', 'win32') === false,
+    'Case X: the win32-x64 flat v13 prebuild is native to a win32/x64 build');
+  assert(isForeignPrebuild('root/better-sqlite3/prebuilds/win32-arm64.node', 'x64', 'win32') === true,
+    'Case X: the win32-arm64 flat prebuild is foreign to a win32/x64 build');
+  assert(isForeignPrebuild('root/node-pty/prebuilds/darwin-arm64/pty.node', 'x64', 'win32') === true,
+    'Case X: a darwin prebuild is foreign to any win32 build');
+  assert(isForeignPrebuild('root/node-pty/prebuilds/linux-x64/node.napi.node', 'x64', 'win32') === true,
+    'Case X: a linux prebuild is foreign to any win32 build');
+  assert(isForeignPrebuild('root/better-sqlite3/build/Release/better_sqlite3.node', 'x64', 'win32') === false,
+    'Case X: a compiled addon is never foreign, on Windows either');
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aftersign-test-'));
   try {
@@ -1161,8 +1180,11 @@ async function caseX() {
     const layout = {
       'better-sqlite3/build/Release/better_sqlite3.node': 'x',
       'node-pty/build/Release/pty.node': 'x',
-      'node-pty/prebuilds/win32-x64/node.abi127.node': 'x',
-      'node-pty/prebuilds/darwin-arm64/node.abi127.node': 'x',
+      'better-sqlite3/prebuilds/win32-x64.node': 'x',
+      'better-sqlite3/prebuilds/win32-arm64.node': 'x',
+      'node-pty/prebuilds/win32-x64/node.napi.node': 'x',
+      'node-pty/prebuilds/darwin-arm64/pty.node': 'x',
+      'node-pty/prebuilds/linux-x64/node.napi.node': 'x',
       'some-dep/prebuilds/anything/node.node': 'x',
       'some-dep/notes.txt': 'x',
     };
@@ -1172,11 +1194,36 @@ async function caseX() {
       fs.writeFileSync(full, body);
     }
 
-    const collected = collectNodeAddonsForWindows(root).map((f) => path.basename(f));
-    assert(collected.length === 2,
-      `Case X: exactly the two build/Release addons are collected (got ${collected.length}: ${collected.join(', ')})`);
-    assert(collected.includes('better_sqlite3.node') && collected.includes('pty.node'),
-      'Case X: the collected set is better_sqlite3.node and pty.node');
+    // No expected arch: build/Release addons plus BOTH win32-arch prebuilds
+    // survive (nothing to prefer between them yet); every non-win32 prebuild
+    // (darwin, linux, the unparseable "anything" platform) is dropped regardless.
+    const anyArch = collectNodeAddonsForWindows(root).map((f) => path.relative(root, f));
+    assert(anyArch.length === 5,
+      `Case X: build/Release + both win32-arch prebuilds survive with no expected arch (got ${anyArch.length}: ${anyArch.join(', ')})`);
+
+    // An x64 build keeps the win32-x64 prebuilds (both shapes) and drops the
+    // win32-arm64 one plus every foreign-platform prebuild.
+    const x64Only = collectNodeAddonsForWindows(root, 'x64').map((f) => path.relative(root, f));
+    assert(x64Only.length === 4,
+      `Case X: an x64 build keeps build/Release plus only the win32-x64 prebuilds (got ${x64Only.length}: ${x64Only.join(', ')})`);
+    assert(
+      x64Only.includes(path.join('better-sqlite3', 'prebuilds', 'win32-x64.node')),
+      'Case X: the win32-x64 flat prebuild (better-sqlite3 v13) is kept'
+    );
+    assert(
+      x64Only.includes(path.join('node-pty', 'prebuilds', 'win32-x64', 'node.napi.node')),
+      'Case X: the win32-x64 nested prebuild (node-pty) is kept'
+    );
+    assert(
+      !x64Only.includes(path.join('better-sqlite3', 'prebuilds', 'win32-arm64.node')),
+      'Case X: the OTHER Windows arch (win32-arm64) is dropped'
+    );
+    assert(
+      !x64Only.some((f) => f.includes('darwin-arm64')) &&
+      !x64Only.some((f) => f.includes('linux-x64')) &&
+      !x64Only.some((f) => f.includes('anything')),
+      'Case X: foreign-platform prebuilds (darwin, linux) and an unparseable one are all dropped, not judged'
+    );
 
     assert(
       collectNodeAddonsForWindows(path.join(tmpDir, 'does-not-exist')).length === 0,
@@ -1404,6 +1451,54 @@ async function caseAB() {
 }
 
 // ---------------------------------------------------------------------------
+// Case AC: findBetterSqliteAddon / isBetterSqliteAddon generalised for win32 —
+// the Windows counterpart of Case AB's darwin coverage. FINDING 1's actual bug
+// was that the win32 arm could never find a v13 prebuild at all; these pin the
+// resolution/tie-break logic directly. Pure-function assertions only (no PE
+// parsing, no process spawn), so — unlike AB's end-to-end half — there is
+// nothing here that needs gating to a real Windows or macOS host.
+// ---------------------------------------------------------------------------
+async function caseAC() {
+  const { isBetterSqliteAddon, findBetterSqliteAddon } = helpers;
+  const p = (...segments) => path.join('root', ...segments);
+
+  assert(isBetterSqliteAddon(p('better-sqlite3', 'prebuilds', 'win32-x64.node'), 'win32'),
+    'Case AC: the win32-x64 flat v13 prebuild is recognised as better-sqlite3');
+  assert(!isBetterSqliteAddon(p('node-pty', 'prebuilds', 'win32-x64', 'node.napi.node'), 'win32'),
+    "Case AC: another package's win32 prebuild is not better-sqlite3");
+  assert(!isBetterSqliteAddon(p('better-sqlite3', 'prebuilds', 'darwin-arm64.node'), 'win32'),
+    'Case AC: a non-win32 better-sqlite3 prebuild is not the addon a Windows build loads');
+  assert(
+    isBetterSqliteAddon(p('some-dep', 'build', 'Release', 'better_sqlite3.node'), 'win32'),
+    'Case AC: the legacy compiled better_sqlite3.node still resolves under the win32 platform param'
+  );
+
+  const both = [
+    p('better-sqlite3', 'prebuilds', 'win32-arm64.node'),
+    p('better-sqlite3', 'prebuilds', 'win32-x64.node'),
+  ];
+  assert(findBetterSqliteAddon(both, 'win32', 'x64') === both[1],
+    'Case AC: given an x64 target, the win32-x64 prebuild is picked over win32-arm64');
+  assert(findBetterSqliteAddon(both, 'win32', 'arm64') === both[0],
+    'Case AC: given an arm64 target, the win32-arm64 prebuild is picked over win32-x64');
+  assert(
+    findBetterSqliteAddon([p('node-pty', 'build', 'Release', 'pty.node')], 'win32', 'x64') === null,
+    'Case AC: no better-sqlite3 addon among other addons resolves to null'
+  );
+
+  // The legacy build/Release layout resolves as the addon to probe regardless
+  // of the target arch — there is no per-arch compiled artifact to choose between.
+  const legacyOnly = [p('better-sqlite3', 'build', 'Release', 'better_sqlite3.node')];
+  assert(findBetterSqliteAddon(legacyOnly, 'win32', 'x64') === legacyOnly[0],
+    'Case AC: the legacy build/Release/better_sqlite3.node still resolves as the addon to probe');
+
+  // The generalisation must leave every mac call site's behavior untouched:
+  // no platform/arch args at all still means darwin + host-arch tie-break.
+  assert(findBetterSqliteAddon([]) === null,
+    'Case AC: an empty candidate list resolves to null with the old no-args mac call shape');
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 (async () => {
@@ -1443,9 +1538,11 @@ async function caseAB() {
     );
   }
   // W and X need no Windows host: W parses crafted PE buffers (its one real-
-  // binary assertion is guarded inside), and X lists a temp directory. Running
-  // them everywhere is what gives the macOS CI a signal on the Windows arm of
-  // afterSign, which is the script that decides whether an artifact ships.
+  // binary assertion is guarded inside), and X lists a temp directory (AC,
+  // further below, is the same story for the addon-resolution tie-break).
+  // Running them everywhere is what gives the macOS CI a signal on the
+  // Windows arm of afterSign, which is the script that decides whether an
+  // artifact ships.
   await caseW();
   await caseX();
 
@@ -1464,6 +1561,8 @@ async function caseAB() {
   // AB is the mac arm's better-sqlite3 v13 N-API layout case; its pure
   // assertions run everywhere and its lipo/probe end-to-end guards itself.
   await caseAB();
+  // AC is the win32 counterpart of AB — pure assertions only, runs everywhere.
+  await caseAC();
 
   console.log(`\nResults: ${passed} passed, ${failed} failed`);
   process.exit(failed > 0 ? 1 : 0);

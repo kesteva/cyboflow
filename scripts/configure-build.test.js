@@ -278,6 +278,26 @@ try {
         !plan.exclusions.includes(`!node_modules/@anthropic-ai/claude-agent-sdk-win32-${targetArch}/**`),
       'the target win32 packages must not be excluded'
     );
+    // A Windows installer used to ship all eight better-sqlite3 v13 prebuilds
+    // (~2 MB each, none of them loadable except its own) — only the win32-<arch>
+    // file this build targets should remain.
+    assert(
+      plan.exclusions.includes(`!node_modules/better-sqlite3/prebuilds/win32-${otherArch}.node`),
+      `the OTHER win32 arch's better-sqlite3 prebuild should be excluded for ${targetArch}`
+    );
+    assert(
+      plan.exclusions.includes('!node_modules/better-sqlite3/prebuilds/darwin-arm64.node') &&
+        plan.exclusions.includes('!node_modules/better-sqlite3/prebuilds/linuxmusl-x64.node'),
+      'foreign-platform better-sqlite3 prebuilds should be excluded from a win build'
+    );
+    assert(
+      !plan.exclusions.includes(`!node_modules/better-sqlite3/prebuilds/win32-${targetArch}.node`),
+      'the target win32 better-sqlite3 prebuild must not be excluded'
+    );
+    assert(
+      !plan.exclusions.some((entry) => entry.startsWith('!node_modules/better-sqlite3/prebuilds/') && entry.endsWith('/**')),
+      'better-sqlite3 exclusions must name files, never the whole prebuilds directory'
+    );
   }
   assert(getWinPackagingPlan(undefined) === null, 'an unset architecture should preserve win packaging');
   console.log('\nPASS: Case D2 (win Claude/Codex packaging plans)');

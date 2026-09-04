@@ -131,6 +131,12 @@ function getWinPackagingPlan(targetArch) {
       ...CODEX_NATIVE_SUFFIXES
         .filter((suffix) => suffix !== targetSuffix)
         .map((suffix) => `!node_modules/@openai/codex-${suffix}/**`),
+      // better-sqlite3 >= 13's N-API prebuild ships one per platform too (see
+      // BETTER_SQLITE_PREBUILD_SUFFIXES above) — a Windows installer needs only
+      // its own win32-<arch> file; the other seven (~2 MB each) are dead weight.
+      ...BETTER_SQLITE_PREBUILD_SUFFIXES
+        .filter((suffix) => suffix !== targetSuffix)
+        .map((suffix) => `!node_modules/better-sqlite3/prebuilds/${suffix}.node`),
     ],
   };
 }
@@ -268,10 +274,17 @@ function configureBuild() {
       (winNpmRebuild ? '' : ' (prebuilt .node files are packaged as-is; set CYBOFLOW_WIN_NPM_REBUILD=1 to rebuild)'));
 
     // With npmRebuild off the .node files ship exactly as they sit in
-    // node_modules, and two everyday flows leave better-sqlite3 on the host
-    // ABI: the auto-flip before the test tiers, and a plain `pnpm install`.
-    // Shipping that crashes on first database open, far from the cause, so
-    // fail here where the fix is one command.
+    // node_modules. Since better-sqlite3 v13 (the Electron 44 upgrade) its
+    // ONLY Windows addon is the N-API prebuild at prebuilds/win32-<arch>.node,
+    // which is RUNTIME-AGNOSTIC — the same file loads under host Node and
+    // Electron alike — so `node scripts/ensure-sqlite-abi.mjs electron` is a
+    // cheap no-op against it (the probe below succeeds immediately; there is
+    // no per-ABI artifact left to flip, unlike the old build/Release story).
+    // The abiProbe stays anyway: it is a REAL load check under the packaged
+    // Electron ABI, not an assumption, and is still what would catch a
+    // regression (a stray per-ABI build/Release artifact shadowing the
+    // prebuild, a corrupted install, or a future non-N-API addon) before it
+    // ships and hard-crashes the app on first database open.
     if (!winNpmRebuild) {
       const probe = abiProbe();
       if (!probe.ok) {
