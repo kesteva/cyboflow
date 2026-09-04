@@ -51,6 +51,13 @@ Then build and package:
 pnpm build:win        # NSIS installer + unpacked build in dist-electron/
 ```
 
+No Windows host at hand? `.github/workflows/windows.yml` (dispatch-only)
+runs the same two things on a `windows-latest` runner: the full `pnpm
+test:unit` chain — the only place the `skipIf(process.platform !== 'win32')`
+tests ever execute in CI — and `pnpm build:win`, uploading the unsigned
+installer as a workflow artifact. Trigger it with
+`gh workflow run windows.yml --ref <branch>`.
+
 `build:win` runs `node scripts/ensure-sqlite-abi.mjs electron` first (a
 no-op against the prebuild in the normal case), then the packaging preflight
 (`configure-build.js`) re-probes the installed better-sqlite3 artifact under

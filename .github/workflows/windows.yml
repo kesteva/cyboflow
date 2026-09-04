@@ -1,0 +1,113 @@
+name: Windows
+
+# Windows parity runs, dispatch-only while they build a track record. Nothing
+# else in CI runs on a Windows host: quality.yml is ubuntu, e2e.yml is macOS.
+# Every `skipIf(process.platform !== 'win32')` test (afterSign cases Y–AA,
+# the named-pipe orch socket, the PowerShell process table, taskkill, the
+# cmd.exe quoting probes) executes ONLY here, and `pnpm build:win` is the only
+# check that exercises the afterSign Windows arm against real v13 prebuilds.
+# Promote the unit job into branch protection once it has run green a few
+# times; the installer job stays a smoke (unsigned output, artifact only).
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_installer:
+        description: 'Also package the NSIS installer (pnpm build:win)'
+        type: boolean
+        default: true
+
+jobs:
+  unit:
+    name: Unit tests (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 75
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.15.1'
+          cache: 'pnpm'
+
+      # Root postinstall = apply-pty-napi-prebuilds.js (places node-pty's
+      # N-API alias so electron-rebuild skips node-gyp) + electron-builder
+      # install-app-deps. Both native modules are prebuilt; no MSVC involved.
+      - name: Install dependencies
+        run: pnpm install
+
+      # Same step as the ubuntu `test` job. better-sqlite3 v13 has no install
+      # script, so the rebuild is a no-op; the value is the :memory: load probe
+      # that proves prebuilds/win32-x64.node opens under host Node before the
+      # DB suites depend on it.
+      - name: Rebuild better-sqlite3 for host Node ABI
+        run: node scripts/rebuild-better-sqlite3-host.mjs
+
+      # The cyboflowMcpServer subprocess tests spawn the BUILT bundle and
+      # hard-fail under CI=true when it is absent (see quality.yml).
+      - name: Build main (MCP server bundle for subprocess tests)
+        run: pnpm build:main
+
+      # Headless unit chain: main + frontend vitest, schema parity, release
+      # scripts, ABI + build tests. Windows runners are roughly 2× slower than
+      # the ubuntu job's ~10-minute vitest legs, hence the larger ceiling.
+      - name: Run unit tests
+        run: pnpm test:unit
+        env:
+          CI: true
+        timeout-minutes: 60
+
+  installer:
+    name: Installer (pnpm build:win)
+    runs-on: windows-latest
+    if: ${{ inputs.build_installer }}
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.15.1'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      # ensure-sqlite-abi electron (no-op on the v13 prebuild, but it also
+      # triggers Electron's first-use binary download) → build:frontend →
+      # build:main → inject-build-info → configure-build --platform win
+      # (lean packaging plan, Electron-ABI preflight) → electron-builder NSIS
+      # → afterSign Windows arm (PE machine check, packaged better-sqlite3
+      # load probe under the packaged Electron, win-unpacked size floor).
+      # electron-builder downloads its NSIS/winCodeSign tooling on first use;
+      # the runner is an administrator, so the winCodeSign archive's darwin
+      # symlinks extract (see docs/WINDOWS-BUILD.md → Troubleshooting).
+      # The output is unsigned — SmartScreen warns on first run.
+      - name: Build Windows installer
+        run: pnpm build:win
+        env:
+          CI: true
+        timeout-minutes: 40
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: cyboflow-windows-x64-installer
+          path: |
+            dist-electron/*.exe
+            dist-electron/*.blockmap
+            dist-electron/*.yml
+          if-no-files-found: error
+          retention-days: 7
