@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Bot, Code2, ExternalLink, RefreshCw, Boxes, Terminal } from 'lucide-react';
+import { Bot, Code2, ExternalLink, RefreshCw, Boxes, Terminal, Sparkles } from 'lucide-react';
 import type { AgentProvider, AgentProviderAccess } from '../../../../shared/types/agentRuntime';
 import { AGENT_PROVIDERS, isAgentProviderEnabled } from '../../../../shared/types/agentRuntime';
 import type { ProviderDetectionResult } from '../../../../shared/types/onboarding';
@@ -337,16 +337,52 @@ function piView(
   };
 }
 
+function agyView(
+  detection: ProviderDetectionResult<'agy'> | null,
+  error: string | null,
+): ProviderViewModel {
+  if (error) {
+    return { status: 'unavailable', label: 'Check failed', detail: error };
+  }
+  if (!detection) {
+    return { status: 'checking', label: 'Checking', detail: 'Looking for an agy binary on this machine.' };
+  }
+  if (detection.state === 'unavailable') {
+    if (detection.binaryPath !== null) {
+      return {
+        status: 'unavailable',
+        label: 'Unsupported version',
+        detail: detection.version
+          ? `Found agy ${detection.version}, but this version isn't supported.`
+          : "Found an agy binary, but its version couldn't be verified.",
+        metadata: detection.binaryPath,
+      };
+    }
+    return {
+      status: 'unavailable',
+      label: 'Not available',
+      detail: 'agy was not found on this machine.',
+    };
+  }
+  return {
+    status: 'connected',
+    label: 'Detected',
+    detail: detection.version ? `agy ${detection.version}` : 'agy binary found',
+    metadata: detection.binaryPath ?? undefined,
+  };
+}
 
 export function IntegrationsSettings(): React.JSX.Element {
   const [claudeDetection, setClaudeDetection] = useState<ProviderDetectionResult<'claude'> | null>(null);
   const [codexDetection, setCodexDetection] = useState<ProviderDetectionResult<'codex'> | null>(null);
   const [ompDetection, setOmpDetection] = useState<ProviderDetectionResult<'omp'> | null>(null);
   const [piDetection, setPiDetection] = useState<ProviderDetectionResult<'pi'> | null>(null);
+  const [agyDetection, setAgyDetection] = useState<ProviderDetectionResult<'agy'> | null>(null);
   const [claudeError, setClaudeError] = useState<string | null>(null);
   const [codexError, setCodexError] = useState<string | null>(null);
   const [ompError, setOmpError] = useState<string | null>(null);
   const [piError, setPiError] = useState<string | null>(null);
+  const [agyError, setAgyError] = useState<string | null>(null);
   const [checking, setChecking] = useState(true);
   const requestId = useRef(0);
 
@@ -357,12 +393,14 @@ export function IntegrationsSettings(): React.JSX.Element {
     setCodexError(null);
     setOmpError(null);
     setPiError(null);
+    setAgyError(null);
 
-    const [claudeResult, codexResult, ompResult, piResult] = await Promise.allSettled([
+    const [claudeResult, codexResult, ompResult, piResult, agyResult] = await Promise.allSettled([
       API.providers.detect('claude'),
       API.providers.detect('codex'),
       API.providers.detect('omp'),
       API.providers.detect('pi'),
+      API.providers.detect('agy'),
     ]);
     if (currentRequest !== requestId.current) return;
 
@@ -402,6 +440,15 @@ export function IntegrationsSettings(): React.JSX.Element {
       setPiError(responseError('Pi', message));
     }
 
+    if (agyResult.status === 'fulfilled' && agyResult.value.success && agyResult.value.data) {
+      setAgyDetection(agyResult.value.data);
+    } else {
+      const message = agyResult.status === 'rejected'
+        ? agyResult.reason instanceof Error ? agyResult.reason.message : undefined
+        : agyResult.value.error;
+      setAgyError(responseError('Antigravity', message));
+    }
+
     setChecking(false);
   }, []);
 
@@ -428,6 +475,7 @@ export function IntegrationsSettings(): React.JSX.Element {
   const ompAvailability = useOmpAvailability();
   const omp = ompView(ompDetection, ompError, ompAvailability);
   const pi = piView(piDetection, piError);
+  const agy = agyView(agyDetection, agyError);
 
   // Provider access — the toggles below write AppConfig.agentProviderAccess,
   // the same field the onboarding Connect step writes, so the two surfaces are
@@ -451,11 +499,14 @@ export function IntegrationsSettings(): React.JSX.Element {
   // materially less complete than the others, so a non-Aria install gets no Pi
   // card at all rather than a switched-off one that invites turning it on.
   const piSurfaced = useIsAgentProviderSurfaced('pi');
+  const agyEnabled = isAgentProviderEnabled(providerAccess, 'agy');
+  const agySurfaced = useIsAgentProviderSurfaced('agy');
   const enabledByProvider: Record<AgentProvider, boolean> = {
     claude: claudeEnabled,
     codex: codexEnabled,
     omp: ompEnabled,
     pi: piEnabled,
+    agy: agyEnabled,
   };
   const [savingProvider, setSavingProvider] = useState<AgentProvider | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -565,6 +616,18 @@ export function IntegrationsSettings(): React.JSX.Element {
               toggleTestId="provider-toggle-pi"
             />
           )}
+          {agySurfaced && (
+            <ProviderRow
+              name="Antigravity"
+              description="Google DeepMind Antigravity CLI — multi-modal and frontier reasoning models via the local agy installation."
+              icon={<Sparkles className="h-4 w-4" />}
+              view={agy}
+              enabled={agyEnabled}
+              onToggle={(next) => void setProviderEnabled('agy', next)}
+              toggleDisabledReason={toggleReason('agy', agyEnabled)}
+              toggleTestId="provider-toggle-agy"
+            />
+          )}
         </div>
 
         {saveError && (
@@ -591,6 +654,12 @@ export function IntegrationsSettings(): React.JSX.Element {
             (run <code className="border border-border-primary bg-bg-primary px-1">pi</code> in a
             terminal and use <code className="border border-border-primary bg-bg-primary px-1">/login</code>{' '}
             or <code className="border border-border-primary bg-bg-primary px-1">--api-key</code>).
+          </p>
+        )}
+        {!agyEnabled && (
+          <p className="mt-3 text-xs leading-relaxed text-text-tertiary">
+            Antigravity is off by default — turn it on once you've installed it and authenticated
+            (run <code className="border border-border-primary bg-bg-primary px-1">agy</code> in a terminal).
           </p>
         )}
       </SettingsSection>

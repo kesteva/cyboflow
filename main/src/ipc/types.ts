@@ -19,6 +19,8 @@ import type {
   OmpPtyManagerLike,
   PiPtyManagerLike,
   PiSdkManagerLike,
+  AgyPtyManagerLike,
+  AgySdkManagerLike,
   OmpSdkManagerLike,
 } from '../services/cliManagerFactory';
 import type { AbstractCliManager } from '../services/panels/cli/AbstractCliManager';
@@ -66,6 +68,10 @@ export interface AppServices {
   piPtyManager: PiPtyManagerLike;
   /** Structured pi runtime (turn-spawn, --session-id resume) for quick sessions AND workflow runs. */
   piSdkManager: PiSdkManagerLike;
+  /** Interactive Antigravity PTY runtime for quick sessions only. */
+  agyPtyManager: AgyPtyManagerLike;
+  /** Structured Antigravity runtime (turn-spawn, --conversation resume) for quick sessions AND workflow runs. */
+  agySdkManager: AgySdkManagerLike;
   /**
    * OMP fleet runtime (Phase 4 coexistence, omp-phase4-coexistence-adr.md). A
    * SIBLING to the process managers — a remote worker supervised over the Prime
@@ -106,6 +112,8 @@ export interface AppServices {
   registerOmpPtyPanel: (runId: string, panelId: string) => void;
   /** Deterministic at-spawn registration for Pi PTY quick-session panels. */
   registerPiPtyPanel: (runId: string, panelId: string) => void;
+  /** Deterministic at-spawn registration for Antigravity PTY quick-session panels. */
+  registerAgyPtyPanel: (runId: string, panelId: string) => void;
   /**
    * Idle-debounced quick-session summarizer (session-summary-plan.md §5). The
    * sessions:input handler calls `noteTurnStart` before dispatching a user turn

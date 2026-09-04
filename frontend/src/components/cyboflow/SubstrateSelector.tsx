@@ -113,6 +113,18 @@ export const PI_PTY_CAVEATS: readonly string[] = [
   'Approvals stay inside the pi TUI — no Cyboflow review-queue integration.',
 ];
 
+/** The v1 limits of the Antigravity structured (agy-sdk) lane. */
+export const AGY_SDK_CAVEATS: readonly string[] = [
+  'Auto-approves tool requests when session permission mode is dontAsk (--dangerously-skip-permissions).',
+  'No mid-turn steering: the next message queues until the current turn finishes.',
+  'Tool activity is not shown in the transcript; only final text per turn.',
+];
+
+/** The v1 limits of the Antigravity CLI (agy-pty) lane. */
+export const AGY_PTY_CAVEATS: readonly string[] = [
+  'Approvals stay inside the Antigravity TUI — no Cyboflow review-queue integration.',
+];
+
 interface SubstrateSelectorProps {
   value: LaunchAgentRuntime;
   onChange: (runtime: LaunchAgentRuntime) => void;
@@ -140,6 +152,7 @@ const PROVIDER_LABELS: Record<AgentProvider, string> = {
   codex: 'Codex',
   omp: 'OMP',
   pi: 'Pi',
+  agy: 'Antigravity',
 };
 
 const MODE_LABELS: Record<RuntimeMode, string> = {
@@ -166,6 +179,8 @@ function lanesForProvider(provider: AgentProvider, omp: OmpAvailability): Provid
       return omp.ariaMode ? { chat: 'omp-fleet' } : { chat: 'omp-sdk', cli: 'omp-pty' };
     case 'pi':
       return { chat: 'pi-sdk', cli: 'pi-pty' };
+    case 'agy':
+      return { chat: 'agy-sdk', cli: 'agy-pty' };
   }
 }
 
@@ -497,6 +512,12 @@ export function SubstrateSelector({
       )}
       {value === 'pi-pty' && (
         <CaveatsPanel testId={caveatsTestId} title="Pi (CLI) — v1 limits" items={PI_PTY_CAVEATS} />
+      )}
+      {value === 'agy-sdk' && (
+        <CaveatsPanel testId={caveatsTestId} title="Antigravity — v1 limits" items={AGY_SDK_CAVEATS} />
+      )}
+      {value === 'agy-pty' && (
+        <CaveatsPanel testId={caveatsTestId} title="Antigravity (CLI) — v1 limits" items={AGY_PTY_CAVEATS} />
       )}
     </div>
   );
