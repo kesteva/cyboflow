@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AppServerServerRequestDispatch } from './client';
+import type { CommandExecutionApprovalKind } from './protocol';
 import {
   CODEX_APP_SERVER_APPROVAL_SOURCE,
   CodexAppServerApprovalBridge,
@@ -70,7 +71,10 @@ class FakeApprovalRouter implements ApprovalRouterPort {
   }
 }
 
-function commandDispatch(id: string | number = 'command-1'): {
+function commandDispatch(
+  id: string | number = 'command-1',
+  kind?: CommandExecutionApprovalKind,
+): {
   request: CommandDispatch;
   respond: ReturnType<typeof vi.fn>;
 } {
@@ -81,6 +85,7 @@ function commandDispatch(id: string | number = 'command-1'): {
       id,
       method: 'item/commandExecution/requestApproval',
       params: {
+        ...(kind ? { kind } : {}),
         threadId: 'thread-1',
         turnId: 'turn-1',
         itemId: 'item-command',
@@ -256,6 +261,30 @@ describe('CodexAppServerApprovalBridge', () => {
 
     expect(respond).toHaveBeenCalledTimes(1);
     expect(respond).toHaveBeenCalledWith({ decision: 'accept' });
+    expect(bridge.pendingCount).toBe(0);
+  });
+
+  it('routes a writeStdin approval as Bash and carries its kind to the router', async () => {
+    const { bridge, router } = makeBridge();
+    const { request, respond } = commandDispatch('stdin-1', 'writeStdin');
+
+    const handling = bridge.handleServerRequest(request);
+    expect(router.calls).toHaveLength(1);
+    expect(router.calls[0]).toMatchObject({
+      toolName: 'Bash',
+      input: {
+        kind: 'writeStdin',
+        requestId: 'stdin-1',
+        appServerMethod: 'item/commandExecution/requestApproval',
+        itemId: 'item-command',
+      },
+    });
+
+    router.calls[0].deferred.resolve({ behavior: 'deny' });
+    await handling;
+
+    expect(respond).toHaveBeenCalledTimes(1);
+    expect(respond).toHaveBeenCalledWith({ decision: 'decline' });
     expect(bridge.pendingCount).toBe(0);
   });
 

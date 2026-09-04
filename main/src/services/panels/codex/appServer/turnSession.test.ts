@@ -32,23 +32,26 @@ const INITIALIZE_RESPONSE: AppServerInitializeResponse = {
   platformOs: 'macos',
 };
 
+/** Captured verbatim from the 0.153.3 binary: `cacheWriteInputTokens` is new. */
 const TOKEN_USAGE_UPDATED_PARAMS = {
   threadId: 'thread-1',
   turnId: 'turn-1',
   tokenUsage: {
     total: {
-      totalTokens: 1_200,
-      inputTokens: 1_000,
-      cachedInputTokens: 400,
-      outputTokens: 200,
-      reasoningOutputTokens: 50,
+      totalTokens: 16_232,
+      inputTokens: 16_227,
+      cachedInputTokens: 9_984,
+      cacheWriteInputTokens: 0,
+      outputTokens: 5,
+      reasoningOutputTokens: 0,
     },
     last: {
-      totalTokens: 150,
-      inputTokens: 120,
-      cachedInputTokens: 20,
-      outputTokens: 30,
-      reasoningOutputTokens: 10,
+      totalTokens: 16_232,
+      inputTokens: 16_227,
+      cachedInputTokens: 9_984,
+      cacheWriteInputTokens: 1_024,
+      outputTokens: 5,
+      reasoningOutputTokens: 0,
     },
     modelContextWindow: 258_400,
   },
@@ -265,6 +268,36 @@ describe('CodexAppServerTurnSession', () => {
     ]);
   });
 
+  it('defaults a missing cacheWriteInputTokens to zero rather than dropping usage', async () => {
+    const client = new FakeTurnSessionClient();
+    const events: TurnSessionEvent[] = [];
+    const session = await activeSession(client, events);
+    const lastWithoutCacheWrite: Record<string, number> = {
+      ...TOKEN_USAGE_UPDATED_PARAMS.tokenUsage.last,
+    };
+    delete lastWithoutCacheWrite.cacheWriteInputTokens;
+
+    session.handleNotification({
+      method: 'thread/tokenUsage/updated',
+      params: {
+        ...TOKEN_USAGE_UPDATED_PARAMS,
+        tokenUsage: {
+          ...TOKEN_USAGE_UPDATED_PARAMS.tokenUsage,
+          last: lastWithoutCacheWrite,
+        },
+      },
+    });
+
+    expect(events).toEqual([{
+      type: 'thread.tokenUsage.updated',
+      ...TOKEN_USAGE_UPDATED_PARAMS,
+      tokenUsage: {
+        ...TOKEN_USAGE_UPDATED_PARAMS.tokenUsage,
+        last: { ...TOKEN_USAGE_UPDATED_PARAMS.tokenUsage.last, cacheWriteInputTokens: 0 },
+      },
+    }]);
+  });
+
   it('preserves malformed and stale token usage notifications as raw', async () => {
     const client = new FakeTurnSessionClient();
     const events: TurnSessionEvent[] = [];
@@ -279,6 +312,7 @@ describe('CodexAppServerTurnSession', () => {
             totalTokens: 150,
             inputTokens: 120,
             cachedInputTokens: 20,
+            cacheWriteInputTokens: 0,
             outputTokens: 30,
           },
         },
@@ -399,6 +433,39 @@ describe('CodexAppServerTurnSession', () => {
     ))).toEqual(items.map((item) => item.type));
   });
 
+  it('parses 0.153.3 audio/localAudio userMessage content instead of degrading to raw', async () => {
+    const client = new FakeTurnSessionClient();
+    const events: TurnSessionEvent[] = [];
+    const session = await activeSession(client, events);
+
+    session.handleNotification({
+      method: 'item/completed',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        completedAtMs: 1,
+        item: {
+          type: 'userMessage',
+          id: 'user-message',
+          clientId: 'nudge-1',
+          content: [
+            { type: 'audio', url: 'https://example.com/clip.mp3' },
+            { type: 'localAudio', path: '/tmp/clip.wav' },
+          ],
+        },
+      },
+    });
+
+    const event = events[0];
+    if (event.type !== 'item.completed' || event.item.type !== 'userMessage') {
+      throw new Error(`expected a parsed userMessage item, got ${JSON.stringify(event)}`);
+    }
+    expect(event.item.content).toEqual([
+      { type: 'audio', url: 'https://example.com/clip.mp3' },
+      { type: 'localAudio', path: '/tmp/clip.wav' },
+    ]);
+  });
+
   it('maps retry errors and terminal completion, interruption, and failure', async () => {
     const client = new FakeTurnSessionClient();
     const events: TurnSessionEvent[] = [];
@@ -414,6 +481,7 @@ describe('CodexAppServerTurnSession', () => {
           message: 'temporary failure',
           codexErrorInfo: null,
           additionalDetails: null,
+          misalignment: null,
         },
       },
     });
@@ -464,6 +532,7 @@ describe('CodexAppServerTurnSession', () => {
           message: 'temporary failure',
           codexErrorInfo: null,
           additionalDetails: null,
+          misalignment: null,
         },
       },
       {
@@ -486,10 +555,134 @@ describe('CodexAppServerTurnSession', () => {
           message: 'terminal failure',
           codexErrorInfo: { type: 'other' },
           additionalDetails: 'details',
+          misalignment: null,
         },
       },
     ]);
     expect(session.activeTurnId).toBeNull();
+  });
+
+  it('parses 0.153.3 misalignment details and drops a malformed block', async () => {
+    const client = new FakeTurnSessionClient();
+    const events: TurnSessionEvent[] = [];
+    const session = await activeSession(client, events);
+
+    session.handleNotification({
+      method: 'error',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        willRetry: false,
+        error: {
+          message: 'blocked',
+          codexErrorInfo: 'misalignmentPolicyViolation',
+          additionalDetails: null,
+          misalignment: {
+            errorType: 'policy',
+            detailedExplanation: 'The request asks for disallowed content.',
+            steer: { instruction: 'Rephrase the request.' },
+          },
+        },
+      },
+    });
+    session.handleNotification({
+      method: 'error',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        willRetry: false,
+        error: {
+          message: 'blocked',
+          codexErrorInfo: null,
+          additionalDetails: null,
+          misalignment: 'not-an-object',
+        },
+      },
+    });
+
+    expect(events.map((event) => (
+      event.type === 'turn.error' ? event.error.misalignment : null
+    ))).toEqual([
+      {
+        errorType: 'policy',
+        detailedExplanation: 'The request asks for disallowed content.',
+        steer: { instruction: 'Rephrase the request.' },
+      },
+      null,
+    ]);
+  });
+
+  it('carries async agentMessage questions through and nulls a malformed list', async () => {
+    const client = new FakeTurnSessionClient();
+    const events: TurnSessionEvent[] = [];
+    const session = await activeSession(client, events);
+
+    session.handleNotification({
+      method: 'item/completed',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        completedAtMs: 1,
+        item: {
+          type: 'agentMessage',
+          id: 'msg-1',
+          text: 'OK',
+          phase: 'final_answer',
+          memoryCitation: null,
+          delivery: 'async',
+          questions: [
+            { title: 'Which environment?', options: ['staging', 'production'] },
+            { title: 'Anything else?', options: null },
+          ],
+        },
+      },
+    });
+    session.handleNotification({
+      method: 'item/completed',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        completedAtMs: 2,
+        item: {
+          type: 'agentMessage',
+          id: 'msg-2',
+          text: 'OK',
+          delivery: null,
+          questions: [{ options: ['a'] }],
+        },
+      },
+    });
+    session.handleNotification({
+      method: 'item/completed',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        completedAtMs: 3,
+        item: {
+          type: 'agentMessage',
+          id: 'msg-3',
+          text: 'OK',
+          delivery: null,
+          // Title present, but options is not a string array — must still null the
+          // whole list rather than surface a question with a bogus options value.
+          questions: [{ title: 'Which environment?', options: [1, 2] }],
+        },
+      },
+    });
+
+    expect(events.map((event) => ('item' in event ? event.item : null))).toEqual([
+      {
+        type: 'agentMessage',
+        id: 'msg-1',
+        text: 'OK',
+        questions: [
+          { title: 'Which environment?', options: ['staging', 'production'] },
+          { title: 'Anything else?', options: null },
+        ],
+      },
+      { type: 'agentMessage', id: 'msg-2', text: 'OK', questions: null },
+      { type: 'agentMessage', id: 'msg-3', text: 'OK', questions: null },
+    ]);
   });
 
   it('preserves unsupported and malformed notifications without reinterpretation', async () => {

@@ -10,7 +10,7 @@ type QuestionDispatch = Extract<
   { method: 'item/tool/requestUserInput' }
 >;
 
-function dispatch(autoResolutionMs: number | null = null): {
+function dispatch(autoResolutionMs: number | null = null, isBlocking = true): {
   request: QuestionDispatch;
   respond: ReturnType<typeof vi.fn>;
 } {
@@ -24,6 +24,7 @@ function dispatch(autoResolutionMs: number | null = null): {
         threadId: 'thread-1',
         turnId: 'turn-1',
         itemId: 'tool-1',
+        isBlocking,
         autoResolutionMs,
         questions: [{
           id: 'codex-question-1',
@@ -81,6 +82,22 @@ describe('CodexAppServerQuestionBridge', () => {
     expect(respond).toHaveBeenCalledWith({
       answers: { 'codex-question-1': { answers: ['Staging, Production'] } },
     });
+  });
+
+  it('still routes a non-blocking question to the human and forwards the answer', async () => {
+    // isBlocking:false only says the TUI need not modal-block; the Codex core
+    // awaits the response either way (core_session.rs ~L2982).
+    const fake = router();
+    const bridge = new CodexAppServerQuestionBridge({ runId: 'run-1', questionRouter: fake.port });
+    const { request, respond } = dispatch(null, false);
+
+    await bridge.handleServerRequest(request);
+
+    expect(fake.requestQuestion).toHaveBeenCalledOnce();
+    expect(respond).toHaveBeenCalledWith({
+      answers: { 'codex-question-1': { answers: ['Staging, Production'] } },
+    });
+    expect(fake.clearPendingForRun).not.toHaveBeenCalled();
   });
 
   it('routes deadline-bound questions immediately and returns an answer before timeout', async () => {

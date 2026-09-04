@@ -342,9 +342,18 @@ function isCommandApprovalDecision(value: unknown): boolean {
   return false;
 }
 
+function isCommandApprovalKind(value: unknown): boolean {
+  return value === 'command' || value === 'writeStdin';
+}
+
 function isCommandApprovalParams(value: unknown): value is CommandExecutionRequestApprovalParams {
   if (!isRecord(value)) return false;
-  return typeof value.threadId === 'string'
+  // 0.153.3 added `kind`; older servers omit it and mean 'command'. An unrecognized
+  // `kind` fails the frame and SIGTERMs the app-server (see client.ts's `fail()`) —
+  // deliberate fail-closed posture per the brief, since we cannot safely dispatch an
+  // approval whose semantics we do not understand.
+  return (!hasOwn(value, 'kind') || isCommandApprovalKind(value.kind))
+    && typeof value.threadId === 'string'
     && typeof value.turnId === 'string'
     && typeof value.itemId === 'string'
     && isFiniteNumber(value.startedAtMs)
@@ -384,11 +393,22 @@ function isFileChangeApprovalParams(value: unknown): value is FileChangeRequestA
     && hasOptionalStringOrNull(value, 'grantRoot');
 }
 
-function isToolRequestUserInputParams(value: unknown): value is ToolRequestUserInputParams {
+/**
+ * The wire shape of `item/tool/requestUserInput`. `isBlocking` arrived in
+ * 0.153.3 and the Rust deserializer defaults it to `true` when absent, so an
+ * older server's frame is valid here and normalized at dispatch.
+ */
+type ToolRequestUserInputParamsWire =
+  Omit<ToolRequestUserInputParams, 'isBlocking'> & { isBlocking?: boolean };
+
+function isToolRequestUserInputParams(
+  value: unknown,
+): value is ToolRequestUserInputParamsWire {
   if (!isRecord(value) || !Array.isArray(value.questions)) return false;
   return typeof value.threadId === 'string'
     && typeof value.turnId === 'string'
     && typeof value.itemId === 'string'
+    && (!hasOwn(value, 'isBlocking') || typeof value.isBlocking === 'boolean')
     && (value.autoResolutionMs === null || isFiniteNumber(value.autoResolutionMs))
     && value.questions.every((question) => {
       if (!isRecord(question)) return false;
@@ -436,7 +456,12 @@ function isMcpElicitationParams(value: unknown): value is McpServerElicitationRe
   if (value.mode === 'form') {
     return isMcpElicitationSchema(value.requestedSchema);
   }
-  if (value.mode === 'openai/form') {
+  // 'openai/form' and 'openaiForm' are two independent server routes (v2mcp.rs
+  // OpenAiForm vs OpenAiElicitationForm), not two spellings of the same one. Accepting
+  // both keeps a legitimate frame from tripping fail(); cyboflow only declares the
+  // legacy `mcpServerOpenaiFormElicitation` capability today, so 'openaiForm' is not
+  // expected to arrive in practice, but validating it costs nothing.
+  if (value.mode === 'openai/form' || value.mode === 'openaiForm') {
     return hasOwn(value, 'requestedSchema') && isJsonValue(value.requestedSchema);
   }
   if (value.mode === 'url') {
@@ -932,7 +957,8 @@ export class CodexAppServerClient {
         this.fail(new AppServerProtocolError(`Codex app-server emitted malformed params for ${method}`));
         return;
       }
-      request = { method, id, params };
+      // Mirror the server's `unwrap_or(true)`: bridges always see a boolean.
+      request = { method, id, params: { ...params, isBlocking: params.isBlocking ?? true } };
     } else if (method === 'item/permissions/requestApproval') {
       if (!isPermissionsRequestApprovalParams(params)) {
         this.fail(new AppServerProtocolError(`Codex app-server emitted malformed params for ${method}`));

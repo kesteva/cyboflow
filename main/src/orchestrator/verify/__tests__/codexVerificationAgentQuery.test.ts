@@ -508,7 +508,12 @@ describe('createCodexVerifyTranscriptAccumulator', () => {
   it('appends the total-cap truncation marker exactly once', () => {
     const acc = createCodexVerifyTranscriptAccumulator();
     for (let i = 0; i < 6; i++) {
-      acc.onEvent(completed({ type: 'agentMessage', id: `m${i}`, text: 'z'.repeat(100_000) }));
+      acc.onEvent(completed({
+        type: 'agentMessage',
+        id: `m${i}`,
+        text: 'z'.repeat(100_000),
+        questions: null,
+      }));
     }
     const text = acc.text() ?? '';
     const marker = '[transcript truncated at 400000 chars]';

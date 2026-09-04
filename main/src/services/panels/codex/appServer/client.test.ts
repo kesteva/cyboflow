@@ -302,6 +302,121 @@ describe('CodexAppServerClient', () => {
     ]);
   });
 
+  it('normalizes 0.153.3 isBlocking and accepts the openaiForm elicitation mode', () => {
+    const seen: Array<Record<string, unknown>> = [];
+    const { child, client } = makeHarness({
+      onServerRequest: (request) => {
+        if (request.method === 'item/tool/requestUserInput') {
+          seen.push({ id: request.id, isBlocking: request.params.isBlocking });
+          request.respond({ answers: {} });
+          return;
+        }
+        if (request.method === 'mcpServer/elicitation/request') {
+          seen.push({ id: request.id, mode: request.params.mode });
+          request.respond({ action: 'accept', content: null, _meta: null });
+        }
+      },
+    });
+
+    const questions = [{
+      id: 'question-1',
+      header: 'Action',
+      question: 'What next?',
+      isOther: false,
+      isSecret: false,
+      options: null,
+    }];
+    child.writeFrame({
+      id: 'non-blocking',
+      method: 'item/tool/requestUserInput',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        itemId: 'tool-1',
+        questions,
+        isBlocking: false,
+        autoResolutionMs: null,
+      },
+    });
+    // A pre-0.153.3 server omits the field; the Rust deserializer defaults it to true.
+    child.writeFrame({
+      id: 'legacy',
+      method: 'item/tool/requestUserInput',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        itemId: 'tool-2',
+        questions,
+        autoResolutionMs: null,
+      },
+    });
+    child.writeFrame({
+      id: 'mcp-openai-form',
+      method: 'mcpServer/elicitation/request',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        serverName: 'cyboflow',
+        mode: 'openaiForm',
+        _meta: null,
+        message: 'Fill in the form',
+        requestedSchema: { type: 'object', fields: [] },
+      },
+    });
+
+    expect(seen).toEqual([
+      { id: 'non-blocking', isBlocking: false },
+      { id: 'legacy', isBlocking: true },
+      { id: 'mcp-openai-form', mode: 'openaiForm' },
+    ]);
+    expect(child.outboundFrames()).toEqual([
+      { id: 'non-blocking', result: { answers: {} } },
+      { id: 'legacy', result: { answers: {} } },
+      { id: 'mcp-openai-form', result: { action: 'accept', content: null, _meta: null } },
+    ]);
+    expect(client.state).toBe('running');
+  });
+
+  it('dispatches writeStdin command approvals and fails closed on an unknown kind', () => {
+    const kinds: Array<string | undefined> = [];
+    const { child, client } = makeHarness({
+      onServerRequest: (request) => {
+        if (request.method !== 'item/commandExecution/requestApproval') return;
+        kinds.push(request.params.kind);
+        request.respond({ decision: 'accept' });
+      },
+    });
+
+    const params = {
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      itemId: 'item-1',
+      startedAtMs: 100,
+      environmentId: null,
+      command: 'y',
+      cwd: '/tmp/worktree',
+    };
+    child.writeFrame({
+      id: 'stdin-1',
+      method: 'item/commandExecution/requestApproval',
+      params: { ...params, kind: 'writeStdin', approvalId: 'callback-1' },
+    });
+    expect(kinds).toEqual(['writeStdin']);
+    expect(child.outboundFrames()).toEqual([{ id: 'stdin-1', result: { decision: 'accept' } }]);
+    expect(client.state).toBe('running');
+
+    child.writeFrame({
+      id: 'bogus-1',
+      method: 'item/commandExecution/requestApproval',
+      params: { ...params, kind: 'bogus' },
+    });
+
+    expect(kinds).toEqual(['writeStdin']);
+    expect(client.state).toBe('failed');
+    expect(child.killCalls).toEqual(['SIGTERM']);
+    expect(child.outboundFrames()).toEqual([{ id: 'stdin-1', result: { decision: 'accept' } }]);
+  });
+
   it('cancels approval requests when no handler is installed', () => {
     const { child } = makeHarness();
 
@@ -390,6 +505,27 @@ describe('CodexAppServerClient', () => {
         startedAtMs: 100,
         environmentId: null,
         commandActions: 'not-an-array',
+      },
+    });
+
+    expect(client.state).toBe('failed');
+    expect(child.killCalls).toEqual(['SIGTERM']);
+    expect(child.outboundFrames()).toEqual([]);
+  });
+
+  it('fails closed on a non-boolean isBlocking value', () => {
+    const { child, client } = makeHarness();
+
+    child.writeFrame({
+      id: 'bad-is-blocking',
+      method: 'item/tool/requestUserInput',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        itemId: 'tool-1',
+        questions: [],
+        isBlocking: 'false',
+        autoResolutionMs: null,
       },
     });
 
