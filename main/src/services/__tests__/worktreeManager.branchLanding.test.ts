@@ -16,12 +16,20 @@
  *
  * Integration test — requires `git` on PATH.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { execSync } from 'child_process';
 import { writeFileSync } from 'fs';
 import { join } from 'path';
 import { WorktreeManager } from '../worktreeManager';
 import { withTempDir } from '../../__test_fixtures__/tmp';
+
+// Every case here drives a dozen real `git` subprocesses against a temp repo.
+// vitest's 5s default is sized for in-process work: it is enough when this file
+// runs alone (~1s a case) and not when the full suite has a fork on every core,
+// where the same case has been seen at 8.8s. That made the failure a property of
+// what else was running, not of the code under test. Time out on a genuine hang
+// instead.
+vi.setConfig({ testTimeout: 60_000 });
 
 function git(cmd: string, cwd: string): string {
   return execSync(`git ${cmd}`, { cwd, stdio: 'pipe' }).toString().trim();

@@ -17,6 +17,14 @@ import { join } from 'path';
 import { WorktreeManager, MergeConflictError, isMergeConflictError } from '../worktreeManager';
 import { withTempDir } from '../../__test_fixtures__/tmp';
 
+// The `(integration)` suites below each drive real `git` subprocesses against a
+// temp repo. vitest's 5s default is sized for in-process work: it holds when this
+// file runs alone (~1s a case) and not when the full suite has a fork on every
+// core, where a merge case has been seen at 6.3s. That made the failure a
+// property of what else was running, not of the code under test. Time out on a
+// genuine hang instead.
+vi.setConfig({ testTimeout: 60_000 });
+
 // ---------------------------------------------------------------------------
 // Type helper to reach _createAtPath for spying.
 // We cast to a structurally-compatible interface rather than using `unknown`
