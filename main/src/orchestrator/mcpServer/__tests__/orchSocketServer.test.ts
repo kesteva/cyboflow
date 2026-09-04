@@ -24,12 +24,13 @@
  * a vi.fn()-backed LoggerLike spy.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { EventEmitter } from 'events';
 import * as net from 'net';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type Database from 'better-sqlite3';
-import { OrchSocketServer } from '../orchSocketServer';
+import { OrchSocketServer, isNamedPipePath } from '../orchSocketServer';
 import { orchSocketEndpoint } from '../orchSocketEndpoint';
 import { OrchTokenRegistry, ORCH_AUTH_KILL_SWITCH_ENV_VAR } from '../../orchAuthToken';
 import type { LoggerLike } from '../../types';
@@ -38,13 +39,33 @@ import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun, seedApproval } from '../../__test_fixtures__/orchestratorTestDb';
 
 // The EADDRINUSE-recovery test needs one real bind failure, which the pre-bind
-// unlink in start() otherwise prevents. Wrap only fs.existsSync so that test can
-// suppress the pre-bind check for a single call; every other fs call (here and in
-// start()) keeps real behavior, and better-sqlite3 uses native I/O rather than
-// this module, so the DB fixtures and the rest of the suite are unaffected.
+// unlink in start() otherwise prevents. Wrap fs.existsSync so that test can
+// suppress the pre-bind check for a single call; mkdirSync/chmodSync/statSync/
+// rmSync are also wrapped (still delegating to the real implementation by
+// default) purely so the named-pipe test below can assert they were never
+// called for a pipe path — every OTHER fs call here and in start() keeps real
+// behavior, and better-sqlite3 uses native I/O rather than this module, so the
+// DB fixtures and the rest of the suite are unaffected.
 vi.mock('fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs')>();
-  return { ...actual, existsSync: vi.fn(actual.existsSync) };
+  return {
+    ...actual,
+    existsSync: vi.fn(actual.existsSync),
+    mkdirSync: vi.fn(actual.mkdirSync),
+    chmodSync: vi.fn(actual.chmodSync),
+    statSync: vi.fn(actual.statSync),
+    rmSync: vi.fn(actual.rmSync),
+  };
+});
+
+// The named-pipe test below substitutes a fake net.Server for one start() call
+// (a real `\\.\pipe\...` listen() cannot bind outside Windows). Wrapping
+// createServer in vi.fn(actual.createServer) keeps every other test's real
+// net.Server behavior unchanged; only that one test's mockImplementationOnce
+// diverts a single call.
+vi.mock('net', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('net')>();
+  return { ...actual, createServer: vi.fn(actual.createServer) };
 });
 
 // ---------------------------------------------------------------------------
@@ -817,5 +838,93 @@ describe('OrchSocketServer', () => {
       await server.stop();
       fs.rmSync(dir, { recursive: true, force: true });
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // Named pipes (Windows) — every unix-socket fs step must be skipped
+  // -------------------------------------------------------------------------
+
+  describe('named pipes', () => {
+    /**
+     * A fake net.Server standing in for a real named-pipe bind: a real
+     * `\\.\pipe\...` listen() cannot bind on a non-Windows host (there is no
+     * AF_UNIX-style fallback), so this drives start()/stop()'s pipe branches
+     * through the SAME event contract a real net.Server gives them — listen()
+     * resolves asynchronously via a 'listening' event (registered as a
+     * `once` listener before listen() is called, exactly like production),
+     * and close() resolves via its callback.
+     */
+    class FakeServer extends EventEmitter {
+      listening = false;
+      listen(_path: string): this {
+        setImmediate(() => {
+          this.listening = true;
+          this.emit('listening');
+        });
+        return this;
+      }
+      close(cb?: () => void): this {
+        this.listening = false;
+        if (cb) setImmediate(cb);
+        return this;
+      }
+      unref(): this {
+        return this;
+      }
+    }
+
+    it('skips every unix-socket fs call for a pipe path, and stop() closes the server', async () => {
+      const pipePath = '\\\\.\\pipe\\cyboflow-test-orch';
+      const fake = new FakeServer();
+      vi.mocked(net.createServer).mockImplementationOnce(() => fake as unknown as net.Server);
+      // Isolate this test's assertions from any fs activity earlier tests left
+      // behind on these shared vi.fn() wrappers.
+      vi.mocked(fs.mkdirSync).mockClear();
+      vi.mocked(fs.chmodSync).mockClear();
+      vi.mocked(fs.existsSync).mockClear();
+      vi.mocked(fs.statSync).mockClear();
+      vi.mocked(fs.rmSync).mockClear();
+
+      server = new OrchSocketServer(pipePath, dbAdapter(db), logger, {}, tokens);
+      await server.start();
+
+      expect(server.getSocketPath()).toBe(pipePath);
+      expect(fake.listening).toBe(true);
+      // boundInode has no meaning for a pipe — isSocketPathIntact must fall
+      // back to "is the server object still listening".
+      expect(server.isSocketPathIntact()).toBe(true);
+
+      expect(fs.mkdirSync).not.toHaveBeenCalled();
+      expect(fs.chmodSync).not.toHaveBeenCalled();
+      expect(fs.existsSync).not.toHaveBeenCalled();
+      expect(fs.statSync).not.toHaveBeenCalled();
+      expect(fs.rmSync).not.toHaveBeenCalled();
+
+      await server.stop();
+
+      expect(fake.listening).toBe(false);
+      // stop() must still have closed the fake server even though every
+      // unix-socket fs step was skipped.
+      expect(fs.rmSync).not.toHaveBeenCalled();
+      expect(server.isSocketPathIntact()).toBe(false);
+    });
+  });
+});
+
+describe('isNamedPipePath', () => {
+  it('is true for a Windows named pipe path', () => {
+    expect(isNamedPipePath('\\\\.\\pipe\\cyboflow-ada-1276b450-orch')).toBe(true);
+  });
+
+  it('is case-insensitive on the prefix', () => {
+    expect(isNamedPipePath('\\\\.\\PIPE\\cyboflow-ada-1276b450-orch')).toBe(true);
+  });
+
+  it('is false for a POSIX socket path', () => {
+    expect(isNamedPipePath('/Users/dev/.cyboflow/sockets/orch.sock')).toBe(false);
+  });
+
+  it('is false for a Windows drive-letter path (not a pipe)', () => {
+    expect(isNamedPipePath('C:/Users/dev/.cyboflow/sockets/orch.sock')).toBe(false);
   });
 });

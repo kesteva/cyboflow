@@ -8,14 +8,29 @@
  * Expected names are literals. Recomputing the hash here with the production
  * expression would make any change to it agree with itself. No electron /
  * better-sqlite3 imports — the standalone-typecheck invariant holds.
+ *
+ * os's own exports are non-configurable, so vi.spyOn can't redefine them
+ * directly — wrap the real implementation in vi.fn() instead (the same
+ * pattern nodeFinder.test.ts uses for fs).
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+vi.mock('os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('os')>();
+  return { ...actual, userInfo: vi.fn(actual.userInfo) };
+});
+
+import * as os from 'os';
 import { orchSocketEndpoint } from '../orchSocketEndpoint';
 
 const STABLE = 'C:/Users/dev/.cyboflow/sockets/orch.sock';
 const DEV = 'C:/Users/dev/.cyboflow-dev/sockets/orch.sock';
 
 describe('orchSocketEndpoint', () => {
+  beforeEach(() => {
+    vi.mocked(os.userInfo).mockClear();
+  });
+
   describe('win32', () => {
     it('names a pipe from the user slug and an 8-hex hash of the socket path', () => {
       expect(orchSocketEndpoint(STABLE, 'win32', 'ada')).toBe(
@@ -58,14 +73,29 @@ describe('orchSocketEndpoint', () => {
         '\\\\.\\pipe\\cyboflow-default-f82a072c-orch',
       );
     });
+
+    it('falls back to "default" when os.userInfo() throws and no username was injected', () => {
+      // The real-world trigger: a uid with no passwd entry (containers, some CI
+      // images, managed accounts) makes os.userInfo() throw SystemError ENOENT.
+      vi.mocked(os.userInfo).mockImplementation(() => {
+        throw new Error('ENOENT: no such user');
+      });
+      expect(orchSocketEndpoint('/sockets/orch.sock', 'win32')).toBe(
+        '\\\\.\\pipe\\cyboflow-default-f82a072c-orch',
+      );
+    });
   });
 
   describe('posix', () => {
     it.each(['linux', 'darwin'] as const)(
-      'returns the injected path unchanged on %s',
+      'returns the injected path unchanged on %s without ever calling os.userInfo',
       (platform) => {
         const socketPath = '/Users/dev/.cyboflow/sockets/orch.sock';
         expect(orchSocketEndpoint(socketPath, platform)).toBe(socketPath);
+        // os.userInfo() throws in some hosts (containers, managed accounts) —
+        // a default-parameter initializer would run it on every call regardless
+        // of platform; it must be evaluated only inside the win32 branch.
+        expect(os.userInfo).not.toHaveBeenCalled();
       }
     );
   });

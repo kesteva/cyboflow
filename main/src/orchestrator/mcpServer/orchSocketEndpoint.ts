@@ -25,12 +25,28 @@ export function orchSocketEndpoint(
   platform: NodeJS.Platform = process.platform,
   // Injected by tests: a real account name is usually already sanitary, so
   // reading the host's would leave the sanitize step below unexercised.
-  username: string = os.userInfo().username
+  // Optional (not a default parameter) so os.userInfo() is only ever evaluated
+  // inside the win32 branch below — see that branch for why.
+  username?: string
 ): string {
   if (platform !== 'win32') {
     return posixPath;
   }
-  const user = (username || 'default').replace(/[^A-Za-z0-9_-]+/g, '-');
+  let resolvedUsername = username;
+  if (resolvedUsername === undefined) {
+    // Resolved lazily, and only here: a default-parameter initializer runs on
+    // every call regardless of platform, and os.userInfo() throws SystemError
+    // ENOENT when the running uid has no passwd entry (containers, some CI
+    // images, managed accounts) — that would abort callers on macOS/Linux,
+    // where this value is never used. Fall back to '', which the sanitize
+    // step below maps to 'default'.
+    try {
+      resolvedUsername = os.userInfo().username;
+    } catch {
+      resolvedUsername = '';
+    }
+  }
+  const user = (resolvedUsername || 'default').replace(/[^A-Za-z0-9_-]+/g, '-');
   // First 8 hex: enough to separate a handful of app kinds, and not a secret.
   const kind = createHash('sha256').update(posixPath).digest('hex').slice(0, 8);
   return `\\\\.\\pipe\\cyboflow-${user}-${kind}-orch`;
