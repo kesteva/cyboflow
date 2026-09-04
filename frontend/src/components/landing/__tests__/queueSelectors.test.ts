@@ -66,6 +66,7 @@ function makeApproval(overrides: Partial<Approval> = {}): Approval {
     createdAt: '2026-07-06T00:00:00.000Z',
     status: 'pending',
     sessionName: null,
+    worktreeName: null,
     agentProvider: null,
     awaited: true,
     ...overrides,

@@ -166,9 +166,9 @@ describe('ReviewQueueView', () => {
 
   it('renders one card per approval in queue', () => {
     mockQueue = [
-      { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending', awaited: true, sessionName: null, agentProvider: null },
-      { id: '2', runId: 'run-1', workflowName: 'wf', toolName: 'Read', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending', awaited: true, sessionName: null, agentProvider: null },
-      { id: '3', runId: 'run-1', workflowName: 'wf', toolName: 'Write', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending', awaited: true, sessionName: null, agentProvider: null },
+      { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending', awaited: true, sessionName: null, worktreeName: null, agentProvider: null },
+      { id: '2', runId: 'run-1', workflowName: 'wf', toolName: 'Read', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending', awaited: true, sessionName: null, worktreeName: null, agentProvider: null },
+      { id: '3', runId: 'run-1', workflowName: 'wf', toolName: 'Write', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending', awaited: true, sessionName: null, worktreeName: null, agentProvider: null },
     ];
     render(<ReviewQueueView />);
     const cards = screen.getAllByTestId('pending-approval-card');
@@ -190,8 +190,8 @@ describe('ReviewQueueView', () => {
 
   it('shows correct total count in header when queue is populated', () => {
     mockQueue = [
-      { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending', awaited: true, sessionName: null, agentProvider: null },
-      { id: '2', runId: 'run-1', workflowName: 'wf', toolName: 'Read', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending', awaited: true, sessionName: null, agentProvider: null },
+      { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending', awaited: true, sessionName: null, worktreeName: null, agentProvider: null },
+      { id: '2', runId: 'run-1', workflowName: 'wf', toolName: 'Read', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending', awaited: true, sessionName: null, worktreeName: null, agentProvider: null },
     ];
     render(<ReviewQueueView />);
     expect(screen.getByTestId('review-total-count')).toHaveTextContent('2 total');
@@ -199,7 +199,7 @@ describe('ReviewQueueView', () => {
 
   it('does not render "No pending reviews" when queue is populated', () => {
     mockQueue = [
-      { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending', awaited: true, sessionName: null, agentProvider: null },
+      { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending', awaited: true, sessionName: null, worktreeName: null, agentProvider: null },
     ];
     render(<ReviewQueueView />);
     expect(screen.queryByText('No pending reviews')).not.toBeInTheDocument();
@@ -207,7 +207,7 @@ describe('ReviewQueueView', () => {
 
   it('renders "Pending" section header when queue is non-empty', () => {
     mockQueue = [
-      { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending', awaited: true, sessionName: null, agentProvider: null },
+      { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending', awaited: true, sessionName: null, worktreeName: null, agentProvider: null },
     ];
     render(<ReviewQueueView />);
     expect(screen.getByText('Pending')).toBeInTheDocument();
@@ -215,7 +215,7 @@ describe('ReviewQueueView', () => {
 
   it('passes runStatus="stuck" to PendingApprovalCard when run is in runStatusMap as stuck', () => {
     mockQueue = [
-      { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending', awaited: true, sessionName: null, agentProvider: null },
+      { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending', awaited: true, sessionName: null, worktreeName: null, agentProvider: null },
     ];
     // Set the slice state before rendering so the QueueRow component picks it up.
     useReviewQueueSlice.setState({ runStatusMap: { 'run-1': 'stuck' } });
@@ -226,8 +226,8 @@ describe('ReviewQueueView', () => {
 
   it('passes runStatus="" (undefined) to PendingApprovalCard when runStatusMap is empty', () => {
     mockQueue = [
-      { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending', awaited: true, sessionName: null, agentProvider: null },
-      { id: '2', runId: 'run-2', workflowName: 'wf', toolName: 'Read', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending', awaited: true, sessionName: null, agentProvider: null },
+      { id: '1', runId: 'run-1', workflowName: 'wf', toolName: 'Bash', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending', awaited: true, sessionName: null, worktreeName: null, agentProvider: null },
+      { id: '2', runId: 'run-2', workflowName: 'wf', toolName: 'Read', payloadPreview: '', rationale: null, createdAt: '2026-01-01T00:00:00Z', status: 'pending', awaited: true, sessionName: null, worktreeName: null, agentProvider: null },
     ];
     useReviewQueueSlice.setState({ runStatusMap: {} });
     render(<ReviewQueueView />);

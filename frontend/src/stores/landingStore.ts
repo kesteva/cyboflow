@@ -42,6 +42,7 @@ import { trpc } from '../trpc/client';
 import { API } from '../utils/api';
 import type { Project } from '../types/project';
 import type { ReviewItem } from '../../../shared/types/reviews';
+import { useSessionStore } from './sessionStore';
 import {
   isTerminalRunStatus,
   useActiveRunsStore,
@@ -442,4 +443,47 @@ export function useRunProjectMap(): Record<string, number> {
     }
     return map;
   }, [runsByProject]);
+}
+
+/** Who is asking, for a surface that holds only a runId. */
+export interface RunSessionIdentity {
+  /** `sessions.name` — what a rename changes; null for a parentless legacy run. */
+  sessionName: string | null;
+  /** The run's worktree branch (`workflow_runs.branch_name`). */
+  branchName: string | null;
+}
+
+/**
+ * runId → session identity, for a surface (a review item, say) that has a run id
+ * and needs to name the agent that halted on it.
+ *
+ * Resolved ENTIRELY in the renderer rather than joined read-side, because both
+ * halves are already here and complete: `ActiveRunRow` carries `session_id` +
+ * `branch_name`, and {@link useSessionStore} holds every session across every
+ * project (`API.sessions.getAll` at boot, kept live by the IPC deltas). A
+ * `LEFT JOIN sessions` in `listRunsHandler` would buy the same two strings at
+ * the cost of a probed optional join on the hottest run query in the app.
+ *
+ * A run absent from `runsByProject` simply resolves to nothing — the caller
+ * renders the card without identity, exactly as it did before.
+ */
+export function useRunSessionMap(): Record<string, RunSessionIdentity> {
+  const runsByProject = useActiveRunsStore((s) => s.runsByProject);
+  const sessions = useSessionStore((s) => s.sessions);
+  return useMemo(() => {
+    const nameById = new Map(sessions.map((session) => [session.id, session.name]));
+    const map: Record<string, RunSessionIdentity> = {};
+    for (const runs of Object.values(runsByProject)) {
+      for (const run of runs) {
+        map[run.id] = {
+          sessionName:
+            run.session_id !== null && run.session_id !== undefined
+              ? (nameById.get(run.session_id) ?? null)
+              : null,
+          branchName: run.branch_name,
+        };
+      }
+    }
+    return map;
+  }, [runsByProject, sessions]);
 }

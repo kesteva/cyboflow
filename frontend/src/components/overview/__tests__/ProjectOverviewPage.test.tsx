@@ -425,6 +425,7 @@ function approval(over: Partial<Approval> = {}): Approval {
     createdAt: '2026-08-28T00:00:00.000Z',
     status: 'pending',
     sessionName: 'release prep',
+    worktreeName: null,
     agentProvider: 'claude',
     awaited: true,
     ...over,

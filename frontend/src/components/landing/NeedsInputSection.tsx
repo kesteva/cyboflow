@@ -6,19 +6,23 @@
  * same fact ("an agent stopped and is waiting for you"):
  *   1. blocked quick sessions   — the ask is `waitingOn`, answered in-session;
  *   2. decision + notification review items — the ask is the item title, with
- *      the body available inline behind "Details ▸";
+ *      the body available inline behind "Details ▸". These carry no session
+ *      identity of their own, so it is resolved from the item's run via
+ *      `runSessionMap` — two "Human gate: Human review" cards are otherwise
+ *      distinguishable only by project;
  *   3. real-time permission approvals — the only rows with two real verdicts,
  *      so they get Approve/Reject inline rather than an "Answer →" jump.
  *
  * Every row is one card: an "ASKED YOU" kicker + quiet clock, the ask itself as
- * the bold headline, then a metadata line (project · session · summary) with the
- * actions right-aligned.
+ * the bold headline, then a metadata line (project · session · branch · summary)
+ * with the actions right-aligned.
  */
 import React from 'react';
 import { trpc } from '../../trpc/client';
 import type { QuickSessionRow } from '../../../../shared/types/quickSessions';
 import type { ReviewItem } from '../../../../shared/types/reviews';
 import type { QueueItem } from '../../utils/reviewQueueSelectors';
+import type { RunSessionIdentity } from '../../stores/landingStore';
 import { formatElapsedMinutes } from '../../utils/homeClassify';
 import { Chip, EmptyStrip, GhostButton, PrimaryButton, SecondaryButton, SectionHeader } from './QueuePrimitives';
 
@@ -53,21 +57,40 @@ function Headline({ children }: { children: React.ReactNode }): React.JSX.Elemen
 function MetaRow({
   projectName,
   sessionName,
+  branchName,
   context,
   actions,
 }: {
   projectName: string | null;
-  /** Rendered with the green ⌥ prefix — the app's marker for a session branch. */
+  /** The session's display name (`sessions.name`) — what a rename actually changes. */
   sessionName: string | null;
+  /**
+   * The session's worktree branch, rendered with the green ⌥ prefix — the app's
+   * marker for a session branch.
+   *
+   * Kept SEPARATE from {@link sessionName} because the two only coincide until
+   * the session is renamed: an untouched session is named after its worktree, so
+   * showing one field looked complete, but after a rename the card showed the
+   * name and lost the branch (or, before this split, showed the branch and lost
+   * the name). Both are shown; when they are still identical the branch alone is
+   * rendered, so an unrenamed session does not read as "tidy-valley ⌥ tidy-valley".
+   */
+  branchName: string | null;
   context: string | null;
   actions: React.ReactNode;
 }): React.JSX.Element {
+  const showName = sessionName !== null && sessionName !== branchName;
   return (
     <div className="flex items-center gap-2.5 text-[11px]">
       {projectName !== null && <Chip title={projectName}>{projectName}</Chip>}
-      {sessionName !== null && (
-        <span className="shrink-0 truncate text-status-success" title={sessionName}>
-          ⌥ {sessionName}
+      {showName && (
+        <span className="shrink-0 truncate font-medium text-text-secondary" title={sessionName}>
+          {sessionName}
+        </span>
+      )}
+      {branchName !== null && (
+        <span className="shrink-0 truncate text-status-success" title={branchName}>
+          ⌥ {branchName}
         </span>
       )}
       {context !== null && (
@@ -102,6 +125,7 @@ function QuickSessionAsk({
       <MetaRow
         projectName={projectName}
         sessionName={row.name}
+        branchName={row.worktreeName}
         context={row.waitingOn !== null ? row.summary : null}
         actions={<PrimaryButton onClick={() => onOpen(row)}>Answer →</PrimaryButton>}
       />
@@ -112,11 +136,14 @@ function QuickSessionAsk({
 function ReviewItemAsk({
   item,
   projectName,
+  identity,
   nowMs,
   onOpen,
 }: {
   item: ReviewItem;
   projectName: string | null;
+  /** Who halted on this item, resolved from its run; null for a manual/triage item. */
+  identity: RunSessionIdentity | null;
   nowMs: number;
   onOpen: (item: ReviewItem) => void;
 }): React.JSX.Element {
@@ -128,7 +155,8 @@ function ReviewItemAsk({
       <Headline>{item.title}</Headline>
       <MetaRow
         projectName={projectName}
-        sessionName={null}
+        sessionName={identity?.sessionName ?? null}
+        branchName={identity?.branchName ?? null}
         context={hasBody && !expanded ? item.body : null}
         actions={
           <>
@@ -157,6 +185,7 @@ function approvalFacts(item: QueueItem): {
   toolName: string;
   preview: string;
   sessionName: string | null;
+  worktreeName: string | null;
   createdAt: string;
   count: number;
 } {
@@ -168,6 +197,7 @@ function approvalFacts(item: QueueItem): {
       toolName: a.toolName,
       preview: a.payloadPreview,
       sessionName: a.sessionName,
+      worktreeName: a.worktreeName,
       createdAt: a.createdAt,
       count: 1,
     };
@@ -179,6 +209,7 @@ function approvalFacts(item: QueueItem): {
     toolName: item.toolName,
     preview: first.payloadPreview,
     sessionName: first.sessionName,
+    worktreeName: first.worktreeName,
     createdAt: first.createdAt,
     count: item.items.length,
   };
@@ -238,6 +269,7 @@ function ApprovalAsk({
       <MetaRow
         projectName={projectName}
         sessionName={facts.sessionName}
+        branchName={facts.worktreeName}
         context={facts.count > 1 ? `${facts.toolName} · ${facts.count} identical requests` : facts.toolName}
         actions={
           <>
@@ -265,6 +297,8 @@ export interface NeedsInputSectionProps {
   projectNameById: Record<number, string>;
   /** runId → projectId, so an approval can name its project. */
   runProjectMap: Record<string, number>;
+  /** runId → session identity, so a review item can name the agent that halted. */
+  runSessionMap: Record<string, RunSessionIdentity>;
   nowMs: number;
   /** Render an empty dashed strip instead of hiding the section (the all-idle state). */
   showWhenEmpty: boolean;
@@ -284,6 +318,7 @@ export const NeedsInputSection = React.forwardRef<HTMLElement, NeedsInputSection
       approvals,
       projectNameById,
       runProjectMap,
+      runSessionMap,
       nowMs,
       showWhenEmpty,
       flashing,
@@ -330,6 +365,7 @@ export const NeedsInputSection = React.forwardRef<HTMLElement, NeedsInputSection
                 key={item.id}
                 item={item}
                 projectName={nameOf(item.project_id)}
+                identity={item.run_id !== null ? (runSessionMap[item.run_id] ?? null) : null}
                 nowMs={nowMs}
                 onOpen={onOpenReviewItem}
               />

@@ -53,6 +53,7 @@ vi.mock('../../../stores/landingStore', () => ({
   useAggregatedBlockingRunIds: () => mockBlockingRunIds,
   useAggregatedRuns: () => mockRuns,
   useRunProjectMap: () => mockRunProjectMap,
+  useRunSessionMap: () => ({}),
   useLandingStore: (selector: (s: { loadError: boolean; retry: () => void }) => unknown) =>
     selector({ loadError: mockLoadError, retry: mockRetry }),
 }));

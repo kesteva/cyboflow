@@ -77,6 +77,7 @@ const baseApproval: Approval = {
   status: 'pending',
   awaited: true,
   sessionName: null,
+  worktreeName: null,
   agentProvider: null,
 };
 
@@ -93,6 +94,7 @@ const groupApprovals: Approval[] = Array.from({ length: 3 }, (_, i) => ({
   status: 'pending' as const,
   awaited: true,
   sessionName: null,
+  worktreeName: null,
   agentProvider: null,
 }));
 
@@ -533,6 +535,7 @@ describe('PendingApprovalCard attribution', () => {
             ...baseApproval,
             workflowName: '__quick__',
             sessionName: 'noble-wolf',
+            worktreeName: null,
             agentProvider: 'omp',
           },
           isBlocking: false,

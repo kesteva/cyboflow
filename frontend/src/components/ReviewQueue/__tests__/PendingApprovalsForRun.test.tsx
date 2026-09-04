@@ -36,6 +36,7 @@ function makeApproval(over: Partial<Approval> = {}): Approval {
     status: 'pending',
     awaited: true,
     sessionName: null,
+    worktreeName: null,
     agentProvider: null,
     ...over,
   };

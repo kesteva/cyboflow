@@ -57,6 +57,7 @@ function makeApproval(id: string, runId = 'run-1'): Approval {
     status: 'pending',
     awaited: true,
   sessionName: null,
+  worktreeName: null,
   agentProvider: null,
   };
 }
