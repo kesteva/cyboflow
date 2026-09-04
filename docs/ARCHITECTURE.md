@@ -1008,6 +1008,12 @@ pnpm electron:rebuild     # Manual escape hatch for better-sqlite3 ABI drift (no
 pnpm test:gate            # Day-gate integration test; manual/unscheduled
 ```
 
+`pnpm dev`'s Electron half (`electron-dev` in `package.json`) waits on the Vite dev server and
+then spawns Electron via `scripts/dev-electron.mjs` — a cross-platform Node launcher (so it
+starts from `cmd.exe` too) that replaced a POSIX-only `wait-on ... && electron .` shell pipeline;
+it owns the `--cdp` / `--inspect` / `--perf` flags (`dev:perf` forwards `--perf`) and strips
+`NODE_OPTIONS` before spawning, since the Electron binary rejects some host-Node-only flags.
+
 **`pnpm test:unit`** is the headless code-change AC gate: `pnpm --filter main test` +
 `pnpm --filter frontend test` (vitest, both one-shot) + schema-parity checks + build-script
 tests, chained by the root `test:unit` script.
@@ -1121,11 +1127,15 @@ of them, so the script announces it. Give a worktree its own `pnpm install` to o
 **`pnpm electron:rebuild`** remains the manual escape hatch, rebuilding for the Electron ABI, as
 do the `e2e:prereqs` / `build:mac:*` scripts.
 
-Do NOT assume the root `postinstall` (`electron-builder install-app-deps`) leaves the module on
-the Electron ABI. It reports `finished moduleName=better-sqlite3`, but with `buildFromSource=false`
-it can resolve a **host-ABI prebuild** and leave NMV 127 in place — measured on a fresh worktree
-install, where `pnpm dev` would then have died on `NODE_MODULE_VERSION`. Which is the point of the
-guard: measure the artifact, never infer its ABI from which command last ran.
+Do NOT assume the root `postinstall` (`node scripts/apply-pty-napi-prebuilds.js && electron-builder
+install-app-deps` — the first step aliases node-pty's installed prebuild to the name
+`@electron/rebuild` looks for, so it never falls through to a node-gyp source build; see
+`docs/WINDOWS-BUILD.md` → "node-pty and `@electron/rebuild`") leaves better-sqlite3 on the
+Electron ABI. `install-app-deps` reports `finished moduleName=better-sqlite3`, but with
+`buildFromSource=false` it can resolve a **host-ABI prebuild** and leave NMV 127 in place —
+measured on a fresh worktree install, where `pnpm dev` would then have died on
+`NODE_MODULE_VERSION`. Which is the point of the guard: measure the artifact, never infer its ABI
+from which command last ran.
 
 **`pnpm test:gate`** is the day-gate integration test; it requires `claude` on PATH plus real
 API access and is manual/unscheduled — not part of `test:unit` or CI.
