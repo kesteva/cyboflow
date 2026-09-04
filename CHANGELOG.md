@@ -6,6 +6,42 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-09-04
+
+### Changed
+
+- **Electron 37 → 44** (Chromium 152, Node 24.19, ABI 149), and **better-sqlite3 12 → 13**. The
+  SQLite bump is not cosmetic: under Electron 44's garbage collector, better-sqlite3 12 aborts the
+  process from a finalizer. Version 13 is an N-API build, so one compiled artifact now loads under
+  both the Electron and host-Node ABIs instead of being swapped between them.
+- **Update manifests declare the macOS floor.** `latest-mac.yml` now carries
+  `minimumSystemVersion` taken from the bundled Electron, so an older machine is told it cannot
+  take the update rather than downloading it and failing to launch.
+- Per-arch packaging drops the seven non-target better-sqlite3 prebuilds instead of shipping all
+  eight in every bundle.
+
+### Added
+
+- **A Blocked band on the review queue**, for halted runs that nothing else speaks for.
+- Progress on Working rows, restored without reinstating the old cards.
+- Needs-input cards name the halted session and carry its worktree branch, so it is clear which
+  session is asking before you open it.
+
+### Fixed
+
+- A session and the flow run hosting it are one Working row, and a session stays out of Working
+  while its run is non-terminal.
+- A dynamic workflow replaces its session row rather than the other way round.
+- Notifications get their own band below Ready for review, instead of being mixed into the "Asked
+  you" queue, and Dismiss is their only action.
+- The merge-clean "Review & merge" card opens the session instead of the merge dialog.
+- Terminal geometry is relayed to the PTY on attach, so a reattached terminal is not left with a
+  stale size.
+- `afterSign` recognises better-sqlite3 13's `prebuilds/darwin-<arch>.node` layout.
+- Two test suites no longer report machine load as failure: the real-git worktree suites get a
+  timeout sized for a loaded machine, and the packaged-bundle smoke tier gets a cold-start budget
+  for its first window under Electron 44.
+
 ## [0.3.0] — 2026-09-03
 
 ### Added
