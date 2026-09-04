@@ -93,6 +93,7 @@
 import { spawn } from 'node:child_process';
 import { killPidSync } from '../../../utils/platformProcess';
 import { cmdExeInvocation } from '../../../utils/win32CmdLine';
+import { ShellDetector } from '../../../utils/shellDetector';
 import { closeSync, existsSync, openSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
@@ -535,6 +536,25 @@ export function peekabooCaptureArgs(outPath: string, appTarget?: string): string
  * plus a note in the output — the evidence is WIDER than requested, never
  * narrower.
  */
+
+/**
+ * The spawn argv for the capture script, pulled out so a test on any host
+ * can pin the exact executable + args without spawning a real PowerShell.
+ * The executable is always the fixed System32 path (see
+ * {@link ShellDetector.windowsPowerShellPath}), never a bare `'powershell'`
+ * that PATH resolution could resolve to a Microsoft Store execution-alias
+ * stub instead of the real interpreter.
+ */
+export function windowsScreenCaptureArgs(
+  scriptPath: string,
+  outPath: string,
+): { command: string; args: string[] } {
+  return {
+    command: ShellDetector.windowsPowerShellPath(),
+    args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-OutPath', outPath],
+  };
+}
+
 async function runWindowsScreenCapture(
   outPath: string,
   timeoutMs: number,
@@ -556,11 +576,8 @@ async function runWindowsScreenCapture(
   await writeFile(scriptPath, script, 'utf8');
   try {
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(
-        'powershell',
-        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-OutPath', outPath],
-        { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true },
-      );
+      const { command, args } = windowsScreenCaptureArgs(scriptPath, outPath);
+      const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
       let stderr = '';
       child.stderr?.on('data', (d: Buffer) => {
         stderr += String(d);

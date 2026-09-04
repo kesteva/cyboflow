@@ -17,6 +17,8 @@ import {
   type ProcessTableRow,
 } from './processTable';
 import { listPidPpidTableSync, killWindowsTree } from '../utils/platformProcess';
+import { windowsProcessTableCommand } from './winProcessTable';
+import { ShellDetector } from '../utils/shellDetector';
 import { isAlive, spawnDetachedGrandchildTree, waitUntil } from '../__test_fixtures__/processTree';
 
 describe('listPidPpidTableSync', () => {
@@ -72,4 +74,15 @@ describe('killWindowsTree', () => {
     );
     expect(allDead).toBe(true);
   }, 30000);
+});
+
+describe('windowsProcessTableCommand', () => {
+  it('pins the fixed System32 PowerShell path, never a bare "powershell"', () => {
+    const { command, args } = windowsProcessTableCommand('pid-ppid-command');
+
+    expect(command).toBe(ShellDetector.windowsPowerShellPath());
+    expect(command).not.toBe('powershell');
+    expect(args[0]).toBe('-NoProfile');
+    expect(args).toContain('-Command');
+  });
 });

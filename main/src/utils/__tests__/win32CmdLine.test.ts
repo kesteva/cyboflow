@@ -8,7 +8,7 @@
  */
 import { describe, it, expect } from 'vitest';
 
-import { cmdCommandLine, cmdExeInvocation, quoteForCmd } from '../win32CmdLine';
+import { cmdCommandLine, cmdExeInvocation, escapeForBatch, quoteForCmd } from '../win32CmdLine';
 
 describe('quoteForCmd', () => {
   it('leaves a plain token alone', () => {
@@ -22,6 +22,17 @@ describe('quoteForCmd', () => {
     expect(quoteForCmd('a|b')).toBe('"a|b"');
     expect(quoteForCmd('say"hi"')).toBe('"say"hi""');
   });
+
+  it('rejects a %NAME% token — cmd.exe expands it even inside double quotes, with no /c-line escape', () => {
+    expect(() => quoteForCmd('C:\\Users\\%TEMP%\\out')).toThrow(/%TEMP%/);
+    expect(() => quoteForCmd('C:\\Users\\%TEMP%\\out')).toThrow(/cannot be escaped/);
+  });
+
+  it('does not misfire on a single unpaired %', () => {
+    // A lone '%' (e.g. a URL-encoded byte) has no closing partner, so it is
+    // not an env-var reference — only a genuine %NAME% pair is rejected.
+    expect(quoteForCmd('100%done')).toBe('100%done');
+  });
 });
 
 describe('cmdCommandLine', () => {
@@ -30,6 +41,18 @@ describe('cmdCommandLine', () => {
     expect(cmdCommandLine(['C:\\Program Files\\d.cmd', 'stop'])).toBe(
       '"C:\\Program Files\\d.cmd" stop',
     );
+  });
+
+  it('rejects a %NAME% token in any position, inherited from quoteForCmd', () => {
+    expect(() => cmdCommandLine(['npx', 'run', 'C:\\Users\\%TEMP%\\script.js'])).toThrow(/%TEMP%/);
+  });
+});
+
+describe('escapeForBatch', () => {
+  it('doubles every % — the escape a .cmd/.bat script body actually honours', () => {
+    expect(escapeForBatch('C:\\Users\\name')).toBe('C:\\Users\\name');
+    expect(escapeForBatch('C:\\Users\\100%done')).toBe('C:\\Users\\100%%done');
+    expect(escapeForBatch('%TEMP%')).toBe('%%TEMP%%');
   });
 });
 

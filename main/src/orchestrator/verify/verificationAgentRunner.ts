@@ -42,7 +42,7 @@ import { basename, join } from 'node:path';
 import type { LoggerLike } from '../types';
 import { emitSeamError } from '../telemetrySink';
 import { resolveGitCommand } from '../../utils/gitExeFinder';
-import { cmdCommandLine, cmdExeInvocation } from '../../utils/win32CmdLine';
+import { cmdCommandLine, cmdExeInvocation, escapeForBatch } from '../../utils/win32CmdLine';
 import {
   type VerificationTaskV1,
   type VerificationReportV1,
@@ -1669,8 +1669,16 @@ const defaultWriteDriverScript = async (
   // On Windows there is no /bin/sh — a .cmd wrapper does the same job (set the
   // env var, forward every argument). Node 24 refuses to spawn .cmd files
   // directly (EINVAL), so defaultStopDriver routes through cmd.exe there.
+  //
+  // nodePath/driverCliPath are escaped with escapeForBatch before landing in the
+  // .cmd body: cmd.exe parses a batch file line by line and expands %NAME% even
+  // inside the quotes below, so an install path that happens to contain a `%`
+  // (a literal percent, or a name that collides with an env var) would silently
+  // become something else at run time — %% is this file's own escape for a
+  // literal `%`. The trailing `%*` is a deliberate, UNescaped batch parameter
+  // reference (forward every arg) and must stay that way.
   const body = process.platform === 'win32'
-    ? `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${nodePath}" "${driverCliPath}" %*\r\n`
+    ? `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${escapeForBatch(nodePath)}" "${escapeForBatch(driverCliPath)}" %*\r\n`
     : `#!/bin/sh\nexport ELECTRON_RUN_AS_NODE=1\nexec "${nodePath}" "${driverCliPath}" "$@"\n`;
   await writeFile(scriptPath, body, 'utf8');
   await chmod(scriptPath, 0o755);

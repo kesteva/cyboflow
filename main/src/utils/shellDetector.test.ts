@@ -129,6 +129,29 @@ describe('ShellDetector.detectWindowsShell (win32)', () => {
   });
 });
 
+describe('ShellDetector.windowsPowerShellPath', () => {
+  // Runs on any host — a fixed System32 lookup, not a platform branch. Every
+  // non-interactive helper (the process-table query, the native-screen
+  // capture) must resolve through this instead of a bare 'powershell', which
+  // PATH resolution can hand a Microsoft Store execution-alias stub.
+  const savedRoot = process.env.SystemRoot;
+
+  beforeEach(() => {
+    process.env.SystemRoot = '/SystemRoot';
+  });
+
+  afterEach(() => {
+    if (savedRoot === undefined) delete process.env.SystemRoot;
+    else process.env.SystemRoot = savedRoot;
+  });
+
+  it('resolves the fixed System32 WindowsPowerShell path, matching systemPowerShellPath', () => {
+    expect(ShellDetector.windowsPowerShellPath()).toBe(
+      path.join('/SystemRoot', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    );
+  });
+});
+
 describe('ShellDetector.commandShellPath', () => {
   // Runs on any host: the interactive fallback can be cmd.exe, which
   // understands none of the -EncodedCommand flags and cannot run the

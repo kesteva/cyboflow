@@ -98,6 +98,18 @@ export class ShellDetector {
   }
 
   /**
+   * The binary a non-interactive Windows helper script should spawn — never a
+   * bare `'powershell'`, which resolves through PATH and can hit a Microsoft
+   * Store execution-alias stub (see {@link detectWindowsShell}'s PATH-probe
+   * comment) instead of the real interpreter. Exported for the process-table
+   * and driver-CLI call sites that shell out to PowerShell directly, so every
+   * one of them resolves through this same fixed-path lookup.
+   */
+  static windowsPowerShellPath(): string {
+    return this.systemPowerShellPath();
+  }
+
+  /**
    * Which binary runs a built command. The cmd.exe last resort understands
    * neither the flags below nor the dialect buildCommandString emits, so
    * command execution uses the system PowerShell instead. Exported for tests.

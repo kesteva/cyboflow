@@ -27,9 +27,11 @@ import {
   serveLogPath,
   servePidFilePath,
   USAGE,
+  windowsScreenCaptureArgs,
   type DriverAttestRecord,
   type DriverDeps,
 } from '../driverCore';
+import { ShellDetector } from '../../../../utils/shellDetector';
 
 // ---------------------------------------------------------------------------
 // Fake browser/context/page — the "playwright-like object" injected in place
@@ -324,6 +326,25 @@ describe('sanitizeScreenshotName', () => {
   it('rejects a name that sanitizes to nothing usable', () => {
     expect(sanitizeScreenshotName('..')).toBeNull();
     expect(sanitizeScreenshotName('/')).toBeNull();
+  });
+});
+
+describe('windowsScreenCaptureArgs', () => {
+  it('spawns the fixed System32 PowerShell path, never a bare "powershell"', () => {
+    const { command, args } = windowsScreenCaptureArgs('C:\\out\\a.capture.ps1', 'C:\\out\\a.png');
+
+    expect(command).toBe(ShellDetector.windowsPowerShellPath());
+    expect(command).not.toBe('powershell');
+    expect(args).toEqual([
+      '-NoProfile',
+      '-NonInteractive',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      'C:\\out\\a.capture.ps1',
+      '-OutPath',
+      'C:\\out\\a.png',
+    ]);
   });
 });
 

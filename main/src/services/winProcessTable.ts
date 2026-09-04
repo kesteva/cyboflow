@@ -16,6 +16,7 @@
  * numeric columns.
  */
 import { execFile } from 'node:child_process';
+import { ShellDetector } from '../utils/shellDetector';
 
 export type WinProcessLineFormat =
   | 'pid-ppid'
@@ -55,15 +56,33 @@ export function buildWindowsProcessTableScript(format: WinProcessLineFormat): st
 }
 
 /**
+ * The `execFile` argv for {@link execWindowsProcessTable}, pulled out so a
+ * test on any host can pin the exact executable + args without spawning a
+ * real PowerShell. The executable is always the fixed System32 path (see
+ * {@link ShellDetector.windowsPowerShellPath}), never a bare `'powershell'`
+ * that PATH resolution could resolve to a Microsoft Store execution-alias
+ * stub instead of the real interpreter.
+ */
+export function windowsProcessTableCommand(
+  format: WinProcessLineFormat,
+): { command: string; args: string[] } {
+  return {
+    command: ShellDetector.windowsPowerShellPath(),
+    args: ['-NoProfile', '-NonInteractive', '-Command', buildWindowsProcessTableScript(format)],
+  };
+}
+
+/**
  * Run the Windows process-table listing and return its stdout: one
  * ps-compatible line per process. Rejects on spawn/query failure exactly like
  * the `ps` call it stands in for — callers' existing error handling applies.
  */
 export function execWindowsProcessTable(format: WinProcessLineFormat): Promise<string> {
   return new Promise<string>((resolve, reject) => {
+    const { command, args } = windowsProcessTableCommand(format);
     execFile(
-      'powershell',
-      ['-NoProfile', '-NonInteractive', '-Command', buildWindowsProcessTableScript(format)],
+      command,
+      args,
       // Full-table command lines can total multiple MB; 64 MiB is comfortably
       // above any realistic table.
       { maxBuffer: 64 * 1024 * 1024, timeout: 30_000, windowsHide: true },

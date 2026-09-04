@@ -66,7 +66,16 @@ export function planWindowsShimVersionProbes(
     plans.push({ command: sibling, args: ['--version'] });
   }
 
-  plans.push(cmdExeInvocation(`${quoteForCmd(executablePath)} --version`));
+  // quoteForCmd REFUSES a token carrying a `%NAME%` reference (cmd.exe would
+  // expand it, unescapably — see win32CmdLine.ts). For a version PROBE that is
+  // not fatal: drop the cmd.exe plan and let the caller report the CLI as
+  // not-found from whatever plans remain, rather than throwing out of provider
+  // detection over an install path nobody can actually spawn through cmd.
+  try {
+    plans.push(cmdExeInvocation(`${quoteForCmd(executablePath)} --version`));
+  } catch {
+    // Unspawnable through cmd.exe — the sibling .exe plan (if any) still stands.
+  }
 
   return plans;
 }

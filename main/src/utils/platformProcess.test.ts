@@ -18,11 +18,14 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   collectDescendantPidsAsync,
   describeProcesses,
+  firstCommandToken,
   forceKillPids,
   killTree,
   killTreeImmediate,
   signalTree,
+  windowsPidPpidTableCommand,
 } from './platformProcess';
+import { ShellDetector } from './shellDetector';
 
 type ExecSpy = ReturnType<typeof vi.fn<(command: string) => Promise<{ stdout: string }>>>;
 
@@ -411,6 +414,33 @@ describe('describeProcesses', () => {
   });
 });
 
+// The win32 arm resolves names off the shared (pid, ppid, command) table via
+// listProcessTable — a real PowerShell query in production, not injectable
+// from here — so its quote-handling is pinned directly through the token
+// parser it calls rather than by driving describeProcesses end-to-end.
+describe('firstCommandToken (win32 describeProcesses helper)', () => {
+  it('resolves a quoted executable path to the text between the quotes, not the first space', () => {
+    // The bug this guards: naively splitting on whitespace turns
+    // `"C:\Program Files\node.exe" server.js` into the token
+    // `"C:\Program`, whose basename is 'Program' rather than 'node.exe'.
+    expect(firstCommandToken('"C:\\Program Files\\node.exe" server.js')).toBe(
+      'C:\\Program Files\\node.exe',
+    );
+  });
+
+  it('splits on whitespace when the executable path is unquoted', () => {
+    expect(firstCommandToken('C:\\tools\\node.exe server.js')).toBe('C:\\tools\\node.exe');
+  });
+
+  it('falls back to the whitespace split on an unclosed quote instead of returning nothing', () => {
+    expect(firstCommandToken('"C:\\Program Files\\node.exe server.js')).toBe('"C:\\Program');
+  });
+
+  it('reads an empty command line as an empty token', () => {
+    expect(firstCommandToken('  ')).toBe('');
+  });
+});
+
 describe('signalTree', () => {
   it('POSIX: signals the process group by negative pid', () => {
     const sendSignal = vi.fn<(pid: number, signal: NodeJS.Signals) => void>();
@@ -546,5 +576,54 @@ describe('killTreeImmediate', () => {
 
     // The sweep failure is ignored by contract — not surfaced through onError.
     expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('win32: taskkill /T /F on the root, then /F on each enumerated descendant — no POSIX signal or sweep', async () => {
+    const events: string[] = [];
+    const execCommand: ExecSpy = vi.fn((command: string) => {
+      events.push(command);
+      return Promise.resolve({ stdout: '' });
+    });
+    const sendSignal = vi.fn<(pid: number, signal: NodeJS.Signals) => void>();
+
+    await killTreeImmediate(4242, {
+      platform: 'win32',
+      descendantPids: [5001, 5002],
+      execCommand,
+      sendSignal,
+    });
+
+    expect(events).toEqual([
+      'taskkill /PID 4242 /T /F',
+      'taskkill /PID 5001 /F',
+      'taskkill /PID 5002 /F',
+    ]);
+    // No process.kill-shaped signal and no POSIX kill/pkill sweep on win32.
+    expect(sendSignal).not.toHaveBeenCalled();
+  });
+
+  it('win32: is fail-soft — a failed root kill still runs the per-descendant pass', async () => {
+    const execCommand: ExecSpy = vi.fn((command: string) =>
+      command === 'taskkill /PID 4242 /T /F'
+        ? Promise.reject(new Error('access denied'))
+        : Promise.resolve({ stdout: '' }),
+    );
+
+    await expect(
+      killTreeImmediate(4242, { platform: 'win32', descendantPids: [5001], execCommand }),
+    ).resolves.toBeUndefined();
+
+    expect(execCommand).toHaveBeenCalledWith('taskkill /PID 5001 /F');
+  });
+});
+
+describe('windowsPidPpidTableCommand', () => {
+  it('pins the fixed System32 PowerShell path, never a bare "powershell"', () => {
+    const { command, args } = windowsPidPpidTableCommand();
+
+    expect(command).toBe(ShellDetector.windowsPowerShellPath());
+    expect(command).not.toBe('powershell');
+    expect(args[0]).toBe('-NoProfile');
+    expect(args).toContain('-Command');
   });
 });

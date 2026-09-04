@@ -130,4 +130,18 @@ describe('planWindowsShimVersionProbes', () => {
     planWindowsShimVersionProbes('/usr/local/bin/claude', fileExists);
     expect(fileExists).not.toHaveBeenCalled();
   });
+
+  it('drops the cmd.exe plan (never throws) for a shim path carrying a %NAME% token', () => {
+    // cmd.exe would expand %TEMP% even inside the quoted /c line and there is
+    // no escape for it there (win32CmdLine's quoteForCmd refuses the token). A
+    // version PROBE must not throw out of provider detection over that: the
+    // cmd plan is dropped and only the sibling .exe plan (when present) stays,
+    // so the caller reports not-found instead of crashing.
+    const shim = 'C:\\Users\\dev\\%TEMP%\\npm\\claude.cmd';
+    expect(planWindowsShimVersionProbes(shim, () => false, 'win32')).toEqual([]);
+    const sibling = 'C:\\Users\\dev\\%TEMP%\\npm\\claude.exe';
+    expect(planWindowsShimVersionProbes(shim, (p) => p === sibling, 'win32')).toEqual([
+      { command: sibling, args: ['--version'] },
+    ]);
+  });
 });

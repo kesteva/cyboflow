@@ -11,7 +11,7 @@
  * of the host, and the per-site reporting — zombie events, log lines — stays at
  * the call sites through the option hooks.
  */
-import { exec, execFile, execSync, spawnSync } from 'node:child_process';
+import { exec, execFile, execFileSync, execSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { basename } from 'node:path';
 import {
@@ -22,6 +22,7 @@ import {
   type ProcessTableRow,
 } from '../services/processTable';
 import { buildWindowsProcessTableScript, execWindowsProcessTable } from '../services/winProcessTable';
+import { ShellDetector } from './shellDetector';
 
 /** Test seam shared by every primitive here: which platform's code path runs. */
 export interface PlatformProcessOptions {
@@ -80,13 +81,31 @@ export function listPidPpidTable(opts: PlatformProcessOptions = {}): Promise<Pro
   });
 }
 
+/**
+ * The win32 argv for {@link listPidPpidTableSync}'s query, pulled out so a
+ * test on any host can pin the exact executable + args without spawning a
+ * real PowerShell. Never a shell string: `execFileSync` with this argv skips
+ * cmd.exe entirely, and the executable is always the fixed System32 path
+ * (see {@link ShellDetector.windowsPowerShellPath}), never a bare
+ * `'powershell'` that PATH resolution could resolve to a Store stub.
+ */
+export function windowsPidPpidTableCommand(): { command: string; args: string[] } {
+  return {
+    command: ShellDetector.windowsPowerShellPath(),
+    args: ['-NoProfile', '-NonInteractive', '-Command', buildWindowsProcessTableScript('pid-ppid')],
+  };
+}
+
 /** {@link listPidPpidTable} for callers that cannot await. */
 export function listPidPpidTableSync(opts: PlatformProcessOptions = {}): ProcessTableRow[] {
   if ((opts.platform ?? process.platform) === 'win32') {
-    const output = execSync(
-      `powershell -NoProfile -NonInteractive -Command "${buildWindowsProcessTableScript('pid-ppid')}"`,
-      { encoding: 'utf8', timeout: 15_000, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
-    );
+    const { command, args } = windowsPidPpidTableCommand();
+    const output = execFileSync(command, args, {
+      encoding: 'utf8',
+      timeout: 15_000,
+      maxBuffer: 64 * 1024 * 1024,
+      windowsHide: true,
+    });
     return parseProcessTable(output);
   }
   return parseProcessTable(execSync('ps -axo pid=,ppid=', { encoding: 'utf8', windowsHide: true }));
@@ -299,6 +318,23 @@ export async function forceKillPids(
 }
 
 /**
+ * The first token of a Windows command line, quote-aware. A CommandLine
+ * whose executable path was quoted for an embedded space — e.g.
+ * `"C:\Program Files\node.exe" server.js` — must not be split on whitespace
+ * before the quote is resolved, or the "token" becomes `"C:\Program` and its
+ * basename `Program`. A missing closing quote (malformed input) falls back to
+ * the plain whitespace split rather than returning nothing.
+ */
+export function firstCommandToken(command: string): string {
+  const trimmed = command.trim();
+  if (trimmed.startsWith('"')) {
+    const closingQuote = trimmed.indexOf('"', 1);
+    if (closingQuote !== -1) return trimmed.slice(1, closingQuote);
+  }
+  return trimmed.split(/\s+/)[0] ?? '';
+}
+
+/**
  * A short name per pid, for a survivor report. Windows has no `ps`, so the
  * shared process table supplies the command line and its first token's
  * basename stands in. An unresolvable pid reports 'unknown'; never throws.
@@ -319,7 +355,7 @@ export async function describeProcesses(
       const rows = await listProcessTable({ platform });
       const commandByPid = new Map(rows.map(row => [row.pid, row.command]));
       return pids.map((pid) => {
-        const firstToken = (commandByPid.get(pid) ?? '').trim().split(/\s+/)[0] ?? '';
+        const firstToken = firstCommandToken(commandByPid.get(pid) ?? '');
         return { pid, name: firstToken ? basename(firstToken) : 'unknown' };
       });
     } catch (error) {
@@ -695,11 +731,16 @@ export async function killTree(pid: number, opts: KillTreeOptions = {}): Promise
 // ---------------------------------------------------------------------------
 
 export interface KillTreeImmediateOptions extends PlatformProcessOptions {
-  /** Descendants to SIGKILL alongside the root. Defaults to enumerating here. */
+  /** Descendants to kill alongside the root. Defaults to enumerating here. */
   descendantPids?: number[];
-  /** Runner for the final sweep. Failures ignored: it is only a backstop. */
+  /**
+   * Shell runner. POSIX: the `kill -9`/`pkill` backstop behind the signals
+   * below. win32: the ONLY kill mechanism — there is no signal to send, so
+   * this runs the whole taskkill ladder. Defaults to `exec` wrapped with
+   * `windowsHide: true`.
+   */
   execCommand?: (command: string) => Promise<{ stdout: string }>;
-  /** Signal sender. Defaults to `process.kill`. */
+  /** Signal sender. POSIX only — win32 has no catchable signals. Defaults to `process.kill`. */
   sendSignal?: (pid: number, signal: NodeJS.Signals) => void;
   /** Called when the ladder itself throws unexpectedly. Defaults to console.error. */
   onError?: (error: unknown) => void;
@@ -707,15 +748,45 @@ export interface KillTreeImmediateOptions extends PlatformProcessOptions {
 
 /**
  * Hard kill with no graceful phase, grace window or probe — the logs-panel
- * stop shape. Unbranched on purpose: Node's SIGKILL is cross-platform, and
- * the shell sweep behind it silently no-ops through cmd.exe on win32.
+ * stop shape. Branched on platform: POSIX SIGKILLs the root and every
+ * enumerated descendant directly, then runs a `kill -9`/`pkill -9 -P` shell
+ * sweep as a backstop (a signal cannot be caught or ignored, so this doubles
+ * as belt-and-suspenders); win32 has neither `process.kill` group semantics
+ * nor a signal `pkill` could translate through cmd.exe, so the whole kill is
+ * `taskkill /PID <pid> /T /F` for the root plus `taskkill /PID <child> /F`
+ * for each enumerated descendant — the same taskkill primitives {@link
+ * killTree} uses, run with no graceful phase or grace window first.
  */
 export async function killTreeImmediate(
   pid: number,
   opts: KillTreeImmediateOptions = {}
 ): Promise<void> {
+  const platform = opts.platform ?? process.platform;
   try {
     const allPids = [pid, ...(opts.descendantPids ?? (await collectDescendantPidsAsync(pid, opts)))];
+    const execCommand =
+      opts.execCommand ?? ((command: string) => promisify(exec)(command, { windowsHide: true }));
+
+    if (platform === 'win32') {
+      // /T walks the PPID chain at call time and reaches most of the tree in
+      // one call; the per-descendant /F below catches anything a broken
+      // parent link (or a pid reused mid-kill) left it unable to see — the
+      // same reasoning killTree documents for its own per-descendant pass.
+      try {
+        await execCommand(`taskkill /PID ${pid} /T /F`);
+      } catch (error) {
+        // Already dead / no permission — the per-descendant pass below decides.
+      }
+      for (const childPid of allPids.slice(1)) {
+        try {
+          await execCommand(`taskkill /PID ${childPid} /F`);
+        } catch (error) {
+          // Already dead or denied — best-effort by contract.
+        }
+      }
+      return;
+    }
+
     const sendSignal =
       opts.sendSignal ??
       ((signalPid: number, signal: NodeJS.Signals) => {
@@ -730,8 +801,6 @@ export async function killTreeImmediate(
     }
 
     // Shell command as the ultimate fallback (kill -9 cannot be caught or ignored)
-    const execCommand =
-      opts.execCommand ?? ((command: string) => promisify(exec)(command, { windowsHide: true }));
     try {
       await execCommand(`kill -9 ${allPids.join(' ')} 2>/dev/null; pkill -9 -P ${pid} 2>/dev/null`);
     } catch (error) {
