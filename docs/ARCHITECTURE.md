@@ -1133,11 +1133,12 @@ of them, so the script announces it. Give a worktree its own `pnpm install` to o
 **`pnpm electron:rebuild`** remains the manual escape hatch, rebuilding for the Electron ABI, as
 do the `e2e:prereqs` / `build:mac:*` scripts.
 
-Do NOT assume the root `postinstall` (`node scripts/apply-pty-napi-prebuilds.js && electron-builder
-install-app-deps` — the first step aliases node-pty's installed prebuild to the name
-`@electron/rebuild` looks for, so it never falls through to a node-gyp source build; see
-`docs/WINDOWS-BUILD.md` → "node-pty and `@electron/rebuild`") leaves better-sqlite3 on the
-Electron ABI. `install-app-deps` reports `finished moduleName=better-sqlite3`, but with
+Do NOT assume the root `postinstall` (`node scripts/apply-pty-napi-prebuilds.js && node
+scripts/install-app-deps.js` — the first step aliases node-pty's installed prebuild to the name
+`@electron/rebuild` looks for, so it never falls through to a node-gyp source build; the second
+wraps `electron-builder install-app-deps` and skips it on win32, where a rebuild is neither needed
+nor possible without a node-gyp-recognised Visual Studio; see `docs/WINDOWS-BUILD.md` → "node-pty
+and `@electron/rebuild`") leaves better-sqlite3 on the Electron ABI. `install-app-deps` reports `finished moduleName=better-sqlite3`, but with
 `buildFromSource=false` it can resolve a **host-ABI prebuild** and leave NMV 127 in place —
 measured on a fresh worktree install, where `pnpm dev` would then have died on
 `NODE_MODULE_VERSION`. Which is the point of the guard: measure the artifact, never infer its ABI

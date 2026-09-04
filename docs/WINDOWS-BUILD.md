@@ -45,8 +45,8 @@ gone:
   through to `prebuild-install` (which has no Electron assets to fetch for
   0.14.1) and then to `node-gyp`, which cannot build a package that ships
   no `src/`. `scripts/apply-pty-napi-prebuilds.js` places that alias
-  automatically, as the root `postinstall` (before `electron-builder
-  install-app-deps`, on every platform) — see "node-pty and
+  automatically, as the root `postinstall` (before the
+  `install-app-deps` step, on every platform) — see "node-pty and
   `@electron/rebuild`" below.
 
 So the whole install is just:
@@ -100,6 +100,17 @@ postinstall, running before `electron-builder install-app-deps`, on every
 platform) copies the package's installed binary to that name so
 electron-rebuild skips the source build on every host — Windows included,
 so a plain `pnpm install` no longer needs `--ignore-scripts` to avoid it.
+
+The second postinstall step, `scripts/install-app-deps.js`, wraps
+`electron-builder install-app-deps` and **skips it on Windows**. Nothing
+there needs an Electron rebuild (both native modules are N-API prebuilds),
+and electron-builder 26's bundled `@electron/rebuild` 3.7 would still push
+better-sqlite3 through node-gyp, whose configure step must find a Visual
+Studio it recognises (2017–2022 with the C++ workload) before `binding.gyp`
+gets to skip the compile — on a VS-less host, or one with VS 2026 such as
+GitHub's `windows-latest`, that failed every install. This is the install-
+time twin of the packaging plan's `npmRebuild: false`, and it honours the
+same `CYBOFLOW_WIN_NPM_REBUILD=1` switch for a host that has a toolchain.
 
 ## Packaging decisions
 
