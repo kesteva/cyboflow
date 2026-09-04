@@ -82,7 +82,7 @@ const PTY_BACKLOG_CAP_BYTES = 200_000;
  * identical class of bug against `claude` and fixes it the same way; see its
  * SUBMIT_DELAY_MS / submitToRepl.)
  *
- * MEASURED against the bundled Codex CLI 0.144.3, driving the real TUI through a
+ * MEASURED against the bundled Codex CLI 0.153.3, driving the real TUI through a
  * node-pty harness and reading the rendered screen (short body, idle composer,
  * both on a fresh REPL and as a genuine 2nd turn after a `-- <prompt>` 1st turn):
  *   body + '\r' in ONE write ............... never submits (stuck in composer)

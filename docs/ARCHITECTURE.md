@@ -651,7 +651,7 @@ cross-package concern.
 - **@anthropic-ai/claude-agent-sdk 0.3.224** — In-process Claude Code invocation via `query()`
   and `PreToolUse` hooks for approval routing. This is the live path; no `claude` CLI binary
   is spawned.
-- **@openai/codex 0.144.3** — Direct dependency (both root and `main/package.json`) that
+- **@openai/codex 0.153.3** — Direct dependency (both root and `main/package.json`) that
   bundles per-platform native `codex` CLI executables (resolved by
   `panels/codex/codexExecutablePath.ts`), not merely a thin API client. `CodexPtyManager` /
   `CodexSdkManager` (`panels/codex/`) spawn it as an external process — one of four agent

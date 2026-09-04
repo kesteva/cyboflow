@@ -114,7 +114,7 @@ describe('CodexAppServerClient', () => {
     const responseFrame = Buffer.from(`${JSON.stringify({
       id: 1,
       result: {
-        userAgent: 'Codex 0.144.3 cafe\u0301',
+        userAgent: 'Codex 0.153.3 cafe\u0301',
         codexHome: '/tmp/codex-home',
         platformFamily: 'unix',
         platformOs: 'macos',
@@ -125,7 +125,7 @@ describe('CodexAppServerClient', () => {
     child.stdout.write(responseFrame.subarray(splitAt));
 
     await expect(initialization).resolves.toEqual({
-      userAgent: 'Codex 0.144.3 cafe\u0301',
+      userAgent: 'Codex 0.153.3 cafe\u0301',
       codexHome: '/tmp/codex-home',
       platformFamily: 'unix',
       platformOs: 'macos',

@@ -108,7 +108,7 @@ export function isMixedRuntimeMix(mix: RuntimeMix): boolean {
  * The Codex models the tier map targets, hardcoded as named constants exactly
  * like the tuning presets hardcode Claude aliases.
  *
- * Slugs verified against the live Codex CLI catalog (codex-cli 0.144.3:
+ * Slugs verified against the live Codex CLI catalog (codex-cli 0.153.3:
  * `gpt-5.6-luna` "fast and affordable", `gpt-5.6-sol` "latest frontier"). A
  * Codex model bump is therefore a ONE-CONSTANT edit — which forks spec_hash
  * revisions for every mixed run, exactly like any preset recalibration.

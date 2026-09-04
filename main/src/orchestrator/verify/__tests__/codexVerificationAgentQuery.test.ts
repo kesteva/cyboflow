@@ -28,7 +28,7 @@ class FakeClient implements CodexVerifyAppServerClient {
   readonly start = vi.fn(() => undefined);
   readonly stop = vi.fn(async (_signal?: NodeJS.Signals) => undefined);
   readonly initialize = vi.fn(async (_params: AppServerInitializeParams) => ({
-    userAgent: 'codex-cli/0.144.3',
+    userAgent: 'codex-cli/0.153.3',
     codexHome: '/tmp/codex',
     platformFamily: 'unix',
     platformOs: 'macos',
@@ -53,7 +53,7 @@ class FakeClient implements CodexVerifyAppServerClient {
 const executable = () => ({
   executablePath: '/app/codex/bin/codex',
   pathDir: '/app/codex/codex-path',
-  version: '0.144.3' as const,
+  version: '0.153.3' as const,
   target: 'aarch64-apple-darwin' as const,
 });
 

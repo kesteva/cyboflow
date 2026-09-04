@@ -25,7 +25,7 @@ vi.mock('../../../../utils/nodeFinder', () => ({
 const BUNDLED: ResolvedCodexExecutable = {
   executablePath: '/Applications/Cyboflow.app/Contents/Resources/app.asar.unpacked/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex',
   pathDir: '/Applications/Cyboflow.app/Contents/Resources/app.asar.unpacked/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/codex-path',
-  version: '0.144.3',
+  version: '0.153.3',
   target: 'aarch64-apple-darwin',
 };
 
@@ -81,7 +81,7 @@ describe('CodexPtyManager.testCliAvailability', () => {
     const manager = makeManager();
     manager.bundled = BUNDLED;
     manager.probeResults.set(BUNDLED.executablePath, {
-      version: 'codex-cli 0.144.3',
+      version: 'codex-cli 0.153.3',
       usedNodeFallback: false,
     });
 
@@ -89,7 +89,7 @@ describe('CodexPtyManager.testCliAvailability', () => {
 
     expect(availability).toEqual({
       available: true,
-      version: 'codex-cli 0.144.3',
+      version: 'codex-cli 0.153.3',
       path: BUNDLED.executablePath,
     });
     // The PATH hunt is the regression under test: the bundled binary is native
@@ -101,7 +101,7 @@ describe('CodexPtyManager.testCliAvailability', () => {
     const manager = makeManager();
     manager.bundled = BUNDLED;
     manager.probeResults.set(BUNDLED.executablePath, {
-      version: 'codex-cli 0.144.3',
+      version: 'codex-cli 0.153.3',
       usedNodeFallback: false,
     });
 
