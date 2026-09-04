@@ -5,11 +5,13 @@
  * Three sources land here, in this order, because they are three shapes of the
  * same fact ("an agent stopped and is waiting for you"):
  *   1. blocked quick sessions   — the ask is `waitingOn`, answered in-session;
- *   2. decision + notification review items — the ask is the item title, with
- *      the body available inline behind "Details ▸". These carry no session
- *      identity of their own, so it is resolved from the item's run via
- *      `runSessionMap` — two "Human gate: Human review" cards are otherwise
- *      distinguishable only by project;
+ *   2. decision review items — the ask is the item title, with the body
+ *      available inline behind "Details ▸". These carry no session identity of
+ *      their own, so it is resolved from the item's run via `runSessionMap` —
+ *      two "Human gate: Human review" cards are otherwise distinguishable only
+ *      by project. NOTE: `notification` items are deliberately NOT here — an FYI
+ *      has no answer, so it lives in the grey NotificationsSection rather than
+ *      under an "Asked you" kicker;
  *   3. real-time permission approvals — the only rows with two real verdicts,
  *      so they get Approve/Reject inline rather than an "Answer →" jump.
  *

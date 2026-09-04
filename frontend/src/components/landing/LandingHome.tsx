@@ -76,7 +76,9 @@ import { SessionDismissDialog } from '../cyboflow/SessionDismissDialog';
 import { AddIdeaModal } from './AddIdeaModal';
 import { QueueHeader } from './QueueHeader';
 import { RecommendedActionsSection } from './RecommendedActionsSection';
+import { BlockedRunsSection } from './BlockedRunsSection';
 import { NeedsInputSection } from './NeedsInputSection';
+import { NotificationsSection } from './NotificationsSection';
 import { HumanTasksSection } from './HumanTasksSection';
 import { ReadyForReviewSection, type ReadyRow } from './ReadyForReviewSection';
 import { WorkingSection, type WorkingRow } from './WorkingSection';
@@ -227,18 +229,21 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
     return map;
   }, [projects]);
 
-  const activeRunCount = React.useMemo(
-    () => runs.filter((run) => classifyRun(run.status) === 'active').length,
-    [runs],
-  );
   const readyToReviewCount = React.useMemo(
     () => runs.filter((run) => run.status === 'awaiting_review').length,
     [runs],
   );
   const attentionQuickCount = React.useMemo(() => quickRows.filter(needsAttention).length, [quickRows]);
 
-  const decisionAndNotificationItems = React.useMemo(
-    () => reviewItems.filter((it) => it.kind === 'decision' || it.kind === 'notification'),
+  // Decisions are asks (red band); notifications are FYIs (grey band). They were
+  // one list until a finished dynamic workflow started reading as "Asked you —
+  // Answer →", claiming a reply nobody was waiting for.
+  const decisionItems = React.useMemo(
+    () => reviewItems.filter((it) => it.kind === 'decision'),
+    [reviewItems],
+  );
+  const notificationItems = React.useMemo(
+    () => reviewItems.filter((it) => it.kind === 'notification'),
     [reviewItems],
   );
   const humanTaskItems = React.useMemo(
@@ -249,13 +254,78 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
     [reviewItems],
   );
 
+  // Working rows — the three sources, deduped down to one row per running thing.
+  const workingRows = React.useMemo<WorkingRow[]>(() => {
+    const activeRuns = runs.filter((run) => classifyRun(run.status) === 'active');
+    // A flow run and the session hosting it are ONE thing, and the RUN is what
+    // represents it — as a row here while it is active, and from the band it
+    // belongs to (Needs your input / Ready for review) once it is not. So the
+    // session's own quick row drops out for every NON-TERMINAL run, not just the
+    // active ones: scoping this to active runs meant a run parking at a gate
+    // handed the session straight back to Working, which then reported a blocked
+    // session as "Running". Only once the run is terminal does the session speak
+    // for itself again.
+    const runSessionIds = new Set(
+      runs
+        .filter((run) => classifyRun(run.status) !== 'terminal')
+        .map((run) => run.session_id)
+        .filter((id): id is string => typeof id === 'string' && id !== ''),
+    );
+    // A live dynamic workflow REPLACES its session's row rather than hiding
+    // behind it: the workflow row says what the fan-out is doing (agent pips, the
+    // running/done tally) where the session row only says "Running". Suppressing
+    // the workflow instead — which is what the triage's promote-to-running was
+    // taken to license — meant the workflow treatment only ever rendered for an
+    // orphan, i.e. essentially never. A session already spoken for by a flow run
+    // keeps the run row; that is the top-level thing.
+    const dynamics = activeDynamicWorkflows.filter((w) => !runSessionIds.has(w.sessionId));
+    const dynamicSessionIds = new Set(dynamics.map((w) => w.sessionId));
+    return [
+      ...activeRuns.map((run) => ({ kind: 'run' as const, id: run.id, run })),
+      ...triage.working
+        .filter((row) => !runSessionIds.has(row.sessionId) && !dynamicSessionIds.has(row.sessionId))
+        .map((row) => ({ kind: 'quick' as const, id: row.sessionId, row })),
+      ...dynamics.map((workflow) => ({ kind: 'dynamic' as const, id: workflow.wfRunId, workflow })),
+    ];
+  }, [runs, triage.working, activeDynamicWorkflows]);
+
+  // Blocked runs — the halted runs NOTHING else on this page speaks for. A run
+  // parked at a gate has a decision item (red band) and a cleanly drained one is
+  // in Ready for review; the remainder — stuck, or paused with nothing filed —
+  // had no home at all once its session's quick row stopped standing in for it.
+  const blockedRunRows = React.useMemo(() => {
+    const readyRunIds = new Set(
+      selectReadyToReviewRuns(runs, reviewItems, approvals, landingBlockingRunIds).map((r) => r.id),
+    );
+    // An item that actually ASKS for this run already represents it. A
+    // notification does not — it reports something finished.
+    const askedFor = new Set(
+      reviewItems
+        .filter((it) => it.kind === 'decision' || it.kind === 'human_task')
+        .map((it) => it.run_id)
+        .filter((id): id is string => id !== null),
+    );
+    return runs.filter(
+      (run) =>
+        classifyRun(run.status) === 'blocked' && !readyRunIds.has(run.id) && !askedFor.has(run.id),
+    );
+  }, [runs, reviewItems, approvals, landingBlockingRunIds]);
+
   const waitingCount =
-    approvalsCount + reviewItems.length + readyToReviewCount + attentionQuickCount;
+    approvalsCount +
+    reviewItems.length +
+    readyToReviewCount +
+    attentionQuickCount +
+    blockedRunRows.length;
   const blockedCount =
     countApprovals(blockingApprovalItems) +
     reviewItems.filter((it) => it.blocking).length +
-    quickRows.filter((r) => r.state === 'blocked').length;
-  const workingCount = activeRunCount + activeDynamicWorkflows.length + triage.working.length;
+    quickRows.filter((r) => r.state === 'blocked').length +
+    // A stuck/paused run is a blocked thing too — without this a page holding
+    // only those reads as 'all-idle' and hides the band that names them.
+    blockedRunRows.length;
+  // The deduped row count, not the raw sum — a flow run and its session are one row.
+  const workingCount = workingRows.length;
   const sessionsCount =
     quickRows.length + runs.filter((run) => classifyRun(run.status) !== 'terminal').length;
 
@@ -354,25 +424,6 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
     }
     return guarded;
   }, [triage.readyForReview, experiments]);
-
-  // -------------------------------------------------------------------------
-  // Working rows
-  // -------------------------------------------------------------------------
-  const workingRows = React.useMemo<WorkingRow[]>(() => {
-    const quickSessionIds = new Set(quickRows.map((r) => r.sessionId));
-    return [
-      ...runs
-        .filter((run) => classifyRun(run.status) === 'active')
-        .map((run) => ({ kind: 'run' as const, id: run.id, run })),
-      ...triage.working.map((row) => ({ kind: 'quick' as const, id: row.sessionId, row })),
-      // A dynamic workflow on a known quick session is already represented by
-      // that session's row (the triage promotes it to `running`), so only
-      // orphans — a workflow on a session the board doesn't list — appear here.
-      ...activeDynamicWorkflows
-        .filter((w) => !quickSessionIds.has(w.sessionId))
-        .map((workflow) => ({ kind: 'dynamic' as const, id: workflow.wfRunId, workflow })),
-    ];
-  }, [runs, triage.working, activeDynamicWorkflows, quickRows]);
 
   // -------------------------------------------------------------------------
   // Section refs, focus + flash
@@ -635,7 +686,7 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
           <NeedsInputSection
             ref={needsInputRef}
             quickRows={triage.needsInput}
-            reviewItems={decisionAndNotificationItems}
+            reviewItems={decisionItems}
             approvals={approvals}
             projectNameById={projectNameById}
             runProjectMap={runProjectMap}
@@ -646,6 +697,13 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
             onOpenQuickSession={openQuickSession}
             onOpenReviewItem={openReviewItem}
             onApprovalDecided={afterLifecycleAction}
+          />
+
+          <BlockedRunsSection
+            runs={blockedRunRows}
+            projectNameById={projectNameById}
+            nowMs={nowMs}
+            onOpenRun={(run) => openRunSession(run.id, run.project_id)}
           />
 
           <HumanTasksSection
@@ -667,11 +725,19 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
               onDismissSession={setDismissTargetId}
             />
           </div>
+
+          <NotificationsSection
+            items={notificationItems}
+            projectNameById={projectNameById}
+            nowMs={nowMs}
+            onDismissed={afterLifecycleAction}
+          />
         </>
       )}
 
       <WorkingSection
         rows={workingRows}
+        nowMs={nowMs}
         showWhenEmpty={showEmptyWells}
         onOpenQuickSession={openQuickSession}
         onOpenRun={(run) => openRunSession(run.id, run.project_id)}

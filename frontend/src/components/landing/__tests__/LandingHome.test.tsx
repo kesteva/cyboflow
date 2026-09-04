@@ -14,6 +14,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Project } from '../../../types/project';
 import type { QuickSessionRow } from '../../../../../shared/types/quickSessions';
+import type { DynamicWorkflowRunState } from '../../../../../shared/types/dynamicWorkflows';
 import type { ActiveRunRow } from '../../../stores/activeRunsStore';
 import type { ReviewItem } from '../../../../../shared/types/reviews';
 import type { BacklogTaskItem, Board } from '../../../../../shared/types/tasks';
@@ -36,6 +37,7 @@ let mockApprovalsQueueLength = 0;
 let mockApprovalBlocking: unknown[] = [];
 let mockApprovalNormal: unknown[] = [];
 let mockQuickRows: QuickSessionRow[] = [];
+let mockDynamicWorkflows: DynamicWorkflowRunState[] = [];
 let mockBacklogTasks: BacklogTaskItem[] = [];
 let mockBacklogBoards: Board[] = [];
 let mockProviderAccess: AgentProviderAccess = {
@@ -65,7 +67,7 @@ vi.mock('../../../stores/reviewQueueStore', () => ({
 }));
 
 vi.mock('../../../stores/dynamicWorkflowStore', () => ({
-  useActiveDynamicWorkflows: () => [],
+  useActiveDynamicWorkflows: () => mockDynamicWorkflows,
   useDynamicWorkflowStore: { getState: () => ({ init: () => undefined }) },
 }));
 
@@ -131,6 +133,18 @@ vi.mock('../../../trpc/client', () => ({
   },
 }));
 
+// WorkingSection's run rows open a live phase subscription per active flow run;
+// the phase graph is not what these page-state tests are about.
+vi.mock('../../../hooks/useWorkflowPhaseState', () => ({
+  useWorkflowPhaseState: () => ({
+    definition: null,
+    currentStepId: null,
+    stepStates: [],
+    isLoading: false,
+    error: null,
+  }),
+}));
+
 // Leaf components with their own heavy store/trpc wiring, unrelated to page-state
 // derivation — stubbed the same way the retired test stubbed EmptyState/SubHeader.
 vi.mock('../../ReviewQueue/ProviderUsageCards', () => ({ ProviderUsageCards: () => null }));
@@ -174,6 +188,26 @@ function quickRow(overrides: Partial<QuickSessionRow> = {}): QuickSessionRow {
     worktreeName: overrides.worktreeName ?? null,
     git: overrides.git ?? null,
   };
+}
+
+function makeWorkflow(overrides: Partial<DynamicWorkflowRunState> = {}): DynamicWorkflowRunState {
+  return {
+    wfRunId: 'wf_1',
+    runId: 'quick-run-1',
+    sessionId: 'sess-a',
+    sessionName: 'smooth-falcon',
+    projectId: 1,
+    name: 'review-changes',
+    description: 'Review the diff across four dimensions',
+    status: 'running',
+    phases: [],
+    agents: [
+      { agentId: 'a1', status: 'done' },
+      { agentId: 'a2', status: 'running' },
+    ],
+    startedAt: '2026-07-06T00:40:00.000Z',
+    ...overrides,
+  } as DynamicWorkflowRunState;
 }
 
 function makeRun(overrides: Partial<ActiveRunRow> & { id: string }): ActiveRunRow {
@@ -285,6 +319,7 @@ beforeEach(() => {
   mockApprovalBlocking = [];
   mockApprovalNormal = [];
   mockQuickRows = [];
+  mockDynamicWorkflows = [];
   mockBacklogTasks = [];
   mockBacklogBoards = [];
   mockProviderAccess = { claude: false, codex: false, omp: false, pi: false } as AgentProviderAccess;
@@ -455,5 +490,182 @@ describe('LandingHome — page states', () => {
     expect(count.className).toMatch(/text-interactive/);
     // approvals(0) + reviewItems(1) + awaiting_review runs(1) + attention quick rows(2) = 4.
     expect(count).toHaveTextContent('4');
+  });
+  it('working: a flow run absorbs its hosting session row instead of listing both', async () => {
+    // A run and the session it runs in are one running thing. Before the dedupe
+    // the page listed `planner ⌥ faint-harbor` AND a bare `faint-harbor`.
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockQuickRows = [
+      quickRow({ sessionId: 'sess-run', name: 'faint-harbor-20260903', state: 'running', idleSince: null }),
+      quickRow({ sessionId: 'sess-solo', name: 'quiet-mesa', state: 'running', idleSince: null }),
+    ];
+    mockRuns = [
+      makeRun({
+        id: 'run-a',
+        status: 'running',
+        workflowName: 'planner',
+        branch_name: 'faint-harbor-20260903',
+        session_id: 'sess-run',
+      }),
+    ];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    const working = screen.getByTestId('rq-working-section');
+    // The run row + the unrelated quick session — not three rows.
+    expect(within(working).getAllByTestId('rq-working-row')).toHaveLength(2);
+    expect(within(working).getByText('planner')).toBeInTheDocument();
+    expect(within(working).getByText('quiet-mesa')).toBeInTheDocument();
+    expect(within(working).queryByText('faint-harbor-20260903')).not.toBeInTheDocument();
+  });
+
+  it('working: a session whose run parked at a gate is not handed back as "Running"', async () => {
+    // The run leaves Working when it stops being active, but it still speaks for
+    // its session from whichever band it moved to — so the session must NOT
+    // reappear here claiming to run. Only a TERMINAL run gives the session back.
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockQuickRows = [
+      quickRow({ sessionId: 'sess-run', name: 'faint-harbor-20260903', state: 'running', idleSince: null }),
+    ];
+    mockRuns = [
+      makeRun({
+        id: 'run-a',
+        status: 'awaiting_input',
+        workflowName: 'planner',
+        branch_name: 'faint-harbor-20260903',
+        session_id: 'sess-run',
+      }),
+    ];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    expect(screen.queryByTestId('rq-working-row')).not.toBeInTheDocument();
+  });
+
+  it('blocked: a stuck run nothing else speaks for gets its own row', async () => {
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockQuickRows = [
+      quickRow({ sessionId: 'sess-run', name: 'faint-harbor-20260903', state: 'running', idleSince: null }),
+    ];
+    mockRuns = [
+      makeRun({
+        id: 'run-a',
+        status: 'stuck',
+        workflowName: 'planner',
+        branch_name: 'faint-harbor-20260903',
+        session_id: 'sess-run',
+        stuck_reason: 'No step transition in 40m',
+      }),
+    ];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    const blocked = screen.getByTestId('rq-blocked-runs-section');
+    expect(within(blocked).getByText('planner')).toBeInTheDocument();
+    expect(within(blocked).getByText('No step transition in 40m')).toBeInTheDocument();
+    // It is NOT also claiming to run.
+    expect(screen.queryByTestId('rq-working-row')).not.toBeInTheDocument();
+  });
+
+  it('blocked: a run whose gate already asks for it stays out of the band', async () => {
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockRuns = [makeRun({ id: 'run-a', status: 'awaiting_input', workflowName: 'planner' })];
+    mockReviewItems = [
+      makeReviewItem({ id: 'rvw-gate', kind: 'decision', run_id: 'run-a', title: 'Approve the plan', blocking: true }),
+    ];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    expect(screen.queryByTestId('rq-blocked-runs-section')).not.toBeInTheDocument();
+    const needsInput = screen.getByTestId('rq-needs-input-section');
+    expect(within(needsInput).getByText('Approve the plan')).toBeInTheDocument();
+  });
+
+  it('blocked: an awaiting_review run stays in Ready for review, not the Blocked band', async () => {
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockRuns = [makeRun({ id: 'run-a', status: 'awaiting_review', workflowName: 'Ship' })];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    expect(screen.queryByTestId('rq-blocked-runs-section')).not.toBeInTheDocument();
+    expect(within(screen.getByTestId('rq-ready-section')).getByText('Ship')).toBeInTheDocument();
+  });
+
+  it('working: a live dynamic workflow replaces its session row instead of hiding behind it', async () => {
+    // The session's own row only ever says "Running"; the workflow row says what
+    // the fan-out is doing. Suppressing the workflow left the treatment dead.
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockQuickRows = [
+      quickRow({ sessionId: 'sess-a', name: 'smooth-falcon', state: 'running', idleSince: null }),
+    ];
+    mockDynamicWorkflows = [makeWorkflow({ sessionId: 'sess-a', sessionName: 'smooth-falcon' })];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    const working = screen.getByTestId('rq-working-section');
+    expect(within(working).getAllByTestId('rq-working-row')).toHaveLength(1);
+    expect(within(working).getByText('Review the diff across four dimensions')).toBeInTheDocument();
+    expect(within(working).getByText(/running · 1 done/)).toBeInTheDocument();
+    expect(within(working).queryByText('Running')).not.toBeInTheDocument();
+  });
+
+  it('working: a flow run outranks a dynamic workflow on the same session', async () => {
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockQuickRows = [
+      quickRow({ sessionId: 'sess-a', name: 'smooth-falcon', state: 'running', idleSince: null }),
+    ];
+    mockDynamicWorkflows = [makeWorkflow({ sessionId: 'sess-a' })];
+    mockRuns = [makeRun({ id: 'run-a', status: 'running', workflowName: 'Sprint', session_id: 'sess-a' })];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    const working = screen.getByTestId('rq-working-section');
+    expect(within(working).getAllByTestId('rq-working-row')).toHaveLength(1);
+    expect(within(working).getByText('Sprint')).toBeInTheDocument();
+  });
+
+  it('working: a terminal run gives its session back to its own row', async () => {
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockQuickRows = [
+      quickRow({ sessionId: 'sess-run', name: 'faint-harbor-20260903', state: 'running', idleSince: null }),
+    ];
+    mockRuns = [
+      makeRun({
+        id: 'run-a',
+        status: 'completed',
+        workflowName: 'planner',
+        branch_name: 'faint-harbor-20260903',
+        session_id: 'sess-run',
+      }),
+    ];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    const working = screen.getByTestId('rq-working-section');
+    expect(within(working).getByText('faint-harbor-20260903')).toBeInTheDocument();
   });
 });
