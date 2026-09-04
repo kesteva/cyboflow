@@ -7,10 +7,10 @@
  * "Needs your input" instead.
  *
  * Three sources merge here: active flow runs, quick sessions the triage classes
- * as running, and detected dynamic workflows. The last two overlap by design
- * (deriveQuickSessionTriage promotes a session with a live dynamic workflow to
- * `running`), so the page dedupes dynamic workflows against the quick rows
- * before handing them over.
+ * as running, and detected dynamic workflows. They overlap — a flow run and a
+ * dynamic workflow both live INSIDE a session — so the page hands over one row
+ * per running thing, keeping whichever source says the most about it: the flow
+ * run over its session, and a dynamic workflow over the session hosting it.
  *
  * Progress lives in a shared right-hand gutter, so a mixed list scans as one
  * column. Two sources have something honest to show there:

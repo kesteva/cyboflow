@@ -271,20 +271,23 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
         .map((run) => run.session_id)
         .filter((id): id is string => typeof id === 'string' && id !== ''),
     );
-    const quickSessionIds = new Set(quickRows.map((r) => r.sessionId));
+    // A live dynamic workflow REPLACES its session's row rather than hiding
+    // behind it: the workflow row says what the fan-out is doing (agent pips, the
+    // running/done tally) where the session row only says "Running". Suppressing
+    // the workflow instead — which is what the triage's promote-to-running was
+    // taken to license — meant the workflow treatment only ever rendered for an
+    // orphan, i.e. essentially never. A session already spoken for by a flow run
+    // keeps the run row; that is the top-level thing.
+    const dynamics = activeDynamicWorkflows.filter((w) => !runSessionIds.has(w.sessionId));
+    const dynamicSessionIds = new Set(dynamics.map((w) => w.sessionId));
     return [
       ...activeRuns.map((run) => ({ kind: 'run' as const, id: run.id, run })),
       ...triage.working
-        .filter((row) => !runSessionIds.has(row.sessionId))
+        .filter((row) => !runSessionIds.has(row.sessionId) && !dynamicSessionIds.has(row.sessionId))
         .map((row) => ({ kind: 'quick' as const, id: row.sessionId, row })),
-      // A dynamic workflow on a known quick session is already represented by
-      // that session's row (the triage promotes it to `running`), so only
-      // orphans — a workflow on a session the board doesn't list — appear here.
-      ...activeDynamicWorkflows
-        .filter((w) => !quickSessionIds.has(w.sessionId))
-        .map((workflow) => ({ kind: 'dynamic' as const, id: workflow.wfRunId, workflow })),
+      ...dynamics.map((workflow) => ({ kind: 'dynamic' as const, id: workflow.wfRunId, workflow })),
     ];
-  }, [runs, triage.working, activeDynamicWorkflows, quickRows]);
+  }, [runs, triage.working, activeDynamicWorkflows]);
 
   // Blocked runs — the halted runs NOTHING else on this page speaks for. A run
   // parked at a gate has a decision item (red band) and a cleanly drained one is

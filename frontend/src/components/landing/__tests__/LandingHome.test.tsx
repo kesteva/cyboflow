@@ -14,6 +14,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Project } from '../../../types/project';
 import type { QuickSessionRow } from '../../../../../shared/types/quickSessions';
+import type { DynamicWorkflowRunState } from '../../../../../shared/types/dynamicWorkflows';
 import type { ActiveRunRow } from '../../../stores/activeRunsStore';
 import type { ReviewItem } from '../../../../../shared/types/reviews';
 import type { BacklogTaskItem, Board } from '../../../../../shared/types/tasks';
@@ -36,6 +37,7 @@ let mockApprovalsQueueLength = 0;
 let mockApprovalBlocking: unknown[] = [];
 let mockApprovalNormal: unknown[] = [];
 let mockQuickRows: QuickSessionRow[] = [];
+let mockDynamicWorkflows: DynamicWorkflowRunState[] = [];
 let mockBacklogTasks: BacklogTaskItem[] = [];
 let mockBacklogBoards: Board[] = [];
 let mockProviderAccess: AgentProviderAccess = {
@@ -65,7 +67,7 @@ vi.mock('../../../stores/reviewQueueStore', () => ({
 }));
 
 vi.mock('../../../stores/dynamicWorkflowStore', () => ({
-  useActiveDynamicWorkflows: () => [],
+  useActiveDynamicWorkflows: () => mockDynamicWorkflows,
   useDynamicWorkflowStore: { getState: () => ({ init: () => undefined }) },
 }));
 
@@ -188,6 +190,26 @@ function quickRow(overrides: Partial<QuickSessionRow> = {}): QuickSessionRow {
   };
 }
 
+function makeWorkflow(overrides: Partial<DynamicWorkflowRunState> = {}): DynamicWorkflowRunState {
+  return {
+    wfRunId: 'wf_1',
+    runId: 'quick-run-1',
+    sessionId: 'sess-a',
+    sessionName: 'smooth-falcon',
+    projectId: 1,
+    name: 'review-changes',
+    description: 'Review the diff across four dimensions',
+    status: 'running',
+    phases: [],
+    agents: [
+      { agentId: 'a1', status: 'done' },
+      { agentId: 'a2', status: 'running' },
+    ],
+    startedAt: '2026-07-06T00:40:00.000Z',
+    ...overrides,
+  } as DynamicWorkflowRunState;
+}
+
 function makeRun(overrides: Partial<ActiveRunRow> & { id: string }): ActiveRunRow {
   return {
     workflow_id: 'wf-1',
@@ -297,6 +319,7 @@ beforeEach(() => {
   mockApprovalBlocking = [];
   mockApprovalNormal = [];
   mockQuickRows = [];
+  mockDynamicWorkflows = [];
   mockBacklogTasks = [];
   mockBacklogBoards = [];
   mockProviderAccess = { claude: false, codex: false, omp: false, pi: false } as AgentProviderAccess;
@@ -581,6 +604,45 @@ describe('LandingHome — page states', () => {
 
     expect(screen.queryByTestId('rq-blocked-runs-section')).not.toBeInTheDocument();
     expect(within(screen.getByTestId('rq-ready-section')).getByText('Ship')).toBeInTheDocument();
+  });
+
+  it('working: a live dynamic workflow replaces its session row instead of hiding behind it', async () => {
+    // The session's own row only ever says "Running"; the workflow row says what
+    // the fan-out is doing. Suppressing the workflow left the treatment dead.
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockQuickRows = [
+      quickRow({ sessionId: 'sess-a', name: 'smooth-falcon', state: 'running', idleSince: null }),
+    ];
+    mockDynamicWorkflows = [makeWorkflow({ sessionId: 'sess-a', sessionName: 'smooth-falcon' })];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    const working = screen.getByTestId('rq-working-section');
+    expect(within(working).getAllByTestId('rq-working-row')).toHaveLength(1);
+    expect(within(working).getByText('Review the diff across four dimensions')).toBeInTheDocument();
+    expect(within(working).getByText(/running · 1 done/)).toBeInTheDocument();
+    expect(within(working).queryByText('Running')).not.toBeInTheDocument();
+  });
+
+  it('working: a flow run outranks a dynamic workflow on the same session', async () => {
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockQuickRows = [
+      quickRow({ sessionId: 'sess-a', name: 'smooth-falcon', state: 'running', idleSince: null }),
+    ];
+    mockDynamicWorkflows = [makeWorkflow({ sessionId: 'sess-a' })];
+    mockRuns = [makeRun({ id: 'run-a', status: 'running', workflowName: 'Sprint', session_id: 'sess-a' })];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    const working = screen.getByTestId('rq-working-section');
+    expect(within(working).getAllByTestId('rq-working-row')).toHaveLength(1);
+    expect(within(working).getByText('Sprint')).toBeInTheDocument();
   });
 
   it('working: a terminal run gives its session back to its own row', async () => {
