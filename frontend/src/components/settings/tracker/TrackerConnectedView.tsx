@@ -50,11 +50,13 @@ import type {
   TrackerDirectionMode,
   TrackerMappingTarget,
   TrackerRecoveryProbe,
+  TrackerStatusSyncMode,
   TrackerSyncLogEntry,
 } from '../../../../../shared/types/trackerSync';
 import { Eyebrow, PillToggle, ProviderTile, Segmented } from './trackerShared';
 import {
-  CONTENT_MODE_OPTIONS,
+  GATED_MODE_OPTIONS,
+  gatedModeLabel,
   logMarkerClass,
   mappingTargetLabel,
   providerMeta,
@@ -137,7 +139,7 @@ export function TrackerConnectedView({
   const meta = providerMeta(connection.provider);
 
   // Optimistic mirror of the editable settings rows.
-  const [statusSyncMode, setStatusSyncMode] = useState<TrackerDirectionMode>(
+  const [statusSyncMode, setStatusSyncMode] = useState<TrackerStatusSyncMode>(
     connection.statusSyncMode,
   );
   const [pullMode, setPullMode] = useState<TrackerDirectionMode>(connection.pullMode);
@@ -326,7 +328,7 @@ export function TrackerConnectedView({
       .catch((err: unknown) => setError(errorMessage(err)));
   };
 
-  const handleStatusSyncMode = (next: TrackerDirectionMode): void => {
+  const handleStatusSyncMode = (next: TrackerStatusSyncMode): void => {
     setStatusSyncMode(next);
     patchSettings({ connectionId: connection.id, statusSyncMode: next });
   };
@@ -457,7 +459,7 @@ export function TrackerConnectedView({
     { label: 'Source', value: connection.sourceLabel },
     {
       label: 'Direction',
-      value: `Status ${directionLabel(statusSyncMode)} · Pull ${directionLabel(pullMode)} · Push ${directionLabel(pushMode)}`,
+      value: `Status ${gatedModeLabel(statusSyncMode)} · Pull ${directionLabel(pullMode)} · Push ${directionLabel(pushMode)}`,
       tone: allAuto ? 'text-status-success' : undefined,
     },
   ];
@@ -887,7 +889,7 @@ export function TrackerConnectedView({
                       </p>
                     </div>
                     <Segmented
-                      options={DIRECTION_OPTIONS}
+                      options={GATED_MODE_OPTIONS}
                       value={statusSyncMode}
                       onChange={handleStatusSyncMode}
                       ariaLabel="Sync task status"
@@ -951,7 +953,7 @@ export function TrackerConnectedView({
                       </p>
                     </div>
                     <Segmented
-                      options={CONTENT_MODE_OPTIONS}
+                      options={GATED_MODE_OPTIONS}
                       value={contentSyncMode}
                       onChange={handleContentSyncMode}
                       ariaLabel="Sync task fields"
@@ -968,7 +970,7 @@ export function TrackerConnectedView({
                       </p>
                     </div>
                     <Segmented
-                      options={CONTENT_MODE_OPTIONS}
+                      options={GATED_MODE_OPTIONS}
                       value={archiveSyncMode}
                       onChange={handleArchiveSyncMode}
                       ariaLabel={`Archive in ${meta.name}`}

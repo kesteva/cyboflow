@@ -111,6 +111,7 @@ describe('Migration 105: dart as a third tracker provider', () => {
       // Appended by 129 (beads as a fourth provider + the reconciliation
       // ledger's generation counter) — asserted for real in migration123.test.ts.
       'config_generation',
+      'status_sync_enabled',
     ]);
     expect(columnNames(raw, 'entity_external_links')).toEqual([
       'id', 'connection_id', 'entity_type', 'entity_id', 'provider', 'external_id',

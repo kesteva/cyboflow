@@ -102,6 +102,7 @@ describe('Migration 129: beads as a fourth tracker provider', () => {
       'pull_mode', 'push_mode', 'push_target',
       'content_sync_mode', 'archive_sync_mode', 'priority_mapping_json', 'category_mapping_json',
       'config_generation',
+      'status_sync_enabled',
     ]);
 
     // A pass can bump it explicitly (the reconciliation engine's own write).

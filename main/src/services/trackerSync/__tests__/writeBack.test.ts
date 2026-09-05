@@ -37,7 +37,12 @@ import type { BacklogTaskItem, TaskChangeAction, TaskChangedEvent, TaskType } fr
 import { insertConnection, upsertLink, listUnresolvedOutbox, updateBaseline, getLinkByEntity, getConnection, markOrphaned, type NewConnectionRow } from '../store';
 import { PROVIDER_ADAPTER_GUARDS_UPDATES } from '../providerCapabilities';
 import { resolveStageIds } from '../stateMapping';
-import { backfillContentWrites, createWriteBackListener, type WriteBackBaselineStamp } from '../writeBack';
+import {
+  backfillContentWrites,
+  backfillStatusWrites,
+  createWriteBackListener,
+  type WriteBackBaselineStamp,
+} from '../writeBack';
 
 const PROJECT_ID = 1;
 const NOW = '2026-07-30 12:00:00';
@@ -85,6 +90,7 @@ function makeConnectionRow(overrides: Partial<NewConnectionRow> = {}): NewConnec
     selection_json: JSON.stringify({ containerId: 'team-1', narrowId: 'all', narrowKind: 'all' }),
     state_mapping_json: '{}',
     status_sync_mode: 'auto',
+    status_sync_enabled: 1,
     pull_mode: 'auto',
     push_mode: 'auto',
     push_target: 1,
@@ -1080,6 +1086,139 @@ describe('writeBack — content backfill on turning the direction on', () => {
 
     expect(backfill(connectionId)).toBe(0);
     expect(outbox()).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Status sync 'off' (migration 130) + its backfill arm
+// ---------------------------------------------------------------------------
+
+function statusBackfill(connectionId: string): number {
+  const connection = getConnection(raw, connectionId);
+  if (connection === null) throw new Error(`no connection ${connectionId}`);
+  return backfillStatusWrites({ db: raw, nowIso: () => NOW }, connection);
+}
+
+describe("writeBack — status sync 'off'", () => {
+  it('DECLINES a stage move outright, exactly as content off does', () => {
+    const connectionId = seedConnection({ status_sync_enabled: 0 });
+    seedIdea('ide_1', 'IDEA-1', stageIds.done);
+    linkIdea(connectionId);
+
+    makeListener().handleTaskChanged(makeEvent('ide_1', 'idea', stageIds.done));
+
+    // Not delayed — DECLINED. A queued row of a kind no drain will ever claim
+    // halts the inbound batch at this issue forever (invariant 5).
+    expect(outbox()).toHaveLength(0);
+  });
+
+  it('declines the close_parent rollup too — one gate covers both status kinds', () => {
+    const connectionId = seedConnection({ status_sync_enabled: 0, mirror_subissues: 1 });
+    seedIdea('ide_1', 'IDEA-1');
+    seedTask('tsk_1', 'TASK-1', { stageId: stageIds.done, ideaId: 'ide_1' });
+    upsertLink(raw, {
+      connection_id: connectionId,
+      entity_type: 'task',
+      entity_id: 'tsk_1',
+      provider: 'linear',
+      external_id: 'ext-child',
+      external_parent_id: 'ext-parent',
+    });
+
+    makeListener().handleTaskChanged(makeEvent('tsk_1', 'task', stageIds.done));
+
+    expect(outbox()).toHaveLength(0);
+  });
+
+  it('still enqueues at MANUAL — the mode gates the drain, only off declines', () => {
+    const connectionId = seedConnection({ status_sync_mode: 'manual', status_sync_enabled: 1 });
+    seedIdea('ide_1', 'IDEA-1', stageIds.done);
+    linkIdea(connectionId);
+
+    makeListener().handleTaskChanged(makeEvent('ide_1', 'idea', stageIds.done));
+
+    expect(outbox()).toHaveLength(1);
+    expect(outbox()[0].kind).toBe('update_state');
+  });
+});
+
+describe('writeBack — status backfill on turning the direction on', () => {
+  it('enqueues the stage move the direction declined while it was off', () => {
+    const connectionId = seedConnection({ status_sync_enabled: 0 });
+    seedIdea('ide_1', 'IDEA-1', stageIds.done);
+    linkIdea(connectionId);
+    makeListener().handleTaskChanged(makeEvent('ide_1', 'idea', stageIds.done));
+    expect(outbox()).toHaveLength(0);
+
+    raw.prepare('UPDATE tracker_connections SET status_sync_enabled = 1 WHERE id = ?').run(connectionId);
+    expect(statusBackfill(connectionId)).toBe(1);
+
+    const rows = outbox();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].kind).toBe('update_state');
+    expect(rows[0].external_id).toBe('ext-1');
+    expect(JSON.parse(rows[0].payload_json)).toEqual({ desiredGroup: 'completed' });
+  });
+
+  it('says nothing for a stage that maps to NO group', () => {
+    // Ready for development deliberately writes nothing — readiness is not
+    // "started" — and a backfill must not start saying what that stage never said.
+    const connectionId = seedConnection();
+    seedIdea('ide_1', 'IDEA-1', stageIds.ready);
+    linkIdea(connectionId);
+
+    expect(statusBackfill(connectionId)).toBe(0);
+    expect(outbox()).toHaveLength(0);
+  });
+
+  it('says nothing when the baseline already records that group as written', () => {
+    const connectionId = seedConnection();
+    seedIdea('ide_1', 'IDEA-1', stageIds.done);
+    const link = linkIdea(connectionId);
+    stampLastWritten(link.id, {
+      stateId: 'state-done',
+      lastWrittenGroup: 'completed',
+      lastWrittenAt: NOW,
+    });
+
+    expect(statusBackfill(connectionId)).toBe(0);
+    expect(outbox()).toHaveLength(0);
+  });
+
+  it('skips archived entities, orphaned links, and missing entity rows', () => {
+    const connectionId = seedConnection();
+    seedIdea('ide_1', 'IDEA-1', stageIds.done);
+    seedIdea('ide_2', 'IDEA-2', stageIds.done);
+    linkIdea(connectionId);
+    raw.prepare("UPDATE ideas SET archived_at = ? WHERE id = 'ide_1'").run(NOW);
+    markOrphaned(raw, linkIdea(connectionId, { entityId: 'ide_2', externalId: 'ext-2' }).id);
+    linkIdea(connectionId, { entityId: 'ide_missing', externalId: 'ext-3' });
+
+    expect(statusBackfill(connectionId)).toBe(0);
+    expect(outbox()).toHaveLength(0);
+  });
+
+  it("is inert while the direction is still off, and on a paused connection", () => {
+    const offConn = seedConnection({ id: 'conn-off', status_sync_enabled: 0 });
+    const pausedConn = seedConnection({ id: 'conn-paused', status: 'paused' });
+    seedIdea('ide_1', 'IDEA-1', stageIds.done);
+    linkIdea(offConn);
+    linkIdea(pausedConn, { externalId: 'ext-2' });
+
+    expect(statusBackfill(offConn)).toBe(0);
+    expect(statusBackfill(pausedConn)).toBe(0);
+    expect(outbox('conn-off')).toHaveLength(0);
+    expect(outbox('conn-paused')).toHaveLength(0);
+  });
+
+  it('is idempotent — a second flip collapses onto the pending row', () => {
+    const connectionId = seedConnection();
+    seedIdea('ide_1', 'IDEA-1', stageIds.done);
+    linkIdea(connectionId);
+
+    expect(statusBackfill(connectionId)).toBe(1);
+    expect(statusBackfill(connectionId)).toBe(0);
+    expect(outbox()).toHaveLength(1);
   });
 });
 

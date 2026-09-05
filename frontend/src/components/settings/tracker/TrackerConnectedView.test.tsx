@@ -211,6 +211,20 @@ describe('TrackerConnectedView — sync settings', () => {
     expect(onChanged).toHaveBeenCalled();
   });
 
+  it('offers Off on status sync and sends it (migration 130)', async () => {
+    // Before 130 this control was Auto/Manual only, so a user who turned every
+    // visible switch off still had cyboflow writing stage moves to the tracker.
+    renderView();
+
+    const group = screen.getByRole('group', { name: 'Sync task status' });
+    expect(within(group).getByRole('button', { name: 'Off' })).toBeInTheDocument();
+
+    fireEvent.click(within(group).getByRole('button', { name: 'Off' }));
+    await waitFor(() =>
+      expect(mockUpdate).toHaveBeenCalledWith({ connectionId: 'conn-1', statusSyncMode: 'off' }),
+    );
+  });
+
   it('changes each direction row independently through updateSettings', async () => {
     renderView();
 

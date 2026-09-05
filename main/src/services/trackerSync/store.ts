@@ -45,6 +45,7 @@ import type {
   TrackerConflictRow,
   TrackerReconciliationLedgerRow,
 } from '../../database/models';
+import type { TrackerStatusSyncMode } from '../../../../shared/types/trackerSync';
 
 // ---------------------------------------------------------------------------
 // Connections
@@ -61,6 +62,37 @@ import type {
  */
 export type NewConnectionRow = Omit<TrackerConnectionRow, 'created_at' | 'updated_at'>;
 
+/**
+ * The ONE three-state status cadence the rest of the app speaks, folded from
+ * the two columns that store it (migration 130).
+ *
+ * `status_sync_enabled` is the consent bit and `status_sync_mode` the cadence,
+ * split because a widened CHECK on the mode column poisons a ledger-wiped
+ * replay through 105/129 — see the migration header. Every reader above the
+ * store goes through here, so the pair never leaks: the engine's gates, the
+ * connection summary and the wizard/connected-view controls all see a plain
+ * `'auto' | 'manual' | 'off'`.
+ *
+ * The inverse (a three-state choice back into the pair) is
+ * {@link statusSyncColumns}, and it deliberately preserves the cadence across
+ * an off/on round trip: turning the direction off remembers whether it was on
+ * Auto or Manual.
+ */
+export function effectiveStatusSyncMode(
+  connection: Pick<TrackerConnectionRow, 'status_sync_mode' | 'status_sync_enabled'>,
+): TrackerStatusSyncMode {
+  return connection.status_sync_enabled === 0 ? 'off' : connection.status_sync_mode;
+}
+
+/** The column pair one {@link TrackerStatusSyncMode} choice writes. See {@link effectiveStatusSyncMode}. */
+export function statusSyncColumns(
+  mode: TrackerStatusSyncMode,
+): Pick<ConnectionSettingsPatch, 'status_sync_mode' | 'status_sync_enabled'> {
+  // 'off' leaves status_sync_mode ALONE — that is what makes the cadence
+  // survive the round trip.
+  return mode === 'off' ? { status_sync_enabled: 0 } : { status_sync_mode: mode, status_sync_enabled: 1 };
+}
+
 /** Insert a new tracker connection row and return it as persisted. */
 export function insertConnection(db: Database.Database, row: NewConnectionRow): TrackerConnectionRow {
   return db
@@ -68,14 +100,14 @@ export function insertConnection(db: Database.Database, row: NewConnectionRow): 
       `INSERT INTO tracker_connections (
          id, project_id, provider, status, workspace_id, workspace_name, actor_label,
          base_url, secret_ciphertext, source_json, selection_mode, selection_json,
-         state_mapping_json, status_sync_mode, pull_mode, push_mode, push_target,
+         state_mapping_json, status_sync_mode, status_sync_enabled, pull_mode, push_mode, push_target,
          content_sync_mode, archive_sync_mode, priority_mapping_json, category_mapping_json,
          mirror_subissues, conflict_mode,
          cursor_updated_at, cursor_external_id, last_sync_at, last_sync_log_json
        ) VALUES (
          @id, @project_id, @provider, @status, @workspace_id, @workspace_name, @actor_label,
          @base_url, @secret_ciphertext, @source_json, @selection_mode, @selection_json,
-         @state_mapping_json, @status_sync_mode, @pull_mode, @push_mode, @push_target,
+         @state_mapping_json, @status_sync_mode, @status_sync_enabled, @pull_mode, @push_mode, @push_target,
          @content_sync_mode, @archive_sync_mode, @priority_mapping_json, @category_mapping_json,
          @mirror_subissues, @conflict_mode,
          @cursor_updated_at, @cursor_external_id, @last_sync_at, @last_sync_log_json
@@ -131,6 +163,8 @@ export interface ConnectionSettingsPatch {
   selection_json?: string | null;
   state_mapping_json?: string;
   status_sync_mode?: TrackerConnectionRow['status_sync_mode'];
+  /** 0 | 1 — the status direction's OFF switch (migration 130). */
+  status_sync_enabled?: number;
   pull_mode?: TrackerConnectionRow['pull_mode'];
   push_mode?: TrackerConnectionRow['push_mode'];
   /** 0 | 1 — see TrackerConnectionRow.push_target (migration 110). */
@@ -160,6 +194,7 @@ const CONNECTION_SETTINGS_COLUMNS = [
   'selection_json',
   'state_mapping_json',
   'status_sync_mode',
+  'status_sync_enabled',
   'pull_mode',
   'push_mode',
   'push_target',
@@ -572,7 +607,8 @@ export function reactivateConnection(
          secret_ciphertext = @secret_ciphertext, source_json = @source_json,
          selection_mode = @selection_mode, selection_json = @selection_json,
          state_mapping_json = @state_mapping_json,
-         status_sync_mode = @status_sync_mode, pull_mode = @pull_mode, push_mode = @push_mode,
+         status_sync_mode = @status_sync_mode, status_sync_enabled = @status_sync_enabled,
+         pull_mode = @pull_mode, push_mode = @push_mode,
          push_target = @push_target,
          content_sync_mode = @content_sync_mode, archive_sync_mode = @archive_sync_mode,
          priority_mapping_json = @priority_mapping_json, category_mapping_json = @category_mapping_json,

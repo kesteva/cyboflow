@@ -90,6 +90,7 @@ import type {
   TrackerSelectionJson,
   TrackerSelectionMode,
   TrackerState,
+  TrackerStatusSyncMode,
   TrackerStateMapping,
   TrackerUserRef,
   TrackerWizardSourceInput,
@@ -99,7 +100,8 @@ import type { EntityCategory, Priority } from '../../../../../shared/types/tasks
 import { Eyebrow, PillToggle, ProviderTile, Segmented } from './trackerShared';
 import {
   BEADS_INIT_DISCLOSURE,
-  CONTENT_MODE_OPTIONS,
+  GATED_MODE_OPTIONS,
+  gatedModeLabel,
   ENTITY_CATEGORIES,
   MAPPING_TARGETS,
   PRIORITY_LEVELS,
@@ -364,7 +366,7 @@ export function TrackerWizardModal({
   const [statesByScope, setStatesByScope] = useState<Record<string, TrackerState[]>>({});
   const [statesLoaded, setStatesLoaded] = useState(false);
   const [mappingByScope, setMappingByScope] = useState<Record<string, TrackerStateMapping>>({});
-  const [statusSyncMode, setStatusSyncMode] = useState<TrackerDirectionMode>('auto');
+  const [statusSyncMode, setStatusSyncMode] = useState<TrackerStatusSyncMode>('auto');
   const [pullMode, setPullMode] = useState<TrackerDirectionMode>('auto');
   const [pushMode, setPushMode] = useState<TrackerDirectionMode>('auto');
   const [mirrorSubissues, setMirrorSubissues] = useState(true);
@@ -2589,7 +2591,7 @@ export function TrackerWizardModal({
             </p>
           </div>
           <Segmented
-            options={DIRECTION_OPTIONS}
+            options={GATED_MODE_OPTIONS}
             value={statusSyncMode}
             onChange={setStatusSyncMode}
             ariaLabel="Sync task status"
@@ -2642,7 +2644,7 @@ export function TrackerWizardModal({
             </p>
           </div>
           <Segmented
-            options={CONTENT_MODE_OPTIONS}
+            options={GATED_MODE_OPTIONS}
             value={contentSyncMode}
             onChange={setContentSyncMode}
             ariaLabel="Sync task fields"
@@ -2657,7 +2659,7 @@ export function TrackerWizardModal({
             </p>
           </div>
           <Segmented
-            options={CONTENT_MODE_OPTIONS}
+            options={GATED_MODE_OPTIONS}
             value={archiveSyncMode}
             onChange={setArchiveSyncMode}
             ariaLabel={`Archive in ${meta.name}`}
@@ -2880,7 +2882,7 @@ export function TrackerWizardModal({
         },
         {
           label: 'Direction',
-          value: `Status ${directionLabel(statusSyncMode)} · Pull ${directionLabel(pullMode)} · Push ${directionLabel(pushMode)}`,
+          value: `Status ${gatedModeLabel(statusSyncMode)} · Pull ${directionLabel(pullMode)} · Push ${directionLabel(pushMode)}`,
           detail: `${mirrorSubissues ? 'Sub-issue mirroring on' : 'Sub-issue mirroring off'} · conflicts ${
             conflictMode === 'auto' ? 'auto-resolve' : 'queue for review'
           }`,
