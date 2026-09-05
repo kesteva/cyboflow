@@ -200,7 +200,9 @@ describe('runFileExplorer', () => {
   // -------------------------------------------------------------------------
   // fs hardening — special files + symlink metadata containment
   // -------------------------------------------------------------------------
-  it('rejects a non-regular file (FIFO) instead of reading it (no threadpool hang)', () => {
+  // POSIX-only fixture: Windows has no FIFOs — the mkfifo on a Git-for-Windows
+  // PATH is MSYS's emulation, which Node cannot stat (the read reports not-found).
+  it.skipIf(process.platform === 'win32')('rejects a non-regular file (FIFO) instead of reading it (no threadpool hang)', () => {
     const fifo = path.join(worktree, 'pipe');
     try {
       execFileSync('mkfifo', [fifo]);
