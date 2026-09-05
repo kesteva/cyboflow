@@ -33,7 +33,13 @@ function runRebuild(extraEnv) {
     cwd: repoRoot,
     stdio: 'inherit',
     env,
+    // On Windows `pnpm` is a .cmd shim, which Node >= 18.20 refuses to spawn
+    // without a shell (EINVAL, status null). The argv is fixed, so a shell is safe.
+    shell: process.platform === 'win32',
   });
+  if (result.error) {
+    log(`pnpm rebuild better-sqlite3 could not be spawned: ${result.error.message}`);
+  }
   return result.status === 0;
 }
 

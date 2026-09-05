@@ -41,6 +41,8 @@ import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import type { LoggerLike } from '../types';
 import { emitSeamError } from '../telemetrySink';
+import { resolveGitCommand } from '../../utils/gitExeFinder';
+import { cmdCommandLine, cmdExeInvocation, escapeForBatch } from '../../utils/win32CmdLine';
 import {
   type VerificationTaskV1,
   type VerificationReportV1,
@@ -96,8 +98,8 @@ export const VERIFY_AGENT_ALLOWED_TOOLS: readonly string[] = ['Bash', 'Read', 'G
 
 /** Subdir under VERIFY_ARTIFACTS_DIR holding the driver wrapper script (co-located with the driver's pid file). */
 const DRIVER_STATE_DIR = '.driver';
-/** The wrapper script the agent invokes as `$VERIFY_DRIVER`. */
-const DRIVER_SCRIPT_NAME = 'verify-driver.sh';
+/** The wrapper script the agent invokes as `$VERIFY_DRIVER` (a .cmd on Windows). */
+const DRIVER_SCRIPT_NAME = process.platform === 'win32' ? 'verify-driver.cmd' : 'verify-driver.sh';
 
 // ---------------------------------------------------------------------------
 // SDK-query seam (the module under test injects a fake — NO SDK import here)
@@ -1508,9 +1510,10 @@ const defaultCheckSnapshotMutated = async (worktreePath: string): Promise<boolea
   // snapshot commit) — untracked build output is ignored, so only a mutation of a
   // TRACKED source trips this.
   try {
-    await execFileAsync('git', ['diff', '--quiet', 'HEAD'], {
+    await execFileAsync(resolveGitCommand(), ['diff', '--quiet', 'HEAD'], {
       cwd: worktreePath,
       timeout: 30_000,
+      windowsHide: true,
     });
     return false;
   } catch (err) {
@@ -1605,6 +1608,7 @@ const defaultListeningPidForPort = async (port: number): Promise<number | null> 
   try {
     const { stdout } = await execFileAsync('lsof', ['-ti', `tcp:${port}`, '-sTCP:LISTEN'], {
       timeout: BINDING_PROBE_TIMEOUT_MS,
+      windowsHide: true,
     });
     const first = stdout.split('\n').map((l) => l.trim()).find((l) => l.length > 0);
     if (first === undefined) return null;
@@ -1628,6 +1632,7 @@ const defaultProcessInfo = async (pid: number): Promise<{ pgid: number; command:
   try {
     const { stdout } = await execFileAsync('ps', ['-o', 'pgid=,command=', '-p', String(pid)], {
       timeout: BINDING_PROBE_TIMEOUT_MS,
+      windowsHide: true,
     });
     const line = stdout.split('\n').map((l) => l.trim()).find((l) => l.length > 0);
     if (line === undefined) return null;
@@ -1661,7 +1666,20 @@ const defaultWriteDriverScript = async (
   // ELECTRON_RUN_AS_NODE makes the packaged Electron binary (process.execPath, the
   // findNodeExecutable fallback in a packaged app) behave as plain node; harmless
   // for a real node. `exec` so the driver process replaces the shell (clean signals).
-  const body = `#!/bin/sh\nexport ELECTRON_RUN_AS_NODE=1\nexec "${nodePath}" "${driverCliPath}" "$@"\n`;
+  // On Windows there is no /bin/sh — a .cmd wrapper does the same job (set the
+  // env var, forward every argument). Node 24 refuses to spawn .cmd files
+  // directly (EINVAL), so defaultStopDriver routes through cmd.exe there.
+  //
+  // nodePath/driverCliPath are escaped with escapeForBatch before landing in the
+  // .cmd body: cmd.exe parses a batch file line by line and expands %NAME% even
+  // inside the quotes below, so an install path that happens to contain a `%`
+  // (a literal percent, or a name that collides with an env var) would silently
+  // become something else at run time — %% is this file's own escape for a
+  // literal `%`. The trailing `%*` is a deliberate, UNescaped batch parameter
+  // reference (forward every arg) and must stay that way.
+  const body = process.platform === 'win32'
+    ? `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${escapeForBatch(nodePath)}" "${escapeForBatch(driverCliPath)}" %*\r\n`
+    : `#!/bin/sh\nexport ELECTRON_RUN_AS_NODE=1\nexec "${nodePath}" "${driverCliPath}" "$@"\n`;
   await writeFile(scriptPath, body, 'utf8');
   await chmod(scriptPath, 0o755);
   return scriptPath;
@@ -1672,7 +1690,19 @@ const defaultStopDriver = async (
   env: Record<string, string>,
 ): Promise<void> => {
   try {
-    await execFileAsync(driverScriptPath, ['stop'], { env: { ...process.env, ...env }, timeout: 20_000 });
+    // Node on Windows refuses to spawn .cmd/.bat files directly (EINVAL), so
+    // the wrapper is executed through cmd.exe there — the same interpreter the
+    // agent's own shell uses for $VERIFY_DRIVER.
+    const cmd = process.platform === 'win32'
+      ? cmdExeInvocation(cmdCommandLine([driverScriptPath, 'stop']))
+      : null;
+    const [file, args] = cmd ? [cmd.command, cmd.args] : [driverScriptPath, ['stop']];
+    await execFileAsync(file, args, {
+      env: { ...process.env, ...env },
+      timeout: 20_000,
+      windowsHide: true,
+      windowsVerbatimArguments: cmd?.windowsVerbatimArguments,
+    });
   } catch {
     // best-effort — the reaper + port probe are the real backstop.
   }

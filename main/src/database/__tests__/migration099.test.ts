@@ -193,8 +193,9 @@ describe('Migration 099: project-brief atype', () => {
 
   it('(f) the fresh-DB initialize() path includes project-brief + the split indexes', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration099-'));
+    let svc: DatabaseService | undefined;
     try {
-      const svc = new DatabaseService(join(dir, 'test.db'));
+      svc = new DatabaseService(join(dir, 'test.db'));
       svc.setMigrationsDirForTesting(join(__dirname, '..', 'migrations'));
       svc.initialize();
       const db = svc.getDb();
@@ -229,6 +230,7 @@ describe('Migration 099: project-brief atype', () => {
           .run(),
       ).toThrow(/CHECK/i);
     } finally {
+      try { svc?.close(); } catch { /* already closed */ }
       rmSync(dir, { recursive: true, force: true });
     }
   });

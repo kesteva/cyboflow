@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { X, ExternalLink, Download, RefreshCw, CheckCircle, AlertCircle } from 'lucide-react';
 import cyboflowWordmark from '../assets/cyboflow-wordmark.svg';
 import { useUpdater } from '../hooks/useUpdater';
+import { pathBasename } from '../utils/pathBasename';
 
 interface VersionInfo {
   current: string;
@@ -143,7 +144,7 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
                   Working Directory
                 </span>
                 <span className="text-sm text-text-primary font-mono truncate max-w-[200px]" title={versionInfo.workingDirectory}>
-                  {versionInfo.workingDirectory.split('/').pop() || versionInfo.workingDirectory}
+                  {pathBasename(versionInfo.workingDirectory) || versionInfo.workingDirectory}
                 </span>
               </div>
             )}

@@ -8,6 +8,7 @@ import type { Logger } from '../../../utils/logger';
 import type { ConfigManager } from '../../configManager';
 import type { ConversationMessage } from '../../../database/models';
 import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
+import { quoteForShellString, resolveGitCommand } from '../../../utils/gitExeFinder';
 import { probeCliVersion } from '../cli/cliVersionProbe';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { electronRunAsNodeGuardEnv } from '../../../utils/electronNodeGuard';
@@ -874,9 +875,10 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   protected ensureWorktreeExcludesCyboflowDir(worktreePath: string): void {
     const EXCLUDE_LINE = '.cyboflow/';
     try {
-      const raw = execSync('git rev-parse --git-path info/exclude', {
+      const raw = execSync(`${quoteForShellString(resolveGitCommand())} rev-parse --git-path info/exclude`, {
         cwd: worktreePath,
         encoding: 'utf-8',
+        windowsHide: true,
         stdio: ['ignore', 'pipe', 'ignore'],
       }).trim();
       if (raw.length === 0) return;

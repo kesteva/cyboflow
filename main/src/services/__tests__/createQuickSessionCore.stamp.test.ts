@@ -222,6 +222,140 @@ describe('createQuickSessionCore — half-created session sweep', () => {
 });
 
 /**
+ * The session-created matcher resolves the wait by comparing the emitted
+ * worktreePath against the nameHint. worktreePath is built with path.join
+ * (worktreeManager), so on WINDOWS it carries BACKSLASHES
+ * (C:\proj\.cyboflow\worktrees\<name>) — the matcher used to be '/'-anchored
+ * only, so every worktree-backed quick session waited out its full timeout and
+ * rejected with "Timed out waiting for quick session to be created" even
+ * though the session + worktree were provisioned (leaking a half-created
+ * session; the caller never fired onSuccess, so the first-run tour never
+ * advanced). These cases pin the separator-agnostic matcher: backslash paths
+ * resolve (base + `-<n>` suffixed forms), forward-slash paths still resolve,
+ * and a non-matching path still times out.
+ */
+describe('createQuickSessionCore — session-created matcher is separator-agnostic', () => {
+  beforeEach(() => {
+    _resetClaimedQuickSessionIdsForTesting();
+  });
+
+  /**
+   * Harness mirroring the reject-on-createRun captures above: the sessionManager
+   * emits one session synchronously on subscribe, and the sentinel createRun
+   * captures the resolved session id, then throws. Reaching createRun at all
+   * proves the matcher resolved the wait (a non-match times out instead). The
+   * session id is a parameter: a resolved id is CLAIMED (see
+   * claimedQuickSessionIds), so sibling calls within one test need distinct ids.
+   */
+  function makeMatcherDeps(
+    worktreePath: string,
+    sessionId: string,
+    resolvedSessionId: { current: string },
+  ): CreateQuickSessionCoreDeps {
+    return {
+      taskQueue: { createSession: async () => ({ id: 'job-1' }) },
+      sessionManager: {
+        on: (_event, listener: (s: QuickSessionRow) => void) => {
+          listener({ id: sessionId, worktreePath });
+        },
+        removeListener: () => {},
+      },
+      workflowRegistry: {
+        ensureQuickWorkflow: () => 'wf-quick',
+        createRun: (_workflowId, _substrate, sessionId) => {
+          // The core always passes the resolved session id here; the structural
+          // dep type types it optional, hence the ?? fallback.
+          resolvedSessionId.current = sessionId ?? '';
+          throw new Error('stop after capture');
+        },
+      },
+      getDb: () => {
+        throw new Error('unreachable — createRun rejects before any db use');
+      },
+      dismissHalfCreatedSession: async () => {},
+    };
+  }
+
+  it('a Windows-style backslash worktreePath resolves the wait', async () => {
+    const resolvedSessionId = { current: '' };
+
+    await expect(
+      createQuickSessionCore(
+        makeMatcherDeps(
+          'C:\\proj\\.cyboflow\\worktrees\\coral-heron-20260830',
+          'sess-win-1',
+          resolvedSessionId,
+        ),
+        { projectId: 1, nameHint: 'coral-heron-20260830' },
+      ),
+    ).rejects.toThrow('stop after capture');
+
+    expect(resolvedSessionId.current).toBe('sess-win-1');
+  });
+
+  it('a Windows-style backslash -<n> suffixed worktreePath resolves too', async () => {
+    const resolvedSessionId = { current: '' };
+
+    await expect(
+      createQuickSessionCore(
+        makeMatcherDeps(
+          'C:\\proj\\.cyboflow\\worktrees\\coral-heron-20260830-1',
+          'sess-win-2',
+          resolvedSessionId,
+        ),
+        { projectId: 1, nameHint: 'coral-heron-20260830' },
+      ),
+    ).rejects.toThrow('stop after capture');
+
+    expect(resolvedSessionId.current).toBe('sess-win-2');
+  });
+
+  it('a POSIX forward-slash worktreePath still resolves in base and suffixed forms', async () => {
+    const resolvedSessionId = { current: '' };
+
+    await expect(
+      createQuickSessionCore(makeMatcherDeps('/wt/coral-heron-20260830', 'sess-posix-1', resolvedSessionId), {
+        projectId: 1,
+        nameHint: 'coral-heron-20260830',
+      }),
+    ).rejects.toThrow('stop after capture');
+    expect(resolvedSessionId.current).toBe('sess-posix-1');
+
+    await expect(
+      createQuickSessionCore(
+        makeMatcherDeps('/wt/coral-heron-20260830-1', 'sess-posix-2', resolvedSessionId),
+        { projectId: 1, nameHint: 'coral-heron-20260830' },
+      ),
+    ).rejects.toThrow('stop after capture');
+    expect(resolvedSessionId.current).toBe('sess-posix-2');
+  });
+
+  it('a non-matching worktreePath still times out (in either separator)', async () => {
+    const resolvedSessionId = { current: '' };
+
+    await expect(
+      createQuickSessionCore(
+        makeMatcherDeps(
+          'C:\\proj\\.cyboflow\\worktrees\\some-other-name',
+          'sess-other-1',
+          resolvedSessionId,
+        ),
+        { projectId: 1, nameHint: 'coral-heron-20260830', timeoutMs: 50 },
+      ),
+    ).rejects.toThrow('Timed out waiting for quick session to be created');
+    expect(resolvedSessionId.current).toBe('');
+
+    await expect(
+      createQuickSessionCore(
+        makeMatcherDeps('/wt/some-other-name', 'sess-other-2', resolvedSessionId),
+        { projectId: 1, nameHint: 'coral-heron-20260830', timeoutMs: 50 },
+      ),
+    ).rejects.toThrow('Timed out waiting for quick session to be created');
+    expect(resolvedSessionId.current).toBe('');
+  });
+});
+
+/**
  * The `__quick__` sentinel run carries the session's provider/runtime, and the
  * dispatch facade reads that ROW back to pick the owning manager
  * (`resolveManager(runId)`). So the gate on what gets forwarded is the

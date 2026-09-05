@@ -37,7 +37,8 @@
  */
 import { isOrphanedWorker } from '../../../shared/types/testConcurrency';
 import type { LoggerLike } from '../orchestrator/types';
-import { collectProcessTree, listProcessTable, type ProcessRow } from './processTable';
+import { collectProcessTree, type ProcessRow } from './processTable';
+import { listProcessTable } from '../utils/platformProcess';
 
 /** How often the periodic sweep runs. */
 export const VITEST_ORPHAN_SWEEP_INTERVAL_MS = 5 * 60_000;

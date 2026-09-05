@@ -16,7 +16,6 @@
   "pnpm": {
     "onlyBuiltDependencies": [
       "electron",
-      "better-sqlite3",
       "@homebridge/node-pty-prebuilt-multiarch",
       "esbuild",
       "msgpackr-extract"
@@ -58,9 +57,9 @@
   },
   "scripts": {
     "dev": "pnpm run electron-dev",
-    "electron-dev": "node scripts/ensure-sqlite-abi.mjs electron && concurrently \"pnpm run --filter frontend dev\" \"wait-on http://localhost:${CYBOFLOW_VITE_PORT:-4521} && env -u NODE_OPTIONS electron . --remote-debugging-port=${CYBOFLOW_CDP_PORT:-9223}\"",
-    "electron-dev:custom": "node scripts/ensure-sqlite-abi.mjs electron && concurrently \"pnpm run --filter frontend dev\" \"wait-on http://localhost:${CYBOFLOW_VITE_PORT:-4521} && env -u NODE_OPTIONS electron .\"",
-    "dev:perf": "node scripts/ensure-sqlite-abi.mjs electron && concurrently \"pnpm run --filter frontend dev\" \"wait-on http://localhost:${CYBOFLOW_VITE_PORT:-4521} && CYBOFLOW_PERF_TRACE=1 electron . --inspect=${CYBOFLOW_INSPECT_PORT:-9229} --remote-debugging-port=${CYBOFLOW_CDP_PORT:-9223}\"",
+    "electron-dev": "node scripts/ensure-sqlite-abi.mjs electron && concurrently \"pnpm run --filter frontend dev\" \"node scripts/dev-electron.mjs --cdp\"",
+    "electron-dev:custom": "node scripts/ensure-sqlite-abi.mjs electron && concurrently \"pnpm run --filter frontend dev\" \"node scripts/dev-electron.mjs\"",
+    "dev:perf": "node scripts/ensure-sqlite-abi.mjs electron && concurrently \"pnpm run --filter frontend dev\" \"node scripts/dev-electron.mjs --cdp --inspect --perf\"",
     "build": "pnpm run build:frontend && pnpm run build:main && pnpm run build:electron",
     "restore-backup": "node scripts/ensure-sqlite-abi.mjs host && node main/scripts/restore-backup.cjs",
     "build:frontend": "pnpm run --filter frontend build",
@@ -78,11 +77,13 @@
     "build:mac:dev:arm64": "pnpm run build:frontend && pnpm run build:main && pnpm run electron:rebuild && BUILD_VARIANT=dev pnpm run inject-build-info && BUILD_VARIANT=dev BUILD_ARCH=arm64 node scripts/configure-build.js && electron-builder --mac --arm64 --publish never --config build/electron-builder.generated.json",
     "build:mac:dev:x64": "pnpm run build:frontend && pnpm run build:main && pnpm run electron:rebuild && BUILD_VARIANT=dev pnpm run inject-build-info && BUILD_VARIANT=dev BUILD_ARCH=x64 node scripts/configure-build.js && electron-builder --mac --x64 --publish never --config build/electron-builder.generated.json",
     "release:mac:dev": "CYBOFLOW_BUILD_ENV=dev pnpm run build:mac:dev && BUILD_VARIANT=dev pnpm run publish:r2",
+    "build:win": "node scripts/ensure-sqlite-abi.mjs electron && pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js --platform win --arch x64 && electron-builder --win --x64 --publish never --config build/electron-builder.generated.json",
+    "build:win:dev": "node scripts/ensure-sqlite-abi.mjs electron && pnpm run build:frontend && pnpm run build:main && pnpm run inject-build-info && node scripts/configure-build.js --platform win --arch x64 --variant dev && electron-builder --win --x64 --publish never --config build/electron-builder.generated.json",
     "publish:r2": "node scripts/publish-update.mjs",
     "preview": "pnpm run --filter frontend preview",
     "lint": "pnpm run -r lint",
     "typecheck": "pnpm run -r typecheck",
-    "postinstall": "electron-builder install-app-deps",
+    "postinstall": "node scripts/apply-pty-napi-prebuilds.js && node scripts/install-app-deps.js",
     "electron:rebuild": "pnpm exec electron-rebuild -f -w better-sqlite3 -m ./main",
     "install:darwin-cross": "pnpm install --config.supportedArchitectures.os=darwin --config.supportedArchitectures.cpu=x64 --config.supportedArchitectures.cpu=arm64",
     "setup": "pnpm install && pnpm run electron:rebuild && pnpm run build:main",
@@ -96,7 +97,7 @@
     "test:headed": "playwright test --headed",
     "test:build": "node build/afterSign.test.js && node build/verifyArtifact.test.js && node scripts/configure-build.test.js",
     "verify:schema": "node scripts/verify-schema-parity.js",
-    "test:unit": "node scripts/ensure-sqlite-abi.mjs host && pnpm --filter main test && pnpm --filter frontend test && pnpm run verify:schema && node scripts/__tests__/verify-schema-parity.test.js && node scripts/__tests__/release-scripts.test.js && node scripts/__tests__/ensure-sqlite-abi.test.js && pnpm run test:build",
+    "test:unit": "node scripts/ensure-sqlite-abi.mjs host && pnpm --filter main test && pnpm --filter frontend test && pnpm run verify:schema && node scripts/__tests__/verify-schema-parity.test.js && node scripts/__tests__/release-scripts.test.js && node scripts/__tests__/ensure-sqlite-abi.test.js && node scripts/__tests__/apply-pty-napi-prebuilds.test.js && node scripts/__tests__/install-app-deps.test.js && pnpm run test:build",
     "test:gate": "node scripts/ensure-sqlite-abi.mjs host && vitest run --config vitest.config.gate.ts",
     "test:integration": "node scripts/ensure-sqlite-abi.mjs host && vitest run --config vitest.config.integration.ts"
   },
@@ -104,7 +105,7 @@
     "@anthropic-ai/claude-agent-sdk": "^0.3.257",
     "@anthropic-ai/sdk": "^0.110.0",
     "@aptabase/electron": "^0.3.1",
-    "@homebridge/node-pty-prebuilt-multiarch": "^0.12.0",
+    "@homebridge/node-pty-prebuilt-multiarch": "^0.14.1",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@openai/codex": "0.144.3",
     "@sentry/electron": "^7.13.0",
@@ -162,6 +163,7 @@
     "asarUnpack": [
       "node_modules/**/*.node",
       "node_modules/@anthropic-ai/claude-agent-sdk-darwin-*/**",
+      "node_modules/@anthropic-ai/claude-agent-sdk-win32-*/**",
       "node_modules/@openai/codex*/**",
       "node_modules/@steipete/peekaboo-mcp/**",
       "main/dist/main/src/orchestrator/mcpServer/**/*.js",
@@ -191,6 +193,15 @@
       ],
       "artifactName": "${productName}-${version}-macOS-${arch}.${ext}",
       "x64ArchFiles": "Contents/Resources/app.asar.unpacked/node_modules/{**/*.node,**/*.dylib}"
+    },
+    "win": {
+      "icon": "main/assets/icon.ico",
+      "target": [
+        {
+          "target": "nsis"
+        }
+      ],
+      "artifactName": "${productName}-${version}-Windows-${arch}.${ext}"
     },
     "publish": {
       "provider": "generic",

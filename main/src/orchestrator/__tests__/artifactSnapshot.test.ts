@@ -248,7 +248,11 @@ describe('snapshotCommittedArtifact — byte copy + layout', () => {
     expect(manifestPath).toBeNull();
   });
 
-  it('ABANDONS the snapshot (null) when the wanted pointer is a rejected symlink', async () => {
+  // POSIX-only fixture: staging a symlinked FILE requires privileges on win32
+  // (no unprivileged stand-in — a junction cannot point at a file).
+  it.skipIf(process.platform === 'win32')(
+    'ABANDONS the snapshot (null) when the wanted pointer is a rejected symlink',
+    async () => {
     // Point prototype/index.html at a file OUTSIDE the run root via a symlink.
     // copyGuardedByte refuses to follow it, so the required byte never copies —
     // the durability gate must return null (no safe content) so the caller keeps
@@ -263,7 +267,8 @@ describe('snapshotCommittedArtifact — byte copy + layout', () => {
     } finally {
       await rm(outside, { force: true });
     }
-  });
+    },
+  );
 
   it('ABANDONS the snapshot (null) when a wanted pointer source is absent (data-loss guard)', async () => {
     // ui-prototype declares prototype/index.html but nothing was seeded on disk.

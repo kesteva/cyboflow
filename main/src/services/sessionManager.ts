@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto';
 import { EventEmitter } from 'events';
-import { spawn, ChildProcess, exec, execSync } from 'child_process';
+import { spawn, ChildProcess } from 'child_process';
 import { ShellDetector } from '../utils/shellDetector';
 import type { Session, SessionUpdate, SessionOutput } from '../types/session';
 import type { DatabaseService } from '../database/database';
@@ -14,6 +14,7 @@ import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
 import { formatForDisplay } from '../utils/timestampUtils';
 import { scriptExecutionTracker } from './scriptExecutionTracker';
 import { isPtyLane, resolvePanelLane } from './panelLane';
+import { collectDescendantPidsAsync, killTree } from '../utils/platformProcess';
 
 // Interface for generic JSON message data that can contain various properties
 interface GenericMessageData {
@@ -1035,8 +1036,10 @@ export class SessionManager extends EventEmitter {
     // Track in shared script execution tracker
     scriptExecutionTracker.start('session', sessionId);
     
-    // Join commands with && to run them sequentially
-    const command = commands.join(' && ');
+    // Join commands to run them sequentially, in the dialect of the shell
+    // getShellCommandArgs routes to (POSIX `a && b`; PowerShell cannot parse
+    // `&&` on PS 5.1, so the win32 form differs — see buildCommandString).
+    const command = ShellDetector.buildCommandString({}, commands);
     
     // Get enhanced shell PATH
     const shellPath = getShellPath();
@@ -1044,11 +1047,15 @@ export class SessionManager extends EventEmitter {
     // Get the user's default shell and command arguments
     const { shell, args } = ShellDetector.getShellCommandArgs(command);
     
-    // Spawn the process with its own process group for easier termination
+    // POSIX: a process group of its own, so the stop ladder can signal the
+    // whole tree. Windows has no process groups, and DETACHED_PROCESS overrides
+    // CREATE_NO_WINDOW there, so a console child would allocate a visible
+    // console; the stop path uses taskkill /T on the pid instead.
     this.runningScriptProcess = spawn(shell, args, {
       cwd: workingDirectory,
       stdio: 'pipe',
-      detached: true, // Create a new process group
+      detached: process.platform !== 'win32',
+      windowsHide: true,
       env: {
         ...process.env,
         PATH: shellPath
@@ -1185,6 +1192,7 @@ export class SessionManager extends EventEmitter {
     const shellPath = getShellPath();
     return execAsync(command, {
       ...options,
+      windowsHide: true,
       env: {
         ...process.env,
         PATH: shellPath
@@ -1202,44 +1210,19 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Recursively gets all descendant PIDs of a parent process.
-   * This handles deeply nested process trees where processes spawn children
-   * that spawn their own children, etc.
-   * 
-   * @param parentPid The parent process ID
-   * @returns Array of all descendant PIDs
+   * Every descendant of `parentPid`. The per-platform enumeration lives in
+   * utils/platformProcess.ts; a failed walk degrades to a partial list.
    */
-  private getAllDescendantPids(parentPid: number): number[] {
-    const descendants: number[] = [];
-
-    try {
-      // Use ps to get children on macOS/Unix
-      const output = execSync(`ps -o pid= --ppid ${parentPid}`, { encoding: 'utf8' });
-      const pids = output.split('\n')
-        .map(line => parseInt(line.trim()))
-        .filter(pid => !isNaN(pid));
-
-      for (const pid of pids) {
-        descendants.push(pid);
-        descendants.push(...this.getAllDescendantPids(pid));
-      }
-    } catch (error) {
-      // Command might fail if no children exist, which is fine
-    }
-
-    return descendants;
+  private getAllDescendantPids(parentPid: number): Promise<number[]> {
+    return collectDescendantPidsAsync(parentPid);
   }
 
   /**
-   * Stops the currently running script and ensures all child processes are terminated.
-   * This method uses multiple approaches to ensure complete cleanup:
-   * 1. Gets all descendant PIDs recursively before killing
-   * 2. Kills the process group via `kill -TERM -<pgid>` then `-9`
-   * 3. Kills individual descendant processes as a fallback
-   * 4. Uses graceful SIGTERM first, then forceful SIGKILL
-   * @returns Promise that resolves when the script has been stopped
+   * Stop the running script and everything it spawned. The ladder is in
+   * {@link terminateScriptTree}; this method owns the bookkeeping around it.
    */
   stopRunningScript(): Promise<void> {
+    const isWin32 = process.platform === 'win32';
     return new Promise((resolve) => {
       if (!this.runningScriptProcess || !this.currentRunningSessionId) {
         resolve();
@@ -1247,7 +1230,7 @@ export class SessionManager extends EventEmitter {
       }
 
       const sessionId = this.currentRunningSessionId;
-      const process = this.runningScriptProcess;
+      const scriptProcess = this.runningScriptProcess;
 
       // Mark as closing in shared tracker
       scriptExecutionTracker.markClosing('session', sessionId);
@@ -1255,113 +1238,78 @@ export class SessionManager extends EventEmitter {
       // Immediately clear references to prevent new output
       this.currentRunningSessionId = null;
       this.runningScriptProcess = null;
-      
-      // Kill the entire process group to ensure all child processes are terminated
-      try {
-        if (process.pid) {
-          // First, get all descendant PIDs before we start killing
-          const descendantPids = this.getAllDescendantPids(process.pid);
-          
-          // Add a simple log entry for stopping the script
-          addSessionLog(sessionId, 'info', `Stopping application process...`, 'Application');
-          
-          // macOS/Unix: First, try SIGTERM for graceful shutdown
-          addSessionLog(sessionId, 'info', `[Sending SIGTERM to process ${process.pid} and its group]`, 'System');
 
-          try {
-            process.kill('SIGTERM');
-          } catch (error) {
-            console.warn('SIGTERM failed:', error);
-          }
-
-          // Kill the entire process group using negative PID
-          exec(`kill -TERM -${process.pid}`, (error) => {
-            if (error) {
-              console.warn(`Error sending SIGTERM to process group: ${error.message}`);
-            }
-          });
-
-          // Give processes a chance to clean up gracefully
-          addSessionLog(sessionId, 'info', '[Waiting 10 seconds for graceful shutdown...]', 'System');
-
-          // Use a shorter timeout for faster cleanup
-          setTimeout(() => {
-            addSessionLog(sessionId, 'info', '\n[Grace period expired, using forceful termination]', 'System');
-
-            // Now forcefully kill the main process
-            try {
-              process.kill('SIGKILL');
-              addSessionLog(sessionId, 'info', `[Sent SIGKILL to process ${process.pid}]`, 'System');
-            } catch (error) {
-              // Process might already be dead
-              addSessionLog(sessionId, 'info', `[Process ${process.pid} already terminated]`, 'System');
-            }
-
-            // Kill the process group with SIGKILL
-            exec(`kill -9 -${process.pid}`, (error) => {
-              if (error) {
-                console.warn(`Error sending SIGKILL to process group: ${error.message}`);
-                addSessionLog(sessionId, 'warn', `[Warning: Could not kill process group: ${error.message}]`, 'System');
-              } else {
-                addSessionLog(sessionId, 'info', `[Sent SIGKILL to process group ${process.pid}]`, 'System');
-              }
-            });
-
-            // Kill all known descendants individually to be sure
-            let killedCount = 0;
-            let alreadyDeadCount = 0;
-
-            descendantPids.forEach(pid => {
-              exec(`kill -9 ${pid}`, (error) => {
-                if (error) {
-                  alreadyDeadCount++;
-                } else {
-                  killedCount++;
-                }
-
-                // Report results after processing all descendants
-                if (killedCount + alreadyDeadCount === descendantPids.length) {
-                  if (killedCount > 0) {
-                    addSessionLog(sessionId, 'info', `[Forcefully terminated ${killedCount} child process${killedCount > 1 ? 'es' : ''}]`, 'System');
-                  }
-                  if (alreadyDeadCount > 0) {
-                    addSessionLog(sessionId, 'info', `[${alreadyDeadCount} process${alreadyDeadCount > 1 ? 'es' : ''} had already terminated gracefully]`, 'System');
-                  }
-                }
-              });
-            });
-
-            // Final cleanup attempt using pkill
-            exec(`pkill -9 -P ${process.pid}`, () => {
-              // Ignore errors - processes might already be dead
-            });
-
-            // Check for zombie processes after a short delay
-            setTimeout(() => {
-              if (process.pid) {
-                const remainingPids = this.getAllDescendantPids(process.pid);
-                if (remainingPids.length > 0) {
-                  addSessionLog(sessionId, 'warn', `[WARNING: ${remainingPids.length} zombie process${remainingPids.length > 1 ? 'es' : ''} could not be terminated: ${remainingPids.join(', ')}]`, 'System');
-                  addSessionLog(sessionId, 'error', `[Please manually kill these processes using: kill -9 ${remainingPids.join(' ')}]`, 'System');
-                } else {
-                  addSessionLog(sessionId, 'info', '\n[All processes terminated successfully]', 'System');
-                }
-              }
-              this.finishStopScript(sessionId);
-              resolve();
-            }, 500);
-          }, 2000); // Reduced from 10 seconds to 2 seconds for faster cleanup
-        } else {
-          // No process PID
-          this.finishStopScript(sessionId);
-          resolve();
-        }
-      } catch (error) {
-        console.warn('Error killing script process:', error);
+      const pid = scriptProcess.pid;
+      if (!pid) {
+        // No process PID
         this.finishStopScript(sessionId);
         resolve();
+        return;
       }
+
+      // Fail-soft by contract: a failed enumeration or session log must not
+      // reject the stop promise — finish the stop either way.
+      void this.terminateScriptTree(sessionId, pid, isWin32).finally(() => {
+        this.finishStopScript(sessionId);
+        resolve();
+      });
     });
+  }
+
+  /**
+   * Run the stop ladder for one script tree, reporting through the session log.
+   * Both platform ladders live in utils/platformProcess.ts (killTree); this
+   * site picks the timings and the wording. Never throws.
+   */
+  private async terminateScriptTree(sessionId: string, pid: number, isWin32: boolean): Promise<void> {
+    try {
+      // Enumerated up front, so children orphaned mid-ladder are still reached.
+      const descendantPids = await this.getAllDescendantPids(pid);
+
+      addSessionLog(sessionId, 'info', `Stopping application process...`, 'Application');
+      addSessionLog(
+        sessionId,
+        'info',
+        isWin32
+          ? `[Forcefully terminating process ${pid} and its tree (taskkill)]`
+          : `[Sending SIGTERM to process ${pid} and its group]`,
+        'System'
+      );
+
+      const stopped = await killTree(pid, {
+        descendantPids,
+        // The ladder's own progress, in the bracketed form the session log
+        // uses. These lines are what the user watches while a stop runs.
+        logger: {
+          info: (message) => addSessionLog(sessionId, 'info', `[${message}]`, 'System'),
+          warn: (message) => addSessionLog(sessionId, 'warn', `[${message}]`, 'System'),
+        },
+        graceMode: 'fixed',
+        // Windows has no catchable signals, so there is nothing for a grace
+        // window to wait for — the ladder is taskkill either way.
+        graceMs: isWin32 ? 0 : 2000,
+        posixGroupMode: 'root',
+        listDescendants: () => this.getAllDescendantPids(pid),
+        onSurvivors: (remainingPids) => {
+          addSessionLog(sessionId, 'warn', `[WARNING: ${remainingPids.length} zombie process${remainingPids.length > 1 ? 'es' : ''} could not be terminated: ${remainingPids.join(', ')}]`, 'System');
+          addSessionLog(
+            sessionId,
+            'error',
+            isWin32
+              ? `[Please manually kill these processes using: taskkill /F /PID ${remainingPids.join(' /PID ')}]`
+              : `[Please manually kill these processes using: kill -9 ${remainingPids.join(' ')}]`,
+            'System'
+          );
+        },
+        onError: (error) => console.warn('Error killing script process:', error),
+      });
+
+      if (stopped) {
+        addSessionLog(sessionId, 'info', '\n[All processes terminated successfully]', 'System');
+      }
+    } catch (error) {
+      console.warn('Error killing script process:', error);
+    }
   }
 
   private finishStopScript(sessionId: string): void {

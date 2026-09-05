@@ -120,6 +120,7 @@ function defaultRunInstall(signal: AbortSignal, timeoutMs: number, logger?: Logg
     const child = spawn('npx', ['playwright', 'install', 'chromium'], {
       shell: true,
       stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
     });
     let settled = false;
     const finish = (ok: boolean): void => {

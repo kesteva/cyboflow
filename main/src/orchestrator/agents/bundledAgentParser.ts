@@ -3,7 +3,10 @@
  * into its `name` / `description` / `tools` / `body` parts.
  *
  * The frontmatter is the leading `---\n…\n---\n` block; everything after the
- * closing fence is the verbatim system-prompt body. `tools` is the comma list on
+ * closing fence is the verbatim system-prompt body. Fences and lines are matched
+ * on `\r?\n`: a Windows checkout under Git's default `core.autocrlf=true`, or a
+ * custom agent file saved by a Windows editor, arrives CRLF-terminated, and an
+ * LF-only fence match silently yields an empty name/description for every agent. `tools` is the comma list on
  * the `tools:` line, trimmed and filtered through `isCliTool` (anything not a
  * known CLI tool is dropped — the catalogue/validation layers own the policy).
  *
@@ -24,7 +27,7 @@ export interface ParsedBundledAgent {
   body: string;
 }
 
-const FRONTMATTER_RE = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/;
+const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/;
 
 /**
  * Read one scalar line (`key: value`) out of a frontmatter block. Returns the
@@ -32,7 +35,7 @@ const FRONTMATTER_RE = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/;
  */
 function readScalar(frontmatter: string, key: string): string {
   const line = frontmatter
-    .split('\n')
+    .split(/\r?\n/)
     .find((l) => l.startsWith(`${key}:`));
   if (line === undefined) return '';
   let value = line.slice(key.length + 1).trim();

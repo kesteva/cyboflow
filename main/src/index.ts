@@ -12,6 +12,7 @@ import {
   shell,
   dialog,
   systemPreferences,
+  Menu,
   IpcMainInvokeEvent,
 } from 'electron';
 import * as path from 'path';
@@ -257,6 +258,7 @@ import { OrchestratorHealth } from './orchestrator/health';
 import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
 import { resolveMcpServerScriptPath } from './orchestrator/mcpServer/scriptPath';
 import { OrchSocketServer } from './orchestrator/mcpServer/orchSocketServer';
+import { orchSocketEndpoint } from './orchestrator/mcpServer/orchSocketEndpoint';
 import { approvalEvents, experimentEvents, questionEvents, runStatusEvents, stepTransitionEvents, stuckEvents } from './orchestrator/trpc/routers/events';
 import { EvalWorker } from './orchestrator/eval/evalWorker';
 import { ClaudeJudge } from './orchestrator/eval/evalJury';
@@ -349,6 +351,7 @@ import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs, flushDevDebug
 import type { DevLogLevel } from './utils/devDebugLog';
 import { getBootDatabasePath, getDemoBootEnvironment, getDemoBootError } from './services/demo/demoBootstrap';
 import { runGitAsync } from './utils/runGit';
+import { resolveGitCommand } from './utils/gitExeFinder';
 import { setStreamParserPerfBump } from '../../shared/streamParser';
 import { setProjectPermissionTrustResolver } from './orchestrator/permissionRules';
 
@@ -2181,11 +2184,11 @@ async function initializeServices(): Promise<boolean> {
       // the project ROOT (baselines are durable at root, not the run worktree).
       if (written.length > 0) {
         try {
-          execFileSync('git', ['add', '--', ...written], { cwd: projectRoot, stdio: 'pipe' });
+          execFileSync(resolveGitCommand(), ['add', '--', ...written], { cwd: projectRoot, stdio: 'pipe', windowsHide: true });
           execFileSync(
-            'git',
+            resolveGitCommand(),
             ['commit', '-m', `chore: accept visual baseline ${baselineKey}`, '--', ...written],
-            { cwd: projectRoot, stdio: 'pipe' },
+            { cwd: projectRoot, stdio: 'pipe', windowsHide: true },
           );
         } catch (err) {
           // A git failure (no repo / nothing changed) is logged but does not undo the
@@ -3231,7 +3234,7 @@ async function initializeServices(): Promise<boolean> {
   // `interactiveCliManager` is already narrowed to InteractiveClaudeManager
   // (the throw-guard above at its construction site).
   const orchSocketServer = new OrchSocketServer(
-    getCyboflowSubdirectory('sockets', 'orch.sock'),
+    orchSocketEndpoint(getCyboflowSubdirectory('sockets', 'orch.sock')),
     cyboflowDb,
     cyboflowLogger,
     {
@@ -4665,7 +4668,9 @@ app.whenReady().then(async () => {
   // Replace Electron's stock default menu before any window exists — the menu
   // is process-global, and the stock menu's View > Reload binds plain Cmd+R
   // (Ctrl+R elsewhere), which would otherwise swallow that keydown before it
-  // ever reaches the renderer's keyboard-shortcut handler. See menu.ts.
+  // ever reaches the renderer's keyboard-shortcut handler. On Windows and
+  // Linux its File submenu also carries Quit, which is what this branch's own
+  // menu was added for. See menu.ts.
   installApplicationMenu();
 
   console.log('[Main] App is ready, initializing services...');
@@ -6888,10 +6893,30 @@ async function drainOnQuit(): Promise<void> {
   // this is cleanup for tidiness rather than a shutdown-correctness requirement.
   databaseBackupService?.stop();
 
-  // Stop orchestrator (drains run queues)
+  // Latch the run executor into shutdown mode BEFORE anything below kills an
+  // agent. cliManagerFactory.shutdown() (further down) aborts every live agent
+  // process, and a live execute() sees that abort as its spawn settling: the
+  // Claude SDK manager reports an intentional abort as a CLEAN exit (the spawn
+  // RESOLVES), while the interactive PTY manager surfaces the kill as a
+  // rejection. Without this latch the first would rest a cut-off run in
+  // awaiting_review and the second would mark it `failed` — both statuses boot
+  // recovery refuses to revive. Latched, both arms skip the transition and the
+  // row stays running/starting, which is precisely what runRecovery.ts looks
+  // for on the next launch (resume, or an honest app_restart/interrupted
+  // force-fail). See RunExecutor.beginShutdown.
+  runExecutor?.beginShutdown();
+
+  // Stop orchestrator (drains run queues). A run with a live execution holds
+  // the head of its concurrency-1 queue with a task that settles only when its
+  // session ends, so at quit it never will — waiting on one flushes nothing and
+  // only spends the quit budget, which is what once left the database close and
+  // the MCP stop unrun. `shouldWait` skips exactly those queues so the state
+  // mutations queued behind ordinary runs still flush. The skipped run is not
+  // transitioned (beginShutdown above is what keeps that true once its agent is
+  // killed below); its non-terminal row is boot recovery's job.
   if (orchestrator) {
     console.log('[Main] Stopping orchestrator...');
-    await orchestrator.stop();
+    await orchestrator.stop((runId) => !runExecutor?.hasActiveExecution(runId));
     console.log('[Main] Orchestrator stopped');
   }
 
@@ -6915,7 +6940,11 @@ async function drainOnQuit(): Promise<void> {
     console.log('[Main] Pairwise judge worker stopped');
   }
 
-  // Cleanup all sessions and terminate child processes
+  // Cleanup all sessions and terminate child processes. Deliberately AFTER the
+  // queue drain above: cleanup() settles no run-executor task (it stops the
+  // project run script and the terminal-panel PTYs), so running it first buys
+  // the drain nothing and its per-pty exit grace polls eat the 10s quit ceiling
+  // in services/quitDrain.ts ahead of the database flush.
   if (sessionManager) {
     console.log('[Main] Cleaning up sessions and terminating child processes...');
     await sessionManager.cleanup();

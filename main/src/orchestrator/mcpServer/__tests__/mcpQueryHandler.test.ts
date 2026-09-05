@@ -23,7 +23,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } 
 import Database from 'better-sqlite3';
 import { execFileSync } from 'node:child_process';
 import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { join, isAbsolute } from 'node:path';
+import { join, isAbsolute, resolve } from 'node:path';
 import * as os from 'node:os';
 import { setCyboflowDirectory, getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
 import { McpQueryHandler, type McpQueryMessage, type McpQueryResponse } from '../mcpQueryHandler';
@@ -2449,11 +2449,14 @@ describe('McpQueryHandler', () => {
         const response = parseLastWrite(writes);
         expect(response.ok).toBe(true);
         const data = response.data as { task: Record<string, unknown> };
+        // The stored path is surfaced resolved to an absolute path — on win32
+        // path.resolve also remaps the separators and roots '/tmp/…' to the
+        // current drive, so derive the expectation through resolve as well.
         expect(data.task['approved_design']).toEqual({
           approved_at: seeded.approvedAt,
           draft_revision: seeded.draftRevision,
           prototype_revision: seeded.prototypeRevision,
-          snapshot_path: seeded.snapshotPath,
+          snapshot_path: resolve(seeded.snapshotPath),
         });
         expect(isAbsolute((data.task['approved_design'] as Record<string, unknown>)['snapshot_path'] as string)).toBe(
           true,

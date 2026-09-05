@@ -96,6 +96,7 @@ pnpm test:e2e          # Built-bundle Playwright; needs a real display. The mini
                        # smoke tier (test:ci:minimal) IS blocking: PR CI + release gate
 pnpm test:gate         # Day-gate integration; needs `claude` on PATH — manual only
 node scripts/ensure-sqlite-abi.mjs <host|electron>   # better-sqlite3 ABI (normally automatic)
+pnpm build:win         # Windows installer — Windows host only; see docs/WINDOWS-BUILD.md
 ```
 
 **better-sqlite3 ABI.** Since better-sqlite3 v13 (the Electron 44 upgrade) the addon is

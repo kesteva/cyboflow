@@ -163,8 +163,9 @@ describe('Migration 061: workflow_runs.seed_idea_ids', () => {
 
   it('(d) the fresh-DB initialize() path includes seed_idea_ids', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration061-'));
+    let svc: DatabaseService | undefined;
     try {
-      const svc = new DatabaseService(join(dir, 'test.db'));
+      svc = new DatabaseService(join(dir, 'test.db'));
       svc.setMigrationsDirForTesting(join(__dirname, '..', 'migrations'));
       svc.initialize();
       const db = svc.getDb();
@@ -174,6 +175,7 @@ describe('Migration 061: workflow_runs.seed_idea_ids', () => {
       );
       expect(runCols).toContain('seed_idea_ids');
     } finally {
+      try { svc?.close(); } catch { /* already closed */ }
       rmSync(dir, { recursive: true, force: true });
     }
   });

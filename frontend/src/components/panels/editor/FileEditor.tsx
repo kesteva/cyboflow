@@ -17,6 +17,7 @@ import { MonacoErrorBoundary } from '../../MonacoErrorBoundary';
 import { useTheme } from '../../../contexts/ThemeContext';
 import { debounce } from '../../../utils/debounce';
 import { migrateLocalStorageKey } from '../../../utils/migrateLocalStorageKey';
+import { pathBasename, parentPath } from '../../../utils/pathBasename';
 import { MarkdownPreview } from '../../MarkdownPreview';
 import { useResizablePanel } from '../../../hooks/useResizablePanel';
 import { EditorPanelState } from '../../../../../shared/types/panels';
@@ -245,9 +246,11 @@ function FileTree({
       });
       
       if (result.success) {
-        // Refresh the parent directory
-        const parentPath = file.path.split('/').slice(0, -1).join('/') || '';
-        loadFiles(parentPath);
+        // Refresh the parent directory. Workspace paths arrive with NATIVE
+        // separators on Windows (main's fileOps returns path.relative output),
+        // so a naive split('/') recompute yields '' and reloads the root —
+        // the deleted file then lingers in the tree.
+        loadFiles(parentPath(file.path));
         
         // If the deleted file was selected, clear the selection
         if (selectedPath === file.path) {
@@ -827,7 +830,7 @@ export function FileEditor({
   useEffect(() => {
     if (initialFilePath && !selectedFile) {
       const file: FileItem = {
-        name: initialFilePath.split('/').pop() || '',
+        name: pathBasename(initialFilePath),
         path: initialFilePath,
         isDirectory: false
       };

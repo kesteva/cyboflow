@@ -43,7 +43,8 @@
  */
 import { existsSync } from 'node:fs';
 import type { LoggerLike } from '../orchestrator/types';
-import { collectProcessTree, listProcessTable, parsePsOutput, type ProcessRow } from './processTable';
+import { collectProcessTree, parsePsOutput, type ProcessRow } from './processTable';
+import { listProcessTable } from '../utils/platformProcess';
 
 /**
  * A single process row parsed from `ps` output. Alias of the shared

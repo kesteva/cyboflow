@@ -53,7 +53,7 @@ describe('buildBuiltInWorkflows', () => {
     // valid PermissionMode values the registry can parse (incl. 'auto').
     for (const descriptor of buildBuiltInWorkflows()) {
       const body = readFileSync(descriptor.path, 'utf-8');
-      const frontmatterMatch = body.match(/^---\n([\s\S]*?)\n---/);
+      const frontmatterMatch = body.match(/^---\r?\n([\s\S]*?)\r?\n---/);
       expect(frontmatterMatch, `${descriptor.name} has a frontmatter block`).not.toBeNull();
       const frontmatter = frontmatterMatch![1];
       const declared = frontmatter.match(/^permission_mode:\s*([A-Za-z]+)/m);

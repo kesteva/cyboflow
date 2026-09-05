@@ -26,6 +26,11 @@
  * `pgrep` + a `process.kill(pid, 0)` liveness probe rather than by asserting on
  * `getAllDescendantPids` itself, to keep that coverage decoupled from the
  * primitive exercised directly in the section below.
+ *
+ * FIXTURES ARE PLATFORM-CONDITIONAL, deliberately: the `sh` job-control trees,
+ * `pgrep` cross-checks, and trappable-signal probes pin POSIX process semantics
+ * and skip on Windows, where each has a `win32:`-gated twin (or a cross-platform
+ * `node` fixture) exercising the same contract.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -36,6 +41,9 @@ import { AbstractCliManager } from '../AbstractCliManager';
 import type { SessionManager } from '../../../sessionManager';
 import type { ConversationMessage } from '../../../../database/models';
 import type { IPty } from '@homebridge/node-pty-prebuilt-multiarch';
+import { collectDescendantPids, listPidPpidTableSync } from '../../../../utils/platformProcess';
+import { collectDescendantPids as walkPidPpidTable } from '../../../processTable';
+import { isAlive, spawnDetachedGrandchildTree, waitUntil } from '../../../../__test_fixtures__/processTree';
 
 // ---------------------------------------------------------------------------
 // Minimal concrete subclass exposing the protected primitives under test.
@@ -99,7 +107,7 @@ class TestCliManager extends AbstractCliManager {
   public killTree(pid: number): Promise<boolean> {
     return this.killProcessTree(pid, 'panel-under-test', 'session-under-test');
   }
-  public descendants(pid: number): number[] {
+  public descendants(pid: number): Promise<number[]> {
     return this.getAllDescendantPids(pid);
   }
   public spawnPty(
@@ -116,15 +124,6 @@ class TestCliManager extends AbstractCliManager {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function childPidsOf(pid: number): number[] {
   try {
     const out = execSync(`pgrep -P ${pid} || true`, { encoding: 'utf8' });
@@ -135,15 +134,6 @@ function childPidsOf(pid: number): number[] {
   } catch {
     return [];
   }
-}
-
-async function waitUntil(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (predicate()) return true;
-    await new Promise((r) => setTimeout(r, 25));
-  }
-  return predicate();
 }
 
 // Clean env (no undefined values) for pty.spawn's { [k]: string } contract.
@@ -202,7 +192,10 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('AbstractCliManager.killProcessTree', () => {
-  it('tears down a real sleep-tree (parent + all descendants gone)', async () => {
+  // POSIX-only fixture: a detached `sh` job-control tree torn down via the
+  // negative-pid process-group ladder. Windows has no group semantics — the
+  // taskkill ladder has its own twin below.
+  it.skipIf(process.platform === 'win32')('tears down a real sleep-tree (parent + all descendants gone)', async () => {
     const mgr = new TestCliManager();
     // Detached => the spawned sh is a process-group leader, so the negative-pid
     // group kills in killProcessTree reach the two backgrounded sleeps.
@@ -245,15 +238,21 @@ describe('AbstractCliManager.killProcessTree', () => {
     const pid = child.pid;
     if (!pid) throw new Error('no pid');
 
-    // Give the handler time to register, then prove a plain SIGTERM is ignored.
-    await new Promise((r) => setTimeout(r, 400));
-    try {
-      process.kill(pid, 'SIGTERM');
-    } catch {
-      /* ignore */
+    // POSIX only: a child can install a SIGTERM handler and survive TERM. On
+    // Windows process.kill unconditionally terminates, so "TERM was ignored" is
+    // unobservable — but the escalation itself still runs: the graceful taskkill
+    // rung cannot stop a console app, and the /F rung below does.
+    if (process.platform !== 'win32') {
+      // Give the handler time to register, then prove a plain SIGTERM is ignored.
+      await new Promise((r) => setTimeout(r, 400));
+      try {
+        process.kill(pid, 'SIGTERM');
+      } catch {
+        /* ignore */
+      }
+      await new Promise((r) => setTimeout(r, 300));
+      expect(isAlive(pid)).toBe(true); // TERM was ignored
     }
-    await new Promise((r) => setTimeout(r, 300));
-    expect(isAlive(pid)).toBe(true); // TERM was ignored
 
     // killProcessTree escalates to SIGKILL, which the child cannot ignore.
     await mgr.killTree(pid);
@@ -263,7 +262,11 @@ describe('AbstractCliManager.killProcessTree', () => {
 
   it('resolves without throwing when the pid has already exited', async () => {
     const mgr = new TestCliManager();
-    const child = trackChild(spawn('sh', ['-c', 'exit 0'], { detached: true, stdio: 'ignore' }));
+    // A real process that exits 0 immediately — node, not `sh -c`, so the
+    // fixture runs identically on every platform.
+    const child = trackChild(
+      spawn(process.execPath, ['-e', 'process.exit(0)'], { detached: true, stdio: 'ignore' })
+    );
     const pid = child.pid;
     if (!pid) throw new Error('no pid');
 
@@ -275,10 +278,52 @@ describe('AbstractCliManager.killProcessTree', () => {
     // Killing an already-dead pid must not throw; returns true (no survivors).
     await expect(mgr.killTree(pid)).resolves.toBe(true);
   }, 15000);
+
+  it.skipIf(process.platform !== 'win32')(
+    'win32: tears down a real node tree via the taskkill ladder (parent + descendants gone)',
+    async () => {
+      const mgr = new TestCliManager();
+      // A node child with its own long-lived detached grandchild — the taskkill
+      // ladder (shared-table descendant enumeration + /T /F) must take BOTH;
+      // the POSIX `kill`/`pkill` ladder below is a silent no-op on Windows.
+      const child = trackChild(
+        spawnDetachedGrandchildTree()
+      );
+      const pid = child.pid;
+      if (!pid) throw new Error('no pid');
+
+      // Independently discover the grandchild BEFORE the kill, through the
+      // shared pid/ppid table rather than the production enumeration. It is
+      // detached, so a tree walk that loses the parent link orphans it — the
+      // exact case this ladder exists for, and the one the old assertion on
+      // the parent alone could not see.
+      let kids: number[] = [];
+      await waitUntil(() => {
+        kids = walkPidPpidTable(pid, listPidPpidTableSync());
+        return kids.length >= 1;
+      }, 8000);
+      expect(kids.length).toBeGreaterThanOrEqual(1);
+      expect(kids.every((k) => isAlive(k))).toBe(true);
+
+      await mgr.killTree(pid);
+
+      // Parent and every discovered descendant must be gone.
+      const parentGone = await waitUntil(() => !isAlive(pid), 8000);
+      expect(parentGone).toBe(true);
+      for (const k of kids) {
+        const gone = await waitUntil(() => !isAlive(k), 8000);
+        expect(gone).toBe(true);
+      }
+    },
+    30000,
+  );
 });
 
 describe('AbstractCliManager.getAllDescendantPids', () => {
-  it('finds a real descendant tree recursively', async () => {
+  // POSIX-only fixture: a detached `sh` job-control tree, cross-checked against
+  // `pgrep -P` — which does not exist on Windows; the win32 twin below uses the
+  // PowerShell pid/ppid table instead.
+  it.skipIf(process.platform === 'win32')('finds a real descendant tree recursively', async () => {
     const mgr = new TestCliManager();
     const child = trackChild(
       spawn('sh', ['-c', 'sleep 100 & sleep 100 & wait'], { detached: true, stdio: 'ignore' })
@@ -288,8 +333,8 @@ describe('AbstractCliManager.getAllDescendantPids', () => {
 
     // Poll: the two backgrounded sleeps take a beat to appear under the shell.
     let found: number[] = [];
-    const ok = await waitUntil(() => {
-      found = mgr.descendants(pid);
+    const ok = await waitUntil(async () => {
+      found = await mgr.descendants(pid);
       return found.length >= 2;
     }, 5000);
 
@@ -303,15 +348,49 @@ describe('AbstractCliManager.getAllDescendantPids', () => {
     }
   }, 10000);
 
+  it.skipIf(process.platform !== 'win32')(
+    'win32: finds a real node tree (parent + detached grandchild) via the process table',
+    async () => {
+      const mgr = new TestCliManager();
+      // Same shape as the win32 killProcessTree fixture: a node child that
+      // spawns its own long-lived detached grandchild.
+      const child = trackChild(
+        spawnDetachedGrandchildTree()
+      );
+      const pid = child.pid;
+      if (!pid) throw new Error('no pid');
+
+      // Positive control via the shared pid/ppid table: the tree really exists.
+      let grandkids: number[] = [];
+      const ok = await waitUntil(() => {
+        grandkids = collectDescendantPids(pid);
+        return grandkids.length >= 1;
+      }, 5000);
+      expect(ok).toBe(true);
+
+      // The primitive must find those processes, and they must be alive.
+      const found = await mgr.descendants(pid);
+      for (const g of grandkids) {
+        expect(found).toContain(g);
+      }
+      expect(found.every((k) => isAlive(k))).toBe(true);
+    },
+    15000,
+  );
+
   it('returns an empty array for a childless pid', async () => {
     const mgr = new TestCliManager();
-    const child = trackChild(spawn('sleep', ['100'], { detached: true, stdio: 'ignore' }));
+    // A real long-lived childless process — node, not `sleep`, so the fixture
+    // runs identically on every platform.
+    const child = trackChild(
+      spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' })
+    );
     const pid = child.pid;
     if (!pid) throw new Error('no pid');
     await new Promise((r) => setTimeout(r, 150));
 
-    // `sleep` genuinely has no children.
-    expect(mgr.descendants(pid)).toEqual([]);
+    // The interval process genuinely has no children.
+    expect(await mgr.descendants(pid)).toEqual([]);
   }, 10000);
 });
 
@@ -323,9 +402,11 @@ describe('AbstractCliManager.spawnPtyProcess', () => {
   it('threads cwd + env to the child and returns an IPty with a live pid/exit', async () => {
     const mgr = new TestCliManager();
     const cwd = fs.realpathSync(os.tmpdir());
+    // node -e prints its cwd and the injected env var — a cross-platform
+    // stand-in for the old `sh -c 'echo ...'` fixture (no `sh` on Windows).
     const pty = await mgr.spawnPty(
-      'sh',
-      ['-c', 'echo CWD=$(pwd); echo VAR=$CYBOFLOW_PTY_TEST; exit 0'],
+      process.execPath,
+      ['-e', 'console.log("CWD=" + process.cwd()); console.log("VAR=" + process.env.CYBOFLOW_PTY_TEST); process.exit(0)'],
       cwd,
       cleanEnv({ CYBOFLOW_PTY_TEST: 'pty-env-marker-123' })
     );
@@ -351,8 +432,18 @@ describe('AbstractCliManager.spawnPtyProcess', () => {
 
   it('surfaces an absent command as a nonzero child exit', async () => {
     const mgr = new TestCliManager();
-    // pty.spawn does not throw for a missing binary on this platform; the base
-    // impl returns an IPty and the failure surfaces as a nonzero exit code.
+    // On POSIX pty.spawn does not throw for a missing binary; the base impl
+    // returns an IPty and the failure surfaces as a nonzero exit code. Windows
+    // conpty cannot create a pty for a nonexistent image — node-pty throws
+    // ("File not found"), which spawnPtyProcess rethrows. Same contract ("an
+    // absent command never looks like a working session"), surfaced as a
+    // rejected spawn instead of a dead terminal.
+    if (process.platform === 'win32') {
+      await expect(
+        mgr.spawnPty('/nonexistent/definitely-not-a-real-binary-xyz', [], fs.realpathSync(os.tmpdir()), cleanEnv()),
+      ).rejects.toThrow(/file not found/i);
+      return;
+    }
     const pty = await mgr.spawnPty(
       '/nonexistent/definitely-not-a-real-binary-xyz',
       [],

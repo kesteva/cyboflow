@@ -211,4 +211,103 @@ describe('RunQueueRegistry', () => {
     // Registry is cleared after drainAll
     expect(registry.stats().runs).toBe(0);
   });
+
+  // (e) a queue whose task cannot finish is skipped without waiting at all
+  it('drainAll() does not wait on a queue shouldWait rejects', async () => {
+    const registry = new RunQueueRegistry();
+
+    const neverSettles = deferred();
+    const q = registry.getOrCreate('run-S');
+    void q.add(() => neverSettles.promise);
+
+    // A cap long enough that waiting would be obvious. The drain must return
+    // without spending it, because this queue's task can never finish.
+    const started = Date.now();
+    await registry.drainAll({ capMs: 5_000, shouldWait: () => false });
+    const elapsed = Date.now() - started;
+
+    expect(elapsed).toBeLessThan(1_000);
+    // The queue is abandoned but stays REGISTERED: its task is still running, so
+    // unregistering it would let a later getOrCreate('run-S') mint a SECOND
+    // concurrency-1 queue for the same run and race it.
+    expect(registry.has('run-S')).toBe(true);
+    expect(registry.getOrCreate('run-S')).toBe(q);
+    expect(registry.stats().runs).toBe(1);
+
+    neverSettles.resolve();
+  });
+
+  it('drainAll() unregisters the queues that went idle and keeps the skipped one', async () => {
+    const registry = new RunQueueRegistry();
+
+    // An ordinary queue holding a state mutation that flushes immediately.
+    let flushed = false;
+    const idle = registry.getOrCreate('run-idle');
+    void idle.add(async () => {
+      flushed = true;
+    });
+
+    // A queue whose task can never finish — the live-execution shape.
+    const neverSettles = deferred();
+    const busy = registry.getOrCreate('run-busy');
+    void busy.add(() => neverSettles.promise);
+
+    await registry.drainAll({ capMs: 5_000, shouldWait: (runId) => runId !== 'run-busy' });
+
+    expect(flushed).toBe(true);
+    expect(registry.has('run-idle')).toBe(false);
+    expect(registry.has('run-busy')).toBe(true);
+    expect(registry.stats().runs).toBe(1);
+
+    neverSettles.resolve();
+  });
+
+  it('drainAll() still waits on a queue shouldWait accepts', async () => {
+    const registry = new RunQueueRegistry();
+
+    const gate = deferred();
+    let finished = false;
+    const q = registry.getOrCreate('run-T');
+    void q.add(async () => {
+      await gate.promise;
+      finished = true;
+    });
+
+    const drain = registry.drainAll({ capMs: 5_000, shouldWait: () => true });
+    expect(finished).toBe(false);
+    gate.resolve();
+    await drain;
+
+    expect(finished).toBe(true);
+  });
+
+  // (f) a queue that never settles is abandoned, not waited out
+  it('drainAll() gives up on a busy queue at the cap and leaves the task running', async () => {
+    const registry = new RunQueueRegistry();
+
+    const neverSettles = deferred();
+    let taskFinished = false;
+
+    const q = registry.getOrCreate('run-R');
+    void q.add(async () => {
+      await neverSettles.promise;
+      taskFinished = true;
+    });
+
+    // The real cap is seconds; the behaviour under test is the same at 10ms.
+    await registry.drainAll({ capMs: 10 });
+
+    expect(taskFinished).toBe(false);
+    // Abandoned at the cap, but still registered for the same reason a skipped
+    // queue is: its task is live, so a duplicate queue must never be mintable.
+    expect(registry.has('run-R')).toBe(true);
+    expect(registry.getOrCreate('run-R')).toBe(q);
+    expect(registry.stats().runs).toBe(1);
+
+    // Nothing cancelled the task — the run keeps whatever status it holds, so
+    // boot recovery still sees it as resumable.
+    neverSettles.resolve();
+    await q.onIdle();
+    expect(taskFinished).toBe(true);
+  });
 });

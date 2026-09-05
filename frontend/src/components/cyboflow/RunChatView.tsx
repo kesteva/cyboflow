@@ -33,6 +33,7 @@ import { UnifiedChatView } from './unified/UnifiedChatView';
 import { formatContextUsage } from './unified/runContextUsage';
 import { LiveTail } from '../chat/LiveTail';
 import { reduceLiveTail, hasVisibleTailContent } from '../../utils/liveTailReducer';
+import { pathBasename } from '../../utils/pathBasename';
 import { trpc } from '../../trpc/client';
 import { useUnifiedRunMessages } from './unified/useUnifiedRunMessages';
 import { usePendingSendStore } from '../../stores/pendingSendStore';
@@ -85,7 +86,7 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   const running = run?.status === 'running' || run?.status === 'starting';
   const worktreePath = run?.worktree_path ?? null;
   const branchName = run?.branch_name ?? null;
-  const folderLabel = worktreePath !== null ? worktreePath.split('/').filter(Boolean).pop() ?? null : null;
+  const folderLabel = worktreePath !== null ? pathBasename(worktreePath) || null : null;
 
   // Live context-% for the meta strip. Flow runs have no server-side
   // contextUsage (the backend extractor skips cyboflow run ids), so we derive it
