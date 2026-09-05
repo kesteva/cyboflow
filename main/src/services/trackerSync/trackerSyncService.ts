@@ -197,6 +197,7 @@ import { isCategory, resolveEffectiveCategoryMapping, seedDefaultCategoryMapping
 import { drainOutbox, processAmbiguous, toSqliteUtc, type OutboxDeps, type OutboxReport } from './outboxWorker';
 import { resolveEffectiveMapping, resolveStageIds } from './stateMapping';
 import {
+  backfillContentWrites,
   createWriteBackListener,
   enqueueArchiveWrite,
   enqueueContentWrite,
@@ -3259,6 +3260,26 @@ export class TrackerSyncService implements TrackerSyncFacade {
         ARCHIVE_OUTBOX_KINDS,
         'cancelled — archive sync was turned off for this connection',
       );
+    }
+
+    // THE INVERSE SWEEP: content sync LEAVING 'off'. Turning it off cancels the
+    // queued rows just above; turning it back on has to reconcile the edits that
+    // were declined outright while it was off, because nothing else ever will —
+    // see writeBack's backfillContentWrites. Reads the connection back rather
+    // than reusing the pre-patch row so the backfill runs against what actually
+    // landed. Archive is deliberately NOT given the same treatment (the replay
+    // would be a bulk irreversible trash on a setting flip).
+    if (connection.content_sync_mode === 'off' && patch.contentSyncMode !== undefined && patch.contentSyncMode !== 'off') {
+      const updated = getConnection(this.db, connectionId);
+      if (updated !== null) {
+        const queued = backfillContentWrites({ db: this.db, nowIso: this.nowIso }, updated);
+        if (queued > 0) {
+          this.logger?.info('[trackerSync] content sync turned on: queued backfill writes', {
+            connectionId,
+            queued,
+          });
+        }
+      }
     }
 
     this.emitTrackerChange(connection.project_id, connectionId, 'connection');

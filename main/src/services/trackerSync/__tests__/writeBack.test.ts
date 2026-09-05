@@ -34,10 +34,10 @@ import { join } from 'node:path';
 import { DatabaseService } from '../../../database/database';
 import type { TrackerOutboxRow } from '../../../database/models';
 import type { BacklogTaskItem, TaskChangeAction, TaskChangedEvent, TaskType } from '../../../../../shared/types/tasks';
-import { insertConnection, upsertLink, listUnresolvedOutbox, updateBaseline, getLinkByEntity, type NewConnectionRow } from '../store';
+import { insertConnection, upsertLink, listUnresolvedOutbox, updateBaseline, getLinkByEntity, getConnection, markOrphaned, type NewConnectionRow } from '../store';
 import { PROVIDER_ADAPTER_GUARDS_UPDATES } from '../providerCapabilities';
 import { resolveStageIds } from '../stateMapping';
-import { createWriteBackListener, type WriteBackBaselineStamp } from '../writeBack';
+import { backfillContentWrites, createWriteBackListener, type WriteBackBaselineStamp } from '../writeBack';
 
 const PROJECT_ID = 1;
 const NOW = '2026-07-30 12:00:00';
@@ -960,6 +960,125 @@ describe('writeBack — content trigger', () => {
       contentEvent({ title: 'Renamed', archived_at: '2026-07-30 12:00:00' }),
     );
 
+    expect(outbox()).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Trigger 5's backfill arm — content sync leaving 'off'
+// ---------------------------------------------------------------------------
+
+/**
+ * The baseline a CONVERGED seeded idea has: `seedIdea` writes title
+ * "Idea IDEA-1" with a null body, and P2 maps to Linear's '3' (see the content
+ * trigger's provider-space test). SYNCED_BASELINE deliberately differs on
+ * title, which is what makes it the DIVERGENT fixture here.
+ */
+const CONVERGED_BASELINE = {
+  title: 'Idea IDEA-1',
+  description: null,
+  stateId: 'state-backlog',
+  priority: '3',
+  category: null,
+};
+
+function backfill(connectionId: string): number {
+  const connection = getConnection(raw, connectionId);
+  if (connection === null) throw new Error(`no connection ${connectionId}`);
+  return backfillContentWrites({ db: raw, nowIso: () => NOW }, connection);
+}
+
+describe('writeBack — content backfill on turning the direction on', () => {
+  beforeEach(() => {
+    seedIdea('ide_1', 'IDEA-1');
+  });
+
+  it('enqueues the write an edit made while the direction was off never queued', () => {
+    // The exact reported shape: the edit landed under 'off' (declined, no row),
+    // and the user then turned content sync on.
+    const connectionId = seedConnection({ content_sync_mode: 'off' });
+    linkIdea(connectionId);
+    makeListener().handleTaskChanged(contentEvent({ title: 'Renamed' }));
+    expect(outbox()).toHaveLength(0);
+
+    raw.prepare("UPDATE tracker_connections SET content_sync_mode = 'auto' WHERE id = ?").run(connectionId);
+    expect(backfill(connectionId)).toBe(1);
+
+    const rows = outbox();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].kind).toBe('update_content');
+    expect(rows[0].external_id).toBe('ext-1');
+    expect(rows[0].entity_id).toBe('ide_1');
+    expect(rows[0].payload_json).toBe('{}');
+  });
+
+  it('enqueues NOTHING for an entity that already matches its baseline', () => {
+    const connectionId = seedConnection({ content_sync_mode: 'auto' });
+    linkIdea(connectionId, { baseline: CONVERGED_BASELINE });
+
+    expect(backfill(connectionId)).toBe(0);
+    expect(outbox()).toHaveLength(0);
+  });
+
+  it("is inert while the direction is still 'off'", () => {
+    // The guard matters: the caller reads the connection back AFTER the patch,
+    // and a mis-ordered call would otherwise queue undrainable rows.
+    const connectionId = seedConnection({ content_sync_mode: 'off' });
+    linkIdea(connectionId);
+
+    expect(backfill(connectionId)).toBe(0);
+    expect(outbox()).toHaveLength(0);
+  });
+
+  it('skips an ARCHIVED entity — the archive direction owns those', () => {
+    const connectionId = seedConnection({ content_sync_mode: 'auto' });
+    linkIdea(connectionId);
+    raw.prepare("UPDATE ideas SET archived_at = ? WHERE id = 'ide_1'").run(NOW);
+
+    expect(backfill(connectionId)).toBe(0);
+    expect(outbox()).toHaveLength(0);
+  });
+
+  it('skips an ORPHANED link — its issue is already gone remotely', () => {
+    const connectionId = seedConnection({ content_sync_mode: 'auto' });
+    markOrphaned(raw, linkIdea(connectionId).id);
+
+    expect(backfill(connectionId)).toBe(0);
+    expect(outbox()).toHaveLength(0);
+  });
+
+  it('skips a link whose entity row is gone', () => {
+    const connectionId = seedConnection({ content_sync_mode: 'auto' });
+    linkIdea(connectionId, { entityId: 'ide_missing' });
+
+    expect(backfill(connectionId)).toBe(0);
+    expect(outbox()).toHaveLength(0);
+  });
+
+  it('is idempotent — a second flip collapses onto the pending row', () => {
+    const connectionId = seedConnection({ content_sync_mode: 'auto' });
+    linkIdea(connectionId);
+
+    expect(backfill(connectionId)).toBe(1);
+    expect(backfill(connectionId)).toBe(0);
+    expect(outbox()).toHaveLength(1);
+  });
+
+  it('reaches every divergent link on the connection, not just the first', () => {
+    const connectionId = seedConnection({ content_sync_mode: 'auto' });
+    seedIdea('ide_2', 'IDEA-2');
+    linkIdea(connectionId);
+    linkIdea(connectionId, { entityId: 'ide_2', externalId: 'ext-2' });
+
+    expect(backfill(connectionId)).toBe(2);
+    expect(outbox().map((row) => row.external_id).sort()).toEqual(['ext-1', 'ext-2']);
+  });
+
+  it('does not touch a PAUSED connection', () => {
+    const connectionId = seedConnection({ content_sync_mode: 'auto', status: 'paused' });
+    linkIdea(connectionId);
+
+    expect(backfill(connectionId)).toBe(0);
     expect(outbox()).toHaveLength(0);
   });
 });

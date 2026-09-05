@@ -1768,6 +1768,48 @@ describe('TrackerSyncService content write-back — echo suppression', () => {
     expect(pass.entries.map((entry) => entry.line)).not.toContain('held at ext-1 — our write is in flight');
     expect(getConnection(raw, CONN_ID)?.cursor_external_id).toBe('ext-1');
   });
+
+  it('BACKFILLS that declined edit when the direction is turned back on', async () => {
+    // The reported bug, end to end: an edit made under 'off' is declined
+    // outright, and before the backfill arm existed, turning content sync on
+    // left it stranded forever — nothing re-derives a row for an entity no
+    // later event happens to touch.
+    makeConnection({ content_sync_mode: 'off' });
+    const ideaId = await importOne();
+    await router.applyChange(PROJECT_ID, {
+      actor: 'user',
+      entityType: 'idea',
+      taskId: ideaId,
+      fields: { title: 'Locally renamed' },
+    });
+    expect(listUnresolvedOutbox(raw, CONN_ID)).toHaveLength(0);
+
+    await service.updateSettings(CONN_ID, { contentSyncMode: 'auto' });
+
+    const queued = listUnresolvedOutbox(raw, CONN_ID);
+    expect(queued).toHaveLength(1);
+    expect(queued[0].kind).toBe('update_content');
+    expect(queued[0].entity_id).toBe(ideaId);
+
+    // And it actually reaches the tracker on the next pass.
+    await service.syncNow(CONN_ID);
+    expect(adapter.contentCalls).toHaveLength(1);
+    expect(adapter.contentCalls[0].patch.title).toBe('Locally renamed');
+  });
+
+  it('queues nothing when the direction was ALREADY on, or when it stays off', async () => {
+    // Only the off -> on TRANSITION backfills. An unrelated settings save on a
+    // live connection must not manufacture writes for every converged link.
+    makeConnection({ content_sync_mode: 'auto' });
+    await importOne();
+
+    await service.updateSettings(CONN_ID, { contentSyncMode: 'manual' });
+    expect(listUnresolvedOutbox(raw, CONN_ID)).toHaveLength(0);
+
+    await service.updateSettings(CONN_ID, { contentSyncMode: 'off' });
+    await service.updateSettings(CONN_ID, { conflictMode: 'manual' });
+    expect(listUnresolvedOutbox(raw, CONN_ID)).toHaveLength(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

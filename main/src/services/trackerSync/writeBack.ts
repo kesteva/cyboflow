@@ -106,6 +106,7 @@ import {
   getLinkByEntity,
   getLinkByExternal,
   listConnections,
+  listLinks,
   listLinksByParentExternal,
   listUnresolvedOutbox,
   supersedeQueuedStateWrites,
@@ -776,6 +777,19 @@ function handleIdeaPush(deps: WriteBackDeps, event: TaskChangedEvent): void {
 const CONTENT_SUPERSEDES: readonly TrackerOutboxRow['kind'][] = ['update_content'];
 
 /**
+ * The FOUR fields {@link contentDiffersFromBaseline} reads, as a structural
+ * subset of {@link BacklogTaskItem}.
+ *
+ * The event-driven trigger hands it a whole `BacklogTaskItem` (which satisfies
+ * this) while {@link backfillContentWrites} reads its four columns straight off
+ * the entity table — there is no run overlay, no stage, and no ref in a diff
+ * that only ever compares title/description/priority/category, and widening the
+ * backfill's SELECT to fabricate a full item would be inventing fields the
+ * comparison never looks at.
+ */
+type ContentFields = Pick<BacklogTaskItem, 'title' | 'body' | 'priority' | 'category'>;
+
+/**
  * A linked entity changed. For every link whose connection has content sync ON,
  * enqueue one `update_content` when the entity now DIFFERS from that link's
  * baseline on a synced field.
@@ -839,7 +853,7 @@ function handleContentChange(
  * the live list can no longer express. The worst a stale token here can do is
  * enqueue a row the drain then settles with nothing to send.
  */
-function contentDiffersFromBaseline(linked: LinkedContext, task: BacklogTaskItem): boolean {
+function contentDiffersFromBaseline(linked: LinkedContext, task: ContentFields): boolean {
   const { connection, link } = linked;
   const baseline = parseJsonObject(link.baseline_json);
 
@@ -948,6 +962,101 @@ export function enqueueContentWrite(
     'superseded by a newer content write for the same issue',
   );
   return true;
+}
+
+/**
+ * The four content columns of one linked entity, or null when the row is gone.
+ *
+ * A plain SELECT, mirroring inboundSync's `readLocalEntity`: the chokepoint rule
+ * governs WRITES, and taskListing's projections carry run overlays a content
+ * diff has no use for. `archived_at` rides along because the backfill filters on
+ * it — see {@link backfillContentWrites}.
+ */
+function readEntityContent(
+  db: Database.Database,
+  entityType: EntityExternalLinkRow['entity_type'],
+  entityId: string,
+): (ContentFields & { archived_at: string | null }) | null {
+  const table = BACKFILL_ENTITY_TABLE[entityType];
+  const row = db
+    .prepare(
+      `SELECT title, body, priority, category, archived_at
+         FROM ${table}
+        WHERE id = ?`,
+    )
+    .get(entityId) as (ContentFields & { archived_at: string | null }) | undefined;
+  return row ?? null;
+}
+
+/**
+ * Entity type -> table, the local twin of inboundSync's `ENTITY_TABLE`. Both
+ * exist because the table name is interpolated into SQL: a `Record` over the
+ * closed union is what keeps that interpolation total and un-injectable.
+ */
+const BACKFILL_ENTITY_TABLE: Record<
+  EntityExternalLinkRow['entity_type'],
+  'ideas' | 'epics' | 'tasks'
+> = { idea: 'ideas', epic: 'epics', task: 'tasks' };
+
+/**
+ * TRIGGER 5's BACKFILL ARM — the missing inverse of invariant 5's enqueue-time
+ * decline, run when a connection's content sync leaves `'off'`.
+ *
+ * WHY IT HAS TO EXIST. `'off'` gates at the ENQUEUE rather than the drain (see
+ * the module header), so every local edit made while the direction was off was
+ * DECLINED, not delayed: no row was ever written, and nothing else re-derives
+ * one. Trigger 5 fires only on the entity-change broadcast, so turning content
+ * sync on afterwards changed nothing about entities nobody happened to touch
+ * again — their edits stayed local forever, silently, with the tracker showing
+ * stale text. Turning a direction ON now reconciles what turning it OFF
+ * declined.
+ *
+ * IT IS THE SAME DECISION TRIGGER 5 MAKES, deliberately reusing
+ * {@link contentDiffersFromBaseline} and {@link enqueueContentWrite} rather than
+ * restating either: the baseline diff is what says a remote write is owed, and
+ * a second copy of that comparison is exactly how the two arms would drift. The
+ * dedupe inside `enqueueContentWrite` also makes this safe to run repeatedly —
+ * a second flip with rows already pending enqueues nothing.
+ *
+ * THREE SKIPS, each for its own reason:
+ *  - ORPHANED links (`activeOnly`), whose remote issue the deletion sweep has
+ *    already archived — writing back is pointless.
+ *  - A MISSING entity row: the link outlived its entity, which the sweep owns.
+ *  - An ARCHIVED entity. A user turning content sync on is asking for their
+ *    live work to reach the tracker, not for text to be pushed onto issues they
+ *    retired while the direction was off; the ARCHIVE direction is the one that
+ *    owns those, under its own mode and its own consent.
+ *
+ * DELIBERATELY CONTENT-ONLY. `archive_sync_mode` has the identical gap, and it
+ * is NOT fixed here: replaying it would trash every remote twin of everything
+ * archived while that direction was off — an irreversible bulk write, on a
+ * setting flip, with no preview. That needs its own confirmation UX and is
+ * recorded as a follow-up, not smuggled in behind a symmetry argument.
+ *
+ * Returns how many rows were enqueued, for the caller's log line.
+ */
+export function backfillContentWrites(
+  deps: WriteBackDeps,
+  connection: TrackerConnectionRow,
+): number {
+  if (connection.content_sync_mode === 'off') return 0;
+  if (connection.status !== 'active') return 0;
+
+  let enqueued = 0;
+  for (const link of listLinks(deps.db, connection.id, { activeOnly: true })) {
+    const entity = readEntityContent(deps.db, link.entity_type, link.entity_id);
+    if (entity === null) continue;
+    if (entity.archived_at !== null) continue;
+    // Epics are never linked to an issue (imports land as ideas, mirroring
+    // creates sub-issues for TASKS only), so the cast below is narrowing a
+    // union the data cannot actually inhabit — but `enqueueContentWrite` takes
+    // the two-member entity type, and skipping is the honest way to say so.
+    if (link.entity_type === 'epic') continue;
+    const linked: LinkedContext = { link, connection };
+    if (!contentDiffersFromBaseline(linked, entity)) continue;
+    if (enqueueContentWrite(deps, linked, link.entity_type, link.entity_id)) enqueued += 1;
+  }
+  return enqueued;
 }
 
 // ---------------------------------------------------------------------------
