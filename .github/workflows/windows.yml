@@ -19,12 +19,14 @@ on:
   # workflow_dispatch only resolves files on the default branch, so a branch
   # that edits this file runs it on push — the only way to exercise a change
   # here before it reaches main. The other paths are the install/packaging
-  # surfaces these jobs exist to guard; a source-only push does not spin up
+  # surfaces these jobs exist to guard (.gitattributes decides what a Windows
+  # checkout even contains — see its header); a source-only push does not spin up
   # two Windows runners. Both jobs run on this path.
   push:
     branches-ignore: [ main ]
     paths:
       - '.github/workflows/windows.yml'
+      - '.gitattributes'
       - 'package.json'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
