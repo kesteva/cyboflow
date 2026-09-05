@@ -221,8 +221,14 @@ function readBundleExecutableName(appPath, execFile = defaultExecFile) {
  * node-pty's `prebuilds/<platform>-<arch>/<name>.node` and better-sqlite3 v13's
  * flat `prebuilds/<platform>-<arch>.node`. Returns null for a non-prebuild.
  */
+// Both separators, not path.sep: on Windows a path can legitimately arrive with
+// forward slashes (Node accepts either), and splitting on `\` alone parsed such a
+// prebuild path to null — "not a prebuild" — so every foreign prebuild passed as
+// native. On POSIX a backslash never appears in these paths, so nothing changes.
+const PATH_SEPARATORS = /[\\/]/;
+
 function parsePrebuildTarget(file) {
-  const segments = file.split(path.sep);
+  const segments = file.split(PATH_SEPARATORS);
   const idx = segments.lastIndexOf('prebuilds');
   if (idx === -1 || idx + 1 >= segments.length) return null;
   const label = segments[idx + 1].replace(/\.node$/, '');
@@ -285,7 +291,7 @@ function collectNodeAddons(dir, expectedArch = null, found = []) {
  * so the mac call sites are unchanged; the Windows arm passes `'win32'`.
  */
 function isBetterSqliteAddon(file, expectedPlatform = 'darwin') {
-  const segments = file.split(path.sep);
+  const segments = file.split(PATH_SEPARATORS);
   if (segments[segments.length - 1] === 'better_sqlite3.node') return true;
   const target = parsePrebuildTarget(file);
   if (!target || target.platform !== expectedPlatform) return false;
