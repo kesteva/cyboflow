@@ -79,7 +79,14 @@ export async function launchElectronApp(dataDir: string): Promise<{
     },
   });
 
-  const page = await app.firstWindow();
+  // Explicit, generous budget rather than Playwright's 30s default. The FIRST
+  // launch of a freshly built bundle pays for a cold page cache over a ~350MB
+  // Electron binary plus macOS's first-run scan of it; on Electron 44 that has
+  // been measured at 31-35s, right at the default, while every warm launch in
+  // the same run settles at 3-5s. CI builds cold every time, so the default
+  // makes the blocking smoke tier a coin flip on machine state. 90s still fails
+  // fast on a genuine boot hang.
+  const page = await app.firstWindow({ timeout: 90_000 });
 
   // Fixture-level sanity gate — the whole point of the rework. `waitForFunction`
   // (not a one-shot `evaluate`) tolerates the initial about:blank → loadFile
