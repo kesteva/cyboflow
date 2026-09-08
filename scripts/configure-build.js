@@ -146,6 +146,51 @@ function getWinPackagingPlan(targetArch) {
  * optional darwin-only dependency, so absence is normal off macOS, and
  * shipping without it falls back to resolving `peekaboo` off the user's PATH.
  */
+/**
+ * Point node-pty's `build/Release` at the TARGET arch before packaging.
+ *
+ * node-pty's darwin loader computes `prebuilds/<platform>-<arch>/<runtime>.abi<ABI>.node`
+ * and, when that exact name is absent, requires `../build/Release/pty.node`.
+ * Our prebuilds carry the `node.napi*.node` name @electron/rebuild demands, not
+ * the ABI name the loader builds, so the packaged app always lands on the
+ * build/Release fallback — which means that file, and the `spawn-helper` binary
+ * beside it, must BE the target arch. They are the host's by default, so a
+ * cross-arch build would otherwise ship an arm64 pty inside an x64 bundle.
+ *
+ * Leaves the tree holding the target arch afterwards: a cross-arch build is
+ * followed by the host-ABI restore the release runbook already prescribes.
+ */
+function stageDarwinPtyForArch(targetArch) {
+  if (targetArch !== 'arm64' && targetArch !== 'x64') return;
+
+  const pkgDir = path.join(
+    __dirname, '..', 'node_modules', '@homebridge', 'node-pty-prebuilt-multiarch',
+  );
+  if (!fs.existsSync(pkgDir)) return;
+
+  const prebuildsDir = path.join(pkgDir, 'prebuilds', `darwin-${targetArch}`);
+  const addon = path.join(
+    prebuildsDir, targetArch === 'arm64' ? 'node.napi.armv8.node' : 'node.napi.node',
+  );
+  const helper = path.join(prebuildsDir, 'spawn-helper');
+  if (!fs.existsSync(addon) || !fs.existsSync(helper)) {
+    console.error(
+      `Error: the darwin-${targetArch} node-pty prebuild is incomplete ` +
+        `(${path.relative(path.join(__dirname, '..'), prebuildsDir)}). A ${targetArch} build ` +
+        `would ship the host architecture's pty and break every terminal. ` +
+        `Run "pnpm run install:darwin-cross" before a cross-arch build.`
+    );
+    process.exit(1);
+  }
+
+  const releaseDir = path.join(pkgDir, 'build', 'Release');
+  fs.mkdirSync(releaseDir, { recursive: true });
+  fs.copyFileSync(addon, path.join(releaseDir, 'pty.node'));
+  fs.copyFileSync(helper, path.join(releaseDir, 'spawn-helper'));
+  fs.chmodSync(path.join(releaseDir, 'spawn-helper'), 0o755);
+  console.log(`Staged node-pty build/Release for darwin-${targetArch}.`);
+}
+
 function warnIfPeekabooMissing() {
   if (process.platform !== 'darwin') return;
   const binary = path.join(
@@ -335,6 +380,8 @@ function configureBuild() {
         `agent binaries; excluding ${leanPackagingPlan.exclusions.length} foreign native packages.`
     );
   }
+
+  if (!isWin) stageDarwinPtyForArch(targetArch);
 
   warnIfPeekabooMissing();
 

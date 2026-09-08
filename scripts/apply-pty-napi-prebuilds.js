@@ -100,6 +100,15 @@ function placeDarwinCrossPrebuild(pkgDir, hostArch) {
     if (!fs.existsSync(downloaded)) return false;
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(downloaded, dest);
+    // `spawn-helper` is a second native artifact, and on darwin node-pty execs
+    // it for every PTY. Keep it beside the addon so the packaging step has the
+    // whole per-arch payload to stage.
+    const helper = path.join(tmp, 'build', 'Release', 'spawn-helper');
+    if (fs.existsSync(helper)) {
+      const helperDest = path.join(path.dirname(dest), 'spawn-helper');
+      fs.copyFileSync(helper, helperDest);
+      fs.chmodSync(helperDest, 0o755);
+    }
     console.log(`[apply-pty-napi-prebuilds] exposed ${path.relative(pkgDir, dest)}`);
     return true;
   } catch {
@@ -138,6 +147,16 @@ for (const pkgDir of storePackageDirs()) {
     if (path.resolve(source) !== path.resolve(buildRelease) && !fs.existsSync(buildRelease)) {
       fs.mkdirSync(path.dirname(buildRelease), { recursive: true });
       fs.copyFileSync(source, buildRelease);
+    }
+    // Mirror the host's spawn-helper into its prebuilds dir too, so both arches
+    // present the same shape to the packaging step.
+    if (process.platform === 'darwin') {
+      const hostHelper = path.join(pkgDir, 'build', 'Release', 'spawn-helper');
+      if (fs.existsSync(hostHelper)) {
+        const helperDest = path.join(prebuildsDir, 'spawn-helper');
+        fs.copyFileSync(hostHelper, helperDest);
+        fs.chmodSync(helperDest, 0o755);
+      }
     }
   } catch (error) {
     console.error(
