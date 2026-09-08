@@ -22,7 +22,9 @@
  * script nor the real cause.
  */
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const { execFileSync } = require('child_process');
 
 const STORE = process.env.PTY_NAPI_STORE_DIR || path.join(__dirname, '..', 'node_modules', '.pnpm');
 const PKG_PREFIX = '@homebridge+node-pty-prebuilt-multiarch@';
@@ -60,6 +62,53 @@ function findSourceBinary(pkgDir, prebuildsDir) {
   return fs.existsSync(buildRelease) ? buildRelease : null;
 }
 
+// arm64 prebuilds use the `armv8` filename suffix, matching @electron/rebuild's
+// prebuildify extension rule; every other arch uses the bare napi name.
+function napiNameFor(arch) {
+  return arch === 'arm64' ? 'node.napi.armv8.node' : 'node.napi.node';
+}
+
+/**
+ * Place the OTHER darwin arch's binary as well.
+ *
+ * The package ships no darwin prebuild directory, so the only binary on disk is
+ * the one `prebuild-install` downloaded for the HOST arch at install time. That
+ * is invisible until you package cross-arch: `electron-builder --mac --x64` on
+ * an arm64 Mac finds no `prebuilds/darwin-x64/`, and @electron/rebuild falls
+ * through to a node-gyp source build that this package cannot satisfy — the
+ * failure names node-gyp, not the missing prebuild. Both macOS arches are
+ * release targets, so fetch the non-host one here rather than at build time.
+ *
+ * The download goes to a scratch dir, NOT into the package: `prebuild-install`
+ * writes `build/Release/pty.node`, which is the host runtime's own fallback
+ * path, and overwriting it with a foreign-arch binary would break `pnpm dev`.
+ */
+function placeDarwinCrossPrebuild(pkgDir, hostArch) {
+  const otherArch = hostArch === 'arm64' ? 'x64' : 'arm64';
+  const dest = path.join(pkgDir, 'prebuilds', `darwin-${otherArch}`, napiNameFor(otherArch));
+  if (fs.existsSync(dest)) return true;
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pty-napi-cross-'));
+  try {
+    fs.copyFileSync(path.join(pkgDir, 'package.json'), path.join(tmp, 'package.json'));
+    execFileSync(path.join(pkgDir, 'node_modules', '.bin', 'prebuild-install'), [
+      '--arch', otherArch,
+      '--platform', 'darwin',
+    ], { cwd: tmp, stdio: 'pipe' });
+
+    const downloaded = path.join(tmp, 'build', 'Release', 'pty.node');
+    if (!fs.existsSync(downloaded)) return false;
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(downloaded, dest);
+    console.log(`[apply-pty-napi-prebuilds] exposed ${path.relative(pkgDir, dest)}`);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 let failed = false;
 
 for (const pkgDir of storePackageDirs()) {
@@ -78,10 +127,7 @@ for (const pkgDir of storePackageDirs()) {
     console.warn('[apply-pty-napi-prebuilds] no prebuilt pty binary found — skipping');
     continue;
   }
-  // arm64 prebuilds use the `armv8` filename suffix, matching
-  // @electron/rebuild's prebuildify extension rule.
-  const napiName = process.arch === 'arm64' ? 'node.napi.armv8.node' : 'node.napi.node';
-  const napiDest = path.join(prebuildsDir, napiName);
+  const napiDest = path.join(prebuildsDir, napiNameFor(process.arch));
   try {
     // Platforms the package ships no prebuild for — darwin is one — have no
     // `<platform>-<arch>` directory at all, so create the leaf, not its parent.
@@ -102,6 +148,17 @@ for (const pkgDir of storePackageDirs()) {
     continue;
   }
   console.log(`[apply-pty-napi-prebuilds] exposed ${path.relative(pkgDir, napiDest)}`);
+
+  // Warn rather than fail: a missing cross-arch binary breaks only a cross-arch
+  // package build, and postinstall runs on every install, where a network
+  // hiccup must not be fatal. Name the consequence so the node-gyp error this
+  // eventually produces is traceable back to here.
+  if (process.platform === 'darwin' && !placeDarwinCrossPrebuild(pkgDir, process.arch)) {
+    console.warn(
+      '[apply-pty-napi-prebuilds] could not fetch the non-host darwin prebuild — ' +
+        'a cross-arch `electron-builder --mac` run will fall through to a node-gyp source build',
+    );
+  }
 }
 
 process.exit(failed ? 1 : 0);
