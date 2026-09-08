@@ -145,9 +145,19 @@ function loadsInProcess(file) {
 const HOST_ARCH = process.arch === 'x64' ? 'x64' : 'arm64';
 const OTHER_ARCH = HOST_ARCH === 'x64' ? 'arm64' : 'x64';
 
+/**
+ * The better-sqlite3 v13 prebuild the HOST can dlopen is keyed by platform:
+ * `prebuilds/win32-<arch>.node` on a Windows host, `darwin-<arch>.node` on a
+ * mac. Linux stays on the darwin name on purpose — the ubuntu CI job never
+ * probes an addon (cases F–V and Y–AA are darwin/win32-only), and this keeps
+ * its fixtures byte-for-byte what they were.
+ */
+const HOST_PREBUILD_PLATFORM = process.platform === 'win32' ? 'win32' : 'darwin';
+
 /** Bundle-relative layouts (under app.asar.unpacked/node_modules) for a fixture addon. */
 const COMPILED_SQLITE_REL = path.join('better-sqlite3', 'build', 'Release', 'better_sqlite3.node');
-const prebuiltSqliteRel = (arch) => path.join('better-sqlite3', 'prebuilds', `darwin-${arch}.node`);
+const prebuiltSqliteRel = (arch) =>
+  path.join('better-sqlite3', 'prebuilds', `${HOST_PREBUILD_PLATFORM}-${arch}.node`);
 
 function betterSqliteModuleDir() {
   try {
@@ -159,9 +169,11 @@ function betterSqliteModuleDir() {
 
 /**
  * A better-sqlite3 addon that the host `node` can actually load, if this
- * checkout has one, with the bundle layout it belongs at. Preference order:
- * the installed v13 N-API prebuild (`prebuilds/darwin-<arch>.node` — the shape
- * every real build ships since the Electron 44 upgrade), then a compiled
+ * checkout has one, with the bundle layout it belongs at. Returns
+ * `{ file, rel }` (callers copy `file`, never the record) or null. Preference
+ * order: the installed v13 N-API prebuild (`prebuilds/<platform>-<arch>.node`
+ * — the shape every real build ships since the Electron 44 upgrade; win32 on a
+ * Windows host, so the Windows runner exercises Case Y), then a compiled
  * `build/Release` artifact carrying the host ABI, then a host-keyed entry banked
  * in .abi-cache by scripts/ensure-sqlite-abi.mjs.
  */
@@ -170,7 +182,7 @@ function resolveHostLoadableAddon() {
   const moduleDir = betterSqliteModuleDir();
   if (moduleDir) {
     candidates.push({
-      file: path.join(moduleDir, 'prebuilds', `darwin-${HOST_ARCH}.node`),
+      file: path.join(moduleDir, 'prebuilds', `${HOST_PREBUILD_PLATFORM}-${HOST_ARCH}.node`),
       rel: prebuiltSqliteRel(HOST_ARCH),
     });
     candidates.push({
@@ -1095,7 +1107,7 @@ function buildWinUnpackedFixture(tmpDir, options = {}) {
   }
 
   const addons = opts.addons === undefined
-    ? [{ name: 'better_sqlite3.node', source: resolveHostLoadableAddon() || process.execPath }]
+    ? [{ name: 'better_sqlite3.node', source: resolveHostLoadableAddon()?.file || process.execPath }]
     : opts.addons;
   for (const addon of addons) {
     const dest = path.join(
@@ -1250,7 +1262,7 @@ async function caseY() {
     // The default floor is 300 MB and the hook does not inject a smaller one,
     // so the fixture pads past it; sparse, like the mac fixtures.
     buildWinUnpackedFixture(tmpDir, {
-      addons: [{ name: 'better_sqlite3.node', source: addon }],
+      addons: [{ name: 'better_sqlite3.node', source: addon.file }],
       padBytes: 310 * 1024 * 1024,
     });
     const { message, warnings } = await runCapturing(winContext(tmpDir, ARCH.x64));
