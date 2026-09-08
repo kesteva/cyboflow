@@ -283,6 +283,36 @@ function collectNodeAddons(dir, expectedArch = null, found = []) {
 }
 
 /**
+ * Native helper EXECUTABLES a packaged module runs at runtime, by basename.
+ *
+ * node-pty execs `spawn-helper` for every PTY it opens on darwin. It is a
+ * Mach-O executable, not a `.node`, so `collectNodeAddons` never saw it — and a
+ * wrong-arch one clears signing, notarization and launch, then fails the first
+ * time a user opens a terminal. That is exactly what a cross-arch build shipped
+ * before the packaging step learned to stage it per target arch.
+ */
+const NATIVE_HELPER_NAMES = new Set(['spawn-helper']);
+
+/**
+ * Collect those helpers under `dir`, with the same symlink and foreign-prebuild
+ * exclusions `collectNodeAddons` applies.
+ */
+function collectNativeHelpers(dir, expectedArch = null, found = []) {
+  if (!fs.existsSync(dir)) return found;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isSymbolicLink()) continue;
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      collectNativeHelpers(fullPath, expectedArch, found);
+    } else if (entry.isFile() && NATIVE_HELPER_NAMES.has(entry.name)) {
+      if (isForeignPrebuild(fullPath, expectedArch)) continue;
+      found.push(fullPath);
+    }
+  }
+  return found;
+}
+
+/**
  * Is this addon better-sqlite3's? Either the classic compiled
  * `build/Release/better_sqlite3.node` (any package dir — the historical fixture
  * shape, and platform-agnostic: v12 shipped it on every OS), or a v13 N-API
@@ -519,6 +549,9 @@ function verifyBundle(options) {
     const targets = [];
     if (executablePath) targets.push({ file: executablePath, allowSingleSliceUniversal: false });
     for (const addon of addons) targets.push({ file: addon, allowSingleSliceUniversal: true });
+    for (const helper of collectNativeHelpers(unpackedRoot, expectedArch)) {
+      targets.push({ file: helper, allowSingleSliceUniversal: true });
+    }
 
     const wrongArch = [];
     for (const target of targets) {
@@ -805,6 +838,7 @@ exports._helpers = {
   archMatches,
   collectNodeAddons,
   collectNodeAddonsForWindows,
+  collectNativeHelpers,
   isForeignPrebuild,
   isBetterSqliteAddon,
   findBetterSqliteAddon,

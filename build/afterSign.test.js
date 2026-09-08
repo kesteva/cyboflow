@@ -1511,6 +1511,67 @@ async function caseAC() {
 }
 
 // ---------------------------------------------------------------------------
+// Case AD: native helper EXECUTABLES are arch-checked too.
+//
+// node-pty execs `spawn-helper` for every PTY, but it is a Mach-O executable,
+// not a `.node`, so the addon collector never saw it. A cross-arch build once
+// shipped an arm64 spawn-helper inside an x64 bundle: signed, notarized, and
+// launchable, failing only when a user opened a terminal.
+// ---------------------------------------------------------------------------
+async function caseAD() {
+  const { collectNativeHelpers } = helpers;
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'aftersign-test-'));
+  try {
+    const root = path.join(tmpDir, 'app.asar.unpacked');
+    const layout = [
+      'node-pty/build/Release/spawn-helper',
+      'node-pty/build/Release/pty.node',
+      'node-pty/prebuilds/darwin-arm64/spawn-helper',
+      'node-pty/prebuilds/darwin-x64/spawn-helper',
+      'node-pty/prebuilds/linux-x64/spawn-helper',
+    ];
+    for (const rel of layout) {
+      const full = path.join(root, rel);
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, 'x');
+    }
+
+    const all = collectNativeHelpers(root);
+    assert(all.length === 3,
+      `Case AD: the staged helper and both darwin prebuild helpers are collected (got ${all.length})`);
+    assert(all.every((f) => path.basename(f) === 'spawn-helper'),
+      'Case AD: the helper collector does not pick up .node addons');
+    assert(!all.some((f) => f.includes('linux-x64')),
+      'Case AD: a foreign-platform helper is skipped, not judged');
+
+    const perArch = collectNativeHelpers(root, 'x64');
+    assert(perArch.length === 2 && !perArch.some((f) => f.includes('darwin-arm64')),
+      `Case AD: an x64 build drops the darwin-arm64 helper (got ${perArch.length})`);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+
+  // End to end: a REAL wrong-arch helper must be named by the verifier. Same
+  // shape as Case F — demanding ia32 of a real Mach-O is a genuine mismatch.
+  await withTmpDir(async (tmpDir) => {
+    buildAppFixture(tmpDir, {
+      addons: [{ source: defaultSqliteAddon().source, rel: COMPILED_SQLITE_REL }],
+    });
+    const helper = path.join(
+      tmpDir, `${PRODUCT_NAME}.app`, 'Contents', 'Resources', 'app.asar.unpacked',
+      'node_modules', 'node-pty', 'build', 'Release', 'spawn-helper',
+    );
+    fs.mkdirSync(path.dirname(helper), { recursive: true });
+    fs.copyFileSync(machOButNotAnAddon(), helper);
+
+    const { message } = await runCapturing(macArchContext(tmpDir, ARCH.ia32));
+    assert(message.includes('spawn-helper'),
+      `Case AD: the verifier names the wrong-arch spawn-helper (got: ${message.slice(0, 200)})`);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 (async () => {
@@ -1575,6 +1636,8 @@ async function caseAC() {
   await caseAB();
   // AC is the win32 counterpart of AB — pure assertions only, runs everywhere.
   await caseAC();
+  // AD guards the native-helper arch check (node-pty's spawn-helper).
+  await caseAD();
 
   console.log(`\nResults: ${passed} passed, ${failed} failed`);
   process.exit(failed > 0 ? 1 : 0);
