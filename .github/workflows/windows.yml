@@ -36,6 +36,16 @@ on:
       - 'scripts/apply-pty-napi-prebuilds.js'
       - 'scripts/ensure-sqlite-abi.mjs'
       - 'scripts/rebuild-better-sqlite3-host.mjs'
+      # The win32-gated process-tree suites and the modules they drive execute
+      # on no other runner, so a change to them has to run here to be tested
+      # at all.
+      - 'main/src/__test_fixtures__/processTree.ts'
+      - 'main/src/utils/platformProcess.ts'
+      - 'main/src/services/processTable.ts'
+      - 'main/src/services/winProcessTable.ts'
+      - 'main/src/**/*.win32.test.ts'
+      - 'main/src/services/__tests__/runCommandManager.winProcessOps.test.ts'
+      - 'main/src/services/panels/cli/__tests__/abstractCliManager.pty.test.ts'
 
 jobs:
   unit:
