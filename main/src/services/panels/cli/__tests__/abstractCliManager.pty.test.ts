@@ -43,7 +43,12 @@ import type { ConversationMessage } from '../../../../database/models';
 import type { IPty } from '@homebridge/node-pty-prebuilt-multiarch';
 import { collectDescendantPids, listPidPpidTableSync } from '../../../../utils/platformProcess';
 import { collectDescendantPids as walkPidPpidTable } from '../../../processTable';
-import { isAlive, spawnDetachedGrandchildTree, waitUntil } from '../../../../__test_fixtures__/processTree';
+import {
+  isAlive,
+  reapDetachedGrandchildTree,
+  spawnNamedDetachedGrandchildTree,
+  waitUntil,
+} from '../../../../__test_fixtures__/processTree';
 
 // ---------------------------------------------------------------------------
 // Minimal concrete subclass exposing the protected primitives under test.
@@ -286,33 +291,32 @@ describe('AbstractCliManager.killProcessTree', () => {
       // A node child with its own long-lived detached grandchild — the taskkill
       // ladder (shared-table descendant enumeration + /T /F) must take BOTH;
       // the POSIX `kill`/`pkill` ladder below is a silent no-op on Windows.
-      const child = trackChild(
-        spawnDetachedGrandchildTree()
-      );
-      const pid = child.pid;
+      const tree = await spawnNamedDetachedGrandchildTree();
+      trackChild(tree.child);
+      const pid = tree.child.pid;
       if (!pid) throw new Error('no pid');
+      try {
+        // Independently confirm the grandchild BEFORE the kill, through the
+        // shared pid/ppid table rather than the production enumeration. It is
+        // detached, so a tree walk that loses the parent link orphans it — the
+        // exact case this ladder exists for, and the one the old assertion on
+        // the parent alone could not see. The check is against the pid the
+        // fixture NAMED, not the whole set the table attributes to the child:
+        // see spawnNamedDetachedGrandchildTree for the phantoms that set holds.
+        const seen = await waitUntil(
+          () => walkPidPpidTable(pid, listPidPpidTableSync()).includes(tree.grandchildPid),
+          8000,
+        );
+        expect(seen).toBe(true);
+        expect(isAlive(tree.grandchildPid)).toBe(true);
 
-      // Independently discover the grandchild BEFORE the kill, through the
-      // shared pid/ppid table rather than the production enumeration. It is
-      // detached, so a tree walk that loses the parent link orphans it — the
-      // exact case this ladder exists for, and the one the old assertion on
-      // the parent alone could not see.
-      let kids: number[] = [];
-      await waitUntil(() => {
-        kids = walkPidPpidTable(pid, listPidPpidTableSync());
-        return kids.length >= 1;
-      }, 8000);
-      expect(kids.length).toBeGreaterThanOrEqual(1);
-      expect(kids.every((k) => isAlive(k))).toBe(true);
+        await mgr.killTree(pid);
 
-      await mgr.killTree(pid);
-
-      // Parent and every discovered descendant must be gone.
-      const parentGone = await waitUntil(() => !isAlive(pid), 8000);
-      expect(parentGone).toBe(true);
-      for (const k of kids) {
-        const gone = await waitUntil(() => !isAlive(k), 8000);
-        expect(gone).toBe(true);
+        // Parent and the named grandchild must be gone.
+        expect(await waitUntil(() => !isAlive(pid), 8000)).toBe(true);
+        expect(await waitUntil(() => !isAlive(tree.grandchildPid), 8000)).toBe(true);
+      } finally {
+        reapDetachedGrandchildTree(tree);
       }
     },
     30000,
@@ -353,27 +357,32 @@ describe('AbstractCliManager.getAllDescendantPids', () => {
     async () => {
       const mgr = new TestCliManager();
       // Same shape as the win32 killProcessTree fixture: a node child that
-      // spawns its own long-lived detached grandchild.
-      const child = trackChild(
-        spawnDetachedGrandchildTree()
-      );
-      const pid = child.pid;
+      // spawns its own long-lived detached grandchild — and names it.
+      const tree = await spawnNamedDetachedGrandchildTree();
+      trackChild(tree.child);
+      const pid = tree.child.pid;
       if (!pid) throw new Error('no pid');
+      try {
+        // Positive control via the shared pid/ppid table: the named grandchild
+        // really sits under the child.
+        const seen = await waitUntil(
+          () => collectDescendantPids(pid).includes(tree.grandchildPid),
+          5000,
+        );
+        expect(seen).toBe(true);
 
-      // Positive control via the shared pid/ppid table: the tree really exists.
-      let grandkids: number[] = [];
-      const ok = await waitUntil(() => {
-        grandkids = collectDescendantPids(pid);
-        return grandkids.length >= 1;
-      }, 5000);
-      expect(ok).toBe(true);
-
-      // The primitive must find those processes, and they must be alive.
-      const found = await mgr.descendants(pid);
-      for (const g of grandkids) {
-        expect(found).toContain(g);
+        // The primitive must find it, and it must be alive. Liveness is
+        // asserted on the pid this test OWNS, not on everything the table
+        // attributes to the child: on a busy runner that set can carry an
+        // unrelated orphan under a recycled pid (see the fixture), and
+        // `found.every(isAlive)` lost exactly that race in CI.
+        const found = await mgr.descendants(pid);
+        expect(found).toContain(tree.grandchildPid);
+        expect(isAlive(pid)).toBe(true);
+        expect(isAlive(tree.grandchildPid)).toBe(true);
+      } finally {
+        reapDetachedGrandchildTree(tree);
       }
-      expect(found.every((k) => isAlive(k))).toBe(true);
     },
     15000,
   );
