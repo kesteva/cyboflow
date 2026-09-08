@@ -460,9 +460,9 @@ describe('SessionSettings', () => {
 
   describe('Default Agent Runtime', () => {
     it('renders the built-in-default state and every OFFERABLE session runtime', () => {
-      // All three providers switched on, so the capability filter is the only
+      // All providers switched on, so the capability filter is the only
       // thing deciding which session runtimes get a button.
-      renderGroup({ agentProviderAccess: { claude: true, codex: true, omp: true, pi: true } });
+      renderGroup({ agentProviderAccess: { claude: true, codex: true, omp: true, pi: true, agy: true } });
 
       expect(screen.getByTestId('default-agent-runtime-unset')).toHaveAttribute('aria-pressed', 'true');
       // Session membership is necessary but not sufficient: the control shows a

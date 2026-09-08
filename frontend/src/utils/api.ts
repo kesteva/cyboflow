@@ -90,6 +90,7 @@ const CATALOG_BRIDGE_FALLBACKS: {
   // discovered `${provider}/${model}` list — no pinned aliases — so an empty
   // catalog would be a silently broken control rather than a degraded one.
   pi: null,
+  agy: null,
 };
 
 // Wrapper class for API calls that provides error handling and consistent interface

@@ -378,8 +378,16 @@ describe('SubstrateSelector — offers exactly the picker-selectable providers',
   });
 
   it('leaves both OMP lanes selectable on a quick session', () => {
-    setProviderAccess({ claude: true, codex: true, omp: true, pi: true });
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: true, agy: true });
     render(<SubstrateSelector value="omp-sdk" onChange={vi.fn()} runtimeScope="session" />);
+
+    expect(screen.getByTestId('substrate-select-mode-chat')).not.toBeDisabled();
+    expect(screen.getByTestId('substrate-select-mode-cli')).not.toBeDisabled();
+  });
+
+  it('leaves both Antigravity lanes selectable on a quick session', () => {
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: true, agy: true });
+    render(<SubstrateSelector value="agy-sdk" onChange={vi.fn()} runtimeScope="session" />);
 
     expect(screen.getByTestId('substrate-select-mode-chat')).not.toBeDisabled();
     expect(screen.getByTestId('substrate-select-mode-cli')).not.toBeDisabled();
@@ -389,14 +397,14 @@ describe('SubstrateSelector — offers exactly the picker-selectable providers',
   // something — never because an unselectable runtime (codex-exec) has no
   // segment, and never merely because the OMP flavor swapped lanes.
   it('does not claim runtimes are hidden when every provider is on', () => {
-    setProviderAccess({ claude: true, codex: true, omp: true, pi: true });
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: true, agy: true });
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
 
     expect(screen.queryByText(/are hidden/i)).not.toBeInTheDocument();
   });
 
   it('does not claim runtimes are hidden merely because a flavor is inactive', () => {
-    setProviderAccess({ claude: true, codex: true, omp: true, pi: true });
+    setProviderAccess({ claude: true, codex: true, omp: true, pi: true, agy: true });
     mockUseOmpAvailability.mockReturnValue({ launchable: true, ariaMode: true });
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
 
@@ -441,6 +449,22 @@ describe('SubstrateSelector — OMP + Pi caveats copy (v1 limits)', () => {
     const panel = screen.getByTestId('substrate-caveats');
     expect(panel).toHaveTextContent('Pi (CLI) — v1 limits');
     expect(panel).toHaveTextContent('Approvals stay inside the pi TUI');
+  });
+
+  it('shows the agy-sdk caveats when the value is forced to agy-sdk', () => {
+    render(<SubstrateSelector value="agy-sdk" onChange={vi.fn()} runtimeScope="session" />);
+
+    const panel = screen.getByTestId('substrate-caveats');
+    expect(panel).toHaveTextContent('Antigravity — v1 limits');
+    expect(panel).toHaveTextContent('Auto-approves tool requests');
+  });
+
+  it('shows the agy-pty caveats when the value is forced to agy-pty', () => {
+    render(<SubstrateSelector value="agy-pty" onChange={vi.fn()} runtimeScope="session" />);
+
+    const panel = screen.getByTestId('substrate-caveats');
+    expect(panel).toHaveTextContent('Antigravity (CLI) — v1 limits');
+    expect(panel).toHaveTextContent('Approvals stay inside the Antigravity TUI');
   });
 
   it('shows no caveats panel for an ordinary claude-sdk value', () => {

@@ -40,7 +40,7 @@ export const ULTRACODE_DEFAULT_MODEL = 'fable';
 
 /** Re-exported from shared so the launch seams can reach it without importing
  *  a component; this stays the canonical import site for UI code. */
-export { DEFAULT_CODEX_MODEL } from '../../../../shared/types/agentModels';
+export { DEFAULT_CODEX_MODEL, DEFAULT_AGY_MODEL } from '../../../../shared/types/agentModels';
 
 interface ModelSelectorProps {
   value: string;

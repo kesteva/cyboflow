@@ -75,6 +75,20 @@ Provider adaptation rules:
 
 ---`;
 
+const AGY_WORKFLOW_ENVELOPE = `# Runtime adapter: Antigravity
+
+You are running the same Cyboflow workflow semantics as the Claude runtime, but through Antigravity (agy).
+
+Provider adaptation rules:
+
+- Treat the workflow body below as the source of truth for phases, step ids, required outputs, database writes, artifacts, and human gates.
+- When the workflow mentions Claude-specific mechanics such as \`.claude/agents/\`, the Agent tool, or a named \`cyboflow-*\` subagent, interpret that as a role/delegation instruction. **Cyboflow installs no agent files on this runtime**, so the workflow's claim that a \`cyboflow-*\` role "is installed in this worktree's \`.claude/agents/\`" does not hold here.
+- Never adopt an agent that merely shares the role's name from external environment. If delegation is requested, use \`define_subagent\`/\`invoke_subagent\` or **perform that role's work directly yourself, in this turn**, preserving the same returned sections and the same contract the role was given.
+- When the workflow reaches a human gate (e.g. AskUserQuestion or request_user_input), use \`ask_question\` or summarize the gate decision clearly in your response.
+- Do not create or read plugin state files. The Cyboflow database remains the single source of truth.
+
+---`;
+
 /**
  * The runtime-adapter block prepended to a launch / programmatic-step prompt,
  * per provider. `null` = the workflow body needs no adaptation, which is what
@@ -122,6 +136,7 @@ export const PROVIDER_PROMPT_ENVELOPES: Record<AgentProvider, string | null> = {
   // persist. That last rule is a mitigation, not a fix: pi workflow runs still
   // have no way to write cyboflow state, and closing THAT needs a pi MCP writer.
   pi: PI_WORKFLOW_ENVELOPE,
+  agy: AGY_WORKFLOW_ENVELOPE,
 };
 
 export function renderWorkflowPromptForRuntime(

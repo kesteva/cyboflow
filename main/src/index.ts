@@ -72,11 +72,15 @@ import {
   isOmpPtyManagerLike,
   isPiPtyManagerLike,
   isPiSdkManagerLike,
+  isAgyPtyManagerLike,
+  isAgySdkManagerLike,
   isOmpSdkManagerLike,
   type CodexPtyManagerLike,
   type OmpPtyManagerLike,
   type PiPtyManagerLike,
   type PiSdkManagerLike,
+  type AgyPtyManagerLike,
+  type AgySdkManagerLike,
 } from './services/cliManagerFactory';
 import { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import { panelManager } from './services/panelManager';
@@ -652,6 +656,8 @@ let codexPtyManager: CodexPtyManagerLike;
 let ompPtyManager: OmpPtyManagerLike;
 let piPtyManager: PiPtyManagerLike;
 let piSdkManager: PiSdkManagerLike;
+let agyPtyManager: AgyPtyManagerLike;
+let agySdkManager: AgySdkManagerLike;
 let gitDiffManager: GitDiffManager;
 let gitStatusManager: GitStatusManager;
 let executionTracker: ExecutionTracker;
@@ -1910,6 +1916,28 @@ async function initializeServices(): Promise<boolean> {
     throw new Error('[Main] cliManagerFactory returned a manager without the Pi SDK seams for pi-sdk');
   }
   piSdkManager = createdPiSdkManager;
+
+  const createdAgyPtyManager = await cliManagerFactory.createManager('agy-pty', {
+    sessionManager,
+    logger,
+    configManager,
+    skipValidation: true,
+  });
+  if (!isAgyPtyManagerLike(createdAgyPtyManager)) {
+    throw new Error('[Main] cliManagerFactory returned a manager without the Agy PTY seams for agy-pty');
+  }
+  agyPtyManager = createdAgyPtyManager;
+
+  const createdAgySdkManager = await cliManagerFactory.createManager('agy-sdk', {
+    sessionManager,
+    logger,
+    configManager,
+    skipValidation: true,
+  });
+  if (!isAgySdkManagerLike(createdAgySdkManager)) {
+    throw new Error('[Main] cliManagerFactory returned a manager without the Agy SDK seams for agy-sdk');
+  }
+  agySdkManager = createdAgySdkManager;
   gitDiffManager = new GitDiffManager(logger);
   gitStatusManager = new GitStatusManager(sessionManager, worktreeManager, gitDiffManager, logger);
   executionTracker = new ExecutionTracker(sessionManager, gitDiffManager);
@@ -3389,6 +3417,8 @@ async function initializeServices(): Promise<boolean> {
     { lane: 'omp-pty', manager: ompPtyManager },
     { lane: 'pi-pty', manager: piPtyManager },
     { lane: 'pi-sdk', manager: piSdkManager },
+    { lane: 'agy-pty', manager: agyPtyManager },
+    { lane: 'agy-sdk', manager: agySdkManager },
   ];
   const managerByLane = new Map<PanelLane, AbstractCliManager>(
     laneManagers.map(({ lane, manager }) => [lane, manager]),
@@ -4448,6 +4478,8 @@ async function initializeServices(): Promise<boolean> {
     ompPtyManager,
     piSdkManager: createdPiSdkManager,
     piPtyManager,
+    agySdkManager: createdAgySdkManager,
+    agyPtyManager,
     claudeModelCatalogService: new ClaudeModelCatalogService(cyboflowLogger),
     // Live-session close-out seams for quick sessions (IDEA-030): route the
     // session merge/rebase/dismiss handlers through the SubstrateDispatchFacade
@@ -4470,6 +4502,8 @@ async function initializeServices(): Promise<boolean> {
       substrateFacade.registerPtyPanel(runId, panelId, ompPtyManager),
     registerPiPtyPanel: (runId: string, panelId: string) =>
       substrateFacade.registerPtyPanel(runId, panelId, piPtyManager),
+    registerAgyPtyPanel: (runId: string, panelId: string) =>
+      substrateFacade.registerPtyPanel(runId, panelId, agyPtyManager),
     // The SAME provider the Claude managers were injected with above, handed to
     // the IPC layer for the CODEX lanes: those spawn from ipc/ with a
     // caller-supplied runId instead of resolving the gate inside the manager, so

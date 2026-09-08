@@ -95,6 +95,8 @@ export const RUNTIME_CAPABILITIES: Readonly<Record<AgentRuntime, AgentRuntimeCap
   // side learns a flag for it. Fast mode remains the Claude-only opt-in.
   'pi-sdk': { selectableInPickers: true, supportsEffort: false, supportsFastMode: false },
   'pi-pty': { selectableInPickers: true, supportsEffort: false, supportsFastMode: false },
+  'agy-sdk': { selectableInPickers: true, supportsEffort: true, supportsFastMode: false },
+  'agy-pty': { selectableInPickers: true, supportsEffort: false, supportsFastMode: false },
  };
 
 /**

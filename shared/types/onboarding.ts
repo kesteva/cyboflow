@@ -102,6 +102,8 @@ export interface ProviderDetectionStates {
   // so the only observable is binary presence + a successful `--version` at
   // or above the floor. No 'loggedOut': nothing in main/ can see pi's auth.
   pi: 'detected' | 'unavailable';
+  // Antigravity (agy) CLI presence and version probe.
+  agy: 'detected' | 'unavailable';
 }
 
 /** The evidence each provider's probe returns alongside its state. */
@@ -119,6 +121,7 @@ export interface ProviderDetectionPayloads {
   // OMP's shape rather than declaring a byte-for-byte twin interface. If the
   // two ever diverge (e.g. pi gains an observable login), split it then.
   pi: OmpBinaryDetection;
+  agy: OmpBinaryDetection;
 }
 
 /**

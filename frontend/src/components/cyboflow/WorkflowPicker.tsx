@@ -38,7 +38,7 @@ import {
   isCyboflowWorkflowName,
 } from '../../../../shared/types/workflows';
 import { DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
-import { normalizeAgentModelSelection } from '../../../../shared/types/agentModels';
+import { normalizeAgentModelSelection, DEFAULT_AGY_MODEL } from '../../../../shared/types/agentModels';
 import {
   DEFAULT_SESSION_AGENT_RUNTIME,
   claudeRuntimeFromSubstrate,
@@ -80,6 +80,7 @@ const PROVIDER_MODEL_FLOOR: Readonly<Record<AgentProvider, string>> = {
   // Empty selection, for OMP's reason: pi has no "let the runtime pick"
   // sentinel row.
   pi: '',
+  agy: DEFAULT_AGY_MODEL,
 };
 
 /**

@@ -314,6 +314,7 @@ export const QUICK_PROVIDER_SDK_RUNTIME: Readonly<Record<AgentProvider, SessionA
   codex: 'codex-sdk',
   omp: 'omp-sdk',
   pi: 'pi-sdk',
+  agy: 'agy-sdk',
 };
 
 /**

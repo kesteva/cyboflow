@@ -48,7 +48,7 @@ import { bootstrapArmSessionPanels } from '../../utils/bootstrapArmSessionPanels
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { SubstrateSelector } from './SubstrateSelector';
-import { ModelSelector, DEFAULT_QUICK_MODEL, DEFAULT_CODEX_MODEL } from './ModelSelector';
+import { ModelSelector, DEFAULT_QUICK_MODEL, DEFAULT_CODEX_MODEL, DEFAULT_AGY_MODEL } from './ModelSelector';
 import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
 import { providerForRuntime, type LaunchAgentRuntime } from './agentRuntimeUi';
 import type { AgentProvider, WorkflowRunStorableRuntime } from '../../../../shared/types/agentRuntime';
@@ -90,6 +90,7 @@ function quickArmAgentRuntime(runtime: LaunchAgentRuntime): WorkflowAgentRuntime
   if (runtime === 'omp-pty') return 'omp-sdk';
   if (runtime === 'omp-fleet') return 'claude-sdk';
   if (runtime === 'pi-pty') return 'pi-sdk';
+  if (runtime === 'agy-pty') return 'agy-sdk';
   return runtime;
 }
 
@@ -117,6 +118,7 @@ const QUICK_ARM_MODEL_RESET: Readonly<Record<AgentProvider, string>> = {
   // ids with no "let the runtime pick" sentinel, so the arm launches on the
   // runtime's own default.
   pi: '',
+  agy: DEFAULT_AGY_MODEL,
 };
 
 /**

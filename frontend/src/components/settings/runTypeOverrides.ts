@@ -28,6 +28,8 @@ import {
   isCodexModelFamily,
   isCodexModelSelection,
   isOmpModelFamily,
+  isAgyModelFamily,
+  DEFAULT_AGY_MODEL,
 } from '../../../../shared/types/agentModels';
 import {
   AGENT_RUNTIME_LABELS as SESSION_AGENT_RUNTIME_LABELS,
@@ -638,6 +640,11 @@ export function coerceModelForRuntime(
       if (model === null) return null;
       if (isOmpModelFamily(model)) return model;
       return isOmpModelFamily(fallbackModel) ? fallbackModel : null;
+    }
+    case 'agy': {
+      if (model === null) return null;
+      if (isAgyModelFamily(model)) return model;
+      return isAgyModelFamily(fallbackModel) ? fallbackModel : DEFAULT_AGY_MODEL;
     }
     case 'claude': {
       if (model === null) return null;

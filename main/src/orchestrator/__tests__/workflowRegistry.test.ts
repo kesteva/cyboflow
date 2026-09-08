@@ -1183,7 +1183,7 @@ describe('WorkflowRegistry', () => {
     const ompEnabledRegistry = (): WorkflowRegistry =>
       new WorkflowRegistry(dbAdapter(db), logger, {
         ...makeConfig('default'),
-        getAgentProviderAccess: () => ({ claude: true, codex: true, omp: true, pi: true }),
+        getAgentProviderAccess: () => ({ claude: true, codex: true, omp: true, pi: true, agy: true }),
       });
 
     it('STAMPS omp-sdk on a real workflow launch, projecting the sdk substrate', async () => {
@@ -1316,6 +1316,71 @@ describe('WorkflowRegistry', () => {
             requestedAgentRuntime: 'pi-sdk',
           }),
         ).toThrow(/Pi provider is disabled/);
+      });
+    });
+
+    it('STAMPS agy-sdk on a real workflow launch, projecting the sdk substrate', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'agy-launchable.md', '---\n---\n');
+        const gated = ompEnabledRegistry();
+        gated.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        const { runId, substrate } = gated.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+          requestedAgentProvider: 'agy',
+          requestedAgentRuntime: 'agy-sdk',
+          requestedExecutionModel: 'programmatic',
+        });
+
+        expect(substrate).toBe('sdk');
+        const row = db
+          .prepare('SELECT agent_provider, agent_runtime FROM workflow_runs WHERE id = ?')
+          .get(runId) as { agent_provider: string; agent_runtime: string };
+        expect(row).toEqual({ agent_provider: 'agy', agent_runtime: 'agy-sdk' });
+      });
+    });
+
+    it('resolves the agy launch arm from the PROVIDER half alone', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'agy-provider-only.md', '---\n---\n');
+        const gated = ompEnabledRegistry();
+        gated.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        const { runId } = gated.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+          requestedAgentProvider: 'agy',
+          requestedExecutionModel: 'programmatic',
+        });
+
+        const row = db
+          .prepare('SELECT agent_provider, agent_runtime FROM workflow_runs WHERE id = ?')
+          .get(runId) as { agent_provider: string; agent_runtime: string };
+        expect(row).toEqual({ agent_provider: 'agy', agent_runtime: 'agy-sdk' });
+      });
+    });
+
+    it('refuses an agy workflow launch when the provider is switched off', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'agy-disabled-launch.md', '---\n---\n');
+        const gated = new WorkflowRegistry(dbAdapter(db), logger, {
+          ...makeConfig('default'),
+          getAgentProviderAccess: () => ({ claude: true, codex: true, omp: false, pi: false, agy: false }),
+        });
+        gated.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        expect(() =>
+          gated.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+            requestedAgentProvider: 'agy',
+            requestedAgentRuntime: 'agy-sdk',
+          }),
+        ).toThrow(/Antigravity provider is disabled/);
       });
     });
 

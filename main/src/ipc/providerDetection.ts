@@ -10,6 +10,7 @@ import { probeClaudeDetection } from './claudeDetection';
 import { probeCodexDetection } from './codexDetection';
 import { detectOmpAvailability } from '../services/panels/omp/ompAvailability';
 import { detectPiAvailability } from '../services/panels/pi/piAvailability';
+import { detectAgyAvailability } from '../services/panels/agy/agyAvailability';
 import type { AppServices } from './types';
 
 /**
@@ -46,6 +47,7 @@ const PROVIDER_DETECTION_PROBES: { [P in AgentProvider]: ProviderDetectionProbe<
   // no services dependency (no `piExecutablePath` config key yet, and pi owns
   // its own provider credentials).
   pi: () => detectPiAvailability(),
+  agy: () => detectAgyAvailability(),
 };
 
 type DetectionResponse =

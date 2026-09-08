@@ -163,6 +163,19 @@ describe('renderWorkflowPromptForRuntime', () => {
     }
   });
 
+  it('prepends the agy envelope to a programmatic-step prompt', () => {
+    const rendered = renderWorkflowPromptForRuntime(BASE_PROMPT, {
+      provider: 'agy',
+      runtime: 'agy-sdk',
+      executionModel: 'programmatic',
+      turnKind: 'programmatic-step',
+    });
+
+    expect(rendered.prompt).toContain('# Runtime adapter: Antigravity');
+    expect(rendered.prompt.endsWith(BASE_PROMPT.prompt)).toBe(true);
+    expect(rendered.systemPromptAppend).toBe(BASE_PROMPT.systemPromptAppend);
+  });
+
   /**
    * Every provider now carries an envelope except claude, whose bodies are
    * written for it. A new provider defaulting to `null` by copy-paste is the
@@ -170,7 +183,7 @@ describe('renderWorkflowPromptForRuntime', () => {
    */
   it('only claude renders identity', () => {
     expect(PROVIDER_PROMPT_ENVELOPES.claude).toBeNull();
-    for (const provider of ['codex', 'omp', 'pi'] as const) {
+    for (const provider of ['codex', 'omp', 'pi', 'agy'] as const) {
       expect(PROVIDER_PROMPT_ENVELOPES[provider], provider).not.toBeNull();
     }
   });
