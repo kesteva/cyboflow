@@ -6,6 +6,48 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-09-08
+
+### Added
+
+- **Windows support, in the codebase.** A win32 runtime substrate (MCP over a named pipe rather
+  than a unix socket, a PowerShell/cmd shell layer, PTY and process operations), an NSIS packaging
+  pipeline, and CI runners for the unit chain and the installer. No Windows installer ships with
+  this release: code signing is not yet wired, so the update feed remains macOS-only and the
+  Windows build exists as a CI artifact. macOS users get the cross-platform half of that work —
+  see Changed and Fixed below.
+
+### Changed
+
+- **One process-list/kill strategy instead of a copy at each call site.** `utils/platformProcess`
+  now owns the kill ladder; `logsManager`, `sessionManager`, `runCommandManager`, and
+  `AbstractCliManager` delegate to it. They had drifted into four subtly different POSIX group
+  shapes, so a stop that worked from one surface could leave children behind from another.
+- **node-pty 0.12.0 → 0.14.1**, an N-API build. Together with better-sqlite3 13 that leaves no
+  native module needing an ABI swap between Electron and host Node.
+- Path handling is separator-aware rather than assuming a forward slash, and keyboard hints and
+  placeholders name the modifier key the host platform actually uses.
+- `.gitattributes` pins LF checkouts. Without it a Windows clone rewrote every bundled agent
+  prompt with CRLF line endings, which silently blanked them.
+
+### Fixed
+
+- **Quitting no longer cancels work that boot recovery would have resumed.** Sessions are stopped
+  before the run-queue drain, busy queues settle through run cancellation, a live run's row stays
+  non-terminal across the drain, and the drain is bounded so a queue whose task cannot finish
+  cannot hold the quit open indefinitely.
+- Bundled agent frontmatter parses on CRLF-terminated files.
+- Repository roots are compared through native `realpath`, so a path reached via a symlink or a
+  short-form alias still matches its canonical form.
+- `afterSign` parses prebuild paths written with either separator, and copies the resolved addon's
+  path rather than the resolver's record of it.
+- The installer step recognises better-sqlite3 13's prebuild layout, and `postinstall` no longer
+  drives node-gyp for it.
+- Cross-arch macOS packaging ships the target architecture's node-pty. Only the host's binary was
+  placed, so building the x64 bundle on an arm64 Mac first fell through to a source build that
+  cannot succeed there, and then packaged the arm64 pty and its `spawn-helper` — which would have
+  broken every terminal on an Intel Mac.
+
 ## [0.3.1] — 2026-09-04
 
 ### Changed
