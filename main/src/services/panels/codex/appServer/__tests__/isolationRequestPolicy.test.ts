@@ -90,6 +90,7 @@ function questionDispatch(): { request: Dispatch<'item/tool/requestUserInput'>; 
         threadId: 'thread-1',
         turnId: 'turn-1',
         itemId: 'item-question',
+        isBlocking: true,
         autoResolutionMs: null,
         questions: [{
           id: 'q1',
