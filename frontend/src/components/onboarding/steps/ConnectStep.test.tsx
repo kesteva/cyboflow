@@ -11,7 +11,7 @@ const CLAUDE_DETECTED: ProviderDetectionResult<'claude'> = {
 };
 
 const CODEX_DETECTED: ProviderDetectionResult<'codex'> = {
-  runtime: { found: true, path: '/app/codex', version: '0.144.3' },
+  runtime: { found: true, path: '/app/codex', version: '0.153.3' },
   account: { found: true, email: 'codex@example.com', planType: 'plus' },
   state: 'detected',
 };

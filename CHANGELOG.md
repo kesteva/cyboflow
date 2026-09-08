@@ -6,6 +6,14 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Bundled Codex CLI upgraded 0.144.3 → 0.153.3** (`@openai/codex`, all six platform binaries).
+  The app-server wire protocol is backward-compatible for every method Cyboflow uses; the
+  reviewed protocol subset now mirrors the additive 0.153.3 fields (prompt-cache write tokens,
+  `isBlocking` on user-input requests, `writeStdin` approval kind, `openaiForm` elicitation,
+  misalignment error details, async agent-message questions).
+
 ## [0.3.2] — 2026-09-08
 
 ### Added

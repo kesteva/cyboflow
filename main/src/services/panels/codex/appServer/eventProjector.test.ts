@@ -43,6 +43,7 @@ describe('projectTurnSessionEvent', () => {
           totalTokens: 15,
           inputTokens: 10,
           cachedInputTokens: 3,
+          cacheWriteInputTokens: 1,
           outputTokens: 5,
           reasoningOutputTokens: 2,
         },
@@ -50,6 +51,7 @@ describe('projectTurnSessionEvent', () => {
           totalTokens: 15,
           inputTokens: 10,
           cachedInputTokens: 3,
+          cacheWriteInputTokens: 1,
           outputTokens: 5,
           reasoningOutputTokens: 2,
         },
@@ -61,7 +63,7 @@ describe('projectTurnSessionEvent', () => {
       threadId: 'thread-1',
       turnId: 'turn-1',
       startedAtMs: 10,
-      item: { type: 'agentMessage', id: 'message-1', text: 'partial' },
+      item: { type: 'agentMessage', id: 'message-1', text: 'partial', questions: null },
     })).toEqual([]);
   });
 
@@ -70,6 +72,7 @@ describe('projectTurnSessionEvent', () => {
       type: 'agentMessage',
       id: 'message-1',
       text: 'Implementation complete.',
+      questions: null,
     }))).toEqual([{
       type: 'agent_message',
       provider: 'codex',
@@ -116,6 +119,7 @@ describe('projectTurnSessionEvent', () => {
       type: 'agentMessage',
       id: 'empty-message',
       text: '   ',
+      questions: null,
     }))).toEqual([]);
   });
 
@@ -127,13 +131,19 @@ describe('projectTurnSessionEvent', () => {
       content: [
         { type: 'text', text: 'Continue the workflow.', text_elements: [] },
         { type: 'localImage', path: '/tmp/context.png', detail: 'high' },
+        { type: 'audio', url: 'https://example.com/clip.mp3' },
+        { type: 'localAudio', path: '/tmp/clip.wav' },
       ],
     }))).toEqual([{
       type: 'agent_message',
       provider: 'codex',
       runtime: 'codex-sdk',
       role: 'user',
-      content: [{ type: 'text', text: 'Continue the workflow.\n[local image: /tmp/context.png]' }],
+      content: [{
+        type: 'text',
+        text: 'Continue the workflow.\n[local image: /tmp/context.png]'
+          + '\n[audio: https://example.com/clip.mp3]\n[local audio: /tmp/clip.wav]',
+      }],
       external_session_id: 'thread-1',
     }]);
   });
@@ -375,6 +385,7 @@ describe('projectTurnSessionEvent', () => {
         message: 'temporary outage',
         codexErrorInfo: { kind: 'rateLimit' },
         additionalDetails: 'retrying shortly',
+        misalignment: null,
       },
     };
     expect(project(retryable)).toEqual([{
@@ -398,6 +409,7 @@ describe('projectTurnSessionEvent', () => {
           message: 'You have reached your usage limit.',
         },
         additionalDetails: 'Resets at 2026-07-12T00:00:00Z',
+        misalignment: null,
       },
     };
     const nonRetryableProjection = project(nonRetryable);
@@ -467,6 +479,7 @@ describe('projectTurnSessionEvent', () => {
         message: 'terminal failure',
         codexErrorInfo: { kind: 'other', message: 'provider explanation' },
         additionalDetails: 'details',
+        misalignment: null,
       },
     })).toEqual([{
       type: 'agent_result',
@@ -490,6 +503,114 @@ describe('projectTurnSessionEvent', () => {
     }
   });
 
+  it('appends misalignment detail to a projected turn error', () => {
+    expect(project({
+      type: 'turn.failed',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      error: {
+        message: 'Turn blocked',
+        codexErrorInfo: 'misalignmentPolicyViolation',
+        additionalDetails: null,
+        misalignment: {
+          errorType: 'policy',
+          detailedExplanation: 'The request asks for disallowed content.',
+          steer: null,
+        },
+      },
+    })[0]).toMatchObject({
+      result: [
+        'Turn blocked',
+        'Codex provider error: "misalignmentPolicyViolation"',
+        'Codex misalignment (policy): The request asks for disallowed content.',
+      ].join('\n'),
+    });
+
+    // An unknown errorType and an empty explanation must not manufacture a line.
+    expect(project({
+      type: 'turn.failed',
+      threadId: 'thread-1',
+      turnId: 'turn-2',
+      error: {
+        message: 'Turn blocked',
+        codexErrorInfo: null,
+        additionalDetails: null,
+        misalignment: { errorType: null, detailedExplanation: '', steer: null },
+      },
+    })[0]).toMatchObject({ result: 'Turn blocked' });
+
+    // A null errorType with a real explanation falls back to the 'unknown' label.
+    expect(project({
+      type: 'turn.failed',
+      threadId: 'thread-1',
+      turnId: 'turn-3',
+      error: {
+        message: 'Turn blocked',
+        codexErrorInfo: null,
+        additionalDetails: null,
+        misalignment: {
+          errorType: null,
+          detailedExplanation: 'Blocked for policy reasons.',
+          steer: null,
+        },
+      },
+    })[0]).toMatchObject({
+      result: [
+        'Turn blocked',
+        'Codex misalignment (unknown): Blocked for policy reasons.',
+      ].join('\n'),
+    });
+  });
+
+  it('folds async agentMessage questions into the projected text', () => {
+    expect(project(completedItem({
+      type: 'agentMessage',
+      id: 'message-async',
+      text: 'Deploy is staged.',
+      questions: [
+        { title: 'Which environment?', options: ['staging', 'production'] },
+        { title: 'Anything else?', options: null },
+      ],
+    }))).toEqual([{
+      type: 'agent_message',
+      provider: 'codex',
+      runtime: 'codex-sdk',
+      role: 'assistant',
+      id: 'message-async',
+      model: 'gpt-test',
+      content: [{
+        type: 'text',
+        text: [
+          'Deploy is staged.',
+          '',
+          'Questions:',
+          '- Which environment? (options: staging / production)',
+          '- Anything else?',
+        ].join('\n'),
+      }],
+      external_session_id: 'thread-1',
+    }]);
+
+    // An empty question list leaves the message untouched.
+    expect(project(completedItem({
+      type: 'agentMessage',
+      id: 'message-plain',
+      text: 'Done.',
+      questions: [],
+    }))[0]).toMatchObject({ content: [{ type: 'text', text: 'Done.' }] });
+
+    // A questions-only async message (blank text) must still project the questions
+    // block, not the empty string it previously collapsed to.
+    expect(project(completedItem({
+      type: 'agentMessage',
+      id: 'message-questions-only',
+      text: '   ',
+      questions: [{ title: 'Which environment?', options: null }],
+    }))[0]).toMatchObject({
+      content: [{ type: 'text', text: 'Questions:\n- Which environment?' }],
+    });
+  });
+
   it('attaches accumulated usage only when projecting a terminal result', () => {
     const usage = {
       input_tokens: 7,
@@ -508,6 +629,7 @@ describe('projectTurnSessionEvent', () => {
       type: 'agentMessage',
       id: 'message-usage',
       text: 'Done.',
+      questions: null,
     }), { ...CONTEXT, usage })[0]).not.toHaveProperty('usage');
   });
 });

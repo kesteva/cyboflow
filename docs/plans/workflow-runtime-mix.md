@@ -134,7 +134,7 @@ to the LEVEL-MATERIALIZED definition (so it sees the level's tier·effort pins):
 | opus / opus-250k | `gpt-5.6-sol` | one rung DOWN on `low..xhigh` (medium→low, high→medium; floor `low`) |
 | fable | `gpt-5.6-sol` | one rung UP (medium→high, high→xhigh; ceiling `xhigh`) |
 
-Model slugs verified against the live Codex CLI catalog (codex-cli 0.144.3:
+Model slugs verified against the live Codex CLI catalog (codex-cli 0.153.3:
 `gpt-5.6-luna` "fast and affordable", `gpt-5.6-sol` "latest frontier") and
 verified to survive `normalizeAgentModelSelection`/`normalizeCodexModelSelection`
 (review). Hardcoded named constants (`CODEX_TIER_MODELS`) exactly like the

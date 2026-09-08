@@ -1,6 +1,7 @@
 import type { AppServerNotification } from './client';
 import { AppServerProtocolError } from './client';
 import type {
+  AgentMessageQuestion,
   AppServerInitializeParams,
   AppServerInitializeResponse,
   AppServerImageDetail,
@@ -15,6 +16,7 @@ import type {
   ThreadTokenUsage,
   ThreadTokenUsageUpdatedNotification,
   TokenUsageBreakdown,
+  TurnErrorMisalignment,
 } from './protocol';
 
 export interface TurnSessionClient {
@@ -29,7 +31,12 @@ export type TurnSessionItem =
       clientId: string | null;
       content: AppServerUserInput[];
     }
-  | { type: 'agentMessage'; id: string; text: string }
+  | {
+      type: 'agentMessage';
+      id: string;
+      text: string;
+      questions: AgentMessageQuestion[] | null;
+    }
   | { type: 'reasoning'; id: string; summary: string[]; content: string[] }
   | {
       type: 'commandExecution';
@@ -79,6 +86,7 @@ export interface TurnSessionError {
   message: string;
   codexErrorInfo: AppServerJsonValue | null;
   additionalDetails: string | null;
+  misalignment: TurnErrorMisalignment | null;
 }
 
 interface TurnSessionTurnEventBase {
@@ -176,12 +184,43 @@ function parseTurnError(value: unknown): TurnSessionError | null {
   const additionalDetails = typeof value.additionalDetails === 'string'
     ? value.additionalDetails
     : null;
-  return { message: value.message, codexErrorInfo, additionalDetails };
+  return {
+    message: value.message,
+    codexErrorInfo,
+    additionalDetails,
+    misalignment: parseMisalignment(value.misalignment),
+  };
+}
+
+/** Malformed misalignment details are dropped, never allowed to void the error. */
+function parseMisalignment(value: unknown): TurnErrorMisalignment | null {
+  if (!isRecord(value)) return null;
+  const errorType = typeof value.errorType === 'string' ? value.errorType : null;
+  const detailedExplanation = typeof value.detailedExplanation === 'string'
+    ? value.detailedExplanation
+    : null;
+  const steer = value.steer === undefined || !isJsonValue(value.steer) ? null : value.steer;
+  return { errorType, detailedExplanation, steer };
 }
 
 function rawItem(value: AppServerJsonValue): TurnSessionItem {
   const itemType = isRecord(value) && typeof value.type === 'string' ? value.type : null;
   return { type: 'raw', itemType, item: value };
+}
+
+/** Anything that is not a well-formed question list reads as no questions. */
+function parseAgentMessageQuestions(value: unknown): AgentMessageQuestion[] | null {
+  if (!Array.isArray(value)) return null;
+  const questions: AgentMessageQuestion[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry) || typeof entry.title !== 'string') return null;
+    const options = entry.options === null || entry.options === undefined
+      ? null
+      : parseStringArray(entry.options);
+    if (entry.options !== null && entry.options !== undefined && options === null) return null;
+    questions.push({ title: entry.title, options });
+  }
+  return questions;
 }
 
 function parseStringArray(value: unknown): string[] | null {
@@ -262,6 +301,10 @@ function parseUserInput(value: unknown): AppServerUserInput | null {
       return typeof value.path === 'string'
         ? { type: 'localImage', path: value.path, ...(typeof value.detail === 'string' ? { detail: value.detail as AppServerImageDetail } : {}) }
         : null;
+    case 'audio':
+      return typeof value.url === 'string' ? { type: 'audio', url: value.url } : null;
+    case 'localAudio':
+      return typeof value.path === 'string' ? { type: 'localAudio', path: value.path } : null;
     case 'skill':
     case 'mention':
       return typeof value.name === 'string' && typeof value.path === 'string'
@@ -298,7 +341,12 @@ function parseItem(value: unknown): TurnSessionItem | null {
     }
     case 'agentMessage':
       return typeof value.text === 'string'
-        ? { type: 'agentMessage', id: value.id, text: value.text }
+        ? {
+            type: 'agentMessage',
+            id: value.id,
+            text: value.text,
+            questions: parseAgentMessageQuestions(value.questions),
+          }
         : rawItem(value);
     case 'reasoning': {
       const summary = parseStringArray(value.summary);
@@ -446,6 +494,11 @@ function parseTokenUsageBreakdown(value: unknown): TokenUsageBreakdown | null {
     totalTokens: value.totalTokens,
     inputTokens: value.inputTokens,
     cachedInputTokens: value.cachedInputTokens,
+    // Added in 0.153.3. Lenient on purpose: one missing counter must never cost
+    // the whole usage notification.
+    cacheWriteInputTokens: isFiniteNumber(value.cacheWriteInputTokens)
+      ? value.cacheWriteInputTokens
+      : 0,
     outputTokens: value.outputTokens,
     reasoningOutputTokens: value.reasoningOutputTokens,
   };

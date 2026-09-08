@@ -47,7 +47,7 @@ const CLAUDE_CONNECTED: ProviderDetectionResult<'claude'> = {
 
 const CODEX_CONNECTED: ProviderDetectionResult<'codex'> = {
   state: 'detected',
-  runtime: { found: true, path: '/app/codex', version: '0.144.3' },
+  runtime: { found: true, path: '/app/codex', version: '0.153.3' },
   account: { found: true, email: 'codex@example.com', planType: 'plus' },
 };
 
@@ -94,7 +94,7 @@ describe('IntegrationsSettings', () => {
 
     expect(await screen.findByText('claude@example.com')).toBeInTheDocument();
     expect(await screen.findByText('codex@example.com')).toBeInTheDocument();
-    expect(screen.getByText(/ChatGPT plus · Codex 0\.144\.3/)).toBeInTheDocument();
+    expect(screen.getByText(/ChatGPT plus · Codex 0\.153\.3/)).toBeInTheDocument();
     expect(screen.getAllByText('Connected')).toHaveLength(2); // pi's connected label is 'Detected'
   });
 

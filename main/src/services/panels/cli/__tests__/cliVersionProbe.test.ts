@@ -18,7 +18,7 @@ describe('describeMissingInterpreter', () => {
 
 describe('probeCliVersion', () => {
   it('returns the direct version without a Node fallback', async () => {
-    const runCommand = vi.fn().mockReturnValue('codex-cli 0.144.3\n');
+    const runCommand = vi.fn().mockReturnValue('codex-cli 0.153.3\n');
 
     const result = await probeCliVersion('/opt/codex/bin/codex', { PATH: '/opt/codex/bin' }, {
       runCommand,
@@ -26,7 +26,7 @@ describe('probeCliVersion', () => {
       resolveNodeExecutable: () => Promise.resolve('/usr/bin/node'),
     });
 
-    expect(result).toEqual({ version: 'codex-cli 0.144.3', usedNodeFallback: false });
+    expect(result).toEqual({ version: 'codex-cli 0.153.3', usedNodeFallback: false });
     expect(runCommand).toHaveBeenCalledTimes(1);
     expect(runCommand).toHaveBeenCalledWith('/opt/codex/bin/codex', ['--version'], {
       PATH: '/opt/codex/bin',
@@ -39,7 +39,7 @@ describe('probeCliVersion', () => {
       .mockImplementationOnce(() => {
         throw new Error(MISSING_NODE);
       })
-      .mockReturnValue('0.144.3\n');
+      .mockReturnValue('0.153.3\n');
 
     const result = await probeCliVersion('/Users/dev/.local/bin/codex', { PATH: '/usr/bin' }, {
       runCommand,
@@ -47,7 +47,7 @@ describe('probeCliVersion', () => {
       resolveNodeExecutable: () => Promise.resolve('/Users/dev/.nvm/versions/node/v22.3.0/bin/node'),
     });
 
-    expect(result).toEqual({ version: '0.144.3', usedNodeFallback: true });
+    expect(result).toEqual({ version: '0.153.3', usedNodeFallback: true });
     expect(runCommand).toHaveBeenLastCalledWith(
       '/Users/dev/.nvm/versions/node/v22.3.0/bin/node',
       ['--no-warnings', '--enable-source-maps', '/Users/dev/.local/lib/codex/index.js', '--version'],

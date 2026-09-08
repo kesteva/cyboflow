@@ -28,7 +28,7 @@ class FakeClient implements CodexVerifyAppServerClient {
   readonly start = vi.fn(() => undefined);
   readonly stop = vi.fn(async (_signal?: NodeJS.Signals) => undefined);
   readonly initialize = vi.fn(async (_params: AppServerInitializeParams) => ({
-    userAgent: 'codex-cli/0.144.3',
+    userAgent: 'codex-cli/0.153.3',
     codexHome: '/tmp/codex',
     platformFamily: 'unix',
     platformOs: 'macos',
@@ -53,7 +53,7 @@ class FakeClient implements CodexVerifyAppServerClient {
 const executable = () => ({
   executablePath: '/app/codex/bin/codex',
   pathDir: '/app/codex/codex-path',
-  version: '0.144.3' as const,
+  version: '0.153.3' as const,
   target: 'aarch64-apple-darwin' as const,
 });
 
@@ -508,7 +508,12 @@ describe('createCodexVerifyTranscriptAccumulator', () => {
   it('appends the total-cap truncation marker exactly once', () => {
     const acc = createCodexVerifyTranscriptAccumulator();
     for (let i = 0; i < 6; i++) {
-      acc.onEvent(completed({ type: 'agentMessage', id: `m${i}`, text: 'z'.repeat(100_000) }));
+      acc.onEvent(completed({
+        type: 'agentMessage',
+        id: `m${i}`,
+        text: 'z'.repeat(100_000),
+        questions: null,
+      }));
     }
     const text = acc.text() ?? '';
     const marker = '[transcript truncated at 400000 chars]';

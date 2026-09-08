@@ -53,7 +53,11 @@ export class CodexAppServerQuestionBridge {
         request.params.questions.map(toQuestionPayload),
         () => undefined,
       );
-      const autoResolutionMs = request.params.autoResolutionMs;
+      // `isBlocking` (0.153.3) is false for a default-mode request, but the Codex
+      // core awaits our response either way (core_session.rs ~L2982), so a
+      // non-blocking request still has to reach the human. It only annotates the
+      // question; the deadline in `autoResolutionMs` is what changes behaviour.
+      const { autoResolutionMs } = request.params;
       if (autoResolutionMs === null) {
         const answer = await answerPromise;
         this.respondIfPending(key, toCodexResponse(request.params.questions, answer));
@@ -80,7 +84,8 @@ export class CodexAppServerQuestionBridge {
     } catch (cause) {
       this.respondIfPending(key, { answers: {} });
       this.reportError(new Error(
-        `Codex user-input routing failed for request ${String(request.id)}`,
+        `Codex user-input routing failed for request ${String(request.id)} `
+        + `(isBlocking=${String(request.params.isBlocking)})`,
         { cause },
       ));
     }

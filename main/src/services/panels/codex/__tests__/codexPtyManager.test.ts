@@ -193,7 +193,7 @@ describe('CodexPtyManager concurrent spawn context', () => {
  * terminal does" defect: the Codex TUI treats a `body + '\r'` written in ONE
  * pty.write as a PASTE, so the trailing '\r' is inserted as a literal newline and
  * the turn sits unsubmitted in the composer forever. Reproduced deterministically
- * against the bundled Codex CLI 0.144.3 through a node-pty harness (see
+ * against the bundled Codex CLI 0.153.3 through a node-pty harness (see
  * COMPOSER_SUBMIT_DELAY_MS in codexPtyManager.ts for the full measurement table).
  */
 describe('CodexPtyManager.relayUserTurn (composer submit)', () => {

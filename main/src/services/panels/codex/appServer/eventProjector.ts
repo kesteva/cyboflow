@@ -6,6 +6,7 @@ import type {
   AgentUsage,
   AgentUserMessageEvent,
 } from '../../../../../../shared/types/agentStream';
+import type { AgentMessageQuestion } from './protocol';
 import type {
   TurnSessionError,
   TurnSessionEvent,
@@ -123,6 +124,10 @@ function userMessageText(item: Extract<TurnSessionItem, { type: 'userMessage' }>
         return `[image: ${content.url}]`;
       case 'localImage':
         return `[local image: ${content.path}]`;
+      case 'audio':
+        return `[audio: ${content.url}]`;
+      case 'localAudio':
+        return `[local audio: ${content.path}]`;
       case 'skill':
         return `[skill: ${content.name} (${content.path})]`;
       case 'mention':
@@ -156,6 +161,14 @@ function formatTurnError(error: TurnSessionError): string {
   if (error.additionalDetails !== null && error.additionalDetails !== error.message) {
     details.push(`Codex provider details: ${error.additionalDetails}`);
   }
+  const misalignment = error.misalignment;
+  if (misalignment !== null && typeof misalignment.detailedExplanation === 'string'
+    && misalignment.detailedExplanation.length > 0) {
+    details.push(
+      `Codex misalignment (${misalignment.errorType ?? 'unknown'}): `
+      + misalignment.detailedExplanation,
+    );
+  }
   return details.join('\n');
 }
 
@@ -171,6 +184,21 @@ function rawCompletedItem(
     itemType: item.itemType,
     item: item.item,
   };
+}
+
+function appendAgentMessageQuestions(
+  text: string,
+  questions: AgentMessageQuestion[] | null,
+): string {
+  if (questions === null || questions.length === 0) return text;
+  const lines = questions.map((question) => {
+    const options = question.options;
+    return options !== null && options.length > 0
+      ? `- ${question.title} (options: ${options.join(' / ')})`
+      : `- ${question.title}`;
+  });
+  const block = ['Questions:', ...lines].join('\n');
+  return text.trim().length === 0 ? block : `${text}\n\n${block}`;
 }
 
 function projectCompletedItem(
@@ -192,10 +220,14 @@ function projectCompletedItem(
             external_session_id: threadId,
           }];
     }
-    case 'agentMessage':
-      return item.text.trim().length === 0
+    case 'agentMessage': {
+      // An async message can carry follow-up questions Codex never re-asks over
+      // requestUserInput; fold them into the text so they are never dropped.
+      const text = appendAgentMessageQuestions(item.text, item.questions);
+      return text.trim().length === 0
         ? []
-        : [buildAssistantEvent(item.id, item.text, 'text', threadId, context.model)];
+        : [buildAssistantEvent(item.id, text, 'text', threadId, context.model)];
+    }
     case 'reasoning': {
       const text = reasoningText(item);
       return text.trim().length === 0

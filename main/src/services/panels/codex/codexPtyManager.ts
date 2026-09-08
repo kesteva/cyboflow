@@ -91,6 +91,9 @@ const PTY_BACKLOG_CAP_BYTES = 200_000;
  *   char-by-char, then '\r' (human typing) . submits
  * So the burst window is >15ms and <=20ms. 150ms is ~7x that floor — margin for a
  * busy main-process event loop, still far below human perception.
+ * RE-CONFIRMED on 0.153.3 (python pty.fork harness, submission = a user message
+ * landing in the ~/.codex/sessions rollout): one-write burst never submits;
+ * '\r' 30 / 60 / 100 / 150ms later submits.
  */
 const COMPOSER_SUBMIT_DELAY_MS = 150;
 
