@@ -4,21 +4,26 @@
  * Configure build settings based on environment.
  *
  * Reads the canonical electron-builder config from package.json's `build` field
- * (the committed source of truth — NEVER mutated) and writes an environment-adjusted
- * copy to build/electron-builder.generated.json. The mac build scripts pass that file
- * to electron-builder via `--config`, which uses it INSTEAD of package.json's `build`
- * (electron-builder reads a `--config` file exclusively; it does not merge package.json
- * `build` on top — see app-builder-lib getConfig). This keeps the tracked package.json
- * clean across signed, unsigned, and dev builds.
+ * (the committed source of truth — NEVER mutated) and writes an
+ * environment-adjusted copy to build/electron-builder.generated.json. The build
+ * scripts pass that file to electron-builder via `--config`, which uses it
+ * INSTEAD of package.json's `build` (electron-builder reads a `--config` file
+ * exclusively; it does not merge package.json `build` on top).
  *
  * Adjustments:
  *   - Signing/notarization posture is toggled based on the presence of Apple credentials.
  *   - When BUILD_VARIANT=dev, the dev appId / productName / artifactName / publish URL
- *     overrides are baked in (these used to be inline `--config.*` flags on build:mac:dev).
+ *     overrides are baked in.
+ *   - When BUILD_PLATFORM=win (see the win branch below for the details):
+ *     build.win is required instead of build.mac, npmRebuild is turned OFF and
+ *     the installed better-sqlite3 artifact is probed against the Electron ABI
+ *     (a wrong-ABI artifact fails the build), and the lean-packaging plan keeps
+ *     the win32 agent binaries and excludes the darwin/linux ones.
  */
 
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 const PACKAGE_JSON_PATH = path.join(__dirname, '..', 'package.json');
 const GENERATED_CONFIG_PATH = path.join(__dirname, '..', 'build', 'electron-builder.generated.json');
@@ -87,18 +92,59 @@ function getLeanPackagingPlan(targetArch) {
 }
 
 /**
- * Warn — loudly, but do not fail — when the bundled screen-capture binary is
- * absent from node_modules.
- *
- * It is an OPTIONAL dependency (`os: ["darwin"]`, so a required one would break
- * `pnpm install` on the Linux CI runners), which means "absent" is a legitimate
- * state on any non-macOS box and this check has to be a no-op there.
- *
- * A warning rather than the hard fail the per-arch agent binaries get: shipping
- * without it degrades to resolving `peekaboo` off the user's PATH, which is
- * exactly the pre-bundling behaviour — a lost convenience, not a broken
- * runtime. Silent, though, it would be the regression where most users simply
- * never satisfy the prerequisite.
+ * The Windows counterpart to getLeanPackagingPlan: a Windows installer needs
+ * only the matching win32 agent packages; the darwin/linux ones are dead
+ * weight (and would ride into the asar unchecked).
+ */
+function getWinPackagingPlan(targetArch) {
+  if (targetArch !== 'x64' && targetArch !== 'arm64') {
+    return null;
+  }
+
+  const targetSuffix = `win32-${targetArch}`;
+  const codexTargetTriple = targetArch === 'x64'
+    ? 'x86_64-pc-windows-msvc'
+    : 'aarch64-pc-windows-msvc';
+
+  return {
+    requiredBinaries: [
+      {
+        label: 'Claude Code',
+        packageName: `@anthropic-ai/claude-agent-sdk-${targetSuffix}`,
+        relativePath: path.join(
+          'node_modules', '@anthropic-ai', `claude-agent-sdk-${targetSuffix}`, 'claude.exe'
+        ),
+      },
+      {
+        label: 'Codex',
+        packageName: `@openai/codex-${targetSuffix}`,
+        relativePath: path.join(
+          'node_modules', '@openai', `codex-${targetSuffix}`,
+          'vendor', codexTargetTriple, 'bin', 'codex.exe'
+        ),
+      },
+    ],
+    exclusions: [
+      ...CLAUDE_NATIVE_SUFFIXES
+        .filter((suffix) => suffix !== targetSuffix)
+        .map((suffix) => `!node_modules/@anthropic-ai/claude-agent-sdk-${suffix}/**`),
+      ...CODEX_NATIVE_SUFFIXES
+        .filter((suffix) => suffix !== targetSuffix)
+        .map((suffix) => `!node_modules/@openai/codex-${suffix}/**`),
+      // better-sqlite3 >= 13's N-API prebuild ships one per platform too (see
+      // BETTER_SQLITE_PREBUILD_SUFFIXES above) — a Windows installer needs only
+      // its own win32-<arch> file; the other seven (~2 MB each) are dead weight.
+      ...BETTER_SQLITE_PREBUILD_SUFFIXES
+        .filter((suffix) => suffix !== targetSuffix)
+        .map((suffix) => `!node_modules/better-sqlite3/prebuilds/${suffix}.node`),
+    ],
+  };
+}
+
+/**
+ * Warn, never fail, when the bundled screen-capture binary is absent. It is an
+ * optional darwin-only dependency, so absence is normal off macOS, and
+ * shipping without it falls back to resolving `peekaboo` off the user's PATH.
  */
 function warnIfPeekabooMissing() {
   if (process.platform !== 'darwin') return;
@@ -112,6 +158,31 @@ function warnIfPeekabooMissing() {
       'native-screen verification will fall back to whatever is on the ' +
       "user's PATH. Run \"pnpm install\" to restore it."
   );
+}
+
+/**
+ * Does the installed better-sqlite3 artifact LOAD under the Electron ABI?
+ * Delegates to ensure-sqlite-abi.mjs --check, which opens a database in a real
+ * child Electron rather than guessing from a marker file. A child process
+ * because that script is ESM and this file is CommonJS; `--check` mutates
+ * nothing. Module-level so tests can stub it via __setAbiProbeForTesting.
+ */
+function probeWinElectronAbi() {
+  const result = spawnSync(
+    process.execPath,
+    [path.join(__dirname, 'ensure-sqlite-abi.mjs'), '--check', 'electron'],
+    { encoding: 'utf8' }
+  );
+  return {
+    ok: result.status === 0,
+    output: `${result.stdout || ''}${result.stderr || ''}`.trim(),
+  };
+}
+
+/** Test seam: replace the ABI probe (see probeWinElectronAbi). */
+let abiProbe = probeWinElectronAbi;
+function __setAbiProbeForTesting(fn) {
+  abiProbe = fn;
 }
 
 function configureBuild() {
@@ -129,8 +200,10 @@ function configureBuild() {
   const canSign = !signingDisabled && hasAppleCertificate;
   const canNotarize = canSign && hasAppleId && hasTeamId && hasAppPassword;
   const isDev = process.env.BUILD_VARIANT === 'dev';
+  const isWin = process.env.BUILD_PLATFORM === 'win';
 
   console.log('Environment check:');
+  console.log(`  - Target Platform: ${isWin ? 'win' : 'mac'}`);
   console.log(`  - Signing Disabled: ${signingDisabled ? '✓' : '✗'}`);
   console.log(`  - Apple Certificate: ${hasAppleCertificate ? '✓' : '✗'}`);
   console.log(`  - Apple ID: ${hasAppleId ? '✓' : '✗'}`);
@@ -143,61 +216,113 @@ function configureBuild() {
   // Read the canonical config from package.json (source of truth — not mutated)
   const packageJson = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, 'utf8'));
 
-  if (!packageJson.build || !packageJson.build.mac) {
+  if (!packageJson.build || (!isWin && !packageJson.build.mac)) {
     console.error('Error: No macOS build configuration found in package.json');
+    process.exit(1);
+  }
+  if (isWin && !packageJson.build.win) {
+    console.error('Error: No Windows build configuration found in package.json');
     process.exit(1);
   }
 
   // Deep-clone so the source package.json is never touched
   const config = JSON.parse(JSON.stringify(packageJson.build));
 
-  // Configure macOS signing posture based on capabilities
-  config.mac.notarize = canNotarize;
+  // Configure macOS signing posture based on capabilities. A win build has no
+  // Apple posture to adjust — the credentials above are darwin-only, and the
+  // win config carries no signing fields to mutate.
+  if (!isWin) {
+    config.mac.notarize = canNotarize;
 
-  if (!canSign) {
-    console.log('Configuring for unsigned build...');
-    config.mac.hardenedRuntime = false;
-    // Keep gatekeeperAssess false so unsigned apps can run locally
-    config.mac.gatekeeperAssess = false;
-    delete config.mac.entitlements;
-    delete config.mac.entitlementsInherit;
-  } else {
-    console.log('Configuring for signed build...');
-    config.mac.hardenedRuntime = true;
-    config.mac.gatekeeperAssess = false;
-    config.mac.entitlements = 'build/entitlements.mac.plist';
-    config.mac.entitlementsInherit = 'build/entitlements.mac.plist';
+    if (!canSign) {
+      console.log('Configuring for unsigned build...');
+      config.mac.hardenedRuntime = false;
+      // Keep gatekeeperAssess false so unsigned apps can run locally
+      config.mac.gatekeeperAssess = false;
+      delete config.mac.entitlements;
+      delete config.mac.entitlementsInherit;
+    } else {
+      console.log('Configuring for signed build...');
+      config.mac.hardenedRuntime = true;
+      config.mac.gatekeeperAssess = false;
+      config.mac.entitlements = 'build/entitlements.mac.plist';
+      config.mac.entitlementsInherit = 'build/entitlements.mac.plist';
+    }
   }
 
-  // Dev-variant overrides (previously inline --config.* flags on build:mac:dev).
-  // Template tokens like ${version} are electron-builder placeholders and must stay literal.
+  // Dev-variant overrides. Template tokens like ${version} are
+  // electron-builder placeholders and must stay literal.
   if (isDev) {
     console.log('Applying dev-variant overrides...');
     config.appId = 'com.cyboflow.app.dev';
     config.productName = 'Cyboflow Dev';
     config.mac.artifactName = 'Cyboflow-Dev-${version}-macOS-${arch}.${ext}';
+    if (isWin && config.win) {
+      config.win.artifactName = 'Cyboflow-Dev-${version}-Windows-${arch}.${ext}';
+    }
     config.publish = { ...(config.publish || {}), url: 'https://updates.cyboflow.com/dev' };
   }
 
-  // Lean per-arch packaging. Both agent distributions ship their native CLIs
-  // as optional per-platform/arch packages. electron-builder bundles
-  // node_modules wholesale, and a cross-arch dev box (or a forced install that
-  // materializes every optionalDependency) can have all of them present. A
-  // macOS DMG needs only the matching darwin package for each agent. Exclude
-  // every foreign native package and fail fast if either target binary is
-  // absent, which would otherwise silently break that runtime after release.
-  // BUILD_ARCH unset / 'universal' leaves files untouched.
+  // Windows ships prebuilt native modules (docs/WINDOWS-BUILD.md), so they are
+  // packaged as-is: a rebuild needs MSVC, which a Windows dev host may not
+  // have, and would clobber the verified prebuilds.
+  // CYBOFLOW_WIN_NPM_REBUILD=1 restores it for hosts with a toolchain.
+  if (isWin) {
+    const winNpmRebuild = process.env.CYBOFLOW_WIN_NPM_REBUILD === '1';
+    config.npmRebuild = winNpmRebuild;
+    console.log(`Windows packaging: npmRebuild=${config.npmRebuild}` +
+      (winNpmRebuild ? '' : ' (prebuilt .node files are packaged as-is; set CYBOFLOW_WIN_NPM_REBUILD=1 to rebuild)'));
+
+    // With npmRebuild off the .node files ship exactly as they sit in
+    // node_modules. Since better-sqlite3 v13 (the Electron 44 upgrade) its
+    // ONLY Windows addon is the N-API prebuild at prebuilds/win32-<arch>.node,
+    // which is RUNTIME-AGNOSTIC — the same file loads under host Node and
+    // Electron alike — so `node scripts/ensure-sqlite-abi.mjs electron` is a
+    // cheap no-op against it (the probe below succeeds immediately; there is
+    // no per-ABI artifact left to flip, unlike the old build/Release story).
+    // The abiProbe stays anyway: it is a REAL load check under the packaged
+    // Electron ABI, not an assumption, and is still what would catch a
+    // regression (a stray per-ABI build/Release artifact shadowing the
+    // prebuild, a corrupted install, or a future non-N-API addon) before it
+    // ships and hard-crashes the app on first database open.
+    if (!winNpmRebuild) {
+      const probe = abiProbe();
+      if (!probe.ok) {
+        console.error(
+          'Error: the installed better-sqlite3 artifact does not load under the ' +
+            'ELECTRON ABI, but this build packages it as-is (npmRebuild=false). Shipping ' +
+            'it would hard-crash the app on first database open ' +
+            '(NODE_MODULE_VERSION mismatch).'
+        );
+        console.error('Run "node scripts/ensure-sqlite-abi.mjs electron" first, then retry the build.');
+        if (probe.output) console.error(`Probe output:\n${probe.output}`);
+        process.exit(1);
+      }
+      console.log('Windows packaging: better-sqlite3 verified on the Electron ABI.');
+    }
+  }
+
+  // Both agent distributions ship native CLIs as optional per-arch packages,
+  // and electron-builder bundles node_modules wholesale, so a cross-arch dev
+  // box can carry all of them. Exclude the foreign ones, and fail fast on a
+  // missing target binary rather than breaking that runtime after release.
   const targetArch = process.env.BUILD_ARCH;
-  const leanPackagingPlan = getLeanPackagingPlan(targetArch);
+  const leanPackagingPlan = isWin
+    ? getWinPackagingPlan(targetArch)
+    : getLeanPackagingPlan(targetArch);
   if (leanPackagingPlan) {
+    const leanPlatform = isWin ? 'Windows' : 'macOS';
     for (const required of leanPackagingPlan.requiredBinaries) {
       const targetBinary = path.join(__dirname, '..', required.relativePath);
       if (fs.existsSync(targetBinary)) continue;
       console.error(
         `Error: the ${targetArch} ${required.label} binary is missing ` +
-          `(${required.packageName}). A ${targetArch} build would ship without it ` +
-          `and break that agent runtime. ` +
-          `Run "pnpm run install:darwin-cross" before a cross-arch build.`
+          `(${required.packageName}). A ${targetArch} ${leanPlatform} build would ` +
+          `ship without it and break that agent runtime. ` +
+          (isWin
+            ? `Run "pnpm install" on the Windows host (its os/cpu constraints ` +
+              `materialize the win32 optional packages).`
+            : `Run "pnpm run install:darwin-cross" before a cross-arch build.`)
       );
       process.exit(1);
     }
@@ -206,8 +331,8 @@ function configureBuild() {
       ...leanPackagingPlan.exclusions,
     ];
     console.log(
-      `Lean packaging: keeping only darwin-${targetArch} agent binaries; ` +
-        `excluding ${leanPackagingPlan.exclusions.length} foreign native packages.`
+      `Lean packaging: keeping only ${isWin ? 'win32' : 'darwin'}-${targetArch} ` +
+        `agent binaries; excluding ${leanPackagingPlan.exclusions.length} foreign native packages.`
     );
   }
 
@@ -219,14 +344,42 @@ function configureBuild() {
 
   const relPath = path.relative(path.join(__dirname, '..'), GENERATED_CONFIG_PATH);
   console.log(`Build configuration written to ${relPath}`);
-  console.log(`Notarization: ${config.mac.notarize ? 'enabled' : 'disabled'}`);
-  console.log(`Hardened Runtime: ${config.mac.hardenedRuntime ? 'enabled' : 'disabled'}`);
+  if (!isWin) {
+    console.log(`Notarization: ${config.mac.notarize ? 'enabled' : 'disabled'}`);
+    console.log(`Hardened Runtime: ${config.mac.hardenedRuntime ? 'enabled' : 'disabled'}`);
+  }
 
   return config;
 }
 
 if (require.main === module) {
+  // CLI arg form (--platform/--arch/--variant) exists so package.json scripts
+  // never need POSIX `VAR=value cmd` env syntax, which breaks on Windows' cmd
+  // shell; it feeds the same env vars the mac scripts set inline.
+  const argv = process.argv.slice(2);
+  const takeValue = (flag) => {
+    const idx = argv.indexOf(flag);
+    if (idx === -1) return undefined;
+    const value = argv[idx + 1];
+    if (!value || value.startsWith('--')) {
+      console.error(`Error: ${flag} needs a value`);
+      process.exit(2);
+    }
+    return value;
+  };
+  const platform = takeValue('--platform');
+  const arch = takeValue('--arch');
+  const variant = takeValue('--variant');
+  if (platform !== undefined) process.env.BUILD_PLATFORM = platform;
+  if (arch !== undefined) process.env.BUILD_ARCH = arch;
+  if (variant !== undefined) process.env.BUILD_VARIANT = variant;
   configureBuild();
 }
 
-module.exports = { configureBuild, getLeanPackagingPlan, GENERATED_CONFIG_PATH };
+module.exports = {
+  configureBuild,
+  getLeanPackagingPlan,
+  getWinPackagingPlan,
+  GENERATED_CONFIG_PATH,
+  __setAbiProbeForTesting,
+};

@@ -8,6 +8,7 @@
  * whole point, and a stale one is worse than none.
  */
 import { describe, it, expect, vi } from 'vitest';
+import * as nodePath from 'node:path';
 import {
   PEEKABOO_PACKAGE,
   PEEKABOO_PATH_FALLBACK,
@@ -15,7 +16,15 @@ import {
 } from '../peekabooExecutablePath';
 
 const PACKAGED = '/Applications/Cyboflow.app/Contents/Resources';
-const PACKAGED_BINARY = `${PACKAGED}/app.asar.unpacked/node_modules/${PEEKABOO_PACKAGE}/peekaboo`;
+// Built with path.join — the resolver joins its segments the same way, so the
+// separators in the expected value match whatever the host platform emits.
+const PACKAGED_BINARY = nodePath.join(
+  PACKAGED,
+  'app.asar.unpacked',
+  'node_modules',
+  PEEKABOO_PACKAGE,
+  'peekaboo',
+);
 
 /** A resolver that never finds the package in node_modules (the packaged case). */
 const noPackage = (): string => {
@@ -39,16 +48,14 @@ describe('resolvePeekabooExecutable', () => {
   it('resolves through node_modules in a dev build', () => {
     // pnpm's symlinked layout makes a hand-written relative path wrong, so this
     // goes through the module graph.
-    const path = resolvePeekabooExecutable({
+    const packageJson = '/repo/node_modules/@steipete/peekaboo-mcp/package.json';
+    const resolved = resolvePeekabooExecutable({
       isPackaged: false,
       platform: 'darwin',
       existsSync: () => true,
-      resolvePackageJson: () => '/repo/node_modules/@steipete/peekaboo-mcp/package.json',
+      resolvePackageJson: () => packageJson,
     });
-    expect(path).toBe('/repo/node_modules/@steipete/peekaboo-mcp/package.json'.replace(
-      'package.json',
-      'peekaboo',
-    ));
+    expect(resolved).toBe(nodePath.join(nodePath.dirname(packageJson), 'peekaboo'));
   });
 
   it('falls back to PATH when the bundled copy is NOT on disk', () => {
@@ -96,7 +103,8 @@ describe('resolvePeekabooExecutable', () => {
   it('skips a candidate whose existence check THROWS rather than propagating', () => {
     // An unreadable candidate is not the one; a throw here would take down the
     // whole backend at construction.
-    const path = resolvePeekabooExecutable({
+    const devPackageJson = '/repo/node_modules/@steipete/peekaboo-mcp/package.json';
+    const resolved = resolvePeekabooExecutable({
       isPackaged: true,
       resourcesPath: PACKAGED,
       platform: 'darwin',
@@ -104,18 +112,19 @@ describe('resolvePeekabooExecutable', () => {
         if (p === PACKAGED_BINARY) throw new Error('EACCES');
         return true;
       },
-      resolvePackageJson: () => '/repo/node_modules/@steipete/peekaboo-mcp/package.json',
+      resolvePackageJson: () => devPackageJson,
     });
-    expect(path).toBe('/repo/node_modules/@steipete/peekaboo-mcp/peekaboo');
+    expect(resolved).toBe(nodePath.join(nodePath.dirname(devPackageJson), 'peekaboo'));
   });
 
   it('ignores the packaged candidate when resourcesPath is unavailable', () => {
-    const path = resolvePeekabooExecutable({
+    const devPackageJson = '/repo/node_modules/@steipete/peekaboo-mcp/package.json';
+    const resolved = resolvePeekabooExecutable({
       isPackaged: true,
       platform: 'darwin',
       existsSync: () => true,
-      resolvePackageJson: () => '/repo/node_modules/@steipete/peekaboo-mcp/package.json',
+      resolvePackageJson: () => devPackageJson,
     });
-    expect(path).toBe('/repo/node_modules/@steipete/peekaboo-mcp/peekaboo');
+    expect(resolved).toBe(nodePath.join(nodePath.dirname(devPackageJson), 'peekaboo'));
   });
 });

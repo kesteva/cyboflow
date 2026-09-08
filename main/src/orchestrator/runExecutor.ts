@@ -622,6 +622,26 @@ export class RunExecutor {
    */
   private pendingFailedFromStatus = new Map<string, 'starting' | 'running' | 'awaiting_review' | 'stuck'>();
 
+  /**
+   * Latched by beginShutdown() when the app starts its quit drain; never
+   * cleared, because nothing outlives a quit.
+   *
+   * Why it exists: drainOnQuit kills every agent process
+   * (cliManagerFactory.shutdown). The Claude SDK manager treats that abort as a
+   * CLEAN exit, so a live spawnCliProcess RESOLVES and the 'drained' arm would
+   * rest the run in awaiting_review — a turn that was cut off mid-sentence would
+   * come back looking review-ready, and boot recovery (runRecovery.ts), which
+   * only revives NON-terminal rows, would leave it there forever. The
+   * interactive PTY manager is the mirror image: its kill REJECTS ("Interactive
+   * Claude exited with code N") and the 'failed' arm would write a terminal
+   * `failed` row that is likewise never resumed. Neither status describes what
+   * happened, so while this latch is set both arms are skipped and the row keeps
+   * whatever non-terminal status it holds — which is exactly what boot recovery
+   * looks for on the next launch (resume, or the honest
+   * app_restart / outcome=interrupted force-fail).
+   */
+  private shuttingDown = false;
+
   constructor(
     protected readonly spawner: ClaudeSpawnerLike,
     private readonly registry: WorkflowRegistryLike,
@@ -917,6 +937,20 @@ export class RunExecutor {
           ...(resumeSessionId ? { resumeSessionId } : {}),
         });
 
+        if (this.shuttingDown) {
+          // Quit drain: this spawn settled because cliManagerFactory.shutdown()
+          // killed the agent (an intentional abort is a CLEAN exit to the SDK
+          // manager), not because the turn finished. Resting here would mark a
+          // cut-off turn review-ready and put it out of boot recovery's reach —
+          // see the `shuttingDown` field. Leave the row running/starting; the
+          // next launch resumes it or force-fails it honestly.
+          this.logger.info(
+            '[RunExecutor] spawn settled during quit drain — leaving the run status for boot recovery',
+            { runId },
+          );
+          return;
+        }
+
         // Iterator drained without error — the agent finished its turn. The run
         // RESTS in awaiting_review awaiting the user's Merge / PR / Dismiss
         // decision. The executor NEVER auto-completes a run.
@@ -934,6 +968,19 @@ export class RunExecutor {
         // deliverer flips it back to running.
         this.drainQueuedInputAtRest(runId);
       } catch (err) {
+        if (this.shuttingDown) {
+          // Mirror of the drained guard above for the interactive PTY substrate,
+          // whose kill REJECTS instead of resolving. That rejection IS the quit,
+          // not a run failure: writing the terminal `failed` status would strand
+          // the run, since boot recovery never revives a terminal row. Swallowed
+          // rather than re-thrown — the only caller (runLauncher's queue.add)
+          // just logs it, and at quit that log reads as a real failure.
+          this.logger.info(
+            '[RunExecutor] spawn rejected during quit drain — leaving the run status for boot recovery',
+            { runId, error: err instanceof Error ? err.message : String(err) },
+          );
+          return;
+        }
         // Stash the error message so onLifecycleTransition('failed') can pick it up.
         const message = err instanceof Error ? err.message : String(err);
         this.pendingFailedMessage.set(runId, message);
@@ -1046,6 +1093,16 @@ export class RunExecutor {
           this.logger.info('[RunExecutor] programmatic run canceled; cancel path owns terminal', { runId });
           return;
         }
+        if (this.shuttingDown) {
+          // Same quit-drain guard as the orchestrated path: the walk unwound
+          // because the agents were killed, so the run keeps its non-terminal
+          // status for boot recovery instead of resting in awaiting_review.
+          this.logger.info(
+            '[RunExecutor] programmatic walk settled during quit drain — leaving the run status for boot recovery',
+            { runId },
+          );
+          return;
+        }
         // The controller walk completed — the run RESTS in awaiting_review,
         // identical to the orchestrated 'drained' arm. The executor never
         // auto-completes a run. The controller already emitted the final step
@@ -1056,6 +1113,16 @@ export class RunExecutor {
         // the orchestrated path). See drainQueuedInputAtRest.
         this.drainQueuedInputAtRest(runId);
       } catch (err) {
+        if (this.shuttingDown) {
+          // Same quit-drain guard as the orchestrated failed arm: a step that
+          // died because its agent was killed is not a run failure, and a
+          // terminal `failed` row would never be revived by boot recovery.
+          this.logger.info(
+            '[RunExecutor] programmatic walk threw during quit drain — leaving the run status for boot recovery',
+            { runId, error: err instanceof Error ? err.message : String(err) },
+          );
+          return;
+        }
         const message = err instanceof Error ? err.message : String(err);
         this.pendingFailedMessage.set(runId, message);
         await this.onLifecycleTransition(runId, 'failed');
@@ -1292,6 +1359,18 @@ export class RunExecutor {
    */
   hasActiveExecution(runId: string): boolean {
     return this.activePanelIds.has(runId);
+  }
+
+  /**
+   * Latch this executor into shutdown mode (see the `shuttingDown` field).
+   *
+   * Called by drainOnQuit BEFORE orchestrator.stop() — and therefore before
+   * cliManagerFactory.shutdown() kills the agents — so that a spawn which
+   * settles only because of that kill does NOT transition the run. Idempotent,
+   * and deliberately one-way: there is no un-latch.
+   */
+  beginShutdown(): void {
+    this.shuttingDown = true;
   }
 
   /**

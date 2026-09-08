@@ -221,8 +221,9 @@ describe('Migration 073: approve-designs atype + per-idea arch-design', () => {
 
   it('(g) the fresh-DB initialize() path includes approve-designs + the split indexes', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration073-'));
+    let svc: DatabaseService | undefined;
     try {
-      const svc = new DatabaseService(join(dir, 'test.db'));
+      svc = new DatabaseService(join(dir, 'test.db'));
       svc.setMigrationsDirForTesting(join(__dirname, '..', 'migrations'));
       svc.initialize();
       const db = svc.getDb();
@@ -278,6 +279,7 @@ describe('Migration 073: approve-designs atype + per-idea arch-design', () => {
           .run(),
       ).toThrow(/CHECK/i);
     } finally {
+      try { svc?.close(); } catch { /* already closed */ }
       rmSync(dir, { recursive: true, force: true });
     }
   });

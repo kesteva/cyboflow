@@ -24,12 +24,14 @@
  * a vi.fn()-backed LoggerLike spy.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { EventEmitter } from 'events';
 import * as net from 'net';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import type Database from 'better-sqlite3';
-import { OrchSocketServer } from '../orchSocketServer';
+import { OrchSocketServer, isNamedPipePath } from '../orchSocketServer';
+import { orchSocketEndpoint } from '../orchSocketEndpoint';
 import { OrchTokenRegistry, ORCH_AUTH_KILL_SWITCH_ENV_VAR } from '../../orchAuthToken';
 import type { LoggerLike } from '../../types';
 import type { OrchSocketProvider } from '../../runLauncher';
@@ -37,13 +39,33 @@ import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun, seedApproval } from '../../__test_fixtures__/orchestratorTestDb';
 
 // The EADDRINUSE-recovery test needs one real bind failure, which the pre-bind
-// unlink in start() otherwise prevents. Wrap only fs.existsSync so that test can
-// suppress the pre-bind check for a single call; every other fs call (here and in
-// start()) keeps real behavior, and better-sqlite3 uses native I/O rather than
-// this module, so the DB fixtures and the rest of the suite are unaffected.
+// unlink in start() otherwise prevents. Wrap fs.existsSync so that test can
+// suppress the pre-bind check for a single call; mkdirSync/chmodSync/statSync/
+// rmSync are also wrapped (still delegating to the real implementation by
+// default) purely so the named-pipe test below can assert they were never
+// called for a pipe path — every OTHER fs call here and in start() keeps real
+// behavior, and better-sqlite3 uses native I/O rather than this module, so the
+// DB fixtures and the rest of the suite are unaffected.
 vi.mock('fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('fs')>();
-  return { ...actual, existsSync: vi.fn(actual.existsSync) };
+  return {
+    ...actual,
+    existsSync: vi.fn(actual.existsSync),
+    mkdirSync: vi.fn(actual.mkdirSync),
+    chmodSync: vi.fn(actual.chmodSync),
+    statSync: vi.fn(actual.statSync),
+    rmSync: vi.fn(actual.rmSync),
+  };
+});
+
+// The named-pipe test below substitutes a fake net.Server for one start() call
+// (a real `\\.\pipe\...` listen() cannot bind outside Windows). Wrapping
+// createServer in vi.fn(actual.createServer) keeps every other test's real
+// net.Server behavior unchanged; only that one test's mockImplementationOnce
+// diverts a single call.
+vi.mock('net', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('net')>();
+  return { ...actual, createServer: vi.fn(actual.createServer) };
 });
 
 // ---------------------------------------------------------------------------
@@ -66,9 +88,17 @@ function makeSpyLogger(): SpyLogger {
   };
 }
 
-/** A unique tmp socket path per call (short enough to stay under the OS limit). */
+/**
+ * A unique tmp socket path per call (short enough to stay under the OS limit).
+ * On Windows a plain fs path cannot host an AF_UNIX bind (EACCES without
+ * elevation), so the fixture routes the name through the production
+ * orchSocketEndpoint seam — exactly what index.ts does at boot — and binds a
+ * named pipe instead. The server code under test is unchanged.
+ */
 function makeTmpSocketPath(): string {
-  return path.join(os.tmpdir(), `orch-${process.pid}-${Math.random().toString(36).slice(2, 8)}.sock`);
+  return orchSocketEndpoint(
+    path.join(os.tmpdir(), `orch-${process.pid}-${Math.random().toString(36).slice(2, 8)}.sock`),
+  );
 }
 
 /**
@@ -314,7 +344,14 @@ describe('OrchSocketServer', () => {
   // 5. start() unlinks stale socket + creates dir; stop() closes the server
   // -------------------------------------------------------------------------
 
-  it('start() creates the sockets dir and unlinks a stale socket file; stop() closes the server', async () => {
+  // POSIX-only: staging a stale socket FILE (and asserting on the fs node the
+  // bind creates) presumes a unix socket is a real filesystem node. Windows
+  // named pipes have no stable fs node — statSync/existsSync race with EBUSY —
+  // and no stale node can occupy a pipe name; stop()-closes coverage is shared
+  // with the transport tests above.
+  it.skipIf(process.platform === 'win32')(
+    'start() creates the sockets dir and unlinks a stale socket file; stop() closes the server',
+    async () => {
     // Point at a nested, not-yet-existing sockets directory + a stale file.
     const dir = path.join(os.tmpdir(), `orch-dir-${process.pid}-${Math.random().toString(36).slice(2, 8)}`);
     socketPath = path.join(dir, 'orch.sock');
@@ -367,13 +404,19 @@ describe('OrchSocketServer', () => {
 
     // Reset so afterEach's stop() is a no-op (already stopped).
     fs.rmSync(dir, { recursive: true, force: true });
-  });
+    },
+  );
 
   // -------------------------------------------------------------------------
   // 6. start() recovers from EADDRINUSE (path in use at bind time)
   // -------------------------------------------------------------------------
 
-  it('recovers from EADDRINUSE by unlinking the in-use socket and retrying once', async () => {
+  // POSIX-only: a stale bind failure requires a unix-socket FILE left occupying
+  // the path. Windows named pipes vanish with their server, so no stale node can
+  // occupy a pipe name and the reclaim path is unreachable there.
+  it.skipIf(process.platform === 'win32')(
+    'recovers from EADDRINUSE by unlinking the in-use socket and retrying once',
+    async () => {
     // A leftover file occupies the socket path AND the pre-bind unlink is
     // suppressed for the first check, so listen() actually throws EADDRINUSE
     // (binding a unix socket fails when any file already occupies the path) —
@@ -399,7 +442,8 @@ describe('OrchSocketServer', () => {
     );
     const lines = await waitForLines(1);
     expect(parse(lines[0]).ok).toBe(true);
-  });
+    },
+  );
 
   // -------------------------------------------------------------------------
   // 7. start() refuses to clobber a LIVE peer's socket (two-instance guard)
@@ -409,7 +453,10 @@ describe('OrchSocketServer', () => {
     // Server A owns the path and is actively listening.
     server = new OrchSocketServer(socketPath, dbAdapter(db), logger, {}, tokens);
     await server.start();
-    expect(fs.existsSync(socketPath)).toBe(true);
+    // The bind's fs node is only inspectable on POSIX — Windows named pipes have
+    // no stable fs node (existsSync/statSync race with EBUSY). Live-ness is
+    // asserted below via the connect-probe and the real client round-trip.
+    if (process.platform !== 'win32') expect(fs.existsSync(socketPath)).toBe(true);
 
     // Server B targets the SAME path. Its start() must detect the live listener
     // via the connect-probe and reject, rather than unlink A's socket out from
@@ -460,7 +507,13 @@ describe('OrchSocketServer', () => {
   // 9. stop() refuses to unlink a socket file another instance now owns
   // -------------------------------------------------------------------------
 
-  it('stop() does NOT unlink the socket file when another instance has rebound the path', async () => {
+  // POSIX-only: the scenario hinges on unlinking a bound socket file by path and
+  // on inode-ownership checks — both unix-socket fs-node semantics. Windows named
+  // pipes have no stable fs node (rm/stat on a live pipe fail EBUSY) and the name
+  // cannot be force-replaced while a server holds it.
+  it.skipIf(process.platform === 'win32')(
+    'stop() does NOT unlink the socket file when another instance has rebound the path',
+    async () => {
     // Server A binds the path and records its inode.
     const serverA = new OrchSocketServer(socketPath, dbAdapter(db), logger, {}, tokens);
     await serverA.start();
@@ -498,7 +551,8 @@ describe('OrchSocketServer', () => {
 
     await serverB.stop();
     // afterEach's stop() targets `server`, which this test never assigned.
-  });
+    },
+  );
 
   // -------------------------------------------------------------------------
   // Structural interface conformance (compile-time assertions)
@@ -784,5 +838,93 @@ describe('OrchSocketServer', () => {
       await server.stop();
       fs.rmSync(dir, { recursive: true, force: true });
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // Named pipes (Windows) — every unix-socket fs step must be skipped
+  // -------------------------------------------------------------------------
+
+  describe('named pipes', () => {
+    /**
+     * A fake net.Server standing in for a real named-pipe bind: a real
+     * `\\.\pipe\...` listen() cannot bind on a non-Windows host (there is no
+     * AF_UNIX-style fallback), so this drives start()/stop()'s pipe branches
+     * through the SAME event contract a real net.Server gives them — listen()
+     * resolves asynchronously via a 'listening' event (registered as a
+     * `once` listener before listen() is called, exactly like production),
+     * and close() resolves via its callback.
+     */
+    class FakeServer extends EventEmitter {
+      listening = false;
+      listen(_path: string): this {
+        setImmediate(() => {
+          this.listening = true;
+          this.emit('listening');
+        });
+        return this;
+      }
+      close(cb?: () => void): this {
+        this.listening = false;
+        if (cb) setImmediate(cb);
+        return this;
+      }
+      unref(): this {
+        return this;
+      }
+    }
+
+    it('skips every unix-socket fs call for a pipe path, and stop() closes the server', async () => {
+      const pipePath = '\\\\.\\pipe\\cyboflow-test-orch';
+      const fake = new FakeServer();
+      vi.mocked(net.createServer).mockImplementationOnce(() => fake as unknown as net.Server);
+      // Isolate this test's assertions from any fs activity earlier tests left
+      // behind on these shared vi.fn() wrappers.
+      vi.mocked(fs.mkdirSync).mockClear();
+      vi.mocked(fs.chmodSync).mockClear();
+      vi.mocked(fs.existsSync).mockClear();
+      vi.mocked(fs.statSync).mockClear();
+      vi.mocked(fs.rmSync).mockClear();
+
+      server = new OrchSocketServer(pipePath, dbAdapter(db), logger, {}, tokens);
+      await server.start();
+
+      expect(server.getSocketPath()).toBe(pipePath);
+      expect(fake.listening).toBe(true);
+      // boundInode has no meaning for a pipe — isSocketPathIntact must fall
+      // back to "is the server object still listening".
+      expect(server.isSocketPathIntact()).toBe(true);
+
+      expect(fs.mkdirSync).not.toHaveBeenCalled();
+      expect(fs.chmodSync).not.toHaveBeenCalled();
+      expect(fs.existsSync).not.toHaveBeenCalled();
+      expect(fs.statSync).not.toHaveBeenCalled();
+      expect(fs.rmSync).not.toHaveBeenCalled();
+
+      await server.stop();
+
+      expect(fake.listening).toBe(false);
+      // stop() must still have closed the fake server even though every
+      // unix-socket fs step was skipped.
+      expect(fs.rmSync).not.toHaveBeenCalled();
+      expect(server.isSocketPathIntact()).toBe(false);
+    });
+  });
+});
+
+describe('isNamedPipePath', () => {
+  it('is true for a Windows named pipe path', () => {
+    expect(isNamedPipePath('\\\\.\\pipe\\cyboflow-ada-1276b450-orch')).toBe(true);
+  });
+
+  it('is case-insensitive on the prefix', () => {
+    expect(isNamedPipePath('\\\\.\\PIPE\\cyboflow-ada-1276b450-orch')).toBe(true);
+  });
+
+  it('is false for a POSIX socket path', () => {
+    expect(isNamedPipePath('/Users/dev/.cyboflow/sockets/orch.sock')).toBe(false);
+  });
+
+  it('is false for a Windows drive-letter path (not a pipe)', () => {
+    expect(isNamedPipePath('C:/Users/dev/.cyboflow/sockets/orch.sock')).toBe(false);
   });
 });

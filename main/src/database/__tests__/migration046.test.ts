@@ -205,8 +205,9 @@ describe('Migration 046: notification review-item kind', () => {
 
   it('(f) the fresh-DB initialize() path accepts notification + keeps the indexes', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration046-'));
+    let svc: DatabaseService | undefined;
     try {
-      const svc = new DatabaseService(join(dir, 'test.db'));
+      svc = new DatabaseService(join(dir, 'test.db'));
       svc.setMigrationsDirForTesting(join(__dirname, '..', 'migrations'));
       svc.initialize();
       const db = svc.getDb();
@@ -232,6 +233,7 @@ describe('Migration 046: notification review-item kind', () => {
       expect(idxNames).toContain('idx_review_items_project_status');
       expect(idxNames).toContain('idx_review_items_project_selected');
     } finally {
+      try { svc?.close(); } catch { /* already closed */ }
       rmSync(dir, { recursive: true, force: true });
     }
   });

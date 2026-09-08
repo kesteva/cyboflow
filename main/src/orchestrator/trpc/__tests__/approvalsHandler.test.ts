@@ -28,11 +28,58 @@
  *  8. reject branch — UPDATE failure logs with [rejectRestOfRun] prefix.
  */
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { execSync } from 'child_process';
+import { readdirSync, readFileSync, type Dirent } from 'fs';
 import { join } from 'path';
 import { approveRestOfRunHandler, rejectRestOfRunHandler } from '../routers/approvals';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun, seedApproval } from '../../__test_fixtures__/orchestratorTestDb';
+
+/**
+ * Sweep the repo's source trees for any of `patterns` and return the matches
+ * (a `file:line:line-text` report, one per line, like grep -n).
+ *
+ * Pure Node rather than an external grep binary (absent on Windows) or
+ * `git grep` (a linked worktree's .git pointer can carry a gitdir path that
+ * only the creating host resolves, so a subprocess git cannot be assumed to
+ * work here). Walks main/src, frontend/src and shared/types, skipping
+ * `__tests__` trees (this file's own assertion strings would self-match) and
+ * `excludeFiles` (repo-relative POSIX paths). Returns '' when nothing matches.
+ */
+function sweepSourceFor(patterns: string[], excludeFiles: string[] = []): string {
+  const repoRoot = join(process.cwd(), '..');
+  const excluded = new Set(excludeFiles);
+  const matches: string[] = [];
+  const walk = (dir: string, rel: string): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const relPath = `${rel}${rel ? '/' : ''}${entry.name}`;
+      if (entry.isDirectory()) {
+        if (entry.name === '__tests__' || entry.name === 'node_modules' || entry.name === 'dist') continue;
+        walk(join(dir, entry.name), relPath);
+        continue;
+      }
+      if (entry.isFile() && /\.(ts|tsx|mts|cts|js|mjs|cjs|jsx)$/.test(entry.name)) {
+        if (excluded.has(relPath)) continue;
+        const text = readFileSync(join(dir, entry.name), 'utf8');
+        text.split('\n').forEach((line, i) => {
+          if (patterns.some((p) => line.includes(p))) {
+            matches.push(`${relPath}:${i + 1}: ${line.trim()}`);
+          }
+        });
+      }
+    }
+  };
+  for (const dir of ['main/src', 'frontend/src', 'shared/types']) {
+    walk(join(repoRoot, ...dir.split('/')), dir);
+  }
+  return matches.join('\n');
+}
+
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -96,17 +143,9 @@ describe('approveRestOfRun handler', () => {
   // Test 3: sweep — no global approve-all symbol in production source
   // -------------------------------------------------------------------------
   it('codebase contains no global approve-all symbol (sweep)', () => {
-    // Run grep from the project root (process.cwd() in the main workspace is
-    // the main/ package directory; we need to go one level up to the repo root).
     // The --exclude-dir=__tests__ flag prevents this test file's own assertion
     // strings from triggering a false positive.
-    const repoRoot = join(process.cwd(), '..');
-    const result = execSync(
-      `grep -rn "approveAll\\|approve_all\\|approveGlobal" ` +
-      `"${repoRoot}/main/src" "${repoRoot}/frontend/src" "${repoRoot}/shared/types" ` +
-      `--exclude-dir=__tests__ || true`,
-      { encoding: 'utf8' },
-    );
+    const result = sweepSourceFor(['approveAll', 'approve_all', 'approveGlobal']);
 
     // The grep should return empty output (no matches outside test files).
     expect(result.trim()).toBe('');
@@ -177,12 +216,9 @@ describe('rejectRestOfRun handler', () => {
     // strings from triggering a false positive.
     // cyboflowMcpServer.ts is excluded: its `rejectAllPending` function rejects
     // IPC socket requests — unrelated to the approvals system and predates this task.
-    const repoRoot = join(process.cwd(), '..');
-    const result = execSync(
-      `grep -rn "rejectAll\\|reject_all\\|rejectGlobal" ` +
-      `"${repoRoot}/main/src" "${repoRoot}/frontend/src" "${repoRoot}/shared/types" ` +
-      `--exclude-dir=__tests__ --exclude=cyboflowMcpServer.ts || true`,
-      { encoding: 'utf8' },
+    const result = sweepSourceFor(
+      ['rejectAll', 'reject_all', 'rejectGlobal'],
+      ['main/src/orchestrator/mcpServer/cyboflowMcpServer.ts'],
     );
 
     // The grep should return empty output (no matches outside test files).

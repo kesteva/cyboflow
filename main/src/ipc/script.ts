@@ -229,6 +229,7 @@ export function registerScriptHandlers(ipcMain: IpcMain, { sessionManager }: App
           {
             cwd: session.worktreePath,
             shell: true,
+            windowsHide: true,
             env: {
               ...process.env,
               PATH: shellPath  // Use enhanced PATH that includes user's shell PATH
@@ -254,7 +255,12 @@ export function registerScriptHandlers(ipcMain: IpcMain, { sessionManager }: App
                 if (foundPath) {
                   errorMessage = `IDE command not found: ${project.open_ide_command}.\n\nThe command '${commandName}' was found at: ${foundPath}\n\nTry updating your project settings to use the full path:\n${foundPath} .`;
                 } else {
-                  errorMessage = `IDE command not found: ${project.open_ide_command}.\n\nMake sure the command is in your PATH or use a full path.\n\nFor VS Code, try: /Applications/Visual\\ Studio\\ Code.app/Contents/Resources/app/bin/code .`;
+                  // The VS Code example is platform-specific: the .app-relative
+                  // launcher path only exists on macOS.
+                  const vscodeHint = process.platform === 'win32'
+                    ? `For VS Code, try: code "${session.worktreePath}"`
+                    : 'For VS Code, try: /Applications/Visual\\ Studio\\ Code.app/Contents/Resources/app/bin/code .';
+                  errorMessage = `IDE command not found: ${project.open_ide_command}.\n\nMake sure the command is in your PATH or use a full path.\n\n${vscodeHint}`;
                 }
               } else if (error.code) {
                 errorMessage = `IDE command failed with exit code ${error.code}: ${stderr || error.message}`;

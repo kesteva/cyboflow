@@ -292,6 +292,7 @@ export class PiSdkManager extends AbstractCliManager {
             [PI_GATE_ENV_KEYS.mode]: state.gateMode,
           },
           stdio: ['pipe', 'pipe', 'pipe'],
+          windowsHide: true,
         },
       );
       state.child = child;

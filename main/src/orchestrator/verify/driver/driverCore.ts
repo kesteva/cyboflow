@@ -91,6 +91,9 @@
  * caller.
  */
 import { spawn } from 'node:child_process';
+import { killPidSync } from '../../../utils/platformProcess';
+import { cmdExeInvocation } from '../../../utils/win32CmdLine';
+import { ShellDetector } from '../../../utils/shellDetector';
 import { closeSync, existsSync, openSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
@@ -441,6 +444,14 @@ export interface DriverDeps {
    * the spawn error in its detail, never an unhandled throw.
    */
   runPeekaboo(bin: string, args: string[], timeoutMs: number): Promise<string>;
+  /**
+   * Test seam: which platform's capture path `native-screenshot` runs.
+   * Defaults to the host platform — the peekaboo CLI is macOS-only, so
+   * Windows resolves the `runWindowsCapture` stand-in instead.
+   */
+  platform?: NodeJS.Platform;
+  /** Windows capture stand-in; injectable so tests need not spawn PowerShell. */
+  runWindowsCapture?: (outPath: string, timeoutMs: number) => Promise<void>;
   /** Write `.driver/attest.json` (creating the dotdir) — the runner's attestation source of truth. */
   writeAttestFile(path: string, record: DriverAttestRecord): Promise<void>;
   stdout(line: string): void;
@@ -510,6 +521,88 @@ export function peekabooListWindowsArgs(app: string): string[] {
  */
 export function peekabooCaptureArgs(outPath: string, appTarget?: string): string[] {
   return appTarget ? ['image', '--app', appTarget, '--path', outPath] : ['image', '--path', outPath];
+}
+
+/**
+ * Windows stand-in for `peekaboo image`: a PowerShell capture of the whole
+ * VIRTUAL SCREEN via System.Drawing, written to the same `--path` target the
+ * peekaboo invocation would have used. Peekaboo is macOS-only, so without
+ * this the driver's observe surface (`native-screenshot`) has no Windows
+ * executable path at all.
+ *
+ * Honest deviation: peekaboo `--app <target>` scopes the capture to one
+ * application's window; there is no cheap Windows equivalent, so this always
+ * captures every screen. A caller that named an appTarget gets the capture
+ * plus a note in the output — the evidence is WIDER than requested, never
+ * narrower.
+ */
+
+/**
+ * The spawn argv for the capture script, pulled out so a test on any host
+ * can pin the exact executable + args without spawning a real PowerShell.
+ * The executable is always the fixed System32 path (see
+ * {@link ShellDetector.windowsPowerShellPath}), never a bare `'powershell'`
+ * that PATH resolution could resolve to a Microsoft Store execution-alias
+ * stub instead of the real interpreter.
+ */
+export function windowsScreenCaptureArgs(
+  scriptPath: string,
+  outPath: string,
+): { command: string; args: string[] } {
+  return {
+    command: ShellDetector.windowsPowerShellPath(),
+    args: ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-OutPath', outPath],
+  };
+}
+
+async function runWindowsScreenCapture(
+  outPath: string,
+  timeoutMs: number,
+): Promise<void> {
+  await mkdir(dirname(outPath), { recursive: true });
+  const scriptPath = `${outPath}.capture.ps1`;
+  const script = [
+    'param([string]$OutPath)',
+    'Add-Type -AssemblyName System.Drawing;',
+    'Add-Type -AssemblyName System.Windows.Forms;',
+    '$b = [System.Windows.Forms.SystemInformation]::VirtualScreen;',
+    '$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height;',
+    '$g = [System.Drawing.Graphics]::FromImage($bmp);',
+    '$g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size);',
+    '$bmp.Save($OutPath, [System.Drawing.Imaging.ImageFormat]::Png);',
+    '$g.Dispose();',
+    '$bmp.Dispose();',
+  ].join('\n');
+  await writeFile(scriptPath, script, 'utf8');
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const { command, args } = windowsScreenCaptureArgs(scriptPath, outPath);
+      const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+      let stderr = '';
+      child.stderr?.on('data', (d: Buffer) => {
+        stderr += String(d);
+      });
+      const timer = setTimeout(() => {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* already gone */
+        }
+        reject(new Error('windows screen capture timed out'));
+      }, timeoutMs);
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        if (code === 0 && existsSync(outPath)) resolve();
+        else reject(new Error(`windows screen capture failed (exit ${code}): ${stderr.trim().slice(-400)}`));
+      });
+      child.on('error', (err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+    });
+  } finally {
+    await rm(scriptPath, { force: true }).catch(() => {});
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1169,9 +1262,20 @@ async function nativeScreenshotCommand(
 ): Promise<number> {
   try {
     await deps.ensureDir(artifactsDir);
+    const outPath = join(artifactsDir, command.name);
+    if ((deps.platform ?? process.platform) === 'win32') {
+      // Peekaboo is macOS-only; capture via PowerShell instead (whole virtual
+      // screen — see runWindowsScreenCapture for the honest --app deviation).
+      await (deps.runWindowsCapture ?? runWindowsScreenCapture)(outPath, PEEKABOO_TIMEOUT_MS);
+      deps.stdout(
+        `ok: native screenshot ${command.name}` +
+          (command.appTarget ? ' (full virtual screen; --app scoping is macOS-only)' : ''),
+      );
+      return 0;
+    }
     await deps.runPeekaboo(
       resolvePeekabooBin(env),
-      peekabooCaptureArgs(join(artifactsDir, command.name), command.appTarget),
+      peekabooCaptureArgs(outPath, command.appTarget),
       PEEKABOO_TIMEOUT_MS,
     );
     deps.stdout(`ok: native screenshot ${command.name}`);
@@ -1353,7 +1457,7 @@ async function defaultSpawnDetachedChromium(args: {
       '--no-sandbox',
       `--user-data-dir=${args.userDataDir}`,
     ],
-    { detached: true, stdio: 'ignore' },
+    { detached: true, stdio: 'ignore', windowsHide: true },
   );
   child.unref();
   if (!child.pid) {
@@ -1383,7 +1487,20 @@ async function defaultSpawnDetachedShell(args: {
   await mkdir(dirname(args.logPath), { recursive: true });
   const fd = openSync(args.logPath, 'a');
   try {
-    const child = spawn('sh', ['-c', args.command], { detached: true, stdio: ['ignore', fd, fd] });
+    // `detached: true` + unref is the POSIX detached-shape (new session via
+    // setsid). Windows has no `sh` — cmd.exe /d /s /c is the interpreter that
+    // runs the command line — and its tree is reaped via taskkill in
+    // defaultKillPid above, so detaching buys nothing there and costs a visible
+    // console: DETACHED_PROCESS overrides CREATE_NO_WINDOW for a console child.
+    const isWindows = process.platform === 'win32';
+    const cmd = isWindows ? cmdExeInvocation(args.command) : null;
+    const child = cmd
+      ? spawn(cmd.command, cmd.args, {
+          stdio: ['ignore', fd, fd],
+          windowsHide: true,
+          windowsVerbatimArguments: cmd.windowsVerbatimArguments,
+        })
+      : spawn('sh', ['-c', args.command], { detached: true, stdio: ['ignore', fd, fd], windowsHide: true });
     child.unref();
     if (!child.pid) {
       throw new Error('failed to spawn the serve command: no pid assigned');
@@ -1441,6 +1558,17 @@ function defaultIsProcessAlive(pid: number): boolean {
 
 function defaultKillPid(pid: number, signal: NodeJS.Signals): void {
   try {
+    // A NEGATIVE pid means "kill the whole process group" on POSIX. Node on
+    // Windows rejects negative pids outright (EINVAL), and `detached: true`
+    // gives the child its own process group there, so the tree kill is done
+    // with `taskkill /T /F` on the positive pid instead — the Windows
+    // equivalent of taking down the group. Callers pass -pid only on POSIX
+    // semantics; both sign shapes land here. The synchronous taskkill
+    // primitive lives in utils/platformProcess.ts.
+    if (process.platform === 'win32') {
+      killPidSync(pid);
+      return;
+    }
     process.kill(pid, signal);
   } catch {
     // already gone — stop is best-effort.
@@ -1467,7 +1595,7 @@ async function defaultHttpGet(url: string, timeoutMs: number): Promise<{ status:
  */
 function defaultRunPeekaboo(bin: string, args: string[], timeoutMs: number): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
     let stdout = '';
     let stderr = '';
     let settled = false;

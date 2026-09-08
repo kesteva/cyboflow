@@ -31,6 +31,7 @@ import {
 import { transitionToRunning } from './cyboflow/transitions';
 import { assertTransitionAllowed } from '../../../shared/workflows/runStateMachine';
 import { isPtyLane } from './panelLane';
+import { normalizePathSeparators } from '../utils/posixPath';
 
 /** Minimal session shape the core resolves + returns (a real `Session`). */
 export interface QuickSessionRow {
@@ -199,18 +200,25 @@ export async function createQuickSessionCore(
   // calls share the emitter, so filter by worktreePath: TaskQueue's
   // ensureUniqueNames may append a `-<n>` suffix on same-second collisions.
   const session = await new Promise<QuickSessionRow>((resolve, reject) => {
+    // Path matching is separator-agnostic: worktreePath comes from path.join
+    // (worktreeManager), so on Windows it carries BACKSLASHES
+    // (C:\proj\.cyboflow\worktrees\<name>) and every '/'-anchored check below
+    // would silently never fire. Normalize to '/' first, then compare the final
+    // segment — covers the base form and any `<name>-<n>` collision suffix, on
+    // both platforms (and a bare-name worktreePath with no separator at all).
     const suffixed = new RegExp(`/${branchName}-\\d+$`);
     // In-place sessions (migration 047) have worktreePath === the project path,
     // never `/${branchName}`, so the path match can never fire — fall back to the
     // session NAME (= worktree template), with the same ` <n>` (name) / `-<n>`
     // (worktree) collision suffixes. Scoped to in-place so worktree sessions keep
-    // matching by path exactly as before.
+    // matching by path exactly as before. Names carry no separators, so this
+    // branch needs no normalization.
     const nameSuffixed = new RegExp(`^${branchName}[ -]\\d+$`);
     const onCreated = (createdSession: QuickSessionRow) => {
-      const wt = createdSession.worktreePath ?? '';
+      const wt = normalizePathSeparators(createdSession.worktreePath ?? '');
       const name = createdSession.name ?? '';
       const matches =
-        wt.endsWith(`/${branchName}`) ||
+        wt.split('/').pop() === branchName ||
         suffixed.test(wt) ||
         (inPlace && (name === branchName || nameSuffixed.test(name)));
       if (!matches) return;

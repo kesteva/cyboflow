@@ -1,0 +1,9 @@
+# Every text file is LF in the index AND in the working tree on every platform.
+# Git for Windows defaults to core.autocrlf=true (GitHub's windows-latest
+# runners included), which would otherwise check the tree out CRLF-terminated
+# and break, silently: the bundled-agent frontmatter parser matched LF-only
+# fences and produced an empty name/description for every agent, vitest's
+# hashbang stripping (`/^#!.*\n/`) left `#!` in a `.mjs` under test, and any
+# test that regex-matches a file's line endings failed. Binary files are
+# detected by content (`text=auto`) and left alone.
+* text=auto eol=lf

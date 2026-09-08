@@ -25,7 +25,9 @@
  * logged and swallowed, never thrown — reaping must never block close-out/quit.
  */
 import { execFile } from 'node:child_process';
+import { execWindowsProcessTable } from './winProcessTable';
 import type { LoggerLike } from '../orchestrator/types';
+import { normalizePathSeparators } from '../utils/posixPath';
 
 /** A single process row parsed from `ps` output. */
 export interface ProcessInfo {
@@ -81,13 +83,18 @@ function parsePsOutput(stdout: string): ProcessInfo[] {
 
 /** Default process lister: `ps -axo pid=,command=` (no header, all processes). */
 function defaultListProcesses(): Promise<ProcessInfo[]> {
+  if (process.platform === 'win32') {
+    // Windows has no `ps`; the PowerShell stand-in emits the same line shape,
+    // so the parser below is used unchanged.
+    return execWindowsProcessTable('pid-command').then(parsePsOutput);
+  }
   return new Promise<ProcessInfo[]>((resolve, reject) => {
     execFile(
       'ps',
       ['-axo', 'pid=,command='],
       // Command lines can be long; 16 MiB is comfortably above any realistic
       // full process table.
-      { maxBuffer: 16 * 1024 * 1024 },
+      { maxBuffer: 16 * 1024 * 1024, windowsHide: true },
       (err, stdout) => {
         if (err) {
           reject(err instanceof Error ? err : new Error(String(err)));
@@ -122,7 +129,9 @@ export class PrototypeServerReaper {
    * empty/undefined `runArtifactsDir` (matching on '' would kill ALL servers).
    */
   async reapForRun(runArtifactsDir: string): Promise<void> {
-    const base = trimDir(runArtifactsDir);
+    // Normalize to forward slashes so the needles match Windows command lines
+    // too (identity on macOS/Linux — no backslashes there).
+    const base = normalizePathSeparators(trimDir(runArtifactsDir));
     if (base.length === 0) {
       this.logger?.debug('[PrototypeServerReaper] empty runArtifactsDir — skipping reap');
       return;
@@ -154,7 +163,8 @@ export class PrototypeServerReaper {
     artifactsRunsRoot: string,
     isRunLive?: (runId: string) => boolean,
   ): Promise<void> {
-    const root = trimDir(artifactsRunsRoot);
+    // Normalize to forward slashes (identity on macOS/Linux) — see reapForRun.
+    const root = normalizePathSeparators(trimDir(artifactsRunsRoot));
     if (root.length === 0) {
       this.logger?.debug('[PrototypeServerReaper] empty artifactsRunsRoot — skipping sweep');
       return;
@@ -201,6 +211,9 @@ export class PrototypeServerReaper {
     context: string,
     target: string,
   ): Promise<void> {
+    // Command lines are matched with backslashes normalized to forward slashes
+    // (identity on macOS/Linux) so the forward-slash path segments above match
+    // on Windows too.
     let processes: ProcessInfo[];
     try {
       processes = await this.listProcesses();
@@ -215,7 +228,7 @@ export class PrototypeServerReaper {
 
     let killed = 0;
     for (const proc of processes) {
-      if (!matches(proc.command)) continue;
+      if (!matches(normalizePathSeparators(proc.command))) continue;
       try {
         this.killPid(proc.pid);
         killed += 1;

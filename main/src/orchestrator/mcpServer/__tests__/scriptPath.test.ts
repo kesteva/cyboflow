@@ -25,7 +25,10 @@ import * as path from 'path';
 // warm-up.
 
 let mockIsPackaged = false;
-const FAKE_RESOURCES_PATH = '/fake/resources';
+// Platform-native separators: resolveMcpServerScriptPath joins with path.join,
+// which converts to the platform separator — a '/fake/resources' constant would
+// never appear in the win32 result.
+const FAKE_RESOURCES_PATH = process.platform === 'win32' ? '\\fake\\resources' : '/fake/resources';
 
 vi.mock('electron', () => ({
   app: {

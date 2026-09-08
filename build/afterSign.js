@@ -32,9 +32,14 @@
  *    better-sqlite3 layouts: <= v12 compiled `build/Release/better_sqlite3.node`
  *    per host ABI; >= v13 is N-API and ships one prebuild per platform as
  *    `prebuilds/<platform>-<arch>.node` (flat files — node-pty's prebuilds are
- *    `prebuilds/<platform>-<arch>/<name>.node` directories). Both are recognised.
- *    A per-arch build only carries the addon for its own arch, so prebuilds for
- *    the OTHER darwin arch are skipped by the arch check rather than judged.
+ *    `prebuilds/<platform>-<arch>/<name>.node` directories). Both layouts are
+ *    recognised on EVERY platform this hook verifies (darwin and win32 alike):
+ *    `isForeignPrebuild` / `isBetterSqliteAddon` / `findBetterSqliteAddon` all
+ *    take the target platform, defaulting to `darwin` so the mac call sites
+ *    below are unchanged; the Windows arm passes `'win32'` explicitly. A
+ *    per-arch build only carries the addon for its own arch, so prebuilds for
+ *    the OTHER arch of the SAME platform are skipped by the arch check rather
+ *    than judged.
  *
  *    Every failure is collected and reported in ONE error, so a release
  *    engineer sees everything that is wrong in a single pass rather than
@@ -43,6 +48,15 @@
  *    Escape hatch: CYBOFLOW_SKIP_BUNDLE_CHECKS=1 skips the hard checks (loudly).
  *    Missing signing credentials do NOT skip them — an unsigned dev build is
  *    still a build whose bundle can be wrong-arch or ABI-broken.
+ *
+ *    Windows gets the same three checks against the win-unpacked layout
+ *    (`verifyWindowsBundle`): the PE machine type of `<productName>.exe`
+ *    read from the COFF header (there is no `lipo` on Windows), the same
+ *    ELECTRON_RUN_AS_NODE load probe of the packaged better-sqlite3 addon —
+ *    the legacy `build/Release/better_sqlite3.node` OR the v13 N-API prebuild
+ *    at `prebuilds/win32-<arch>.node` (better-sqlite3) /
+ *    `prebuilds/win32-<arch>/<name>.node` (node-pty) — and a size floor on the
+ *    unpacked directory. The JAR tripwire stays mac-only.
  *
  * Notarization is delegated to electron-builder's built-in hook (controlled
  * by build.mac.notarize in package.json). This script does NOT invoke the
@@ -63,6 +77,8 @@ const { execFileSync } = require('child_process');
 const DEFAULT_MIN_APP_BYTES = 150 * 1024 * 1024;
 /** The asar carries main + frontend + node_modules; a stub is orders smaller. */
 const DEFAULT_MIN_ASAR_BYTES = 10 * 1024 * 1024;
+/** A real win-unpacked dir measures ~1.1 GB; near this floor is a stub. */
+const DEFAULT_MIN_WIN_UNPACKED_BYTES = 300 * 1024 * 1024;
 
 const SKIP_ENV_VAR = 'CYBOFLOW_SKIP_BUNDLE_CHECKS';
 
@@ -79,6 +95,13 @@ const SLICES_BY_ARCH = {
   x64: ['x86_64', 'x86_64h'],
   armv7l: ['armv7', 'armv7s'],
   arm64: ['arm64', 'arm64e'],
+};
+
+/** COFF machine types (PE header) that satisfy each arch on Windows. */
+const PE_MACHINE_BY_ARCH = {
+  ia32: 0x014c,
+  x64: 0x8664,
+  arm64: 0xaa64,
 };
 
 /** Default command runner; injectable so tests can stub command execution. */
@@ -142,6 +165,22 @@ function archMatches(slices, expectedArch, allowSingleSliceUniversal = false) {
 }
 
 /**
+ * Read the COFF machine type out of a PE image header (the Windows equivalent
+ * of asking `lipo` for the Mach-O slices). `buffer` must start with the DOS
+ * 'MZ' magic; the uint32 at 0x3C points at the 'PE\0\0' signature, whose
+ * COFF header carries the machine type as its first uint16. Returns null when
+ * the buffer is not a PE image or is truncated — never throws.
+ */
+function readPeMachineType(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 0x40) return null;
+  if (buffer.readUInt16LE(0) !== 0x5a4d) return null; // 'MZ'
+  const peOffset = buffer.readUInt32LE(0x3c);
+  if (peOffset + 6 > buffer.length) return null;
+  if (buffer.readUInt32LE(peOffset) !== 0x00004550) return null; // 'PE\0\0'
+  return buffer.readUInt16LE(peOffset + 4);
+}
+
+/**
  * Resolve the bundle's main executable from Contents/Info.plist.
  *
  * The product name varies by variant ("Cyboflow" vs "Cyboflow Dev"), so the
@@ -182,8 +221,14 @@ function readBundleExecutableName(appPath, execFile = defaultExecFile) {
  * node-pty's `prebuilds/<platform>-<arch>/<name>.node` and better-sqlite3 v13's
  * flat `prebuilds/<platform>-<arch>.node`. Returns null for a non-prebuild.
  */
+// Both separators, not path.sep: on Windows a path can legitimately arrive with
+// forward slashes (Node accepts either), and splitting on `\` alone parsed such a
+// prebuild path to null — "not a prebuild" — so every foreign prebuild passed as
+// native. On POSIX a backslash never appears in these paths, so nothing changes.
+const PATH_SEPARATORS = /[\\/]/;
+
 function parsePrebuildTarget(file) {
-  const segments = file.split(path.sep);
+  const segments = file.split(PATH_SEPARATORS);
   const idx = segments.lastIndexOf('prebuilds');
   if (idx === -1 || idx + 1 >= segments.length) return null;
   const label = segments[idx + 1].replace(/\.node$/, '');
@@ -193,22 +238,27 @@ function parsePrebuildTarget(file) {
 }
 
 /**
- * Is this `.node` a prebuilt binary this macOS build does not ship for?
+ * Is this `.node` a prebuilt binary this build does not ship for?
  *
- * Two kinds. (1) Non-macOS platforms: node-pty-prebuilt-multiarch and
+ * Two kinds. (1) A FOREIGN platform: node-pty-prebuilt-multiarch and
  * better-sqlite3 ship prebuilds for every platform they support (linux, win32,
- * …), and they ride along in the asar even on a macOS build. Those are ELF/PE,
- * not Mach-O, so `lipo -archs` cannot read them — feeding them to the arch check
- * produces dozens of spurious "could not read the architecture" failures.
- * (2) The OTHER darwin arch: a per-arch build carries `darwin-x64` and
- * `darwin-arm64` prebuilds alike, and the off-target one legitimately fails the
- * arch check. Neither is a defect in the bundle, so both are skipped, not judged.
- * (`expectedArch` universal or unknown keeps every darwin prebuild.)
+ * darwin, …), and they ride along in the asar regardless of which platform is
+ * being packaged. Those are ELF/Mach-O/PE for a platform this build is not, so
+ * feeding them to the mac arch check (which shells out to `lipo`) or the
+ * Windows PE-header read produces spurious failures. (2) The OTHER arch of the
+ * SAME platform: a per-arch build carries e.g. `darwin-x64` AND `darwin-arm64`
+ * (or `win32-x64` AND `win32-arm64`) prebuilds alike, and the off-target one
+ * legitimately fails the arch check. Neither is a defect in the bundle, so both
+ * are skipped, not judged. (`expectedArch` universal or unknown keeps every
+ * prebuild of the expected platform.)
+ *
+ * `expectedPlatform` defaults to `'darwin'` so every existing (mac) call site
+ * is unchanged; the Windows arm passes `'win32'` explicitly.
  */
-function isForeignPrebuild(file, expectedArch = null) {
+function isForeignPrebuild(file, expectedArch = null, expectedPlatform = 'darwin') {
   const target = parsePrebuildTarget(file);
   if (!target) return false;
-  if (target.platform !== 'darwin') return true;
+  if (target.platform !== expectedPlatform) return true;
   if (!expectedArch || expectedArch === 'universal' || !target.arch) return false;
   return target.arch !== expectedArch;
 }
@@ -235,30 +285,82 @@ function collectNodeAddons(dir, expectedArch = null, found = []) {
 /**
  * Is this addon better-sqlite3's? Either the classic compiled
  * `build/Release/better_sqlite3.node` (any package dir — the historical fixture
- * shape), or a v13 N-API prebuild `prebuilds/darwin-<arch>.node` living under a
- * `better-sqlite3` package directory.
+ * shape, and platform-agnostic: v12 shipped it on every OS), or a v13 N-API
+ * prebuild `prebuilds/<expectedPlatform>-<arch>.node` living under a
+ * `better-sqlite3` package directory. `expectedPlatform` defaults to `'darwin'`
+ * so the mac call sites are unchanged; the Windows arm passes `'win32'`.
  */
-function isBetterSqliteAddon(file) {
-  const segments = file.split(path.sep);
+function isBetterSqliteAddon(file, expectedPlatform = 'darwin') {
+  const segments = file.split(PATH_SEPARATORS);
   if (segments[segments.length - 1] === 'better_sqlite3.node') return true;
   const target = parsePrebuildTarget(file);
-  if (!target || target.platform !== 'darwin') return false;
+  if (!target || target.platform !== expectedPlatform) return false;
   const idx = segments.lastIndexOf('prebuilds');
   return idx > 0 && segments[idx - 1] === 'better-sqlite3';
 }
 
 /**
- * The better-sqlite3 addon the packaged app will load, or null. When more than
- * one survives collection (a universal build keeps both darwin prebuilds), the
- * one matching the host arch is the one this host can honestly probe.
+ * The better-sqlite3 addon the packaged app will load, or null.
+ *
+ * `expectedPlatform` defaults to `'darwin'` and `expectedArch` to `null`, which
+ * reproduces the original mac-only behavior exactly: when more than one
+ * candidate survives collection (a UNIVERSAL darwin build keeps both arch
+ * prebuilds, and `expectedArch` is `'universal'` there — not a single arch to
+ * prefer), fall back to the HOST arch, since that is the one arch this host can
+ * honestly dlopen and probe.
+ *
+ * Windows never ships a universal build, so its caller passes a concrete
+ * `expectedArch` (the build's own target, not the probing host's) and that is
+ * preferred directly — this is also what lets `findBetterSqliteAddon` be
+ * exercised as a pure function against BOTH win32 prebuilds on any host,
+ * independent of `process.arch` (see build/afterSign.test.js Case AC).
  */
-function findBetterSqliteAddon(addons) {
-  const candidates = addons.filter(isBetterSqliteAddon);
+function findBetterSqliteAddon(addons, expectedPlatform = 'darwin', expectedArch = null) {
+  const candidates = addons.filter((file) => isBetterSqliteAddon(file, expectedPlatform));
   if (candidates.length <= 1) return candidates[0] || null;
-  const hostArch = process.arch === 'x64' ? 'x64' : 'arm64';
-  return (
-    candidates.find((file) => parsePrebuildTarget(file)?.arch === hostArch) || candidates[0]
-  );
+  const preferredArch =
+    expectedArch && expectedArch !== 'universal'
+      ? expectedArch
+      : expectedPlatform === 'darwin'
+        ? (process.arch === 'x64' ? 'x64' : 'arm64')
+        : null;
+  const match =
+    preferredArch && candidates.find((file) => parsePrebuildTarget(file)?.arch === preferredArch);
+  return match || candidates[0];
+}
+
+/**
+ * Collect every `*.node` under `dir` for a WINDOWS bundle: the legacy compiled
+ * `build/Release/*.node` layout (node-pty always ships this; better-sqlite3
+ * <= v12 did too), AND — since better-sqlite3 v13 / the Electron 44 upgrade —
+ * win32 prebuilds under `prebuilds/`, in both shapes bundled here: the flat
+ * `prebuilds/win32-<arch>.node` (better-sqlite3's N-API prebuild — its ONLY
+ * Windows addon since v13; there is no `build/Release/better_sqlite3.node` any
+ * more) and the nested `prebuilds/<platform>-<arch>/<name>.node`
+ * (node-pty-prebuilt-multiarch, which ships every platform it supports).
+ *
+ * `prebuilds/` directories used to be skipped ENTIRELY here — that was wrong
+ * once better-sqlite3's only Windows addon moved into one. Instead, exactly
+ * like the mac arm's `collectNodeAddons`, each `.node` under `prebuilds/` is
+ * filtered per-file via `isForeignPrebuild(file, expectedArch, 'win32')`: a
+ * prebuild for another platform (darwin, linux) or the OTHER Windows arch is
+ * dropped rather than judged (it would either crash the PE-header read or fail
+ * the arch check spuriously), while a same-platform, same-arch prebuild is
+ * kept and reaches the probe below.
+ */
+function collectNodeAddonsForWindows(dir, expectedArch = null, found = []) {
+  if (!fs.existsSync(dir)) return found;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isSymbolicLink()) continue;
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      collectNodeAddonsForWindows(fullPath, expectedArch, found);
+    } else if (entry.isFile() && entry.name.endsWith('.node')) {
+      if (isForeignPrebuild(fullPath, expectedArch, 'win32')) continue;
+      found.push(fullPath);
+    }
+  }
+  return found;
 }
 
 /**
@@ -484,6 +586,117 @@ function verifyBundle(options) {
   return failures;
 }
 
+/**
+ * The Windows counterpart of `verifyBundle`, sized for the win-unpacked
+ * layout electron-builder produces (`<appOutDir>/win-unpacked/`):
+ *   1. architecture — the PE machine type of the packaged `<productName>.exe`
+ *      (there is no `lipo` on Windows, so the COFF header is read directly),
+ *   2. a real runtime ABI probe of the packaged better-sqlite3 addon — the
+ *      legacy `build/Release/better_sqlite3.node` (<= v12) OR the v13 N-API
+ *      prebuild at `prebuilds/win32-<arch>.node` (the ONLY layout a current
+ *      checkout ships; `findBetterSqliteAddon` picks whichever is present) —
+ *      spawned under the packaged executable with ELECTRON_RUN_AS_NODE=1, the
+ *      same honest-load pattern as the mac arm,
+ *   3. a size floor on the unpacked directory (asar + unpacked natives ride
+ *      inside it, so one floor covers the stub cases).
+ * Returning the failures (rather than throwing) lets the caller report them
+ * all in ONE error, like the mac arm.
+ */
+function verifyWindowsBundle(options) {
+  const {
+    appOutDir,
+    productName,
+    expectedArch,
+    minDirBytes = DEFAULT_MIN_WIN_UNPACKED_BYTES,
+  } = options;
+
+  const failures = [];
+
+  // electron-builder's Windows appOutDir IS the win-unpacked directory
+  // (dist-electron/win-unpacked) — unlike the mac layout, there is no nested
+  // step. Accept a legacy/doubled nesting in case a caller passes the parent.
+  const nested = path.join(appOutDir, 'win-unpacked');
+  const appDir = fs.existsSync(nested) ? nested : appOutDir;
+  if (!fs.existsSync(appDir) || !fs.existsSync(path.join(appDir, `${productName}.exe`))) {
+    return [`the packaged app directory is missing entirely (expected ${productName}.exe under): ${appDir}`];
+  }
+
+  const executablePath = path.join(appDir, `${productName}.exe`);
+
+  // --- Check 1: architecture of the main executable (PE machine type) ---
+  if (!expectedArch) {
+    failures.push(
+      'could not determine the expected architecture from the electron-builder ' +
+        'context, so the bundle cannot be verified'
+    );
+  } else if (!PE_MACHINE_BY_ARCH[expectedArch]) {
+    failures.push(
+      `cannot verify a ${expectedArch} Windows bundle — no known PE machine ` +
+        `type for it (expected one of: ${Object.keys(PE_MACHINE_BY_ARCH).join(', ')})`
+    );
+  } else if (!fs.existsSync(executablePath)) {
+    failures.push(`the packaged executable is missing: ${executablePath}`);
+  } else {
+    let machine = null;
+    let readFailed = false;
+    try {
+      machine = readPeMachineType(fs.readFileSync(executablePath));
+    } catch (err) {
+      readFailed = true;
+      failures.push(`could not read the PE header of ${executablePath}: ${err.message}`);
+    }
+    if (!readFailed && machine === null) {
+      failures.push(
+        `${executablePath} has no readable PE header — it is not a Windows executable`
+      );
+    } else if (!readFailed && machine !== PE_MACHINE_BY_ARCH[expectedArch]) {
+      failures.push(
+        `${executablePath} is a PE machine 0x${machine.toString(16)} binary, ` +
+          `expected 0x${PE_MACHINE_BY_ARCH[expectedArch].toString(16)} (${expectedArch})`
+      );
+    }
+  }
+
+  // --- Check 2: runtime ABI probe of the packaged better-sqlite3 addon ---
+  const unpackedRoot = path.join(appDir, 'resources', 'app.asar.unpacked');
+  const addons = collectNodeAddonsForWindows(unpackedRoot, expectedArch);
+  if (addons.length === 0) {
+    failures.push(
+      `no *.node native addons found under ${unpackedRoot} — the app ships ` +
+        'better-sqlite3, node-pty and others, so an empty set means native ' +
+        'modules were not unpacked and the app cannot boot'
+    );
+  }
+  const betterSqlite = findBetterSqliteAddon(addons, 'win32', expectedArch);
+  if (!betterSqlite) {
+    failures.push(
+      `better_sqlite3.node was not found under ${unpackedRoot} (expected ` +
+        `build/Release/better_sqlite3.node or prebuilds/win32-<arch>.node) — the app stores ` +
+        'all of its state in SQLite and cannot start without it'
+    );
+  } else if (fs.existsSync(executablePath)) {
+    const probe = probeNativeModule(executablePath, betterSqlite);
+    if (!probe.ok) {
+      failures.push(
+        `the packaged Electron binary cannot load the packaged ` +
+          `better_sqlite3.node (ABI mismatch or broken addon):\n    ` +
+          `${betterSqlite}\n    ${probe.detail.split('\n').join('\n    ')}`
+      );
+    }
+  }
+
+  // --- Check 3: size floor on the unpacked directory ---
+  const dirBytes = computeDirectorySize(appDir);
+  if (dirBytes < minDirBytes) {
+    failures.push(
+      `the unpacked app is only ${formatBytes(dirBytes)} (floor is ` +
+        `${formatBytes(minDirBytes)}) — a real win-unpacked build is ~1.1 GB, so this is a stub`
+    );
+  }
+
+  return failures;
+}
+
 /** The warn-only JAR tripwire, unchanged in behavior. */
 function scanForJars(appPath) {
   const unpackedRoot = path.join(appPath, 'Contents/Resources/app.asar.unpacked');
@@ -518,7 +731,13 @@ function scanForJars(appPath) {
 exports.default = async function(context) {
   const { appOutDir, packager, arch } = context;
 
-  if (packager.platform.name !== 'mac') {
+  const platformName = packager.platform.name;
+  const isMac = platformName === 'mac';
+  // app-builder-lib's Platform.WINDOWS carries name "windows" (nodeName
+  // "win32", buildConfigurationKey "win"); accept both spellings so this does
+  // not depend on the electron-builder version.
+  const isWindows = platformName === 'windows' || platformName === 'win';
+  if (!isMac && !isWindows) {
     return;
   }
 
@@ -530,10 +749,11 @@ exports.default = async function(context) {
     console.log('AfterSign: No signing credentials found');
   }
 
-  console.log('AfterSign: notarization is handled by electron-builder built-in hook; this script only scans for JAR files');
-
-  const appPath = path.join(appOutDir, `${packager.appInfo.productName}.app`);
-  scanForJars(appPath);
+  if (isMac) {
+    console.log('AfterSign: notarization is handled by electron-builder built-in hook; this script only scans for JAR files');
+    const appPath = path.join(appOutDir, `${packager.appInfo.productName}.app`);
+    scanForJars(appPath);
+  }
 
   if (process.env[SKIP_ENV_VAR] === '1') {
     console.warn('AfterSign: ============================================================');
@@ -552,7 +772,17 @@ exports.default = async function(context) {
   }
 
   console.log('AfterSign: verifying the packaged bundle (arch, native-module ABI, size floors)');
-  const failures = verifyBundle({ appPath, expectedArch: resolveExpectedArch(arch) });
+  const expectedArch = resolveExpectedArch(arch);
+  const failures = isMac
+    ? verifyBundle({
+        appPath: path.join(appOutDir, `${packager.appInfo.productName}.app`),
+        expectedArch,
+      })
+    : verifyWindowsBundle({
+        appOutDir,
+        productName: packager.appInfo.productName,
+        expectedArch,
+      });
 
   if (failures.length > 0) {
     throw new Error(
@@ -568,10 +798,13 @@ exports.default = async function(context) {
 exports._helpers = {
   DEFAULT_MIN_APP_BYTES,
   DEFAULT_MIN_ASAR_BYTES,
+  DEFAULT_MIN_WIN_UNPACKED_BYTES,
   SKIP_ENV_VAR,
   ARCH_NAME_BY_ORDINAL,
+  PE_MACHINE_BY_ARCH,
   archMatches,
   collectNodeAddons,
+  collectNodeAddonsForWindows,
   isForeignPrebuild,
   isBetterSqliteAddon,
   findBetterSqliteAddon,
@@ -580,7 +813,9 @@ exports._helpers = {
   lipoArchs,
   probeNativeModule,
   readBundleExecutableName,
+  readPeMachineType,
   resolveExpectedArch,
   summarizeProbeStderr,
   verifyBundle,
+  verifyWindowsBundle,
 };

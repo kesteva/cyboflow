@@ -89,7 +89,14 @@ beforeEach(() => {
   writeFileSync(join(projectDir, 'binfile.bin'), Buffer.from([0x61, 0x62, 0x00, 0x63]));
   writeFileSync(join(outsideDir, 'secret.txt'), 'NEEDLE outside scope\n');
   writeFileSync(join(extraDir, 'note.md'), 'NEEDLE in the extra folder\n');
-  symlinkSync(join(outsideDir, 'secret.txt'), join(projectDir, 'escape'));
+  // The escape link: a file symlink on POSIX; on win32 file symlinks need
+  // elevation, so a directory junction onto outsideDir stands in — the realpath
+  // scope guard sees the same out-of-scope resolution either way.
+  if (process.platform === 'win32') {
+    symlinkSync(outsideDir, join(projectDir, 'escape'), 'junction');
+  } else {
+    symlinkSync(join(outsideDir, 'secret.txt'), join(projectDir, 'escape'));
+  }
 
   dbPath = join(tmpRoot, 'test.db');
   rawDb = new Database(dbPath);
@@ -287,7 +294,7 @@ describe('mcp-fs-grep', () => {
     expect(resp.ok).toBe(true);
     const data = resp.data as { matches: Array<{ file: string; line: number; text: string }>; filesScanned: number };
     const files = data.matches.map((m) => m.file);
-    expect(files.some((f) => f.endsWith('src/index.ts'))).toBe(true);
+    expect(files.some((f) => f.endsWith(join('src', 'index.ts')))).toBe(true);
     // node_modules is a skip-dir — its NEEDLE never surfaces.
     expect(files.some((f) => f.includes('node_modules'))).toBe(false);
     // The escaping symlink is never followed, so the outside NEEDLE never appears.

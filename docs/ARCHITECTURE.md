@@ -1008,6 +1008,12 @@ pnpm electron:rebuild     # Manual escape hatch for better-sqlite3 ABI drift (no
 pnpm test:gate            # Day-gate integration test; manual/unscheduled
 ```
 
+`pnpm dev`'s Electron half (`electron-dev` in `package.json`) waits on the Vite dev server and
+then spawns Electron via `scripts/dev-electron.mjs` — a cross-platform Node launcher (so it
+starts from `cmd.exe` too) that replaced a POSIX-only `wait-on ... && electron .` shell pipeline;
+it owns the `--cdp` / `--inspect` / `--perf` flags (`dev:perf` forwards `--perf`) and strips
+`NODE_OPTIONS` before spawning, since the Electron binary rejects some host-Node-only flags.
+
 **`pnpm test:unit`** is the headless code-change AC gate: `pnpm --filter main test` +
 `pnpm --filter frontend test` (vitest, both one-shot) + schema-parity checks + build-script
 tests, chained by the root `test:unit` script.
@@ -1068,6 +1074,12 @@ even loaded, and `pnpm electron:rebuild`, postinstall's `install-app-deps` and C
 compile outright when a prebuild is present). Steady state is therefore *no* `build/Release`
 artifact at all and every `ensure-sqlite-abi.mjs` call passing as a cheap no-op. The machinery
 below is retained as a guard for a platform without a prebuild or a future non-N-API addon.
+better-sqlite3 is also kept OUT of `pnpm.onlyBuiltDependencies`: pnpm 10.11 ignores the package's
+`gypfile: false` and, for an allow-listed package, runs npm's implicit `node-gyp rebuild` at
+install — harmless where a toolchain exists, but node-gyp's configure step needs a recognised
+Visual Studio on Windows before `binding.gyp` can skip anything, which broke `pnpm install` on
+`windows-latest` (VS 2026, unknown to pnpm's bundled node-gyp 11). `pnpm rebuild better-sqlite3`
+stays a no-op that exits 0, so `rebuild-better-sqlite3-host.mjs` is unaffected.
 `node-pty` is N-API as well and loads under both ABIs; the one post-packaging restore that
 remains is an **arch** one, not an ABI one — the x64 mac builds compile an x64 `pty.node` that an
 arm64 host cannot dlopen (see `docs/RELEASE-RUNBOOK.md`). The history below explains what the
@@ -1121,11 +1133,16 @@ of them, so the script announces it. Give a worktree its own `pnpm install` to o
 **`pnpm electron:rebuild`** remains the manual escape hatch, rebuilding for the Electron ABI, as
 do the `e2e:prereqs` / `build:mac:*` scripts.
 
-Do NOT assume the root `postinstall` (`electron-builder install-app-deps`) leaves the module on
-the Electron ABI. It reports `finished moduleName=better-sqlite3`, but with `buildFromSource=false`
-it can resolve a **host-ABI prebuild** and leave NMV 127 in place — measured on a fresh worktree
-install, where `pnpm dev` would then have died on `NODE_MODULE_VERSION`. Which is the point of the
-guard: measure the artifact, never infer its ABI from which command last ran.
+Do NOT assume the root `postinstall` (`node scripts/apply-pty-napi-prebuilds.js && node
+scripts/install-app-deps.js` — the first step aliases node-pty's installed prebuild to the name
+`@electron/rebuild` looks for, so it never falls through to a node-gyp source build; the second
+wraps `electron-builder install-app-deps` and skips it on win32, where a rebuild is neither needed
+nor possible without a node-gyp-recognised Visual Studio; see `docs/WINDOWS-BUILD.md` → "node-pty
+and `@electron/rebuild`") leaves better-sqlite3 on the Electron ABI. `install-app-deps` reports `finished moduleName=better-sqlite3`, but with
+`buildFromSource=false` it can resolve a **host-ABI prebuild** and leave NMV 127 in place —
+measured on a fresh worktree install, where `pnpm dev` would then have died on
+`NODE_MODULE_VERSION`. Which is the point of the guard: measure the artifact, never infer its ABI
+from which command last ran.
 
 **`pnpm test:gate`** is the day-gate integration test; it requires `claude` on PATH plus real
 API access and is manual/unscheduled — not part of `test:unit` or CI.

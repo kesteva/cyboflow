@@ -21,6 +21,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import type Database from 'better-sqlite3';
 import type { LoggerLike } from '../../../orchestrator/types';
+import { resolveGitCommand } from '../../../utils/gitExeFinder';
 import { resolveWorkflowBundle } from '../../../orchestrator/workflows/workflowBundle';
 import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
 import {
@@ -89,9 +90,10 @@ function isNotAGitRepositoryError(err: unknown): boolean {
 function ensureBundleExcluded(worktreePath: string, extraPatterns: string[], logger?: LoggerLike): void {
   const patterns = [...CYBOFLOW_EXCLUDE_PATTERNS, ...extraPatterns];
   try {
-    const raw = execFileSync('git', ['rev-parse', '--git-path', 'info/exclude'], {
+    const raw = execFileSync(resolveGitCommand(), ['rev-parse', '--git-path', 'info/exclude'], {
       cwd: worktreePath,
       encoding: 'utf8',
+      windowsHide: true,
       // Pin git's message language for isNotAGitRepositoryError, and capture
       // stderr rather than letting the child's `fatal:` line leak to the app's
       // own stderr on the (expected) non-repo path.

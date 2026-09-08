@@ -19,10 +19,11 @@
  * run until the user acts in the UI.
  */
 
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { randomUUID } from 'crypto';
+import { resolveGitCommand } from '../../utils/gitExeFinder';
 import type { EventEmitter } from 'events';
 import type Database from 'better-sqlite3';
 import { ApprovalRouter } from '../../orchestrator/approvalRouter';
@@ -345,10 +346,19 @@ export class DemoScriptContext {
   commit(message: string): void {
     this.checkpoint();
     const cwd = this.args.worktreePath;
-    execSync('git add -A', { cwd, stdio: 'pipe' });
-    execSync(
-      `git -c user.name="Cyboflow Demo" -c user.email="demo@cyboflow.dev" -c commit.gpgsign=false commit -m ${JSON.stringify(message)}`,
-      { cwd, stdio: 'pipe' },
+    // argv-array spawn (not a shell string): works with git off the GUI PATH
+    // (gitExeFinder) and passes the identity/`-m` values verbatim — a shell
+    // string would need quoting that cmd.exe and sh disagree about.
+    execFileSync(resolveGitCommand(), ['add', '-A'], { cwd, stdio: 'pipe', windowsHide: true });
+    execFileSync(
+      resolveGitCommand(),
+      [
+        '-c', 'user.name=Cyboflow Demo',
+        '-c', 'user.email=demo@cyboflow.dev',
+        '-c', 'commit.gpgsign=false',
+        'commit', '-m', message,
+      ],
+      { cwd, stdio: 'pipe', windowsHide: true },
     );
   }
 

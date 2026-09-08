@@ -460,6 +460,7 @@ export class CodexSdkManager extends AbstractCliManager {
       const version = execFileSync(executable.executablePath, ['--version'], {
         encoding: 'utf8',
         timeout: 10_000,
+        windowsHide: true,
       }).trim();
       if (!version.includes(CODEX_EXECUTABLE_VERSION)) {
         return {

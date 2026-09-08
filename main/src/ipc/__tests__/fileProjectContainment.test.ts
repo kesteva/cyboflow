@@ -24,6 +24,7 @@ import * as path from 'path';
 vi.mock('electron', () => ({ app: { isPackaged: false, getPath: vi.fn(() => '/mock') } }));
 
 import { createFileOps } from '../fileOps';
+import { createDirSymlink, fileSymlinksNeedPrivilege } from '../../__test_fixtures__/symlink';
 import type { AppServices } from '../types';
 import type { Session } from '../../types/session';
 
@@ -67,16 +68,33 @@ describe('file:read-project — realpath containment', () => {
     expect(res).toMatchObject({ success: true, data: 'hello\n' });
   });
 
-  it('REJECTS a symlinked FILE inside the project that points outside it', async () => {
+  // POSIX-only fixture: a symlinked FILE needs privileges on win32; the dir-
+  // symlink escape cases below carry the same realpath-guard coverage there.
+  it.skipIf(fileSymlinksNeedPrivilege)(
+    'REJECTS a symlinked FILE inside the project that points outside it',
+    async () => {
     fs.symlinkSync(path.join(outsidePath, 'secret.txt'), path.join(projectPath, 'leak.txt'));
     const res = await ops.readProject({ projectId: 1, filePath: 'leak.txt' });
     expect(res.success).toBe(false);
     expect((res as { data?: unknown }).data).toBeUndefined();
     expect(!res.success && res.error).toMatch(/outside/i);
-  });
+    },
+  );
 
   it('REJECTS a path through a symlinked DIRECTORY inside the project', async () => {
-    fs.symlinkSync(outsidePath, path.join(projectPath, 'escape'));
+    createDirSymlink(outsidePath, path.join(projectPath, 'escape'));
+    const res = await ops.readProject({ projectId: 1, filePath: 'escape/secret.txt' });
+    expect(res.success).toBe(false);
+    expect(!res.success && res.error).toMatch(/outside/i);
+  });
+
+  it('REJECTS a link escape to a SIBLING dir that shares a name prefix (prefix-safety)', async () => {
+    // 'project-evil' shares 'project' as a string prefix; the containment check
+    // must compare path components (or resolved realpaths), not raw prefixes.
+    const evilSibling = path.join(tmpRoot, 'project-evil');
+    fs.mkdirSync(evilSibling, { recursive: true });
+    fs.writeFileSync(path.join(evilSibling, 'secret.txt'), 'SECRET\n');
+    createDirSymlink(evilSibling, path.join(projectPath, 'escape'));
     const res = await ops.readProject({ projectId: 1, filePath: 'escape/secret.txt' });
     expect(res.success).toBe(false);
     expect(!res.success && res.error).toMatch(/outside/i);
@@ -85,7 +103,7 @@ describe('file:read-project — realpath containment', () => {
   it('still allows a symlink that stays WITHIN the project', async () => {
     fs.mkdirSync(path.join(projectPath, 'real'));
     fs.writeFileSync(path.join(projectPath, 'real', 'inner.txt'), 'inner\n');
-    fs.symlinkSync(path.join(projectPath, 'real'), path.join(projectPath, 'link'));
+    createDirSymlink(path.join(projectPath, 'real'), path.join(projectPath, 'link'));
     const res = await ops.readProject({ projectId: 1, filePath: 'link/inner.txt' });
     expect(res).toMatchObject({ success: true, data: 'inner\n' });
   });
@@ -103,23 +121,33 @@ describe('file:write-project — realpath containment', () => {
     expect(fs.readFileSync(path.join(projectPath, 'nested/deep/new.txt'), 'utf-8')).toBe('written\n');
   });
 
-  it('REJECTS writing through a symlink pointing outside, leaving the target untouched', async () => {
+  // POSIX-only fixture: a symlinked FILE needs privileges on win32; the dir-
+  // symlink write case below carries the same realpath-guard coverage there.
+  it.skipIf(fileSymlinksNeedPrivilege)(
+    'REJECTS writing through a symlink pointing outside, leaving the target untouched',
+    async () => {
     fs.symlinkSync(path.join(outsidePath, 'secret.txt'), path.join(projectPath, 'leak.txt'));
     const res = await ops.writeProject({ projectId: 1, filePath: 'leak.txt', content: 'PWNED\n' });
     expect(res.success).toBe(false);
     expect(fs.readFileSync(path.join(outsidePath, 'secret.txt'), 'utf-8')).toBe('SECRET\n');
-  });
+    },
+  );
 
-  it('REJECTS a DANGLING symlink pointing outside — writeFile would CREATE the target', async () => {
+  // POSIX-only fixture: a DANGLING FILE symlink has no unprivileged win32
+  // stand-in (a dangling junction can only name a directory).
+  it.skipIf(fileSymlinksNeedPrivilege)(
+    'REJECTS a DANGLING symlink pointing outside — writeFile would CREATE the target',
+    async () => {
     const wouldBeCreated = path.join(outsidePath, 'planted.txt');
     fs.symlinkSync(wouldBeCreated, path.join(projectPath, 'dangling.txt'));
     const res = await ops.writeProject({ projectId: 1, filePath: 'dangling.txt', content: 'PWNED\n' });
     expect(res.success).toBe(false);
     expect(fs.existsSync(wouldBeCreated)).toBe(false);
-  });
+    },
+  );
 
   it('REJECTS a write through a symlinked DIRECTORY inside the project', async () => {
-    fs.symlinkSync(outsidePath, path.join(projectPath, 'escape'));
+    createDirSymlink(outsidePath, path.join(projectPath, 'escape'));
     const res = await ops.writeProject({ projectId: 1, filePath: 'escape/planted.txt', content: 'PWNED\n' });
     expect(res.success).toBe(false);
     expect(fs.existsSync(path.join(outsidePath, 'planted.txt'))).toBe(false);
@@ -127,7 +155,10 @@ describe('file:write-project — realpath containment', () => {
 });
 
 describe('file:write (session-scoped) — writes the path it validated', () => {
-  it('does not re-follow the leaf symlink at write time', async () => {
+  // POSIX-only fixture: the leaf FILE link has no unprivileged win32 stand-in.
+  it.skipIf(fileSymlinksNeedPrivilege)(
+    'does not re-follow the leaf symlink at write time',
+    async () => {
     // The guard resolved the leaf and accepted it; writing to the LEXICAL path
     // instead would re-traverse the link. Point a link at a sibling INSIDE the
     // worktree: the write must land on the resolved target, once.
@@ -139,15 +170,21 @@ describe('file:write (session-scoped) — writes the path it validated', () => {
     // The alias is still a symlink — the write went THROUGH the resolved path,
     // it did not replace the link with a regular file.
     expect(fs.lstatSync(path.join(projectPath, 'alias.txt')).isSymbolicLink()).toBe(true);
-  });
+    },
+  );
 
-  it('REJECTS a dangling symlink escaping the worktree', async () => {
+  // POSIX-only fixture: a DANGLING FILE symlink has no unprivileged win32
+  // stand-in (a dangling junction can only name a directory).
+  it.skipIf(fileSymlinksNeedPrivilege)(
+    'REJECTS a dangling symlink escaping the worktree',
+    async () => {
     const wouldBeCreated = path.join(outsidePath, 'wt-planted.txt');
     fs.symlinkSync(wouldBeCreated, path.join(projectPath, 'wt-dangling.txt'));
     const res = await ops.write({ sessionId: 's1', filePath: 'wt-dangling.txt', content: 'PWNED\n' });
     expect(res.success).toBe(false);
     expect(fs.existsSync(wouldBeCreated)).toBe(false);
-  });
+    },
+  );
 });
 
 describe('file:list — realpath containment', () => {
@@ -156,11 +193,13 @@ describe('file:list — realpath containment', () => {
     fs.writeFileSync(path.join(projectPath, 'src', 'a.ts'), '');
     const res = await ops.list({ sessionId: 's1', path: 'src' });
     expect(res.success).toBe(true);
-    expect(res.success && res.files.map((f) => f.path)).toEqual(['src/a.ts']);
+    // Relative paths come back in the platform's native separators
+    // (path.relative), so build the expectation the same way.
+    expect(res.success && res.files.map((f) => f.path)).toEqual([path.join('src', 'a.ts')]);
   });
 
   it('REJECTS listing through a symlinked directory that escapes the worktree', async () => {
-    fs.symlinkSync(outsidePath, path.join(projectPath, 'escape'));
+    createDirSymlink(outsidePath, path.join(projectPath, 'escape'));
     const res = await ops.list({ sessionId: 's1', path: 'escape' });
     expect(res.success).toBe(false);
     expect((res as { files?: unknown }).files).toBeUndefined();
@@ -179,6 +218,7 @@ describe('file:search — the pattern cannot walk the glob root out of the proje
     fs.writeFileSync(path.join(projectPath, 'src', 'findme.ts'), '');
     const res = await ops.search({ projectId: 1, pattern: 'findme' });
     expect(res.success).toBe(true);
-    expect(res.success && res.files.some((f) => f.path === 'src/findme.ts')).toBe(true);
+    // Match against native separators (see the file:list note above).
+    expect(res.success && res.files.some((f) => f.path === path.join('src', 'findme.ts'))).toBe(true);
   });
 });

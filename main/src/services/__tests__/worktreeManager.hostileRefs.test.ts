@@ -135,7 +135,13 @@ describe('option-injection: a ref starting with "-" never reaches git as an opti
   });
 });
 
-describe('shell injection: a branch named $(…) is inert against real git', () => {
+  // POSIX-only: the hostile fixture needs a refname containing '>' (a shell
+  // redirect). Git-for-Windows refuses refnames that are invalid Windows
+  // filenames, so a branch that would cmd-substitute cannot exist there; the
+  // argv-form (shell-less) spawn guarantees are pinned by the suites above.
+  describe.skipIf(process.platform === 'win32')(
+    'shell injection: a branch named $(…) is inert against real git',
+    () => {
   const SENTINEL = join(tmpdir(), 'cyboflow-worktree-shell-injection-sentinel');
   const HOSTILE_BRANCH = `$(id>${SENTINEL})`;
 
@@ -189,4 +195,5 @@ describe('shell injection: a branch named $(…) is inert against real git', () 
       expect(existsSync(SENTINEL)).toBe(false);
     });
   });
-});
+  },
+);

@@ -48,18 +48,10 @@ const SRC_ROOT = locateSrcRoot();
  * the call site genuinely cannot use runGit.
  */
 const LEGACY_ALLOWLIST: ReadonlyMap<string, string> = new Map([
-  [
-    'services/demo/demoEnvironment.ts',
-    'Demo-fixture builder: constructs a scripted repo from trusted literals, no repo-controlled input.',
-  ],
-  [
-    'services/demo/demoScriptContext.ts',
-    'Demo-fixture builder: same trusted-literal scope as demoEnvironment.',
-  ],
-  [
-    'services/panels/claude/interactiveClaudeManager.ts',
-    'AbstractCliManager subclass — the CLI substrate’s own exec surface (see docs/AGENT-GUIDE.md).',
-  ],
+  // Currently EMPTY: the last three entries (demoEnvironment, demoScriptContext,
+  // interactiveClaudeManager) were migrated to gitExeFinder-resolved commands
+  // (argv arrays or variable-first shell strings) in the win-cli-exec fix. New
+  // entries need the same review bar as before.
 ]);
 
 /**

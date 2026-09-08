@@ -1132,7 +1132,9 @@ describe('verdictDelivery (slice 10b — report findings + supersession)', () =>
     const deliver = createVerdictDelivery({
       db: dbAdapter(db),
       artifactsDirResolver: () => '/art/run-tr1',
-      fileExists: (absPath) => absPath === '/art/run-tr1/transcript-vr_tr1.md',
+      // Production builds the candidate with path.join, so match against the
+      // host-separator form rather than a POSIX literal.
+      fileExists: (absPath) => absPath === join('/art/run-tr1', 'transcript-vr_tr1.md'),
     });
     await deliver({
       requestId: 'vr_tr1',

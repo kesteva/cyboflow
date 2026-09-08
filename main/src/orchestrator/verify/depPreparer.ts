@@ -86,6 +86,7 @@ import { promisify } from 'node:util';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import type { LoggerLike } from '../types';
+import { cmdCommandLine, cmdExeInvocation } from '../../utils/win32CmdLine';
 
 const execFileAsync = promisify(execFile);
 
@@ -192,14 +193,78 @@ export type DepExec = (
   opts: { cwd: string; timeoutMs: number },
 ) => Promise<{ code: number; out: string }>;
 
+/**
+ * Windows stand-in for the POSIX `cp -R`/`cp -Rc` clone rungs: there is no `cp`
+ * binary on Windows, so without this every dependency clone ENOENT'd and the
+ * snapshot provisioned WITHOUT the dir — fail-soft, but a guaranteed downstream
+ * build failure on every Windows verification. A recursive copy that preserves
+ * links VERBATIM, matching the BSD `cp -R` semantics documented on the POSIX
+ * rungs: directory links are re-created as JUNCTIONS (no privilege needed —
+ * pnpm's Windows workspace shape), file links need symlink privilege and fail
+ * the copy like any other unclonable filesystem. A copied junction keeps its
+ * ABSOLUTE target, exactly like an absolute symlink does under `cp -R` on
+ * POSIX.
+ */
+async function copyDirVerbatimWin32(src: string, dest: string): Promise<void> {
+  await fsPromises.mkdir(dest, { recursive: true });
+  for (const entry of await fsPromises.readdir(src, { withFileTypes: true })) {
+    const from = path.join(src, entry.name);
+    const to = path.join(dest, entry.name);
+    if (entry.isSymbolicLink()) {
+      const target = await fsPromises.readlink(from);
+      const targetsDirectory = await fsPromises
+        .stat(from)
+        .then((s) => s.isDirectory())
+        .catch(() => false);
+      await fsPromises.symlink(target, to, targetsDirectory ? 'junction' : 'file');
+    } else if (entry.isDirectory()) {
+      await copyDirVerbatimWin32(from, to);
+    } else {
+      await fsPromises.copyFile(from, to);
+    }
+  }
+}
+
 /** The production exec: `execFile` with stdout+stderr merged into `out` and every failure mapped to a code. */
 export const defaultDepExec: DepExec = async (cmd, args, opts) => {
+  // `cp` does not exist on Windows: translate the exact argv the two clone
+  // rungs pass (`['-Rc'|'-R', src, dest]`) to an in-process verbatim copy.
+  // Anything else (notably the electron-builder rebuild) still goes to execFile.
+  // `npx` on Windows is `npx.cmd`, which Node refuses to spawn shell-less
+  // (EINVAL hardening). cmd.exe resolves the shim and `windowsHide` (set on
+  // every exec below) keeps it invisible.
+  if (process.platform === 'win32' && cmd === 'npx') {
+    const cmd = cmdExeInvocation(cmdCommandLine(['npx', ...args]));
+    const result = await execFileAsync(cmd.command, cmd.args, {
+      cwd: opts.cwd,
+      encoding: 'utf8',
+      timeout: opts.timeoutMs,
+      maxBuffer: 10 * 1024 * 1024,
+      windowsHide: true,
+      windowsVerbatimArguments: cmd.windowsVerbatimArguments,
+    });
+    return { code: 0, out: `${result.stdout}${result.stderr}` };
+  }
+  if (
+    process.platform === 'win32' &&
+    cmd === 'cp' &&
+    args.length === 3 &&
+    (args[0] === '-R' || args[0] === '-Rc')
+  ) {
+    try {
+      await copyDirVerbatimWin32(args[1], args[2]);
+      return { code: 0, out: '' };
+    } catch (err) {
+      return { code: 1, out: err instanceof Error ? err.message : String(err) };
+    }
+  }
   try {
     const { stdout, stderr } = await execFileAsync(cmd, args, {
       cwd: opts.cwd,
       encoding: 'utf8',
       timeout: opts.timeoutMs,
       maxBuffer: 10 * 1024 * 1024,
+      windowsHide: true,
     });
     return { code: 0, out: `${stdout}${stderr}` };
   } catch (err) {
@@ -239,6 +304,12 @@ export interface DepPreparerDeps {
   baseDir: string;
   /** Command runner (clone + rebuild). Faked in tests. */
   exec: DepExec;
+  /**
+   * Which platform's clone command to issue. Defaults to the host; injected so
+   * the robocopy arm is exercised from any host, since a macOS run would
+   * otherwise never reach it.
+   */
+  platform?: NodeJS.Platform;
   logger?: LoggerLike;
 }
 
@@ -503,13 +574,30 @@ export class VerifyDepPreparer {
   }
 
   /**
-   * Clone one dependency dir. `cp -Rc` asks APFS for clonefile (copy-on-write:
-   * near-zero time and disk until something writes). `-c` is macOS-only and
-   * clonefile is refused across filesystems, so ANY failure retries as a plain
-   * recursive copy — slower, identical result. A partial destination from the
-   * failed attempt is removed first so the retry starts clean.
+   * Clone one dependency dir. On POSIX, `cp -Rc` asks APFS for clonefile
+   * (copy-on-write: near-zero time and disk until something writes). `-c` is
+   * macOS-only and clonefile is refused across filesystems, so ANY failure
+   * retries as a plain recursive copy — slower, identical result. A partial
+   * destination from the failed attempt is removed first so the retry starts
+   * clean.
+   *
+   * Windows has no `cp` (and the packaged app cannot assume a Git-for-Windows
+   * `cp.exe` on PATH), so it clones with robocopy — shipped with the OS — whose
+   * exit codes are a BITMASK: anything below 8 is a success flavor
+   * (1=files copied, 2=extra dest files, 4=mismatched attributes); 8+ are
+   * real failures.
    */
   private async cloneDir(src: string, dest: string, cwd: string): Promise<void> {
+    if ((this.deps.platform ?? process.platform) === 'win32') {
+      const copied = await this.deps.exec(
+        'robocopy',
+        [src, dest, '/E', '/NFL', '/NDL', '/NJH', '/NP', '/NS', '/NC'],
+        { cwd, timeoutMs: CLONE_TIMEOUT_MS },
+      );
+      if (copied.code < 8) return;
+      throw new Error(`robocopy failed for ${src} (code ${copied.code}): ${copied.out}`);
+    }
+
     const cloned = await this.deps.exec('cp', ['-Rc', src, dest], { cwd, timeoutMs: CLONE_TIMEOUT_MS });
     if (cloned.code === 0) return;
 

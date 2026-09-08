@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Save, Trash2, FolderIcon, GitBranch, Settings, Code2, BrainCircuit, ShieldCheck } from 'lucide-react';
 import { API } from '../utils/api';
+import { isApplePlatform } from '../utils/platform';
 import type { Project } from '../types/project';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';
 import { Input, Textarea } from './ui/Input';
@@ -11,6 +12,11 @@ import { Card } from './ui/Card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/Select';
 
 type PermissionTrustValue = 'undecided' | 'trusted' | 'untrusted';
+
+/** Full-path editor example for the "command not found" troubleshooting note. */
+const EDITOR_FULL_PATH_EXAMPLE = isApplePlatform()
+  ? '/usr/local/bin/code .'
+  : '"C:\\Program Files\\Microsoft VS Code\\bin\\code.cmd" .';
 
 /** NULL/undefined on the wire means "undecided" — the Select needs a concrete value. */
 function toSelectValue(trust: Project['permission_trust']): PermissionTrustValue {
@@ -300,7 +306,7 @@ export default function ProjectSettings({ project, isOpen, onClose, onUpdate, on
                 <br />
                 <span className="text-text-secondary font-semibold">Troubleshooting:</span>
                 <br />
-                <span className="text-text-tertiary">• If the command is not found, use the full path (e.g., </span><span className="font-mono text-text-secondary">/usr/local/bin/code .</span><span className="text-text-tertiary">)</span>
+                <span className="text-text-tertiary">• If the command is not found, use the full path (e.g., </span><span className="font-mono text-text-secondary">{EDITOR_FULL_PATH_EXAMPLE}</span><span className="text-text-tertiary">)</span>
                 <br />
                 <span className="text-text-tertiary">• For VS Code and Cursor, install the shell command from the Command Palette:</span>
                 <br />

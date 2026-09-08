@@ -47,6 +47,7 @@ import { useQuestionStore } from '../../stores/questionStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { useSessionStore } from '../../stores/sessionStore';
 import { API } from '../../utils/api';
+import { kbdHint } from '../../utils/platform';
 import type { IPCResponse } from '../../utils/api';
 import { trpc } from '../../trpc/client';
 import { UnifiedComposer } from './unified/UnifiedComposer';
@@ -497,7 +498,7 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
 
   const placeholder =
     mode === 'quick'
-      ? 'Write a command…  (⌘↵ to send)'
+      ? `Write a command…  (${kbdHint('mod', 'Enter')} to send)`
       : isPaused
         ? 'Run paused — Resume to continue'
         : isIdleNudgeable

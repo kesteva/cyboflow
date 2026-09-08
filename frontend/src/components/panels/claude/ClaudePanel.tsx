@@ -16,6 +16,7 @@ import { AlertTriangle } from 'lucide-react';
 import { useNavigationStore } from '../../../stores/navigationStore';
 import { DemoTerminalView } from '../../cyboflow/DemoTerminalView';
 import { API } from '../../../utils/api';
+import { pathBasename } from '../../../utils/pathBasename';
 import { QuickSessionComposer } from '../../cyboflow/unified/QuickSessionComposer';
 import { UnifiedChatView } from '../../cyboflow/unified/UnifiedChatView';
 import { useUnifiedPanelMessages } from '../../cyboflow/unified/useUnifiedPanelMessages';
@@ -427,7 +428,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
     sessionWorking || (paneSession.status === 'waiting' && lastMessage?.role === 'user');
   const worktreePath = paneSession.worktreePath ?? null;
   const folderLabel =
-    worktreePath !== null ? worktreePath.split('/').filter(Boolean).pop() ?? null : null;
+    worktreePath !== null ? pathBasename(worktreePath) || null : null;
   const branchName = hook.gitCommands?.currentBranch ?? null;
 
   // Interactive (PTY) substrate body — the live xterm (+ open-time resume

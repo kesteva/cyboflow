@@ -6,6 +6,7 @@
  * (scope resolution, symlink-escape, caps) lives in mcpFsTools.test.ts.
  */
 import { describe, it, expect } from 'vitest';
+import * as path from 'node:path';
 import {
   isPathWithinRoots,
   isSecretPath,
@@ -14,24 +15,33 @@ import {
   matchesBasenameGlob,
 } from '../fsAccessGuard';
 
+/**
+ * The helpers under test split/compare on the HOST path separator (in
+ * production both arguments are realpathSync'd on the same host, so they
+ * always agree). Rewrite the fixture literals to that separator so the
+ * containment/deny-list semantics — not the fixture's separator choice —
+ * are what the assertions pin.
+ */
+const sep = (p: string): string => p.split('/').join(path.sep);
+
 describe('isPathWithinRoots — separator-boundary containment', () => {
   it('accepts the root itself and any descendant', () => {
-    expect(isPathWithinRoots('/a/b', ['/a/b'])).toBe(true);
-    expect(isPathWithinRoots('/a/b/c/d.ts', ['/a/b'])).toBe(true);
+    expect(isPathWithinRoots(sep('/a/b'), [sep('/a/b')])).toBe(true);
+    expect(isPathWithinRoots(sep('/a/b/c/d.ts'), [sep('/a/b')])).toBe(true);
   });
 
   it('rejects a sibling that merely shares a name prefix (/a/bc is NOT inside /a/b)', () => {
-    expect(isPathWithinRoots('/a/bc', ['/a/b'])).toBe(false);
-    expect(isPathWithinRoots('/a/bcd/file', ['/a/b'])).toBe(false);
+    expect(isPathWithinRoots(sep('/a/bc'), [sep('/a/b')])).toBe(false);
+    expect(isPathWithinRoots(sep('/a/bcd/file'), [sep('/a/b')])).toBe(false);
   });
 
   it('rejects a path above the root and an empty root set', () => {
-    expect(isPathWithinRoots('/a', ['/a/b'])).toBe(false);
-    expect(isPathWithinRoots('/a/b', [])).toBe(false);
+    expect(isPathWithinRoots(sep('/a'), [sep('/a/b')])).toBe(false);
+    expect(isPathWithinRoots(sep('/a/b'), [])).toBe(false);
   });
 
   it('accepts when inside any one of several roots', () => {
-    expect(isPathWithinRoots('/y/z/f', ['/a/b', '/y/z'])).toBe(true);
+    expect(isPathWithinRoots(sep('/y/z/f'), [sep('/a/b'), sep('/y/z')])).toBe(true);
   });
 });
 
@@ -44,7 +54,7 @@ describe('isSecretPath — deny-list', () => {
       '/proj/.kube/config',
       '/proj/.docker/config.json',
     ]) {
-      expect(isSecretPath(p)).toBe(true);
+      expect(isSecretPath(sep(p))).toBe(true);
     }
   });
 

@@ -11,7 +11,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import {
   loadVerifyConfig,
   matchDeliverable,
@@ -121,7 +121,11 @@ describe('loadVerifyConfig', () => {
     expect(logger.warn).toHaveBeenCalledTimes(1);
     const [msg, ctx] = (logger.warn as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(String(msg)).toMatch(/malformed JSON/i);
-    expect(ctx).toMatchObject({ configPath: expect.stringContaining(VERIFY_CONFIG_RELATIVE_PATH) });
+    // The constant is authored with forward slashes; the logged configPath uses
+    // the platform's native separators (path.join of the same components).
+    expect(ctx).toMatchObject({
+      configPath: expect.stringContaining(VERIFY_CONFIG_RELATIVE_PATH.split('/').join(sep)),
+    });
   });
 
   it('returns null on malformed JSON even with no logger (silent fail-soft)', async () => {

@@ -34,6 +34,7 @@ import type { Dirent } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { LoggerLike } from '../types';
+import { resolveGitCommand } from '../../utils/gitExeFinder';
 import { VerifyDepPreparer, defaultDepExec, type DepExec } from './depPreparer';
 
 const execFileAsync = promisify(execFile);
@@ -59,20 +60,22 @@ const CLONE_TIMEOUT_MS = 5 * 60 * 1000;
 /**
  * Shell-free git invocation, injectable for tests. Args are passed
  * positionally to the `git` binary (never shell-interpolated). The default
- * implementation is a plain `execFile('git', args, { cwd })` call; the primary
- * test suite exercises this module against a real throwaway git repo fixture
- * rather than a faked git, but the seam exists so callers/tests that need to
- * simulate an operational git failure (timeout, spawn failure) can do so
- * without depending on OS-level git behavior.
+ * implementation is a plain `execFile(resolveGitCommand(), args, { cwd })`
+ * call (gitExeFinder resolves the binary for GUI launches where PATH misses
+ * git); the primary test suite exercises this module against a real throwaway
+ * git repo fixture rather than a faked git, but the seam exists so
+ * callers/tests that need to simulate an operational git failure (timeout,
+ * spawn failure) can do so without depending on OS-level git behavior.
  */
 export type GitExec = (args: readonly string[], cwd: string) => Promise<string>;
 
 const defaultGitExec: GitExec = async (args, cwd) => {
-  const { stdout } = await execFileAsync('git', args as string[], {
+  const { stdout } = await execFileAsync(resolveGitCommand(), args as string[], {
     cwd,
     encoding: 'utf8',
     timeout: GIT_TIMEOUT_MS,
     maxBuffer: GIT_MAX_BUFFER,
+    windowsHide: true,
   });
   return stdout;
 };
@@ -345,6 +348,10 @@ async function cloneDependencyDir(
   exec: DepExec,
   logger?: LoggerLike,
 ): Promise<void> {
+  // Windows has no `cp` to shell out to; `defaultDepExec` translates these two
+  // argv into an in-process junction-preserving copy there (depPreparer.ts).
+  // Running the ladder THROUGH the injected seam keeps that seam the one
+  // authoritative failure point on every platform.
   const cloned = await exec('cp', ['-Rc', src, dest], {
     cwd: snapshotWorktreePath,
     timeoutMs: CLONE_TIMEOUT_MS,

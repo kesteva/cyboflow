@@ -237,8 +237,9 @@ describe('Migration 082: Design Mode v0', () => {
 
   it('(g) a fresh DatabaseService.initialize() run applies the migration cleanly', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration082-'));
+    let svc: DatabaseService | undefined;
     try {
-      const svc = new DatabaseService(join(dir, 'test.db'));
+      svc = new DatabaseService(join(dir, 'test.db'));
       svc.setMigrationsDirForTesting(MIG_DIR);
       svc.initialize();
       const db = svc.getDb();
@@ -267,6 +268,7 @@ describe('Migration 082: Design Mode v0', () => {
           .run(),
       ).not.toThrow();
     } finally {
+      try { svc?.close(); } catch { /* already closed */ }
       rmSync(dir, { recursive: true, force: true });
     }
   });

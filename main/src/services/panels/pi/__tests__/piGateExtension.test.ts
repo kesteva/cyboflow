@@ -17,7 +17,10 @@ import {
  * (a closure reference would ReferenceError right here).
  */
 async function loadGateModule(envMode: 'dontAsk' | 'gated') {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-gate-'));
+  // realpathSync.native: a Windows temp dir spelled with an 8.3 short name
+  // (C:\Users\RUNNER~1\…) gets its '~' percent-encoded by vite's import
+  // resolution and the module fails to load; the expanded long name is safe.
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync.native(os.tmpdir()), 'pi-gate-'));
   const file = path.join(dir, 'gate.mjs');
   fs.writeFileSync(
     file,

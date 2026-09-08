@@ -43,6 +43,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { app } from 'electron';
 import type { LoggerLike } from '../../../orchestrator/types';
+import { findExecutableInPath } from '../../../utils/shellPath';
 
 // ---------------------------------------------------------------------------
 // Hook-script path resolution (sibling of resolveMcpServerScriptPath)
@@ -180,6 +181,16 @@ export interface InteractiveSettingsWriteOptions {
    * Production callers omit it and let resolveShellHookScriptPath use __dirname.
    */
   hookDirOverride?: string;
+  /**
+   * Test-only platform override. Production callers omit it and hookCommand
+   * reads process.platform.
+   */
+  platform?: NodeJS.Platform;
+  /**
+   * Test-only node-binary override, so the win32 command shape can be asserted
+   * literally without depending on where node lives on the host.
+   */
+  nodePath?: string;
 }
 
 /**
@@ -204,6 +215,45 @@ function ensureHookExecutable(hookScriptPath: string, logger?: LoggerLike): void
   }
 }
 
+let cachedHookNodePath: string | null = null;
+
+/**
+ * The node binary the Windows hook commands run under, resolved once —
+ * hookCommand is called three times per settings fragment. A miss is not
+ * cached, so a later call can retry.
+ */
+function hookNodePath(): string {
+  if (cachedHookNodePath) return cachedHookNodePath;
+  const resolved = findExecutableInPath('node');
+  if (resolved) cachedHookNodePath = resolved;
+  return resolved ?? 'node';
+}
+
+/** Drop the memoized node path (tests, or after a version-manager switch). */
+export function clearHookNodePathCache(): void {
+  cachedHookNodePath = null;
+}
+
+/**
+ * The registered command for a hook script. On POSIX a BARE PATH works: it is
+ * execed via /bin/sh, which needs only the execute bit plus the node shebang.
+ *
+ * On Windows the command runs under cmd.exe, where a bare `.js` path resolves
+ * through the file association, which may not be node at all. Naming a bare
+ * `node` is no better: the hook inherits whatever PATH Claude Code hands it,
+ * and a PreToolUse hook that cannot start exits non-zero — which Claude Code
+ * reads as "not blocked", since only exit code 2 blocks. The gate would fail
+ * open, so the resolved node path is embedded.
+ */
+export function hookCommand(
+  hookScriptPath: string,
+  platform: NodeJS.Platform = process.platform,
+  nodePath?: string,
+): string {
+  if (platform !== 'win32') return hookScriptPath;
+  return `"${nodePath ?? hookNodePath()}" "${hookScriptPath}"`;
+}
+
 /**
  * Build the cyboflow inline `hooks` settings fragment for the `--settings
  * '<json>'` flag: the PreToolUse `'*'` gating hook (probe-verified: flag-tier
@@ -222,7 +272,8 @@ export function resolveInlineGatingHooks(
   const stopHookScriptPath = resolveStopHookScriptPath(opts.hookDirOverride);
   ensureHookExecutable(stopHookScriptPath, logger);
   const stop: HookMatcherGroup[] = [
-    { hooks: [{ type: 'command', command: stopHookScriptPath, timeout: STOP_HOOK_TIMEOUT_SECONDS }] },
+    { hooks: [{ type: 'command', command: hookCommand(stopHookScriptPath, opts.platform, opts.nodePath),
+        timeout: STOP_HOOK_TIMEOUT_SECONDS }] },
   ];
 
   // The AskUserQuestion "parked on a question" notify hook — a PreToolUse entry
@@ -236,7 +287,8 @@ export function resolveInlineGatingHooks(
   ensureHookExecutable(questionHookScriptPath, logger);
   const questionGroup: HookMatcherGroup = {
     matcher: 'AskUserQuestion',
-    hooks: [{ type: 'command', command: questionHookScriptPath, timeout: STOP_HOOK_TIMEOUT_SECONDS }],
+    hooks: [{ type: 'command', command: hookCommand(questionHookScriptPath, opts.platform, opts.nodePath),
+      timeout: STOP_HOOK_TIMEOUT_SECONDS }],
   };
 
   if (
@@ -254,7 +306,8 @@ export function resolveInlineGatingHooks(
   ensureHookExecutable(hookScriptPath, logger);
   return {
     PreToolUse: [
-      { matcher: '*', hooks: [{ type: 'command', command: hookScriptPath, timeout: HIGH_TIMEOUT_SECONDS }] },
+      { matcher: '*', hooks: [{ type: 'command', command: hookCommand(hookScriptPath, opts.platform, opts.nodePath),
+          timeout: HIGH_TIMEOUT_SECONDS }] },
       questionGroup,
     ],
     Stop: stop,

@@ -356,8 +356,12 @@ describe('convertDbSessionToSession — run_id → runId mapping', () => {
 
 describe('DB round-trip — run_id INSERT persistence', () => {
   let tmpDir: string;
+  // Services opened by the current test; closed in afterEach because an open
+  // SQLite handle blocks the tmpdir rm on Windows (POSIX deletes anyway).
+  const openServices: DatabaseService[] = [];
 
   afterEach(() => {
+    for (const svc of openServices.splice(0)) svc.close();
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -377,6 +381,7 @@ describe('DB round-trip — run_id INSERT persistence', () => {
     const realMigrationsDir = join(__dirname, '../../database/migrations');
 
     const svc = new DatabaseService(dbPath);
+    openServices.push(svc);
     svc.setMigrationsDirForTesting(realMigrationsDir);
     svc.initialize();
 
@@ -415,6 +420,7 @@ describe('DB round-trip — run_id INSERT persistence', () => {
     const realMigrationsDir = join(__dirname, '../../database/migrations');
 
     const svc = new DatabaseService(dbPath);
+    openServices.push(svc);
     svc.setMigrationsDirForTesting(realMigrationsDir);
     svc.initialize();
 
@@ -450,6 +456,7 @@ describe('DB round-trip — run_id INSERT persistence', () => {
     const realMigrationsDir = join(__dirname, '../../database/migrations');
 
     const svc = new DatabaseService(dbPath);
+    openServices.push(svc);
     svc.setMigrationsDirForTesting(realMigrationsDir);
     svc.initialize();
 
@@ -487,6 +494,7 @@ describe('DB round-trip — run_id INSERT persistence', () => {
     const realMigrationsDir = join(__dirname, '../../database/migrations');
 
     const svc = new DatabaseService(dbPath);
+    openServices.push(svc);
     svc.setMigrationsDirForTesting(realMigrationsDir);
     svc.initialize();
 

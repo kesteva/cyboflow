@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { rmDbTestDir, sweepLeakedDbTestDirs } from './cleanupDbTestDir';
 import { DatabaseService, MigrationFailedError } from '../database';
 
 describe('runFileBasedMigrations', () => {
@@ -17,7 +18,8 @@ describe('runFileBasedMigrations', () => {
   });
 
   afterEach(() => {
-    rmSync(dbDir, { recursive: true, force: true });
+    sweepLeakedDbTestDirs(tmpdir());
+    rmDbTestDir(dbDir);
   });
 
   it('applies a fresh .sql file and records it in user_preferences', () => {

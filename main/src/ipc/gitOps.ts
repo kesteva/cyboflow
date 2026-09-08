@@ -65,7 +65,11 @@ function isOwnRepoRoot(worktreePath: string): boolean {
   try {
     const toplevel = runGit(worktreePath, ['rev-parse', '--show-toplevel']).trim();
     if (!toplevel) return false;
-    return fs.realpathSync(toplevel) === fs.realpathSync(worktreePath);
+    // realpathSync.native, not the JS realpath: on Windows only the native call
+    // expands 8.3 short names (C:\Users\RUNNER~1\…) and canonicalises case, and
+    // git prints the toplevel long-named with forward slashes, so the JS variant
+    // compares two spellings of the same directory and answers false.
+    return fs.realpathSync.native(toplevel) === fs.realpathSync.native(worktreePath);
   } catch {
     // Not a repo, or the directory is gone — either way there is no branch to show.
     return false;

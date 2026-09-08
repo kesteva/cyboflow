@@ -76,6 +76,28 @@ describe('renderAgentMarkdown ↔ parseBundledAgent round-trip', () => {
     expect(parsed.body.trim()).toBe('You are the implement subagent.\n\n## Result\nDone.');
   });
 
+  // A Windows checkout under Git's default core.autocrlf=true (GitHub's
+  // windows-latest runners included) hands the parser CRLF-terminated files;
+  // an LF-only fence match silently returned '' for every name/description.
+  it('parses a CRLF-terminated file (Windows autocrlf checkout) identically to LF', () => {
+    const tools: CliTool[] = ['Read', 'Grep'];
+    const lf = renderAgentMarkdown({
+      agentKey: 'code-review',
+      description: 'Reviews the diff: correctness and layering.',
+      tools,
+      enabledMcps: [],
+      systemPrompt: 'You review.\n\n## Result\nVerdict.',
+    });
+    const crlf = lf.replace(/\n/g, '\r\n');
+    expect(crlf).not.toBe(lf);
+    const parsed = parseBundledAgent(crlf);
+    expect(parsed.name).toBe('cyboflow-code-review');
+    expect(parsed.description).toBe('Reviews the diff: correctness and layering.');
+    expect(parsed.tools).toEqual(tools);
+    // The body stays verbatim (CRLF preserved) — only the fence/line matching is lenient.
+    expect(parsed.body.trim()).toBe('You review.\r\n\r\n## Result\r\nVerdict.');
+  });
+
   it('appends mcp__<server>__* wildcards to the tools line for enabledMcps', () => {
     const md = renderAgentMarkdown({
       agentKey: 'implement',

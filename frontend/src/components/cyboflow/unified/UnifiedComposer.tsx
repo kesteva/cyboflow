@@ -2,6 +2,7 @@ import React, { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import { Paperclip, Square, Lock, X, FileText, CornerDownLeft } from 'lucide-react';
 import FilePathAutocomplete from '../../FilePathAutocomplete';
 import { cn } from '../../../utils/cn';
+import { kbdHint } from '../../../utils/platform';
 import type { ChatVisibility } from './useChatVisibility';
 import {
   type AttachedImage,
@@ -447,7 +448,7 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
                   onClick={() => void interruptSubmit()}
                   disabled={!canSend}
                   data-testid="unified-composer-interrupt-send"
-                  title="Stop the agent and send this message now (⌘⇧↵)"
+                  title={`Stop the agent and send this message now (${kbdHint('modShift', 'Enter')})`}
                   className={cn(
                     'inline-flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.1em] transition-[filter]',
                     canSend ? 'hover:brightness-110' : 'cursor-not-allowed opacity-50',
@@ -455,7 +456,7 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
                   style={{ backgroundColor: 'var(--ink)', border: '1px solid var(--ink)', color: 'var(--paper)' }}
                 >
                   <Square className="h-3 w-3 fill-current" /> {interruptLabel}
-                  <kbd className="opacity-70">⌘⇧↵</kbd>
+                  <kbd className="opacity-70">{kbdHint('modShift', 'Enter')}</kbd>
                 </button>
                 {onStop && (
                   // Secondary (outline) Stop — abort without sending; distinct

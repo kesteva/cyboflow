@@ -17,6 +17,7 @@
  */
 import { create } from 'zustand';
 import { isPerEntityArtifact, type ArtifactType } from '../../../shared/types/artifacts';
+import { pathBasename } from '../utils/pathBasename';
 import {
   type CenterPaneSessionState,
   type FileTabStatus,
@@ -109,10 +110,10 @@ interface CenterPaneStore {
   clearSession: (key: string) => void;
 }
 
-/** Basename of a path (file tab label default). */
+/** Basename of a path (file tab label default). Separator-agnostic: paths
+ * reaching the tab store may carry native (Windows) separators. */
 function basename(filePath: string): string {
-  const parts = filePath.split('/');
-  return parts[parts.length - 1] || filePath;
+  return pathBasename(filePath) || filePath;
 }
 
 export const useCenterPaneStore = create<CenterPaneStore>((set) => {

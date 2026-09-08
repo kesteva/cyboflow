@@ -26,10 +26,17 @@ interface ExecCall {
   baseEntries: string[];
 }
 
+/**
+ * The command name the preparer clones with on THIS host (`cp` on POSIX,
+ * `robocopy` on win32 — see depPreparer.cloneDir). Assertions that count clone
+ * invocations filter on this.
+ */
+const CLONE_CMD = process.platform === 'win32' ? 'robocopy' : 'cp';
+
 interface FakeExecOptions {
-  /** false ⇒ `cp -Rc` fails like a filesystem without clonefile, forcing the `-R` fallback. */
+  /** false ⇒ the clone attempt fails, forcing the fallback copy (POSIX `cp -Rc` → `-R`; win32: robocopy exits 8). */
   clonefileSupported?: boolean;
-  /** true ⇒ the plain `-R` copy fails too (nothing can be cloned). */
+  /** true ⇒ the plain copy fails too (nothing can be cloned). */
   plainCopyFails?: boolean;
   /** Exit code for `npx electron-builder install-app-deps`. */
   rebuildCode?: number;
@@ -39,6 +46,12 @@ interface FakeExecOptions {
  * A fake exec that actually performs the copy (so the preparer's own existence
  * checks on the published mirror are exercised against real directories) and
  * records every invocation.
+ *
+ * `clonefileSupported` is a POSIX-only lever: it makes `cp -Rc` fail so the
+ * preparer degrades to the plain `-R` copy. On win32 the preparer uses robocopy
+ * (no clonefile attempt exists to degrade from), so `clonefileSupported: false`
+ * instead forces the robocopy call to fail with a bitmask failure code (8+),
+ * and `plainCopyFails` fails the copy outright on both hosts.
  */
 function makeFakeExec(
   baseDir: string,
@@ -63,6 +76,13 @@ function makeFakeExec(
       if (opts.plainCopyFails) return { code: 1, out: 'cp: No space left on device' };
       await fsPromises.cp(src, dest, { recursive: true });
       return { code: 0, out: '' };
+    }
+    if (cmd === 'robocopy') {
+      const [src, dest] = args;
+      if (opts.plainCopyFails) return { code: 8, out: 'robocopy: access denied' };
+      if (!clonefileSupported) return { code: 8, out: 'robocopy: simulated failure' };
+      await fsPromises.cp(src, dest, { recursive: true });
+      return { code: 1, out: '' }; // robocopy: 1 = files copied successfully
     }
     if (cmd === 'npx') {
       return { code: opts.rebuildCode ?? 0, out: '' };
@@ -157,10 +177,10 @@ describe('VerifyDepPreparer.prepare — keying', () => {
       expect(await exists(path.join(baseDir, key, 'sub', 'package.json'))).toBe(true);
 
       // REUSE: same key, and no second clone.
-      const cloneCalls = calls.filter((c) => c.cmd === 'cp').length;
+      const cloneCalls = calls.filter((c) => c.cmd === CLONE_CMD).length;
       const second = await preparer.prepare(worktree, depDirs);
       expect(second?.get(depDirs[0])).toBe(rootMirror);
-      expect(calls.filter((c) => c.cmd === 'cp').length).toBe(cloneCalls);
+      expect(calls.filter((c) => c.cmd === CLONE_CMD).length).toBe(cloneCalls);
     });
   });
 
@@ -178,7 +198,7 @@ describe('VerifyDepPreparer.prepare — keying', () => {
       const keyAfter = keyOf(after?.get(depDirs[0]) ?? '');
 
       expect(keyAfter).not.toBe(keyBefore);
-      expect(calls.filter((c) => c.cmd === 'cp').length).toBe(2);
+      expect(calls.filter((c) => c.cmd === CLONE_CMD).length).toBe(2);
       expect(await exists(path.join(baseDir, keyBefore))).toBe(true);
     });
   });
@@ -225,7 +245,13 @@ describe('VerifyDepPreparer.prepare — keying', () => {
 });
 
 describe('VerifyDepPreparer.prepare — clone, rebuild, publish', () => {
-  it('falls back from `cp -Rc` (clonefile) to a plain `cp -R` and still publishes', async () => {
+  // POSIX-only: the clonefile→plain-copy ladder is a `cp -Rc` story. Windows
+  // clones with robocopy in ONE call (no clonefile attempt exists to degrade
+  // from — see depPreparer.cloneDir), so there is no fallback ladder to pin
+  // there; the win32 robocopy happy path is covered by the keying tests above.
+  it.skipIf(process.platform === 'win32')(
+    'falls back from `cp -Rc` (clonefile) to a plain `cp -R` and still publishes',
+    async () => {
     await withFixture(async ({ worktree, baseDir }) => {
       const depDirs = await makeWorktree(worktree);
       const calls: ExecCall[] = [];
@@ -237,7 +263,7 @@ describe('VerifyDepPreparer.prepare — clone, rebuild, publish', () => {
       const map = await preparer.prepare(worktree, depDirs);
 
       expect(map).not.toBeNull();
-      const cpFlags = calls.filter((c) => c.cmd === 'cp').map((c) => c.args[0]);
+      const cpFlags = calls.filter((c) => c.cmd === CLONE_CMD).map((c) => c.args[0]);
       expect(cpFlags).toEqual(['-Rc', '-R']);
       expect(await fsPromises.readFile(path.join(map?.get(depDirs[0]) ?? '', 'marker.txt'), 'utf8')).toBe(
         'root-marker\n',
@@ -291,7 +317,7 @@ describe('VerifyDepPreparer.prepare — clone, rebuild, publish', () => {
         preparer.prepare(worktree, depDirs),
       ]);
 
-      expect(calls.filter((call) => call.cmd === 'cp').length).toBe(1);
+      expect(calls.filter((call) => call.cmd === CLONE_CMD).length).toBe(1);
       expect(a?.get(depDirs[0])).toBe(b?.get(depDirs[0]));
       expect(b?.get(depDirs[0])).toBe(c?.get(depDirs[0]));
 
@@ -463,6 +489,66 @@ describe('VerifyDepPreparer.prepare — every failure degrades to null', () => {
       const withNested = [...rootOnly, path.join(worktree, 'sub', 'node_modules')];
 
       expect(await preparer.prepare(worktree, withNested)).toBeNull();
+    });
+  });
+
+  // The win32 clone arm, driven from any host through the injected platform.
+  // Without this the robocopy path is reachable only on a Windows runner, so a
+  // macOS CI gives no signal on it at all.
+  describe('win32 clone arm', () => {
+    it('clones with robocopy and treats a bitmask code below 8 as success', async () => {
+      await withFixture(async ({ worktree, baseDir }) => {
+        const depDirs = await makeWorktree(worktree);
+        const calls: ExecCall[] = [];
+        const preparer = new VerifyDepPreparer({
+          baseDir,
+          platform: 'win32',
+          exec: makeFakeExec(baseDir, calls),
+        });
+
+        expect(await preparer.prepare(worktree, depDirs)).not.toBeNull();
+
+        const clone = calls.find((c) => c.cmd === 'robocopy');
+        expect(clone).toBeDefined();
+        // /E recurses including empty dirs; the rest silence the per-file log,
+        // which robocopy prints by default and which nothing here reads.
+        expect(clone?.args.slice(2)).toEqual(['/E', '/NFL', '/NDL', '/NJH', '/NP', '/NS', '/NC']);
+        // Never the POSIX command: cp does not exist on Windows.
+        expect(calls.some((c) => c.cmd === 'cp')).toBe(false);
+      });
+    });
+
+    it('the POSIX arm is equally reachable from a Windows host', async () => {
+      // The mirror image of the case above, and what proves the seam drives
+      // the branch rather than the host doing so: this runs on Windows and
+      // must still take the cp path.
+      await withFixture(async ({ worktree, baseDir }) => {
+        const depDirs = await makeWorktree(worktree);
+        const calls: ExecCall[] = [];
+        const preparer = new VerifyDepPreparer({
+          baseDir,
+          platform: 'darwin',
+          exec: makeFakeExec(baseDir, calls),
+        });
+
+        expect(await preparer.prepare(worktree, depDirs)).not.toBeNull();
+        expect(calls.some((c) => c.cmd === 'cp' && c.args[0] === '-Rc')).toBe(true);
+        expect(calls.some((c) => c.cmd === 'robocopy')).toBe(false);
+      });
+    });
+
+    it('treats a robocopy code of 8 or more as a real failure', async () => {
+      await withFixture(async ({ worktree, baseDir }) => {
+        const depDirs = await makeWorktree(worktree);
+        const preparer = new VerifyDepPreparer({
+          baseDir,
+          platform: 'win32',
+          exec: makeFakeExec(baseDir, [], { plainCopyFails: true }),
+        });
+
+        // A failed clone is fail-soft by contract: null, never a throw.
+        await expect(preparer.prepare(worktree, depDirs)).resolves.toBeNull();
+      });
     });
   });
 

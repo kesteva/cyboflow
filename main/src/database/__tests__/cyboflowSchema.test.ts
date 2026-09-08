@@ -25,6 +25,7 @@ import Database from 'better-sqlite3';
 import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { rmDbTestDir, sweepLeakedDbTestDirs } from './cleanupDbTestDir';
 import { DatabaseService } from '../database';
 import { seedApproval } from '../../orchestrator/__test_fixtures__/orchestratorTestDb';
 
@@ -294,7 +295,8 @@ describe('006_cyboflow_schema — fresh-install migration runner integration', (
   let tmpDbDir: string;
 
   afterEach(() => {
-    rmSync(tmpDbDir, { recursive: true, force: true });
+    sweepLeakedDbTestDirs(tmpdir());
+    rmDbTestDir(tmpDbDir);
   });
 
   it('applies 006_cyboflow_schema.sql exactly once and records the ledger marker', () => {
@@ -385,7 +387,8 @@ describe('006_cyboflow_schema — existing-install migration runner integration'
   let tmpDbDir: string;
 
   afterEach(() => {
-    rmSync(tmpDbDir, { recursive: true, force: true });
+    sweepLeakedDbTestDirs(tmpdir());
+    rmDbTestDir(tmpDbDir);
   });
 
   it('auto-flags 003/004/005 and applies 006 exactly once with no errors', () => {
@@ -527,7 +530,8 @@ describe('006_cyboflow_schema — workflow_runs reconciler (post-006 in-place ed
   let tmpDbDir: string;
 
   afterEach(() => {
-    rmSync(tmpDbDir, { recursive: true, force: true });
+    sweepLeakedDbTestDirs(tmpdir());
+    rmDbTestDir(tmpDbDir);
   });
 
   it('adds permission_mode_snapshot, branch_name, error_message when a pre-edit 006 install re-initializes', () => {
@@ -728,9 +732,8 @@ describe('DatabaseService — getQuickSessions / quick-session NULL-tolerance', 
   let tmpDbDir009: string;
 
   afterEach(() => {
-    if (tmpDbDir009) {
-      rmSync(tmpDbDir009, { recursive: true, force: true });
-    }
+    sweepLeakedDbTestDirs(tmpdir());
+    rmDbTestDir(tmpDbDir009);
   });
 
   it('getQuickSessions(projectId) returns only sessions with is_quick = 1; getAllSessions returns both', () => {

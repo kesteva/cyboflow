@@ -27,6 +27,7 @@ import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPan
 import { ARTIFACT_COLORS, ARTIFACT_GLYPHS } from '../../../../shared/types/artifacts';
 import { useArtifactsList, useSessionArtifactsList } from '../../hooks/useArtifactsList';
 import { hideSupersededPrototypes } from '../../utils/prototypeArtifacts';
+import { pathBasename } from '../../utils/pathBasename';
 import { useArtifactTabsSync } from '../../hooks/useArtifactTabsSync';
 import { useNavigationStore } from '../../stores/navigationStore';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
@@ -55,9 +56,8 @@ interface RunCenterPaneProps {
 
 /** Basename of a worktree path for the dock header (e.g. "recipe-holder"). */
 function folderBasename(worktreePath?: string | null): string | undefined {
-  if (!worktreePath) return undefined;
-  const parts = worktreePath.replace(/\/+$/, '').split('/');
-  return parts[parts.length - 1] || undefined;
+  // Worktree paths are native separators (backslashes on Windows).
+  return worktreePath ? pathBasename(worktreePath) || undefined : undefined;
 }
 
 export function RunCenterPane({

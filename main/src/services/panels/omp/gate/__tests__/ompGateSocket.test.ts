@@ -29,6 +29,9 @@ import {
   type OmpGateLogger,
   type OmpGateRuntime,
 } from '../ompGateExtension';
+// The production platform seam that maps the POSIX socket path onto a Windows
+// named pipe — the test stubs bind the endpoint exactly the way index.ts does.
+import { orchSocketEndpoint } from '../../../../../orchestrator/mcpServer/orchSocketEndpoint';
 import type { OmpGateSentinel, OmpToolCallEvent } from '../ompGateTypes';
 
 const silentLogger: OmpGateLogger = {
@@ -74,7 +77,10 @@ interface StubOrchestrator {
 async function startOrchestrator(
   respond: (req: Record<string, unknown>) => string | null,
 ): Promise<StubOrchestrator> {
-  const socketPath = path.join(makeTempDir(), 's');
+  // On Windows a plain fs path cannot host the AF_UNIX-style bind (EACCES
+  // without elevation) — route the name through the production orchSocketEndpoint
+  // seam, exactly what index.ts does at boot, so the stub binds a named pipe.
+  const socketPath = orchSocketEndpoint(path.join(makeTempDir(), 's'));
   const received: Record<string, unknown>[] = [];
   const connections: net.Socket[] = [];
 
@@ -299,7 +305,10 @@ describe('requestSocketDecision', () => {
   });
 
   it('rejects when the socket does not exist (orchestrator unreachable)', async () => {
-    const socketPath = path.join(makeTempDir(), 'absent');
+    // Named-pipe endpoint on Windows (see startOrchestrator); the absent name
+    // surfaces the same ENOENT-style connect failure the client maps to
+    // "orchestrator unreachable".
+    const socketPath = orchSocketEndpoint(path.join(makeTempDir(), 'absent'));
 
     await expect(
       requestSocketDecision({
@@ -313,7 +322,10 @@ describe('requestSocketDecision', () => {
   });
 
   it('rejects when the orchestrator closes before answering', async () => {
-    const socketPath = path.join(makeTempDir(), 's');
+    // On Windows a plain fs path cannot host the AF_UNIX-style bind (EACCES
+  // without elevation) — route the name through the production orchSocketEndpoint
+  // seam, exactly what index.ts does at boot, so the stub binds a named pipe.
+  const socketPath = orchSocketEndpoint(path.join(makeTempDir(), 's'));
     const server = net.createServer((conn) => {
       serverConnections.push(conn);
       conn.end();

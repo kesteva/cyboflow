@@ -193,8 +193,9 @@ describe('Migration 097: verify-runbook artifact atype', () => {
 
   it('(f) the fresh-DB initialize() path includes verify-runbook in the atype CHECK', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration097-'));
+    let svc: DatabaseService | undefined;
     try {
-      const svc = new DatabaseService(join(dir, 'test.db'));
+      svc = new DatabaseService(join(dir, 'test.db'));
       svc.setMigrationsDirForTesting(join(__dirname, '..', 'migrations'));
       svc.initialize();
       const db = svc.getDb();
@@ -224,6 +225,7 @@ describe('Migration 097: verify-runbook artifact atype', () => {
           .run(),
       ).toThrow(/CHECK/i);
     } finally {
+      try { svc?.close(); } catch { /* already closed */ }
       rmSync(dir, { recursive: true, force: true });
     }
   });

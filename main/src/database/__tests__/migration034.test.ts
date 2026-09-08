@@ -306,8 +306,9 @@ describe('Migration 034: findings-triage columns', () => {
 
   it('(f) the fresh-DB initialize() path includes the new columns + indexes', () => {
     const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration034-'));
+    let svc: DatabaseService | undefined;
     try {
-      const svc = new DatabaseService(join(dir, 'test.db'));
+      svc = new DatabaseService(join(dir, 'test.db'));
       svc.setMigrationsDirForTesting(join(__dirname, '..', 'migrations'));
       svc.initialize();
       const db = svc.getDb();
@@ -334,6 +335,7 @@ describe('Migration 034: findings-triage columns', () => {
       expect(idxNames).toContain('idx_review_items_project_staged');
       expect(idxNames).toContain('idx_review_items_project_selected');
     } finally {
+      try { svc?.close(); } catch { /* already closed */ }
       rmSync(dir, { recursive: true, force: true });
     }
   });

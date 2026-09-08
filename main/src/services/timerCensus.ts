@@ -32,6 +32,8 @@
  * time are only attributed if the census is installed before that import runs.
  */
 
+import { normalizePathSeparators } from '../utils/posixPath';
+
 /** Minimal logger surface — kept local so this module imports nothing heavy. */
 interface CensusLogger {
   info(message: string): void;
@@ -81,14 +83,19 @@ function callSite(): string {
     const match = line.match(/\(?((?:\/|[A-Za-z]:)[^():\s]+):(\d+):\d+\)?\s*$/);
     if (!match) continue;
     const [, file, lineNo] = match;
-    if (firstFrame === null) firstFrame = `${file.split('/').slice(-2).join('/')}:${lineNo}`;
-    if (file.includes('timerCensus')) continue;
-    if (file.includes('node:')) continue;
-    if (file.includes('/node_modules/')) {
+    // V8 frames carry platform-native paths (backslashes on Windows, where the
+    // drive-letter form above already parses). Normalize to '/' once so the
+    // '/node_modules/' include and the short-label splits below work on both
+    // platforms.
+    const normFile = normalizePathSeparators(file);
+    if (firstFrame === null) firstFrame = `${normFile.split('/').slice(-2).join('/')}:${lineNo}`;
+    if (normFile.includes('timerCensus')) continue;
+    if (normFile.includes('node:')) continue;
+    if (normFile.includes('/node_modules/')) {
       // Keep node_modules frames, but label them so app code is easy to spot.
-      return `[dep] ${file.split('/node_modules/')[1]?.split('/').slice(0, 2).join('/') ?? file}:${lineNo}`;
+      return `[dep] ${normFile.split('/node_modules/')[1]?.split('/').slice(0, 2).join('/') ?? normFile}:${lineNo}`;
     }
-    return `${file.split('/').slice(-2).join('/')}:${lineNo}`;
+    return `${normFile.split('/').slice(-2).join('/')}:${lineNo}`;
   }
   return firstFrame ?? '(unresolved)';
 }

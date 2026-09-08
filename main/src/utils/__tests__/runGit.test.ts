@@ -168,9 +168,11 @@ describe('cwd option', () => {
     // Both paths may be equivalent even if one uses a symlink resolution
     // e.g. /var/folders vs /private/var/folders on macOS
     expect(result).toBeTruthy();
-    // The returned path and our dir should resolve to the same location
-    const resolvedDir = fs.realpathSync(dir);
-    const resolvedResult = fs.realpathSync(result);
+    // The returned path and our dir should resolve to the same location.
+    // realpathSync.native: on Windows the temp dir may be spelled with an 8.3
+    // short name (C:\Users\RUNNER~1\…) that only the native call expands.
+    const resolvedDir = fs.realpathSync.native(dir);
+    const resolvedResult = fs.realpathSync.native(result);
     expect(resolvedResult).toBe(resolvedDir);
   });
 });

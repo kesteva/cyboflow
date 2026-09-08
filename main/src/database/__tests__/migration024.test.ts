@@ -34,6 +34,7 @@ import Database from 'better-sqlite3';
 import { readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { rmDbTestDir, sweepLeakedDbTestDirs } from './cleanupDbTestDir';
 import { DatabaseService } from '../database';
 
 interface TableInfoRow {
@@ -247,7 +248,8 @@ describe('Migration 024: archive-in-place + Archived stage removal', () => {
     let tmpDbDir: string;
 
     afterEach(() => {
-      if (tmpDbDir) rmSync(tmpDbDir, { recursive: true, force: true });
+      sweepLeakedDbTestDirs(tmpdir());
+    rmDbTestDir(tmpDbDir);
     });
 
     it('a freshly migrated DB + new project has archived_at and NO position-11 stage', () => {

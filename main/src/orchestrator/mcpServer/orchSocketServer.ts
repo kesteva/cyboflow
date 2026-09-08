@@ -95,6 +95,19 @@ const SOCKET_DIR_MODE = 0o700;
 /** Socket-file mode: owner read/write, so no other user can connect. */
 const SOCKET_FILE_MODE = 0o600;
 
+/**
+ * True for a Windows named pipe path (`\\.\pipe\...`, orchSocketEndpoint.ts's
+ * sole output on win32). A named pipe is NOT a filesystem node: there is no
+ * directory to create or chmod, no stale file to probe/unlink before binding,
+ * and no inode to stat afterward — every unix-socket filesystem step below is
+ * skipped for a path this returns true for. Case-insensitive on the prefix
+ * (Windows path comparisons are); path shape alone decides, independent of
+ * `process.platform`, so a test can exercise this from any host.
+ */
+export function isNamedPipePath(p: string): boolean {
+  return p.toLowerCase().startsWith('\\\\.\\pipe\\');
+}
+
 // ---------------------------------------------------------------------------
 // OrchSocketServer
 // ---------------------------------------------------------------------------
@@ -153,32 +166,41 @@ export class OrchSocketServer {
   async start(): Promise<void> {
     // Any inode from a prior bind is stale the moment we re-enter start().
     this.boundInode = null;
-    // Owner-only from the moment it exists. `mode` applies only to directories
-    // this call CREATES (and is masked by umask), so an existing dir from an
-    // older build — created with the default 0755 — is tightened explicitly.
-    const socketDir = path.dirname(this.socketPath);
-    fs.mkdirSync(socketDir, { recursive: true, mode: SOCKET_DIR_MODE });
-    this.tightenMode(socketDir, SOCKET_DIR_MODE, 'sockets directory');
+    // A named pipe is not a filesystem node — every step in this block is
+    // unix-socket-specific (directory to hold the node, stale-file probe,
+    // leftover unlink) and would misfire against a pipe path: mkdirSync on a
+    // pipe's fake "directory" component, or an existsSync/rmSync racing a live
+    // pipe server for EBUSY. None of it is needed there: the pipe namespace has
+    // no leftover-file state to reclaim, so listen() below is the whole story.
+    const pipe = isNamedPipePath(this.socketPath);
+    if (!pipe) {
+      // Owner-only from the moment it exists. `mode` applies only to directories
+      // this call CREATES (and is masked by umask), so an existing dir from an
+      // older build — created with the default 0755 — is tightened explicitly.
+      const socketDir = path.dirname(this.socketPath);
+      fs.mkdirSync(socketDir, { recursive: true, mode: SOCKET_DIR_MODE });
+      this.tightenMode(socketDir, SOCKET_DIR_MODE, 'sockets directory');
 
-    // A unix socket fails to bind onto a leftover file from a prior run, so a
-    // stale file must be unlinked first. But unlink-before-bind must NOT clobber
-    // a socket a LIVE peer is still listening on — that is exactly the
-    // two-instance orch.sock clobber that stranded every subsequent MCP
-    // subprocess (the file was replaced out from under a running server). The
-    // single-instance-per-kind lock (index.ts) should already prevent a second
-    // server here; this probe is defense-in-depth if that guard ever fails open.
-    if (fs.existsSync(this.socketPath)) {
-      if (await this.isSocketAlive(this.socketPath)) {
-        this.server = null;
-        this.logger.error('[Cyboflow Orch IPC] live socket already in use — refusing to clobber', {
-          socketPath: this.socketPath,
-        });
-        throw new Error(
-          `[Cyboflow Orch IPC] refusing to bind ${this.socketPath}: another server is already listening on it`,
-        );
+      // A unix socket fails to bind onto a leftover file from a prior run, so a
+      // stale file must be unlinked first. But unlink-before-bind must NOT clobber
+      // a socket a LIVE peer is still listening on — that is exactly the
+      // two-instance orch.sock clobber that stranded every subsequent MCP
+      // subprocess (the file was replaced out from under a running server). The
+      // single-instance-per-kind lock (index.ts) should already prevent a second
+      // server here; this probe is defense-in-depth if that guard ever fails open.
+      if (fs.existsSync(this.socketPath)) {
+        if (await this.isSocketAlive(this.socketPath)) {
+          this.server = null;
+          this.logger.error('[Cyboflow Orch IPC] live socket already in use — refusing to clobber', {
+            socketPath: this.socketPath,
+          });
+          throw new Error(
+            `[Cyboflow Orch IPC] refusing to bind ${this.socketPath}: another server is already listening on it`,
+          );
+        }
+        // No live listener answered — a stale leftover file. Safe to remove.
+        fs.rmSync(this.socketPath, { force: true });
       }
-      // No live listener answered — a stale leftover file. Safe to remove.
-      fs.rmSync(this.socketPath, { force: true });
     }
 
     const server = net.createServer((socket) => this.onConnection(socket));
@@ -204,22 +226,27 @@ export class OrchSocketServer {
         server.on('error', (err: Error) => {
           this.logger.error('[Cyboflow Orch IPC] server error', { error: err.message });
         });
-        // Record the inode we just bound so stop() can prove ownership before
-        // unlinking. A failed stat leaves it null, which makes stop() skip the
-        // unlink — strictly the safe direction (a stale file is reclaimed by the
-        // next start()'s probe; a clobbered live socket is not recoverable).
-        // Tighten the socket file itself before announcing readiness: between
-        // bind and this chmod the node is world-connectable under a default
-        // umask, and every client we spawn starts only after start() resolves.
-        this.tightenMode(this.socketPath, SOCKET_FILE_MODE, 'socket file');
-        try {
-          this.boundInode = fs.statSync(this.socketPath).ino;
-        } catch (err) {
-          this.boundInode = null;
-          this.logger.debug('[Cyboflow Orch IPC] could not stat bound socket', {
-            error: err instanceof Error ? err.message : String(err),
-          });
+        if (!pipe) {
+          // Record the inode we just bound so stop() can prove ownership before
+          // unlinking. A failed stat leaves it null, which makes stop() skip the
+          // unlink — strictly the safe direction (a stale file is reclaimed by the
+          // next start()'s probe; a clobbered live socket is not recoverable).
+          // Tighten the socket file itself before announcing readiness: between
+          // bind and this chmod the node is world-connectable under a default
+          // umask, and every client we spawn starts only after start() resolves.
+          this.tightenMode(this.socketPath, SOCKET_FILE_MODE, 'socket file');
+          try {
+            this.boundInode = fs.statSync(this.socketPath).ino;
+          } catch (err) {
+            this.boundInode = null;
+            this.logger.debug('[Cyboflow Orch IPC] could not stat bound socket', {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
         }
+        // For a pipe there is no mode to tighten and no fs node to stat —
+        // boundInode stays null (expected; see isSocketPathIntact, which checks
+        // server.listening instead for a pipe path rather than an inode match).
         this.logger.info('[Cyboflow Orch IPC] listening', { socketPath: this.socketPath });
         resolve();
       };
@@ -238,6 +265,15 @@ export class OrchSocketServer {
       const onError = (err: NodeJS.ErrnoException): void => {
         if (err.code === 'EADDRINUSE' && !retriedAddrInUse) {
           retriedAddrInUse = true;
+          if (pipe) {
+            // A pipe name is held only by a live server — there is no stale
+            // leftover state for a pipe path the way a dead process can leave
+            // behind a unix-socket file, so EADDRINUSE here is unconditionally
+            // an ownership conflict. Never rmSync a pipe path (there is no file
+            // to remove and no retry that could ever succeed against it).
+            failOwnershipConflict();
+            return;
+          }
           // A peer may have bound the path in the probe→listen window. Never
           // unlink a live socket — reject; only reclaim a stale/dead file.
           void this.isSocketAlive(this.socketPath).then((alive) => {
@@ -307,8 +343,17 @@ export class OrchSocketServer {
     }
     this.connections.clear();
 
+    // A named pipe has no fs node, so there is nothing for another instance to
+    // "rebind" out from under us in the unix-socket sense this check exists
+    // for (statting a LIVE pipe by path opens a phantom client handle into its
+    // owner's onConnection, or throws EBUSY — never a safe ownership probe).
+    // The pipe namespace itself is the ownership boundary: if we are holding
+    // this OrchSocketServer's `server` handle, it is because our listen()
+    // succeeded, so close() unconditionally below is always correct here.
+    const pipe = isNamedPipePath(this.socketPath);
+
     // Ownership check must happen BEFORE close() — see the libuv note above.
-    if (this.pathBelongsToAnotherInstance(boundInode)) {
+    if (!pipe && this.pathBelongsToAnotherInstance(boundInode)) {
       server.unref();
       this.logger.warn(
         '[Cyboflow Orch IPC] socket path was rebound by another instance — leaving it and our handle untouched',
@@ -320,6 +365,8 @@ export class OrchSocketServer {
     await new Promise<void>((resolve) => {
       server.close(() => resolve());
     });
+
+    if (pipe) return; // no fs node to unlink
 
     // close() already unlinked our own socket; this is a belt-and-braces sweep
     // for the case where it did not (e.g. never fully bound). ENOENT is expected.
@@ -413,6 +460,15 @@ export class OrchSocketServer {
    * Sync and cheap (one stat), so it can be polled from a health snapshot.
    */
   isSocketPathIntact(): boolean {
+    // A Windows named pipe cannot be unlinked — there is no filesystem path
+    // to lose, so there is no inode to re-stat either (boundInode stays null
+    // there). The only way a new subprocess can fail to connect is the server
+    // having stopped listening, which is exactly what this reports. Path shape
+    // alone decides (not process.platform), so this is exercisable from any
+    // host in tests.
+    if (isNamedPipePath(this.socketPath)) {
+      return this.server !== null && this.server.listening;
+    }
     if (!this.server || this.boundInode === null) return false;
     try {
       return fs.statSync(this.socketPath).ino === this.boundInode;

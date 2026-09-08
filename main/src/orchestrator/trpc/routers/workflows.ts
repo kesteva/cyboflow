@@ -12,6 +12,7 @@
  * 'better-sqlite3', or main/src/services/*.
  */
 import { z } from 'zod';
+import { workflowNameIssue } from '../../workflowName';
 import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure } from '../trpc';
 import { buildBuiltInWorkflows } from '../../workflows/builtInWorkflows';
@@ -19,6 +20,16 @@ import { workflowDefinitionSchema } from '../../workflowDefinitionSchema';
 import type { WorkflowRow, WorkflowDefinition } from '../../../../../shared/types/workflows';
 import { TUNING_LEVELS } from '../../../../../shared/tuning/workflowTuning';
 import { RUNTIME_MIXES } from '../../../../../shared/tuning/runtimeMix';
+
+const workflowNameSchema = z
+  .string()
+  .min(1)
+  .superRefine((name, ctx) => {
+    const issue = workflowNameIssue(name);
+    if (issue) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: issue });
+    }
+  });
 
 export const workflowsRouter = router({
   /**
@@ -225,8 +236,9 @@ export const workflowsRouter = router({
   /**
    * Create a brand-new custom workflow from an edited definition ("Save as new
    * flow" / "Create a project-specific copy"). The `workflowDefinitionSchema`
-   * validates `definition` as `.input()` (BAD_REQUEST on failure); a name
-   * collision maps to CONFLICT.
+   * validates `definition` as `.input()` (BAD_REQUEST on failure); the name is
+   * Windows-validated (workflowNameIssue — it flows into git branches and
+   * worktree paths) and a name collision maps to CONFLICT.
    *
    * Scope (migration 030) is chosen by `projectId`: omitted or `null` mints a
    * GLOBAL custom flow (the product default — one shared flow across projects);
@@ -238,7 +250,7 @@ export const workflowsRouter = router({
     .input(
       z.object({
         projectId: z.number().int().positive().nullable().optional(),
-        name: z.string().min(1),
+        name: workflowNameSchema,
         definition: workflowDefinitionSchema,
         permissionMode: z.enum(['default', 'acceptEdits', 'auto', 'dontAsk']).optional(),
       }),

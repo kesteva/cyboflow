@@ -16,9 +16,11 @@
  * Every spawn needs a live orchestrator socket: the server exits(1) immediately
  * without CYBOFLOW_RUN_ID + CYBOFLOW_ORCH_SOCKET, and a refused connection ends
  * it via its own `socket.on('close')` shutdown. So beforeAll stands up a real
- * net.createServer() on a temp unix socket that accepts and holds connections;
- * the accepted-connection count is then usable as proof a spawn actually booted,
- * which keeps the "still alive" assertions from passing vacuously.
+ * net.createServer() on the platform's orchestrator endpoint — a temp unix
+ * socket, or a named pipe on Windows (orchSocketEndpoint) — that accepts and
+ * holds connections; the accepted-connection count is then usable as proof a
+ * spawn actually booted, which keeps the "still alive" assertions from passing
+ * vacuously.
  *
  * CYBOFLOW_MCP_PARENT_WATCHDOG_MS (a documented test seam on parentWatchdog) is
  * set on every spawn so the ppid poll runs in hundreds of milliseconds instead of
@@ -30,6 +32,8 @@ import * as fs from 'fs';
 import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
+import { orchSocketEndpoint } from '../orchSocketEndpoint';
+import { isAlive } from '../../../__test_fixtures__/processTree';
 
 // main/src/orchestrator/mcpServer/__tests__ -> main/
 const MAIN_DIR = path.resolve(__dirname, '..', '..', '..', '..');
@@ -142,10 +146,6 @@ function ppidOf(pid: number): number | null {
   }
 }
 
-function isAlive(pid: number): boolean {
-  return ppidOf(pid) !== null;
-}
-
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
@@ -162,7 +162,10 @@ describeIfBuilt('cyboflowMcpServer subprocess lifecycle', () => {
 
   beforeAll(async () => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cybo-mcp-life-'));
-    socketPath = path.join(tmpDir, 'orch.sock');
+    // Windows cannot bind a Unix socket (EACCES); the production endpoint seam
+    // returns a named pipe there. The test only needs a live server for the
+    // subprocess to dial — the endpoint itself is OrchSocketEndpoint's contract.
+    socketPath = orchSocketEndpoint(path.join(tmpDir, 'orch.sock'));
 
     orchServer = net.createServer((sock) => {
       acceptedConnections += 1;
@@ -273,7 +276,14 @@ describeIfBuilt('cyboflowMcpServer subprocess lifecycle', () => {
     20_000,
   );
 
-  it(
+  // POSIX-only, deliberately. Windows never reparents an orphan to pid 1 —
+  // measured out-of-band: a detached process whose spawner has exited still
+  // reports that spawner's pid as process.ppid — so the ppid===1 signal this
+  // watchdog is built on cannot fire there (parentWatchdog.ts's rationale is
+  // Darwin's unconditional reparent-to-launchd). The fifo recipe below is also
+  // POSIX-only (no mkfifo). The still-alive test above covers the surviving
+  // no-false-kill guarantee on Windows.
+  it.skipIf(process.platform === 'win32')(
     'exits when its spawner dies, with stdin still open (the ppid watchdog)',
     async () => {
       // THE TRAP THIS TEST IS BUILT AROUND. If the server's stdin ever reaches

@@ -219,7 +219,9 @@ describe('StaticServerManager', () => {
       await writeFile(join(root, 'index.html'), '<html></html>');
       await mkdir(join(root, 'node_modules'), { recursive: true });
       await writeFile(join(root, 'node_modules', 'pkg.js'), 'module.exports = {};');
-      await symlink(join(root, 'node_modules'), join(root, 'x'));
+      // A dir symlink; junctions are the unprivileged win32 stand-in and resolve
+      // through realpath the same way.
+      await symlink(join(root, 'node_modules'), join(root, 'x'), process.platform === 'win32' ? 'junction' : 'dir');
 
       const mgr = new StaticServerManager();
       const handle = await mgr.spawn({
@@ -285,7 +287,12 @@ describe('StaticServerManager', () => {
     }
   });
 
-  it('404s a symlink pointing outside staticRoot', async () => {
+  // POSIX-only fixture: a symlinked FILE needs privileges on win32 (a junction
+  // cannot point at a file); the denied-dir alias test above covers the
+  // post-realpath guard on win32 via a junction.
+  it.skipIf(process.platform === 'win32')(
+    '404s a symlink pointing outside staticRoot',
+    async () => {
     const root = await mkdtemp(join(tmpdir(), 'cvv-static-'));
     const outside = await mkdtemp(join(tmpdir(), 'cvv-outside-'));
     try {
@@ -310,7 +317,8 @@ describe('StaticServerManager', () => {
       await rm(root, { recursive: true, force: true });
       await rm(outside, { recursive: true, force: true });
     }
-  });
+    },
+  );
 
   it('release() closes the server (subsequent fetch rejects) and is idempotent', async () => {
     const root = await mkdtemp(join(tmpdir(), 'cvv-static-'));

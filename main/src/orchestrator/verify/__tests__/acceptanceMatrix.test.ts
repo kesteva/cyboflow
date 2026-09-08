@@ -747,21 +747,32 @@ async function initDepFixtureRepo(dir: string): Promise<void> {
 }
 
 /**
- * A `DepExec` that shells out to the REAL `cp` (so the preparer's own existence
- * checks run against real directories, and the published mirror is a real tree
- * the snapshot can clone from) and records every invocation. The Electron ABI
- * rebuild is a recorded no-op — §7.2 puts it here on purpose, and the two rows
- * below assert WHERE it happens, never that it works.
+ * A `DepExec` that shells out to the REAL `cp` on POSIX (so the preparer's own
+ * existence checks run against real directories, and the published mirror is a
+ * real tree the snapshot can clone from) and records every invocation. The
+ * Electron ABI rebuild is a recorded no-op — §7.2 puts it here on purpose, and
+ * the two rows below assert WHERE it happens, never that it works.
  *
  * Real `cp` rather than `fsPromises.cp`: the latter REWRITES a relative symlink
  * into an absolute path back into the source tree, which is the §7.2 finding-6
  * breakage in miniature. A mirror built that way would make these rows assert
  * against a fixture the production path never produces.
+ *
+ * On win32 the preparer clones with robocopy (see cloneDir) — the fixture arm
+ * performs the copy via fsPromises.cp, which is safe HERE: the fixture tree
+ * carries no symlinks, so the rewriting caveat does not apply.
  */
+const CLONE_CMD = process.platform === 'win32' ? 'robocopy' : 'cp';
+
 function recordingDepExec(calls: Array<{ cmd: string; args: string[] }>): DepExec {
   return async (cmd, args, opts) => {
     calls.push({ cmd, args: [...args] });
-    return cmd === 'cp' ? defaultDepExec(cmd, args, opts) : { code: 0, out: '' };
+    if (cmd === 'cp') return defaultDepExec(cmd, args, opts);
+    if (cmd === 'robocopy') {
+      await fsPromises.cp(args[0], args[1], { recursive: true });
+      return { code: 0, out: '' };
+    }
+    return { code: 0, out: '' };
   };
 }
 
@@ -905,7 +916,7 @@ describe('§5.4 matrix — dependency preparation', () => {
       expect(status).toBe('passed');
 
       // A mirror was BUILT (cold): the preparer's clone ran at least once.
-      expect(execCalls.filter((c) => c.cmd === 'cp').length).toBeGreaterThan(0);
+      expect(execCalls.filter((c) => c.cmd === CLONE_CMD).length).toBeGreaterThan(0);
       const sets = await publishedSets(cacheDir);
       expect(sets).toHaveLength(1);
       expect(await exists(path.join(sets[0], 'node_modules', 'marker.txt'))).toBe(true);
@@ -936,7 +947,7 @@ describe('§5.4 matrix — dependency preparation', () => {
 
       const first = await runAgainstRealRepo({ repo, cacheDir, execCalls, runId: 'run-warm-1' });
       expect(first.status).toBe('passed');
-      const clonesAfterCold = execCalls.filter((c) => c.cmd === 'cp').length;
+      const clonesAfterCold = execCalls.filter((c) => c.cmd === CLONE_CMD).length;
       expect(clonesAfterCold).toBeGreaterThan(0);
 
       // A fresh scheduler singleton for the second request — the cache is on
@@ -946,7 +957,7 @@ describe('§5.4 matrix — dependency preparation', () => {
 
       expect(second.status).toBe('passed');
       // The whole point of the cache: the published set was ADOPTED, not rebuilt.
-      expect(execCalls.filter((c) => c.cmd === 'cp').length).toBe(clonesAfterCold);
+      expect(execCalls.filter((c) => c.cmd === CLONE_CMD).length).toBe(clonesAfterCold);
 
       // And the warm path is no less isolated than the cold one: the second
       // snapshot got its own clone of the SAME mirror, and the first run's write

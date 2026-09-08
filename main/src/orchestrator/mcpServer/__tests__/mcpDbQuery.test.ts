@@ -65,6 +65,13 @@ beforeEach(() => {
 
 afterEach(() => {
   rawDb.close();
+  // The mcp-db-query handler lazily caches a readonly sibling connection to the
+  // same db file for its whole lifetime. On Windows an open handle blocks the
+  // tmpdir rm below, so release it before cleanup (production holds it for the
+  // process lifetime, matching the main db connection — there is no public API).
+  (
+    handler as unknown as { globalAgentReadonlyDb?: { close: () => void } }
+  ).globalAgentReadonlyDb?.close();
   rmSync(tmpDir, { recursive: true, force: true });
 });
 

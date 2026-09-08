@@ -4,6 +4,7 @@ import * as os from 'os';
 import { glob } from 'glob';
 import { appendCommitFooter } from '../utils/commitFooter';
 import { runGitAsync, runGitCapture, assertNotOptionLike, END_OF_OPTIONS } from '../utils/runGit';
+import { normalizePathSeparators } from '../utils/posixPath';
 import type { AppServices } from './types';
 import type { WorkspaceFileOpsLike, FileItem } from '../orchestrator/trpc/contracts/workspaceFileOps';
 
@@ -460,10 +461,20 @@ export function createFileOps(
 
           // Use git show to get file content at specific revision. argv form (no
           // shell), with END_OF_OPTIONS pinning the spec into a value position.
+          // Git's `<rev>:<path>` object spec always uses forward slashes as
+          // separators — on Windows, path.normalize emits native backslashes
+          // that git treats as literal filename characters, so the spec never
+          // matches. Only remap on win32: on POSIX a backslash is a legitimate
+          // (literal) filename character in a tracked path, and remapping it
+          // unconditionally would ask git for a path it never tracked (empty
+          // content via the "does not exist" branch below, silently).
+          const gitObjectPath = process.platform === 'win32'
+            ? normalizePathSeparators(normalizedPath)
+            : normalizedPath;
           const { stdout } = await runGitCapture(session.worktreePath, [
             'show',
             END_OF_OPTIONS,
-            `${revision}:${normalizedPath}`,
+            `${revision}:${gitObjectPath}`,
           ]);
 
           return { success: true, content: stdout };
@@ -734,13 +745,20 @@ export function createFileOps(
             const fullPath = path.join(searchDir, file);
             const relativePath = path.relative(resolvedSearchDirectory, fullPath);
 
+            // Both comparisons below are against '/'-separated forms (the literal
+            // worktree filters, and git ls-files output which git always emits
+            // with '/'), while path.relative is platform-native (backslashes on
+            // Windows). Normalize once for MATCHING — the reported path stays
+            // exactly what path.relative produced.
+            const relativeMatchPath = normalizePathSeparators(relativePath);
+
             // Skip worktree directories
-            if (relativePath.includes('worktrees/') || relativePath.startsWith('worktrees/')) {
+            if (relativeMatchPath.includes('worktrees/') || relativeMatchPath.startsWith('worktrees/')) {
               return null;
             }
 
             // If we're in a git repo, only include tracked/untracked-but-not-ignored files
-            if (isGitRepo && gitTrackedFiles.size > 0 && !gitTrackedFiles.has(relativePath)) {
+            if (isGitRepo && gitTrackedFiles.size > 0 && !gitTrackedFiles.has(relativeMatchPath)) {
               // Check if it's a directory - directories might not be in git ls-files
               try {
                 const stats = await fs.stat(fullPath);

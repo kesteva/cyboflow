@@ -38,7 +38,7 @@ function probeKeychain(): Promise<boolean> {
       const child = execFile(
         '/usr/bin/security',
         ['find-generic-password', '-s', KEYCHAIN_SERVICE],
-        { timeout: KEYCHAIN_TIMEOUT_MS },
+        { timeout: KEYCHAIN_TIMEOUT_MS, windowsHide: true },
         (error) => {
           // No stdout/stderr inspected — only the presence/absence of an error
           // (non-zero exit, timeout, or spawn failure) decides the result.

@@ -32,6 +32,7 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { getShellPath } from './shellPath';
+import { resolveGitCommand } from './gitExeFinder';
 
 const execFileAsyncPromise = promisify(execFile);
 
@@ -104,28 +105,30 @@ export function buildCommandEnv(override?: NodeJS.ProcessEnv): NodeJS.ProcessEnv
 }
 
 export function runGit(cwd: string, args: string[], options: RunGitOptions = {}): string {
-  return execFileSync('git', args, {
+  return execFileSync(resolveGitCommand(), args, {
     cwd,
     encoding: 'utf8',
     maxBuffer: options.maxBuffer ?? DEFAULT_MAX_BUFFER,
     env: buildCommandEnv(options.env),
+    windowsHide: true,
   });
 }
 
 export async function runGitAsync(cwd: string, args: string[], options: RunGitOptions = {}): Promise<string> {
-  const { stdout } = await runToolCapture('git', cwd, args, options);
+  const { stdout } = await runToolCapture(resolveGitCommand(), cwd, args, options);
   return stdout;
 }
 
 /** git twin of {@link runGitAsync} for callers that also need stderr. */
 export function runGitCapture(cwd: string, args: string[], options: RunGitOptions = {}): Promise<CommandOutput> {
-  return runToolCapture('git', cwd, args, options);
+  return runToolCapture(resolveGitCommand(), cwd, args, options);
 }
 
 /**
- * Generic execFile runner for the non-git CLIs that sit alongside these call
- * sites (currently `gh`), so they get the same shell-free argv handling and the
- * same login-shell PATH resolution.
+ * Generic execFile runner used by the runGitAsync/runGitCapture twins (with the
+ * git command resolved by gitExeFinder) and for the non-git CLIs that sit
+ * alongside these call sites (currently `gh`), so they get the same shell-free
+ * argv handling and the same login-shell PATH resolution.
  */
 export async function runToolCapture(
   bin: string,
@@ -140,6 +143,7 @@ export async function runToolCapture(
     env: buildCommandEnv(options.env),
     signal: options.signal,
     timeout: options.timeout,
+    windowsHide: true,
   });
   return { stdout, stderr };
 }

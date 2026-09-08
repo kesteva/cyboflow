@@ -14,6 +14,7 @@
 import { readFileSync } from 'fs';
 import { parseMarkdownFrontmatter } from './markdownFrontmatter';
 import { randomUUID } from 'crypto';
+import { workflowNameIssue } from './workflowName';
 import type { LoggerLike, DatabaseLike } from './types';
 import type { PermissionMode, WorkflowRow, WorkflowRunRow, CyboflowWorkflowName, WorkflowDefinition } from '../../../shared/types/workflows';
 import {
@@ -1033,6 +1034,11 @@ export class WorkflowRegistry {
     const { projectId, name } = params;
     const specJson = params.specJson ?? '{}';
     const permissionMode: PermissionMode = params.permissionMode ?? 'default';
+
+    const nameIssue = workflowNameIssue(name);
+    if (nameIssue !== null) {
+      throw new Error(`WorkflowRegistry.createCustom: ${nameIssue}`);
+    }
 
     if (isCyboflowWorkflowName(name) || name === QUICK_WORKFLOW_NAME) {
       throw new Error(

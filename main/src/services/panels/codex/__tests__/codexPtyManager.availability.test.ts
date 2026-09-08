@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as path from 'node:path';
 import { CodexPtyManager } from '../codexPtyManager';
 import type { ResolvedCodexExecutable } from '../codexExecutablePath';
 import type { CliVersionProbeResult } from '../../cli/cliVersionProbe';
@@ -107,7 +108,8 @@ describe('CodexPtyManager.testCliAvailability', () => {
     await manager.callTestCliAvailability();
     const environment = await manager.callGetSystemEnvironment();
 
-    expect(environment.PATH.split(':')[0]).toBe(BUNDLED.pathDir);
+    // The spawn PATH is joined with path.delimiter (':' on POSIX, ';' on win32).
+    expect(environment.PATH.split(path.delimiter)[0]).toBe(BUNDLED.pathDir);
   });
 
   it('falls back to PATH when this tree ships no bundled binary', async () => {

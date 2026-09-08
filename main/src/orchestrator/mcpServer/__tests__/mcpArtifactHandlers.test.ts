@@ -407,7 +407,11 @@ describe('McpQueryHandler artifact handlers', () => {
       expect((db.prepare('SELECT COUNT(*) AS n FROM artifacts').get() as { n: number }).n).toBe(0);
     });
 
-    it('ui-prototype whose index.html is a symlink: rejects (prototype_invalid)', async () => {
+    // POSIX-only fixture: staging a symlinked FILE requires privileges on win32
+    // (no unprivileged stand-in — a junction cannot point at a file).
+    it.skipIf(process.platform === 'win32')(
+      'ui-prototype whose index.html is a symlink: rejects (prototype_invalid)',
+      async () => {
       seedRun(db, 'run-1');
       const outside = join(cyboflowTmpRoot, 'evil.html');
       writeFileSync(outside, '<html><body>evil</body></html>', 'utf-8');
@@ -417,7 +421,8 @@ describe('McpQueryHandler artifact handlers', () => {
       const res = await report('run-1', 'ui-prototype');
       expect(res.ok).toBe(false);
       expect(res.error).toMatch(/^invalid_payload: prototype_invalid/);
-    });
+      },
+    );
 
     it('ui-prototype over the size ceiling: rejects (prototype_too_large)', async () => {
       seedRun(db, 'run-1');

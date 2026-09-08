@@ -2,6 +2,7 @@ import React from 'react';
 import { Wrench, CheckCircle, XCircle, Clock, ChevronDown, ChevronRight } from 'lucide-react';
 import { ToolCall } from '../transformers/MessageTransformer';
 import { MarkdownPreview } from '../../../MarkdownPreview';
+import { pathBasename } from '../../../../utils/pathBasename';
 import { isAgentDispatchToolName } from '../../../../../../shared/types/agentIdentity';
 
 interface ToolCallViewProps {
@@ -156,7 +157,7 @@ const getCompactToolSummary = (tool: ToolCall): string => {
   switch (tool.name) {
     case 'Read':
       if (isReadInput(input)) {
-        const filename = input.file_path.split('/').pop() || input.file_path;
+        const filename = pathBasename(input.file_path) || input.file_path;
         const lines = input.offset ? ` (lines ${input.offset}-${input.offset + (input.limit || 2000)})` : '';
         return filename + lines;
       }
@@ -164,14 +165,14 @@ const getCompactToolSummary = (tool: ToolCall): string => {
     
     case 'Edit':
       if (isEditInput(input)) {
-        const filename = input.file_path.split('/').pop() || input.file_path;
+        const filename = pathBasename(input.file_path) || input.file_path;
         return filename;
       }
       return '';
       
     case 'MultiEdit':
       if (isMultiEditInput(input)) {
-        const filename = input.file_path.split('/').pop() || input.file_path;
+        const filename = pathBasename(input.file_path) || input.file_path;
         const editsInfo = ` (${input.edits.length} changes)`;
         return filename + editsInfo;
       }
@@ -179,7 +180,7 @@ const getCompactToolSummary = (tool: ToolCall): string => {
     
     case 'Write':
       if (isWriteInput(input)) {
-        const filename = input.file_path.split('/').pop() || input.file_path;
+        const filename = pathBasename(input.file_path) || input.file_path;
         const lines = ` (${input.content.split('\n').length} lines)`;
         return filename + lines;
       }
@@ -196,14 +197,14 @@ const getCompactToolSummary = (tool: ToolCall): string => {
     case 'Grep':
       if (isGrepInput(input)) {
         const pattern = input.pattern.length > 20 ? input.pattern.substring(0, 20) + '...' : input.pattern;
-        const location = input.path ? ` in ${input.path.split('/').pop() || input.path}` : '';
+        const location = input.path ? ` in ${pathBasename(input.path) || input.path}` : '';
         return `"${pattern}"${location}`;
       }
       return '';
     
     case 'Glob':
       if (isGlobInput(input)) {
-        const location = input.path ? ` in ${input.path.split('/').pop() || input.path}` : '';
+        const location = input.path ? ` in ${pathBasename(input.path) || input.path}` : '';
         return `${input.pattern}${location}`;
       }
       return '';
@@ -244,13 +245,13 @@ const getCompactToolSummary = (tool: ToolCall): string => {
     
     case 'LS':
       if (isLSInput(input)) {
-        return input.path.split('/').pop() || input.path;
+        return pathBasename(input.path) || input.path;
       }
       return '';
     
     case 'NotebookEdit':
       if (isNotebookEditInput(input)) {
-        const filename = input.notebook_path.split('/').pop() || input.notebook_path;
+        const filename = pathBasename(input.notebook_path) || input.notebook_path;
         const mode = input.edit_mode || 'replace';
         return `${filename} (${mode})`;
       }
@@ -277,10 +278,10 @@ const getCompactToolSummary = (tool: ToolCall): string => {
     default:
       // For unknown tools, try to show something meaningful using type checks
       if (typeof input.file_path === 'string') {
-        return input.file_path.split('/').pop() || input.file_path;
+        return pathBasename(input.file_path) || input.file_path;
       }
       if (typeof input.path === 'string') {
-        return input.path.split('/').pop() || input.path;
+        return pathBasename(input.path) || input.path;
       }
       if (typeof input.command === 'string') {
         return input.command.substring(0, 30) + '...';
