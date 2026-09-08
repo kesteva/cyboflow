@@ -33,6 +33,12 @@ const PKG_REL = path.join(
 );
 const ARCH_DIR = `${process.platform}-${process.arch === 'armv7l' ? 'arm' : process.arch}`;
 const SOURCE_BYTES = 'pty-binary-bytes';
+const HOST_HELPER_BYTES = 'host-spawn-helper-bytes';
+const CROSS_BYTES = 'cross-arch-pty-bytes';
+const CROSS_HELPER_BYTES = 'cross-arch-spawn-helper-bytes';
+/** The darwin arch this host is NOT — the one a cross-arch build targets. */
+const OTHER_ARCH = process.arch === 'arm64' ? 'x64' : 'arm64';
+const IS_DARWIN = process.platform === 'darwin';
 
 /**
  * A throwaway pnpm store holding one node-pty package dir. `prebuildify`
@@ -40,7 +46,12 @@ const SOURCE_BYTES = 'pty-binary-bytes';
  * `buildRelease` puts a binary where the package's own install script leaves
  * one, which is all a macOS install has.
  */
-function makeStore({ prebuildify = true, buildRelease = true } = {}) {
+function makeStore({
+  prebuildify = true,
+  buildRelease = true,
+  spawnHelper = false,
+  fetcher = null,
+} = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pty-napi-'));
   const store = path.join(root, '.pnpm');
   const pkgDir = path.join(store, PKG_REL);
@@ -58,11 +69,34 @@ function makeStore({ prebuildify = true, buildRelease = true } = {}) {
     fs.writeFileSync(path.join(pkgDir, 'build', 'Release', 'pty.node'), SOURCE_BYTES);
   }
 
+  if (spawnHelper) {
+    fs.mkdirSync(path.join(pkgDir, 'build', 'Release'), { recursive: true });
+    fs.writeFileSync(path.join(pkgDir, 'build', 'Release', 'spawn-helper'), HOST_HELPER_BYTES);
+  }
+  // Stand in for the real `prebuild-install`, which would download the other
+  // arch's tarball. `succeed` reproduces what it leaves in its CWD; `fail`
+  // reproduces an offline install.
+  if (fetcher) {
+    const binDir = path.join(pkgDir, 'node_modules', '.bin');
+    fs.mkdirSync(binDir, { recursive: true });
+    const binPath = path.join(binDir, 'prebuild-install');
+    fs.writeFileSync(
+      binPath,
+      fetcher === 'succeed'
+        ? '#!/bin/sh\nmkdir -p build/Release\n' +
+            `printf '%s' '${CROSS_BYTES}' > build/Release/pty.node\n` +
+            `printf '%s' '${CROSS_HELPER_BYTES}' > build/Release/spawn-helper\n`
+        : '#!/bin/sh\nexit 1\n',
+    );
+    fs.chmodSync(binPath, 0o755);
+  }
+
   return {
     root,
     store,
     pkgDir,
     prebuildsDir: path.join(pkgDir, 'prebuilds', ARCH_DIR),
+    crossPrebuildsDir: path.join(pkgDir, 'prebuilds', `darwin-${OTHER_ARCH}`),
     cleanup: () => fs.rmSync(root, { recursive: true, force: true }),
   };
 }
@@ -128,6 +162,80 @@ test('a store with no binary at all is skipped, not failed', () => {
     const result = run(fixture);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stderr, /no prebuilt pty binary found/);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Cross-arch placement. Both macOS arches are release targets, but only the
+// HOST arch's binary is on disk after an install, and the package ships no
+// darwin prebuild directory. A build for the other arch therefore found nothing
+// and fell through to a node-gyp source build; the arch that DID get placed
+// then had to be the target's, because node-pty's darwin loader always lands on
+// build/Release. These lock both halves down without touching the network.
+// ---------------------------------------------------------------------------
+
+test('the non-host darwin arch gets the addon and its spawn-helper', { skip: !IS_DARWIN }, () => {
+  const fixture = makeStore({ spawnHelper: true, fetcher: 'succeed' });
+  try {
+    const result = run(fixture);
+    assert.equal(result.status, 0, result.stderr);
+
+    const expectedAlias = OTHER_ARCH === 'arm64' ? 'node.napi.armv8.node' : 'node.napi.node';
+    const placed = fs.readdirSync(fixture.crossPrebuildsDir).sort();
+    assert.deepEqual(placed, ['spawn-helper', expectedAlias].sort());
+
+    // The other arch's payload, not a copy of the host's.
+    assert.equal(
+      fs.readFileSync(path.join(fixture.crossPrebuildsDir, expectedAlias), 'utf8'),
+      CROSS_BYTES,
+    );
+    assert.equal(
+      fs.readFileSync(path.join(fixture.crossPrebuildsDir, 'spawn-helper'), 'utf8'),
+      CROSS_HELPER_BYTES,
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('build/Release keeps the HOST arch so the dev runtime still loads', { skip: !IS_DARWIN }, () => {
+  const fixture = makeStore({ spawnHelper: true, fetcher: 'succeed' });
+  try {
+    assert.equal(run(fixture).status, 0);
+
+    const release = path.join(fixture.pkgDir, 'build', 'Release');
+    assert.equal(fs.readFileSync(path.join(release, 'pty.node'), 'utf8'), SOURCE_BYTES);
+    assert.equal(fs.readFileSync(path.join(release, 'spawn-helper'), 'utf8'), HOST_HELPER_BYTES);
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('the host arch mirrors its spawn-helper beside the addon', { skip: !IS_DARWIN }, () => {
+  const fixture = makeStore({ spawnHelper: true, fetcher: 'succeed' });
+  try {
+    assert.equal(run(fixture).status, 0);
+    assert.equal(
+      fs.readFileSync(path.join(fixture.prebuildsDir, 'spawn-helper'), 'utf8'),
+      HOST_HELPER_BYTES,
+    );
+  } finally {
+    fixture.cleanup();
+  }
+});
+
+test('a failed cross-arch fetch warns but does not fail the install', { skip: !IS_DARWIN }, () => {
+  const fixture = makeStore({ spawnHelper: true, fetcher: 'fail' });
+  try {
+    const result = run(fixture);
+    // postinstall runs on every install; a network hiccup must not be fatal.
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /could not fetch the non-host darwin prebuild/);
+    assert.equal(fs.existsSync(fixture.crossPrebuildsDir), false);
+    // The host arch is still placed — the cross failure is not contagious.
+    assert.ok(aliasFiles(fixture).some((f) => /^node\.napi(\.armv8)?\.node$/.test(f)));
   } finally {
     fixture.cleanup();
   }
