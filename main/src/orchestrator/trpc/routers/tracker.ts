@@ -328,22 +328,26 @@ const selectionModeSchema = z.enum(['all', 'assignee', 'manual']);
 const conflictModeSchema = z.enum(['auto', 'manual']);
 
 /**
- * One of the three per-direction cadences (TrackerDirectionMode). Same two
- * literals as `conflictModeSchema` and deliberately a SEPARATE declaration:
- * they answer different questions ("when does this direction run" vs. "who
- * resolves a clash"), and sharing one schema would silently couple them if
- * either ever grows a third value.
+ * TrackerDirectionMode — the PULL and PUSH cadences. Same two literals as
+ * `conflictModeSchema` and deliberately a SEPARATE declaration: they answer
+ * different questions ("when does this direction run" vs. "who resolves a
+ * clash"), and sharing one schema would silently couple them if either ever
+ * grows a third value.
+ *
+ * Status left this schema at migration 130 — see `gatedSyncModeSchema`. Pull
+ * and push stay two-state because neither writes to the tracker on its own.
  */
 const directionModeSchema = z.enum(['auto', 'manual']);
 
 /**
- * TrackerContentSyncMode — field write-back / archive cadence (migration 118).
- * A SEPARATE declaration from `directionModeSchema`, deliberately: 'off' is a
- * real third answer here ("never"), and coupling it onto the two-state schema
- * above would let status/pull/push silently accept a value they must never
- * see.
+ * TrackerGatedSyncMode — the cadence of the three directions that can be turned
+ * OFF outright: status (migration 130), field write-back and archive
+ * (migration 118). A SEPARATE declaration from `directionModeSchema`,
+ * deliberately: 'off' is a real third answer here ("never"), and coupling it
+ * onto the two-state schema above would let pull/push silently accept a value
+ * they must never see.
  */
-const contentSyncModeSchema = z.enum(['auto', 'manual', 'off']);
+const gatedSyncModeSchema = z.enum(['auto', 'manual', 'off']);
 
 const priorityLevelSchema = z.enum(['P0', 'P1', 'P2', 'P3', 'P4', 'P5', 'P6']);
 const entityCategorySchema = z.enum(['feature', 'bug', 'chore']);
@@ -638,13 +642,13 @@ export const trackerRouter = router({
         selectionMode: selectionModeSchema,
         selectionJson: selectionJsonSchema.nullable(),
         stateMapping: stateMappingSchema,
-        statusSyncMode: directionModeSchema,
+        statusSyncMode: gatedSyncModeSchema,
         pullMode: directionModeSchema,
         pushMode: directionModeSchema,
         /** Omitted = 'off'. */
-        contentSyncMode: contentSyncModeSchema.optional(),
+        contentSyncMode: gatedSyncModeSchema.optional(),
         /** Omitted = 'off'; see contentSyncMode. */
-        archiveSyncMode: contentSyncModeSchema.optional(),
+        archiveSyncMode: gatedSyncModeSchema.optional(),
         /** Omitted = the seed only, no user override. */
         priorityMapping: priorityMappingOverlaySchema.optional(),
         /** Omitted = the seed only; also omitted for a provider with no category sync. */
@@ -813,11 +817,11 @@ export const trackerRouter = router({
     .input(
       z.object({
         connectionId: z.string().min(1),
-        statusSyncMode: directionModeSchema.optional(),
+        statusSyncMode: gatedSyncModeSchema.optional(),
         pullMode: directionModeSchema.optional(),
         pushMode: directionModeSchema.optional(),
-        contentSyncMode: contentSyncModeSchema.optional(),
-        archiveSyncMode: contentSyncModeSchema.optional(),
+        contentSyncMode: gatedSyncModeSchema.optional(),
+        archiveSyncMode: gatedSyncModeSchema.optional(),
         priorityMapping: priorityMappingOverlaySchema.optional(),
         categoryMapping: categoryMappingOverlaySchema.optional(),
         mirrorSubissues: z.boolean().optional(),

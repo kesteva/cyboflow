@@ -92,6 +92,7 @@ import type {
   TrackerEntityLinkRef,
   TrackerEntityType,
   TrackerFieldOptions,
+  TrackerGatedSyncMode,
   TrackerGroupTree,
   TrackerIssue,
   TrackerNarrowKind,
@@ -142,6 +143,7 @@ import {
   cancelUnresolvedOutbox,
   clearSecret,
   connectionMatchesIdentity,
+  effectiveStatusSyncMode,
   enqueueOutbox,
   findDisconnectedConnection,
   findOutboxByClientKey,
@@ -169,6 +171,7 @@ import {
   listConnectionsForProviderProject,
   listDuplicatePushTargets,
   sourceScopeEquals,
+  statusSyncColumns,
   storedSourceScope,
   supersedeQueuedStateWrites,
   updateBaseline,
@@ -197,6 +200,8 @@ import { isCategory, resolveEffectiveCategoryMapping, seedDefaultCategoryMapping
 import { drainOutbox, processAmbiguous, toSqliteUtc, type OutboxDeps, type OutboxReport } from './outboxWorker';
 import { resolveEffectiveMapping, resolveStageIds } from './stateMapping';
 import {
+  backfillContentWrites,
+  backfillStatusWrites,
   createWriteBackListener,
   enqueueArchiveWrite,
   enqueueContentWrite,
@@ -320,7 +325,9 @@ const ELIGIBILITY_PATCH_KEYS = [
 ] as const satisfies readonly (keyof TrackerSettingsPatch)[];
 
 /**
- * True when a {@link TrackerContentSyncMode} direction may run under `trigger`.
+ * True when a {@link TrackerGatedSyncMode} direction may run under `trigger` —
+ * the status, content and archive directions, all three of which have an
+ * `'off'`. (pull and push are two-state and use {@link directionRuns}.)
  *
  * `'off'` short-circuits BEFORE the `trigger === 'manual'` escape — the one
  * place this differs from {@link directionRuns} — because "Sync now" must
@@ -329,8 +336,22 @@ const ELIGIBILITY_PATCH_KEYS = [
  * only disagree about WHEN a direction runs, `'off'` disagrees about WHETHER
  * it ever does.
  */
-function contentDirectionRuns(mode: TrackerContentSyncMode, trigger: TrackerSyncTrigger): boolean {
+function gatedDirectionRuns(mode: TrackerGatedSyncMode, trigger: TrackerSyncTrigger): boolean {
   return mode !== 'off' && (mode === 'auto' || trigger === 'manual');
+}
+
+/**
+ * Did this patch turn a gated direction ON — `'off'` before, something else
+ * after? The TRANSITION, not the destination: a settings save that leaves an
+ * already-live direction alone (or omits it entirely, `next === undefined`)
+ * must not trigger a backfill, or every unrelated save would re-scan every link
+ * on the connection.
+ */
+function turnedOn(
+  previous: TrackerGatedSyncMode,
+  next: TrackerGatedSyncMode | undefined,
+): boolean {
+  return previous === 'off' && next !== undefined && next !== 'off';
 }
 
 /**
@@ -344,10 +365,10 @@ function drainKinds(
   trigger: TrackerSyncTrigger,
 ): TrackerOutboxRow['kind'][] {
   const kinds: TrackerOutboxRow['kind'][] = [];
-  if (directionRuns(connection.status_sync_mode, trigger)) kinds.push(...STATUS_OUTBOX_KINDS);
+  if (gatedDirectionRuns(effectiveStatusSyncMode(connection), trigger)) kinds.push(...STATUS_OUTBOX_KINDS);
   if (directionRuns(connection.push_mode, trigger)) kinds.push(...PUSH_OUTBOX_KINDS);
-  if (contentDirectionRuns(connection.content_sync_mode, trigger)) kinds.push(...CONTENT_OUTBOX_KINDS);
-  if (contentDirectionRuns(connection.archive_sync_mode, trigger)) kinds.push(...ARCHIVE_OUTBOX_KINDS);
+  if (gatedDirectionRuns(connection.content_sync_mode, trigger)) kinds.push(...CONTENT_OUTBOX_KINDS);
+  if (gatedDirectionRuns(connection.archive_sync_mode, trigger)) kinds.push(...ARCHIVE_OUTBOX_KINDS);
   return kinds;
 }
 
@@ -355,18 +376,23 @@ function drainKinds(
  * The outbox kinds NO trigger can drain for this connection right now — the
  * exact complement {@link drainKinds} can never include, whatever the trigger.
  *
- * Only the two migration-112 modes have an `'off'` state at all; the other
- * three are binary (`TrackerDirectionMode = 'auto' | 'manual'`), so their kinds
- * are always claimable by SOME trigger and can never become undrainable. That
- * is a type-level guarantee, not a convention — which is why this reads the two
- * content-sync modes directly rather than asking {@link drainKinds} what it
- * left out.
+ * Only the three GATED modes have an `'off'` state at all; pull and push are
+ * binary (`TrackerDirectionMode = 'auto' | 'manual'`), so their kinds are
+ * always claimable by SOME trigger and can never become undrainable. That is a
+ * type-level guarantee, not a convention — which is why this reads the three
+ * gated modes directly rather than asking {@link drainKinds} what it left out.
  */
 function undrainableKinds(connection: TrackerConnectionRow): {
   kinds: TrackerOutboxRow['kind'][];
   reason: string;
 }[] {
   const off: { kinds: TrackerOutboxRow['kind'][]; reason: string }[] = [];
+  if (effectiveStatusSyncMode(connection) === 'off') {
+    off.push({
+      kinds: [...STATUS_OUTBOX_KINDS],
+      reason: 'cancelled — status sync is off for this connection',
+    });
+  }
   if (connection.content_sync_mode === 'off') {
     off.push({
       kinds: [...CONTENT_OUTBOX_KINDS],
@@ -1029,7 +1055,10 @@ export class TrackerSyncService implements TrackerSyncFacade {
     // applyLinkedStage / importNewIssues.
     const drainable = drainKinds(connection, trigger);
     const pullRuns = directionRuns(connection.pull_mode, trigger);
-    const applyLinkedStage = directionRuns(connection.status_sync_mode, trigger);
+    // Status governs BOTH directions, so 'off' stops the inbound stage apply
+    // too — the whole point of the switch is that a user who turned status sync
+    // off gets neither half of it.
+    const applyLinkedStage = gatedDirectionRuns(effectiveStatusSyncMode(connection), trigger);
     const inboundRuns = pullRuns || applyLinkedStage;
     appendHeldDirectionLines(entries, connection, trigger);
 
@@ -1537,6 +1566,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
       project_id: 0,
       provider: credentials.provider,
       status: 'active',
+      status_sync_enabled: 1,
       workspace_id: credentials.workspaceSlug ?? null,
       workspace_name: null,
       actor_label: null,
@@ -2073,7 +2103,10 @@ export class TrackerSyncService implements TrackerSyncFacade {
       selection_json:
         payload.selectionJson === null ? null : JSON.stringify(payload.selectionJson),
       state_mapping_json: JSON.stringify(payload.stateMapping),
-      status_sync_mode: payload.statusSyncMode,
+      // The wizard hands one three-state choice; the row stores it as the
+      // cadence/consent pair (migration 130).
+      status_sync_mode: payload.statusSyncMode === 'off' ? 'auto' : payload.statusSyncMode,
+      status_sync_enabled: payload.statusSyncMode === 'off' ? 0 : 1,
       pull_mode: payload.pullMode,
       push_mode: payload.pushMode,
       // Omitted = the push target, which is what a single-mapping connect (every
@@ -3164,7 +3197,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
       sourceLabel: readSourceLabel(row),
       sourceScope: readSourceScope(row),
       selectionMode: row.selection_mode,
-      statusSyncMode: row.status_sync_mode,
+      statusSyncMode: effectiveStatusSyncMode(row),
       pullMode: row.pull_mode,
       pushMode: row.push_mode,
       contentSyncMode: row.content_sync_mode,
@@ -3209,7 +3242,7 @@ export class TrackerSyncService implements TrackerSyncFacade {
     const connection = getConnection(this.db, connectionId);
     if (connection === null) return;
     updateConnectionSettings(this.db, connectionId, {
-      ...(patch.statusSyncMode !== undefined ? { status_sync_mode: patch.statusSyncMode } : {}),
+      ...(patch.statusSyncMode !== undefined ? statusSyncColumns(patch.statusSyncMode) : {}),
       ...(patch.pullMode !== undefined ? { pull_mode: patch.pullMode } : {}),
       ...(patch.pushMode !== undefined ? { push_mode: patch.pushMode } : {}),
       ...(patch.contentSyncMode !== undefined ? { content_sync_mode: patch.contentSyncMode } : {}),
@@ -3244,6 +3277,14 @@ export class TrackerSyncService implements TrackerSyncFacade {
       bumpConfigGeneration(this.db, connectionId);
     }
 
+    if (patch.statusSyncMode === 'off') {
+      cancelPendingKinds(
+        this.db,
+        connectionId,
+        STATUS_OUTBOX_KINDS,
+        'cancelled — status sync was turned off for this connection',
+      );
+    }
     if (patch.contentSyncMode === 'off') {
       cancelPendingKinds(
         this.db,
@@ -3259,6 +3300,41 @@ export class TrackerSyncService implements TrackerSyncFacade {
         ARCHIVE_OUTBOX_KINDS,
         'cancelled — archive sync was turned off for this connection',
       );
+    }
+
+    // THE INVERSE SWEEP: a gated direction LEAVING 'off'. Turning one off
+    // cancels its queued rows just above; turning it back on has to reconcile
+    // the intents that were declined outright while it was off, because nothing
+    // else ever will — see writeBack's backfillContentWrites /
+    // backfillStatusWrites. Reads the connection back rather than reusing the
+    // pre-patch row so each backfill runs against what actually landed.
+    //
+    // ARCHIVE is deliberately NOT given the same treatment: replaying it would
+    // bulk-trash every remote twin archived while that direction was off —
+    // irreversible, on a setting flip, with no preview.
+    if (turnedOn(connection.content_sync_mode, patch.contentSyncMode)) {
+      const updated = getConnection(this.db, connectionId);
+      if (updated !== null) {
+        const queued = backfillContentWrites({ db: this.db, nowIso: this.nowIso }, updated);
+        if (queued > 0) {
+          this.logger?.info('[trackerSync] content sync turned on: queued backfill writes', {
+            connectionId,
+            queued,
+          });
+        }
+      }
+    }
+    if (turnedOn(effectiveStatusSyncMode(connection), patch.statusSyncMode)) {
+      const updated = getConnection(this.db, connectionId);
+      if (updated !== null) {
+        const queued = backfillStatusWrites({ db: this.db, nowIso: this.nowIso }, updated);
+        if (queued > 0) {
+          this.logger?.info('[trackerSync] status sync turned on: queued backfill writes', {
+            connectionId,
+            queued,
+          });
+        }
+      }
     }
 
     this.emitTrackerChange(connection.project_id, connectionId, 'connection');
@@ -4169,6 +4245,7 @@ function adoptedConnectionRow(
     project_id: old.project_id,
     provider: old.provider,
     status: 'active',
+    status_sync_enabled: old.status_sync_enabled,
     workspace_id: probe.currentWorkspaceId,
     workspace_name: probe.currentWorkspaceName,
     actor_label: old.actor_label,
@@ -4365,27 +4442,27 @@ function appendHeldDirectionLines(
   trigger: TrackerSyncTrigger,
 ): void {
   const held: string[] = [];
-  if (!directionRuns(connection.status_sync_mode, trigger)) held.push('status');
   if (!directionRuns(connection.pull_mode, trigger)) held.push('import');
   if (!directionRuns(connection.push_mode, trigger)) held.push('push');
   for (const direction of held) {
     entries.push({ marker: '·', line: `${direction} held · manual — use Sync now` });
   }
 
-  // The two content-sync-mode directions get their OWN phrasing rather than
-  // reusing the loop above: 'off' is not something "Sync now" can unstick (it
-  // gates at the enqueue, never the drain — invariant 5), so a held line that
-  // said "use Sync now" for an 'off' direction would promise a fix that does
-  // nothing.
-  appendContentModeLine(entries, 'content changes', connection.content_sync_mode, trigger);
-  appendContentModeLine(entries, 'archive', connection.archive_sync_mode, trigger);
+  // The three GATED directions get their OWN phrasing rather than joining the
+  // loop above: 'off' is not something "Sync now" can unstick (it gates at the
+  // enqueue, never the drain — invariant 5), so a held line that said "use Sync
+  // now" for an 'off' direction would promise a fix that does nothing. Status
+  // moved into this set with migration 130.
+  appendGatedModeLine(entries, 'status', effectiveStatusSyncMode(connection), trigger);
+  appendGatedModeLine(entries, 'content changes', connection.content_sync_mode, trigger);
+  appendGatedModeLine(entries, 'archive', connection.archive_sync_mode, trigger);
 }
 
-/** One {@link appendHeldDirectionLines} line for a single content-sync-mode direction, or none. */
-function appendContentModeLine(
+/** One {@link appendHeldDirectionLines} line for a single GATED direction, or none. */
+function appendGatedModeLine(
   entries: TrackerSyncLogEntry[],
   label: string,
-  mode: TrackerContentSyncMode,
+  mode: TrackerGatedSyncMode,
   trigger: TrackerSyncTrigger,
 ): void {
   if (mode === 'off') {

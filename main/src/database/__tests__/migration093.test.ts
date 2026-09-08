@@ -110,6 +110,7 @@ describe('Migration 093: tracker-sync data model', () => {
       // Appended by 129 (beads as a fourth provider + the reconciliation
       // ledger's generation counter), asserted for real in migration123.test.ts.
       'config_generation',
+      'status_sync_enabled',
     ]);
 
     expect(columnNames(raw, 'entity_external_links')).toEqual([

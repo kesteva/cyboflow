@@ -484,6 +484,42 @@ export type TrackerConnectionStatus = 'active' | 'paused' | 'disconnected';
 export type TrackerDirectionMode = 'auto' | 'manual';
 
 /**
+ * The THREE-STATE cadence: `'auto'` runs a direction on every pass, `'manual'`
+ * holds it until the user asks, `'off'` declines it altogether.
+ *
+ * `'off'` is categorically different from the other two, and the difference is
+ * WHERE it gates: auto/manual only disagree about WHEN a direction runs, so
+ * they gate the DRAIN and an intent is always recorded; `'off'` disagrees about
+ * WHETHER it ever runs, so it gates the ENQUEUE (docs/proposals/
+ * tracker-field-writeback.md invariant 5). A row queued under an off direction
+ * would be undrainable even by "Sync now", and the kind-agnostic inbound
+ * blocker would then halt the pass at that issue forever.
+ *
+ * The corollary — the one that cost a user their edits — is that an off
+ * direction DISCARDS intents rather than banking them, so turning a direction
+ * back ON has to reconcile what it declined. See writeBack's
+ * `backfillContentWrites`.
+ */
+export type TrackerGatedSyncMode = 'auto' | 'manual' | 'off';
+
+/**
+ * Per-connection cadence for status on LINKED items — stage write-back OUT and
+ * remote state application IN, the one direction that moves in both.
+ *
+ * Three-state since migration 130. It began as a {@link TrackerDirectionMode}
+ * (094) on the theory that status only ever answers "when", never "whether" —
+ * which held right up until someone turned every visible control off and found
+ * cyboflow still writing their stage moves into the tracker. It defaults to
+ * 'auto' on every connection the wizard creates and it WRITES, so it needs the
+ * same off switch content and archive have.
+ *
+ * `pullMode` and `pushMode` stay two-state deliberately: pull only imports, and
+ * push already has `pushTarget` as its per-connection off switch, so neither
+ * carries the hazard this fixed.
+ */
+export type TrackerStatusSyncMode = TrackerGatedSyncMode;
+
+/**
  * Per-connection cadence for field write-back ("Sync task fields") and remote
  * archive/trash (migration 118). A SEPARATE type from {@link
  * TrackerDirectionMode} rather than a widening of it — deliberately: the
@@ -503,7 +539,7 @@ export type TrackerDirectionMode = 'auto' | 'manual';
  * under an 'off' direction would be undrainable even by "Sync now", which
  * would permanently stall the inbound cursor.
  */
-export type TrackerContentSyncMode = 'auto' | 'manual' | 'off';
+export type TrackerContentSyncMode = TrackerGatedSyncMode;
 
 /** The three entity tables a tracker link can point at (mirrors EntityExternalLinkRow). */
 export type TrackerEntityType = 'idea' | 'epic' | 'task';
@@ -564,7 +600,7 @@ export interface TrackerConnectionSummary {
   /** The mapping's source scope (parsed from source_json); null on legacy rows with no recorded scope. */
   sourceScope: { containerId: string; narrowId: string; narrowKind: TrackerNarrowKind } | null;
   selectionMode: TrackerSelectionMode;
-  statusSyncMode: TrackerDirectionMode;
+  statusSyncMode: TrackerStatusSyncMode;
   pullMode: TrackerDirectionMode;
   pushMode: TrackerDirectionMode;
   /** Field write-back cadence (migration 118); 'off' on every pre-Phase-3 connection. */
@@ -673,7 +709,7 @@ export interface TrackerConnectPayload {
   selectionMode: TrackerSelectionMode;
   selectionJson: TrackerSelectionJson | null;
   stateMapping: TrackerStateMapping;
-  statusSyncMode: TrackerDirectionMode;
+  statusSyncMode: TrackerStatusSyncMode;
   pullMode: TrackerDirectionMode;
   pushMode: TrackerDirectionMode;
   /**
@@ -713,7 +749,7 @@ export interface TrackerConnectPayload {
  * leaves the stored value untouched (mirrors the store's ConnectionSettingsPatch).
  */
 export interface TrackerSettingsPatch {
-  statusSyncMode?: TrackerDirectionMode;
+  statusSyncMode?: TrackerStatusSyncMode;
   pullMode?: TrackerDirectionMode;
   pushMode?: TrackerDirectionMode;
   contentSyncMode?: TrackerContentSyncMode;

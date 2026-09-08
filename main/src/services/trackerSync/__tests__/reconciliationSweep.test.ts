@@ -308,6 +308,7 @@ function makeConnection(overrides: Partial<NewConnectionRow> = {}): TrackerConne
     selection_json: null,
     state_mapping_json: '{}',
     status_sync_mode: 'auto',
+    status_sync_enabled: 1,
     pull_mode: 'auto',
     push_mode: 'auto',
     push_target: 1,

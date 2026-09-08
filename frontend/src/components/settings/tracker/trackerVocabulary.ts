@@ -11,7 +11,7 @@
  * type that crosses the IPC boundary.
  */
 import type {
-  TrackerContentSyncMode,
+  TrackerGatedSyncMode,
   TrackerMappingTarget,
   TrackerProvider,
   TrackerState,
@@ -299,22 +299,22 @@ export function seedStateMapping(
 }
 
 // ---------------------------------------------------------------------------
-// Field write-back cadence (migration 118) — a THREE-state cousin of the
-// direction controls above. `contentSyncMode`/`archiveSyncMode` are a
-// SEPARATE type (TrackerContentSyncMode) from TrackerDirectionMode precisely
-// so 'off' cannot leak onto status/pull/push — see trackerSync.ts's header —
-// which is also why this gets its OWN options list and label function rather
-// than reusing the wizard/connected-view's local `DIRECTION_OPTIONS` /
+// The GATED cadences — the THREE-state cousins of the direction controls
+// above: status (migration 130), field write-back and archive (migration 118).
+// These are a SEPARATE type (TrackerGatedSyncMode) from TrackerDirectionMode
+// precisely so 'off' cannot leak onto pull/push — see trackerSync.ts's header
+// — which is also why they get their OWN options list and label function
+// rather than reusing the wizard/connected-view's local `DIRECTION_OPTIONS` /
 // `directionLabel` (a binary ternary that would render 'off' as "Manual").
 // ---------------------------------------------------------------------------
 
-export const CONTENT_MODE_OPTIONS: readonly { value: TrackerContentSyncMode; label: string }[] = [
+export const GATED_MODE_OPTIONS: readonly { value: TrackerGatedSyncMode; label: string }[] = [
   { value: 'auto', label: 'Auto' },
   { value: 'manual', label: 'Manual' },
   { value: 'off', label: 'Off' },
 ];
 
-export function contentModeLabel(mode: TrackerContentSyncMode): string {
+export function gatedModeLabel(mode: TrackerGatedSyncMode): string {
   if (mode === 'auto') return 'Auto';
   if (mode === 'manual') return 'Manual';
   return 'Off';

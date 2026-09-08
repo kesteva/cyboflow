@@ -518,8 +518,28 @@ export interface TrackerConnectionRow {
   selection_mode: 'all' | 'assignee' | 'manual';
   selection_json: string | null;
   state_mapping_json: string;
-  /** Status flow for LINKED items, BOTH directions (stage write-back + remote state apply). */
+  /**
+   * CADENCE of the status flow for LINKED items, BOTH directions (stage
+   * write-back + remote state apply). Two-state; the direction's OFF switch is
+   * the separate `status_sync_enabled` below.
+   */
   status_sync_mode: 'auto' | 'manual';
+  /**
+   * 0 | 1 (migration 130) — does the status direction run AT ALL? Off means
+   * neither half of it does, and the write-back declines its intents at the
+   * ENQUEUE (invariant 5), exactly like content/archive 'off'.
+   *
+   * A SECOND COLUMN rather than a third value on `status_sync_mode` because
+   * 105 and 129 both recreate this table with that column CHECKed to
+   * ('auto','manual') and both run before 130 — a stored 'off' fails 105 on a
+   * ledger-wiped replay and blocks boot. See the migration header. It also
+   * mirrors push (`push_mode` cadence + `push_target` consent) and means
+   * toggling status sync off and back on RESTORES the auto/manual choice.
+   *
+   * Nothing above the store reads the pair: `effectiveStatusSyncMode()` folds
+   * them into the one three-state `TrackerStatusSyncMode` value.
+   */
+  status_sync_enabled: number; // 0 | 1
   /** Importing NEW remote issues as ideas. */
   pull_mode: 'auto' | 'manual';
   /** Creating a TOP-LEVEL tracker issue for a NEW cyboflow idea. */
@@ -534,9 +554,9 @@ export interface TrackerConnectionRow {
   /**
    * Field write-back ("Sync task fields": title/description/priority/category)
    * for LINKED items, OUTBOUND only (migration 118). A SEPARATE three-state
-   * schema from status_sync_mode/pull_mode/push_mode above — 'off' is a real
-   * third answer here ("never"), not something those two-state columns can
-   * express — see TrackerContentSyncMode in shared/types/trackerSync.ts.
+   * schema from pull_mode/push_mode above, which stay two-state because
+   * neither writes to the tracker on its own — see TrackerContentSyncMode in
+   * shared/types/trackerSync.ts.
    * Defaults 'off': an existing connection never consented to write-back.
    */
   content_sync_mode: 'auto' | 'manual' | 'off';

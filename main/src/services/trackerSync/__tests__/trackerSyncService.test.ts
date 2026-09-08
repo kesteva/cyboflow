@@ -452,6 +452,7 @@ function makeConnection(overrides: Partial<NewConnectionRow> = {}): TrackerConne
     selection_json: null,
     state_mapping_json: '{}',
     status_sync_mode: 'auto',
+    status_sync_enabled: 1,
     pull_mode: 'auto',
     push_mode: 'auto',
     push_target: 1,
@@ -844,6 +845,7 @@ describe('TrackerSyncService inbound ordering backstop', () => {
       push_mode: 'manual',
       pull_mode: 'auto',
       status_sync_mode: 'auto',
+      status_sync_enabled: 1,
     });
     plane = new PlaneLikeAdapter();
     service = new TrackerSyncService({
@@ -1446,7 +1448,7 @@ describe('TrackerSyncService direction modes', () => {
     ];
     const held = await service.syncConnection(CONN_ID);
 
-    expect(held.entries.map((e) => e.line)).toContain('status held · manual — use Sync now');
+    expect(held.entries.map((e) => e.line)).toContain('status held (manual) · use Sync now');
     const afterHold = raw.prepare('SELECT title, stage_id FROM ideas WHERE id = ?').get(ideaId) as {
       title: string;
       stage_id: string;
@@ -1543,7 +1545,7 @@ describe('TrackerSyncService direction modes', () => {
 
     expect(auto.entries.map((e) => e.line)).toEqual(
       expect.arrayContaining([
-        'status held · manual — use Sync now',
+        'status held (manual) · use Sync now',
         'import held · manual — use Sync now',
         'push held · manual — use Sync now',
       ]),
@@ -1612,6 +1614,55 @@ describe('TrackerSyncService content/archive sync modes', () => {
 
     await service.syncNow(CONN_ID);
     expect(adapter.contentCalls).toHaveLength(0);
+  });
+
+  it('status OFF: the update_state row is never CLAIMED, and the pass settles it', async () => {
+    // Migration 130 gave status the same 'off' content and archive had. Same
+    // invariant 5 shape: undrainable, so the pass must settle it rather than
+    // let the kind-agnostic inbound blocker halt this issue forever.
+    const connection = makeConnection({ status_sync_enabled: 0 });
+    const row = enqueueOutbox(raw, {
+      connection_id: connection.id,
+      kind: 'update_state',
+      entity_type: 'idea',
+      entity_id: 'idea-1',
+      external_id: 'ext-1',
+      payload_json: JSON.stringify({ desiredGroup: 'completed' }),
+    });
+
+    const auto = await service.syncConnection(CONN_ID);
+
+    expect(adapter.updateCalls).toEqual([]);
+    expect(auto.entries.map((e) => e.line)).toContain('status off');
+    expect(outboxRow(row.id).state).toBe('done');
+    expect(outboxRow(row.id).last_error).toContain('status sync is off');
+
+    // Not even "Sync now" unsticks it — that is what separates off from manual.
+    await service.syncNow(CONN_ID);
+    expect(adapter.updateCalls).toEqual([]);
+  });
+
+  it('status OFF also stops the INBOUND half — it governs both directions', async () => {
+    const connection = makeConnection({ status_sync_enabled: 0, pull_mode: 'auto' });
+    adapter.issues = [makeIssue()];
+    service.start();
+    await service.syncConnection(CONN_ID);
+    const link = getLinkByExternal(raw, connection.id, 'ext-1');
+    const ideaId = link?.entity_id ?? '';
+    const stageBefore = raw
+      .prepare('SELECT stage_id AS s FROM ideas WHERE id = ?')
+      .get(ideaId) as { s: string };
+
+    // The issue moves to a DONE state remotely; with status sync off, the local
+    // stage must not follow.
+    adapter.issues = [
+      makeIssue({ stateId: 'state-done', updatedAt: '2026-07-30T13:00:00.000Z' }),
+    ];
+    await service.syncNow(CONN_ID);
+
+    expect(
+      (raw.prepare('SELECT stage_id AS s FROM ideas WHERE id = ?').get(ideaId) as { s: string }).s,
+    ).toBe(stageBefore.s);
   });
 
   it('content MANUAL: an automatic pass holds the row; Sync now claims it', async () => {
@@ -1767,6 +1818,88 @@ describe('TrackerSyncService content write-back — echo suppression', () => {
     const pass = await service.syncNow(CONN_ID);
     expect(pass.entries.map((entry) => entry.line)).not.toContain('held at ext-1 — our write is in flight');
     expect(getConnection(raw, CONN_ID)?.cursor_external_id).toBe('ext-1');
+  });
+
+  it('BACKFILLS that declined edit when the direction is turned back on', async () => {
+    // The reported bug, end to end: an edit made under 'off' is declined
+    // outright, and before the backfill arm existed, turning content sync on
+    // left it stranded forever — nothing re-derives a row for an entity no
+    // later event happens to touch.
+    makeConnection({ content_sync_mode: 'off' });
+    const ideaId = await importOne();
+    await router.applyChange(PROJECT_ID, {
+      actor: 'user',
+      entityType: 'idea',
+      taskId: ideaId,
+      fields: { title: 'Locally renamed' },
+    });
+    expect(listUnresolvedOutbox(raw, CONN_ID)).toHaveLength(0);
+
+    await service.updateSettings(CONN_ID, { contentSyncMode: 'auto' });
+
+    const queued = listUnresolvedOutbox(raw, CONN_ID);
+    expect(queued).toHaveLength(1);
+    expect(queued[0].kind).toBe('update_content');
+    expect(queued[0].entity_id).toBe(ideaId);
+
+    // And it actually reaches the tracker on the next pass.
+    await service.syncNow(CONN_ID);
+    expect(adapter.contentCalls).toHaveLength(1);
+    expect(adapter.contentCalls[0].patch.title).toBe('Locally renamed');
+  });
+
+  it('turning STATUS sync off settles its queued rows; turning it on backfills the stage', async () => {
+    makeConnection({ status_sync_mode: 'auto' });
+    const ideaId = await importOne();
+
+    // Off: the stage move is declined outright, not banked.
+    await service.updateSettings(CONN_ID, { statusSyncMode: 'off' });
+    await router.applyChange(PROJECT_ID, {
+      actor: 'user',
+      entityType: 'idea',
+      taskId: ideaId,
+      stageId: STAGE.done,
+    });
+    expect(listUnresolvedOutbox(raw, CONN_ID)).toHaveLength(0);
+
+    // On again: the declined intent is reconciled, at the cadence it had before.
+    await service.updateSettings(CONN_ID, { statusSyncMode: 'auto' });
+
+    const queued = listUnresolvedOutbox(raw, CONN_ID);
+    expect(queued).toHaveLength(1);
+    expect(queued[0].kind).toBe('update_state');
+    expect(JSON.parse(queued[0].payload_json)).toEqual({ desiredGroup: 'completed' });
+  });
+
+  it('an off/on round trip RESTORES the manual cadence rather than defaulting it', async () => {
+    // The reason the off switch is a second column and not a third enum value:
+    // 'off' does not overwrite the cadence, so Manual survives the round trip.
+    makeConnection({ status_sync_mode: 'manual' });
+
+    await service.updateSettings(CONN_ID, { statusSyncMode: 'off' });
+    expect((await service.connections(PROJECT_ID))[0].statusSyncMode).toBe('off');
+
+    await service.updateSettings(CONN_ID, { statusSyncMode: 'manual' });
+    expect((await service.connections(PROJECT_ID))[0].statusSyncMode).toBe('manual');
+    expect(
+      (raw.prepare('SELECT status_sync_mode AS m FROM tracker_connections WHERE id = ?').get(CONN_ID) as {
+        m: string;
+      }).m,
+    ).toBe('manual');
+  });
+
+  it('queues nothing when the direction was ALREADY on, or when it stays off', async () => {
+    // Only the off -> on TRANSITION backfills. An unrelated settings save on a
+    // live connection must not manufacture writes for every converged link.
+    makeConnection({ content_sync_mode: 'auto' });
+    await importOne();
+
+    await service.updateSettings(CONN_ID, { contentSyncMode: 'manual' });
+    expect(listUnresolvedOutbox(raw, CONN_ID)).toHaveLength(0);
+
+    await service.updateSettings(CONN_ID, { contentSyncMode: 'off' });
+    await service.updateSettings(CONN_ID, { conflictMode: 'manual' });
+    expect(listUnresolvedOutbox(raw, CONN_ID)).toHaveLength(0);
   });
 });
 

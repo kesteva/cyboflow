@@ -18,8 +18,8 @@
  * those intents unconditionally. A connection whose status sync is manual still
  * accumulates its stage writes and emits them, in order, on the next "Sync now".
  *
- * `'off'` — which only the two migration-112 modes have — is the ONE exception,
- * and it gates HERE, at the enqueue (invariant 5 of
+ * `'off'` — which the status, content and archive modes have (migrations 118
+ * and 130) — is the ONE exception, and it gates HERE, at the enqueue (invariant 5 of
  * docs/proposals/tracker-field-writeback.md). A row whose direction is off is
  * not delayed, it is UNDRAINABLE: `claimNextPending` never claims its kind, not
  * even under "Sync now", while `collectOutboxBlockers` is kind-agnostic and
@@ -36,7 +36,9 @@
  *      ('started' / 'completed' / 'cancelled' — `Ready for development`
  *      deliberately maps to nothing: readiness is not started). A group that
  *      differs from the last group we wrote (stamped on the link's baseline by
- *      the worker) enqueues an `update_state`.
+ *      the worker) enqueues an `update_state`. Gated, with trigger 3, on
+ *      `status_sync_mode !== 'off'` — both reach the outbox through
+ *      {@link enqueueStateWrite}, which is where that gate lives.
  *   2. DECOMPOSITION. A linked idea that just picked up its `decomposed_at`
  *      retire stamp writes 'started' to the origin issue, and — when the
  *      connection has `mirror_subissues = 1` — enqueues one `create_sub_issue`
@@ -101,11 +103,13 @@ import type {
 } from '../../database/models';
 import type { TrackerProvider, TrackerStateGroup } from '../../../../shared/types/trackerSync';
 import {
+  effectiveStatusSyncMode,
   enqueueOutbox,
   getConnection,
   getLinkByEntity,
   getLinkByExternal,
   listConnections,
+  listLinks,
   listLinksByParentExternal,
   listUnresolvedOutbox,
   supersedeQueuedStateWrites,
@@ -488,6 +492,12 @@ function enqueueStateWrite(
   const { db } = deps;
   const { connection } = linked;
 
+  // INVARIANT 5, for the status direction (migration 130 gave it an 'off').
+  // The SINGLE gate for both status kinds — update_state and close_parent both
+  // reach the outbox through here — so an off direction declines the intent
+  // outright rather than banking a row no drain will ever claim.
+  if (effectiveStatusSyncMode(connection) === 'off') return false;
+
   // INVARIANT 5's shape again, for a capability rather than a mode: a provider
   // whose adapter cannot guard an existing-issue write must not have one
   // QUEUED, because the drain would refuse it and the kind-agnostic inbound
@@ -776,6 +786,19 @@ function handleIdeaPush(deps: WriteBackDeps, event: TaskChangedEvent): void {
 const CONTENT_SUPERSEDES: readonly TrackerOutboxRow['kind'][] = ['update_content'];
 
 /**
+ * The FOUR fields {@link contentDiffersFromBaseline} reads, as a structural
+ * subset of {@link BacklogTaskItem}.
+ *
+ * The event-driven trigger hands it a whole `BacklogTaskItem` (which satisfies
+ * this) while {@link backfillContentWrites} reads its four columns straight off
+ * the entity table — there is no run overlay, no stage, and no ref in a diff
+ * that only ever compares title/description/priority/category, and widening the
+ * backfill's SELECT to fabricate a full item would be inventing fields the
+ * comparison never looks at.
+ */
+type ContentFields = Pick<BacklogTaskItem, 'title' | 'body' | 'priority' | 'category'>;
+
+/**
  * A linked entity changed. For every link whose connection has content sync ON,
  * enqueue one `update_content` when the entity now DIFFERS from that link's
  * baseline on a synced field.
@@ -839,7 +862,7 @@ function handleContentChange(
  * the live list can no longer express. The worst a stale token here can do is
  * enqueue a row the drain then settles with nothing to send.
  */
-function contentDiffersFromBaseline(linked: LinkedContext, task: BacklogTaskItem): boolean {
+function contentDiffersFromBaseline(linked: LinkedContext, task: ContentFields): boolean {
   const { connection, link } = linked;
   const baseline = parseJsonObject(link.baseline_json);
 
@@ -948,6 +971,164 @@ export function enqueueContentWrite(
     'superseded by a newer content write for the same issue',
   );
   return true;
+}
+
+/**
+ * The four content columns of one linked entity, or null when the row is gone.
+ *
+ * A plain SELECT, mirroring inboundSync's `readLocalEntity`: the chokepoint rule
+ * governs WRITES, and taskListing's projections carry run overlays a content
+ * diff has no use for. `archived_at` rides along because the backfill filters on
+ * it — see {@link backfillContentWrites}.
+ */
+function readEntityContent(
+  db: Database.Database,
+  entityType: EntityExternalLinkRow['entity_type'],
+  entityId: string,
+): (ContentFields & { archived_at: string | null }) | null {
+  const table = BACKFILL_ENTITY_TABLE[entityType];
+  const row = db
+    .prepare(
+      `SELECT title, body, priority, category, archived_at
+         FROM ${table}
+        WHERE id = ?`,
+    )
+    .get(entityId) as (ContentFields & { archived_at: string | null }) | undefined;
+  return row ?? null;
+}
+
+/**
+ * Entity type -> table, the local twin of inboundSync's `ENTITY_TABLE`. Both
+ * exist because the table name is interpolated into SQL: a `Record` over the
+ * closed union is what keeps that interpolation total and un-injectable.
+ */
+const BACKFILL_ENTITY_TABLE: Record<
+  EntityExternalLinkRow['entity_type'],
+  'ideas' | 'epics' | 'tasks'
+> = { idea: 'ideas', epic: 'epics', task: 'tasks' };
+
+/**
+ * TRIGGER 5's BACKFILL ARM — the missing inverse of invariant 5's enqueue-time
+ * decline, run when a connection's content sync leaves `'off'`.
+ *
+ * WHY IT HAS TO EXIST. `'off'` gates at the ENQUEUE rather than the drain (see
+ * the module header), so every local edit made while the direction was off was
+ * DECLINED, not delayed: no row was ever written, and nothing else re-derives
+ * one. Trigger 5 fires only on the entity-change broadcast, so turning content
+ * sync on afterwards changed nothing about entities nobody happened to touch
+ * again — their edits stayed local forever, silently, with the tracker showing
+ * stale text. Turning a direction ON now reconciles what turning it OFF
+ * declined.
+ *
+ * IT IS THE SAME DECISION TRIGGER 5 MAKES, deliberately reusing
+ * {@link contentDiffersFromBaseline} and {@link enqueueContentWrite} rather than
+ * restating either: the baseline diff is what says a remote write is owed, and
+ * a second copy of that comparison is exactly how the two arms would drift. The
+ * dedupe inside `enqueueContentWrite` also makes this safe to run repeatedly —
+ * a second flip with rows already pending enqueues nothing.
+ *
+ * THREE SKIPS, each for its own reason:
+ *  - ORPHANED links (`activeOnly`), whose remote issue the deletion sweep has
+ *    already archived — writing back is pointless.
+ *  - A MISSING entity row: the link outlived its entity, which the sweep owns.
+ *  - An ARCHIVED entity. A user turning content sync on is asking for their
+ *    live work to reach the tracker, not for text to be pushed onto issues they
+ *    retired while the direction was off; the ARCHIVE direction is the one that
+ *    owns those, under its own mode and its own consent.
+ *
+ * DELIBERATELY CONTENT-ONLY. `archive_sync_mode` has the identical gap, and it
+ * is NOT fixed here: replaying it would trash every remote twin of everything
+ * archived while that direction was off — an irreversible bulk write, on a
+ * setting flip, with no preview. That needs its own confirmation UX and is
+ * recorded as a follow-up, not smuggled in behind a symmetry argument.
+ *
+ * Returns how many rows were enqueued, for the caller's log line.
+ */
+export function backfillContentWrites(
+  deps: WriteBackDeps,
+  connection: TrackerConnectionRow,
+): number {
+  if (connection.content_sync_mode === 'off') return 0;
+  if (connection.status !== 'active') return 0;
+
+  let enqueued = 0;
+  for (const link of listLinks(deps.db, connection.id, { activeOnly: true })) {
+    const entity = readEntityContent(deps.db, link.entity_type, link.entity_id);
+    if (entity === null) continue;
+    if (entity.archived_at !== null) continue;
+    // Epics are never linked to an issue (imports land as ideas, mirroring
+    // creates sub-issues for TASKS only), so the cast below is narrowing a
+    // union the data cannot actually inhabit — but `enqueueContentWrite` takes
+    // the two-member entity type, and skipping is the honest way to say so.
+    if (link.entity_type === 'epic') continue;
+    const linked: LinkedContext = { link, connection };
+    if (!contentDiffersFromBaseline(linked, entity)) continue;
+    if (enqueueContentWrite(deps, linked, link.entity_type, link.entity_id)) enqueued += 1;
+  }
+  return enqueued;
+}
+
+/**
+ * The stage and archive stamp of one linked entity, or null when the row is
+ * gone. The status twin of {@link readEntityContent}.
+ */
+function readEntityStage(
+  db: Database.Database,
+  entityType: EntityExternalLinkRow['entity_type'],
+  entityId: string,
+): { stage_id: string; archived_at: string | null } | null {
+  const row = db
+    .prepare(
+      `SELECT stage_id, archived_at
+         FROM ${BACKFILL_ENTITY_TABLE[entityType]}
+        WHERE id = ?`,
+    )
+    .get(entityId) as { stage_id: string; archived_at: string | null } | undefined;
+  return row ?? null;
+}
+
+/**
+ * TRIGGER 1's BACKFILL ARM — the status twin of {@link backfillContentWrites},
+ * run when a connection's status sync leaves `'off'` (migration 130).
+ *
+ * Identical defect, identical shape: `'off'` gates the ENQUEUE, so every stage
+ * move made while status sync was off was declined rather than banked, and
+ * trigger 1 only ever fires on an entity-change event. Without this, turning
+ * status sync back on left every linked issue at whatever state it held when
+ * the direction went off, until something happened to move that entity again.
+ *
+ * ONE DIFFERENCE FROM THE CONTENT ARM, and it is what makes this cheap: the
+ * "is a write owed" question is already {@link enqueueStateWrite}'s, which
+ * compares the desired group against the baseline's `lastWrittenGroup` stamp
+ * and dedupes against the unresolved outbox. So this resolves each entity's
+ * desired group and calls it — there is no second comparison to keep in step.
+ *
+ * A stage that maps to NO group (Idea, Ready for development — readiness is not
+ * "started") is skipped rather than written: those stages deliberately say
+ * nothing to a tracker, and a backfill must not start saying something they
+ * never said.
+ */
+export function backfillStatusWrites(
+  deps: WriteBackDeps,
+  connection: TrackerConnectionRow,
+): number {
+  if (effectiveStatusSyncMode(connection) === 'off') return 0;
+  if (connection.status !== 'active') return 0;
+
+  const stageIds = resolveStageIds(deps.db, connection.project_id);
+  let enqueued = 0;
+  for (const link of listLinks(deps.db, connection.id, { activeOnly: true })) {
+    const entity = readEntityStage(deps.db, link.entity_type, link.entity_id);
+    if (entity === null) continue;
+    // Same reasoning as the content arm: an entity retired while the direction
+    // was off belongs to the ARCHIVE direction, not to this one.
+    if (entity.archived_at !== null) continue;
+    const group = writeBackGroupForStage(entity.stage_id, stageIds);
+    if (group === null) continue;
+    const linked: LinkedContext = { link, connection };
+    if (enqueueStateWrite(deps, linked, link.external_id, group)) enqueued += 1;
+  }
+  return enqueued;
 }
 
 // ---------------------------------------------------------------------------

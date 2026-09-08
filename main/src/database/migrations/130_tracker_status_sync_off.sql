@@ -1,0 +1,60 @@
+-- Migration 130: an OFF switch for the status sync direction.
+--
+-- WHY. 094 minted status/pull/push as a two-state pair ('auto' | 'manual') and
+-- 118 minted content/archive as three-state ('auto' | 'manual' | 'off'), on the
+-- theory that the original three answer "when", never "whether". Practice
+-- disagreed for status. `status_sync_mode` governs BOTH directions of status on
+-- linked items (stage write-back out, remote state application in), it defaults
+-- to 'auto' on every connection the wizard creates, and it had no off switch —
+-- so a user who set every visible control to Off still had cyboflow writing
+-- stage changes into their tracker, with no way to stop it short of pausing or
+-- disconnecting the whole connection. That is the one direction where "I turned
+-- it off" and "it is off" could disagree.
+--
+-- WHY A SECOND COLUMN RATHER THAN WIDENING THE CHECK. Widening
+-- `status_sync_mode` to admit 'off' was the obvious shape and it is REPLAY-
+-- POISONOUS: 105 and 129 both RECREATE tracker_connections with
+-- `CHECK (status_sync_mode IN ('auto','manual'))` and copy the column forward,
+-- and both run BEFORE this file. On a ledger-wiped replay of a database where
+-- any connection sat at 'off', 105's `INSERT ... SELECT` fails the CHECK, the
+-- runner aborts, and the app will not boot. (Measured, not theorised:
+-- "MigrationFailedError: Migration 105_tracker_provider_dart.sql failed: CHECK
+-- constraint failed: status_sync_mode IN ('auto','manual')".) Nothing this file
+-- can do prevents that — no statement here runs before 105 on a replay — so the
+-- off switch must live somewhere 105 does not copy.
+--
+-- A NEW column is exactly that, and it degrades the way this schema's other
+-- late additions already do: 105/129's hardcoded column lists predate it, so a
+-- full replay DROPS it and this file re-adds it at its DEFAULT. The same
+-- documented, accepted degradation migration110.test.ts pins for `push_target`,
+-- 118's for `content_sync_mode`, and 129's for `config_generation` — a setting
+-- resets, nothing fails to boot.
+--
+--   status_sync_enabled  0 = the direction is OFF (neither half runs, and the
+--                        write-back declines its intents at the ENQUEUE, per
+--                        invariant 5), 1 = it runs at the cadence
+--                        `status_sync_mode` names.
+--
+-- The pair is also better modelling than a widened enum, and it has direct
+-- precedent one column over: PUSH is already expressed as `push_mode` (cadence)
+-- plus `push_target` (whether this mapping row pushes at all). Splitting
+-- cadence from consent means turning status sync off and back on RESTORES the
+-- auto-vs-manual choice the user had, instead of collapsing it to a default.
+-- Code above the store never sees the pair: `effectiveStatusSyncMode()` folds
+-- the two columns into the one three-state `TrackerStatusSyncMode` the engine,
+-- the IPC surface and the UI all speak.
+--
+-- DEFAULT 1 — ON, and no backfill. Status sync is a direction every existing
+-- connection was already running, so silently stopping it on upgrade would be
+-- its own surprise. This is the opposite of 118's reasoning and for the
+-- opposite reason: 118's columns were a NEW capability nobody had consented to,
+-- this is an existing one nobody asked to have withdrawn. 'off' is reachable
+-- only by a user choosing it.
+--
+-- REPLAY SAFETY: a single ADD COLUMN, whose second pass throws "duplicate
+-- column name" — the runner's tolerated-per-statement error — leaving the
+-- column and its value exactly as the first pass left them. No table recreate,
+-- so no FK children to protect and no PRAGMA to hoist.
+
+ALTER TABLE tracker_connections
+  ADD COLUMN status_sync_enabled INTEGER NOT NULL DEFAULT 1;
