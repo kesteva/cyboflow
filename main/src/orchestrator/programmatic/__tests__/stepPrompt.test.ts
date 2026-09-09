@@ -880,6 +880,15 @@ describe('composeStepPrompt', () => {
     expect(prove).toContain('runbook/sha mismatch');
     expect(prove).toContain('setup_proof: true');
     expect(prove).toContain('Never mark a runbook proven');
+    // F10 (docs/proposals/visual-verification-brittleness-fixes.md): the DB
+    // record is authoritative — the runner executes the REGISTERED
+    // `portable_json` by content hash and never reads the snapshot's file — so
+    // the prose must no longer claim an uncommitted runbook makes every proof
+    // judge an empty tree, and `committed: false` is a warning, not a blocker.
+    expect(prove).not.toContain('every proof will be judged against a tree that has no runbook in it');
+    expect(prove).not.toContain('that is a blocker on proving, not a note');
+    expect(prove).toContain("the REGISTERED record's `portable_json`");
+    expect(prove).toContain('is a WARNING, not a blocker');
 
     // inspect/derive share prove's agent key, so the contract must key on the step.
     const derive = composeStepPrompt({

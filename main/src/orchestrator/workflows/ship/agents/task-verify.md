@@ -94,6 +94,16 @@ shape of `serve`/`target`/`attestation` below:
   the tray icon render, does the dialog show the right text) don't need
   `requiresDrive` and are exercised normally.
 
+`modality` is the authoritative declaration — set it whenever you know the
+deliverable is a desktop/Electron app (`cdp-app`) or a browser surface (`web`).
+If you omit both `modality` and `serve.attach`, the harness resolves the
+modality from the project's proven runbook (`cdp-app` first, then `web`). Never
+invent `serve.attach` to force a modality. One caveat so the word cannot mislead
+you: a declared modality selects among the surfaces this project actually has —
+it never creates one. If you declare `cdp-app` without an `attach` serve (or
+`web` alongside one) and the project has no proven runbook for what you
+declared, the harness uses what your own `serve` describes instead.
+
 Pick exactly ONE of the two recipes below — the section you emit still has
 exactly one heading and one json fence, never both forms at once.
 
@@ -132,7 +142,7 @@ exactly one heading and one json fence, never both forms at once.
   "modality": "cdp-app",
   "build": ["pnpm build:main", "pnpm build:preload"],
   "serve": {
-    "cmd": "pnpm electron . --remote-debugging-port=\"$VERIFY_DRIVER_PORT\" --user-data-dir=\"$VERIFY_ARTIFACTS_DIR/.electron-profile\"",
+    "cmd": "pnpm electron . --remote-debugging-port=\"$VERIFY_DRIVER_PORT\" --user-data-dir=\"$VERIFY_DATA_DIR/.electron-profile\"",
     "attach": "cdp"
   },
   "attestation": { "kind": "cdp-token", "expression": "window.__CYBOFLOW_BUILD_SHA__", "expected": "<literal baked into this build — omit attestation if the project exposes no such global>" },
@@ -149,9 +159,11 @@ Notes on the Electron recipe: `serve.cmd` launches the app itself, never
 `electron --inspect` or a dev server; there is generally no `target` (the
 driver attaches to the already-open window, not a URL) and no navigate/goto
 step in `behaviors` — click/type/screenshot address the live window directly.
-`$VERIFY_ARTIFACTS_DIR` is already a per-request scratch dir, so anchoring the
-isolated profile dir under it costs nothing extra and guarantees it never
-collides with the user's own running instance or a sibling verification run.
+`$VERIFY_DATA_DIR` is a fresh, empty, per-request directory the harness
+provisions, so anchoring the isolated profile dir under it costs nothing extra
+and guarantees it never collides with the user's own running instance, a sibling
+verification run, or this lane's previous attempt (`$VERIFY_ARTIFACTS_DIR` is
+per-RUN and reused across attempts — screenshots go there, state does not).
 
 Field rules:
 
@@ -159,8 +171,9 @@ Field rules:
   the deliverable under verification. `taskRef`: this task's ref, so the verdict
   drives the right lane.
 - `modality` (recommended): `"web"` | `"cdp-app"` | `"native-screen"` — pick it
-  per the guidance above. Omit only when genuinely unsure; the runner derives
-  a default from `serve.attach`, but stating it explicitly catches a
+  per the guidance above. Omit only when genuinely unsure; the harness then
+  falls back to `serve.attach` and, failing that, to the project's proven
+  runbook — but stating it explicitly is what PINS the surface, and it catches a
   composer/runner disagreement instead of silently trusting one side.
 - `build`: ordered shell commands that produce a runnable deliverable from a
   CLEAN checkout of the current branch's committed state. Derive them from

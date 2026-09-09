@@ -28,8 +28,10 @@
  * host so the controller itself stays DB/electron-free and unit-testable with a fake.
  */
 import { VerificationScheduler } from './verificationScheduler';
+import type { ProvenRunbookRevision } from './verificationScheduler';
 import { captureSnapshotSha } from './snapshotProvisioner';
 import { findForbiddenTaskCommands } from './dependencyCommandGuard';
+import { taskDerivesEnvironment } from './bootstrapEligibility';
 import {
   deriveLegacyInputFromTask,
   FALLBACK_CHAINS,
@@ -37,6 +39,7 @@ import {
   resolveTaskModality,
 } from '../../../../shared/types/visualVerification';
 import type {
+  VerificationModality,
   VerificationTaskV1,
   VerificationType,
   VisualBackendId,
@@ -83,9 +86,15 @@ export const FORBIDDEN_DEP_COMMAND_ERROR = 'forbidden_dependency_command';
  * Outcome of {@link prepareVerificationEnqueue}. `ok:false` means NOTHING is
  * enqueued and the caller surfaces `error` to the composer verbatim; `ok:true`
  * carries the task to persist (possibly runbook-merged) and the pin to stamp.
+ *
+ * `modality` is the modality this preparation actually settled on (F5). It is
+ * reported rather than merely used because the caller resolved its own copy
+ * BEFORE the bootstrap and needs to know if the preparation had to fall back
+ * (see the stamp-consistency invariant in this section's header); it is also the
+ * value the persisted task re-derives to, so a caller can assert on it.
  */
 export type PreparedVerificationEnqueue =
-  | { ok: true; task?: VerificationTaskV1; pin?: RunbookPin }
+  | { ok: true; task?: VerificationTaskV1; pin?: RunbookPin; modality: VerificationModality }
   | { ok: false; error: string };
 
 /**
@@ -111,6 +120,252 @@ function forbiddenCommandError(offenders: string[], source: 'task' | 'runbook'):
   );
 }
 
+// ---------------------------------------------------------------------------
+// MODALITY RESOLUTION — once, early, declaration first (F5 / RC3, Codex #3 —
+// docs/proposals/visual-verification-brittleness-fixes.md)
+//
+// `resolveTaskModality` answers from the composed task's SHAPE alone: anything
+// without `serve.attach === 'cdp'` is `web`. On a project whose proven runbook
+// declares only `cdp-app` (cyboflow itself), a composer that merely omitted
+// `attach` therefore asked for a modality nothing was ever proven against — the
+// injection below found no record, the §3.2 degrade gate skipped the lane, and
+// nothing anywhere told the composer which modalities that project actually has.
+// That is RC3: the modality selector was the LLM's guess about a fact the
+// harness already knows.
+//
+// Two corrections. (1) The composer's EXPLICIT `task.modality` — a field
+// `VerificationTaskV1` has carried all along (visualVerification.ts) and the
+// task-verify prompt already asks for — is honoured instead of being ignored in
+// favour of the shape. (2) When nothing is declared at all, the project's PROVEN
+// RECORDS are asked, in the order `cdp-app`, `web`: a project with a proven
+// cdp-app entry is an app, and a composer that wants its web surface says so.
+//
+// And the answer is computed ONCE per enqueue, BEFORE the bootstrap preflight
+// (Codex #3): the bootstrap used to run on the composer-derived modality, so an
+// undeclared task on a cdp-app project would derive and prove a brand-new `web`
+// runbook — spending real budget and rewriting the shared
+// `.cyboflow/verify-runbook.json` — before the injection seam ever looked at the
+// proven record that already existed.
+//
+// BOTH ENQUEUE PATHS GET IT. The programmatic seam resolves it up front (it must
+// — it is the one that runs the bootstrap) and hands the value down; the MCP
+// handler passes nothing and {@link prepareVerificationEnqueue} resolves it
+// itself. That matters because `execution_model` defaults to `orchestrated`, so
+// the MCP path is the DEFAULT plane: leaving it on the old shape-only derivation
+// would have made the task-verify prompt's promise about `modality` and the
+// proven runbook false for most runs (fix round, reviewer finding on the
+// prompt).
+//
+// THE INVARIANT THAT MAKES ALL OF THIS SAFE (fix round, blocker). The request
+// row's modality is stamped by `scheduler.enqueue`, which RE-DERIVES it from
+// (type, PERSISTED task) via `resolveTaskModality` — shape-only, `task.modality`
+// ignored. A resolution the persisted task cannot re-derive to would therefore
+// hand the §3.2 degrade gate a modality this request was never resolved for, and
+// on a project where THAT other modality happens to be proven the gate would
+// wave through an UNPINNED request carrying the composer's own guessed
+// build/serve. So resolution only ever answers with a modality that is either
+//
+//   (a) the task's own SHAPE — which the stamp re-derives by definition; or
+//   (b) one this project has a PROVEN record for — which the injection then
+//       merges, replacing `serve` with the record's own, so the persisted task
+//       re-derives to it. The merge's existing consistency guard is what makes
+//       that a CHECKED claim rather than an assumption, and the preparation
+//       falls back to (a) whenever the injection did not actually happen.
+//
+// A declaration that is neither — `"modality": "cdp-app"` written next to a
+// plain `serve`, on a project with no cdp-app record — falls back to the shape,
+// which is exactly the pre-F5 answer for that task (merge + pin against the
+// shape's own proven record, if it has one). This is the ONE place the
+// implementation departs from the spec's "declared-but-not-proven ⇒ the gate
+// skips with the reason naming the declared modality": making the gate say that
+// requires stamping the declared value, and the stamp is single-sited inside
+// `scheduler.enqueue`.
+//
+// DECLARED-AND-CONSISTENT IS UNCHANGED, and it is the case the prompt asks for:
+// `"modality": "cdp-app"` alongside `serve.attach === 'cdp'` (or `"web"` with no
+// attach) with no proven record still means no merge and no pin, and the degrade
+// gate skips with its existing reason naming that modality.
+//
+// A DEGENERATE TASK NEVER CONSULTS THE RECORDS. A pre-live task (a bare
+// `target`, no build and no serve) derives no environment: it is exempt from the
+// degrade gate entirely, and it is the one request shape that has actually
+// passed in production. Resolving it against a runbook record would merge a full
+// build + serve + attestation into it and turn it into a different request, so
+// it keeps its shape's answer — the same carve-out the bootstrap preflight and
+// the degrade gate already make for it.
+// ---------------------------------------------------------------------------
+
+/**
+ * The order the proven records are probed in when the composer declared nothing
+ * (F5). BOTH proven + nothing declared ⇒ `cdp-app` wins, by the rule above.
+ */
+const RECORD_PROBE_ORDER: readonly VerificationModality[] = ['cdp-app', 'web'];
+
+/**
+ * The DECLARED modality for a request, or `null` when nothing declares one.
+ * Pure and total — the caller decides what a `null` means.
+ *
+ * Precedence (F5 steps 1–3):
+ *   1. the run's verify TYPE, for the two modalities a task shape cannot
+ *      express — `native-desktop` → `native-screen`, `mobile-flow` → `mobile`
+ *      (identical to {@link resolveTaskModality}, which owns that mapping);
+ *   2. the composer's own `task.modality`, when it is one of the two WEB-AXIS
+ *      members. A task-declared `native-screen`/`mobile` on a web-shaped run is
+ *      deliberately NOT honoured: the run's stamped type owns that axis and step
+ *      1 already answered it, and the request row's modality is re-derived from
+ *      (type, task) at the INSERT — so honouring it here would stamp a row whose
+ *      modality contradicts the one this resolution was made for.
+ *   3. `serve.attach === 'cdp'` → `cdp-app` — the legacy shape discriminant,
+ *      still authoritative when the composer wrote the shape but not the word.
+ */
+export function declaredWebModality(
+  type: VerificationType,
+  task: Pick<VerificationTaskV1, 'serve' | 'modality'> | null,
+): VerificationModality | null {
+  if (type === 'native-desktop') return 'native-screen';
+  if (type === 'mobile-flow') return 'mobile';
+  if (task?.modality === 'web' || task?.modality === 'cdp-app') return task.modality;
+  if (task?.serve?.attach === 'cdp') return 'cdp-app';
+  return null;
+}
+
+/**
+ * Resolve the modality this enqueue runs under.
+ *
+ *   1. A declaration that MATCHES the task's own shape wins outright, with no
+ *      record read at all — the common case, and the one the prompt asks for.
+ *   2. A DEGENERATE task (no build, no serve) keeps its shape: it derives no
+ *      environment, so there is nothing for a runbook record to describe.
+ *   3. Otherwise the PROVEN records decide, and they are the only thing that can
+ *      move the answer off the shape: a declaration the shape does not express
+ *      is adopted only when a proven record backs it (one probe, for exactly
+ *      that modality); a task that declared nothing at all probes
+ *      {@link RECORD_PROBE_ORDER}, `cdp-app` first.
+ *   4. Failing all of that, the task's SHAPE — `web` for anything without
+ *      `serve.attach`, i.e. today's default.
+ *
+ * Every answer is therefore either the shape or a proven modality, which is the
+ * stamp-consistency invariant this section's header spells out.
+ *
+ * FAIL-SOFT BY CONSTRUCTION. No scheduler wired, or any throw out of the probe,
+ * skips the record consultation entirely and falls through to the shape. This
+ * runs before a request row exists, on the lane's critical path, and the enqueue
+ * seam's contract is NEVER THROWS; a resolution hiccup must cost the lane its
+ * record-derived modality, never the lane itself.
+ *
+ * Logs at info WHICH precedence step decided, because that is the one fact that
+ * makes a "no proven runbook for modality X" skip legible after the fact.
+ */
+export async function resolveEnqueueModality(args: {
+  type: VerificationType;
+  task: Pick<VerificationTaskV1, 'build' | 'serve' | 'modality'> | null;
+  projectId: number;
+  runId: string;
+  /** The requesting run's worktree, when it has one (the store's probe path). */
+  probePath?: string;
+  logger?: LoggerLike;
+}): Promise<VerificationModality> {
+  const { logger, task } = args;
+  // The modality the request row would be stamped with if NOTHING is merged into
+  // the task: `scheduler.enqueue` re-derives the stamp from exactly this call.
+  const shape = resolveTaskModality(args.type, task);
+  const declared = declaredWebModality(args.type, task);
+
+  if (declared !== null && declared === shape) {
+    logger?.info('[resolveEnqueueModality] modality declared by the request', {
+      projectId: args.projectId,
+      runId: args.runId,
+      modality: declared,
+      source: task?.modality === declared ? 'task.modality' : 'type-or-serve-shape',
+    });
+    return declared;
+  }
+
+  if (task === null || !taskDerivesEnvironment(task)) {
+    logger?.info('[resolveEnqueueModality] degenerate task keeps its shape; records not consulted', {
+      projectId: args.projectId,
+      runId: args.runId,
+      modality: shape,
+      declared,
+      source: 'no-environment',
+    });
+    return shape;
+  }
+
+  // Either the composer declared a modality its own task shape does not express
+  // — adopted ONLY if a proven record backs it, so the merge can make the stamp
+  // agree — or it declared nothing at all, in which case the records choose.
+  const candidates: readonly VerificationModality[] = declared !== null ? [declared] : RECORD_PROBE_ORDER;
+  try {
+    const scheduler = VerificationScheduler.tryGetInstance();
+    if (scheduler !== null) {
+      for (const candidate of candidates) {
+        const revision = await scheduler.resolveProvenRunbook({
+          projectId: args.projectId,
+          runId: args.runId,
+          modality: candidate,
+          ...(args.probePath !== undefined ? { probePath: args.probePath } : {}),
+        });
+        if (revision !== null) {
+          logger?.info('[resolveEnqueueModality] modality resolved from the proven runbook record', {
+            projectId: args.projectId,
+            runId: args.runId,
+            modality: candidate,
+            declared,
+            source: 'proven-record',
+            runbookHash: revision.hash,
+          });
+          return candidate;
+        }
+      }
+      // F4 ∘ F5 (Codex review of the fix round): with drift non-writing, a
+      // project's cdp-app record can be `drifted` (or a registered draft) for a
+      // long stretch. An UNDECLARED lane must still point at the modality that
+      // HAS a record, so the bootstrap takes the re-prove (drifted) or derive
+      // (draft) path for it instead of deriving a rival `web` runbook beside
+      // it. Nothing merges here (the record is not proven), so the stamp-
+      // consistency fallback in prepareVerificationEnqueue still applies; the
+      // bootstrap is the only consumer that sees this answer un-narrowed.
+      if (declared === null) {
+        for (const candidate of RECORD_PROBE_ORDER) {
+          const present = await scheduler.runbookRecordPresent({
+            projectId: args.projectId,
+            runId: args.runId,
+            modality: candidate,
+            ...(args.probePath !== undefined ? { probePath: args.probePath } : {}),
+          });
+          if (present) {
+            logger?.info('[resolveEnqueueModality] modality resolved from an unproven runbook record (bootstrap will re-prove or derive it)', {
+              projectId: args.projectId,
+              runId: args.runId,
+              modality: candidate,
+              source: 'present-record',
+            });
+            return candidate;
+          }
+        }
+      }
+    }
+  } catch (err) {
+    // Skips the rest of the probe on purpose: a store that threw once will throw
+    // again on the next candidate, and the shape below is the honest answer.
+    logger?.debug('[resolveEnqueueModality] proven-record probe unavailable; falling back to the task shape', {
+      projectId: args.projectId,
+      runId: args.runId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  logger?.info('[resolveEnqueueModality] no proven record backs the request; falling back to the task shape', {
+    projectId: args.projectId,
+    runId: args.runId,
+    modality: shape,
+    declared,
+    source: 'shape-fallback',
+  });
+  return shape;
+}
+
 /**
  * MERGE a proven runbook's modality entry into a composed task (§5.2 seam 3).
  *
@@ -134,11 +389,22 @@ function forbiddenCommandError(offenders: string[], source: 'task' | 'runbook'):
  * to standing the project up. The entry's `viewports`/`notes` are NOT merged —
  * capture framing belongs to the request, and the notes are for humans reading
  * the committed file.
+ *
+ * `resolvedModality` (F5) is STAMPED onto the merged task when the composer
+ * declared none. Without it a record-resolved lane (nothing declared, the
+ * modality derived from the project's proven record) would persist a task whose
+ * only modality signal is `serve.attach`, and the runner's cross-check
+ * (`resolveRequestModality`: `req.modality ?? task.modality` versus the task
+ * shape) would be judging the harness's decision against a task that never
+ * recorded it. It never OVERRIDES a declaration — a declared value is the whole
+ * point of step 2 of the precedence.
  */
 export function mergeRunbookIntoTask(
   task: VerificationTaskV1,
   entry: VerifyRunbookModalityEntry,
+  resolvedModality?: VerificationModality,
 ): VerificationTaskV1 {
+  const modality = task.modality ?? resolvedModality;
   return {
     version: 1,
     summary: task.summary,
@@ -146,7 +412,7 @@ export function mergeRunbookIntoTask(
     attestation: entry.attestation,
     ...(task.taskRef !== undefined ? { taskRef: task.taskRef } : {}),
     ...(task.target !== undefined ? { target: task.target } : {}),
-    ...(task.modality !== undefined ? { modality: task.modality } : {}),
+    ...(modality !== undefined ? { modality } : {}),
     ...(task.viewports !== undefined ? { viewports: task.viewports } : {}),
     ...(task.timeoutMs !== undefined ? { timeoutMs: task.timeoutMs } : {}),
     ...(entry.build !== undefined ? { build: entry.build } : {}),
@@ -191,10 +457,21 @@ export async function prepareVerificationEnqueue(args: {
   pin?: RunbookPin;
   /** The tree whose portable runbook half is probed; absent ⇒ the scheduler resolves it from the run/project. */
   probePath?: string;
+  /**
+   * F5 — the modality the caller ALREADY resolved (see
+   * {@link resolveEnqueueModality}). Present from `enqueueTaskVerification`,
+   * which must resolve it before the bootstrap preflight and cannot resolve it
+   * twice without risking two different answers. ABSENT from the MCP handler and
+   * the test harnesses, which is why this function resolves it ITSELF when it is
+   * missing rather than falling back to the shape-only derivation: the MCP path
+   * is the DEFAULT (`orchestrated`) plane, and the task-verify prompt's promise
+   * about `modality` and the proven runbook has to hold there too.
+   */
+  modality?: VerificationModality;
   logger?: LoggerLike;
 }): Promise<PreparedVerificationEnqueue> {
   const { task, logger } = args;
-  if (task === undefined) return { ok: true };
+  if (task === undefined) return { ok: true, modality: resolveTaskModality(args.type, null) };
 
   // (1) §7.2 — the composer's own commands.
   const composed = findForbiddenTaskCommands(task);
@@ -202,47 +479,101 @@ export async function prepareVerificationEnqueue(args: {
     return { ok: false, error: forbiddenCommandError(composed, 'task') };
   }
 
+  // The modality the row would be stamped with if nothing is merged in — the
+  // fallback the whole stamp-consistency invariant is written around.
+  const shape = resolveTaskModality(args.type, task);
+
   // (2) A caller-supplied pin is authoritative (setup proof) — stamp it verbatim.
+  // Nothing is merged, so the row stamps the SHAPE and that is what this reports.
   if (args.pin !== undefined) {
-    return { ok: true, task, pin: args.pin };
+    return { ok: true, task, pin: args.pin, modality: shape };
   }
 
   // (3) §5.2 seam 3 — the proven-runbook injection.
   const scheduler = VerificationScheduler.tryGetInstance();
-  if (scheduler === null) return { ok: true, task };
-  const modality = resolveTaskModality(args.type, task);
-  const revision = await scheduler.resolveProvenRunbook({
-    projectId: args.projectId,
-    runId: args.runId,
-    modality,
-    ...(args.probePath !== undefined ? { probePath: args.probePath } : {}),
-  });
-  if (revision === null) return { ok: true, task };
-
-  const merged = mergeRunbookIntoTask(task, revision.entry);
-
-  // The stamped modality is re-derived from the PERSISTED task
-  // (`scheduler.enqueue` → `resolveTaskModality`), so a merge that changes the
-  // `serve.attach` discriminant would stamp a modality DIFFERENT from the one
-  // this runbook was resolved for — the capability ledger, the screen lease and
-  // the runner's preflight would then all key on a modality nothing was proven
-  // against. That can only happen if a record filed under modality M declares an
-  // entry inconsistent with M (a malformed runbook), so the response is to drop
-  // the injection and let the degrade gate speak, never to silently execute the
-  // inconsistency.
-  if (resolveTaskModality(args.type, merged) !== modality) {
-    logger?.warn('[prepareVerificationEnqueue] runbook entry contradicts its own modality; skipping injection', {
+  if (scheduler === null) return { ok: true, task, modality: shape };
+  const resolved =
+    args.modality ??
+    (await resolveEnqueueModality({
+      type: args.type,
+      task,
       projectId: args.projectId,
       runId: args.runId,
-      modality,
-      merged: resolveTaskModality(args.type, merged),
-      runbookHash: revision.hash,
+      ...(args.probePath !== undefined ? { probePath: args.probePath } : {}),
+      ...(logger ? { logger } : {}),
+    }));
+
+  /**
+   * Resolve + merge ONE candidate modality, or answer null.
+   *
+   * The stamped modality is re-derived from the PERSISTED task
+   * (`scheduler.enqueue` → `resolveTaskModality`), so a merge that changes the
+   * `serve.attach` discriminant would stamp a modality DIFFERENT from the one
+   * this runbook was resolved for — the capability ledger, the screen lease and
+   * the runner's preflight would then all key on a modality nothing was proven
+   * against. That can only happen if a record filed under modality M declares an
+   * entry inconsistent with M (a malformed runbook), so the response is to drop
+   * the injection and let the degrade gate speak, never to silently execute the
+   * inconsistency.
+   *
+   * F5 KEEPS THAT GUARD EXACTLY AS IT WAS, and it is what makes a
+   * record-resolved modality safe: `mergeRunbookIntoTask` REPLACES `serve`, so a
+   * task that declared nothing and resolved to `cdp-app` from the record comes
+   * out of the merge carrying the entry's own `attach: 'cdp'` and re-derives to
+   * `cdp-app`. A `cdp-app` record whose entry forgot the attach form still trips
+   * the guard and skips the injection, as it always did.
+   */
+  const tryInject = async (
+    candidate: VerificationModality,
+  ): Promise<{ revision: ProvenRunbookRevision; merged: VerificationTaskV1 } | null> => {
+    const revision = await scheduler.resolveProvenRunbook({
+      projectId: args.projectId,
+      runId: args.runId,
+      modality: candidate,
+      ...(args.probePath !== undefined ? { probePath: args.probePath } : {}),
     });
-    return { ok: true, task };
+    if (revision === null) return null;
+    const merged = mergeRunbookIntoTask(task, revision.entry, candidate);
+    if (resolveTaskModality(args.type, merged) !== candidate) {
+      logger?.warn('[prepareVerificationEnqueue] runbook entry contradicts its own modality; skipping injection', {
+        projectId: args.projectId,
+        runId: args.runId,
+        modality: candidate,
+        merged: resolveTaskModality(args.type, merged),
+        runbookHash: revision.hash,
+      });
+      return null;
+    }
+    return { revision, merged };
+  };
+
+  let modality = resolved;
+  let injected = await tryInject(modality);
+
+  // STAMP CONSISTENCY (fix round, blocker — see this section's header). An
+  // injection is the ONLY thing that can make the persisted task re-derive to a
+  // modality its composed shape does not express. When it did not happen — no
+  // record, or a record whose entry contradicts its own modality — keeping the
+  // off-shape answer would leave the row stamped with the shape while the
+  // capability ledger, the §3.2 degrade gate and the runner all reason about
+  // something else, and on a project where the SHAPE's modality is proven the
+  // gate would wave the request through unpinned, running the composer's own
+  // guessed build/serve. So fall back to the shape and give it the same chance
+  // to inject: that is precisely the pre-F5 behavior for this task.
+  if (injected === null && modality !== shape) {
+    logger?.info('[prepareVerificationEnqueue] no proven record confirmed the resolved modality; using the task shape', {
+      projectId: args.projectId,
+      runId: args.runId,
+      resolved: modality,
+      shape,
+    });
+    modality = shape;
+    injected = await tryInject(shape);
   }
+  if (injected === null) return { ok: true, task, modality };
 
   // (4) §7.2 again, now over the runbook-sourced commands.
-  const fromRunbook = findForbiddenTaskCommands(merged);
+  const fromRunbook = findForbiddenTaskCommands(injected.merged);
   if (fromRunbook.length > 0) {
     return { ok: false, error: forbiddenCommandError(fromRunbook, 'runbook') };
   }
@@ -251,10 +582,15 @@ export async function prepareVerificationEnqueue(args: {
     projectId: args.projectId,
     runId: args.runId,
     modality,
-    runbookHash: revision.hash,
-    runbookLocalVersion: revision.version,
+    runbookHash: injected.revision.hash,
+    runbookLocalVersion: injected.revision.version,
   });
-  return { ok: true, task: merged, pin: { hash: revision.hash, localVersion: revision.version } };
+  return {
+    ok: true,
+    task: injected.merged,
+    pin: { hash: injected.revision.hash, localVersion: injected.revision.version },
+    modality,
+  };
 }
 
 /** Parse the stamped `verify_chain` JSON into a `VisualBackendId[]` (mirrors mcpQueryHandler). Fail-soft → []. */
@@ -362,7 +698,9 @@ export async function enqueueTaskVerification(
       .get(runId) as
       | { projectId?: unknown; verifyEnabled?: unknown; verifyType?: unknown; verifyChain?: unknown }
       | undefined;
-    if (!row) return { outcome: 'skipped', reason: 'verification-disabled' };
+    // Distinct from the off switch below (F8): a missing run row is an anomaly
+    // the controller should surface, not a deliberate 'verification-disabled'.
+    if (!row) return { outcome: 'skipped', reason: 'no-run-row' };
     enabled = row.verifyEnabled === 1 || row.verifyEnabled === true;
     stampedType = isVerificationType(row.verifyType) ? row.verifyType : null;
     stampedChain = parseStampedChain(row.verifyChain);
@@ -372,7 +710,8 @@ export async function enqueueTaskVerification(
       runId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return { outcome: 'skipped', reason: 'verification-disabled' };
+    // Likewise distinct (F8): an unreadable stamp is a fault, not an off switch.
+    return { outcome: 'skipped', reason: 'run-stamp-unreadable' };
   }
 
   if (!enabled || stampedType === null || !Number.isFinite(projectId)) {
@@ -388,6 +727,65 @@ export async function enqueueTaskVerification(
   // it overrides task.taskRef AND drives the derived legacy input — both persisted
   // columns then carry the SAME ref regardless of what the composing agent wrote.
   const composedTask: VerificationTaskV1 = { ...opts.task, taskRef: laneTaskRef };
+
+  // (3-modality) F5 / RC3 — THE LANE'S MODALITY, RESOLVED ONCE, HERE.
+  //
+  // Everything downstream that keys on a modality — the bootstrap preflight
+  // below, the proven-runbook injection in `prepareVerificationEnqueue`, and
+  // (through the merged task's shape) the stamp `scheduler.enqueue` writes on the
+  // row — now reads THIS value, so they cannot disagree. Before F5 each derived
+  // its own from the composed task's shape, which meant an undeclared task on a
+  // project with only a proven `cdp-app` entry bootstrapped a fresh `web` runbook
+  // (real budget, and a rewrite of the shared `.cyboflow/verify-runbook.json`)
+  // before the injection seam ever consulted the record that already existed —
+  // Codex #3 against F5's first revision, which resolved this AFTER the
+  // bootstrap.
+  //
+  // THE BOOTSTRAP CAN ONLY EVER RUN ON THE SHAPE OR ON A PROVEN MODALITY (fix
+  // round, reviewer finding on the bootstrap). Resolution adopts an off-shape
+  // declaration only when a PROVEN record backs it, so the two possibilities
+  // below are: the shape — exactly which modality the bootstrap ran on before F5
+  // — or a modality whose record is already proven, which the preflight declines
+  // as `already-proven`. A composer's one-word `"modality": "cdp-app"` can
+  // therefore never talk this project into deriving a rival runbook over the
+  // `.cyboflow/verify-runbook.json` its real, proven modality depends on.
+  //
+  // A PROOF REQUEST DOES NOT PROBE THE RECORDS. The verify-setup proof and the
+  // lane bootstrap's own proof are both excluded from the bootstrap below, and a
+  // pinned one short-circuits the injection too (`prepareVerificationEnqueue`
+  // returns on the caller pin before any lookup) — so an F5 probe would buy
+  // nothing on the one path where it costs the most: every extra `status()` read
+  // is a read that can DEMOTE a rival modality's record while a proof is in
+  // flight (RC2). They keep the pure SHAPE derivation they had before F5 — which
+  // is also what the MCP handler's setup-proof pre-check uses to find the record
+  // the pin is validated against, so the two stay aligned — and an unpinned proof
+  // still resolves its own record for THAT modality inside the preparation,
+  // exactly as it did.
+  //
+  // Total by construction (see {@link resolveEnqueueModality}); wrapped anyway,
+  // like every other collaborator call in this never-throws seam.
+  const carriesCallerPin = opts.runbookHash !== undefined && opts.runbookLocalVersion !== undefined;
+  const isProofRequest = carriesCallerPin || opts.setupProof === true || opts.bootstrapProof === true;
+  let modality: VerificationModality;
+  try {
+    modality = isProofRequest
+      ? resolveTaskModality(type, composedTask)
+      : await resolveEnqueueModality({
+          type,
+          task: composedTask,
+          projectId,
+          runId,
+          probePath: worktreePath,
+          ...(logger ? { logger } : {}),
+        });
+  } catch (err) {
+    logger?.warn('[enqueueTaskVerification] modality resolution threw; falling back to the task shape', {
+      runId,
+      laneTaskRef,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    modality = resolveTaskModality(type, composedTask);
+  }
 
   // (3a) The RUNBOOK BOOTSTRAP (lane-runbook-bootstrap.md §12 steps 1–8).
   //
@@ -420,7 +818,7 @@ export async function enqueueTaskVerification(
         projectId,
         runId,
         laneTaskRef,
-        modality: resolveTaskModality(type, composedTask),
+        modality,
         task: composedTask,
         probePath: worktreePath,
       });
@@ -492,6 +890,8 @@ export async function enqueueTaskVerification(
       ...(opts.runbookHash !== undefined && opts.runbookLocalVersion !== undefined
         ? { pin: { hash: opts.runbookHash, localVersion: opts.runbookLocalVersion } }
         : {}),
+      // F5 — the SAME value the bootstrap ran on, never a second derivation.
+      modality,
       probePath: worktreePath,
       ...(logger ? { logger } : {}),
     });
@@ -501,7 +901,9 @@ export async function enqueueTaskVerification(
       laneTaskRef,
       error: err instanceof Error ? err.message : String(err),
     });
-    prepared = { ok: true, task: composedTask };
+    // Unpinned and unmerged ⇒ the row stamps the composed task's own shape, so
+    // that — not the resolved value — is the honest modality to report back.
+    prepared = { ok: true, task: composedTask, modality: resolveTaskModality(type, composedTask) };
   }
   if (!prepared.ok) {
     logger?.warn('[enqueueTaskVerification] composed task rejected at enqueue; skipping visual verification', {
@@ -510,6 +912,20 @@ export async function enqueueTaskVerification(
       error: prepared.error,
     });
     return { outcome: 'skipped', reason: prepared.error };
+  }
+  // The preparation settles the modality (it is the half that knows whether the
+  // injection actually happened); a disagreement with the value the bootstrap ran
+  // on means a record moved underneath this enqueue between the two reads. Not an
+  // error — the preparation's answer is the one the row will stamp — but the one
+  // fact that makes such a lane legible afterwards.
+  if (prepared.modality !== modality) {
+    logger?.info('[enqueueTaskVerification] the preparation settled on a different modality than the bootstrap ran on', {
+      runId,
+      laneTaskRef,
+      bootstrapModality: modality,
+      preparedModality: prepared.modality,
+    });
+    modality = prepared.modality;
   }
   const task: VerificationTaskV1 = prepared.task ?? composedTask;
   const input = deriveLegacyInputFromTask(task, laneTaskRef);
@@ -540,6 +956,15 @@ export async function enqueueTaskVerification(
     // scheduler.enqueue, which resolves + stamps it from (type, task) at the
     // single INSERT — one derivation site, so a lane enqueue and an MCP enqueue
     // can never disagree about a request's modality.
+    //
+    // F5 does not change that, and the preparation is what keeps it true (fix
+    // round, blocker): the resolved modality reaches the stamp through the task
+    // the merge produced — its `serve` is the record's, so the shape re-derives
+    // to the same answer — and when no merge happened the preparation has
+    // already fallen back to the composed task's own shape, which is what the
+    // stamp derives anyway. `prepared.modality` is therefore always what the row
+    // gets, and the §3.2 degrade gate reads the same modality this enqueue was
+    // resolved for.
     const requestId = VerificationScheduler.getInstance().enqueue({
       runId,
       projectId,

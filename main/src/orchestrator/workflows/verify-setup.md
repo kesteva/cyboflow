@@ -139,9 +139,10 @@ Now, and only now, touch the repo. In order:
 
 1. **Write `.cyboflow/verify-runbook.json`** (the portable half only) plus the
    APPROVED rung-1 / rung-2 changes. Commit atomically
-   (`chore: add verification runbook`). The runbook must be committed before you
-   prove it: the verifier runs in a **detached snapshot at a commit**, so an
-   uncommitted runbook is invisible to it.
+   (`chore: add verification runbook`). The proof does NOT read this file: the
+   runner executes the REGISTERED record's `portable_json`, fetched by content
+   hash, so an uncommitted runbook still proves. Commit it because the committed
+   file is the human-reviewable EXPORT of what you registered.
 
    **`git add` on this path can silently do nothing.** Plenty of projects ignore
    or locally-exclude `.cyboflow/` — it is where cyboflow keeps worktrees and
@@ -149,8 +150,10 @@ Now, and only now, touch the repo. In order:
    success. Stage it with `git add -f .cyboflow/verify-runbook.json`, and confirm
    the commit really contains it with
    `git cat-file -e HEAD:.cyboflow/verify-runbook.json`. Registration re-checks
-   this and hands back `committed: false` with a warning if you missed it; treat
-   that as a blocker on proving, not a note.
+   this and hands back `committed: false` with a warning if you missed it. That
+   is a WARNING, not a blocker: proving works either way, but the reviewable
+   export is not in HEAD — re-stage with `git add -f`, commit, and register again
+   so the committed file matches the record.
 2. **Register each approved modality:**
 
    ```
