@@ -14,6 +14,12 @@
  *            WorkflowStepCard, so human-review keeps the human-gate badge) +
  *            the merge-gate bar (testid swimlane-merge-gate).
  *
+ * "Visual check" is the one step card NOT painted from lane status alone: on an
+ * integrated lane it is derived from `lane.visualVerification` — the lane's real
+ * latest verification request — because the merge gate integrates a lane on
+ * skipped/timeout/low_confidence too (F8 / Codex #9, docs/proposals/visual-
+ * verification-brittleness-fixes.md).
+ *
  * Lane chip mapping (contract #6): integrated → MERGED; running → RUNNING;
  * failed → ESCALATED (failed lanes surface at the human gate by design);
  * blocked OR (queued AND blockedByRefs.length > 0) → BLOCKED "waiting on
@@ -34,6 +40,7 @@ import type { StepStatus } from './WorkflowStepCard';
 import {
   SPRINT_LANE_STEP_IDS,
   SPRINT_BATCH_CAP,
+  SPRINT_VISUAL_VERIFY_STEP,
 } from '../../../../shared/types/sprintBatch';
 import type { SprintLaneStepId } from '../../../../shared/types/sprintBatch';
 
@@ -50,8 +57,18 @@ export interface SprintSwimlaneCanvasProps {
   sprintStatus?: string;
 }
 
-/** Per-lane step visual state — 'failed' styles the current step of a failed lane. */
-type LaneStepStatus = 'pending' | 'running' | 'done' | 'failed';
+/**
+ * Per-lane step visual state — 'failed' styles the current step of a failed lane.
+ *
+ * 'advisory' and 'skipped' exist ONLY for the visual-verify step of an INTEGRATED
+ * lane (F8 / Codex #9, docs/proposals/visual-verification-brittleness-fixes.md):
+ * the merge gate integrates a lane on `passed`, `low_confidence`, `skipped` AND
+ * `timeout`, so painting every step of an integrated lane 'done' claimed a green
+ * "Visual check" for three outcomes where no visual check ran.
+ *   advisory — low_confidence: a verdict was reached but not confidently.
+ *   skipped  — skipped / timeout / no request row at all: it did not run.
+ */
+type LaneStepStatus = 'pending' | 'running' | 'done' | 'failed' | 'advisory' | 'skipped';
 
 /** Chip vocabulary per contract #6. */
 type LaneChip = 'MERGED' | 'RUNNING' | 'ESCALATED' | 'BLOCKED' | 'QUEUED';
@@ -124,15 +141,79 @@ function activeFanOutCap(definition: WorkflowDefinition | null): number {
 }
 
 /**
- * Derives the five per-step states from the lane:
- *   integrated      → all done;
+ * The visual-verify step's state on an INTEGRATED lane, derived from the lane's
+ * REAL latest verification request (F8 / Codex #9). An integrated lane says
+ * nothing about whether a visual check ran: `mergeGateLaneAdvance` integrates on
+ * `passed`, `low_confidence`, `skipped` AND `timeout` (advance-with-visibility —
+ * a missing precondition must never wedge a sprint), so only the request row can
+ * distinguish "verified" from "never checked".
+ *
+ *   passed                        → done      (green check, as before)
+ *   low_confidence                → advisory  (amber — a human must look)
+ *   failed                        → failed    (red)
+ *   skipped / timeout / no row    → skipped   (grey — it did not run)
+ *   still queued/leased/running   → skipped   (no verdict has landed yet)
+ *   STALE (any status)            → skipped   (grey — the newest attributable row
+ *                                              belongs to an EARLIER lane attempt)
+ *
+ * The stale case is checked FIRST and is not cosmetic: when a later attempt's
+ * verification is dropped before a request row exists (the codex-substrate
+ * channel-unavailable drop this whole change set is about), the newest
+ * attributable row is still the PREVIOUS attempt's — so without the check an
+ * integrated lane rendered a red "Visual check failed" quoting a verdict about a
+ * diff that no longer exists. `stale` is derived store-side by the same rule
+ * `mergeGateLaneAdvance` uses to refuse a superseded verdict.
+ */
+function integratedVisualStepState(lane: SprintLane): { status: LaneStepStatus; title: string } {
+  const v = lane.visualVerification;
+  const reason = v?.errorMessage != null && v.errorMessage.length > 0 ? v.errorMessage : null;
+  const attributed =
+    v?.failureClass != null ? ` (attributed to: ${v.failureClass})` : '';
+  if (v === null) {
+    return {
+      status: 'skipped',
+      title: 'Visual check did not run — no verification request was ever created for this lane',
+    };
+  }
+  if (v.stale) {
+    const at = v.laneAttempt === null ? '' : ` (the newest one is from attempt ${v.laneAttempt})`;
+    return {
+      status: 'skipped',
+      title: `Visual check did not run on this attempt — no verification request was created for it${at}`,
+    };
+  }
+  if (v.status === 'passed') return { status: 'done', title: 'Visual check passed' };
+  if (v.status === 'low_confidence') {
+    return {
+      status: 'advisory',
+      title: `Visual check needs human review${reason ? ` — ${reason}` : ''}${attributed}`,
+    };
+  }
+  if (v.status === 'failed') {
+    return { status: 'failed', title: `Visual check failed${reason ? ` — ${reason}` : ''}${attributed}` };
+  }
+  if (v.status === 'skipped' || v.status === 'timeout') {
+    return {
+      status: 'skipped',
+      title: `Visual check did not run (${v.status})${reason ? ` — ${reason}` : ''}${attributed}`,
+    };
+  }
+  return { status: 'skipped', title: `Visual check did not run — the request is still ${v.status}` };
+}
+
+/**
+ * Derives the per-step states from the lane:
+ *   integrated      → all done, EXCEPT visual-verify, which is derived from the
+ *                     lane's real verification outcome (see above — F8);
  *   running/failed  → steps before current_step_id done, current = running
  *                     (failed styling on a failed lane), after pending;
  *   queued/blocked  → all pending (also when current_step_id is null/unknown).
  */
 function laneStepStatuses(lane: SprintLane, stepIds: readonly string[]): LaneStepStatus[] {
   if (lane.status === 'integrated') {
-    return stepIds.map(() => 'done');
+    return stepIds.map((id) =>
+      id === SPRINT_VISUAL_VERIFY_STEP ? integratedVisualStepState(lane).status : 'done',
+    );
   }
   if (lane.status === 'running' || lane.status === 'failed') {
     const idx = lane.currentStepId === null ? -1 : stepIds.indexOf(lane.currentStepId);
@@ -211,28 +292,39 @@ function LaneStepCard({
   label,
   status,
   optional,
+  title,
 }: {
   taskId: string;
   stepId: string;
   label: string;
   status: LaneStepStatus;
   optional: boolean;
+  /** Hover text — carries WHY a visual check is advisory / did not run (F8). */
+  title?: string;
 }) {
   const isPending = status === 'pending';
   const isRunning = status === 'running';
   const isDone = status === 'done';
   const isFailed = status === 'failed';
+  // F8: an integrated lane whose visual check was low_confidence (advisory,
+  // amber) or never ran (skipped, grey). Both keep the card's non-pending
+  // "settled" background — the step DID settle, just not into a green check.
+  const isAdvisory = status === 'advisory';
+  const isSkipped = status === 'skipped';
 
   const dotColor = isDone
     ? 'var(--color-status-success)'
     : isRunning || isFailed
       ? 'var(--color-status-error)'
-      : '#c8bea3';
+      : isAdvisory
+        ? 'var(--color-status-warning)'
+        : '#c8bea3';
 
   return (
     <div
       data-testid={`swimlane-step-${taskId}-${stepId}`}
       data-status={status}
+      {...(title !== undefined ? { title } : {})}
       style={{
         flex: 1,
         minWidth: 0,
@@ -240,10 +332,12 @@ function LaneStepCard({
         borderStyle: 'solid',
         borderColor: isFailed
           ? 'var(--color-status-error)'
-          : isPending
-            ? '#d8cfb8'
-            : '#1a1815',
-        background: isPending ? '#efeadc' : '#fff',
+          : isAdvisory
+            ? 'var(--color-status-warning)'
+            : isPending || isSkipped
+              ? '#d8cfb8'
+              : '#1a1815',
+        background: isPending || isSkipped ? '#efeadc' : '#fff',
         padding: '4px 6px',
         position: 'relative',
         ...(isRunning
@@ -304,7 +398,14 @@ function LaneStepCard({
           style={{
             fontSize: 9,
             fontWeight: 600,
-            color: isPending ? '#9c8e6c' : isFailed ? 'var(--color-status-error)' : '#1a1815',
+            color:
+              isPending || isSkipped
+                ? '#9c8e6c'
+                : isFailed
+                  ? 'var(--color-status-error)'
+                  : isAdvisory
+                    ? 'var(--color-status-warning)'
+                    : '#1a1815',
             whiteSpace: 'nowrap',
             overflow: 'hidden',
             textOverflow: 'ellipsis',
@@ -620,6 +721,13 @@ export function SprintSwimlaneCanvas({
                         label={laneStep.label}
                         status={stepStatuses[i]}
                         optional={laneStep.optional}
+                        // F8: only the visual-verify step of an INTEGRATED lane
+                        // carries hover text — it is the one card whose state is
+                        // derived from something the strip cannot otherwise show
+                        // (the lane's real verification outcome + its reason).
+                        {...(laneStep.id === SPRINT_VISUAL_VERIFY_STEP && lane.status === 'integrated'
+                          ? { title: integratedVisualStepState(lane).title }
+                          : {})}
                       />
                     ))}
                   </div>

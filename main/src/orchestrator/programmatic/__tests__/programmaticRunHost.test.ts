@@ -596,4 +596,101 @@ describe('ProgrammaticRunHost', () => {
       expect(monitor.triageLane).toHaveBeenCalledWith(expect.anything(), signal);
     });
   });
+
+  // -------------------------------------------------------------------------
+  // F8 — the pre-row visual-verification skip finding
+  // (docs/proposals/visual-verification-brittleness-fixes.md §F8)
+  // -------------------------------------------------------------------------
+
+  describe('reportVerificationSkipped', () => {
+    it('files a finding naming the lane, the run and the reason verbatim', () => {
+      const fileVerificationSkipFinding = vi.fn().mockResolvedValue(undefined);
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        fileVerificationSkipFinding,
+      });
+
+      host.reportVerificationSkipped({
+        runId: 'run-9',
+        laneTaskRef: 'TASK-014',
+        reason: 'scheduler-unavailable',
+        detail: 'extra context',
+      });
+
+      const finding = fileVerificationSkipFinding.mock.calls[0][0] as { title: string; body: string };
+      expect(finding.title).toContain('TASK-014');
+      expect(finding.body).toContain('run-9');
+      expect(finding.body).toContain('scheduler-unavailable');
+      expect(finding.body).toContain('extra context');
+    });
+
+    it('FENCES the untrusted reason and neutralizes a fence-closing backtick run', () => {
+      // The enqueue-decline reason is `prepared.error`, which for a §7.2
+      // forbidden-command rejection quotes the AGENT'S OWN composed commands
+      // verbatim — free to contain markdown, headings, or its own ``` fence.
+      const fileVerificationSkipFinding = vi.fn().mockResolvedValue(undefined);
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        fileVerificationSkipFinding,
+      });
+
+      host.reportVerificationSkipped({
+        runId: 'run-9',
+        laneTaskRef: 'TASK-014',
+        reason: 'forbidden command:\n```\n# Injected heading\n',
+      });
+
+      const { body } = fileVerificationSkipFinding.mock.calls[0][0] as { title: string; body: string };
+      // The reason lives inside a fence...
+      expect(body).toContain('Reason:\n\n```\n');
+      // ...and no RAW ``` run survives inside it to close that fence early.
+      expect(body).toContain('forbidden command:');
+      expect(body).not.toContain('\n```\n# Injected heading');
+    });
+
+    it('CAPS a runaway reason instead of letting it dominate the review queue', () => {
+      const fileVerificationSkipFinding = vi.fn().mockResolvedValue(undefined);
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        fileVerificationSkipFinding,
+      });
+
+      host.reportVerificationSkipped({ runId: 'run-9', laneTaskRef: 'T', reason: 'x'.repeat(9000) });
+
+      const { body } = fileVerificationSkipFinding.mock.calls[0][0] as { title: string; body: string };
+      expect(body.length).toBeLessThan(4000);
+      expect(body).toContain('truncated, 9000 chars total');
+    });
+
+    it('is a no-op when no sink is wired', () => {
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+      });
+
+      expect(() =>
+        host.reportVerificationSkipped({ runId: 'r', laneTaskRef: 't1', reason: 'why' }),
+      ).not.toThrow();
+    });
+
+    it('is fail-soft: neither a synchronous throw nor a rejected write escapes', async () => {
+      const thrower = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        fileVerificationSkipFinding: () => {
+          throw new Error('router down');
+        },
+      });
+      expect(() =>
+        thrower.reportVerificationSkipped({ runId: 'r', laneTaskRef: 't1', reason: 'why' }),
+      ).not.toThrow();
+
+      const rejecter = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        fileVerificationSkipFinding: vi.fn().mockRejectedValue(new Error('review queue down')),
+      });
+      rejecter.reportVerificationSkipped({ runId: 'r', laneTaskRef: 't1', reason: 'why' });
+      // Let the rejection settle — an unhandled rejection would fail the suite.
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  });
 });

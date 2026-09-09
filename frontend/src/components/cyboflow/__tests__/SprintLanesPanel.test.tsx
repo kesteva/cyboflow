@@ -58,6 +58,7 @@ const LANES: SprintLaneRow[] = [
     title: 'Implement the thing',
     attempts: 0,
     blockedByRefs: [],
+    visualVerification: null,
     updatedAt: '2026-06-11T00:00:00Z',
   },
   {
@@ -70,6 +71,7 @@ const LANES: SprintLaneRow[] = [
     title: null,
     attempts: 0,
     blockedByRefs: [],
+    visualVerification: null,
     updatedAt: '2026-06-11T00:00:00Z',
   },
 ];
@@ -154,6 +156,7 @@ describe('SprintLanesPanel', () => {
         status: 'integrated',
         currentStepId: null,
         attempts: 0,
+        visualVerification: null,
         timestamp: '2026-06-11T00:01:00Z',
       });
     });

@@ -1565,6 +1565,156 @@ describe('verdictDelivery — §3.1 classification in the non-blocking finding b
   });
 });
 
+// ---------------------------------------------------------------------------
+// F8 — every FAILED body carries the concrete reason + the §3.1 attribution
+// (docs/proposals/visual-verification-brittleness-fixes.md §F8)
+// ---------------------------------------------------------------------------
+
+describe('verdictDelivery — F8: FAILED bodies carry Reason + attribution', () => {
+  let db: Database.Database;
+
+  /** A terminal FAIL row carrying report_json AND the migration-095 classification. */
+  function seedFailedRequest(opts: {
+    id: string;
+    runId: string;
+    reportJson?: string | null;
+    errorMessage?: string | null;
+    failureClass?: string | null;
+    evidence?: VerificationFailureEvidence[];
+  }): void {
+    db.prepare(
+      `INSERT INTO verification_requests
+         (id, run_id, project_id, status, verify_type, deliverable_json, report_json,
+          error_message, failure_class, failure_evidence_json, modality)
+       VALUES (?, ?, 1, 'failed', 'static-render-snapshot', ?, ?, ?, ?, ?, 'web')`,
+    ).run(
+      opts.id,
+      opts.runId,
+      JSON.stringify({ intent: 'x', taskRef: 'TASK-1' }),
+      opts.reportJson ?? null,
+      opts.errorMessage ?? null,
+      opts.failureClass ?? null,
+      opts.evidence ? JSON.stringify(opts.evidence) : null,
+    );
+  }
+
+  beforeEach(() => {
+    db = buildDb();
+    ArtifactRouter._resetForTesting();
+    ReviewItemRouter._resetForTesting();
+    SprintLaneStore._resetForTesting();
+    ArtifactRouter.initialize(dbAdapter(db));
+    ReviewItemRouter.initialize(dbAdapter(db));
+  });
+
+  afterEach(() => {
+    ArtifactRouter._resetForTesting();
+    ReviewItemRouter._resetForTesting();
+    SprintLaneStore._resetForTesting();
+    db.close();
+  });
+
+  const deliverFail = async (requestId: string, runId: string, verdict?: VerdictV1): Promise<void> => {
+    const deliver = createVerdictDelivery({
+      db: dbAdapter(db),
+      artifactsDirResolver: () => '/tmp/does-not-matter',
+      fileExists: () => false,
+    });
+    await deliver({
+      requestId,
+      runId,
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'failed',
+      verdict,
+      fileNames: [],
+    });
+  };
+
+  it('a FAIL WITH A REPORT names the behaviors AND the reason AND the attribution', async () => {
+    seedRun(db, 'run-f1');
+    seedFailedRequest({
+      id: 'vr_f1',
+      runId: 'run-f1',
+      reportJson: JSON.stringify({
+        outcome: 'judged',
+        behaviors: [{ id: 'b1', result: 'fail', evidence: { notes: 'button never appeared' } }],
+        feedback: 'the CTA is missing',
+      }),
+      errorMessage: 'chromium crashed mid-capture',
+      failureClass: 'env',
+      evidence: [{ source: 'runner', check: 'browser', detail: 'chromium exited 139' }],
+    });
+
+    await deliverFail('vr_f1', 'run-f1');
+
+    const body = bodyOf(db, 'run-f1');
+    expect(body).toContain('Behaviors that failed:');
+    expect(body).toContain('button never appeared');
+    // F8 additions: without these an env-classified FAIL read as a code defect.
+    expect(body).toContain('Reason: chromium crashed mid-capture');
+    expect(body).toContain('Attributed to: environment (harness-verified)');
+    expect(body).toContain('chromium exited 139');
+  });
+
+  it('a FAIL with only a LEGACY VERDICT carries the reason + attribution too', async () => {
+    seedRun(db, 'run-f2');
+    seedFailedRequest({
+      id: 'vr_f2',
+      runId: 'run-f2',
+      errorMessage: 'judge returned no report',
+      failureClass: 'deliverable',
+    });
+
+    await deliverFail('vr_f2', 'run-f2', FAIL_VERDICT);
+
+    const body = bodyOf(db, 'run-f2');
+    expect(body).toContain('the header overlaps the content area');
+    expect(body).toContain('header overlaps content');
+    expect(body).toContain('Reason: judge returned no report');
+    expect(body).toContain('Attributed to: the deliverable under test');
+  });
+
+  it('a BUILD-failure FAIL keeps its excerpt and gains the attribution', async () => {
+    seedRun(db, 'run-f3');
+    seedFailedRequest({
+      id: 'vr_f3',
+      runId: 'run-f3',
+      reportJson: JSON.stringify({
+        outcome: 'build_failed',
+        behaviors: [],
+        buildLogExcerpt: 'error TS2304: cannot find name',
+      }),
+      failureClass: 'deliverable',
+    });
+
+    await deliverFail('vr_f3', 'run-f3');
+
+    const body = bodyOf(db, 'run-f3');
+    expect(body).toContain('error TS2304');
+    expect(body).toContain('Attributed to: the deliverable under test');
+  });
+
+  it('an UNCLASSIFIED FAIL renders no attribution line (pre-095 rows are unchanged)', async () => {
+    seedRun(db, 'run-f4');
+    seedFailedRequest({
+      id: 'vr_f4',
+      runId: 'run-f4',
+      reportJson: JSON.stringify({
+        outcome: 'judged',
+        behaviors: [{ id: 'b1', result: 'fail', evidence: { notes: 'nope' } }],
+      }),
+    });
+
+    await deliverFail('vr_f4', 'run-f4');
+
+    const body = bodyOf(db, 'run-f4');
+    expect(body).toContain('Behaviors that failed:');
+    expect(body).not.toContain('Attributed to:');
+    expect(body).not.toContain('Reason:');
+  });
+});
+
 describe('createCapabilityBreakerFinding — the §3.4 auto-pause notice', () => {
   let db: Database.Database;
 

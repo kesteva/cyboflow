@@ -12,12 +12,22 @@ import { renderHook, act, waitFor } from '@testing-library/react';
 // ---------------------------------------------------------------------------
 // tRPC mock — controllable sprintLanes.query + capturable subscribe onData.
 // ---------------------------------------------------------------------------
+interface LaneVisual {
+  status: string;
+  failureClass: string | null;
+  errorMessage: string | null;
+  laneAttempt: number | null;
+  stale: boolean;
+}
+
 interface LaneEvent {
   batchId: string;
   taskId: string;
   status: string;
   currentStepId: string | null;
   attempts: number;
+  /** F8 round-2: the lane's visual-verification outcome as of this write. */
+  visualVerification: LaneVisual | null;
   timestamp: string;
 }
 
@@ -63,6 +73,7 @@ function laneRow(taskId: string, over: Partial<{ ref: string; title: string; sta
     title: over.title ?? `Task ${taskId}`,
     attempts: over.attempts ?? 0,
     blockedByRefs: [],
+    visualVerification: null as LaneVisual | null,
     updatedAt: '2026-01-01T00:00:00Z',
   };
 }
@@ -74,9 +85,18 @@ function laneEvent(taskId: string, over: Partial<LaneEvent> = {}): LaneEvent {
     status: over.status ?? 'running',
     currentStepId: over.currentStepId ?? 'step-1',
     attempts: over.attempts ?? 1,
+    visualVerification: over.visualVerification ?? null,
     timestamp: over.timestamp ?? '2026-01-02T00:00:00Z',
   };
 }
+
+const PASSED: LaneVisual = {
+  status: 'passed',
+  failureClass: null,
+  errorMessage: null,
+  laneAttempt: 1,
+  stale: false,
+};
 
 function deferred<T>() {
   let resolve!: (v: T) => void;
@@ -154,6 +174,43 @@ describe('useSprintLanes', () => {
     // ref/title preserved from the snapshot (events carry neither).
     expect(t1.ref).toBe('TSK-1');
     expect(t1.title).toBe('First');
+  });
+
+  // -------------------------------------------------------------------------
+  // F8 round-2: the snapshot query fires ONCE per mount, so any field the event
+  // merge drops is frozen at its mount-time value for the life of the mount. The
+  // lane's visual-verification verdict lands AFTER mount on every live sprint —
+  // before this merge every integrated lane, passes included, kept the pre-verdict
+  // `null` and the canvas painted "Visual check did not run".
+  // -------------------------------------------------------------------------
+
+  it('merges visualVerification from a later event onto an existing lane', async () => {
+    query.mockResolvedValue([laneRow('t1', { status: 'running' })]);
+    const { result } = renderHook(() => useSprintLanes('run-1'));
+    await waitFor(() => expect(result.current.lanes).toHaveLength(1));
+    expect(result.current.lanes[0].visualVerification).toBeNull();
+
+    act(() =>
+      sub.onData?.(laneEvent('t1', { status: 'integrated', visualVerification: PASSED })),
+    );
+
+    expect(result.current.lanes[0].visualVerification).toEqual(PASSED);
+  });
+
+  it('carries visualVerification onto an event-only (pre-snapshot) lane row', async () => {
+    const d = deferred<ReturnType<typeof laneRow>[]>();
+    query.mockReturnValue(d.promise);
+    const { result } = renderHook(() => useSprintLanes('run-1'));
+
+    act(() =>
+      sub.onData?.(laneEvent('t9', { status: 'integrated', visualVerification: PASSED })),
+    );
+
+    expect(result.current.lanes[0].visualVerification).toEqual(PASSED);
+    await act(async () => {
+      d.resolve([]);
+      await Promise.resolve();
+    });
   });
 
   it('resets to empty and unsubscribes when runId flips to null', async () => {

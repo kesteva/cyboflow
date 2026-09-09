@@ -36,7 +36,13 @@ import type {
   SprintLaneChangedEvent,
   SprintLaneRow,
   SprintLaneStepId,
+  SprintLaneVisualVerification,
 } from '../../../shared/types/sprintBatch';
+import {
+  REQUEST_STATUS,
+  isVerificationFailureClass,
+  type RequestStatus,
+} from '../../../shared/types/visualVerification';
 import {
   AWAITING_VERIFY_STEP,
   SPRINT_BATCH_CAP,
@@ -176,6 +182,61 @@ interface LaneDbRow {
   updated_at: string;
   ref: string | null;
   title: string | null;
+}
+
+/**
+ * The `verification_requests` projection the lane read-model derives
+ * `SprintLaneRow.visualVerification` from (F8 / Codex #9).
+ */
+interface LaneVerificationDbRow {
+  enqueue_key: string | null;
+  deliverable_json: string | null;
+  status: string;
+  failure_class: string | null;
+  error_message: string | null;
+}
+
+/** Runtime membership test for the RequestStatus union (no `as` casts). */
+const REQUEST_STATUS_SET: ReadonlySet<string> = new Set<string>(REQUEST_STATUS);
+function isRequestStatus(value: string): value is RequestStatus {
+  return REQUEST_STATUS_SET.has(value);
+}
+
+/**
+ * The lane a request was fired for, read from `deliverable_json.taskRef` — the
+ * CANONICAL lane link in this codebase (visualVerifyGate.parseTaskRef /
+ * requestStatusForLane, verdictDelivery's lane resolution). Mirrored here rather
+ * than imported because this file may not pull in DB/electron-shaped modules
+ * (see the header's standalone-typecheck invariant). Fail-soft to null.
+ */
+function parseRequestTaskRef(json: string | null): string | null {
+  if (typeof json !== 'string' || json.length === 0) return null;
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (parsed !== null && typeof parsed === 'object') {
+      const ref = (parsed as { taskRef?: unknown }).taskRef;
+      if (typeof ref === 'string' && ref.length > 0) return ref;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The LANE attempt an enqueue_key encodes (`${runId}:${taskRef}:${attempt}` — the
+ * attempt is the LAST colon-segment; runId/taskRef may themselves contain colons).
+ * Byte-identical rule to `verdictDelivery.parseAttemptFromEnqueueKey`, duplicated
+ * for the same standalone-typecheck reason as parseRequestTaskRef. Returns null on
+ * an absent/malformed key — including every MCP-fired request, which has none.
+ */
+function parseLaneAttemptFromEnqueueKey(enqueueKey: string | null): number | null {
+  if (typeof enqueueKey !== 'string' || enqueueKey.length === 0) return null;
+  const lastColon = enqueueKey.lastIndexOf(':');
+  if (lastColon < 0) return null;
+  const tail = enqueueKey.slice(lastColon + 1);
+  const n = Number.parseInt(tail, 10);
+  return Number.isInteger(n) && n >= 0 && String(n) === tail.trim() ? n : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -671,6 +732,10 @@ export class SprintLaneStore {
         status: lane.status,
         currentStepId: lane.currentStepId,
         attempts: lane.attempts,
+        // F8 round-2: carried on the event so a live-watched canvas learns the
+        // verdict without re-querying the snapshot (the read-back `lane` already
+        // holds the derivation).
+        visualVerification: lane.visualVerification,
         timestamp: lane.updatedAt,
       };
       sprintLaneEvents.emit(sprintLaneChannel(runId), event);
@@ -756,6 +821,8 @@ export class SprintLaneStore {
           status: 'queued',
           currentStepId: null,
           attempts: 0,
+          // The lane row is gone; there is nothing left to attribute a request to.
+          visualVerification: null,
           timestamp: new Date().toISOString(),
         };
         sprintLaneEvents.emit(sprintLaneChannel(runId), event);
@@ -896,6 +963,12 @@ export class SprintLaneStore {
       status: lane.status,
       currentStepId: lane.currentStepId,
       attempts: lane.attempts,
+      // F8 round-2: THE seam that makes the feature live. The visual merge gate
+      // drives a lane through this chokepoint only AFTER the scheduler's
+      // markTerminal has committed the verdict, so the integrating event carries
+      // the real outcome — without it a live canvas kept the mount-time snapshot's
+      // `null` and painted every integrated lane "Visual check did not run".
+      visualVerification: lane.visualVerification,
       timestamp: now,
     };
     sprintLaneEvents.emit(sprintLaneChannel(runId), event);
@@ -1052,7 +1125,10 @@ export class SprintLaneStore {
       )
       .all(batchId) as LaneDbRow[];
     const blockedBy = this.blockedByRefsForBatch(batchId);
-    return rows.map((row) => this.toLaneRow(row, blockedBy.get(row.task_id) ?? []));
+    const visual = this.visualVerificationForLanes(batchId, rows);
+    return rows.map((row) =>
+      this.toLaneRow(row, blockedBy.get(row.task_id) ?? [], visual.get(row.task_id) ?? null),
+    );
   }
 
   /** One lane (same projection as listLanes), or undefined when absent. */
@@ -1068,7 +1144,121 @@ export class SprintLaneStore {
       .get(batchId, taskId) as LaneDbRow | undefined;
     if (!row) return undefined;
     const blockedBy = this.blockedByRefsForBatch(batchId);
-    return this.toLaneRow(row, blockedBy.get(row.task_id) ?? []);
+    const visual = this.visualVerificationForLanes(batchId, [row]);
+    return this.toLaneRow(row, blockedBy.get(row.task_id) ?? [], visual.get(row.task_id) ?? null);
+  }
+
+  /**
+   * Derive each lane's REAL visual-verification outcome (F8 / Codex #9,
+   * docs/proposals/visual-verification-brittleness-fixes.md §F8) — the most
+   * recent `verification_requests` row attributable to the lane, or absent from
+   * the map when the lane has none.
+   *
+   * WHY IT IS DERIVED, NOT STORED: `mergeGateLaneAdvance` integrates a lane on
+   * `passed`, `low_confidence`, `skipped` AND `timeout`, and the swimlane paints
+   * every step of an integrated lane 'done' — so three of those four rendered a
+   * green "Visual check" for a check that never ran. A stamp on the pre-row drop
+   * alone would not have fixed that; the state has to come from the request row.
+   *
+   * ATTRIBUTION is by `deliverable_json.taskRef` FIRST — the canonical lane link
+   * the rest of the system uses (visualVerifyGate.requestStatusForLane /
+   * eventMatchesLane, verdictDelivery) — matched against the lane's opaque id OR
+   * its display ref, with the `enqueue_key` prefix (`<runId>:<laneTaskRef>:`,
+   * enqueueFromTask.ts) kept as a secondary match. Keying on enqueue_key ALONE was
+   * wrong: there are two enqueue producers and only one of them sets a key. The
+   * `cyboflow_request_verification` MCP path — the ONLY path on the default
+   * `orchestrated` execution model, and the path the controller ADOPTS a pre-fired
+   * request through — calls VerificationScheduler.enqueue with no `enqueueKey`, so
+   * its rows store NULL and were dropped here; the swimlane then told the user, of
+   * a lane that had genuinely PASSED, that no request was ever created for it.
+   *
+   * PROOF RUNS ARE EXCLUDED by the `setup_proof` / `bootstrap_proof` COLUMNS, plus
+   * the `:bootstrap:<round>` key generation as belt-and-braces — the same
+   * exclusion verdictDelivery and visualVerifyGate apply: a proof's terminal is
+   * never a lane's verdict even though it carries the owning lane's ref. The key
+   * predicate is written `enqueue_key IS NULL OR enqueue_key NOT LIKE ...` because
+   * SQL three-valued logic makes a bare NOT LIKE on NULL filter the row out — the
+   * very rows this fix exists to admit.
+   *
+   * STALENESS: a row is marked `stale` when its LANE attempt (parsed from the
+   * enqueue key) is below the lane's current `attempts`, the same supersession
+   * rule mergeGateLaneAdvance applies before writing a verdict. That is how a
+   * later attempt whose verification was dropped pre-row (the codex channel-
+   * unavailable drop) avoids rendering the PREVIOUS attempt's FAIL as this
+   * attempt's outcome.
+   *
+   * FAIL-SOFT / PRE-MIGRATION: any read failure (a DB predating migration 055 /
+   * 095 / 107, so `verification_requests`, `failure_class` or `bootstrap_proof`
+   * do not exist yet) yields an EMPTY map — every lane reports `null` ("no row"),
+   * never a throw that would take the whole lane listing down with it.
+   */
+  private visualVerificationForLanes(
+    batchId: string,
+    lanes: readonly { task_id: string; ref: string | null; attempts: number }[],
+  ): Map<string, SprintLaneVisualVerification> {
+    const out = new Map<string, SprintLaneVisualVerification>();
+    if (lanes.length === 0) return out;
+    try {
+      // A batch normally has exactly ONE owning run, but read them all: a
+      // re-launched/resumed run reusing the batch would otherwise strand its
+      // lanes' verdicts.
+      const runRows = this.db
+        .prepare('SELECT id FROM workflow_runs WHERE batch_id = ?')
+        .all(batchId) as { id: string }[];
+      const runIds = runRows.map((r) => r.id).filter((id) => typeof id === 'string' && id.length > 0);
+      if (runIds.length === 0) return out;
+
+      const placeholders = runIds.map(() => '?').join(', ');
+      const rows = this.db
+        .prepare(
+          `SELECT enqueue_key, deliverable_json, status, failure_class, error_message
+             FROM verification_requests
+            WHERE run_id IN (${placeholders})
+              AND setup_proof = 0
+              AND bootstrap_proof = 0
+              AND (enqueue_key IS NULL OR enqueue_key NOT LIKE '%:bootstrap:%')
+            ORDER BY enqueued_at DESC, rowid DESC`,
+        )
+        .all(...runIds) as LaneVerificationDbRow[];
+      if (rows.length === 0) return out;
+
+      // Parse each row's taskRef ONCE (not once per lane) — the scan below is
+      // O(lanes x rows) and JSON.parse is the only expensive step in it.
+      const candidates = rows.map((row) => ({ row, taskRef: parseRequestTaskRef(row.deliverable_json) }));
+
+      for (const lane of lanes) {
+        const prefixes: string[] = [];
+        for (const runId of runIds) {
+          prefixes.push(`${runId}:${lane.task_id}:`);
+          if (lane.ref !== null && lane.ref.length > 0) prefixes.push(`${runId}:${lane.ref}:`);
+        }
+        // Rows are newest-first, so the FIRST hit is the latest attributable request.
+        const hit = candidates.find(({ row, taskRef }) => {
+          if (taskRef !== null && (taskRef === lane.task_id || (lane.ref !== null && taskRef === lane.ref))) {
+            return true;
+          }
+          return row.enqueue_key !== null && prefixes.some((p) => row.enqueue_key?.startsWith(p) === true);
+        });
+        if (hit === undefined) continue;
+        const match = hit.row;
+        if (!isRequestStatus(match.status)) continue;
+        const laneAttempt = parseLaneAttemptFromEnqueueKey(match.enqueue_key);
+        out.set(lane.task_id, {
+          status: match.status,
+          failureClass: isVerificationFailureClass(match.failure_class) ? match.failure_class : null,
+          errorMessage: typeof match.error_message === 'string' ? match.error_message : null,
+          laneAttempt,
+          stale: laneAttempt !== null && lane.attempts > laneAttempt,
+        });
+      }
+    } catch (err) {
+      this.logger?.debug('[SprintLaneStore] visual-verification derivation skipped (fail-soft)', {
+        batchId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return new Map();
+    }
+    return out;
   }
 
   /**
@@ -1107,7 +1297,11 @@ export class SprintLaneStore {
     return map;
   }
 
-  private toLaneRow(row: LaneDbRow, blockedByRefs: string[]): SprintLaneRow {
+  private toLaneRow(
+    row: LaneDbRow,
+    blockedByRefs: string[],
+    visualVerification: SprintLaneVisualVerification | null,
+  ): SprintLaneRow {
     return {
       batchId: row.batch_id,
       taskId: row.task_id,
@@ -1117,6 +1311,7 @@ export class SprintLaneStore {
       title: row.title,
       attempts: row.attempts,
       blockedByRefs,
+      visualVerification,
       updatedAt: row.updated_at,
     };
   }

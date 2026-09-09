@@ -56,6 +56,9 @@ function laneRow(p: Partial<SprintLaneRow> & { taskId: string; status: SprintLan
     title: null,
     attempts: 0,
     blockedByRefs: [],
+    // F8: the lane read-model now carries its derived visual-verification
+    // outcome; the monitor never reads it, so the fixture default is "no row".
+    visualVerification: null,
     updatedAt: '2026-01-01T00:00:00.000Z',
     ...p,
   };

@@ -2,9 +2,13 @@
  * SprintSwimlaneCanvas tests (feat/parallel-sprint swim-lane canvas).
  *
  * Behaviors verified:
- *   1. Per-step derivation — integrated lane: all five steps done; running
+ *   1. Per-step derivation — integrated lane: the pre-verify steps done; running
  *      lane: before current done / current running / after pending; failed
  *      lane: current step failed; queued lane: all pending.
+ *   1b. F8 — the "Visual check" card of an INTEGRATED lane is derived from the
+ *      lane's real verification outcome (passed → done, low_confidence →
+ *      advisory, failed → failed, skipped/timeout/no-row → skipped), with the
+ *      reason + failure class on hover; non-integrated lanes are untouched.
  *   2. Chip mapping — MERGED / RUNNING / ESCALATED / BLOCKED (with
  *      "waiting on <refs>") / QUEUED ("waiting for worker slot") + escalated
  *      context text using attempts.
@@ -91,6 +95,9 @@ const PHASE_STATE: UseWorkflowPhaseStateResult = {
 
 const baseLane = {
   batchId: 'batch-1',
+  // F8: the lane read-model carries its derived visual-verification outcome.
+  // null = no verification request row is attributable to the lane.
+  visualVerification: null,
   updatedAt: '2026-06-11T00:00:00Z',
 };
 
@@ -192,12 +199,16 @@ const stepStatus = (taskId: string, stepId: string): string | null =>
 // ---------------------------------------------------------------------------
 
 describe('SprintSwimlaneCanvas — per-step derivation', () => {
-  it('marks all five steps done for an integrated lane', async () => {
+  it('marks the pre-verify steps done for an integrated lane', async () => {
     await renderCanvas();
 
-    for (const stepId of ['implement', 'write-tests', 'code-review', 'task-verify', 'visual-verify']) {
+    for (const stepId of ['implement', 'write-tests', 'code-review', 'task-verify']) {
       expect(stepStatus('t1', stepId)).toBe('done');
     }
+    // F8: t1 carries NO verification request row, so the visual check is NOT
+    // painted green just because the lane integrated — the merge gate integrates
+    // on skipped/timeout/low_confidence too.
+    expect(stepStatus('t1', 'visual-verify')).toBe('skipped');
   });
 
   it('derives before/current/after for a running lane', async () => {
@@ -491,5 +502,146 @@ describe('SprintSwimlaneCanvas — worker cap denominator', () => {
 
     // Denominator is the step's own cap (3), not the global SPRINT_BATCH_CAP (5).
     expect(screen.getByTestId('swimlane-summary')).toHaveTextContent('workers 2/3');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F8 — the "Visual check" card is derived from the lane's REAL verification
+// outcome, not from lane status (docs/proposals/visual-verification-
+// brittleness-fixes.md §F8 / Codex #9). The merge gate integrates a lane on
+// passed, low_confidence, skipped AND timeout, so an integrated lane alone says
+// nothing about whether a visual check ran.
+// ---------------------------------------------------------------------------
+
+describe('SprintSwimlaneCanvas — visual-check state (F8)', () => {
+  function integratedLane(
+    taskId: string,
+    visualVerification: SprintLaneRow['visualVerification'],
+  ): SprintLaneRow {
+    return {
+      ...baseLane,
+      taskId,
+      status: 'integrated',
+      currentStepId: null,
+      ref: `TASK-${taskId.toUpperCase()}`,
+      title: `Task ${taskId}`,
+      attempts: 0,
+      blockedByRefs: [],
+      visualVerification,
+    };
+  }
+
+  async function renderLanes(lanes: SprintLaneRow[]): Promise<void> {
+    lanesQuerySpy.mockResolvedValue(lanes);
+    render(<SprintSwimlaneCanvas runId="run-f8" phaseState={PHASE_STATE} sprintStatus="running" />);
+    await screen.findByTestId(`swimlane-lane-${lanes[0].taskId}`);
+  }
+
+  const stepTitle = (taskId: string, stepId: string): string | null =>
+    screen.getByTestId(`swimlane-step-${taskId}-${stepId}`).getAttribute('title');
+
+  it('paints passed → done, low_confidence → advisory, failed → failed', async () => {
+    await renderLanes([
+      integratedLane('vp', { status: 'passed', failureClass: null, errorMessage: null, laneAttempt: 1, stale: false }),
+      integratedLane('vl', { status: 'low_confidence', failureClass: null, errorMessage: 'judge unsure', laneAttempt: 1, stale: false }),
+      integratedLane('vf', { status: 'failed', failureClass: 'deliverable', errorMessage: 'button missing', laneAttempt: 2, stale: false }),
+    ]);
+
+    expect(stepStatus('vp', 'visual-verify')).toBe('done');
+    expect(stepStatus('vl', 'visual-verify')).toBe('advisory');
+    expect(stepStatus('vf', 'visual-verify')).toBe('failed');
+  });
+
+  it('paints skipped / timeout / no-row → skipped', async () => {
+    await renderLanes([
+      integratedLane('vs', { status: 'skipped', failureClass: null, errorMessage: 'no proven runbook', laneAttempt: 0, stale: false }),
+      integratedLane('vt', { status: 'timeout', failureClass: 'env', errorMessage: 'deadline exceeded', laneAttempt: 1, stale: false }),
+      integratedLane('vn', null),
+    ]);
+
+    expect(stepStatus('vs', 'visual-verify')).toBe('skipped');
+    expect(stepStatus('vt', 'visual-verify')).toBe('skipped');
+    expect(stepStatus('vn', 'visual-verify')).toBe('skipped');
+  });
+
+  it('carries the reason (and the failure class) in the hover title', async () => {
+    await renderLanes([
+      integratedLane('vs', { status: 'skipped', failureClass: null, errorMessage: 'no proven runbook', laneAttempt: 0, stale: false }),
+      integratedLane('vt', { status: 'timeout', failureClass: 'env', errorMessage: 'deadline exceeded', laneAttempt: 1, stale: false }),
+      integratedLane('vn', null),
+      integratedLane('vl', { status: 'low_confidence', failureClass: null, errorMessage: 'judge unsure', laneAttempt: 1, stale: false }),
+    ]);
+
+    expect(stepTitle('vs', 'visual-verify')).toContain('no proven runbook');
+    expect(stepTitle('vt', 'visual-verify')).toContain('deadline exceeded');
+    expect(stepTitle('vt', 'visual-verify')).toContain('env');
+    expect(stepTitle('vn', 'visual-verify')).toContain('Visual check did not run');
+    expect(stepTitle('vl', 'visual-verify')).toContain('needs human review');
+  });
+
+  it('renders a STALE verdict as "did not run", never as this attempt\'s outcome', async () => {
+    // Attempt 1 FAILED; the lane looped back and attempt 2's verification was
+    // dropped before a request row existed, so the newest attributable row is
+    // still attempt 1's FAIL. Painting it red would quote a verdict about a diff
+    // that no longer exists.
+    await renderLanes([
+      integratedLane('vst', {
+        status: 'failed',
+        failureClass: 'deliverable',
+        errorMessage: 'button missing',
+        laneAttempt: 1,
+        stale: true,
+      }),
+    ]);
+
+    expect(stepStatus('vst', 'visual-verify')).toBe('skipped');
+    expect(stepTitle('vst', 'visual-verify')).toContain('did not run on this attempt');
+    expect(stepTitle('vst', 'visual-verify')).toContain('attempt 1');
+    expect(stepTitle('vst', 'visual-verify')).not.toContain('button missing');
+  });
+
+  it('a STALE pass is not painted done either', async () => {
+    await renderLanes([
+      integratedLane('vsp', {
+        status: 'passed',
+        failureClass: null,
+        errorMessage: null,
+        laneAttempt: 1,
+        stale: true,
+      }),
+    ]);
+
+    expect(stepStatus('vsp', 'visual-verify')).toBe('skipped');
+  });
+
+  it('leaves every OTHER step of an integrated lane done', async () => {
+    await renderLanes([
+      integratedLane('vs', { status: 'skipped', failureClass: null, errorMessage: 'no proven runbook', laneAttempt: 0, stale: false }),
+    ]);
+
+    for (const stepId of ['implement', 'write-tests', 'code-review', 'task-verify']) {
+      expect(stepStatus('vs', stepId)).toBe('done');
+    }
+  });
+
+  it('leaves the non-integrated branches untouched (a running lane is unaffected)', async () => {
+    await renderLanes([
+      {
+        ...baseLane,
+        taskId: 'vr',
+        status: 'running',
+        currentStepId: 'code-review',
+        ref: 'TASK-VR',
+        title: 'Running task',
+        attempts: 0,
+        blockedByRefs: [],
+        // A stale terminal row from a prior attempt must not repaint a live lane.
+        visualVerification: { status: 'skipped', failureClass: null, errorMessage: 'stale', laneAttempt: 1, stale: false },
+      },
+    ]);
+
+    expect(stepStatus('vr', 'code-review')).toBe('running');
+    expect(stepStatus('vr', 'visual-verify')).toBe('pending');
+    expect(stepTitle('vr', 'visual-verify')).toBeNull();
   });
 });

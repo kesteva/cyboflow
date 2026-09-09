@@ -199,6 +199,30 @@ function isPureHumanGate(step: WorkflowStep): boolean {
   return step.agent === HUMAN_GATE_AGENT;
 }
 
+/**
+ * The enqueue-decline reason F8 does NOT file a finding for, because in its
+ * intended case it is a deliberate operator choice rather than a surprise — the
+ * run has verification switched off. Filing for it would put a finding on every
+ * lane of every verify-disabled run.
+ *
+ * KNOWN OVER-BREADTH (review round 2, not fixable from here): verify/
+ * enqueueFromTask.ts returns this same literal from three places — the genuine
+ * off switch (disabled / unstamped run) AND two anomalies: no `workflow_runs` row
+ * for the runId, and the run-stamp SELECT throwing. The two anomalies are
+ * precisely the kind of surprise F8 exists to surface, and this guard swallows
+ * them; the controller cannot tell them apart because the outcome carries only
+ * the string. The fix is to give those paths their own reasons in
+ * enqueueFromTask.ts (that file is owned by another area of this change set) —
+ * this guard then narrows to the deliberate case with no edit here.
+ *
+ * Duplicated as a literal (not imported) on purpose: the controller is
+ * deliberately DB/electron-free, and importing it from enqueueFromTask.ts would
+ * pull that module's DB-shaped dependencies into the controller's import graph.
+ * If that string is ever renamed there, rename it here too — the cost of a drift
+ * is one extra finding per verify-disabled lane, never a wedged run.
+ */
+const VERIFY_DISABLED_ENQUEUE_REASON = 'verification-disabled';
+
 /** Whether a (non-pure-gate) agent step also carries a trailing human checkpoint. */
 function hasTrailingGate(step: WorkflowStep): boolean {
   return step.human === true && step.agent !== HUMAN_GATE_AGENT;
@@ -219,6 +243,25 @@ export class WorkflowController {
    * `stepGuidance` thunk the runner threads (steer).
    */
   private directives: RunDirectives = createRunDirectives();
+
+  /**
+   * `${runId}:${laneTaskRef}` keys already reported through
+   * {@link reportVerificationSkipped}, so ONE lane files at most ONE
+   * "visual verification never reached the queue" finding per run.
+   *
+   * Both F8 seams sit inside the fan-out INNER-STEP walk, which a lane re-enters
+   * on every loopback (code-review blocking defect, task-verify VERDICT: FAIL,
+   * step failure) up to FAN_OUT_LANE_ATTEMPT_CAP. On a substrate that never
+   * captures step text the channel-unavailable branch therefore fires on EVERY
+   * attempt of EVERY lane — an 8-lane sprint looping twice would post 24
+   * byte-identical review-queue cards. The spec asks for "a NON-blocking finding"
+   * (singular), and unlike verdictDelivery's findings these carry no requestId to
+   * correlate or supersede on (there is no request row — that is the whole point),
+   * so de-duplication has to happen here, at the source.
+   *
+   * Instance-scoped and never cleared: one controller instance walks one run.
+   */
+  private readonly reportedVerificationSkips = new Set<string>();
 
   /**
    * Walk `def` to a terminal result. Resolves with the outcome + the ordered
@@ -700,6 +743,35 @@ export class WorkflowController {
     return this.finish({ outcome: 'completed', steps }, runId);
   }
 
+  /**
+   * Fail-soft report that a lane's visual verification never reached the queue
+   * (F8 "never skip silently", docs/proposals/visual-verification-brittleness-
+   * fixes.md). Wrapped here rather than at each call site so a host whose sink
+   * throws can never disturb lane advancement — the whole point of the finding is
+   * VISIBILITY, so it must be strictly weaker than the walk it observes.
+   *
+   * IDEMPOTENT per lane (see reportedVerificationSkips): a lane that loops back
+   * re-runs task-verify and would otherwise re-file the identical finding on every
+   * attempt. The FIRST reason is the one kept — later attempts on the same lane
+   * drop the same way for the same reason.
+   */
+  private reportVerificationSkipped(runId: string, laneTaskRef: string, reason: string, detail?: string): void {
+    // At most one finding per lane per run — see reportedVerificationSkips.
+    const key = `${runId}:${laneTaskRef}`;
+    if (this.reportedVerificationSkips.has(key)) return;
+    this.reportedVerificationSkips.add(key);
+    try {
+      this.host.reportVerificationSkipped?.({
+        runId,
+        laneTaskRef,
+        reason,
+        ...(detail !== undefined ? { detail } : {}),
+      });
+    } catch {
+      // A broken finding sink must never affect the walk.
+    }
+  }
+
   /** Fail-soft monitor-feed emit to the supervisor (Stage 3). */
   private emit(event: SupervisorEvent): void {
     try {
@@ -1172,6 +1244,21 @@ export class WorkflowController {
                 'info',
                 `fan-out item '${itemId}': visual verification not enqueued (${enqueueOutcome.reason}); advancing`,
               );
+              // F8 ("never skip silently"): the enqueue seam declines BEFORE a
+              // request row exists, so — unlike a gate-side skip, which writes a
+              // 'skipped' row and a verdictDelivery finding — nothing reaches the
+              // human. Raise a non-blocking finding for every declined reason
+              // EXCEPT 'verification-disabled': a deliberate off switch is not a
+              // surprise, and filing one finding per lane per run for it would
+              // bury the reasons that are.
+              if (enqueueOutcome.reason !== VERIFY_DISABLED_ENQUEUE_REASON) {
+                this.reportVerificationSkipped(
+                  runId,
+                  itemId,
+                  enqueueOutcome.reason,
+                  'The composed verification task was declined at the enqueue seam, so NO verification request was created and no visual check ran. The lane advanced regardless (fail-open). Fix the reason above and re-run verification, or verify this deliverable manually.',
+                );
+              }
               continue;
             }
           } else {
@@ -1438,9 +1525,9 @@ export class WorkflowController {
         // loopback path a failed step / a task-verify FAIL takes (declared loopback
         // → laneAttempt bump → 3× cap → fail), threading the `## Blocking` section
         // into the re-driven `implement` step as one-shot loopback feedback. A
-        // substrate that cannot capture final text (codex / interactive) yields no
-        // verdict line → treated as CLEAN (channel unavailable), exactly as the
-        // task-verify FAIL channel degrades there.
+        // substrate that cannot capture final text (interactive; codex captures it
+        // since F1) yields no verdict line → treated as CLEAN (channel unavailable),
+        // exactly as the task-verify FAIL channel degrades there.
         if (innerStep.id === SPRINT_CODE_REVIEW_STEP) {
           const resultText = result.resultText;
           if (resultText !== null && resultText !== undefined) {
@@ -1513,14 +1600,28 @@ export class WorkflowController {
           adoptedPreFiredRequest = false;
           const resultText = result.resultText;
           if (resultText === null || resultText === undefined) {
-            // A substrate that cannot capture the step's final text (codex /
-            // interactive): no verdict channel exists, so FAIL routing stays
-            // unavailable there, and visual verification — Claude-scoped v1 —
-            // fails OPEN for this lane (channel-unavailable).
+            // No final text: either a substrate that cannot capture it (interactive;
+            // codex captures it since F1) or a clean turn that said nothing. No
+            // verdict channel exists, so FAIL routing stays unavailable, and visual
+            // verification fails OPEN for this lane (channel-unavailable) — with a
+            // non-blocking finding so the silence is visible (F8).
+            //
+            // F8 ("never skip silently", docs/proposals/visual-verification-
+            // brittleness-fixes.md): this drop happens BEFORE any request row
+            // exists, so the verify queue and the DB show nothing at all — the
+            // single largest reason visual verification "never runs" is invisible
+            // in the product. Raise a NON-BLOCKING finding naming the reason
+            // verbatim. Lane advancement is untouched.
             if (visualActive) {
               this.host.log?.(
                 'warn',
                 `fan-out item '${itemId}': task-verify produced no result text; skipping visual verification (channel unavailable)`,
+              );
+              this.reportVerificationSkipped(
+                runId,
+                itemId,
+                'the task-verify step produced no result text, so no verification task could be composed',
+                'The task-verify turn produced no final agent text (an interactive substrate does not capture it; a Codex or Claude turn that ended without a message also yields none), so the `## Visual verification task` fence never reached the controller. No verification request was created for this lane and no visual check ran — the lane advanced regardless. Re-run the task, or verify the deliverable manually.',
               );
               visualVerifyTask = undefined;
             }
