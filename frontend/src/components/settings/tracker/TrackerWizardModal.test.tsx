@@ -781,7 +781,7 @@ describe('TrackerWizardModal — priority/category mapping + content modes', () 
     mapDefaults();
     await advance(2); // → Tasks → States
 
-    const contentGroup = screen.getByRole('group', { name: 'Sync task fields' });
+    const contentGroup = screen.getByRole('group', { name: 'Push task fields to Linear' });
     expect(within(contentGroup).getByRole('button', { name: 'Off' })).toHaveAttribute(
       'aria-pressed',
       'true',
@@ -812,7 +812,7 @@ describe('TrackerWizardModal — priority/category mapping + content modes', () 
 
     fireEvent.change(screen.getByLabelText('Linear priority for P0'), { target: { value: '2' } });
     fireEvent.click(
-      within(screen.getByRole('group', { name: 'Sync task fields' })).getByRole('button', {
+      within(screen.getByRole('group', { name: 'Push task fields to Linear' })).getByRole('button', {
         name: 'Auto',
       }),
     );

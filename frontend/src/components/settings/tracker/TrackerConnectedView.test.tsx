@@ -270,7 +270,7 @@ describe('TrackerConnectedView — sync settings', () => {
   it('patches the two field write-back modes independently, all three states available', async () => {
     renderView();
 
-    const contentGroup = screen.getByRole('group', { name: 'Sync task fields' });
+    const contentGroup = screen.getByRole('group', { name: 'Push task fields to Linear' });
     // Three states, unlike the binary direction rows above.
     expect(within(contentGroup).getAllByRole('button')).toHaveLength(3);
     expect(within(contentGroup).getByRole('button', { name: 'Off' })).toHaveAttribute(
@@ -294,6 +294,21 @@ describe('TrackerConnectedView — sync settings', () => {
         archiveSyncMode: 'manual',
       }),
     );
+  });
+
+  it('names the field control by its DIRECTION and says inbound edits still merge', async () => {
+    // `content_sync_mode` gates the ENQUEUE of `update_content` only — inbound
+    // title/description merges are governed by the pull direction and keep
+    // flowing whatever this control says (inboundSync.ts's header: "Content is
+    // a different direction and merges normally either way"). A control named
+    // "Sync task fields" reads as bidirectional and made a user conclude the
+    // integration was off while Linear was still overwriting their titles.
+    renderView();
+
+    expect(
+      await screen.findByRole('group', { name: 'Push task fields to Linear' }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Edits made in Linear still merge in\./)).toBeInTheDocument();
   });
 
   it('renders the priority/category mapping counts read-only, category gated by provider support', async () => {
