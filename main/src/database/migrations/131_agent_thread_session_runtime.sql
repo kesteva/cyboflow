@@ -1,4 +1,4 @@
--- Migration 130: bind the global-agent thread's stored conversation id to the
+-- Migration 131: bind the global-agent thread's stored conversation id to the
 -- PROVIDER it belongs to.
 --
 -- Design: docs/proposals/ASSISTANT-CODEX-RUNTIME.md §2. The assistant can now be
@@ -14,7 +14,7 @@
 -- thread was necessarily captured on Claude (the only runtime that existed), and
 -- the first turn on either provider re-stamps it.
 --
--- 129 is the latest landed prefix, so 130 is the next free one. Idempotent per
+-- 130 is the latest landed prefix, so 131 is the next free one. Idempotent per
 -- statement: a re-applied file raises `duplicate column name`, which the runner
 -- tolerates.
 ALTER TABLE agent_threads ADD COLUMN session_runtime TEXT;

@@ -25,7 +25,7 @@ const MIGRATION =
   ) +
   '\n' +
   readFileSync(
-    join(__dirname, '..', '..', 'database', 'migrations', '130_agent_thread_session_runtime.sql'),
+    join(__dirname, '..', '..', 'database', 'migrations', '131_agent_thread_session_runtime.sql'),
     'utf-8',
   );
 

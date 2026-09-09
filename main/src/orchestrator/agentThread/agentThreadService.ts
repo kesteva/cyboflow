@@ -338,7 +338,7 @@ export class AgentThreadService {
     // runtime switch the stored id is therefore not stale, it is UNUSABLE —
     // drop it and cold-start on the new provider. The durable transcript in
     // agent_thread_events is untouched, so the user still sees their history.
-    // A stored id with NO recorded runtime predates migration 130, when Claude
+    // A stored id with NO recorded runtime predates migration 131, when Claude
     // was the only host — so it is a Claude id, and a first Codex turn after the
     // upgrade must cold-start rather than hand it to `thread/resume`.
     const storedRuntime: AssistantRuntime | null =

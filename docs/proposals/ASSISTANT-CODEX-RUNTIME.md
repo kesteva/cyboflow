@@ -64,7 +64,7 @@ Claude alias floors to `undefined` = Codex app-server default). No second model 
   `system/init` with `session_id = external_session_id` (thread id) by
   `agentStreamEventToClaudeStreamEvent`, so `maybeCaptureSessionId` works as-is.
 - **Stored conversation id is provider-bound.** Migration
-  `130_agent_thread_session_runtime.sql`: `ALTER TABLE agent_threads ADD COLUMN
+  `131_agent_thread_session_runtime.sql`: `ALTER TABLE agent_threads ADD COLUMN
   session_runtime TEXT` (+ `schema.sql` sync per `database/migrations/AGENTS.md`).
   Store it alongside `claude_session_id` on capture. On a turn whose runtime differs
   from the stored one: clear the id and cold-start on the new provider (never hand a
@@ -144,7 +144,7 @@ createdCodexSdkManager }` and `runtime: () => configManager.getAssistantRuntime(
    resolution (main + frontend types). — S
 2. `feat(codex)`: `eventsSink` honored, invocation bookkeeping skipped for agent ids,
    `mcpScope` env, `isolation` bundle in `runConfig`. — M (core)
-3. `feat(assistant)`: multi-manager service, migration 130 + `sessionRuntime`,
+3. `feat(assistant)`: multi-manager service, migration 131 + `sessionRuntime`,
    retention degrade, resume-error text, error-event surfacing. — M
 4. `feat(main)`: `index.ts` wiring. — S
 5. `feat(ui)`: Settings runtime row + provider-aware picker, onboarding write, composer

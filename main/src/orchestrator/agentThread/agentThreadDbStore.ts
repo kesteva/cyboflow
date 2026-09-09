@@ -110,7 +110,7 @@ export class AgentThreadDbStore {
 
   /**
    * One-time-per-turn capture of the provider-owned warm-resume session id,
-   * together with the runtime it was captured under (migration 130) — the two
+   * together with the runtime it was captured under (migration 131) — the two
    * are written as ONE row update because a stored id without its provider is
    * un-resumable: neither manager can safely be handed the other's id.
    * Clearing the id (null) therefore clears the runtime too.

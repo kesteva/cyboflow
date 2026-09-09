@@ -28,7 +28,7 @@ const MIGRATION =
   ) +
   '\n' +
   readFileSync(
-    join(__dirname, '..', '..', 'database', 'migrations', '130_agent_thread_session_runtime.sql'),
+    join(__dirname, '..', '..', 'database', 'migrations', '131_agent_thread_session_runtime.sql'),
     'utf-8',
   );
 
@@ -100,7 +100,7 @@ describe('AgentThreadDbStore', () => {
       expect(store.getThread('thread-1')?.claudeSessionId).toBeNull();
     });
 
-    it('session_runtime defaults to null and is written ALONGSIDE the id it belongs to (migration 130)', () => {
+    it('session_runtime defaults to null and is written ALONGSIDE the id it belongs to (migration 131)', () => {
       const store = new AgentThreadDbStore(dbAdapter(db));
       const created = store.createThread({ id: 'thread-1' });
       // A fresh thread has no conversation, so no runtime either.
@@ -121,7 +121,7 @@ describe('AgentThreadDbStore', () => {
       expect(store.getThread('thread-1')?.sessionRuntime).toBeNull();
     });
 
-    it('reads a legacy row (id captured before migration 130) as an unrecorded runtime, and an unknown stored value too', () => {
+    it('reads a legacy row (id captured before migration 131) as an unrecorded runtime, and an unknown stored value too', () => {
       const store = new AgentThreadDbStore(dbAdapter(db));
       store.createThread({ id: 'thread-1' });
       // Exactly the pre-130 shape: an id with no runtime beside it.

@@ -165,7 +165,7 @@ export interface AgentThread {
   claudeSessionId: string | null;
   /**
    * Which runtime {@link AgentThread.claudeSessionId} was captured under
-   * (migration 130). The two providers' conversation ids are NOT interchangeable
+   * (migration 131). The two providers' conversation ids are NOT interchangeable
    * — handing a Claude session id to Codex's `thread/resume`, or the reverse,
    * fails the turn — so AgentThreadService clears the stored id and cold-starts
    * whenever the resolved assistant runtime differs from this. NULL means no
