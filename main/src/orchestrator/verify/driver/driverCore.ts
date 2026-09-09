@@ -1467,7 +1467,81 @@ async function defaultSpawnDetachedChromium(args: {
 }
 
 /**
- * `sh -c <command>`, detached into its OWN process group with stdout+stderr
+ * The exact spawn shape for a serve command, pulled out so a test on any host
+ * can pin the argv without spawning anything (F7 / Codex #10).
+ *
+ * POSIX: `sh -c '<command>\n:'` — the VERBATIM command, then a NEWLINE and the
+ * no-op `:` builtin. The trailing statement is load-bearing and MEASURED (macOS,
+ * 2026-09-09): `sh -c 'sleep 30'` EXEC-OPTIMIZES — the shell replaces itself with
+ * the command, so the detached group leader's `ps` argv becomes the resolved
+ * binary (`node …/pnpm run electron-dev`) and the runner's `serveCommandMatches`
+ * rejects a genuine pass as "a substitute or a wrapper was started" (RC6:
+ * vr_a7fc7e33, vr_e6e0ab68 both reported outcome `pass`, every behavior passing).
+ * With the trailing `\n:` the shell has a second statement to run and STAYS the
+ * group leader with the pinned command verbatim in its argv, on `/bin/sh`
+ * (bash 3.2), `/bin/bash` AND `/bin/dash`. The `: ; <cmd>` PREFIX form does NOT
+ * — dash execs the last simple command — which is why the no-op goes last.
+ * `serveCommandMatches` is unchanged by this; it simply stops seeing a wrapper.
+ *
+ * Windows: unchanged — cmd.exe /d /s /c is the interpreter and there is no `sh`
+ * to exec-optimize.
+ */
+export function serveShellInvocation(
+  command: string,
+  platform: NodeJS.Platform = process.platform,
+): { command: string; args: string[]; detached: boolean; windowsVerbatimArguments?: boolean } {
+  if (platform === 'win32') {
+    const cmd = cmdExeInvocation(command);
+    return {
+      command: cmd.command,
+      args: cmd.args,
+      detached: false,
+      windowsVerbatimArguments: cmd.windowsVerbatimArguments,
+    };
+  }
+  return { command: 'sh', args: ['-c', `${command}\n:`], detached: true };
+}
+
+/**
+ * Env vars that describe how THIS process was started and must never describe
+ * the serve child (F7 / Codex #5, extended by the round-2 review).
+ *
+ * `$VERIFY_DRIVER` is a wrapper that exports `ELECTRON_RUN_AS_NODE=1` so the
+ * packaged Electron binary standing in as node behaves as node — and the serve
+ * child, spawned from inside that wrapper, INHERITED it. An Electron deliverable
+ * then launched as plain node and died with "Cannot read properties of undefined
+ * (reading getAppPath)", surfacing only as "exited with code 1". That is why
+ * cyboflow's own runbook carries a load-bearing `unset ELECTRON_RUN_AS_NODE;`
+ * prefix; stripping it here means no runbook has to know.
+ *
+ * `NODE_PATH` is the same shape of leak and the more dangerous one. The wrapper
+ * binds it to CYBOFLOW'S OWN `node_modules` so THIS process can
+ * `require('playwright')` (F3 / RC4); a serve child that inherited it would run
+ * the deliverable with cyboflow's install on its CJS resolution fallback, so a
+ * snapshot whose dependency mirror never warmed could still boot — and PASS a
+ * verification that fails for a real user. A deliverable that genuinely wants a
+ * NODE_PATH sets one in its own serve command, which the shell applies after
+ * this env is inherited.
+ */
+const SERVE_STRIPPED_ENV_NAMES = [
+  'ELECTRON_RUN_AS_NODE',
+  'ELECTRON_NO_ATTACH_CONSOLE',
+  'NODE_PATH',
+] as const;
+
+/**
+ * The env a serve child gets: everything this process inherited (the harness
+ * PATH included) MINUS {@link SERVE_STRIPPED_ENV_NAMES}. A copy — `process.env`
+ * itself is never mutated.
+ */
+export function serveChildEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = { ...base };
+  for (const name of SERVE_STRIPPED_ENV_NAMES) delete env[name];
+  return env;
+}
+
+/**
+ * `sh -c <command>\n:`, detached into its OWN process group with stdout+stderr
  * appended to `logPath`.
  *
  * `detached: true` is what makes teardown possible at all: it gives the shell a
@@ -1476,6 +1550,10 @@ async function defaultSpawnDetachedChromium(args: {
  * `pnpm dev` would leave its node/esbuild children orphaned and the leased port
  * bound. `unref()` then lets this short-lived CLI exit immediately, which is the
  * whole contract of `serve` (the agent polls readiness itself).
+ *
+ * The argv shape ({@link serveShellInvocation}) is what keeps the shell as that
+ * leader, and the env ({@link serveChildEnv}) is what keeps an Electron
+ * deliverable from launching as plain node — see both for the measurements.
  *
  * The log fd is duplicated into the child by `spawn`, so closing our copy right
  * after is correct — the child keeps writing to the file.
@@ -1492,15 +1570,16 @@ async function defaultSpawnDetachedShell(args: {
     // runs the command line — and its tree is reaped via taskkill in
     // defaultKillPid above, so detaching buys nothing there and costs a visible
     // console: DETACHED_PROCESS overrides CREATE_NO_WINDOW for a console child.
-    const isWindows = process.platform === 'win32';
-    const cmd = isWindows ? cmdExeInvocation(args.command) : null;
-    const child = cmd
-      ? spawn(cmd.command, cmd.args, {
-          stdio: ['ignore', fd, fd],
-          windowsHide: true,
-          windowsVerbatimArguments: cmd.windowsVerbatimArguments,
-        })
-      : spawn('sh', ['-c', args.command], { detached: true, stdio: ['ignore', fd, fd], windowsHide: true });
+    const invocation = serveShellInvocation(args.command);
+    const child = spawn(invocation.command, invocation.args, {
+      detached: invocation.detached,
+      stdio: ['ignore', fd, fd],
+      windowsHide: true,
+      env: serveChildEnv(),
+      ...(invocation.windowsVerbatimArguments !== undefined
+        ? { windowsVerbatimArguments: invocation.windowsVerbatimArguments }
+        : {}),
+    });
     child.unref();
     if (!child.pid) {
       throw new Error('failed to spawn the serve command: no pid assigned');
