@@ -770,7 +770,9 @@ reviews for nothing.
 declares `portEnv`, so its port binding becomes genuinely correct. Its nonce
 binding does not: no runbook written before this release declares `nonceEnv`, so
 those records still depend on the agent reading `notes`. Re-derivation is the fix
-for them, and the feature being default-OFF is why that costs nothing today.
+for them; the feature was default-OFF at the time this was written, which is why
+that cost nothing then — F9 (`visual-verification-brittleness-fixes.md`) flips
+the default to ON, so this gap now needs re-derivation to actually happen.
 
 ## 19. Second live smoke (2026-08-20) — and the bug it found
 
@@ -850,3 +852,30 @@ binding checks process-group membership rather than the string — correct by
 design, but not the guarantee the prompt's wording implies.
 
 Still not done: no `*.itest.ts` end-to-end (§14).
+
+## 20. Default flip (F9, 2026-09-09) — the flip does not reach upgraded installs
+
+`visual-verification-brittleness-fixes.md` §F9 flips
+`VISUAL_VERIFY_DEFAULTS.autoBootstrapRunbook` false→true
+(`shared/types/visualVerification.ts`) so a project stays verifiable without a
+second opt-in once `enabled` is on. An adversarial fix-round review found the
+flip is a no-op for every install that has ever pressed Save in Settings —
+including the one this proposal's own live smokes ran against. `Settings.tsx`
+unconditionally stamps `autoBootstrapRunbook` into the saved config on every
+Save, from any tab, because the renderer state is lifted into one payload
+object; under the old default that stamped a literal `false`.
+`ConfigManager.getVisualVerifyConfig()` resolves via
+`vv?.autoBootstrapRunbook ?? VISUAL_VERIFY_DEFAULTS.autoBootstrapRunbook`, so a
+persisted `false` wins over the new floor forever — `??` only ever sees an
+`undefined` on a config.json that has never been through Settings' save path.
+There is no config migration for this key (the only migration in
+`ConfigManager.initialize()` is `enableCrystalFooter` → `enableCyboflowFooter`).
+
+The fix is a one-time migration in `ConfigManager.initialize()`, mirroring that
+existing one: on load, if `visualVerify.autoBootstrapRunbook === false` and a
+new migration marker is absent, delete the stored `false` (letting it fall
+through to the new floor) and stamp the marker so a later, deliberate opt-out
+is never re-flipped. `main/src/services/configManager.ts` is outside this
+proposal's own file boundary and was not edited here — this section exists so
+the gap is written down rather than silently narrowing F9's scope. Until that
+migration lands, F9 only reaches a fresh `config.json`.

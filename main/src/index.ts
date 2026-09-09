@@ -2738,7 +2738,8 @@ async function initializeServices(): Promise<boolean> {
   //
   // Gated twice before any of it runs — the project toggle and the kill switch
   // (combined in `evaluateRunbookBootstrap`), then §4's runbook-situation check.
-  // Default OFF.
+  // Default ON since F9 (visual-verification-brittleness-fixes.md); the kill
+  // switch is CYBOFLOW_DISABLE_RUNBOOK_BOOTSTRAP=1.
   // ------------------------------------------------------------------------
   const runbookBootstrapStamps = new RunbookBootstrapStampStore(cyboflowDb, cyboflowLogger);
   const runbookBootstrapSuppression = new BootstrapSuppressionStore(cyboflowDb, cyboflowLogger);

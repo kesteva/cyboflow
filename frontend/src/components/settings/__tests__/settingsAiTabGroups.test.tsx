@@ -192,7 +192,9 @@ describe('Settings — AI tab groups', () => {
         interactivePtyOnly: true,
         computeCostFromRates: true,
         artifactCommitDir: 'docs/artifacts',
-        visualVerify: { enabled: true, autoBootstrapRunbook: false },
+        // F9: the fetched config omits autoBootstrapRunbook, so the load
+        // fallback floors it to the new default (ON).
+        visualVerify: { enabled: true, autoBootstrapRunbook: true },
         idleSessionReview: { enabled: false, thresholdMinutes: 11 },
         // Session settings
         systemPromptAppend: 'be terse',
