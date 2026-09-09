@@ -104,6 +104,12 @@ interface ElectronAPI {
     gitCommit?: string;
     buildTimestamp?: number;
     worktreeName?: string;
+    /**
+     * Dev builds only: the human name of the cyboflow session that owns this
+     * worktree, reported ONLY when the session was renamed away from its
+     * worktree slug (main/src/utils/hostSessionName.ts).
+     */
+    sessionName?: string;
     variant?: 'stable' | 'dev';
   }>>;
 

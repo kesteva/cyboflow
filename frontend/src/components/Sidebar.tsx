@@ -133,8 +133,16 @@ export const Sidebar = memo(function Sidebar({
   const [version, setVersion] = useState<string>('');
   const [gitCommit, setGitCommit] = useState<string>('');
   const [worktreeName, setWorktreeName] = useState<string>('');
+  // Dev builds only, and only when the session was RENAMED away from its
+  // worktree slug — the main process reports it in that case alone.
+  const [sessionName, setSessionName] = useState<string>('');
   const [isDev, setIsDev] = useState<boolean>(false);
   const { state: updateState, download: downloadUpdate, install: installUpdate, check: checkForUpdate } = useUpdater();
+  // The footer's middle segment: a renamed session reads far better than the
+  // `hidden-comet-20260901` worktree slug it was generated as, so it wins when
+  // present. The worktree name remains the label for an unrenamed session (the
+  // two are identical there) and in the About dialog, which shows both.
+  const workspaceLabel = sessionName || worktreeName;
   useEffect(() => {
     // Fetch version info on component mount
     const fetchVersion = async () => {
@@ -157,6 +165,9 @@ export const Sidebar = memo(function Sidebar({
             console.log('[Sidebar Debug] Set worktreeName:', result.data.worktreeName);
           } else {
             console.log('[Sidebar Debug] No worktreeName in response');
+          }
+          if (result.data.sessionName) {
+            setSessionName(result.data.sessionName);
           }
           setIsDev(result.data.variant === 'dev');
         }
@@ -557,7 +568,7 @@ export const Sidebar = memo(function Sidebar({
                   onClick={onAboutClick}
                   title="Click to view version details"
                 >
-                  v{version}{worktreeName && ` • ${worktreeName}`}{gitCommit && ` • ${gitCommit}`}
+                  v{version}{workspaceLabel && ` • ${workspaceLabel}`}{gitCommit && ` • ${gitCommit}`}
                 </div>
               ))}
           </div>

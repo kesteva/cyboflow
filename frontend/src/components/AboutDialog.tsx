@@ -12,6 +12,7 @@ interface VersionInfo {
   gitCommit?: string;
   buildTimestamp?: number;
   worktreeName?: string;
+  sessionName?: string;
   variant?: 'stable' | 'dev';
 }
 
@@ -47,6 +48,7 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
           gitCommit: result.data.gitCommit,
           buildTimestamp: result.data.buildTimestamp,
           worktreeName: result.data.worktreeName,
+          sessionName: result.data.sessionName,
           variant: result.data.variant
         });
       }
@@ -145,6 +147,17 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
                 </span>
                 <span className="text-sm text-text-primary font-mono truncate max-w-[200px]" title={versionInfo.workingDirectory}>
                   {pathBasename(versionInfo.workingDirectory) || versionInfo.workingDirectory}
+                </span>
+              </div>
+            )}
+
+            {versionInfo?.sessionName && (
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-medium text-text-secondary">
+                  Session
+                </span>
+                <span className="text-sm text-text-primary truncate max-w-[200px]" title={versionInfo.sessionName}>
+                  {versionInfo.sessionName}
                 </span>
               </div>
             )}

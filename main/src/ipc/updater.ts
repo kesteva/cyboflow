@@ -5,6 +5,7 @@ import * as path from 'path';
 import { commandExecutor } from '../utils/commandExecutor';
 import { quoteForShellString, resolveGitCommand } from '../utils/gitExeFinder';
 import { getCurrentWorktreeName } from '../utils/worktreeUtils';
+import { resolveHostSessionName } from '../utils/hostSessionName';
 import { getCyboflowDirectory } from '../utils/cyboflowDirectory';
 import { AppUpdater } from '../services/appUpdater';
 
@@ -51,6 +52,7 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices)
       let gitCommit: string | undefined;
       let buildTimestamp: number | undefined;
       let worktreeName: string | undefined;
+      let sessionName: string | undefined;
       let variant: 'stable' | 'dev' | undefined;
 
       // Try to read build info if in packaged app
@@ -106,6 +108,18 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices)
         // Detect current worktree name for development builds only
         worktreeName = getCurrentWorktreeName(process.cwd());
         console.log('[Version Debug] Worktree name:', worktreeName);
+
+        // A renamed session is far more legible than its auto-generated
+        // worktree slug, and the name only exists in the HOSTING instance's
+        // database — see resolveHostSessionName. Only reported when it actually
+        // differs from the worktree name, so the renderer never has to compare.
+        if (worktreeName) {
+          const hostSessionName = resolveHostSessionName(process.cwd());
+          if (hostSessionName && hostSessionName !== worktreeName) {
+            sessionName = hostSessionName;
+          }
+          console.log('[Version Debug] Host session name:', sessionName);
+        }
       }
 
       const responseData: {
@@ -117,6 +131,7 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices)
         gitCommit?: string;
         buildTimestamp?: number;
         worktreeName?: string;
+        sessionName?: string;
         variant?: 'stable' | 'dev';
       } = {
         current: app.getVersion(),
@@ -135,6 +150,12 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices)
         console.log('[Version Debug] Adding worktreeName to response:', worktreeName);
       } else {
         console.log('[Version Debug] Not adding worktreeName. isPackaged:', app.isPackaged, 'worktreeName:', worktreeName);
+      }
+
+      // Same dev-only gate as worktreeName: the session name is a dogfooding
+      // affordance, absent from packaged builds.
+      if (!app.isPackaged && sessionName) {
+        responseData.sessionName = sessionName;
       }
 
       console.log('[Version Debug] Final response data:', responseData);

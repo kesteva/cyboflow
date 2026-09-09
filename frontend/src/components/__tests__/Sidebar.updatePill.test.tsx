@@ -216,6 +216,58 @@ describe('Sidebar — update pill (TASK-001)', () => {
 });
 
 /**
+ * The footer's middle segment identifies WHICH dev checkout you are looking at.
+ * It prefers the human session name over the worktree slug, because a renamed
+ * session ("support codex assistant") says far more than the auto-generated
+ * `hidden-comet-20260901` directory it lives in. The main process only reports
+ * `sessionName` when it differs from the worktree name, so the renderer's rule
+ * is a plain fallback.
+ */
+describe('Sidebar — version line workspace label', () => {
+  function stubVersionInfo(data: Record<string, unknown>) {
+    Object.defineProperty(window, 'electronAPI', {
+      writable: true,
+      value: {
+        invoke: mockInvoke,
+        getVersionInfo: () => Promise.resolve({ success: true, data }),
+        uiState: { getExpanded: () => Promise.resolve({ success: false }) },
+      },
+    });
+  }
+
+  it('shows the session name instead of the worktree name when one is reported', async () => {
+    setUpdaterState({ status: 'idle' });
+    stubVersionInfo({
+      current: '1.2.3',
+      gitCommit: 'abcdef1',
+      worktreeName: 'hidden-comet-20260901',
+      sessionName: 'support codex assistant',
+    });
+
+    renderSidebar();
+
+    const versionLine = await screen.findByTitle('Click to view version details');
+    await waitFor(() => expect(versionLine).toHaveTextContent('support codex assistant'));
+    expect(versionLine).not.toHaveTextContent('hidden-comet-20260901');
+    expect(versionLine).toHaveTextContent('abcdef1');
+  });
+
+  it('falls back to the worktree name when no session name is reported', async () => {
+    setUpdaterState({ status: 'idle' });
+    stubVersionInfo({
+      current: '1.2.3',
+      gitCommit: 'abcdef1',
+      worktreeName: 'hidden-comet-20260901',
+    });
+
+    renderSidebar();
+
+    const versionLine = await screen.findByTitle('Click to view version details');
+    await waitFor(() => expect(versionLine).toHaveTextContent('hidden-comet-20260901'));
+  });
+});
+
+/**
  * The bug-report button lives INSIDE the same bordered footer block as the
  * version line, which is the whole risk this guards: the block must not inherit
  * the version line's `{version && …}` gate. A user whose version fetch failed —
