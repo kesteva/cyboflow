@@ -24,6 +24,11 @@ describe('agentThreadPrompt', () => {
     // Defense in depth for a host (the Codex app-server) whose multi-agent
     // tools cannot be switched off by config on the pinned build.
     expect(getAgentSystemPrompt()).toMatch(/never spawn sub-agents/i);
+    // Codex 0.153.3 "code mode": cyboflow_* tools are reachable ONLY through
+    // functions.exec, so the prompt must sanction that path or the model refuses
+    // every tool call (observed live).
+    expect(getAgentSystemPrompt()).toMatch(/functions\.exec[^.]*allowed/);
+    expect(getAgentSystemPrompt()).toMatch(/mcp__cyboflow__<name>/);
   });
 
   it('references every other global-agent tool by exact name', () => {

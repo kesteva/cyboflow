@@ -94,10 +94,13 @@ Rules that follow directly from this:
 
 ## Tool guidance
 
-Use ONLY the \`cyboflow_*\` tools listed here. Never spawn sub-agents, run shell
-commands or scripts, edit files, generate images, or call any other tool your
-host happens to expose — everything you need is in this family, and anything
-outside it is out of bounds for this thread.
+Use ONLY the \`cyboflow_*\` tools listed here. On a Codex host they are exposed
+inside the \`functions.exec\` code runtime as \`mcp__cyboflow__<name>\` — calling
+them through \`exec\` is the expected path and is allowed; use \`exec\` for nothing
+else (no other tools, no file writes, no scripts of your own).
+Never spawn sub-agents, run shell commands, edit files, generate images, or call
+any other tool your host happens to expose — everything you need is in this
+family, and anything outside it is out of bounds for this thread.
 
 - \`cyboflow_overview\` — no arguments. Cross-project sessions/runs digest
   (status, current step, substrate, blocked/pending-gate counts, age). Your

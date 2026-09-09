@@ -169,6 +169,23 @@ createdCodexSdkManager }` and `runtime: () => configManager.getAssistantRuntime(
   survives every multi-agent flag spelling on this build; sub-agents inherit the same
   confinement, and the developer instructions forbid spawning. Settings → Assistant shows the
   Codex folder-access note.
+- **A′. Re-probe on Codex 0.153.3 (2026-09-09, direct app-server probe with the exact
+  isolation thread config, stand-in MCP server, permissive developer instructions).** Still
+  closed: shell (`tools.exec_command is not a function`, no `require`), the user's
+  `config.toml` servers, the plugin server, apps/connectors, web search; `apply_patch` is
+  listed but every patch is rejected by the read-only sandbox. NEW on this build and now
+  closed: `image_gen__imagegen` (the `imagegen` key no longer works — it generated an image;
+  `features.image_generation=false` does), `create_goal`/`get_goal`/`update_goal`
+  (`features.goals=false`), `view_image` (`features.view_image=false`). `features.tool_registry`
+  expects a struct — a boolean fails the thread start. NEW residual: "code mode" — MCP tools are
+  exposed only inside the `functions.exec` JS runtime as `mcp__cyboflow__<name>`, never as
+  direct function tools; `features.code_mode`/`code_mode_only` and `mcp_tool_exposure="direct"`
+  (thread config or process `-c`) change nothing for gpt-6-astra or gpt-5.6-sol. The prompt's
+  "never run scripts" rule made the in-app assistant refuse EVERY tool call on this build, so the
+  tool guidance now sanctions `exec` for `cyboflow_*` calls and nothing else. Unchanged residual:
+  `collaboration.spawn_agent` (also survives `multi_agent_v2=false`). Unverified: whether
+  `request_user_input_async` (delivered as an agentMessage with `questions`, not a server
+  request) renders sensibly in the rail.
 - **B. Default behaviour.** Recommend: follow `defaultAgentRuntime` automatically
   (fixes the reported bug with zero extra clicks). Alternative: explicit opt-in only.
 - **C. Error surfacing** in the rail is in scope as a prerequisite (Codex auth /

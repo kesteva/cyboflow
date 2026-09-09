@@ -485,8 +485,10 @@ plugins, apps/connectors and web search disabled through the thread config, the 
 `config.toml` MCP servers disabled by name (the thread config MERGES with that file), no
 `agent_invocations`/`raw_events` bookkeeping, and a local fail-closed policy that accepts only
 `cyboflow_*` MCP elicitations (nothing reaches the approval/question routers, which need a
-running `workflow_runs` row). Known residual on Codex 0.144.3: multi-agent spawn cannot be
-switched off by config; sub-agents inherit the same confinement. The
+running `workflow_runs` row). Known residuals on Codex 0.153.3: multi-agent spawn cannot be
+switched off by config (sub-agents inherit the same confinement), and "code mode" exposes the
+MCP tools only inside the `functions.exec` JS runtime — the developer instructions sanction that
+path for `cyboflow_*` calls and nothing else. The
 stored resume id is provider-bound (`agent_threads.session_runtime`); switching runtimes
 cold-starts the conversation. Plan + review log: `docs/proposals/ASSISTANT-CODEX-RUNTIME.md`.
 
