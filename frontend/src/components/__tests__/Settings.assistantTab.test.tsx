@@ -247,4 +247,79 @@ describe('Settings — Assistant tab', () => {
       );
     });
   });
+
+  describe('runtime picker', () => {
+    it('renders with "Follow default runtime" pressed by default', async () => {
+      render(<Settings isOpen onClose={vi.fn()} initialTab="assistant" />);
+
+      const followDefault = await screen.findByTestId('assistant-runtime-follow-default');
+      expect(followDefault).toHaveAttribute('aria-pressed', 'true');
+      expect(followDefault).toHaveTextContent('Currently Claude');
+      expect(screen.getByTestId('assistant-runtime-claude-sdk')).toHaveAttribute('aria-pressed', 'false');
+      expect(screen.getByTestId('assistant-runtime-codex-sdk')).toHaveAttribute('aria-pressed', 'false');
+    });
+
+    it('loads a stored assistantRuntime pressed', async () => {
+      configGet.mockResolvedValue({
+        success: true,
+        data: baseConfig({ assistantRuntime: 'codex-sdk' }),
+      });
+      render(<Settings isOpen onClose={vi.fn()} initialTab="assistant" />);
+
+      const codex = await screen.findByTestId('assistant-runtime-codex-sdk');
+      expect(codex).toHaveAttribute('aria-pressed', 'true');
+      expect(screen.getByTestId('assistant-runtime-follow-default')).toHaveAttribute('aria-pressed', 'false');
+    });
+
+    it('picking Codex sends assistantRuntime: codex-sdk and clears a stored Claude model', async () => {
+      configGet.mockResolvedValue({
+        success: true,
+        data: baseConfig({ assistantModel: 'opus' }),
+      });
+      render(<Settings isOpen onClose={vi.fn()} initialTab="assistant" />);
+
+      const codex = await screen.findByTestId('assistant-runtime-codex-sdk');
+      fireEvent.click(codex);
+      expect(codex).toHaveAttribute('aria-pressed', 'true');
+
+      fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+      await waitFor(() =>
+        expect(configUpdate).toHaveBeenCalledWith(
+          expect.objectContaining({ assistantRuntime: 'codex-sdk', assistantModel: undefined }),
+        ),
+      );
+    });
+
+    it('picking "Follow default runtime" sends assistantRuntime: undefined', async () => {
+      configGet.mockResolvedValue({
+        success: true,
+        data: baseConfig({ assistantRuntime: 'codex-sdk' }),
+      });
+      render(<Settings isOpen onClose={vi.fn()} initialTab="assistant" />);
+
+      const followDefault = await screen.findByTestId('assistant-runtime-follow-default');
+      fireEvent.click(followDefault);
+      expect(followDefault).toHaveAttribute('aria-pressed', 'true');
+
+      fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+      await waitFor(() =>
+        expect(configUpdate).toHaveBeenCalledWith(
+          expect.objectContaining({ assistantRuntime: undefined }),
+        ),
+      );
+    });
+
+    it('hides the Codex option when the Codex provider is switched off', async () => {
+      configGet.mockResolvedValue({
+        success: true,
+        data: baseConfig({ agentProviderAccess: { claude: true, codex: false } }),
+      });
+      render(<Settings isOpen onClose={vi.fn()} initialTab="assistant" />);
+
+      await screen.findByTestId('assistant-runtime-follow-default');
+      expect(screen.queryByTestId('assistant-runtime-codex-sdk')).not.toBeInTheDocument();
+    });
+  });
 });

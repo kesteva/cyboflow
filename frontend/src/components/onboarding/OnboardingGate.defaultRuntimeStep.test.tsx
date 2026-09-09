@@ -176,19 +176,22 @@ describe('OnboardingGate — Default agent step (2)', () => {
     expect(screen.getByRole('radio', { name: /Codex/ })).toHaveTextContent(/^CodexCodex SDK$/);
   });
 
-  it('qualifies the Cyboflow-chat claim only while Codex is the highlighted pick', async () => {
+  it('shows no Cyboflow-chat caveat for either pick — the assistant now follows this default too', async () => {
     await mountAtDefaultRuntimeStep(baseAppConfig(), { claude: true, codex: true });
 
-    // Claude preselected — nothing to qualify.
+    // Claude preselected.
     expect(
       screen.queryByText('The Cyboflow chat assistant runs on Claude for now.'),
     ).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('radio', { name: /Codex/ }));
 
+    // Still no caveat: resolveAssistantRuntime follows defaultAgentRuntime by
+    // default, so a Codex pick here reaches the assistant with no extra UI
+    // (Settings → Assistant can still override it explicitly).
     expect(
-      await screen.findByText('The Cyboflow chat assistant runs on Claude for now.'),
-    ).toBeInTheDocument();
+      screen.queryByText('The Cyboflow chat assistant runs on Claude for now.'),
+    ).not.toBeInTheDocument();
   });
 
   it('preselects the first activated provider on a pristine install', async () => {

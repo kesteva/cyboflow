@@ -32,7 +32,12 @@ interface PendingApproval {
   request: ApprovalDispatch;
 }
 
-type ApprovalDispatch = Exclude<
+/**
+ * Every server request EXCEPT the user-input question (which the question bridge
+ * owns). Exported so the global-agent isolation policy can classify the same
+ * union without restating it.
+ */
+export type ApprovalDispatch = Exclude<
   AppServerServerRequestDispatch,
   { method: 'item/tool/requestUserInput' }
 >;
@@ -49,13 +54,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function isMcpToolCallApproval(request: AppServerServerRequestDispatch): boolean {
+export function isMcpToolCallApproval(request: AppServerServerRequestDispatch): boolean {
   if (request.method !== 'mcpServer/elicitation/request') return false;
   return isRecord(request.params._meta)
     && request.params._meta.codex_approval_kind === 'mcp_tool_call';
 }
 
-function mcpToolName(request: Extract<
+export function mcpToolName(request: Extract<
   AppServerServerRequestDispatch,
   { method: 'mcpServer/elicitation/request' }
 >): string {
@@ -69,6 +74,23 @@ function mcpToolName(request: Extract<
     }
   }
   return `MCP:${request.params.serverName}`;
+}
+
+/**
+ * The cyboflow-side tool label for an approval request — what the approval
+ * router (and the isolation policy's WARN line) names the request by.
+ */
+export function approvalRequestToolName(request: ApprovalDispatch): string {
+  switch (request.method) {
+    case 'item/commandExecution/requestApproval':
+      return 'Bash';
+    case 'item/fileChange/requestApproval':
+      return 'Edit';
+    case 'item/permissions/requestApproval':
+      return 'Permissions';
+    case 'mcpServer/elicitation/request':
+      return mcpToolName(request);
+  }
 }
 
 export class CodexAppServerApprovalBridge {
@@ -130,7 +152,7 @@ export class CodexAppServerApprovalBridge {
     try {
       const decision = await this.approvalRouter.requestApproval(
         this.runId,
-        this.toolName(request),
+        approvalRequestToolName(request),
         this.approvalInput(request),
         () => {
           // The returned promise is authoritative. ApprovalRouter resolves it
@@ -162,19 +184,6 @@ export class CodexAppServerApprovalBridge {
         `Failed to clear pending Codex approvals for run ${this.runId}`,
         { cause },
       ));
-    }
-  }
-
-  private toolName(request: ApprovalDispatch): string {
-    switch (request.method) {
-      case 'item/commandExecution/requestApproval':
-        return 'Bash';
-      case 'item/fileChange/requestApproval':
-        return 'Edit';
-      case 'item/permissions/requestApproval':
-        return 'Permissions';
-      case 'mcpServer/elicitation/request':
-        return mcpToolName(request);
     }
   }
 

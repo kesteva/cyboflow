@@ -9,9 +9,13 @@ import {
 } from '../../../shared/types/sessionDefaults';
 import {
   type AssistantContextRetention,
+  type AssistantRuntime,
+  assistantRuntimeProvider,
   DEFAULT_ASSISTANT_CONTEXT_RETENTION,
   isAssistantContextRetention,
+  resolveAssistantRuntime,
 } from '../../../shared/types/agentThread';
+import { normalizeAgentModelSelection } from '../../../shared/types/agentModels';
 import {
   type AgentProvider,
   type AgentProviderAccess,
@@ -401,6 +405,45 @@ export class ConfigManager extends EventEmitter {
   getAssistantModel(): string | null {
     const value = this.config.assistantModel?.trim();
     return value && value.length > 0 ? value : null;
+  }
+
+  /**
+   * Which runtime hosts the global assistant, consumed by AgentThreadService per
+   * turn (a Settings change takes effect on the very next turn, no restart).
+   *
+   * Delegates to the SHARED {@link resolveAssistantRuntime} resolver — the same
+   * one the renderer calls — so the two surfaces can never disagree about which
+   * provider the assistant is on. The ladder is: the explicit
+   * `assistantRuntime` when its provider is enabled → the provider of
+   * `defaultAgentRuntime` (which is what makes the onboarding "Codex is my
+   * default" pick reach the assistant with no extra UI) → 'claude-sdk'.
+   */
+  getAssistantRuntime(): AssistantRuntime {
+    return resolveAssistantRuntime({
+      assistantRuntime: this.config.assistantRuntime,
+      defaultAgentRuntime: this.config.defaultAgentRuntime,
+      isProviderEnabled: (provider) => this.isAgentProviderEnabled(provider),
+    });
+  }
+
+  /**
+   * The assistant's model alias RESOLVED FOR ONE RUNTIME. There is deliberately
+   * one stored `assistantModel` key for both providers, so the same value has to
+   * mean different things per provider:
+   *   - Claude — `assistantModel ?? getDefaultModel()`, the pre-existing
+   *     behaviour (the Claude spawn always carries an explicit alias);
+   *   - Codex  — `assistantModel` run through normalizeAgentModelSelection,
+   *     which floors a value belonging to another provider's family (a stale
+   *     Claude alias left over from a runtime switch) to undefined. Null here
+   *     means "send no model", i.e. the Codex app-server's own default — the
+   *     right answer, since a Claude alias would be rejected outright.
+   */
+  getAssistantModelFor(runtime: AssistantRuntime): string | null {
+    const stored = this.getAssistantModel();
+    if (assistantRuntimeProvider(runtime) === 'claude') {
+      return stored ?? this.getDefaultModel();
+    }
+    return normalizeAgentModelSelection('codex', stored) ?? null;
   }
 
   /**

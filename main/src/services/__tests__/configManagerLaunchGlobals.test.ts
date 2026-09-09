@@ -261,7 +261,7 @@ describe('global launch defaults: defaultLaunchModel / defaultAgentRuntime', () 
     expect(manager.getDefaultModel()).toBe('sonnet');
   });
 
-  it('leaves the legacy defaultModel consumers alone (exactly two production getDefaultModel() call sites)', async () => {
+  it('leaves the legacy defaultModel consumers alone (exactly one production getDefaultModel() call site)', async () => {
     const mainSrc = path.resolve(__dirname, '../..');
     const files = await productionSources(mainSrc);
     const callSites: string[] = [];
@@ -272,12 +272,11 @@ describe('global launch defaults: defaultLaunchModel / defaultAgentRuntime', () 
       for (let i = 0; i < hits; i += 1) callSites.push(path.relative(mainSrc, file));
     }
     expect(callSites.sort()).toEqual([
-      // The legacy panel-model backfill.
+      // The legacy panel-model backfill. The global assistant's Claude fallback
+      // is the other consumer, but it now lives INSIDE ConfigManager
+      // (getAssistantModelFor — per-provider, see ASSISTANT-CODEX-RUNTIME.md),
+      // which this scan excludes as the declaration file.
       path.join('database', 'database.ts'),
-      // The global assistant's model fallback.
-      'index.ts',
-      // Not a call — a doc-comment describing the fallback index.ts wires in.
-      path.join('orchestrator', 'agentThread', 'agentThreadService.ts'),
     ]);
   });
 });

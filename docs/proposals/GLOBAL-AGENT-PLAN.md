@@ -425,9 +425,10 @@ launching once a chokepoint exists.
 
 - Digest auto-trigger policy: first-open-per-launch (planned) vs. also on queue-delta
   thresholds (Stage 4 territory — keep out of Stage 1).
-- Model default for the thread: ConfigManager default vs. pinned cheaper model; the
-  `agent_threads.model` column supports either; composer chip displays it (switch UI can be
-  Stage 1.5 or 2).
+- ~~Model default for the thread~~ — decided 2026-09-03: the thread follows Settings →
+  Assistant (`assistantModel`, per-provider) and is hosted on the runtime
+  `resolveAssistantRuntime` picks (Claude SDK or Codex app-server); see
+  `ASSISTANT-CODEX-RUNTIME.md`. `agent_threads.model` stays NULL (live config wins).
 - Whether `cyboflow_backlog`/`cyboflow_queue` return all projects by default or require an
   explicit project filter beyond N projects (token-budget guard for the digest prompt).
 

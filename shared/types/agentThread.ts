@@ -15,6 +15,81 @@
 import type { CyboflowWorkflowName } from './workflows';
 import type { CliSubstrate } from './substrate';
 import type { EntityCategory, IdeaScope, Priority, TaskType } from './tasks';
+import {
+  isAgentRuntime,
+  PROVIDER_DEFAULT_RUNTIME,
+  providerForRuntime,
+  type AgentProvider,
+} from './agentRuntime';
+
+// ---------------------------------------------------------------------------
+// Assistant runtime (docs/proposals/ASSISTANT-CODEX-RUNTIME.md §1)
+// ---------------------------------------------------------------------------
+
+/**
+ * The runtimes the global assistant can be hosted on. A deliberate SUBSET of
+ * `ALL_AGENT_RUNTIMES`: the assistant's hermetic spawn contract (isolation,
+ * scoped MCP family, injected transcript sink) is implemented by the Claude SDK
+ * manager and the Codex app-server manager only. OMP / pi as the user's primary
+ * runtime leave the assistant on Claude.
+ */
+export const ASSISTANT_RUNTIMES = ['claude-sdk', 'codex-sdk'] as const;
+
+export type AssistantRuntime = (typeof ASSISTANT_RUNTIMES)[number];
+
+/** Floor when nothing resolves — the pre-existing (Claude-only) behaviour. */
+export const DEFAULT_ASSISTANT_RUNTIME: AssistantRuntime = 'claude-sdk';
+
+export function isAssistantRuntime(value: unknown): value is AssistantRuntime {
+  return (ASSISTANT_RUNTIMES as readonly unknown[]).includes(value);
+}
+
+/** The provider an assistant runtime spawns through. */
+export function assistantRuntimeProvider(runtime: AssistantRuntime): 'claude' | 'codex' {
+  return runtime === 'codex-sdk' ? 'codex' : 'claude';
+}
+
+export interface ResolveAssistantRuntimeInput {
+  /** `AppConfig.assistantRuntime` — the explicit Settings → Assistant pick (may be absent/invalid). */
+  assistantRuntime?: unknown;
+  /** `AppConfig.defaultAgentRuntime` — the launch default the onboarding "default agent" step writes. */
+  defaultAgentRuntime?: string | null;
+  /** Provider-access gate (Settings → Integrations); a disabled provider is never resolved. */
+  isProviderEnabled: (provider: AgentProvider) => boolean;
+}
+
+/**
+ * The ONE resolver for "which runtime hosts the assistant", shared by
+ * ConfigManager (main) and the renderer so the two never disagree:
+ *   1. the explicit `assistantRuntime`, when valid and its provider is enabled;
+ *   2. else the provider of `defaultAgentRuntime` mapped through
+ *      PROVIDER_DEFAULT_RUNTIME, when that provider is claude|codex and enabled —
+ *      this is what lets the onboarding "Codex is my default" choice reach the
+ *      assistant with no extra UI;
+ *   3. else DEFAULT_ASSISTANT_RUNTIME.
+ * Step 3 does NOT consult the Claude access toggle: an install with every
+ * provider switched off still needs a deterministic answer, and the spawn seam's
+ * own provider gate (assertProviderEnabled) is what refuses the turn.
+ */
+export function resolveAssistantRuntime(input: ResolveAssistantRuntimeInput): AssistantRuntime {
+  if (isAssistantRuntime(input.assistantRuntime)) {
+    if (input.isProviderEnabled(assistantRuntimeProvider(input.assistantRuntime))) {
+      return input.assistantRuntime;
+    }
+  }
+  // config.json is user-editable: an unknown runtime string is treated as
+  // absent rather than routed through the loud `providerForRuntimeValue`.
+  const launchProvider = isAgentRuntime(input.defaultAgentRuntime)
+    ? providerForRuntime(input.defaultAgentRuntime)
+    : null;
+  if (launchProvider === 'codex' || launchProvider === 'claude') {
+    const candidate = PROVIDER_DEFAULT_RUNTIME[launchProvider];
+    if (isAssistantRuntime(candidate) && input.isProviderEnabled(launchProvider)) {
+      return candidate;
+    }
+  }
+  return DEFAULT_ASSISTANT_RUNTIME;
+}
 
 // ---------------------------------------------------------------------------
 // Proposal kind / status enums
@@ -81,7 +156,23 @@ export interface AgentThread {
   id: string;
   scope: AgentThreadScope;
   model: string | null;
+  /**
+   * The provider-owned conversation id threaded back as the warm-resume handle.
+   * The column name `claude_session_id` is FROZEN (migration 074) and the field
+   * keeps it, but the id is no longer necessarily Claude's — see
+   * {@link AgentThread.sessionRuntime}.
+   */
   claudeSessionId: string | null;
+  /**
+   * Which runtime {@link AgentThread.claudeSessionId} was captured under
+   * (migration 131). The two providers' conversation ids are NOT interchangeable
+   * — handing a Claude session id to Codex's `thread/resume`, or the reverse,
+   * fails the turn — so AgentThreadService clears the stored id and cold-starts
+   * whenever the resolved assistant runtime differs from this. NULL means no
+   * runtime was recorded (every thread predating the column, all of which were
+   * necessarily Claude), and is treated as "no mismatch".
+   */
+  sessionRuntime: AssistantRuntime | null;
   createdAt: string;
   updatedAt: string;
 }

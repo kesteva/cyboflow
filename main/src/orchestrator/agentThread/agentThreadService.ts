@@ -2,8 +2,16 @@
  * AgentThreadService — the hosting service for the global-agent chat thread.
  *
  * Mints/loads the single 'global' thread, prepares its neutral home dir, and
- * drives turns through {@link AgentSpawnManagerLike} (the narrow slice of
- * ClaudeCodeManager it needs) with the S0.2 global-agent spawn contract:
+ * drives turns through {@link AgentSpawnManagerLike} (the narrow slice of a CLI
+ * manager it needs) with the S0.2 global-agent spawn contract.
+ *
+ * The host provider is resolved PER TURN from `runtime()`
+ * (ConfigManager.getAssistantRuntime — Claude or Codex), and the matching
+ * manager is picked out of `managers`. Everything below is provider-neutral
+ * except two seams: the stored conversation id is bound to the runtime that
+ * minted it (see {@link AgentThread.sessionRuntime}) and dropped on a switch,
+ * and 'compact-daily' retention degrades to 'clear-daily' on Codex, which has no
+ * compaction RPC. The spawn contract itself is identical on both:
  *   - synthetic identity  panelId === sessionId === `agent:<threadId>` (no runId,
  *     no spawnKey → warm-eligible), neutral cwd = the thread's home dir;
  *   - `isolation: 'agent'` (hermetic — no inherited MCP/plugins/rules),
@@ -40,7 +48,11 @@
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { AgentThread, AssistantContextRetention } from '../../../../shared/types/agentThread';
+import type {
+  AgentThread,
+  AssistantContextRetention,
+  AssistantRuntime,
+} from '../../../../shared/types/agentThread';
 import { DEFAULT_ASSISTANT_CONTEXT_RETENTION } from '../../../../shared/types/agentThread';
 import type { CliSpawnOutcome } from '../../../../shared/types/cliPanels';
 import type { ClaudeSpawnOptions } from '../../services/panels/claude/claudeCodeManager';
@@ -81,6 +93,7 @@ export type AgentSpawnOptions = Pick<
   | 'sessionId'
   | 'worktreePath'
   | 'prompt'
+  | 'hidePromptFromTranscript'
   | 'isolation'
   | 'tools'
   | 'mcpScope'
@@ -116,16 +129,30 @@ interface AgentOutputPayload {
 
 export interface AgentThreadServiceDeps {
   store: AgentThreadDbStore;
-  manager: AgentSpawnManagerLike;
+  /**
+   * One manager per assistant runtime, selected per turn by {@link runtime}.
+   * A Record (not an optional map) so adding a runtime to ASSISTANT_RUNTIMES
+   * fails the build at every wiring site rather than silently resolving to an
+   * absent manager at the first turn on the new provider.
+   */
+  managers: Record<AssistantRuntime, AgentSpawnManagerLike>;
+  /**
+   * Which runtime hosts the assistant, checked per turn. The caller wires this
+   * to `configManager.getAssistantRuntime()`, so a Settings change takes effect
+   * on the very next turn with no restart.
+   */
+  runtime: () => AssistantRuntime;
   /** Live-tail publish to the renderer's `cyboflow:stream:<threadId>` channel. */
   publish: (id: string, envelope: unknown) => void;
   /**
-   * ConfigManager default model (null ⇒ leave the spawn's model unset). The
-   * caller wires this to `getAssistantModel() ?? getDefaultModel()`, so a
-   * Settings "Assistant" model override takes effect on the next turn with no
-   * restart.
+   * ConfigManager default model FOR THE RESOLVED RUNTIME (null ⇒ leave the
+   * spawn's model unset). The caller wires this to
+   * `configManager.getAssistantModelFor(runtime)`: Claude resolves
+   * `assistantModel ?? defaultModel`, while Codex floors a stale Claude alias to
+   * null so the app-server picks its own default rather than rejecting a model
+   * id from the wrong family.
    */
-  defaultModel: () => string | null;
+  defaultModel: (runtime: AssistantRuntime) => string | null;
   /**
    * Authoritative kill switch for the global assistant, checked per turn. The
    * caller wires this to `configManager.isAssistantEnabled()`, so a Settings
@@ -180,6 +207,12 @@ function isResumeError(err: unknown): boolean {
     message.includes('no conversation found') ||
     /conversation .*not found/.test(message) ||
     (message.includes('session') && /(not found|invalid|expired|does not exist|no longer)/.test(message)) ||
+    // Codex's app-server calls the same thing a THREAD, not a session: a failed
+    // `thread/resume` says the thread is gone, never the word "session". Without
+    // this arm the identical failure would rethrow on Codex instead of
+    // cold-starting, stranding the assistant on a conversation that no longer
+    // exists.
+    (message.includes('thread') && /(not found|invalid|expired|does not exist|no longer|unknown)/.test(message)) ||
     (message.includes('resume') && /(fail|unable|invalid|not found|expired)/.test(message))
   );
 }
@@ -210,11 +243,25 @@ function isSameLocalDay(aMs: number, bMs: number): boolean {
   );
 }
 
+/** One attached 'output' listener: which manager it is on, and under which runtime. */
+interface AgentThreadBridge {
+  runtime: AssistantRuntime;
+  manager: AgentSpawnManagerLike;
+  listener: (payload: unknown) => void;
+}
+
 export class AgentThreadService {
   /** ONE durable writer for all threads; owns the runId → threadId mapping. */
   private readonly sink: AgentThreadEventsSink;
-  /** threadId → 'output' listener, so the bridge attaches at most once per thread. */
-  private readonly eventBridges = new Map<string, (payload: unknown) => void>();
+  /**
+   * threadId → the per-manager 'output' listeners bridging that thread. ONE
+   * entry per (thread, runtime): the assistant can switch providers mid-life, so
+   * both managers must be listened to from the first turn — a bridge attached
+   * lazily only to the turn's own manager would miss the events of a turn that
+   * switched, including its session-id capture. Each listener carries the
+   * runtime it belongs to, which is how a captured id learns its provider.
+   */
+  private readonly eventBridges = new Map<string, AgentThreadBridge[]>();
 
   constructor(private readonly deps: AgentThreadServiceDeps) {
     this.sink = new AgentThreadEventsSink(deps.store, deps.logger);
@@ -280,14 +327,37 @@ export class AgentThreadService {
       );
     }
 
-    const model = (thread.model ?? this.deps.defaultModel()) ?? undefined;
+    // Which provider hosts THIS turn. Resolved once and threaded through
+    // everything below, so a Settings change mid-turn cannot leave the retention
+    // pass, the spawn, and the id capture disagreeing about the provider.
+    const runtime = this.deps.runtime();
+    const model = (thread.model ?? this.deps.defaultModel(runtime)) ?? undefined;
+
+    // A conversation id belongs to the provider that minted it: Codex's
+    // `thread/resume` cannot take a Claude session id, nor the reverse. On a
+    // runtime switch the stored id is therefore not stale, it is UNUSABLE —
+    // drop it and cold-start on the new provider. The durable transcript in
+    // agent_thread_events is untouched, so the user still sees their history.
+    // A stored id with NO recorded runtime predates migration 131, when Claude
+    // was the only host — so it is a Claude id, and a first Codex turn after the
+    // upgrade must cold-start rather than hand it to `thread/resume`.
+    const storedRuntime: AssistantRuntime | null =
+      thread.claudeSessionId === null ? null : (thread.sessionRuntime ?? 'claude-sdk');
+    if (storedRuntime !== null && storedRuntime !== runtime) {
+      this.deps.logger?.info(
+        `[agentThreadService] assistant runtime changed for thread ${threadId} ` +
+          `(${storedRuntime} → ${runtime}); starting a fresh conversation`,
+      );
+      this.deps.store.updateClaudeSessionId(threadId, null);
+      thread = this.deps.store.getThread(threadId) ?? thread;
+    }
 
     // Day-boundary context retention: on the first turn of a new local day,
     // apply the configured strategy BEFORE this turn spawns. May clear the
     // stored resume id (clear-daily) or run a /compact turn that recaptures it
     // (compact-daily) — so re-read the thread afterwards; the stored id always
     // reflects the live conversation.
-    await this.applyDailyRetention(thread, model);
+    await this.applyDailyRetention(thread, model, runtime);
     thread = this.deps.store.getThread(threadId) ?? thread;
 
     const resumeSessionId = thread.claudeSessionId ?? undefined;
@@ -298,17 +368,45 @@ export class AgentThreadService {
         : text;
 
     try {
-      await this.spawn(threadId, prompt, model, resumeSessionId);
+      await this.spawn(threadId, prompt, model, resumeSessionId, runtime);
     } catch (err) {
       if (resumeSessionId !== undefined && isResumeError(err)) {
         this.deps.logger?.warn(
           `[agentThreadService] stale resume for thread ${threadId}; retrying fresh: ${errMessage(err)}`,
         );
         this.deps.store.updateClaudeSessionId(threadId, null);
-        await this.spawn(threadId, prompt, model, undefined);
+        try {
+          await this.spawn(threadId, prompt, model, undefined, runtime);
+        } catch (retryErr) {
+          this.recordSpawnFailure(threadId, retryErr);
+          throw retryErr;
+        }
         return;
       }
+      this.recordSpawnFailure(threadId, err);
       throw err;
+    }
+  }
+
+  /**
+   * Surface a failed turn IN THE TRANSCRIPT, then let the caller rethrow.
+   *
+   * Without this the rail shows the person's own message and then nothing —
+   * `sendMessage` rejects into a caller with no dedicated error slot, so the
+   * failure only ever reached the console. Codex makes that unacceptable: its
+   * two most likely first-turn failures (ChatGPT auth required, Codex not
+   * installed) are exactly what a user hits on the turn they switch providers.
+   * Persisted AND published, so the running rail updates without a refetch.
+   * Fail-soft in both halves — reporting the failure must never replace it.
+   */
+  private recordSpawnFailure(threadId: string, err: unknown): void {
+    try {
+      const event = this.sink.recordAssistantError(threadId, errMessage(err));
+      this.deps.publish(threadId, this.toEnvelope(event));
+    } catch (recordErr) {
+      this.deps.logger?.warn(
+        `[agentThreadService] error-event record failed for thread ${threadId}: ${errMessage(recordErr)}`,
+      );
     }
   }
 
@@ -337,14 +435,32 @@ export class AgentThreadService {
    * better-sqlite3 is synchronous, so there is no await between the read and
    * the write for a concurrent call to race through.
    */
-  private async applyDailyRetention(thread: AgentThread, model: string | undefined): Promise<void> {
+  private async applyDailyRetention(
+    thread: AgentThread,
+    model: string | undefined,
+    runtime: AssistantRuntime,
+  ): Promise<void> {
     const now = this.nowMs();
     const last = this.deps.store.getLastTurnAt(thread.id);
     const sameDay = last !== null && isSameLocalDay(last, now);
     this.deps.store.setLastTurnAt(thread.id, now);
     if (sameDay) return;
 
-    const strategy = this.deps.contextRetention?.() ?? DEFAULT_ASSISTANT_CONTEXT_RETENTION;
+    const configured = this.deps.contextRetention?.() ?? DEFAULT_ASSISTANT_CONTEXT_RETENTION;
+    // 'compact-daily' has no implementation on Codex: `/compact` is a Claude SDK
+    // input the CLI executes server-side, whereas the Codex app-server protocol
+    // exposes no compaction RPC — sending the same string there would hand the
+    // model a literal user message reading "/compact". Degrade to the
+    // 'clear-daily' behaviour, which honours the user's actual intent (do not
+    // carry yesterday's context into today) with the mechanism that exists.
+    const strategy =
+      configured === 'compact-daily' && runtime !== 'claude-sdk' ? 'clear-daily' : configured;
+    if (strategy !== configured) {
+      this.deps.logger?.info(
+        `[agentThreadService] compact-daily is not supported on ${runtime}; ` +
+          `thread ${thread.id} starts the new day fresh instead`,
+      );
+    }
     if (strategy === 'auto-compact') return;
     if (thread.claudeSessionId === null) return;
 
@@ -361,7 +477,7 @@ export class AgentThreadService {
       this.deps.logger?.info(
         `[agentThreadService] compact-daily retention: compacting thread ${thread.id} for the new day`,
       );
-      await this.spawn(thread.id, COMPACT_PROMPT, model, thread.claudeSessionId);
+      await this.spawn(thread.id, COMPACT_PROMPT, model, thread.claudeSessionId, runtime);
     } catch (err) {
       if (isResumeError(err)) {
         this.deps.logger?.warn(
@@ -379,8 +495,10 @@ export class AgentThreadService {
 
   /** Tear down all live-tail bridges + the sink (app shutdown). */
   dispose(): void {
-    for (const listener of this.eventBridges.values()) {
-      this.deps.manager.off('output', listener);
+    for (const bridges of this.eventBridges.values()) {
+      for (const bridge of bridges) {
+        bridge.manager.off('output', bridge.listener);
+      }
     }
     this.eventBridges.clear();
     this.sink.dispose();
@@ -395,6 +513,7 @@ export class AgentThreadService {
     text: string,
     model: string | undefined,
     resumeSessionId: string | undefined,
+    runtime: AssistantRuntime,
   ): Promise<void> {
     const identity = agentSpawnIdentity(threadId);
     const options: AgentSpawnOptions = {
@@ -410,29 +529,67 @@ export class AgentThreadService {
       // system-prompt append, so a warm process's fingerprint only changes
       // when the prompt content itself changes (see the class doc comment).
       systemPromptAppend: getAgentSystemPrompt(),
+      // The two providers echo the prompt in opposite ways, and the transcript
+      // must end up with exactly ONE copy of the human's turn either way. The
+      // Codex app-server echoes every input natively, so its echo is suppressed
+      // (this service already recorded the turn itself, from the RAW text — an
+      // unsuppressed echo would also leak the contextHint, which must never
+      // reach the transcript). The Claude manager suppresses its own synthesized
+      // echo whenever `eventsSink` is set, so the flag is left off there.
+      ...(runtime === 'codex-sdk' ? { hidePromptFromTranscript: true } : {}),
       ...(model !== undefined ? { model } : {}),
       ...(resumeSessionId !== undefined ? { resumeSessionId } : {}),
     };
-    await this.deps.manager.spawnCliProcess(options);
+    await this.managerFor(runtime).spawnCliProcess(options);
   }
 
+  private managerFor(runtime: AssistantRuntime): AgentSpawnManagerLike {
+    return this.deps.managers[runtime];
+  }
+
+  /**
+   * Attach one live-tail listener per MANAGER for this thread, once. Both
+   * providers are bridged from the first turn regardless of which one is
+   * currently resolved: the runtime can change between turns, and a listener
+   * attached lazily to only the turn's own manager would miss the switched
+   * turn's events entirely, including its `system/init` — leaving the new
+   * conversation's id uncaptured and every following turn cold-starting.
+   *
+   * Two runtimes may resolve to the SAME manager instance (a demo or test
+   * wiring); the identity check keeps that from double-writing the transcript.
+   */
   private ensureEventBridge(threadId: string): void {
     if (this.eventBridges.has(threadId)) return;
     const identity = agentSpawnIdentity(threadId);
-    const listener = (payload: unknown): void => {
-      this.onOutput(threadId, identity, payload);
-    };
-    this.deps.manager.on('output', listener);
-    this.eventBridges.set(threadId, listener);
+    const bridges: AgentThreadBridge[] = [];
+    for (const [runtime, manager] of Object.entries(this.deps.managers) as Array<
+      [AssistantRuntime, AgentSpawnManagerLike]
+    >) {
+      if (bridges.some((bridge) => bridge.manager === manager)) continue;
+      const listener = (payload: unknown): void => {
+        this.onOutput(threadId, identity, runtime, payload);
+      };
+      manager.on('output', listener);
+      bridges.push({ runtime, manager, listener });
+    }
+    this.eventBridges.set(threadId, bridges);
   }
 
   /** Bridge one 'output' event: capture the session id + publish live-tail. */
-  private onOutput(threadId: string, identity: string, payload: unknown): void {
+  private onOutput(
+    threadId: string,
+    identity: string,
+    runtime: AssistantRuntime,
+    payload: unknown,
+  ): void {
     if (typeof payload !== 'object' || payload === null) return;
     const p = payload as Partial<AgentOutputPayload>;
     if (p.panelId !== identity || p.type !== 'json') return;
 
-    this.maybeCaptureSessionId(threadId, p.data);
+    // `runtime` is the manager the event arrived ON, not the currently resolved
+    // one — the id is stamped with the provider that actually minted it, which
+    // is what makes a later switch detectable.
+    this.maybeCaptureSessionId(threadId, runtime, p.data);
     try {
       this.deps.publish(threadId, this.toEnvelope(p.data));
     } catch (err) {
@@ -443,18 +600,23 @@ export class AgentThreadService {
   }
 
   /**
-   * Persist the SDK conversation id from a system/init event. The manager's own
-   * capture targets `workflow_runs` (no row for a run-less thread), so the thread
-   * relies on this. Unconditional overwrite: a warm turn re-writes the same id
-   * (harmless); a fresh conversation (post stale-resume) writes the new id — the
-   * stored id always reflects the live conversation.
+   * Persist the provider's conversation id from a system/init event, TOGETHER
+   * with the runtime it was captured under. The manager's own capture targets
+   * `workflow_runs` (no row for a run-less thread), so the thread relies on this.
+   * Unconditional overwrite: a warm turn re-writes the same id (harmless); a
+   * fresh conversation (post stale-resume, or post runtime switch) writes the
+   * new id — the stored pair always reflects the live conversation.
+   *
+   * Provider-neutral by construction: Codex's `agent_init` reaches the 'output'
+   * stream already projected to `system` / `init` with `session_id` set to its
+   * `external_session_id`, so ONE shape check serves both managers.
    */
-  private maybeCaptureSessionId(threadId: string, data: unknown): void {
+  private maybeCaptureSessionId(threadId: string, runtime: AssistantRuntime, data: unknown): void {
     if (typeof data !== 'object' || data === null) return;
     const e = data as { type?: unknown; subtype?: unknown; session_id?: unknown };
     if (e.type !== 'system' || e.subtype !== 'init') return;
     if (typeof e.session_id !== 'string' || e.session_id === '') return;
-    this.deps.store.updateClaudeSessionId(threadId, e.session_id);
+    this.deps.store.updateClaudeSessionId(threadId, e.session_id, runtime);
   }
 
   private toEnvelope(data: unknown): { type: string; payload: unknown; timestamp: string } {

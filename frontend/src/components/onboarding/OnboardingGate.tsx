@@ -9,6 +9,8 @@ import { DEFAULT_QUICK_MODEL, QUICK_RUN_TYPE_KEY } from '../../../../shared/type
 import type { IPCResponse } from '../../utils/api';
 import { API } from '../../utils/api';
 import { useConfigStore } from '../../stores/configStore';
+import { assistantRuntimeProvider } from '../../../../shared/types/agentThread';
+import { resolveAssistantRuntimeFromConfig } from '../../utils/assistantRuntime';
 import {
   retryCodexModelCatalog,
   useCodexModelCatalog,
@@ -546,14 +548,25 @@ export function OnboardingGate(): React.JSX.Element | null {
     modelNextInFlight.current = true;
     try {
       if (defaultModel !== null) {
-        // `assistantModel` follows only a CLAUDE pick: the chat assistant is
-        // hard-wired to ClaudeCodeManager, so a Codex id there would be spawned
-        // against a runtime that cannot serve it. 'auto' is skipped for the same
+        // `assistantModel` follows the pick only when it matches the RESOLVED
+        // assistant runtime's provider — the assistant can now run on either
+        // Claude or Codex (docs/proposals/ASSISTANT-CODEX-RUNTIME.md), and
+        // follows `defaultAgentRuntime` by default (resolveAssistantRuntime),
+        // so a Codex pick here reaches the assistant with no extra UI once
+        // Codex is the default runtime. Read at CLICK TIME: step 2
+        // (handleDefaultRuntimeNext) has already persisted `defaultAgentRuntime`
+        // by the time this fires, so the config store already reflects it. An
+        // explicit Settings → Assistant runtime pick (assistantRuntime) still
+        // wins inside the resolver, so this never overwrites a deliberate
+        // choice with the wrong provider's id. 'auto' is skipped for the same
         // reason it exists — it means "no explicit model", which the assistant
         // already expresses by leaving the field unset.
+        const resolvedAssistantRuntime = resolveAssistantRuntimeFromConfig(
+          useConfigStore.getState().config,
+        );
         await useConfigStore.getState().updateConfig({
           defaultLaunchModel: defaultModel,
-          ...(modelProvider === 'claude' && defaultModel !== 'auto'
+          ...(modelProvider === assistantRuntimeProvider(resolvedAssistantRuntime) && defaultModel !== 'auto'
             ? { assistantModel: defaultModel }
             : {}),
         });

@@ -474,6 +474,22 @@ cross-project read + propose-action family), or **design** (the minimal Design M
 is enforced by lookup, not by filtering — a tool the active scope does not advertise throws
 `Unknown tool` on direct invocation, not merely absent from ListTools.
 
+The global assistant that uses the **global-agent** scope is hosted on ONE of two runtimes,
+resolved per turn by `resolveAssistantRuntime` (shared/types/agentThread.ts): the explicit
+`assistantRuntime` setting, else the provider of `defaultAgentRuntime` (so "Codex is my default"
+from onboarding carries over), else `claude-sdk`. `AgentThreadService` holds both managers and
+spawns with the same hermetic contract on either — `isolation: 'agent'`, `mcpScope:
+'global-agent'`, an injected transcript sink, no run row. On Codex that contract is honoured by
+the app-server manager's isolation branch: read-only sandbox, `approvalPolicy: never`, the shell,
+plugins, apps/connectors and web search disabled through the thread config, the user's own
+`config.toml` MCP servers disabled by name (the thread config MERGES with that file), no
+`agent_invocations`/`raw_events` bookkeeping, and a local fail-closed policy that accepts only
+`cyboflow_*` MCP elicitations (nothing reaches the approval/question routers, which need a
+running `workflow_runs` row). Known residual on Codex 0.144.3: multi-agent spawn cannot be
+switched off by config; sub-agents inherit the same confinement. The
+stored resume id is provider-bound (`agent_threads.session_runtime`); switching runtimes
+cold-starts the conversation. Plan + review log: `docs/proposals/ASSISTANT-CODEX-RUNTIME.md`.
+
 **All three surfaces derive from one registry** (`mcpServer/toolRegistry/`). Each tool is one
 `defineTool` entry — name, description, a zod schema, the envelope it forwards, and a
 `toEnvelope` mapping the snake_case arguments to the handler's camelCase params. From that entry

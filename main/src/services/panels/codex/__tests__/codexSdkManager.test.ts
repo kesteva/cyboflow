@@ -10,6 +10,8 @@ import type {
   CodexAppServerClientOptions,
 } from '../appServer/client';
 import type { AppServerInitializeParams } from '../appServer/protocol';
+import type { AgentStreamEvent } from '../../../../../../shared/types/agentStream';
+import { EventRouter } from '../../../../../../shared/streamParser';
 import { CODEX_RAW_NOTIFICATION_EVENT_TYPE } from '../appServer/rawNotificationSink';
 import {
   CodexSdkManager,
@@ -1072,6 +1074,175 @@ describe('CodexSdkManager warm app-server reuse', () => {
       // Evicted → a matching resume now cold-respawns instead of reusing a dead entry.
       await manager.spawnCliProcess(baseTurn({ prompt: 'second', resumeSessionId: 'codex-thread-1' }));
       expect(clients).toHaveLength(2);
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hermetic global-agent (isolation) spawn
+// ---------------------------------------------------------------------------
+
+/**
+ * A SpawnEventsSink test double. The global-agent thread injects the real
+ * AgentThreadEventsSink, which persists thread-keyed into `agent_thread_events`;
+ * all this manager owes it is the SAME narrowed stream the built-in sink would
+ * have received, plus a dispose at turn teardown.
+ */
+class RecordingEventsSink {
+  readonly events: AgentStreamEvent[] = [];
+  readonly attached: string[] = [];
+  readonly disposed: Array<string | undefined> = [];
+  private teardown: (() => void) | null = null;
+
+  attachToRouter(router: EventRouter<AgentStreamEvent>, runId: string): void {
+    this.attached.push(runId);
+    this.teardown = router.onRun(runId, (event) => {
+      this.events.push(event);
+    });
+  }
+
+  dispose(runId?: string): void {
+    this.disposed.push(runId);
+    this.teardown?.();
+    this.teardown = null;
+  }
+}
+
+const AGENT_IDENTITY = 'agent:thread-1';
+
+function agentTurn(
+  sink: RecordingEventsSink,
+  overrides: Record<string, unknown> = {},
+): Parameters<CodexSdkManager['spawnCliProcess']>[0] {
+  return {
+    // panelId === sessionId === `agent:<threadId>`, and NO runId — the thread has
+    // no workflow_runs row to name.
+    panelId: AGENT_IDENTITY,
+    sessionId: AGENT_IDENTITY,
+    worktreePath: '/Users/me',
+    prompt: 'what changed today?',
+    isolation: 'agent',
+    mcpScope: 'global-agent',
+    hidePromptFromTranscript: true,
+    eventsSink: sink,
+    ...overrides,
+  } as Parameters<CodexSdkManager['spawnCliProcess']>[0];
+}
+
+describe('CodexSdkManager hermetic global-agent spawn', () => {
+  it('routes the turn into the injected sink and writes NEITHER run-keyed table', async () => {
+    const db = createDb();
+    try {
+      const { manager } = makeWarmManager(db);
+      const sink = new RecordingEventsSink();
+
+      await manager.spawnCliProcess(agentTurn(sink));
+
+      // The injected sink REPLACES the built-in RawEventsSink — same stream.
+      expect(sink.attached).toEqual([AGENT_IDENTITY]);
+      expect(sink.events.map((event) => event.type)).toEqual([
+        'agent_session_info',
+        'agent_init',
+        'agent_message',
+        'agent_result',
+      ]);
+      expect(sink.disposed).toEqual([AGENT_IDENTITY]);
+
+      // raw_events.run_id is FK'd to workflow_runs and agent_invocations INSERTs
+      // the same FK — `agent:thread-1` has no row in it, so both are skipped
+      // outright rather than left to fail (throw) or WARN-drop per notification.
+      const rawCount = db.prepare('SELECT COUNT(*) AS c FROM raw_events').get() as { c: number };
+      const invocationCount = db
+        .prepare('SELECT COUNT(*) AS c FROM agent_invocations')
+        .get() as { c: number };
+      expect(rawCount.c).toBe(0);
+      expect(invocationCount.c).toBe(0);
+
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('starts the thread read-only with no shell tool, no web search, and the global-agent MCP scope', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      await manager.spawnCliProcess(agentTurn(new RecordingEventsSink()));
+
+      expect(clients[0].requests[1]).toMatchObject({
+        method: 'thread/start',
+        params: {
+          cwd: '/Users/me',
+          sandbox: 'read-only',
+          approvalPolicy: 'never',
+          config: {
+            features: { shell_tool: false },
+            web_search: 'disabled',
+            mcp_servers: {
+              cyboflow: { env: { CYBOFLOW_MCP_SCOPE: 'global-agent' } },
+            },
+          },
+        },
+      });
+
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('declines a server request locally instead of routing it to the approval bridge', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db);
+      await manager.spawnCliProcess(agentTurn(new RecordingEventsSink()));
+
+      const respond = vi.fn();
+      // The fake approval router answers ALLOW, so an 'accept' here would prove
+      // the request reached the bridge (whose real router would instead throw
+      // RunNotRunningError for this run-less id and silently decline).
+      await clients[0].options.onServerRequest?.({
+        id: 'command-1',
+        method: 'item/commandExecution/requestApproval',
+        params: {
+          threadId: 'codex-thread-1',
+          turnId: 'turn-1',
+          itemId: 'item-command',
+          startedAtMs: 100,
+          approvalId: 'approval-command',
+          environmentId: null,
+          command: 'rm -rf /',
+          cwd: '/Users/me',
+        },
+        respond,
+        reject: vi.fn(),
+      });
+
+      expect(respond).toHaveBeenCalledWith({ decision: 'decline' });
+
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('keeps a run-scoped spawn writing both tables (no isolation regression)', async () => {
+    const db = createDb();
+    try {
+      const { manager } = makeWarmManager(db);
+      await manager.spawnCliProcess(baseTurn({ prompt: 'ship it' }));
+
+      const rawCount = db.prepare('SELECT COUNT(*) AS c FROM raw_events').get() as { c: number };
+      const invocationCount = db
+        .prepare('SELECT COUNT(*) AS c FROM agent_invocations')
+        .get() as { c: number };
+      expect(rawCount.c).toBeGreaterThan(0);
+      expect(invocationCount.c).toBe(1);
+
       await manager.killAllProcesses();
     } finally {
       db.close();
