@@ -171,24 +171,39 @@ export function buildCodexAppServerThreadConfiguration(
       config: {
         ...buildMcpConfig(runId, runtimeConfig, options.mcpScope, isolation?.disabledMcpServers ?? []),
         // Every built-in surface a read-only sandbox does not already close,
-        // each by its documented key (Codex config reference):
+        // each by its documented key (Codex config reference), verified by a
+        // direct app-server probe on the pinned build (0.153.3, 2026-09-09):
         //   shell_tool / unified_exec — the shell + the PTY-backed `exec` tool
-        //     (verified live: shell_tool alone still leaves `exec`);
-        //   multi_agent — spawn_agent / send_input / wait_agent … ;
+        //     (shell_tool alone still leaves `exec`);
+        //   plugins — plugin-declared MCP servers (the bundled Computer Use
+        //     plugin's cua_repl); disabling one BY NAME instead fails the thread;
         //   apps + apps._default.enabled — ChatGPT app/connector tools, which
         //     "are not controlled by the sandboxed-command network proxy";
-        //   remote_plugin — the remote plugin catalog (request_plugin_install).
-        // Spellings where the pinned build (0.144.3) predates the current docs:
-        // `plugins` (verified live — it is what removed the bundled Computer Use
-        // plugin's MCP server) and `imagegen`; `collab` / `collaboration` are
-        // its multi-agent names. Unknown keys are ignored by the app-server
-        // (verified live), so every spelling rides.
+        //   remote_plugin — the remote plugin catalog (request_plugin_install);
+        //   image_generation — `image_gen__imagegen` (the older `imagegen`
+        //     spelling no longer removes it: it generated an image on 0.153.3);
+        //   goals — create_goal / get_goal / update_goal;
+        //   view_image — reads arbitrary local image files into the model.
+        // `collab` / `collaboration` / `imagegen` are older spellings that still
+        // ride: unknown feature keys are ignored (verified live) — but a key that
+        // expects a STRUCT, e.g. `tool_registry`, rejects a boolean and fails
+        // the thread start, so only documented boolean features are listed.
         //
-        // KNOWN RESIDUAL (0.144.3): none of multi_agent / collab / collaboration
-        // removed `collaboration.spawn_agent` in the live probe. A spawned
-        // sub-agent inherits this same thread configuration (no shell, no
-        // foreign MCP, read-only sandbox), so it is a cost surface, not a data
-        // escape; the developer instructions forbid it as well.
+        // KNOWN RESIDUALS (0.153.3):
+        //   - none of multi_agent / multi_agent_v2 / collab / collaboration
+        //     removes `collaboration.spawn_agent`. A spawned sub-agent inherits
+        //     this same thread configuration (no shell, no foreign MCP, read-only
+        //     sandbox), so it is a cost surface, not a data escape; the developer
+        //     instructions forbid it as well.
+        //   - "code mode": MCP tools are exposed ONLY inside the `functions.exec`
+        //     JS runtime (as `mcp__cyboflow__<name>`), never as direct function
+        //     tools. Neither features.code_mode / code_mode_only nor
+        //     mcp_tool_exposure="direct" (thread config or process -c) changes
+        //     that for the current models. The runtime has no shell, no
+        //     `require`, and no network; the developer instructions sanction it
+        //     for cyboflow_* calls and nothing else (agentThreadPrompt.ts).
+        //   - include_apply_patch_tool=false does not remove `apply_patch`; the
+        //     read-only sandbox rejects every patch.
         features: {
           shell_tool: false,
           unified_exec: false,
@@ -199,6 +214,9 @@ export function buildCodexAppServerThreadConfiguration(
           remote_plugin: false,
           plugins: false,
           imagegen: false,
+          image_generation: false,
+          goals: false,
+          view_image: false,
         },
         apps: { _default: { enabled: false } },
         include_apply_patch_tool: false,
