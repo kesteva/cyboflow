@@ -124,8 +124,19 @@ export async function runbookBootstrapPreflight(
   // without turning verbose logging on for every degenerate task in every run.
   const quiet =
     !decision.proceed && (decision.reason === 'disabled' || decision.reason === 'no-environment');
+  // The three proceed shapes read very differently to whoever is looking at this
+  // log to decide whether the feature did the right thing — deriving a rival
+  // runbook and re-proving an existing one are opposite actions (F4 / Codex #2),
+  // and a line that called both "would bootstrap" would hide exactly the
+  // distinction stage 2 exists to make.
   const line = decision.proceed
-    ? `[runbookBootstrapPreflight] would bootstrap (${decision.adopt ? 'adopt committed runbook' : 'derive a new runbook'})`
+    ? `[runbookBootstrapPreflight] would bootstrap (${
+        decision.mode === 'reprove'
+          ? 're-prove the existing runbook'
+          : decision.adopt
+            ? 'adopt committed runbook'
+            : 'derive a new runbook'
+      })`
     : `[runbookBootstrapPreflight] declined: ${decision.reason}`;
   const detail = {
     runId: args.runId,

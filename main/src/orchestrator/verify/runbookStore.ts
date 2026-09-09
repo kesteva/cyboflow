@@ -19,26 +19,54 @@
  * is a CONJUNCTION re-checked on every read. `status()` answers `'proven'` only
  * when ALL of the following hold — record present and marked proven, AND the
  * portable file at the probe path parses and hashes to the record's
- * `portable_hash`, AND a freshly computed project input-hash equals the stored
- * one, AND the host fingerprint equals the stored one. §5.3: "Any component
- * changing demotes." §1 is the reason: the failed `.cyboflow/verify.json` era
- * proved that a config which is merely WRITTEN is worth nothing, and a config
- * that was once proven but whose inputs have since moved is the same thing
- * wearing a green badge.
+ * `portable_hash` WHEN THIS TREE CARRIES ONE AT ALL (see THE FILE IS AN EXPORT
+ * below), AND a freshly computed project input-hash equals the stored one, AND
+ * the host fingerprint equals the stored one. §5.3: "Any component changing
+ * demotes." §1 is the reason: the failed `.cyboflow/verify.json` era proved that
+ * a config which is merely WRITTEN is worth nothing, and a config that was once
+ * proven but whose inputs have since moved is the same thing wearing a green
+ * badge.
  *
- * DEMOTION IS A WRITE-THROUGH ON READ, WITH ONE DELIBERATE EXCEPTION.
- * A hash / input-hash / host-fingerprint mismatch DEMOTES the record to
- * `'unproven-draft'` right there in the read path — the drift is discovered by
- * whichever request asks next, and the record is corrected then rather than left
- * lying until someone re-runs setup. But a MISSING FILE with an existing record
- * does NOT demote: that is the ordinary pre-merge state (the setup flow commits
- * the portable half on its own branch; every OTHER branch legitimately lacks the
- * file until the merge lands). Demoting there would make a proof evaporate the
- * first time an unrelated lane asked — the read answers `'unproven-draft'` for
- * THIS probe path (correctly: this tree cannot be verified with a runbook it
- * does not contain) while leaving the record intact for the trees that do have
- * it. That asymmetry is the whole difference between "this tree lacks it" and
- * "this runbook changed".
+ * DRIFT IS COMPUTED ON EVERY READ AND NEVER PERSISTED (F4 / Codex #2 —
+ * docs/proposals/visual-verification-brittleness-fixes.md). An input-hash /
+ * host-fingerprint mismatch makes THIS read answer `'unproven-draft'` with
+ * reason `'drifted'`, and a portable file that is PRESENT but is not the
+ * record's content answers `'content-drifted'` (the two are separated because
+ * only the first can be cleared by re-proving — see
+ * {@link VerifyRunbookStatusReason}); neither writes ANYTHING. The persisted
+ * `status` column therefore moves on exactly two verbs — `registerDraft` (down)
+ * and `markProven` (up) — and a proof survives the transient conditions that
+ * used to destroy it outright: a dependency bump, an app release, a stable↔dev
+ * switch, a one-character `notes` edit, or simply being read from a tree whose
+ * file has not merged yet. Recovery used to mean a full re-derive; now it means
+ * the inputs coming back, or a re-prove that re-stamps them.
+ *
+ * The gate and the badge stay honest without that destruction because BOTH go
+ * through this conjunction on every read (`verificationRequests.ts:475`, `:953`
+ * re-validate a stored `'proven'` rather than trusting the column). THE ACCEPTED
+ * CONSEQUENCE (Codex #2): `getByHash` returns the persisted status WITHOUT
+ * recomputing drift, and the runner's execution-time pin check
+ * (`verificationAgentRunner.ts:967`) rejects a non-`'proven'` record — so with
+ * non-writing drift that execution-time signal now fires only for a
+ * RE-REGISTERED (superseded) record, never for a drifted one. The ENQUEUE GATE
+ * is the freshness check. The residual window (gate says proven → something
+ * drifts → the pinned run still executes) is the same one that has always
+ * existed between the gate's read and a later one: the request is
+ * content-addressed to `portable_json` and its snapshot sha is already fixed.
+ *
+ * THE FILE IS AN EXPORT; THE RECORD IS WHAT EXECUTES (F10). Nothing reads
+ * `.cyboflow/verify-runbook.json` inside the detached snapshot — the runner
+ * fetches `portable_json` by content hash (`getByHash`). So a probe path that
+ * GENUINELY LACKS the file — the ordinary pre-merge state on every branch that
+ * has not landed the runbook yet — SKIPS the portable-hash conjunct and is
+ * judged on the other two; the input hash still refuses a branch whose scripts
+ * or lockfile moved, which is the part that actually changes what "build and
+ * serve this" means. A file that is PRESENT but unparseable, or that hashes to
+ * something else, is real content drift and still refuses. This is why
+ * `readPortableFile` must answer `null` ONLY for a genuinely absent file and
+ * THROW on every other IO failure (Codex #8): collapsing an unreadable tree into
+ * `null` would launder it into the record-authoritative path, whereas a throw
+ * lands in this class's fail-soft catch as `'absent'`/`'indeterminate'`.
  *
  * IO IS INJECTED, NOT IMPORTED (see {@link VerifyRunbookStoreDeps}). Reading the
  * portable file, hashing project inputs, and fingerprinting the host are all
@@ -98,14 +126,36 @@ export type VerifyRunbookStatus = 'proven' | 'unproven-draft' | 'absent';
  *  - `'draft'` — a record exists and is marked `'unproven-draft'`. There is no
  *    proof to endanger, so re-deriving over it is safe.
  *  - `'proven-file-absent-here'` — a record is PROVEN and this tree simply
- *    lacks the portable file. The documented pre-merge case (see the class
- *    doc's deliberate exception): the honest answer for this probe path is
- *    `'unproven-draft'`, but the record is live and someone else's. **Never
- *    write over this one** — the resolution is to merge the branch carrying
- *    the file, not to derive a new runbook.
- *  - `'drifted'` — a proven record was just DEMOTED by this very read (hash,
- *    project-input, or host-fingerprint mismatch). The proof is already gone;
- *    the record now reads `'unproven-draft'` for everyone.
+ *    lacks the portable file. RETAINED IN THIS UNION BUT NO LONGER PRODUCED BY
+ *    `statusDetail` (F10): the file is an export and the record is what
+ *    executes, so an absent file now skips only the portable-hash conjunct and
+ *    the read can still answer `'proven'`. It stays in the type because other
+ *    modules still map it — `bootstrapEligibility` → `'proof-belongs-elsewhere'`
+ *    (never bootstrap), the scheduler → `VERIFY_RUNBOOK_ELSEWHERE_REASON` — and
+ *    an injected/stubbed status resolver may still emit it. If it is ever
+ *    produced again, the rule it carries is unchanged: **never write over this
+ *    one**; the resolution is to merge the branch carrying the file.
+ *  - `'drifted'` — a proven record's PROVENANCE no longer holds: the project
+ *    input hash or the host fingerprint moved away from what the proof was
+ *    taken against. COMPUTED, NOT PERSISTED (F4): the DB row still reads
+ *    `'proven'`, this read answers `'unproven-draft'`, and the next read
+ *    re-derives the same answer from the same evidence. A caller that WRITES
+ *    must treat it as "re-prove this record", not "re-derive over it" — the
+ *    runbook itself may be perfectly good and merely proven against inputs
+ *    that have since moved. This is the ONE drift a re-prove can clear, which
+ *    is why it is spelled apart from the next one.
+ *  - `'content-drifted'` — the tree DOES carry a portable file and it is not
+ *    the record's content: it no longer parses, or it hashes to something other
+ *    than `portable_hash`. Also computed and never persisted, and it gates
+ *    exactly like `'drifted'` — but its REMEDY is the opposite one, which is
+ *    why the two are not one reason (F4 fix round). A re-prove cannot clear
+ *    this: promotion deliberately never re-stamps `portable_hash` (Codex #1),
+ *    so a proof pinned to the record would pass and the very next read would
+ *    compute the same mismatch — a passing proof that can never be confirmed,
+ *    once per run, forever. What this needs is RE-REGISTRATION of the tree's
+ *    revision (`registerDraft`, i.e. the Verify Setup flow) and then a proof of
+ *    that. See {@link decideRunbookBootstrap}, which declines it for exactly
+ *    this reason.
  *  - `'indeterminate'` — the store could not observe enough to answer (a
  *    pre-096 DB, a SQL error, an input hash that would not compute). Fails soft
  *    to `'absent'` like everything else here, but is NOT evidence that nothing
@@ -123,6 +173,7 @@ export type VerifyRunbookStatusReason =
   | 'draft'
   | 'proven-file-absent-here'
   | 'drifted'
+  | 'content-drifted'
   | 'indeterminate';
 
 /** The three-valued gate answer plus the situation that produced it. */
@@ -140,9 +191,17 @@ export interface VerifyRunbookStatusDetail {
 export interface VerifyRunbookStoreDeps {
   /**
    * Read `<dirPath>/.cyboflow/verify-runbook.json` (the portable half). Returns
-   * the raw file text, or `null` when the file is ABSENT — a distinction the
-   * store depends on: absent is the benign pre-merge case that must not demote,
-   * while unparseable/mismatched content is real drift that must.
+   * the raw file text, or `null` when the file is GENUINELY ABSENT.
+   *
+   * THE NULL IS LOAD-BEARING AND NARROW (F10 / Codex #8). `null` means "this
+   * tree does not carry the file", which the store treats as
+   * record-authoritative: the portable-hash conjunct is skipped and the proof is
+   * judged on the input hash + host fingerprint alone. Every OTHER failure —
+   * permissions, an IO error, a path component that is not a directory in a way
+   * the implementation cannot read as absence — must REJECT, so it degrades to
+   * the fail-soft `'absent'`/`'indeterminate'` answer instead of laundering an
+   * unreadable tree into a proof. Unparseable/mismatched CONTENT is neither: it
+   * is real drift, and the store refuses it.
    */
   readPortableFile: (dirPath: string) => Promise<string | null>;
   /**
@@ -212,23 +271,39 @@ export class VerifyRunbookStore {
    *     freshly cloned). Behaves exactly like `'absent'` at the gate; the
    *     distinction only sharpens the CTA.
    *   - record marked `'unproven-draft'` → `'unproven-draft'`, unconditionally
-   *     (already the lowest non-absent state — nothing to re-check, nothing to
-   *     demote).
+   *     (already the lowest non-absent state — nothing to re-check, and a drift
+   *     check could only ever refuse, never promote).
    *   - record marked `'proven'`:
-   *       * file absent                  → `'unproven-draft'`, NO demotion (the
-   *         pre-merge case — see the class doc's deliberate exception).
+   *       * file GENUINELY ABSENT here   → the portable-hash conjunct is
+   *         SKIPPED and the other two decide (F10: the record, not the file, is
+   *         what a proof executes — see the class doc). The pre-merge tree can
+   *         therefore still read `'proven'`.
    *       * file unparseable, or hashes
-   *         to something else            → DEMOTE, `'unproven-draft'`.
-   *       * fresh input-hash differs     → DEMOTE, `'unproven-draft'`.
-   *       * host fingerprint differs     → DEMOTE, `'unproven-draft'`.
-   *       * all four agree               → `'proven'`.
+   *         to something else            → `'unproven-draft'`/`'content-drifted'`
+   *         (a DIFFERENT remedy from the two below: re-register, do not
+   *         re-prove — see {@link VerifyRunbookStatusReason}).
+   *       * fresh input-hash differs     → `'unproven-draft'`/`'drifted'`.
+   *       * host fingerprint differs     → `'unproven-draft'`/`'drifted'`.
+   *       * the applicable conjuncts
+   *         all agree                    → `'proven'`.
+   *
+   * NONE OF THOSE ANSWERS WRITES (F4). The persisted `status` column is not
+   * corrected here; it moves only under `registerDraft`/`markProven`, and every
+   * gate/badge read recomputes this conjunction — see the class doc.
    *
    * A stored `input_hash` / `host_fingerprint_json` of NULL against a freshly
-   * computed non-null value counts as a DIFFERENCE and demotes. That is the
+   * computed non-null value counts as a DIFFERENCE and refuses. That is the
    * conservative reading of "any component changing demotes": a proven record
    * whose provenance was never captured cannot be shown to still hold, and the
    * cost of being wrong here is one re-proof, versus shipping against a runbook
    * proven on inputs nobody recorded.
+   *
+   * A READ THAT CANNOT OBSERVE ITS INPUTS IS NOT A DRIFT. A `computeInputHash`
+   * of `null`, a `readPortableFile` that REJECTS (permissions, IO — see that
+   * dep's contract), or any SQL error lands on the fail-soft
+   * `'absent'`/`'indeterminate'` answer: refused, but never mistaken for
+   * evidence that something changed, and — like every other answer here — never
+   * written.
    */
   async status(
     projectId: number,
@@ -245,9 +320,9 @@ export class VerifyRunbookStore {
    *
    * This is the real implementation; `status()` is a projection of it, so the
    * gate's answer and a writing caller's answer can never be computed by two
-   * code paths that drift. It has the same side effect the three-valued version
-   * always had — a drift check that fails DEMOTES the record write-through — so
-   * asking for the detail is not a cheaper or more passive read.
+   * code paths that drift. BOTH ARE PURE READS (F4): a drift check that fails
+   * answers `'drifted'` and writes nothing, so asking for the detail — or asking
+   * at all — can no longer cost a project its proof.
    */
   async statusDetail(
     projectId: number,
@@ -271,18 +346,23 @@ export class VerifyRunbookStore {
 
       if (row.status !== 'proven') return { status: 'unproven-draft', reason: 'draft' };
 
-      // The pre-merge case: this tree simply does not carry the file. Report
-      // honestly for THIS probe path without touching the record.
-      if (rawFile === null) {
-        return { status: 'unproven-draft', reason: 'proven-file-absent-here' };
-      }
-
-      if (!parsedFile) {
-        return this.demoted(projectId, modality, 'portable file no longer parses');
-      }
-      const freshHash = runbookPortableHash(parsedFile);
-      if (freshHash !== row.portable_hash) {
-        return this.demoted(projectId, modality, 'portable runbook hash drift');
+      // F10 — RECORD-AUTHORITATIVE WHEN THE FILE IS GENUINELY ABSENT HERE.
+      // The proof executes the DB record's `portable_json` (the runner resolves
+      // it by content hash), so a tree that simply does not carry the export
+      // cannot change WHAT would run: the portable-hash conjunct has nothing to
+      // compare and is skipped. The other two conjuncts below still run, and the
+      // input hash is the one that matters for a branch — it refuses a tree
+      // whose scripts or lockfile moved away from what the proof was taken
+      // against. `readPortableFile` guarantees `null` means ABSENT and never
+      // UNREADABLE (Codex #8), so nothing unreadable reaches this path.
+      if (rawFile !== null) {
+        if (!parsedFile) {
+          return this.drifted(projectId, modality, 'content-drifted', 'portable file no longer parses');
+        }
+        const freshHash = runbookPortableHash(parsedFile);
+        if (freshHash !== row.portable_hash) {
+          return this.drifted(projectId, modality, 'content-drifted', 'portable runbook hash drift');
+        }
       }
 
       const freshInputHash = await this.deps.computeInputHash(probePath);
@@ -296,16 +376,22 @@ export class VerifyRunbookStore {
         return { status: 'absent', reason: 'indeterminate' };
       }
       if (freshInputHash !== row.input_hash) {
-        return this.demoted(projectId, modality, 'project input hash drift');
+        return this.drifted(projectId, modality, 'drifted', 'project input hash drift');
       }
 
       const freshFingerprint = await this.deps.hostFingerprint();
       if (freshFingerprint !== row.host_fingerprint_json) {
-        return this.demoted(projectId, modality, 'host fingerprint drift');
+        return this.drifted(projectId, modality, 'drifted', 'host fingerprint drift');
       }
 
       return { status: 'proven', reason: 'proven' };
     } catch (err) {
+      // The single fail-soft answer for everything this method could not
+      // observe: a pre-096 DB, a SQL error, and — since F10/Codex #8 — a
+      // `readPortableFile` that REJECTED. That last one is the load-bearing
+      // arm: an unreadable file must land HERE, not on the record-authoritative
+      // path an absent file takes, so 'absent'/'indeterminate' is both non-'proven'
+      // and non-writing. The gate skips; nothing is destroyed.
       this.deps.logger?.warn('[VerifyRunbookStore] status failed (fail-soft)', {
         projectId,
         modality,
@@ -435,9 +521,39 @@ export class VerifyRunbookStore {
    * and the flip is rejected — the proof attests to content that is no longer
    * what the record holds.
    *
-   * Synchronous (no injected IO on this path), and the one method whose failure
-   * is REPORTED rather than swallowed: silently declining to record a proof
-   * would strand the wizard in a loop that can never exit.
+   * `fresh` RE-STAMPS THE PROVENANCE THE DRIFT CHECK COMPARES AGAINST (F4 /
+   * Codex #1). The stored `input_hash` / `host_fingerprint_json` were written by
+   * `registerDraft`, over whatever tree and host happened to be current when the
+   * DRAFT was written — which for the setup flow is a flow worktree, and for a
+   * record that has been sitting a while is a host that has since taken an
+   * Electron or playwright bump. The proof, by contrast, was just obtained HERE,
+   * so the caller passes what it observed at promotion time and the record
+   * starts describing the thing that was actually proven. Omit it and the flip
+   * is status-only, exactly as before.
+   *
+   * NEVER `portable_hash` (Codex #1, explicitly rejected in §3 of the fix set):
+   * that column is the CONTENT ADDRESS of `portable_json` and the target of every
+   * pin, the snapshot the proof executed in is already disposed by the time this
+   * runs, and re-stamping it would silently re-point live pins at content they
+   * never attested to. Both CAS predicates stay, for the same reason.
+   *
+   * AND NEVER A NULL `input_hash` OVER A STORED ONE (F4 fix round). The re-stamp
+   * is FIELD-BY-FIELD because `fresh.inputHash` carries a third state that
+   * `hostFingerprint` does not: `null` means "could not observe this tree" (the
+   * probe path was cleaned up, a manifest was momentarily unreadable), not "the
+   * inputs are empty". Writing it would be self-destroying — `statusDetail`
+   * counts a stored NULL against a freshly computed value as a DIFFERENCE, so
+   * the promotion this method exists to record would drift on the very next
+   * read. An unobservable input hash therefore leaves the stored one alone,
+   * exactly as the caller's own fallback does for a probe that THREW, while a
+   * fingerprint that was observed is still re-stamped. The consequence is the
+   * pre-F4 one for that column — a possibly stale baseline, which costs at worst
+   * a re-prove — instead of a guaranteed drift.
+   *
+   * Synchronous (no injected IO on this path — the caller does its own probing
+   * and hands the values in), and the one method whose failure is REPORTED
+   * rather than swallowed: silently declining to record a proof would strand the
+   * wizard in a loop that can never exit.
    */
   markProven(
     projectId: number,
@@ -445,16 +561,39 @@ export class VerifyRunbookStore {
     hash: string,
     expectedVersion: number,
     proofJson: string,
+    fresh?: { inputHash: string | null; hostFingerprint: string },
   ): { ok: true } | { ok: false; error: 'cas-conflict' | 'hash-mismatch' | 'not-found' | string } {
     try {
       const now = new Date().toISOString();
+      // Assembled rather than branched two ways because the re-stamp is
+      // field-by-field (see the `fresh` notes above): status + proof always,
+      // the host fingerprint whenever one was observed, the input hash only
+      // when it was actually computable. The WHERE clause — both CAS
+      // predicates — is identical in every shape.
+      const sets: string[] = ["status = 'proven'", 'proof_json = ?'];
+      const params: unknown[] = [proofJson];
+      if (fresh) {
+        if (fresh.inputHash !== null) {
+          sets.push('input_hash = ?');
+          params.push(fresh.inputHash);
+        } else {
+          this.deps.logger?.debug(
+            '[VerifyRunbookStore] promotion could not observe the project inputs; keeping the stored input_hash',
+            { projectId, modality, hash },
+          );
+        }
+        sets.push('host_fingerprint_json = ?');
+        params.push(fresh.hostFingerprint);
+      }
+      sets.push('updated_at = ?');
+      params.push(now);
       const result = this.db
         .prepare(
           `UPDATE verify_runbook_local
-           SET status = 'proven', proof_json = ?, updated_at = ?
-           WHERE project_id = ? AND modality = ? AND portable_hash = ? AND version = ?`,
+               SET ${sets.join(', ')}
+               WHERE project_id = ? AND modality = ? AND portable_hash = ? AND version = ?`,
         )
-        .run(proofJson, now, projectId, modality, hash, expectedVersion);
+        .run(...params, projectId, modality, hash, expectedVersion);
       if (result.changes > 0) return { ok: true };
 
       // Nothing matched — say WHICH predicate failed, so the caller can decide
@@ -473,6 +612,32 @@ export class VerifyRunbookStore {
       });
       return { ok: false, error: message };
     }
+  }
+
+  /**
+   * The two drift-check inputs, observed RIGHT NOW over `probePath` — what a
+   * caller hands to {@link VerifyRunbookStore.markProven} as `fresh` (F4).
+   *
+   * It exists here rather than at the call site so the promotion re-stamps the
+   * values through the SAME injected deps the drift check will later compare
+   * against. A second implementation of either probe would produce a proof that
+   * either never expires or expires immediately — the identical trap the
+   * bootstrap's §10 suppression avoids by keying on these same two probes.
+   *
+   * NOT fail-soft: `computeInputHash` already reports "could not observe" as
+   * `null`, which is passed through verbatim and which
+   * {@link VerifyRunbookStore.markProven} then declines to WRITE over a stored
+   * value (F4 fix round — a stored NULL reads as a difference against any
+   * computed value, so stamping one would make the promotion drift on its own
+   * next read). A `hostFingerprint` that REJECTS has no such third state and no
+   * safe stand-in, so the rejection propagates and the caller decides: the
+   * scheduler's promotion path catches it and falls back to a status-only flip
+   * rather than losing the proof.
+   */
+  async freshProvenance(probePath: string): Promise<{ inputHash: string | null; hostFingerprint: string }> {
+    const inputHash = await this.deps.computeInputHash(probePath);
+    const hostFingerprint = await this.deps.hostFingerprint();
+    return { inputHash, hostFingerprint };
   }
 
   /**
@@ -656,49 +821,51 @@ export class VerifyRunbookStore {
   }
 
   /**
-   * Write-through demotion (§5.3 "Any component changing demotes"): flip a
-   * proven record to `'unproven-draft'` and clear its proof, so the next reader
-   * — and the phase-3 health panel — sees the honest state without waiting for
-   * someone to re-run setup.
+   * COMPUTE-AND-RETURN drift (F4 —
+   * docs/proposals/visual-verification-brittleness-fixes.md). One conjunct of
+   * the proof no longer holds for this read, so this read answers
+   * `'unproven-draft'`/`'drifted'` — and writes NOTHING.
    *
-   * Deliberately does NOT bump `version`. The version is the CONTENT CAS token
-   * (owned by `registerDraft`); bumping it here would make a pin taken against
-   * this record unresolvable, when what the runner actually needs is to resolve
-   * it and discover the status is no longer `'proven'`. Also does not clear
-   * `input_hash`/`host_fingerprint_json` — they stay as the record of what the
-   * proof WAS taken against, which is what makes a subsequent re-proof
-   * diagnosable.
+   * THIS USED TO BE A WRITE-THROUGH DEMOTION (`UPDATE … status =
+   * 'unproven-draft', proof_json = NULL`), and that write was the single
+   * highest-blast-radius defect in the whole feature (RC2): the drift conjuncts
+   * fold in lockfile bytes, `process.versions.modules` and `app.getPath('exe')`,
+   * so an ordinary dependency bump, an app release, or a stable↔dev switch
+   * destroyed a hard-won proof — and merely OPENING the Project Overview
+   * (`verificationRequests.ts` → `effectiveRunbookStatus`) was enough to trigger
+   * it. Recovery cost a full re-derive of a human-authored runbook.
    *
-   * Fail-soft: a failed demotion still returns `'unproven-draft'`/`'drifted'`
-   * to the caller. The read answer is correct either way; only the persisted
-   * correction is lost, and the next read re-detects the same drift.
+   * Nothing is lost by not writing: the gate and the badge both recompute this
+   * conjunction on every read, so the honest answer reaches every reader anyway
+   * (class doc, DRIFT IS COMPUTED ON EVERY READ). What IS deliberately kept is
+   * `input_hash`/`host_fingerprint_json` — the record of what the proof was
+   * taken against, which is what makes a drift diagnosable and what a re-prove
+   * re-stamps (see {@link VerifyRunbookStore.markProven}'s `fresh`).
+   *
+   * Kept at `warn` with the same fields it always logged, so the existing log
+   * grep for a vanishing proof still finds the moment it stopped holding.
+   *
+   * `answer` says WHICH drift, and it is not cosmetic (F4 fix round): a
+   * `'drifted'` provenance mismatch is cleared by re-proving the record, while a
+   * `'content-drifted'` tree carries a runbook the record does not hold and can
+   * ONLY be cleared by re-registering it — promotion never re-stamps
+   * `portable_hash`, so re-proving a content drift would pass and then read as
+   * drifted again on the very next check. `bootstrapEligibility` routes the two
+   * to different answers on the strength of this discriminant; the GATE still
+   * treats them identically, and both still refuse.
    */
-  private demoted(
+  private drifted(
     projectId: number,
     modality: VerificationModality,
+    answer: 'drifted' | 'content-drifted',
     reason: string,
   ): VerifyRunbookStatusDetail {
-    try {
-      this.db
-        .prepare(
-          `UPDATE verify_runbook_local
-           SET status = 'unproven-draft', proof_json = NULL, updated_at = ?
-           WHERE project_id = ? AND modality = ? AND status = 'proven'`,
-        )
-        .run(new Date().toISOString(), projectId, modality);
-      this.deps.logger?.warn('[VerifyRunbookStore] demoted proven runbook to unproven-draft', {
-        projectId,
-        modality,
-        reason,
-      });
-    } catch (err) {
-      this.deps.logger?.warn('[VerifyRunbookStore] demotion write failed (fail-soft)', {
-        projectId,
-        modality,
-        reason,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-    return { status: 'unproven-draft', reason: 'drifted' };
+    this.deps.logger?.warn('[VerifyRunbookStore] proven runbook reads as drifted (record left intact)', {
+      projectId,
+      modality,
+      answer,
+      reason,
+    });
+    return { status: 'unproven-draft', reason: answer };
   }
 }

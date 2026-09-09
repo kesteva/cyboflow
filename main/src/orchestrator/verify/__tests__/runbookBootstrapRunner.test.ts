@@ -67,14 +67,22 @@ const RUNBOOK: VerifyRunbookV1 = {
   },
 };
 
-const ARGS = {
+/** The fields both modes share; `mode` (F4 / Codex #2) is what splits them. */
+const BASE = {
   projectId: 1,
   runId: 'run-1',
   laneTaskRef: 'TASK-7',
   modality: 'web' as const,
   worktreePath: '/wt',
-  adopt: false,
 };
+
+const ARGS = { ...BASE, mode: 'derive' as const, adopt: false };
+
+/**
+ * The re-prove arm. It carries NO `adopt` — the union has none on this side, and
+ * writing one would assert an authorship decision that was never taken.
+ */
+const REPROVE_ARGS = { ...BASE, mode: 'reprove' as const };
 
 const PASS: BootstrapProofOutcome = { status: 'passed', errorMessage: null, failureClass: null, feedback: null };
 const FAIL: BootstrapProofOutcome = {
@@ -98,7 +106,7 @@ interface Harness {
   suppression: BootstrapSuppressionStore;
   written: Array<{ path: string; content: string }>;
   commits: Array<{ paths: readonly string[]; message: string }>;
-  proofs: Array<{ round: number; runbookHash: string }>;
+  proofs: Array<{ round: number; runbookHash: string; runbookLocalVersion: number }>;
   drafts: number;
   /** What a human would actually see — recorded by default so every test can assert on it. */
   artifacts: ArtifactReport[];
@@ -111,7 +119,7 @@ function harness(over: Partial<RunbookBootstrapDeps> & { draftResults?: unknown[
   const suppression = new BootstrapSuppressionStore(db as unknown as DatabaseLike);
   const written: Array<{ path: string; content: string }> = [];
   const commits: Array<{ paths: readonly string[]; message: string }> = [];
-  const proofs: Array<{ round: number; runbookHash: string }> = [];
+  const proofs: Array<{ round: number; runbookHash: string; runbookLocalVersion: number }> = [];
   const state = { drafts: 0, awaits: 0 };
   const artifactRecorder = recorder<ArtifactReport>();
   const findingRecorder = recorder<FindingReport>();
@@ -139,9 +147,13 @@ function harness(over: Partial<RunbookBootstrapDeps> & { draftResults?: unknown[
       return `sha-${commits.length}`;
     },
     registerDraft: async () => ({ hash: 'hash-1', version: 3 }),
+    // The re-prove path's only input: the record as the STORE holds it, which is
+    // deliberately a different revision from `registerDraft`'s so a test cannot
+    // pass by accident when the two are confused.
+    currentRecord: () => ({ hash: 'record-hash', version: 7, runbook: RUNBOOK, status: 'proven' as const }),
     setOrigin: vi.fn(),
-    enqueueProof: async ({ round, runbookHash }) => {
-      proofs.push({ round, runbookHash });
+    enqueueProof: async ({ round, runbookHash, runbookLocalVersion }) => {
+      proofs.push({ round, runbookHash, runbookLocalVersion });
       return { requestId: `req-${round}` };
     },
     // Counted independently of `proofs`: the RESUME path awaits a request it
@@ -583,7 +595,7 @@ describe('runRunbookBootstrap — the proof', () => {
   it('pins the proof to the revision it just registered', async () => {
     const h = harness();
     await runRunbookBootstrap(ARGS, h.deps);
-    expect(h.proofs).toEqual([{ round: 1, runbookHash: 'hash-1' }]);
+    expect(h.proofs).toEqual([{ round: 1, runbookHash: 'hash-1', runbookLocalVersion: 3 }]);
     h.db.close();
   });
 
@@ -852,6 +864,255 @@ describe('runRunbookBootstrap — the human-facing surfaces', () => {
     });
     await runRunbookBootstrap(ARGS, h.deps);
     expect(artifact.calls).toEqual([]);
+    h.db.close();
+  });
+});
+
+/**
+ * F4 stage 2 / Codex #2 — the RE-PROVE mode.
+ *
+ * The situation: a record was proven and then DRIFTED (its inputs, this host, or
+ * its own content moved). Since F4 stage 1 that drift is computed on every read
+ * and never persisted, so the record answers `'drifted'` forever. Two responses
+ * are wrong and both were shipped at some point:
+ *
+ *  - DERIVE over it (pre-F4, via the write-through demotion that made the next
+ *    read say 'draft'): a machine-authored runbook replaces a human's, over a
+ *    defect that was never in the runbook.
+ *  - DECLINE it (stage 1 alone): the project can never verify again on this
+ *    host, because nothing ever re-answers the question.
+ *
+ * So the tests here are almost entirely about what this mode does NOT do. The
+ * absence assertions are the feature.
+ */
+describe('runRunbookBootstrap — the RE-PROVE mode', () => {
+  it('proves the record AS IT STANDS: no draft, no write, no commit, no registration', async () => {
+    // Every one of these would change a human's branch or a human's record to
+    // fix a proof that expired for environmental reasons. The pin is the
+    // record's own (hash, version) — NOT registerDraft's, which is why the
+    // harness gives the two different values.
+    const registerDraft = vi.fn(async () => ({ hash: 'hash-1', version: 3 }));
+    const h = harness({ registerDraft });
+    const outcome = await runRunbookBootstrap(REPROVE_ARGS, h.deps);
+
+    expect(outcome).toEqual({
+      kind: 'proven',
+      runbookHash: 'record-hash',
+      runbookVersion: 7,
+      commitSha: null,
+      rung1: null,
+    });
+    expect(h.proofs).toEqual([{ round: 1, runbookHash: 'record-hash', runbookLocalVersion: 7 }]);
+    expect(h.drafts).toBe(0);
+    expect(h.written).toEqual([]);
+    expect(h.commits).toEqual([]);
+    expect(registerDraft).not.toHaveBeenCalled();
+    expect(h.deps.setOrigin).not.toHaveBeenCalled();
+    h.db.close();
+  });
+
+  it('composes the proof from the RECORD, through the same composer the derive path uses', async () => {
+    // The composed task is what the executable fingerprint is derived from, so a
+    // reprove-specific composer that shaped the same runbook even slightly
+    // differently would produce a task the pinned record does not match — the
+    // runner would then reject a proof of its own making.
+    const tasks: unknown[] = [];
+    const h = harness({
+      enqueueProof: async ({ task, round }) => {
+        tasks.push(task);
+        return { requestId: `req-${round}` };
+      },
+    });
+    await runRunbookBootstrap(REPROVE_ARGS, h.deps);
+    expect(tasks).toEqual([composeBootstrapProofTask(RUNBOOK, 'web')]);
+    h.db.close();
+  });
+
+  it('a FAILED re-prove is unproven, carries the harness reason, and NEVER suppresses', async () => {
+    // A suppression asserts "a runbook cannot be derived for this project state
+    // on this host". A stale proof failing says the ENVIRONMENT moved; it says
+    // nothing structural about the project, and recording it as though it did
+    // would silence a project whose runbook is fine.
+    const h = harness({ proofs: [FAIL] });
+    const outcome = await runRunbookBootstrap(REPROVE_ARGS, h.deps);
+    expect(outcome.kind).toBe('unproven');
+    if (outcome.kind !== 'unproven') throw new Error('unreachable');
+    expect(outcome.detail).toContain('the serve command exited immediately');
+    expect(outcome.detail).toContain('deliverable');
+    expect(outcome.commitSha).toBeNull();
+    expect(outcome.rung1).toBeNull();
+    expect(h.suppression.read(1, 'web')).toBeNull();
+    h.db.close();
+  });
+
+  it('runs exactly ONE round — a re-run of an identical proof buys nothing', async () => {
+    // Derive's second round earns its cost by re-drafting with the failure in
+    // hand. There is no re-draft here, so a second round would ask the same
+    // question of the same record at the same price.
+    const h = harness({ proofs: [FAIL, PASS] });
+    const outcome = await runRunbookBootstrap(REPROVE_ARGS, h.deps);
+    expect(outcome.kind).toBe('unproven');
+    expect(h.proofs).toHaveLength(1);
+    expect(h.stamps.read('run-1', 1, 'web')?.state).toBe('failed');
+    h.db.close();
+  });
+
+  it('an EXISTING suppression does not veto a re-prove — and a PASSING one does not clear it', async () => {
+    // §10's suppression is a statement about DERIVING. A record that drifted was
+    // proven once, so the project demonstrably stands up; letting a failed
+    // derivation block re-proving it would answer a question nobody asked.
+    //
+    // The second half is the F4 fix round: the shared `consumeProof` used to
+    // clear the suppression on ANY pass, which is a write — and this mode's
+    // whole contract is that it writes nothing. A derive that proves has
+    // falsified "a runbook cannot be derived here" and must clear it; a reprove
+    // has derived nothing, so it has falsified nothing.
+    const h = harness();
+    h.suppression.suppress({
+      projectId: 1,
+      modality: 'web',
+      inputHash: 'input-a',
+      hostFingerprint: 'host-a',
+      reason: 'no script serves the renderer',
+    });
+    await expect(runRunbookBootstrap(REPROVE_ARGS, h.deps)).resolves.toMatchObject({ kind: 'proven' });
+    expect(h.suppression.read(1, 'web')?.reason).toBe('no script serves the renderer');
+    h.db.close();
+  });
+
+  it('takes the SAME single-flight as derive, so two lanes cannot double-prove', async () => {
+    const h = harness();
+    h.stamps.claim({ runId: 'run-1', projectId: 1, modality: 'web', ownerTaskRef: 'TASK-2' });
+    const outcome = await runRunbookBootstrap(REPROVE_ARGS, h.deps);
+    expect(outcome).toMatchObject({ kind: 'declined', reason: 'in-flight' });
+    expect(h.proofs).toEqual([]);
+    h.db.close();
+  });
+
+  it('leaves the stamp PROVEN with the RECORD pin, so a sibling lane resolves it', async () => {
+    const h = harness();
+    await runRunbookBootstrap(REPROVE_ARGS, h.deps);
+    expect(h.stamps.read('run-1', 1, 'web')).toMatchObject({
+      state: 'proven',
+      runbookHash: 'record-hash',
+      runbookVersion: 7,
+    });
+    h.db.close();
+  });
+
+  it('a restarted owner mid-proof AWAITS its own request rather than firing a second', async () => {
+    const h = harness();
+    h.stamps.claim({ runId: 'run-1', projectId: 1, modality: 'web', ownerTaskRef: 'TASK-7' });
+    h.stamps.advance({
+      runId: 'run-1',
+      projectId: 1,
+      modality: 'web',
+      ownerTaskRef: 'TASK-7',
+      state: 'proving',
+      round: 1,
+      requestId: 'req-earlier',
+      runbookHash: 'record-hash',
+      runbookVersion: 7,
+    });
+    const awaited: string[] = [];
+    const deps: RunbookBootstrapDeps = {
+      ...h.deps,
+      awaitProof: async (requestId) => {
+        awaited.push(requestId);
+        return PASS;
+      },
+    };
+    const outcome = await runRunbookBootstrap(REPROVE_ARGS, deps);
+    expect(awaited).toEqual(['req-earlier']);
+    expect(h.proofs).toEqual([]);
+    expect(outcome).toMatchObject({ kind: 'proven', runbookHash: 'record-hash', runbookVersion: 7 });
+    h.db.close();
+  });
+
+  it('a record that cannot be read is infrastructure, and enqueues nothing', async () => {
+    const h = harness({ currentRecord: () => null });
+    const outcome = await runRunbookBootstrap(REPROVE_ARGS, h.deps);
+    expect(outcome).toMatchObject({ kind: 'declined', reason: 'infrastructure' });
+    expect(h.proofs).toEqual([]);
+    expect(h.suppression.read(1, 'web')).toBeNull();
+    h.db.close();
+  });
+
+  it('a record that declares no entry for THIS modality is refused, not improvised around', async () => {
+    const h = harness({
+      currentRecord: () => ({
+        hash: 'record-hash',
+        version: 7,
+        runbook: { version: 1, modalities: {} },
+        status: 'proven' as const,
+      }),
+    });
+    const outcome = await runRunbookBootstrap(REPROVE_ARGS, h.deps);
+    expect(outcome).toMatchObject({ kind: 'declined', reason: 'rejected' });
+    expect(h.proofs).toEqual([]);
+    h.db.close();
+  });
+
+  it('declines a modality a portable runbook cannot express, without touching the stamp', async () => {
+    const h = harness();
+    const outcome = await runRunbookBootstrap({ ...REPROVE_ARGS, modality: 'mobile' }, h.deps);
+    expect(outcome).toMatchObject({ kind: 'declined', reason: 'undeclarable-modality' });
+    expect(h.stamps.read('run-1', 1, 'mobile')).toBeNull();
+    h.db.close();
+  });
+
+  it('does NOT report proven when the record did not actually flip', async () => {
+    // Same guard as derive: the engine declines to promote a proof that ran in
+    // the dirty-worktree fallback or lost its CAS, and all of those end `passed`.
+    const h = harness({ confirmProven: async () => false });
+    const outcome = await runRunbookBootstrap(REPROVE_ARGS, h.deps);
+    expect(outcome.kind).toBe('unproven');
+    h.db.close();
+  });
+
+  it('tells a human an EXISTING runbook was re-proved — no commit, nothing to review', async () => {
+    // The derive artifact says "Lane X derived one, committed it" and lists what
+    // is on the branch. All of that is false here, and pointing a reviewer at a
+    // commit that does not exist is worse than saying nothing.
+    const artifact = recorder<ArtifactReport>();
+    const h = harness({ reportArtifact: artifact.fn });
+    await runRunbookBootstrap(REPROVE_ARGS, h.deps);
+    expect(artifact.calls).toHaveLength(1);
+    const markdown = artifact.calls[0].markdown;
+    expect(markdown).toContain('re-proved by this run');
+    expect(markdown).toContain('RE-PROVEN');
+    expect(markdown).toContain('exactly as it already stands');
+    expect(markdown).not.toContain('derived by this run');
+    expect(markdown).not.toContain('Commit');
+    h.db.close();
+  });
+
+  it('reports the FAILED re-prove too, saying the branch was left alone', async () => {
+    const artifact = recorder<ArtifactReport>();
+    const h = harness({ proofs: [FAIL], reportArtifact: artifact.fn });
+    await runRunbookBootstrap(REPROVE_ARGS, h.deps);
+    expect(artifact.calls).toHaveLength(1);
+    expect(artifact.calls[0].markdown).toContain('STILL NOT PROVEN');
+    expect(artifact.calls[0].markdown).toContain('Nothing was changed on this branch');
+    expect(artifact.calls[0].markdown).toContain('the serve command exited immediately');
+    h.db.close();
+  });
+
+  it('files NO rung-1 finding — a re-prove cannot produce a config edit', async () => {
+    const finding = recorder<FindingReport>();
+    const h = harness({ reportFinding: finding.fn, proofs: [FAIL] });
+    await runRunbookBootstrap(REPROVE_ARGS, h.deps);
+    expect(finding.calls).toEqual([]);
+    h.db.close();
+  });
+
+  it('a THROWING reporter does not turn a re-proven runbook into an unproven one', async () => {
+    const h = harness({
+      reportArtifact: async () => {
+        throw new Error('artifact router is down');
+      },
+    });
+    await expect(runRunbookBootstrap(REPROVE_ARGS, h.deps)).resolves.toMatchObject({ kind: 'proven' });
     h.db.close();
   });
 });

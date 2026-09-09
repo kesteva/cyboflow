@@ -387,7 +387,12 @@ export interface VerificationTaskV1 {
     requiresDrive?: boolean;
   }>;
   viewports?: ViewportSpec[];
-  /** Capped by scheduler config. */
+  /**
+   * Floored at the scheduler's default agent deadline and capped by its ceiling:
+   * a value BELOW the default is raised to it (F2/RC5 — a composed 180000 once
+   * killed a healthy run mid-attest). Prefer `serve.readyWhen.timeoutMs` to
+   * bound readiness; leave this unset.
+   */
   timeoutMs?: number;
 }
 
