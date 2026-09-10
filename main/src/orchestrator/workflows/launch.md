@@ -144,14 +144,21 @@ own design. There are no per-idea design flags.
    brief (including its architecture section) and the prototype notes. For
    each `### Blocking` item, re-delegate the relevant agent exactly ONCE with
    the concrete fix, then refresh the brief artifact and/or prototype
-   artifact. Record every `### Findings` item — plus any must-fix that
-   survives its one revision — via `cyboflow_report_finding` with
-   **`blocking: false`**. Never loop, never emit a blocking finding here.
+   artifact. **A brief fix is not incorporated until you have RE-REPORTED
+   `atype: 'project-brief'` with the corrected markdown** — no idea exists yet
+   to hold it, so that report is the only carrier, and the `ideas` step reads
+   it back. Never re-run the adversarial reviewer and never loop a fix. Track a
+   short note describing what was auto-fixed. Record every `### Findings` item —
+   plus any must-fix that survives its one revision — via
+   `cyboflow_report_finding` with **`blocking: false`**. Never emit a blocking
+   finding here; carry these non-blocking findings into the design-gate preview.
 7. **approve-design** → **human gate — ONLY when `ui-prototype` or
    `architecture` ran**; otherwise continue straight to ideas. Inline
    **AskUserQuestion** (header `Approve design`, options Approve / Revise
    ONLY; point at the prototype tab and/or the brief's architecture section
-   and include the adversarial findings in the preview). Revise →
+   and put BOTH the adversarial findings and the note of what was auto-fixed
+   in the preview — the brief moved after the user approved it at
+   `approve-brief`, so this gate is where they see what changed). Revise →
    re-delegate with the feedback, refresh the artifact(s), re-ask; never
    proceed without Approve.
 
@@ -159,7 +166,10 @@ own design. There are no per-idea design flags.
 
 8. **ideas** → delegate to `cyboflow-interview` with `MODE: IDEAS` and the
    APPROVED brief INCLUDING its `## Architecture design` section when one
-   exists (re-read the brief from your own latest report). It returns an
+   exists — **re-read it from your own latest `project-brief` report, never
+   from the copy in your context**: an `adversarial-review` or `approve-design`
+   revision lives only in that report, and quoting a stale brief here silently
+   drops it. It returns an
    ordered `## Idea set` — aim for 4–8 ideas, hard cap 10 — each with a short
    stub (`#### Problem definition` / `#### Proposed solution`, ≤5 bullets
    each), a one-line caption, `SCOPE:`, `BUILD_ORDER: N`, and
@@ -283,6 +293,10 @@ Approve, so nothing user-visible lands before sign-off. Create each proposal
 - **Lineage is mandatory.** Pass `originating_idea_id` on EVERY epic/task
   create — the write chokepoint refuses to guess, and a missing link lands
   NULL with a warning.
+- **Adversarial review never adds a gate.** It and `approve-design` run only
+  when a UI prototype or architecture ran. Auto-revise each must-fix once,
+  never loop, re-report the brief so the fix survives, and report every
+  remaining issue with `blocking: false` for the existing design gate preview.
 - **Re-fetch entity bodies after every gate.** While you are parked at a gate,
   in-artifact feedback can revise an idea's spec or `## Architecture design`
   through a host-side revision agent. After ANY gate resolution, re-fetch via
