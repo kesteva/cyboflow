@@ -36,6 +36,7 @@ function status(reason: VerifyRunbookStatusReason): VerifyRunbookStatusDetail {
     draft: 'unproven-draft',
     'proven-file-absent-here': 'unproven-draft',
     drifted: 'unproven-draft',
+    'content-drifted': 'unproven-draft',
     indeterminate: 'absent',
   };
   return { status: map[reason], reason };
@@ -63,6 +64,11 @@ describe('declineForRunbookStatus', () => {
     ['proven', 'already-proven'],
     ['proven-file-absent-here', 'proof-belongs-elsewhere'],
     ['drifted', 'stale-proof'],
+    // The GATE is deliberately coarse: both drifts are the same fact to a
+    // request that needs a usable runbook, and the skip string must not fork
+    // (`runbookDeclineForSkipReason` reverse-maps it). The finer distinction is
+    // made one level up, in decideRunbookBootstrap.
+    ['content-drifted', 'stale-proof'],
     ['indeterminate', 'unobservable'],
   ])('%s → %s', (reason, expected) => {
     expect(declineForRunbookStatus(status(reason))).toBe(expected);
@@ -86,6 +92,7 @@ describe('decideRunbookBootstrap', () => {
   it('proceeds on a project that has nothing, deriving a new runbook', () => {
     expect(decideRunbookBootstrap({ ...on, status: status('no-record') })).toEqual({
       proceed: true,
+      mode: 'derive',
       adopt: false,
     });
   });
@@ -95,6 +102,7 @@ describe('decideRunbookBootstrap', () => {
     // with a machine-authored rival would throw away human intent for no gain.
     expect(decideRunbookBootstrap({ ...on, status: status('file-only') })).toEqual({
       proceed: true,
+      mode: 'derive',
       adopt: true,
     });
   });
@@ -102,20 +110,92 @@ describe('decideRunbookBootstrap', () => {
   it('proceeds on an existing draft record — there is no proof to endanger', () => {
     expect(decideRunbookBootstrap({ ...on, status: status('draft') })).toEqual({
       proceed: true,
+      mode: 'derive',
       adopt: false,
+    });
+  });
+
+  it('a DRIFTED proof proceeds in REPROVE mode, carrying no adopt question at all', () => {
+    // F4 / Codex #2, the whole point of stage 2. Drift is now computed on every
+    // read and never persisted, so a drifted record answers 'drifted' forever:
+    // declining here (which is what the gate's own classification still says,
+    // and what stage 1 alone did) would mean the project can never verify again.
+    // Deriving here would UPSERT a machine-authored rival over a human-authored
+    // runbook whose only defect is a stale proof. Neither is the answer.
+    //
+    // `adopt` is ABSENT rather than false: a reprove authors nothing, so there
+    // is no adopt-vs-author decision, and a made-up `false` would read like one
+    // that had been taken.
+    expect(decideRunbookBootstrap({ ...on, status: status('drifted') })).toEqual({
+      proceed: true,
+      mode: 'reprove',
+    });
+  });
+
+  it('the GATE still classifies that same record as a decline — the two seams differ on purpose', () => {
+    // `declineForRunbookStatus` is what the §3.2 gate writes onto a skipped row,
+    // and a drifted record genuinely cannot serve a request. Only the BOOTSTRAP
+    // decision treats it as actionable. Pinned together so a future "simplify"
+    // that folds the two back into one function fails here rather than in
+    // production, in whichever direction it folds them.
+    expect(declineForRunbookStatus(status('drifted'))).toBe('stale-proof');
+    expect(decideRunbookBootstrap({ ...on, status: status('drifted') })).toMatchObject({ proceed: true });
+  });
+
+  /**
+   * A CONTENT drift must never reach the reprove (F4 fix round).
+   *
+   * Promotion re-stamps `input_hash`/`host_fingerprint_json` and deliberately
+   * never `portable_hash` (Codex #1), so nothing a proof does can make this
+   * tree's file agree with the record again. Routed to `'reprove'`, the sequence
+   * is: deploy an agent, build and serve the project, PASS, fail `confirmProven`
+   * against the same unchanged mismatch, report "still not proven" about a
+   * runbook that just proved — and repeat on the next run, and the next, each
+   * time spending a deployment and a verification-budget charge. Declining is
+   * the honest answer, and the remedy text says the true thing: re-register this
+   * revision (the Verify Setup flow), then prove it.
+   */
+  it('a CONTENT drift declines instead — a proof cannot re-stamp the content hash', () => {
+    expect(decideRunbookBootstrap({ ...on, status: status('content-drifted') })).toEqual({
+      proceed: false,
+      reason: 'stale-proof',
+    });
+  });
+
+  it('the reprove arm is keyed on the exact reason, not on "the decline was stale-proof"', () => {
+    // Both drifts decline as 'stale-proof' at the gate, so a mode decision made
+    // off the DECLINE cannot tell them apart — which is how the loop above got
+    // built in the first place. Pinned as a pair.
+    expect(declineForRunbookStatus(status('content-drifted'))).toBe(
+      declineForRunbookStatus(status('drifted')),
+    );
+    expect(decideRunbookBootstrap({ ...on, status: status('drifted') })).toMatchObject({
+      mode: 'reprove',
+    });
+    expect(decideRunbookBootstrap({ ...on, status: status('content-drifted') })).toMatchObject({
+      proceed: false,
     });
   });
 
   it.each<[VerifyRunbookStatusReason, BootstrapDeclineReason]>([
     ['proven', 'already-proven'],
     ['proven-file-absent-here', 'proof-belongs-elsewhere'],
-    ['drifted', 'stale-proof'],
+    ['content-drifted', 'stale-proof'],
     ['indeterminate', 'unobservable'],
   ])('declines on %s with reason %s', (reason, expected) => {
     expect(decideRunbookBootstrap({ ...on, status: status(reason) })).toEqual({
       proceed: false,
       reason: expected,
     });
+  });
+
+  it('the toggle beats a drifted record too — reprove is gated by the same switch', () => {
+    // The reprove path spends a verification budget charge and deploys an agent
+    // exactly like a derive does. A project with the feature off must not get one
+    // through the back door of having once been proven.
+    expect(
+      decideRunbookBootstrap({ enabled: false, derivesEnvironment: true, status: status('drifted') }),
+    ).toEqual({ proceed: false, reason: 'disabled' });
   });
 
   it('the toggle wins over everything, and is reported as the toggle', () => {
@@ -145,6 +225,9 @@ describe('bootstrapRemedyText', () => {
 
   it('tells a drifted project to re-prove rather than to re-derive', () => {
     expect(bootstrapRemedyText('stale-proof') ?? '').toContain('re-proven');
+    // …and, for the content-drift half of the same decline, that the file has
+    // to be re-registered first — the one thing a re-prove cannot do.
+    expect(bootstrapRemedyText('stale-proof') ?? '').toContain('re-registered');
   });
 
   it.each<BootstrapDeclineReason>(['disabled', 'no-environment', 'already-proven'])(

@@ -71,11 +71,20 @@ export interface LeverValues {
   port: string | null;
   /** This request's attestation nonce. */
   nonce: string;
+  /**
+   * This request's FRESH, EMPTY data dir (`VERIFY_DATA_DIR`) — `null` when the
+   * caller provisioned none. Request-scoped on purpose: `VERIFY_ARTIFACTS_DIR`
+   * is RUN-scoped, so a data dir keyed on it is reused across attempts and
+   * carries the previous attempt's state into the next one (F3 / RC4: the
+   * passing run vr_bcae0966 reported a stale `orch.sock` EADDRINUSE inside the
+   * verified instance).
+   */
+  dataDir: string | null;
 }
 
 /** One rejected lever, for the caller to log. */
 export interface DroppedLever {
-  lever: 'portEnv' | 'nonceEnv';
+  lever: 'portEnv' | 'nonceEnv' | 'dataDirEnv';
   name: string;
   reason: 'malformed' | 'denied' | 'shadows-harness';
 }
@@ -89,10 +98,15 @@ export interface ResolvedLeverEnv {
 /**
  * Resolve the exportable half of a runbook's levers against a base env.
  *
- * Only `portEnv` and `nonceEnv` are exported: `dataDirEnv` and `cdpPortFlag`
- * bind values this seam does not hold (the data dir is provisioned per request
- * elsewhere, and a CLI flag is not an env var at all), and inventing a binding
- * for them here would be worse than leaving them declarative.
+ * `portEnv`, `nonceEnv` and `dataDirEnv` are exported. Only `cdpPortFlag`
+ * remains unbound, and permanently: it is a CLI FLAG, not an env var — there is
+ * no environment for this seam to put it in, and the runbook's serve command is
+ * the only thing that knows where in its own argv it goes.
+ *
+ * `dataDirEnv` was parsed, hashed and documented while being read by nothing
+ * until F3 (RC4): the harness now provisions a fresh per-request dir and passes
+ * it as {@link LeverValues.dataDir}, so a project whose app reads a data-dir env
+ * var gets attempt isolation without editing its serve command.
  */
 export function resolveLeverEnv(
   base: Readonly<Record<string, string>>,
@@ -128,5 +142,6 @@ export function resolveLeverEnv(
 
   bind('portEnv', levers.portEnv, values.port);
   bind('nonceEnv', levers.nonceEnv, values.nonce);
+  bind('dataDirEnv', levers.dataDirEnv, values.dataDir);
   return { additions, dropped };
 }

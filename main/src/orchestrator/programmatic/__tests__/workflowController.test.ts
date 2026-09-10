@@ -1276,6 +1276,20 @@ describe('WorkflowController', () => {
         };
       }
 
+      /**
+       * Attach a recording F8 skip sink to the host and return the log
+       * (docs/proposals/visual-verification-brittleness-fixes.md §F8).
+       */
+      function recordSkips(
+        host: ControllerHost,
+      ): Array<{ runId: string; laneTaskRef: string; reason: string; detail?: string }> {
+        const skips: Array<{ runId: string; laneTaskRef: string; reason: string; detail?: string }> = [];
+        host.reportVerificationSkipped = (input) => {
+          skips.push(input);
+        };
+        return skips;
+      }
+
       /** A runner where task-verify returns a scripted resultText; other steps ok. */
       function verifyRunner(
         taskVerifyText: string | null,
@@ -1358,6 +1372,7 @@ describe('WorkflowController', () => {
         host.visualGate = makeVisualGate([]);
         const enqueue = makeEnqueue({ outcome: 'skipped', reason: 'verification-disabled' });
         host.enqueueVisualVerification = enqueue.fn;
+        const skips = recordSkips(host);
         const runner = verifyRunner(taskVerifyWithTask());
 
         const result = await new WorkflowController(runner, host).run('r', d);
@@ -1366,6 +1381,105 @@ describe('WorkflowController', () => {
         expect(enqueue.calls.length).toBe(1);
         // Skipped → never parked.
         expect(driver.lanes.some((l) => l.currentStepId === 'awaiting-verify')).toBe(false);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+        // F8: 'verification-disabled' is a DELIBERATE off switch — no finding.
+        expect(skips).toEqual([]);
+      });
+
+      // ── F8 "never skip silently" (docs/proposals/visual-verification-
+      //    brittleness-fixes.md): the two PRE-ROW drops raise a non-blocking
+      //    finding. Gate-side skips already write a 'skipped' row + a
+      //    verdictDelivery finding; these two write nothing at all. ──
+      it('F8: enqueue "skipped" for any OTHER reason files a non-blocking finding, lane still integrates', async () => {
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = makeVisualGate([]);
+        host.enqueueVisualVerification = makeEnqueue({ outcome: 'skipped', reason: 'scheduler-unavailable' }).fn;
+        const skips = recordSkips(host);
+        const runner = verifyRunner(taskVerifyWithTask());
+
+        const result = await new WorkflowController(runner, host).run('run-f8', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(skips.length).toBe(1);
+        expect(skips[0]).toMatchObject({ runId: 'run-f8', laneTaskRef: 't1', reason: 'scheduler-unavailable' });
+        // Advancement is untouched — the finding is strictly weaker than the walk.
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+      });
+
+      it('F8: files at most ONE finding per lane even when the lane loops back', async () => {
+        // Both F8 seams sit inside the fan-out INNER-STEP walk, which a lane
+        // re-enters on every loopback. On a substrate that never captures step
+        // text the channel-unavailable branch fires on EVERY attempt — without
+        // per-lane de-duplication an 8-lane sprint looping twice would post 24
+        // byte-identical review-queue cards, and these findings carry no
+        // requestId to correlate or supersede on (there is no request row).
+        const d = def([
+          phase('p1', [
+            step({
+              id: 'execute',
+              agent: 'orchestrate',
+              fanOut: {
+                over: 'tasks',
+                inner: [
+                  { id: 'implement', agent: 'implement' },
+                  { id: 'task-verify', agent: 'task-verify', loopback: 'implement' },
+                  { id: 'code-review', agent: 'code-review', loopback: 'implement' },
+                  { id: 'visual-verify', agent: 'visual-verify' },
+                ],
+              },
+            }),
+          ]),
+        ]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = makeVisualGate([]);
+        const skips = recordSkips(host);
+        // task-verify NEVER captures result text (the codex substrate), and
+        // code-review — which runs AFTER it — returns a blocking defect on its
+        // first pass, so the lane loops back and task-verify runs a second time.
+        const calls: string[] = [];
+        let reviewPass = 0;
+        const runner: StepRunner = {
+          async runStep(sp) {
+            calls.push(sp.id);
+            if (sp.id === 'task-verify') return { status: 'ok', resultText: null };
+            if (sp.id === 'code-review') {
+              reviewPass += 1;
+              return {
+                status: 'ok',
+                resultText: reviewPass === 1 ? '## Blocking defect\nfix it' : 'no blocking defects',
+              };
+            }
+            return { status: 'ok' };
+          },
+        };
+
+        const result = await new WorkflowController(runner, host).run('run-dupe', d);
+
+        expect(result.outcome).toBe('completed');
+        // The loopback really happened — task-verify dropped its task TWICE...
+        expect(calls.filter((id) => id === 'task-verify').length).toBeGreaterThan(1);
+        // ...and exactly ONE finding reached the human.
+        expect(skips.length).toBe(1);
+        expect(skips[0]).toMatchObject({ runId: 'run-dupe', laneTaskRef: 't1' });
+      });
+
+      it('F8: a THROWING finding sink never disturbs lane advancement', async () => {
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = makeVisualGate([]);
+        host.enqueueVisualVerification = makeEnqueue({ outcome: 'skipped', reason: 'scheduler-unavailable' }).fn;
+        host.reportVerificationSkipped = () => {
+          throw new Error('review queue down');
+        };
+        const runner = verifyRunner(taskVerifyWithTask());
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
         expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
       });
 
@@ -1522,6 +1636,7 @@ describe('WorkflowController', () => {
         host.visualGate = makeVisualGate([]);
         const enqueue = makeEnqueue();
         host.enqueueVisualVerification = enqueue.fn;
+        const skips = recordSkips(host);
         const runner = verifyRunner(null); // task-verify captured no text
 
         const result = await new WorkflowController(runner, host).run('r', d);
@@ -1530,6 +1645,25 @@ describe('WorkflowController', () => {
         expect(enqueue.calls.length).toBe(0);
         expect(driver.lanes.some((l) => l.currentStepId === 'awaiting-verify')).toBe(false);
         expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+        // F8: the drop happens BEFORE any request row exists, so it is invisible
+        // everywhere unless the controller says so.
+        expect(skips.length).toBe(1);
+        expect(skips[0].laneTaskRef).toBe('t1');
+        expect(skips[0].reason).toContain('no result text');
+      });
+
+      it('F8: an INACTIVE visual gate files no channel-unavailable finding', async () => {
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = makeVisualGate([], false); // present but inactive
+        host.enqueueVisualVerification = makeEnqueue().fn;
+        const skips = recordSkips(host);
+
+        const result = await new WorkflowController(verifyRunner(null), host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(skips).toEqual([]);
       });
 
       // ── Disabled-run verdict enforcement: the functional VERDICT channel is

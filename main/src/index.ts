@@ -2560,15 +2560,28 @@ async function initializeServices(): Promise<boolean> {
   };
 
   const verifyRunbookStore = new VerifyRunbookStore(cyboflowDb, {
-    // ABSENT vs UNREADABLE both answer null: the store's contract is that null
-    // means "this tree does not carry the file", which is the ordinary pre-merge
-    // state on every branch that has not landed the runbook yet, and must NOT
-    // demote a proven record.
+    // ABSENT AND UNREADABLE ARE NOT THE SAME ANSWER (F4/F10 + Codex #8 —
+    // docs/proposals/visual-verification-brittleness-fixes.md). `null` is the
+    // store's "this tree genuinely does not carry the file" — the ordinary
+    // pre-merge state on every branch that has not landed the runbook yet — and
+    // the store now treats it as RECORD-AUTHORITATIVE: it skips the
+    // portable-hash conjunct and judges the proof on the project input hash and
+    // the host fingerprint alone. That makes the narrowness load-bearing. This
+    // used to collapse EVERY fs error into `null`, which under the new gate
+    // would launder an unreadable tree (a permissions error, a truncated read,
+    // an IO fault) into a proof; so only the two codes that genuinely mean
+    // "nothing is there" answer `null`, and anything else REJECTS, landing in
+    // the store's own fail-soft catch as 'absent'/'indeterminate'.
     readPortableFile: async (dirPath: string): Promise<string | null> => {
       try {
         return await fs.promises.readFile(path.join(dirPath, VERIFY_RUNBOOK_RELATIVE_PATH), 'utf8');
-      } catch {
-        return null;
+      } catch (err) {
+        // ENOENT: no such file. ENOTDIR: a path component is not a directory —
+        // the same "there is nothing here" fact observed one level up (an
+        // unresolvable/stale worktree path), not a read failure.
+        const code = (err as NodeJS.ErrnoException | null)?.code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+        throw err;
       }
     },
     computeInputHash: verifyComputeInputHash,
@@ -2725,7 +2738,8 @@ async function initializeServices(): Promise<boolean> {
   //
   // Gated twice before any of it runs — the project toggle and the kill switch
   // (combined in `evaluateRunbookBootstrap`), then §4's runbook-situation check.
-  // Default OFF.
+  // Default ON since F9 (visual-verification-brittleness-fixes.md); the kill
+  // switch is CYBOFLOW_DISABLE_RUNBOOK_BOOTSTRAP=1.
   // ------------------------------------------------------------------------
   const runbookBootstrapStamps = new RunbookBootstrapStampStore(cyboflowDb, cyboflowLogger);
   const runbookBootstrapSuppression = new BootstrapSuppressionStore(cyboflowDb, cyboflowLogger);
@@ -2794,6 +2808,12 @@ async function initializeServices(): Promise<boolean> {
         }),
       registerDraft: (projectId, worktreePath, modality) =>
         verifyRunbookStore.registerDraft(projectId, worktreePath, modality),
+      // The 'reprove' mode's only input (F4 / Codex #2): the record as it stands,
+      // content and pin together. It reads the DB, NOT this worktree's file —
+      // what a re-prove must prove is the revision the engine will execute, and
+      // a divergence between the two is itself one of the things that made the
+      // record drift.
+      currentRecord: (projectId, modality) => verifyRunbookStore.getCurrent(projectId, modality),
       setOrigin: (projectId, modality, origin) => verifyRunbookStore.setOrigin(projectId, modality, origin),
       // A passing proof and a proven record are two different facts: the engine
       // declines to promote a proof that ran in the dirty-worktree fallback,

@@ -18,7 +18,9 @@
  *      write happens before the emit, so the snapshot normally subsumes it).
  *   3. On each subscription onData event: upserts the lane into the by-taskId
  *      list (event payloads carry no ref/title, so an event-created lane keeps
- *      those null until a fresh snapshot resolves them).
+ *      those null until a fresh snapshot resolves them). The event's
+ *      `visualVerification` IS merged — the snapshot query never re-fires, so a
+ *      field left out of this merge is stuck at its mount-time value forever.
  *   4. On unmount or runId change: sets cancelled=true and unsubscribes.
  *   5. When runId === null (or the run has no batch): empty lanes, no tRPC.
  *
@@ -93,7 +95,10 @@ export function useSprintLanes(runId: string | null): UseSprintLanesResult {
             if (idx === -1) {
               // Event arrived before the snapshot listed this lane — create a
               // bare row (ref/title/blockedByRefs resolve on the next snapshot;
-              // blockedByRefs is a read-side join, so events never carry it).
+              // blockedByRefs is a read-side derivation the event does not carry).
+              // `visualVerification` DOES travel on the event (F8 round-2), so a
+              // verdict that lands after mount is rendered immediately instead of
+              // waiting for a snapshot query that never re-fires.
               return {
                 ...prev,
                 lanes: [
@@ -107,6 +112,7 @@ export function useSprintLanes(runId: string | null): UseSprintLanesResult {
                     title: null,
                     attempts: event.attempts,
                     blockedByRefs: [],
+                    visualVerification: event.visualVerification,
                     updatedAt: event.timestamp,
                   },
                 ],
@@ -119,6 +125,12 @@ export function useSprintLanes(runId: string | null): UseSprintLanesResult {
               status: event.status,
               currentStepId: event.currentStepId,
               attempts: event.attempts,
+              // F8 round-2: the snapshot query fires ONCE per mount, so anything
+              // not merged here is frozen at its mount-time value for the life of
+              // the mount. Before this line every integrated lane on a
+              // live-watched sprint — passes included — kept the pre-verdict
+              // `null` and rendered "Visual check did not run".
+              visualVerification: event.visualVerification,
               updatedAt: event.timestamp,
             };
             return { ...prev, lanes, error: null };

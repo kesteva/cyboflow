@@ -377,7 +377,7 @@ export class SpawnStepRunner implements StepRunner {
       if (ctx.signal?.aborted) return { status: 'aborted' };
       // Typed step-output channel (§5.3): forward the step agent's final result
       // text captured at the spawn seam. `void` (a substrate that does not capture,
-      // e.g. interactive/codex) ⇒ null. The controller parses this on the `ok` path.
+      // e.g. interactive) ⇒ null. The controller parses this on the `ok` path.
       return { status: 'ok', resultText: outcome?.resultText ?? null };
     } catch (err) {
       // A rejection during/after a cancel is the cancel, not a genuine failure.

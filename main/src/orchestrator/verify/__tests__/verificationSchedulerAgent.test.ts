@@ -12,6 +12,8 @@ import Database from 'better-sqlite3';
 import {
   VerificationScheduler,
   ResourceLeasePool,
+  DEFAULT_AGENT_REQUEST_TIMEOUT_MS,
+  AGENT_REQUEST_TIMEOUT_CEILING_MS,
   AWAIT_TERMINAL_NOT_FOUND_MESSAGE,
   AWAIT_TERMINAL_TIMEOUT_MESSAGE,
   VERIFY_NO_RUNBOOK_REASON,
@@ -375,6 +377,62 @@ describe("VerificationScheduler — ['agent'] stamp dispatch", () => {
     // pre-deploy gate and an SDK session was spent (the runner's own `deployed`
     // flag is unobservable on this path because raceWithAbort rejects).
     expect(row.judge_calls_used).toBe(1);
+  });
+});
+
+/**
+ * F2 (RC5) — the composed `task.timeoutMs` may RAISE the agent deadline, never
+ * lower it below the harness default.
+ *
+ * The outer `timeoutMs` is documented on no composer-facing surface (only the
+ * nested `serve.readyWhen.timeoutMs` is), and a task-verify composer that
+ * guessed `180000` had a healthy prove run killed at 180s mid-attestation —
+ * build passed, app booted — while the identical task at `1200000` passed in
+ * 7m18s. The floor makes a low guess inert; the ceiling is unchanged.
+ *
+ * Deliberately run against the PRODUCTION constants (no injected
+ * agentRequestTimeoutMs), because the bug was about the real 10-minute default.
+ */
+describe('VerificationScheduler — the agent deadline floor (F2)', () => {
+  it.each([
+    ['a composer guess below the default is RAISED to it', 180_000, DEFAULT_AGENT_REQUEST_TIMEOUT_MS],
+    ['a value between the default and the ceiling is honored verbatim', 15 * 60 * 1000, 15 * 60 * 1000],
+    ['a value above the ceiling is still capped', 30 * 60 * 1000, AGENT_REQUEST_TIMEOUT_CEILING_MS],
+  ])('%s', async (_label, requested, expected) => {
+    const runId = `run-deadline-${requested}`;
+    seedRun(db, runId, JSON.stringify(['agent']));
+    const run = vi.fn(
+      async (_req: VerificationAgentRequest): Promise<VerificationAgentRunResult> => ({
+        status: 'passed',
+        fileNames: [],
+        deployed: true,
+        provisionMode: 'snapshot',
+      }),
+    );
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: CONFIG,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      agentRunner: { run },
+      runbookStatus: async () => ({ status: 'proven', reason: 'proven' }),
+    });
+    scheduler.enqueue({
+      runId,
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { intent: 'x' },
+      chain: [],
+      task: { ...SERVE_TASK, timeoutMs: requested },
+      snapshotSha: 'sha-deadline',
+    });
+    await flushDrain();
+
+    expect(run).toHaveBeenCalledTimes(1);
+    // The deadline rides on the request so the query boundary uses the SAME bound.
+    expect(run.mock.calls[0][0].timeoutMs).toBe(expected);
   });
 });
 
@@ -1051,6 +1109,10 @@ describe('VerificationScheduler — §3.2 degrade path (no proven runbook)', () 
   it.each([
     ['proven-file-absent-here', 'unproven-draft', VERIFY_RUNBOOK_ELSEWHERE_REASON],
     ['drifted', 'unproven-draft', VERIFY_RUNBOOK_DRIFTED_REASON],
+    // Both drifts skip with the SAME string on purpose (F4 fix round): they are
+    // one fact to a request, and `runbookDeclineForSkipReason` reverse-maps this
+    // text. Only the bootstrap tells them apart.
+    ['content-drifted', 'unproven-draft', VERIFY_RUNBOOK_DRIFTED_REASON],
     ['indeterminate', 'absent', VERIFY_RUNBOOK_UNREADABLE_REASON],
     // The bootstrappable situations keep the ORIGINAL reason verbatim, so every
     // existing consumer and CTA keeps matching what it always matched.
@@ -1728,6 +1790,40 @@ function runbookRow(dbX: Database.Database): { status: string; version: number; 
     .get('web') as { status: string; version: number; proof_json: string | null };
 }
 
+/**
+ * The same store with MUTABLE probes, so a test can move the host or the project
+ * inputs BETWEEN the draft registration and the proof — which is the exact
+ * condition F4's promotion re-stamp exists for (a draft stamped in one place,
+ * proven in another).
+ */
+function buildMutableRunbookStore(
+  dbX: Database.Database,
+  io: { inputHash: string | null; fingerprint: string; fingerprintThrows?: boolean },
+): VerifyRunbookStore {
+  return new VerifyRunbookStore(dbAdapter(dbX), {
+    readPortableFile: async () => JSON.stringify(PROOF_RUNBOOK),
+    computeInputHash: async () => io.inputHash,
+    hostFingerprint: async () => {
+      if (io.fingerprintThrows === true) throw new Error('fingerprint probe exploded');
+      return io.fingerprint;
+    },
+  });
+}
+
+/** The three provenance columns the drift check compares against. */
+function runbookProvenance(dbX: Database.Database): {
+  portable_hash: string;
+  input_hash: string | null;
+  host_fingerprint_json: string | null;
+} {
+  return dbX
+    .prepare(
+      `SELECT portable_hash, input_hash, host_fingerprint_json
+       FROM verify_runbook_local WHERE project_id = 1 AND modality = ?`,
+    )
+    .get('web') as { portable_hash: string; input_hash: string | null; host_fingerprint_json: string | null };
+}
+
 describe('VerificationScheduler — §5.3 engine-enforced proof', () => {
   const PASS_RESULT: VerificationAgentRunResult = {
     status: 'passed',
@@ -1806,6 +1902,94 @@ describe('VerificationScheduler — §5.3 engine-enforced proof', () => {
     expect(proof.preflight.checks.map((c) => c.id)).toEqual(['node', 'chromium']);
     expect(typeof proof.verifiedAt).toBe('string');
     expect(proof.requestId).toMatch(/^vr_/);
+  });
+
+  /**
+   * F4 / Codex #1 — the promotion also RE-STAMPS the drift baseline.
+   *
+   * `registerDraft` stamps `input_hash`/`host_fingerprint_json` from whatever
+   * tree and host were current when the DRAFT was written. A proof taken later
+   * (or, for the setup flow, in a different worktree) was therefore born already
+   * drifted, and the very first gate read after a successful prove answered
+   * 'unproven-draft' — one of the two mechanisms that made cyboflow's own
+   * 9/01 proof unusable. The engine now stamps what it observed at promotion
+   * time, over the SAME path the gate probes.
+   */
+  it('promotion re-stamps the provenance over the run worktree — and never the portable hash', async () => {
+    seedRun(db, 'run-proof-restamp', JSON.stringify(['agent']));
+    const io = { inputHash: 'input-1' as string | null, fingerprint: 'host-1' };
+    const store = buildMutableRunbookStore(db, io);
+    const registered = (await store.registerDraft(1, '/live/worktree', 'web')) as {
+      hash: string;
+      version: number;
+    };
+    expect(runbookProvenance(db).host_fingerprint_json).toBe('host-1');
+
+    // Both drift conjuncts move between the draft and the proof: an app release
+    // (fingerprint) and a lockfile bump (input hash).
+    io.fingerprint = 'host-2';
+    io.inputHash = 'input-2';
+
+    const { scheduler } = initWith(store);
+    scheduler.enqueue({
+      runId: 'run-proof-restamp',
+      projectId: 1,
+      type: 'interactive-web-behavior',
+      input: { intent: 'prove the runbook' },
+      chain: [],
+      task: SERVE_TASK,
+      snapshotSha: 'sha-proof-restamp',
+      setupProof: true,
+      runbookHash: registered.hash,
+      runbookLocalVersion: registered.version,
+    });
+    await flushDrain();
+
+    expect(runbookRow(db).status).toBe('proven');
+    const provenance = runbookProvenance(db);
+    expect(provenance.input_hash).toBe('input-2');
+    expect(provenance.host_fingerprint_json).toBe('host-2');
+    // Codex #1: the content address is the target of every pin and the link to
+    // `portable_json`. It is never re-stamped.
+    expect(provenance.portable_hash).toBe(registered.hash);
+    expect(runbookRow(db).version).toBe(registered.version);
+
+    // The payoff: the proof is live on the VERY NEXT gate read, instead of
+    // reading as drifted against a baseline nobody refreshed.
+    expect(await store.status(1, '/live/worktree', 'web')).toBe('proven');
+  });
+
+  it('a provenance probe that THROWS still promotes — status-only, exactly as before F4', async () => {
+    seedRun(db, 'run-proof-probe-throws', JSON.stringify(['agent']));
+    const io = { inputHash: 'input-1' as string | null, fingerprint: 'host-1', fingerprintThrows: false };
+    const store = buildMutableRunbookStore(db, io);
+    const registered = (await store.registerDraft(1, '/live/worktree', 'web')) as {
+      hash: string;
+      version: number;
+    };
+    // The probe breaks only AFTER the draft is stamped, so the failure is
+    // isolated to the promotion path.
+    io.fingerprintThrows = true;
+
+    const { scheduler } = initWith(store);
+    scheduler.enqueue({
+      runId: 'run-proof-probe-throws',
+      projectId: 1,
+      type: 'interactive-web-behavior',
+      input: { intent: 'prove the runbook' },
+      chain: [],
+      task: SERVE_TASK,
+      snapshotSha: 'sha-proof-probe-throws',
+      setupProof: true,
+      runbookHash: registered.hash,
+      runbookLocalVersion: registered.version,
+    });
+    await flushDrain();
+
+    // A broken probe must never cost a real proof its promotion.
+    expect(requestRow(db).status).toBe('passed');
+    expect(runbookRow(db).status).toBe('proven');
+    expect(runbookProvenance(db).host_fingerprint_json).toBe('host-1');
   });
 
   it('a CAS conflict (the record moved mid-flight) is a warn, never a verdict change', async () => {
@@ -2332,5 +2516,119 @@ describe('VerificationScheduler — the bootstrap toggle is read live', () => {
     expect(await call()).toMatchObject({ kind: 'not-attempted' });
     expect(attempts).toHaveLength(1);
     db.close();
+  });
+});
+
+/**
+ * F4 stage 2 / Codex #2 — WHICH of the two bootstraps the decision dispatches.
+ *
+ * `decideRunbookBootstrap` now answers with a MODE, and this method is the seam
+ * that acts on it. Pinned here rather than left to the decision module's own
+ * tests because a mis-wire is silent in exactly the direction that costs the
+ * most: a DRIFTED record routed to `'derive'` would overwrite a human-authored
+ * runbook with a machine-authored rival to fix a proof that expired for
+ * environmental reasons — and every lane would still go green afterwards.
+ */
+describe('VerificationScheduler — which bootstrap MODE the decision dispatches', () => {
+  const TASK: VerificationTaskV1 = {
+    version: 1,
+    summary: 'verify the widget',
+    serve: { cmd: 'pnpm run preview' },
+    behaviors: [],
+  };
+
+  /**
+   * A scheduler whose runbook read answers `reason` and whose bootstrap runner
+   * only RECORDS what it was handed. `adopt` is captured only off the arm that
+   * has one, so a reprove that somehow grew the field would show up as an extra
+   * key rather than being read through a cast.
+   */
+  function dispatcher(
+    reason: 'draft' | 'file-only' | 'drifted' | 'content-drifted',
+    enabled = true,
+  ): {
+    seen: Array<{ mode: string; adopt?: boolean }>;
+    call: () => Promise<unknown>;
+    close: () => void;
+  } {
+    const own = new Database(':memory:');
+    const seen: Array<{ mode: string; adopt?: boolean }> = [];
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(own),
+      backends: {
+        capturePage: fakeBackend(vi.fn(async () => ({ ok: true, fileNames: [] }) satisfies CaptureResult)),
+      },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: { ...CONFIG, autoBootstrapRunbook: enabled },
+      leasePool: new ResourceLeasePool(new Mutex()),
+      onVerdict: () => {},
+      runbookStatus: async () => ({ status: 'unproven-draft', reason }),
+      runbookBootstrap: async (args) => {
+        seen.push(args.mode === 'derive' ? { mode: args.mode, adopt: args.adopt } : { mode: args.mode });
+        return { kind: 'declined', reason: 'unavailable', detail: 'test' };
+      },
+    });
+    return {
+      seen,
+      call: () =>
+        scheduler.maybeBootstrapRunbook({
+          projectId: 1,
+          runId: 'run-mode',
+          laneTaskRef: 'TASK-1',
+          modality: 'web',
+          probePath: '/wt',
+          task: TASK,
+        }),
+      close: () => own.close(),
+    };
+  }
+
+  it("a DRIFTED proof dispatches 'reprove', with no adopt flag at all", async () => {
+    // The record is written, committed and registered; only its proof expired.
+    // Re-deriving would answer a question nobody asked, and (since F4 stage 1
+    // made drift non-writing) declining would strand the project forever.
+    const d = dispatcher('drifted');
+    expect(await d.call()).toMatchObject({ kind: 'declined' });
+    expect(d.seen).toEqual([{ mode: 'reprove' }]);
+    d.close();
+  });
+
+  it("an ordinary draft still dispatches 'derive', adopt false", async () => {
+    const d = dispatcher('draft');
+    await d.call();
+    expect(d.seen).toEqual([{ mode: 'derive', adopt: false }]);
+    d.close();
+  });
+
+  it("a committed-but-unproven runbook still dispatches 'derive' with adopt TRUE", async () => {
+    // The adopt decision has to survive the mode plumbing: this tree carries a
+    // runbook a teammate committed, so the honest action is to prove what is
+    // there, not to author a rival — the same §4 rule, one arm over.
+    const d = dispatcher('file-only');
+    await d.call();
+    expect(d.seen).toEqual([{ mode: 'derive', adopt: true }]);
+    d.close();
+  });
+
+  it('a CONTENT drift dispatches NOTHING — a proof could never clear it', async () => {
+    // The loop this closes (F4 fix round): dispatched as a reprove, this record
+    // would deploy an agent, build and serve the project, PASS, fail its own
+    // `confirmProven` against the same unchanged file-vs-record mismatch — since
+    // promotion never re-stamps `portable_hash` — report "still not proven", and
+    // do it again on the next run, forever, charging the project's verification
+    // budget each time. The gate still skips with the same drift string; the
+    // remedy is re-registration, which no bootstrap mode performs.
+    const d = dispatcher('content-drifted');
+    expect(await d.call()).toEqual({ kind: 'not-attempted', reason: 'stale-proof' });
+    expect(d.seen).toEqual([]);
+    d.close();
+  });
+
+  it('the toggle still beats a drifted record — a reprove spends a deployment too', async () => {
+    const d = dispatcher('drifted', false);
+    expect(await d.call()).toEqual({ kind: 'not-attempted', reason: 'disabled' });
+    expect(d.seen).toEqual([]);
+    d.close();
   });
 });

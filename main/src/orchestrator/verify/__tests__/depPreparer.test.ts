@@ -16,7 +16,7 @@ import { describe, it, expect } from 'vitest';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import { withTempDir } from '../../../__test_fixtures__/tmp';
-import { VerifyDepPreparer, type DepExec } from '../depPreparer';
+import { VerifyDepPreparer, makeDepExec, type DepExec } from '../depPreparer';
 
 interface ExecCall {
   cmd: string;
@@ -563,6 +563,49 @@ describe('VerifyDepPreparer.prepare — every failure degrades to null', () => {
       });
 
       await expect(preparer.prepare(worktree, depDirs)).resolves.toBeNull();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F3 / RC4 — the PATH the production exec hands its children. This is the one
+// suite that spawns a REAL child: what matters is the env a spawned process
+// actually receives, which no fake can establish.
+// ---------------------------------------------------------------------------
+
+describe.skipIf(process.platform === 'win32')('makeDepExec — the child environment', () => {
+  it('runs commands under the harness PATH, not the inherited one', async () => {
+    // A node dir the GUI PATH would never carry — the shape of the 9/01
+    // `spawn npx ENOENT`, where the packaged app's PATH had no node and no npx.
+    const harnessPath = ['/opt/cyboflow-node/bin', '/usr/bin', '/bin'].join(':');
+    const exec = makeDepExec(async () => harnessPath);
+    const previous = process.env.CYBOFLOW_DEP_EXEC_PROBE;
+    process.env.CYBOFLOW_DEP_EXEC_PROBE = 'inherited';
+    try {
+      await withTempDir('dep-exec-path-', async (cwd) => {
+        const result = await exec(
+          'sh',
+          ['-c', 'printf %s "$PATH|$CYBOFLOW_DEP_EXEC_PROBE"'],
+          { cwd, timeoutMs: 10_000 },
+        );
+        expect(result.code).toBe(0);
+        // The harness PATH wins outright...
+        expect(result.out.split('|')[0]).toBe(harnessPath);
+        // ...and everything else this process holds is still inherited.
+        expect(result.out.split('|')[1]).toBe('inherited');
+      });
+    } finally {
+      if (previous === undefined) delete process.env.CYBOFLOW_DEP_EXEC_PROBE;
+      else process.env.CYBOFLOW_DEP_EXEC_PROBE = previous;
+    }
+  });
+
+  it('reports a non-zero exit as a VALUE, unchanged by the env plumbing', async () => {
+    const exec = makeDepExec(async () => process.env.PATH ?? '/usr/bin:/bin');
+    await withTempDir('dep-exec-exit-', async (cwd) => {
+      const result = await exec('sh', ['-c', 'echo nope >&2; exit 3'], { cwd, timeoutMs: 10_000 });
+      expect(result.code).toBe(3);
+      expect(result.out).toContain('nope');
     });
   });
 });

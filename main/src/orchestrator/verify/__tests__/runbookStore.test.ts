@@ -7,15 +7,26 @@
  * columns come from the REAL migration 096, not a hand-rolled schema.
  *
  * The suite is organized around the store's ONE non-obvious invariant:
- * `'proven'` is a conjunction re-checked on every read, and the four ways it
- * can stop holding do NOT all mean the same thing.
- *   - portable hash / project input-hash / host fingerprint drift  → DEMOTE.
- *     Something the proof depended on changed; the green badge is now a lie.
- *   - the portable FILE is simply missing from the probed tree      → do NOT
- *     demote. That is the ordinary pre-merge state (the setup flow commits the
- *     runbook on its own branch), and demoting would make the proof evaporate
- *     the first time an unrelated lane asked.
- * Both answer `'unproven-draft'` to the caller; only one of them writes.
+ * `'proven'` is a conjunction re-checked on every read, and the ways it can
+ * stop holding do NOT all mean the same thing.
+ *   - portable hash / project input-hash / host fingerprint drift  → the READ
+ *     answers `'unproven-draft'`/`'drifted'`. Something the proof depended on
+ *     changed; the green badge would be a lie.
+ *   - the portable FILE is simply missing from the probed tree      → the
+ *     portable-hash conjunct is SKIPPED and the other two decide (F10: the
+ *     record's `portable_json`, not the file, is what a proof executes). That
+ *     is the ordinary pre-merge state on every branch that has not landed the
+ *     runbook yet, and it can still read `'proven'`.
+ *   - the portable file is UNREADABLE (the injected dep rejects)     → fail-soft
+ *     `'absent'`/`'indeterminate'`. Never the record-authoritative path.
+ *
+ * AND NONE OF THEM WRITE (F4 —
+ * docs/proposals/visual-verification-brittleness-fixes.md). Drift used to be a
+ * write-through demotion, which meant a lockfile bump or an app release
+ * destroyed a proof and merely opening the Project Overview could trigger it.
+ * The persisted `status` column now moves under `registerDraft`/`markProven`
+ * only — so most assertions here pair the ANSWER with `persistedStatus()`,
+ * which is the thing that must not have changed.
  *
  * IO is injected (a fake portable-file map + mutable input-hash/fingerprint
  * values), so these exercise the DB state machine without a filesystem.
@@ -107,18 +118,28 @@ function baseRunbook(): VerifyRunbookV1 {
 interface Harness {
   store: VerifyRunbookStore;
   db: Database.Database;
-  /** dirPath → portable file text (absent key ⇒ readPortableFile resolves null). */
+  /** dirPath → portable file text (absent key ⇒ readPortableFile resolves null = GENUINELY ABSENT). */
   files: Map<string, string>;
+  /**
+   * dirPaths whose read REJECTS — the production reader's post-F10 contract
+   * (index.ts: `null` only for ENOENT/ENOTDIR, throw otherwise), so the store's
+   * "unreadable is not absent" behavior is exercised the way it really happens.
+   */
+  unreadable: Set<string>;
   state: { inputHash: string | null; fingerprint: string };
   warnings: string[];
 }
 
 function makeHarness(db: Database.Database = buildDb()): Harness {
   const files = new Map<string, string>([[WORKTREE, JSON.stringify(baseRunbook())]]);
+  const unreadable = new Set<string>();
   const state = { inputHash: 'inputs-v1' as string | null, fingerprint: 'host-v1' };
   const warnings: string[] = [];
   const deps: VerifyRunbookStoreDeps = {
-    readPortableFile: async (dirPath) => files.get(dirPath) ?? null,
+    readPortableFile: async (dirPath) => {
+      if (unreadable.has(dirPath)) throw new Error('EACCES: permission denied');
+      return files.get(dirPath) ?? null;
+    },
     computeInputHash: async () => state.inputHash,
     hostFingerprint: async () => state.fingerprint,
     logger: {
@@ -130,10 +151,30 @@ function makeHarness(db: Database.Database = buildDb()): Harness {
       debug: () => {},
     },
   };
-  return { store: new VerifyRunbookStore(db, deps), db, files, state, warnings };
+  return { store: new VerifyRunbookStore(db, deps), db, files, unreadable, state, warnings };
 }
 
-/** Read the persisted status directly — the assertion that separates demote from don't-demote. */
+/** The whole persisted record — what a non-writing read must leave untouched. */
+function persistedRow(
+  db: Database.Database,
+  modality = 'web',
+): { status: string; version: number; proof_json: string | null; portable_hash: string; input_hash: string | null; host_fingerprint_json: string | null } {
+  return db
+    .prepare(
+      `SELECT status, version, proof_json, portable_hash, input_hash, host_fingerprint_json
+       FROM verify_runbook_local WHERE project_id = 1 AND modality = ?`,
+    )
+    .get(modality) as {
+    status: string;
+    version: number;
+    proof_json: string | null;
+    portable_hash: string;
+    input_hash: string | null;
+    host_fingerprint_json: string | null;
+  };
+}
+
+/** Read the persisted status directly — the assertion that separates "answered" from "wrote". */
 function persistedStatus(db: Database.Database, modality = 'web'): string | undefined {
   const row = db
     .prepare('SELECT status FROM verify_runbook_local WHERE project_id = 1 AND modality = ?')
@@ -263,8 +304,19 @@ describe('VerifyRunbookStore lifecycle', () => {
   });
 });
 
-describe('VerifyRunbookStore drift → write-through demotion', () => {
-  it('demotes when the portable file hashes to something else', async () => {
+/**
+ * F4 — drift is COMPUTED AND RETURNED, never written.
+ *
+ * Each case asserts the same two things: the READ is honest
+ * (`'unproven-draft'`, so the gate and the badge still refuse), and the RECORD
+ * is untouched (still `'proven'`, proof intact). The second half is the whole
+ * change: the write-through demotion this suite used to assert made an ordinary
+ * dependency bump or app release destroy a proof outright, recoverable only by
+ * re-deriving a human-authored runbook — and merely opening the Project
+ * Overview was enough to trigger it.
+ */
+describe('VerifyRunbookStore drift → computed, non-writing', () => {
+  it('reads unproven when the portable file hashes to something else, WITHOUT writing', async () => {
     const h = makeHarness();
     await proveWeb(h);
 
@@ -276,56 +328,81 @@ describe('VerifyRunbookStore drift → write-through demotion', () => {
     h.files.set(WORKTREE, JSON.stringify(edited));
 
     expect(await h.store.status(1, WORKTREE, 'web')).toBe('unproven-draft');
-    expect(persistedStatus(h.db)).toBe('unproven-draft');
+    expect(persistedStatus(h.db)).toBe('proven');
     h.db.close();
   });
 
-  it('demotes when the portable file no longer parses', async () => {
+  it('reads unproven when the portable file no longer parses, WITHOUT writing', async () => {
     const h = makeHarness();
     await proveWeb(h);
     h.files.set(WORKTREE, '{ not json');
 
     expect(await h.store.status(1, WORKTREE, 'web')).toBe('unproven-draft');
-    expect(persistedStatus(h.db)).toBe('unproven-draft');
+    expect(persistedStatus(h.db)).toBe('proven');
     h.db.close();
   });
 
-  it('demotes on project input-hash drift (an edited dev script)', async () => {
+  it('reads unproven on project input-hash drift (an edited dev script), WITHOUT writing', async () => {
     const h = makeHarness();
     await proveWeb(h);
     h.state.inputHash = 'inputs-v2';
 
     expect(await h.store.status(1, WORKTREE, 'web')).toBe('unproven-draft');
-    expect(persistedStatus(h.db)).toBe('unproven-draft');
+    expect(persistedStatus(h.db)).toBe('proven');
     h.db.close();
   });
 
-  it('demotes on host-fingerprint drift (chromium removed, a TCC grant revoked)', async () => {
+  it('reads unproven on host-fingerprint drift (chromium moved, an Electron ABI bump), WITHOUT writing', async () => {
     const h = makeHarness();
     await proveWeb(h);
     h.state.fingerprint = 'host-v2';
 
     expect(await h.store.status(1, WORKTREE, 'web')).toBe('unproven-draft');
-    expect(persistedStatus(h.db)).toBe('unproven-draft');
+    expect(persistedStatus(h.db)).toBe('proven');
     h.db.close();
   });
 
-  it('a demotion clears the proof but PRESERVES the record version (the pin stays resolvable)', async () => {
+  it('a drifting read leaves the ENTIRE record intact — proof, version, and provenance', async () => {
     const h = makeHarness();
     const pin = await proveWeb(h);
+    const before = persistedRow(h.db);
     h.state.fingerprint = 'host-v2';
     await h.store.status(1, WORKTREE, 'web');
 
-    const row = h.db
-      .prepare('SELECT version, proof_json, input_hash FROM verify_runbook_local WHERE project_id = 1 AND modality = ?')
-      .get('web') as { version: number; proof_json: string | null; input_hash: string | null };
-    expect(row.version).toBe(pin.version);
-    expect(row.proof_json).toBeNull();
-    // The provenance of what the proof WAS taken against is kept, for diagnosis.
-    expect(row.input_hash).toBe('inputs-v1');
+    // Byte-for-byte the same record: the read is a read.
+    expect(persistedRow(h.db)).toEqual(before);
+    expect(persistedRow(h.db).version).toBe(pin.version);
+    expect(persistedRow(h.db).proof_json).toBe('{"sha":"deadbeef"}');
+    // The provenance of what the proof WAS taken against is what makes the
+    // drift diagnosable — and what a re-prove re-stamps.
+    expect(persistedRow(h.db).input_hash).toBe('inputs-v1');
 
-    // And the runner can still resolve the pin — it just sees an honest status.
-    expect(h.store.getByHash(1, 'web', pin.hash)?.status).toBe('unproven-draft');
+    // The runner still resolves the pin, and (F4/Codex #2, accepted) it now sees
+    // 'proven' — drift is caught at the ENQUEUE gate, not at execution time.
+    expect(h.store.getByHash(1, 'web', pin.hash)?.status).toBe('proven');
+    h.db.close();
+  });
+
+  it('the drift warn still fires, so a vanishing proof is still greppable', async () => {
+    const h = makeHarness();
+    await proveWeb(h);
+    h.state.inputHash = 'inputs-v2';
+    await h.store.status(1, WORKTREE, 'web');
+    expect(h.warnings.some((w) => w.includes('drifted'))).toBe(true);
+    h.db.close();
+  });
+
+  it('the inputs coming back restores proven with no re-registration at all', async () => {
+    // The other half of "non-destructive": a proof that reads drifted because
+    // the developer switched to the dev build is proven again the moment they
+    // switch back. Under write-through demotion this needed a full re-derive.
+    const h = makeHarness();
+    await proveWeb(h);
+    h.state.fingerprint = 'host-v2';
+    expect(await h.store.status(1, WORKTREE, 'web')).toBe('unproven-draft');
+
+    h.state.fingerprint = 'host-v1';
+    expect(await h.store.status(1, WORKTREE, 'web')).toBe('proven');
     h.db.close();
   });
 
@@ -335,7 +412,9 @@ describe('VerifyRunbookStore drift → write-through demotion', () => {
     h.state.fingerprint = 'host-v2';
     expect(await h.store.status(1, WORKTREE, 'web')).toBe('unproven-draft');
 
-    // Re-register against the new host, then re-prove.
+    // Re-register against the new host, then re-prove. (registerDraft is the
+    // one verb that still writes the record DOWN — new content is unproven
+    // content — so this is where the persisted 'proven' actually goes away.)
     const re = await h.store.registerDraft(1, WORKTREE, 'web');
     if ('error' in re) throw new Error(re.error);
     expect(re.hash).toBe(pin.hash);
@@ -345,20 +424,97 @@ describe('VerifyRunbookStore drift → write-through demotion', () => {
   });
 });
 
-describe('VerifyRunbookStore non-demoting states', () => {
-  it('an ABSENT file with a proven record reports unproven-draft WITHOUT demoting (pre-merge)', async () => {
+/**
+ * F10 — the file is an EXPORT; the record is what executes.
+ *
+ * Nothing reads `.cyboflow/verify-runbook.json` inside the detached snapshot:
+ * the runner fetches `portable_json` by content hash. So a probe path that
+ * genuinely lacks the file cannot change WHAT would run, and the portable-hash
+ * conjunct is skipped rather than the whole read being refused. The input hash
+ * is what still guards a branch — it is the one that folds in package scripts
+ * and the lockfile.
+ *
+ * The narrowness of "absent" is the safety property: an UNREADABLE file must
+ * never take this path, which is why the production reader rejects on anything
+ * but ENOENT/ENOTDIR (index.ts, Codex #8) and the harness models that.
+ */
+describe('VerifyRunbookStore — an absent file is record-authoritative (F10)', () => {
+  it('a proven record reads PROVEN from a tree that lacks the file, when the other conjuncts hold', async () => {
     const h = makeHarness();
     await proveWeb(h);
 
-    // A sibling lane's worktree legitimately lacks the not-yet-merged runbook.
-    expect(await h.store.status(1, '/tmp/wt-b', 'web')).toBe('unproven-draft');
+    // A sibling lane's worktree legitimately lacks the not-yet-merged runbook —
+    // and, being a checkout of the same project, hashes the same inputs.
+    expect(await h.store.statusDetail(1, '/tmp/wt-b', 'web')).toEqual({
+      status: 'proven',
+      reason: 'proven',
+    });
     expect(persistedStatus(h.db)).toBe('proven');
 
-    // The tree that DOES carry it is still proven.
+    // The tree that DOES carry it is still proven, by the full conjunction.
     expect(await h.store.status(1, WORKTREE, 'web')).toBe('proven');
     h.db.close();
   });
 
+  it('an absent file does NOT excuse input drift — the branch still refuses, and still without writing', async () => {
+    const h = makeHarness();
+    await proveWeb(h);
+    // The tree lacks the runbook AND its scripts/lockfile moved: exactly the
+    // case the skipped conjunct must not launder.
+    h.state.inputHash = 'inputs-v2';
+
+    expect(await h.store.statusDetail(1, '/tmp/wt-b', 'web')).toEqual({
+      status: 'unproven-draft',
+      reason: 'drifted',
+    });
+    expect(persistedStatus(h.db)).toBe('proven');
+    h.db.close();
+  });
+
+  it('an absent file does NOT excuse host drift either', async () => {
+    const h = makeHarness();
+    await proveWeb(h);
+    h.state.fingerprint = 'host-v2';
+
+    expect(await h.store.statusDetail(1, '/tmp/wt-b', 'web')).toEqual({
+      status: 'unproven-draft',
+      reason: 'drifted',
+    });
+    h.db.close();
+  });
+
+  it('an UNREADABLE file is not an absent one: fail-soft indeterminate, never proven, never written', async () => {
+    const h = makeHarness();
+    await proveWeb(h);
+    h.unreadable.add(WORKTREE);
+
+    // The reader rejected (a permissions/IO fault), so the store cannot observe
+    // the tree at all — and an inability to look is never evidence of a proof.
+    expect(await h.store.statusDetail(1, WORKTREE, 'web')).toEqual({
+      status: 'absent',
+      reason: 'indeterminate',
+    });
+    expect(persistedStatus(h.db)).toBe('proven');
+    h.db.close();
+  });
+
+  it('a PRESENT but unparseable file keeps its rejection (content drift, not absence)', async () => {
+    const h = makeHarness();
+    await proveWeb(h);
+    h.files.set(WORKTREE, '{ not json');
+
+    // 'content-drifted', not 'drifted': the remedy is to re-register this
+    // tree's revision, and no proof can substitute for that (F4 fix round).
+    expect(await h.store.statusDetail(1, WORKTREE, 'web')).toEqual({
+      status: 'unproven-draft',
+      reason: 'content-drifted',
+    });
+    expect(persistedStatus(h.db)).toBe('proven');
+    h.db.close();
+  });
+});
+
+describe('VerifyRunbookStore non-demoting states', () => {
   it('an uncomputable input hash fails soft to absent WITHOUT demoting', async () => {
     const h = makeHarness();
     await proveWeb(h);
@@ -439,6 +595,160 @@ describe('VerifyRunbookStore.markProven CAS', () => {
   it('reports not-found when no record exists for the (project, modality)', () => {
     const h = makeHarness();
     expect(h.store.markProven(1, 'web', 'h', 1, '{}')).toEqual({ ok: false, error: 'not-found' });
+    h.db.close();
+  });
+});
+
+/**
+ * F4 / Codex #1 — promotion RE-STAMPS the provenance the drift check compares
+ * against, and only that.
+ *
+ * `registerDraft` stamps `input_hash`/`host_fingerprint_json` from whatever tree
+ * and host were current when the DRAFT was written — a flow worktree, or a host
+ * that has since taken an Electron bump. A proof obtained afterwards was
+ * therefore born already drifted. The engine now hands `markProven` what it
+ * observed at promotion time.
+ *
+ * `portable_hash` is deliberately NOT re-stampable: it is the content address of
+ * `portable_json` and the target of every pin.
+ */
+describe('VerifyRunbookStore.markProven — fresh provenance re-stamp', () => {
+  it('re-stamps input_hash + host_fingerprint_json, and never portable_hash', async () => {
+    const h = makeHarness();
+    const pin = await h.store.registerDraft(1, WORKTREE, 'web');
+    if ('error' in pin) throw new Error(pin.error);
+    expect(persistedRow(h.db).input_hash).toBe('inputs-v1');
+
+    // The host moved between the draft and the proof (an app release, a
+    // playwright bump) — the proof describes the NEW one.
+    expect(
+      h.store.markProven(1, 'web', pin.hash, pin.version, '{"sha":"beef"}', {
+        inputHash: 'inputs-v2',
+        hostFingerprint: 'host-v2',
+      }),
+    ).toEqual({ ok: true });
+
+    const row = persistedRow(h.db);
+    expect(row.status).toBe('proven');
+    expect(row.input_hash).toBe('inputs-v2');
+    expect(row.host_fingerprint_json).toBe('host-v2');
+    // The content address is untouched, so the pin still resolves.
+    expect(row.portable_hash).toBe(pin.hash);
+    expect(row.version).toBe(pin.version);
+    expect(h.store.getByHash(1, 'web', pin.hash)?.status).toBe('proven');
+    h.db.close();
+  });
+
+  it('the re-stamp is what makes the very next read proven instead of drifted', async () => {
+    const h = makeHarness();
+    const pin = await h.store.registerDraft(1, WORKTREE, 'web');
+    if ('error' in pin) throw new Error(pin.error);
+    // The draft was registered on host-v1; the proof ran on host-v2.
+    h.state.fingerprint = 'host-v2';
+
+    // Without the re-stamp the proof is born drifted…
+    expect(h.store.markProven(1, 'web', pin.hash, pin.version, '{}')).toEqual({ ok: true });
+    expect(await h.store.status(1, WORKTREE, 'web')).toBe('unproven-draft');
+
+    // …with it, the record describes the host that actually proved it.
+    const fresh = await h.store.freshProvenance(WORKTREE);
+    expect(fresh).toEqual({ inputHash: 'inputs-v1', hostFingerprint: 'host-v2' });
+    expect(h.store.markProven(1, 'web', pin.hash, pin.version, '{}', fresh)).toEqual({ ok: true });
+    expect(await h.store.status(1, WORKTREE, 'web')).toBe('proven');
+    h.db.close();
+  });
+
+  /**
+   * An UNOBSERVABLE input hash must not be WRITTEN (F4 fix round).
+   *
+   * `null` from `computeInputHash` means "could not look at this tree" — a
+   * worktree already cleaned up when the terminal settled, a manifest
+   * momentarily unreadable — not "the inputs are empty". Stamping it would be
+   * self-destroying: `statusDetail` counts a stored NULL against any freshly
+   * computed value as a difference, so the promotion would read as drifted on
+   * its very next check, and the record would need a whole re-prove to recover
+   * from having just been proven. The stored baseline is kept instead, which is
+   * exactly what the caller's fallback does when the probe THROWS.
+   */
+  it('a null input hash is NOT written over the stored one; the fingerprint still is', async () => {
+    const h = makeHarness();
+    const pin = await h.store.registerDraft(1, WORKTREE, 'web');
+    if ('error' in pin) throw new Error(pin.error);
+    expect(persistedRow(h.db).input_hash).toBe('inputs-v1');
+
+    h.state.inputHash = null;
+    h.state.fingerprint = 'host-v2';
+    const fresh = await h.store.freshProvenance(WORKTREE);
+    expect(fresh.inputHash).toBeNull();
+    expect(h.store.markProven(1, 'web', pin.hash, pin.version, '{}', fresh)).toEqual({ ok: true });
+
+    const row = persistedRow(h.db);
+    expect(row.status).toBe('proven');
+    expect(row.input_hash).toBe('inputs-v1');
+    // The half that WAS observed is still re-stamped — a probe that could not
+    // read the tree says nothing about the host.
+    expect(row.host_fingerprint_json).toBe('host-v2');
+    h.db.close();
+  });
+
+  it('the promotion survives its own next read when the inputs were unobservable', async () => {
+    // The concrete regression: with a NULL written, this read answered
+    // 'unproven-draft'/'drifted' one line after a successful proof.
+    const h = makeHarness();
+    const pin = await h.store.registerDraft(1, WORKTREE, 'web');
+    if ('error' in pin) throw new Error(pin.error);
+
+    h.state.inputHash = null;
+    const fresh = await h.store.freshProvenance(WORKTREE);
+    expect(h.store.markProven(1, 'web', pin.hash, pin.version, '{}', fresh)).toEqual({ ok: true });
+
+    // The tree becomes readable again and its inputs are unchanged.
+    h.state.inputHash = 'inputs-v1';
+    expect(await h.store.statusDetail(1, WORKTREE, 'web')).toEqual({
+      status: 'proven',
+      reason: 'proven',
+    });
+    h.db.close();
+  });
+
+  it('BOTH CAS predicates still gate the re-stamping flip', async () => {
+    const h = makeHarness();
+    const pin = await h.store.registerDraft(1, WORKTREE, 'web');
+    if ('error' in pin) throw new Error(pin.error);
+    const fresh = { inputHash: 'inputs-v2', hostFingerprint: 'host-v2' };
+
+    expect(h.store.markProven(1, 'web', pin.hash, pin.version + 1, '{}', fresh)).toEqual({
+      ok: false,
+      error: 'cas-conflict',
+    });
+    expect(h.store.markProven(1, 'web', 'not-the-hash', pin.version, '{}', fresh)).toEqual({
+      ok: false,
+      error: 'hash-mismatch',
+    });
+
+    // A refused flip re-stamps NOTHING — the provenance is part of the same
+    // guarded UPDATE, not a second write.
+    const row = persistedRow(h.db);
+    expect(row.status).toBe('unproven-draft');
+    expect(row.input_hash).toBe('inputs-v1');
+    expect(row.host_fingerprint_json).toBe('host-v1');
+    h.db.close();
+  });
+
+  it('freshProvenance propagates a rejecting host probe (the caller decides, not the store)', async () => {
+    const h = makeHarness();
+    await h.store.registerDraft(1, WORKTREE, 'web');
+    // A fingerprint that cannot be computed has no safe stand-in: swallowing it
+    // would stamp a value that never matches. The scheduler catches this and
+    // falls back to a status-only flip rather than losing the proof.
+    const broken = new VerifyRunbookStore(h.db, {
+      readPortableFile: async () => null,
+      computeInputHash: async () => 'inputs-v1',
+      hostFingerprint: async () => {
+        throw new Error('probe exploded');
+      },
+    });
+    await expect(broken.freshProvenance(WORKTREE)).rejects.toThrow('probe exploded');
     h.db.close();
   });
 });
@@ -534,13 +844,15 @@ describe('VerifyRunbookStore fail-soft on a pre-096 DB', () => {
  * `statusDetail()` — the situation behind the three-valued answer
  * (lane-runbook-bootstrap.md §4).
  *
- * The suite above proves the ANSWERS are right. This one exists because three
+ * The suite above proves the ANSWERS are right. This one exists because several
  * distinct situations answer `'unproven-draft'` and two answer `'absent'`, and
  * a caller that intends to WRITE — a bootstrap that would `registerDraft` over
  * the singleton (project, modality) row — has to tell them apart. The load
- * bearing case is `'proven-file-absent-here'`: the record is live, proven, and
- * shared with every other tree, and a caller that read only the collapsed
- * `'unproven-draft'` would overwrite it.
+ * bearing case is now `'drifted'`: the record is live and someone's proof is
+ * merely out of date with its inputs, so the response is to RE-PROVE it, not to
+ * re-derive over it. (`'proven-file-absent-here'` stays in the union for the
+ * modules that map it, but F10 means `statusDetail` no longer produces it — an
+ * absent file just skips the portable-hash conjunct.)
  *
  * Every case also asserts that `status()` projects to the same answer, so the
  * gate's view and a writer's view cannot drift apart.
@@ -579,15 +891,15 @@ describe('VerifyRunbookStore.statusDetail', () => {
     h.db.close();
   });
 
-  it('a PROVEN record whose file this tree lacks is proven-file-absent-here, and stays proven', async () => {
+  it('NEVER answers proven-file-absent-here any more — an absent file is judged on the other conjuncts (F10)', async () => {
     const h = makeHarness();
     await proveWeb(h);
 
-    // THE case a writing caller must never act on — the pre-merge state. The
-    // collapsed answer is indistinguishable from 'draft'; the reason is not.
+    // The pre-merge state used to be its own refusal. It is now simply the
+    // record's answer, because the record is what the runner executes.
     expect(await h.store.statusDetail(1, '/tmp/wt-b', 'web')).toEqual({
-      status: 'unproven-draft',
-      reason: 'proven-file-absent-here',
+      status: 'proven',
+      reason: 'proven',
     });
     expect(persistedStatus(h.db)).toBe('proven');
 
@@ -600,26 +912,39 @@ describe('VerifyRunbookStore.statusDetail', () => {
     h.db.close();
   });
 
+  /**
+   * WHICH drift, not just THAT it drifted (F4 fix round).
+   *
+   * The two file-shaped rows answer `'content-drifted'` and the two
+   * provenance-shaped rows answer `'drifted'`, and the split is load bearing
+   * rather than descriptive: `decideRunbookBootstrap` re-proves the second pair
+   * and DECLINES the first, because promotion never re-stamps `portable_hash`
+   * (Codex #1) and so no proof can ever clear a content mismatch. Collapsing
+   * them again would re-create a passing proof that fails its own confirmation,
+   * once per run, forever. Both still gate identically — same status, same
+   * intact record.
+   */
   it.each([
-    ['portable hash drift', (h: Harness) => h.files.set(WORKTREE, JSON.stringify({
+    ['portable hash drift', 'content-drifted', (h: Harness) => h.files.set(WORKTREE, JSON.stringify({
       ...baseRunbook(),
       modalities: { ...baseRunbook().modalities, web: { ...baseRunbook().modalities.web!, build: ['pnpm build:other'] } },
     }))],
-    ['project input drift', (h: Harness) => { h.state.inputHash = 'inputs-v2'; }],
-    ['host fingerprint drift', (h: Harness) => { h.state.fingerprint = 'host-v2'; }],
-    ['an unparseable portable file', (h: Harness) => h.files.set(WORKTREE, '{ not json')],
-  ])('%s reports drifted and demotes the record', async (_label, mutate) => {
+    ['project input drift', 'drifted', (h: Harness) => { h.state.inputHash = 'inputs-v2'; }],
+    ['host fingerprint drift', 'drifted', (h: Harness) => { h.state.fingerprint = 'host-v2'; }],
+    ['an unparseable portable file', 'content-drifted', (h: Harness) => h.files.set(WORKTREE, '{ not json')],
+  ])('%s reports %s and leaves the record alone (F4)', async (_label, reason, mutate) => {
     const h = makeHarness();
     await proveWeb(h);
     mutate(h);
 
     expect(await h.store.statusDetail(1, WORKTREE, 'web')).toEqual({
       status: 'unproven-draft',
-      reason: 'drifted',
+      reason,
     });
-    // 'drifted' is the one reason that has already spent the proof — unlike
-    // 'proven-file-absent-here', there is nothing left here to protect.
-    expect(persistedStatus(h.db)).toBe('unproven-draft');
+    // 'drifted' is a COMPUTED answer, not a spent proof: the record is still
+    // proven, and it is the enqueue gate — which recomputes this on every read —
+    // that keeps the badge and the lane honest.
+    expect(persistedStatus(h.db)).toBe('proven');
     h.db.close();
   });
 

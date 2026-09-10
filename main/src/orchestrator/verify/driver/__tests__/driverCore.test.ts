@@ -24,8 +24,10 @@ import {
   pidFilePath,
   runDriverCommand,
   sanitizeScreenshotName,
+  serveChildEnv,
   serveLogPath,
   servePidFilePath,
+  serveShellInvocation,
   USAGE,
   windowsScreenCaptureArgs,
   type DriverAttestRecord,
@@ -1388,3 +1390,155 @@ describe('createDefaultDriverDeps — pid file + process helpers (no browser tou
     expect(() => deps.killPid(999_999_999, 'SIGKILL')).not.toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// F7 / Codex #5 #10 — the serve spawn shape: the shell stays the process-GROUP
+// LEADER with the pinned command verbatim in its argv, and the child never
+// inherits ELECTRON_RUN_AS_NODE.
+// ---------------------------------------------------------------------------
+
+describe('serveShellInvocation', () => {
+  it('keeps sh as the leader by appending a NEWLINE and the no-op builtin', () => {
+    const inv = serveShellInvocation('pnpm run electron-dev', 'darwin');
+    expect(inv.command).toBe('sh');
+    expect(inv.args).toEqual(['-c', 'pnpm run electron-dev\n:']);
+    expect(inv.detached).toBe(true);
+  });
+
+  // The whole point of the trailing statement: `sh -c '<one simple command>'`
+  // exec-optimizes, the leader's argv becomes the resolved binary, and
+  // serveCommandMatches rejects a genuine pass as a wrapper (RC6).
+  it('never leaves a single simple command as the only statement', () => {
+    const inv = serveShellInvocation('sleep 30', 'linux');
+    expect(inv.args[1]).toBe('sleep 30\n:');
+    expect(inv.args[1].endsWith('\n:')).toBe(true);
+  });
+
+  // Codex #10: the `: ; <cmd>` PREFIX form does NOT retain the leader on dash.
+  it('puts the no-op AFTER the command, never before it', () => {
+    expect(serveShellInvocation('serve me', 'darwin').args[1].startsWith(':')).toBe(false);
+  });
+
+  it('carries the command verbatim — the pinned string is what ps must show', () => {
+    const cmd = 'unset ELECTRON_RUN_AS_NODE; CYBOFLOW_DIR="$VERIFY_DATA_DIR" pnpm run electron-dev';
+    expect(serveShellInvocation(cmd, 'darwin').args[1]).toBe(`${cmd}\n:`);
+  });
+
+  it('leaves the Windows cmd.exe path unchanged (no sh to exec-optimize)', () => {
+    const inv = serveShellInvocation('npm start', 'win32');
+    expect(inv.command.toLowerCase()).toContain('cmd');
+    expect(inv.args.join(' ')).toContain('npm start');
+    expect(inv.args.join(' ')).not.toContain('\n:');
+    expect(inv.detached).toBe(false);
+  });
+});
+
+describe('serveChildEnv', () => {
+  it('strips the Electron-as-node markers this process was started with', () => {
+    const env = serveChildEnv({
+      PATH: '/usr/bin',
+      ELECTRON_RUN_AS_NODE: '1',
+      ELECTRON_NO_ATTACH_CONSOLE: '1',
+    });
+    expect(env.ELECTRON_RUN_AS_NODE).toBeUndefined();
+    expect(env.ELECTRON_NO_ATTACH_CONSOLE).toBeUndefined();
+  });
+
+  // Round-2 review: the $VERIFY_DRIVER wrapper binds NODE_PATH to CYBOFLOW's own
+  // node_modules so THIS process can require('playwright'). A serve child that
+  // inherited it would run the deliverable with cyboflow's install on its CJS
+  // resolution fallback — a snapshot whose dependency mirror never warmed could
+  // boot anyway and PASS a verification that fails for a real user.
+  it("strips NODE_PATH so the deliverable never resolves out of cyboflow's install", () => {
+    const env = serveChildEnv({
+      PATH: '/usr/bin',
+      NODE_PATH: '/repo/node_modules',
+    });
+    expect(env.NODE_PATH).toBeUndefined();
+    expect(env.PATH).toBe('/usr/bin');
+  });
+
+  it('keeps every other inherited variable, the harness PATH included', () => {
+    const env = serveChildEnv({
+      PATH: '/opt/homebrew/bin:/usr/bin',
+      VERIFY_DATA_DIR: '/artifacts/data/vr-1',
+      ELECTRON_RUN_AS_NODE: '1',
+    });
+    expect(env).toEqual({
+      PATH: '/opt/homebrew/bin:/usr/bin',
+      VERIFY_DATA_DIR: '/artifacts/data/vr-1',
+    });
+  });
+
+  it('never mutates the env it was handed', () => {
+    const base = { ELECTRON_RUN_AS_NODE: '1' };
+    serveChildEnv(base);
+    expect(base.ELECTRON_RUN_AS_NODE).toBe('1');
+  });
+});
+
+/**
+ * The MEASUREMENT itself, run for real against this host's `/bin/sh`: a serve
+ * child spawned through the production dep reports (a) no ELECTRON_RUN_AS_NODE
+ * even though this process has one, and (b) a `ps` argv for its OWN pid — the
+ * detached group leader — containing the pinned command verbatim. Nothing but a
+ * real shell can prove either, and both are what F7 turns on.
+ */
+describe.skipIf(process.platform === 'win32')(
+  'createDefaultDriverDeps().spawnDetachedShell (real /bin/sh, no browser)',
+  () => {
+    let artifactsDir: string;
+    let previousRunAsNode: string | undefined;
+
+    beforeEach(async () => {
+      artifactsDir = await mkdtemp(join(tmpdir(), 'cvv-serve-'));
+      previousRunAsNode = process.env.ELECTRON_RUN_AS_NODE;
+      // What the $VERIFY_DRIVER wrapper exports, and what the serve child used
+      // to inherit — the reason every Electron runbook carried `unset …;`.
+      process.env.ELECTRON_RUN_AS_NODE = '1';
+    });
+
+    afterEach(async () => {
+      if (previousRunAsNode === undefined) delete process.env.ELECTRON_RUN_AS_NODE;
+      else process.env.ELECTRON_RUN_AS_NODE = previousRunAsNode;
+      await rm(artifactsDir, { recursive: true, force: true });
+    });
+
+    /** Run one serve command through the production dep and return its log. */
+    async function serveAndReadLog(command: string, until: string): Promise<string> {
+      const { readFile } = await import('node:fs/promises');
+      const logPath = serveLogPath(artifactsDir);
+      const { pid } = await createDefaultDriverDeps().spawnDetachedShell({ command, logPath });
+      expect(pid).toBeGreaterThan(1);
+      let log = '';
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline && !log.includes(until)) {
+        await new Promise((r) => setTimeout(r, 50));
+        log = await readFile(logPath, 'utf8').catch(() => '');
+      }
+      return log;
+    }
+
+    // A SINGLE SIMPLE COMMAND — the exact shape that used to exec-optimize. The
+    // command prints its own group leader's argv, so the assertion IS the
+    // measurement: with the trailing `\n:` that argv is `sh -c ps …` (the shell
+    // survived and carries the pinned string serveCommandMatches looks for);
+    // without it, sh execs `ps` and the line reads `ps -o command= -p <pid>`.
+    it('keeps sh as the group leader for a single simple command', async () => {
+      const log = await serveAndReadLog('ps -o command= -p $$', 'ps -o command=');
+      const psLine = log.split('\n').find((line) => line.includes('ps -o command='));
+      expect(psLine).toBeDefined();
+      expect(psLine).toContain('sh');
+      expect(psLine).toContain('-c');
+    });
+
+    it('does not hand ELECTRON_RUN_AS_NODE down to the serve child', async () => {
+      const marker = 'cyboflow-serve-env-marker';
+      const log = await serveAndReadLog(
+        `echo "${marker} RUN_AS_NODE=[\${ELECTRON_RUN_AS_NODE:-unset}]"`,
+        marker,
+      );
+      expect(log).toContain(`${marker} RUN_AS_NODE=[unset]`);
+    });
+  },
+);

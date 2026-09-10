@@ -87,6 +87,7 @@ import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import type { LoggerLike } from '../types';
 import { cmdCommandLine, cmdExeInvocation } from '../../utils/win32CmdLine';
+import { pathEnvKey, sharedHarnessPath } from './harnessEnv';
 
 const execFileAsync = promisify(execFile);
 
@@ -225,55 +226,87 @@ async function copyDirVerbatimWin32(src: string, dest: string): Promise<void> {
   }
 }
 
-/** The production exec: `execFile` with stdout+stderr merged into `out` and every failure mapped to a code. */
-export const defaultDepExec: DepExec = async (cmd, args, opts) => {
-  // `cp` does not exist on Windows: translate the exact argv the two clone
-  // rungs pass (`['-Rc'|'-R', src, dest]`) to an in-process verbatim copy.
-  // Anything else (notably the electron-builder rebuild) still goes to execFile.
-  // `npx` on Windows is `npx.cmd`, which Node refuses to spawn shell-less
-  // (EINVAL hardening). cmd.exe resolves the shim and `windowsHide` (set on
-  // every exec below) keeps it invisible.
-  if (process.platform === 'win32' && cmd === 'npx') {
-    const cmd = cmdExeInvocation(cmdCommandLine(['npx', ...args]));
-    const result = await execFileAsync(cmd.command, cmd.args, {
-      cwd: opts.cwd,
-      encoding: 'utf8',
-      timeout: opts.timeoutMs,
-      maxBuffer: 10 * 1024 * 1024,
-      windowsHide: true,
-      windowsVerbatimArguments: cmd.windowsVerbatimArguments,
-    });
-    return { code: 0, out: `${result.stdout}${result.stderr}` };
-  }
-  if (
-    process.platform === 'win32' &&
-    cmd === 'cp' &&
-    args.length === 3 &&
-    (args[0] === '-R' || args[0] === '-Rc')
-  ) {
-    try {
-      await copyDirVerbatimWin32(args[1], args[2]);
-      return { code: 0, out: '' };
-    } catch (err) {
-      return { code: 1, out: err instanceof Error ? err.message : String(err) };
+/**
+ * Build the production exec over a PATH source (F3 / RC4).
+ *
+ * WHY THE PATH IS EXPLICIT. This module's one privileged command is
+ * `npx electron-builder install-app-deps`, and in a packaged app the inherited
+ * `process.env.PATH` is the GUI login PATH — no `npx`, no `node`. Live on
+ * 2026-09-01 that produced `spawn npx ENOENT` ×3, the dep mirror never warmed,
+ * the first snapshot had ZERO `node_modules`, and a purely ENVIRONMENTAL failure
+ * was classified `ambiguous` (blocking) as a `build_failed`. The login-shell
+ * PATH — the same one every other spawn seam in the app uses — is what makes the
+ * rebuild resolvable. It is passed on the CLONE commands too: one env for every
+ * command this module runs is one thing to reason about, and `cp` benefits from
+ * being found the same way.
+ *
+ * The resolver is a parameter rather than a hard call so the tests can pin the
+ * env a child actually receives without shelling out to a login shell.
+ */
+export function makeDepExec(resolvePath: () => Promise<string>): DepExec {
+  return async (cmd, args, opts) => {
+    // Under the key case THIS process spells it (`Path` on Windows): a hardcoded
+    // `PATH` would leave the merged env carrying both, and the Windows `npx`
+    // branch below is the one that most needs the restored value (round-2
+    // review; `prependCodexPathToEnvironment` resolves the key the same way).
+    const env = { ...process.env, [pathEnvKey()]: await resolvePath() };
+    // `cp` does not exist on Windows: translate the exact argv the two clone
+    // rungs pass (`['-Rc'|'-R', src, dest]`) to an in-process verbatim copy.
+    // Anything else (notably the electron-builder rebuild) still goes to execFile.
+    // `npx` on Windows is `npx.cmd`, which Node refuses to spawn shell-less
+    // (EINVAL hardening). cmd.exe resolves the shim and `windowsHide` (set on
+    // every exec below) keeps it invisible.
+    if (process.platform === 'win32' && cmd === 'npx') {
+      const cmd = cmdExeInvocation(cmdCommandLine(['npx', ...args]));
+      const result = await execFileAsync(cmd.command, cmd.args, {
+        cwd: opts.cwd,
+        encoding: 'utf8',
+        env,
+        timeout: opts.timeoutMs,
+        maxBuffer: 10 * 1024 * 1024,
+        windowsHide: true,
+        windowsVerbatimArguments: cmd.windowsVerbatimArguments,
+      });
+      return { code: 0, out: `${result.stdout}${result.stderr}` };
     }
-  }
-  try {
-    const { stdout, stderr } = await execFileAsync(cmd, args, {
-      cwd: opts.cwd,
-      encoding: 'utf8',
-      timeout: opts.timeoutMs,
-      maxBuffer: 10 * 1024 * 1024,
-      windowsHide: true,
-    });
-    return { code: 0, out: `${stdout}${stderr}` };
-  } catch (err) {
-    const e = err as { code?: unknown; stdout?: unknown; stderr?: unknown; message?: unknown };
-    const code = typeof e.code === 'number' ? e.code : 1;
-    const out = `${typeof e.stdout === 'string' ? e.stdout : ''}${typeof e.stderr === 'string' ? e.stderr : ''}`;
-    return { code, out: out.length > 0 ? out : String(e.message ?? 'exec failed') };
-  }
-};
+    if (
+      process.platform === 'win32' &&
+      cmd === 'cp' &&
+      args.length === 3 &&
+      (args[0] === '-R' || args[0] === '-Rc')
+    ) {
+      try {
+        await copyDirVerbatimWin32(args[1], args[2]);
+        return { code: 0, out: '' };
+      } catch (err) {
+        return { code: 1, out: err instanceof Error ? err.message : String(err) };
+      }
+    }
+    try {
+      const { stdout, stderr } = await execFileAsync(cmd, args, {
+        cwd: opts.cwd,
+        encoding: 'utf8',
+        env,
+        timeout: opts.timeoutMs,
+        maxBuffer: 10 * 1024 * 1024,
+        windowsHide: true,
+      });
+      return { code: 0, out: `${stdout}${stderr}` };
+    } catch (err) {
+      const e = err as { code?: unknown; stdout?: unknown; stderr?: unknown; message?: unknown };
+      const code = typeof e.code === 'number' ? e.code : 1;
+      const out = `${typeof e.stdout === 'string' ? e.stdout : ''}${typeof e.stderr === 'string' ? e.stderr : ''}`;
+      return { code, out: out.length > 0 ? out : String(e.message ?? 'exec failed') };
+    }
+  };
+}
+
+/**
+ * The production exec: {@link makeDepExec} over the process-wide memoized
+ * login-shell PATH (one shell spawn per process, shared with the verification
+ * runner's own env resolution).
+ */
+export const defaultDepExec: DepExec = makeDepExec(sharedHarnessPath);
 
 // ---------------------------------------------------------------------------
 // Single-flight registry (module-level, shared by every instance)

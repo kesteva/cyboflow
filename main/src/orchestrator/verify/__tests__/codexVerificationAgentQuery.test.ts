@@ -274,6 +274,43 @@ describe('makeCodexVerificationAgentQuery', () => {
     expect(client.options.cwd).toBe('/workspace');
   });
 
+  // F3 / RC4 round-2 review (blocker). The runner now exports the real
+  // login-shell PATH in args.env; `prependCodexPathToEnvironment` writes the
+  // SAME key, so an args.env spread AFTER the prepend silently dropped
+  // `executable.pathDir` — and with it the bundled Codex helper binaries
+  // (ripgrep) the codex binary resolves from there. Both properties are pinned:
+  // the harness PATH beats what this process inherited, AND pathDir is in front.
+  it('keeps the codex PATH dir in front of the harness PATH from args.env', async () => {
+    const clients: FakeClient[] = [];
+    const factory = (options: CodexAppServerClientOptions): FakeClient => {
+      const client = new FakeClient(options, (method, _params, current) => {
+        if (method === 'account/read') return accountResponse();
+        if (method === 'model/list') return modelResponse();
+        if (method === 'thread/start') return { thread: { id: 'thread-1' } };
+        if (method === 'turn/start') {
+          emitSuccessTurn(current, JSON.stringify(validReport()));
+          return { turn: { id: 'turn-1' } };
+        }
+        throw new Error(`unexpected method ${method}`);
+      });
+      clients.push(client);
+      return client;
+    };
+    const query = makeCodexVerificationAgentQuery(undefined, undefined, {
+      clientFactory: factory,
+      resolveExecutable: executable,
+    });
+
+    await query({
+      ...baseArgs,
+      env: { ...baseArgs.env, PATH: '/opt/homebrew/bin:/usr/bin:/bin' },
+    });
+    const client = clients[0];
+    if (!client) throw new Error('fake client was not created');
+    const path = client.options.env?.PATH ?? '';
+    expect(path).toBe('/app/codex/codex-path:/opt/homebrew/bin:/usr/bin:/bin');
+  });
+
   it('passes args.model through and skips model/list', async () => {
     const clients: FakeClient[] = [];
     const factory = (options: CodexAppServerClientOptions): FakeClient => {

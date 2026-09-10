@@ -1249,3 +1249,272 @@ describe('CodexSdkManager hermetic global-agent spawn', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// F1 / RC1 — typed step-output channel (CliSpawnOutcome.resultText)
+//
+// The programmatic plane reads this: spawnStepRunner maps `void` to
+// `resultText: null`, and workflowController then drops task-verify's composed
+// visual-verification task ("channel unavailable") and its VERDICT: FAIL
+// loopback. So a clean Codex turn MUST resolve the outcome shape, and an
+// aborted one must NEVER hand back a stale result.
+// ---------------------------------------------------------------------------
+
+/** Emits the given agent-message texts (in order) then a clean turn/completed. */
+function textTurnHandler(texts: Array<string | null>): RequestHandler {
+  let turnCounter = 0;
+  return (method, _params, client) => {
+    if (method === 'account/read') {
+      return {
+        account: { type: 'chatgpt', email: 'user@example.com', planType: 'pro' },
+        requiresOpenaiAuth: true,
+      };
+    }
+    if (method === 'thread/start') return { thread: { id: 'codex-thread-1' } };
+    if (method === 'thread/resume') return { thread: { id: 'codex-thread-1' } };
+    if (method === 'turn/interrupt') return {};
+    if (method === 'turn/start') {
+      turnCounter += 1;
+      const turnId = `turn-${turnCounter}`;
+      const text = texts[turnCounter - 1] ?? null;
+      setTimeout(() => {
+        if (text !== null) {
+          client.notify({
+            method: 'item/completed',
+            params: {
+              threadId: 'codex-thread-1',
+              turnId,
+              completedAtMs: 20,
+              item: { type: 'agentMessage', id: `message-${turnCounter}`, text },
+            },
+          });
+        }
+        client.notify({
+          method: 'turn/completed',
+          params: { threadId: 'codex-thread-1', turn: { id: turnId, status: 'completed' } },
+        });
+      }, 0);
+      return { turn: { id: turnId } };
+    }
+    throw new Error(`Unexpected request: ${method}`);
+  };
+}
+
+describe('CodexSdkManager typed step output (F1)', () => {
+  const WARM_ENV = 'CYBOFLOW_DISABLE_CODEX_WARM';
+  afterEach(() => {
+    delete process.env[WARM_ENV];
+  });
+
+  it('resolves the last completed agentMessage text as resultText', async () => {
+    const db = createDb();
+    try {
+      const { manager } = makeWarmManager(db, textTurnHandler(['hello']));
+      await expect(manager.spawnCliProcess(baseTurn({ prompt: 'go' })))
+        .resolves.toEqual({ resultText: 'hello' });
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('latches the LAST agentMessage of a turn, not the first', async () => {
+    const db = createDb();
+    try {
+      const { manager } = makeWarmManager(db, (method, _params, client) => {
+        if (method === 'account/read') {
+          return {
+            account: { type: 'chatgpt', email: 'user@example.com', planType: 'pro' },
+            requiresOpenaiAuth: true,
+          };
+        }
+        if (method === 'thread/start') return { thread: { id: 'codex-thread-1' } };
+        if (method === 'turn/interrupt') return {};
+        if (method === 'turn/start') {
+          setTimeout(() => {
+            for (const [index, text] of ['interim thought', 'VERDICT: FAIL'].entries()) {
+              client.notify({
+                method: 'item/completed',
+                params: {
+                  threadId: 'codex-thread-1',
+                  turnId: 'turn-1',
+                  completedAtMs: 20 + index,
+                  item: { type: 'agentMessage', id: `message-${index}`, text },
+                },
+              });
+            }
+            client.notify({
+              method: 'turn/completed',
+              params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } },
+            });
+          }, 0);
+          return { turn: { id: 'turn-1' } };
+        }
+        throw new Error(`Unexpected request: ${method}`);
+      });
+      await expect(manager.spawnCliProcess(baseTurn({ prompt: 'verify' })))
+        .resolves.toEqual({ resultText: 'VERDICT: FAIL' });
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('resolves resultText: null for a clean turn with no agent message', async () => {
+    const db = createDb();
+    try {
+      const { manager } = makeWarmManager(db, textTurnHandler([null]));
+      await expect(manager.spawnCliProcess(baseTurn({ prompt: 'silent' })))
+        .resolves.toEqual({ resultText: null });
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('gives each warm-reuse turn its OWN text (both turns speak)', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db, textTurnHandler(['from A', 'from B']));
+      await expect(manager.spawnCliProcess(baseTurn({ prompt: 'first' })))
+        .resolves.toEqual({ resultText: 'from A' });
+      expect(clients).toHaveLength(1); // parked
+
+      await expect(manager.spawnCliProcess(
+        baseTurn({ prompt: 'second', resumeSessionId: 'codex-thread-1' }),
+      )).resolves.toEqual({ resultText: 'from B' });
+      expect(clients).toHaveLength(1); // warm reuse — no cold respawn
+
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  // The load-bearing per-turn assertion: turn B is TEXT-LESS, so only a latch that
+  // lives on the per-turn CodexTurnContext can answer `null`. Hoist
+  // `lastAgentMessageText` onto the warm ENTRY and this test resolves 'from A' —
+  // the both-turns-speak case above cannot see that regression, because turn B
+  // overwrites the leak before it is read.
+  it('never leaks turn A text into a TEXT-LESS warm-reuse turn B', async () => {
+    const db = createDb();
+    try {
+      const { manager, clients } = makeWarmManager(db, textTurnHandler(['from A', null]));
+      await expect(manager.spawnCliProcess(baseTurn({ prompt: 'first' })))
+        .resolves.toEqual({ resultText: 'from A' });
+      expect(clients).toHaveLength(1); // parked
+
+      await expect(manager.spawnCliProcess(
+        baseTurn({ prompt: 'second', resumeSessionId: 'codex-thread-1' }),
+      )).resolves.toEqual({ resultText: null });
+      expect(clients).toHaveLength(1); // warm reuse — no cold respawn
+
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  // A whitespace-only agentMessage is not a message (the projector drops it, the
+  // eval jury rejects on it). Latching `''` would hand workflowController a
+  // non-null, substance-less resultText, which it reads as a live verdict channel
+  // with a missing fence → contract retry → a second such turn FAILS the lane.
+  it('treats a whitespace-only agent message as no text (resultText: null)', async () => {
+    const db = createDb();
+    try {
+      const { manager } = makeWarmManager(db, textTurnHandler(['   \n  ']));
+      await expect(manager.spawnCliProcess(baseTurn({ prompt: 'blank' })))
+        .resolves.toEqual({ resultText: null });
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('keeps the last SUBSTANTIVE message when a turn trails off into blank text', async () => {
+    const db = createDb();
+    try {
+      const { manager } = makeWarmManager(db, (method, _params, client) => {
+        if (method === 'account/read') {
+          return {
+            account: { type: 'chatgpt', email: 'user@example.com', planType: 'pro' },
+            requiresOpenaiAuth: true,
+          };
+        }
+        if (method === 'thread/start') return { thread: { id: 'codex-thread-1' } };
+        if (method === 'turn/interrupt') return {};
+        if (method === 'turn/start') {
+          setTimeout(() => {
+            for (const [index, text] of ['VERDICT: FAIL', '  '].entries()) {
+              client.notify({
+                method: 'item/completed',
+                params: {
+                  threadId: 'codex-thread-1',
+                  turnId: 'turn-1',
+                  completedAtMs: 20 + index,
+                  item: { type: 'agentMessage', id: `message-${index}`, text },
+                },
+              });
+            }
+            client.notify({
+              method: 'turn/completed',
+              params: { threadId: 'codex-thread-1', turn: { id: 'turn-1', status: 'completed' } },
+            });
+          }, 0);
+          return { turn: { id: 'turn-1' } };
+        }
+        throw new Error(`Unexpected request: ${method}`);
+      });
+      await expect(manager.spawnCliProcess(baseTurn({ prompt: 'verify' })))
+        .resolves.toEqual({ resultText: 'VERDICT: FAIL' });
+      await manager.killAllProcesses();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('resolves NO result text when the turn is aborted after an agent message arrived', async () => {
+    const db = createDb();
+    try {
+      let markMessageSeen!: () => void;
+      const messageSeen = new Promise<void>((resolve) => {
+        markMessageSeen = resolve;
+      });
+      const { manager } = makeWarmManager(db, (method, _params, client) => {
+        if (method === 'account/read') {
+          return {
+            account: { type: 'chatgpt', email: 'user@example.com', planType: 'pro' },
+            requiresOpenaiAuth: true,
+          };
+        }
+        if (method === 'thread/start') return { thread: { id: 'codex-thread-1' } };
+        if (method === 'turn/interrupt') return {};
+        if (method === 'turn/start') {
+          // An agent message lands, but the turn NEVER completes — the kill below
+          // aborts it mid-flight. A stale 'partial answer' must not escape.
+          setTimeout(() => {
+            client.notify({
+              method: 'item/completed',
+              params: {
+                threadId: 'codex-thread-1',
+                turnId: 'turn-1',
+                completedAtMs: 20,
+                item: { type: 'agentMessage', id: 'message-1', text: 'partial answer' },
+              },
+            });
+            markMessageSeen();
+          }, 0);
+          return { turn: { id: 'turn-1' } };
+        }
+        throw new Error(`Unexpected request: ${method}`);
+      });
+
+      const spawn = manager.spawnCliProcess(baseTurn({ prompt: 'wait' }));
+      await messageSeen;
+      await manager.killProcess('panel-1');
+      await expect(spawn).resolves.toBeUndefined();
+    } finally {
+      db.close();
+    }
+  });
+});

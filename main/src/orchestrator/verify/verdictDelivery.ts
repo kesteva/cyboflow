@@ -361,6 +361,12 @@ function renderFailedBehaviors(report: VerificationReportV1, task: VerificationT
  *   - a verdict-less FAIL with neither: the generic capture/judge-failure text.
  *   - low_confidence: "needs human review" + reason.
  *   - timeout / skipped: advance-with-visibility framing + the CONCRETE reason.
+ *
+ * EVERY branch closes with `Reason: <error_message>` (when the row has one) and
+ * the §3.1 classification lines (when the row was classified) — F8, "never skip
+ * silently". The FAIL branches used to omit both, so an env-classified FAIL (one
+ * the harness PROVED was its own environment, and which did not charge the lane a
+ * retry) reached the human indistinguishable from a real deliverable defect.
  */
 function buildFindingText(args: {
   status: string;
@@ -384,6 +390,9 @@ function buildFindingText(args: {
     ];
     if (excerpt) parts.push(['Build/launch log excerpt:', '```', excerpt, '```'].join('\n'));
     if (report?.feedback) parts.push(report.feedback);
+    // F8: every FAILED body carries the §3.1 attribution when the row has one —
+    // a build failure the harness classified 'env' is not the lane's defect.
+    parts.push(...renderClassification(classification));
     return { title: `Visual verification failed (${kind} error)`, body: parts.join('\n\n') };
   }
 
@@ -440,6 +449,13 @@ function buildFindingText(args: {
   }
 
   // ---- FAIL with a behavior report ----
+  //
+  // F8 ("never skip silently", docs/proposals/visual-verification-brittleness-
+  // fixes.md): a FAIL body carries the CONCRETE reason and the §3.1 attribution
+  // too, exactly as the timeout/skipped branches above do. Without them an
+  // env-classified FAIL — one the harness PROVED was its own environment, and
+  // which therefore did not charge the lane a retry — read to a human as "the
+  // deliverable is broken", with nothing in the body to say otherwise.
   if (status === 'failed' && report) {
     const parts: string[] = [];
     const failed = renderFailedBehaviors(report, task);
@@ -449,6 +465,8 @@ function buildFindingText(args: {
       parts.push('Visual verification failed. The lane was sent back to re-implement.');
     }
     if (report.feedback) parts.push(report.feedback);
+    if (errorMessage) parts.push(`Reason: ${errorMessage}`);
+    parts.push(...renderClassification(classification));
     return { title: 'Visual verification failed', body: parts.join('\n\n') };
   }
 
@@ -463,7 +481,11 @@ function buildFindingText(args: {
         lines.push(`- [${issue.severity}]${where} ${issue.description}`);
       }
     }
-    return { title: 'Visual verification failed', body: lines.join('\n') };
+    // F8: the legacy-verdict branch had neither the reason nor the class.
+    const legacyParts = lines.length > 0 ? [lines.join('\n')] : [];
+    if (errorMessage) legacyParts.push(`Reason: ${errorMessage}`);
+    legacyParts.push(...renderClassification(classification));
+    return { title: 'Visual verification failed', body: legacyParts.join('\n\n') };
   }
 
   // ---- verdict-less FAIL with neither report nor verdict ----
@@ -471,6 +493,8 @@ function buildFindingText(args: {
     'Visual verification could not produce a verdict (no screenshots were captured or judged). The lane was sent back to re-implement; investigate the deploy/capture/judge step (deployment reachable? selectors/URL valid?).',
   ];
   if (errorMessage) parts.push(`Reason: ${errorMessage}`);
+  // F8: this branch already carried the reason; the attribution was still missing.
+  parts.push(...renderClassification(classification));
   return { title: 'Visual verification failed', body: parts.join('\n\n') };
 }
 

@@ -35,7 +35,7 @@
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, writeFile, chmod, access, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, chmod, access, readFile, rm } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
@@ -73,6 +73,12 @@ import type {
   VerifyRunbookV1,
 } from '../../../../shared/types/verifyRunbook';
 import { resolveLeverEnv } from './runbookLevers';
+import {
+  resolveHarnessPath,
+  resolveHarnessNodePath,
+  defaultResolveShellPath,
+  pathEnvKey,
+} from './harnessEnv';
 import { canonicalJsonStringify } from '../agentThread/specHash';
 import {
   createDefaultDriverDeps,
@@ -98,6 +104,8 @@ export const VERIFY_AGENT_ALLOWED_TOOLS: readonly string[] = ['Bash', 'Read', 'G
 
 /** Subdir under VERIFY_ARTIFACTS_DIR holding the driver wrapper script (co-located with the driver's pid file). */
 const DRIVER_STATE_DIR = '.driver';
+/** Subdir under VERIFY_ARTIFACTS_DIR holding the per-REQUEST data dirs (F3 / RC4). */
+const DATA_STATE_DIR = 'data';
 /** The wrapper script the agent invokes as `$VERIFY_DRIVER` (a .cmd on Windows). */
 const DRIVER_SCRIPT_NAME = process.platform === 'win32' ? 'verify-driver.cmd' : 'verify-driver.sh';
 
@@ -383,6 +391,43 @@ export interface VerificationAgentRunnerDeps {
   /** Absolute path to the compiled driverCli.js (resolved at index.ts for dev + asar). */
   driverCliPath: string;
   logger?: LoggerLike;
+  /**
+   * F3 / RC4 — the user's real login-shell PATH, the base of the `PATH` this
+   * runner exports (see the env block in {@link VerificationAgentRunner.run}).
+   * Defaults to `harnessEnv.defaultResolveShellPath` (i.e. `getShellPath()`, the
+   * same source every other spawn seam uses). Resolved PER REQUEST and NOT
+   * memoized here — `getShellPath()` owns the cache, and `configManager` clears
+   * it when the user edits `additionalPaths`, so caching again at this seam
+   * would make verification the only place that fix never reaches (round-2
+   * review). Injected in tests so no suite spawns a login shell.
+   */
+  resolveShellPath?: () => Promise<string>;
+  /**
+   * F3 / RC4 — CYBOFLOW'S OWN `node_modules` root, so the bundled driver can
+   * `require('playwright')`. Defaults to {@link resolveHarnessNodePath} walking
+   * up from {@link VerificationAgentRunnerDeps.driverCliPath}; `null` ⇒ no
+   * NODE_PATH is bound at all. Never the snapshot's or the live worktree's
+   * `node_modules` (Codex #4 — see that function).
+   *
+   * IT IS BOUND IN THE DRIVER WRAPPER, NOT IN THE AGENT'S ENV (round-2 review).
+   * Exporting it to the agent put cyboflow's own `node_modules` on the CJS
+   * resolution fallback of the DELIVERABLE's build and of the serve child, so a
+   * snapshot whose dependency mirror never warmed — RC4's own 9/01 scenario,
+   * ZERO `node_modules` — could resolve react/vite/better-sqlite3 out of the
+   * running app's install and PASS a verification that fails for a real user.
+   * The one consumer is `$VERIFY_DRIVER`, and `driverCore.serveChildEnv` strips
+   * it again before the serve child inherits it.
+   */
+  resolveNodeModulesRoot?: (driverCliPath: string) => Promise<string | null>;
+  /**
+   * F3 / RC4 — provision the request's FRESH, EMPTY `VERIFY_DATA_DIR`. Given the
+   * absolute path the runner derived, it must leave that directory existing and
+   * empty. BEST-EFFORT by contract: a failure is logged and the var is exported
+   * anyway (the path still points inside the request's own artifacts, never at
+   * the developer's real state dir, and most apps create their data dir
+   * themselves). Defaults to a recursive remove + mkdir; injected in tests.
+   */
+  prepareDataDir?: (dataDir: string) => Promise<void>;
   // -- seams (real defaults; faked in tests) --
   /**
    * §3.5 preflight probe: resolve a launchable chromium binary, or `null` when
@@ -510,8 +555,19 @@ export interface VerificationAgentRunnerDeps {
   /** `git diff --quiet HEAD` on the snapshot — true when the verifier mutated tracked sources. */
   checkSnapshotMutated?: (worktreePath: string) => Promise<boolean>;
   fileExists?: (absPath: string) => Promise<boolean>;
-  /** Write the `$VERIFY_DRIVER` wrapper script; returns its absolute path. */
-  writeDriverScript?: (artifactsDir: string, nodePath: string, driverCliPath: string) => Promise<string>;
+  /**
+   * Write the `$VERIFY_DRIVER` wrapper script; returns its absolute path.
+   * `nodeModulesRoot` is the NODE_PATH the wrapper binds for the driver process
+   * alone (`null` ⇒ bind none) — see
+   * {@link VerificationAgentRunnerDeps.resolveNodeModulesRoot} for why it lives
+   * here rather than in the agent's env.
+   */
+  writeDriverScript?: (
+    artifactsDir: string,
+    nodePath: string,
+    driverCliPath: string,
+    nodeModulesRoot: string | null,
+  ) => Promise<string>;
   /** Best-effort `$VERIFY_DRIVER stop`. */
   stopDriver?: (driverScriptPath: string, env: Record<string, string>) => Promise<void>;
   /** Best-effort SIGKILL of the driver's recorded browser pid, if still alive. */
@@ -549,6 +605,12 @@ against its expected result — then return ONE structured report.
 
 Environment (already set for your Bash tool):
 - VERIFY_ARTIFACTS_DIR — write every screenshot here (bare filenames, no subdirs).
+- VERIFY_DATA_DIR — a FRESH, EMPTY directory for this request. Point the app's
+  state/data directory at it if the task's serve command does not already.
+- PATH is provided by the harness (your real login-shell PATH) — do not rebuild it.
+  Do NOT set NODE_PATH: "$VERIFY_DRIVER" carries its own module path, and pointing
+  NODE_PATH at any node_modules would make the deliverable's build resolve modules
+  it does not actually declare.
 - VERIFY_DRIVER — a CLI you drive the headless browser with. Subcommands:
     "$VERIFY_DRIVER" serve '<command>'                    # starts the serve/app, detached
     "$VERIFY_DRIVER" goto <url>
@@ -1655,32 +1717,103 @@ const defaultFileExists = async (absPath: string): Promise<boolean> => {
   }
 };
 
+/**
+ * `VERIFY_DATA_DIR` for one request (F3 / RC4).
+ *
+ * Keyed on the REQUEST, not on `artifactsDir`: the artifacts dir is RUN-scoped
+ * (`verificationScheduler`'s `artifactsDirResolver(row.run_id)`), so anything
+ * keyed on it alone is handed back to the next ATTEMPT with the previous
+ * attempt's state still in it — which is how the passing run vr_bcae0966 found a
+ * stale `orch.sock` EADDRINUSE inside the app it had just booted.
+ *
+ * WHY THE LAST 8 CHARACTERS AND NOT THE WHOLE ID (measured, 2026-09-09; a
+ * deliberate narrowing of F3's `<artifactsDir>/data/<requestId>`). A data dir is
+ * where an app puts its UNIX SOCKETS, and macOS caps `sun_path` at 104 BYTES —
+ * silently TRUNCATING anything longer. Live evidence in this very tree:
+ * `~/.cyboflow/artifacts/runs/<32-hex>/cyboflow-home/sockets/orch.sock` is 111
+ * chars and the socket on disk is named `or`. A request id is `vr_` + 32 hex, so
+ * `<artifactsDir>/data/<requestId>` would be 120 chars and the truncation would
+ * land INSIDE the id — i.e. in a directory that does not exist, turning a
+ * survivable truncated FILE name into an ENOENT bind and a deliverable that
+ * cannot boot. Eight characters of a v4 uuid make the dir unique per run at the
+ * same length as the name it replaces, so nothing that works today stops working.
+ * (The truncation itself is pre-existing and orthogonal — it belongs to whoever
+ * shortens the artifacts root.)
+ *
+ * Exported for the unit test.
+ */
+export function verifyDataDirPath(artifactsDir: string, requestId: string): string {
+  return join(artifactsDir, DATA_STATE_DIR, requestId.slice(-8));
+}
+
+/**
+ * Default {@link VerificationAgentRunnerDeps.prepareDataDir}: remove and
+ * re-create, so the dir is EMPTY even if a previous attempt somehow reused this
+ * request id. The recursive remove is bounded to a path this runner composed
+ * under the request's own artifacts dir — never anything a task or a runbook
+ * names.
+ */
+const defaultPrepareDataDir = async (dataDir: string): Promise<void> => {
+  await rm(dataDir, { recursive: true, force: true });
+  await mkdir(dataDir, { recursive: true });
+};
+
+/**
+ * The `$VERIFY_DRIVER` wrapper body — PURE, and exported so a test on any host
+ * can pin either platform's text without writing a file.
+ *
+ * NODE_PATH IS BOUND HERE AND NOWHERE ELSE (F3 / RC4, narrowed by the round-2
+ * review). The driver is a plain-node child of this wrapper and has to
+ * `require('playwright')` out of CYBOFLOW's own node_modules; the DELIVERABLE
+ * must not inherit that, or a build missing a dependency cyboflow happens to
+ * ship resolves it anyway and PASSES a verification that fails for a real user.
+ * Binding it in the wrapper reaches the one consumer and nothing else —
+ * `driverCore.serveChildEnv` strips it back off before a serve child inherits
+ * it. Omitted entirely when this build resolved no root (a packaged build until
+ * playwright joins `asarUnpack`): an empty NODE_PATH is worse than none.
+ *
+ * ELECTRON_RUN_AS_NODE makes the packaged Electron binary (process.execPath, the
+ * findNodeExecutable fallback in a packaged app) behave as plain node; harmless
+ * for a real node. `exec` so the driver process replaces the shell (clean
+ * signals). On Windows there is no /bin/sh — a .cmd wrapper does the same job
+ * (set the env vars, forward every argument). Node 24 refuses to spawn .cmd
+ * files directly (EINVAL), so defaultStopDriver routes through cmd.exe there.
+ *
+ * Every interpolated path is escaped with escapeForBatch before landing in the
+ * .cmd body: cmd.exe parses a batch file line by line and expands %NAME% even
+ * inside the quotes below, so an install path that happens to contain a `%`
+ * (a literal percent, or a name that collides with an env var) would silently
+ * become something else at run time — %% is this file's own escape for a
+ * literal `%`. The trailing `%*` is a deliberate, UNescaped batch parameter
+ * reference (forward every arg) and must stay that way. A `set` value is NOT
+ * quoted in cmd: the quotes would become part of the value.
+ */
+export function driverScriptBody(
+  nodePath: string,
+  driverCliPath: string,
+  nodeModulesRoot: string | null,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  if (platform === 'win32') {
+    const nodePathLine = nodeModulesRoot !== null
+      ? `set NODE_PATH=${escapeForBatch(nodeModulesRoot)}\r\n`
+      : '';
+    return `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n${nodePathLine}"${escapeForBatch(nodePath)}" "${escapeForBatch(driverCliPath)}" %*\r\n`;
+  }
+  const nodePathLine = nodeModulesRoot !== null ? `export NODE_PATH="${nodeModulesRoot}"\n` : '';
+  return `#!/bin/sh\nexport ELECTRON_RUN_AS_NODE=1\n${nodePathLine}exec "${nodePath}" "${driverCliPath}" "$@"\n`;
+}
+
 const defaultWriteDriverScript = async (
   artifactsDir: string,
   nodePath: string,
   driverCliPath: string,
+  nodeModulesRoot: string | null,
 ): Promise<string> => {
   const dir = join(artifactsDir, DRIVER_STATE_DIR);
   await mkdir(dir, { recursive: true });
   const scriptPath = join(dir, DRIVER_SCRIPT_NAME);
-  // ELECTRON_RUN_AS_NODE makes the packaged Electron binary (process.execPath, the
-  // findNodeExecutable fallback in a packaged app) behave as plain node; harmless
-  // for a real node. `exec` so the driver process replaces the shell (clean signals).
-  // On Windows there is no /bin/sh — a .cmd wrapper does the same job (set the
-  // env var, forward every argument). Node 24 refuses to spawn .cmd files
-  // directly (EINVAL), so defaultStopDriver routes through cmd.exe there.
-  //
-  // nodePath/driverCliPath are escaped with escapeForBatch before landing in the
-  // .cmd body: cmd.exe parses a batch file line by line and expands %NAME% even
-  // inside the quotes below, so an install path that happens to contain a `%`
-  // (a literal percent, or a name that collides with an env var) would silently
-  // become something else at run time — %% is this file's own escape for a
-  // literal `%`. The trailing `%*` is a deliberate, UNescaped batch parameter
-  // reference (forward every arg) and must stay that way.
-  const body = process.platform === 'win32'
-    ? `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${escapeForBatch(nodePath)}" "${escapeForBatch(driverCliPath)}" %*\r\n`
-    : `#!/bin/sh\nexport ELECTRON_RUN_AS_NODE=1\nexec "${nodePath}" "${driverCliPath}" "$@"\n`;
-  await writeFile(scriptPath, body, 'utf8');
+  await writeFile(scriptPath, driverScriptBody(nodePath, driverCliPath, nodeModulesRoot), 'utf8');
   await chmod(scriptPath, 0o755);
   return scriptPath;
 };
@@ -1782,8 +1915,41 @@ const defaultReapServe = (artifactsDir: string): void => {
 export class VerificationAgentRunner implements VerificationAgentRunnerLike {
   private readonly deps: VerificationAgentRunnerDeps;
 
+  /**
+   * F3 / RC4 — the resolved `node_modules` root the driver wrapper binds as
+   * NODE_PATH (or `null`), memoized for the life of this runner. Caching is
+   * right HERE and wrong for the PATH below: this answers a question about the
+   * INSTALL LAYOUT of the running build, which cannot change while it runs,
+   * whereas the login-shell PATH has a user-facing escape hatch
+   * (`additionalPaths`) that `configManager` expects to take effect at once.
+   */
+  private harnessNodePath: Promise<string | null> | null = null;
+
   constructor(deps: VerificationAgentRunnerDeps) {
     this.deps = deps;
+  }
+
+  /**
+   * The PATH every process this request starts will see — the agent's Bash,
+   * `$VERIFY_DRIVER`, and the serve child under it. It is the LOGIN-SHELL PATH
+   * (never the GUI PATH a packaged app inherits) with the resolved node's own
+   * directory in front. See `harnessEnv` for why this is the difference between
+   * a verification and `pnpm: command not found`, and for why the lookup is
+   * deliberately re-done per request rather than cached at this seam.
+   */
+  private resolvePathEnv(nodeExecutable: string): Promise<string> {
+    return resolveHarnessPath({
+      nodeExecutable,
+      resolveShellPath: this.deps.resolveShellPath ?? defaultResolveShellPath,
+    });
+  }
+
+  /** Cyboflow's own `node_modules` root for `NODE_PATH`, or `null` (see the dep). */
+  private resolveNodePathEnv(): Promise<string | null> {
+    this.harnessNodePath ??= (
+      this.deps.resolveNodeModulesRoot ?? ((p: string) => resolveHarnessNodePath(p))
+    )(this.deps.driverCliPath);
+    return this.harnessNodePath;
   }
 
   /**
@@ -2169,10 +2335,65 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       // (b cont.) Env + the driver wrapper script. VERIFY_PORT rides only when the
       // task implies a server (the scheduler decided that when it leased the port).
       const node = await this.deps.resolveNode();
+      // F3 / RC4 — the EXECUTION half of the environment.
+      // `verificationAgentQuery` merges this env OVER `process.env`, so these
+      // keys are what the agent, `$VERIFY_DRIVER` and every serve child
+      // underneath them actually get. NODE_PATH is NOT among them: it is
+      // written into the driver wrapper below, whose process is its only
+      // legitimate consumer (round-2 review — see `resolveNodeModulesRoot`).
+      const pathEnv = await this.resolvePathEnv(node);
+      const nodePathEnv = await this.resolveNodePathEnv();
       const writeScript = this.deps.writeDriverScript ?? defaultWriteDriverScript;
-      driverScriptPath = await writeScript(req.artifactsDir, node, this.deps.driverCliPath);
+      driverScriptPath = await writeScript(
+        req.artifactsDir,
+        node,
+        this.deps.driverCliPath,
+        nodePathEnv,
+      );
+      // A FRESH, EMPTY dir per REQUEST (never per run — see verifyDataDirPath).
+      // Provisioning is BEST-EFFORT and the var is exported either way. Two
+      // reasons, and the round-2 review pushed back on this, so both are on the
+      // record:
+      //   (1) The var must never expand to the empty string. A runbook that
+      //       assigns its app's data-dir var from it would then hand the app
+      //       nothing and let it fall back to the DEVELOPER'S OWN real state
+      //       directory — cyboflow's own runbook guards that with an explicit
+      //       `test -n "$VERIFY_DATA_DIR"` prelude, but no other project's does.
+      //   (2) The path is unique per request, so there is no stale state for a
+      //       failed prepare to leave behind: the only thing lost is the
+      //       pre-creation, and an app that owns a data dir creates it. The
+      //       pathological case the review named (an UNCREATABLE parent) means
+      //       the artifacts dir itself is broken, which fails the screenshots
+      //       and the transcript write too.
+      // THE RESIDUAL IS REAL AND NOT FIXED HERE: if the app truly cannot come
+      // up because of this, the agent reports `launch_failed` and the §3.1
+      // classifier has no harness-sourced env evidence for it, so it lands
+      // `ambiguous` (blocking) and burns an implement attempt. The right fix is
+      // a `data-dir` id in `PreflightCheckResult` (preflight.ts) so the existing
+      // `!preflight.ok` branch returns a fail-open `skipped` with evidence — a
+      // change to preflight.ts + the suites that build these deps without the
+      // seam, both outside this area's file list. Logged at ERROR so the one
+      // host where it fires is findable.
+      const dataDir = verifyDataDirPath(req.artifactsDir, req.requestId);
+      try {
+        await (this.deps.prepareDataDir ?? defaultPrepareDataDir)(dataDir);
+      } catch (err) {
+        logger?.error('[VerificationAgentRunner] could not provision VERIFY_DATA_DIR', {
+          runId: req.runId,
+          requestId: req.requestId,
+          dataDir,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
       env = {
         VERIFY_ARTIFACTS_DIR: req.artifactsDir,
+        // The login-shell PATH, not the GUI one a packaged app inherits, with
+        // the resolved node's dir in front (RC4: `pnpm: command not found`).
+        // Written under whatever case THIS process spells it (`Path` on
+        // Windows): the consumer merges this map over `process.env`, and a
+        // second, case-variant PATH key there is a coin flip (round-2 review).
+        [pathEnvKey()]: pathEnv,
+        VERIFY_DATA_DIR: dataDir,
         VERIFY_DRIVER_PORT: String(req.verifyDriverPort),
         VERIFY_DRIVER: driverScriptPath,
         // Never reused and never derived from anything the deliverable could
@@ -2200,14 +2421,20 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       // The runbook's declared levers, bound to this request's leased values and
       // layered OVER the harness env (never under it — see `resolveLeverEnv`
       // rule 1). This is what lets a project whose serve command reads `PORT`,
-      // or whose build stamps a marker from `APP_BUILD_ID`, satisfy the port
-      // lease and the attestation nonce without the verification agent having to
-      // infer either from the runbook's prose. Dropped levers are logged rather
+      // whose build stamps a marker from `APP_BUILD_ID`, or whose app keeps its
+      // state under `dataDirEnv` (F3 / RC4), satisfy the port lease, the
+      // attestation nonce and per-attempt isolation without the verification
+      // agent having to infer any of it from the runbook's prose. Note the
+      // asymmetry a runbook can still create: a serve command that assigns the
+      // same var INLINE overrides the lever binding, which is why cyboflow's own
+      // runbook assigns `CYBOFLOW_DIR="$VERIFY_DATA_DIR"` explicitly rather than
+      // relying on the lever. Dropped levers are logged rather
       // than raised: a lever that does not take effect shows up downstream as an
       // honest attestation failure, which is the outcome we want over a pass.
       const leverEnv = resolveLeverEnv(env, pinnedLevers, {
         port: req.verifyPort !== null ? String(req.verifyPort) : null,
         nonce: attestNonce,
+        dataDir,
       });
       if (leverEnv.dropped.length > 0) {
         logger?.warn('[VerificationAgentRunner] runbook lever(s) not exported', {

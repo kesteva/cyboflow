@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { resolveLeverEnv } from '../runbookLevers';
 
 const BASE = Object.freeze({ VERIFY_PORT: '4300', VERIFY_ATTEST_NONCE: 'nonce-1', VERIFY_MODALITY: 'web' });
-const VALUES = { port: '4300', nonce: 'nonce-1' } as const;
+const VALUES = { port: '4300', nonce: 'nonce-1', dataDir: '/artifacts/data/vr-1' } as const;
 
 describe('resolveLeverEnv', () => {
   it('exports a declared portEnv bound to the leased port', () => {
@@ -16,13 +16,58 @@ describe('resolveLeverEnv', () => {
     expect(additions).toEqual({ APP_BUILD_ID: 'nonce-1' });
   });
 
-  it('exports both levers at once', () => {
+  it('exports every bindable lever at once, and never the CLI flag', () => {
     const { additions } = resolveLeverEnv(
       BASE,
       { portEnv: 'PORT', nonceEnv: 'APP_BUILD_ID', dataDirEnv: 'CYBOFLOW_DIR', cdpPortFlag: '--x' },
       VALUES,
     );
-    expect(additions).toEqual({ PORT: '4300', APP_BUILD_ID: 'nonce-1' });
+    // cdpPortFlag is a CLI flag, not an env var — there is no environment for
+    // this seam to put it in, so it stays permanently unbound.
+    expect(additions).toEqual({
+      PORT: '4300',
+      APP_BUILD_ID: 'nonce-1',
+      CYBOFLOW_DIR: '/artifacts/data/vr-1',
+    });
+  });
+
+  // F3 / RC4 — dataDirEnv was parsed, hashed and documented while being bound
+  // by nothing, which is how an app under verification kept re-reading the
+  // PREVIOUS attempt's state.
+  it('exports a declared dataDirEnv bound to this request fresh data dir', () => {
+    const { additions, dropped } = resolveLeverEnv(BASE, { dataDirEnv: 'CYBOFLOW_DIR' }, VALUES);
+    expect(additions).toEqual({ CYBOFLOW_DIR: '/artifacts/data/vr-1' });
+    expect(dropped).toEqual([]);
+  });
+
+  it('skips dataDirEnv when the harness provisioned no data dir', () => {
+    const { additions, dropped } = resolveLeverEnv(
+      BASE,
+      { dataDirEnv: 'CYBOFLOW_DIR' },
+      { ...VALUES, dataDir: null },
+    );
+    expect(additions).toEqual({});
+    expect(dropped).toEqual([]);
+  });
+
+  it('refuses to let dataDirEnv shadow a harness variable', () => {
+    const { additions, dropped } = resolveLeverEnv(BASE, { dataDirEnv: 'VERIFY_MODALITY' }, VALUES);
+    expect(additions).toEqual({});
+    expect(dropped).toEqual([
+      { lever: 'dataDirEnv', name: 'VERIFY_MODALITY', reason: 'shadows-harness' },
+    ]);
+  });
+
+  it.each(['PATH', 'NODE_PATH', 'HOME'])('drops dataDirEnv naming %s', (name) => {
+    const { additions, dropped } = resolveLeverEnv(BASE, { dataDirEnv: name }, VALUES);
+    expect(additions).toEqual({});
+    expect(dropped).toEqual([{ lever: 'dataDirEnv', name, reason: 'denied' }]);
+  });
+
+  it('drops a malformed dataDirEnv name', () => {
+    const { additions, dropped } = resolveLeverEnv(BASE, { dataDirEnv: 'cyboflow dir' }, VALUES);
+    expect(additions).toEqual({});
+    expect(dropped).toEqual([{ lever: 'dataDirEnv', name: 'cyboflow dir', reason: 'malformed' }]);
   });
 
   it('exports nothing when the runbook declares no levers', () => {
@@ -30,7 +75,11 @@ describe('resolveLeverEnv', () => {
   });
 
   it('skips portEnv when the task implies no server', () => {
-    const { additions, dropped } = resolveLeverEnv(BASE, { portEnv: 'PORT' }, { port: null, nonce: 'n' });
+    const { additions, dropped } = resolveLeverEnv(
+      BASE,
+      { portEnv: 'PORT' },
+      { port: null, nonce: 'n', dataDir: null },
+    );
     expect(additions).toEqual({});
     expect(dropped).toEqual([]);
   });

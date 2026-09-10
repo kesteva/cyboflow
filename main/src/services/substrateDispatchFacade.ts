@@ -633,7 +633,7 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     // (index.ts: defaultCliManager.spawnCliProcess.bind(...)), so no cast is needed.
     // Forward the dispatched manager's resolved value UNCHANGED so the SDK
     // manager's captured result text (§5.3) reaches the step runner; the
-    // interactive/codex managers resolve void, so this stays byte-identical there.
+    // interactive manager resolves void, so this stays byte-identical there.
     const spawn: ClaudeSpawnerLike['spawnCliProcess'] = mgr.spawnCliProcess.bind(mgr);
     return await spawn(options);
   }

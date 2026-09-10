@@ -27,6 +27,7 @@ import {
   resolveSprintMaxTasks,
   SPRINT_BATCH_MAX_TASKS_DEFAULTS,
 } from '../../../shared/types/sprintBatch';
+import { VISUAL_VERIFY_DEFAULTS } from '../../../shared/types/visualVerification';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { KeyboardShortcutOverrides } from '../../../shared/types/keyboardShortcuts';
@@ -226,9 +227,16 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // default ('.cyboflow/artifacts', resolved against each project's root).
   const [artifactCommitDir, setArtifactCommitDir] = useState('');
   // Layered visual verification master switch (default OFF). MVP exposes only the
-  // master toggle; advanced numeric fields stay config-only for now.
-  const [visualVerifyEnabled, setVisualVerifyEnabled] = useState(false);
-  const [autoBootstrapRunbook, setAutoBootstrapRunbook] = useState(false);
+  // master toggle; advanced numeric fields stay config-only for now. Seeded from
+  // VISUAL_VERIFY_DEFAULTS (shared) rather than a hardcoded literal so this can
+  // never drift from ConfigManager's resolved default (F9 fix-round review).
+  const [visualVerifyEnabled, setVisualVerifyEnabled] = useState(VISUAL_VERIFY_DEFAULTS.enabled);
+  // Lane runbook bootstrap (default ON — F9 / lane-runbook-bootstrap.md §12):
+  // seeded from VISUAL_VERIFY_DEFAULTS.autoBootstrapRunbook until the config
+  // loads, same reasoning as visualVerifyEnabled above.
+  const [autoBootstrapRunbook, setAutoBootstrapRunbook] = useState(
+    VISUAL_VERIFY_DEFAULTS.autoBootstrapRunbook,
+  );
   // Auto-surface idle PTY quick sessions into the human review queue (default ON).
   // A blocking human_task is minted for an interactive quick session that finished
   // a turn and has sat unviewed longer than idleReviewThresholdMinutes.
@@ -331,8 +339,10 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setErrorReportingEnabled(data.telemetry?.errorReportingEnabled ?? true);
       setUsageMetricsEnabled(data.telemetry?.usageMetricsEnabled ?? true);
       setArtifactCommitDir(data.artifactCommitDir ?? '');
-      setVisualVerifyEnabled(data.visualVerify?.enabled ?? false);
-      setAutoBootstrapRunbook(data.visualVerify?.autoBootstrapRunbook ?? false);
+      setVisualVerifyEnabled(data.visualVerify?.enabled ?? VISUAL_VERIFY_DEFAULTS.enabled);
+      setAutoBootstrapRunbook(
+        data.visualVerify?.autoBootstrapRunbook ?? VISUAL_VERIFY_DEFAULTS.autoBootstrapRunbook,
+      );
       setIdleReviewEnabled(data.idleSessionReview?.enabled ?? true);
       setIdleReviewThresholdMinutes(data.idleSessionReview?.thresholdMinutes ?? 5);
 
