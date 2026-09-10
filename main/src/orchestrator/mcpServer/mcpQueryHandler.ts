@@ -166,7 +166,7 @@ import {
 } from '../verify/verificationScheduler';
 import { resolveVisualVerification, SHIPPED_VERIFY_BACKENDS } from '../visualVerificationResolver';
 import { loadVerifyConfig } from '../verifyConfigLoader';
-import { prepareVerificationEnqueue } from '../verify/enqueueFromTask';
+import { laneEnqueueKeyFor, prepareVerificationEnqueue } from '../verify/enqueueFromTask';
 import { captureSnapshotSha, isRunbookCommittedAtHead, isWorktreeDirty } from '../verify/snapshotProvisioner';
 import type { VerifyRunbookStore } from '../verify/runbookStore';
 import { isVerifyRunbookModality, VERIFY_RUNBOOK_RELATIVE_PATH } from '../../../../shared/types/verifyRunbook';
@@ -187,6 +187,7 @@ import type {
 } from '../../../../shared/types/visualVerification';
 import type { AdHocSnapshotResult } from '../eval/snapshotRunForEval';
 import { SprintLaneStore, SprintLaneError } from '../sprintLaneStore';
+import type { SprintLaneRow } from '../../../../shared/types/sprintBatch';
 import {
   resolveSprintMaxTasks,
   AWAITING_VERIFY_STEP,
@@ -5424,6 +5425,16 @@ export class McpQueryHandler {
       snapshotSha = null;
     }
 
+    // Key the row to its lane attempt when the taskRef names a lane of this
+    // run's batch (see laneEnqueueKeyFor for why, and for the dedup it implies);
+    // anything else enqueues unkeyed as before. A setup proof is never lane
+    // traffic, keyed or not.
+    const lanes = msg.setupProof === true || input.taskRef === undefined ? null : this.lanesForRun(msg.runId);
+    const enqueueKey =
+      lanes !== null && input.taskRef !== undefined
+        ? laneEnqueueKeyFor(msg.runId, input.taskRef, lanes)
+        : undefined;
+
     try {
       const requestId = VerificationScheduler.getInstance().enqueue({
         runId: msg.runId,
@@ -5433,6 +5444,7 @@ export class McpQueryHandler {
         chain,
         task,
         snapshotSha,
+        ...(enqueueKey !== undefined ? { enqueueKey } : {}),
         ...(msg.setupProof === true ? { setupProof: true } : {}),
         ...(prepared.pin
           ? { runbookHash: prepared.pin.hash, runbookLocalVersion: prepared.pin.localVersion }
@@ -5897,19 +5909,28 @@ export class McpQueryHandler {
    * hiccup never fails a fire-and-continue request.
    */
   private defaultTaskRefForRun(runId: string): string | undefined {
+    const lanes = this.lanesForRun(runId);
+    if (lanes === null || lanes.length !== 1) return undefined; // multi-lane cannot be defaulted; non-lane run has none
+    const only = lanes[0];
+    return typeof only.ref === 'string' && only.ref.length > 0 ? only.ref : only.taskId;
+  }
+
+  /**
+   * The sprint lanes of the run's batch, or `null` for a run with no batch
+   * (a quick chat, a planner/verify-setup run) or when the lane store cannot
+   * answer — both callers treat that as "no lane context", never as an error.
+   */
+  private lanesForRun(runId: string): SprintLaneRow[] | null {
     try {
       const runRow = this.db
         .prepare('SELECT batch_id AS batchId FROM workflow_runs WHERE id = ?')
         .get(runId) as { batchId?: unknown } | undefined;
       const batchId =
         typeof runRow?.batchId === 'string' && runRow.batchId.length > 0 ? runRow.batchId : null;
-      if (!batchId) return undefined;
-      const lanes = SprintLaneStore.getInstance().listLanes(batchId);
-      if (lanes.length !== 1) return undefined; // multi-lane cannot be defaulted; non-lane run has none
-      const only = lanes[0];
-      return typeof only.ref === 'string' && only.ref.length > 0 ? only.ref : only.taskId;
+      if (!batchId) return null;
+      return SprintLaneStore.getInstance().listLanes(batchId);
     } catch {
-      return undefined;
+      return null;
     }
   }
 
