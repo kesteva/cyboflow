@@ -30,7 +30,7 @@ import {
   resolveDefaultDepPreparer,
   SnapshotProvisionError,
 } from '../snapshotProvisioner';
-import { VerifyDepPreparer, defaultDepExec, type DepExec } from '../depPreparer';
+import { VerifyDepPreparer, makeDepExec, type DepExec } from '../depPreparer';
 import { VERIFY_RUNBOOK_RELATIVE_PATH } from '../../../../../shared/types/verifyRunbook';
 
 function git(cwd: string, args: string[]): string {
@@ -46,8 +46,11 @@ function git(cwd: string, args: string[]): string {
  * to produce a real mirror on disk for the snapshot to clone from.
  */
 function realCloneDepExec(): DepExec {
+  // The production exec over THIS process's PATH: `defaultDepExec` resolves a
+  // login-shell PATH first, which has no place inside the unit gate.
+  const exec = makeDepExec(async () => process.env.PATH ?? '/usr/bin:/bin');
   return async (cmd, args, opts) =>
-    cmd === 'cp' || cmd === 'robocopy' ? defaultDepExec(cmd, args, opts) : { code: 0, out: '' };
+    cmd === 'cp' || cmd === 'robocopy' ? exec(cmd, args, opts) : { code: 0, out: '' };
 }
 
 /** Adds the lockfile + package.json the preparer keys on (uncommitted is fine — it reads the live worktree). */

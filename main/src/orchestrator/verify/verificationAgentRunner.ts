@@ -422,10 +422,11 @@ export interface VerificationAgentRunnerDeps {
   /**
    * F3 / RC4 — provision the request's FRESH, EMPTY `VERIFY_DATA_DIR`. Given the
    * absolute path the runner derived, it must leave that directory existing and
-   * empty. BEST-EFFORT by contract: a failure is logged and the var is exported
-   * anyway (the path still points inside the request's own artifacts, never at
-   * the developer's real state dir, and most apps create their data dir
-   * themselves). Defaults to a recursive remove + mkdir; injected in tests.
+   * empty. Runs as the 'data-dir' PREFLIGHT check (preflight.ts), before any
+   * spend: a throw fails the preflight, which returns a fail-open `skipped`
+   * carrying the check as harness evidence — never a deployed agent reporting
+   * `launch_failed` against a dir that does not exist. Defaults to a recursive
+   * remove + mkdir; injected in tests.
    */
   prepareDataDir?: (dataDir: string) => Promise<void>;
   // -- seams (real defaults; faked in tests) --
@@ -2117,6 +2118,7 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         // 'native-capture' check does not run at all (see the dep's doc), so
         // no default may be substituted here.
         ...(nativeCaptureProbe ? { nativeCaptureProbe } : {}),
+        prepareDataDir: this.deps.prepareDataDir ?? defaultPrepareDataDir,
       },
       {
         task: req.task,
@@ -2124,6 +2126,7 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         leasedPort: req.verifyPort ?? req.verifyDriverPort - 1,
         driverPort: req.verifyDriverPort,
         modality,
+        dataDir: verifyDataDirPath(req.artifactsDir, req.requestId),
       },
     );
   }
@@ -2350,41 +2353,13 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         this.deps.driverCliPath,
         nodePathEnv,
       );
-      // A FRESH, EMPTY dir per REQUEST (never per run — see verifyDataDirPath).
-      // Provisioning is BEST-EFFORT and the var is exported either way. Two
-      // reasons, and the round-2 review pushed back on this, so both are on the
-      // record:
-      //   (1) The var must never expand to the empty string. A runbook that
-      //       assigns its app's data-dir var from it would then hand the app
-      //       nothing and let it fall back to the DEVELOPER'S OWN real state
-      //       directory — cyboflow's own runbook guards that with an explicit
-      //       `test -n "$VERIFY_DATA_DIR"` prelude, but no other project's does.
-      //   (2) The path is unique per request, so there is no stale state for a
-      //       failed prepare to leave behind: the only thing lost is the
-      //       pre-creation, and an app that owns a data dir creates it. The
-      //       pathological case the review named (an UNCREATABLE parent) means
-      //       the artifacts dir itself is broken, which fails the screenshots
-      //       and the transcript write too.
-      // THE RESIDUAL IS REAL AND NOT FIXED HERE: if the app truly cannot come
-      // up because of this, the agent reports `launch_failed` and the §3.1
-      // classifier has no harness-sourced env evidence for it, so it lands
-      // `ambiguous` (blocking) and burns an implement attempt. The right fix is
-      // a `data-dir` id in `PreflightCheckResult` (preflight.ts) so the existing
-      // `!preflight.ok` branch returns a fail-open `skipped` with evidence — a
-      // change to preflight.ts + the suites that build these deps without the
-      // seam, both outside this area's file list. Logged at ERROR so the one
-      // host where it fires is findable.
+      // A FRESH, EMPTY dir per REQUEST (never per run — see verifyDataDirPath),
+      // already provisioned by the 'data-dir' preflight check: a host where it
+      // cannot be created returned a fail-open `skipped` with that evidence
+      // before anything was deployed, so by here the dir exists and is empty,
+      // and the var can never expand to a path an app would fall back from
+      // into the developer's own real state directory.
       const dataDir = verifyDataDirPath(req.artifactsDir, req.requestId);
-      try {
-        await (this.deps.prepareDataDir ?? defaultPrepareDataDir)(dataDir);
-      } catch (err) {
-        logger?.error('[VerificationAgentRunner] could not provision VERIFY_DATA_DIR', {
-          runId: req.runId,
-          requestId: req.requestId,
-          dataDir,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
       env = {
         VERIFY_ARTIFACTS_DIR: req.artifactsDir,
         // The login-shell PATH, not the GUI one a packaged app inherits, with

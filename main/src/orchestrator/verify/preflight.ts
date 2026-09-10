@@ -54,7 +54,7 @@ import type {
 
 /** One preflight check's outcome. Only checks that RAN appear in {@link AgentPreflightResult.checks}. */
 export interface PreflightCheckResult {
-  id: 'node' | 'chromium' | 'driver-cli' | 'port-free' | 'driver-port-free' | 'native-capture';
+  id: 'node' | 'chromium' | 'driver-cli' | 'data-dir' | 'port-free' | 'driver-port-free' | 'native-capture';
   ok: boolean;
   /** Bounded human-readable detail — what was resolved, or why the check failed / was inconclusive. */
   detail: string;
@@ -98,6 +98,22 @@ export interface AgentPreflightDeps {
    * `resolveNode`.
    */
   nativeCaptureProbe?: () => Promise<boolean>;
+  /**
+   * Provision the request's FRESH, EMPTY `VERIFY_DATA_DIR` at the absolute path
+   * the runner derived (F3 / RC4): leave it existing and empty. OPTIONAL like
+   * `nativeCaptureProbe` — absent (or no `dataDir` in the args) ⇒ the
+   * 'data-dir' check is NOT RUN.
+   *
+   * A THROW here is AFFIRMATIVE failure, not inconclusive — the second probe
+   * after `resolveNode` to work that way. The harness itself tried to create a
+   * directory under the request's own artifacts root and could not; a serve
+   * command that keys its app's state dir off the var would then start against
+   * a path that does not exist, and the failure would surface as the AGENT's
+   * `launch_failed` with no harness evidence behind it — a blocking
+   * `ambiguous` that burns an implement attempt on a broken host. Failing the
+   * preflight instead makes it a fail-open `skipped` with the evidence attached.
+   */
+  prepareDataDir?: (dataDir: string) => Promise<void>;
 }
 
 function errorDetail(err: unknown): string {
@@ -181,6 +197,23 @@ async function checkNativeCapture(probe: () => Promise<boolean>): Promise<Prefli
 }
 
 /** 'driver-cli' — ALWAYS applicable: the bundled driver CLI entrypoint must exist before the runner can spawn it. A `fileExists` throw is inconclusive (fail-open). */
+/**
+ * 'data-dir' — CONDITIONAL on the probe being wired AND a path being given.
+ * Affirmative on throw (see the dep's doc): the harness could not make a
+ * directory it owns.
+ */
+async function checkDataDir(
+  prepareDataDir: NonNullable<AgentPreflightDeps['prepareDataDir']>,
+  dataDir: string,
+): Promise<PreflightCheckResult> {
+  try {
+    await prepareDataDir(dataDir);
+    return { id: 'data-dir', ok: true, detail: `provisioned ${dataDir}` };
+  } catch (err) {
+    return { id: 'data-dir', ok: false, detail: `could not provision VERIFY_DATA_DIR at ${dataDir}: ${errorDetail(err)}` };
+  }
+}
+
 async function checkDriverCli(deps: AgentPreflightDeps, driverCliPath: string): Promise<PreflightCheckResult> {
   try {
     const exists = await deps.fileExists(driverCliPath);
@@ -223,7 +256,8 @@ async function checkPortFree(
 /**
  * Run every APPLICABLE preflight check for a composed task, in order:
  * node → chromium (conditional) → native-capture (conditional) → driver-cli →
- * port-free (conditional) → driver-port-free. See each check's own doc for its
+ * data-dir (conditional) → port-free (conditional) → driver-port-free. See
+ * each check's own doc for its
  * applicability rule. `ok` is the conjunction of every check that RAN; an
  * inapplicable check is simply absent from `checks`, never counted for or
  * against `ok`.
@@ -240,9 +274,11 @@ export async function runAgentPreflight(
     leasedPort: number;
     driverPort: number;
     modality?: VerificationModality;
+    /** The request's `VERIFY_DATA_DIR`; with `deps.prepareDataDir`, enables the 'data-dir' check. */
+    dataDir?: string;
   },
 ): Promise<AgentPreflightResult> {
-  const { task, driverCliPath, leasedPort, driverPort, modality } = args;
+  const { task, driverCliPath, leasedPort, driverPort, modality, dataDir } = args;
   const isAttachCdp = task.serve?.attach === 'cdp';
   const checks: PreflightCheckResult[] = [];
 
@@ -257,6 +293,10 @@ export async function runAgentPreflight(
   }
 
   checks.push(await checkDriverCli(deps, driverCliPath));
+
+  if (deps.prepareDataDir && dataDir !== undefined) {
+    checks.push(await checkDataDir(deps.prepareDataDir, dataDir));
+  }
 
   // The agent must BIND the leased port itself only when there is a serve
   // step it is NOT attaching to an existing CDP endpoint for.
