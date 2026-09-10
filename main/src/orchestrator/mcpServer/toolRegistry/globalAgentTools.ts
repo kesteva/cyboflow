@@ -1,9 +1,15 @@
 /**
- * Global-agent tool family — the 13 `cyboflow_*` tools advertised when
+ * Global-agent tool family — the 16 `cyboflow_*` tools advertised when
  * CYBOFLOW_MCP_SCOPE=global-agent (the cross-project assistant thread, not a
- * workflow run). Read-only cross-project surfaces, plus one write-shaped tool
- * (`cyboflow_propose_action`) that only ever records a human-reviewable
- * proposal.
+ * workflow run). Read-only cross-project surfaces, plus TWO write-shaped
+ * tools with disjoint targets: `cyboflow_propose_action` (records a
+ * human-reviewable proposal — no project state changes until a human
+ * confirms it) and `cyboflow_widget_save` (writes only the user's OWN
+ * custom-widget library — a `custom_widgets` row — never a view, never a
+ * backlog entity, never a proposal; no human gate, since saving to your own
+ * draft library changes nothing about project state). `cyboflow_db_schema`
+ * and `cyboflow_widget_preview` (read-only) round out the custom-widget
+ * authoring trio (docs/proposals/CUSTOM-VIEWS.md §7.2).
  *
  * Every entry is a straight port of the hand-written `case` arm it replaced
  * in `handleGlobalAgentCallTool` (cyboflowMcpServer.ts) — same checks, same
@@ -209,7 +215,7 @@ export const GLOBAL_AGENT_SCOPE_TOOLS: readonly RegisteredTool[] = [
   defineTool({
     name: 'cyboflow_propose_action',
     description:
-      'THE ONLY write-shaped tool available to the global agent. Records a proposal — a candidate action for a human to review — and returns { proposalId }. Calling this tool NEVER executes anything: no run is launched, no task is reprioritized, no workflow is edited, nothing navigates. A human must explicitly confirm the resulting proposal card before any side effect happens, and confirmation runs through the SAME chokepoints every other write in this app uses (TaskChangeRouter / WorkflowRegistry / RunLauncher), stamped actor:\'user\'. After calling this tool, STOP and describe the proposal in your reply — do NOT claim the action happened, and do NOT poll or retry waiting for it to happen. `payload_json` is a JSON-encoded object (field names camelCase, matching shared/types/agentThread.ts AgentProposalPayload exactly) whose `kind` selects its shape: launch-run {kind,projectId,workflowName,substrate?,taskIds?,ideaIds?,findingIds?,note?}; reprioritize-backlog {kind,projectId,items:[{taskId,priority?,stageId?}]}; edit-workflow {kind,workflowId,definitionJson,summary?} (preconditions — the current spec hash — are captured server-side from a fresh read, never trusted from the caller, even if you include one); open-session {kind,navigation:{target:\'run\',runId}|{target:\'quick-session\',sessionId,runId?}}; create-backlog-items {kind,projectId,items:[{taskType:\'idea\'|\'epic\'|\'task\',title,summary?,body?,priority?,category?,scope?,parentEpicId?,originatingIdeaId?}]} (THE way to add ideas/epics/tasks to a project\'s backlog — up to 20 per proposal, created in the order listed; parentEpicId/originatingIdeaId may reference only entities that ALREADY exist, by opaque id or display ref, and a link that does not resolve rejects the whole proposal at propose time). An unrecognized kind or a payload missing a kind\'s required fields is rejected with \'invalid_payload\'.',
+      'ONE OF TWO write-shaped tools available to the global agent (the other, disjoint one is cyboflow_widget_save — it writes only your own widget library, never this). Records a proposal — a candidate action for a human to review — and returns { proposalId }. Calling this tool NEVER executes anything: no run is launched, no task is reprioritized, no workflow is edited, nothing navigates. A human must explicitly confirm the resulting proposal card before any side effect happens, and confirmation runs through the SAME chokepoints every other write in this app uses (TaskChangeRouter / WorkflowRegistry / RunLauncher), stamped actor:\'user\'. After calling this tool, STOP and describe the proposal in your reply — do NOT claim the action happened, and do NOT poll or retry waiting for it to happen. `payload_json` is a JSON-encoded object (field names camelCase, matching shared/types/agentThread.ts AgentProposalPayload exactly) whose `kind` selects its shape: launch-run {kind,projectId,workflowName,substrate?,taskIds?,ideaIds?,findingIds?,note?}; reprioritize-backlog {kind,projectId,items:[{taskId,priority?,stageId?}]}; edit-workflow {kind,workflowId,definitionJson,summary?} (preconditions — the current spec hash — are captured server-side from a fresh read, never trusted from the caller, even if you include one); open-session {kind,navigation:{target:\'run\',runId}|{target:\'quick-session\',sessionId,runId?}}; create-backlog-items {kind,projectId,items:[{taskType:\'idea\'|\'epic\'|\'task\',title,summary?,body?,priority?,category?,scope?,parentEpicId?,originatingIdeaId?}]} (THE way to add ideas/epics/tasks to a project\'s backlog — up to 20 per proposal, created in the order listed; parentEpicId/originatingIdeaId may reference only entities that ALREADY exist, by opaque id or display ref, and a link that does not resolve rejects the whole proposal at propose time). An unrecognized kind or a payload missing a kind\'s required fields is rejected with \'invalid_payload\'.',
     input: z.object({
       payload_json: z.string().min(1).describe('JSON-encoded AgentProposalPayload (required) — see the tool description for the per-kind shape.'),
     }),
@@ -217,5 +223,62 @@ export const GLOBAL_AGENT_SCOPE_TOOLS: readonly RegisteredTool[] = [
     // The arm's literal is bespoke — richer than the derived `payload_json: string`.
     expected: { payload_json: 'payload_json: string (JSON-encoded AgentProposalPayload)' },
     toEnvelope: (args) => ({ payloadJson: args.payload_json }),
+  }),
+
+  defineTool({
+    name: 'cyboflow_db_schema',
+    description:
+      'READ-ONLY schema introspection of the app database: every table\'s columns (name, type, pk, notnull) plus an approximate row count (COUNT(*); null for the huge raw_events table, where that would be expensive). Prefer this over cyboflow_db_query\'s `SELECT name, sql FROM sqlite_master` for discovering a table\'s shape before building a custom-widget SQL source — it is cheaper and gives you columns directly. Omit `table` to list every table; pass it to scope to one.',
+    input: z.object({
+      table: z.string().min(1).describe('Optional — scope to one table name. Omit to list every table.').optional(),
+    }),
+    envelope: 'mcp-db-schema',
+    toEnvelope: (args) => ({ table: args.table }),
+  }),
+
+  defineTool({
+    name: 'cyboflow_widget_preview',
+    description:
+      'Validates a custom-widget spec and runs its sources exactly as the page will — NEVER saves anything. `spec_json` is a JSON-encoded WidgetSpec: `{version:1, sources:{name:{type:\'sql\',sql,params?}|{type:\'query\',name,input}}, transforms?:{sourceName:[{op:\'filter\'|\'sort\'|\'limit\'|\'bucketDate\'|\'group\'|\'derive\', ...}]}, render:{type:\'shape\',shape:\'stat\'|\'table\'|\'columns\'|\'bars\'|\'list\',...}|{type:\'html\',html}, actions?:[...], settings?:[...], refreshSec?}`. `settings_json` is an optional JSON-encoded object of `{name: value}` used to resolve any `{setting:name}` references in the spec (falls back to each setting\'s declared default). `project_id` supplies the value `{context:\'projectId\'}` params resolve to. On success returns `{sources:{name:{columns,rows,truncated,tookMs}}, warnings, plan, paused}` with each source\'s rows capped at 50 for the transcript (marked `truncatedForTranscript:true` when more exist — the real page is not capped this way). A malformed spec returns `invalid_spec` with a `detail` array of `path: message` strings; malformed JSON returns `invalid_json` / `invalid_settings`.',
+    input: z.object({
+      spec_json: z.string().min(1).describe('JSON-encoded WidgetSpec (required) — see the tool description for the contract.'),
+      settings_json: z
+        .string()
+        .describe('Optional JSON-encoded object of setting values ({name: value}) resolving this spec\'s {setting:name} references.')
+        .optional(),
+      project_id: z.number().describe('Optional — the projectId {context:"projectId"} source params resolve to.').optional(),
+    }),
+    envelope: 'mcp-widget-preview',
+    expected: { spec_json: 'spec_json: string (JSON-encoded WidgetSpec)' },
+    toEnvelope: (args) => ({ specJson: args.spec_json, settingsJson: args.settings_json, projectId: args.project_id }),
+  }),
+
+  defineTool({
+    name: 'cyboflow_widget_save',
+    description:
+      'THE SECOND write-shaped tool available to the global agent (disjoint from cyboflow_propose_action) — writes ONLY the user\'s custom-widget library (a custom_widgets row). It NEVER writes a view, a backlog entity, or a proposal, and needs no human confirmation: saving to your own draft library is not a project-state change. `session_id` MUST come from the page\'s `[custom-widget-session]` envelope — never invent one; if you see no such envelope, tell the user to start from Customize -> Create a custom widget (or Edit with assistant) first. `widget_id` omitted creates a new widget; passed, it updates that widget (a draft owned by a DIFFERENT live session is refused with session_mismatch). `spec_json` is the same WidgetSpec shape cyboflow_widget_preview validates — preview it first. `publish:false` saves a draft only, visible live in the authoring slot; `publish:true` saves AND promotes the draft to the published spec every other surface renders. Returns `{ widgetId, revision }`.',
+    input: z.object({
+      session_id: z
+        .string()
+        .min(1)
+        .describe('The authoring session id from the page\'s [custom-widget-session] envelope (required) — never invent one.'),
+      widget_id: z.string().min(1).describe('Optional — the widget id to update. Omit to create a new widget.').optional(),
+      name: z.string().min(1).describe('Widget name shown in the library (required)'),
+      description: z.string().describe('Optional short description shown in the library.').optional(),
+      spec_json: z.string().min(1).describe('JSON-encoded WidgetSpec (required) — the same shape cyboflow_widget_preview validates.'),
+      publish: z
+        .boolean()
+        .describe('true saves AND promotes to the published spec every other surface renders; false saves a draft only (required)'),
+    }),
+    envelope: 'mcp-widget-save',
+    expected: { spec_json: 'spec_json: string (JSON-encoded WidgetSpec)' },
+    toEnvelope: (args) => ({
+      sessionId: args.session_id,
+      widgetId: args.widget_id,
+      name: args.name,
+      description: args.description,
+      specJson: args.spec_json,
+      publish: args.publish,
+    }),
   }),
 ];

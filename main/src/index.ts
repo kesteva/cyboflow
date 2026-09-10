@@ -3303,6 +3303,13 @@ async function initializeServices(): Promise<boolean> {
       // handler fails closed (returns an error) — so it must be the SAME instance
       // the executor + tRPC context read.
       agentThreadStore,
+      // Custom-widget-authoring global-agent tools (cyboflow_db_schema /
+      // _widget_preview / _widget_save, docs/proposals/CUSTOM-VIEWS.md §9 row
+      // S6): the SAME `customViewsService` instance constructed above, so a
+      // saved widget draft is visible to the exact service the renderer's
+      // tRPC router reads. Absent only if this handler runs before boot
+      // wiring completes (never the case in production).
+      customViews: customViewsService ?? undefined,
       // Global-agent scoped filesystem tools (cyboflow_fs_read / _list / _grep):
       // the always-included roots are the registered project paths; this dep
       // supplies the user-configured EXTRA folders on top. Absent ⇒ [] (project

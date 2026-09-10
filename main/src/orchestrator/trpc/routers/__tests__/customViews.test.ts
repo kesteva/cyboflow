@@ -26,7 +26,7 @@ import type {
   CustomViewsDbSchemaTable,
 } from '../../../customViews/customViewsService';
 import type { WidgetActionPreview, ExecuteWidgetActionResult, WidgetActionTarget } from '../../../customViews/widgetActionService';
-import type { CustomView, CustomViewSurface, CustomWidget, ViewLayout, WidgetDataPayload } from '../../../../../../shared/types/customViews';
+import type { CustomView, CustomViewSurface, CustomWidget, ViewLayout, WidgetDataPayload, WidgetSpec } from '../../../../../../shared/types/customViews';
 
 // ---------------------------------------------------------------------------
 // Fake CustomViewsServiceLike
@@ -106,6 +106,33 @@ class FakeCustomViewsService implements CustomViewsServiceLike {
 
   getWidget(id: string): CustomWidget | null {
     return this.widgets.get(id) ?? null;
+  }
+
+  saveWidget(input: {
+    id?: string;
+    name: string;
+    description?: string | null;
+    spec: WidgetSpec;
+    authoringSessionId: string;
+    threadId?: string | null;
+    publish: boolean;
+  }): CustomWidget {
+    const existing = input.id ? this.widgets.get(input.id) : undefined;
+    const widget: CustomWidget = {
+      id: existing?.id ?? input.id ?? 'widget-1',
+      name: input.name,
+      description: input.description ?? null,
+      publishedSpec: input.publish ? input.spec : (existing?.publishedSpec ?? null),
+      draftSpec: input.publish ? null : input.spec,
+      authoringSessionId: input.publish ? null : input.authoringSessionId,
+      revision: (existing?.revision ?? 0) + 1,
+      threadId: input.threadId ?? existing?.threadId ?? null,
+      createdAt: existing?.createdAt ?? '2026-01-01T00:00:00Z',
+      updatedAt: '2026-01-01T00:00:00Z',
+    };
+    this.widgets.set(widget.id, widget);
+    this.emitWidgetDraft({ widgetId: widget.id, authoringSessionId: input.authoringSessionId, kind: input.publish ? 'published' : 'draft' });
+    return widget;
   }
 
   publishDraft(input: { id: string; authoringSessionId: string }): CustomWidget {

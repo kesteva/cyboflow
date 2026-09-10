@@ -98,12 +98,17 @@ import {
 // invariant (unlike orchSocketServer.ts, which must stay import-clean of
 // 'better-sqlite3'/'electron' so runLauncher.ts's structural boundary holds).
 import BetterSqlite3Database from 'better-sqlite3';
+import { z } from 'zod';
 import {
   AGENT_QUERY_LIMITS,
   openReadonlySibling,
   runReadonlyQuery,
   validateReadonlySql,
 } from '../readOnlyQuery';
+import { scalarSchema, widgetSpecSchema } from '../../../../shared/customViews/validate';
+import { WIDGET_LIMITS, type Scalar } from '../../../../shared/types/customViews';
+import type { CustomViewsServiceLike } from '../customViews/customViewsService';
+import { CustomViewsStoreError } from '../customViews/types';
 import type { DatabaseLike, LoggerLike } from '../types';
 import { getCyboflowSubdirectory } from '../../utils/cyboflowDirectory';
 import {
@@ -979,6 +984,66 @@ export type McpQueryMessage =
       limit?: number;
     }
   | {
+      /**
+       * READ-ONLY schema introspection of the app database (docs/proposals/
+       * CUSTOM-VIEWS.md §7.2) — tables, columns (name/type/pk/notnull), and an
+       * approximate row count per table (COUNT(*); null for `raw_events`,
+       * where that is too expensive). Delegates to the injected
+       * `customViews.dbSchema()` — this handler touches no SQL directly.
+       * Absent `customViews` dep -> `custom_views_unavailable`.
+       */
+      type: 'mcp-db-schema';
+      requestId: string;
+      runId: string;
+      /** Optional — scope the reply to one table name. */
+      table?: string;
+    }
+  | {
+      /**
+       * Validates a custom-widget spec and runs its sources exactly as the
+       * page will (through `CustomViewsService.runWidget` / the §4.2/§4.3
+       * query engine), WITHOUT ever saving anything. `specJson`/`settingsJson`
+       * are plain JSON strings — the registry keeps them that way (finding
+       * #16: it may import only zod and its own siblings, not the shared
+       * union schemas), so THIS handler is where they are JSON.parsed and
+       * validated against the shared `widgetSpecSchema` / `scalarSchema`.
+       * Absent `customViews` dep -> `custom_views_unavailable`.
+       */
+      type: 'mcp-widget-preview';
+      requestId: string;
+      runId: string;
+      specJson: string;
+      /** Optional JSON-encoded `{name: value}` resolving the spec's `{setting:name}` references. */
+      settingsJson?: string;
+      /** Optional — the projectId `{context:'projectId'}` source params resolve to. */
+      projectId?: number;
+    }
+  | {
+      /**
+       * THE SECOND write-shaped global-agent tool (disjoint from
+       * mcp-propose-action) — writes ONLY the calling user's own
+       * custom-widget library (`custom_widgets` rows via
+       * `CustomViewsService.saveWidget`), never a view, never a backlog
+       * entity, never a proposal. `publish:false` saves a draft owned by
+       * `sessionId` (sourced from the page's `[custom-widget-session]`
+       * envelope, §7.1); `publish:true` saves and promotes it to the spec
+       * every other surface renders. A `widgetId` whose draft is owned by a
+       * different live session comes back `session_mismatch`. Emits
+       * `onWidgetDraft` for the renderer's session-bound live landing
+       * (§7.3). Absent `customViews` dep -> `custom_views_unavailable`.
+       */
+      type: 'mcp-widget-save';
+      requestId: string;
+      runId: string;
+      sessionId: string;
+      /** Optional — omitted creates a new widget; passed, updates that widget. */
+      widgetId?: string;
+      name: string;
+      description?: string;
+      specJson: string;
+      publish: boolean;
+    }
+  | {
       type: 'shell-approval-request';
       requestId: string;
       runId: string;
@@ -1349,6 +1414,17 @@ export interface McpQueryHandlerDeps {
    * 'agent_thread_store_unavailable'; every other handler is unaffected.
    */
   agentThreadStore?: AgentThreadDbStore;
+
+  /**
+   * Custom Views service (migration 132, docs/proposals/CUSTOM-VIEWS.md §9
+   * row S6) — backs the three custom-widget-authoring global-agent tools
+   * (`cyboflow_db_schema` / `cyboflow_widget_preview` / `cyboflow_widget_save`).
+   * A narrow STRUCTURAL interface (mirroring the `workflowConfig` precedent
+   * above), not the concrete `CustomViewsService` class, so a test can hand
+   * in a fake built over its own fixtures. Absent -> every one of the three
+   * tools fails closed with `custom_views_unavailable`.
+   */
+  customViews?: CustomViewsServiceLike;
 
   /**
    * Extra absolute folder paths the global-agent filesystem tools
@@ -1746,6 +1822,15 @@ export class McpQueryHandler {
         case 'mcp-history':
           this.handleAgentHistory(msg, client);
           break;
+        case 'mcp-db-schema':
+          this.handleDbSchema(msg, client);
+          break;
+        case 'mcp-widget-preview':
+          await this.handleWidgetPreview(msg, client);
+          break;
+        case 'mcp-widget-save':
+          this.handleWidgetSave(msg, client);
+          break;
         case 'shell-approval-request':
           // Async-deferred — the FIRST handler that does NOT writeResponse
           // synchronously. It returns after kicking off requestApproval; only
@@ -1797,7 +1882,11 @@ export class McpQueryHandler {
       // a throw here is by construction a caller error and does not belong on
       // the channel reserved for app faults. Every other message type builds its
       // own SQL and keeps ERROR, where a throw IS ours.
-      const logAtWarn = msg.type === 'mcp-db-query';
+      //
+      // mcp-widget-preview extends the same exemption (docs/proposals/
+      // CUSTOM-VIEWS.md §7.2): its `sql` sources are agent-authored WidgetSpec
+      // content, same caller-error shape as mcp-db-query's raw SQL.
+      const logAtWarn = msg.type === 'mcp-db-query' || msg.type === 'mcp-widget-preview';
       const summary = `[Cyboflow MCP Query] ${msg.type} threw; returned to client as ok:false:`;
       if (logAtWarn) {
         console.warn(`${summary} ${error} (agent-authored SQL — caller error, not an app fault)`);
@@ -7230,6 +7319,177 @@ export class McpQueryHandler {
       ok: true,
       data: { columns: result.columns, rows: result.rows, rowCount: result.rowCount, truncated: result.truncated },
     });
+  }
+
+  // --------------------------------------------------------------------------
+  // Custom-widget authoring tools (cyboflow_db_schema / _widget_preview /
+  // _widget_save) — docs/proposals/CUSTOM-VIEWS.md §7.2 / §9 row S6. All three
+  // fail closed with 'custom_views_unavailable' when the `customViews` dep is
+  // absent, mirroring the workflowConfig / agentThreadStore precedent above.
+  // --------------------------------------------------------------------------
+
+  private handleDbSchema(
+    msg: Extract<McpQueryMessage, { type: 'mcp-db-schema' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+    const customViews = this.deps.customViews;
+    if (!customViews) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'custom_views_unavailable' });
+      return;
+    }
+    const tables = customViews.dbSchema();
+    const filtered = msg.table ? tables.filter((t) => t.table === msg.table) : tables;
+    this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: true, data: { tables: filtered } });
+  }
+
+  private async handleWidgetPreview(
+    msg: Extract<McpQueryMessage, { type: 'mcp-widget-preview' }>,
+    client: net.Socket,
+  ): Promise<void> {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+    const customViews = this.deps.customViews;
+    if (!customViews) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'custom_views_unavailable' });
+      return;
+    }
+
+    let rawSpec: unknown;
+    try {
+      rawSpec = JSON.parse(msg.specJson);
+    } catch {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_json' });
+      return;
+    }
+    const parsedSpec = widgetSpecSchema.safeParse(rawSpec);
+    if (!parsedSpec.success) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'invalid_spec',
+        data: { detail: parsedSpec.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`) },
+      });
+      return;
+    }
+
+    let settings: Record<string, Scalar> = {};
+    if (msg.settingsJson !== undefined) {
+      let rawSettings: unknown;
+      try {
+        rawSettings = JSON.parse(msg.settingsJson);
+      } catch {
+        this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_settings' });
+        return;
+      }
+      const parsedSettings = z.record(scalarSchema).safeParse(rawSettings);
+      if (!parsedSettings.success) {
+        this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_settings' });
+        return;
+      }
+      settings = parsedSettings.data;
+    }
+
+    // Errors from here (e.g. `invalid_spec:<message>` when a setting doesn't
+    // resolve against the spec's declared settings) propagate to
+    // handleMessage's outer try/catch, which — via the WARN exemption above —
+    // logs this as a caller error, not an app fault: the spec is agent-authored.
+    const payload = await customViews.runWidget({
+      widget: { inline: parsedSpec.data },
+      settings,
+      refreshSec: WIDGET_LIMITS.minRefreshSec,
+      context: { projectId: msg.projectId ?? null },
+    });
+
+    // Cap each source's rows to 50 for the transcript — the real page is not
+    // capped this way; this only bounds what goes back over the wire to the
+    // model.
+    const sources: Record<string, unknown> = {};
+    for (const [name, outcome] of Object.entries(payload.sources)) {
+      if ('error' in outcome) {
+        sources[name] = outcome;
+        continue;
+      }
+      const cappedRows = outcome.rows.slice(0, 50);
+      sources[name] = {
+        columns: outcome.columns,
+        rows: cappedRows,
+        truncated: outcome.truncated,
+        tookMs: outcome.tookMs,
+        ...(cappedRows.length < outcome.rows.length ? { truncatedForTranscript: true } : {}),
+      };
+    }
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { sources, warnings: payload.warnings, plan: payload.plan, paused: payload.paused },
+    });
+  }
+
+  private handleWidgetSave(
+    msg: Extract<McpQueryMessage, { type: 'mcp-widget-save' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+    const customViews = this.deps.customViews;
+    if (!customViews) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'custom_views_unavailable' });
+      return;
+    }
+
+    let rawSpec: unknown;
+    try {
+      rawSpec = JSON.parse(msg.specJson);
+    } catch {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_json' });
+      return;
+    }
+    const parsedSpec = widgetSpecSchema.safeParse(rawSpec);
+    if (!parsedSpec.success) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'invalid_spec',
+        data: { detail: parsedSpec.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`) },
+      });
+      return;
+    }
+
+    try {
+      const widget = customViews.saveWidget({
+        id: msg.widgetId,
+        name: msg.name,
+        description: msg.description ?? null,
+        spec: parsedSpec.data,
+        authoringSessionId: msg.sessionId,
+        threadId: ctx.threadId,
+        publish: msg.publish,
+      });
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { widgetId: widget.id, revision: widget.revision },
+      });
+    } catch (err) {
+      const error = err instanceof CustomViewsStoreError ? err.code : err instanceof Error ? err.message : String(err);
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error });
+    }
   }
 
   // --------------------------------------------------------------------------

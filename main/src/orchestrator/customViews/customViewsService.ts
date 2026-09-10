@@ -116,6 +116,27 @@ export interface CustomViewsServiceLike {
 
   listWidgets(): CustomWidget[];
   getWidget(id: string): CustomWidget | null;
+  /**
+   * The assistant's ONE write entrypoint (S6, `cyboflow_widget_save`):
+   * saves `spec` as a draft via `store.saveDraft`, then — when `publish` is
+   * true — promotes it via `store.publishDraft` in the same call. Emits
+   * exactly ONE `onWidgetDraft` event describing the FINAL outcome
+   * (`kind:'draft'` when `publish` is false, `kind:'published'` when it
+   * promoted), not one event per store call — the renderer's session-bound
+   * live landing (§7.3) only needs to know where the widget ended up.
+   * `id` omitted creates a new widget; a `session_mismatch` /
+   * `not_found` from the store propagates unchanged (the MCP handler maps
+   * it to the response `error` string).
+   */
+  saveWidget(input: {
+    id?: string;
+    name: string;
+    description?: string | null;
+    spec: WidgetSpec;
+    authoringSessionId: string;
+    threadId?: string | null;
+    publish: boolean;
+  }): CustomWidget;
   publishDraft(input: { id: string; authoringSessionId: string }): CustomWidget;
   discardDraft(input: { id: string; authoringSessionId: string }): CustomWidget | null;
   deleteWidget(id: string): void;
@@ -214,6 +235,34 @@ export class CustomViewsService implements CustomViewsServiceLike {
 
   getWidget(id: string): CustomWidget | null {
     return this.deps.store.getWidget(id);
+  }
+
+  saveWidget(input: {
+    id?: string;
+    name: string;
+    description?: string | null;
+    spec: WidgetSpec;
+    authoringSessionId: string;
+    threadId?: string | null;
+    publish: boolean;
+  }): CustomWidget {
+    const draft = this.deps.store.saveDraft({
+      id: input.id,
+      name: input.name,
+      description: input.description ?? null,
+      spec: input.spec,
+      authoringSessionId: input.authoringSessionId,
+      threadId: input.threadId ?? null,
+    });
+    const widget = input.publish
+      ? this.deps.store.publishDraft({ id: draft.id, authoringSessionId: input.authoringSessionId })
+      : draft;
+    this.emitWidgetDraft({
+      widgetId: widget.id,
+      authoringSessionId: input.authoringSessionId,
+      kind: input.publish ? 'published' : 'draft',
+    });
+    return widget;
   }
 
   publishDraft(input: { id: string; authoringSessionId: string }): CustomWidget {
