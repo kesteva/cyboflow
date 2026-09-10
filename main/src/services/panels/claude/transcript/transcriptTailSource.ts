@@ -51,6 +51,23 @@ export interface TranscriptTailSourceOptions {
    * so tests can exercise the give-up path without a real 2-minute wait.
    */
   lateDiscoveryWindowMs?: number;
+  /**
+   * Defer the discovery deadline until {@link TranscriptTailSource.armDiscoveryDeadline}
+   * is called, instead of starting it at `start()`.
+   *
+   * The soft timeout + extended window bound the spawn -> first-`.jsonl` race,
+   * but `claude` writes NO transcript while its REPL sits idle — the file appears
+   * only once a turn begins. When the spawn carries an initial prompt those two
+   * moments coincide and the default (false) is correct. When it does NOT (a
+   * prompt-less REPL waiting on the user), a deadline started at `start()` is
+   * timing the USER, and its give-up would detach the structured pipeline
+   * permanently over a session that is merely idle. Such a source defers; the
+   * manager arms it on the turn-start edge.
+   *
+   * A deferred source still watches + polls (at the low-frequency background
+   * cadence) so a transcript that appears anyway is bound immediately.
+   */
+  deferDeadlineUntilArmed?: boolean;
   /** REQUIRED structural logger (CODE-PATTERNS.md optional-logger rule). */
   logger: StructuralLogger;
   /**
@@ -112,6 +129,16 @@ export class TranscriptTailSource implements TranscriptSource {
   private rejectFirstLine: ((err: Error) => void) | undefined;
   private settled = false;
 
+  /**
+   * Constructed with a DEFERRED deadline (see `deferDeadlineUntilArmed`). Stays
+   * true for the source's whole life: it also marks every bind as out-of-band,
+   * because the spawn that created this source never awaited `waitForFirstLine`
+   * and has long since returned.
+   */
+  private readonly deferDeadline: boolean;
+  /** The discovery deadline is running (always true from `start()` unless deferred). */
+  private deadlineArmed = false;
+
   /** The soft timeout fired: a subsequent bind is a LATE recovery. */
   private softTimedOut = false;
   /** Discovery is permanently abandoned (true give-up or stop()). */
@@ -141,6 +168,7 @@ export class TranscriptTailSource implements TranscriptSource {
     this.discoveryTimeoutMs = opts.discoveryTimeoutMs;
     this.lateDiscoveryWindowMs =
       opts.lateDiscoveryWindowMs ?? DEFAULT_LATE_DISCOVERY_WINDOW_MS;
+    this.deferDeadline = opts.deferDeadlineUntilArmed === true;
     this.logger = opts.logger;
     this.onLateBind = opts.onLateBind;
     this.onGiveUp = opts.onGiveUp;
@@ -182,15 +210,57 @@ export class TranscriptTailSource implements TranscriptSource {
       );
     }
 
-    this.discoveryInterval = setInterval(() => {
-      this.tryDiscover();
-    }, POLL_INTERVAL_MS);
+    // A DEFERRED source has no deadline yet, so it polls at the low-frequency
+    // background cadence: nothing is expected to appear until a turn starts, and
+    // a 50ms poll held for the whole idle life of the session would be pure
+    // wakeups. armDiscoveryDeadline() upshifts to POLL_INTERVAL_MS.
+    this.discoveryInterval = setInterval(
+      () => {
+        this.tryDiscover();
+      },
+      this.deferDeadline ? LATE_POLL_INTERVAL_MS : POLL_INTERVAL_MS,
+    );
 
+    if (this.deferDeadline) {
+      this.logger.verbose?.(
+        `[Cyboflow Transcript] discovery deadline DEFERRED in ${this.keyDir} — the spawn starts no turn, so there is nothing to time until one does`,
+      );
+    } else {
+      this.deadlineArmed = true;
+      this.discoveryTimer = setTimeout(() => {
+        this.onDiscoveryTimeout();
+      }, this.discoveryTimeoutMs);
+    }
+
+    // Attempt an immediate discovery in case the file already appeared.
+    this.tryDiscover();
+  }
+
+  /**
+   * Start the deferred discovery deadline (see `deferDeadlineUntilArmed`) and
+   * upshift the background poll to the fast cadence. Called by the manager on the
+   * turn-start edge — the first moment `claude` is actually expected to write a
+   * transcript, and therefore the first moment a timeout would mean a real
+   * failure rather than an idle user.
+   *
+   * Idempotent; inert once bound, stopped, given up, or already armed.
+   */
+  armDiscoveryDeadline(): void {
+    if (this.deadlineArmed || this.bound || this.stopped || this.discoveryGaveUp) return;
+    this.deadlineArmed = true;
+    // Upshift the poll: a turn is in flight, so the transcript is imminent.
+    if (this.discoveryInterval !== undefined) {
+      clearInterval(this.discoveryInterval);
+      this.discoveryInterval = setInterval(() => {
+        this.tryDiscover();
+      }, POLL_INTERVAL_MS);
+    }
     this.discoveryTimer = setTimeout(() => {
       this.onDiscoveryTimeout();
     }, this.discoveryTimeoutMs);
-
-    // Attempt an immediate discovery in case the file already appeared.
+    this.logger.verbose?.(
+      `[Cyboflow Transcript] discovery deadline ARMED in ${this.keyDir} — a turn started, expecting a transcript within ${this.discoveryTimeoutMs}ms`,
+    );
     this.tryDiscover();
   }
 
@@ -202,6 +272,10 @@ export class TranscriptTailSource implements TranscriptSource {
         new Error('[Cyboflow Transcript] waitForFirstLine called before start()'),
       );
     }
+    // Awaiting the first line IS the declaration that one is expected now, so an
+    // unarmed deferred source arms here rather than handing back a promise with
+    // no deadline behind it, which would hang the caller forever.
+    this.armDiscoveryDeadline();
     return this.firstLinePromise;
   }
 
@@ -336,18 +410,24 @@ export class TranscriptTailSource implements TranscriptSource {
       this.inode = undefined;
     }
     this.clearDiscovery();
-    // Captured BEFORE settle(true): if the soft timeout already fired, this bind
-    // is a LATE recovery — the firstLine promise was already rejected and the
-    // spawn moved on, so we notify the manager to re-attach downstream state.
-    const late = this.softTimedOut;
+    // Captured BEFORE settle(true). `onLateBind` is the "the spawn is not waiting
+    // on this bind, re-attach downstream state yourself" channel, and TWO shapes
+    // need it: (a) the soft timeout already fired, so the firstLine promise was
+    // rejected and the spawn moved on; (b) a DEFERRED source, whose spawn never
+    // awaited waitForFirstLine at all and returned long before the user's first
+    // turn produced this file. Without (b) a deferred session would bind its
+    // transcript and still never persist `claude_session_id`.
+    const outOfBand = this.softTimedOut || this.deferDeadline;
     this.logger.verbose?.(
       `[Cyboflow Transcript] bound session ${this.sessionUuid} (${this.boundPath})`,
     );
     this.settle(true); // no-op if the soft timeout already settled(false)
     this.startTail();
-    if (late) {
+    if (outOfBand) {
       this.logger.warn(
-        `[Cyboflow Transcript] late-bound session ${this.sessionUuid} after discovery timeout — structured pipeline recovered`,
+        this.softTimedOut
+          ? `[Cyboflow Transcript] late-bound session ${this.sessionUuid} after discovery timeout — structured pipeline recovered`
+          : `[Cyboflow Transcript] bound session ${this.sessionUuid} on the session's first turn (deferred discovery) — structured pipeline attached`,
       );
       if (this.sessionUuid !== undefined) this.onLateBind?.(this.sessionUuid);
     }

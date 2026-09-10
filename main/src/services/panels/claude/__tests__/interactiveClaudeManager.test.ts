@@ -56,6 +56,8 @@ class FakeTranscriptSource implements TranscriptSource {
   onTurnEnd: OnTurnEndCallback | undefined;
   stopped = false;
   started = false;
+  /** The manager's out-of-band bind channel (persists claude_session_id). */
+  onLateBind: ((sessionUuid: string) => void) | undefined;
   private uuid: string | undefined;
 
   constructor(uuid?: string) {
@@ -78,6 +80,18 @@ class FakeTranscriptSource implements TranscriptSource {
 
   getSessionUuid(): string | undefined {
     return this.uuid;
+  }
+
+  /**
+   * How the manager constructed this source: `deferDeadlineUntilArmed` is set
+   * when the spawn started no turn, so the discovery clock waits for one.
+   */
+  deferDeadlineUntilArmed = false;
+
+  /** Counts armDiscoveryDeadline() calls (the manager's turn-start edge). */
+  armCalls = 0;
+  armDiscoveryDeadline(): void {
+    this.armCalls += 1;
   }
 
   /** Records no-fork resume binds; sets the uuid as the real source would. */
@@ -131,8 +145,17 @@ class TestableInteractiveClaudeManager extends InteractiveClaudeManager {
     return fake as unknown as import('@homebridge/node-pty-prebuilt-multiarch').IPty;
   }
 
-  protected override createTranscriptSource(): TranscriptSource {
+  protected override createTranscriptSource(
+    _worktreePath: string,
+    callbacks?: {
+      onLateBind?: (sessionUuid: string) => void;
+      onGiveUp?: () => void;
+      deferDeadlineUntilArmed?: boolean;
+    },
+  ): TranscriptSource {
     const src = new FakeTranscriptSource(this.nextSessionUuid);
+    src.deferDeadlineUntilArmed = callbacks?.deferDeadlineUntilArmed === true;
+    src.onLateBind = callbacks?.onLateBind;
     this.fakeSources.push(src);
     return src;
   }
@@ -1433,6 +1456,153 @@ describe('InteractiveClaudeManager', () => {
       await new Promise((r) => setTimeout(r, 600));
       await spawn;
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // Transcript-discovery deadline: armed by a TURN, not by the spawn.
+  // -------------------------------------------------------------------------
+  describe('discovery deadline vs. a spawn that starts no turn', () => {
+    let db: Database.Database;
+    let mgr: TestableInteractiveClaudeManager;
+
+    beforeEach(() => {
+      db = createTestDb({ disableForeignKeys: true });
+      ApprovalRouter.initialize(dbAdapter(db));
+      QuestionRouter.initialize(dbAdapter(db));
+      mgr = new TestableInteractiveClaudeManager(
+        createMockSessionManager(),
+        createLoggerSpy() as unknown as import('../../../../utils/logger').Logger,
+        createMockConfigManager(),
+        db,
+      );
+    });
+
+    afterEach(async () => {
+      for (const pty of mgr.ptys) pty.fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      ApprovalRouter._resetForTesting();
+      QuestionRouter._resetForTesting();
+      db.close();
+      vi.clearAllMocks();
+    });
+
+    it('an argv prompt spawns an UNDEFERRED source (spawn and first turn coincide)', async () => {
+      const spawn = mgr.spawnCliProcess({
+        panelId: 'panel-dd1',
+        sessionId: 'sess-dd1',
+        worktreePath: '/tmp/wt-dd1',
+        prompt: 'go',
+      });
+      await waitFor(() => mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
+
+      expect(mgr.fakeSources[0].deferDeadlineUntilArmed).toBe(false);
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+
+    it('a prompt-less spawn DEFERS the deadline and never arms it at spawn', async () => {
+      // `claude` writes no transcript while its REPL idles, so a clock started
+      // here would be timing the user; its latched give-up would permanently
+      // detach the structured pipeline from a session that is merely quiet.
+      const spawn = mgr.spawnCliProcess({
+        panelId: 'panel-dd2',
+        sessionId: 'sess-dd2',
+        worktreePath: '/tmp/wt-dd2',
+        prompt: '',
+      });
+      await waitFor(() => mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
+
+      expect(mgr.fakeSources[0].deferDeadlineUntilArmed).toBe(true);
+      expect(mgr.fakeSources[0].armCalls).toBe(0);
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+
+    it("arms the deadline on the first turn's arming edge, once — not on later turns", async () => {
+      const spawn = mgr.spawnCliProcess({
+        panelId: 'panel-dd3',
+        sessionId: 'sess-dd3',
+        worktreePath: '/tmp/wt-dd3',
+        prompt: '',
+      });
+      await waitFor(() => mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
+      const src = mgr.fakeSources[0];
+
+      // Composed body with no Enter yet starts nothing.
+      mgr.sendInput('panel-dd3', 'first message');
+      expect(src.armCalls).toBe(0);
+
+      // The composer's deferred Enter submits — the turn starts here.
+      mgr.sendInput('panel-dd3', '\r');
+      expect(src.armCalls).toBe(1);
+
+      // A second submit inside the SAME turn is not a new arming edge.
+      mgr.sendInput('panel-dd3', 'more\r');
+      expect(src.armCalls).toBe(1);
+
+      // A later turn re-arms the edge; the source itself is idempotent, but the
+      // manager should not be spraying calls per keystroke either.
+      mgr.notifyTurnEnd('panel-dd3');
+      mgr.sendInput('panel-dd3', 'second turn\r');
+      expect(src.armCalls).toBe(2);
+
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+
+    it('a bare Enter with no composed body arms nothing (it starts no turn)', async () => {
+      const spawn = mgr.spawnCliProcess({
+        panelId: 'panel-dd4',
+        sessionId: 'sess-dd4',
+        worktreePath: '/tmp/wt-dd4',
+        prompt: '',
+      });
+      await waitFor(() => mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
+
+      mgr.sendInput('panel-dd4', '\r');
+      expect(mgr.fakeSources[0].armCalls).toBe(0);
+
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+  });
+
+  it('a deferred source binding on the first turn still persists claude_session_id', async () => {
+    // The spawn returned without awaiting discovery, so the bind arrives out of
+    // band through onLateBind — the only channel left that can persist the id.
+    const db = createTestDb({ disableForeignKeys: true });
+    ApprovalRouter.initialize(dbAdapter(db));
+    QuestionRouter.initialize(dbAdapter(db));
+    const sessionDbUpdate = vi.fn();
+    const mgr = new TestableInteractiveClaudeManager(
+      createMockSessionManager({ db: { updateSession: sessionDbUpdate } as unknown as MockDb }),
+      createLoggerSpy() as unknown as import('../../../../utils/logger').Logger,
+      createMockConfigManager(),
+      db,
+    );
+
+    const spawn = mgr.spawnCliProcess({
+      panelId: 'panel-dd5',
+      sessionId: 'sess-dd5',
+      worktreePath: '/tmp/wt-dd5',
+      prompt: '',
+    });
+    await waitFor(() => mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
+    expect(sessionDbUpdate).not.toHaveBeenCalled();
+
+    mgr.fakeSources[0].onLateBind?.('first-turn-uuid');
+    expect(sessionDbUpdate).toHaveBeenCalledWith('sess-dd5', { claude_session_id: 'first-turn-uuid' });
+
+    mgr.ptys[0].fireExit(0);
+    await new Promise((r) => setTimeout(r, 600));
+    await spawn;
+    ApprovalRouter._resetForTesting();
+    QuestionRouter._resetForTesting();
+    db.close();
   });
 
   // -------------------------------------------------------------------------

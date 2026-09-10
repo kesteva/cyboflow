@@ -254,6 +254,125 @@ describe('TranscriptTailSource', () => {
     expect(onLateBind).not.toHaveBeenCalled();
   });
 
+  describe('deferred discovery deadline (a spawn that starts no turn)', () => {
+    it('does NOT time out or give up while unarmed, however long the REPL sits idle', async () => {
+      // The bug this guards: `claude` writes no transcript until a turn begins,
+      // so a prompt-less REPL produced no `.jsonl` and the spawn-time clock timed
+      // the USER. Give-up is latched, so it permanently detached the structured
+      // pipeline from a session that was merely waiting to be typed into.
+      const logger = makeSpyLogger();
+      const onGiveUp = vi.fn();
+      const src = trackedSource({
+        worktreePath: WORKTREE,
+        projectsRoot: tmpRoot,
+        discoveryTimeoutMs: 20,
+        lateDiscoveryWindowMs: 20,
+        logger,
+        onGiveUp,
+        deferDeadlineUntilArmed: true,
+      });
+
+      await src.start(() => undefined);
+
+      // Well past soft timeout + extended window had they been running at start().
+      await new Promise((r) => setTimeout(r, 150));
+      expect(onGiveUp).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
+    });
+
+    it('still binds a transcript that appears while unarmed, reporting it out of band', async () => {
+      // Deferred means "no deadline", not "not watching": the spawn already
+      // returned without awaiting, so the bind must reach the manager through
+      // onLateBind or claude_session_id is never persisted.
+      const onLateBind = vi.fn();
+      const received: unknown[] = [];
+      const src = trackedSource({
+        worktreePath: WORKTREE,
+        projectsRoot: tmpRoot,
+        discoveryTimeoutMs: 20,
+        lateDiscoveryWindowMs: 20,
+        logger: makeSpyLogger(),
+        onLateBind,
+        deferDeadlineUntilArmed: true,
+      });
+
+      await src.start((obj) => received.push(obj));
+
+      const uuid = 'deadbeef-0000-1111-2222-333344445555';
+      fs.writeFileSync(path.join(keyDir, `${uuid}.jsonl`), assistantTextLine('typed') + '\n');
+
+      await waitFor(() => received.length >= 1);
+      expect(src.getSessionUuid()).toBe(uuid);
+      expect(onLateBind).toHaveBeenCalledWith(uuid);
+    });
+
+    it('arming starts the clock: only THEN can a missing transcript give up', async () => {
+      const logger = makeSpyLogger();
+      const onGiveUp = vi.fn();
+      const src = trackedSource({
+        worktreePath: WORKTREE,
+        projectsRoot: tmpRoot,
+        discoveryTimeoutMs: 40,
+        lateDiscoveryWindowMs: 60,
+        logger,
+        onGiveUp,
+        deferDeadlineUntilArmed: true,
+      });
+
+      await src.start(() => undefined);
+      await new Promise((r) => setTimeout(r, 150));
+      expect(onGiveUp).not.toHaveBeenCalled();
+
+      src.armDiscoveryDeadline();
+
+      await waitFor(() => onGiveUp.mock.calls.length >= 1);
+      expect(logger.error).toHaveBeenCalled();
+    });
+
+    it('arming is idempotent and inert once bound (later turns are no-ops)', async () => {
+      const logger = makeSpyLogger();
+      const onGiveUp = vi.fn();
+      const src = trackedSource({
+        worktreePath: WORKTREE,
+        projectsRoot: tmpRoot,
+        discoveryTimeoutMs: 40,
+        lateDiscoveryWindowMs: 40,
+        logger,
+        onGiveUp,
+        deferDeadlineUntilArmed: true,
+      });
+
+      await src.start(() => undefined);
+
+      const uuid = 'cafebabe-9999-8888-7777-666655554444';
+      fs.writeFileSync(path.join(keyDir, `${uuid}.jsonl`), assistantTextLine('bound') + '\n');
+      await waitFor(() => src.getSessionUuid() !== undefined);
+
+      // Every subsequent turn calls this; none may resurrect a discovery timer.
+      src.armDiscoveryDeadline();
+      src.armDiscoveryDeadline();
+
+      await new Promise((r) => setTimeout(r, 150));
+      expect(onGiveUp).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
+    });
+
+    it('waitForFirstLine on an unarmed deferred source arms rather than hanging', async () => {
+      const src = trackedSource({
+        worktreePath: WORKTREE,
+        projectsRoot: tmpRoot,
+        discoveryTimeoutMs: 40,
+        lateDiscoveryWindowMs: 5000,
+        logger: makeSpyLogger(),
+        deferDeadlineUntilArmed: true,
+      });
+
+      await src.start(() => undefined);
+
+      await expect(src.waitForFirstLine(40)).rejects.toThrow(/discovery timeout/i);
+    });
+  });
+
   it('tails incrementally: split line reassembled, malformed line skipped, in order', async () => {
     const logger = makeSpyLogger();
     const received: unknown[] = [];

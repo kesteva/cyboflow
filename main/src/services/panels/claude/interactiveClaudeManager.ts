@@ -1216,6 +1216,16 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       args.push('--', composedPrompt);
     }
 
+    // Does this spawn START A TURN? Only an argv prompt does. It decides whether
+    // the transcript-discovery deadline is meaningful at spawn time: `claude`
+    // writes its `.jsonl` when a turn begins, NOT when the REPL opens (verified —
+    // an idle prompt-less REPL produces no file at all). With a prompt, spawn and
+    // first turn coincide and the deadline bounds a real race. Without one, the
+    // clock would be timing the USER, and its give-up would permanently detach
+    // the structured pipeline (token meter + claude_session_id persistence) from
+    // a session that is merely waiting to be typed into. See armDiscoveryDeadline.
+    const spawnStartsTurn = composedPrompt.length > 0;
+
     const cliEnv = await this.initializeCliEnvironment({ ...options, runId });
     const extraEnv = await this.getCliEnvironment({ ...options, runId });
     const systemEnv = await this.getSystemEnvironment();
@@ -1344,6 +1354,10 @@ export class InteractiveClaudeManager extends AbstractCliManager {
             outcome: 'gave-up',
           },
         ),
+      // A prompt-less spawn has no turn to time yet — defer the deadline to the
+      // turn-start edge (sendInput) so the give-up above keeps meaning "claude
+      // never engaged a turn it was given", not "the user hadn't typed yet".
+      deferDeadlineUntilArmed: !spawnStartsTurn,
     });
     this.tailSources.set(panelId, tailSource);
 
@@ -1397,6 +1411,20 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // settled above, so this resolves immediately.)
     //
     // Now await transcript discovery (claude is engaging the argv prompt) — loud on timeout.
+    //
+    // A spawn that starts NO turn is the exception: there is nothing in flight to
+    // wait for, so we do not await (and do not arm the deadline — see the
+    // `spawnStartsTurn` note above). Discovery keeps watching in the background at
+    // the low-frequency cadence; the first user turn arms the clock, and the bind
+    // it produces arrives out of band through onLateBind, which persists
+    // claude_session_id exactly as the awaited path does.
+    if (!spawnStartsTurn) {
+      this.logger?.verbose(
+        `[InteractiveClaudeManager] panel ${panelId} spawned with no initial turn — transcript discovery deferred to the first user turn`,
+      );
+      this.persistDiscoveredSessionId(sessionId, tailSource);
+      return spawnPromise;
+    }
     try {
       await tailSource.waitForFirstLine(DISCOVERY_TIMEOUT_MS);
     } catch (discoveryErr) {
@@ -1561,6 +1589,12 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     callbacks?: {
       onLateBind?: (sessionUuid: string) => void;
       onGiveUp?: () => void;
+      /**
+       * Set when the spawn starts NO turn (a prompt-less REPL). See
+       * TranscriptTailSourceOptions.deferDeadlineUntilArmed: the deadline is
+       * armed on the turn-start edge instead of at spawn.
+       */
+      deferDeadlineUntilArmed?: boolean;
     },
   ): TranscriptSource {
     if (this.logger === undefined) {
@@ -1572,6 +1606,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       logger: this.logger,
       onLateBind: callbacks?.onLateBind,
       onGiveUp: callbacks?.onGiveUp,
+      deferDeadlineUntilArmed: callbacks?.deferDeadlineUntilArmed === true,
     });
   }
 
@@ -1742,6 +1777,13 @@ export class InteractiveClaudeManager extends AbstractCliManager {
         const wasInFlight = this.turnInFlightPanelIds.has(panelId);
         this.turnInFlightPanelIds.add(panelId);
         const run = this.interactiveRuns.get(panelId);
+        // Turn-start edge = the first moment a transcript is actually expected.
+        // A source spawned without an initial prompt deferred its discovery
+        // deadline to here; arming it now makes the timeout bound the real
+        // spawn->transcript race instead of the user's typing latency. Inert on
+        // an already-armed or already-bound source, so every later turn is a
+        // no-op and the optional-method guard covers non-tail sources.
+        if (!wasInFlight) this.tailSources.get(panelId)?.armDiscoveryDeadline?.();
         if (!wasInFlight && run) {
           const payload: InteractiveTurnStartPayload = {
             panelId,
