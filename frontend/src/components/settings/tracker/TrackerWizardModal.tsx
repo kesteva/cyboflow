@@ -2637,17 +2637,19 @@ export function TrackerWizardModal({
 
         <div className="mt-3 flex items-center justify-between gap-3 border-t border-border-primary pt-3">
           <div className="min-w-0">
-            <p className="text-xs font-semibold text-text-primary">Sync task fields</p>
+            <p className="text-xs font-semibold text-text-primary">
+              Push task fields to {meta.name}
+            </p>
             <p className="mt-0.5 text-[11px] text-text-tertiary">
               Title, description, priority{meta.supportsCategorySync ? ', and category' : ''} push
-              out to {meta.name}.
+              out to {meta.name}. Edits made in {meta.name} still merge in.
             </p>
           </div>
           <Segmented
             options={GATED_MODE_OPTIONS}
             value={contentSyncMode}
             onChange={setContentSyncMode}
-            ariaLabel="Sync task fields"
+            ariaLabel={`Push task fields to ${meta.name}`}
           />
         </div>
 

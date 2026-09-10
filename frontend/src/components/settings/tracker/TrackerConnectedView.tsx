@@ -946,17 +946,20 @@ export function TrackerConnectedView({
 
                   <div className="flex items-center justify-between gap-3 px-3 py-2.5">
                     <div className="min-w-0">
-                      <p className="text-xs font-semibold text-text-primary">Sync task fields</p>
+                      <p className="text-xs font-semibold text-text-primary">
+                        Push task fields to {meta.name}
+                      </p>
                       <p className="text-[11px] text-text-tertiary">
                         Title, description, priority
                         {meta.supportsCategorySync ? ', and category' : ''} push out to {meta.name}.
+                        Edits made in {meta.name} still merge in.
                       </p>
                     </div>
                     <Segmented
                       options={GATED_MODE_OPTIONS}
                       value={contentSyncMode}
                       onChange={handleContentSyncMode}
-                      ariaLabel="Sync task fields"
+                      ariaLabel={`Push task fields to ${meta.name}`}
                     />
                   </div>
 
