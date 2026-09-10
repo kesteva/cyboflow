@@ -232,8 +232,12 @@ export interface SourceResult {
 }
 
 /** The full payload `customViews.runWidget` returns for one widget run. */
+/** A source slot: its result, or the per-source error that replaced it (§4.2 — one bad
+ *  source never fails the whole widget). */
+export type SourceOutcome = SourceResult | { error: string };
+
 export interface WidgetDataPayload {
-  sources: Record<string, SourceResult>;
+  sources: Record<string, SourceOutcome>;
   warnings: string[];
   plan?: Record<string, string[]>;
   computedAt: string;
