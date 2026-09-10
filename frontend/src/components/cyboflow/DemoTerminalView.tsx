@@ -123,11 +123,14 @@ function buildWelcome(cols: number): string {
  *  {@link Chunk}s. `delay` is the pause (ms) BEFORE the chunk is written, giving
  *  a streaming feel. Under reduced motion every delay is collapsed to 0.
  *
- *  This mirrors the cyboflow PTY preamble a real interactive quick session
- *  receives as its first prompt (`QUICK_PTY_BRIEFING` in main/src/ipc/session.ts)
- *  followed by the agent's brief acknowledgement — so the demo terminal reads
- *  like a real freshly-briefed quick session. Kept in sync by hand (display-only
- *  copy; the renderer cannot import main-process source). */
+ *  This DRAMATIZES the cyboflow session context a real interactive quick session
+ *  is briefed with (`QUICK_PTY_BRIEFING` in
+ *  main/src/ipc/quickSessionBriefings.ts), followed by the agent's brief
+ *  acknowledgement. A real session no longer SHOWS either: the briefing rides
+ *  `--append-system-prompt`, so it is invisible and costs no turn, and the REPL
+ *  opens idle. The demo keeps them on screen deliberately — it is explaining to a
+ *  viewer what the session knows, which an empty terminal cannot do. Display-only
+ *  copy, kept in sync by hand (the renderer cannot import main-process source). */
 interface Chunk {
   text: string;
   delay: number;

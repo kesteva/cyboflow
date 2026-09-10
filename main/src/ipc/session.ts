@@ -1593,13 +1593,15 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               panel.id,
               session.id,
               session.worktreePath,
-              QUICK_PTY_BRIEFING,
+              '', // prompt — the briefing rides --append-system-prompt, so the REPL opens idle
               session.permissionMode,
               requestedModel, // pinned to a concrete snapshot at the spawn seam
               requestedEffort, // 'ultracode' → `--settings {ultracode:true}` (Ultracode card)
               requestedFastMode, // default off; opts this session into fast mode
               undefined, // resumeSessionId — not applicable to a fresh eager spawn
               requestedReasoningEffort,
+              undefined, // userAcknowledgedProviderDisabled — not a resume prompt
+              QUICK_PTY_BRIEFING, // session context, NOT a user turn
             )
             .catch((err: unknown) => {
               eagerSpawnFailed = true;
@@ -1620,8 +1622,12 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
                 sessionId: session.id,
               });
             });
-          // Mirror sessions:input — the REPL is live; show the session as running.
-          await sessionManager.updateSession(session.id, { status: 'running' });
+          // The REPL is live but IDLE — the briefing rides the system prompt, so
+          // this spawn starts no turn. Marking it 'running' would strand the
+          // session showing "working" forever: only a turn-end rests it, and
+          // there is no turn. The 'turn-start' seam (index.ts) flips it to
+          // running the moment the user actually types.
+          await sessionManager.updateSession(session.id, { status: 'stopped' });
           // …unless the spawn already rejected inside the microtask window that
           // await opened (a cached "not available" probe rejects on the next
           // tick), in which case this write just clobbered the catch's error
@@ -2475,23 +2481,27 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           claudePanelId,
           sessionId,
           session.worktreePath,
-          QUICK_PTY_BRIEFING,
+          '', // prompt — the briefing rides --append-system-prompt, so the REPL opens idle
           session.permissionMode,
           panelModel,
           undefined, // effort — the ultracode card setting is a launch-time choice
           panelFastMode,
           undefined, // resumeSessionId — a restart is a FRESH conversation
           panelReasoningEffort,
+          undefined, // userAcknowledgedProviderDisabled — not a resume prompt
+          QUICK_PTY_BRIEFING, // session context, NOT a user turn
         )
         .catch((err: unknown) => {
           restartSpawnFailed = true;
           console.error(`[IPC] Interactive restart spawn failed for session ${sessionId}:`, err);
           reportEagerSpawnFailure(err, 'interactive', 'claude', { sessionManager, sessionId });
         });
-      await sessionManager.updateSession(sessionId, { status: 'running' });
+      // Idle, not running: the restart's briefing rides the system prompt and
+      // starts no turn, so nothing would ever rest a 'running' mark here.
+      await sessionManager.updateSession(sessionId, { status: 'stopped' });
       // Same microtask race as the create-quick eager spawns: a rejection inside
-      // the await above already wrote the error status, which this 'running'
-      // write then clobbered. Re-assert it.
+      // the await above already wrote the status, which this write then
+      // clobbered. Re-assert it.
       if (restartSpawnFailed) {
         await sessionManager.updateSession(sessionId, { status: 'error' });
       }

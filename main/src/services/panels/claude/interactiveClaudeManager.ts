@@ -132,13 +132,17 @@ import { isClaudeEffortLevel, type ReasoningEffort } from '../../../../../shared
  *                      so the spawn path binds it directly from EOF
  *                      (bindKnownFileFromEnd) to keep the structured pipeline (token
  *                      meter) flowing; the live xterm rides the raw PTY byte path.
- *   systemPromptAppend: the `options.systemPromptAppend` field is intentionally
- *                      UNREAD on this substrate (the interactive REPL has no SDK
- *                      `systemPrompt.append` channel). The workflow prompt appends
- *                      — step-reporting (S6/TASK-811) AND the derived fan-out
- *                      execution instructions — are delivered instead via a
- *                      prompt-body PREPEND in `composePromptBody`, both resolved
- *                      from the run's frozen effective definition.
+ *   systemPromptAppend: emitted as the CLI's `--append-system-prompt <text>`, the
+ *                      interactive analogue of the SDK's `systemPrompt.append`.
+ *                      This carries SESSION CONTEXT (the quick-session briefing
+ *                      ipc/session.ts threads to every substrate), which is not a
+ *                      user turn and must not render as one.
+ *                      The WORKFLOW prompt appends — step-reporting (S6/TASK-811)
+ *                      AND the derived fan-out execution instructions — still ride
+ *                      a prompt-body PREPEND in `composePromptBody` instead: they
+ *                      are resolved from the run's frozen effective definition and
+ *                      are per-RUN, not per-spawn, so they must survive a resume
+ *                      respawn's prompt rather than a flag the respawn rebuilds.
  * ------------------------------------------------------------------------- */
 
 /** CLI spawn options accepted by the interactive substrate. */
@@ -210,8 +214,12 @@ interface InteractiveClaudeSpawnOptions {
   /** When true, `--strict-mcp-config` is threaded (see parity table). */
   strictMcpConfig?: boolean;
   /**
-   * NO interactive append channel — delivered via prompt-body prepend in
-   * S6/TASK-811. Accepted for parity; not consumed here.
+   * Text appended to the CLI's system prompt via `--append-system-prompt`. Used
+   * for session context the model needs but the user never typed — the
+   * quick-session briefing (ipc/session.ts). Invisible in the transcript, which
+   * is the point: delivering it as the first positional prompt made it render as
+   * a user message and spend the session's first turn being acknowledged.
+   * Omitted / blank → no flag.
    */
   systemPromptAppend?: string;
   [key: string]: unknown;
@@ -655,6 +663,21 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // strictMcpConfig: isolate to per-run .mcp.json servers only.
     if (options.strictMcpConfig) {
       args.push('--strict-mcp-config');
+    }
+
+    // systemPromptAppend → the CLI's `--append-system-prompt`. This is session
+    // CONTEXT (who is hosting the agent, what the worktree is, which MCP servers
+    // are connected), not something the user asked for, so it belongs in the
+    // system prompt exactly as every other substrate delivers it — the SDK path
+    // rides `systemPrompt.append` and Codex rides `developerInstructions`
+    // (ipc/session.ts threads the same briefing text to all three). This lane
+    // used to spend the session's FIRST TURN on it instead: the briefing went out
+    // as the positional prompt, so it rendered in the transcript and burned a
+    // turn on an acknowledgement nobody asked for. Pushed before the load-bearing
+    // end-of-options `--` separator.
+    const append = options.systemPromptAppend?.trim();
+    if (append) {
+      args.push('--append-system-prompt', append);
     }
 
     // agentPermissionMode 'auto': hand gating to NATIVE Claude auto-mode via the
@@ -2133,6 +2156,14 @@ export class InteractiveClaudeManager extends AbstractCliManager {
      * (see AbstractCliManager.assertProviderEnabled).
      */
     userAcknowledgedProviderDisabled?: boolean,
+    /**
+     * Session context for `--append-system-prompt` (the quick-session briefing).
+     * Kept SEPARATE from `prompt` on purpose: it is not a turn the user took, so
+     * it must not open the transcript as a message and must not consume the
+     * session's first turn. A caller that has a briefing passes an empty `prompt`
+     * alongside it, which spawns a bare REPL that waits for the user.
+     */
+    systemPromptAppend?: string,
   ): Promise<void> {
     await this.spawnCliProcess({
       panelId,
@@ -2143,6 +2174,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       effort,
       fastMode,
       reasoningEffort,
+      ...(systemPromptAppend ? { systemPromptAppend } : {}),
       ...(userAcknowledgedProviderDisabled ? { userAcknowledgedProviderDisabled } : {}),
       // When set, buildCommandArgs emits a plain `--resume <uuid>` (no fork) so the
       // prior conversation reopens live — eager resume passes an empty prompt.

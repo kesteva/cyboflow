@@ -374,6 +374,45 @@ describe('InteractiveClaudeManager', () => {
       expect(args).not.toContain('--model');
     });
 
+    it('emits --append-system-prompt for systemPromptAppend, and nothing when blank', () => {
+      const withAppend = mgr.callBuildCommandArgs({
+        panelId: 'p1',
+        sessionId: 's1',
+        worktreePath: '/tmp/wt',
+        prompt: '',
+        systemPromptAppend: 'You are running inside cyboflow.',
+      });
+      const idx = withAppend.indexOf('--append-system-prompt');
+      expect(idx).toBeGreaterThanOrEqual(0);
+      expect(withAppend[idx + 1]).toBe('You are running inside cyboflow.');
+
+      for (const blank of [undefined, '', '   ']) {
+        const args = mgr.callBuildCommandArgs({
+          panelId: 'p1',
+          sessionId: 's1',
+          worktreePath: '/tmp/wt',
+          prompt: 'hi',
+          ...(blank === undefined ? {} : { systemPromptAppend: blank }),
+        });
+        expect(args).not.toContain('--append-system-prompt');
+      }
+    });
+
+    it('keeps --append-system-prompt BEFORE the end-of-options separator', () => {
+      // buildCommandArgs owns everything left of `--`; the positional prompt is
+      // appended after it by spawnCliProcess. A flag emitted on the wrong side
+      // would be parsed as prompt text.
+      const args = mgr.callBuildCommandArgs({
+        panelId: 'p1',
+        sessionId: 's1',
+        worktreePath: '/tmp/wt',
+        prompt: '',
+        systemPromptAppend: 'context',
+      });
+      expect(args).not.toContain('--');
+      expect(args[args.length - 1]).not.toBe('context');
+    });
+
     it('threads --strict-mcp-config iff strictMcpConfig === true', () => {
       const withFlag = mgr.callBuildCommandArgs({
         panelId: 'p1',
