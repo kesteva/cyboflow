@@ -27,6 +27,15 @@ task Backlog — so treat the table as illustrative, not exhaustive; the branch 
 the "Center-surface state machine" comment in `App.tsx` is the current list (the comment
 itself enumerates only the main branches).
 
+**Custom views.** `LandingHome` and `ProjectOverviewPage` keep their data wiring and page chrome
+but hand the ordered section list to `frontend/src/customViews/ViewSurface.tsx`, which renders
+either the canonical order (the `default` view, byte-for-byte the previous page) or the active
+saved view's layout, mounting `WidgetHost` for non-section widgets. The header's right slot
+(`QueueHeader` `controls`, the overview `<h1>` row) holds the view switcher and the Customize
+button; customize mode wraps items in `EditableBlock`s and shows a `DraftBanner` under the header.
+State: `frontend/src/stores/customViewsStore.ts`. Design + data model:
+`docs/proposals/CUSTOM-VIEWS.md`.
+
 **Onboarding shell states.** The first-run tour has three shell states, read by `App.tsx`
 from `frontend/src/utils/onboarding.ts`:
 

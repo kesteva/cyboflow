@@ -528,10 +528,13 @@ IPC mirroring `designPrototypeServer`), then
 `<iframe sandbox="allow-scripts" src={…} />`. The frame is cross-origin to the shell, so it
 gets its own OOPIF process; without `allow-same-origin` it has no storage; the CSP blocks
 subresources; the scripted-frame guard blocks navigation off the origin with no external
-open (the server serves nothing but the blessed documents anyway). Parent → frame:
-`postMessage({ type:'cyboflow-widget-data', payload }, origin)` targeted at the server origin.
-Frame → parent: accepted only when `event.source === iframe.contentWindow` **and**
-`event.origin === serverOrigin`.
+open (the server serves nothing but the blessed documents anyway). Because the frame has no
+`allow-same-origin`, its origin is opaque (`'null'`) regardless of the URL, so the origin string
+carries no authentication either way: parent → frame `postMessage` must target `'*'` (a message
+targeted at the server origin is dropped by the browser), and frame → parent messages are
+accepted only when `event.source === iframe.contentWindow` (plus an origin allowlist of `'null'`
+or the server origin as a narrowing check). Source identity + the navigation guard are what
+carry the security.
 
 ### 5.5 Store — `frontend/src/stores/customViewsStore.ts` (new, zustand)
 

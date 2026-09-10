@@ -500,6 +500,13 @@ the ListTools declaration (zod → JSON Schema, `toolSchema.ts`), the argument v
 only the generic `findTool → prepare → executeMcpQuery` dispatch and a small table for the one
 locally-served tool (`cyboflow_reference`, whose content is compiled in).
 
+The global-agent family carries exactly TWO write-shaped tools with disjoint targets:
+`cyboflow_propose_action` (an `agent_proposals` row a human confirms) and `cyboflow_widget_save`
+(the user's own `custom_widgets` library — never a view, an entity, or a proposal). The
+custom-widget authoring tools (`cyboflow_db_schema`, `cyboflow_widget_preview`,
+`cyboflow_widget_save`) route through `CustomViewsService` so a preview runs the exact query path
+the page will (see "Custom views" under Data Model and `docs/proposals/CUSTOM-VIEWS.md`).
+
 The entry's `toEnvelope` is typechecked against `EnvelopeParams<T>` — the `McpQueryMessage` union
 member for the envelope it names — which closes the seam's real hole: the envelope crosses the
 socket as JSON and is re-typed by a blind `parsed as McpQueryMessage` cast, so before the registry
@@ -1011,6 +1018,50 @@ backfill (no prod data existed); the destructive DROP+recreate in 015 is intenti
 
 `copy:assets` (in `main/package.json`) copies BOTH `*.sql` migrations and the workflow `*.md`
 prompt bodies into the build output, so new migrations and prompt files ship in packaged builds.
+
+### Custom views (migration 132)
+
+Users compose named **views** of the Human review queue and Project overview pages out of
+**widgets** (`docs/proposals/CUSTOM-VIEWS.md`; the vocabulary deliberately avoids "variant", which
+means a workflow A/B variant here). Three tables:
+
+- `custom_views` — one row per saved view: `surface` (`review-queue` | `project-overview`),
+  a case-insensitively unique `name` per surface, `layout_json` (`ViewLayout` from
+  `shared/types/customViews.ts`), and a `revision` CAS token every `updateView` and every widget
+  action check. The unmodified page is the sentinel view `default`, never stored; the active view
+  per surface lives in `user_preferences` under `customViews.active.<surface>`.
+- `custom_widgets` — the user's widget library. `published_spec_json` is what every surface
+  renders; `draft_spec_json` + `authoring_session_id` hold the assistant's in-progress edit for
+  ONE authoring session, so a draft never clobbers a published widget and a late save from an
+  earlier session cannot bind to a newer slot.
+- `widget_action_log` — a 1:1 side table on `agent_proposals` marking proposals created by a
+  widget CTA (`operation_id` UNIQUE makes each click idempotent across transport retries).
+  `agent_proposals` itself is NOT altered: migration 125 recreates it from a fixed column list, so
+  an added column would not survive a ledger-wiped replay. `AgentThreadDbStore.listProposals`
+  LEFT JOINs this table to keep widget clicks off the assistant rail; `listProposalsByStatus`
+  (crash recovery) stays unfiltered.
+
+Every widget is a declarative `WidgetSpec`: named `sources` (read-only SQL with `:params`, or an
+allowlisted `insightsQueries` helper), per-source `transforms`, a `render` (a page section from
+the catalog, a generic shape, or author HTML), and `actions` whose kinds are the proposal kinds
+plus `navigate`. SQL runs on the same `{ readonly: true }` sibling connection and SELECT-only
+validator as the assistant's `cyboflow_db_query` (`main/src/orchestrator/readOnlyQuery.ts`; the
+widget profile additionally rejects `EXPLAIN` and `WITH RECURSIVE`). `WidgetDataService` caches
+by a hash of the setting-resolved spec, honours a per-request `refreshSec`, and pauses a key
+whose run exceeded 2 s until the spec changes or the user retries — repeat suppression, not a
+pre-emptive budget (better-sqlite3 has no interrupt). Widget actions go through
+`prepareProposal` (shared with the MCP propose handler) → `agent_proposals` → the same
+`executeProposal` state machine the rail's Confirm uses, stamped `actor:'user'`; a
+frame-originated request always passes a parent-owned confirm dialog showing the
+server-resolved arguments.
+
+Tier-3 (author HTML) widgets are served by `main/src/services/customWidgetServer.ts`, a single
+process-global token-gated loopback server modelled on the design-prototype server, into an
+`allow-scripts`-only iframe. The server origin is registered with the scripted-frame navigation
+guard (`main/src/ipc/artifactFrameGuard.ts`), so any navigation off the origin is blocked with
+NO `shell.openExternal` fallback — the reason `srcdoc` was rejected. The frame's origin is opaque
+(`'null'`), so the parent authenticates messages by `event.source` identity and the guard, not by
+origin string.
 
 ## Build & Run
 
