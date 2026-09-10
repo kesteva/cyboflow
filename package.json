@@ -166,6 +166,8 @@
       "node_modules/@anthropic-ai/claude-agent-sdk-win32-*/**",
       "node_modules/@openai/codex*/**",
       "node_modules/@steipete/peekaboo-mcp/**",
+      "node_modules/playwright/**",
+      "node_modules/playwright-core/**",
       "main/dist/main/src/orchestrator/mcpServer/**/*.js",
       "main/dist/main/src/orchestrator/shellHooks/**/*.js",
       "main/dist/main/src/orchestrator/verify/driver/**/*.js"
