@@ -1771,7 +1771,8 @@ const defaultPrepareDataDir = async (dataDir: string): Promise<void> => {
  * Binding it in the wrapper reaches the one consumer and nothing else —
  * `driverCore.serveChildEnv` strips it back off before a serve child inherits
  * it. Omitted entirely when this build resolved no root (a packaged build until
- * playwright joins `asarUnpack`): an empty NODE_PATH is worse than none.
+ * `node_modules/playwright*` were dropped from `asarUnpack`): an empty
+ * NODE_PATH is worse than none.
  *
  * ELECTRON_RUN_AS_NODE makes the packaged Electron binary (process.execPath, the
  * findNodeExecutable fallback in a packaged app) behave as plain node; harmless

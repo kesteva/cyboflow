@@ -97,9 +97,20 @@ describe('resolveHarnessNodePath', () => {
     expect(found).toBe('/repo/main/node_modules');
   });
 
-  // The packaged shape: asarUnpack unpacks the driver JS but NOT
-  // node_modules/playwright*, so the marker is nowhere on the walk. An absent
-  // NODE_PATH is the honest answer — see the function's caveat.
+  // The packaged shape: asarUnpack unpacks the driver JS AND node_modules/
+  // playwright*, so the walk from the unpacked driver reaches the unpacked
+  // node_modules (smoked against a real arm64 build, 9/10).
+  it('finds the unpacked node_modules in a packaged app', async () => {
+    const found = await resolveHarnessNodePath(
+      '/Applications/Cyboflow.app/Contents/Resources/app.asar.unpacked/main/dist/driver/driverCli.js',
+      world(['/Applications/Cyboflow.app/Contents/Resources/app.asar.unpacked/node_modules/playwright/package.json']),
+    );
+    expect(found).toBe('/Applications/Cyboflow.app/Contents/Resources/app.asar.unpacked/node_modules');
+  });
+
+  // A packaged build whose asarUnpack lost the playwright entries: the marker
+  // is nowhere on the walk (inside app.asar is unreadable to plain node), and
+  // an absent NODE_PATH is the honest answer — see the function's doc.
   it('answers null when no node_modules on the walk carries playwright', async () => {
     const found = await resolveHarnessNodePath(
       '/Applications/Cyboflow.app/Contents/Resources/app.asar.unpacked/main/dist/driver/driverCli.js',

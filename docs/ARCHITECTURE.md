@@ -468,6 +468,13 @@ better-sqlite3, or `main/src/services/**`). It advertises tools to the SDK over 
 forwards each call as a JSON envelope over the orch unix socket to `McpQueryHandler` in the main
 process, which dispatches on the envelope's `type`.
 
+The visual-verification driver (`orchestrator/verify/driver/driverCli.ts`, the `$VERIFY_DRIVER`
+subprocess) is a standalone node subprocess of the same kind and gets the same treatment:
+`scripts/bundle-verify-driver.mjs` inlines its sibling modules (`utils/platformProcess`, …) so
+it runs from `app.asar.unpacked` with nothing beside it, leaving only `playwright` external —
+resolved from cyboflow's own unpacked `node_modules/playwright*` via the NODE_PATH the driver
+wrapper binds.
+
 Which tools it advertises depends on `CYBOFLOW_MCP_SCOPE`, resolved once at module init and fixed
 for the subprocess's lifetime: **run** (the default flow family), **global-agent** (the
 cross-project read + propose-action family), or **design** (the minimal Design Mode family). Scope

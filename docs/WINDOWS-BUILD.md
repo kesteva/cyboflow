@@ -240,8 +240,9 @@ written down here.
 
 - **White screen at launch + MCP subprocess "Cannot find module"**: the
   packaged app contains RAW tsc output — `build:main` normally runs
-  `bundle-preload.mjs` + `bundle-mcp-server.mjs` after `tsc`, and a partial
+  `bundle-preload.mjs` + `bundle-mcp-server.mjs` + `bundle-verify-driver.mjs` after `tsc`, and a partial
   or cross-OS incremental build that skips them breaks the packaged app (an
   unbundled sandboxed preload cannot load; the unbundled MCP server cannot
   resolve its siblings from `app.asar.unpacked`). Run both bundle scripts
-  after every `main` build, on the build host.
+  after every `main` build, on the build host (the driver one too — an unbundled
+  driverCli.js dies on its first sibling require the same way).

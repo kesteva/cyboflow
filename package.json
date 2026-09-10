@@ -63,7 +63,7 @@
     "build": "pnpm run build:frontend && pnpm run build:main && pnpm run build:electron",
     "restore-backup": "node scripts/ensure-sqlite-abi.mjs host && node main/scripts/restore-backup.cjs",
     "build:frontend": "pnpm run --filter frontend build",
-    "build:main": "pnpm run --filter main build && node scripts/bundle-mcp-server.mjs && node scripts/bundle-preload.mjs",
+    "build:main": "pnpm run --filter main build && node scripts/bundle-mcp-server.mjs && node scripts/bundle-preload.mjs && node scripts/bundle-verify-driver.mjs",
     "build:electron": "electron-builder --publish never",
     "build:mac": "pnpm run build:frontend && pnpm run build:main && pnpm run electron:rebuild && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --universal --publish never --config build/electron-builder.generated.json",
     "build:mac:universal": "pnpm run build:frontend && pnpm run build:main && pnpm run electron:rebuild && pnpm run inject-build-info && node scripts/configure-build.js && electron-builder --mac --universal --publish never --config build/electron-builder.generated.json",
@@ -166,6 +166,8 @@
       "node_modules/@anthropic-ai/claude-agent-sdk-win32-*/**",
       "node_modules/@openai/codex*/**",
       "node_modules/@steipete/peekaboo-mcp/**",
+      "node_modules/playwright/**",
+      "node_modules/playwright-core/**",
       "main/dist/main/src/orchestrator/mcpServer/**/*.js",
       "main/dist/main/src/orchestrator/shellHooks/**/*.js",
       "main/dist/main/src/orchestrator/verify/driver/**/*.js"
