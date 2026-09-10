@@ -115,6 +115,14 @@ vi.mock('../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
       insights: { workflowStats: { query: vi.fn().mockResolvedValue([]) } },
+      // Custom Views: the surface always init()s the store, which reads these.
+      // An empty view list is the Default view — today's page.
+      customViews: {
+        listViews: { query: vi.fn().mockResolvedValue([]) },
+        getActiveView: { query: vi.fn().mockResolvedValue({ viewId: 'default' }) },
+        listWidgets: { query: vi.fn().mockResolvedValue([]) },
+        onWidgetDraft: { subscribe: vi.fn(() => ({ unsubscribe: vi.fn() })) },
+      },
       verificationRequests: { setupByProject: { query: vi.fn().mockResolvedValue([]) } },
       tracker: { connections: { query: vi.fn().mockResolvedValue([]) } },
       substrates: { resolveEffective: { query: vi.fn().mockResolvedValue({ substrate: 'sdk' }) } },

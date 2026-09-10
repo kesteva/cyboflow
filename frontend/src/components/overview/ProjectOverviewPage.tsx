@@ -53,6 +53,7 @@ import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { useQuickSessionsStore } from '../../stores/quickSessionsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { trpc } from '../../trpc/client';
+import { ViewSurface } from '../../customViews/ViewSurface';
 import type { BacklogTaskItem, BoardStage } from '../../../../shared/types/tasks';
 import type { WorkflowRunStats } from '../../../../shared/types/insights';
 import type { VerifyProjectSetupRow } from '../../../../shared/types/visualVerification';
@@ -270,11 +271,64 @@ export function ProjectOverviewPage({ projectId }: ProjectOverviewPageProps): Re
     void launchTopIdeaPlanner([topIdeaId], projectId);
   }, [launchTopIdeaPlanner, onRunFlow, projectId, topIdeaId, topIdeaLaunching]);
 
+  // The view-aware tail (docs/proposals/CUSTOM-VIEWS.md §5.2) — same treatment
+  // as the review queue: the three sections keep their components and props,
+  // and only their ORDER becomes data.
+  const sections: Record<string, React.ReactNode | null> = {
+    'overview.active-agents': <OverviewActiveAgents projectId={projectId} pageState={pageState} />,
+    'overview.recommended': (
+      <OverviewRecommendedActions
+        projectId={projectId}
+        pageState={pageState}
+        actions={actions}
+        dismissed={dismissed}
+        onDismissedChange={setDismissed}
+        onSelectTasks={onSelectTasks}
+        onLaunchTopIdea={onLaunchTopIdea}
+        onRunFlow={onRunFlow}
+        onReviewTrackerConflicts={onReviewTrackerConflicts}
+        onAddIdea={onOpenBacklog}
+      />
+    ),
+    'overview.backlog': (
+      <OverviewBacklogSection
+        projectId={projectId}
+        pageState={pageState}
+        backlog={backlog}
+        itemsById={itemsById}
+        onOpenBacklog={onOpenBacklog}
+        onRunPlannerFlow={() => onRunFlow('planner')}
+      />
+    ),
+  };
+
+  // The launch-error row is page chrome, and it sits BETWEEN active agents and
+  // recommended actions — not directly under the header. Anchoring it to the
+  // section it follows is what keeps the Default view identical to today's
+  // page; a `chrome.afterHeader` slot would have moved it up one position.
+  const chrome = {
+    afterSection: {
+      // Errors from BOTH light launch paths (top-idea planner CTA, the batch
+      // picker's sprint launch) surface here.
+      'overview.active-agents':
+        launchError !== null ? (
+          <p className="text-status-error" role="alert" style={{ fontSize: '11px' }}>
+            {launchError}
+          </p>
+        ) : null,
+    },
+  };
+
   return (
-    <div className="h-full overflow-y-auto bg-bg-primary" data-testid="project-overview-page">
+    <div
+      className="h-full overflow-y-auto bg-bg-primary"
+      data-scroll-container
+      data-testid="project-overview-page"
+    >
       <div className="mx-auto flex w-full max-w-[1120px] flex-col gap-7 px-11 pb-12 pt-9">
         {/* Page header — git-branch mark + project name. No eyebrow, no counts
-            line: the sections carry their own counts. */}
+            line: the sections carry their own counts. S5 adds the view switcher
+            + Customize cluster to the right of the title. */}
         <header className="flex items-center gap-2.5">
           <GitBranch className="h-[18px] w-[18px] shrink-0 text-text-secondary" strokeWidth={1.8} />
           <h1
@@ -285,36 +339,11 @@ export function ProjectOverviewPage({ projectId }: ProjectOverviewPageProps): Re
           </h1>
         </header>
 
-        <OverviewActiveAgents projectId={projectId} pageState={pageState} />
-
-        {/* Errors from BOTH light launch paths (top-idea planner CTA, the
-            batch picker's sprint launch) surface here. */}
-        {launchError !== null && (
-          <p className="text-status-error" role="alert" style={{ fontSize: '11px' }}>
-            {launchError}
-          </p>
-        )}
-
-        <OverviewRecommendedActions
-          projectId={projectId}
-          pageState={pageState}
-          actions={actions}
-          dismissed={dismissed}
-          onDismissedChange={setDismissed}
-          onSelectTasks={onSelectTasks}
-          onLaunchTopIdea={onLaunchTopIdea}
-          onRunFlow={onRunFlow}
-          onReviewTrackerConflicts={onReviewTrackerConflicts}
-          onAddIdea={onOpenBacklog}
-        />
-
-        <OverviewBacklogSection
-          projectId={projectId}
-          pageState={pageState}
-          backlog={backlog}
-          itemsById={itemsById}
-          onOpenBacklog={onOpenBacklog}
-          onRunPlannerFlow={() => onRunFlow('planner')}
+        <ViewSurface
+          surface="project-overview"
+          sections={sections}
+          context={{ projectId }}
+          chrome={chrome}
         />
       </div>
 
