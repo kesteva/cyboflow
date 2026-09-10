@@ -65,7 +65,7 @@ import {
 import type { HarnessAttestationResult } from '../harnessAttestation';
 import { VerifyCapabilityStore, CAPABILITY_BREAKER_THRESHOLD } from '../capabilityStore';
 import { VerifyRunbookStore, type VerifyRunbookStoreDeps } from '../runbookStore';
-import { VerifyDepPreparer, defaultDepExec, type DepExec } from '../depPreparer';
+import { VerifyDepPreparer, makeDepExec, type DepExec } from '../depPreparer';
 import { captureSnapshotSha, provisionSnapshot, type SnapshotProvision } from '../snapshotProvisioner';
 import { prepareVerificationEnqueue } from '../enqueueFromTask';
 import { decideMergeGate, isMergeGateBlocking } from '../mergeGateLaneAdvance';
@@ -543,6 +543,12 @@ function makeRunner(world: RunnerWorld): VerificationAgentRunner {
     claudeDefaultModel: 'claude-opus-4-8',
     resolveNode: async () => '/usr/bin/node',
     driverCliPath: '/app/driverCli.js',
+    // The three F3 seams, faked so the matrix neither spawns a login shell
+    // (`defaultResolveShellPath`) nor mkdirs under the fake '/artifacts' root —
+    // the latter would fail the 'data-dir' preflight on every deploying row.
+    resolveShellPath: async () => process.env.PATH ?? '/usr/bin:/bin',
+    resolveNodeModulesRoot: async () => null,
+    prepareDataDir: async () => {},
     provision: world.provision ?? fakeProvision,
     checkSnapshotMutated: async () => false,
     fileExists: world.fileExists ?? (async () => true),
@@ -769,10 +775,13 @@ async function initDepFixtureRepo(dir: string): Promise<void> {
  */
 const CLONE_CMD = process.platform === 'win32' ? 'robocopy' : 'cp';
 
+/** The production exec over THIS process's PATH — no login-shell resolution inside the unit gate. */
+const cloneDepExec: DepExec = makeDepExec(async () => process.env.PATH ?? '/usr/bin:/bin');
+
 function recordingDepExec(calls: Array<{ cmd: string; args: string[] }>): DepExec {
   return async (cmd, args, opts) => {
     calls.push({ cmd, args: [...args] });
-    if (cmd === 'cp') return defaultDepExec(cmd, args, opts);
+    if (cmd === 'cp') return cloneDepExec(cmd, args, opts);
     if (cmd === 'robocopy') {
       await fsPromises.cp(args[0], args[1], { recursive: true });
       return { code: 0, out: '' };

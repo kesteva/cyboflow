@@ -1969,19 +1969,23 @@ describe('VerificationAgentRunner — the harness execution env', () => {
   // Fail-soft, and the var is exported ANYWAY: a runbook that assigns its app's
   // data-dir var from it must never expand it to the empty string and let the
   // app fall back to the developer's real state directory.
-  it('still exports the data dir when provisioning it failed, and logs an error', async () => {
-    const { runner, query, error } = makeRunner({
+  // A dir the harness cannot create is HARNESS evidence, so it must arrive as
+  // a fail-open preflight skip with the check attached — never as a deployed
+  // agent's `launch_failed` (a blocking `ambiguous` that burns an attempt).
+  it('fails preflight (skipped, not deployed) when the data dir cannot be provisioned', async () => {
+    const { runner, query } = makeRunner({
       prepareDataDir: async () => {
         throw new Error('EROFS: read-only file system');
       },
     });
     const result = await runner.run(makeReq());
-    expect(result.status).toBe('passed');
-    expect(envOf(query).VERIFY_DATA_DIR).toBe('/artifacts/data/vr-1');
-    expect(error).toHaveBeenCalledWith(
-      '[VerificationAgentRunner] could not provision VERIFY_DATA_DIR',
-      expect.objectContaining({ dataDir: '/artifacts/data/vr-1' }),
+    expect(result.status).toBe('skipped');
+    expect(result.deployed).toBe(false);
+    expect(query).not.toHaveBeenCalled();
+    expect(result.preflight?.checks).toContainEqual(
+      expect.objectContaining({ id: 'data-dir', ok: false, detail: expect.stringContaining('/artifacts/data/vr-1') }),
     );
+    expect(result.errorMessage).toContain('EROFS');
   });
 
   // The wrapper body, pinned on BOTH platforms from this macOS host.
