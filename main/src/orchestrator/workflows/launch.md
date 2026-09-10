@@ -74,9 +74,16 @@ the child creates that complete the component, never before — a body write
 marks downstream components stale, and stamping afterwards is what clears the
 flag. Stamp per idea as you finish it, never once at the end for the batch.
 The per-step stamps are called out below; by `approve-plan`, every approved
-idea must carry `idea-spec`, `epics`, and `stories` settled. An unstamped
-component is indistinguishable from work never done, and the next run redoes
-it.
+idea must carry `idea-spec`, `epics`, and `stories` settled, plus
+`architecture` on the idea that carries that section.
+
+**Re-stamp after a later write that stales you.** A body write marks
+downstream components stale by MATERIALIZING a ledger row for them, including
+for components that until then had no row and were merely deriving as
+complete. That row then wins over derivation permanently. So a component
+stamped at an early step and staled by a later step's body write stays
+`incomplete` unless the later step re-stamps it — the ordering rule above is
+not "stamp once", it is "stamp after the last write that touches you".
 
 **`prototype` is the one component Launch never stamps.** The prototype and
 architecture passes run ONCE on the whole concept, before any idea exists. The
@@ -239,8 +246,15 @@ own design. There are no per-idea design flags.
     expansion emits `MATERIAL_CHANGE: yes`, reopen the affected decision with
     the user (AskUserQuestion, referencing the brief) before continuing —
     never silently mutate approved intent.
-    - **Stamp** `idea-spec` `complete` on each idea after ITS body write
-      lands.
+    - **Stamp**, after each idea's body write lands: `idea-spec` `complete`,
+      and — on the one idea carrying the folded `## Architecture design`
+      section — `architecture` `complete` AGAIN. Re-stamping architecture here
+      is not redundant: replacing the stub with `## Idea spec` counts as a spec
+      change, which marks the whole downstream set (architecture, prototype,
+      epics, stories) stale, so the step-8 stamp has just been invalidated. The
+      section itself was preserved verbatim, so it is still valid — say so with
+      the stamp, or the idea ends the run reading "architecture needs review"
+      over a body that carries a perfectly good architecture section.
 
 The epics/tasks you create here land as **hidden drafts** (`approved_at`
 unset — board-invisible and sprint-ineligible) until `approve-plan` returns

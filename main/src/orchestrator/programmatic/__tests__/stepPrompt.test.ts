@@ -723,6 +723,9 @@ describe('composeStepPrompt', () => {
     });
     expect(out).toContain("component: 'idea-spec', state: 'complete'");
     expect(out).toContain('AFTER');
+    // The spec rewrite stales architecture by materializing a row, so the
+    // ideas-step stamp must be renewed here or it reads "needs review".
+    expect(out).toContain("component: 'architecture', state: 'complete'");
   });
 
   it('stamps architecture but never prototype on the launch ideas step', () => {
