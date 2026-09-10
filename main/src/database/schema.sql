@@ -77,3 +77,42 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_status_created ON workflow_runs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_id ON workflow_runs(workflow_id);
+
+-- Custom Views (migration 132, docs/proposals/CUSTOM-VIEWS.md §3.2): saved
+-- per-surface widget layouts, the user's custom-widget library, and the
+-- widget-action audit/idempotency side table. See 132's own header for why
+-- widget_action_log is a side table rather than a column on agent_proposals.
+CREATE TABLE IF NOT EXISTS custom_views (
+  id TEXT PRIMARY KEY,
+  surface TEXT NOT NULL CHECK (surface IN ('review-queue','project-overview')),
+  name TEXT NOT NULL,
+  layout_json TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 1,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_custom_views_surface_name
+  ON custom_views (surface, name COLLATE NOCASE);
+
+CREATE TABLE IF NOT EXISTS custom_widgets (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT,
+  published_spec_json TEXT,            -- NULL until first publish
+  draft_spec_json TEXT,                -- NULL when no draft is pending
+  authoring_session_id TEXT,           -- owner of draft_spec_json
+  revision INTEGER NOT NULL DEFAULT 1,
+  thread_id TEXT,                      -- soft link, no FK (threads may be reset)
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS widget_action_log (
+  proposal_id TEXT PRIMARY KEY REFERENCES agent_proposals(id) ON DELETE CASCADE,
+  operation_id TEXT NOT NULL UNIQUE,
+  view_id TEXT NOT NULL,
+  view_revision INTEGER NOT NULL,
+  instance_id TEXT NOT NULL,
+  action_id TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
