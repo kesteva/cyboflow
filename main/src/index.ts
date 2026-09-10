@@ -287,6 +287,12 @@ import {
   type ProposalExecutorDeps,
   type TaskFieldsSnapshot,
 } from './orchestrator/agentThread/proposalExecutor';
+import { prepareProposal, createPrepareProposalDeps } from './orchestrator/agentThread/prepareProposal';
+import { CustomViewsDbStore } from './orchestrator/customViews/customViewsStore';
+import { createCustomViewsService, type CustomViewsServiceLike } from './orchestrator/customViews/customViewsService';
+import { CATALOG_WIDGET_SPECS } from '../../shared/customViews/catalogSpecs';
+import { WIDGET_THEME_TOKENS } from '../../shared/customViews/theme';
+import { CustomWidgetServerManager } from './services/customWidgetServer';
 import {
   DESIGN_MODE_KICKOFF_PROMPT,
   finishDesignSessionCreate,
@@ -530,6 +536,15 @@ let runExecutor: RunExecutor;
 // guards on it.
 let agentThreadStore: AgentThreadDbStore;
 let agentThreadService: AgentThreadService | null = null;
+// Custom Views (migration 132, docs/proposals/CUSTOM-VIEWS.md §9 row S3).
+// Built in initializeServices() right after agentThreadStore (same cyboflowDb,
+// same "store before anything reaches for it" ordering) and read later by the
+// tRPC createContext block + the widget server's loadWidget — hence module
+// scope. customViewsService closes over agentThreadStore/agentThreadService
+// LAZILY (ensureGlobalThreadId reads the module var at call time), so it is
+// safe to construct before agentThreadService exists.
+let customViewsStore: CustomViewsDbStore | null = null;
+let customViewsService: CustomViewsServiceLike | null = null;
 // Monitor-actuation seam (retry_step): bound in the tRPC dep-wiring block —
 // where db/runQueues/runExecutor are all live — to the SAME retryRunHandler
 // chokepoint the runs.retryStep mutation uses. The monitorFactory (built earlier,
@@ -675,6 +690,11 @@ const prototypeServerReaper = new PrototypeServerReaper();
 // instance. Constructed in initializeServices (its HTML loader needs `services`),
 // so it is null until boot finishes wiring.
 let designPrototypeServerManager: DesignPrototypeServerManager | null = null;
+// Custom Views tier-3 widget document server (docs/proposals/CUSTOM-VIEWS.md
+// §5.4) — a single PROCESS-GLOBAL server, unlike the per-run prototype server
+// above. Constructed alongside it (same watchdog) so both share one frame
+// watchdog instance; stopped at the same two teardown sites.
+let customWidgetServerManager: CustomWidgetServerManager | null = null;
 
 // Design Mode v1 design-feedback delivery pipeline (design-mode.md "Design
 // feedback v1 — acknowledged durable outbox"). Module-level so the deferred boot
@@ -1060,6 +1080,15 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         // initializeServices.
         sessionGitOps,
         sessionOps,
+        // Custom Views (migration 132). Built in initializeServices(), read
+        // from the module-scope holder at REQUEST time — same lazy pattern as
+        // sessionGitOps/sessionOps above.
+        customViews: customViewsService ?? undefined,
+        // Custom Views tier-3 widget document server — built alongside the
+        // design-prototype server below (module-scope holder read lazily, same
+        // pattern). CustomWidgetServerManager.ensure/stop already match
+        // CustomWidgetServerLike's shape, so no adapter is needed.
+        customWidgetServer: customWidgetServerManager ?? undefined,
       }),
   });
 }
@@ -1379,6 +1408,10 @@ async function createWindow() {
     // gone). Fail-soft and out-of-band, so it fires server-stopped for any still
     // alive; the renderer is already down, so those notifies are no-ops.
     void designPrototypeServerManager?.stopAll();
+    // The Custom Views widget server is process-global, not window-scoped, but
+    // no frame can reach it once the window is gone — stop it alongside the
+    // prototype servers rather than leave it listening on an orphaned port.
+    void customWidgetServerManager?.stop();
     mainWindow = null;
   });
 
@@ -3222,6 +3255,31 @@ async function initializeServices(): Promise<boolean> {
   // (app.whenReady, below) and injected into the tRPC context — one store, one DB.
   agentThreadStore = new AgentThreadDbStore(cyboflowDb);
 
+  // Custom Views service (migration 132, docs/proposals/CUSTOM-VIEWS.md §9 row
+  // S3) — built right here so index.ts wiring stays the ONE call
+  // createCustomViewsService documents: the store (this DB), the built-in
+  // catalog specs (shared, so the widget action service can resolve a
+  // `{type:'catalog'}` ref the same way runWidget does), and the three
+  // proposal-preparation closures the widget action service shares with the
+  // MCP cyboflow_propose_action handler (prepareProposal.ts). Every closure
+  // below reads its module-scope target LAZILY (agentThreadService may not
+  // exist yet; the executor deps holder is set later in app.whenReady), so
+  // construction order here is safe.
+  customViewsStore = new CustomViewsDbStore(cyboflowDb);
+  customViewsService = createCustomViewsService({
+    db: cyboflowDb,
+    store: customViewsStore,
+    catalogSpecs: CATALOG_WIDGET_SPECS,
+    ensureGlobalThreadId: () => {
+      if (!agentThreadService) throw new Error('assistant_unavailable');
+      return agentThreadService.ensureGlobalThread().id;
+    },
+    createProposal: (input) => agentThreadStore.createProposal(input),
+    prepare: (raw) => prepareProposal(createPrepareProposalDeps(cyboflowDb), raw),
+    execute: (proposalId) => executeProposal(getProposalExecutorDeps(), proposalId),
+    getProposal: (id) => agentThreadStore.getProposal(id),
+  });
+
   // OrchSocketServer — the orchestrator-side half of the Cyboflow MCP IPC link.
   // Stands up the Unix-domain socket under ~/.cyboflow/sockets/orch.sock that the
   // spawned cyboflowMcpServer subprocess(es) connect back to so the cyboflow_*
@@ -4540,7 +4598,11 @@ async function initializeServices(): Promise<boolean> {
   // manager start/stops the watchdog), so the watchdog closes over the
   // module-level manager var, which is assigned on the next line.
   const designFrameWatchdog = new DesignFrameWatchdog({
-    getTargets: () => designPrototypeServerManager?.getTargets() ?? [],
+    // Both loopback servers share this ONE watchdog instance — the Custom
+    // Views tier-3 widget server (docs/proposals/CUSTOM-VIEWS.md §5.4) is a
+    // second, process-global source of scripted frames, so its live target is
+    // concatenated onto the design-prototype server's per-run ones.
+    getTargets: () => [...(designPrototypeServerManager?.getTargets() ?? []), ...(customWidgetServerManager?.getTargets() ?? [])],
     getFrames: () => {
       const win = mainWindow;
       if (!win || win.isDestroyed()) return [];
@@ -4578,6 +4640,23 @@ async function initializeServices(): Promise<boolean> {
     logger: cyboflowLogger,
   });
   registerDesignPrototypeServerHandlers(ipcMain, designPrototypeServerManager);
+  // Custom Views tier-3 widget document server (docs/proposals/CUSTOM-VIEWS.md
+  // §5.4) — the SAME watchdog as the prototype server above (its getTargets
+  // already concatenates both managers). loadWidget reads the store built in
+  // initializeServices(); customViewsStore is non-null by the time a widget
+  // frame can request one (it is constructed before this window-bound wiring
+  // ever runs), but the closure guards it defensively anyway.
+  customWidgetServerManager = new CustomWidgetServerManager({
+    loadWidget: (widgetId: string) => customViewsStore?.getWidget(widgetId) ?? null,
+    theme: WIDGET_THEME_TOKENS,
+    watchdog: designFrameWatchdog,
+    logger: cyboflowLogger,
+  });
+  // No ipcMain.handle registration here — customWidgetServerManager.ensure/stop
+  // are exposed as the cyboflow.customWidgetServer tRPC router (ratchet-blocked
+  // otherwise: main/src/ipc/__tests__/noNewIpcHandlers.test.ts). Wired into
+  // createContext via `customWidgetServer: customWidgetServerManager ?? undefined`
+  // below, alongside `customViews`.
   // Design Mode v0 (design-mode.md) — the Approve intent-first state machine. The
   // cyboflow.design tRPC router (standalone-typecheck-clean) reaches this singleton
   // via getInstance(); boot recovery reads its deps bag. The prototype-byte reader
@@ -7016,6 +7095,11 @@ async function drainOnQuit(): Promise<void> {
     console.log('[Main] Stopping design prototype servers...');
     await designPrototypeServerManager.stopAll();
     console.log('[Main] Design prototype servers stopped');
+  }
+  if (customWidgetServerManager) {
+    console.log('[Main] Stopping custom widget server...');
+    await customWidgetServerManager.stop();
+    console.log('[Main] Custom widget server stopped');
   }
 
   // Close task queue

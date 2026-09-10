@@ -144,7 +144,7 @@ import { PROTOTYPE_HTML_RELPATH, MAX_PROTOTYPE_HTML_BYTES, ARTIFACT_POLICIES } f
 import { QUICK_WORKFLOW_NAME, LEGACY_DROPPED_WORKFLOW_NAMES } from '../workflowRegistry';
 import { AgentThreadDbStore } from '../agentThread/agentThreadDbStore';
 import { computeSpecHash } from '../agentThread/specHash';
-import { prepareProposal } from '../agentThread/prepareProposal';
+import { prepareProposal, createPrepareProposalDeps } from '../agentThread/prepareProposal';
 import {
   extractTurnText,
   excerptAround,
@@ -7139,15 +7139,7 @@ export class McpQueryHandler {
       this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_json' });
       return;
     }
-    const prepared = prepareProposal(
-      {
-        db: this.db,
-        readWorkflowRow: (workflowId) => this.readWorkflowRow(workflowId),
-        readTaskIdentity: (taskId) => this.readTaskIdentity(taskId),
-        resolveExistingEntity: (projectId, refOrId, type) => this.resolveExistingEntity(projectId, refOrId, type),
-      },
-      raw,
-    );
+    const prepared = prepareProposal(createPrepareProposalDeps(this.db), raw);
     if (!prepared.ok) {
       this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: prepared.error });
       return;

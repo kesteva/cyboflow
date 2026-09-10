@@ -36,6 +36,7 @@ import type { WorkflowRow } from '../../../../shared/types/workflows';
 import type { EntityCategory, IdeaScope, Priority, TaskType } from '../../../../shared/types/tasks';
 import { resolveEffectiveDefinition } from '../../../../shared/tuning/workflowTuning';
 import { computeSpecHash } from './specHash';
+import { resolveBacklogRef } from '../taskListing';
 import type { DatabaseLike } from '../types';
 
 /** A non-null object whose own keys can be safely indexed. */
@@ -382,4 +383,56 @@ export function prepareProposal(deps: PrepareProposalDeps, raw: unknown): Prepar
   // launch-run carries no preconditions (shared type contract).
 
   return { ok: true, payload, preconditions };
+}
+
+// ---------------------------------------------------------------------------
+// createPrepareProposalDeps — the PrepareProposalDeps.{readWorkflowRow,
+// readTaskIdentity,resolveExistingEntity} bodies, factored out of
+// McpQueryHandler's private methods of the same names so a SECOND caller (the
+// custom-views widget action service, docs/proposals/CUSTOM-VIEWS.md §4.4)
+// gets the identical reads over its own DatabaseLike without duplicating them.
+// mcpQueryHandler.ts's handleProposeAction now builds its deps through this
+// factory too, so there is exactly one implementation of each read.
+// ---------------------------------------------------------------------------
+
+/** Build a `PrepareProposalDeps` bag backed by plain reads on `db` — no class, no external state. */
+export function createPrepareProposalDeps(db: DatabaseLike): PrepareProposalDeps {
+  return {
+    db,
+    readWorkflowRow(workflowId: string): WorkflowRow | null {
+      const row = db
+        .prepare(
+          `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, tuning_level, runtime_mix, created_at, archived_at
+             FROM workflows WHERE id = ?`,
+        )
+        .get(workflowId) as WorkflowRow | undefined;
+      return row ?? null;
+    },
+    readTaskIdentity(taskId: string): { ref: string; stage_id: string; version: number; type: TaskType } | undefined {
+      const tables: Array<{ table: string; type: TaskType }> = [
+        { table: 'ideas', type: 'idea' },
+        { table: 'epics', type: 'epic' },
+        { table: 'tasks', type: 'task' },
+      ];
+      for (const { table, type } of tables) {
+        const row = db
+          .prepare(`SELECT ref, stage_id, version FROM ${table} WHERE id = ?`)
+          .get(taskId) as { ref?: unknown; stage_id?: unknown; version?: unknown } | undefined;
+        if (!row) continue;
+        return {
+          ref: typeof row.ref === 'string' ? row.ref : '',
+          stage_id: typeof row.stage_id === 'string' ? row.stage_id : '',
+          version: typeof row.version === 'number' ? row.version : Number(row.version),
+          type,
+        };
+      }
+      return undefined;
+    },
+    resolveExistingEntity(projectId: number, refOrId: string, type: TaskType): string | null {
+      const id = resolveBacklogRef(db, projectId, refOrId) ?? refOrId;
+      const table = type === 'idea' ? 'ideas' : type === 'epic' ? 'epics' : 'tasks';
+      const row = db.prepare(`SELECT 1 FROM ${table} WHERE id = ? AND project_id = ?`).get(id, projectId);
+      return row !== undefined ? id : null;
+    },
+  };
 }

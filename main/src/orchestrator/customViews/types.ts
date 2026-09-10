@@ -38,7 +38,14 @@ export class CustomViewsStoreError extends Error {
       | 'in_use'
       | 'corrupt_layout'
       | 'session_mismatch'
-      | 'no_draft',
+      | 'no_draft'
+      // S3 addition (docs/proposals/CUSTOM-VIEWS.md §9 row S3): a plain
+      // `{type:'custom', widgetId}` ref names a widget that has only ever
+      // been drafted — customViewsService.runWidget/resetBreaker resolve
+      // ONLY `published_spec_json` for a non-`draftOf` ref (§4.4's own
+      // resolveSpec does the same for actions), so this is distinct from
+      // `no_draft` (publishDraft on a widget with nothing pending).
+      | 'draft_only',
     message?: string,
   ) {
     super(message ?? code);
