@@ -64,8 +64,9 @@ pnpm build:win        # NSIS installer + unpacked build in dist-electron/
 No Windows host at hand? `.github/workflows/windows.yml` (dispatch-only)
 runs the same two things on a `windows-latest` runner: the full `pnpm
 test:unit` chain — the only place the `skipIf(process.platform !== 'win32')`
-tests ever execute in CI — and `pnpm build:win`, uploading the unsigned
-installer as a workflow artifact. Trigger it with
+tests ever execute in CI — and `pnpm build:win`, uploading the installer as
+a workflow artifact (signed when the `AZURE_*` secrets are configured — see
+"Code signing" below — unsigned otherwise). Trigger it with
 `gh workflow run windows.yml --ref <branch>`.
 
 `build:win` runs `node scripts/ensure-sqlite-abi.mjs electron` first (a
@@ -200,12 +201,94 @@ installer takes electron-builder's defaults. Read from
 | `runAfterFinish` | `true` | |
 
 This is deliberate for a first port: a per-user, one-click install needs no
-administrator and cannot disturb a machine-wide install of anything else. The
-build is also unsigned, so there is no `publisherName` to declare — SmartScreen
-will warn on first run until a code-signing certificate exists. Adding an
-`nsis` block is the change to make when any of that should differ; leaving the
-block out is not the same as having chosen these values, which is why they are
-written down here.
+administrator and cannot disturb a machine-wide install of anything else.
+Adding an `nsis` block is the change to make when any of that should differ;
+leaving the block out is not the same as having chosen these values, which is
+why they are written down here.
+
+## Code signing (Azure Artifact Signing)
+
+Windows signing goes through **Azure Artifact Signing** — the service Microsoft
+shipped as "Trusted Signing"; the portal renamed it, but the resource provider
+(`Microsoft.CodeSigning`), the endpoints (`*.codesigning.azure.net`) and the
+PowerShell module (`TrustedSigning`) all kept the old names, so both spellings
+turn up in tooling.
+
+The resources (subscription `Azure subscription 1`, resource group
+`cyboflow-signing`):
+
+| Resource | Value |
+|---|---|
+| Signing account | `cyboflowsigning` (East US, Basic SKU) |
+| Endpoint | `https://eus.codesigning.azure.net/` |
+| Certificate profile | `cyboflow-public-trust` (Public Trust) |
+| Identity validation | Individual, `Raimundo Esteva`, expires **2027-09-10** |
+| Certificate subject | `CN=Raimundo Esteva, O=Raimundo Esteva, L=San Luis Obispo, S=ca, C=US` |
+
+`publisherName` in the build config must equal the certificate's CN
+**exactly** — electron-builder passes it through to `Invoke-TrustedSigning`,
+and a mismatch fails at sign time.
+
+**The certificates are short-lived by design.** A profile's current
+certificate expires in days, not years; every signature is RFC3161 timestamped
+(`http://timestamp.acs.microsoft.com`) so it stays valid long after the cert
+that produced it expired. There is no certificate to renew, install, or
+protect. The two things that DO expire on a calendar: the identity validation
+(annually) and the service principal's client secret.
+
+### How it is wired
+
+`scripts/configure-build.js` injects `win.azureSignOptions` into the generated
+electron-builder config only when the Microsoft Entra ID credentials are
+present. It is injected rather than declared in `package.json` because
+**the key's mere presence selects the signer**: electron-builder instantiates
+`WindowsSignAzureManager` whenever `azureSignOptions != null` and then hard-fails
+if the credentials are incomplete. A declared-but-uncredentialed key would break
+every local Windows build and the CI installer smoke, so the uncredentialed path
+must omit it entirely (`scripts/configure-build.test.js` Cases G/G2/G3 pin all
+three outcomes).
+
+Partial credentials **hard-fail the build** rather than falling through to an
+unsigned installer — a release that looks like it succeeded and ships unsigned
+is the worse failure.
+
+The four non-secret values live in `WIN_AZURE_SIGN_DEFAULTS` in that script
+(each is readable from any signed binary we ship) and can be overridden per
+build with `CYBOFLOW_AZURE_PUBLISHER_NAME`, `CYBOFLOW_AZURE_ENDPOINT`,
+`CYBOFLOW_AZURE_ACCOUNT`, `CYBOFLOW_AZURE_PROFILE`.
+
+### Credentials
+
+electron-builder reads these itself, via the Azure Identity
+`EnvironmentCredential` contract — they never pass through our config:
+
+| Variable | Required |
+|---|---|
+| `AZURE_TENANT_ID` | always |
+| `AZURE_CLIENT_ID` | always |
+| `AZURE_CLIENT_SECRET` | one of these three |
+| `AZURE_CLIENT_CERTIFICATE_PATH` | " |
+| `AZURE_USERNAME` + `AZURE_PASSWORD` | " |
+
+The service principal needs the **Artifact Signing Certificate Profile Signer**
+role, scoped to the certificate profile (not the whole account).
+
+### Signing only runs on a Windows host
+
+`app-builder-lib`'s `winPackager.ts` resolves its VM as
+`process.platform === "win32" ? new VmManager() : getWindowsVm(...)`, so signing
+from macOS requires a provisioned Parallels/VirtualBox Windows VM. In practice
+signing happens on the `windows-latest` runner in
+`.github/workflows/windows.yml`. On first run electron-builder installs the
+`TrustedSigning` PowerShell module (`Install-Module -Name TrustedSigning
+-MinimumVersion 0.5.0 -Scope CurrentUser`), which adds ~30s to the job.
+
+### SmartScreen
+
+A Public Trust certificate removes the "unknown publisher" block, but
+SmartScreen reputation accrues per-publisher over download volume — early
+signed builds can still draw a warning. That is expected and resolves with
+usage, not with configuration.
 
 ## Known degradations and follow-ups
 
@@ -214,7 +297,9 @@ written down here.
   work (PowerShell capture, always full-screen — per-app scoping comes from
   peekaboo, the macOS-only screen-capture helper the verifier uses there). Native-screen verification is scheduler-gated
   to hosts with a capability probe.
-- **No Windows update feed** (see updater above).
+- **No Windows update feed** (see updater above). Note this is independent of
+  signing: a signed installer is still not an auto-updating one, and
+  `publish:r2` has no Windows arm yet.
 - **x64 only**; ARM64 needs its own packaging path and prebuild
   verification.
 
