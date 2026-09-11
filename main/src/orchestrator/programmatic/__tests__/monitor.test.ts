@@ -2086,6 +2086,34 @@ describe('DefaultMonitorSession.triageLane', () => {
     expect(injected[1].text).toContain('sdk down');
   });
 
+  it('tags the give_up with the SYSTEMIC error text when the triage query dies on a dead quota', async () => {
+    // The 2026-09-05 cascade shape: the supervisor's OWN turn hits the limit, so
+    // it judges nothing. An untagged give_up here fails the lane for something
+    // the lane did not do (and, concurrently, every one of its siblings).
+    const limit = "You've hit your session limit · resets 6pm (America/Los_Angeles)";
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi.fn().mockRejectedValue(new Error(limit));
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent });
+
+    const decision = await session.triageLane(laneReq());
+
+    expect(decision).toMatchObject({ verdict: 'give_up', systemicError: limit });
+    expect(injected[1].text).toContain('environment-level');
+    expect(injected[1].text).not.toContain('letting the lane fail');
+  });
+
+  it('leaves systemicError unset for an ORDINARY triage failure', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi.fn().mockRejectedValue(new Error('sdk down'));
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn() });
+
+    const decision = await session.triageLane(laneReq());
+
+    expect(decision.verdict).toBe('give_up');
+    expect(decision).not.toHaveProperty('systemicError');
+  });
+
   it('fails-soft to give_up when the history read throws', async () => {
     const reader: HistoryReader = { read: vi.fn().mockRejectedValue(new Error('db gone')) };
     const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery: vi.fn(), textQuery: vi.fn() });

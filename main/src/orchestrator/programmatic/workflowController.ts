@@ -886,6 +886,14 @@ export class WorkflowController {
     // Captures the LAST systemic error text seen across any lane in a wave, so the
     // wave-park path can surface it on the awaitSystemicPause call.
     let lastSystemicError: string | undefined;
+    // WAVE-SCOPED LATCH: set the moment one lane's triage consult dies on a
+    // systemic condition, reset immediately before each wave dispatches. Lanes
+    // run concurrently and the consults are serialized on the monitor's send
+    // chain, so without it a five-lane wave makes five doomed consults against a
+    // dead quota — and the ones past MONITOR_RUN_RESCUE_CAP get no consult at
+    // all and settle 'failed' on an environment condition. With it, the first
+    // systemic verdict parks every later lane of the same wave for free.
+    let waveSystemicTriage = false;
 
     /**
      * Walk ONE item through the inner chain. Fail-soft per inner step:
@@ -985,7 +993,7 @@ export class WorkflowController {
       attempt: number,
       failureKind: LaneFailureKind,
       errorExcerpt: string,
-    ): Promise<number | null> => {
+    ): Promise<number | null | { systemic: string }> => {
       if (!this.host.triageLaneFailure) return null;
       const usedForLane = laneRescues.perItem.get(itemId) ?? 0;
       if (usedForLane >= MONITOR_LANE_RESCUE_CAP || laneRescues.runTotal >= MONITOR_RUN_RESCUE_CAP) {
@@ -1021,6 +1029,17 @@ export class WorkflowController {
           `fan-out item '${itemId}': lane triage threw (${err instanceof Error ? err.message : String(err)}); failing the lane`,
         );
         return releaseReservation();
+      }
+      if (outcome.kind === 'systemic') {
+        // The consult itself died on an environment-level condition — it judged
+        // nothing, so this costs no rescue budget and the lane is NOT this
+        // lane's defect. Hand the text up; the caller parks the fan-out.
+        releaseReservation();
+        this.host.log?.(
+          'warn',
+          `fan-out item '${itemId}': lane triage hit a SYSTEMIC condition (${outcome.error}); parking the fan-out instead of failing the lane`,
+        );
+        return { systemic: outcome.error };
       }
       if (outcome.kind !== 'rescue') return releaseReservation();
       const targetIndex = inner.findIndex((candidate) => candidate.id === outcome.targetStepId);
@@ -1158,6 +1177,15 @@ export class WorkflowController {
        *     contract the normal merge-gate loopback keeps via
        *     `laneAttempt = outcome.attempt`.
        *
+       * Returns the sentinel `'systemic'` when the consult itself died on an
+       * environment-level condition (the supervisor's own SDK turn hit the usage
+       * limit). That is NOT a verdict about the lane, so the three non-gate call
+       * sites bubble it up as a systemic lane outcome and the wave loop parks the
+       * whole fan-out; the two MERGE-GATE sites treat it exactly like `null`
+       * (their lane row is already persisted 'failed' and its verification
+       * attempt identity must not be reused). A wave-scoped latch makes the FIRST
+       * such verdict park every later lane of the same wave without consulting.
+       *
        * `needsRevive` is set at the MERGE-GATE sites only: the merge-gate driver
        * durably wrote the lane row 'failed' before `awaitVerdict` resolved, so a
        * rescue there has to un-settle the row before re-driving or the lane would
@@ -1171,7 +1199,16 @@ export class WorkflowController {
         failureKind: LaneFailureKind,
         errorExcerpt: string,
         needsRevive = false,
-      ): Promise<number | null> => {
+      ): Promise<number | null | 'systemic'> => {
+        // The wave already learned the environment is down (see the latch's
+        // declaration): park without consulting and without reserving budget.
+        if (waveSystemicTriage) {
+          this.host.log?.(
+            'warn',
+            `fan-out item '${itemId}': a sibling lane's triage already died on a systemic condition this wave; parking without consulting`,
+          );
+          return 'systemic';
+        }
         const targetIndex = await consultLaneTriage(
           itemId,
           failingStepId,
@@ -1179,6 +1216,11 @@ export class WorkflowController {
           failureKind,
           errorExcerpt,
         );
+        if (targetIndex !== null && typeof targetIndex === 'object') {
+          waveSystemicTriage = true;
+          lastSystemicError = targetIndex.systemic;
+          return 'systemic';
+        }
         if (targetIndex === null) return null;
         clearStateForRewind(targetIndex);
         if (needsRevive) driver.reviveLane?.({ runId, itemId });
@@ -1325,7 +1367,13 @@ export class WorkflowController {
               'the visual merge gate rejected this lane at its attempt cap',
               true,
             );
-            if (rescueTarget !== null) {
+            // A 'systemic' verdict is treated EXACTLY like `null` here: the merge
+            // gate already persisted this lane 'failed' and the verification
+            // request that produced the verdict owns the current attempt number,
+            // so re-driving it as a parked lane would restart at attempt 1 and
+            // dedup onto that terminal request. The lane settles failed; a
+            // sibling's inner-step systemic still parks the wave.
+            if (typeof rescueTarget === 'number') {
               // A MERGE-GATE rescue must advance the verification attempt: the
               // scheduler's enqueue key is `${runId}:${ref}:${attempt}`, and the
               // request that just FAILED owns the current number — re-enqueueing
@@ -1374,7 +1422,9 @@ export class WorkflowController {
                 `the visual merge gate loopback was refused (attempt ${outcome.attempt}, lane attempt ${laneAttempt}, ${visualLoopbacks} visual loopback(s) used)`,
                 true,
               );
-              if (rescueTarget !== null) {
+              // 'systemic' is treated like `null` for the same reason as the
+              // 'failed' arm above (persisted row + attempt identity).
+              if (typeof rescueTarget === 'number') {
                 // Same verification-attempt advance as the 'failed' arm above —
                 // the refused verdict's request owns the current enqueue key, so
                 // an un-bumped re-enqueue would dedup onto it and replay the
@@ -1503,6 +1553,10 @@ export class WorkflowController {
             'inner-step',
             result.error ?? '(no error text)',
           );
+          // The triage consult itself died on an environment condition: the lane
+          // row has NOT been written 'failed' at this arm, so bubble up and let
+          // the wave loop park the whole fan-out (and re-dispatch on 'retry').
+          if (rescueTarget === 'systemic') return 'systemic';
           if (rescueTarget !== null) {
             k = rescueTarget - 1; // The loop's k++ lands on the target next.
             continue;
@@ -1570,6 +1624,8 @@ export class WorkflowController {
                 'code-review',
                 extractBlockingSection(resultText) ?? resultText,
               );
+              // Nothing is persisted at this arm yet — park, don't fail.
+              if (rescueTarget === 'systemic') return 'systemic';
               if (rescueTarget !== null) {
                 k = rescueTarget - 1; // The loop's k++ lands on the target next.
                 continue;
@@ -1645,6 +1701,8 @@ export class WorkflowController {
               // — consult lane triage before settling. The excerpt is the verify
               // agent's own result text (its verdict + fix guidance).
               const rescueTarget = await rescueLaneOrNull(innerStep.id, 'task-verify', resultText);
+              // Nothing is persisted at this arm yet — park, don't fail.
+              if (rescueTarget === 'systemic') return 'systemic';
               if (rescueTarget !== null) {
                 k = rescueTarget - 1; // The loop's k++ lands on the target next.
                 continue;
@@ -1909,6 +1967,10 @@ export class WorkflowController {
         wave.push(itemId);
         for (const filePath of files) waveFiles.add(filePath);
       }
+      // Reset the systemic-triage latch: it bounds ONE wave's doomed consults,
+      // and a wave that dispatches after a resumed pause deserves a fresh read of
+      // whether the environment is still down.
+      waveSystemicTriage = false;
       const outcomes = await Promise.all(wave.map((itemId) => driveItem(itemId)));
       if (outcomes.includes('aborted') || signal?.aborted) return { terminal: true, incompleteCount };
       // Settle each lane. A 'systemic' lane is NEITHER integrated NOR failed: it

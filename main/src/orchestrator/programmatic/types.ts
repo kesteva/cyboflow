@@ -374,6 +374,12 @@ export interface LaneTriageFailure {
  *                 the task's body (the monitor's `adjust_and_retry`); a refused
  *                 edit is DOWNGRADED to a plain rescue with `adjusted: false`,
  *                 never to a give_up — the guidance still carries the substance.
+ *   - 'systemic' — the triage consult ITSELF died on an environment-level
+ *                 condition (a dead session limit, an expired login): the brain
+ *                 could not judge anything, so a give_up here would fail a lane
+ *                 the environment failed, not the lane. The controller parks the
+ *                 whole fan-out on `error` instead, exactly as it does for a
+ *                 systemic INNER-STEP failure. `error` is the systemic text.
  * `targetStepId` is guaranteed by the brain's parse ladder to be one of the
  * request's `innerStepIds` at or before the failing step, and `guidance` to be
  * non-blank; the controller still re-resolves the id against its own chain
@@ -381,6 +387,7 @@ export interface LaneTriageFailure {
  */
 export type LaneRescueOutcome =
   | { kind: 'give_up' }
+  | { kind: 'systemic'; error: string }
   | { kind: 'rescue'; targetStepId: string; guidance: string; adjusted: boolean };
 
 /**

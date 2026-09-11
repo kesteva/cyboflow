@@ -547,6 +547,36 @@ describe('ProgrammaticRunHost', () => {
       expect(await unwired.triageLaneFailure(failure)).toMatchObject({ kind: 'rescue', adjusted: false });
     });
 
+    it('maps a systemic-tagged give_up to a SYSTEMIC outcome and files no finding', async () => {
+      // The supervisor's own turn hit the limit: it judged nothing, so the lane
+      // must be parked, not failed.
+      const limit = "You've hit your session limit · resets 6pm (America/Los_Angeles)";
+      const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor: makeLaneMonitor({ verdict: 'give_up', reason: 'triage failed', systemicError: limit }),
+        fileLaneTriageFinding,
+      });
+
+      expect(await host.triageLaneFailure(failure)).toEqual({ kind: 'systemic', error: limit });
+      expect(fileLaneTriageFinding).not.toHaveBeenCalled();
+    });
+
+    it('maps an escaped systemic throw to a SYSTEMIC outcome, and an ordinary throw to give_up', async () => {
+      const limit = 'Claude AI usage limit reached|1751234567';
+      const systemicThrower = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor: { triage: vi.fn(), answer: vi.fn().mockResolvedValue(''), triageLane: vi.fn().mockRejectedValue(new Error(limit)) },
+      });
+      expect(await systemicThrower.triageLaneFailure(failure)).toEqual({ kind: 'systemic', error: limit });
+
+      const ordinaryThrower = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor: { triage: vi.fn(), answer: vi.fn().mockResolvedValue(''), triageLane: vi.fn().mockRejectedValue(new Error('parse blew up')) },
+      });
+      expect(await ordinaryThrower.triageLaneFailure(failure)).toEqual({ kind: 'give_up' });
+    });
+
     it('is fail-soft on the finding: a throwing sink never costs the lane its rescue', async () => {
       const host = new ProgrammaticRunHost({
         runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),

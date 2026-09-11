@@ -46,6 +46,7 @@ import type { BlockingItemsResolver } from './blockingItemsGate';
 import type { SystemicPauseResolver } from './systemicPauseGate';
 import type { MonitorSession } from './monitor';
 import { buildAssistantTextEvent } from './syntheticEvents';
+import { isSystemicStepError } from './systemicError';
 
 /**
  * Rollback lever for autonomous LANE RESCUE (precedent: CYBOFLOW_DISABLE_WARM_SDK).
@@ -423,6 +424,13 @@ export class ProgrammaticRunHost implements ControllerHost {
    * Fail-soft overall: `DefaultMonitorSession.triageLane` already never rejects,
    * so the try/catch is belt-and-braces — any escape still yields give_up, i.e.
    * exactly the behavior of a run without the seam.
+   *
+   * The ONE non-give_up failure arm is `{ kind: 'systemic' }`: a consult that
+   * died on an environment-level condition (the brain's own SDK turn hit the
+   * usage limit / a dead login) judged NOTHING, so settling the lane 'failed'
+   * would blame a task for the environment — and, with a whole wave failing at
+   * once, would convert one dead quota into a fan-out-wide cascade. The
+   * controller parks on it instead.
    */
   async triageLaneFailure(req: LaneTriageFailure): Promise<LaneRescueOutcome> {
     if (laneTriageDisabled()) {
@@ -473,7 +481,21 @@ export class ProgrammaticRunHost implements ControllerHost {
         },
         req.signal,
       );
-      if (decision.verdict === 'give_up') return { kind: 'give_up' };
+      if (decision.verdict === 'give_up') {
+        // The brain never judged anything — the consult itself died on an
+        // environment-level condition. Surface it so the controller parks the
+        // fan-out rather than settling this lane (and its siblings) 'failed'.
+        if (decision.systemicError !== undefined) {
+          this.args.logger?.warn('[ProgrammaticRunHost] lane triage died on a systemic condition; parking instead of failing the lane', {
+            runId: this.args.runId,
+            itemId: req.itemId,
+            stepId: req.stepId,
+            error: decision.systemicError,
+          });
+          return { kind: 'systemic', error: decision.systemicError };
+        }
+        return { kind: 'give_up' };
+      }
 
       let adjusted = false;
       let downgradeReason: string | undefined;
@@ -517,13 +539,22 @@ export class ProgrammaticRunHost implements ControllerHost {
 
       return { kind: 'rescue', targetStepId: decision.targetStepId, guidance: decision.guidance, adjusted };
     } catch (err) {
-      this.args.logger?.warn('[ProgrammaticRunHost] lane triage failed; letting the lane fail', {
-        runId: this.args.runId,
-        itemId: req.itemId,
-        stepId: req.stepId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return { kind: 'give_up' };
+      const message = err instanceof Error ? err.message : String(err);
+      // Same reasoning as the tagged give_up above, for an escape the monitor's
+      // own fail-soft did not catch.
+      const systemic = isSystemicStepError(message);
+      this.args.logger?.warn(
+        systemic
+          ? '[ProgrammaticRunHost] lane triage threw a systemic error; parking instead of failing the lane'
+          : '[ProgrammaticRunHost] lane triage failed; letting the lane fail',
+        {
+          runId: this.args.runId,
+          itemId: req.itemId,
+          stepId: req.stepId,
+          error: message,
+        },
+      );
+      return systemic ? { kind: 'systemic', error: message } : { kind: 'give_up' };
     }
   }
 
