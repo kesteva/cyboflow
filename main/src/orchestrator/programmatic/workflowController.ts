@@ -164,6 +164,44 @@ export const MONITOR_LANE_RESCUE_CAP = 1;
 export const MONITOR_RUN_RESCUE_CAP = 4;
 
 /**
+ * How many lanes of ONE wave must fail with the SAME error text before the
+ * fan-out treats that error as ENVIRONMENTAL rather than as each lane's own
+ * defect, and parks instead of failing them.
+ *
+ * The classifier (`isSystemicStepError`) can only recognise shapes someone has
+ * already seen; corroboration recognises the shape of the EVIDENCE. Three
+ * independent lanes — different tasks, different files, different agents —
+ * producing byte-identical failure text is not three coincidental task defects,
+ * whatever the text says. Three is the smallest count that is not a coincidence:
+ * two lanes routinely fail on the same missing dependency or the same broken
+ * base commit, which IS a real defect the run should surface.
+ *
+ * Comparison is EXACT (trimmed) text, deliberately not `digestErrorSkeleton` —
+ * that digest strips quoted content, paths and numbers for human-reviewed
+ * telemetry grouping and would happily fuse three genuinely different
+ * `Cannot find module "<x>"` failures into one park.
+ */
+export const SAME_ERROR_CORROBORATION_MIN = 3;
+
+/**
+ * What one lane's walk ended as. Carries the failure text on the OUTCOME (never
+ * in state that outlives the wave) so the wave-settle corroboration pass can
+ * compare this wave's failures against each other and nothing else.
+ *
+ * `persisted` says whether the lane row was ALREADY written 'failed' by the arm
+ * that produced the outcome. The generic inner-step arm DEFERS its write
+ * (`persisted: false`) so a corroborated environment failure is never observably
+ * stamped onto a lane that did nothing wrong; every other failing arm has
+ * already written (either itself or, at the merge gate, via the gate driver) and
+ * is therefore not a corroboration candidate.
+ */
+type LaneWalkOutcome =
+  | { kind: 'done' }
+  | { kind: 'aborted' }
+  | { kind: 'systemic'; error?: string }
+  | { kind: 'failed'; error?: string; persisted: boolean };
+
+/**
  * Walk-scoped bookkeeping for autonomous lane rescue. Created once per `run()`
  * and threaded into every `runFanOut`, so the caps span the whole walk (a run
  * with two fan-out steps cannot spend the run budget twice) and a lane's rescue
@@ -883,29 +921,37 @@ export class WorkflowController {
 
     const inner = fanOut.inner;
     const allowedStepIds: readonly string[] = inner.map((s) => s.id);
-    // Captures the LAST systemic error text seen across any lane in a wave, so the
-    // wave-park path can surface it on the awaitSystemicPause call.
-    let lastSystemicError: string | undefined;
-    // WAVE-SCOPED LATCH: set the moment one lane's triage consult dies on a
-    // systemic condition, reset immediately before each wave dispatches. Lanes
-    // run concurrently and the consults are serialized on the monitor's send
-    // chain, so without it a five-lane wave makes five doomed consults against a
-    // dead quota — and the ones past MONITOR_RUN_RESCUE_CAP get no consult at
-    // all and settle 'failed' on an environment condition. With it, the first
-    // systemic verdict parks every later lane of the same wave for free.
-    let waveSystemicTriage = false;
+    // WAVE-SCOPED LATCH (defined ⇒ latched): set to the error text the moment one
+    // lane's triage consult dies on a systemic condition, cleared immediately
+    // before each wave dispatches. Lanes run concurrently and the consults are
+    // serialized on the monitor's send chain, so without it a five-lane wave
+    // makes five doomed consults against a dead quota — and the ones past
+    // MONITOR_RUN_RESCUE_CAP get no consult at all and settle 'failed' on an
+    // environment condition. With it, the first systemic verdict parks every
+    // later lane of the same wave for free. Every OTHER systemic/failure text
+    // rides on the lane's own outcome, so nothing about one wave's errors can
+    // leak into the next wave's corroboration.
+    let waveSystemicTriageError: string | undefined;
 
     /**
      * Walk ONE item through the inner chain. Fail-soft per inner step:
      *  - required inner failure with a declared, in-chain loopback → re-drive its
      *    target through attempt 3; otherwise mark the lane (failed) + stop;
      *  - optional inner failure → skip that inner step, continue the lane;
-     *  - SYSTEMIC inner failure (env-level) → do NOT fail/skip the lane; capture the
-     *    error and return 'systemic' so the wave loop parks the whole fan-out;
+     *  - SYSTEMIC inner failure (env-level) → do NOT fail/skip the lane; return
+     *    `{ kind: 'systemic' }` carrying the error so the wave loop parks the whole
+     *    fan-out;
      *  - all inner steps ok → mark the lane 'integrated', UNLESS the driver's
      *    optional commit-integrity probe shows the lane committed nothing and left
      *    the worktree dirty, in which case the lane is failed instead.
-     * Returns 'aborted' when the signal fired mid-walk so the wave can short out.
+     * Returns `{ kind: 'aborted' }` when the signal fired mid-walk so the wave can
+     * short out.
+     *
+     * A `{ kind: 'failed' }` outcome says whether the lane row was already
+     * written: the generic inner-step exhaustion arm alone DEFERS its write to the
+     * wave settle (`persisted: false`) so the corroboration pass there can
+     * reclassify it as environmental before anything is stamped on the lane. See
+     * {@link SAME_ERROR_CORROBORATION_MIN}.
      */
     /** Resolve a declared inner-chain loopback target; invalid data fails the lane. */
     const loopbackIndex = (innerStep: (typeof inner)[number]): number =>
@@ -1062,7 +1108,7 @@ export class WorkflowController {
     // widened to accept it when the controller parks at the merge-gate.
     const parkAllowedStepIds: readonly string[] = [...allowedStepIds, AWAITING_VERIFY_STEP];
 
-    const driveItem = async (itemId: string): Promise<'done' | 'failed' | 'aborted' | 'systemic'> => {
+    const driveItem = async (itemId: string): Promise<LaneWalkOutcome> => {
       driver.driveLane({
         runId,
         itemId,
@@ -1199,15 +1245,15 @@ export class WorkflowController {
         failureKind: LaneFailureKind,
         errorExcerpt: string,
         needsRevive = false,
-      ): Promise<number | null | 'systemic'> => {
+      ): Promise<number | null | { systemic: string }> => {
         // The wave already learned the environment is down (see the latch's
         // declaration): park without consulting and without reserving budget.
-        if (waveSystemicTriage) {
+        if (waveSystemicTriageError !== undefined) {
           this.host.log?.(
             'warn',
             `fan-out item '${itemId}': a sibling lane's triage already died on a systemic condition this wave; parking without consulting`,
           );
-          return 'systemic';
+          return { systemic: waveSystemicTriageError };
         }
         const targetIndex = await consultLaneTriage(
           itemId,
@@ -1217,9 +1263,8 @@ export class WorkflowController {
           errorExcerpt,
         );
         if (targetIndex !== null && typeof targetIndex === 'object') {
-          waveSystemicTriage = true;
-          lastSystemicError = targetIndex.systemic;
-          return 'systemic';
+          waveSystemicTriageError = targetIndex.systemic;
+          return targetIndex;
         }
         if (targetIndex === null) return null;
         clearStateForRewind(targetIndex);
@@ -1228,7 +1273,7 @@ export class WorkflowController {
       };
 
       for (let k = 0; k < inner.length; k++) {
-        if (signal?.aborted) return 'aborted';
+        if (signal?.aborted) return { kind: 'aborted' };
         // Operator LANE REWIND — consult 1 of 3 (IDLE between inner steps). Covers
         // a request that lands while the lane is between turns (mid commit-probe,
         // or in the gap before the next step's lane write). Consulted BEFORE the
@@ -1356,7 +1401,7 @@ export class WorkflowController {
               continue;
             }
           }
-          if (outcome.kind === 'aborted') return 'aborted';
+          if (outcome.kind === 'aborted') return { kind: 'aborted' };
           if (outcome.kind === 'failed') {
             // Budget exhaustion (the merge gate hit its own attempt cap) — consult
             // autonomous lane triage before settling. The gate ALREADY wrote the
@@ -1394,7 +1439,7 @@ export class WorkflowController {
             }
             driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
             this.host.log?.('warn', `fan-out item '${itemId}': visual merge-gate FAILED; lane failed`);
-            return 'failed';
+            return { kind: 'failed', persisted: true };
           }
           if (outcome.kind === 'loopback') {
             visualLoopbacks += 1;
@@ -1436,7 +1481,7 @@ export class WorkflowController {
               }
               driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
               this.host.log?.('warn', `fan-out item '${itemId}': visual merge-gate loopback exhausted; lane failed`);
-              return 'failed';
+              return { kind: 'failed', persisted: true };
             }
             laneAttempt = outcome.attempt;
             loopbackAttemptStepIndex = targetIndex;
@@ -1519,15 +1564,14 @@ export class WorkflowController {
           }
         }
 
-        if (result.status === 'aborted') return 'aborted';
+        if (result.status === 'aborted') return { kind: 'aborted' };
         if (result.status === 'failed') {
           // Systemic (env-level) failure: NOT this lane's defect. Do not fail the
           // lane and do not skip even an optional inner step — bubble up so the wave
           // loop parks the whole fan-out and re-dispatches once the condition clears.
           if (result.systemic === true) {
-            lastSystemicError = result.error;
             this.host.log?.('warn', `fan-out item '${itemId}': step '${innerStep.id}' hit a systemic failure; pausing`);
-            return 'systemic';
+            return { kind: 'systemic', ...(result.error !== undefined ? { error: result.error } : {}) };
           }
           if (innerStep.optional === true) {
             this.host.log?.('warn', `fan-out item '${itemId}': optional step '${innerStep.id}' failed; skipping`);
@@ -1556,17 +1600,28 @@ export class WorkflowController {
           // The triage consult itself died on an environment condition: the lane
           // row has NOT been written 'failed' at this arm, so bubble up and let
           // the wave loop park the whole fan-out (and re-dispatch on 'retry').
-          if (rescueTarget === 'systemic') return 'systemic';
+          if (rescueTarget !== null && typeof rescueTarget === 'object') {
+            return { kind: 'systemic', error: rescueTarget.systemic };
+          }
           if (rescueTarget !== null) {
             k = rescueTarget - 1; // The loop's k++ lands on the target next.
             continue;
           }
-          driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
+          // The 'failed' WRITE IS DEFERRED to the wave settle (see
+          // SAME_ERROR_CORROBORATION_MIN): this is the arm an environment failure
+          // reaches when it is not a recognised systemic shape, and writing here
+          // would stamp — and emit a lane event for — a failure the corroboration
+          // pass may be about to reclassify as environmental. Every other failing
+          // arm has already written and is excluded from corroboration.
           this.host.log?.(
             'warn',
-            `fan-out item '${itemId}': step '${innerStep.id}' failed; lane failed${targetIndex >= 0 ? ' (attempt cap reached)' : ''}`,
+            `fan-out item '${itemId}': step '${innerStep.id}' failed${targetIndex >= 0 ? ' (attempt cap reached)' : ''}; settling after the wave`,
           );
-          return 'failed';
+          return {
+            kind: 'failed',
+            persisted: false,
+            ...(result.error !== undefined ? { error: result.error } : {}),
+          };
         }
 
         // Code-review typed output (Item 0): on a CLEAN (status:'ok') code-review
@@ -1625,7 +1680,9 @@ export class WorkflowController {
                 extractBlockingSection(resultText) ?? resultText,
               );
               // Nothing is persisted at this arm yet — park, don't fail.
-              if (rescueTarget === 'systemic') return 'systemic';
+              if (rescueTarget !== null && typeof rescueTarget === 'object') {
+                return { kind: 'systemic', error: rescueTarget.systemic };
+              }
               if (rescueTarget !== null) {
                 k = rescueTarget - 1; // The loop's k++ lands on the target next.
                 continue;
@@ -1635,7 +1692,7 @@ export class WorkflowController {
                 'warn',
                 `fan-out item '${itemId}': code-review ${signal}; lane failed${targetIndex >= 0 ? ' (attempt cap reached)' : ''}`,
               );
-              return 'failed';
+              return { kind: 'failed', persisted: true };
             }
           }
         }
@@ -1702,7 +1759,9 @@ export class WorkflowController {
               // agent's own result text (its verdict + fix guidance).
               const rescueTarget = await rescueLaneOrNull(innerStep.id, 'task-verify', resultText);
               // Nothing is persisted at this arm yet — park, don't fail.
-              if (rescueTarget === 'systemic') return 'systemic';
+              if (rescueTarget !== null && typeof rescueTarget === 'object') {
+                return { kind: 'systemic', error: rescueTarget.systemic };
+              }
               if (rescueTarget !== null) {
                 k = rescueTarget - 1; // The loop's k++ lands on the target next.
                 continue;
@@ -1712,7 +1771,7 @@ export class WorkflowController {
                 'warn',
                 `fan-out item '${itemId}': task-verify VERDICT: FAIL; lane failed${targetIndex >= 0 ? ' (attempt cap reached)' : ''}`,
               );
-              return 'failed';
+              return { kind: 'failed', persisted: true };
             }
             if (verdict === null) {
               this.host.log?.(
@@ -1762,7 +1821,7 @@ export class WorkflowController {
                     'warn',
                     `fan-out item '${itemId}': task-verify violated the visual-verification output contract twice; lane failed`,
                   );
-                  return 'failed';
+                  return { kind: 'failed', persisted: true };
                 }
                 laneContractRetries += 1;
                 pendingContractError =
@@ -1801,7 +1860,7 @@ export class WorkflowController {
               'error',
               `fan-out item '${itemId}': completed all inner steps but made no git commit and left uncommitted changes in the worktree — refusing to mark integrated`,
             );
-            return 'failed';
+            return { kind: 'failed', persisted: true };
           }
         } catch (err) {
           this.host.log?.(
@@ -1812,7 +1871,7 @@ export class WorkflowController {
       }
 
       driver.driveLane({ runId, itemId, status: 'integrated', allowedStepIds });
-      return 'done';
+      return { kind: 'done' };
     };
 
     // DAG-aware wave scheduling: dispatch a task only once ALL of its in-scope
@@ -1970,19 +2029,69 @@ export class WorkflowController {
       // Reset the systemic-triage latch: it bounds ONE wave's doomed consults,
       // and a wave that dispatches after a resumed pause deserves a fresh read of
       // whether the environment is still down.
-      waveSystemicTriage = false;
+      waveSystemicTriageError = undefined;
       const outcomes = await Promise.all(wave.map((itemId) => driveItem(itemId)));
-      if (outcomes.includes('aborted') || signal?.aborted) return { terminal: true, incompleteCount };
-      // Settle each lane. A 'systemic' lane is NEITHER integrated NOR failed: it
-      // STAYS in `remaining` (uncounted) so it re-dispatches after the pause clears.
+      if (outcomes.some((o) => o.kind === 'aborted') || signal?.aborted) {
+        return { terminal: true, incompleteCount };
+      }
+
+      // ── CORROBORATION ────────────────────────────────────────────────────
+      // Group this wave's UNPERSISTED failures (and its systemic lanes) by EXACT
+      // trimmed error text. A group is corroborated when it holds at least
+      // SAME_ERROR_CORROBORATION_MIN lanes, or when one of its members already
+      // failed systemically — independent lanes cannot produce byte-identical
+      // failure text by coincidence, whatever the classifier makes of the words.
+      // A corroborated failure is reclassified systemic: never written 'failed',
+      // it stays in `remaining` and re-runs once the condition clears.
+      //
+      // The whole pass reads ONLY this wave's outcomes, so a previous wave's
+      // quota text can never corroborate this wave's review failures.
+      const groups = new Map<string, { items: string[]; systemic: number }>();
+      wave.forEach((itemId, idx) => {
+        const outcome = outcomes[idx];
+        if (outcome.kind === 'failed' && outcome.persisted) return;
+        if (outcome.kind !== 'failed' && outcome.kind !== 'systemic') return;
+        const text = outcome.error?.trim();
+        if (text === undefined || text.length === 0) return;
+        const group = groups.get(text) ?? { items: [], systemic: 0 };
+        if (outcome.kind === 'systemic') group.systemic += 1;
+        else group.items.push(itemId);
+        groups.set(text, group);
+      });
+      const corroborated = new Set<string>();
+      // Prefer a genuinely systemic lane's own text for the park; fall back to a
+      // corroborated group's text when the whole wave failed by corroboration.
+      let waveSystemicError = outcomes.reduce<string | undefined>(
+        (acc, outcome) => (outcome.kind === 'systemic' && outcome.error !== undefined ? outcome.error : acc),
+        undefined,
+      );
+      for (const [text, group] of groups) {
+        if (group.items.length === 0) continue;
+        if (group.systemic === 0 && group.items.length < SAME_ERROR_CORROBORATION_MIN) continue;
+        for (const itemId of group.items) corroborated.add(itemId);
+        waveSystemicError ??= text;
+        this.host.log?.(
+          'warn',
+          `fan-out '${step.id}': ${group.items.length} lane(s) failed with the SAME error${group.systemic > 0 ? ' as a systemically-failed lane' : ''}; treating it as environmental rather than as ${group.items.length} task defects: ${text.slice(0, 120)}`,
+        );
+      }
+
+      // Settle each lane. A 'systemic' lane (or a corroborated failure) is NEITHER
+      // integrated NOR failed: it STAYS in `remaining` (uncounted) so it
+      // re-dispatches after the pause clears.
       const pausedThisWave: string[] = [];
       wave.forEach((itemId, idx) => {
-        if (outcomes[idx] === 'systemic') {
+        const outcome = outcomes[idx];
+        if (outcome.kind === 'systemic' || corroborated.has(itemId)) {
           pausedThisWave.push(itemId);
           return; // leave in `remaining`
         }
         remaining.delete(itemId);
-        if (outcomes[idx] === 'failed') {
+        if (outcome.kind === 'failed') {
+          // The deferred write for a lane corroboration judged a genuine defect.
+          if (!outcome.persisted) {
+            driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
+          }
           failed.add(itemId);
           incompleteCount += 1;
         } else {
@@ -2003,9 +2112,9 @@ export class WorkflowController {
           systemicPauses.set(step.id, used + 1);
           this.host.log?.(
             'warn',
-            `fan-out '${step.id}' hit a systemic failure on ${pausedThisWave.length} lane(s); pausing the run: ${lastSystemicError ?? '(no error text)'}`,
+            `fan-out '${step.id}' hit a systemic failure on ${pausedThisWave.length} lane(s); pausing the run: ${waveSystemicError ?? '(no error text)'}`,
           );
-          const verdict = await this.host.awaitSystemicPause(step, { ...baseCtx, attempt: 1 }, lastSystemicError);
+          const verdict = await this.host.awaitSystemicPause(step, { ...baseCtx, attempt: 1 }, waveSystemicError);
           if (verdict === 'canceled' || signal?.aborted) return { terminal: true, incompleteCount };
           if (verdict === 'retry') {
             // Un-park: the still-in-`remaining` items re-dispatch on the next loop.
