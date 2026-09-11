@@ -41,6 +41,8 @@ export function AgentThreadView({
   const sending = useAgentThreadStore((s) => s.sending);
   const sendMessage = useAgentThreadStore((s) => s.sendMessage);
   const proposals = useAgentThreadStore((s) => s.proposals);
+  const composerDraft = useAgentThreadStore((s) => s.composerDraft);
+  const setComposerDraft = useAgentThreadStore((s) => s.setComposerDraft);
 
   const { messages, loadError } = useUnifiedAgentThreadMessages(thread?.id ?? null);
 
@@ -101,6 +103,8 @@ export function AgentThreadView({
             onSend={handleSend}
             disabled={sending || thread === null}
             placeholder={composerPlaceholder}
+            prefill={composerDraft}
+            onPrefillConsumed={() => setComposerDraft(null)}
           />
         </div>
       }

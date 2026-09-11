@@ -11,6 +11,11 @@ import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { LayoutItem } from '../../../../../shared/types/customViews';
 
+const publishDraftMutate = vi.fn((_input: { id: string; authoringSessionId: string }) =>
+  Promise.resolve({ id: 'w-1' }),
+);
+const discardDraftMutate = vi.fn((_input: { id: string; authoringSessionId: string }) => Promise.resolve(null));
+
 vi.mock('../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
@@ -19,6 +24,8 @@ vi.mock('../../../trpc/client', () => ({
         getActiveView: { query: vi.fn(() => Promise.resolve({ viewId: 'default' })) },
         listWidgets: { query: vi.fn(() => Promise.resolve([])) },
         onWidgetDraft: { subscribe: vi.fn(() => ({ unsubscribe: vi.fn() })) },
+        publishDraft: { mutate: (input: { id: string; authoringSessionId: string }) => publishDraftMutate(input) },
+        discardDraft: { mutate: (input: { id: string; authoringSessionId: string }) => discardDraftMutate(input) },
       },
     },
   },
@@ -53,6 +60,8 @@ const ITEMS: LayoutItem[] = [
 
 beforeEach(() => {
   draftWithItems(ITEMS);
+  publishDraftMutate.mockClear();
+  discardDraftMutate.mockClear();
 });
 
 describe('EditableBlock — keyboard reorder', () => {
@@ -130,5 +139,109 @@ describe('EditableBlock — keyboard reorder', () => {
     );
     expect(screen.getByText('Hidden')).toBeInTheDocument();
     expect(screen.queryByTestId('body')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S6 — the Draft chip (docs/proposals/CUSTOM-VIEWS.md §7.3)
+// ---------------------------------------------------------------------------
+
+const CUSTOM_ITEM: LayoutItem = { instanceId: 'c1', widget: { type: 'custom', widgetId: 'w-1' }, settings: {} };
+
+describe('EditableBlock — Draft chip', () => {
+  it('renders no Draft chip when this item is not the open authoring slot', () => {
+    render(
+      <EditableBlock item={CUSTOM_ITEM} index={0} total={1} payload={null}>
+        <div>body</div>
+      </EditableBlock>,
+    );
+    expect(screen.queryByText('Draft')).toBeNull();
+    expect(screen.queryByTestId('editable-draft-publish-c1')).toBeNull();
+  });
+
+  it('renders the Draft chip + Publish/Discard buttons while this item is the authoring slot and unpublished', () => {
+    useCustomViewsStore.setState({
+      authoring: { sessionId: 's1', instanceId: 'c1', mode: 'create', widgetId: 'w-1', draftPreview: true },
+    });
+    render(
+      <EditableBlock item={CUSTOM_ITEM} index={0} total={1} payload={null}>
+        <div>body</div>
+      </EditableBlock>,
+    );
+    expect(screen.getByText('Draft')).toBeInTheDocument();
+    expect(screen.getByTestId('editable-draft-publish-c1')).toBeInTheDocument();
+    expect(screen.getByTestId('editable-draft-discard-c1')).toBeInTheDocument();
+  });
+
+  it('hides the chip once draftPreview flips false (published)', () => {
+    useCustomViewsStore.setState({
+      authoring: { sessionId: 's1', instanceId: 'c1', mode: 'create', widgetId: 'w-1', draftPreview: false },
+    });
+    render(
+      <EditableBlock item={CUSTOM_ITEM} index={0} total={1} payload={null}>
+        <div>body</div>
+      </EditableBlock>,
+    );
+    expect(screen.queryByText('Draft')).toBeNull();
+  });
+
+  it('Publish calls publishDraft (via publishAuthoringDraft)', async () => {
+    const user = userEvent.setup();
+    useCustomViewsStore.setState({
+      authoring: { sessionId: 's1', instanceId: 'c1', mode: 'create', widgetId: 'w-1', draftPreview: true },
+    });
+    render(
+      <EditableBlock item={CUSTOM_ITEM} index={0} total={1} payload={null}>
+        <div>body</div>
+      </EditableBlock>,
+    );
+    await user.click(screen.getByTestId('editable-draft-publish-c1'));
+    expect(publishDraftMutate).toHaveBeenCalledWith({ id: 'w-1', authoringSessionId: 's1' });
+  });
+
+  it('Discard draft calls discardDraft (via discardAuthoringDraft) and closes the slot', async () => {
+    const user = userEvent.setup();
+    useCustomViewsStore.setState({
+      authoring: { sessionId: 's1', instanceId: 'c1', mode: 'create', widgetId: 'w-1', draftPreview: true },
+    });
+    render(
+      <EditableBlock item={CUSTOM_ITEM} index={0} total={1} payload={null}>
+        <div>body</div>
+      </EditableBlock>,
+    );
+    await user.click(screen.getByTestId('editable-draft-discard-c1'));
+    expect(discardDraftMutate).toHaveBeenCalledWith({ id: 'w-1', authoringSessionId: 's1' });
+    expect(useCustomViewsStore.getState().authoring).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S6 — "Edit with assistant" wiring (docs/proposals/CUSTOM-VIEWS.md §7.1)
+// ---------------------------------------------------------------------------
+
+describe('EditableBlock — "Edit with assistant"', () => {
+  it('hides the footer button when surface/viewName are omitted (this component\'s own unit tests)', async () => {
+    const user = userEvent.setup();
+    render(
+      <EditableBlock item={CUSTOM_ITEM} index={0} total={1} payload={null}>
+        <div>body</div>
+      </EditableBlock>,
+    );
+    await user.click(screen.getByTestId('editable-gear-c1'));
+    expect(screen.queryByTestId('widget-settings-edit-assistant')).toBeNull();
+  });
+
+  it('shows the footer button and kicks off an edit-mode authoring session when surface/viewName are supplied', async () => {
+    const user = userEvent.setup();
+    render(
+      <EditableBlock item={CUSTOM_ITEM} index={0} total={1} payload={null} surface="review-queue" viewName="Ship week" projectId={7}>
+        <div>body</div>
+      </EditableBlock>,
+    );
+    await user.click(screen.getByTestId('editable-gear-c1'));
+    await user.click(screen.getByTestId('widget-settings-edit-assistant'));
+
+    const authoring = useCustomViewsStore.getState().authoring;
+    expect(authoring).toMatchObject({ mode: 'edit', instanceId: 'c1', widgetId: 'w-1' });
   });
 });

@@ -65,14 +65,24 @@
  * description.
  */
 import React, { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import type { CustomViewSurface, LayoutItem, WidgetDataPayload } from '../../../shared/types/customViews';
+import type { CustomViewSurface, CustomWidget, LayoutItem, WidgetDataPayload } from '../../../shared/types/customViews';
 import { catalogEntry, sectionOrderFor } from './catalog';
-import { useCustomViewsStore, useActiveView, useDraft, useSurfaceLoaded } from '../stores/customViewsStore';
+import {
+  useCustomViewsStore,
+  useActiveView,
+  useDraft,
+  useSurfaceLoaded,
+  type AuthoringSlot,
+} from '../stores/customViewsStore';
+import { useAgentThreadStore } from '../stores/agentThreadStore';
+import { useLayoutStore } from '../stores/layoutStore';
 import { ViewIdentityContext, type ViewIdentity } from './viewContext';
 import { WidgetFrame, UnavailableBody } from './WidgetFrame';
 import { WidgetHost } from './WidgetHost';
 import { EditableBlock } from './edit/EditableBlock';
 import { InsertBar } from './edit/InsertBar';
+import { PlaceholderSlot } from './edit/PlaceholderSlot';
+import { startAuthoring } from './authoring/startAuthoring';
 
 export interface ViewSurfaceChrome {
   /** Page chrome rendered once, before every section. */
@@ -111,6 +121,23 @@ export function ViewSurface({
   const draft = useDraft(surface);
   const order = sectionOrderFor(surface);
   const editing = draft !== null;
+  const authoring = useCustomViewsStore((s) => s.authoring);
+  const widgets = useCustomViewsStore((s) => s.widgets);
+  // What "Edit with assistant" / the create-widget kickoff put in the
+  // contextHint envelope (§7.1) — the active view's name, else "Default".
+  const viewName = activeView?.name ?? 'Default';
+
+  const handleCreateCustom = useCallback(
+    (at: number) => {
+      startAuthoring(
+        useCustomViewsStore.getState(),
+        useAgentThreadStore.getState(),
+        useLayoutStore.getState(),
+        { mode: 'create', surface, at, viewName, projectId: context.projectId },
+      );
+    },
+    [surface, viewName, context.projectId],
+  );
 
   const identity: ViewIdentity = useMemo(
     () => ({
@@ -137,7 +164,19 @@ export function ViewSurface({
   const items = editing ? draft.layout.items : loaded && activeView !== null ? activeView.layout.items : null;
 
   const body = editing
-    ? renderEditing(items as LayoutItem[], sections, context, chrome, surface, payloadByInstance, handlePayload)
+    ? renderEditing({
+        items: items as LayoutItem[],
+        sections,
+        context,
+        chrome,
+        surface,
+        viewName,
+        payloadByInstance,
+        onPayload: handlePayload,
+        authoring,
+        widgets,
+        onCreateCustom: handleCreateCustom,
+      })
     : items === null
       ? renderDefault(order, sections, chrome)
       : renderCustom(items, order, sections, context, chrome);
@@ -257,25 +296,54 @@ function unavailable(item: LayoutItem, title: string): React.JSX.Element {
 // Customize mode
 // ---------------------------------------------------------------------------
 
-function renderEditing(
-  items: LayoutItem[],
-  sections: Record<string, ReactNode | null>,
-  context: { projectId: number | null },
-  chrome: ViewSurfaceChrome | undefined,
-  surface: CustomViewSurface,
-  payloadByInstance: Record<string, WidgetDataPayload | null>,
-  onPayload: (instanceId: string, payload: WidgetDataPayload | null) => void,
-): React.JSX.Element {
+interface RenderEditingArgs {
+  items: LayoutItem[];
+  sections: Record<string, ReactNode | null>;
+  context: { projectId: number | null };
+  chrome: ViewSurfaceChrome | undefined;
+  surface: CustomViewSurface;
+  /** The active view's name, or `'Default'` — threaded to `EditableBlock` for the "Edit with assistant" kickoff (§7.1). */
+  viewName: string;
+  payloadByInstance: Record<string, WidgetDataPayload | null>;
+  onPayload: (instanceId: string, payload: WidgetDataPayload | null) => void;
+  /** The open authoring slot, or `null` — decides which single item (if any) renders a placeholder/draft preview (§7.3). */
+  authoring: AuthoringSlot | null;
+  widgets: CustomWidget[];
+  /** S6's "Create a custom widget" kickoff — threaded to every `InsertBar`. */
+  onCreateCustom: (at: number) => void;
+}
+
+function renderEditing({
+  items,
+  sections,
+  context,
+  chrome,
+  surface,
+  viewName,
+  payloadByInstance,
+  onPayload,
+  authoring,
+  widgets,
+  onCreateCustom,
+}: RenderEditingArgs): React.JSX.Element {
   return (
     <>
       {chrome?.afterHeader}
-      <InsertBar surface={surface} at={0} />
+      <InsertBar surface={surface} at={0} onCreateCustom={onCreateCustom} />
       {items.map((item, index) => (
         <Fragment key={item.instanceId}>
-          <EditableBlock item={item} index={index} total={items.length} payload={payloadByInstance[item.instanceId] ?? null}>
-            {item.hidden === true ? null : renderEditingItemBody(item, sections, context, onPayload)}
+          <EditableBlock
+            item={item}
+            index={index}
+            total={items.length}
+            payload={payloadByInstance[item.instanceId] ?? null}
+            surface={surface}
+            viewName={viewName}
+            projectId={context.projectId}
+          >
+            {item.hidden === true ? null : renderEditingItemBody(item, sections, context, authoring, widgets, onPayload)}
           </EditableBlock>
-          <InsertBar surface={surface} at={index + 1} />
+          <InsertBar surface={surface} at={index + 1} onCreateCustom={onCreateCustom} />
         </Fragment>
       ))}
     </>
@@ -286,6 +354,8 @@ function renderEditingItemBody(
   item: LayoutItem,
   sections: Record<string, ReactNode | null>,
   context: { projectId: number | null },
+  authoring: AuthoringSlot | null,
+  widgets: CustomWidget[],
   onPayload: (instanceId: string, payload: WidgetDataPayload | null) => void,
 ): ReactNode {
   if (item.widget.type === 'catalog') {
@@ -304,7 +374,39 @@ function renderEditingItemBody(
     if (declares(sections, id)) return sections[id];
     return unavailable(item, entry?.title ?? id);
   }
+
+  // item.widget.type === 'custom' from here.
+  const isAuthoringSlot = authoring !== null && authoring.instanceId === item.instanceId;
+
+  // Not yet bound to a widget: this is the placeholder an assistant-built
+  // widget hasn't landed in yet (§7.1) — never the generic "unavailable" chip.
+  if (isAuthoringSlot && item.widget.widgetId.length === 0) {
+    return <PlaceholderSlot testId={frameTestIdFor(item)} />;
+  }
+
+  // Bound but still unpublished: render the DRAFT spec/document, not the
+  // (nonexistent, or stale) published one (§7.3).
+  if (isAuthoringSlot && authoring.draftPreview) {
+    const widgetId = item.widget.widgetId;
+    const draftSpec = widgets.find((w) => w.id === widgetId)?.draftSpec ?? null;
+    return (
+      <WidgetHost
+        item={item}
+        spec={draftSpec}
+        context={context}
+        editing
+        draft
+        onPayload={(payload) => onPayload(item.instanceId, payload)}
+      />
+    );
+  }
+
   return (
     <WidgetHost item={item} context={context} editing onPayload={(payload) => onPayload(item.instanceId, payload)} />
   );
+}
+
+/** Mirrors `WidgetHost`'s internal frame test id so the placeholder's test hook matches what a bound widget would use. */
+function frameTestIdFor(item: LayoutItem): string {
+  return `widget-frame-${item.instanceId}`;
 }

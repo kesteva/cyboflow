@@ -8,17 +8,19 @@
  * settings are different data and a shared cache here would just re-implement
  * the main process's (§4.3).
  *
- * ## Scope in S4
+ * ## Read path (S4) + customize mode (S5) + authoring (S6)
  *
- * This is the READ path only. The customize-mode editing actions the plan lists
- * on this store (`enterCustomize` / `moveItem` / `toggleHidden` /
- * `updateItemSettings` / `removeItem` / `insertItem` / `save` / `discard`) land
- * in S5, and the authoring actions (`openAuthoring` / `onDraftEvent` /
- * `finishAuthoring`) in S6. The `authoring` field is declared here — typed as
- * the plan specifies — and stays `null`; the `onWidgetDraft` subscription is
- * opened here too, and its events are dropped, because the SUBSCRIPTION IS THE
- * LOAD-BEARING PART: it must be live before the seed queries so a draft landing
- * mid-load is never missed once S6 binds a handler to it.
+ * The base store is the READ path: saved views, the active id, the widget
+ * library. S5 added the customize-mode editing actions (`enterCustomize` /
+ * `moveItem` / `toggleHidden` / `updateItemSettings` / `removeItem` /
+ * `insertItem` / `save` / `discard`). S6 adds the authoring actions
+ * (`openAuthoring` / `onDraftEvent` / `publishAuthoringDraft` /
+ * `discardAuthoringDraft` / `finishAuthoring`) that back the placeholder slot
+ * an assistant-built widget lands in (§7.1/§7.3). The `onWidgetDraft`
+ * subscription is opened in `init()`, BEFORE the seed queries, because it is
+ * the LOAD-BEARING PART: it must be live before the seeds or a draft landing
+ * mid-load would be missed. Every event it delivers routes to `onDraftEvent`,
+ * which drops anything that doesn't match the currently open authoring slot.
  *
  * ## Seed-query + subscription race
  *
@@ -111,14 +113,43 @@ export function isUsableView(entry: ViewEntry): entry is CustomView {
 }
 
 /**
- * The placeholder slot awaiting an assistant-built widget (§5.5). S6 fills it;
- * S4 declares it so the shape is pinned by the same contract that will use it.
+ * The placeholder slot awaiting an assistant-built widget (§5.5). S4 declared
+ * the shape; S6 fills it in.
  */
 export interface AuthoringSlot {
   sessionId: string;
   instanceId: string;
   mode: 'create' | 'edit';
   widgetId: string | null;
+  /**
+   * True while the slot is showing an UNPUBLISHED draft (a `kind:'draft'`
+   * event landed and no `kind:'published'` has landed since). Doubles as the
+   * "was this ever published" flag `discard()` needs: it must call
+   * `discardDraft` only while this is true — once published, the widget is
+   * no longer this authoring session's to discard (§7.3).
+   */
+  draftPreview: boolean;
+}
+
+/**
+ * `openAuthoring`'s argument (§7.1). `create` inserts a placeholder item at
+ * `at` in the surface's open draft; `edit` marks an existing item
+ * (`instanceId`/`widgetId`) as under authoring without touching the draft.
+ */
+export type OpenAuthoringArgs =
+  | { surface: CustomViewSurface; mode: 'create'; at: number }
+  | { surface: CustomViewSurface; mode: 'edit'; instanceId: string; widgetId: string };
+
+/**
+ * `customViews.onWidgetDraft`'s payload (§7.3). Mirrors
+ * `main/src/orchestrator/customViews/customViewsService.ts`'s `WidgetDraftEvent`
+ * — declared again here rather than imported so the renderer's module graph
+ * never reaches into `main/` (same convention as {@link CorruptViewEntry}).
+ */
+export interface WidgetDraftEvent {
+  widgetId: string;
+  authoringSessionId: string;
+  kind: 'draft' | 'published';
 }
 
 /**
@@ -153,7 +184,7 @@ export interface CustomViewsState {
   activeViewIdBySurface: BySurface<string>;
   widgets: CustomWidget[];
   loadedSurfaces: BySurface<boolean>;
-  /** S5/S6 fill this; always `null` in S4. */
+  /** The placeholder slot awaiting an assistant-built widget (§7.1); `null` outside an authoring session. */
   authoring: AuthoringSlot | null;
   /** Customize mode's working copy for ONE surface at a time; `null` outside customize mode. */
   draft: CustomViewsDraft | null;
@@ -194,8 +225,37 @@ export interface CustomViewsState {
    * server's error code — this call never rejects.
    */
   save: (input: { mode: 'update' | 'new'; name: string; setActive: boolean }) => Promise<void>;
-  /** Drop the draft without saving (and any pending authoring draft widget it owns). */
+  /** Drop the draft without saving (and any pending, unpublished authoring draft widget it owns). */
   discard: () => void;
+
+  /**
+   * Open an authoring slot (§7.1/§5.5): mints a fresh `sessionId` and, for
+   * `mode:'create'`, inserts a placeholder item (`{ type:'custom', widgetId:
+   * '' }`) into `args.surface`'s open draft at `args.at` (a no-op insertion
+   * when that surface has no open draft — the slot still opens). For
+   * `mode:'edit'` the existing item is left untouched; only `authoring` marks
+   * it as under authoring. Returns the minted `sessionId`, which
+   * `startAuthoring` needs for the assistant's `contextHint` envelope.
+   */
+  openAuthoring: (args: OpenAuthoringArgs) => string;
+  /**
+   * Route one `onWidgetDraft` event to the open authoring slot (§7.3).
+   * Ignored unless `evt.authoringSessionId` matches `authoring.sessionId`
+   * (a stale event from a superseded or already-closed session) — and, once
+   * the slot has bound a widget, unless `evt.widgetId` matches it too. Binds
+   * `authoring.widgetId` on first landing and rewrites the slot's item to
+   * `{ type:'custom', widgetId }`, flips `draftPreview` (`true` on
+   * `kind:'draft'`, `false` on `kind:'published'`), and refreshes the widget
+   * library either way so `widgets` carries the new/updated spec.
+   */
+  onDraftEvent: (evt: WidgetDraftEvent) => void;
+  /** Publish the open slot's draft widget; keeps `authoring` open (§7.3) so the assistant can keep iterating on it. */
+  publishAuthoringDraft: () => Promise<void>;
+  /** Discard the open slot's draft widget; for `mode:'create'` this also drops the placeholder item and closes the slot. */
+  discardAuthoringDraft: () => void;
+  /** Close the authoring slot. Never touches the widget or the draft item — call after the flow is done (published, or the caller decided to leave it as-is). */
+  finishAuthoring: () => void;
+
   /** Rename a SAVED view (outside the draft) by id — looks up its current revision itself. */
   renameView: (id: string, name: string) => Promise<{ ok: true } | { ok: false; error: string }>;
   /** Delete a SAVED view by id; clears the active pref when it pointed here (server-side). */
@@ -216,6 +276,11 @@ function bySurface<T>(value: () => T): BySurface<T> {
 
 /** A fresh uuid — `crypto.randomUUID()` directly would work too; wrapped so tests can spy on it. */
 function newInstanceId(): string {
+  return crypto.randomUUID();
+}
+
+/** A fresh uuid for an authoring session (§7.1) — same shape as {@link newInstanceId}, named for what it identifies. */
+function newSessionId(): string {
   return crypto.randomUUID();
 }
 
@@ -331,14 +396,15 @@ export const useCustomViewsStore = create<CustomViewsState>((set, get) => {
       generationBySurface.set(surface, generation);
       refCountBySurface.set(surface, 1);
 
-      // SUBSCRIPTION FIRST, seeds second (the race policy). S4 drops every
-      // event — S6 binds them to the authoring slot — but the channel has to
-      // be open before the seeds or a draft landing mid-load is lost.
+      // SUBSCRIPTION FIRST, seeds second (the race policy): the channel has
+      // to be open before the seeds or a draft landing mid-load is lost.
+      // Every event routes to `onDraftEvent`, which drops anything that
+      // doesn't match the currently open authoring slot.
       let unsubscribe: (() => void) | null = null;
       try {
         const subscription = trpc.cyboflow.customViews.onWidgetDraft.subscribe(undefined, {
-          onData: () => {
-            // S6: bind to `authoring.sessionId`. Ignored until then.
+          onData: (evt) => {
+            get().onDraftEvent(evt);
           },
           onError: (err: unknown) => {
             console.error('[customViewsStore] onWidgetDraft subscription error:', err);
@@ -514,6 +580,14 @@ export const useCustomViewsStore = create<CustomViewsState>((set, get) => {
       if (draft === null) return;
       // Clear a stale error from a previous attempt before this one starts.
       set((s) => (s.draft === null ? s : { draft: { ...s.draft, saveError: null } }));
+      // An unpublished authoring placeholder (`widgetId: ''`) is not a
+      // storable item — the server's layout validator rejects an empty id —
+      // so the layout SENT strips it; the draft on screen keeps it until
+      // the slot resolves or is discarded.
+      const layout: ViewLayout = {
+        ...draft.layout,
+        items: draft.layout.items.filter((it) => !(it.widget.type === 'custom' && it.widget.widgetId === '')),
+      };
       try {
         let saved: CustomView;
         if (mode === 'update') {
@@ -524,13 +598,13 @@ export const useCustomViewsStore = create<CustomViewsState>((set, get) => {
             id: draft.baseViewId,
             expectedRevision: draft.baseRevision,
             name,
-            layout: draft.layout,
+            layout,
           });
         } else {
           saved = await trpc.cyboflow.customViews.createView.mutate({
             surface: draft.surface,
             name,
-            layout: draft.layout,
+            layout,
           });
         }
         await refreshViewsAndActive(draft.surface);
@@ -547,10 +621,10 @@ export const useCustomViewsStore = create<CustomViewsState>((set, get) => {
 
     discard: () => {
       const authoring = get().authoring;
-      // S6 territory in full (openAuthoring never runs in S5, so `authoring`
-      // stays null here) — guarded now so a discard mid-authoring-session
-      // never leaves an orphaned draft widget once S6 lands.
-      if (authoring !== null && authoring.widgetId !== null) {
+      // Only an UNPUBLISHED draft is this session's to discard — once
+      // published the widget belongs to the library regardless of what
+      // happens to the view draft that was open when it landed (§7.3).
+      if (authoring !== null && authoring.widgetId !== null && authoring.draftPreview) {
         void trpc.cyboflow.customViews.discardDraft
           .mutate({ id: authoring.widgetId, authoringSessionId: authoring.sessionId })
           .catch((err: unknown) => {
@@ -559,6 +633,100 @@ export const useCustomViewsStore = create<CustomViewsState>((set, get) => {
       }
       set({ draft: null, authoring: null });
     },
+
+    // -------------------------------------------------------------------
+    // Authoring (S6 — §7.1/§7.3)
+    // -------------------------------------------------------------------
+
+    openAuthoring: (args) => {
+      const sessionId = newSessionId();
+      if (args.mode === 'create') {
+        const instanceId = newInstanceId();
+        set((s) => {
+          const slot: AuthoringSlot = { sessionId, instanceId, mode: 'create', widgetId: null, draftPreview: false };
+          if (s.draft === null || s.draft.surface !== args.surface) return { authoring: slot };
+          const items = [...s.draft.layout.items];
+          const index = Math.max(0, Math.min(args.at, items.length));
+          const placeholder: LayoutItem = {
+            instanceId,
+            widget: { type: 'custom', widgetId: '' },
+            settings: {},
+          };
+          items.splice(index, 0, placeholder);
+          return {
+            draft: { ...s.draft, layout: { ...s.draft.layout, items }, dirty: true },
+            authoring: slot,
+          };
+        });
+      } else {
+        set({
+          authoring: {
+            sessionId,
+            instanceId: args.instanceId,
+            mode: 'edit',
+            widgetId: args.widgetId,
+            draftPreview: false,
+          },
+        });
+      }
+      return sessionId;
+    },
+
+    onDraftEvent: (evt) => {
+      const authoring = get().authoring;
+      if (authoring === null || authoring.sessionId !== evt.authoringSessionId) return;
+      if (authoring.widgetId !== null && authoring.widgetId !== evt.widgetId) return;
+
+      const draftPreview = evt.kind === 'draft';
+      set((s) => {
+        const nextAuthoring: AuthoringSlot = { ...authoring, widgetId: evt.widgetId, draftPreview };
+        if (s.draft === null) return { authoring: nextAuthoring };
+        const items = s.draft.layout.items.map((it) =>
+          it.instanceId === authoring.instanceId
+            ? { ...it, widget: { type: 'custom' as const, widgetId: evt.widgetId } }
+            : it,
+        );
+        return { draft: { ...s.draft, layout: { ...s.draft.layout, items } }, authoring: nextAuthoring };
+      });
+      void get().refreshWidgets();
+    },
+
+    publishAuthoringDraft: async () => {
+      const authoring = get().authoring;
+      if (authoring === null || authoring.widgetId === null) return;
+      try {
+        await trpc.cyboflow.customViews.publishDraft.mutate({
+          id: authoring.widgetId,
+          authoringSessionId: authoring.sessionId,
+        });
+        // The onDraftEvent-equivalent local update — do not wait on the
+        // subscription round-trip; if it also delivers this event, applying
+        // it again is a harmless no-op (onDraftEvent is idempotent).
+        get().onDraftEvent({ widgetId: authoring.widgetId, authoringSessionId: authoring.sessionId, kind: 'published' });
+      } catch (err: unknown) {
+        console.error('[customViewsStore] publishDraft failed:', err);
+      }
+    },
+
+    discardAuthoringDraft: () => {
+      const authoring = get().authoring;
+      if (authoring === null || authoring.widgetId === null) return;
+      void trpc.cyboflow.customViews.discardDraft
+        .mutate({ id: authoring.widgetId, authoringSessionId: authoring.sessionId })
+        .catch((err: unknown) => {
+          console.error('[customViewsStore] discardDraft (authoring) failed:', err);
+        });
+      set((s) => {
+        if (s.authoring === null) return s;
+        if (s.authoring.mode === 'create' && s.draft !== null) {
+          const items = s.draft.layout.items.filter((it) => it.instanceId !== authoring.instanceId);
+          return { authoring: null, draft: { ...s.draft, layout: { ...s.draft.layout, items }, dirty: true } };
+        }
+        return { authoring: null };
+      });
+    },
+
+    finishAuthoring: () => set({ authoring: null }),
 
     renameView: async (id, name) => {
       const state = get();

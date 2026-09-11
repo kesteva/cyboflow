@@ -1,6 +1,7 @@
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
+import { useState } from 'react';
 import { AgentComposer } from './AgentComposer';
 
 describe('AgentComposer', () => {
@@ -79,5 +80,58 @@ describe('AgentComposer', () => {
     fireEvent.keyDown(screen.getByTestId('agent-composer-input'), { key: 'Enter', metaKey: true });
 
     expect(onSend).not.toHaveBeenCalled();
+  });
+
+  // ---------------------------------------------------------------------
+  // `prefill` — the Custom Views §7.1 authoring kickoff's one-shot pre-fill
+  // ---------------------------------------------------------------------
+
+  /** Mirrors how `AgentThreadView` wires `composerDraft`: a `prefill` prop that
+   *  the parent clears via `onPrefillConsumed`. */
+  function PrefillHost({ onSend, onConsumed }: { onSend: (text: string) => void; onConsumed: () => void }) {
+    const [draft, setDraft] = useState<string | null>('seed text');
+    return (
+      <AgentComposer
+        onSend={onSend}
+        disabled={false}
+        prefill={draft}
+        onPrefillConsumed={() => {
+          setDraft(null);
+          onConsumed();
+        }}
+      />
+    );
+  }
+
+  it('applies a non-empty prefill to the textarea and reports it consumed once', () => {
+    const onConsumed = vi.fn();
+    render(<PrefillHost onSend={vi.fn()} onConsumed={onConsumed} />);
+
+    expect(screen.getByTestId('agent-composer-input')).toHaveValue('seed text');
+    expect(onConsumed).toHaveBeenCalledTimes(1);
+  });
+
+  it('a null/undefined/empty prefill never applies and never reports consumed', () => {
+    const onPrefillConsumed = vi.fn();
+    const { rerender } = render(
+      <AgentComposer onSend={vi.fn()} disabled={false} prefill={null} onPrefillConsumed={onPrefillConsumed} />,
+    );
+    expect(screen.getByTestId('agent-composer-input')).toHaveValue('');
+    expect(onPrefillConsumed).not.toHaveBeenCalled();
+
+    rerender(<AgentComposer onSend={vi.fn()} disabled={false} prefill="" onPrefillConsumed={onPrefillConsumed} />);
+    expect(screen.getByTestId('agent-composer-input')).toHaveValue('');
+    expect(onPrefillConsumed).not.toHaveBeenCalled();
+  });
+
+  it('the user can edit the applied prefill freely, and it is not reapplied once the source clears (one-shot)', () => {
+    const onConsumed = vi.fn();
+    render(<PrefillHost onSend={vi.fn()} onConsumed={onConsumed} />);
+
+    const input = screen.getByTestId('agent-composer-input');
+    expect(input).toHaveValue('seed text');
+    fireEvent.change(input, { target: { value: 'seed text edited' } });
+    expect(input).toHaveValue('seed text edited');
+    expect(onConsumed).toHaveBeenCalledTimes(1);
   });
 });

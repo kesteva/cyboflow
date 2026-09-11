@@ -28,7 +28,13 @@ let updateViewImpl: (input: {
 let createViewImpl: (input: { surface: string; name: string; layout: ViewLayout }) => Promise<CustomView> = () =>
   Promise.reject(new Error('not configured'));
 let deleteViewImpl: (input: { id: string }) => Promise<{ ok: true }> = () => Promise.resolve({ ok: true });
+let publishDraftImpl: (input: { id: string; authoringSessionId: string }) => Promise<CustomWidget> = () =>
+  Promise.reject(new Error('not configured'));
+let discardDraftImpl: (input: { id: string; authoringSessionId: string }) => Promise<CustomWidget | null> = () =>
+  Promise.resolve(null);
 const unsubscribe = vi.fn();
+const publishDraftMock = vi.fn((input: { id: string; authoringSessionId: string }) => publishDraftImpl(input));
+const discardDraftMock = vi.fn((input: { id: string; authoringSessionId: string }) => discardDraftImpl(input));
 
 vi.mock('../../trpc/client', () => ({
   trpc: {
@@ -61,6 +67,12 @@ vi.mock('../../trpc/client', () => ({
           mutate: (input: { surface: string; name: string; layout: ViewLayout }) => createViewImpl(input),
         },
         deleteView: { mutate: (input: { id: string }) => deleteViewImpl(input) },
+        publishDraft: {
+          mutate: (input: { id: string; authoringSessionId: string }) => publishDraftMock(input),
+        },
+        discardDraft: {
+          mutate: (input: { id: string; authoringSessionId: string }) => discardDraftMock(input),
+        },
         onWidgetDraft: {
           subscribe: vi.fn(() => {
             calls.push('subscribe');
@@ -109,7 +121,11 @@ beforeEach(() => {
   updateViewImpl = () => Promise.reject(new Error('not configured'));
   createViewImpl = () => Promise.reject(new Error('not configured'));
   deleteViewImpl = () => Promise.resolve({ ok: true });
+  publishDraftImpl = () => Promise.reject(new Error('not configured'));
+  discardDraftImpl = () => Promise.resolve(null);
   unsubscribe.mockReset();
+  publishDraftMock.mockClear();
+  discardDraftMock.mockClear();
   useCustomViewsStore.setState({
     viewsBySurface: { 'review-queue': [], 'project-overview': [] },
     activeViewIdBySurface: { 'review-queue': 'default', 'project-overview': 'default' },
@@ -372,6 +388,30 @@ describe('customViewsStore.save', () => {
     expect(useCustomViewsStore.getState().viewsBySurface['review-queue']).toEqual([saved]);
   });
 
+  it('strips an unpublished authoring placeholder (widgetId "") from the layout it sends', async () => {
+    const view = makeView({ id: 'v1', name: 'Mine', surface: 'review-queue', revision: 4 });
+    useCustomViewsStore.setState({
+      viewsBySurface: { 'review-queue': [view], 'project-overview': [] },
+      activeViewIdBySurface: { 'review-queue': 'v1', 'project-overview': 'default' },
+    });
+    useCustomViewsStore.getState().enterCustomize('review-queue');
+    useCustomViewsStore.getState().openAuthoring({ surface: 'review-queue', mode: 'create', at: 0 });
+    expect(useCustomViewsStore.getState().draft?.layout.items[0]?.widget).toEqual({ type: 'custom', widgetId: '' });
+
+    let sentLayout: { items: { widget: { type: string } }[] } | null = null;
+    updateViewImpl = (input) => {
+      sentLayout = (input as unknown as { layout: { items: { widget: { type: string } }[] } }).layout;
+      return Promise.resolve(makeView({ id: 'v1', name: 'Mine', surface: 'review-queue', revision: 5 }));
+    };
+
+    await useCustomViewsStore.getState().save({ mode: 'update', name: 'Mine', setActive: false });
+
+    expect(sentLayout).not.toBeNull();
+    const items = (sentLayout as unknown as { items: { widget: { type: string; widgetId?: string } }[] }).items;
+    expect(items.some((it) => it.widget.type === 'custom' && it.widget.widgetId === '')).toBe(false);
+    expect(items.length).toBe(view.layout.items.length);
+  });
+
   it('a concurrency failure keeps the draft and records saveError', async () => {
     const view = makeView({
       id: 'v1',
@@ -427,6 +467,190 @@ describe('customViewsStore.discard', () => {
     expect(useCustomViewsStore.getState().draft).not.toBeNull();
     useCustomViewsStore.getState().discard();
     expect(useCustomViewsStore.getState().draft).toBeNull();
+  });
+
+  it('discards the pending draft widget when the authoring session owns an UNPUBLISHED draft', () => {
+    useCustomViewsStore.getState().enterCustomize('review-queue');
+    const sessionId = useCustomViewsStore.getState().openAuthoring({ surface: 'review-queue', mode: 'create', at: 0 });
+    useCustomViewsStore.getState().onDraftEvent({ widgetId: 'w-1', authoringSessionId: sessionId, kind: 'draft' });
+
+    useCustomViewsStore.getState().discard();
+
+    expect(discardDraftMock).toHaveBeenCalledWith({ id: 'w-1', authoringSessionId: sessionId });
+    expect(useCustomViewsStore.getState().draft).toBeNull();
+    expect(useCustomViewsStore.getState().authoring).toBeNull();
+  });
+
+  it('does NOT call discardDraft once the draft was published', () => {
+    useCustomViewsStore.getState().enterCustomize('review-queue');
+    const sessionId = useCustomViewsStore.getState().openAuthoring({ surface: 'review-queue', mode: 'create', at: 0 });
+    useCustomViewsStore.getState().onDraftEvent({ widgetId: 'w-1', authoringSessionId: sessionId, kind: 'draft' });
+    useCustomViewsStore.getState().onDraftEvent({ widgetId: 'w-1', authoringSessionId: sessionId, kind: 'published' });
+
+    useCustomViewsStore.getState().discard();
+
+    expect(discardDraftMock).not.toHaveBeenCalled();
+    expect(useCustomViewsStore.getState().draft).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Authoring (S6) — the placeholder slot + drafts vs published (§7.1, §7.3)
+// ---------------------------------------------------------------------------
+
+describe('customViewsStore.openAuthoring', () => {
+  beforeEach(() => {
+    useCustomViewsStore.getState().enterCustomize('review-queue');
+  });
+
+  it('mode "create" inserts a placeholder item at `at` and opens the slot', () => {
+    const before = useCustomViewsStore.getState().draft?.layout.items.length ?? 0;
+    const sessionId = useCustomViewsStore.getState().openAuthoring({ surface: 'review-queue', mode: 'create', at: 1 });
+
+    const draft = useCustomViewsStore.getState().draft;
+    expect(draft?.layout.items).toHaveLength(before + 1);
+    expect(draft?.layout.items[1].widget).toEqual({ type: 'custom', widgetId: '' });
+    expect(draft?.dirty).toBe(true);
+
+    const authoring = useCustomViewsStore.getState().authoring;
+    expect(authoring).toEqual({
+      sessionId,
+      instanceId: draft?.layout.items[1].instanceId,
+      mode: 'create',
+      widgetId: null,
+      draftPreview: false,
+    });
+  });
+
+  it('mode "edit" marks the existing item without touching the draft\'s items', () => {
+    const items = useCustomViewsStore.getState().draft?.layout.items ?? [];
+    const before = items.length;
+    const targetInstanceId = items[0].instanceId;
+
+    const sessionId = useCustomViewsStore
+      .getState()
+      .openAuthoring({ surface: 'review-queue', mode: 'edit', instanceId: targetInstanceId, widgetId: 'w-1' });
+
+    expect(useCustomViewsStore.getState().draft?.layout.items).toHaveLength(before);
+    expect(useCustomViewsStore.getState().authoring).toEqual({
+      sessionId,
+      instanceId: targetInstanceId,
+      mode: 'edit',
+      widgetId: 'w-1',
+      draftPreview: false,
+    });
+  });
+});
+
+describe('customViewsStore.onDraftEvent', () => {
+  beforeEach(() => {
+    useCustomViewsStore.getState().enterCustomize('review-queue');
+  });
+
+  it('ignores an event for a different (stale/superseded) session', () => {
+    const sessionId = useCustomViewsStore.getState().openAuthoring({ surface: 'review-queue', mode: 'create', at: 0 });
+    useCustomViewsStore.getState().onDraftEvent({ widgetId: 'w-x', authoringSessionId: 'someone-else', kind: 'draft' });
+
+    expect(useCustomViewsStore.getState().authoring).toEqual(
+      expect.objectContaining({ sessionId, widgetId: null, draftPreview: false }),
+    );
+  });
+
+  it('a "draft" event binds the widgetId, marks the item, flips draftPreview, and refreshes the library', async () => {
+    const sessionId = useCustomViewsStore.getState().openAuthoring({ surface: 'review-queue', mode: 'create', at: 0 });
+    const instanceId = useCustomViewsStore.getState().authoring?.instanceId as string;
+    mockWidgets = [widget({ id: 'w-1', draftSpec: null })];
+    calls.length = 0;
+
+    useCustomViewsStore.getState().onDraftEvent({ widgetId: 'w-1', authoringSessionId: sessionId, kind: 'draft' });
+
+    const authoring = useCustomViewsStore.getState().authoring;
+    expect(authoring?.widgetId).toBe('w-1');
+    expect(authoring?.draftPreview).toBe(true);
+    const item = useCustomViewsStore.getState().draft?.layout.items.find((it) => it.instanceId === instanceId);
+    expect(item?.widget).toEqual({ type: 'custom', widgetId: 'w-1' });
+    await vi.waitFor(() => expect(calls).toContain('listWidgets'));
+  });
+
+  it('a "published" event flips draftPreview off, keeps the widgetId, and refreshes the library', async () => {
+    const sessionId = useCustomViewsStore.getState().openAuthoring({ surface: 'review-queue', mode: 'create', at: 0 });
+    useCustomViewsStore.getState().onDraftEvent({ widgetId: 'w-1', authoringSessionId: sessionId, kind: 'draft' });
+    calls.length = 0;
+
+    useCustomViewsStore.getState().onDraftEvent({ widgetId: 'w-1', authoringSessionId: sessionId, kind: 'published' });
+
+    expect(useCustomViewsStore.getState().authoring?.widgetId).toBe('w-1');
+    expect(useCustomViewsStore.getState().authoring?.draftPreview).toBe(false);
+    await vi.waitFor(() => expect(calls).toContain('listWidgets'));
+  });
+
+  it('ignores an event whose widgetId conflicts with an already-bound slot', () => {
+    const sessionId = useCustomViewsStore.getState().openAuthoring({ surface: 'review-queue', mode: 'create', at: 0 });
+    useCustomViewsStore.getState().onDraftEvent({ widgetId: 'w-1', authoringSessionId: sessionId, kind: 'draft' });
+    useCustomViewsStore.getState().onDraftEvent({ widgetId: 'w-2', authoringSessionId: sessionId, kind: 'draft' });
+    expect(useCustomViewsStore.getState().authoring?.widgetId).toBe('w-1');
+  });
+});
+
+describe('customViewsStore.publishAuthoringDraft / discardAuthoringDraft / finishAuthoring', () => {
+  beforeEach(() => {
+    useCustomViewsStore.getState().enterCustomize('review-queue');
+  });
+
+  it('publishAuthoringDraft calls publishDraft, then applies the published state locally (no wait on the subscription)', async () => {
+    const sessionId = useCustomViewsStore.getState().openAuthoring({ surface: 'review-queue', mode: 'create', at: 0 });
+    useCustomViewsStore.getState().onDraftEvent({ widgetId: 'w-1', authoringSessionId: sessionId, kind: 'draft' });
+    publishDraftImpl = () => Promise.resolve(widget({ id: 'w-1', publishedSpec: null }));
+
+    await useCustomViewsStore.getState().publishAuthoringDraft();
+
+    expect(publishDraftMock).toHaveBeenCalledWith({ id: 'w-1', authoringSessionId: sessionId });
+    expect(useCustomViewsStore.getState().authoring?.draftPreview).toBe(false);
+    expect(useCustomViewsStore.getState().authoring?.widgetId).toBe('w-1');
+    // Kept open — the assistant may keep iterating (§7.3).
+    expect(useCustomViewsStore.getState().authoring).not.toBeNull();
+  });
+
+  it('discardAuthoringDraft calls discardDraft, drops the placeholder item (mode "create"), and closes the slot', () => {
+    const before = useCustomViewsStore.getState().draft?.layout.items.length ?? 0;
+    const sessionId = useCustomViewsStore.getState().openAuthoring({ surface: 'review-queue', mode: 'create', at: 0 });
+    const instanceId = useCustomViewsStore.getState().authoring?.instanceId as string;
+    useCustomViewsStore.getState().onDraftEvent({ widgetId: 'w-1', authoringSessionId: sessionId, kind: 'draft' });
+
+    useCustomViewsStore.getState().discardAuthoringDraft();
+
+    expect(discardDraftMock).toHaveBeenCalledWith({ id: 'w-1', authoringSessionId: sessionId });
+    expect(useCustomViewsStore.getState().authoring).toBeNull();
+    const items = useCustomViewsStore.getState().draft?.layout.items ?? [];
+    expect(items).toHaveLength(before);
+    expect(items.some((it) => it.instanceId === instanceId)).toBe(false);
+  });
+
+  it('discardAuthoringDraft in mode "edit" closes the slot without touching the draft\'s items', () => {
+    const items = useCustomViewsStore.getState().draft?.layout.items ?? [];
+    const before = items.length;
+    const targetInstanceId = items[0].instanceId;
+    const sessionId = useCustomViewsStore
+      .getState()
+      .openAuthoring({ surface: 'review-queue', mode: 'edit', instanceId: targetInstanceId, widgetId: 'w-1' });
+    useCustomViewsStore.getState().onDraftEvent({ widgetId: 'w-1', authoringSessionId: sessionId, kind: 'draft' });
+
+    useCustomViewsStore.getState().discardAuthoringDraft();
+
+    expect(discardDraftMock).toHaveBeenCalledWith({ id: 'w-1', authoringSessionId: sessionId });
+    expect(useCustomViewsStore.getState().authoring).toBeNull();
+    expect(useCustomViewsStore.getState().draft?.layout.items).toHaveLength(before);
+  });
+
+  it('finishAuthoring closes the slot without calling discardDraft or touching the draft', () => {
+    const before = useCustomViewsStore.getState().draft?.layout.items.length ?? 0;
+    useCustomViewsStore.getState().openAuthoring({ surface: 'review-queue', mode: 'create', at: 0 });
+
+    useCustomViewsStore.getState().finishAuthoring();
+
+    expect(discardDraftMock).not.toHaveBeenCalled();
+    expect(useCustomViewsStore.getState().authoring).toBeNull();
+    expect(useCustomViewsStore.getState().draft?.layout.items).toHaveLength(before + 1);
   });
 });
 

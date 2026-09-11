@@ -10,7 +10,7 @@
  * composers (border/mono-text/uppercase-button conventions, italic placeholder
  * per the design packet) without inheriting that machinery.
  */
-import { useCallback, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { CornerDownLeft } from 'lucide-react';
 import { kbdHint } from '../../utils/platform';
 
@@ -22,6 +22,16 @@ export interface AgentComposerProps {
   /** Overrides the default placeholder (e.g. the onboarding guided host's
    *  follow-up prompt). Defaults to {@link PLACEHOLDER}. */
   placeholder?: string;
+  /**
+   * One-shot external pre-fill (Custom Views §7.1's authoring kickoff —
+   * `agentThreadStore.composerDraft`). Applied to the internal draft the
+   * instant it changes to a non-empty string, then immediately reported back
+   * via `onPrefillConsumed` so the caller can clear its source — `null`/
+   * `undefined`/empty is "nothing pending" and is never applied.
+   */
+  prefill?: string | null;
+  /** Called right after `prefill` is applied, so the caller can clear it (one-shot; omitted if `prefill` is never used). */
+  onPrefillConsumed?: () => void;
 }
 
 const PLACEHOLDER = 'Ask, or run /plan /approve /triage…';
@@ -36,9 +46,20 @@ export function AgentComposer({
   onSend,
   disabled,
   placeholder = PLACEHOLDER,
+  prefill,
+  onPrefillConsumed,
 }: AgentComposerProps): React.ReactElement {
   const [value, setValue] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Apply an external pre-fill once, then report it consumed so the caller
+  // clears its source — the next render's `prefill` goes back to falsy and
+  // this effect will not refire until something sets a new one.
+  useEffect(() => {
+    if (prefill === null || prefill === undefined || prefill.length === 0) return;
+    setValue(prefill);
+    onPrefillConsumed?.();
+  }, [prefill, onPrefillConsumed]);
 
   // Auto-grow up to COMPOSER_MAX_PX (4 lines), then scroll — re-measured on
   // every value change so the box also shrinks back after a send clears it.

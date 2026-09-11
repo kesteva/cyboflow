@@ -64,6 +64,28 @@ export interface AgentThreadState {
   liveTailTick: number;
 
   /**
+   * A one-shot pre-fill for the composer (Custom Views §7.1's authoring
+   * kickoff — `startAuthoring` sets it, `AgentComposer`/`AgentThreadView`
+   * apply it once via `onPrefillConsumed` and it is expected to be cleared
+   * back to `null` right after). `null` the rest of the time.
+   */
+  composerDraft: string | null;
+  /** Set (or clear with `null`) the composer's one-shot pre-fill text. */
+  setComposerDraft: (text: string | null) => void;
+
+  /**
+   * A `contextHint` envelope queued for the NEXT `sendMessage` call (Custom
+   * Views §7.1) — `startAuthoring` sets this so the turn the user actually
+   * sends carries the `[custom-widget-session]` envelope, without the
+   * composer or its caller having to thread it through explicitly.
+   * `sendMessage` consumes and clears it automatically; an explicit
+   * `opts.contextHint` on the call still wins over it.
+   */
+  pendingContextHint: string | null;
+  /** Set (or clear with `null`) the pending `contextHint` for the next `sendMessage`. */
+  setPendingContextHint: (hint: string | null) => void;
+
+  /**
    * Bootstrap: fetch getThread + listProposals, then wire the two
    * subscriptions above. Idempotent (closure-guarded); returns an unsubscribe
    * that tears down both subscriptions and any pending debounce timer.
@@ -103,6 +125,11 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
     loading: false,
     sending: false,
     liveTailTick: 0,
+    composerDraft: null,
+    pendingContextHint: null,
+
+    setComposerDraft: (text) => set({ composerDraft: text }),
+    setPendingContextHint: (hint) => set({ pendingContextHint: hint }),
 
     init: () => {
       if (initialized) return cachedUnsubscribe!;
@@ -178,12 +205,19 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
         console.warn('[agentThreadStore] sendMessage called before the thread loaded — dropped');
         return;
       }
+      // An explicit opts.contextHint wins; otherwise a queued authoring
+      // kickoff hint (§7.1) rides this turn — one-shot, cleared regardless
+      // of whether the mutation succeeds (a failed send does not owe a
+      // second attempt at the same hint; the user can just try again).
+      const pendingHint = get().pendingContextHint;
+      const contextHint = opts?.contextHint ?? pendingHint ?? undefined;
+      if (pendingHint !== null) set({ pendingContextHint: null });
       set({ sending: true });
       try {
         await trpc.cyboflow.agentThread.sendMessage.mutate({
           threadId,
           text,
-          ...(opts?.contextHint !== undefined ? { contextHint: opts.contextHint } : {}),
+          ...(contextHint !== undefined ? { contextHint } : {}),
         });
       } catch (err: unknown) {
         console.error('[agentThreadStore] sendMessage failed:', err);

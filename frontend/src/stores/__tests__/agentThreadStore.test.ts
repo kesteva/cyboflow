@@ -94,6 +94,8 @@ beforeEach(() => {
     loading: false,
     sending: false,
     liveTailTick: 0,
+    composerDraft: null,
+    pendingContextHint: null,
   });
 });
 
@@ -277,6 +279,57 @@ describe('sendMessage', () => {
 
     expect(useAgentThreadStore.getState().sending).toBe(false);
     errSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// composerDraft / pendingContextHint — Custom Views §7.1's authoring kickoff
+// ---------------------------------------------------------------------------
+
+describe('composerDraft / pendingContextHint', () => {
+  it('setComposerDraft / setPendingContextHint set and clear (null)', () => {
+    useAgentThreadStore.getState().setComposerDraft('Build me a widget…');
+    expect(useAgentThreadStore.getState().composerDraft).toBe('Build me a widget…');
+    useAgentThreadStore.getState().setComposerDraft(null);
+    expect(useAgentThreadStore.getState().composerDraft).toBeNull();
+
+    useAgentThreadStore.getState().setPendingContextHint('[custom-widget-session]\n...');
+    expect(useAgentThreadStore.getState().pendingContextHint).toBe('[custom-widget-session]\n...');
+    useAgentThreadStore.getState().setPendingContextHint(null);
+    expect(useAgentThreadStore.getState().pendingContextHint).toBeNull();
+  });
+
+  it('sendMessage attaches a pending contextHint to the NEXT turn only, then clears it', async () => {
+    useAgentThreadStore.setState({ thread: makeThread() });
+    useAgentThreadStore.getState().setPendingContextHint('[custom-widget-session]\nsessionId=s1');
+
+    await useAgentThreadStore.getState().sendMessage('here is my widget');
+
+    expect(mockSendMessageMutate).toHaveBeenCalledWith({
+      threadId: 'thread-1',
+      text: 'here is my widget',
+      contextHint: '[custom-widget-session]\nsessionId=s1',
+    });
+    expect(useAgentThreadStore.getState().pendingContextHint).toBeNull();
+
+    // A second send carries no hint — it was one-shot.
+    await useAgentThreadStore.getState().sendMessage('a follow-up');
+    expect(mockSendMessageMutate).toHaveBeenLastCalledWith({ threadId: 'thread-1', text: 'a follow-up' });
+  });
+
+  it('an explicit opts.contextHint wins over a pending one', async () => {
+    useAgentThreadStore.setState({ thread: makeThread() });
+    useAgentThreadStore.getState().setPendingContextHint('[custom-widget-session]\nsessionId=s1');
+
+    await useAgentThreadStore.getState().sendMessage('hello', { contextHint: 'widget:i1' });
+
+    expect(mockSendMessageMutate).toHaveBeenCalledWith({
+      threadId: 'thread-1',
+      text: 'hello',
+      contextHint: 'widget:i1',
+    });
+    // Still consumed/cleared even though it lost.
+    expect(useAgentThreadStore.getState().pendingContextHint).toBeNull();
   });
 });
 
