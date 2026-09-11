@@ -6,6 +6,23 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-09-11
+
+### Added
+
+- **The global assistant can run on Codex.** Settings → Assistant gains a Runtime choice (follow
+  the default runtime / Claude / Codex), and its model picker follows whichever provider that
+  resolves to. The stored conversation is provider-bound, so switching runtimes starts a fresh
+  thread rather than replaying one provider's history into the other. The Codex thread is
+  hermetic: user MCP servers, plugin-declared servers, apps, sub-agents, image generation, goals,
+  and image viewing are all disabled for it.
+- **Tracker status sync has an off switch.** `status_sync_mode` governs status in both directions
+  and previously offered only Auto and Manual, so a user could set every visible control to Off
+  and still have Cyboflow writing stage moves into their tracker. Off now gates the enqueue, and
+  an off→on round trip restores the previous Auto-vs-Manual choice.
+- Dev builds show the session's human-given name in the version marker and the About dialog,
+  instead of only the auto-generated worktree slug.
+
 ### Changed
 
 - **Bundled Codex CLI upgraded 0.144.3 → 0.153.3** (`@openai/codex`, all six platform binaries).
@@ -13,6 +30,43 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
   reviewed protocol subset now mirrors the additive 0.153.3 fields (prompt-cache write tokens,
   `isBlocking` on user-input requests, `writeStdin` approval kind, `openaiForm` elicitation,
   misalignment error details, async agent-message questions).
+- **The sprint lane runbook bootstrap is on by default.** Only two projects had a runbook record,
+  so nearly every lane skipped verification on "no proven runbook".
+  `CYBOFLOW_DISABLE_RUNBOOK_BOOTSTRAP=1` remains the kill switch, and an install that has
+  explicitly saved the setting keeps its saved value.
+- The tracker's field write-back control is now named "Push task fields to &lt;provider&gt;". It
+  reads as bidirectional but gates only the outbound write; edits made in the provider merge back
+  regardless, governed by the pull mode.
+
+### Fixed
+
+- **Visual verification in sprint lanes had not passed since 8/01**, for six independent reasons,
+  all addressed here: the Codex substrate discarded every task-verify step's result text (62 of 62
+  turns), so the verification request was dropped before a row existed — and the `VERDICT: FAIL`
+  loopback and code-review Blocking sections were lost the same way; opening the Project Overview
+  demoted every project's proven runbook, because drift was written back on read; the modality was
+  guessed from the composer instead of resolved once from the task's own declaration; the harness
+  gave the verification agent no login-shell `PATH`, so dependency preparation died on
+  `spawn npx ENOENT`; a composed timeout below the default killed healthy runs at 180s; and shell
+  exec-optimization replaced the pinned serve command in `argv`, rejecting two genuine passes.
+- **Packaged builds could not run visual verification at all.** The driver runs under plain Node,
+  which cannot read inside `app.asar`, so every packaged verification since the 8/30
+  `platformProcess` refactor failed on its first `require`. The driver is now bundled
+  self-contained, and Playwright is unpacked alongside it.
+- A lane whose verification was skipped no longer looks like a pass: the swimlane's Visual check
+  step is derived from the lane's own latest verification request, and a dropped request files a
+  finding naming the reason.
+- A data directory the harness could not create is now an affirmative preflight failure. It was
+  logged and then used anyway, so the app failed to launch and the verdict landed `ambiguous` —
+  blocking, and burning an implement attempt on a broken host.
+- Verification requests fired through `cyboflow_request_verification` are keyed to the lane's
+  current attempt, so a verdict from a previous implement round is no longer mistaken for this
+  one's.
+- Turning tracker content write-back back on now backfills. Because `off` gates the enqueue rather
+  than the drain, every edit made while it was off was declined outright, and entities nobody
+  happened to touch again kept stale remote text forever. Archive sync has the same gap and is
+  deliberately not backfilled — replaying it would bulk-trash every remote twin archived while the
+  direction was off.
 
 ## [0.3.2] — 2026-09-08
 
