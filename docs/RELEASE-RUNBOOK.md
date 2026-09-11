@@ -278,8 +278,11 @@ grep -m1 version dist-electron/win-*/latest.yml   # both = $V
 # Authenticode check from the Mac (osslsigncode via Homebrew). The chain only
 # verifies against Microsoft's Identity Verification root, which macOS does not
 # ship — fetch it once.
-ROOT=/tmp/ms-idv-root-2020.crt
-[ -f $ROOT ] || curl -sSo $ROOT "https://www.microsoft.com/pkiops/certs/Microsoft%20Identity%20Verification%20Root%20Certificate%20Authority%202020.crt"
+# Microsoft serves the root as DER; osslsigncode's -CAfile wants PEM (a DER
+# file fails with "no certificate or crl found" and a misleading "Failed").
+ROOT=/tmp/ms-idv-root-2020.pem
+[ -f $ROOT ] || curl -sS "https://www.microsoft.com/pkiops/certs/Microsoft%20Identity%20Verification%20Root%20Certificate%20Authority%202020.crt" \
+  | openssl x509 -inform DER -out $ROOT
 for exe in dist-electron/win-*/*.exe; do
   osslsigncode verify -in "$exe" -CAfile $ROOT -TSA-CAfile $ROOT | grep -E 'Subject:|Signature verification|Succeeded|Failed'
 done

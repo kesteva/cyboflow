@@ -206,8 +206,9 @@ gh run download "$WIN_STABLE" -n cyboflow-windows-x64-installer     -D dist-elec
 gh run download "$WIN_DEV"    -n cyboflow-windows-x64-installer-dev -D dist-electron/win-dev
 ls -lh dist-electron/win-*/                       # each: *.exe ~300M, *.exe.blockmap, latest.yml
 grep -m1 version dist-electron/win-*/latest.yml   # both = <version>
-ROOT=/tmp/ms-idv-root-2020.crt
-[ -f $ROOT ] || curl -sSo $ROOT "https://www.microsoft.com/pkiops/certs/Microsoft%20Identity%20Verification%20Root%20Certificate%20Authority%202020.crt"
+ROOT=/tmp/ms-idv-root-2020.pem      # MS serves DER; osslsigncode needs PEM
+[ -f $ROOT ] || curl -sS "https://www.microsoft.com/pkiops/certs/Microsoft%20Identity%20Verification%20Root%20Certificate%20Authority%202020.crt" \
+  | openssl x509 -inform DER -out $ROOT
 for exe in dist-electron/win-*/*.exe; do
   osslsigncode verify -in "$exe" -CAfile $ROOT -TSA-CAfile $ROOT | grep -E 'Subject:|Succeeded|Failed|No signature'
 done
