@@ -6,6 +6,11 @@ import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/types/modelAvailability';
 import type { FastModeStateNotice } from '../../../shared/types/panels';
 import type { ProviderDetectionResult } from '../../../shared/types/onboarding';
+import type {
+  GitDetectRequest,
+  GitIdentityInput,
+  GitPrerequisiteResult,
+} from '../../../shared/types/gitPrerequisite';
 import type { ProviderModelCatalogs } from '../../../shared/types/agentModels';
 import type { AgentProvider } from '../../../shared/types/agentRuntime';
 import type { OpenIdeaSessionRequest } from '../../../shared/types/ideaSession';
@@ -730,6 +735,27 @@ export class API {
         throw new Error('Electron API not available');
       }
       return window.electronAPI.providers.detect(provider);
+    },
+  };
+
+  static git = {
+    /**
+     * The onboarding git prerequisite probe: is git runnable, and does it have
+     * a commit identity? `refresh: true` drops the main process's memoized PATH
+     * and git resolution first — the "Check again" after an install.
+     */
+    async detect(request: GitDetectRequest): Promise<IPCResponse<GitPrerequisiteResult>> {
+      if (!isElectron() || !window.electronAPI.git) {
+        throw new Error('Electron API not available');
+      }
+      return window.electronAPI.git.detect(request);
+    },
+    /** Writes `user.name` / `user.email` with `git config --global` and returns a fresh probe. */
+    async setIdentity(input: GitIdentityInput): Promise<IPCResponse<GitPrerequisiteResult>> {
+      if (!isElectron() || !window.electronAPI.git) {
+        throw new Error('Electron API not available');
+      }
+      return window.electronAPI.git.setIdentity(input);
     },
   };
 

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { PROVIDER_DEFAULT_RUNTIME, providerForRuntime } from '../../../../shared/types/agentRuntime';
 import { normalizeAgentModelSelection } from '../../../../shared/types/agentModels';
 import type { ProviderDetectionResult } from '../../../../shared/types/onboarding';
+import type { GitPrerequisiteResult } from '../../../../shared/types/gitPrerequisite';
 import { PROVIDERS_DETECT_CHANNEL } from '../../../../shared/types/onboarding';
 import type { ReasoningEffort } from '../../../../shared/types/reasoningEffort';
 import { normalizeEffortSelection } from '../../../../shared/types/reasoningEffort';
@@ -44,6 +45,7 @@ import { TelemetryStep, type TelemetryDraft } from './steps/TelemetryStep';
 import { DefaultRuntimeStep } from './steps/DefaultRuntimeStep';
 import { ModelStep } from './steps/ModelStep';
 import { HandoffStep } from './steps/HandoffStep';
+import { GitPrerequisiteStep, type GitIdentityDraft } from './steps/GitPrerequisiteStep';
 import { stageTourExit } from './guided/guidedFinish';
 
 /**
@@ -78,6 +80,19 @@ const UNAVAILABLE_OMP_DETECTION: ProviderDetectionResult<'omp'> = {
   binaryPath: null,
   version: null,
   state: 'unavailable',
+};
+
+/**
+ * What the git probe resolves to when the bridge is absent (non-Electron
+ * render, the test harness's API mock) or the IPC itself fails. Fail OPEN: a
+ * broken probe must never wall the tour off — the prerequisite card exists to
+ * name a real missing git, not to add a new way to get stuck.
+ */
+const GIT_PROBE_UNAVAILABLE: GitPrerequisiteResult = {
+  platform: 'linux',
+  binary: { found: true, path: null, version: null },
+  identity: { name: null, email: null },
+  state: 'ready',
 };
 
 /** Step-3 effort floor per provider, used when nothing valid is persisted. */
@@ -125,6 +140,14 @@ export function OnboardingGate(): React.JSX.Element | null {
   const setHandoffChoice = useOnboardingStore((s) => s.setHandoffChoice);
 
   const [checking, setChecking] = useState(false);
+  // The git prerequisite (shared/types/gitPrerequisite.ts). null = the boot
+  // probe has not resolved; the card renders in front of the modal steps while
+  // the state is not 'ready', unless the user dismissed it for this boot.
+  const [gitPrereq, setGitPrereq] = useState<GitPrerequisiteResult | null>(null);
+  const [gitChecking, setGitChecking] = useState(false);
+  const [gitDismissed, setGitDismissed] = useState(false);
+  const [gitIdentity, setGitIdentity] = useState<GitIdentityDraft>({ name: '', email: '' });
+  const [gitError, setGitError] = useState<string | null>(null);
   // Step-5 (telemetry) draft, resolved fresh from AppConfig.telemetry every
   // time the step is (re-)entered — see the resolve effect below. null = not yet
   // resolved (config not loaded, or step just entered before config's around).
@@ -225,6 +248,62 @@ export function OnboardingGate(): React.JSX.Element | null {
     if (!hydrated) return;
     document.body.dataset.onboarding = status === 'active' ? 'active' : 'resolved';
   }, [hydrated, status]);
+
+  // The git prerequisite probe: once per active tour at boot, and again on the
+  // card's "Check again" (refresh drops main's memoized PATH + git resolution,
+  // so an install made while the app was open is seen). The identity draft is
+  // seeded from whatever half git already has, never over what the user typed.
+  const probeGit = useCallback(async (refresh: boolean) => {
+    setGitChecking(true);
+    let result = GIT_PROBE_UNAVAILABLE;
+    try {
+      const res = await API.git.detect({ refresh });
+      if (res.success && res.data) result = res.data;
+    } catch {
+      /* no bridge, or the probe failed — fail open (see GIT_PROBE_UNAVAILABLE) */
+    }
+    setGitIdentity((draft) => ({
+      name: draft.name || (result.identity.name ?? ''),
+      email: draft.email || (result.identity.email ?? ''),
+    }));
+    setGitPrereq(result);
+    setGitChecking(false);
+  }, []);
+
+  useEffect(() => {
+    if (status !== 'active' || gitPrereq !== null || gitChecking) return;
+    void probeGit(false);
+  }, [status, gitPrereq, gitChecking, probeGit]);
+
+  // One event per blocked state the probe lands on, keyed on the state itself so
+  // a re-check that stays blocked does not re-fire.
+  const gitBlockedState = gitPrereq !== null && gitPrereq.state !== 'ready' ? gitPrereq.state : null;
+  useEffect(() => {
+    if (gitBlockedState === null) return;
+    trackEvent('onboarding_prerequisite_blocked', {
+      prerequisite: gitBlockedState === 'missing' ? 'git_missing' : 'git_identity',
+    });
+  }, [gitBlockedState]);
+
+  const handleGitIdentitySave = useCallback(async () => {
+    setGitChecking(true);
+    setGitError(null);
+    try {
+      const res = await API.git.setIdentity({ name: gitIdentity.name, email: gitIdentity.email });
+      if (res.success && res.data) {
+        setGitPrereq(res.data);
+      } else {
+        setGitError(res.error ?? 'Could not save your git identity.');
+      }
+    } catch (error) {
+      setGitError(error instanceof Error ? error.message : String(error));
+    }
+    setGitChecking(false);
+  }, [gitIdentity]);
+
+  const handleGitDownload = useCallback(() => {
+    if (window.electronAPI) void window.electronAPI.openExternal('https://git-scm.com/downloads');
+  }, []);
 
   // The step-1 provider probes. Re-run together on Check again; each failure
   // degrades independently so one provider never hides a usable sibling.
@@ -711,14 +790,38 @@ export function OnboardingGate(): React.JSX.Element | null {
       primary = { label: "Let's go →", disabled: false, onClick: next };
   }
 
+  // The git prerequisite card, when it is up, owns the footer primary: the
+  // tour's own primary must not be reachable (by click or ArrowRight) while a
+  // wall the user has not cleared or dismissed sits in front of the step.
+  const gitBlocked = gitPrereq !== null && gitPrereq.state !== 'ready' && !gitDismissed;
+  let gitPrimary: PrimaryAction | null = null;
+  if (gitBlocked && gitPrereq) {
+    gitPrimary =
+      gitPrereq.state === 'missing'
+        ? {
+            label: '↻ Check again',
+            disabled: gitChecking,
+            title: 'Looking for git…',
+            onClick: () => void probeGit(true),
+          }
+        : {
+            label: 'Save & continue',
+            disabled: gitChecking || gitIdentity.name.trim() === '' || gitIdentity.email.trim() === '',
+            title: 'Enter a name and email',
+            onClick: () => void handleGitIdentitySave(),
+          };
+  }
+
   // Arrow-key nav reads the live primary so ArrowRight honours step gates /
   // config persistence. The guided screens (7-8) carry their own buttons and
   // their own branch semantics, so arrows are inert there — this component is
   // still mounted for hydration/persistence, but it does not drive them.
   const primaryRef = useRef(primary);
-  primaryRef.current = primary;
+  primaryRef.current = gitPrimary ?? primary;
   const stepRef = useRef(step);
   stepRef.current = step;
+  const gitBlockedRef = useRef(gitBlocked);
+  gitBlockedRef.current = gitBlocked;
   useEffect(() => {
     if (status !== 'active') return;
     const onKey = (e: KeyboardEvent) => {
@@ -728,6 +831,7 @@ export function OnboardingGate(): React.JSX.Element | null {
         const p = primaryRef.current;
         if (!p.disabled) p.onClick();
       } else if (e.key === 'ArrowLeft') {
+        if (gitBlockedRef.current) return; // the card has no Back
         back();
       }
     };
@@ -738,6 +842,9 @@ export function OnboardingGate(): React.JSX.Element | null {
   if (!hydrated || status !== 'active') return null;
   // Steps 7-8 render inside the shell row (GuidedSetupSurface), not this portal.
   if (!ONBOARDING_MODAL_STEPS.includes(step)) return null;
+  // No-flash rule, extended: a git-less machine must not see the Welcome card
+  // for a frame before the prerequisite card replaces it.
+  if (gitPrereq === null) return null;
 
   // The steps this run does NOT show, so the dots and "STEP n / N" counters
   // describe the tour the user actually walks.
@@ -811,6 +918,37 @@ export function OnboardingGate(): React.JSX.Element | null {
         return null;
     }
   })();
+
+  if (gitBlocked && gitPrimary) {
+    return (
+      <OnboardingOverlay>
+        <OnboardingSpiralReveal step={step} />
+        <OnboardingModalCard
+          step={step}
+          maxVisitedStep={maxVisitedStep}
+          hero={false}
+          primary={gitPrimary}
+          onBack={back}
+          onSkip={() => setGitDismissed(true)}
+          onGoTo={goTo}
+          prerequisite={{
+            title: gitPrereq.state === 'missing' ? 'Git is required' : 'Tell git who you are',
+            skipLabel: gitPrereq.state === 'missing' ? 'Continue without git' : 'Skip for now',
+          }}
+        >
+          <GitPrerequisiteStep
+            result={gitPrereq}
+            checking={gitChecking}
+            identity={gitIdentity}
+            onIdentityChange={setGitIdentity}
+            error={gitError}
+            onRecheck={() => void probeGit(true)}
+            onDownload={handleGitDownload}
+          />
+        </OnboardingModalCard>
+      </OnboardingOverlay>
+    );
+  }
 
   return (
     <OnboardingOverlay>

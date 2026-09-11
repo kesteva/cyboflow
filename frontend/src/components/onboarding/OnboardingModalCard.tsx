@@ -26,6 +26,13 @@ interface OnboardingModalCardProps {
   onBack: () => void;
   onSkip: () => void;
   onGoTo: (step: number) => void;
+  /**
+   * Prerequisite chrome (the git card): a fixed title in place of the step's,
+   * no "STEP n / N" counter, dots, or Back — the card is not a tour step, it
+   * sits IN FRONT of whichever step the tour is on until the prerequisite
+   * clears — and the footer's Skip link relabelled (its handler is `onSkip`).
+   */
+  prerequisite?: { title: string; skipLabel: string };
 }
 
 /**
@@ -47,15 +54,17 @@ export function OnboardingModalCard({
   onBack,
   onSkip,
   onGoTo,
+  prerequisite,
 }: OnboardingModalCardProps): React.JSX.Element {
-  const showBack = step > 0;
+  const showBack = step > 0 && !prerequisite;
   const visible = skippedSteps ?? NO_SKIPPED;
+  const title = prerequisite?.title ?? ONBOARDING_TITLES[step];
   return (
     <div className="pointer-events-auto fixed inset-0 flex items-center justify-center p-6">
       <div
         role="dialog"
         aria-modal="true"
-        aria-label={ONBOARDING_TITLES[step]}
+        aria-label={title}
         /* max-h/max-w-full: the card's 468×512 is a PREFERRED size, not a floor.
            The app window has no minHeight, so on a short (non-fullscreen) window
            a hard 512 overflows the centered wrapper equally top and bottom — and
@@ -69,10 +78,12 @@ export function OnboardingModalCard({
         {!hero && (
           <div className="flex flex-shrink-0 items-center gap-2.5 bg-interactive px-5 py-[13px] text-text-on-interactive">
             <CyboflowMark size={18} className="flex-shrink-0 opacity-90" />
-            <span className="flex-1 text-[15px] font-bold tracking-[-.01em]">{ONBOARDING_TITLES[step]}</span>
-            <span className="text-[9px] tracking-[.14em] text-text-on-interactive/80">
-              STEP {visibleStepNumber(step, visible)} / {visibleStepTotal(visible)}
-            </span>
+            <span className="flex-1 text-[15px] font-bold tracking-[-.01em]">{title}</span>
+            {!prerequisite && (
+              <span className="text-[9px] tracking-[.14em] text-text-on-interactive/80">
+                STEP {visibleStepNumber(step, visible)} / {visibleStepTotal(visible)}
+              </span>
+            )}
           </div>
         )}
 
@@ -87,14 +98,16 @@ export function OnboardingModalCard({
             data-testid="onboarding-skip"
             className="border-none bg-transparent py-2 pl-0 pr-2 text-[10px] font-semibold uppercase tracking-[.1em] text-text-tertiary transition-colors hover:text-text-primary"
           >
-            Skip
+            {prerequisite?.skipLabel ?? 'Skip'}
           </button>
-          <OnboardingDots
-            step={step}
-            maxVisitedStep={maxVisitedStep}
-            skippedSteps={visible}
-            onGoTo={onGoTo}
-          />
+          {!prerequisite && (
+            <OnboardingDots
+              step={step}
+              maxVisitedStep={maxVisitedStep}
+              skippedSteps={visible}
+              onGoTo={onGoTo}
+            />
+          )}
           <span className="flex-1" />
           {showBack && (
             <button

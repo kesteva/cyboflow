@@ -39,6 +39,13 @@ import {
   PROVIDERS_DETECT_CHANNEL,
   type ProviderDetectionResult,
 } from '../../shared/types/onboarding';
+import {
+  GIT_DETECT_CHANNEL,
+  GIT_SET_IDENTITY_CHANNEL,
+  type GitDetectRequest,
+  type GitIdentityInput,
+  type GitPrerequisiteResult,
+} from '../../shared/types/gitPrerequisite';
 
 interface LogEntry {
   timestamp: string;
@@ -469,6 +476,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Git operations
   git: {
     detectBranch: (path: string): Promise<IPCResponse<string>> => ipcRenderer.invoke('projects:detect-branch', path),
+    // First-run onboarding — the git prerequisite (binary + commit identity).
+    detect: (request: GitDetectRequest): Promise<IPCResponse<GitPrerequisiteResult>> =>
+      ipcRenderer.invoke(GIT_DETECT_CHANNEL, request),
+    setIdentity: (input: GitIdentityInput): Promise<IPCResponse<GitPrerequisiteResult>> =>
+      ipcRenderer.invoke(GIT_SET_IDENTITY_CHANNEL, input),
   },
 
   // Folders
