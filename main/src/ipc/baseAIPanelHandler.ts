@@ -207,7 +207,7 @@ export abstract class BaseAIPanelHandler {
         const settings = databaseService.getPanelSettings(panelId);
         
         // Allow derived classes to provide defaults via override
-        const settingsWithDefaults = this.applySettingsDefaults(settings);
+        const settingsWithDefaults = this.applySettingsDefaults(settings, panelId);
         
         return { success: true, data: settingsWithDefaults };
       } catch (error) {
@@ -305,9 +305,13 @@ export abstract class BaseAIPanelHandler {
    * Apply default settings for the panel type
    * Override this in derived classes to provide panel-specific defaults
    */
-  protected applySettingsDefaults(settings: Record<string, unknown>): Record<string, unknown> {
+  protected applySettingsDefaults(
+    settings: Record<string, unknown>,
+    _panelId?: string,
+  ): Record<string, unknown> {
     // Base implementation just returns settings as-is
-    // Derived classes can override to add their defaults
+    // Derived classes can override to add their defaults (the panel id lets a
+    // derived class resolve defaults that depend on the owning session).
     return settings;
   }
 

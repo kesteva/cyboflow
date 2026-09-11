@@ -494,9 +494,11 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
 
   // Opus-only fast-mode toggle, next to the checkpoint pill. Mirrors the model
   // pill's mounting (idle quick SDK only) and is shown only while Opus is the
-  // selected model — fast mode has no effect on other models.
+  // selected model — fast mode has no effect on other models. Claude only: an
+  // OMP selection like `anthropic/claude-opus-5` also matches the Opus test,
+  // but fast mode is a Claude Code SDK option no other spawn seam threads.
   const fastModeSlot =
-    !interactive && !running && panelId && isOpusModel(modelId) ? (
+    !interactive && !running && panelId && agentProvider === 'claude' && isOpusModel(modelId) ? (
       <FastModePill panelId={panelId} fastMode={fastMode} onChange={setFastMode} report={fastModeReport} />
     ) : undefined;
 
