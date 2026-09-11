@@ -67,7 +67,10 @@ test:unit` chain — the only place the `skipIf(process.platform !== 'win32')`
 tests ever execute in CI — and `pnpm build:win`, uploading the installer as
 a workflow artifact (signed when the `AZURE_*` secrets are configured — see
 "Code signing" below — unsigned otherwise). Trigger it with
-`gh workflow run windows.yml --ref <branch>`.
+`gh workflow run windows.yml --ref <branch> [-f variant=dev]`; the `variant`
+input selects `build:win` (artifact `cyboflow-windows-x64-installer`) or
+`build:win:dev` (`…-installer-dev`). This is also how releases build the
+Windows installers — `docs/RELEASE-RUNBOOK.md` §3.
 
 `build:win` runs `node scripts/ensure-sqlite-abi.mjs electron` first (a
 no-op against the prebuild in the normal case), then the packaging preflight
@@ -181,8 +184,9 @@ same `CYBOFLOW_WIN_NPM_REBUILD=1` switch for a host that has a toolchain.
   works from a Start-Menu launch.
 - **Hook commands run through `node`** (`node "<script>"`) — a bare `.js`
   path under cmd.exe resolves via file association, which may not be node.
-- **Updater**: no Windows update feed exists, so the auto-updater reports
-  "not supported" instead of erroring on every check.
+- **Updater**: polls `updates.cyboflow.com/<variant>/latest.yml` and verifies
+  the downloaded installer's Authenticode publisher before running it — see
+  `docs/UPDATES.md` → "Windows".
 
 ## Installer configuration
 
@@ -297,9 +301,6 @@ usage, not with configuration.
   work (PowerShell capture, always full-screen — per-app scoping comes from
   peekaboo, the macOS-only screen-capture helper the verifier uses there). Native-screen verification is scheduler-gated
   to hosts with a capability probe.
-- **No Windows update feed** (see updater above). Note this is independent of
-  signing: a signed installer is still not an auto-updating one, and
-  `publish:r2` has no Windows arm yet.
 - **x64 only**; ARM64 needs its own packaging path and prebuild
   verification.
 
