@@ -66,6 +66,7 @@
  */
 import { create } from 'zustand';
 import { trpc } from '../trpc/client';
+import { useAgentThreadStore } from './agentThreadStore';
 import { CATALOG_WIDGET_SPECS } from '../../../shared/customViews/catalogSpecs';
 import { sectionOrderFor } from '../customViews/catalog';
 import {
@@ -282,6 +283,20 @@ function newInstanceId(): string {
 /** A fresh uuid for an authoring session (§7.1) — same shape as {@link newInstanceId}, named for what it identifies. */
 function newSessionId(): string {
   return crypto.randomUUID();
+}
+
+/**
+ * Drop the kickoff `contextHint` `startAuthoring` queued for `sessionId` if it
+ * is still pending on the agent thread store — once the slot is closed, a send
+ * carrying that envelope would name a session nothing listens to any more,
+ * and any draft the assistant then saved under it would be orphaned.
+ */
+function clearPendingKickoffHint(sessionId: string): void {
+  const agentThread = useAgentThreadStore.getState();
+  const hint = agentThread.pendingContextHint;
+  if (hint !== null && hint.includes(`sessionId=${sessionId}`)) {
+    agentThread.setPendingContextHint(null);
+  }
 }
 
 /** `{ settingName: declaredDefault }` for every setting a spec declares — the seed for a freshly-inserted item. */
@@ -631,6 +646,7 @@ export const useCustomViewsStore = create<CustomViewsState>((set, get) => {
             console.error('[customViewsStore] discardDraft failed:', err);
           });
       }
+      if (authoring !== null) clearPendingKickoffHint(authoring.sessionId);
       set({ draft: null, authoring: null });
     },
 
@@ -716,6 +732,7 @@ export const useCustomViewsStore = create<CustomViewsState>((set, get) => {
         .catch((err: unknown) => {
           console.error('[customViewsStore] discardDraft (authoring) failed:', err);
         });
+      clearPendingKickoffHint(authoring.sessionId);
       set((s) => {
         if (s.authoring === null) return s;
         if (s.authoring.mode === 'create' && s.draft !== null) {
@@ -726,7 +743,11 @@ export const useCustomViewsStore = create<CustomViewsState>((set, get) => {
       });
     },
 
-    finishAuthoring: () => set({ authoring: null }),
+    finishAuthoring: () => {
+      const authoring = get().authoring;
+      if (authoring !== null) clearPendingKickoffHint(authoring.sessionId);
+      set({ authoring: null });
+    },
 
     renameView: async (id, name) => {
       const state = get();

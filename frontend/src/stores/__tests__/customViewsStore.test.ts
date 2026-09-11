@@ -85,6 +85,7 @@ vi.mock('../../trpc/client', () => ({
 }));
 
 import { useCustomViewsStore } from '../customViewsStore';
+import { useAgentThreadStore } from '../agentThreadStore';
 import { QUEUE_SECTION_ORDER } from '../../customViews/catalog';
 
 function widget(partial: Partial<CustomWidget> & Pick<CustomWidget, 'id'>): CustomWidget {
@@ -479,6 +480,23 @@ describe('customViewsStore.discard', () => {
     expect(discardDraftMock).toHaveBeenCalledWith({ id: 'w-1', authoringSessionId: sessionId });
     expect(useCustomViewsStore.getState().draft).toBeNull();
     expect(useCustomViewsStore.getState().authoring).toBeNull();
+  });
+
+  it('clears the pending kickoff contextHint for the closed authoring session, leaving other hints alone', () => {
+    useCustomViewsStore.getState().enterCustomize('review-queue');
+    const sessionId = useCustomViewsStore.getState().openAuthoring({ surface: 'review-queue', mode: 'create', at: 0 });
+    useAgentThreadStore.getState().setPendingContextHint(`[custom-widget-session]\nsessionId=${sessionId} surface=review-queue`);
+
+    useCustomViewsStore.getState().discard();
+    expect(useAgentThreadStore.getState().pendingContextHint).toBeNull();
+
+    // A hint for some OTHER session is not this slot's to clear.
+    useCustomViewsStore.getState().enterCustomize('review-queue');
+    useCustomViewsStore.getState().openAuthoring({ surface: 'review-queue', mode: 'create', at: 0 });
+    useAgentThreadStore.getState().setPendingContextHint('[custom-widget-session]\nsessionId=someone-else');
+    useCustomViewsStore.getState().finishAuthoring();
+    expect(useAgentThreadStore.getState().pendingContextHint).toBe('[custom-widget-session]\nsessionId=someone-else');
+    useAgentThreadStore.getState().setPendingContextHint(null);
   });
 
   it('does NOT call discardDraft once the draft was published', () => {
