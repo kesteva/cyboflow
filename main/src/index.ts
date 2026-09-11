@@ -2069,7 +2069,13 @@ async function initializeServices(): Promise<boolean> {
   // block), and the runs-router lane dep-bag below. The cyboflow_update_sprint_task
   // MCP handler reaches it via getInstance(). Logger is REQUIRED here (CODE-PATTERNS.md
   // optional-logger rule) — omitting it silently no-ops all lane diagnostics.
-  const sprintLaneStore = SprintLaneStore.initialize(cyboflowDb, cyboflowLogger);
+  // `getSprintMaxTasks` (Item 7) wires createForRun's OWN batch-cap enforcement
+  // to the same live per-substrate override every other cap check already
+  // reads (runs.start, experiments.start, the MCP backstop) — never omit it,
+  // or the store's cap silently floors to the built-in defaults.
+  const sprintLaneStore = SprintLaneStore.initialize(cyboflowDb, cyboflowLogger, {
+    getSprintMaxTasks: () => configManager.getSprintMaxTasks(),
+  });
 
   // The human-gate run-pause manager (P4) pairs with the ReviewItemRouter
   // initialized above (the tracker sync loop needs that one at construction, so

@@ -3491,6 +3491,24 @@ export class McpQueryHandler {
         });
         return;
       }
+      // createForRun's OWN batch-cap enforcement (Item 7) — the handler's step-5
+      // pre-check above already returns this same 'ship_batch_too_large' code for
+      // the common case, so this branch only fires when something changed the
+      // eligible count BETWEEN that pre-check and the transaction (e.g. a
+      // concurrent eligibility change) and the store's cap is what actually
+      // caught it. Same wire code either way — callers see ONE signal.
+      if (err.code === 'batch_too_large') {
+        this.logger?.warn('[Cyboflow MCP Query] create-sprint-batch: batch too large', {
+          detail: err.message,
+        });
+        this.writeResponse(client, {
+          type: 'mcp-query-response',
+          requestId,
+          ok: false,
+          error: 'ship_batch_too_large',
+        });
+        return;
+      }
       this.writeResponse(client, {
         type: 'mcp-query-response',
         requestId,

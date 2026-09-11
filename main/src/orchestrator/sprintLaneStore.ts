@@ -48,6 +48,8 @@ import {
   SPRINT_BATCH_CAP,
   SPRINT_LANE_STEP_IDS,
   TERMINAL_BATCH_STATUSES,
+  resolveSprintMaxTasks,
+  type SprintMaxTasksOverrides,
 } from '../../../shared/types/sprintBatch';
 import { resolveRunFanOutInner } from './laneChainResolution';
 import { isAgentDispatchToolName } from '../../../shared/types/agentIdentity';
@@ -146,7 +148,7 @@ export function sprintLaneChannel(runId: string): string {
 // Errors
 // ---------------------------------------------------------------------------
 
-export type SprintLaneErrorCode = 'lane_not_found' | 'bad_request' | 'no_eligible_tasks';
+export type SprintLaneErrorCode = 'lane_not_found' | 'bad_request' | 'no_eligible_tasks' | 'batch_too_large';
 
 /** Discriminated error for all lane-write rejections. */
 export class SprintLaneError extends Error {
@@ -243,6 +245,22 @@ function parseLaneAttemptFromEnqueueKey(enqueueKey: string | null): number | nul
 // SprintLaneStore
 // ---------------------------------------------------------------------------
 
+/**
+ * Optional collaborators injected at initialize time. `getSprintMaxTasks`
+ * reads the LIVE per-substrate override (ConfigManager.getSprintMaxTasks) so
+ * createForRun's cap enforcement (Item 7) never drifts from the picker /
+ * runs.start / experiments.start / MCP-backstop checks that already call
+ * `resolveSprintMaxTasks` over the same live override — this is the FIFTH
+ * (and truly final) enforcement point, inside the write chokepoint itself, so
+ * no other caller of createForRun can ever bypass the cap. Omitted in tests
+ * and any caller that hasn't wired ConfigManager — resolveSprintMaxTasks
+ * falls back to the built-in per-substrate defaults either way, so the cap is
+ * NEVER optional, only its user-configured override is.
+ */
+export interface SprintLaneStoreDeps {
+  getSprintMaxTasks?: () => SprintMaxTasksOverrides;
+}
+
 export class SprintLaneStore {
   private static instance: SprintLaneStore | null = null;
 
@@ -269,6 +287,7 @@ export class SprintLaneStore {
   constructor(
     private readonly db: DatabaseLike,
     private readonly logger?: LoggerLike,
+    private readonly deps?: SprintLaneStoreDeps,
   ) {}
 
   /**
@@ -306,8 +325,8 @@ export class SprintLaneStore {
   // Lifecycle (singleton, mirroring TaskChangeRouter)
   // --------------------------------------------------------------------------
 
-  static initialize(db: DatabaseLike, logger?: LoggerLike): SprintLaneStore {
-    SprintLaneStore.instance = new SprintLaneStore(db, logger);
+  static initialize(db: DatabaseLike, logger?: LoggerLike, deps?: SprintLaneStoreDeps): SprintLaneStore {
+    SprintLaneStore.instance = new SprintLaneStore(db, logger, deps);
     return SprintLaneStore.instance;
   }
 
@@ -343,7 +362,11 @@ export class SprintLaneStore {
    * with concurrency = SPRINT_BATCH_CAP and integration_branch NULL (all work
    * happens in the SHARED session worktree — there is no integration branch).
    * Duplicate task ids are collapsed (UNIQUE(batch_id, task_id)); an empty
-   * selection is rejected with 'bad_request'.
+   * selection is rejected with 'bad_request'; an ELIGIBLE selection larger
+   * than the live per-substrate cap (resolveSprintMaxTasks, layered over the
+   * `deps.getSprintMaxTasks` override passed at initialize time) is rejected
+   * with 'batch_too_large' — the store's OWN enforcement, so no caller can
+   * seed an over-cap batch by skipping its own pre-check (Item 7).
    */
   createForRun(projectId: number, substrate: CliSubstrate, taskIds: string[]): { batchId: string } {
     const uniqueTaskIds = [...new Set(taskIds)];
@@ -375,6 +398,30 @@ export class SprintLaneStore {
         candidates: uniqueTaskIds.length,
       });
       throw new SprintLaneError('no_eligible_tasks', reason);
+    }
+
+    // Batch cap (Item 7): the store OWNS this check now, not just its callers.
+    // Every existing pre-check (the batch picker's client-side disable,
+    // runs.start's 400, experiments.start's 400, the MCP
+    // cyboflow_create_sprint_batch backstop) calls resolveSprintMaxTasks over
+    // the SAME live override BEFORE reaching here — those exist purely for a
+    // fast, friendly failure. This is the one check that can never be
+    // bypassed by a caller that forgets its own pre-check, so it runs against
+    // the FINAL eligible count (post-filter), not the raw selection size —
+    // an over-selection that eligibility filtering trims back under the cap
+    // must not be rejected for a size it no longer has.
+    const maxTasks = resolveSprintMaxTasks(this.deps?.getSprintMaxTasks?.(), substrate);
+    if (eligibleTaskIds.length > maxTasks) {
+      const reason =
+        `createForRun: ${eligibleTaskIds.length} eligible task(s) exceed the ${substrate} ` +
+        `batch cap of ${maxTasks}`;
+      this.logger?.warn('[SprintLaneStore] eligible selection exceeds the batch cap', {
+        projectId,
+        substrate,
+        eligible: eligibleTaskIds.length,
+        maxTasks,
+      });
+      throw new SprintLaneError('batch_too_large', reason);
     }
 
     const batchId = randomUUID().replace(/-/g, '');

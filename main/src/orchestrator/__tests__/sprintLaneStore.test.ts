@@ -224,6 +224,66 @@ describe('SprintLaneStore', () => {
         expect((err as SprintLaneError).code).toBe('bad_request');
       }
     });
+
+    // -------------------------------------------------------------------------
+    // Batch cap (Item 7) — the store's OWN enforcement, independent of every
+    // pre-check its callers already run (runs.start, experiments.start, the
+    // MCP backstop). Default per-substrate caps: sdk=15, interactive=10
+    // (SPRINT_BATCH_MAX_TASKS_DEFAULTS).
+    // -------------------------------------------------------------------------
+
+    it('throws batch_too_large when the ELIGIBLE selection exceeds the default sdk cap (15)', () => {
+      const taskIds = Array.from({ length: 16 }, (_, i) => `tsk_${i}`);
+      expect(() => store.createForRun(1, 'sdk', taskIds)).toThrowError(SprintLaneError);
+      try {
+        store.createForRun(1, 'sdk', taskIds);
+      } catch (err) {
+        expect((err as SprintLaneError).code).toBe('batch_too_large');
+      }
+    });
+
+    it('passes at exactly the default sdk cap (15)', () => {
+      const taskIds = Array.from({ length: 15 }, (_, i) => `tsk_${i}`);
+      const { batchId } = store.createForRun(1, 'sdk', taskIds);
+      const count = db
+        .prepare('SELECT COUNT(*) AS n FROM sprint_batch_tasks WHERE batch_id = ?')
+        .get(batchId) as { n: number };
+      expect(count.n).toBe(15);
+    });
+
+    it('throws batch_too_large when the ELIGIBLE selection exceeds the default interactive cap (10)', () => {
+      const taskIds = Array.from({ length: 11 }, (_, i) => `tsk_${i}`);
+      expect(() => store.createForRun(1, 'interactive', taskIds)).toThrowError(SprintLaneError);
+    });
+
+    it('honours a getSprintMaxTasks override passed at initialize time', () => {
+      // Re-initialize the singleton (same db) with a tighter sdk cap of 2.
+      store = SprintLaneStore.initialize(dbAdapter(db), undefined, {
+        getSprintMaxTasks: () => ({ sdk: 2 }),
+      });
+
+      expect(() => store.createForRun(1, 'sdk', ['tsk_a', 'tsk_b', 'tsk_c'])).toThrowError(SprintLaneError);
+      try {
+        store.createForRun(1, 'sdk', ['tsk_a', 'tsk_b', 'tsk_c']);
+      } catch (err) {
+        expect((err as SprintLaneError).code).toBe('batch_too_large');
+      }
+
+      // At the overridden cap (2) it still passes.
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_x', 'tsk_y']);
+      const count = db
+        .prepare('SELECT COUNT(*) AS n FROM sprint_batch_tasks WHERE batch_id = ?')
+        .get(batchId) as { n: number };
+      expect(count.n).toBe(2);
+    });
+
+    it('with no getter, falls back to the built-in default rather than treating the cap as optional', () => {
+      // No deps passed at all (mirrors most of this file's `store`) — the cap
+      // must still apply, never silently disable.
+      const bareStore = SprintLaneStore.initialize(dbAdapter(db));
+      const taskIds = Array.from({ length: 16 }, (_, i) => `tsk_${i}`);
+      expect(() => bareStore.createForRun(1, 'sdk', taskIds)).toThrowError(SprintLaneError);
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -1427,6 +1487,23 @@ describe('SprintLaneStore', () => {
       expect(laneB?.currentStepId).toBe('implement');
     });
 
+    it('also re-queues a blocked lane (Item 6: blocked lanes never started and must rejoin a retry)', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a', 'tsk_b', 'tsk_c']);
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'failed', currentStepId: 'implement' });
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_b', status: 'blocked' });
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_c', status: 'running', currentStepId: 'implement' });
+      seedOwningRun(batchId);
+
+      const count = store.resetFailedLanes(batchId);
+
+      expect(count).toBe(2);
+      const lanes = store.listLanes(batchId);
+      expect(lanes.find((l) => l.taskId === 'tsk_a')?.status).toBe('queued');
+      expect(lanes.find((l) => l.taskId === 'tsk_b')?.status).toBe('queued');
+      // Untouched — 'tsk_c' was never failed/blocked.
+      expect(lanes.find((l) => l.taskId === 'tsk_c')?.status).toBe('running');
+    });
+
     it('emits a SprintLaneChangedEvent per reset lane on the owning run channel', () => {
       const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
       store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'failed', currentStepId: 'implement' });
@@ -1486,23 +1563,6 @@ describe('SprintLaneStore', () => {
       seedOwningRun(batchId);
 
       expect(store.reviveLane(batchId, 'tsk_a')).toBe(1);
-
-    it('also re-queues a blocked lane (Item 6: blocked lanes never started and must rejoin a retry)', () => {
-      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a', 'tsk_b', 'tsk_c']);
-      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'failed', currentStepId: 'implement' });
-      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_b', status: 'blocked' });
-      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_c', status: 'running', currentStepId: 'implement' });
-      seedOwningRun(batchId);
-
-      const count = store.resetFailedLanes(batchId);
-
-      expect(count).toBe(2);
-      const lanes = store.listLanes(batchId);
-      expect(lanes.find((l) => l.taskId === 'tsk_a')?.status).toBe('queued');
-      expect(lanes.find((l) => l.taskId === 'tsk_b')?.status).toBe('queued');
-      // Untouched — 'tsk_c' was never failed/blocked.
-      expect(lanes.find((l) => l.taskId === 'tsk_c')?.status).toBe('running');
-    });
 
       const lane = store.listLanes(batchId)[0];
       expect(lane.status).toBe('running');
