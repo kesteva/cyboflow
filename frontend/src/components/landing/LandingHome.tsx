@@ -73,6 +73,8 @@ import { useTaskRunLauncher } from '../Backlog/useTaskRunLauncher';
 import { ViewSurface } from '../../customViews/ViewSurface';
 import { scrollToSectionOrTop } from '../../customViews/scrollToSectionOrTop';
 import { useSectionPlaced } from '../../customViews/useSectionPlaced';
+import { ViewHeaderControls } from '../../customViews/edit/ViewHeaderControls';
+import { DraftBanner } from '../../customViews/edit/DraftBanner';
 import { ProviderUsageCards } from '../ReviewQueue/ProviderUsageCards';
 import { SessionMergeDialog } from '../cyboflow/SessionMergeDialog';
 import { SessionDismissDialog } from '../cyboflow/SessionDismissDialog';
@@ -808,8 +810,12 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
 
   return page(
     <>
-      {/* S5 fills `controls` with the view switcher + Customize. */}
-      <QueueHeader waitingCount={waitingCount} state={state} />
+      <QueueHeader
+        waitingCount={waitingCount}
+        state={state}
+        controls={<ViewHeaderControls surface="review-queue" />}
+      />
+      <DraftBanner surface="review-queue" />
       <ViewSurface
         surface="review-queue"
         sections={sections}

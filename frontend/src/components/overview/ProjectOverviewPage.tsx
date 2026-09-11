@@ -54,6 +54,8 @@ import { useQuickSessionsStore } from '../../stores/quickSessionsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { trpc } from '../../trpc/client';
 import { ViewSurface } from '../../customViews/ViewSurface';
+import { ViewHeaderControls } from '../../customViews/edit/ViewHeaderControls';
+import { DraftBanner } from '../../customViews/edit/DraftBanner';
 import type { BacklogTaskItem, BoardStage } from '../../../../shared/types/tasks';
 import type { WorkflowRunStats } from '../../../../shared/types/insights';
 import type { VerifyProjectSetupRow } from '../../../../shared/types/visualVerification';
@@ -327,17 +329,22 @@ export function ProjectOverviewPage({ projectId }: ProjectOverviewPageProps): Re
     >
       <div className="mx-auto flex w-full max-w-[1120px] flex-col gap-7 px-11 pb-12 pt-9">
         {/* Page header — git-branch mark + project name. No eyebrow, no counts
-            line: the sections carry their own counts. S5 adds the view switcher
-            + Customize cluster to the right of the title. */}
-        <header className="flex items-center gap-2.5">
-          <GitBranch className="h-[18px] w-[18px] shrink-0 text-text-secondary" strokeWidth={1.8} />
-          <h1
-            className="truncate font-bold tracking-tight text-text-primary"
-            style={{ fontSize: '24px' }}
-          >
-            {projectName ?? 'Project'}
-          </h1>
+            line: the sections carry their own counts. The view switcher +
+            Customize cluster sits to the right of the title. */}
+        <header className="flex items-center justify-between gap-2.5">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <GitBranch className="h-[18px] w-[18px] shrink-0 text-text-secondary" strokeWidth={1.8} />
+            <h1
+              className="truncate font-bold tracking-tight text-text-primary"
+              style={{ fontSize: '24px' }}
+            >
+              {projectName ?? 'Project'}
+            </h1>
+          </div>
+          <ViewHeaderControls surface="project-overview" />
         </header>
+
+        <DraftBanner surface="project-overview" />
 
         <ViewSurface
           surface="project-overview"

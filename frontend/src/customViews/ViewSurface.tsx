@@ -45,14 +45,34 @@
  * id on the overview page, or a catalog id this build dropped) renders the
  * "not available" chip rather than vanishing, so the user can see why their
  * view looks short. Everything else mounts a `WidgetHost`.
+ *
+ * ## Customize mode (S5)
+ *
+ * Customize mode renders the OPEN DRAFT (`customViewsStore`'s `draft`), never
+ * the saved active view — the two can differ the instant the user makes an
+ * edit. Every item is wrapped in `EditableBlock` (grip / eye / gear / trash),
+ * `InsertBar`s sit between items and at both ends, and `hidden` items render
+ * COLLAPSED rather than vanishing (there has to be something to click "eye"
+ * back on). `ViewIdentityContext.editing` flips true, which disables every
+ * widget's action controls regardless of `viewId`/`viewRevision` — see
+ * `viewContext.ts`'s `actionsEnabled`. Page-state chrome (`afterSection`) is
+ * NOT rendered while editing: those wells answer the page's live state, not
+ * the layout being edited, and re-deriving which ones would apply to a
+ * not-yet-saved layout is not worth the complexity for a transient mode.
+ * Per-item live payloads are collected here (via `WidgetHost`'s `onPayload`)
+ * and handed to each `EditableBlock` so its settings popover's Reads row can
+ * show real source names + warnings instead of only the catalog's static
+ * description.
  */
-import React, { Fragment, useEffect, useMemo, type ReactNode } from 'react';
-import type { CustomViewSurface, LayoutItem } from '../../../shared/types/customViews';
+import React, { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import type { CustomViewSurface, LayoutItem, WidgetDataPayload } from '../../../shared/types/customViews';
 import { catalogEntry, sectionOrderFor } from './catalog';
-import { useActiveView, useCustomViewsStore, useSurfaceLoaded } from '../stores/customViewsStore';
+import { useCustomViewsStore, useActiveView, useDraft, useSurfaceLoaded } from '../stores/customViewsStore';
 import { ViewIdentityContext, type ViewIdentity } from './viewContext';
 import { WidgetFrame, UnavailableBody } from './WidgetFrame';
 import { WidgetHost } from './WidgetHost';
+import { EditableBlock } from './edit/EditableBlock';
+import { InsertBar } from './edit/InsertBar';
 
 export interface ViewSurfaceChrome {
   /** Page chrome rendered once, before every section. */
@@ -88,23 +108,37 @@ export function ViewSurface({
 
   const activeView = useActiveView(surface);
   const loaded = useSurfaceLoaded(surface);
+  const draft = useDraft(surface);
   const order = sectionOrderFor(surface);
+  const editing = draft !== null;
 
   const identity: ViewIdentity = useMemo(
     () => ({
-      viewId: activeView?.id ?? null,
-      viewRevision: activeView?.revision ?? null,
-      editing: false, // S5 flips this in customize mode.
+      // Editing has no legitimate action identity of its own regardless of
+      // which view it started from — see `viewContext.ts`'s `actionsEnabled`.
+      viewId: editing ? null : (activeView?.id ?? null),
+      viewRevision: editing ? null : (activeView?.revision ?? null),
+      editing,
     }),
-    [activeView],
+    [editing, activeView],
   );
 
-  // Not loaded yet, Default selected, or the active view turned out corrupt →
-  // the page as it has always been.
-  const items = loaded && activeView !== null ? activeView.layout.items : null;
+  // Per-instance latest payload, fed by each WidgetHost's `onPayload` while
+  // editing — S5's settings popover reads it for the Reads row. Never
+  // populated outside customize mode; nothing reads it there.
+  const [payloadByInstance, setPayloadByInstance] = useState<Record<string, WidgetDataPayload | null>>({});
+  const handlePayload = useCallback((instanceId: string, payload: WidgetDataPayload | null): void => {
+    setPayloadByInstance((prev) => (prev[instanceId] === payload ? prev : { ...prev, [instanceId]: payload }));
+  }, []);
 
-  const body =
-    items === null
+  // Not loaded yet, Default selected, or the active view turned out corrupt →
+  // the page as it has always been. Editing always wins: the draft is what
+  // customize mode edits, whatever the saved active view says.
+  const items = editing ? draft.layout.items : loaded && activeView !== null ? activeView.layout.items : null;
+
+  const body = editing
+    ? renderEditing(items as LayoutItem[], sections, context, chrome, surface, payloadByInstance, handlePayload)
+    : items === null
       ? renderDefault(order, sections, chrome)
       : renderCustom(items, order, sections, context, chrome);
 
@@ -216,5 +250,61 @@ function unavailable(item: LayoutItem, title: string): React.JSX.Element {
     <WidgetFrame title={item.title ?? title} testId={`widget-frame-${item.instanceId}`}>
       <UnavailableBody reason="Not available on this page" />
     </WidgetFrame>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Customize mode
+// ---------------------------------------------------------------------------
+
+function renderEditing(
+  items: LayoutItem[],
+  sections: Record<string, ReactNode | null>,
+  context: { projectId: number | null },
+  chrome: ViewSurfaceChrome | undefined,
+  surface: CustomViewSurface,
+  payloadByInstance: Record<string, WidgetDataPayload | null>,
+  onPayload: (instanceId: string, payload: WidgetDataPayload | null) => void,
+): React.JSX.Element {
+  return (
+    <>
+      {chrome?.afterHeader}
+      <InsertBar surface={surface} at={0} />
+      {items.map((item, index) => (
+        <Fragment key={item.instanceId}>
+          <EditableBlock item={item} index={index} total={items.length} payload={payloadByInstance[item.instanceId] ?? null}>
+            {item.hidden === true ? null : renderEditingItemBody(item, sections, context, onPayload)}
+          </EditableBlock>
+          <InsertBar surface={surface} at={index + 1} />
+        </Fragment>
+      ))}
+    </>
+  );
+}
+
+function renderEditingItemBody(
+  item: LayoutItem,
+  sections: Record<string, ReactNode | null>,
+  context: { projectId: number | null },
+  onPayload: (instanceId: string, payload: WidgetDataPayload | null) => void,
+): ReactNode {
+  if (item.widget.type === 'catalog') {
+    const id = item.widget.catalogId;
+    const entry = catalogEntry(id);
+    if (entry !== null && entry.spec !== undefined) {
+      return (
+        <WidgetHost
+          item={item}
+          context={context}
+          editing
+          onPayload={(payload) => onPayload(item.instanceId, payload)}
+        />
+      );
+    }
+    if (declares(sections, id)) return sections[id];
+    return unavailable(item, entry?.title ?? id);
+  }
+  return (
+    <WidgetHost item={item} context={context} editing onPayload={(payload) => onPayload(item.instanceId, payload)} />
   );
 }

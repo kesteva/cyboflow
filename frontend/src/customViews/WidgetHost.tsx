@@ -70,6 +70,15 @@ export interface WidgetHostProps {
   editing?: boolean;
   /** Render the widget's DRAFT document (tier 3, authoring slot only). */
   draft?: boolean;
+  /**
+   * Reported on every payload change (including back to `null` on unmount's
+   * final generation bump never firing this — only real fetches do). S5's
+   * `WidgetSettingsPopover` reads it through `ViewSurface`'s per-instance map
+   * for the Reads row's live source names + warnings — the host is the only
+   * place that ever sees a payload, so anything that wants to show the same
+   * data has to be told about it rather than re-fetching it.
+   */
+  onPayload?: (payload: WidgetDataPayload | null) => void;
 }
 
 /** WidgetHost — see {@link WidgetHostProps}. */
@@ -79,6 +88,7 @@ export function WidgetHost({
   context,
   editing = false,
   draft = false,
+  onPayload,
 }: WidgetHostProps): React.JSX.Element {
   const resolveWidgetSpec = useCustomViewsStore((s) => s.resolveWidgetSpec);
   const widgets = useCustomViewsStore((s) => s.widgets);
@@ -87,6 +97,10 @@ export function WidgetHost({
   const [payload, setPayload] = useState<WidgetDataPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(spec !== null);
+
+  useEffect(() => {
+    onPayload?.(payload);
+  }, [onPayload, payload]);
 
   const refreshSec = clampRefresh(item.refreshSec ?? spec?.refreshSec);
   const settingsKey = JSON.stringify(item.settings);

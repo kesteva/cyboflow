@@ -43,16 +43,38 @@
  * empty, which `ViewSurface` renders as the Default view — the current page.
  * That is the correct failure mode: customization is additive, so losing it
  * must cost nothing.
+ *
+ * ## S5 — the draft (customize mode)
+ *
+ * `draft` is the ONLY thing customize-mode editing touches; the saved
+ * `viewsBySurface` entry is untouched until `save` succeeds. `enterCustomize`
+ * seeds the draft from the active view's layout when one is active, or — when
+ * Default is active (including "not loaded yet" and a corrupt active view) —
+ * from the canonical catalog section order, so customizing from Default starts
+ * from exactly what the user is already looking at. Every editing action
+ * (`moveItem` / `toggleHidden` / `updateItemSettings` / `removeItem` /
+ * `insertItem`) is a pure `draft.layout.items` transform and a no-op when
+ * there is no draft for anything to apply to.
+ *
+ * `save` never throws to its caller: on failure (a CAS `concurrency` race,
+ * `name_taken`, or anything else) it records the code on `draft.saveError` and
+ * KEEPS the draft, so the customize-mode UI stays exactly where the user left
+ * it with the reason visible — see `edit/SaveDiscardControls.tsx`. Only a
+ * successful save or an explicit `discard()` clears `draft`.
  */
 import { create } from 'zustand';
 import { trpc } from '../trpc/client';
 import { CATALOG_WIDGET_SPECS } from '../../../shared/customViews/catalogSpecs';
+import { sectionOrderFor } from '../customViews/catalog';
 import {
   CUSTOM_VIEW_SURFACES,
   DEFAULT_VIEW_ID,
   type CustomView,
   type CustomViewSurface,
   type CustomWidget,
+  type LayoutItem,
+  type Scalar,
+  type ViewLayout,
   type WidgetRef,
   type WidgetSpec,
 } from '../../../shared/types/customViews';
@@ -99,6 +121,30 @@ export interface AuthoringSlot {
   widgetId: string | null;
 }
 
+/**
+ * Customize mode's editable copy of one surface's layout (§5.5). `baseViewId`
+ * / `baseRevision` are `null` when customizing started from Default — there is
+ * no existing view to CAS-update, so `save({mode:'update'})` is not a valid
+ * call against a `null` `baseViewId` (the UI routes that case to
+ * `mode:'new'` instead; see `edit/SaveDiscardControls.tsx`).
+ */
+export interface CustomViewsDraft {
+  surface: CustomViewSurface;
+  layout: ViewLayout;
+  baseViewId: string | null;
+  baseRevision: number | null;
+  dirty: boolean;
+  /** The failed save's error code (`'concurrency'`, `'name_taken'`, ...), or `null`. Cleared on the next save attempt. */
+  saveError: string | null;
+}
+
+/** `updateItemSettings`'s patch. `null` on `title`/`refreshSec` clears the override. */
+export interface DraftItemPatch {
+  settings?: Record<string, Scalar>;
+  title?: string | null;
+  refreshSec?: number | null;
+}
+
 type BySurface<T> = Record<CustomViewSurface, T>;
 
 export interface CustomViewsState {
@@ -109,6 +155,8 @@ export interface CustomViewsState {
   loadedSurfaces: BySurface<boolean>;
   /** S5/S6 fill this; always `null` in S4. */
   authoring: AuthoringSlot | null;
+  /** Customize mode's working copy for ONE surface at a time; `null` outside customize mode. */
+  draft: CustomViewsDraft | null;
 
   /** Wire one surface. Returns an idempotent release; call it on unmount. */
   init: (surface: CustomViewSurface) => () => void;
@@ -118,6 +166,42 @@ export interface CustomViewsState {
   refreshWidgets: () => Promise<void>;
   /** The spec a layout ref resolves to, or `null` (unknown id, or draft-only). */
   resolveWidgetSpec: (ref: WidgetRef) => WidgetSpec | null;
+
+  /**
+   * Enter customize mode for `surface`: seed `draft` from the active view's
+   * layout, or — Default active, not loaded yet, or the active view is
+   * corrupt — from the canonical catalog section order (fresh `instanceId`s,
+   * empty settings). Replaces any existing draft (for this or another
+   * surface); customize mode is single-surface by design.
+   */
+  enterCustomize: (surface: CustomViewSurface) => void;
+  /** Reorder the draft's items. No-op without a draft or out-of-range indices. */
+  moveItem: (from: number, to: number) => void;
+  /** Flip one item's `hidden` flag in the draft. */
+  toggleHidden: (instanceId: string) => void;
+  /** Merge `patch` into one draft item — settings merge, `title`/`refreshSec` set-or-clear. */
+  updateItemSettings: (instanceId: string, patch: DraftItemPatch) => void;
+  /** Drop one item from the draft. */
+  removeItem: (instanceId: string) => void;
+  /** Insert a new layout item for `ref` at index `at`, settings seeded from its spec's declared defaults. */
+  insertItem: (at: number, ref: WidgetRef) => void;
+  /**
+   * Persist the draft. `mode:'update'` CAS-updates `draft.baseViewId` (a
+   * `null` `baseViewId` is a caller error — there is nothing to update);
+   * `mode:'new'` creates a view named `name`. On success the views list is
+   * refreshed, the view is activated when `setActive` is true, and the draft
+   * is cleared. On failure the draft is KEPT with `saveError` set to the
+   * server's error code — this call never rejects.
+   */
+  save: (input: { mode: 'update' | 'new'; name: string; setActive: boolean }) => Promise<void>;
+  /** Drop the draft without saving (and any pending authoring draft widget it owns). */
+  discard: () => void;
+  /** Rename a SAVED view (outside the draft) by id — looks up its current revision itself. */
+  renameView: (id: string, name: string) => Promise<{ ok: true } | { ok: false; error: string }>;
+  /** Delete a SAVED view by id; clears the active pref when it pointed here (server-side). */
+  deleteView: (id: string) => Promise<{ ok: true } | { ok: false; error: string }>;
+  /** True while `surface` has an open draft. */
+  isCustomizing: (surface: CustomViewSurface) => boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +212,22 @@ function bySurface<T>(value: () => T): BySurface<T> {
   const out = {} as BySurface<T>;
   for (const surface of CUSTOM_VIEW_SURFACES) out[surface] = value();
   return out;
+}
+
+/** A fresh uuid — `crypto.randomUUID()` directly would work too; wrapped so tests can spy on it. */
+function newInstanceId(): string {
+  return crypto.randomUUID();
+}
+
+/** `{ settingName: declaredDefault }` for every setting a spec declares — the seed for a freshly-inserted item. */
+function defaultSettingsFor(spec: WidgetSpec | null): Record<string, Scalar> {
+  if (spec === null || spec.settings === undefined) return {};
+  return Object.fromEntries(spec.settings.map((field) => [field.name, field.default]));
+}
+
+/** An error's message, else its string form — the convention every other call site in this module follows. */
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 // ---------------------------------------------------------------------------
@@ -187,12 +287,37 @@ export const useCustomViewsStore = create<CustomViewsState>((set, get) => {
     }));
   }
 
+  /**
+   * Re-read one surface's views + active id after a direct mutation (save /
+   * rename / delete) — a lighter sibling of `seed` that never touches
+   * `widgets` and is not gated by the init/subscription race's generation
+   * counter, because it runs in response to a user action that already
+   * happened, not a mount race.
+   */
+  async function refreshViewsAndActive(surface: CustomViewSurface): Promise<void> {
+    const [views, active] = await Promise.all([
+      trpc.cyboflow.customViews.listViews.query({ surface }).catch((err: unknown) => {
+        console.error('[customViewsStore] listViews (refresh) failed:', err);
+        return get().viewsBySurface[surface];
+      }),
+      trpc.cyboflow.customViews.getActiveView.query({ surface }).catch((err: unknown) => {
+        console.error('[customViewsStore] getActiveView (refresh) failed:', err);
+        return { viewId: get().activeViewIdBySurface[surface] };
+      }),
+    ]);
+    set((s) => ({
+      viewsBySurface: { ...s.viewsBySurface, [surface]: views as ViewEntry[] },
+      activeViewIdBySurface: { ...s.activeViewIdBySurface, [surface]: active.viewId },
+    }));
+  }
+
   return {
     viewsBySurface: bySurface<ViewEntry[]>(() => []),
     activeViewIdBySurface: bySurface<string>(() => DEFAULT_VIEW_ID),
     widgets: [],
     loadedSurfaces: bySurface<boolean>(() => false),
     authoring: null,
+    draft: null,
 
     init: (surface) => {
       // A second consumer of a live wiring just takes a reference.
@@ -274,6 +399,217 @@ export const useCustomViewsStore = create<CustomViewsState>((set, get) => {
       const widget = get().widgets.find((w) => w.id === ref.widgetId);
       return widget?.publishedSpec ?? null;
     },
+
+    // -------------------------------------------------------------------
+    // Customize mode (S5)
+    // -------------------------------------------------------------------
+
+    enterCustomize: (surface) => {
+      const state = get();
+      const activeId = state.activeViewIdBySurface[surface];
+      const entry = state.viewsBySurface[surface].find((v) => v.id === activeId);
+      const usable = activeId !== DEFAULT_VIEW_ID && entry !== undefined && isUsableView(entry) ? entry : null;
+
+      let items: LayoutItem[];
+      let baseViewId: string | null;
+      let baseRevision: number | null;
+      if (usable !== null) {
+        // Deep-enough clone: the draft must never alias the saved view's
+        // arrays/objects, or an in-place edit would mutate `viewsBySurface`
+        // before a save ever happens.
+        items = usable.layout.items.map((it) => ({ ...it, settings: { ...it.settings } }));
+        baseViewId = usable.id;
+        baseRevision = usable.revision;
+      } else {
+        items = sectionOrderFor(surface).map((catalogId) => ({
+          instanceId: newInstanceId(),
+          widget: { type: 'catalog', catalogId } as const,
+          settings: {},
+        }));
+        baseViewId = null;
+        baseRevision = null;
+      }
+
+      set({
+        draft: {
+          surface,
+          layout: { version: 1, items },
+          baseViewId,
+          baseRevision,
+          dirty: false,
+          saveError: null,
+        },
+      });
+    },
+
+    moveItem: (from, to) => {
+      set((s) => {
+        if (s.draft === null) return s;
+        const items = s.draft.layout.items;
+        if (from < 0 || from >= items.length || to < 0 || to >= items.length || from === to) return s;
+        const next = [...items];
+        const [moved] = next.splice(from, 1);
+        next.splice(to, 0, moved);
+        return { draft: { ...s.draft, layout: { ...s.draft.layout, items: next }, dirty: true } };
+      });
+    },
+
+    toggleHidden: (instanceId) => {
+      set((s) => {
+        if (s.draft === null) return s;
+        const items = s.draft.layout.items.map((it) =>
+          it.instanceId === instanceId ? { ...it, hidden: it.hidden !== true } : it,
+        );
+        return { draft: { ...s.draft, layout: { ...s.draft.layout, items }, dirty: true } };
+      });
+    },
+
+    updateItemSettings: (instanceId, patch) => {
+      set((s) => {
+        if (s.draft === null) return s;
+        const items = s.draft.layout.items.map((it) => {
+          if (it.instanceId !== instanceId) return it;
+          const next: LayoutItem = { ...it };
+          if (patch.settings !== undefined) next.settings = { ...next.settings, ...patch.settings };
+          if ('title' in patch) {
+            if (patch.title === null || patch.title === undefined || patch.title.length === 0) delete next.title;
+            else next.title = patch.title;
+          }
+          if ('refreshSec' in patch) {
+            if (patch.refreshSec === null || patch.refreshSec === undefined) delete next.refreshSec;
+            else next.refreshSec = patch.refreshSec;
+          }
+          return next;
+        });
+        return { draft: { ...s.draft, layout: { ...s.draft.layout, items }, dirty: true } };
+      });
+    },
+
+    removeItem: (instanceId) => {
+      set((s) => {
+        if (s.draft === null) return s;
+        const items = s.draft.layout.items.filter((it) => it.instanceId !== instanceId);
+        return { draft: { ...s.draft, layout: { ...s.draft.layout, items }, dirty: true } };
+      });
+    },
+
+    insertItem: (at, ref) => {
+      const spec = get().resolveWidgetSpec(ref);
+      const newItem: LayoutItem = {
+        instanceId: newInstanceId(),
+        widget: ref,
+        settings: defaultSettingsFor(spec),
+      };
+      set((s) => {
+        if (s.draft === null) return s;
+        const items = [...s.draft.layout.items];
+        const index = Math.max(0, Math.min(at, items.length));
+        items.splice(index, 0, newItem);
+        return { draft: { ...s.draft, layout: { ...s.draft.layout, items }, dirty: true } };
+      });
+    },
+
+    save: async ({ mode, name, setActive }) => {
+      const draft = get().draft;
+      if (draft === null) return;
+      // Clear a stale error from a previous attempt before this one starts.
+      set((s) => (s.draft === null ? s : { draft: { ...s.draft, saveError: null } }));
+      try {
+        let saved: CustomView;
+        if (mode === 'update') {
+          if (draft.baseViewId === null || draft.baseRevision === null) {
+            throw new Error('no_base_view');
+          }
+          saved = await trpc.cyboflow.customViews.updateView.mutate({
+            id: draft.baseViewId,
+            expectedRevision: draft.baseRevision,
+            name,
+            layout: draft.layout,
+          });
+        } else {
+          saved = await trpc.cyboflow.customViews.createView.mutate({
+            surface: draft.surface,
+            name,
+            layout: draft.layout,
+          });
+        }
+        await refreshViewsAndActive(draft.surface);
+        if (setActive) {
+          await get().setActive(draft.surface, saved.id);
+        }
+        set({ draft: null });
+      } catch (err: unknown) {
+        const message = errorMessage(err);
+        console.error('[customViewsStore] save failed:', err);
+        set((s) => (s.draft === null ? s : { draft: { ...s.draft, saveError: message } }));
+      }
+    },
+
+    discard: () => {
+      const authoring = get().authoring;
+      // S6 territory in full (openAuthoring never runs in S5, so `authoring`
+      // stays null here) — guarded now so a discard mid-authoring-session
+      // never leaves an orphaned draft widget once S6 lands.
+      if (authoring !== null && authoring.widgetId !== null) {
+        void trpc.cyboflow.customViews.discardDraft
+          .mutate({ id: authoring.widgetId, authoringSessionId: authoring.sessionId })
+          .catch((err: unknown) => {
+            console.error('[customViewsStore] discardDraft failed:', err);
+          });
+      }
+      set({ draft: null, authoring: null });
+    },
+
+    renameView: async (id, name) => {
+      const state = get();
+      let target: { surface: CustomViewSurface; revision: number } | null = null;
+      for (const surface of CUSTOM_VIEW_SURFACES) {
+        const entry = state.viewsBySurface[surface].find((v) => v.id === id);
+        if (entry !== undefined && isUsableView(entry)) {
+          target = { surface, revision: entry.revision };
+          break;
+        }
+      }
+      if (target === null) {
+        return { ok: false, error: 'not_found' };
+      }
+      try {
+        await trpc.cyboflow.customViews.updateView.mutate({
+          id,
+          expectedRevision: target.revision,
+          name,
+        });
+        await refreshViewsAndActive(target.surface);
+        return { ok: true };
+      } catch (err: unknown) {
+        console.error('[customViewsStore] renameView failed:', err);
+        return { ok: false, error: errorMessage(err) };
+      }
+    },
+
+    deleteView: async (id) => {
+      const state = get();
+      let surface: CustomViewSurface | null = null;
+      for (const s of CUSTOM_VIEW_SURFACES) {
+        if (state.viewsBySurface[s].some((v) => v.id === id)) {
+          surface = s;
+          break;
+        }
+      }
+      try {
+        await trpc.cyboflow.customViews.deleteView.mutate({ id });
+        if (surface !== null) await refreshViewsAndActive(surface);
+        return { ok: true };
+      } catch (err: unknown) {
+        console.error('[customViewsStore] deleteView failed:', err);
+        return { ok: false, error: errorMessage(err) };
+      }
+    },
+
+    isCustomizing: (surface) => {
+      const draft = get().draft;
+      return draft !== null && draft.surface === surface;
+    },
   };
 });
 
@@ -295,4 +631,14 @@ export function useActiveView(surface: CustomViewSurface): CustomView | null {
 /** Whether `surface`'s seed queries have committed at least once. */
 export function useSurfaceLoaded(surface: CustomViewSurface): boolean {
   return useCustomViewsStore((s) => s.loadedSurfaces[surface]);
+}
+
+/** Reactive `isCustomizing` (§5.5) — true while `surface` has an open draft. */
+export function useIsCustomizing(surface: CustomViewSurface): boolean {
+  return useCustomViewsStore((s) => s.draft !== null && s.draft.surface === surface);
+}
+
+/** The open draft for `surface`, or `null` outside customize mode. */
+export function useDraft(surface: CustomViewSurface): CustomViewsDraft | null {
+  return useCustomViewsStore((s) => (s.draft !== null && s.draft.surface === surface ? s.draft : null));
 }

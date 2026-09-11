@@ -11,7 +11,7 @@
  *     switch cannot leave the UI showing a view the backend did not accept.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { CustomView, CustomWidget } from '../../../../shared/types/customViews';
+import type { CustomView, CustomWidget, ViewLayout } from '../../../../shared/types/customViews';
 
 const calls: string[] = [];
 let mockViews: CustomView[] = [];
@@ -19,6 +19,15 @@ let mockWidgets: CustomWidget[] = [];
 let mockActiveViewId = 'default';
 let setActiveViewImpl: (input: { surface: string; viewId: string }) => Promise<{ ok: true }> = () =>
   Promise.resolve({ ok: true });
+let updateViewImpl: (input: {
+  id: string;
+  expectedRevision: number;
+  name?: string;
+  layout?: ViewLayout;
+}) => Promise<CustomView> = () => Promise.reject(new Error('not configured'));
+let createViewImpl: (input: { surface: string; name: string; layout: ViewLayout }) => Promise<CustomView> = () =>
+  Promise.reject(new Error('not configured'));
+let deleteViewImpl: (input: { id: string }) => Promise<{ ok: true }> = () => Promise.resolve({ ok: true });
 const unsubscribe = vi.fn();
 
 vi.mock('../../trpc/client', () => ({
@@ -44,6 +53,14 @@ vi.mock('../../trpc/client', () => ({
           }),
         },
         setActiveView: { mutate: (input: { surface: string; viewId: string }) => setActiveViewImpl(input) },
+        updateView: {
+          mutate: (input: { id: string; expectedRevision: number; name?: string; layout?: ViewLayout }) =>
+            updateViewImpl(input),
+        },
+        createView: {
+          mutate: (input: { surface: string; name: string; layout: ViewLayout }) => createViewImpl(input),
+        },
+        deleteView: { mutate: (input: { id: string }) => deleteViewImpl(input) },
         onWidgetDraft: {
           subscribe: vi.fn(() => {
             calls.push('subscribe');
@@ -56,6 +73,7 @@ vi.mock('../../trpc/client', () => ({
 }));
 
 import { useCustomViewsStore } from '../customViewsStore';
+import { QUEUE_SECTION_ORDER } from '../../customViews/catalog';
 
 function widget(partial: Partial<CustomWidget> & Pick<CustomWidget, 'id'>): CustomWidget {
   return {
@@ -72,12 +90,25 @@ function widget(partial: Partial<CustomWidget> & Pick<CustomWidget, 'id'>): Cust
   };
 }
 
+function makeView(partial: Partial<CustomView> & Pick<CustomView, 'id' | 'name' | 'surface'>): CustomView {
+  return {
+    layout: { version: 1, items: [] },
+    revision: 1,
+    createdAt: '2026-09-10T00:00:00.000Z',
+    updatedAt: '2026-09-10T00:00:00.000Z',
+    ...partial,
+  };
+}
+
 beforeEach(() => {
   calls.length = 0;
   mockViews = [];
   mockWidgets = [];
   mockActiveViewId = 'default';
   setActiveViewImpl = () => Promise.resolve({ ok: true });
+  updateViewImpl = () => Promise.reject(new Error('not configured'));
+  createViewImpl = () => Promise.reject(new Error('not configured'));
+  deleteViewImpl = () => Promise.resolve({ ok: true });
   unsubscribe.mockReset();
   useCustomViewsStore.setState({
     viewsBySurface: { 'review-queue': [], 'project-overview': [] },
@@ -85,6 +116,7 @@ beforeEach(() => {
     widgets: [],
     loadedSurfaces: { 'review-queue': false, 'project-overview': false },
     authoring: null,
+    draft: null,
   });
 });
 
@@ -192,5 +224,259 @@ describe('customViewsStore.resolveWidgetSpec', () => {
       useCustomViewsStore.getState().resolveWidgetSpec({ type: 'custom', widgetId: 'w-draft' }),
     ).toBeNull();
     expect(useCustomViewsStore.getState().resolveWidgetSpec({ type: 'custom', widgetId: 'gone' })).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Customize mode (S5) — the draft lifecycle
+// (docs/proposals/CUSTOM-VIEWS.md §5.5, §9 row S5)
+// ---------------------------------------------------------------------------
+
+describe('customViewsStore.enterCustomize', () => {
+  it('seeds the draft from the canonical catalog order when Default is active', () => {
+    useCustomViewsStore.getState().enterCustomize('review-queue');
+    const draft = useCustomViewsStore.getState().draft;
+    expect(draft).not.toBeNull();
+    expect(draft?.surface).toBe('review-queue');
+    expect(draft?.baseViewId).toBeNull();
+    expect(draft?.baseRevision).toBeNull();
+    expect(draft?.dirty).toBe(false);
+    expect(draft?.layout.items.map((it) => (it.widget.type === 'catalog' ? it.widget.catalogId : null))).toEqual([
+      ...QUEUE_SECTION_ORDER,
+    ]);
+    // Fresh, distinct instance ids.
+    const ids = draft?.layout.items.map((it) => it.instanceId) ?? [];
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('seeds the draft from the active view layout, with its own copies of the items', () => {
+    const view = makeView({
+      id: 'v1',
+      name: 'Mine',
+      surface: 'review-queue',
+      revision: 4,
+      layout: {
+        version: 1,
+        items: [{ instanceId: 'i1', widget: { type: 'catalog', catalogId: 'queue.backlog' }, settings: {} }],
+      },
+    });
+    useCustomViewsStore.setState({
+      viewsBySurface: { 'review-queue': [view], 'project-overview': [] },
+      activeViewIdBySurface: { 'review-queue': 'v1', 'project-overview': 'default' },
+    });
+
+    useCustomViewsStore.getState().enterCustomize('review-queue');
+    const draft = useCustomViewsStore.getState().draft;
+    expect(draft?.baseViewId).toBe('v1');
+    expect(draft?.baseRevision).toBe(4);
+    expect(draft?.layout.items).toHaveLength(1);
+    expect(draft?.layout.items[0].instanceId).toBe('i1');
+
+    // Mutating the draft must never alias the saved view's items.
+    useCustomViewsStore.getState().toggleHidden('i1');
+    expect(view.layout.items[0].hidden).toBeUndefined();
+  });
+});
+
+describe('customViewsStore draft editing actions', () => {
+  beforeEach(() => {
+    useCustomViewsStore.getState().enterCustomize('review-queue');
+  });
+
+  it('moveItem reorders the draft', () => {
+    const before = useCustomViewsStore.getState().draft?.layout.items.map((it) => it.instanceId) ?? [];
+    useCustomViewsStore.getState().moveItem(0, 2);
+    const after = useCustomViewsStore.getState().draft?.layout.items.map((it) => it.instanceId) ?? [];
+    expect(after[2]).toBe(before[0]);
+    expect(useCustomViewsStore.getState().draft?.dirty).toBe(true);
+  });
+
+  it('toggleHidden flips one item and leaves the others alone', () => {
+    const id = useCustomViewsStore.getState().draft?.layout.items[0].instanceId as string;
+    useCustomViewsStore.getState().toggleHidden(id);
+    expect(useCustomViewsStore.getState().draft?.layout.items[0].hidden).toBe(true);
+    useCustomViewsStore.getState().toggleHidden(id);
+    expect(useCustomViewsStore.getState().draft?.layout.items[0].hidden).toBe(false);
+  });
+
+  it('removeItem drops the item', () => {
+    const id = useCustomViewsStore.getState().draft?.layout.items[0].instanceId as string;
+    const countBefore = useCustomViewsStore.getState().draft?.layout.items.length ?? 0;
+    useCustomViewsStore.getState().removeItem(id);
+    const items = useCustomViewsStore.getState().draft?.layout.items ?? [];
+    expect(items).toHaveLength(countBefore - 1);
+    expect(items.some((it) => it.instanceId === id)).toBe(false);
+  });
+
+  it('insertItem inserts at the given index, seeding settings from the spec defaults', () => {
+    useCustomViewsStore.getState().insertItem(1, { type: 'catalog', catalogId: 'insights.daily-usage' });
+    const items = useCustomViewsStore.getState().draft?.layout.items ?? [];
+    expect(items).toHaveLength(QUEUE_SECTION_ORDER.length + 1);
+    const inserted = items[1];
+    expect(inserted.widget).toEqual({ type: 'catalog', catalogId: 'insights.daily-usage' });
+    // Declared defaults (groupBy/days/project) were seeded, not left empty.
+    expect(inserted.settings.groupBy).toBe('day');
+    expect(inserted.settings.days).toBe(30);
+  });
+
+  it('updateItemSettings merges settings and sets/clears title + refreshSec', () => {
+    const id = useCustomViewsStore.getState().draft?.layout.items[0].instanceId as string;
+    useCustomViewsStore.getState().updateItemSettings(id, { title: 'Renamed', refreshSec: 120 });
+    let item = useCustomViewsStore.getState().draft?.layout.items[0];
+    expect(item?.title).toBe('Renamed');
+    expect(item?.refreshSec).toBe(120);
+
+    useCustomViewsStore.getState().updateItemSettings(id, { settings: { foo: 'bar' } });
+    item = useCustomViewsStore.getState().draft?.layout.items[0];
+    expect(item?.settings.foo).toBe('bar');
+
+    useCustomViewsStore.getState().updateItemSettings(id, { title: null, refreshSec: null });
+    item = useCustomViewsStore.getState().draft?.layout.items[0];
+    expect(item?.title).toBeUndefined();
+    expect(item?.refreshSec).toBeUndefined();
+  });
+
+  it('editing actions are a no-op without a draft', () => {
+    useCustomViewsStore.setState({ draft: null });
+    useCustomViewsStore.getState().moveItem(0, 1);
+    useCustomViewsStore.getState().toggleHidden('nope');
+    useCustomViewsStore.getState().removeItem('nope');
+    expect(useCustomViewsStore.getState().draft).toBeNull();
+  });
+});
+
+describe('customViewsStore.save', () => {
+  it('mode "update" calls updateView with the draft baseRevision, refreshes, and clears the draft', async () => {
+    const view = makeView({ id: 'v1', name: 'Mine', surface: 'review-queue', revision: 4 });
+    useCustomViewsStore.setState({
+      viewsBySurface: { 'review-queue': [view], 'project-overview': [] },
+      activeViewIdBySurface: { 'review-queue': 'v1', 'project-overview': 'default' },
+    });
+    useCustomViewsStore.getState().enterCustomize('review-queue');
+
+    const saved = makeView({ id: 'v1', name: 'Mine', surface: 'review-queue', revision: 5 });
+    let receivedInput: { id: string; expectedRevision: number; name?: string } | null = null;
+    updateViewImpl = (input) => {
+      receivedInput = input;
+      mockViews = [saved];
+      mockActiveViewId = 'v1';
+      return Promise.resolve(saved);
+    };
+
+    await useCustomViewsStore.getState().save({ mode: 'update', name: 'Mine', setActive: true });
+
+    expect(receivedInput).not.toBeNull();
+    expect((receivedInput as unknown as { id: string }).id).toBe('v1');
+    expect((receivedInput as unknown as { expectedRevision: number }).expectedRevision).toBe(4);
+    expect(useCustomViewsStore.getState().draft).toBeNull();
+    expect(useCustomViewsStore.getState().viewsBySurface['review-queue']).toEqual([saved]);
+  });
+
+  it('a concurrency failure keeps the draft and records saveError', async () => {
+    const view = makeView({
+      id: 'v1',
+      name: 'Mine',
+      surface: 'review-queue',
+      revision: 4,
+      layout: {
+        version: 1,
+        items: [{ instanceId: 'i1', widget: { type: 'catalog', catalogId: 'queue.backlog' }, settings: {} }],
+      },
+    });
+    useCustomViewsStore.setState({
+      viewsBySurface: { 'review-queue': [view], 'project-overview': [] },
+      activeViewIdBySurface: { 'review-queue': 'v1', 'project-overview': 'default' },
+    });
+    useCustomViewsStore.getState().enterCustomize('review-queue');
+    updateViewImpl = () => Promise.reject(new Error('concurrency'));
+
+    await useCustomViewsStore.getState().save({ mode: 'update', name: 'Mine', setActive: true });
+
+    const draft = useCustomViewsStore.getState().draft;
+    expect(draft).not.toBeNull();
+    expect(draft?.saveError).toBe('concurrency');
+    // Nothing about the working layout was thrown away.
+    expect(draft?.layout.items.length).toBeGreaterThan(0);
+  });
+
+  it('mode "new" calls createView and activates the result when asked', async () => {
+    useCustomViewsStore.getState().enterCustomize('review-queue');
+    const created = makeView({ id: 'v2', name: 'Ship week', surface: 'review-queue', revision: 1 });
+    let receivedInput: { surface: string; name: string } | null = null;
+    createViewImpl = (input) => {
+      receivedInput = input;
+      mockViews = [created];
+      return Promise.resolve(created);
+    };
+    setActiveViewImpl = (input) => {
+      mockActiveViewId = input.viewId;
+      return Promise.resolve({ ok: true });
+    };
+
+    await useCustomViewsStore.getState().save({ mode: 'new', name: 'Ship week', setActive: true });
+
+    expect(receivedInput).toEqual(expect.objectContaining({ surface: 'review-queue', name: 'Ship week' }));
+    expect(useCustomViewsStore.getState().draft).toBeNull();
+    expect(useCustomViewsStore.getState().activeViewIdBySurface['review-queue']).toBe('v2');
+  });
+});
+
+describe('customViewsStore.discard', () => {
+  it('clears the draft without saving', () => {
+    useCustomViewsStore.getState().enterCustomize('review-queue');
+    expect(useCustomViewsStore.getState().draft).not.toBeNull();
+    useCustomViewsStore.getState().discard();
+    expect(useCustomViewsStore.getState().draft).toBeNull();
+  });
+});
+
+describe('customViewsStore.renameView / deleteView', () => {
+  it('renameView looks up the revision itself and refreshes on success', async () => {
+    const view = makeView({ id: 'v1', name: 'Old', surface: 'review-queue', revision: 2 });
+    useCustomViewsStore.setState({ viewsBySurface: { 'review-queue': [view], 'project-overview': [] } });
+    const renamed = makeView({ id: 'v1', name: 'New', surface: 'review-queue', revision: 3 });
+    let receivedRevision: number | null = null;
+    updateViewImpl = (input) => {
+      receivedRevision = input.expectedRevision;
+      mockViews = [renamed];
+      return Promise.resolve(renamed);
+    };
+
+    const result = await useCustomViewsStore.getState().renameView('v1', 'New');
+    expect(result).toEqual({ ok: true });
+    expect(receivedRevision).toBe(2);
+    expect(useCustomViewsStore.getState().viewsBySurface['review-queue']).toEqual([renamed]);
+  });
+
+  it('renameView reports failure without throwing', async () => {
+    const view = makeView({ id: 'v1', name: 'Old', surface: 'review-queue', revision: 2 });
+    useCustomViewsStore.setState({ viewsBySurface: { 'review-queue': [view], 'project-overview': [] } });
+    updateViewImpl = () => Promise.reject(new Error('name_taken'));
+    const result = await useCustomViewsStore.getState().renameView('v1', 'Dup');
+    expect(result).toEqual({ ok: false, error: 'name_taken' });
+  });
+
+  it('deleteView deletes and refreshes the owning surface', async () => {
+    const view = makeView({ id: 'v1', name: 'Gone soon', surface: 'review-queue', revision: 1 });
+    useCustomViewsStore.setState({ viewsBySurface: { 'review-queue': [view], 'project-overview': [] } });
+    let deletedId: string | null = null;
+    deleteViewImpl = (input) => {
+      deletedId = input.id;
+      mockViews = [];
+      return Promise.resolve({ ok: true });
+    };
+
+    const result = await useCustomViewsStore.getState().deleteView('v1');
+    expect(result).toEqual({ ok: true });
+    expect(deletedId).toBe('v1');
+    expect(useCustomViewsStore.getState().viewsBySurface['review-queue']).toEqual([]);
+  });
+});
+
+describe('customViewsStore.isCustomizing', () => {
+  it('is true only for the surface with an open draft', () => {
+    useCustomViewsStore.getState().enterCustomize('review-queue');
+    expect(useCustomViewsStore.getState().isCustomizing('review-queue')).toBe(true);
+    expect(useCustomViewsStore.getState().isCustomizing('project-overview')).toBe(false);
   });
 });
