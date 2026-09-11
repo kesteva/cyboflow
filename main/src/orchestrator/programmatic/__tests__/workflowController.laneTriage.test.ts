@@ -595,7 +595,7 @@ describe('WorkflowController — autonomous lane rescue', () => {
     expect(consults).toHaveLength(0);
   });
 
-  it('never consults for a lane blocked by a failed PREREQUISITE (markBlocked)', async () => {
+  it('never consults for a lane BLOCKED by a failed prerequisite (markBlocked)', async () => {
     const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
     const runner = makeRunner({ 't1:implement': [{ status: 'failed', error: 'boom' }] });
     const deps = new Map<string, string[]>([['t2', ['t1']]]);
@@ -606,7 +606,9 @@ describe('WorkflowController — autonomous lane rescue', () => {
 
     // Exactly ONE consult — t1's own exhaustion. t2 never reaches a budget.
     expect(consults.map((c) => c.itemId)).toEqual(['t1']);
-    expect(laneStatus(driver.lanes, 't2')).toBe('failed');
+    // …and t2 settles 'blocked' (never started), not 'failed' — it has no defect
+    // to triage, and reporting one would manufacture a second failure.
+    expect(laneStatus(driver.lanes, 't2')).toBe('blocked');
   });
 
   it('never consults for a task-verify OUTPUT-CONTRACT exhaustion', async () => {

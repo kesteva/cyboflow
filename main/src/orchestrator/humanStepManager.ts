@@ -174,8 +174,9 @@ export class HumanStepManager {
         gateOpened = true;
 
         // Item 2: a sprint/ship run that reaches its terminal human gate with
-        // failed lanes gets a per-lane partial-sprint summary in the gate body
-        // (ref/title + failing step + attempts) instead of the generic prompt.
+        // INCOMPLETE lanes gets a per-lane partial-sprint summary in the gate body
+        // (failed lanes with their failing step + attempts, never-started lanes
+        // with the prerequisite that stranded them) instead of the generic prompt.
         // Fail-soft — a null summary (non-sprint run, clean sprint, or read error)
         // falls back to the generic body, so the gate always opens.
         const enrichedBody = composePartialSprintGateBody(this.db, runId, stepName);

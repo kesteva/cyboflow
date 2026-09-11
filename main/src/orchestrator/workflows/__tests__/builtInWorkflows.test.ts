@@ -600,4 +600,25 @@ describe('buildBuiltInWorkflows', () => {
       );
     }
   });
+
+  it("declares a SELF-loopback on every fan-out's implement step (sprint + ship)", () => {
+    // A first-step failure must get the same second chance every later inner step
+    // gets. The programmatic controller reads `loopback` literally — an undeclared
+    // one means "no target", so `implement`'s FIRST failure used to exhaust the
+    // lane outright. Declaring it here (rather than special-casing the first step
+    // in the controller) leaves every custom chain's semantics untouched.
+    for (const name of ['sprint', 'ship'] as const) {
+      const fanOuts = WORKFLOW_DEFINITIONS[name].phases
+        .flatMap((phase) => phase.steps)
+        .filter((s) => s.fanOut !== undefined);
+      expect(fanOuts.length, `${name}: has a fan-out step`).toBeGreaterThan(0);
+      for (const step of fanOuts) {
+        const implement = step.fanOut?.inner.find((inner) => inner.id === 'implement');
+        expect(implement, `${name}/${step.id}: has an implement inner step`).toBeDefined();
+        expect(implement?.loopback, `${name}/${step.id}: implement loops back to itself`).toBe(
+          'implement',
+        );
+      }
+    }
+  });
 });

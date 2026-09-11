@@ -900,7 +900,7 @@ export class WorkflowController {
    * bump `laneAttempt`. Bounded by MONITOR_LANE_RESCUE_CAP (per lane) and
    * MONITOR_RUN_RESCUE_CAP (per walk). Failures that are NOT budget exhaustion
    * never consult: a systemic failure (it has its own park path), an aborted
-   * result, a dependency-blocked / cycle lane (`markBlocked`), a lane the
+   * result, a never-started / cycle lane (`markBlocked`), a lane the
    * commit-integrity probe caught, and a task-verify output-CONTRACT exhaustion
    * (a malformed result is not a defect a rescue can reason about).
    */
@@ -1912,14 +1912,43 @@ export class WorkflowController {
     let expectedFiles = readExpectedFiles();
 
     const integrated = new Set<string>();
+    // Two DIFFERENT terminal settlements, deliberately not one set:
+    //   `failed`  — the lane EXECUTED and did not succeed (its own defect, a
+    //               systemic give-up, a spent pause budget). A human reading the
+    //               gate needs to see its error.
+    //   `blocked` — the lane NEVER STARTED because something it depends on did
+    //               not finish. Reporting that as 'failed' manufactures defects
+    //               out of a dependency graph: one real failure at the root of a
+    //               fan-out used to stamp 'failed' on every descendant, which is
+    //               how a single bad lane read as a whole-sprint collapse.
     const failed = new Set<string>();
+    const blocked = new Set<string>();
     // MUTABLE (reassigned each wave by the live re-resolution below), so the
-    // markBlocked closure + the settle loop always see the current working set.
+    // mark* closures + the settle loop always see the current working set.
     let remaining = new Set(items);
     let incompleteCount = 0;
 
-    /** Mark a lane failed (a blocked/unrunnable task) and count it incomplete. */
+    /**
+     * Settle a lane that NEVER STARTED because a prerequisite did not finish.
+     * Writes 'blocked' (not 'failed'), so the lane row, the board chip and the
+     * partial-sprint gate summary all say "never started" rather than blaming
+     * the task. Still counts incomplete: the sprint did not finish its work.
+     */
     const markBlocked = (itemId: string, reason: string): void => {
+      driver.driveLane({ runId, itemId, status: 'blocked', allowedStepIds });
+      this.host.log?.('warn', `fan-out item '${itemId}': ${reason}; lane blocked`);
+      remaining.delete(itemId);
+      blocked.add(itemId);
+      incompleteCount += 1;
+    };
+
+    /**
+     * Settle a lane that DID execute and could not be completed — the systemic
+     * give-up / exhausted-pause-budget / no-pause-seam path. These lanes ran real
+     * agent turns against a real condition, so they stay 'failed': calling them
+     * "never started" would hide the very failure the human is being asked about.
+     */
+    const markFailed = (itemId: string, reason: string): void => {
       driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
       this.host.log?.('warn', `fan-out item '${itemId}': ${reason}; lane failed`);
       remaining.delete(itemId);
@@ -1983,28 +2012,48 @@ export class WorkflowController {
         // Rebuild the working set: keep only not-yet-settled lanes, in resolve
         // order (a removed queued lane is simply absent from `fresh`; a settled
         // lane is filtered by integrated/failed).
-        remaining = new Set(fresh.filter((id) => !integrated.has(id) && !failed.has(id)));
+        remaining = new Set(
+          fresh.filter((id) => !integrated.has(id) && !failed.has(id) && !blocked.has(id)),
+        );
         if (remaining.size === 0) break;
       }
 
+      // Readiness is a PURE read: a lane whose prerequisite died is simply not
+      // ready. Nothing is written here. Settling a descendant the moment its
+      // parent fails is what made one failure look like many — and it is
+      // premature besides, since an operator can still rewind or reset the parent
+      // while the fan-out is dispatching other work.
       const ready: string[] = [];
-      let blockedThisPass = false;
       for (const itemId of remaining) {
         const ps = prereqs.get(itemId) ?? [];
-        if (ps.some((p) => failed.has(p))) {
-          markBlocked(itemId, 'a blocking prerequisite failed');
-          blockedThisPass = true;
-        } else if (ps.every((p) => integrated.has(p))) {
-          ready.push(itemId);
-        }
+        if (ps.some((p) => failed.has(p) || blocked.has(p))) continue;
+        if (ps.every((p) => integrated.has(p))) ready.push(itemId);
         // else: still waiting on a pending prerequisite.
       }
 
       if (ready.length === 0) {
-        if (blockedThisPass) continue; // made progress — re-evaluate readiness
-        // Nothing ready and nothing newly blocked, yet items remain ⇒ their
-        // prerequisites are unresolvable (a cycle, or a prereq that never runs).
-        // Fail them rather than spin forever.
+        // NOTHING is dispatchable and lanes remain: only now is a lane's wait
+        // provably permanent. Prune to a fixpoint so a chain A→B→C names the
+        // right culprit at each link (B waits on a FAILED A, C on a BLOCKED B)
+        // instead of collapsing everything into "cycle?".
+        let progressed = true;
+        while (progressed) {
+          progressed = false;
+          for (const itemId of [...remaining]) {
+            const ps = prereqs.get(itemId) ?? [];
+            const dead = ps.find((p) => failed.has(p) || blocked.has(p));
+            if (dead === undefined) continue;
+            markBlocked(
+              itemId,
+              failed.has(dead)
+                ? `never started: prerequisite '${dead}' failed`
+                : `never started: prerequisite '${dead}' was never started`,
+            );
+            progressed = true;
+          }
+        }
+        // Whatever is left waits on a prerequisite that is neither settled nor
+        // dispatchable — a cycle, or a prereq outside this fan-out that never runs.
         for (const itemId of [...remaining]) {
           markBlocked(itemId, 'unresolvable blocking dependencies (cycle?)');
         }
@@ -2127,11 +2176,12 @@ export class WorkflowController {
           // then fall through and fail the still-paused lanes below.
           systemicGiveUps.add(step.id);
         }
-        // Seam absent, budget exhausted, or 'giveup': fail each still-paused lane
-        // exactly like a blocked lane (driveLane failed + remaining.delete +
-        // failed.add + incompleteCount += 1).
+        // Seam absent, budget exhausted, or 'giveup': these lanes EXECUTED and
+        // hit a real condition, so they settle 'failed' (markFailed) — never
+        // 'blocked', which would report an agent turn that actually ran against a
+        // dead environment as a lane that never started.
         for (const itemId of pausedThisWave) {
-          if (remaining.has(itemId)) markBlocked(itemId, 'systemic failure — gave up waiting');
+          if (remaining.has(itemId)) markFailed(itemId, 'systemic failure — gave up waiting');
         }
       }
     }

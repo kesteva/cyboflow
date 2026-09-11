@@ -1487,6 +1487,23 @@ describe('SprintLaneStore', () => {
 
       expect(store.reviveLane(batchId, 'tsk_a')).toBe(1);
 
+    it('also re-queues a blocked lane (Item 6: blocked lanes never started and must rejoin a retry)', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a', 'tsk_b', 'tsk_c']);
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'failed', currentStepId: 'implement' });
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_b', status: 'blocked' });
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_c', status: 'running', currentStepId: 'implement' });
+      seedOwningRun(batchId);
+
+      const count = store.resetFailedLanes(batchId);
+
+      expect(count).toBe(2);
+      const lanes = store.listLanes(batchId);
+      expect(lanes.find((l) => l.taskId === 'tsk_a')?.status).toBe('queued');
+      expect(lanes.find((l) => l.taskId === 'tsk_b')?.status).toBe('queued');
+      // Untouched — 'tsk_c' was never failed/blocked.
+      expect(lanes.find((l) => l.taskId === 'tsk_c')?.status).toBe('running');
+    });
+
       const lane = store.listLanes(batchId)[0];
       expect(lane.status).toBe('running');
       // The rescue's next driveLane stamps the target step; blanking it here

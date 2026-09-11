@@ -412,6 +412,64 @@ describe('WorkflowController — systemic-pause seam', () => {
     });
   });
 
+  // ── systemic settlement stays 'failed', never 'blocked' ────────────────────
+  describe("systemic abandonment settles 'failed'", () => {
+    // A lane that PARKED ran real agent turns against a real condition. Whatever
+    // ends the park — a human giving up, a spent pause budget, or no pause seam
+    // at all — it must settle 'failed'; calling it "never started" would hide the
+    // failure the human is being asked about.
+    const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+    const alwaysSystemicT1: StepRunner = {
+      async runStep(_s, ctx) {
+        return ctx.item?.id === 't1' ? systemicFail('overloaded') : { status: 'ok' };
+      },
+    };
+
+    it("on a human 'giveup'", async () => {
+      const driver = makeFanOutDriver(['t1', 't2']);
+      const { host, pauseCalls } = makeSystemicHost({ verdicts: ['giveup'] });
+      host.fanOut = driver;
+
+      await new WorkflowController(alwaysSystemicT1, host).run('r', d);
+
+      expect(pauseCalls).toHaveLength(1);
+      expect(failedLanes(driver)).toEqual(['t1']);
+      expect(driver.lanes.some((l) => l.status === 'blocked')).toBe(false);
+    });
+
+    it('when the pause SEAM is absent entirely', async () => {
+      const driver = makeFanOutDriver(['t1', 't2']);
+      const host: ControllerHost = {
+        reportStep() {},
+        async requestHumanGate() {
+          return 'approve';
+        },
+        fanOut: driver,
+      };
+
+      await new WorkflowController(alwaysSystemicT1, host).run('r', d);
+
+      expect(failedLanes(driver)).toEqual(['t1']);
+      expect(driver.lanes.some((l) => l.status === 'blocked')).toBe(false);
+    });
+
+    it('when the per-step pause BUDGET is exhausted', async () => {
+      const driver = makeFanOutDriver(['t1', 't2']);
+      // Every park says 'retry', so the lane re-dispatches until MAX_SYSTEMIC_PAUSES
+      // is spent and the wave falls through to the settle path.
+      const { host, pauseCalls } = makeSystemicHost({
+        verdicts: Array.from({ length: MAX_SYSTEMIC_PAUSES }, () => 'retry' as SystemicPauseVerdict),
+      });
+      host.fanOut = driver;
+
+      await new WorkflowController(alwaysSystemicT1, host).run('r', d);
+
+      expect(pauseCalls).toHaveLength(MAX_SYSTEMIC_PAUSES);
+      expect(failedLanes(driver)).toEqual(['t1']);
+      expect(driver.lanes.some((l) => l.status === 'blocked')).toBe(false);
+    });
+  });
+
   // ── same-error corroboration ────────────────────────────────────────────────
   describe('same-error corroboration', () => {
     /**

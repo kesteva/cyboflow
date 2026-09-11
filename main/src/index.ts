@@ -3834,12 +3834,18 @@ async function initializeServices(): Promise<boolean> {
           over === 'tasks'
             ? sprintLaneStore
                 .listLanes(batchId)
-                // Crash-safe resume: skip lanes already settled (integrated/failed)
-                // so a re-entered fanOut step does not re-run completed work or flip
-                // a failed lane back to integrated — mirrors the monotonic-forward
-                // guard in deriveLaneFromTaskDispatch. On a fresh run all lanes are
+                // Crash-safe resume: skip lanes already settled (integrated/
+                // failed/blocked) so a re-entered fanOut step does not re-run
+                // completed work, flip a failed lane back to integrated, or
+                // let a BLOCKED child re-enter without its failed parent
+                // (Item 6, Codex C3 — a blocked lane never started and stays
+                // excluded until an explicit reset, e.g. resetFailedLanes,
+                // re-queues it) — mirrors the monotonic-forward guard in
+                // deriveLaneFromTaskDispatch. On a fresh run all lanes are
                 // 'queued', so every task is returned.
-                .filter((lane) => lane.status !== 'integrated' && lane.status !== 'failed')
+                .filter(
+                  (lane) => lane.status !== 'integrated' && lane.status !== 'failed' && lane.status !== 'blocked',
+                )
                 .map((lane) => lane.taskId)
             : [],
         // DAG ordering (2026-06-22): expose the batch's BLOCKING edges so the

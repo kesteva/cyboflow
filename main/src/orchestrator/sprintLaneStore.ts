@@ -1321,13 +1321,16 @@ export class SprintLaneStore {
   // --------------------------------------------------------------------------
 
   /**
-   * Re-queue every 'failed' lane of a batch back to 'queued' (clearing
-   * current_step_id), so a fan-out RETRY re-dispatches them instead of
-   * instantly re-settling with the same failures. The production fan-out
+   * Re-queue every 'failed' OR 'blocked' lane of a batch back to 'queued'
+   * (clearing current_step_id), so a fan-out RETRY re-dispatches them instead
+   * of instantly re-settling with the same failures. The production fan-out
    * driver (fanOutDriverFactory.resolveItems, main/src/index.ts) filters OUT
-   * lanes already marked 'integrated' or 'failed' — without this reset, a
-   * retried fanOut step would see zero eligible items for every
-   * previously-failed lane.
+   * lanes already marked 'integrated', 'failed' or 'blocked' — without this
+   * reset, a retried fanOut step would see zero eligible items for every
+   * previously-failed-or-blocked lane. 'blocked' lanes are included because
+   * they never started (Item 6: a lane blocks when a prerequisite failed) —
+   * a retry needs them back in the dispatchable pool exactly like a lane that
+   * DID run and failed.
    *
    * Routes each reset through `updateLane` (rather than a raw batch UPDATE) so
    * the write + SprintLaneChangedEvent emit pipeline is IDENTICAL to every
@@ -1341,17 +1344,19 @@ export class SprintLaneStore {
    * `RetryRunDeps.resetFailedLanes` signature.
    *
    * Fail-soft: never throws. Returns the number of lanes reset, or 0 when
-   * there are no failed lanes, the batch has no owning run, or anything in
-   * between errors (logged at 'warn').
+   * there are no failed/blocked lanes, the batch has no owning run, or
+   * anything in between errors (logged at 'warn').
    */
   resetFailedLanes(batchId: string): number {
     try {
-      const failedTaskIds = (
+      const resetTaskIds = (
         this.db
-          .prepare(`SELECT task_id AS taskId FROM sprint_batch_tasks WHERE batch_id = ? AND status = 'failed'`)
+          .prepare(
+            `SELECT task_id AS taskId FROM sprint_batch_tasks WHERE batch_id = ? AND status IN ('failed', 'blocked')`,
+          )
           .all(batchId) as Array<{ taskId: string }>
       ).map((r) => r.taskId);
-      if (failedTaskIds.length === 0) return 0;
+      if (resetTaskIds.length === 0) return 0;
 
       const runRow = this.db
         .prepare('SELECT id FROM workflow_runs WHERE batch_id = ?')
@@ -1364,11 +1369,11 @@ export class SprintLaneStore {
       }
 
       let reset = 0;
-      for (const taskId of failedTaskIds) {
+      for (const taskId of resetTaskIds) {
         this.updateLane({ runId: runRow.id, batchId, taskId, status: 'queued', currentStepId: null });
         reset += 1;
       }
-      this.logger?.info('[SprintLaneStore] reset failed fan-out lanes for retry', {
+      this.logger?.info('[SprintLaneStore] reset failed/blocked fan-out lanes for retry', {
         batchId,
         runId: runRow.id,
         count: reset,
