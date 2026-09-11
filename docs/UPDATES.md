@@ -118,10 +118,15 @@ files still exist alongside them in the bucket.
 
 - `main/src/services/appUpdater.ts` wraps `electron-updater`. It is a **no-op in
   dev** (`app.isPackaged === false`) and only runs in packaged builds.
-- `autoDownload` is **off** and `autoInstallOnAppQuit` is **off** by design: a
-  silent install mid-run could kill an in-progress orchestrator/agent session.
-  The flow is explicit — *check → download → "Restart to update"* (see the
-  About dialog).
+- The app checks the feed **8 s after boot and then once every 24 h** while it
+  stays open. A scheduled check that finds a newer version **downloads it
+  unattended** (a download is harmless to a running session), and the bottom-left
+  version pill goes *Downloading… N%* → **"Restart to update"**. The daily
+  re-check never re-downloads a version it has already staged.
+- electron-updater's own `autoDownload` and `autoInstallOnAppQuit` stay **off**:
+  the **install** is always explicit ("Restart to update" in the pill, Settings →
+  Updates, or the About dialog), because a silent quit-time install mid-run could
+  kill an in-progress orchestrator/agent session.
 - electron-builder bakes `build.publish` (the generic `updates.cyboflow.com/<variant>`
   URL) into the packaged `app-update.yml`, so the app knows where to poll with no
   extra config. The stable URL is in `package.json`; `scripts/configure-build.js`

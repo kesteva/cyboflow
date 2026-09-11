@@ -439,3 +439,128 @@ describe('AppUpdater version comparison', () => {
     expect(isNewerVersion('0.2.5-rc.1', '0.2.5')).toBe(true);
   });
 });
+
+describe('AppUpdater scheduled checks', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    // Earlier describes build harnesses whose boot timers never fire; drop
+    // them so advancing the clock here counts only this test's schedule.
+    vi.clearAllTimers();
+    vi.clearAllMocks();
+  });
+
+  /** Fire the electron-updater event handler AppUpdater registered for `name`. */
+  function fireUpdaterEvent(name: string, payload: unknown): void {
+    const handler = mockAutoUpdater.on.mock.calls.find((c) => c[0] === name)?.[1] as
+      | ((p: unknown) => void)
+      | undefined;
+    if (!handler) throw new Error(`no handler registered for ${name}`);
+    handler(payload);
+  }
+
+  /** Run the boot-time check and let its async chain settle. */
+  async function bootCheck(): Promise<void> {
+    await vi.advanceTimersByTimeAsync(8_000);
+  }
+
+  it('auto-downloads when the boot-time check finds a newer version', async () => {
+    makeHarness('0.2.5');
+    mockAutoUpdater.checkForUpdates.mockResolvedValue({ updateInfo: { version: '0.2.6' } });
+    mockAutoUpdater.downloadUpdate.mockResolvedValue(undefined);
+
+    await bootCheck();
+
+    expect(mockAutoUpdater.checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(mockAutoUpdater.downloadUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not download when the feed is not ahead', async () => {
+    makeHarness('0.2.5');
+    mockAutoUpdater.checkForUpdates.mockResolvedValue({ updateInfo: { version: '0.2.5' } });
+
+    await bootCheck();
+
+    expect(mockAutoUpdater.downloadUpdate).not.toHaveBeenCalled();
+  });
+
+  it('re-checks once a day for as long as the app stays open', async () => {
+    makeHarness('0.2.5');
+    mockAutoUpdater.checkForUpdates.mockResolvedValue({ updateInfo: { version: '0.2.5' } });
+
+    await bootCheck();
+    expect(mockAutoUpdater.checkForUpdates).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1_000);
+    expect(mockAutoUpdater.checkForUpdates).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(2 * 24 * 60 * 60 * 1_000);
+    expect(mockAutoUpdater.checkForUpdates).toHaveBeenCalledTimes(4);
+  });
+
+  it('does not re-download a version it already staged', async () => {
+    const { updater } = makeHarness('0.2.5');
+    mockAutoUpdater.checkForUpdates.mockResolvedValue({ updateInfo: { version: '0.2.6' } });
+    mockAutoUpdater.downloadUpdate.mockImplementation(async () => {
+      fireUpdaterEvent('update-downloaded', { version: '0.2.6' });
+    });
+
+    await bootCheck();
+    expect(mockAutoUpdater.downloadUpdate).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1_000);
+    expect(mockAutoUpdater.checkForUpdates).toHaveBeenCalledTimes(2);
+    expect(mockAutoUpdater.downloadUpdate).toHaveBeenCalledTimes(1);
+
+    // A later manual check reports the staged version so the UI can offer the
+    // restart directly.
+    expect(await updater.check()).toMatchObject({
+      updateAvailable: true,
+      latestVersion: '0.2.6',
+      downloadedVersion: '0.2.6',
+    });
+  });
+
+  it('downloads again when the feed moves past the staged version', async () => {
+    makeHarness('0.2.5');
+    mockAutoUpdater.checkForUpdates.mockResolvedValueOnce({ updateInfo: { version: '0.2.6' } });
+    mockAutoUpdater.downloadUpdate.mockImplementationOnce(async () => {
+      fireUpdaterEvent('update-downloaded', { version: '0.2.6' });
+    });
+    await bootCheck();
+
+    mockAutoUpdater.checkForUpdates.mockResolvedValueOnce({ updateInfo: { version: '0.2.7' } });
+    mockAutoUpdater.downloadUpdate.mockResolvedValueOnce(undefined);
+    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1_000);
+
+    expect(mockAutoUpdater.downloadUpdate).toHaveBeenCalledTimes(2);
+  });
+
+  it('coalesces a manual download into one already in flight', async () => {
+    const { updater } = makeHarness('0.2.5');
+    let finish: () => void = () => undefined;
+    mockAutoUpdater.downloadUpdate.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { finish = resolve; }),
+    );
+
+    const first = updater.download();
+    await updater.download();
+    expect(mockAutoUpdater.downloadUpdate).toHaveBeenCalledTimes(1);
+
+    finish();
+    await first;
+    // Once settled, the next request goes through again.
+    mockAutoUpdater.downloadUpdate.mockResolvedValueOnce(undefined);
+    await updater.download();
+    expect(mockAutoUpdater.downloadUpdate).toHaveBeenCalledTimes(2);
+  });
+
+  it('surfaces a failed scheduled download as an error event without throwing', async () => {
+    const { lastEvent } = makeHarness('0.2.5');
+    mockAutoUpdater.checkForUpdates.mockResolvedValue({ updateInfo: { version: '0.2.6' } });
+    mockAutoUpdater.downloadUpdate.mockRejectedValue(new Error('HTTP 503'));
+
+    await bootCheck();
+
+    expect(lastEvent()).toEqual({ kind: 'error', message: 'HTTP 503' });
+  });
+});
