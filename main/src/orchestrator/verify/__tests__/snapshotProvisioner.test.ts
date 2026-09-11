@@ -104,7 +104,12 @@ afterEach(() => {
   delete process.env.CYBOFLOW_DISABLE_VERIFY_DEP_PREPARER;
 });
 
-describe('snapshotProvisioner', () => {
+// Every case below drives a REAL git fixture (init, commits, `worktree add`,
+// dispose) — roughly ten process spawns each. The 5s default measures runner
+// load, not the code: a loaded Windows CI runner serves those at 1–2s apiece
+// and the provisionSnapshot cases timed out there wholesale. Same allowance
+// worktreeManager.test.ts gives its real-git cases.
+describe('snapshotProvisioner', { timeout: 60_000 }, () => {
   describe('captureSnapshotSha', () => {
     it('returns HEAD of the run worktree', async () => {
       await withTempDir('snapshot-provisioner-', async (dir) => {

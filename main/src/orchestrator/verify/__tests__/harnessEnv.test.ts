@@ -47,7 +47,9 @@ describe('resolveHarnessPath', () => {
       resolveShellPath: async () => {
         throw new Error('login shell unavailable');
       },
-      fallbackPath: '/usr/bin:/bin',
+      // Joined with the host delimiter: prependNodeDir splits on it, so a
+      // hardcoded ':' is ONE opaque entry on Windows and the assertion drifts.
+      fallbackPath: ['/usr/bin', '/bin'].join(delimiter),
     });
     expect(value).toBe(['/opt/node/bin', '/usr/bin', '/bin'].join(delimiter));
   });
@@ -86,15 +88,19 @@ describe('resolveHarnessNodePath', () => {
   });
 
   it('stops at the NEAREST directory carrying playwright', async () => {
-    const driverCli = '/repo/main/dist/driver/driverCli.js';
+    // Spelled through `join` like the sibling case: the walk probes
+    // `join(dir, marker)`, which is backslash-separated on Windows, so a fake
+    // tree keyed on POSIX literals is never hit there.
+    const repo = '/repo';
+    const driverCli = join(repo, 'main/dist/driver/driverCli.js');
     const found = await resolveHarnessNodePath(
       driverCli,
       world([
-        '/repo/main/node_modules/playwright/package.json',
-        '/repo/node_modules/playwright/package.json',
+        join(repo, 'main/node_modules/playwright/package.json'),
+        join(repo, 'node_modules/playwright/package.json'),
       ]),
     );
-    expect(found).toBe('/repo/main/node_modules');
+    expect(found).toBe(join(repo, 'main/node_modules'));
   });
 
   // The packaged shape: asarUnpack unpacks the driver JS but NOT
