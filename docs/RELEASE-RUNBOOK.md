@@ -59,6 +59,33 @@ mirror the app never reads.**
 All of these must pass. `test:unit` is the AC gate; `test:integration` is the
 blocking mocked-SDK job for `main/src/services/panels/claude/` changes.
 
+### Windows unit tests (hosted runner — start first, runs in parallel)
+
+The `skipIf(process.platform !== 'win32')` suites run **only** on the
+`windows-latest` job in `.github/workflows/windows.yml`, and POSIX-host suites
+have carried Windows-only breakage that the macOS gate cannot see (the 9/10
+verify-harness merge shipped `:`-vs-`;` PATH joins, an EBUSY unlink of an open
+SQLite file, and real-git cases that time out at the 5s default on a loaded
+runner). `gh workflow run` needs the commit on a REMOTE ref, and local `main`
+is normally ahead of `origin/main` at this point — so push a throwaway gate
+branch rather than `main` (step 6 owns that push):
+
+```bash
+V=<version>
+git push origin HEAD:refs/heads/release-gate/$V
+gh workflow run windows.yml --ref release-gate/$V -f build_installer=false
+until RUN=$(gh run list --workflow windows.yml --branch release-gate/$V --limit 1 \
+  --json databaseId -q '.[0].databaseId') && [ -n "$RUN" ]; do sleep 5; done
+# … run the local gate below while it executes (~15 min) …
+gh run watch "$RUN" --exit-status
+git push origin --delete release-gate/$V
+```
+
+If the branch push also matches the workflow's `push` path filter, a second
+(push-triggered, unit + installer) run appears; both must be green.
+
+### Local gate
+
 ```bash
 pnpm typecheck        # must be clean
 pnpm lint             # 0 errors (warnings are non-gating)

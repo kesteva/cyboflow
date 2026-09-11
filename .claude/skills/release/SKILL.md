@@ -1,6 +1,6 @@
 ---
 name: release
-description: Cut a Cyboflow release end-to-end — run the full test gate, bump the version + changelog, build four signed/notarized macOS DMGs (stable + dev, arm64 + x64), publish both R2 update feeds (the in-app update channel), and cut the GitHub release. Use when asked to cut/ship/publish a release, make a release build, or roll a new version. Follows docs/RELEASE-RUNBOOK.md.
+description: Cut a Cyboflow release end-to-end — run the full test gate (local + the Windows unit leg on CI), bump the version + changelog, build four signed/notarized macOS DMGs (stable + dev, arm64 + x64), publish both R2 update feeds (the in-app update channel), and cut the GitHub release. Use when asked to cut/ship/publish a release, make a release build, or roll a new version. Follows docs/RELEASE-RUNBOOK.md.
 ---
 
 # Release
@@ -60,6 +60,37 @@ Work through the phases **in order** and do not skip verification.
 
 ## Phase 1 — Full test gate (all must pass)
 
+**Start the Windows leg FIRST** — it runs on a hosted runner for ~15 min, in
+parallel with everything below. The `skipIf(process.platform !== 'win32')`
+suites (afterSign cases Y–AA, the named-pipe orch socket, the PowerShell
+process table, taskkill, cmd.exe quoting) execute **nowhere else**, and the
+POSIX-host suites have shipped Windows-only breakage before (the 9/10
+verify-harness merge: `:` vs `;` PATH joins, an EBUSY unlink, real-git
+timeouts). The runner needs a REMOTE ref and local `main` is normally ahead of
+`origin/main`, so push a throwaway gate branch — **not `main`**, Phase 6 owns
+that push:
+
+```bash
+V=<version>
+git push origin HEAD:refs/heads/release-gate/$V
+gh workflow run windows.yml --ref release-gate/$V -f build_installer=false
+# The run is created asynchronously; wait for it to appear, then watch it.
+until RUN=$(gh run list --workflow windows.yml --branch release-gate/$V --limit 1 \
+  --json databaseId -q '.[0].databaseId') && [ -n "$RUN" ]; do sleep 5; done
+echo "Windows gate: https://github.com/kesteva/cyboflow/actions/runs/$RUN"
+```
+(The branch push itself may also trigger `windows.yml` if the diff touches its
+path filter — then two runs appear; both must be green, and the dispatched one
+is the cheaper, unit-only run.) Continue with the local gate while it runs;
+collect the verdict at the end of this phase:
+
+```bash
+gh run watch "$RUN" --exit-status          # exit 0 = Unit tests (Windows) green
+git push origin --delete release-gate/$V   # cleanup, whatever the verdict
+```
+
+Local gate, in this order:
+
 ```bash
 pnpm typecheck        # clean
 pnpm lint             # 0 errors (warnings OK)
@@ -69,10 +100,12 @@ pnpm run e2e:prereqs && pnpm run test:ci:minimal  # packaged-app smoke (blocking
 pnpm test:gate        # real-API canary — needs authenticated `claude` on PATH
 pnpm smoke:sdk        # real-API protocol canary
 ```
-If anything fails, stop and report — do not proceed to a build. The E2E smoke
-tier launches the built Electron bundle, so it needs this machine's display;
-the two canaries spend real API tokens (~15-20 min combined) and exist because
-CI can never run them (no authenticated `claude` on hosted runners).
+If anything fails — the Windows run included — stop and report; do not proceed
+to a build. The E2E smoke tier launches the built Electron bundle, so it needs
+this machine's display; the two canaries spend real API tokens (~15-20 min
+combined) and exist because CI can never run them (no authenticated `claude` on
+hosted runners). The Windows run is the mirror image: it exists because this
+Mac can never run those suites.
 
 ## Phase 2 — Version bump + changelog
 
