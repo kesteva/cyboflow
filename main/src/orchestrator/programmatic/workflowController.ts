@@ -932,6 +932,17 @@ export class WorkflowController {
     // rides on the lane's own outcome, so nothing about one wave's errors can
     // leak into the next wave's corroboration.
     let waveSystemicTriageError: string | undefined;
+    /**
+     * Lane-triage consults are SERIALIZED through this chain so the latch above
+     * is re-read AFTER the previous consult resolved. Lanes fail concurrently:
+     * without the chain, every lane of a wave that fails before the first
+     * consult returns passes the latch check together, four of them burn
+     * MONITOR_RUN_RESCUE_CAP on a monitor whose own turn is dead, and the fifth
+     * — refused a consult on a "spent" budget — settles 'failed' on the
+     * environment. The monitor already runs consults one at a time, so
+     * serializing here costs no wall-clock.
+     */
+    let triageConsultChain: Promise<unknown> = Promise.resolve();
 
     /**
      * Walk ONE item through the inner chain. Fail-soft per inner step:
@@ -1246,27 +1257,35 @@ export class WorkflowController {
         errorExcerpt: string,
         needsRevive = false,
       ): Promise<number | null | { systemic: string }> => {
-        // The wave already learned the environment is down (see the latch's
-        // declaration): park without consulting and without reserving budget.
-        if (waveSystemicTriageError !== undefined) {
-          this.host.log?.(
-            'warn',
-            `fan-out item '${itemId}': a sibling lane's triage already died on a systemic condition this wave; parking without consulting`,
+        const consult = async (): Promise<number | null | { systemic: string }> => {
+          // The wave already learned the environment is down (see the latch's
+          // declaration): park without consulting and without reserving budget.
+          // Read INSIDE the serialized turn, so a lane that failed while a
+          // sibling's consult was in flight sees that sibling's verdict.
+          if (waveSystemicTriageError !== undefined) {
+            this.host.log?.(
+              'warn',
+              `fan-out item '${itemId}': a sibling lane's triage already died on a systemic condition this wave; parking without consulting`,
+            );
+            return { systemic: waveSystemicTriageError };
+          }
+          const verdict = await consultLaneTriage(
+            itemId,
+            failingStepId,
+            laneAttempt,
+            failureKind,
+            errorExcerpt,
           );
-          return { systemic: waveSystemicTriageError };
-        }
-        const targetIndex = await consultLaneTriage(
-          itemId,
-          failingStepId,
-          laneAttempt,
-          failureKind,
-          errorExcerpt,
+          if (verdict !== null && typeof verdict === 'object') waveSystemicTriageError = verdict.systemic;
+          return verdict;
+        };
+        const turn = triageConsultChain.then(consult, consult);
+        triageConsultChain = turn.then(
+          () => undefined,
+          () => undefined,
         );
-        if (targetIndex !== null && typeof targetIndex === 'object') {
-          waveSystemicTriageError = targetIndex.systemic;
-          return targetIndex;
-        }
-        if (targetIndex === null) return null;
+        const targetIndex = await turn;
+        if (targetIndex === null || typeof targetIndex === 'object') return targetIndex;
         clearStateForRewind(targetIndex);
         if (needsRevive) driver.reviveLane?.({ runId, itemId });
         return targetIndex;
@@ -2081,6 +2100,18 @@ export class WorkflowController {
       waveSystemicTriageError = undefined;
       const outcomes = await Promise.all(wave.map((itemId) => driveItem(itemId)));
       if (outcomes.some((o) => o.kind === 'aborted') || signal?.aborted) {
+        // Cancellation ends the walk here, BEFORE the settle below — so a lane
+        // that already failed this wave and deferred its 'failed' write (the
+        // corroboration arm) would otherwise stay 'running' in the lane store
+        // forever. Persist those writes now; no corroboration and no park, the
+        // run is terminal either way.
+        wave.forEach((itemId, idx) => {
+          const outcome = outcomes[idx];
+          if (outcome.kind !== 'failed' || outcome.persisted) return;
+          driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
+          remaining.delete(itemId);
+          failed.add(itemId);
+        });
         return { terminal: true, incompleteCount };
       }
 

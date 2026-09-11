@@ -706,6 +706,35 @@ describe('WorkflowController — autonomous lane rescue', () => {
     for (const id of items) expect(laneStatus(driver.lanes, id)).toBe('integrated');
   });
 
+  it('SERIALIZES consults so five lanes failing BEFORE the first consult resolves still park as one', async () => {
+    // Regression (Codex F1): the latch is read before the consult, and lanes
+    // fail concurrently — five lanes that all fail at step 0 pass the latch
+    // check together. Unserialized, four consults reserve MONITOR_RUN_RESCUE_CAP
+    // and the fifth is refused on a "spent" budget and settles 'failed'.
+    // Corroboration cannot rescue it either: every lane fails with DIFFERENT
+    // text, and the systemic lanes carry the monitor's error, not the step's.
+    const items = ['t1', 't2', 't3', 't4', 't5'];
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }, { id: 'verify' }], 5)])]);
+    const runner = makeRunner(
+      Object.fromEntries(items.map((id, n) => [`${id}:implement`, [{ status: 'failed', error: `tsc: ${n + 1} errors` }]])),
+    );
+    const { host, driver, consults, pauseCalls } = makeTriageHost({
+      items,
+      outcomes: [{ kind: 'systemic', error: LIMIT }],
+      pauses: ['retry'],
+      maxConcurrency: 5,
+    });
+
+    const result = await new WorkflowController(runner, host).run('r', d);
+
+    expect(result.outcome).toBe('completed');
+    // Exactly ONE consult: the four that queued behind it re-read the latch.
+    expect(consults).toHaveLength(1);
+    expect(pauseCalls).toEqual([{ stepId: 'execute', error: LIMIT }]);
+    expect(failedWrites(driver.lanes)).toEqual([]);
+    for (const id of items) expect(laneStatus(driver.lanes, id)).toBe('integrated');
+  });
+
   it('treats a systemic triage verdict at the MERGE GATE exactly like a give_up', async () => {
     // The gate already PERSISTED this lane 'failed' and the verification request
     // it just resolved owns the lane's current attempt number, so a park would

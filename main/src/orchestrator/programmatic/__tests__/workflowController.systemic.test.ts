@@ -511,6 +511,26 @@ describe('WorkflowController — systemic-pause seam', () => {
       }
     });
 
+    it("persists a deferred 'failed' write when a SIBLING aborts the wave (cancel does not lose it)", async () => {
+      // Regression (Codex F3): the corroboration arm defers its write to the
+      // wave settle, but an aborted sibling returns before the settle runs —
+      // the completed failure must not be left 'running' in the lane store.
+      const driver = makeFanOutDriver(['t1', 't2']);
+      const runner = makeLaneRunner({
+        't1:implement': [plainFail('tsc: 4 errors in exporter.ts')],
+        't2:implement': [{ status: 'aborted' }],
+      });
+      const { host, pauseCalls } = makeSystemicHost({ verdicts: ['retry'] });
+      host.fanOut = driver;
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('canceled');
+      expect(pauseCalls).toEqual([]);
+      expect(failedLanes(driver)).toEqual(['t1']);
+      expect(driver.lanes.some((l) => l.itemId === 't2' && l.status === 'failed')).toBe(false);
+    });
+
     it('does NOT park for TWO lanes with identical text — each is written failed exactly once', async () => {
       // Two lanes failing alike is ordinary (a shared missing dependency, a bad
       // base commit) and IS the run's problem to surface.
