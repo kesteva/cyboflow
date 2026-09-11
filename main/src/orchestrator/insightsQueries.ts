@@ -542,24 +542,38 @@ interface CostLadderSegment {
   lastCost: number;
   /** This segment's running max `total_cost_usd` — flushed into costUsd when the segment ends. */
   segMaxCost: number;
-  /** This segment's most recently observed `Σ modelUsage[*].outputTokens` (0 when never applicable). */
-  lastOutTotal: number;
+  /**
+   * This segment's most recently observed `Σ modelUsage[*].outputTokens` —
+   * null until a result carries a COMPLETE counter set (see
+   * resultModelUsageOutputTokens), so an unavailable total can never be
+   * mistaken for a total of zero.
+   */
+  lastOutTotal: number | null;
 }
 
 /**
  * Σ `modelUsage[*].outputTokens` for a `result` payload (camelCase SDK field,
- * cumulative per process) — 0 when `modelUsage` is absent or not an object.
+ * cumulative per process), or null when the counters are NOT comparable:
+ * `modelUsage` absent / not an object / empty, or any model entry without a
+ * finite `outputTokens`. Null must stay distinct from 0 — an empty
+ * `modelUsage` (the SDK fixtures emit one) folded to 0 would satisfy the
+ * ladder's "total grew by less than this query's output" test on EVERY result
+ * and restore the per-result overcount the ladder exists to remove.
  * Used only by the cost ladder's token-increment invariant (see doc above);
  * mirrors the `modelUsage[*].contextWindow` reads in liveContextUsage.ts /
  * runContextUsageListing.ts.
  */
-function resultModelUsageOutputTokens(payload: Record<string, unknown>): number {
+function resultModelUsageOutputTokens(payload: Record<string, unknown>): number | null {
   const modelUsage = payload.modelUsage;
-  if (!isRecord(modelUsage)) return 0;
+  if (!isRecord(modelUsage)) return null;
+  const entries = Object.values(modelUsage);
+  if (entries.length === 0) return null;
   let total = 0;
-  for (const modelData of Object.values(modelUsage)) {
-    if (!isRecord(modelData)) continue;
-    total += asNumber(modelData.outputTokens);
+  for (const modelData of entries) {
+    if (!isRecord(modelData)) return null;
+    const outputTokens = modelData.outputTokens;
+    if (typeof outputTokens !== 'number' || !Number.isFinite(outputTokens)) return null;
+    total += outputTokens;
   }
   return total;
 }
@@ -697,9 +711,11 @@ function scanRawEventRollups(
             isRecord(resultUsage) &&
             typeof resultUsage.output_tokens === 'number' &&
             Number.isFinite(resultUsage.output_tokens);
-          const hasModelUsage = isRecord(payload.modelUsage);
-          const tokenTestApplicable = hasModelUsage && hasOutputTokensField;
-          const outTotal = hasModelUsage ? resultModelUsageOutputTokens(payload) : 0;
+          // null ⇒ this result's counters are not comparable; the token test is
+          // skipped for it and the segment's last comparable total is kept (the
+          // invariant still holds across a skipped result because the counter
+          // is cumulative).
+          const outTotal = resultModelUsageOutputTokens(payload);
           const outputTokensThisResult = hasOutputTokensField
             ? (resultUsage as Record<string, unknown>).output_tokens as number
             : 0;
@@ -712,14 +728,17 @@ function scanRawEventRollups(
           } else {
             const isNewSegment =
               cost < segment.lastCost ||
-              (tokenTestApplicable && outTotal < segment.lastOutTotal + outputTokensThisResult);
+              (outTotal !== null &&
+                segment.lastOutTotal !== null &&
+                hasOutputTokensField &&
+                outTotal < segment.lastOutTotal + outputTokensThisResult);
             if (isNewSegment) {
               target.costUsd = (target.costUsd ?? 0) + segment.segMaxCost;
               costSegments.set(segmentKey, { runId: row.runId, lastCost: cost, segMaxCost: cost, lastOutTotal: outTotal });
             } else {
               segment.lastCost = cost;
               segment.segMaxCost = Math.max(segment.segMaxCost, cost);
-              if (tokenTestApplicable) segment.lastOutTotal = outTotal;
+              if (outTotal !== null) segment.lastOutTotal = outTotal;
             }
           }
         } else if (hasFiniteCost) {

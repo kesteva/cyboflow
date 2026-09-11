@@ -1069,6 +1069,49 @@ describe('selectRunUsageRollups', () => {
       expect(rollup.costUsd).toBeCloseTo(3.0, 5);
     });
 
+    it('an EMPTY modelUsage never trips the token-increment test (unavailable ≠ zero)', () => {
+      // Regression (Codex F2): `{}` summed to 0, and 0 < 0 + output_tokens held on
+      // every result — re-opening a segment per result and restoring the
+      // per-result overcount. Same process, cost 1.00 → 2.00: ladder max is 2.00.
+      seedWorkflow(db, { id: 'wf-1' });
+      seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+      seedEvent(db, 'r1', 'result', resultPayload(1.0, 1, { sessionId: 's1', outputTokens: 10, modelUsage: {} }));
+      seedEvent(db, 'r1', 'result', resultPayload(2.0, 1, { sessionId: 's1', outputTokens: 10, modelUsage: {} }));
+
+      const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+      expect(rollup.costUsd).toBeCloseTo(2.0, 5);
+    });
+
+    it('a modelUsage entry WITHOUT a finite outputTokens is treated as not comparable', () => {
+      // A partial counter set is not a cumulative total. Only the cost-decrease
+      // test applies to such a result — and 1.00 → 2.00 is not a decrease.
+      seedWorkflow(db, { id: 'wf-1' });
+      seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+      seedEvent(
+        db,
+        'r1',
+        'result',
+        resultPayload(1.0, 1, { sessionId: 's1', outputTokens: 10, modelUsage: { 'claude-x': { outputTokens: 500 } } }),
+      );
+      seedEvent(
+        db,
+        'r1',
+        'result',
+        resultPayload(2.0, 1, { sessionId: 's1', outputTokens: 10, modelUsage: { 'claude-x': {} } }),
+      );
+      // A later COMPLETE counter is compared against the last complete one
+      // (500): 600 ≥ 500 + 10 ⇒ still the same process.
+      seedEvent(
+        db,
+        'r1',
+        'result',
+        resultPayload(2.5, 1, { sessionId: 's1', outputTokens: 10, modelUsage: { 'claude-x': { outputTokens: 600 } } }),
+      );
+
+      const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+      expect(rollup.costUsd).toBeCloseTo(2.5, 5);
+    });
+
     it('two interleaved session_ids ladder independently within the same run', () => {
       seedWorkflow(db, { id: 'wf-1' });
       seedRun(db, { id: 'r1', workflowId: 'wf-1' });
