@@ -7,7 +7,8 @@ name: Windows
 # cmd.exe quoting probes) executes ONLY here, and `pnpm build:win` is the only
 # check that exercises the afterSign Windows arm against real v13 prebuilds.
 # Promote the unit job into branch protection once it has run green a few
-# times; the installer job stays a smoke (unsigned output, artifact only).
+# times; the installer job stays a smoke (artifact only — signed when the
+# AZURE_* secrets are configured, unsigned otherwise).
 
 on:
   workflow_dispatch:
@@ -124,11 +125,24 @@ jobs:
       # electron-builder downloads its NSIS/winCodeSign tooling on first use;
       # the runner is an administrator, so the winCodeSign archive's darwin
       # symlinks extract (see docs/WINDOWS-BUILD.md → Troubleshooting).
-      # The output is unsigned — SmartScreen warns on first run.
+      #
+      # SIGNING: the AZURE_* vars below are the Microsoft Entra ID credentials
+      # electron-builder reads for Azure Artifact Signing. configure-build.js
+      # injects win.azureSignOptions only when all of them are populated, so a
+      # run WITHOUT the secrets (a fork PR, or a repo where they were never
+      # configured) still produces a valid — if unsigned — installer rather
+      # than failing. Half-populated is the one case that hard-fails, by
+      # design: a release that silently ships unsigned is worse than a red
+      # build. Signing runs here rather than on a Mac because app-builder-lib
+      # drives it through PowerShell and would otherwise need a Windows VM.
+      # See docs/WINDOWS-BUILD.md → "Code signing (Azure Artifact Signing)".
       - name: Build Windows installer
         run: pnpm build:win
         env:
           CI: true
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         timeout-minutes: 40
 
       - name: Upload installer
