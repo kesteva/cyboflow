@@ -1,14 +1,13 @@
 import * as path from 'path';
 import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
 import * as fs from 'fs';
-import { execSync } from 'child_process';
 import type Database from 'better-sqlite3';
 import type * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import type { Logger } from '../../../utils/logger';
 import type { ConfigManager } from '../../configManager';
 import type { ConversationMessage } from '../../../database/models';
 import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
-import { quoteForShellString, resolveGitCommand } from '../../../utils/gitExeFinder';
+import { ensureGitExcludeEntries } from '../../../utils/gitExcludeWriter';
 import { probeCliVersion } from '../cli/cliVersionProbe';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { electronRunAsNodeGuardEnv } from '../../../utils/electronNodeGuard';
@@ -870,39 +869,18 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    * Append `.cyboflow/` to the worktree's git exclude file if not already
    * present. Idempotent and fail-soft: a non-git directory (unit-test fixture
    * dirs) or any git/fs error only logs a warning — the spawn proceeds.
+   * Delegates to the shared `gitExcludeWriter` (also used by
+   * workflowBundleInstall's bundle-glob exclude and OMP's `.omp/` exclude).
    * Protected for the test harness subclass.
    */
   protected ensureWorktreeExcludesCyboflowDir(worktreePath: string): void {
-    const EXCLUDE_LINE = '.cyboflow/';
-    try {
-      const raw = execSync(`${quoteForShellString(resolveGitCommand())} rev-parse --git-path info/exclude`, {
-        cwd: worktreePath,
-        encoding: 'utf-8',
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      }).trim();
-      if (raw.length === 0) return;
-      // --git-path output may be relative to the worktree root or absolute.
-      const excludePath = path.resolve(worktreePath, raw);
-      let existing = '';
-      try {
-        existing = fs.readFileSync(excludePath, 'utf-8');
-      } catch {
-        /* no exclude file yet — created below */
-      }
-      const hasLine = existing
-        .split('\n')
-        .some((line) => line.trim() === EXCLUDE_LINE || line.trim() === '/.cyboflow/');
-      if (hasLine) return;
-      fs.mkdirSync(path.dirname(excludePath), { recursive: true });
-      const sep = existing.length === 0 || existing.endsWith('\n') ? '' : '\n';
-      fs.appendFileSync(excludePath, `${sep}${EXCLUDE_LINE}\n`, 'utf-8');
+    const result = ensureGitExcludeEntries(worktreePath, ['.cyboflow/'], {
+      logger: this.toLoggerLike(this.logger),
+      label: 'InteractiveClaudeManager',
+    });
+    if (result !== null && result.added.length > 0) {
       this.logger?.info(
-        `[InteractiveClaudeManager] excluded .cyboflow/ via worktree-local ${excludePath}`,
-      );
-    } catch (err) {
-      this.logger?.warn(
-        `[InteractiveClaudeManager] could not write worktree exclude for .cyboflow/ (non-git dir?): ${err instanceof Error ? err.message : String(err)}`,
+        `[InteractiveClaudeManager] excluded .cyboflow/ via worktree-local git exclude in ${worktreePath}`,
       );
     }
   }

@@ -1,18 +1,23 @@
 /**
  * Unit tests for RunLauncher.
  *
- * Behaviors covered (per TASK-352 test_strategy):
- * 1. ensureGitignoreEntry — append entry when missing
- * 2. ensureGitignoreEntry — idempotent when entry present
- * 3. ensureGitignoreEntry — creates .gitignore when file missing
+ * Behaviors covered (per TASK-352 test_strategy, updated for the Item-4
+ * git-exclude migration — TASK plan-tier0-1-v2.md):
+ * 1. ensureGitExcludeEntry — excludes the entry in a fresh git repo
+ * 2. ensureGitExcludeEntry — idempotent when entry already present
+ * 3. ensureGitExcludeEntry — fail-soft (no throw) on a non-git directory
  * 4. launch — updates workflow_runs row with worktree_path, branch_name, status='starting'
  *
  * Tests use withTempDir for filesystem isolation (auto-cleanup on exit).
  * The launch test uses an in-memory SQLite DB for the workflow_runs assertion.
+ * The ensureGitExcludeEntry tests spawn real `git` — 60s per test (real-git
+ * subprocess spawns can be slow under load,
+ * feedback_worktree_test_runner_landmines).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type Database from 'better-sqlite3';
-import { writeFileSync, readFileSync, existsSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
+import { execFileSync } from 'child_process';
 import { randomUUID } from 'crypto';
 import { join } from 'path';
 import { RunLauncher } from '../runLauncher';
@@ -139,102 +144,69 @@ function makeFakeSessionPermDeps(): {
 }
 
 // ---------------------------------------------------------------------------
-// ensureGitignoreEntry
+// ensureGitExcludeEntry (Item 4: git excludes instead of .gitignore)
 // ---------------------------------------------------------------------------
 
-describe('RunLauncher.ensureGitignoreEntry', () => {
-  it('appends entry when missing from existing .gitignore', async () => {
-    await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb();
-      const fakeRegistry = {} as WorkflowRegistry;
-      const fakeWorktree = {} as WorktreeManager;
-      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeSpyLogger(), fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+function makeLauncher(logger: ReturnType<typeof makeSpyLogger>, db: Database.Database): RunLauncher {
+  const fakeRegistry = {} as WorkflowRegistry;
+  const fakeWorktree = {} as WorktreeManager;
+  return new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+}
 
-      const gitignorePath = join(tmpDir, '.gitignore');
-      writeFileSync(gitignorePath, 'node_modules\n', 'utf-8');
+describe('RunLauncher.ensureGitExcludeEntry', () => {
+  it(
+    'excludes .cyboflow/worktrees/ via the LOCAL git exclude of a fresh repo',
+    async () => {
+      await withTempDir('runlauncher-test-', async (tmpDir) => {
+        execFileSync('git', ['init', '-q'], { cwd: tmpDir });
+        const db = createTestDb();
+        const launcher = makeLauncher(makeSpyLogger(), db);
 
-      await launcher.ensureGitignoreEntry(tmpDir);
+        await launcher.ensureGitExcludeEntry(tmpDir);
 
-      const content = readFileSync(gitignorePath, 'utf-8');
-      expect(content).toContain('.cyboflow/worktrees/');
-    });
-  });
+        const excludePath = join(tmpDir, '.git', 'info', 'exclude');
+        const content = readFileSync(excludePath, 'utf-8');
+        expect(content).toContain('.cyboflow/worktrees/');
+        // The tracked .gitignore must NEVER be touched by this call.
+        expect(existsSync(join(tmpDir, '.gitignore'))).toBe(false);
+      });
+    },
+    60_000,
+  );
 
-  it('idempotent when entry already present (with trailing slash)', async () => {
-    await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb();
-      const fakeRegistry = {} as WorkflowRegistry;
-      const fakeWorktree = {} as WorktreeManager;
-      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeSpyLogger(), fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+  it(
+    'is idempotent — a second call appends no duplicate line',
+    async () => {
+      await withTempDir('runlauncher-test-', async (tmpDir) => {
+        execFileSync('git', ['init', '-q'], { cwd: tmpDir });
+        const db = createTestDb();
+        const launcher = makeLauncher(makeSpyLogger(), db);
 
-      const gitignorePath = join(tmpDir, '.gitignore');
-      const original = 'node_modules\n.cyboflow/worktrees/\n';
-      writeFileSync(gitignorePath, original, 'utf-8');
+        await launcher.ensureGitExcludeEntry(tmpDir);
+        const first = readFileSync(join(tmpDir, '.git', 'info', 'exclude'), 'utf-8');
+        await launcher.ensureGitExcludeEntry(tmpDir);
+        const second = readFileSync(join(tmpDir, '.git', 'info', 'exclude'), 'utf-8');
 
-      await launcher.ensureGitignoreEntry(tmpDir);
+        expect(second).toBe(first);
+        expect(second.split('\n').filter((l) => l.trim() === '.cyboflow/worktrees/')).toHaveLength(1);
+      });
+    },
+    60_000,
+  );
 
-      const content = readFileSync(gitignorePath, 'utf-8');
-      // Should not have a duplicate line
-      const lines = content.split('\n').filter((l) => l.trim() === '.cyboflow/worktrees/');
-      expect(lines).toHaveLength(1);
-      expect(content).toBe(original);
-    });
-  });
+  it(
+    'is fail-soft (never throws, writes no .gitignore) on a non-git directory',
+    async () => {
+      await withTempDir('runlauncher-test-', async (tmpDir) => {
+        const db = createTestDb();
+        const launcher = makeLauncher(makeSpyLogger(), db);
 
-  it('idempotent when entry already present (without trailing slash)', async () => {
-    await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb();
-      const fakeRegistry = {} as WorkflowRegistry;
-      const fakeWorktree = {} as WorktreeManager;
-      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeSpyLogger(), fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
-
-      const gitignorePath = join(tmpDir, '.gitignore');
-      const original = '.cyboflow/worktrees\n';
-      writeFileSync(gitignorePath, original, 'utf-8');
-
-      await launcher.ensureGitignoreEntry(tmpDir);
-
-      const content = readFileSync(gitignorePath, 'utf-8');
-      // File should be unchanged
-      expect(content).toBe(original);
-    });
-  });
-
-  it('creates .gitignore with the entry when file does not exist', async () => {
-    await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb();
-      const fakeRegistry = {} as WorkflowRegistry;
-      const fakeWorktree = {} as WorktreeManager;
-      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeSpyLogger(), fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
-
-      const gitignorePath = join(tmpDir, '.gitignore');
-      expect(existsSync(gitignorePath)).toBe(false);
-
-      await launcher.ensureGitignoreEntry(tmpDir);
-
-      expect(existsSync(gitignorePath)).toBe(true);
-      const content = readFileSync(gitignorePath, 'utf-8');
-      expect(content).toBe('.cyboflow/worktrees/\n');
-    });
-  });
-
-  it('appends without duplicating a newline when existing file ends with newline', async () => {
-    await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb();
-      const fakeRegistry = {} as WorkflowRegistry;
-      const fakeWorktree = {} as WorktreeManager;
-      const launcher = new RunLauncher(dbAdapter(db), fakeRegistry, fakeWorktree, makeSpyLogger(), fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
-
-      const gitignorePath = join(tmpDir, '.gitignore');
-      writeFileSync(gitignorePath, 'dist/\n', 'utf-8');
-
-      await launcher.ensureGitignoreEntry(tmpDir);
-
-      const content = readFileSync(gitignorePath, 'utf-8');
-      // Should not have a blank line between dist/ and .cyboflow/worktrees/
-      expect(content).toBe('dist/\n.cyboflow/worktrees/\n');
-    });
-  });
+        await expect(launcher.ensureGitExcludeEntry(tmpDir)).resolves.toBeUndefined();
+        expect(existsSync(join(tmpDir, '.gitignore'))).toBe(false);
+      });
+    },
+    60_000,
+  );
 });
 
 // ---------------------------------------------------------------------------

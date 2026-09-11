@@ -1,9 +1,9 @@
-import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { electronRunAsNodeGuardEnv } from '../../../utils/electronNodeGuard';
 import type { Logger } from '../../../utils/logger';
-import { resolveGitCommand } from '../../../utils/gitExeFinder';
+import { ensureGitExcludeEntries } from '../../../utils/gitExcludeWriter';
+import { makeLoggerLike } from '../../../orchestrator/loggerAdapter';
 
 /**
  * Writer for `<worktree>/.omp/mcp.json` — how the `cyboflow` MCP server (the
@@ -179,55 +179,20 @@ const OMP_EXCLUDE_LINE = '.omp/';
  * session diff rail or gets swept into a `git add -A` checkpoint commit —
  * `.omp/` joins `.cyboflow/` in that file, per proposal §5.4.
  *
- * SEAM NOTE for the wiring step: this is a THIRD independent implementation of
- * "idempotently append a line to the worktree-local git exclude, fail-soft on
- * a non-git dir". The other two are
- * `InteractiveClaudeManager.ensureWorktreeExcludesCyboflowDir`
- * (`main/src/services/panels/claude/interactiveClaudeManager.ts`, appends
- * `.cyboflow/`) and `workflowBundleInstall.ensureBundleExcluded`
- * (`main/src/services/panels/claude/workflowBundleInstall.ts`, appends the
- * `cyboflow-*.md` bundle globs behind a marker comment). Neither is exported
- * or otherwise shared, and both live outside this task's file set
- * (`main/src/services/panels/omp/`), so this is a fresh copy rather than a
- * call into either. Worth extracting a single
- * `ensureWorktreeGitExclude(worktreePath, lines, logger?)` helper at the
- * wiring step instead of a fourth copy landing later.
+ * Delegates the git-path resolution, idempotent append and fail-soft error
+ * handling to the shared `gitExcludeWriter` — the single implementation that
+ * replaced this function's own copy plus
+ * `InteractiveClaudeManager.ensureWorktreeExcludesCyboflowDir` (`.cyboflow/`)
+ * and `workflowBundleInstall.ensureBundleExcluded` (the `cyboflow-*.md`
+ * bundle globs), per this doc comment's own note that a fourth copy should
+ * not land.
  */
 function ensureWorktreeExcludesOmpDir(worktreePath: string, logger?: Logger): void {
-  try {
-    const raw = execFileSync(resolveGitCommand(), ['rev-parse', '--git-path', 'info/exclude'], {
-      cwd: worktreePath,
-      encoding: 'utf8',
-      windowsHide: true,
-      // Pin git's message language the same way workflowBundleInstall does,
-      // so a locale-dependent "not a git repository" message never surprises
-      // a caller trying to distinguish "no repo" from a real failure here —
-      // this function does not need that distinction (both paths just warn),
-      // but the pin costs nothing and keeps the two implementations aligned.
-      env: { ...process.env, LC_ALL: 'C' },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim();
-    if (raw.length === 0) return;
-    const excludePath = path.isAbsolute(raw) ? raw : path.resolve(worktreePath, raw);
-
-    let existingExclude = '';
-    try {
-      existingExclude = fs.readFileSync(excludePath, 'utf-8');
-    } catch {
-      /* no exclude file yet — created below */
-    }
-    const hasLine = existingExclude
-      .split(/\r?\n/)
-      .some((line) => line.trim() === OMP_EXCLUDE_LINE || line.trim() === '/.omp/');
-    if (hasLine) return;
-
-    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
-    const sep = existingExclude.length === 0 || existingExclude.endsWith('\n') ? '' : '\n';
-    fs.appendFileSync(excludePath, `${sep}${OMP_EXCLUDE_LINE}\n`, 'utf-8');
-    logger?.info(`[OMP] excluded .omp/ via worktree-local ${excludePath}`);
-  } catch (err) {
-    logger?.warn(
-      `[OMP] could not write worktree exclude for .omp/ (non-git dir?): ${err instanceof Error ? err.message : String(err)}`,
-    );
+  const result = ensureGitExcludeEntries(worktreePath, [OMP_EXCLUDE_LINE], {
+    logger: makeLoggerLike(logger),
+    label: 'OMP',
+  });
+  if (result !== null && result.added.length > 0) {
+    logger?.info(`[OMP] excluded .omp/ via worktree-local git exclude in ${worktreePath}`);
   }
 }

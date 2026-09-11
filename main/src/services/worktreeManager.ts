@@ -973,12 +973,11 @@ export class WorktreeManager {
           console.log(`[WorktreeManager] Successfully fast-forwarded ${mainBranch} to ${branchName}`);
         } catch (error: unknown) {
           const err = error as Error & { stderr?: string; stdout?: string };
-          throw new Error(
-            `Failed to fast-forward ${mainBranch} to ${branchName}.\n\n` +
+          const gitOutput = err.stderr || err.stdout || err.message;
+          const hint =
             `This usually means ${mainBranch} has commits that ${branchName} doesn't have.\n` +
-            `You may need to rebase the worktree onto ${mainBranch} first, or reset ${mainBranch} to match origin.\n\n` +
-            `Git output: ${err.stderr || err.stdout || err.message}`
-          );
+            `You may need to rebase the worktree onto ${mainBranch} first, or reset ${mainBranch} to match origin.`;
+          throw new Error(`Failed to fast-forward ${mainBranch} to ${branchName}:\n${gitOutput}\n\n${hint}`);
         }
 
         console.log(`[WorktreeManager] Successfully squashed and merged worktree to ${mainBranch}`);
@@ -1070,12 +1069,11 @@ export class WorktreeManager {
           console.log(`[WorktreeManager] Successfully fast-forwarded ${mainBranch} to ${branchName}`);
         } catch (error: unknown) {
           const err = error as Error & { stderr?: string; stdout?: string };
-          throw new Error(
-            `Failed to fast-forward ${mainBranch} to ${branchName}.\n\n` +
+          const gitOutput = err.stderr || err.stdout || err.message;
+          const hint =
             `This usually means ${mainBranch} has commits that ${branchName} doesn't have.\n` +
-            `You may need to rebase the worktree onto ${mainBranch} first, or reset ${mainBranch} to match origin.\n\n` +
-            `Git output: ${err.stderr || err.stdout || err.message}`
-          );
+            `You may need to rebase the worktree onto ${mainBranch} first, or reset ${mainBranch} to match origin.`;
+          throw new Error(`Failed to fast-forward ${mainBranch} to ${branchName}:\n${gitOutput}\n\n${hint}`);
         }
 
         console.log(`[WorktreeManager] Successfully merged worktree to ${mainBranch} (without squashing)`);
