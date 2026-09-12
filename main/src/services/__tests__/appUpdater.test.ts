@@ -67,7 +67,7 @@ function electronCachedSession(): unknown {
   return (ELECTRON_EXECUTOR as { cachedSession?: unknown }).cachedSession;
 }
 
-import { AppUpdater, isNewerVersion } from '../appUpdater';
+import { AppUpdater, hasUpdateFeed, isNewerVersion } from '../appUpdater';
 import { NodeHttpExecutor, isProxyOrCertTransportFailure } from '../nodeHttpExecutor';
 
 const NETWORK_GONE = {
@@ -390,6 +390,48 @@ describe('AppUpdater HTTP transport selection', () => {
  * can only fail with "Please check update first". Regression guard for a
  * `latest !== current` check that treated any difference as an update.
  */
+// ---------------------------------------------------------------------------
+// Platform gate. `publish:r2` maintains a feed for macOS (latest-mac.yml) and
+// Windows (latest.yml) under the same <variant>/ prefix; nothing else ships, so
+// the updater must stay inert there rather than ENOENT on every interval.
+// ---------------------------------------------------------------------------
+
+describe('AppUpdater platform gate', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.clearAllMocks();
+    mockAutoUpdater.httpExecutor = ELECTRON_EXECUTOR;
+  });
+
+  it.each(['darwin', 'win32'] as const)('is supported on %s', async (platform) => {
+    mockAutoUpdater.checkForUpdates.mockResolvedValue({ updateInfo: { version: '0.1.28' } });
+    const updater = new AppUpdater(makeApp() as unknown as App, () => null, undefined, platform);
+    updater.init();
+    expect(mockAutoUpdater.on).toHaveBeenCalled();
+    const result = await updater.check();
+    expect(result.supported).toBe(true);
+    expect(mockAutoUpdater.checkForUpdates).toHaveBeenCalledTimes(1);
+  });
+
+  it('is inert on linux: no events wired, check reports unsupported', async () => {
+    const updater = new AppUpdater(makeApp() as unknown as App, () => null, undefined, 'linux');
+    updater.init();
+    expect(mockAutoUpdater.on).not.toHaveBeenCalled();
+    await expect(updater.check()).resolves.toEqual({
+      supported: false,
+      currentVersion: '0.1.28',
+      updateAvailable: false,
+    });
+    expect(mockAutoUpdater.checkForUpdates).not.toHaveBeenCalled();
+  });
+
+  it('hasUpdateFeed names exactly the platforms publish:r2 serves', () => {
+    expect(hasUpdateFeed('darwin')).toBe(true);
+    expect(hasUpdateFeed('win32')).toBe(true);
+    expect(hasUpdateFeed('linux')).toBe(false);
+  });
+});
+
 describe('AppUpdater version comparison', () => {
   beforeEach(() => {
     vi.useFakeTimers();

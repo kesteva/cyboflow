@@ -1,6 +1,6 @@
 ---
 name: release
-description: Cut a Cyboflow release end-to-end — run the full test gate, bump the version + changelog, build four signed/notarized macOS DMGs (stable + dev, arm64 + x64), publish both R2 update feeds (the in-app update channel), and cut the GitHub release. Use when asked to cut/ship/publish a release, make a release build, or roll a new version. Follows docs/RELEASE-RUNBOOK.md.
+description: Cut a Cyboflow release end-to-end — run the full test gate (local + the Windows unit leg on CI), bump the version + changelog, build four signed/notarized macOS DMGs (stable + dev, arm64 + x64) plus two Azure-signed Windows installers on CI, publish both R2 update feeds (macOS + Windows manifests) (the in-app update channel), and cut the GitHub release. Use when asked to cut/ship/publish a release, make a release build, or roll a new version. Follows docs/RELEASE-RUNBOOK.md.
 ---
 
 # Release
@@ -57,8 +57,44 @@ Work through the phases **in order** and do not skip verification.
          node_modules/@openai/codex-darwin-{arm64,x64}
    ```
    If any are missing, run the cross-arch install **with `--force`** (see runbook).
+6. Windows leg prerequisites: `gh auth status` is logged in (dispatching
+   `windows.yml` + downloading its artifacts), `osslsigncode` is installed
+   (`brew install osslsigncode`), and the repo has the `AZURE_TENANT_ID` /
+   `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` secrets
+   (`gh secret list | grep AZURE_` shows all three).
 
 ## Phase 1 — Full test gate (all must pass)
+
+**Start the Windows leg FIRST** — it runs on a hosted runner for ~15 min, in
+parallel with everything below. The `skipIf(process.platform !== 'win32')`
+suites (afterSign cases Y–AA, the named-pipe orch socket, the PowerShell
+process table, taskkill, cmd.exe quoting) execute **nowhere else**, and the
+POSIX-host suites have shipped Windows-only breakage before (the 9/10
+verify-harness merge: `:` vs `;` PATH joins, an EBUSY unlink, real-git
+timeouts). The runner needs a REMOTE ref and local `main` is normally ahead of
+`origin/main`, so push a throwaway gate branch — **not `main`**, Phase 6 owns
+that push:
+
+```bash
+V=<version>
+git push origin HEAD:refs/heads/release-gate/$V
+gh workflow run windows.yml --ref release-gate/$V -f build_installer=false
+# The run is created asynchronously; wait for it to appear, then watch it.
+until RUN=$(gh run list --workflow windows.yml --branch release-gate/$V --limit 1 \
+  --json databaseId -q '.[0].databaseId') && [ -n "$RUN" ]; do sleep 5; done
+echo "Windows gate: https://github.com/kesteva/cyboflow/actions/runs/$RUN"
+```
+(The branch push itself may also trigger `windows.yml` if the diff touches its
+path filter — then two runs appear; both must be green, and the dispatched one
+is the cheaper, unit-only run.) Continue with the local gate while it runs;
+collect the verdict at the end of this phase:
+
+```bash
+gh run watch "$RUN" --exit-status          # exit 0 = Unit tests (Windows) green
+git push origin --delete release-gate/$V   # cleanup, whatever the verdict
+```
+
+Local gate, in this order:
 
 ```bash
 pnpm typecheck        # clean
@@ -69,10 +105,12 @@ pnpm run e2e:prereqs && pnpm run test:ci:minimal  # packaged-app smoke (blocking
 pnpm test:gate        # real-API canary — needs authenticated `claude` on PATH
 pnpm smoke:sdk        # real-API protocol canary
 ```
-If anything fails, stop and report — do not proceed to a build. The E2E smoke
-tier launches the built Electron bundle, so it needs this machine's display;
-the two canaries spend real API tokens (~15-20 min combined) and exist because
-CI can never run them (no authenticated `claude` on hosted runners).
+If anything fails — the Windows run included — stop and report; do not proceed
+to a build. The E2E smoke tier launches the built Electron bundle, so it needs
+this machine's display; the two canaries spend real API tokens (~15-20 min
+combined) and exist because CI can never run them (no authenticated `claude` on
+hosted runners). The Windows run is the mirror image: it exists because this
+Mac can never run those suites.
 
 ## Phase 2 — Version bump + changelog
 
@@ -98,7 +136,26 @@ CI can never run them (no authenticated `claude` on hosted runners).
   Build **after** this commit — the DMGs stamp `buildInfo.gitCommit` from it, and
   the tag must point here.
 
-## Phase 3 — Four signed builds
+## Phase 3 — Four signed macOS builds + two Windows installers
+
+**Dispatch the Windows installers FIRST** — they build on `windows-latest` (~10 min
+each, the only host that can Azure-sign) in parallel with the macOS builds. They
+must build the **release commit** (DMGs and installers share `buildInfo.gitCommit`),
+and `workflow_dispatch` needs a **remote** ref, so push it to a throwaway branch:
+
+```bash
+V=<version>
+git push origin HEAD:refs/heads/release-build/$V      # the "chore: release" commit
+for variant in stable dev; do
+  gh workflow run windows.yml --ref release-build/$V -f build_installer=true -f variant=$variant
+done
+sleep 20; gh run list --workflow windows.yml --branch release-build/$V --limit 3 \
+  --json databaseId,event,displayTitle,status
+# Record the two workflow_dispatch ids as WIN_STABLE / WIN_DEV. The push itself
+# may also trigger a third (push-event) run — harmless, ignore it.
+```
+
+Then the macOS builds:
 
 ```bash
 set -a; . ./.envrc.local; set +a
@@ -139,14 +196,36 @@ cd .. && pnpm rebuild better-sqlite3 @homebridge/node-pty-prebuilt-multiarch  # 
 If an arm64 DMG is a 215K stub, rebuild it by hand from the `.zip` (recipe in the
 cross-arch memory / runbook).
 
+**Windows installers.** Download each artifact into its OWN dir (both carry a
+`latest.yml`; Phase 5 copies the right pair in per feed) and verify the
+Authenticode signature from the Mac:
+
+```bash
+gh run watch "$WIN_STABLE" --exit-status && gh run watch "$WIN_DEV" --exit-status
+gh run download "$WIN_STABLE" -n cyboflow-windows-x64-installer     -D dist-electron/win-stable
+gh run download "$WIN_DEV"    -n cyboflow-windows-x64-installer-dev -D dist-electron/win-dev
+ls -lh dist-electron/win-*/                       # each: *.exe ~300M, *.exe.blockmap, latest.yml
+grep -m1 version dist-electron/win-*/latest.yml   # both = <version>
+ROOT=/tmp/ms-idv-root-2020.pem      # MS serves DER; osslsigncode needs PEM
+[ -f $ROOT ] || curl -sS "https://www.microsoft.com/pkiops/certs/Microsoft%20Identity%20Verification%20Root%20Certificate%20Authority%202020.crt" \
+  | openssl x509 -inform DER -out $ROOT
+for exe in dist-electron/win-*/*.exe; do
+  osslsigncode verify -in "$exe" -CAfile $ROOT -TSA-CAfile $ROOT | grep -E 'Subject:|Succeeded|Failed|No signature'
+done
+```
+Both must print `CN=Raimundo Esteva` and `Succeeded`. `No signature found` means
+the `AZURE_*` secrets were absent on the runner — **stop**; an unsigned installer
+is never published (the installed app's updater would reject it anyway).
+
 ## Phase 5 — Publish to R2, the in-app update channel (CONFIRM FIRST) — THE release
 
 **This is the step that actually ships the update.** The app polls
-`updates.cyboflow.com/<variant>/latest-mac.yml` (R2) and never reads GitHub. Do
-**both** feeds. For each: merge the per-arch manifests with `gen-mac-latest-yml.mjs`
-(arm64 zip first — each build overwrites `latest-mac.yml`), then upload with an
-explicit `PUBLISH_ONLY` allowlist so the mixed `dist-electron` doesn't
-cross-contaminate feeds. See `docs/UPDATES.md`.
+`updates.cyboflow.com/<variant>/latest-mac.yml` (macOS) / `latest.yml` (Windows)
+on R2 and never reads GitHub. Do **both** feeds, each carrying both platforms.
+For each: merge the per-arch manifests with `gen-mac-latest-yml.mjs` (arm64 zip
+first — each build overwrites `latest-mac.yml`), copy that variant's Windows trio
+up from its Phase 4 dir, then upload with an explicit `PUBLISH_ONLY` allowlist so
+the mixed `dist-electron` doesn't cross-contaminate feeds. See `docs/UPDATES.md`.
 
 ```bash
 set -a; . ./.envrc.local; set +a
@@ -157,25 +236,31 @@ node scripts/gen-mac-latest-yml.mjs dist-electron/latest-mac.yml \
   Cyboflow-$V-macOS-arm64.zip Cyboflow-$V-macOS-arm64.dmg \
   Cyboflow-$V-macOS-x64.zip  Cyboflow-$V-macOS-x64.dmg
 cat dist-electron/latest-mac.yml          # sanity: version, 4 files, path=arm64 zip
-S="Cyboflow-$V-macOS-arm64.dmg,Cyboflow-$V-macOS-arm64.dmg.blockmap,Cyboflow-$V-macOS-arm64.zip,Cyboflow-$V-macOS-arm64.zip.blockmap,Cyboflow-$V-macOS-x64.dmg,Cyboflow-$V-macOS-x64.dmg.blockmap,Cyboflow-$V-macOS-x64.zip,Cyboflow-$V-macOS-x64.zip.blockmap,latest-mac.yml"
-PUBLISH_ONLY="$S" UPDATE_DRY_RUN=true pnpm publish:r2   # verify list first
+cp dist-electron/win-stable/* dist-electron/  # stable exe + blockmap + latest.yml
+S="Cyboflow-$V-macOS-arm64.dmg,Cyboflow-$V-macOS-arm64.dmg.blockmap,Cyboflow-$V-macOS-arm64.zip,Cyboflow-$V-macOS-arm64.zip.blockmap,Cyboflow-$V-macOS-x64.dmg,Cyboflow-$V-macOS-x64.dmg.blockmap,Cyboflow-$V-macOS-x64.zip,Cyboflow-$V-macOS-x64.zip.blockmap,latest-mac.yml,Cyboflow-$V-Windows-x64.exe,Cyboflow-$V-Windows-x64.exe.blockmap,latest.yml"
+PUBLISH_ONLY="$S" UPDATE_DRY_RUN=true pnpm publish:r2   # verify: 12 files, 3 -latest- aliases
 PUBLISH_ONLY="$S" pnpm publish:r2                        # real → stable/
 
 # dev feed
 node scripts/gen-mac-latest-yml.mjs dist-electron/latest-mac.yml \
   Cyboflow-Dev-$V-macOS-arm64.zip Cyboflow-Dev-$V-macOS-arm64.dmg \
   Cyboflow-Dev-$V-macOS-x64.zip  Cyboflow-Dev-$V-macOS-x64.dmg
+cp dist-electron/win-dev/* dist-electron/     # dev trio; its latest.yml OVERWRITES stable's
+grep -m1 url dist-electron/latest.yml         # must name Cyboflow-Dev-…exe
 D="${S//Cyboflow-$V/Cyboflow-Dev-$V}"                    # stable names → Dev names
 BUILD_VARIANT=dev PUBLISH_ONLY="$D" pnpm publish:r2      # real → dev/
 
-# verify both feeds live
-curl -s https://updates.cyboflow.com/stable/latest-mac.yml | grep -m1 version
-curl -s https://updates.cyboflow.com/dev/latest-mac.yml    | grep -m1 version
+# verify both feeds live, both platforms
+for v in stable dev; do
+  curl -s https://updates.cyboflow.com/$v/latest-mac.yml | grep -m1 version
+  curl -s https://updates.cyboflow.com/$v/latest.yml     | grep -m1 version
+done
 ```
 
 `pnpm publish:r2` is a credentialed network write — in auto/headless modes the
 permission classifier may block it; if so, have the user run it (`!` prefix) or
-grant the Bash rule. Do not report the release as done until both feeds show `<version>`.
+grant the Bash rule. Do not report the release as done until both feeds show
+`<version>` in **both** manifests (`latest-mac.yml` and `latest.yml`).
 
 ## Phase 6 — Push + GitHub release, archival mirror (CONFIRM FIRST)
 
@@ -191,14 +276,18 @@ gh release create v<version> \
   dist-electron/Cyboflow-<version>-macOS-x64.dmg \
   dist-electron/Cyboflow-Dev-<version>-macOS-arm64.dmg \
   dist-electron/Cyboflow-Dev-<version>-macOS-x64.dmg \
+  dist-electron/win-stable/Cyboflow-<version>-Windows-x64.exe \
+  dist-electron/win-dev/Cyboflow-Dev-<version>-Windows-x64.exe \
   --title "v<version>" --notes-file /tmp/notes.md
 gh release view v<version> --json assets --jq '.assets[] | "\(.name) [\(.state)]"'
+git push origin --delete release-build/<version>    # Phase 3 throwaway branch
 ```
-All four assets must read `[uploaded]`. The repo is public — DMG URLs are
+All six assets must read `[uploaded]`. The repo is public — the URLs are
 anonymously downloadable.
 
 ## Wrap-up
 
-Report: both R2 feeds live at `<version>` (the update channel), the GitHub release
-URL, the four artifact names/sizes, and that `main` + tag are pushed. If branch
+Report: both R2 feeds live at `<version>` in both manifests (the update channel),
+the GitHub release URL, the six artifact names/sizes, and that `main` + tag are
+pushed and `release-build/<version>` is deleted. If branch
 protection was bypassed on the direct push, say so.

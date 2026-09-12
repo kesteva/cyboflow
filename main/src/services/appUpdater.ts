@@ -49,6 +49,15 @@ export function isNewerVersion(latest: string, current: string): boolean {
 }
 
 /**
+ * Platforms `publish:r2` maintains a feed for. Each reads its own manifest under
+ * the same `<variant>/` prefix — `latest-mac.yml` on macOS, `latest.yml` on
+ * Windows (electron-updater picks the name per platform). Linux ships no build.
+ */
+export function hasUpdateFeed(platform: NodeJS.Platform): boolean {
+  return platform === 'darwin' || platform === 'win32';
+}
+
+/**
  * Wraps electron-updater for cyboflow. Reads the generic update feed baked into
  * the packaged app-update.yml — which feed (.../stable vs .../dev) is fixed at
  * build time per app variant, so there is no in-app channel switch (see
@@ -109,8 +118,8 @@ export class AppUpdater {
     private readonly getMainWindow: () => BrowserWindow | null,
     private readonly logger?: Logger,
     /**
-     * Test seam: the host platform gates the updater (a feed exists for
-     * macOS only today), and tests must be deterministic on every host.
+     * Test seam: the host platform gates the updater (feeds exist for macOS
+     * and Windows only), and tests must be deterministic on every host.
      */
     private readonly platform: NodeJS.Platform = process.platform,
   ) {}
@@ -124,11 +133,10 @@ export class AppUpdater {
       this.logger?.verbose('[AppUpdater] dev build — auto-updater disabled');
       return;
     }
-    if (this.platform !== 'darwin') {
-      // No update feed exists for non-macOS platforms yet (the R2 feed only
-      // carries macOS artifacts, and electron-updater would log a hard ENOENT
-      // for the missing app-update.yml on every interval). Log once, disable.
-      // Revisit when a Windows feed (latest.yml) ships.
+    if (!hasUpdateFeed(this.platform)) {
+      // No update feed exists for this platform (electron-updater would log a
+      // hard ENOENT for the missing app-update.yml on every interval). Log
+      // once, disable.
       this.logger?.verbose('[AppUpdater] no update feed for this platform — auto-updater disabled');
       return;
     }
@@ -164,9 +172,9 @@ export class AppUpdater {
    */
   async check(): Promise<UpdateCheckResult> {
     const currentVersion = this.app.getVersion();
-    if (!this.app.isPackaged || this.platform !== 'darwin') {
-      // Mirrors init(): no feed exists for non-macOS platforms (yet), so an
-      // updater verdict there is not "no update" but "not supported".
+    if (!this.app.isPackaged || !hasUpdateFeed(this.platform)) {
+      // Mirrors init(): no feed exists for this platform, so an updater
+      // verdict there is not "no update" but "not supported".
       return { supported: false, currentVersion, updateAvailable: false };
     }
     try {

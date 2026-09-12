@@ -148,9 +148,15 @@ describe('Migration 130: an off switch for status sync', () => {
 
     wipeLedger(dbPath);
 
-    expect(() => new DatabaseService(dbPath).initialize()).toThrow(
-      /CHECK constraint failed: status_sync_mode/,
-    );
+    // Hold the failing service so its handle can be closed: initialize()
+    // opens the file BEFORE the chain runs, and the throw leaves it open.
+    // Windows locks open files, so afterEach's rmSync would fail with EBUSY.
+    const replay = new DatabaseService(dbPath);
+    try {
+      expect(() => replay.initialize()).toThrow(/CHECK constraint failed: status_sync_mode/);
+    } finally {
+      replay.close();
+    }
   });
 
   it('is convergent on a ledger-wiped replay', () => {
