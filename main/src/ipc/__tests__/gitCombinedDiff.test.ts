@@ -60,10 +60,10 @@ function commitFile(dir: string, name: string, content: string, message: string)
   return execSync('git rev-parse HEAD', { cwd: dir, encoding: 'utf8' }).trim();
 }
 
-function makeServices(worktreePath: string): AppServices {
+function makeServices(worktreePath: string, sessionOverrides: Record<string, unknown> = {}): AppServices {
   return {
     sessionManager: {
-      getSession: vi.fn(() => ({ id: 's1', worktreePath, isMainRepo: false, archived: false })),
+      getSession: vi.fn(() => ({ id: 's1', worktreePath, isMainRepo: false, archived: false, ...sessionOverrides })),
       getProjectForSession: vi.fn(() => ({ id: 7, name: 'Proj', path: worktreePath })),
     },
     gitDiffManager: new GitDiffManager(),
@@ -142,6 +142,51 @@ describe('sessionGit ops getCombinedDiff (async git plumbing, real repo)', () =>
       expect(result.data.changedFiles).toEqual(['a.txt']);
       expect(result.data.diff).toContain('+a1');
       expect(result.data.diff).toContain('+a2');
+    });
+  });
+
+  it('no executionIds, zero commits on the branch: uncommitted edits still render (TASK-207)', async () => {
+    await withTempDir('combined-diff-zero-commits-', async (repo) => {
+      initRepoMain(repo);
+      const baseSha = commitFile(repo, 'base.txt', 'base\n', 'base commit');
+      execSync('git checkout -b feature', { cwd: repo, stdio: 'pipe' });
+
+      // Zero commits of its own on `feature` — only uncommitted work: an edit to
+      // the tracked file and a new untracked file.
+      fs.writeFileSync(path.join(repo, 'base.txt'), 'base\nedited-in-place\n');
+      fs.writeFileSync(path.join(repo, 'c.txt'), 'new-untracked\n');
+
+      const ops = createGitOps(makeServices(repo, { baseCommit: baseSha }));
+      const result = (await ops.getCombinedDiff({ sessionId: 's1' })) as {
+        success: boolean;
+        data: { diff: string; changedFiles: string[] };
+      };
+
+      expect(result.success).toBe(true);
+      expect(result.data.diff).not.toBe('');
+      expect(result.data.changedFiles.length).toBeGreaterThan(0);
+      expect(result.data.changedFiles).toEqual(expect.arrayContaining(['base.txt', 'c.txt']));
+      expect(result.data.diff).toContain('+edited-in-place');
+      expect(result.data.diff).toContain('+new-untracked');
+    });
+  });
+
+  it('no executionIds, repo with no commits at all: degrades without throwing', async () => {
+    await withTempDir('combined-diff-no-commits-at-all-', async (repo) => {
+      // git init only — no commits, so HEAD is unborn and no branch exists yet.
+      execSync('git init', { cwd: repo, stdio: 'pipe' });
+      execSync('git config user.email "test@example.com"', { cwd: repo, stdio: 'pipe' });
+      execSync('git config user.name "Test"', { cwd: repo, stdio: 'pipe' });
+      fs.writeFileSync(path.join(repo, 'untracked.txt'), 'hello\n');
+
+      const ops = createGitOps(makeServices(repo));
+      const result = (await ops.getCombinedDiff({ sessionId: 's1' })) as {
+        success: boolean;
+        data?: { diff: string; changedFiles: string[] };
+        error?: string;
+      };
+
+      expect(result.success).toBe(true);
     });
   });
 });

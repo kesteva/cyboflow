@@ -715,7 +715,59 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
         return { success: true, data: uncommittedDiff };
       }
 
-      const { commits, comparisonBranch, historySource } = await getSessionCommitHistory(session, 50);
+      // No specific execution IDs: resolve the branch point directly instead of
+      // deriving it from commit history. Going through getSessionCommitHistory's
+      // `commits` array here used to mean a session with real edits but zero
+      // commits of its own hit the `!commits.length` early return below and
+      // showed nothing — exactly the "surface my uncommitted work" case this
+      // view exists for. The fallback chain, in order:
+      //   1. session.baseCommit, if it still rev-parses (the branch point
+      //      recorded at session creation — see the comment on comparisonBranch
+      //      above for why this is preferred over live main).
+      //   2. the comparisonBranch/mainBranch getSessionCommitHistory already
+      //      resolves (handles the gc'd-base-commit retry and the main-repo /
+      //      origin-branch cases) — reused rather than duplicated here.
+      //   3. captureWorkingDirectoryDiff (vs HEAD) as the last resort, for a
+      //      worktree where neither of the above resolves (e.g. a repo with no
+      //      commits at all, where HEAD itself is unborn).
+      if (!executionIds || executionIds.length === 0) {
+        let baseRef: string | undefined;
+
+        if (session.baseCommit) {
+          try {
+            await runGitAsync(session.worktreePath, ['rev-parse', '--verify', `${session.baseCommit}^{commit}`]);
+            baseRef = session.baseCommit;
+          } catch (error) {
+            // Recorded base commit was gc'd (or never resolvable) — fall through
+            // to the comparisonBranch rung below, same rationale as the retry in
+            // getSessionCommitHistory.
+            console.warn(`[IPC:git] session.baseCommit ${session.baseCommit} unresolvable for session ${sessionId}, falling back:`, error);
+          }
+        }
+
+        if (!baseRef) {
+          try {
+            const { comparisonBranch } = await getSessionCommitHistory(session, 50);
+            baseRef = comparisonBranch;
+          } catch (error) {
+            console.warn(`[IPC:git] Could not resolve a comparison branch for session ${sessionId}, falling back to the working-directory diff:`, error);
+          }
+        }
+
+        if (baseRef) {
+          try {
+            const result = await gitDiffManager.captureDiffAgainstRef(session.worktreePath, baseRef);
+            return { success: true, data: result };
+          } catch (error) {
+            console.warn(`[IPC:git] captureDiffAgainstRef against ${baseRef} failed for session ${sessionId}, falling back to the working-directory diff:`, error);
+          }
+        }
+
+        const uncommittedDiff = await gitDiffManager.captureWorkingDirectoryDiff(session.worktreePath);
+        return { success: true, data: uncommittedDiff };
+      }
+
+      const { commits } = await getSessionCommitHistory(session, 50);
 
       if (!commits.length) {
         return {
@@ -795,77 +847,6 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
           );
           return { success: true, data: diff };
         }
-      }
-
-      // If no specific execution IDs are provided, get all diffs including uncommitted changes
-      if (!executionIds || executionIds.length === 0) {
-        if (commits.length === 0) {
-          // No commits, but there might be uncommitted changes
-          const uncommittedDiff = await gitDiffManager.captureWorkingDirectoryDiff(session.worktreePath);
-          return { success: true, data: uncommittedDiff };
-        }
-
-        // For a single commit, show changes from before the commit to working directory
-        if (commits.length === 1) {
-          let fromCommitHash: string;
-          try {
-            // Try to get the parent of the commit
-            fromCommitHash = (await runGitAsync(session.worktreePath, ['rev-parse', `${commits[0].hash}^`])).trim();
-          } catch (error) {
-            // If there's no parent (initial commit), use git's empty tree hash
-            fromCommitHash = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
-          }
-
-          // Get diff from parent to working directory (includes the commit and any uncommitted changes)
-          const diff = await runGitAsync(session.worktreePath, ['diff', fromCommitHash]);
-
-          const stats = gitDiffManager.parseDiffStats(
-            await runGitAsync(session.worktreePath, ['diff', '--stat', fromCommitHash])
-          );
-
-          const changedFiles = (await runGitAsync(session.worktreePath, ['diff', '--name-only', fromCommitHash]))
-            .trim().split('\n').filter(f => f);
-
-          return {
-            success: true,
-            data: {
-              diff,
-              stats,
-              changedFiles
-            }
-          };
-        }
-
-        // For multiple commits, get diff from parent of first commit to working directory (all changes including uncommitted)
-        const firstCommit = commits[commits.length - 1]; // Oldest commit
-        let fromCommitHash: string;
-
-        try {
-          // Try to get the parent of the first commit
-          fromCommitHash = (await runGitAsync(session.worktreePath, ['rev-parse', `${firstCommit.hash}^`])).trim();
-        } catch (error) {
-          // If there's no parent (initial commit), use git's empty tree hash
-          fromCommitHash = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
-        }
-
-        // Get diff from the parent of first commit to working directory (includes uncommitted changes)
-        const diff = await runGitAsync(session.worktreePath, ['diff', fromCommitHash]);
-
-        const stats = gitDiffManager.parseDiffStats(
-          await runGitAsync(session.worktreePath, ['diff', '--stat', fromCommitHash])
-        );
-
-        const changedFiles = (await runGitAsync(session.worktreePath, ['diff', '--name-only', fromCommitHash]))
-          .trim().split('\n').filter(f => f);
-
-        return {
-          success: true, 
-          data: {
-            diff,
-            stats,
-            changedFiles
-          }
-        };
       }
 
       // For multiple individual selections, we need to create a range from first to last
