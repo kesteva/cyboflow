@@ -175,7 +175,7 @@ describe('createQuickSessionCore — half-created session sweep', () => {
     dismissThrows?: boolean;
   }): CreateQuickSessionCoreDeps {
     return {
-      taskQueue: { createSession: async () => ({ id: 'job-1' }) },
+      taskQueue: { createSession: async () => ({ id: 'job-1' }), onSessionJobFailed: () => () => {} },
       sessionManager: {
         // Deliver the matching session synchronously on subscribe — the core
         // registers its listener after the createSession await, so an immediate
@@ -222,6 +222,83 @@ describe('createQuickSessionCore — half-created session sweep', () => {
 });
 
 /**
+ * A session-creation JOB FAILURE (the worktree processor threw: no git, no
+ * identity for the initial commit, a bad base branch …) must reject the wait
+ * with the job's own error, immediately — not after the 30s timeout that hid
+ * both fresh-machine failures for a whole release. Failures for OTHER jobs are
+ * ignored, and one that lands before createSession has resolved (the id is not
+ * yet known) is still honoured.
+ */
+describe('createQuickSessionCore — job failure propagation', () => {
+  beforeEach(() => {
+    _resetClaimedQuickSessionIdsForTesting();
+  });
+
+  function makeDeps(fail: { jobId: string; when: 'after-enqueue' | 'before-enqueue-resolves' }): {
+    deps: CreateQuickSessionCoreDeps;
+    unsubscribed: () => boolean;
+  } {
+    let listener: ((jobId: string, error: Error) => void) | null = null;
+    let unsubscribed = false;
+    const boom = new Error('Failed to create worktree: Author identity unknown');
+    const deps: CreateQuickSessionCoreDeps = {
+      taskQueue: {
+        createSession: async () => {
+          if (fail.when === 'before-enqueue-resolves') listener?.(fail.jobId, boom);
+          return { id: 'job-1' };
+        },
+        onSessionJobFailed: (l) => {
+          listener = l;
+          return () => {
+            unsubscribed = true;
+          };
+        },
+      },
+      sessionManager: {
+        on: () => {
+          // Never emits session-created — the job died before the row landed.
+          if (fail.when === 'after-enqueue') queueMicrotask(() => listener?.(fail.jobId, boom));
+        },
+        removeListener: () => {},
+      },
+      workflowRegistry: {
+        ensureQuickWorkflow: () => 'wf-quick',
+        createRun: () => {
+          throw new Error('unreachable');
+        },
+      },
+      getDb: () => {
+        throw new Error('unreachable');
+      },
+      dismissHalfCreatedSession: async () => {},
+    };
+    return { deps, unsubscribed: () => unsubscribed };
+  }
+
+  it('rejects with the job error as soon as the queue reports the failure', async () => {
+    const { deps, unsubscribed } = makeDeps({ jobId: 'job-1', when: 'after-enqueue' });
+    await expect(
+      createQuickSessionCore(deps, { projectId: 1, nameHint: 'arm-a', timeoutMs: 60_000 }),
+    ).rejects.toThrow('Quick session creation failed: Failed to create worktree: Author identity unknown');
+    expect(unsubscribed()).toBe(true);
+  });
+
+  it('honours a failure that lands before the job id is known', async () => {
+    const { deps } = makeDeps({ jobId: 'job-1', when: 'before-enqueue-resolves' });
+    await expect(
+      createQuickSessionCore(deps, { projectId: 1, nameHint: 'arm-a', timeoutMs: 60_000 }),
+    ).rejects.toThrow('Author identity unknown');
+  });
+
+  it("ignores another job's failure and still times out on its own", async () => {
+    const { deps } = makeDeps({ jobId: 'job-other', when: 'after-enqueue' });
+    await expect(
+      createQuickSessionCore(deps, { projectId: 1, nameHint: 'arm-a', timeoutMs: 20 }),
+    ).rejects.toThrow('Timed out waiting for quick session to be created');
+  });
+});
+
+/**
  * The session-created matcher resolves the wait by comparing the emitted
  * worktreePath against the nameHint. worktreePath is built with path.join
  * (worktreeManager), so on WINDOWS it carries BACKSLASHES
@@ -253,7 +330,7 @@ describe('createQuickSessionCore — session-created matcher is separator-agnost
     resolvedSessionId: { current: string },
   ): CreateQuickSessionCoreDeps {
     return {
-      taskQueue: { createSession: async () => ({ id: 'job-1' }) },
+      taskQueue: { createSession: async () => ({ id: 'job-1' }), onSessionJobFailed: () => () => {} },
       sessionManager: {
         on: (_event, listener: (s: QuickSessionRow) => void) => {
           listener({ id: sessionId, worktreePath });
@@ -381,7 +458,7 @@ describe('createQuickSessionCore — sentinel runtime uses the STORABLE set', ()
   async function captureSentinelOpts(agentRuntime: string): Promise<SentinelOpts> {
     let captured: SentinelOpts = {};
     const deps: CreateQuickSessionCoreDeps = {
-      taskQueue: { createSession: async () => ({ id: 'job-1' }) },
+      taskQueue: { createSession: async () => ({ id: 'job-1' }), onSessionJobFailed: () => () => {} },
       sessionManager: {
         on: (_event, listener: (s: QuickSessionRow) => void) => {
           listener({ id: 'sess-storable', worktreePath: '/wt/arm-a' });
@@ -470,7 +547,7 @@ describe('A/B quick-arm runtime stamp — sentinel run and session row agree', (
   async function sentinelOptsForArm(quickConfig: ArmQuickConfig): Promise<SentinelOpts> {
     let captured: SentinelOpts = {};
     const deps: CreateQuickSessionCoreDeps = {
-      taskQueue: { createSession: async () => ({ id: 'job-arm' }) },
+      taskQueue: { createSession: async () => ({ id: 'job-arm' }), onSessionJobFailed: () => () => {} },
       sessionManager: {
         on: (_event, listener: (s: QuickSessionRow) => void) => {
           listener({ id: ARM_SESSION_ID, worktreePath: '/wt/arm-a' });
