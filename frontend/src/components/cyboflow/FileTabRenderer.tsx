@@ -25,6 +25,7 @@ import { MarkdownPreview } from '../MarkdownPreview';
 import type { DiffHunk, HunkLine, ParsedFileDiff } from '../../utils/parseFileHunks';
 import { pathBasename, pathDirPrefix } from '../../utils/pathBasename';
 import type { FileTabStatus } from '../../../../shared/types/centerPane';
+import type { DiffGroupScope } from '../../../../shared/types/runFiles';
 
 const RAIL = 'var(--color-bg-secondary)';
 const HAIRLINE = 'var(--color-border-primary)';
@@ -49,6 +50,10 @@ interface FileTabRendererProps {
   sessionId: string;
   filePath: string;
   status?: FileTabStatus;
+  /** Base ref/SHA to diff against; undefined/null selects the default base. */
+  baseRef?: string | null;
+  /** Which diff-group scope this tab belongs to. */
+  scope?: DiffGroupScope;
 }
 
 function basename(p: string): string {
@@ -400,8 +405,8 @@ function ViewModeControl({
 
 // ---------------------------------------------------------------------------
 
-export function FileTabRenderer({ sessionId, filePath }: FileTabRendererProps): ReactElement {
-  const { loading, error, fileDiff } = useFileDiffData(sessionId, filePath);
+export function FileTabRenderer({ sessionId, filePath, baseRef, scope }: FileTabRendererProps): ReactElement {
+  const { loading, error, fileDiff } = useFileDiffData(sessionId, filePath, baseRef ?? undefined, scope);
   const [mode, setMode] = useState<ViewMode>(readInitialViewMode);
 
   const changeMode = (m: ViewMode) => {

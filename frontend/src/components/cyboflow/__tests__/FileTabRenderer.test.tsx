@@ -109,6 +109,12 @@ describe('FileTabRenderer', () => {
     expect(screen.getByTestId('file-tab-binary')).toBeInTheDocument();
   });
 
+  it('forwards baseRef/scope through to useFileDiffData', () => {
+    setHook({ loading: false, error: null, fileDiff: PARSED });
+    render(<FileTabRenderer sessionId="s1" filePath="src/a.ts" baseRef="main" scope="unstaged" />);
+    expect(mockHook).toHaveBeenCalledWith('s1', 'src/a.ts', 'main', 'unstaged');
+  });
+
   it('renders the header and the 3-col hunk grid (Diff mode)', () => {
     setHook({ loading: false, error: null, fileDiff: PARSED });
     render(<FileTabRenderer sessionId="s1" filePath="src/a.ts" />);

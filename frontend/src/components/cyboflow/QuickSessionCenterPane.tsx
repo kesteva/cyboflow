@@ -139,9 +139,18 @@ export function QuickSessionCenterPane({
 
   const renderActiveTab = (): ReactElement => {
     if (activeTab && activeTab.kind === 'file' && activeTab.filePath) {
-      // The diff/content source is the pane's session key — sessionId alone is
-      // sufficient (no run / base-sha needed); see FileTabRenderer.
-      return <FileTabRenderer sessionId={sessionKey} filePath={activeTab.filePath} status={activeTab.status} />;
+      // The diff/content source is the pane's session key; an optional
+      // baseRef/scope on the tab (base-propagation channel) is forwarded through
+      // to FileTabRenderer so the diff can be computed against a supplied base.
+      return (
+        <FileTabRenderer
+          sessionId={sessionKey}
+          filePath={activeTab.filePath}
+          status={activeTab.status}
+          baseRef={activeTab.baseRef}
+          scope={activeTab.scope}
+        />
+      );
     }
     if (activeTab && activeTab.kind === 'approved-design' && activeTab.ideaId) {
       return (
