@@ -1,5 +1,5 @@
 import * as fs from 'node:fs';
-import { runGitAsync } from '../utils/runGit';
+import { runGitAsync, END_OF_OPTIONS } from '../utils/runGit';
 import type { Logger } from '../utils/logger';
 
 export interface GitDiffStats {
@@ -129,11 +129,17 @@ export class GitDiffManager {
     worktreePath: string,
     ref: string = 'HEAD',
   ): Promise<{ stats: GitDiffStats; changedFiles: string[] }> {
+    const resolvedRef = await this.resolveRefForDiff(worktreePath, ref);
+    if (resolvedRef === null) {
+      this.logger?.warn(`Could not resolve ref "${ref}" for diff stats in ${worktreePath}`);
+      return { stats: { additions: 0, deletions: 0, filesChanged: 0 }, changedFiles: [] };
+    }
+
     let additions = 0;
     let deletions = 0;
     const changedFiles: string[] = [];
 
-    const numstat = (await runGitAsync(worktreePath, ['diff', '--numstat', ref])).trim();
+    const numstat = (await runGitAsync(worktreePath, ['diff', '--numstat', resolvedRef])).trim();
     if (numstat) {
       for (const line of numstat.split('\n')) {
         const [added, deleted, ...pathParts] = line.split('\t');
@@ -403,6 +409,38 @@ export class GitDiffManager {
     };
   }
 
+  /**
+   * Resolve a caller-supplied `ref` (branch, tag, or sha) to a concrete commit
+   * sha before it reaches `git diff` argv (TASK-208).
+   *
+   * A ref like `--output=/tmp/pwn` is a valid `git diff` OPTION, not a
+   * revision — git happily parses it as a flag and writes an arbitrary file,
+   * returning empty stdout instead of erroring. `execFile` blocks shell
+   * injection but not this git-argv option-injection class. Routing every
+   * caller-supplied ref through `git rev-parse --verify --end-of-options
+   * <ref>^{commit}` closes it: END_OF_OPTIONS forces the ref into a value
+   * position, and `^{commit}` forces a commit-ish resolution that an
+   * option-like string can never satisfy (it fails to resolve, same as any
+   * other unresolvable ref).
+   *
+   * Returns null when the ref is falsy or fails to resolve — callers treat
+   * that as "unresolvable ref", falling back to their normal safe
+   * empty/zeroed result rather than throwing. The `'HEAD'` default is
+   * trivially safe and skips the extra git process on the hot path.
+   */
+  private async resolveRefForDiff(worktreePath: string, ref: string): Promise<string | null> {
+    if (!ref) return null;
+    if (ref === 'HEAD') return 'HEAD';
+    try {
+      const resolved = (
+        await runGitAsync(worktreePath, ['rev-parse', '--verify', END_OF_OPTIONS, `${ref}^{commit}`])
+      ).trim();
+      return resolved || null;
+    } catch {
+      return null;
+    }
+  }
+
   async getCurrentCommitHash(worktreePath: string): Promise<string> {
     try {
       return (await runGitAsync(worktreePath, ['rev-parse', 'HEAD'])).trim();
@@ -465,7 +503,11 @@ export class GitDiffManager {
       // Get diff of the working tree against <ref> (default HEAD), including both
       // staged and unstaged changes. With a base ref this also surfaces commits
       // made since <ref>; with HEAD it is committed-agnostic (uncommitted only).
-      let diff = await runGitAsync(worktreePath, ['diff', ref]);
+      const resolvedRef = await this.resolveRefForDiff(worktreePath, ref);
+      if (resolvedRef === null) {
+        throw new Error(`Could not resolve ref "${ref}" for diff in ${worktreePath}`);
+      }
+      let diff = await runGitAsync(worktreePath, ['diff', resolvedRef]);
       console.log(`Git diff in ${worktreePath}: ${diff.length} characters`);
 
       // Get untracked files and create diff-like output for them
@@ -497,8 +539,12 @@ export class GitDiffManager {
 
   private async getChangedFiles(worktreePath: string, ref: string = 'HEAD'): Promise<string[]> {
     try {
+      const resolvedRef = await this.resolveRefForDiff(worktreePath, ref);
+      if (resolvedRef === null) {
+        throw new Error(`Could not resolve ref "${ref}" for changed files in ${worktreePath}`);
+      }
       // Get tracked changed files (working tree vs <ref>)
-      const trackedOutput = await runGitAsync(worktreePath, ['diff', '--name-only', ref]);
+      const trackedOutput = await runGitAsync(worktreePath, ['diff', '--name-only', resolvedRef]);
       const trackedFiles = trackedOutput.trim().split('\n').filter((f: string) => f.length > 0);
 
       // Get untracked files
@@ -524,7 +570,11 @@ export class GitDiffManager {
 
   private async getDiffStats(worktreePath: string, ref: string = 'HEAD'): Promise<GitDiffStats> {
     try {
-      const output = await runGitAsync(worktreePath, ['diff', '--stat', ref]);
+      const resolvedRef = await this.resolveRefForDiff(worktreePath, ref);
+      if (resolvedRef === null) {
+        throw new Error(`Could not resolve ref "${ref}" for diff stats in ${worktreePath}`);
+      }
+      const output = await runGitAsync(worktreePath, ['diff', '--stat', resolvedRef]);
 
       const trackedStats = this.parseDiffStats(output);
 

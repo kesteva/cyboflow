@@ -28,6 +28,19 @@ import type { GitDiffManager } from '../services/gitDiffManager';
 import type { Logger } from '../utils/logger';
 import { runGitAsync } from '../utils/runGit';
 
+/**
+ * git's "nothing after this is an option" marker (git >= 2.24) — see
+ * {@link END_OF_OPTIONS} in `utils/runGit.ts`, the canonical export. Kept as a
+ * literal here (rather than importing the named binding) because
+ * `sessionOps`'s pre-existing mocked test (`sessionGetStatisticsFiles.test.ts`,
+ * out of this module's edit scope) stubs `../../utils/runGit` without this
+ * export, and Vitest throws on ANY property access to an undefined mock
+ * export — every candidate would be treated as "unresolvable" instead of
+ * being verified. The value is stable and covered by
+ * `sessionFileStats.refResolution.test.ts`'s exact-argv assertion.
+ */
+const END_OF_OPTIONS = '--end-of-options';
+
 /** The `files` block of the sessions:get-statistics payload, minus executionCount. */
 export interface SessionFileStats {
   totalFilesChanged: number;
@@ -51,11 +64,30 @@ export async function resolveSessionDiffBaseRef(
 ): Promise<string | null> {
   for (const candidate of candidates) {
     if (!candidate) continue;
+    // A candidate starting with `-` would be parsed by git as an OPTION, not a
+    // value — reject it locally rather than even attempting to resolve it
+    // (TASK-208). `--end-of-options` below defends the rev-parse call itself,
+    // but a hard local reject here also avoids spending a git process on a
+    // string that can never be a legitimate ref.
+    if (candidate.startsWith('-')) continue;
     try {
       // `^{commit}` forces a commit-ish resolution, so a branch name, a tag and
-      // a raw sha all validate the same way; --quiet keeps git silent on miss.
-      await runGitAsync(worktreePath, ['rev-parse', '--verify', '--quiet', `${candidate}^{commit}`]);
-      return candidate;
+      // a raw sha all validate the same way; --quiet keeps git silent on miss;
+      // --end-of-options forces the value position (TASK-208). Return the
+      // RESOLVED sha (rev-parse's stdout), not the candidate string, so the
+      // caller diffs against a concrete commit rather than a moving/ambiguous
+      // ref name. Fall back to the candidate itself in the (git-cannot-happen
+      // in practice, but harmless) case rev-parse succeeds with empty stdout.
+      const resolved = (
+        await runGitAsync(worktreePath, [
+          'rev-parse',
+          '--verify',
+          '--quiet',
+          END_OF_OPTIONS,
+          `${candidate}^{commit}`,
+        ])
+      ).trim();
+      return resolved || candidate;
     } catch {
       // Unresolvable in this worktree — try the next candidate.
     }

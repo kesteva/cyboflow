@@ -46,10 +46,12 @@ describe('resolveSessionDiffBaseRef', () => {
       const sha = headSha(tmpDir);
 
       expect(await resolveSessionDiffBaseRef(tmpDir, [sha, 'main'])).toBe(sha);
-      // A gc'd / never-existed base commit falls through to the main branch.
-      expect(await resolveSessionDiffBaseRef(tmpDir, [MISSING_SHA, 'main'])).toBe('main');
+      // A gc'd / never-existed base commit falls through to the main branch,
+      // resolved to its SHA (TASK-208: the resolved commit-ish, not the raw
+      // candidate string, is what must reach downstream argv).
+      expect(await resolveSessionDiffBaseRef(tmpDir, [MISSING_SHA, 'main'])).toBe(sha);
       // Empty candidates are ignored rather than treated as a ref.
-      expect(await resolveSessionDiffBaseRef(tmpDir, [null, undefined, 'main'])).toBe('main');
+      expect(await resolveSessionDiffBaseRef(tmpDir, [null, undefined, 'main'])).toBe(sha);
     });
   });
 
