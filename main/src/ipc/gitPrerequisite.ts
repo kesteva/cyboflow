@@ -141,14 +141,57 @@ export async function setGitIdentity(
   return { success: true, data: await probeGitPrerequisite({ refresh: false }, deps) };
 }
 
+/**
+ * Dev lever: `CYBOFLOW_FAKE_GIT_PREREQ=missing|identity` makes the probe report
+ * that state on a machine where git is fine, so the onboarding card can be
+ * exercised. Under it the identity write is a NO-OP that reports 'ready' —
+ * it must never touch the developer's real `--global` config.
+ */
+function fakeGitPrerequisite(): GitPrerequisiteResult | null {
+  const state = process.env.CYBOFLOW_FAKE_GIT_PREREQ;
+  if (state !== 'missing' && state !== 'identity') return null;
+  const platform = normalizePlatform(process.platform);
+  if (state === 'missing') {
+    return {
+      platform,
+      binary: { found: false, path: null, version: null },
+      identity: { name: null, email: null },
+      state,
+    };
+  }
+  return {
+    platform,
+    binary: { found: true, path: '/fake/git', version: '2.45.2' },
+    identity: { name: null, email: null },
+    state,
+  };
+}
+
 export function registerGitPrerequisiteHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
     GIT_DETECT_CHANNEL,
     async (_event, request: unknown): Promise<{ success: true; data: GitPrerequisiteResult }> => {
+      const fake = fakeGitPrerequisite();
+      if (fake) {
+        console.warn(`[GitPrerequisite] CYBOFLOW_FAKE_GIT_PREREQ=${fake.state} — reporting a fake probe`);
+        return { success: true, data: fake };
+      }
       const refresh =
         typeof request === 'object' && request !== null && (request as Partial<GitDetectRequest>).refresh === true;
       return { success: true, data: await probeGitPrerequisite({ refresh }) };
     },
   );
-  ipcMain.handle(GIT_SET_IDENTITY_CHANNEL, (_event, input: unknown) => setGitIdentity(input));
+  ipcMain.handle(GIT_SET_IDENTITY_CHANNEL, (_event, input: unknown) => {
+    const fake = fakeGitPrerequisite();
+    if (fake) {
+      const validated = validateGitIdentity(input);
+      if (!validated.ok) return { success: false, error: validated.error };
+      console.warn('[GitPrerequisite] CYBOFLOW_FAKE_GIT_PREREQ set — NOT writing git config, reporting ready');
+      return {
+        success: true,
+        data: { ...fake, binary: { ...fake.binary, found: true }, identity: validated.value, state: 'ready' as const },
+      };
+    }
+    return setGitIdentity(input);
+  });
 }
