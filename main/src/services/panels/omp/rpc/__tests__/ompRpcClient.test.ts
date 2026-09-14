@@ -10,12 +10,11 @@ import {
   type OmpRpcProcess,
   type SpawnOmpRpcProcess,
 } from '../ompRpcClient';
-import { collectDescendantPids } from '../../../../processTable';
-import { listPidPpidTableSync } from '../../../../../utils/platformProcess';
 import { OMP_RPC_MODE_ARGS, OMP_RPC_UI_MODE_ARGS, type OmpRpcEvent } from '../ompContract';
 import {
-  DETACHED_GRANDCHILD_SCRIPT,
   isAlive,
+  namedDetachedGrandchildStderrScript,
+  readNamedGrandchildPid,
   waitUntil,
 } from '../../../../../__test_fixtures__/processTree';
 
@@ -603,10 +602,13 @@ describe('OmpRpcClient — win32 tree teardown', () => {
           process.execPath,
           [
             '-e',
-            // Emit the ready frame OMP would, spawn a long-lived detached
-            // grandchild (its MCP-server stand-in), then stay alive.
-            `console.log(JSON.stringify(${JSON.stringify(READY_FRAME)}));` +
-              DETACHED_GRANDCHILD_SCRIPT,
+            // Spawn a long-lived detached grandchild (OMP's MCP-server
+            // stand-in) and NAME it on stderr, then emit the ready frame OMP
+            // would and stay alive. The pid goes on stderr because the client
+            // owns stdout — a pid line there would corrupt the RPC stream.
+            namedDetachedGrandchildStderrScript(
+              `console.log(JSON.stringify(${JSON.stringify(READY_FRAME)}));`,
+            ),
           ],
           { stdio: ['pipe', 'pipe', 'pipe'], detached: true },
         );
@@ -622,20 +624,22 @@ describe('OmpRpcClient — win32 tree teardown', () => {
       const pid = realChild?.pid;
       expect(pid).toBeTypeOf('number');
 
+      // The grandchild names itself, so this suite asserts over the tree it
+      // OWNS. A pid/ppid walk cannot: Windows keeps a dead parent's pid as a
+      // process's ParentProcessId and reissues pids quickly, so on a busy CI
+      // runner an unrelated orphan hangs under a fresh fixture pid, gets walked
+      // as a "descendant", and never dies — see processTree.ts.
+      const grandchildPid = await readNamedGrandchildPid(realChild?.stderr ?? null);
       await client.handshake();
 
-      // Positive control via the shared process table: the grandchild exists.
-      let grandkids: number[] = [];
-      for (let i = 0; i < 15 && grandkids.length === 0; i++) {
-        await new Promise((r) => setTimeout(r, 200));
-        grandkids = collectDescendantPids(pid as number, listPidPpidTableSync());
-      }
-      expect(grandkids.length).toBeGreaterThanOrEqual(1);
+      // Positive control: both halves of the tree are up before the ladder runs.
+      expect(isAlive(pid as number)).toBe(true);
+      expect(isAlive(grandchildPid)).toBe(true);
 
       await client.stop();
 
       const allDead = await waitUntil(
-        () => !isAlive(pid as number) && grandkids.every((g) => !isAlive(g)),
+        () => !isAlive(pid as number) && !isAlive(grandchildPid),
         8000,
       );
       expect(allDead).toBe(true);
