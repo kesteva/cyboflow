@@ -212,6 +212,42 @@ describe('BaseSelector', () => {
     expect(mockListBranches).not.toHaveBeenCalled();
   });
 
+  it('disables the trigger when sessionId is null and never calls getComparisonBases', async () => {
+    render(<BaseSelector sessionId={null} projectId="p1" selectedRef={null} onChange={vi.fn()} />);
+
+    const trigger = screen.getByTestId('base-selector-trigger') as HTMLButtonElement;
+    expect(trigger.disabled).toBe(true);
+    expect(mockGetComparisonBases).not.toHaveBeenCalled();
+  });
+
+  it('degrades to disabled entries (never crashes) when getComparisonBases rejects', async () => {
+    mockGetComparisonBases.mockRejectedValue(new Error('boom'));
+    render(<BaseSelector sessionId="s1" projectId="p1" selectedRef={null} onChange={vi.fn()} />);
+    await waitFor(() => expect(mockGetComparisonBases).toHaveBeenCalledWith({ sessionId: 's1' }));
+    await openMenu();
+
+    const branchPoint = screen.getByTestId('base-selector-option-branch-point') as HTMLButtonElement;
+    const local = screen.getByTestId('base-selector-option-local-default') as HTMLButtonElement;
+    const origin = screen.getByTestId('base-selector-option-origin-default') as HTMLButtonElement;
+    expect(branchPoint.disabled).toBe(true);
+    expect(local.disabled).toBe(true);
+    expect(origin.disabled).toBe(true);
+  });
+
+  it('degrades to disabled entries (never crashes) when getComparisonBases resolves { success: false }', async () => {
+    mockGetComparisonBases.mockResolvedValue({ success: false, error: 'precondition failed' });
+    render(<BaseSelector sessionId="s1" projectId="p1" selectedRef={null} onChange={vi.fn()} />);
+    await waitFor(() => expect(mockGetComparisonBases).toHaveBeenCalledWith({ sessionId: 's1' }));
+    await openMenu();
+
+    const branchPoint = screen.getByTestId('base-selector-option-branch-point') as HTMLButtonElement;
+    const local = screen.getByTestId('base-selector-option-local-default') as HTMLButtonElement;
+    const origin = screen.getByTestId('base-selector-option-origin-default') as HTMLButtonElement;
+    expect(branchPoint.disabled).toBe(true);
+    expect(local.disabled).toBe(true);
+    expect(origin.disabled).toBe(true);
+  });
+
   it('keeps the "vs" label intact and truncates only the ref at a 240px container width', async () => {
     const { container } = render(
       <div style={{ width: 240 }}>
