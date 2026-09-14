@@ -668,7 +668,7 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
       undefined, // resumeSessionId — fresh eager spawn, not a resume
       undefined, // reasoningEffort — no persisted setting in this test
       undefined, // userAcknowledgedProviderDisabled — not a resume prompt
-      expect.stringContaining('cyboflow'), // systemPromptAppend — the briefing
+      expect.stringContaining('cyboflow'), // sessionBriefing
     );
   });
 

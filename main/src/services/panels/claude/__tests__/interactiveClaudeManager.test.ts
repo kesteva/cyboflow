@@ -382,17 +382,17 @@ describe('InteractiveClaudeManager', () => {
       expect(args).not.toContain('--model');
     });
 
-    it('emits --append-system-prompt for systemPromptAppend, and nothing when blank', () => {
-      const withAppend = mgr.callBuildCommandArgs({
+    it('emits --append-system-prompt for sessionBriefing, and nothing when blank', () => {
+      const withBriefing = mgr.callBuildCommandArgs({
         panelId: 'p1',
         sessionId: 's1',
         worktreePath: '/tmp/wt',
         prompt: '',
-        systemPromptAppend: 'You are running inside cyboflow.',
+        sessionBriefing: 'You are running inside cyboflow.',
       });
-      const idx = withAppend.indexOf('--append-system-prompt');
+      const idx = withBriefing.indexOf('--append-system-prompt');
       expect(idx).toBeGreaterThanOrEqual(0);
-      expect(withAppend[idx + 1]).toBe('You are running inside cyboflow.');
+      expect(withBriefing[idx + 1]).toBe('You are running inside cyboflow.');
 
       for (const blank of [undefined, '', '   ']) {
         const args = mgr.callBuildCommandArgs({
@@ -400,25 +400,26 @@ describe('InteractiveClaudeManager', () => {
           sessionId: 's1',
           worktreePath: '/tmp/wt',
           prompt: 'hi',
-          ...(blank === undefined ? {} : { systemPromptAppend: blank }),
+          ...(blank === undefined ? {} : { sessionBriefing: blank }),
         });
         expect(args).not.toContain('--append-system-prompt');
       }
     });
 
-    it('keeps --append-system-prompt BEFORE the end-of-options separator', () => {
-      // buildCommandArgs owns everything left of `--`; the positional prompt is
-      // appended after it by spawnCliProcess. A flag emitted on the wrong side
-      // would be parsed as prompt text.
+    it('NEVER emits systemPromptAppend as a flag — that field is the workflow channel', () => {
+      // RunExecutor sets systemPromptAppend on EVERY run with the step-reporting
+      // + fan-out appends; this substrate already prepends those to the prompt
+      // body (composePromptBody). A flag here would deliver them twice, with the
+      // degraded copy in the system prompt. Found in adversarial review.
       const args = mgr.callBuildCommandArgs({
         panelId: 'p1',
         sessionId: 's1',
         worktreePath: '/tmp/wt',
-        prompt: '',
-        systemPromptAppend: 'context',
+        prompt: 'do the step',
+        systemPromptAppend: '## Step reporting\nCall cyboflow_report_step…',
       });
-      expect(args).not.toContain('--');
-      expect(args[args.length - 1]).not.toBe('context');
+      expect(args).not.toContain('--append-system-prompt');
+      expect(args.join(' ')).not.toContain('Step reporting');
     });
 
     it('threads --strict-mcp-config iff strictMcpConfig === true', () => {
@@ -1619,6 +1620,55 @@ describe('InteractiveClaudeManager', () => {
       expect(minted).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
       expect(mgr.fakeSources[0].expectedSessionUuid).toBe(minted);
       expect(args).not.toContain('--resume');
+
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+
+    it('a briefing spawn puts --append-system-prompt BEFORE `--` and carries no positional prompt', async () => {
+      // The `--mcp-config` variadic swallows anything after it that is not a
+      // flag; only `--` ends option parsing. A briefing on the wrong side of it
+      // would be parsed as prompt text (or as a bogus config path).
+      const spawn = mgr.spawnCliProcess({
+        panelId: 'panel-dd8',
+        sessionId: 'sess-dd8',
+        worktreePath: '/tmp/wt-dd8',
+        prompt: '',
+        sessionBriefing: 'You are running inside cyboflow.',
+      });
+      await waitFor(() => mgr.ptys.length > 0 && mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
+
+      const args = mgr.ptys[0].args;
+      const flagIdx = args.indexOf('--append-system-prompt');
+      expect(flagIdx).toBeGreaterThanOrEqual(0);
+      expect(args[flagIdx + 1]).toBe('You are running inside cyboflow.');
+      // No positional prompt → no `--` at all: the REPL opens idle.
+      expect(args).not.toContain('--');
+      expect(mgr.fakeSources[0].deferDeadlineUntilArmed).toBe(true);
+
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+
+    it('with BOTH a briefing and a prompt, the flag precedes `--` and the prompt follows it', async () => {
+      const spawn = mgr.spawnCliProcess({
+        panelId: 'panel-dd9',
+        sessionId: 'sess-dd9',
+        worktreePath: '/tmp/wt-dd9',
+        prompt: 'fix the parser',
+        sessionBriefing: 'context',
+      });
+      await waitFor(() => mgr.ptys.length > 0 && mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
+
+      const args = mgr.ptys[0].args;
+      const sep = args.indexOf('--');
+      expect(sep).toBeGreaterThanOrEqual(0);
+      expect(args.indexOf('--append-system-prompt')).toBeLessThan(sep);
+      expect(args[sep + 1]).toBe('fix the parser');
+      expect(args.length).toBe(sep + 2);
+      expect(mgr.fakeSources[0].deferDeadlineUntilArmed).toBe(false);
 
       mgr.ptys[0].fireExit(0);
       await new Promise((r) => setTimeout(r, 600));

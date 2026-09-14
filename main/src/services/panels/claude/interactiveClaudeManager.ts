@@ -133,17 +133,18 @@ import { isClaudeEffortLevel, type ReasoningEffort } from '../../../../../shared
  *                      so the spawn path binds it directly from EOF
  *                      (bindKnownFileFromEnd) to keep the structured pipeline (token
  *                      meter) flowing; the live xterm rides the raw PTY byte path.
- *   systemPromptAppend: emitted as the CLI's `--append-system-prompt <text>`, the
- *                      interactive analogue of the SDK's `systemPrompt.append`.
- *                      This carries SESSION CONTEXT (the quick-session briefing
- *                      ipc/session.ts threads to every substrate), which is not a
- *                      user turn and must not render as one.
- *                      The WORKFLOW prompt appends — step-reporting (S6/TASK-811)
- *                      AND the derived fan-out execution instructions — still ride
- *                      a prompt-body PREPEND in `composePromptBody` instead: they
- *                      are resolved from the run's frozen effective definition and
- *                      are per-RUN, not per-spawn, so they must survive a resume
- *                      respawn's prompt rather than a flag the respawn rebuilds.
+ *   systemPromptAppend: the `options.systemPromptAppend` field is intentionally
+ *                      UNREAD on this substrate. It is NOT a dead parity stub:
+ *                      RunExecutor.buildOptionsOverrides sets it on EVERY run
+ *                      with the workflow appends (step-reporting + fan-out) that
+ *                      the SDK substrate consumes via `systemPrompt.append`. This
+ *                      substrate delivers those SAME appends — with the richer
+ *                      dispatch/workflowName resolution — via a prompt-body
+ *                      PREPEND in `composePromptBody`. Emitting the field as
+ *                      `--append-system-prompt` too would hand a workflow run the
+ *                      instructions twice, with the degraded copy in the system
+ *                      prompt. Session context that genuinely belongs on the
+ *                      system prompt has its OWN field: `sessionBriefing`.
  * ------------------------------------------------------------------------- */
 
 /** CLI spawn options accepted by the interactive substrate. */
@@ -224,14 +225,21 @@ interface InteractiveClaudeSpawnOptions {
    */
   sessionUuid?: string;
   /**
-   * Text appended to the CLI's system prompt via `--append-system-prompt`. Used
-   * for session context the model needs but the user never typed — the
-   * quick-session briefing (ipc/session.ts). Invisible in the transcript, which
-   * is the point: delivering it as the first positional prompt made it render as
-   * a user message and spend the session's first turn being acknowledged.
-   * Omitted / blank → no flag.
+   * UNREAD here — see the parity table. Carries the per-run WORKFLOW appends
+   * that this substrate delivers through composePromptBody's prepend instead.
+   * Never emit it as a flag: it would duplicate those instructions.
    */
   systemPromptAppend?: string;
+  /**
+   * Session context appended to the CLI's system prompt via
+   * `--append-system-prompt`: the quick-session briefing from ipc/session.ts —
+   * who is hosting the agent, what the worktree is, which MCP servers exist.
+   * Set by the quick-session spawn seams only; never by RunExecutor. Invisible
+   * in the transcript, which is the point: delivering it as the first positional
+   * prompt made it render as a user message and spend the session's first turn
+   * being acknowledged. Omitted / blank → no flag.
+   */
+  sessionBriefing?: string;
   [key: string]: unknown;
 }
 
@@ -682,19 +690,19 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       args.push('--strict-mcp-config');
     }
 
-    // systemPromptAppend → the CLI's `--append-system-prompt`. This is session
+    // sessionBriefing → the CLI's `--append-system-prompt`. This is session
     // CONTEXT (who is hosting the agent, what the worktree is, which MCP servers
     // are connected), not something the user asked for, so it belongs in the
-    // system prompt exactly as every other substrate delivers it — the SDK path
-    // rides `systemPrompt.append` and Codex rides `developerInstructions`
-    // (ipc/session.ts threads the same briefing text to all three). This lane
-    // used to spend the session's FIRST TURN on it instead: the briefing went out
-    // as the positional prompt, so it rendered in the transcript and burned a
-    // turn on an acknowledgement nobody asked for. Pushed before the load-bearing
-    // end-of-options `--` separator.
-    const append = options.systemPromptAppend?.trim();
-    if (append) {
-      args.push('--append-system-prompt', append);
+    // system prompt — the SDK lane delivers its briefing via `systemPrompt.append`
+    // and Codex via `developerInstructions`. This lane used to spend the
+    // session's FIRST TURN on it: the briefing went out as the positional prompt,
+    // rendered in the transcript, and burned a turn on an acknowledgement nobody
+    // asked for. Deliberately NOT `options.systemPromptAppend` — see the parity
+    // table: that field carries the workflow appends this lane already prepends
+    // to the prompt body. Pushed before the load-bearing `--` separator.
+    const briefing = options.sessionBriefing?.trim();
+    if (briefing) {
+      args.push('--append-system-prompt', briefing);
     }
 
     // agentPermissionMode 'auto': hand gating to NATIVE Claude auto-mode via the
@@ -1270,7 +1278,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // clock would be timing the USER, and its give-up would permanently detach
     // the structured pipeline (token meter + claude_session_id persistence) from
     // a session that is merely waiting to be typed into. See armDiscoveryDeadline.
-    const spawnStartsTurn = composedPrompt.length > 0;
+    const spawnStartsTurn = composedPrompt.trim().length > 0;
 
     const cliEnv = await this.initializeCliEnvironment({ ...options, runId });
     const extraEnv = await this.getCliEnvironment({ ...options, runId });
@@ -1341,8 +1349,9 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // ROB-5: a non-empty initial prompt rides claude's POSITIONAL argument (see
     // the note below waitForFirstLine), so the FIRST turn is already in flight
     // the moment the PTY exists — no sendInput ever sees it. An empty prompt
-    // (eager resume) starts no turn.
-    if (typeof options.prompt === 'string' && options.prompt.trim().length > 0) {
+    // (eager resume, or a briefing-only quick spawn) starts no turn. Same
+    // predicate as the discovery deadline: what was actually pushed as argv.
+    if (spawnStartsTurn) {
       this.turnInFlightPanelIds.add(panelId);
     }
 
@@ -2200,7 +2209,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
      * session's first turn. A caller that has a briefing passes an empty `prompt`
      * alongside it, which spawns a bare REPL that waits for the user.
      */
-    systemPromptAppend?: string,
+    sessionBriefing?: string,
   ): Promise<void> {
     await this.spawnCliProcess({
       panelId,
@@ -2211,7 +2220,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       effort,
       fastMode,
       reasoningEffort,
-      ...(systemPromptAppend ? { systemPromptAppend } : {}),
+      ...(sessionBriefing ? { sessionBriefing } : {}),
       ...(userAcknowledgedProviderDisabled ? { userAcknowledgedProviderDisabled } : {}),
       // When set, buildCommandArgs emits a plain `--resume <uuid>` (no fork) so the
       // prior conversation reopens live — eager resume passes an empty prompt.

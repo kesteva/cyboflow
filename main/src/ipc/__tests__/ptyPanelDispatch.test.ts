@@ -125,7 +125,7 @@ describe('relayOrSpawnPtyPanel — interactive Claude', () => {
     // --append-system-prompt and the REPL opens idle rather than spending its
     // first turn acknowledging a message the user never sent.
     expect(args[3]).toBe(''); // prompt — no user turn on an eager spawn
-    expect(args[11]).toBe(QUICK_PTY_BRIEFING); // systemPromptAppend
+    expect(args[11]).toBe(QUICK_PTY_BRIEFING); // sessionBriefing
     expect(interactive.relayUserTurn).not.toHaveBeenCalled();
   });
 

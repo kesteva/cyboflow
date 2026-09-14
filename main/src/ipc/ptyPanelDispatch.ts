@@ -66,7 +66,7 @@ interface InteractivePtyManagerLike extends PtyManagerLike {
     reasoningEffort?: ReasoningEffort,
     userAcknowledgedProviderDisabled?: boolean,
     /** Session context for `--append-system-prompt` — never a user turn. */
-    systemPromptAppend?: string,
+    sessionBriefing?: string,
   ): Promise<void>;
 }
 
