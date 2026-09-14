@@ -1,21 +1,20 @@
-import type { IpcMain } from 'electron';
 import * as os from 'os';
 import * as path from 'path';
-import {
-  GIT_DETECT_CHANNEL,
-  GIT_SET_IDENTITY_CHANNEL,
-  type GitDetectRequest,
-  type GitIdentityInput,
-  type GitPrerequisiteResult,
+import type {
+  GitDetectRequest,
+  GitIdentityInput,
+  GitPrerequisiteResult,
 } from '../../../shared/types/gitPrerequisite';
+import type { GitPrerequisiteOpsLike } from '../orchestrator/trpc/contracts/gitPrerequisiteOps';
 import { clearGitExecutableCache, resolveGitCommand } from '../utils/gitExeFinder';
 import { runToolCapture } from '../utils/runGit';
 import { clearShellPathCache } from '../utils/shellPath';
 
 /**
- * The onboarding git prerequisite probe (`git:detect`) and the identity writer
- * (`git:set-identity`). See shared/types/gitPrerequisite.ts for the contract
- * and why it exists.
+ * The onboarding git prerequisite probe and the identity writer — the ops
+ * implementation behind the `cyboflow.gitPrerequisite` tRPC router
+ * (createGitPrerequisiteOps, injected into the tRPC context from index.ts).
+ * See shared/types/gitPrerequisite.ts for the contract and why it exists.
  *
  * The probe resolves git through the same ladder every worktree operation
  * uses ({@link resolveGitCommand} → the login-shell PATH, the standard Windows
@@ -167,31 +166,28 @@ function fakeGitPrerequisite(): GitPrerequisiteResult | null {
   };
 }
 
-export function registerGitPrerequisiteHandlers(ipcMain: IpcMain): void {
-  ipcMain.handle(
-    GIT_DETECT_CHANNEL,
-    async (_event, request: unknown): Promise<{ success: true; data: GitPrerequisiteResult }> => {
+export function createGitPrerequisiteOps(): GitPrerequisiteOpsLike {
+  return {
+    detect: async (request) => {
       const fake = fakeGitPrerequisite();
       if (fake) {
         console.warn(`[GitPrerequisite] CYBOFLOW_FAKE_GIT_PREREQ=${fake.state} — reporting a fake probe`);
-        return { success: true, data: fake };
+        return fake;
       }
-      const refresh =
-        typeof request === 'object' && request !== null && (request as Partial<GitDetectRequest>).refresh === true;
-      return { success: true, data: await probeGitPrerequisite({ refresh }) };
+      return probeGitPrerequisite({ refresh: request.refresh === true });
     },
-  );
-  ipcMain.handle(GIT_SET_IDENTITY_CHANNEL, (_event, input: unknown) => {
-    const fake = fakeGitPrerequisite();
-    if (fake) {
-      const validated = validateGitIdentity(input);
-      if (!validated.ok) return { success: false, error: validated.error };
-      console.warn('[GitPrerequisite] CYBOFLOW_FAKE_GIT_PREREQ set — NOT writing git config, reporting ready');
-      return {
-        success: true,
-        data: { ...fake, binary: { ...fake.binary, found: true }, identity: validated.value, state: 'ready' as const },
-      };
-    }
-    return setGitIdentity(input);
-  });
+    setIdentity: async (input) => {
+      const fake = fakeGitPrerequisite();
+      if (fake) {
+        const validated = validateGitIdentity(input);
+        if (!validated.ok) return { success: false, error: validated.error };
+        console.warn('[GitPrerequisite] CYBOFLOW_FAKE_GIT_PREREQ set — NOT writing git config, reporting ready');
+        return {
+          success: true,
+          data: { ...fake, binary: { ...fake.binary, found: true }, identity: validated.value, state: 'ready' },
+        };
+      }
+      return setGitIdentity(input);
+    },
+  };
 }

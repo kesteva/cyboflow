@@ -9,6 +9,7 @@ import { normalizeEffortSelection } from '../../../../shared/types/reasoningEffo
 import { DEFAULT_QUICK_MODEL, QUICK_RUN_TYPE_KEY } from '../../../../shared/types/sessionDefaults';
 import type { IPCResponse } from '../../utils/api';
 import { API } from '../../utils/api';
+import { trpc } from '../../trpc/client';
 import { useConfigStore } from '../../stores/configStore';
 import { assistantRuntimeProvider } from '../../../../shared/types/agentThread';
 import { resolveAssistantRuntimeFromConfig } from '../../utils/assistantRuntime';
@@ -257,8 +258,7 @@ export function OnboardingGate(): React.JSX.Element | null {
     setGitChecking(true);
     let result = GIT_PROBE_UNAVAILABLE;
     try {
-      const res = await API.git.detect({ refresh });
-      if (res.success && res.data) result = res.data;
+      result = await trpc.cyboflow.gitPrerequisite.detect.query({ refresh });
     } catch {
       /* no bridge, or the probe failed — fail open (see GIT_PROBE_UNAVAILABLE) */
     }
@@ -289,11 +289,14 @@ export function OnboardingGate(): React.JSX.Element | null {
     setGitChecking(true);
     setGitError(null);
     try {
-      const res = await API.git.setIdentity({ name: gitIdentity.name, email: gitIdentity.email });
-      if (res.success && res.data) {
+      const res = await trpc.cyboflow.gitPrerequisite.setIdentity.mutate({
+        name: gitIdentity.name,
+        email: gitIdentity.email,
+      });
+      if (res.success) {
         setGitPrereq(res.data);
       } else {
-        setGitError(res.error ?? 'Could not save your git identity.');
+        setGitError(res.error);
       }
     } catch (error) {
       setGitError(error instanceof Error ? error.message : String(error));

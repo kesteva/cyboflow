@@ -32,11 +32,6 @@ import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/
 import type { ProviderModelCatalogs } from '../../../shared/types/agentModels';
 import type { AgentProvider } from '../../../shared/types/agentRuntime';
 import type { ProviderDetectionResult } from '../../../shared/types/onboarding';
-import type {
-  GitDetectRequest,
-  GitIdentityInput,
-  GitPrerequisiteResult,
-} from '../../../shared/types/gitPrerequisite';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 
 interface LogEntry {
@@ -282,9 +277,6 @@ interface ElectronAPI {
   // Git operations
   git: {
     detectBranch: (path: string) => Promise<IPCResponse<string>>;
-    // First-run onboarding — the git prerequisite (binary + commit identity).
-    detect: (request: GitDetectRequest) => Promise<IPCResponse<GitPrerequisiteResult>>;
-    setIdentity: (input: GitIdentityInput) => Promise<IPCResponse<GitPrerequisiteResult>>;
   };
 
   // Folders

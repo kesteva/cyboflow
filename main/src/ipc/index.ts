@@ -19,7 +19,6 @@ import { registerIdeaAttachmentHandlers } from './ideaAttachments';
 import { registerTelemetryHandlers } from './telemetry';
 import { registerModelHandlers } from './models';
 import { registerProviderDetectionHandlers } from './providerDetection';
-import { registerGitPrerequisiteHandlers } from './gitPrerequisite';
 import { registerBugReportHandlers } from './bugReport';
 import { installIpcSenderGuard, resolveSenderGuardConfig } from './senderGuard';
 
@@ -52,5 +51,4 @@ export function registerIpcHandlers(services: AppServices): void {
   registerBugReportHandlers(ipcMain, services);
   registerModelHandlers(ipcMain, services);
   registerProviderDetectionHandlers(ipcMain, services);
-  registerGitPrerequisiteHandlers(ipcMain);
 }

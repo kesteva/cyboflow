@@ -35,7 +35,7 @@ export interface GitPrerequisiteResult {
   state: GitPrerequisiteState;
 }
 
-/** Request shape for {@link GIT_DETECT_CHANNEL}. */
+/** Request shape for `cyboflow.gitPrerequisite.detect`. */
 export interface GitDetectRequest {
   /**
    * Drop the memoized shell PATH + git-binary resolution before probing, so a
@@ -45,11 +45,8 @@ export interface GitDetectRequest {
   refresh: boolean;
 }
 
-/** Request shape for {@link GIT_SET_IDENTITY_CHANNEL} — written with `git config --global`. */
+/** Request shape for `cyboflow.gitPrerequisite.setIdentity` — written with `git config --global`. */
 export interface GitIdentityInput {
   name: string;
   email: string;
 }
-
-export const GIT_DETECT_CHANNEL = 'git:detect';
-export const GIT_SET_IDENTITY_CHANNEL = 'git:set-identity';

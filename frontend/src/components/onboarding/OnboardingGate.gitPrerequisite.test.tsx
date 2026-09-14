@@ -1,6 +1,6 @@
 /**
  * OnboardingGate — the git prerequisite card. Not a tour step: the gate probes
- * `API.git.detect` once per active tour and, while the result is not 'ready',
+ * `cyboflow.gitPrerequisite.detect` once per active tour and, while the result is not 'ready',
  * renders the card IN FRONT of whichever modal step the tour is on
  * (shared/types/gitPrerequisite.ts). Drives the real onboardingStore with the
  * API layer mocked, covering: the no-flash hold until the probe resolves, the
@@ -35,11 +35,18 @@ vi.mock('../../utils/api', () => ({
       get: (...a: unknown[]) => configGet(...a),
       update: (...a: unknown[]) => configUpdate(...a),
     },
-    git: {
-      detect: (...a: unknown[]) => gitDetect(...a),
-      setIdentity: (...a: unknown[]) => gitSetIdentity(...a),
-    },
     dialog: { openFile: vi.fn(), openDirectory: vi.fn() },
+  },
+}));
+
+vi.mock('../../trpc/client', () => ({
+  trpc: {
+    cyboflow: {
+      gitPrerequisite: {
+        detect: { query: (...a: unknown[]) => gitDetect(...a) },
+        setIdentity: { mutate: (...a: unknown[]) => gitSetIdentity(...a) },
+      },
+    },
   },
 }));
 
@@ -115,7 +122,7 @@ async function mountActive(): Promise<void> {
 
 describe('OnboardingGate — git prerequisite card', () => {
   it('holds the tour until the probe resolves, then shows the Welcome card when git is ready', async () => {
-    let resolveProbe: (r: { success: boolean; data: GitPrerequisiteResult }) => void = () => {};
+    let resolveProbe: (r: GitPrerequisiteResult) => void = () => {};
     gitDetect.mockReturnValue(new Promise((r) => (resolveProbe = r)));
     await mountActive();
 
@@ -123,13 +130,13 @@ describe('OnboardingGate — git prerequisite card', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(gitDetect).toHaveBeenCalledWith({ refresh: false });
 
-    await act(async () => resolveProbe({ success: true, data: READY }));
+    await act(async () => resolveProbe(READY));
     expect(await screen.findByRole('dialog', { name: 'Welcome to Cyboflow' })).toBeInTheDocument();
     expect(trackEvent).not.toHaveBeenCalledWith('onboarding_prerequisite_blocked', expect.anything());
   });
 
   it("renders the 'missing' card with the host's install line and re-probes with refresh on Check again", async () => {
-    gitDetect.mockResolvedValueOnce({ success: true, data: MISSING }).mockResolvedValueOnce({ success: true, data: READY });
+    gitDetect.mockResolvedValueOnce(MISSING).mockResolvedValueOnce(READY);
     await mountActive();
 
     const dialog = await screen.findByRole('dialog', { name: 'Git is required' });
@@ -150,7 +157,7 @@ describe('OnboardingGate — git prerequisite card', () => {
   });
 
   it("renders the 'identity' form seeded from git's half-set identity and saves through the bridge", async () => {
-    gitDetect.mockResolvedValue({ success: true, data: IDENTITY });
+    gitDetect.mockResolvedValue(IDENTITY);
     gitSetIdentity.mockResolvedValue({ success: true, data: READY });
     await mountActive();
 
@@ -172,7 +179,7 @@ describe('OnboardingGate — git prerequisite card', () => {
   });
 
   it('shows a save failure inline and keeps the form up', async () => {
-    gitDetect.mockResolvedValue({ success: true, data: IDENTITY });
+    gitDetect.mockResolvedValue(IDENTITY);
     gitSetIdentity.mockResolvedValue({ success: false, error: 'Enter a valid email address.' });
     await mountActive();
 
@@ -185,7 +192,7 @@ describe('OnboardingGate — git prerequisite card', () => {
   });
 
   it('lets the user continue without git for this boot, without advancing the tour', async () => {
-    gitDetect.mockResolvedValue({ success: true, data: MISSING });
+    gitDetect.mockResolvedValue(MISSING);
     await mountActive();
 
     await screen.findByRole('dialog', { name: 'Git is required' });
@@ -197,7 +204,7 @@ describe('OnboardingGate — git prerequisite card', () => {
   });
 
   it('keeps ArrowRight/ArrowLeft from driving the tour behind the card', async () => {
-    gitDetect.mockResolvedValue({ success: true, data: MISSING });
+    gitDetect.mockResolvedValue(MISSING);
     await mountActive();
     await screen.findByRole('dialog', { name: 'Git is required' });
 
@@ -216,7 +223,7 @@ describe('OnboardingGate — git prerequisite card', () => {
   });
 
   it('does not probe when the tour is not active (an install upgrading in with projects)', async () => {
-    gitDetect.mockResolvedValue({ success: true, data: MISSING });
+    gitDetect.mockResolvedValue(MISSING);
     projectsGetAll.mockResolvedValue({ success: true, data: [{ id: 1 }] });
     render(<OnboardingGate />);
     await waitFor(() => expect(useOnboardingStore.getState().hydrated).toBe(true));
