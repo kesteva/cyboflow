@@ -47,6 +47,35 @@ export interface RunGitDiff {
   changedFiles: string[];
 }
 
+/**
+ * Which diff-viewer group a `WorktreeStatusEntry` belongs in. 'committed' has
+ * no `git status` counterpart (it covers commits made since a base ref, e.g.
+ * `captureDiffAgainstRef`'s ref) — status only ever classifies the working
+ * tree + index, so this member exists purely for callers grouping alongside a
+ * status join, not something `getWorktreeStatus` itself ever produces.
+ */
+export type DiffGroupScope = 'unstaged' | 'staged' | 'untracked' | 'committed';
+
+/**
+ * One `git status --porcelain=v1 -z --untracked-files=all` entry, as a flag
+ * record rather than an enum: a path with both staged and unstaged changes
+ * (porcelain `MM`) sets BOTH `staged` and `unstaged`, which a single-scope
+ * classification cannot represent. `conflicted` is mutually exclusive with
+ * the other three flags — an unmerged path (`UU`/`AA`/`DD`/`AU`/`UA`/`DU`/
+ * `UD`) sets only `conflicted`, never `staged`/`unstaged` (see
+ * GitDiffManager.getWorktreeStatus).
+ */
+export interface WorktreeStatusEntry {
+  /** Path relative to the worktree root ('/' separators). For a rename, the NEW path. */
+  path: string;
+  /** Present only for a rename/copy: the path this entry was renamed/copied from. */
+  oldPath?: string;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+  conflicted: boolean;
+}
+
 /** The result of reading a single file from a run's worktree. */
 export interface RunFileContent {
   /** Path relative to the worktree root, POSIX-style ('/' separators). */

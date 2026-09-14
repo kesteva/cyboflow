@@ -1,6 +1,8 @@
 import * as fs from 'node:fs';
 import { runGitAsync, END_OF_OPTIONS, assertNotOptionLike } from '../utils/runGit';
 import type { Logger } from '../utils/logger';
+import { GitOperationalError } from './gitPlumbingCommands';
+import type { WorktreeStatusEntry } from '../../../shared/types/runFiles';
 
 export interface GitDiffStats {
   additions: number;
@@ -30,6 +32,109 @@ export interface GitCommit {
   date: Date;
   author: string;
   stats: GitDiffStats;
+}
+
+/**
+ * Unmerged (conflict) status codes from `git status --porcelain`, mirroring
+ * `fastCheckWorkingDirectory`'s `git diff --diff-filter=U` conflict check
+ * (gitPlumbingCommands.ts:125). A path in one of these states must set ONLY
+ * `conflicted` — never `staged`/`unstaged`, which a naive "X !== ' ' ⇒
+ * staged, Y !== ' ' ⇒ unstaged" rule would otherwise produce for e.g. `UU`.
+ */
+const CONFLICTED_STATUS_CODES: ReadonlySet<string> = new Set([
+  'UU', 'AA', 'DD', 'AU', 'UA', 'DU', 'UD',
+]);
+
+/**
+ * An AbortError means WE cancelled the git child (superseded/torn-down
+ * fetch), not that git reported something meaningful. Mirrors
+ * gitPlumbingCommands.ts's isAbortError (not exported there, so duplicated
+ * here rather than reaching into that module's internals).
+ */
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && err.name === 'AbortError';
+}
+
+/**
+ * An operational git failure — killed by timeout/signal, or failed to spawn
+ * (ENOENT) — as opposed to git running to completion and reporting a semantic
+ * non-zero exit. Mirrors gitPlumbingCommands.ts's isOperationalFailure.
+ */
+function isOperationalFailure(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const e = err as NodeJS.ErrnoException & { killed?: boolean; signal?: NodeJS.Signals | null };
+  if (e.killed === true) return true;
+  if (typeof e.signal === 'string' && e.signal.length > 0) return true;
+  if (e.code === 'ENOENT') return true;
+  return false;
+}
+
+/**
+ * Parse one `git status --porcelain=v1 -z --untracked-files=all` NUL-field
+ * stream into status entries.
+ *
+ * `-z` changes TWO things from the human-readable form documented in `git
+ * status --help`:
+ *  - Paths are never C-quoted (no escaping of spaces/specials), so a path
+ *    with a literal space or shell metacharacter round-trips byte-for-byte —
+ *    required to join against the (also-unquoted) `diff --git a/<path> …`
+ *    blob path that parseFileHunks/getChangedFiles produce.
+ *  - A rename/copy record emits the NEW path first, then the OLD path, each
+ *    its own NUL-terminated field (`XY <new>\0<old>\0`) — the OPPOSITE order
+ *    of the human-readable `R  <old> -> <new>` form. `oldPath` on the
+ *    returned entry is always the OLD path regardless of this reversed wire
+ *    order.
+ */
+function parseWorktreeStatus(output: unknown): WorktreeStatusEntry[] {
+  if (typeof output !== 'string' || output.length === 0) return [];
+
+  const fields = output.split('\0');
+  const entries: WorktreeStatusEntry[] = [];
+
+  for (let i = 0; i < fields.length; i++) {
+    const record = fields[i];
+    // The trailing NUL (and any stray blank field) yields an empty string.
+    if (!record || record.length < 3) continue;
+
+    const x = record[0];
+    const y = record[1];
+    const path = record.slice(3);
+    const code = `${x}${y}`;
+
+    let oldPath: string | undefined;
+    // A rename/copy record carries a SECOND NUL-terminated field — the path
+    // this entry was renamed/copied FROM — which must be consumed here so it
+    // is never mistaken for the next record.
+    if (x === 'R' || x === 'C' || y === 'R' || y === 'C') {
+      i++;
+      oldPath = fields[i];
+    }
+
+    if (code === '??') {
+      entries.push({ path, staged: false, unstaged: false, untracked: true, conflicted: false });
+      continue;
+    }
+    if (code === '!!') {
+      // Only ever appears with --ignored, which getWorktreeStatus does not pass.
+      continue;
+    }
+    if (CONFLICTED_STATUS_CODES.has(code)) {
+      entries.push({ path, staged: false, unstaged: false, untracked: false, conflicted: true });
+      continue;
+    }
+
+    const entry: WorktreeStatusEntry = {
+      path,
+      staged: x !== ' ',
+      unstaged: y !== ' ',
+      untracked: false,
+      conflicted: false,
+    };
+    if (oldPath !== undefined) entry.oldPath = oldPath;
+    entries.push(entry);
+  }
+
+  return entries;
 }
 
 export class GitDiffManager {
@@ -109,6 +214,47 @@ export class GitDiffManager {
       );
       throw error;
     }
+  }
+
+  /**
+   * Parse `git status --porcelain=v1 -z --untracked-files=all` for a worktree
+   * into a flag record per path (staged / unstaged / untracked / conflicted).
+   *
+   * Deliberately standalone rather than folded into captureDiffAgainstRef's
+   * return (D-9/TASK-209): GitDiffResult is shared by callers — including
+   * executionTracker.ts — that have no use for per-path status flags, so
+   * widening it here would ripple to all of them. The tRPC boundary composes
+   * this with a diff result instead of GitDiffManager doing it internally.
+   *
+   * `-uall` (`--untracked-files=all`) is mandatory: the default `--porcelain`
+   * collapses an untracked directory into a single `?? newdir/` row, while
+   * getUntrackedFiles (used by the diff-blob paths elsewhere in this class)
+   * enumerates every file inside it via `git ls-files --others
+   * --exclude-standard` — without `-uall` the Untracked group would show one
+   * unopenable directory row with no matching per-file diff.
+   *
+   * `-z` is mandatory: without it, a path with spaces/specials is C-quoted
+   * here but NOT in the `diff --git a/<path> …` blob, breaking the
+   * status↔diff join on exactly the adversarial-filename class this file
+   * already hardens against elsewhere.
+   */
+  async getWorktreeStatus(worktreePath: string): Promise<WorktreeStatusEntry[]> {
+    let output: string;
+    try {
+      output = await runGitAsync(worktreePath, ['status', '--porcelain=v1', '-z', '--untracked-files=all']);
+    } catch (error) {
+      // A deliberate cancellation must propagate, not be swallowed into an
+      // empty (looks-clean) result.
+      if (isAbortError(error)) throw error;
+      // A timeout/kill/spawn failure must NOT masquerade as "no changes" —
+      // mirrors fastGetAheadBehind / fastGetDiffStats in gitPlumbingCommands.ts.
+      if (isOperationalFailure(error)) {
+        throw new GitOperationalError(`git status failed operationally in ${worktreePath}`, error);
+      }
+      this.logger?.warn(`Could not get worktree status in ${worktreePath}`);
+      return [];
+    }
+    return parseWorktreeStatus(output);
   }
 
   /**
@@ -496,10 +642,6 @@ export class GitDiffManager {
         console.error(`Not a git repository: ${worktreePath}`);
         return '';
       }
-
-      // Check git status to see what files have changes
-      const status = await runGitAsync(worktreePath, ['status', '--porcelain']);
-      console.log(`Git status in ${worktreePath}:`, status || '(no changes)');
 
       // Get diff of the working tree against <ref> (default HEAD), including both
       // staged and unstaged changes. With a base ref this also surfaces commits
