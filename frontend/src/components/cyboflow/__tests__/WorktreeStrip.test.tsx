@@ -102,9 +102,9 @@ describe('WorktreeStrip', () => {
     const commitBtn = screen.getByTestId('worktree-strip-commit') as HTMLButtonElement;
     const restoreBtn = screen.getByTestId('worktree-strip-restore') as HTMLButtonElement;
     expect(commitBtn.disabled).toBe(true);
-    expect(commitBtn.getAttribute('title')).toBeTruthy();
+    expect(commitBtn.getAttribute('title')).toBe('Select a session to commit changes');
     expect(restoreBtn.disabled).toBe(true);
-    expect(restoreBtn.getAttribute('title')).toBeTruthy();
+    expect(restoreBtn.getAttribute('title')).toBe('Select a session to restore changes');
   });
 
   it('disables Commit… (with a title) but keeps Restore enabled when a conflicted entry is present', async () => {
@@ -117,7 +117,7 @@ describe('WorktreeStrip', () => {
     const commitBtn = screen.getByTestId('worktree-strip-commit') as HTMLButtonElement;
     const restoreBtn = screen.getByTestId('worktree-strip-restore') as HTMLButtonElement;
     expect(commitBtn.disabled).toBe(true);
-    expect(commitBtn.getAttribute('title')).toBeTruthy();
+    expect(commitBtn.getAttribute('title')).toBe('Resolve conflicts before committing');
     expect(restoreBtn.disabled).toBe(false);
   });
 
