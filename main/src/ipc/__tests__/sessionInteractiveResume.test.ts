@@ -138,10 +138,14 @@ function makeServices(opts: {
     ),
     addSessionOutput: vi.fn(() => Promise.resolve()),
     updateSession: vi.fn(() => Promise.resolve()),
+    // The idle-rest seam (restInteractiveSessionIdle) writes the turn-end
+    // resting value through the DB seam, exactly like index.ts's rester.
+    db: { updateSession: vi.fn() },
     emit: vi.fn(),
   };
   const fakeInteractive = {
     isPanelRunning: vi.fn(() => opts.replRunning ?? false),
+    hasTurnInFlightForSession: vi.fn(() => false),
     startPanel,
     relayUserTurn: vi.fn(),
   };
@@ -250,6 +254,51 @@ describe('sessions:resume-interactive (eager spawn)', () => {
     expect(call[1]).toBe(SESSION_ID);
     expect(call[3]).toBe(''); // empty prompt → bare resumed REPL, no first turn
     expect(call[8]).toBe(CLAUDE_SESSION_ID); // → plain `--resume <uuid>`
+    // The briefing is a system-prompt flag now, not conversation content, so a
+    // resume must hand it over again (the CLI's recorded system prompt lasts
+    // only until compaction).
+    expect(call[11]).toEqual(expect.stringContaining('cyboflow'));
+  });
+
+  it('restart: rests the session idle when no panel of it holds a turn', async () => {
+    const { services, startPanel, fakeInteractive } = makeServices({ substrate: 'interactive', replRunning: false });
+    const handlers = registerWith(services);
+    const res = (await invoke(handlers, 'sessions:restart-interactive', SESSION_ID)) as { success: boolean };
+    expect(res.success).toBe(true);
+    expect(startPanel).toHaveBeenCalledTimes(1);
+    expect(startPanel.mock.calls[0][3]).toBe(''); // no forced turn
+    expect(startPanel.mock.calls[0][11]).toEqual(expect.stringContaining('cyboflow')); // briefing
+    expect(fakeInteractive.hasTurnInFlightForSession).toHaveBeenCalledWith(SESSION_ID);
+    const sm = services.sessionManager as unknown as { db: { updateSession: ReturnType<typeof vi.fn> } };
+    expect(sm.db.updateSession).toHaveBeenCalledWith(SESSION_ID, { status: 'completed' });
+  });
+
+  it('restart: does NOT rest the session while a sibling panel is mid-turn', async () => {
+    // Session status is shared across panels. Retrying one dead added panel
+    // while the primary is working must not flip the whole session to idle.
+    const { services, fakeInteractive } = makeServices({ substrate: 'interactive', replRunning: false });
+    fakeInteractive.hasTurnInFlightForSession.mockReturnValue(true);
+    const handlers = registerWith(services);
+    const res = (await invoke(handlers, 'sessions:restart-interactive', SESSION_ID)) as { success: boolean };
+    expect(res.success).toBe(true);
+    const sm = services.sessionManager as unknown as {
+      db: { updateSession: ReturnType<typeof vi.fn> };
+      updateSession: ReturnType<typeof vi.fn>;
+    };
+    expect(sm.db.updateSession).not.toHaveBeenCalled();
+    expect(sm.updateSession).not.toHaveBeenCalledWith(SESSION_ID, expect.objectContaining({ status: expect.anything() }));
+  });
+
+  it('rests the resumed session idle — no turn is forced, so nothing would rest a running mark', async () => {
+    const { services } = makeServices({ substrate: 'interactive', replRunning: false });
+    const handlers = registerWith(services);
+    await invoke(handlers, RESUME, SESSION_ID);
+    const sm = services.sessionManager as unknown as {
+      db: { updateSession: ReturnType<typeof vi.fn> };
+      updateSession: ReturnType<typeof vi.fn>;
+    };
+    expect(sm.db.updateSession).toHaveBeenCalledWith(SESSION_ID, { status: 'completed' });
+    expect(sm.updateSession).not.toHaveBeenCalledWith(SESSION_ID, { status: 'running' });
   });
 
   // Resuming SPAWNS a claude REPL, so the Settings → Integrations toggle governs

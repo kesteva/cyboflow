@@ -60,6 +60,7 @@ import {
   QUICK_OMP_PTY_BRIEFING,
   QUICK_PI_PTY_BRIEFING,
 } from './quickSessionBriefings';
+import { restInteractiveSessionIdle } from './interactiveSessionRest';
 import { relayOrSpawnPtyPanel } from './ptyPanelDispatch';
 import { agentProviderDisabledMessage, assertAgentProviderAllowed } from '../../../shared/agents/agentProviderGuard';
 import { resolveSubstrate } from '../orchestrator/substrateResolver';
@@ -1621,17 +1622,18 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
                 sessionManager,
                 sessionId: session.id,
               });
+              // The error status is written HERE, where the failure is known —
+              // not only in the post-rest re-assert below, whose ordering
+              // relative to this catch depends on whether the rest yields.
+              void sessionManager.updateSession(session.id, { status: 'error' });
             });
           // The REPL is live but IDLE — the briefing rides the system prompt, so
-          // this spawn starts no turn. Marking it 'running' would strand the
-          // session showing "working" forever: only a turn-end rests it, and
-          // there is no turn. The 'turn-start' seam (index.ts) flips it to
-          // running the moment the user actually types.
-          await sessionManager.updateSession(session.id, { status: 'stopped' });
-          // …unless the spawn already rejected inside the microtask window that
-          // await opened (a cached "not available" probe rejects on the next
-          // tick), in which case this write just clobbered the catch's error
-          // status. Re-assert it.
+          // this spawn starts no turn. See restInteractiveSessionIdle for why it
+          // rests at the turn-end value rather than 'running' or 'stopped'.
+          restInteractiveSessionIdle(sessionManager, session.id);
+          // …unless the spawn already rejected before this point (a cached "not
+          // available" probe rejects on the next tick), in which case the rest
+          // just clobbered the catch's error status. Re-assert it.
           if (eagerSpawnFailed) {
             await sessionManager.updateSession(session.id, { status: 'error' });
           }
@@ -2216,6 +2218,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               panelFastMode,
               undefined, // resumeSessionId — a fresh-fallback respawn, not an explicit resume
               panelReasoningEffort,
+              undefined, // userAcknowledgedProviderDisabled — not a resume prompt
+              QUICK_PTY_BRIEFING, // a fresh REPL needs its session context too
             )
             .catch((err: unknown) => {
               console.error(`[IPC] Interactive REPL re-spawn failed for session ${sessionId}:`, err);
@@ -2400,11 +2404,17 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           claudeSessionId, // → `--resume <uuid>` (no fork)
           panelReasoningEffort,
           acknowledgeProviderDisabled === true,
+          // The briefing is a system-prompt flag now, not conversation content,
+          // so a resumed REPL must be handed it again — the CLI's recorded
+          // system prompt survives only until the conversation compacts.
+          QUICK_PTY_BRIEFING,
         )
         .catch((err: unknown) => {
           console.error(`[IPC] Interactive resume spawn failed for session ${sessionId}:`, err);
         });
-      await sessionManager.updateSession(sessionId, { status: 'running' });
+      // No turn is forced on resume, so nothing would ever rest a 'running'
+      // mark — rest it idle; the first typed turn marks it running.
+      restInteractiveSessionIdle(sessionManager, sessionId);
       return { success: true };
     } catch (error) {
       console.error('[IPC] Failed to resume interactive session:', error);
@@ -2495,13 +2505,20 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           restartSpawnFailed = true;
           console.error(`[IPC] Interactive restart spawn failed for session ${sessionId}:`, err);
           reportEagerSpawnFailure(err, 'interactive', 'claude', { sessionManager, sessionId });
+          // Written here, where the failure is known (see the create-quick twin).
+          void sessionManager.updateSession(sessionId, { status: 'error' });
         });
       // Idle, not running: the restart's briefing rides the system prompt and
-      // starts no turn, so nothing would ever rest a 'running' mark here.
-      await sessionManager.updateSession(sessionId, { status: 'stopped' });
+      // starts no turn, so nothing would ever rest a 'running' mark here. But
+      // session status is SHARED across the session's panels — restarting one
+      // dead added panel while the primary is mid-turn must not rest the whole
+      // session under it. Rest only when no panel of this session holds a turn.
+      if (!interactiveCliManager.hasTurnInFlightForSession(sessionId)) {
+        restInteractiveSessionIdle(sessionManager, sessionId);
+      }
       // Same microtask race as the create-quick eager spawns: a rejection inside
-      // the await above already wrote the status, which this write then
-      // clobbered. Re-assert it.
+      // the spawn's microtask window already wrote the error status, which the
+      // rest above may have clobbered. Re-assert it.
       if (restartSpawnFailed) {
         await sessionManager.updateSession(sessionId, { status: 'error' });
       }

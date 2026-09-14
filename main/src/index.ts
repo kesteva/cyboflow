@@ -48,6 +48,7 @@ import {
 } from './utils/windowState';
 import { registerIpcHandlers } from './ipc';
 import { QUICK_PTY_BRIEFING } from './ipc/quickSessionBriefings';
+import { restInteractiveSessionIdle } from './ipc/interactiveSessionRest';
 import { registerArtifactImageHandlers } from './ipc/artifactImages';
 import { registerArtifactHtmlHandlers, loadCanonicalPrototypeHtml } from './ipc/artifactHtml';
 import {
@@ -6143,11 +6144,9 @@ app.whenReady().then(async () => {
                 });
               });
             // The REPL is live but IDLE — the briefing rides the system prompt, so
-            // this spawn starts no turn. Marking it 'running' would strand the
-            // session showing "working" forever: the only thing that rests it is
-            // a turn-end, and there is no turn. The 'turn-start' seam flips it to
-            // running the moment the user actually types.
-            await sessionManager.updateSession(session.id, { status: 'stopped' });
+            // this spawn starts no turn. See restInteractiveSessionIdle for why it
+            // rests at the turn-end value rather than 'running' or 'stopped'.
+            restInteractiveSessionIdle(sessionManager, session.id);
           } catch (err) {
             loggerLike.warn('[Main] experiment arm: interactive chat-panel seed failed', {
               sessionId: session.id,
