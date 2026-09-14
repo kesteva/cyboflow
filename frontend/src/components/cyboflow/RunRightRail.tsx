@@ -43,6 +43,7 @@ import { SprintLanesPanel } from './SprintLanesPanel';
 import { SessionFileExplorer } from './SessionFileExplorer';
 import { RunDiffTabPanel } from './RunDiffTabPanel';
 import { SessionDiffTabPanel } from './SessionDiffTabPanel';
+import { BaseSelector } from './BaseSelector';
 import { ArtifactsPanel } from './ArtifactsPanel';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
@@ -94,6 +95,31 @@ const RAIL_MIN_WIDTH = 240;
 const RAIL_MAX_ABS_WIDTH = 640;
 /** localStorage key for the persisted rail width. Brand-new key — no migration. */
 const RAIL_WIDTH_KEY = 'cyboflow.runRightRail.width';
+/**
+ * localStorage key for the persisted comparison-base SELECTION (TASK-218,
+ * BaseSelector). Brand-new key — no migration. Holds a JSON-serialized
+ * `Record<string, string | null>` map keyed by `selectedSessionId` when
+ * present, else the active run id — never a single scalar, since different
+ * sessions/runs can each have their own selection. This is the raw
+ * SELECTION the user picked, never the RESOLVED base a panel's fetch echoes
+ * back via onResolvedBase (see `resolvedBaseBySession` below) — the two
+ * must never be conflated.
+ */
+const COMPARISON_BASE_KEY = 'cyboflow.runRightRail.comparisonBase';
+
+/** Best-effort read of the persisted comparison-base selection map. Any
+ * malformed/absent value degrades to an empty map, never a throw. */
+function loadComparisonBaseMap(): Record<string, string | null> {
+  if (typeof localStorage === 'undefined') return {};
+  const raw = localStorage.getItem(COMPARISON_BASE_KEY);
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, string | null>) : {};
+  } catch {
+    return {};
+  }
+}
 
 /** Upper resize bound: absolute cap, but never more than ~50% of the viewport. */
 function maxRailWidth(): number {
@@ -188,6 +214,15 @@ export function RunRightRail({
     setResolvedBaseBySession((prev) => ({ ...prev, [sessionKey]: base }));
   }, []);
 
+  // The user's comparison-base SELECTION (TASK-218, BaseSelector) — distinct
+  // from resolvedBaseBySession above (the RESOLVED base a panel's fetch
+  // echoed back). Persisted per key (selectedSessionId, else the active run
+  // id, else never persisted — see COMPARISON_BASE_KEY). Seeded once from
+  // localStorage on mount.
+  const [comparisonBaseByKey, setComparisonBaseByKey] = useState<Record<string, string | null>>(() =>
+    loadComparisonBaseMap(),
+  );
+
   // The width is written to storage only from the drag handler below, never
   // from an effect on [width] — a mount, a React.StrictMode double-mount, or
   // a viewport change can never stamp the default (or anything else) into
@@ -238,6 +273,40 @@ export function RunRightRail({
   // The center-pane key is the run's parent session when known, else the run id
   // (legacy parentless runs) — matches RunCenterPane's keying.
   const artifactsSessionKey = selectedSessionId ?? activeRunId ?? '';
+
+  // The comparison-base selection's persistence key: selectedSessionId when
+  // present, else the active run id, else null (never persisted — see
+  // COMPARISON_BASE_KEY's doc comment).
+  const comparisonBaseKey = selectedSessionId ?? activeRunId ?? null;
+  const selectedComparisonRef =
+    comparisonBaseKey !== null ? (comparisonBaseByKey[comparisonBaseKey] ?? null) : null;
+  const handleComparisonBaseChange = useCallback(
+    (ref: string | null) => {
+      if (comparisonBaseKey === null) {
+        // Nothing to key persistence off of (D-7) — no session, no run.
+        return;
+      }
+      setComparisonBaseByKey((prev) => {
+        const next = { ...prev, [comparisonBaseKey]: ref };
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(COMPARISON_BASE_KEY, JSON.stringify(next));
+        }
+        return next;
+      });
+    },
+    [comparisonBaseKey],
+  );
+  // BaseSelector's projectId: the active run's project when a run is active,
+  // else the quick-session project (threaded in by CyboflowRoot), else null —
+  // converted to a string (BaseSelector's projectId prop is `string | null`).
+  const baseSelectorProjectId =
+    activeRunId !== null
+      ? activeRunProjectId !== null
+        ? String(activeRunProjectId)
+        : null
+      : quickSessionProjectId != null
+        ? String(quickSessionProjectId)
+        : null;
 
   // Clicking a file in the Diff tab opens it as a center-pane file tab (keyed by
   // the selected session, like the File Explorer launcher). Undefined when no
@@ -389,35 +458,52 @@ export function RunRightRail({
             </div>
           )
         ) : currentTab.id === 'diff' ? (
-          // Diff tab — two scopes:
+          // Diff tab — a full-width BaseSelector row directly under the rail
+          // tab bar (TASK-218), then two scopes for the body below it:
           //  • Active run → run-scoped working-directory diff (keyed by runId,
           //    since flow runs have session_id NULL).
           //  • No run but a session is selected → session-scoped combined diff
           //    (the at-rest experience for quick / session-hosted sessions). The
           //    earlier change wired only the run path and regressed this case to
           //    a dead-end "No active run".
-          activeRunId !== null ? (
-            <div className="h-full overflow-hidden">
-              <RunDiffTabPanel
-                runId={activeRunId}
-                onOpenFile={openDiffFile}
-                onResolvedBase={(base) => handleResolvedBase(selectedSessionId ?? '', base)}
+          // BaseSelector's `sessionId` is ALWAYS `selectedSessionId` (its own
+          // getComparisonBases resolves off a session even for the run-scoped
+          // arm); it renders disabled when that's null, which BaseSelector
+          // already handles.
+          <div className="flex h-full flex-col overflow-hidden">
+            <div className="shrink-0 border-b border-border-primary p-2">
+              <BaseSelector
+                sessionId={selectedSessionId}
+                projectId={baseSelectorProjectId}
+                selectedRef={selectedComparisonRef}
+                onChange={handleComparisonBaseChange}
               />
             </div>
-          ) : selectedSessionId !== null ? (
-            <SessionDiffTabPanel
-              sessionId={selectedSessionId}
-              onOpenFile={openDiffFile}
-              onResolvedBase={(base) => handleResolvedBase(selectedSessionId, base)}
-            />
-          ) : (
-            <div
-              data-testid="run-right-rail-diff-empty-norun"
-              className="p-4 text-sm text-text-secondary"
-            >
-              Select a session to view its diff.
+            <div className="flex-1 overflow-hidden">
+              {activeRunId !== null ? (
+                <RunDiffTabPanel
+                  runId={activeRunId}
+                  comparisonRef={selectedComparisonRef}
+                  onOpenFile={openDiffFile}
+                  onResolvedBase={(base) => handleResolvedBase(selectedSessionId ?? '', base)}
+                />
+              ) : selectedSessionId !== null ? (
+                <SessionDiffTabPanel
+                  sessionId={selectedSessionId}
+                  comparisonRef={selectedComparisonRef}
+                  onOpenFile={openDiffFile}
+                  onResolvedBase={(base) => handleResolvedBase(selectedSessionId, base)}
+                />
+              ) : (
+                <div
+                  data-testid="run-right-rail-diff-empty-norun"
+                  className="p-4 text-sm text-text-secondary"
+                >
+                  Select a session to view its diff.
+                </div>
+              )}
             </div>
-          )
+          </div>
         ) : (
           // Artifacts tab — two scopes, mirroring the Diff tab:
           //  • Active run → run-scoped (existing behavior, keyed by the run's

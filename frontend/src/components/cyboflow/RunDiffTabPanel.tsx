@@ -10,16 +10,19 @@
  *
  * tRPC: vanilla createTRPCProxyClient — `.query()` returns a Promise (there are
  * no React-Query hooks in this app). The fetch mirrors useSprintLanes: an effect
- * keyed by runId, a `cancelled` guard on unmount/runId-change, and the
+ * keyed by `[runId, comparisonRef]` (TASK-218 — selecting a new comparison base
+ * refetches), a `cancelled` guard on unmount/dep-change, and the
  * AppRouter-inferred output type (never a local mirror).
  *
  * States:
  *   - loading                     → muted "Loading diff…"
  *   - error                       → muted error line
  *   - null / empty diff / no files → muted "No changes in this run's worktree yet."
- *   - otherwise                   → RunDiffFileList (flat changed-files list;
+ *   - otherwise                   → RunDiffFileList — grouped (Unstaged / Staged /
+ *                                    Untracked / Committed) via the response's
+ *                                    `worktree` payload passed as `groups`;
  *                                    clicking a row opens the file in the center
- *                                    pane where the Diff / Split / Preview lives).
+ *                                    pane where the Diff / Split / Preview lives.
  */
 import { useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
@@ -47,10 +50,18 @@ const INITIAL_STATE: RunDiffState = {
 
 export function RunDiffTabPanel({
   runId,
+  comparisonRef,
   onOpenFile,
   onResolvedBase,
 }: {
   runId: string;
+  /**
+   * The user-selected comparison base (BaseSelector / TASK-218), lifted by the
+   * rail and forwarded verbatim into `cyboflow.runs.gitDiff`'s `comparisonRef`
+   * input (undefined/null both mean "use the run's own default"). Included in
+   * the fetch effect's deps — selecting a new base DOES refetch.
+   */
+  comparisonRef?: string | null;
   /**
    * Forwarded to DiffViewer — click a file header to open it (vs. toggle). The
    * grouped arm additionally passes the clicked row's group scope.
@@ -71,7 +82,7 @@ export function RunDiffTabPanel({
     let cancelled = false;
     setState({ ...INITIAL_STATE, isLoading: true });
 
-    trpc.cyboflow.runs.gitDiff.query({ runId }).then(
+    trpc.cyboflow.runs.gitDiff.query({ runId, comparisonRef: comparisonRef ?? undefined }).then(
       (result) => {
         if (cancelled) return;
         setState({ diff: result, isLoading: false, error: null });
@@ -88,9 +99,11 @@ export function RunDiffTabPanel({
       cancelled = true;
     };
     // onResolvedBase is a per-render callback from the rail; keying the fetch
-    // on it would refetch on every rail render (D-8: single fetch per runId).
+    // on it would refetch on every rail render (D-8: single fetch per
+    // [runId, comparisonRef] pair). comparisonRef IS a dep on purpose — a new
+    // selection must refetch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId]);
+  }, [runId, comparisonRef]);
 
   if (state.isLoading) {
     return (
@@ -116,10 +129,11 @@ export function RunDiffTabPanel({
 
   const diffText = state.diff?.diff ?? '';
 
-  // Flat changed-files list — the diff body itself opens in the center pane.
+  // Grouped changed-files list (worktree payload) — the diff body itself
+  // opens in the center pane.
   return (
     <div data-testid="run-right-rail-diff" className="h-full">
-      <RunDiffFileList diff={diffText} onOpenFile={onOpenFile} />
+      <RunDiffFileList diff={diffText} onOpenFile={onOpenFile} groups={state.diff?.worktree} />
     </div>
   );
 }
