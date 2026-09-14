@@ -18,7 +18,7 @@
  */
 import type { AppServices } from './types';
 import type { SessionGitOpsLike, SessionGitDiffStats } from '../orchestrator/trpc/contracts/sessionGitOps';
-import { runGit, runGitAsync, END_OF_OPTIONS } from '../utils/runGit';
+import { runGit, runGitAsync, END_OF_OPTIONS, assertNotOptionLike } from '../utils/runGit';
 import { appendCommitFooter } from '../utils/commitFooter';
 import { panelManager } from '../services/panelManager';
 import { mainWindow } from '../index';
@@ -1998,6 +1998,126 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
     }
   };
 
+  /**
+   * `git rev-list --count HEAD..<ref>` — how many commits `ref` has that HEAD
+   * lacks. `ref` must already be PROVEN to resolve by the caller (the local
+   * existence check, or getOriginBranch's own successful return), so no
+   * option-like guard is needed on `ref` itself here: the `HEAD..` prefix also
+   * makes it structurally impossible for the resulting argv token to start
+   * with `-`. Degrades to 0 on any failure rather than throwing.
+   */
+  async function countBehind(worktreePath: string, ref: string): Promise<number> {
+    try {
+      const out = await runGitAsync(worktreePath, ['rev-list', '--count', END_OF_OPTIONS, `HEAD..${ref}`]);
+      const n = parseInt(out.trim(), 10);
+      return Number.isFinite(n) ? n : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Read-only freshness signal for `originDefault`: the mtime of the
+   * worktree's `FETCH_HEAD` file, resolved via `git rev-parse --git-path` (not
+   * a hardcoded `.git/FETCH_HEAD`, since a worktree's gitdir is elsewhere).
+   * NEVER triggers a fetch — a missing/unreadable file just answers `null`.
+   */
+  async function getFetchedAt(worktreePath: string): Promise<string | null> {
+    try {
+      const gitPath = (await runGitAsync(worktreePath, ['rev-parse', '--git-path', 'FETCH_HEAD'])).trim();
+      const resolved = path.isAbsolute(gitPath) ? gitPath : path.join(worktreePath, gitPath);
+      const stat = await fs.promises.stat(resolved);
+      return stat.mtime.toISOString();
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Backs the future BaseSelector menu (TASK-216): every candidate base the
+   * picker can offer, resolved server-side so the renderer never runs git
+   * itself. See {@link SessionGitOpsLike.getComparisonBases} for the per-leg
+   * degradation contract.
+   */
+  const getComparisonBases = async ({
+    sessionId,
+  }: OpsInput<'getComparisonBases'>): Promise<OpsResult<'getComparisonBases'>> => {
+    try {
+      const session = await sessionManager.getSession(sessionId);
+      if (!session || !session.worktreePath) {
+        return { success: false, error: 'Session or worktree path not found' };
+      }
+
+      const project = sessionManager.getProjectForSession(sessionId);
+      if (!project) {
+        return { success: false, error: 'Project not found for session' };
+      }
+
+      const worktreePath = session.worktreePath;
+
+      // branchPoint: the session's recorded branch point, if it still resolves.
+      const branchPointSha = await resolveSessionDiffBaseRef(worktreePath, [session.baseCommit]);
+      const branchPoint = branchPointSha ? { ref: branchPointSha, shortSha: branchPointSha.slice(0, 7) } : null;
+
+      // defaultBranch: origin/HEAD's symref first, falling back to the
+      // project's checked-out branch. getProjectMainBranch throws on detached
+      // HEAD — caught here so this method never propagates that throw.
+      let defaultBranch: string | null = null;
+      try {
+        const symref = (
+          await runGitAsync(worktreePath, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'])
+        ).trim();
+        defaultBranch = symref.startsWith('origin/') ? symref.slice('origin/'.length) : symref || null;
+      } catch {
+        try {
+          defaultBranch = await worktreeManager.getProjectMainBranch(project.path);
+        } catch {
+          defaultBranch = null;
+        }
+      }
+
+      let localDefault: { ref: string; behind: number } | null = null;
+      let originDefault: { ref: string; behind: number; fetchedAt: string | null } | null = null;
+
+      if (defaultBranch) {
+        try {
+          assertNotOptionLike(defaultBranch, 'default branch');
+          await runGitAsync(worktreePath, [
+            'rev-parse',
+            '--verify',
+            '--quiet',
+            END_OF_OPTIONS,
+            `${defaultBranch}^{commit}`,
+          ]);
+          localDefault = { ref: defaultBranch, behind: await countBehind(worktreePath, defaultBranch) };
+        } catch {
+          localDefault = null;
+        }
+
+        const originRef = await worktreeManager.getOriginBranch(worktreePath, defaultBranch);
+        if (originRef) {
+          originDefault = {
+            ref: originRef,
+            behind: await countBehind(worktreePath, originRef),
+            fetchedAt: await getFetchedAt(worktreePath),
+          };
+        } else {
+          originDefault = null;
+        }
+      }
+
+      return {
+        success: true,
+        data: { branchPoint, defaultBranch, localDefault, originDefault },
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to get comparison bases',
+      };
+    }
+  };
+
   const getCurrentBranch = async ({ sessionId }: OpsInput<'getCurrentBranch'>): Promise<OpsResult<'getCurrentBranch'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
@@ -2132,5 +2252,6 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
     getRemoteUrl,
     getGitStatus,
     cancelStatusForProject,
+    getComparisonBases,
   };
 }

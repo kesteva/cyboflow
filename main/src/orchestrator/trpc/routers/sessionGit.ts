@@ -213,6 +213,33 @@ export const sessionGitRouter = router({
       return requireOps(ctx.sessionGitOps).getGitCommands(input);
     }),
 
+  /**
+   * New (TASK-216): the future BaseSelector menu's data source — every
+   * candidate base the picker can offer, resolved server-side. See
+   * SessionGitOpsLike.getComparisonBases for the per-leg degradation
+   * contract (each leg is `null`, never fabricated, when it can't be
+   * answered).
+   */
+  getComparisonBases: protectedProcedure
+    .input(sessionInput)
+    .query(async ({
+      ctx,
+      input,
+    }): Promise<
+      | {
+          success: true;
+          data: {
+            branchPoint: { ref: string; shortSha: string } | null;
+            defaultBranch: string | null;
+            localDefault: { ref: string; behind: number } | null;
+            originDefault: { ref: string; behind: number; fetchedAt: string | null } | null;
+          };
+        }
+      | SessionGitError
+    > => {
+      return requireOps(ctx.sessionGitOps).getComparisonBases(input);
+    }),
+
   getCurrentBranch: protectedProcedure
     .input(sessionInput)
     .query(async ({

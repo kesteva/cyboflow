@@ -373,4 +373,37 @@ export interface SessionGitOpsLike {
    * work for every non-archived session in the project.
    */
   cancelStatusForProject(request: { projectId: number }): Promise<{ success: true } | SessionGitError>;
+
+  /**
+   * New (TASK-216): the data source for the diff panel's future BaseSelector
+   * menu — every candidate base the picker can offer, resolved server-side so
+   * the renderer never runs git itself. Each leg degrades independently to
+   * `null` rather than throwing or fabricating an answer:
+   *   • `branchPoint` — the session's recorded branch point
+   *     (`resolveSessionDiffBaseRef(worktreePath, [session.baseCommit])`),
+   *     `null` when `baseCommit` is unset or no longer resolves.
+   *   • `defaultBranch` — the resolved project default branch name (via
+   *     `origin/HEAD`'s symref, falling back to
+   *     `worktreeManager.getProjectMainBranch`), `null` on a detached-HEAD
+   *     project root or any other unresolvable case.
+   *   • `localDefault` — that branch's LOCAL tip in this worktree plus how far
+   *     HEAD trails it, `null` when `defaultBranch` is null or the local
+   *     branch does not exist in this worktree.
+   *   • `originDefault` — the branch's `origin/<name>` twin plus its trailing
+   *     count and the freshness of the last fetch (`FETCH_HEAD`'s mtime, read
+   *     only — this method NEVER runs `git fetch`), `null` when `defaultBranch`
+   *     is null or there is no such origin ref.
+   */
+  getComparisonBases(request: { sessionId: string }): Promise<
+    | {
+        success: true;
+        data: {
+          branchPoint: { ref: string; shortSha: string } | null;
+          defaultBranch: string | null;
+          localDefault: { ref: string; behind: number } | null;
+          originDefault: { ref: string; behind: number; fetchedAt: string | null } | null;
+        };
+      }
+    | SessionGitError
+  >;
 }

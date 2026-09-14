@@ -87,6 +87,15 @@ function makeFakeOps(): FakeOps {
       },
     }),
     getCurrentBranch: vi.fn().mockResolvedValue({ success: true, data: { branch: 'feature' } }),
+    getComparisonBases: vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        branchPoint: { ref: 'a'.repeat(40), shortSha: 'a'.repeat(7) },
+        defaultBranch: 'main',
+        localDefault: { ref: 'main', behind: 0 },
+        originDefault: { ref: 'origin/main', behind: 0, fetchedAt: '2026-09-14T00:00:00.000Z' },
+      },
+    }),
     getRemoteUrl: vi.fn().mockResolvedValue({ success: true, data: { remoteUrl: '', branchName: '' } }),
     getGitStatus: vi.fn().mockResolvedValue({ success: true, gitStatus: { state: 'clean' } }),
     cancelStatusForProject: vi.fn().mockResolvedValue({ success: true }),
@@ -231,6 +240,22 @@ describe('cyboflow.sessionGit', () => {
       expect(result).toEqual({ success: true, data: { branch: 'feature' } });
     });
 
+    it('getComparisonBases', async () => {
+      const sessionGitOps = makeFakeOps();
+      const caller = appRouter.createCaller(createContext({ sessionGitOps }));
+      const result = await caller.cyboflow.sessionGit.getComparisonBases({ sessionId: 's1' });
+      expect(sessionGitOps.getComparisonBases).toHaveBeenCalledWith({ sessionId: 's1' });
+      expect(result).toEqual({
+        success: true,
+        data: {
+          branchPoint: { ref: 'a'.repeat(40), shortSha: 'a'.repeat(7) },
+          defaultBranch: 'main',
+          localDefault: { ref: 'main', behind: 0 },
+          originDefault: { ref: 'origin/main', behind: 0, fetchedAt: '2026-09-14T00:00:00.000Z' },
+        },
+      });
+    });
+
     it('a plain failure envelope also passes through untouched', async () => {
       const sessionGitOps = makeFakeOps();
       sessionGitOps.getExecutions.mockResolvedValue({ success: false, error: 'Session or worktree path not found' });
@@ -317,6 +342,11 @@ describe('cyboflow.sessionGit', () => {
     it('cancelStatusForProject', async () => {
       const caller = appRouter.createCaller(createContext());
       await expect(caller.cyboflow.sessionGit.cancelStatusForProject({ projectId: 1 })).rejects.toSatisfy(isPrecond);
+    });
+
+    it('getComparisonBases', async () => {
+      const caller = appRouter.createCaller(createContext());
+      await expect(caller.cyboflow.sessionGit.getComparisonBases({ sessionId: 's1' })).rejects.toSatisfy(isPrecond);
     });
   });
 });
