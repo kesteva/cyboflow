@@ -45,6 +45,21 @@ export interface RunGitDiff {
   stats: RunGitDiffStats;
   /** Paths (worktree-relative) that changed. */
   changedFiles: string[];
+  /**
+   * The SHA `diff`/`stats`/`changedFiles` were actually diffed against — the
+   * resolved form of whichever ref (comparisonRef, then baseRef) the caller
+   * supplied. `null` only for the working-directory-vs-HEAD fallback (no
+   * resolvable ref was supplied), never a substitute for "unknown". Downstream
+   * consumers rely on this to know they are looking at the SAME base as the
+   * grouped worktree view below.
+   */
+  resolvedBase: string | null;
+  /**
+   * The worktree's per-path status flags + the four group rollups
+   * (unstaged/staged/untracked/committed), computed against the SAME
+   * `resolvedBase` above — the grouped Diff-tab view.
+   */
+  worktree: WorktreeStatusPayload;
 }
 
 /**
