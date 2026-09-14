@@ -38,10 +38,12 @@ vi.mock('../scriptExecutionTracker', () => ({
 }));
 
 import { SessionManager } from '../sessionManager';
-import { collectDescendantPids } from '../processTable';
-import { listPidPpidTableSync } from '../../utils/platformProcess';
 import type { DatabaseService } from '../../database/database';
-import { isAlive, spawnDetachedGrandchildTree, waitUntil } from '../../__test_fixtures__/processTree';
+import {
+  isAlive,
+  spawnNamedDetachedGrandchildTree,
+  waitUntil,
+} from '../../__test_fixtures__/processTree';
 
 describe('SessionManager.stopRunningScript — win32 ladder', () => {
   it.skipIf(process.platform !== 'win32')(
@@ -50,27 +52,24 @@ describe('SessionManager.stopRunningScript — win32 ladder', () => {
       const sm = new SessionManager({} as unknown as DatabaseService);
 
       // A REAL node child that spawns its own long-lived detached grandchild —
-      // the shape a RUN script presents (shell + app + app children).
-      const child = spawnDetachedGrandchildTree();
-      const pid = child.pid;
+      // the shape a RUN script presents (shell + app + app children). It names
+      // its grandchild, so this suite asserts over the tree it OWNS rather than
+      // a pid/ppid walk, which sweeps up phantoms on Windows (processTree.ts).
+      const tree = await spawnNamedDetachedGrandchildTree();
+      const pid = tree.child.pid;
       expect(pid).toBeTypeOf('number');
 
-      // Positive control via the shared process table: the grandchild exists —
-      // this is the same enumeration the stop ladder performs up-front.
-      let grandkids: number[] = [];
-      for (let i = 0; i < 15 && grandkids.length === 0; i++) {
-        await new Promise((r) => setTimeout(r, 200));
-        grandkids = collectDescendantPids(pid as number, listPidPpidTableSync());
-      }
-      expect(grandkids.length).toBeGreaterThanOrEqual(1);
+      // Positive control: both halves are up before the ladder runs.
+      expect(isAlive(pid as number)).toBe(true);
+      expect(isAlive(tree.grandchildPid)).toBe(true);
 
-      (sm as unknown as { runningScriptProcess: ChildProcess | null }).runningScriptProcess = child;
+      (sm as unknown as { runningScriptProcess: ChildProcess | null }).runningScriptProcess = tree.child;
       (sm as unknown as { currentRunningSessionId: string | null }).currentRunningSessionId = 'session-under-test';
 
       await sm.stopRunningScript();
 
       const allDead = await waitUntil(
-        () => !isAlive(pid as number) && grandkids.every((g) => !isAlive(g)),
+        () => !isAlive(pid as number) && !isAlive(tree.grandchildPid),
         8000,
       );
       expect(allDead).toBe(true);

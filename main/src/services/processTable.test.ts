@@ -19,7 +19,11 @@ import {
 import { listPidPpidTableSync, killWindowsTree } from '../utils/platformProcess';
 import { windowsProcessTableCommand } from './winProcessTable';
 import { ShellDetector } from '../utils/shellDetector';
-import { isAlive, spawnDetachedGrandchildTree, waitUntil } from '../__test_fixtures__/processTree';
+import {
+  isAlive,
+  spawnNamedDetachedGrandchildTree,
+  waitUntil,
+} from '../__test_fixtures__/processTree';
 
 describe('listPidPpidTableSync', () => {
   it('round-trips a real spawned child into the (pid, ppid) table on this host', async () => {
@@ -54,22 +58,27 @@ describe('killWindowsTree', () => {
   it.skipIf(process.platform !== 'win32')('reaps a real spawned parent+grandchild tree on win32', async () => {
     // A node child that spawns its own long-lived detached grandchild — the
     // shape a CLI/app-server presents. taskkill /T /F must take BOTH.
-    const child = spawnDetachedGrandchildTree();
-    const pid = child.pid;
+    const tree = await spawnNamedDetachedGrandchildTree();
+    const pid = tree.child.pid;
     expect(pid).toBeTypeOf('number');
 
-    // Positive control: the grandchild really shows up in the shared table.
+    // Positive control: the walk — this file's subject — really finds the
+    // grandchild the parent NAMED. Asserting containment rather than a bare
+    // count also pins that it found the right process, not a phantom.
     let grandkids: number[] = [];
-    for (let i = 0; i < 15 && grandkids.length === 0; i++) {
+    for (let i = 0; i < 15 && !grandkids.includes(tree.grandchildPid); i++) {
       await new Promise((r) => setTimeout(r, 200));
       grandkids = collectDescendantPids(pid as number, listPidPpidTableSync());
     }
-    expect(grandkids.length).toBeGreaterThanOrEqual(1);
+    expect(grandkids).toContain(tree.grandchildPid);
 
     killWindowsTree(pid as number);
 
+    // Teardown is asserted over the NAMED pid, never the walked set: a phantom
+    // swept up by the walk may outlive the tree and never go dead. See
+    // processTree.ts.
     const allDead = await waitUntil(
-      () => !isAlive(pid as number) && grandkids.every((g) => !isAlive(g)),
+      () => !isAlive(pid as number) && !isAlive(tree.grandchildPid),
       8000,
     );
     expect(allDead).toBe(true);
