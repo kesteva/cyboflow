@@ -7,7 +7,8 @@ name: Windows
 # cmd.exe quoting probes) executes ONLY here, and `pnpm build:win` is the only
 # check that exercises the afterSign Windows arm against real v13 prebuilds.
 # Promote the unit job into branch protection once it has run green a few
-# times; the installer job stays a smoke (unsigned output, artifact only).
+# times; the installer job stays a smoke (artifact only — signed when the
+# AZURE_* secrets are configured, unsigned otherwise).
 
 on:
   workflow_dispatch:
@@ -16,6 +17,11 @@ on:
         description: 'Also package the NSIS installer (pnpm build:win)'
         type: boolean
         default: true
+      variant:
+        description: 'App variant to package: stable (Cyboflow) or dev (Cyboflow Dev, polls the /dev feed)'
+        type: choice
+        options: [stable, dev]
+        default: stable
   # workflow_dispatch only resolves files on the default branch, so a branch
   # that edits this file runs it on push — the only way to exercise a change
   # here before it reaches main. The other paths are the install/packaging
@@ -94,10 +100,13 @@ jobs:
         timeout-minutes: 60
 
   installer:
-    name: Installer (pnpm build:win)
+    name: Installer (pnpm build:win${{ inputs.variant == 'dev' && ':dev' || '' }})
     runs-on: windows-latest
     if: ${{ github.event_name == 'push' || inputs.build_installer }}
     timeout-minutes: 45
+    env:
+      # `inputs.variant` is empty on a push run → stable.
+      WIN_VARIANT: ${{ inputs.variant == 'dev' && 'dev' || 'stable' }}
 
     steps:
       - name: Checkout code
@@ -124,17 +133,44 @@ jobs:
       # electron-builder downloads its NSIS/winCodeSign tooling on first use;
       # the runner is an administrator, so the winCodeSign archive's darwin
       # symlinks extract (see docs/WINDOWS-BUILD.md → Troubleshooting).
-      # The output is unsigned — SmartScreen warns on first run.
+      #
+      # SIGNING: the AZURE_* vars below are the Microsoft Entra ID credentials
+      # electron-builder reads for Azure Artifact Signing. configure-build.js
+      # injects win.azureSignOptions only when all of them are populated, so a
+      # run WITHOUT the secrets (a fork PR, or a repo where they were never
+      # configured) still produces a valid — if unsigned — installer rather
+      # than failing. Half-populated is the one case that hard-fails, by
+      # design: a release that silently ships unsigned is worse than a red
+      # build. Signing runs here rather than on a Mac because app-builder-lib
+      # drives it through PowerShell and would otherwise need a Windows VM.
+      # See docs/WINDOWS-BUILD.md → "Code signing (Azure Artifact Signing)".
+      #
+      # VARIANT: build:win:dev packages "Cyboflow Dev" (separate appId, artifact
+      # name, and the /dev update feed) — the Windows twin of build:mac:dev. A
+      # release publishes both; docs/RELEASE-RUNBOOK.md dispatches this workflow
+      # once per variant.
       - name: Build Windows installer
-        run: pnpm build:win
+        run: pnpm build:win${{ env.WIN_VARIANT == 'dev' && ':dev' || '' }}
         env:
           CI: true
+          # build:win:dev passes --variant to configure-build.js but cannot
+          # export BUILD_VARIANT for inject-build-info the way build:mac:dev
+          # does (no `VAR=x cmd` on cmd.exe), so the About dialog / telemetry
+          # environment would otherwise stamp a dev installer "stable".
+          BUILD_VARIANT: ${{ env.WIN_VARIANT }}
+          CYBOFLOW_BUILD_ENV: ${{ env.WIN_VARIANT }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         timeout-minutes: 40
 
+      # Artifact name carries the variant so a stable and a dev run on the same
+      # ref never overwrite each other; the stable name is unchanged for the
+      # release runbook and any older link.
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
-          name: cyboflow-windows-x64-installer
+          name: cyboflow-windows-x64-installer${{ env.WIN_VARIANT == 'dev' && '-dev' || '' }}
           path: |
             dist-electron/*.exe
             dist-electron/*.blockmap

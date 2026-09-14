@@ -9,8 +9,8 @@
  * workflow_runs.created_at), so every card read "used just now" for any run in
  * the preceding offset-many hours.
  *
- * Timezone-independent: assertions are expressed against an explicit UTC
- * instant or against getTimezoneOffset(), so they hold on a UTC CI host too.
+ * Timezone-independent: the regression guard gates on the UTC offset of the
+ * value it actually parses (not a frozen instant), so it holds on any host.
  */
 import { describe, it, expect } from 'vitest';
 import { formatDistanceToNow, parseTimestamp } from '../timestampUtils';
@@ -79,11 +79,20 @@ describe('formatDistanceToNow normalizes a raw SQLite string', () => {
   });
 
   it('regression guard: the bare parse would have said "just now" instead', () => {
-    // Only meaningful on a host behind UTC, which is where the bug bites; on a
-    // UTC host the two agree and there is nothing to guard.
-    const raw = sqliteStampAgo(3 * 60 * 60_000);
-    if (new Date(UTC_INSTANT).getTimezoneOffset() > 0) {
-      const naiveElapsedMs = Date.now() - new Date(raw).getTime();
+    // Only meaningful where the host's UTC offset EXCEEDS the window: the bare
+    // parse reads the unzoned stamp as LOCAL, landing it `offset` in the future
+    // of the true instant, and that only outweighs "3 hours ago" once
+    // offset > 3h. Read the offset off the PARSED value, not a frozen instant —
+    // a DST transition between the two makes the guard fire where the
+    // assertion cannot hold (Santiago, Sept 2026). Elsewhere the bare parse is
+    // still wrong — east of UTC it lands in the PAST, and at 0 < offset <= 3h
+    // in the future by less than the window — but neither misreads as
+    // "just now", so this particular guard has nothing to assert there.
+    const WINDOW_MS = 3 * 60 * 60_000;
+    const raw = sqliteStampAgo(WINDOW_MS);
+    const naive = new Date(raw); // the bug under test: unzoned string read as local time
+    if (naive.getTimezoneOffset() * 60_000 > WINDOW_MS) {
+      const naiveElapsedMs = Date.now() - naive.getTime();
       expect(naiveElapsedMs).toBeLessThan(0); // parsed into the future
       expect(formatDistanceToNow(raw)).not.toBe('just now');
     }

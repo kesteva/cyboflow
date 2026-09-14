@@ -75,6 +75,54 @@ export function spawnDetachedGrandchildTree(options: SpawnOptions = {}): ChildPr
 export const NAMED_DETACHED_GRANDCHILD_SCRIPT =
   "const c = require('child_process').spawn(process.execPath, ['-e','setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' }); c.unref(); process.stdout.write(c.pid + '\\n'); setInterval(()=>{},1000);";
 
+/**
+ * {@link NAMED_DETACHED_GRANDCHILD_SCRIPT}, but the pid is named on STDERR and
+ * the caller supplies what the parent should emit on stdout first.
+ *
+ * For ladders whose subject owns the child's stdout — an RPC client reading a
+ * handshake frame, say — where a pid line on stdout would corrupt the stream.
+ * The naming is what matters, not the pipe it arrives on: see
+ * {@link NAMED_DETACHED_GRANDCHILD_SCRIPT} for why a table walk cannot stand in
+ * for it.
+ */
+export function namedDetachedGrandchildStderrScript(stdoutPrologue = ''): string {
+  return (
+    "const c = require('child_process').spawn(process.execPath, ['-e','setInterval(()=>{},1000)'], { detached: true, stdio: 'ignore' }); c.unref();" +
+    "process.stderr.write(c.pid + '\\n');" +
+    stdoutPrologue +
+    'setInterval(()=>{},1000);'
+  );
+}
+
+/** Resolve the pid the parent named on `stderr` (see the function above). */
+export function readNamedGrandchildPid(
+  stderr: NodeJS.ReadableStream | null,
+  timeoutMs = 10_000,
+): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    if (!stderr) {
+      reject(new Error('named grandchild fixture spawned without a stderr pipe'));
+      return;
+    }
+    let buffered = '';
+    const timer = setTimeout(() => {
+      stderr.off('data', onData);
+      reject(new Error(`named grandchild fixture did not name its grandchild within ${timeoutMs}ms`));
+    }, timeoutMs);
+    const onData = (chunk: Buffer | string) => {
+      buffered += String(chunk);
+      const newline = buffered.indexOf('\n');
+      if (newline === -1) return;
+      clearTimeout(timer);
+      stderr.off('data', onData);
+      const pid = Number.parseInt(buffered.slice(0, newline), 10);
+      if (Number.isInteger(pid) && pid > 0) resolve(pid);
+      else reject(new Error(`named grandchild fixture reported a non-pid: ${JSON.stringify(buffered)}`));
+    };
+    stderr.on('data', onData);
+  });
+}
+
 export interface NamedDetachedGrandchildTree {
   child: ChildProcess;
   grandchildPid: number;

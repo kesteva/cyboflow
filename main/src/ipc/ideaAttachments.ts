@@ -5,6 +5,7 @@ import { existsSync } from 'fs';
 import { randomBytes } from 'crypto';
 import type { AppServices } from './types';
 import { getCyboflowSubdirectory } from '../utils/cyboflowDirectory';
+import { sanitizeExtension, extensionFromName } from './attachmentNaming';
 import type { IdeaAttachment } from '../../../shared/types/tasks';
 
 /**
@@ -33,20 +34,6 @@ import type { IdeaAttachment } from '../../../shared/types/tasks';
 function safeOwnerKey(ownerKey: string): string {
   const cleaned = ownerKey.replace(/[^a-zA-Z0-9_-]/g, '_');
   return cleaned.length > 0 ? cleaned : 'unknown';
-}
-
-/** Bounds a derived extension's length regardless of input (e.g. a long MIME subtype). */
-const MAX_EXTENSION_LENGTH = 12;
-
-/** Reduce to a safe alphanumeric extension, bounded in length. */
-function sanitizeExtension(raw: string): string {
-  return raw.replace(/[^a-zA-Z0-9]/g, '').slice(0, MAX_EXTENSION_LENGTH);
-}
-
-/** The extension from an original filename (e.g. "report.pdf" -> "pdf"), or '' if absent/unsafe. */
-function extensionFromName(name: string): string {
-  const match = /\.([a-zA-Z0-9]+)$/.exec(name);
-  return match ? sanitizeExtension(match[1]) : '';
 }
 
 /** Known image extensions -> MIME, used to reconstruct a data URL for thumbnails on load. */

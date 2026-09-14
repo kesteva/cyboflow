@@ -6,6 +6,64 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-09-14
+
+### Added
+
+- **Cyboflow runs on Windows.** The first Windows release: a signed x64 installer — code-signed
+  with Azure Artifact Signing, so SmartScreen names the publisher instead of warning about an
+  unknown one — the in-app auto-updater enabled on `win32`, and a Windows arm on the R2 update
+  feed (`latest.yml` plus the NSIS installer under the same `<variant>/` prefix). `publish:r2`
+  maintains a version-less `Cyboflow-latest-Windows-x64.exe` alias alongside the existing
+  `-latest-` DMG aliases. Windows is **x64 only** — there is no arm64 Windows build.
+- **Updates are re-checked daily and downloaded in the background.** The updater ran exactly one
+  check, 8 seconds after boot, so anyone who leaves Cyboflow open for days never heard about a
+  release. The scheduled check now repeats every 24 h and stages the download itself, landing the
+  rail CTA on "Restart to update"; installing is still explicit.
+- **Launch decomposes every approved idea**, not just a 1–3 idea foundation subset. The
+  `INITIAL_BUILD` flag and the two-tier decomposition it drove are gone, and expand-spec / epics /
+  tasks now run over every approved idea. `BUILD_ORDER` remains the build sequence and still
+  decides which idea carries the folded architecture section, but it is no longer a cut line.
+  Denied ideas stay the only ones skipped.
+
+### Changed
+
+- **Launch stamps the idea component ledger.** `planner.md` and `ship.md` carried the stamp
+  obligations and `launch.md` carried none, so an idea Launch had specced, epic'd and
+  task-decomposed still read `incomplete` for `epics` and `stories` — and the next Planner or
+  design-mode run treated it as unplanned and redid the work. Stamped on both planes, because the
+  flow markdown reaches only one of them: a programmatic step turn is composed from its `desc`
+  plus contracts and never sees the flow prose.
+
+### Fixed
+
+- **Mermaid diagrams render at `securityLevel: strict`, and their anchors are neutralized.** A
+  `click <node> "<url>"` directive emits an `<a href>` under every security level, and the diagram
+  SVG lands in the app's top frame where the artifact frame guard does not apply. `href`,
+  `xlink:href` and `target` are now stripped from every anchor after insertion; the anchor element
+  itself stays, because mermaid puts a linked node's transform on it. (#20)
+- **A pending chat attachment could escape the Cyboflow data directory.** `assertAttachmentOwner`
+  skipped its ownership check for any id starting with `pending_`, and the id was then joined
+  verbatim under `artifacts/`. The exact minted shape is now required, and the three `artifacts`
+  joins are routed through `safeRunId` as defense in depth. The saved extension is also no longer
+  taken straight from the client MIME subtype. (#18)
+- A chat panel's model pill no longer reads `opus` over a turn that actually ran on another
+  provider's model. Every non-Claude id (OMP `openrouter/auto`, Codex `gpt-*`) was floored to
+  `opus` because the settings default was normalized against the Claude family unconditionally;
+  the provider is now resolved from the panel's session and the floor applied per provider. The
+  Fast pill is Claude-only as well.
+- The architecture component stamp survives a Launch run. Replacing an idea's stub with
+  `## Idea spec` registers as a spec change, which stales the whole downstream set — and staling
+  materializes a ledger row, which then wins over derivation permanently, leaving the idea reading
+  `architecture: incomplete (stale)` over a body that still carried a valid section. `expand-spec`
+  re-stamps architecture alongside `idea-spec`.
+- Test-suite defects reported against developer machines unlike CI's: the timestamp regression
+  guard is gated on the offset of the value it parses rather than the host's offset at a frozen
+  August instant, so it no longer fires at exactly UTC-3 or in zones whose offset crossed a DST
+  boundary since August (#16); and repo fixtures are isolated from a developer's user-level git
+  ignores, which had hidden fixture files from both `ls-files --others --exclude-standard` and
+  `git clean -fd` (#17). The verify-harness suites now pass on Windows too.
+
 ## [0.3.3] — 2026-09-11
 
 ### Added
