@@ -306,7 +306,46 @@ describe('TranscriptTailSource', () => {
       expect(onLateBind).toHaveBeenCalledWith(uuid);
     });
 
-    it('arming starts the clock: only THEN can a missing transcript give up', async () => {
+    it('an armed window that finds nothing re-defers instead of latching (slash command / paste)', async () => {
+      // The arming edge is a keystroke heuristic: `/help` submits a body but
+      // writes no transcript. A latched give-up here would permanently detach
+      // the pipeline from a session whose REAL first prompt is still to come.
+      const logger = makeSpyLogger();
+      const onGiveUp = vi.fn();
+      const onLateBind = vi.fn();
+      const received: unknown[] = [];
+      const src = trackedSource({
+        worktreePath: WORKTREE,
+        projectsRoot: tmpRoot,
+        discoveryTimeoutMs: 40,
+        lateDiscoveryWindowMs: 60,
+        logger,
+        onGiveUp,
+        onLateBind,
+        deferDeadlineUntilArmed: true,
+      });
+
+      await src.start((obj) => received.push(obj));
+
+      // First "turn": a slash command. Armed, then the whole window elapses.
+      src.armDiscoveryDeadline();
+      await new Promise((r) => setTimeout(r, 200));
+      expect(onGiveUp).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/returning to unarmed/));
+
+      // Second turn: the real first prompt. Arming works again and the
+      // transcript it produces is bound.
+      src.armDiscoveryDeadline();
+      const uuid = 'fee1dead-1111-2222-3333-444455556666';
+      fs.writeFileSync(path.join(keyDir, `${uuid}.jsonl`), assistantTextLine('real') + '\n');
+
+      await waitFor(() => received.length >= 1);
+      expect(src.getSessionUuid()).toBe(uuid);
+      expect(onLateBind).toHaveBeenCalledWith(uuid);
+    });
+
+    it('a NON-deferred source still gives up for real (the argv-prompt case is unchanged)', async () => {
       const logger = makeSpyLogger();
       const onGiveUp = vi.fn();
       const src = trackedSource({
@@ -316,15 +355,10 @@ describe('TranscriptTailSource', () => {
         lateDiscoveryWindowMs: 60,
         logger,
         onGiveUp,
-        deferDeadlineUntilArmed: true,
       });
 
       await src.start(() => undefined);
-      await new Promise((r) => setTimeout(r, 150));
-      expect(onGiveUp).not.toHaveBeenCalled();
-
-      src.armDiscoveryDeadline();
-
+      await expect(src.waitForFirstLine(40)).rejects.toThrow(/discovery timeout/i);
       await waitFor(() => onGiveUp.mock.calls.length >= 1);
       expect(logger.error).toHaveBeenCalled();
     });

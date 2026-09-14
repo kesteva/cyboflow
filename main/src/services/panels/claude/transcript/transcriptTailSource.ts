@@ -65,7 +65,11 @@ export interface TranscriptTailSourceOptions {
    * manager arms it on the turn-start edge.
    *
    * A deferred source still watches + polls (at the low-frequency background
-   * cadence) so a transcript that appears anyway is bound immediately.
+   * cadence). It also NEVER latches a give-up: the turn-start edge that arms it
+   * is a keystroke heuristic that fires for slash commands and pastes too, so an
+   * armed window that finds nothing returns to unarmed instead of detaching the
+   * pipeline for good (see giveUpDiscovery). `onGiveUp` is never called for a
+   * deferred source.
    */
   deferDeadlineUntilArmed?: boolean;
   /** REQUIRED structural logger (CODE-PATTERNS.md optional-logger rule). */
@@ -481,7 +485,10 @@ export class TranscriptTailSource implements TranscriptSource {
    * (the window elapses with no file) is surfaced as a seam-worthy failure.
    */
   private onDiscoveryTimeout(): void {
-    if (this.settled || this.bound) return;
+    // NOT guarded on `settled`: a deferred source that re-deferred after its
+    // window can be armed again, and its firstLine promise settled long ago.
+    // settle() is idempotent, so reaching this twice is harmless.
+    if (this.bound || this.stopped || this.softTimedOut) return;
     this.softTimedOut = true;
     this.logger.warn(
       `[Cyboflow Transcript] discovery timeout after ${this.discoveryTimeoutMs}ms in ${this.keyDir} — keeping a background poll alive for ${this.lateDiscoveryWindowMs}ms in case claude is still bootstrapping`,
@@ -503,18 +510,57 @@ export class TranscriptTailSource implements TranscriptSource {
   }
 
   /**
-   * TRUE give-up: the extended window elapsed with no transcript ever appearing.
-   * This is the genuinely-actionable failure (claude never engaged the prompt),
-   * so it logs at error and fires `onGiveUp` for the manager to report as a seam.
+   * The extended window elapsed with no transcript appearing. What that MEANS
+   * depends on how the clock was started:
+   *
+   * - A source armed at `start()` (the spawn carried an argv prompt) knows a
+   *   turn was in flight the whole time, so this is the genuinely-actionable
+   *   failure — claude never engaged the prompt. It latches (`discoveryGaveUp`),
+   *   logs at error, and fires `onGiveUp` for the manager to report as a seam.
+   *
+   * - A DEFERRED source was armed by the manager's turn-start edge, which is a
+   *   keystroke heuristic: a submitted line with a body. That fires for things
+   *   that never produce a transcript — a local slash command (`/help`,
+   *   `/status`, `/model`; verified: none writes a `.jsonl`), or a bracketed
+   *   paste carrying its own newlines. Latching here would permanently detach
+   *   the pipeline from a session whose REAL first prompt is still to come. So a
+   *   deferred source never gives up: it drops back to the unarmed low-frequency
+   *   state and waits for the next turn-start to arm it again. It logs at warn
+   *   each time so a genuine never-engages case is still visible in the logs,
+   *   just not as a latched failure.
    */
   private giveUpDiscovery(): void {
     if (this.bound || this.stopped || this.discoveryGaveUp) return;
-    this.discoveryGaveUp = true;
     this.clearLateDiscovery();
+    if (this.deferDeadline) {
+      this.redefer();
+      return;
+    }
+    this.discoveryGaveUp = true;
     this.logger.error(
       `[Cyboflow Transcript] discovery gave up after ${this.discoveryTimeoutMs + this.lateDiscoveryWindowMs}ms — no new *.jsonl ever appeared in ${this.keyDir}; session runs without the structured pipeline`,
     );
     this.onGiveUp?.();
+  }
+
+  /**
+   * Return a deferred source to its unarmed state after an armed window found
+   * nothing: clock off, background poll back on, ready for the next
+   * `armDiscoveryDeadline()`. The firstLine promise stays settled (nobody awaits
+   * a deferred source's promise), and the soft-timeout flag is cleared so the
+   * next arm can time out again rather than short-circuiting.
+   */
+  private redefer(): void {
+    this.deadlineArmed = false;
+    this.softTimedOut = false;
+    this.logger.warn(
+      `[Cyboflow Transcript] armed discovery window (${this.discoveryTimeoutMs + this.lateDiscoveryWindowMs}ms) found no transcript in ${this.keyDir} — the submitted line started no turn (slash command / paste?); returning to unarmed and waiting for the next one`,
+    );
+    if (this.discoveryInterval === undefined) {
+      this.discoveryInterval = setInterval(() => {
+        this.tryDiscover();
+      }, LATE_POLL_INTERVAL_MS);
+    }
   }
 
   private clearDiscovery(): void {
