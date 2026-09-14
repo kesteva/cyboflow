@@ -89,6 +89,33 @@ path filter — then two runs appear; both must be green, and the dispatched one
 is the cheaper, unit-only run.) Continue with the local gate while it runs;
 collect the verdict at the end of this phase:
 
+**If the Windows job goes red, stop using CI as the debugger.** ~15 min per
+attempt, almost all of it queue + cold install + running 738 files to learn
+about one. Use the Azure VM instead — measured 9/14 at **33 s per targeted run
+vs ~15 min on CI**:
+
+```bash
+az vm start -g cyboflow-wintest-w3 -n cyboflow-win11        # ~40 s
+# one-time per boot (~4 min), as SYSTEM — the interactive user's checkout is invisible:
+#   npm i -g pnpm@10.11.1
+#   git clone https://github.com/kesteva/cyboflow.git C:\cyboflow   (repo is public)
+#   git config --global core.autocrlf false   # CRLF blanks the bundled agent binaries
+#   git fetch origin release-gate/$V --depth 1 && git checkout -f FETCH_HEAD
+#   pnpm install --frozen-lockfile
+az vm run-command invoke -g cyboflow-wintest-w3 -n cyboflow-win11 \
+  --command-id RunPowerShellScript --scripts @vm-test.ps1 \
+  --query 'value[0].message' -o tsv
+az vm deallocate -g cyboflow-wintest-w3 -n cyboflow-win11   # ALWAYS — bills while running
+```
+
+Once targeted fixes pass, run the **full** suite there (`npx vitest run`,
+~10 min) before pushing: it surfaces the *next* Windows failure immediately
+instead of one CI round later. `run-command` is serialized per VM, so a
+background full run blocks the targeted loop; `az` also buffers output until
+completion, so a running invoke's log stays empty. Push the fixes and let CI
+confirm — a green VM run is strong evidence, not the gate. Full notes:
+`docs/RELEASE-RUNBOOK.md` → "When the Windows job goes red".
+
 ```bash
 gh run watch "$RUN" --exit-status          # exit 0 = Unit tests (Windows) green
 git push origin --delete release-gate/$V   # cleanup, whatever the verdict
