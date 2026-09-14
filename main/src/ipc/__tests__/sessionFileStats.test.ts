@@ -17,6 +17,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { execSync } from 'child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import * as os from 'node:os';
 import { GitDiffManager } from '../../services/gitDiffManager';
 import { withTempDir } from '../../__test_fixtures__/tmp';
 import { computeSessionFileStats, resolveSessionDiffBaseRef } from '../sessionFileStats';
@@ -60,6 +61,20 @@ describe('resolveSessionDiffBaseRef', () => {
       initRepo(tmpDir);
       expect(await resolveSessionDiffBaseRef(tmpDir, [MISSING_SHA, 'no-such-branch'])).toBeNull();
       expect(await resolveSessionDiffBaseRef(tmpDir, [])).toBeNull();
+    });
+  });
+
+  it('skips a `-`-prefixed candidate locally and falls through to the next resolvable one, without any git side effect', async () => {
+    await withTempDir('session-baseref-optioninjection-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const sha = headSha(tmpDir);
+      const marker = path.join(os.tmpdir(), `cyboflow-pwn-baseref-${Date.now()}`);
+      expect(fs.existsSync(marker)).toBe(false);
+
+      const result = await resolveSessionDiffBaseRef(tmpDir, [`--output=${marker}`, 'main']);
+
+      expect(result).toBe(sha);
+      expect(fs.existsSync(marker)).toBe(false);
     });
   });
 });

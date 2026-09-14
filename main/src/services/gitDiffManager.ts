@@ -425,12 +425,10 @@ export class GitDiffManager {
    *
    * Returns null when the ref is falsy or fails to resolve — callers treat
    * that as "unresolvable ref", falling back to their normal safe
-   * empty/zeroed result rather than throwing. The `'HEAD'` default is
-   * trivially safe and skips the extra git process on the hot path.
+   * empty/zeroed result rather than throwing.
    */
   private async resolveRefForDiff(worktreePath: string, ref: string): Promise<string | null> {
     if (!ref) return null;
-    if (ref === 'HEAD') return 'HEAD';
     try {
       const resolved = (
         await runGitAsync(worktreePath, ['rev-parse', '--verify', END_OF_OPTIONS, `${ref}^{commit}`])

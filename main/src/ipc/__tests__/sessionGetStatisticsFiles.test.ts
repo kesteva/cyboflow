@@ -54,6 +54,13 @@ const { mockRunGitAsync } = vi.hoisted(() => ({
 vi.mock('../../utils/runGit', () => ({
   runGitAsync: mockRunGitAsync,
   runGit: vi.fn(),
+  END_OF_OPTIONS: '--end-of-options',
+  assertNotOptionLike: (value: string, label: string) => {
+    if (value.startsWith('-')) {
+      throw new Error(`Refusing to pass ${label} "${value}" to git: values starting with "-" are parsed as options`);
+    }
+    return value;
+  },
 }));
 
 import { createSessionOps } from '../sessionOps';
