@@ -17,7 +17,7 @@
  * run-recovery stampers. That asymmetry is the whole point of the seam.
  */
 import type { AppServices } from './types';
-import type { SessionGitOpsLike } from '../orchestrator/trpc/contracts/sessionGitOps';
+import type { SessionGitOpsLike, SessionGitDiffStats } from '../orchestrator/trpc/contracts/sessionGitOps';
 import { runGit, runGitAsync, END_OF_OPTIONS } from '../utils/runGit';
 import { appendCommitFooter } from '../utils/commitFooter';
 import { panelManager } from '../services/panelManager';
@@ -41,10 +41,21 @@ import { trackUsage } from '../services/telemetry';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
 import { ALREADY_UP_TO_DATE_CODE } from '../services/worktreeManager';
 import { getCurrentBranch as readCurrentBranch } from '../services/gitPlumbingCommands';
+import { resolveSessionDiffBaseRef } from './sessionFileStats';
+import type { WorktreeStatusPayload, DiffGroupScope } from '../../../shared/types/runFiles';
 import * as fs from 'fs';
+import * as path from 'path';
 
 // Extended type for git system virtual panels
 type SystemPanelType = ToolPanelType | 'git';
+
+/**
+ * Largest untracked file getCombinedDiff's own `scope: 'untracked'` blob
+ * builder will read whole — mirrors GitDiffManager.MAX_UNTRACKED_READ_BYTES
+ * (gitDiffManager.ts, private, do-not-touch per TASK-212's boundary), so the
+ * two never disagree on what counts as "too large to render".
+ */
+const MAX_UNTRACKED_READ_BYTES = 1024 * 1024;
 
 // Interface for custom git errors that contain additional context
 interface GitError extends Error {
@@ -545,6 +556,159 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
     };
   };
 
+  // ---------------------------------------------------------------------
+  // Seam B (TASK-212): the `resolvedBase` + `worktree` envelope every
+  // SessionGitDiffResult now carries, and the `scope`/`comparisonRef` wire
+  // fields on getCombinedDiff.
+  // ---------------------------------------------------------------------
+
+  /**
+   * Assemble the wire-level WorktreeStatusPayload (`entries` + per-scope
+   * `groups` + `committedUnavailable`) for one worktree, from
+   * GitDiffManager.getWorktreeStatus (TASK-209) and .getDiffGroups
+   * (TASK-210). `resolvedBase` gates the Committed group only — null anchors
+   * nothing and committedUnavailable comes back true; the other three groups
+   * are always populated (see getDiffGroups's own doc comment).
+   */
+  const buildWorktreeStatus = async (
+    worktreePath: string,
+    resolvedBase: string | null,
+  ): Promise<WorktreeStatusPayload> => {
+    const [entries, diffGroups] = await Promise.all([
+      gitDiffManager.getWorktreeStatus(worktreePath),
+      gitDiffManager.getDiffGroups(worktreePath, resolvedBase),
+    ]);
+    return { entries, groups: diffGroups.groups, committedUnavailable: diffGroups.committedUnavailable };
+  };
+
+  /**
+   * Resolve the base a getCombinedDiff response should anchor `resolvedBase`
+   * / the Committed group on, in priority order: an explicit `comparisonRef`
+   * (TASK-212 wire field — resolved to a SHA via the TASK-208 resolver before
+   * it can reach any git argv; an unresolvable ref falls back to the session
+   * default rather than throwing), else the session's recorded branch point
+   * (`session.baseCommit`), else the comparison branch
+   * getSessionCommitHistory already derives (remote/local/main-branch
+   * fallback chain). Returns the resolved 40-char SHA, or null when nothing
+   * resolves — the caller then has no base to diff since (the
+   * working-dir-vs-HEAD rung).
+   */
+  const resolveCombinedDiffBase = async (
+    session: Session,
+    worktreePath: string,
+    comparisonRef?: string,
+  ): Promise<string | null> => {
+    if (comparisonRef) {
+      const resolved = await resolveSessionDiffBaseRef(worktreePath, [comparisonRef]);
+      if (resolved) return resolved;
+      console.warn(
+        `[IPC:git] comparisonRef "${comparisonRef}" unresolvable in ${worktreePath}, falling back to the session default`,
+      );
+    }
+
+    const fromBaseCommit = await resolveSessionDiffBaseRef(worktreePath, [session.baseCommit]);
+    if (fromBaseCommit) return fromBaseCommit;
+
+    try {
+      const { comparisonBranch } = await getSessionCommitHistory(session, 50);
+      return await resolveSessionDiffBaseRef(worktreePath, [comparisonBranch]);
+    } catch (error) {
+      console.warn(`[IPC:git] Could not resolve a comparison branch for session ${session.id}:`, error);
+      return null;
+    }
+  };
+
+  /**
+   * Build the diff blob for one DiffGroupScope, using the SAME git query the
+   * corresponding getDiffGroups rollup uses (TASK-212 spec item 5): plain
+   * `git diff` for unstaged, `--cached` for staged, `<merge-base>..HEAD` for
+   * committed, the synthesized untracked block for untracked.
+   * GitDiffManager's own per-scope helpers (getStagedGroup / getUnstagedGroup
+   * / getCommittedGroup / getUntrackedGroup / createDiffForUntrackedFiles)
+   * are private and gitDiffManager.ts is do-not-touch for this task (widening
+   * its GitDiffResult would drag in executionTracker.ts) — the argv/blob
+   * construction is small enough to mirror here rather than adding a new
+   * public seam to that file.
+   */
+  const buildScopedDiff = async (
+    worktreePath: string,
+    scope: DiffGroupScope,
+    resolvedBase: string | null,
+  ): Promise<{ diff: string; stats: SessionGitDiffStats; changedFiles: string[] }> => {
+    const empty = { diff: '', stats: { additions: 0, deletions: 0, filesChanged: 0 }, changedFiles: [] as string[] };
+
+    switch (scope) {
+      case 'unstaged': {
+        const diff = await runGitAsync(worktreePath, ['diff']);
+        const changedFiles = (await runGitAsync(worktreePath, ['diff', '--name-only']))
+          .trim().split('\n').filter(Boolean);
+        const stats = gitDiffManager.parseDiffStats(await runGitAsync(worktreePath, ['diff', '--stat']));
+        return { diff, stats, changedFiles };
+      }
+      case 'staged': {
+        const diff = await runGitAsync(worktreePath, ['diff', '--cached']);
+        const changedFiles = (await runGitAsync(worktreePath, ['diff', '--cached', '--name-only']))
+          .trim().split('\n').filter(Boolean);
+        const stats = gitDiffManager.parseDiffStats(await runGitAsync(worktreePath, ['diff', '--cached', '--stat']));
+        return { diff, stats, changedFiles };
+      }
+      case 'committed': {
+        if (!resolvedBase) return empty;
+        try {
+          const mergeBase = (
+            await runGitAsync(worktreePath, ['merge-base', END_OF_OPTIONS, resolvedBase, 'HEAD'])
+          ).trim();
+          if (!mergeBase) return empty;
+          const range = `${mergeBase}..HEAD`;
+          const diff = await runGitAsync(worktreePath, ['diff', END_OF_OPTIONS, range]);
+          const changedFiles = (await runGitAsync(worktreePath, ['diff', '--name-only', END_OF_OPTIONS, range]))
+            .trim().split('\n').filter(Boolean);
+          const stats = gitDiffManager.parseDiffStats(
+            await runGitAsync(worktreePath, ['diff', '--stat', END_OF_OPTIONS, range]),
+          );
+          return { diff, stats, changedFiles };
+        } catch {
+          // No common ancestor (unrelated histories) or the merge-base step
+          // failed — never fall back to "the whole tree" (mirrors
+          // GitDiffManager.getCommittedGroup).
+          return empty;
+        }
+      }
+      case 'untracked': {
+        const listOutput = await runGitAsync(worktreePath, ['ls-files', '--others', '--exclude-standard']);
+        const files = listOutput.trim().split('\n').filter((f) => f.trim().length > 0);
+        let diff = '';
+        let additions = 0;
+        for (const file of files) {
+          const cleanFile = file.trim();
+          if (!cleanFile) continue;
+          try {
+            const filePath = path.join(worktreePath, cleanFile);
+            const stat = fs.statSync(filePath);
+            if (stat.size > MAX_UNTRACKED_READ_BYTES) continue;
+            const content = fs.readFileSync(filePath, 'utf8');
+            diff += `diff --git a/${cleanFile} b/${cleanFile}\n`;
+            diff += `new file mode 100644\n`;
+            diff += `index 0000000..0000000\n`;
+            diff += `--- /dev/null\n`;
+            diff += `+++ b/${cleanFile}\n`;
+            const lines = content.split('\n');
+            additions += lines.length;
+            if (lines.length > 0) {
+              diff += `@@ -0,0 +1,${lines.length} @@\n`;
+              for (const line of lines) diff += `+${line}\n`;
+            }
+          } catch {
+            // Skip files that can't be read (binary, oversize, permission
+            // denied, missing, etc.), mirroring
+            // GitDiffManager.createDiffForUntrackedFiles.
+          }
+        }
+        return { diff, stats: { additions, deletions: 0, filesChanged: files.length }, changedFiles: files };
+      }
+    }
+  };
+
   const getExecutions = async ({ sessionId }: OpsInput<'getExecutions'>): Promise<OpsResult<'getExecutions'>> => {
     try {
       const session = await sessionManager.getSession(sessionId);
@@ -619,8 +783,15 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
 
       // Get diff for the specific commit
       const commit = commits[executionIndex];
-      const diff = await gitDiffManager.getCommitDiff(session.worktreePath, commit.hash);
-      return { success: true, data: diff };
+      const uncommittedDiff = await gitDiffManager.getCommitDiff(session.worktreePath, commit.hash);
+      // getCommitDiff's own beforeHash is `${commitHash}~1` — a valid rev
+      // expression but not a resolved SHA (the wire contract requires one).
+      // Resolve it through the TASK-208 resolver; null (e.g. the commit has no
+      // parent) falls back to the working-dir-vs-HEAD null rung rather than
+      // leaking an unresolved rev string.
+      const resolvedBase = await resolveSessionDiffBaseRef(session.worktreePath, [`${commit.hash}~1`]);
+      const worktree = await buildWorktreeStatus(session.worktreePath, resolvedBase);
+      return { success: true, data: { ...uncommittedDiff, resolvedBase, worktree } };
     } catch (error) {
       console.error('Failed to get execution diff:', error);
       const errorMessage = error instanceof Error ? error.message : 'Failed to get execution diff';
@@ -682,8 +853,12 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
         return { success: false, error: 'Cannot access git diff for archived session' };
       }
 
-      const diff = await gitDiffManager.getGitDiff(session.worktreePath);
-      return { success: true, data: diff };
+      const uncommittedDiff = await gitDiffManager.getGitDiff(session.worktreePath);
+      // getGitDiff is the working-dir-vs-HEAD rung by definition — resolvedBase
+      // is null here (see SessionGitDiffResult's doc comment), so Committed
+      // comes back unavailable rather than anchored on a stand-in.
+      const worktree = await buildWorktreeStatus(session.worktreePath, null);
+      return { success: true, data: { ...uncommittedDiff, resolvedBase: null, worktree } };
     } catch (error) {
       // Don't log errors for expected failures
       const errorMessage = error instanceof Error ? error.message : 'Failed to get git diff';
@@ -694,25 +869,45 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
     }
   };
 
-  const getCombinedDiff = async ({ sessionId, executionIds }: OpsInput<'getCombinedDiff'>): Promise<OpsResult<'getCombinedDiff'>> => {
+  const getCombinedDiff = async ({
+    sessionId,
+    executionIds,
+    comparisonRef,
+    scope,
+  }: OpsInput<'getCombinedDiff'>): Promise<OpsResult<'getCombinedDiff'>> => {
     try {
       // Get session to find worktree path
       const session = await sessionManager.getSession(sessionId);
       if (!session || !session.worktreePath) {
         return { success: false, error: 'Session or worktree path not found' };
       }
+      const worktreePath = session.worktreePath;
+
+      // `scope` (TASK-212) selects one DiffGroupScope's own git query for the
+      // returned blob, and takes precedence over `executionIds` — it answers
+      // "show me just the Staged/Unstaged/Untracked/Committed group", a
+      // different question than the execution-range selector below.
+      // `comparisonRef`, if supplied, overrides the base the Committed scope
+      // (and resolvedBase itself) anchors on.
+      if (scope) {
+        const resolvedBase = await resolveCombinedDiffBase(session, worktreePath, comparisonRef);
+        const scopedDiff = await buildScopedDiff(worktreePath, scope, resolvedBase);
+        const worktree = await buildWorktreeStatus(worktreePath, resolvedBase);
+        return { success: true, data: { ...scopedDiff, resolvedBase, worktree } };
+      }
 
       // Handle uncommitted changes request
       if (executionIds && executionIds.length === 1 && executionIds[0] === 0) {
         // Verify the worktree exists and has uncommitted changes
         try {
-          await runGitAsync(session.worktreePath, ['status', '--porcelain']);
+          await runGitAsync(worktreePath, ['status', '--porcelain']);
         } catch (error) {
           console.error('Error checking git status:', error);
         }
-        
-        const uncommittedDiff = await gitDiffManager.captureWorkingDirectoryDiff(session.worktreePath);
-        return { success: true, data: uncommittedDiff };
+
+        const uncommittedDiff = await gitDiffManager.captureWorkingDirectoryDiff(worktreePath);
+        const worktree = await buildWorktreeStatus(worktreePath, null);
+        return { success: true, data: { ...uncommittedDiff, resolvedBase: null, worktree } };
       }
 
       // No specific execution IDs: resolve the branch point directly instead of
@@ -720,62 +915,42 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
       // `commits` array here used to mean a session with real edits but zero
       // commits of its own hit the `!commits.length` early return below and
       // showed nothing — exactly the "surface my uncommitted work" case this
-      // view exists for. The fallback chain, in order:
-      //   1. session.baseCommit, if it still rev-parses (the branch point
-      //      recorded at session creation — see the comment on comparisonBranch
-      //      above for why this is preferred over live main).
-      //   2. the comparisonBranch/mainBranch getSessionCommitHistory already
-      //      resolves (handles the gc'd-base-commit retry and the main-repo /
-      //      origin-branch cases) — reused rather than duplicated here.
-      //   3. captureWorkingDirectoryDiff (vs HEAD) as the last resort, for a
-      //      worktree where neither of the above resolves (e.g. a repo with no
-      //      commits at all, where HEAD itself is unborn).
+      // view exists for. resolveCombinedDiffBase owns the fallback chain now
+      // (comparisonRef, then session.baseCommit, then the
+      // comparisonBranch/mainBranch getSessionCommitHistory already resolves);
+      // captureWorkingDirectoryDiff (vs HEAD) remains the last resort, for a
+      // worktree where nothing above resolves (e.g. a repo with no commits at
+      // all, where HEAD itself is unborn).
       if (!executionIds || executionIds.length === 0) {
-        let baseRef: string | undefined;
-
-        if (session.baseCommit) {
-          try {
-            await runGitAsync(session.worktreePath, ['rev-parse', '--verify', `${session.baseCommit}^{commit}`]);
-            baseRef = session.baseCommit;
-          } catch (error) {
-            // Recorded base commit was gc'd (or never resolvable) — fall through
-            // to the comparisonBranch rung below, same rationale as the retry in
-            // getSessionCommitHistory.
-            console.warn(`[IPC:git] session.baseCommit ${session.baseCommit} unresolvable for session ${sessionId}, falling back:`, error);
-          }
-        }
-
-        if (!baseRef) {
-          try {
-            const { comparisonBranch } = await getSessionCommitHistory(session, 50);
-            baseRef = comparisonBranch;
-          } catch (error) {
-            console.warn(`[IPC:git] Could not resolve a comparison branch for session ${sessionId}, falling back to the working-directory diff:`, error);
-          }
-        }
+        const baseRef = await resolveCombinedDiffBase(session, worktreePath, comparisonRef);
 
         if (baseRef) {
           try {
-            const result = await gitDiffManager.captureDiffAgainstRef(session.worktreePath, baseRef);
-            return { success: true, data: result };
+            const result = await gitDiffManager.captureDiffAgainstRef(worktreePath, baseRef);
+            const worktree = await buildWorktreeStatus(worktreePath, baseRef);
+            return { success: true, data: { ...result, resolvedBase: baseRef, worktree } };
           } catch (error) {
             console.warn(`[IPC:git] captureDiffAgainstRef against ${baseRef} failed for session ${sessionId}, falling back to the working-directory diff:`, error);
           }
         }
 
-        const uncommittedDiff = await gitDiffManager.captureWorkingDirectoryDiff(session.worktreePath);
-        return { success: true, data: uncommittedDiff };
+        const uncommittedDiff = await gitDiffManager.captureWorkingDirectoryDiff(worktreePath);
+        const worktree = await buildWorktreeStatus(worktreePath, null);
+        return { success: true, data: { ...uncommittedDiff, resolvedBase: null, worktree } };
       }
 
       const { commits } = await getSessionCommitHistory(session, 50);
 
       if (!commits.length) {
+        const worktree = await buildWorktreeStatus(worktreePath, null);
         return {
           success: true,
           data: {
             diff: '',
             stats: { additions: 0, deletions: 0, filesChanged: 0 },
-            changedFiles: []
+            changedFiles: [],
+            resolvedBase: null,
+            worktree
           }
         };
       }
@@ -793,14 +968,19 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
           if (commitIndex >= 0 && commitIndex < commits.length) {
             const fromCommit = commits[commitIndex];
             // Get diff from commit to working directory (includes uncommitted changes)
-            const diff = await runGitAsync(session.worktreePath, ['diff', fromCommit.hash]);
+            const diff = await runGitAsync(worktreePath, ['diff', fromCommit.hash]);
 
             const stats = gitDiffManager.parseDiffStats(
-              await runGitAsync(session.worktreePath, ['diff', '--stat', fromCommit.hash])
+              await runGitAsync(worktreePath, ['diff', '--stat', fromCommit.hash])
             );
 
-            const changedFiles = (await runGitAsync(session.worktreePath, ['diff', '--name-only', fromCommit.hash]))
+            const changedFiles = (await runGitAsync(worktreePath, ['diff', '--name-only', fromCommit.hash]))
               .trim().split('\n').filter(Boolean);
+
+            // The commit-range branches report their OWN from-hash as
+            // resolvedBase, not the session base — fromCommit.hash is already
+            // a resolved 40-char SHA (git log's %H).
+            const worktree = await buildWorktreeStatus(worktreePath, fromCommit.hash);
 
             return {
               success: true,
@@ -809,7 +989,9 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
                 stats,
                 changedFiles,
                 beforeHash: fromCommit.hash,
-                afterHash: 'UNCOMMITTED'
+                afterHash: 'UNCOMMITTED',
+                resolvedBase: fromCommit.hash,
+                worktree
               }
             };
           }
@@ -832,7 +1014,7 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
 
           try {
             // Try to get the parent of the older commit
-            const parentHash = (await runGitAsync(session.worktreePath, ['rev-parse', `${olderCommit.hash}^`])).trim();
+            const parentHash = (await runGitAsync(worktreePath, ['rev-parse', `${olderCommit.hash}^`])).trim();
             fromCommitHash = parentHash;
           } catch (error) {
             // If there's no parent (initial commit), use git's empty tree hash
@@ -840,12 +1022,13 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
           }
 
           // Use git diff to show all changes from before the range to the newest selected commit
-          const diff = await gitDiffManager.captureCommitDiff(
-            session.worktreePath,
+          const uncommittedDiff = await gitDiffManager.captureCommitDiff(
+            worktreePath,
             fromCommitHash,
             newerCommit.hash
           );
-          return { success: true, data: diff };
+          const worktree = await buildWorktreeStatus(worktreePath, fromCommitHash);
+          return { success: true, data: { ...uncommittedDiff, resolvedBase: fromCommitHash, worktree } };
         }
       }
 
@@ -862,12 +1045,13 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
           const fromCommit = commits[fromIndex]; // Oldest selected
           const toCommit = commits[toIndex]; // Newest selected
 
-          const diff = await gitDiffManager.captureCommitDiff(
-            session.worktreePath,
+          const uncommittedDiff = await gitDiffManager.captureCommitDiff(
+            worktreePath,
             fromCommit.hash,
             toCommit.hash
           );
-          return { success: true, data: diff };
+          const worktree = await buildWorktreeStatus(worktreePath, fromCommit.hash);
+          return { success: true, data: { ...uncommittedDiff, resolvedBase: fromCommit.hash, worktree } };
         }
       }
 
@@ -876,18 +1060,25 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
         const commitIndex = executionIds[0] - 1;
         if (commitIndex >= 0 && commitIndex < commits.length) {
           const commit = commits[commitIndex];
-          const diff = await gitDiffManager.getCommitDiff(session.worktreePath, commit.hash);
-          return { success: true, data: diff };
+          const uncommittedDiff = await gitDiffManager.getCommitDiff(worktreePath, commit.hash);
+          // getCommitDiff's own beforeHash (`${commitHash}~1`) is not a
+          // resolved SHA — resolve it the same way getExecutionDiff does.
+          const resolvedBase = await resolveSessionDiffBaseRef(worktreePath, [`${commit.hash}~1`]);
+          const worktree = await buildWorktreeStatus(worktreePath, resolvedBase);
+          return { success: true, data: { ...uncommittedDiff, resolvedBase, worktree } };
         }
       }
 
       // Fallback to empty diff
+      const worktree = await buildWorktreeStatus(worktreePath, null);
       return {
         success: true,
         data: {
           diff: '',
           stats: { additions: 0, deletions: 0, filesChanged: 0 },
-          changedFiles: []
+          changedFiles: [],
+          resolvedBase: null,
+          worktree
         }
       };
     } catch (error) {

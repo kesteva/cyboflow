@@ -32,6 +32,7 @@
  * which `rebaseMainIntoWorktree` calls directly.
  */
 import type { GitStatus } from '../../../types/session';
+import type { WorktreeStatusPayload, DiffGroupScope } from '../../../../../shared/types/runFiles';
 
 /** The failure half every one of these envelopes shares. */
 export type SessionGitError = { success: false; error: string };
@@ -51,6 +52,16 @@ export interface SessionGitDiffStats {
  * Structural mirror of GitDiffManager's `GitDiffResult` (source of truth:
  * main/src/services/gitDiffManager.ts). The wire twin the renderer already
  * declares is frontend/src/types/diff.ts `GitDiffResult`.
+ *
+ * `resolvedBase` and `worktree` are Seam B (TASK-212) additions, both
+ * REQUIRED — a loud exhaustive tripwire rather than an optional field an
+ * `undefined` could silently satisfy, which would let the center pane derive
+ * its own base and reintroduce a live bug. `resolvedBase` is the concrete SHA
+ * (never a branch name) the response was actually computed against, `null`
+ * only for the working-dir-vs-HEAD rung (no base to anchor on). `worktree` is
+ * the same `getWorktreeStatus` + `getDiffGroups` (TASK-209/210) payload every
+ * one of these three methods assembles, for the grouped Diff-tab view
+ * alongside whichever single diff blob the method itself returns.
  */
 export interface SessionGitDiffResult {
   diff: string;
@@ -58,6 +69,8 @@ export interface SessionGitDiffResult {
   changedFiles: string[];
   beforeHash?: string;
   afterHash?: string;
+  resolvedBase: string | null;
+  worktree: WorktreeStatusPayload;
 }
 
 /**
@@ -189,10 +202,20 @@ export interface SessionGitOpsLike {
    * Mirrors legacy `sessions:get-combined-diff`. `executionIds` selects what to
    * diff: omitted/empty = everything including uncommitted; `[0]` = uncommitted
    * only; a pair = the range; more than two = first..last.
+   *
+   * Seam B (TASK-212) additions, both wire fields (not merely hook arguments):
+   * `comparisonRef` overrides the base the response is computed against
+   * (resolved to a SHA before it reaches git argv; falls back to the session
+   * default on an unresolvable ref, never throws). `scope`, when present,
+   * takes precedence over `executionIds` and selects one `DiffGroupScope`'s
+   * own git query for the returned diff blob (see gitOps.ts's
+   * getCombinedDiff for the per-scope command mapping).
    */
   getCombinedDiff(request: {
     sessionId: string;
     executionIds?: number[];
+    comparisonRef?: string;
+    scope?: DiffGroupScope;
   }): Promise<{ success: true; data: SessionGitDiffResult } | SessionGitError>;
 
   /**

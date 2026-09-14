@@ -26,19 +26,43 @@ function isBadRequest(err: unknown): boolean {
 
 type FakeOps = SessionGitOpsLike & Record<keyof SessionGitOpsLike, ReturnType<typeof vi.fn>>;
 
+/** A minimal WorktreeStatusPayload for the SessionGitDiffResult mocks below. */
+const emptyWorktree = { entries: [], groups: [], committedUnavailable: true };
+
 function makeFakeOps(): FakeOps {
   return {
     getExecutions: vi.fn().mockResolvedValue({ success: true, data: [] }),
-    getExecutionDiff: vi
-      .fn()
-      .mockResolvedValue({ success: true, data: { diff: '', stats: { additions: 0, deletions: 0, filesChanged: 0 }, changedFiles: [] } }),
+    getExecutionDiff: vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        diff: '',
+        stats: { additions: 0, deletions: 0, filesChanged: 0 },
+        changedFiles: [],
+        resolvedBase: null,
+        worktree: emptyWorktree,
+      },
+    }),
     commit: vi.fn().mockResolvedValue({ success: true }),
-    diff: vi
-      .fn()
-      .mockResolvedValue({ success: true, data: { diff: '', stats: { additions: 0, deletions: 0, filesChanged: 0 }, changedFiles: [] } }),
-    getCombinedDiff: vi
-      .fn()
-      .mockResolvedValue({ success: true, data: { diff: '', stats: { additions: 0, deletions: 0, filesChanged: 0 }, changedFiles: [] } }),
+    diff: vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        diff: '',
+        stats: { additions: 0, deletions: 0, filesChanged: 0 },
+        changedFiles: [],
+        resolvedBase: null,
+        worktree: emptyWorktree,
+      },
+    }),
+    getCombinedDiff: vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        diff: '',
+        stats: { additions: 0, deletions: 0, filesChanged: 0 },
+        changedFiles: [],
+        resolvedBase: null,
+        worktree: emptyWorktree,
+      },
+    }),
     rebaseMainIntoWorktree: vi.fn().mockResolvedValue({ success: true, data: { message: 'ok' } }),
     abortRebaseAndUseClaude: vi.fn().mockResolvedValue({ success: true, data: { message: 'ok', panelId: 'p1' } }),
     squashAndRebaseToMain: vi.fn().mockResolvedValue({ success: true, data: { message: 'merged' } }),
@@ -95,6 +119,25 @@ describe('cyboflow.sessionGit', () => {
       const caller = appRouter.createCaller(createContext({ sessionGitOps }));
       await caller.cyboflow.sessionGit.getCombinedDiff({ sessionId: 's1', executionIds: [1, 2] });
       expect(sessionGitOps.getCombinedDiff).toHaveBeenCalledWith({ sessionId: 's1', executionIds: [1, 2] });
+    });
+
+    // TASK-212 (Seam B): comparisonRef and scope are wire fields, not merely
+    // hook arguments — zod must NOT strip either before the resolver reaches
+    // them (the critical silent-drop trap the zod schema change guards
+    // against).
+    it('getCombinedDiff forwards its optional comparisonRef and scope', async () => {
+      const sessionGitOps = makeFakeOps();
+      const caller = appRouter.createCaller(createContext({ sessionGitOps }));
+      await caller.cyboflow.sessionGit.getCombinedDiff({
+        sessionId: 's1',
+        comparisonRef: 'abc123',
+        scope: 'staged',
+      });
+      expect(sessionGitOps.getCombinedDiff).toHaveBeenCalledWith({
+        sessionId: 's1',
+        comparisonRef: 'abc123',
+        scope: 'staged',
+      });
     });
 
     it('squashAndRebaseToMain', async () => {

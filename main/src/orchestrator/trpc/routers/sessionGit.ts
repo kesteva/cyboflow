@@ -82,7 +82,17 @@ export const sessionGitRouter = router({
     }),
 
   getCombinedDiff: protectedProcedure
-    .input(z.object({ sessionId: z.string().min(1), executionIds: z.array(z.number().int()).optional() }))
+    .input(
+      z.object({
+        sessionId: z.string().min(1),
+        executionIds: z.array(z.number().int()).optional(),
+        // TASK-212 (Seam B): both wire fields, forwarded into the ops call
+        // below — zod strips anything NOT declared here before the resolver
+        // ever sees it, so omitting either would silently drop it.
+        comparisonRef: z.string().min(1).optional(),
+        scope: z.enum(['unstaged', 'staged', 'untracked', 'committed']).optional(),
+      }),
+    )
     .query(async ({ ctx, input }): Promise<{ success: true; data: SessionGitDiffResult } | SessionGitError> => {
       return requireOps(ctx.sessionGitOps).getCombinedDiff(input);
     }),

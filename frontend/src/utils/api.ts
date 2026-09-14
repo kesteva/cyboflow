@@ -238,8 +238,13 @@ export class API {
       return trpc.cyboflow.sessionGit.diff.query({ sessionId });
     },
 
-    async getCombinedDiff(sessionId: string, executionIds?: number[]) {
-      return trpc.cyboflow.sessionGit.getCombinedDiff.query({ sessionId, executionIds });
+    async getCombinedDiff(
+      sessionId: string,
+      executionIds?: number[],
+      comparisonRef?: string,
+      scope?: 'unstaged' | 'staged' | 'untracked' | 'committed',
+    ) {
+      return trpc.cyboflow.sessionGit.getCombinedDiff.query({ sessionId, executionIds, comparisonRef, scope });
     },
 
     // Main repo session
