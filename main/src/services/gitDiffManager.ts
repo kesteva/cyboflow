@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import { runGitAsync, END_OF_OPTIONS, assertNotOptionLike } from '../utils/runGit';
 import type { Logger } from '../utils/logger';
 import { GitOperationalError } from './gitPlumbingCommands';
-import type { WorktreeStatusEntry } from '../../../shared/types/runFiles';
+import type { WorktreeStatusEntry, DiffGroupRollup } from '../../../shared/types/runFiles';
 
 export interface GitDiffStats {
   additions: number;
@@ -16,6 +16,19 @@ export interface GitDiffResult {
   changedFiles: string[];
   beforeHash?: string;
   afterHash?: string;
+}
+
+/**
+ * Return shape of {@link GitDiffManager.getDiffGroups} (TASK-210) — the
+ * `groups`/`committedUnavailable` half of the wire-level
+ * `WorktreeStatusPayload` (shared/types/runFiles.ts). `entries` (the
+ * `getWorktreeStatus` flag records) is composed alongside this by the caller
+ * that assembles the full payload; this method owns only the per-scope
+ * membership + rollups.
+ */
+export interface DiffGroupsResult {
+  groups: DiffGroupRollup[];
+  committedUnavailable: boolean;
 }
 
 /**
@@ -281,21 +294,11 @@ export class GitDiffManager {
       return { stats: { additions: 0, deletions: 0, filesChanged: 0 }, changedFiles: [] };
     }
 
-    let additions = 0;
-    let deletions = 0;
-    const changedFiles: string[] = [];
-
-    const numstat = (await runGitAsync(worktreePath, ['diff', '--numstat', resolvedRef])).trim();
-    if (numstat) {
-      for (const line of numstat.split('\n')) {
-        const [added, deleted, ...pathParts] = line.split('\t');
-        const filePath = pathParts.join('\t').trim();
-        if (!filePath) continue;
-        changedFiles.push(filePath);
-        if (added !== '-') additions += parseInt(added, 10) || 0;
-        if (deleted !== '-') deletions += parseInt(deleted, 10) || 0;
-      }
-    }
+    const numstat = await runGitAsync(worktreePath, ['diff', '--numstat', resolvedRef]);
+    const parsed = this.parseNumstat(numstat);
+    let additions = parsed.additions;
+    const deletions = parsed.deletions;
+    const changedFiles: string[] = [...parsed.files];
 
     // Untracked files are invisible to `git diff` at any ref, so add them the
     // same way getDiffStats does: every line counts as an addition.
@@ -309,6 +312,171 @@ export class GitDiffManager {
       stats: { additions, deletions, filesChanged: changedFiles.length },
       changedFiles,
     };
+  }
+
+  /**
+   * Parse `git diff --numstat` output (`additions \t deletions \t path` per
+   * line, `-`/`-` for a binary file) into aggregate stats + the file list.
+   * Shared by getDiffStatsAgainstRef and the per-scope rollups in
+   * getDiffGroups (TASK-210) so the two never drift on numstat semantics.
+   */
+  private parseNumstat(output: string): { additions: number; deletions: number; files: string[] } {
+    let additions = 0;
+    let deletions = 0;
+    const files: string[] = [];
+    const trimmed = output.trim();
+    if (!trimmed) return { additions, deletions, files };
+    for (const line of trimmed.split('\n')) {
+      const [added, deleted, ...pathParts] = line.split('\t');
+      const filePath = pathParts.join('\t').trim();
+      if (!filePath) continue;
+      files.push(filePath);
+      if (added !== '-') additions += parseInt(added, 10) || 0;
+      if (deleted !== '-') deletions += parseInt(deleted, 10) || 0;
+    }
+    return { additions, deletions, files };
+  }
+
+  /**
+   * Compute the four diff-group scopes (unstaged / staged / untracked /
+   * committed) that back the run/session Diff tab's grouped view (TASK-210).
+   * Each scope is an INDEPENDENT `git diff --numstat` call, never derived
+   * from a single base-relative diff blob — a file that is both
+   * committed-since-`resolvedBase` AND separately dirty in the working tree
+   * needs different +n/-n numbers in the Committed group vs. the Unstaged
+   * group, which one combined diff cannot represent.
+   *
+   * Committed membership is a three-dot (merge-base) comparison, computed
+   * explicitly rather than reused from a two-dot `resolvedBase..HEAD` diff:
+   * if `resolvedBase` is "ahead" of HEAD (a stale/reverted base), a raw
+   * two-dot diff reports reverse deletions for files HEAD never touched.
+   * Taking the merge-base of `resolvedBase` and HEAD first anchors the
+   * comparison at their common ancestor — the same anchor `git diff
+   * base...HEAD` uses.
+   *
+   * When `resolvedBase` is null, or the merge-base step fails (unrelated
+   * histories / no common ancestor), Committed is EMPTY and
+   * `committedUnavailable` is true — this never falls back to "the whole
+   * tree". The other three groups do not depend on `resolvedBase` and are
+   * always populated.
+   */
+  async getDiffGroups(worktreePath: string, resolvedBase: string | null): Promise<DiffGroupsResult> {
+    const [staged, unstaged, untracked, committed] = await Promise.all([
+      this.getStagedGroup(worktreePath),
+      this.getUnstagedGroup(worktreePath),
+      this.getUntrackedGroup(worktreePath),
+      this.getCommittedGroup(worktreePath, resolvedBase),
+    ]);
+
+    return {
+      groups: [unstaged, staged, untracked, committed.group],
+      committedUnavailable: committed.unavailable,
+    };
+  }
+
+  /** Staged scope: index vs HEAD. */
+  private async getStagedGroup(worktreePath: string): Promise<DiffGroupRollup> {
+    const output = await runGitAsync(worktreePath, ['diff', '--cached', '--numstat']);
+    const { additions, deletions, files } = this.parseNumstat(output);
+    return { scope: 'staged', files, additions, deletions };
+  }
+
+  /** Unstaged scope: working tree vs index. No caller-supplied ref involved. */
+  private async getUnstagedGroup(worktreePath: string): Promise<DiffGroupRollup> {
+    const output = await runGitAsync(worktreePath, ['diff', '--numstat']);
+    const { additions, deletions, files } = this.parseNumstat(output);
+    return { scope: 'unstaged', files, additions, deletions };
+  }
+
+  /**
+   * Untracked scope. Membership is every path `getUntrackedFiles` reports
+   * (matching getWorktreeStatus's untracked entries); the addition count per
+   * file is sourced from the SAME `split('\n').length` arithmetic
+   * createDiffForUntrackedFiles uses to build its synthesized diff blob (one
+   * `+` row per split element, including the trailing empty element a
+   * newline-terminated file produces) — this is what the frontend's
+   * parseFileDiffs (frontend/src/utils/parseFileHunks.ts) would count parsing
+   * that same blob. `main/` cannot take a runtime dependency on `frontend/`
+   * (only type-only cross-imports exist elsewhere in this codebase), so the
+   * arithmetic is replicated here rather than imported.
+   *
+   * Deliberately NOT `countUntrackedAdditions` (this file, ~line 813): that
+   * helper counts `\n` occurrences (`wc -l` semantics) — for `"a\nb\n"` it
+   * reports 2, while the blob-based count (and this method) reports 3. Using
+   * the wc-l count here would make this rollup disagree with what the Diff
+   * tab's viewer actually renders from the blob.
+   */
+  private async getUntrackedGroup(worktreePath: string): Promise<DiffGroupRollup> {
+    const files = await this.getUntrackedFiles(worktreePath);
+    let additions = 0;
+    for (const file of files) {
+      if (!file || file.trim().length === 0) continue;
+      try {
+        const cleanFile = file.trim();
+        const filePath = `${worktreePath}/${cleanFile}`;
+        const stat = fs.statSync(filePath);
+        // Mirrors createDiffForUntrackedFiles: an oversize file is omitted
+        // from the diff blob entirely, so it contributes 0 here too.
+        if (stat.size > MAX_UNTRACKED_READ_BYTES) continue;
+        const content = fs.readFileSync(filePath, 'utf8');
+        additions += content.split('\n').length;
+      } catch {
+        // Skip files that can't be read (binary, permission denied, missing, etc.),
+        // mirroring createDiffForUntrackedFiles.
+      }
+    }
+    return { scope: 'untracked', files, additions, deletions: 0 };
+  }
+
+  /**
+   * Committed scope: explicit three-dot (merge-base) membership + rollup.
+   * See getDiffGroups's doc comment for why merge-base is required instead of
+   * a plain two-dot diff.
+   *
+   * Ref safety (TASK-208 discipline, defense-in-depth): `resolvedBase` is
+   * re-resolved via resolveRefForDiff (assertNotOptionLike + `rev-parse
+   * --verify --end-of-options`) even though the caller contract already
+   * guarantees a resolved sha, and the merge-base command's OWN output is
+   * re-resolved the same way before it is fed into the following `diff`
+   * calls, rather than trusted as already-safe.
+   */
+  private async getCommittedGroup(
+    worktreePath: string,
+    resolvedBase: string | null,
+  ): Promise<{ group: DiffGroupRollup; unavailable: boolean }> {
+    const empty: DiffGroupRollup = { scope: 'committed', files: [], additions: 0, deletions: 0 };
+    if (!resolvedBase) return { group: empty, unavailable: true };
+
+    const safeBase = await this.resolveRefForDiff(worktreePath, resolvedBase);
+    if (safeBase === null) return { group: empty, unavailable: true };
+
+    let mergeBaseRaw: string;
+    try {
+      mergeBaseRaw = (
+        await runGitAsync(worktreePath, ['merge-base', END_OF_OPTIONS, safeBase, 'HEAD'])
+      ).trim();
+    } catch {
+      // No common ancestor (e.g. unrelated histories) — never fall back to
+      // "the whole tree".
+      return { group: empty, unavailable: true };
+    }
+    if (!mergeBaseRaw) return { group: empty, unavailable: true };
+
+    const safeMergeBase = await this.resolveRefForDiff(worktreePath, mergeBaseRaw);
+    if (safeMergeBase === null) return { group: empty, unavailable: true };
+
+    try {
+      const range = `${safeMergeBase}..HEAD`;
+      const nameOutput = await runGitAsync(worktreePath, ['diff', '--name-only', END_OF_OPTIONS, range]);
+      const files = nameOutput.trim().split('\n').filter((f) => f.length > 0);
+
+      const numstatOutput = await runGitAsync(worktreePath, ['diff', '--numstat', END_OF_OPTIONS, range]);
+      const { additions, deletions } = this.parseNumstat(numstatOutput);
+
+      return { group: { scope: 'committed', files, additions, deletions }, unavailable: false };
+    } catch {
+      return { group: empty, unavailable: true };
+    }
   }
 
   /**

@@ -679,3 +679,175 @@ describe('GitDiffManager.getWorktreeStatus', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// TASK-210: GitDiffManager.getDiffGroups — per-scope diff rollups
+// (unstaged/staged/untracked/committed) and merge-base (three-dot) Committed
+// membership. Real temp repos, no mocking of fs or git.
+// ---------------------------------------------------------------------------
+
+function headSha2(dir: string): string {
+  return execSync('git rev-parse HEAD', { cwd: dir, encoding: 'utf8' }).trim();
+}
+
+describe('GitDiffManager.getDiffGroups', () => {
+  it('gives a file staged AND separately dirty DIFFERENT +n/-n in Staged vs Unstaged', async () => {
+    await withTempDir('gitdiff-groups-staged-vs-unstaged-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'f.txt', 'line1\n', 'base');
+      const baseSha = headSha2(repo);
+
+      // Stage one version of the file...
+      fs.writeFileSync(path.join(repo, 'f.txt'), 'line1\nstaged-line\n');
+      execSync('git add f.txt', { cwd: repo, stdio: 'pipe' });
+      // ...then dirty the working tree further, on top of the staged content.
+      fs.writeFileSync(path.join(repo, 'f.txt'), 'line1\nstaged-line\nworking-a\nworking-b\n');
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, baseSha);
+
+      const staged = result.groups.find((g) => g.scope === 'staged')!;
+      const unstaged = result.groups.find((g) => g.scope === 'unstaged')!;
+
+      expect(staged.files).toContain('f.txt');
+      expect(unstaged.files).toContain('f.txt');
+      // Staged: index vs HEAD adds exactly 1 line ("staged-line").
+      expect(staged.additions).toBe(1);
+      // Unstaged: worktree vs index adds exactly 2 lines ("working-a", "working-b").
+      expect(unstaged.additions).toBe(2);
+      expect(staged.additions).not.toBe(unstaged.additions);
+    });
+  });
+
+  it('a file committed-since-base AND separately dirty appears in Committed AND Unstaged with independent numbers', async () => {
+    await withTempDir('gitdiff-groups-committed-and-dirty-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'seed.txt', 'seed\n', 'base');
+      const baseSha = headSha2(repo);
+
+      // Committed since base: a new file landing 3 lines.
+      commitFile(repo, 'f.txt', 'a\nb\nc\n', 'add f since base');
+
+      // Separately dirty on top of the committed version.
+      fs.writeFileSync(path.join(repo, 'f.txt'), 'a\nb\nc\nworking\n');
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, baseSha);
+
+      const committed = result.groups.find((g) => g.scope === 'committed')!;
+      const unstaged = result.groups.find((g) => g.scope === 'unstaged')!;
+
+      expect(committed.files).toContain('f.txt');
+      expect(unstaged.files).toContain('f.txt');
+      expect(committed.additions).toBe(3);
+      expect(unstaged.additions).toBe(1);
+      expect(committed.additions).not.toBe(unstaged.additions);
+      expect(result.committedUnavailable).toBe(false);
+    });
+  });
+
+  it("an untracked newline-terminated file's addition count matches the blob-based (split('\\n').length) count, not the wc-l style count", async () => {
+    await withTempDir('gitdiff-groups-untracked-count-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'seed.txt', 'seed\n', 'base');
+      const baseSha = headSha2(repo);
+
+      // "a\nb\n".split('\n') === ['a', 'b', ''] → length 3. The wc-l style
+      // \n-occurrence count (countUntrackedAdditions) would report 2.
+      fs.writeFileSync(path.join(repo, 'new.txt'), 'a\nb\n');
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, baseSha);
+      const untracked = result.groups.find((g) => g.scope === 'untracked')!;
+
+      expect(untracked.files).toContain('new.txt');
+      expect(untracked.additions).toBe(3);
+      expect(untracked.additions).not.toBe(2);
+    });
+  });
+
+  it('a base "ahead" of HEAD does not fill Committed with reverse deletions for untouched files', async () => {
+    await withTempDir('gitdiff-groups-base-ahead-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'a.txt', 'a1\n', 'c1');
+      const midSha = headSha2(repo);
+      commitFile(repo, 'b.txt', 'b1\n', 'c2 - later commit');
+      const aheadSha = headSha2(repo);
+
+      // HEAD now points BEHIND aheadSha — aheadSha is "ahead" of HEAD.
+      execSync(`git reset --hard ${midSha}`, { cwd: repo, stdio: 'pipe' });
+      expect(headSha2(repo)).toBe(midSha);
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, aheadSha);
+      const committed = result.groups.find((g) => g.scope === 'committed')!;
+
+      // b.txt was introduced only by the now-unreachable aheadSha commit —
+      // HEAD never touched it. A raw two-dot `aheadSha..HEAD` diff would
+      // report it as a reverse deletion; the merge-base anchor must not.
+      expect(committed.files).not.toContain('b.txt');
+      expect(committed.files).toEqual([]);
+      expect(committed.additions).toBe(0);
+      expect(committed.deletions).toBe(0);
+      expect(result.committedUnavailable).toBe(false);
+    });
+  });
+
+  it('two commits with no common ancestor (unrelated histories) → Committed EMPTY and committedUnavailable=true, never the whole tree', async () => {
+    await withTempDir('gitdiff-groups-unrelated-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'a.txt', 'a\n', 'base');
+      const baseSha = headSha2(repo);
+
+      execSync('git checkout --orphan other', { cwd: repo, stdio: 'pipe' });
+      execSync('git rm -rf .', { cwd: repo, stdio: 'pipe' });
+      commitFile(repo, 'c.txt', 'c\n', 'orphan commit');
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, baseSha);
+      const committed = result.groups.find((g) => g.scope === 'committed')!;
+
+      expect(result.committedUnavailable).toBe(true);
+      expect(committed.files).toEqual([]);
+      expect(committed.additions).toBe(0);
+      expect(committed.deletions).toBe(0);
+    });
+  });
+
+  it('resolvedBase === null → Committed empty + committedUnavailable=true, and staged/unstaged/untracked stay fully populated', async () => {
+    await withTempDir('gitdiff-groups-null-base-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'seed.txt', 'seed\n', 'base');
+      commitFile(repo, 'other.txt', 'x\n', 'add other');
+
+      // Staged.
+      fs.writeFileSync(path.join(repo, 'seed.txt'), 'seed\nstaged\n');
+      execSync('git add seed.txt', { cwd: repo, stdio: 'pipe' });
+      // Unstaged.
+      fs.writeFileSync(path.join(repo, 'other.txt'), 'x\ny\n');
+      // Untracked.
+      fs.writeFileSync(path.join(repo, 'untracked.txt'), 'z\n');
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, null);
+
+      expect(result.groups).toHaveLength(4);
+      expect(result.groups.map((g) => g.scope).sort()).toEqual([
+        'committed', 'staged', 'unstaged', 'untracked',
+      ]);
+
+      expect(result.committedUnavailable).toBe(true);
+      const committed = result.groups.find((g) => g.scope === 'committed')!;
+      expect(committed.files).toEqual([]);
+      expect(committed.additions).toBe(0);
+      expect(committed.deletions).toBe(0);
+
+      const staged = result.groups.find((g) => g.scope === 'staged')!;
+      const unstaged = result.groups.find((g) => g.scope === 'unstaged')!;
+      const untracked = result.groups.find((g) => g.scope === 'untracked')!;
+      expect(staged.files).toContain('seed.txt');
+      expect(unstaged.files).toContain('other.txt');
+      expect(untracked.files).toContain('untracked.txt');
+    });
+  });
+});

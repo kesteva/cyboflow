@@ -76,6 +76,40 @@ export interface WorktreeStatusEntry {
   conflicted: boolean;
 }
 
+/**
+ * Per-scope membership + aggregate +/- rollup for one `DiffGroupScope`
+ * (TASK-210). Computed from an INDEPENDENT `git diff --numstat` call per
+ * scope rather than derived from a single base-relative diff blob: a file
+ * that is both committed-since-base and separately dirty in the working tree
+ * needs different numbers in the Committed group vs. the Unstaged group, and
+ * a single combined diff cannot represent that. `files` is the membership
+ * list for that group (worktree-relative paths).
+ */
+export interface DiffGroupRollup {
+  scope: DiffGroupScope;
+  files: string[];
+  additions: number;
+  deletions: number;
+}
+
+/**
+ * Wire payload combining `getWorktreeStatus`'s per-path flags with the
+ * per-scope rollups from `GitDiffManager.getDiffGroups` (TASK-210). `groups`
+ * always has exactly 4 entries, one per `DiffGroupScope`, in a fixed render
+ * order (unstaged, staged, untracked, committed).
+ *
+ * `committedUnavailable` is true whenever Committed membership could not be
+ * computed from a merge-base with HEAD — no base ref supplied, or the
+ * merge-base step failed (e.g. unrelated histories with no common ancestor).
+ * In that case Committed's `files`/`additions`/`deletions` are all empty/zero
+ * — this NEVER falls back to treating "the whole tree" as committed.
+ */
+export interface WorktreeStatusPayload {
+  entries: WorktreeStatusEntry[];
+  groups: DiffGroupRollup[];
+  committedUnavailable: boolean;
+}
+
 /** The result of reading a single file from a run's worktree. */
 export interface RunFileContent {
   /** Path relative to the worktree root, POSIX-style ('/' separators). */
