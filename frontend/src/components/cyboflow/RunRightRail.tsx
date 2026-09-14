@@ -13,7 +13,7 @@
  *     (RunDiffTabPanel; flow runs are keyed by runId since workflow_runs.session_id
  *     is NULL, so it fetches cyboflow.runs.gitDiff, worktree_path-resolved). With no
  *     active run but a selected session it falls back to the session-scoped combined
- *     diff (RunRightRailDiff → CombinedDiffView) — the at-rest experience.
+ *     diff (SessionDiffTabPanel) — the at-rest experience.
  *   - Artifacts — the "RUN DELIVERABLES" reopen surface (ArtifactsPanel); lists
  *     every artifact the run produced so closed center-pane tabs can be reopened.
  *     Two scopes, mirroring the Diff tab:
@@ -48,6 +48,7 @@ import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
+import type { DiffGroupScope } from '../../../../shared/types/runFiles';
 
 type TabId = 'workflow-progress' | 'file-explorer' | 'diff' | 'artifacts';
 
@@ -174,6 +175,19 @@ export function RunRightRail({
   const startXRef = useRef<number>(0);
   const startWidthRef = useRef<number>(0);
 
+  // The base each Diff-tab panel most recently echoed via onResolvedBase,
+  // keyed by the centerPane session key (selectedSessionId) both openFileTab
+  // call sites below key on. This is the RESOLVED base the panel actually
+  // diffed against (AR-11) — never the raw selection (a later task's
+  // concern) — so a file tab opened from either the diff row or the File
+  // Explorer resolves against the SAME base the rail is currently showing.
+  // Absent an entry (no fetch has completed yet) resolves to null, the
+  // representable "session default" base.
+  const [resolvedBaseBySession, setResolvedBaseBySession] = useState<Record<string, string | null>>({});
+  const handleResolvedBase = useCallback((sessionKey: string, base: string | null) => {
+    setResolvedBaseBySession((prev) => ({ ...prev, [sessionKey]: base }));
+  }, []);
+
   // The width is written to storage only from the drag handler below, never
   // from an effect on [width] — a mount, a React.StrictMode double-mount, or
   // a viewport change can never stamp the default (or anything else) into
@@ -228,10 +242,17 @@ export function RunRightRail({
   // Clicking a file in the Diff tab opens it as a center-pane file tab (keyed by
   // the selected session, like the File Explorer launcher). Undefined when no
   // session backs the center pane (e.g. a parentless flow run) — the diff then
-  // keeps its click = toggle behavior.
+  // keeps its click = toggle behavior. Carries the panel's own last-echoed
+  // resolvedBase (AR-11) plus the clicked row's group scope, so the tab
+  // resolves against the SAME base the rail is currently showing.
   const openDiffFile =
     selectedSessionId !== null
-      ? (filePath: string) => openFileTab(selectedSessionId, { filePath })
+      ? (filePath: string, scope?: DiffGroupScope) =>
+          openFileTab(selectedSessionId, {
+            filePath,
+            baseRef: resolvedBaseBySession[selectedSessionId] ?? null,
+            scope,
+          })
       : undefined;
 
   const currentTab = TABS.find((t) => t.id === activeTab) ?? TABS[0];
@@ -345,7 +366,17 @@ export function RunRightRail({
               // the explorer uses its own takeover viewer.
               onOpenFile={
                 activeRunId !== null
-                  ? (filePath) => openFileTab(selectedSessionId, { filePath })
+                  ? (filePath) =>
+                      // R-9: pass the SAME lifted base as the Diff tab's
+                      // openDiffFile (scope omitted — File Explorer opens
+                      // aren't scoped to a diff group), never `undefined` —
+                      // openFileTab writes baseRef unconditionally, so an
+                      // undefined here would silently reset a diff-opened
+                      // tab's base back to the default.
+                      openFileTab(selectedSessionId, {
+                        filePath,
+                        baseRef: resolvedBaseBySession[selectedSessionId] ?? null,
+                      })
                   : undefined
               }
             />
@@ -367,10 +398,18 @@ export function RunRightRail({
           //    a dead-end "No active run".
           activeRunId !== null ? (
             <div className="h-full overflow-hidden">
-              <RunDiffTabPanel runId={activeRunId} onOpenFile={openDiffFile} />
+              <RunDiffTabPanel
+                runId={activeRunId}
+                onOpenFile={openDiffFile}
+                onResolvedBase={(base) => handleResolvedBase(selectedSessionId ?? '', base)}
+              />
             </div>
           ) : selectedSessionId !== null ? (
-            <SessionDiffTabPanel sessionId={selectedSessionId} onOpenFile={openDiffFile} />
+            <SessionDiffTabPanel
+              sessionId={selectedSessionId}
+              onOpenFile={openDiffFile}
+              onResolvedBase={(base) => handleResolvedBase(selectedSessionId, base)}
+            />
           ) : (
             <div
               data-testid="run-right-rail-diff-empty-norun"

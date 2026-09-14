@@ -12,6 +12,7 @@
 import { useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
 import { API } from '../../utils/api';
+import type { DiffGroupScope } from '../../../../shared/types/runFiles';
 import { RunDiffFileList } from './RunDiffFileList';
 
 interface SessionDiffState {
@@ -25,10 +26,20 @@ const INITIAL_STATE: SessionDiffState = { diff: '', isLoading: false, error: nul
 export function SessionDiffTabPanel({
   sessionId,
   onOpenFile,
+  onResolvedBase,
 }: {
   sessionId: string;
-  /** Forwarded to RunDiffFileList — click a file row to open it. */
-  onOpenFile?: (filePath: string) => void;
+  /**
+   * Forwarded to RunDiffFileList — click a file row to open it. The grouped
+   * arm additionally passes the clicked row's group scope.
+   */
+  onOpenFile?: (filePath: string, scope?: DiffGroupScope) => void;
+  /**
+   * Echoes the base this panel's diff was actually resolved against — called
+   * once per successful fetch, never on the error arm. See RunDiffTabPanel's
+   * twin for the rationale (lifts the SAME base into openFileTab).
+   */
+  onResolvedBase?: (base: string | null) => void;
 }): ReactElement {
   const [state, setState] = useState<SessionDiffState>(INITIAL_STATE);
 
@@ -44,6 +55,7 @@ export function SessionDiffTabPanel({
           return;
         }
         setState({ diff: res.data.diff ?? '', isLoading: false, error: null });
+        onResolvedBase?.(res.data.resolvedBase ?? null);
       },
       (err: unknown) => {
         if (cancelled) return;
@@ -58,6 +70,9 @@ export function SessionDiffTabPanel({
     return () => {
       cancelled = true;
     };
+    // onResolvedBase is a per-render callback from the rail; keying the fetch
+    // on it would refetch on every rail render (D-8: single fetch per sessionId).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
   if (state.isLoading) {

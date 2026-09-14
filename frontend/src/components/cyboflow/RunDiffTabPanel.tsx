@@ -26,6 +26,7 @@ import type { ReactElement } from 'react';
 import type { inferRouterOutputs } from '@trpc/server';
 import { trpc } from '../../trpc/client';
 import type { AppRouter } from '../../../../shared/types/trpc';
+import type { DiffGroupScope } from '../../../../shared/types/runFiles';
 import { RunDiffFileList } from './RunDiffFileList';
 
 type RouterOutputs = inferRouterOutputs<AppRouter>;
@@ -47,10 +48,22 @@ const INITIAL_STATE: RunDiffState = {
 export function RunDiffTabPanel({
   runId,
   onOpenFile,
+  onResolvedBase,
 }: {
   runId: string;
-  /** Forwarded to DiffViewer — click a file header to open it (vs. toggle). */
-  onOpenFile?: (filePath: string) => void;
+  /**
+   * Forwarded to DiffViewer — click a file header to open it (vs. toggle). The
+   * grouped arm additionally passes the clicked row's group scope.
+   */
+  onOpenFile?: (filePath: string, scope?: DiffGroupScope) => void;
+  /**
+   * Echoes the base this panel's diff was actually resolved against — called
+   * once per successful fetch (including a null/no-worktree result), never on
+   * the error arm. Lets the rail lift the SAME base into openFileTab so a file
+   * tab opened from this panel (or the File Explorer) resolves against the
+   * base the rail is currently showing, not a separately-derived one.
+   */
+  onResolvedBase?: (base: string | null) => void;
 }): ReactElement {
   const [state, setState] = useState<RunDiffState>(INITIAL_STATE);
 
@@ -62,6 +75,7 @@ export function RunDiffTabPanel({
       (result) => {
         if (cancelled) return;
         setState({ diff: result, isLoading: false, error: null });
+        onResolvedBase?.(result?.resolvedBase ?? null);
       },
       (err: unknown) => {
         if (cancelled) return;
@@ -73,6 +87,9 @@ export function RunDiffTabPanel({
     return () => {
       cancelled = true;
     };
+    // onResolvedBase is a per-render callback from the rail; keying the fetch
+    // on it would refetch on every rail render (D-8: single fetch per runId).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId]);
 
   if (state.isLoading) {
