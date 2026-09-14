@@ -2,6 +2,7 @@ import * as path from 'path';
 import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
 import * as fs from 'fs';
 import { execSync } from 'child_process';
+import { randomUUID } from 'crypto';
 import type Database from 'better-sqlite3';
 import type * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import type { Logger } from '../../../utils/logger';
@@ -213,6 +214,15 @@ interface InteractiveClaudeSpawnOptions {
   runId?: string;
   /** When true, `--strict-mcp-config` is threaded (see parity table). */
   strictMcpConfig?: boolean;
+  /**
+   * The session uuid cyboflow MINTED for a fresh spawn, emitted as
+   * `--session-id <uuid>` so claude names its transcript `<uuid>.jsonl`. Set by
+   * spawnCliProcess (never by callers) and mutually exclusive with
+   * `resumeSessionId`, which reopens an existing file instead. Pins transcript
+   * discovery to that one file — see TranscriptTailSourceOptions.expectedSessionUuid
+   * for why snapshot-diff discovery is unsafe for a long-lived source.
+   */
+  sessionUuid?: string;
   /**
    * Text appended to the CLI's system prompt via `--append-system-prompt`. Used
    * for session context the model needs but the user never typed — the
@@ -658,6 +668,13 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // (token meter) flowing. Pushed before the end-of-options `--` separator.
     if (options.resumeSessionId) {
       args.push('--resume', options.resumeSessionId);
+    } else if (options.sessionUuid) {
+      // Fresh spawn: WE name the transcript. claude writes
+      // `~/.claude/projects/<key>/<sessionUuid>.jsonl` (verified 2.1.267:
+      // the file lands under the given uuid with a matching top-level
+      // sessionId), so the tail source waits for that exact file instead of
+      // guessing at the first new one in a directory other processes share.
+      args.push('--session-id', options.sessionUuid);
     }
 
     // strictMcpConfig: isolate to per-run .mcp.json servers only.
@@ -1207,8 +1224,14 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // (In-place sessions get theirs in the app data dir — never the checkout.)
     await this.writeInteractiveMcpConfig(worktreePath, runId, sessionId);
 
+    // A fresh spawn mints its own transcript uuid (→ `--session-id`), so
+    // discovery below is pinned to a file we named rather than to "the first
+    // new *.jsonl" in a key dir shared with sibling panels, in-place sessions,
+    // and the user's own terminal claude. A resume reopens a known file instead.
+    const sessionUuid = options.resumeSessionId ? undefined : this.mintSessionUuid();
+
     // Build args + env via the abstract hooks.
-    const args = this.buildCommandArgs({ ...options, runId });
+    const args = this.buildCommandArgs({ ...options, runId, sessionUuid });
 
     // Pass the initial prompt as claude's POSITIONAL argument so claude processes
     // it as the first REPL turn NATIVELY — replacing the former post-spawn PTY
@@ -1381,6 +1404,8 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       // turn-start edge (sendInput) so the give-up above keeps meaning "claude
       // never engaged a turn it was given", not "the user hadn't typed yet".
       deferDeadlineUntilArmed: !spawnStartsTurn,
+      // Fresh spawn: bind ONLY the file claude was told to write.
+      expectedSessionUuid: sessionUuid,
     });
     this.tailSources.set(panelId, tailSource);
 
@@ -1618,6 +1643,8 @@ export class InteractiveClaudeManager extends AbstractCliManager {
        * armed on the turn-start edge instead of at spawn.
        */
       deferDeadlineUntilArmed?: boolean;
+      /** The minted `--session-id` of a fresh spawn; pins discovery to its file. */
+      expectedSessionUuid?: string;
     },
   ): TranscriptSource {
     if (this.logger === undefined) {
@@ -1630,7 +1657,17 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       onLateBind: callbacks?.onLateBind,
       onGiveUp: callbacks?.onGiveUp,
       deferDeadlineUntilArmed: callbacks?.deferDeadlineUntilArmed === true,
+      expectedSessionUuid: callbacks?.expectedSessionUuid,
     });
+  }
+
+  /**
+   * Mint the transcript uuid a fresh spawn hands claude as `--session-id`.
+   * Overridable seam (like createTranscriptSource / spawnPtyProcess) so a
+   * real-stack test can make its fake claude write a deterministic file.
+   */
+  protected mintSessionUuid(): string {
+    return randomUUID();
   }
 
   /**

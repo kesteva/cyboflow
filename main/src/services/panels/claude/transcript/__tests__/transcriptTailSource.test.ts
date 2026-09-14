@@ -280,17 +280,18 @@ describe('TranscriptTailSource', () => {
       expect(logger.error).not.toHaveBeenCalled();
     });
 
-    it('still binds a transcript that appears while unarmed, reporting it out of band', async () => {
-      // Deferred means "no deadline", not "not watching": the spawn already
-      // returned without awaiting, so the bind must reach the manager through
-      // onLateBind or claude_session_id is never persisted.
+    it('UNPINNED: a file appearing while unarmed is a stranger\'s — absorbed, never bound', async () => {
+      // Every turn of ours passes through the arming edge first, so a new
+      // transcript while unarmed cannot be ours (an added chat panel, another
+      // in-place session, the user's terminal claude — all share the key dir).
+      // Binding it would persist a foreign uuid as this session's.
       const onLateBind = vi.fn();
       const received: unknown[] = [];
       const src = trackedSource({
         worktreePath: WORKTREE,
         projectsRoot: tmpRoot,
-        discoveryTimeoutMs: 20,
-        lateDiscoveryWindowMs: 20,
+        discoveryTimeoutMs: 40,
+        lateDiscoveryWindowMs: 5000,
         logger: makeSpyLogger(),
         onLateBind,
         deferDeadlineUntilArmed: true,
@@ -298,12 +299,72 @@ describe('TranscriptTailSource', () => {
 
       await src.start((obj) => received.push(obj));
 
-      const uuid = 'deadbeef-0000-1111-2222-333344445555';
-      fs.writeFileSync(path.join(keyDir, `${uuid}.jsonl`), assistantTextLine('typed') + '\n');
+      const foreign = 'deadbeef-0000-1111-2222-333344445555';
+      fs.writeFileSync(path.join(keyDir, `${foreign}.jsonl`), assistantTextLine('not ours') + '\n');
+      await new Promise((r) => setTimeout(r, 150));
+      expect(src.getSessionUuid()).toBeUndefined();
+      expect(onLateBind).not.toHaveBeenCalled();
+
+      // Now OUR turn starts. The foreign file is already in the snapshot, so
+      // only the file that appears from here on is a candidate.
+      src.armDiscoveryDeadline();
+      const ours = '0ca11ed0-aaaa-bbbb-cccc-ddddeeeeffff';
+      fs.writeFileSync(path.join(keyDir, `${ours}.jsonl`), assistantTextLine('ours') + '\n');
 
       await waitFor(() => received.length >= 1);
-      expect(src.getSessionUuid()).toBe(uuid);
-      expect(onLateBind).toHaveBeenCalledWith(uuid);
+      expect(src.getSessionUuid()).toBe(ours);
+      expect(onLateBind).toHaveBeenCalledWith(ours);
+    });
+
+    it('PINNED: binds exactly the expected file, even while unarmed, and ignores every other', async () => {
+      // The manager mints the uuid and passes it as `--session-id`, so the
+      // file's NAME is the proof of ownership — no snapshot, no arm state.
+      const onLateBind = vi.fn();
+      const received: unknown[] = [];
+      const ours = 'p1aced00-1234-5678-9abc-def012345678';
+      const src = trackedSource({
+        worktreePath: WORKTREE,
+        projectsRoot: tmpRoot,
+        discoveryTimeoutMs: 40,
+        lateDiscoveryWindowMs: 5000,
+        logger: makeSpyLogger(),
+        onLateBind,
+        deferDeadlineUntilArmed: true,
+        expectedSessionUuid: ours,
+      });
+
+      await src.start((obj) => received.push(obj));
+
+      // A stranger's file — even as the lone new candidate — is not ours.
+      fs.writeFileSync(path.join(keyDir, 'deadbeef-0000-1111-2222-333344445555.jsonl'), assistantTextLine('no') + '\n');
+      await new Promise((r) => setTimeout(r, 150));
+      expect(src.getSessionUuid()).toBeUndefined();
+
+      fs.writeFileSync(path.join(keyDir, `${ours}.jsonl`), assistantTextLine('yes') + '\n');
+      await waitFor(() => received.length >= 1);
+      expect(src.getSessionUuid()).toBe(ours);
+      expect(onLateBind).toHaveBeenCalledWith(ours);
+      const e0 = received[0] as { message: { content: Array<{ text: string }> } };
+      expect(e0.message.content[0].text).toBe('yes');
+    });
+
+    it('PINNED + armed: two candidates racing, only the pinned one binds', async () => {
+      // Codex's repro: an idle primary panel + an added chat in the SAME session,
+      // same key dir, same cwd — cwd matching cannot separate them; the pin can.
+      const ours = 'p1aced00-1234-5678-9abc-def012345679';
+      const src = trackedSource({
+        worktreePath: WORKTREE,
+        projectsRoot: tmpRoot,
+        discoveryTimeoutMs: 500,
+        lateDiscoveryWindowMs: 5000,
+        logger: makeSpyLogger(),
+        expectedSessionUuid: ours,
+      });
+      await src.start(() => undefined);
+      fs.writeFileSync(path.join(keyDir, 'a1b2c3d4-0000-1111-2222-333344445555.jsonl'), assistantTextLine('sibling') + '\n');
+      fs.writeFileSync(path.join(keyDir, `${ours}.jsonl`), assistantTextLine('ours') + '\n');
+      await src.waitForFirstLine(500);
+      expect(src.getSessionUuid()).toBe(ours);
     });
 
     it('an armed window that finds nothing re-defers instead of latching (slash command / paste)', async () => {
@@ -378,6 +439,8 @@ describe('TranscriptTailSource', () => {
 
       await src.start(() => undefined);
 
+      // The first turn arms; its transcript binds.
+      src.armDiscoveryDeadline();
       const uuid = 'cafebabe-9999-8888-7777-666655554444';
       fs.writeFileSync(path.join(keyDir, `${uuid}.jsonl`), assistantTextLine('bound') + '\n');
       await waitFor(() => src.getSessionUuid() !== undefined);

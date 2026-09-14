@@ -87,6 +87,8 @@ class FakeTranscriptSource implements TranscriptSource {
    * when the spawn started no turn, so the discovery clock waits for one.
    */
   deferDeadlineUntilArmed = false;
+  /** The minted `--session-id` the manager pinned discovery to (fresh spawns). */
+  expectedSessionUuid: string | undefined;
 
   /** Counts armDiscoveryDeadline() calls (the manager's turn-start edge). */
   armCalls = 0;
@@ -139,8 +141,12 @@ class TestableInteractiveClaudeManager extends InteractiveClaudeManager {
 
   // Inherited spawnPtyProcess is replaced with a fake here (test-only) so no real
   // PTY is spawned. The production class never redeclares spawnPtyProcess.
-  protected override async spawnPtyProcess(): Promise<import('@homebridge/node-pty-prebuilt-multiarch').IPty> {
+  protected override async spawnPtyProcess(
+    _command: string,
+    args: string[],
+  ): Promise<import('@homebridge/node-pty-prebuilt-multiarch').IPty> {
     const fake = new FakePty();
+    fake.args = args; // the FULL argv the production spawn would hand claude
     this.ptys.push(fake);
     return fake as unknown as import('@homebridge/node-pty-prebuilt-multiarch').IPty;
   }
@@ -151,10 +157,12 @@ class TestableInteractiveClaudeManager extends InteractiveClaudeManager {
       onLateBind?: (sessionUuid: string) => void;
       onGiveUp?: () => void;
       deferDeadlineUntilArmed?: boolean;
+      expectedSessionUuid?: string;
     },
   ): TranscriptSource {
     const src = new FakeTranscriptSource(this.nextSessionUuid);
     src.deferDeadlineUntilArmed = callbacks?.deferDeadlineUntilArmed === true;
+    src.expectedSessionUuid = callbacks?.expectedSessionUuid;
     src.onLateBind = callbacks?.onLateBind;
     this.fakeSources.push(src);
     return src;
@@ -1586,6 +1594,52 @@ describe('InteractiveClaudeManager', () => {
       mgr.notifyTurnEnd('panel-dd3');
       mgr.sendInput('panel-dd3', 'second turn\r');
       expect(src.armCalls).toBe(2);
+
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+
+    it('a fresh spawn mints a --session-id and pins discovery to that exact uuid', async () => {
+      // The pin is what makes a long-lived source safe: the key dir is shared
+      // with sibling panels and in-place sessions, and cwd cannot tell them
+      // apart. The uuid claude is told to use IS the file we wait for.
+      const spawn = mgr.spawnCliProcess({
+        panelId: 'panel-dd6',
+        sessionId: 'sess-dd6',
+        worktreePath: '/tmp/wt-dd6',
+        prompt: '',
+      });
+      await waitFor(() => mgr.ptys.length > 0 && mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
+
+      const args = mgr.ptys[0].args;
+      const idx = args.indexOf('--session-id');
+      expect(idx).toBeGreaterThanOrEqual(0);
+      const minted = args[idx + 1];
+      expect(minted).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      expect(mgr.fakeSources[0].expectedSessionUuid).toBe(minted);
+      expect(args).not.toContain('--resume');
+
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+
+    it('a resume reopens the known file: --resume, no --session-id, no pin', async () => {
+      const spawn = mgr.spawnCliProcess({
+        panelId: 'panel-dd7',
+        sessionId: 'sess-dd7',
+        worktreePath: '/tmp/wt-dd7',
+        prompt: '',
+        resumeSessionId: 'known-uuid-777',
+      });
+      await waitFor(() => mgr.ptys.length > 0 && mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
+
+      const args = mgr.ptys[0].args;
+      expect(args).not.toContain('--session-id');
+      expect(args[args.indexOf('--resume') + 1]).toBe('known-uuid-777');
+      expect(mgr.fakeSources[0].expectedSessionUuid).toBeUndefined();
+      expect(mgr.fakeSources[0].bindKnownFileFromEndCalls).toEqual(['known-uuid-777']);
 
       mgr.ptys[0].fireExit(0);
       await new Promise((r) => setTimeout(r, 600));

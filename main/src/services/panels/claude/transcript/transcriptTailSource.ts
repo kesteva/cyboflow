@@ -72,6 +72,24 @@ export interface TranscriptTailSourceOptions {
    * deferred source.
    */
   deferDeadlineUntilArmed?: boolean;
+  /**
+   * PIN discovery to one exact file: `<expectedSessionUuid>.jsonl`. The manager
+   * mints this uuid and hands it to claude as `--session-id`, so the transcript
+   * claude writes is named by US before it exists — discovery becomes "wait for
+   * that file", with no snapshot-diff and no candidate ambiguity.
+   *
+   * This is what makes a long-lived (deferred) source safe. Unpinned discovery
+   * binds the first NEW `.jsonl` in the key dir, and the key dir is shared by
+   * every process whose cwd encodes to it: two in-place quick sessions on the
+   * same project, an added chat panel beside an idle primary, the user's own
+   * terminal `claude`, an SDK flow run hosted in the same worktree. Matching
+   * the transcript's `cwd` cannot tell those apart — they share it. A source
+   * that watches for a session's whole idle life would bind whichever of them
+   * wrote first and persist a stranger's uuid as this session's.
+   *
+   * Omitted → legacy snapshot-diff discovery (tests; never production spawns).
+   */
+  expectedSessionUuid?: string;
   /** REQUIRED structural logger (CODE-PATTERNS.md optional-logger rule). */
   logger: StructuralLogger;
   /**
@@ -140,6 +158,8 @@ export class TranscriptTailSource implements TranscriptSource {
    * and has long since returned.
    */
   private readonly deferDeadline: boolean;
+  /** The pinned transcript basename (`<uuid>.jsonl`), or undefined for snapshot-diff. */
+  private readonly expectedBasename: string | undefined;
   /** The discovery deadline is running (always true from `start()` unless deferred). */
   private deadlineArmed = false;
 
@@ -173,6 +193,8 @@ export class TranscriptTailSource implements TranscriptSource {
     this.lateDiscoveryWindowMs =
       opts.lateDiscoveryWindowMs ?? DEFAULT_LATE_DISCOVERY_WINDOW_MS;
     this.deferDeadline = opts.deferDeadlineUntilArmed === true;
+    this.expectedBasename =
+      opts.expectedSessionUuid !== undefined ? `${opts.expectedSessionUuid}.jsonl` : undefined;
     this.logger = opts.logger;
     this.onLateBind = opts.onLateBind;
     this.onGiveUp = opts.onGiveUp;
@@ -251,6 +273,9 @@ export class TranscriptTailSource implements TranscriptSource {
    */
   armDiscoveryDeadline(): void {
     if (this.deadlineArmed || this.bound || this.stopped || this.discoveryGaveUp) return;
+    // Unpinned: "new" is measured from the turn start, not from spawn — anything
+    // that appeared while we were idle belongs to another process.
+    if (this.expectedBasename === undefined) this.snapshot = this.listJsonlBasenames();
     this.deadlineArmed = true;
     // Upshift the poll: a turn is in flight, so the transcript is imminent.
     if (this.discoveryInterval !== undefined) {
@@ -263,7 +288,7 @@ export class TranscriptTailSource implements TranscriptSource {
       this.onDiscoveryTimeout();
     }, this.discoveryTimeoutMs);
     this.logger.verbose?.(
-      `[Cyboflow Transcript] discovery deadline ARMED in ${this.keyDir} — a turn started, expecting a transcript within ${this.discoveryTimeoutMs}ms`,
+      `[Cyboflow Transcript] discovery deadline ARMED in ${this.keyDir} — expecting ${this.expectedBasename ?? 'a new *.jsonl'} within ${this.discoveryTimeoutMs}ms`,
     );
     this.tryDiscover();
   }
@@ -335,7 +360,26 @@ export class TranscriptTailSource implements TranscriptSource {
     // or stop()) is the terminal guard instead.
     if (this.bound || this.stopped || this.discoveryGaveUp) return;
 
+    // PINNED: the only file that can be ours is the one claude was told to
+    // write. Its appearance is proof of ownership regardless of arm state.
+    if (this.expectedBasename !== undefined) {
+      if (fs.existsSync(path.join(this.keyDir, this.expectedBasename))) {
+        this.bindFile(this.expectedBasename);
+      }
+      return;
+    }
+
     const current = this.listJsonlBasenames();
+
+    // UNPINNED + UNARMED: nothing of ours can appear — every turn of ours passes
+    // through the arming edge first — so a new file now is somebody else's.
+    // Absorb it into the snapshot instead of binding it, so that when we DO arm,
+    // "new" means "since the turn started".
+    if (this.deferDeadline && !this.deadlineArmed) {
+      this.snapshot = current;
+      return;
+    }
+
     const candidates: string[] = [];
     for (const name of current) {
       if (!this.snapshot.has(name)) candidates.push(name);
@@ -531,6 +575,12 @@ export class TranscriptTailSource implements TranscriptSource {
    */
   private giveUpDiscovery(): void {
     if (this.bound || this.stopped || this.discoveryGaveUp) return;
+    // One last look before concluding nothing appeared: the low-frequency poll
+    // can be up to LATE_POLL_INTERVAL_MS behind a file that landed just inside
+    // the window, and a deferred re-defer would otherwise absorb that file as a
+    // stranger's on its next unarmed tick.
+    this.tryDiscover();
+    if (this.bound) return;
     this.clearLateDiscovery();
     if (this.deferDeadline) {
       this.redefer();
