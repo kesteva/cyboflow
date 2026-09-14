@@ -108,8 +108,23 @@ az vm start -g cyboflow-wintest-w3 -n cyboflow-win11        # ~40 s from dealloc
 az vm run-command invoke -g cyboflow-wintest-w3 -n cyboflow-win11 \
   --command-id RunPowerShellScript --scripts @vm-test.ps1 \
   --query 'value[0].message' -o tsv
-az vm deallocate -g cyboflow-wintest-w3 -n cyboflow-win11   # ALWAYS — it bills while running
 ```
+
+> **DEALLOCATE THE VM WHEN YOU ARE DONE — this is not optional.**
+>
+> ```bash
+> az vm deallocate -g cyboflow-wintest-w3 -n cyboflow-win11
+> az vm list -g cyboflow-wintest-w3 -d --query '[].powerState' -o tsv   # must read "VM deallocated"
+> ```
+>
+> A D4s_v6 bills for every hour it is *running*, whether or not anything is
+> using it — stopping it from inside Windows is **not** enough, only
+> `az vm deallocate` releases the compute. Verify the power state rather than
+> trusting the deallocate call; do it as soon as the Windows work is proven,
+> not at the end of the release, because the rest of the cut is another hour
+> of macOS builds during which the box would sit idle and billing. This is
+> also the single easiest step in this runbook to walk away from, since
+> nothing downstream fails if you forget.
 
 Notes that cost time to rediscover:
 

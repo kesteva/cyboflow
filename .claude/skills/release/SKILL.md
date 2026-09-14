@@ -105,8 +105,21 @@ az vm start -g cyboflow-wintest-w3 -n cyboflow-win11        # ~40 s
 az vm run-command invoke -g cyboflow-wintest-w3 -n cyboflow-win11 \
   --command-id RunPowerShellScript --scripts @vm-test.ps1 \
   --query 'value[0].message' -o tsv
-az vm deallocate -g cyboflow-wintest-w3 -n cyboflow-win11   # ALWAYS — bills while running
 ```
+
+**DEALLOCATE THE VM AS SOON AS THE WINDOWS WORK IS PROVEN — mandatory, and do
+not defer it to the end of the release** (the remaining macOS builds are
+another hour the box would spend idle and billing):
+
+```bash
+az vm deallocate -g cyboflow-wintest-w3 -n cyboflow-win11
+az vm list -g cyboflow-wintest-w3 -d --query '[].powerState' -o tsv   # must read "VM deallocated"
+```
+
+Verify the power state — do not trust the deallocate call. A D4s_v6 bills for
+every running hour whether or not anything uses it, and shutting Windows down
+from inside does NOT release the compute. Nothing downstream fails if you skip
+this, which is exactly why it gets forgotten.
 
 Once targeted fixes pass, run the **full** suite there (`npx vitest run`,
 ~10 min) before pushing: it surfaces the *next* Windows failure immediately
