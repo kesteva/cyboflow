@@ -7,6 +7,8 @@ import { existsSync } from 'fs';
 import type { AppServices } from './types';
 import type { CreateSessionRequest } from '../types/session';
 import { getCyboflowSubdirectory } from '../utils/cyboflowDirectory';
+import { safeRunId } from '../orchestrator/artifactSnapshot';
+import { attachmentExtension, isPendingAttachmentOwner } from './attachmentNaming';
 import { panelManager } from '../services/panelManager';
 import { trackUsage } from '../services/telemetry';
 import { reportEagerSpawnFailure } from './eagerSpawnFailure';
@@ -1906,8 +1908,10 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           }
         }
 
-        // Clean up session artifacts (images)
-        const artifactsDir = getCyboflowSubdirectory('artifacts', sessionId);
+        // Clean up session artifacts (images). safeRunId is defense in depth —
+        // a no-op for every id this app mints, a containment guarantee for
+        // anything else — matching the join used when the artifacts were saved.
+        const artifactsDir = getCyboflowSubdirectory('artifacts', safeRunId(sessionId));
         if (existsSync(artifactsDir)) {
           try {
             // Update progress: cleaning artifacts
@@ -3604,7 +3608,13 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
    * The id is used ONLY as the `artifacts/<id>` directory key, but it must still
    * name something this app owns so a renderer can never write an arbitrary path
    * segment. Three owners are legal:
-   *   - `pending_*`  — a session id minted before the session row exists.
+   *   - `pending_*`  — an owner key minted before its backing row exists. Today
+   *     only the idea-attachment dialogs mint one (and they go through
+   *     ideas:save-attachments, not these handlers), so this arm is kept for
+   *     parity rather than live traffic. It must match the exact minted shape
+   *     (isPendingAttachmentOwner) — a malformed pending id (e.g. one carrying
+   *     `..`/`/` segments) does NOT short-circuit here and instead falls through
+   *     to the session/run lookups below, where it is rejected as unknown.
    *   - a session id — quick-session chat (useClaudePanel / QuickSessionComposer).
    *   - a WORKFLOW RUN id — the run-chat composer, the AskUserQuestion card, and
    *     the question-gate answer path all namespace by runId. A run id is NOT a
@@ -3613,7 +3623,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
    *     which is why attaching an image to a flow run's chat failed outright.
    */
   const assertAttachmentOwner = async (ownerId: string): Promise<void> => {
-    if (ownerId.startsWith('pending_')) return;
+    if (isPendingAttachmentOwner(ownerId)) return;
     if (await sessionManager.getSession(ownerId)) return;
     if (cyboflow.workflowRegistry.getRunById(ownerId)) return;
     throw new Error('Attachment owner not found');
@@ -3623,19 +3633,22 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     try {
       await assertAttachmentOwner(ownerId);
 
-      // Create images directory in CYBOFLOW_DIR/artifacts/{ownerId}
-      const imagesDir = getCyboflowSubdirectory('artifacts', ownerId);
+      // Create images directory in CYBOFLOW_DIR/artifacts/{ownerId}.
+      // safeRunId is defense in depth here — a no-op for every id this app
+      // mints (session/run UUIDs, pending_<base36>), and a containment
+      // guarantee against anything else that reached this point.
+      const imagesDir = getCyboflowSubdirectory('artifacts', safeRunId(ownerId));
       if (!existsSync(imagesDir)) {
         await fs.mkdir(imagesDir, { recursive: true });
       }
 
       const savedPaths: string[] = [];
-      
+
       for (const image of images) {
         // Generate unique filename
         const timestamp = Date.now();
         const randomStr = Math.random().toString(36).substring(2, 9);
-        const extension = image.type.split('/')[1] || 'png';
+        const extension = attachmentExtension(image.name, image.type, 'png');
         const filename = `${timestamp}_${randomStr}.${extension}`;
         const filePath = path.join(imagesDir, filename);
 
@@ -3663,7 +3676,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       await assertAttachmentOwner(ownerId);
 
       // Create text directory in CYBOFLOW_DIR/artifacts/{ownerId}
-      const textDir = getCyboflowSubdirectory('artifacts', ownerId);
+      const textDir = getCyboflowSubdirectory('artifacts', safeRunId(ownerId));
       if (!existsSync(textDir)) {
         await fs.mkdir(textDir, { recursive: true });
       }
