@@ -389,3 +389,112 @@ describe('GitDiffManager.hasChanges (async)', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// TASK-208: caller-supplied `ref` reaching the four `runGitAsync(['diff', ...,
+// ref])` argv sites bare is a `git diff` OPTION-INJECTION hole — a ref of
+// `--output=<path>` is a valid `git diff` option that writes an arbitrary
+// file and returns empty stdout, silently defeating the "unresolvable ref
+// falls back" contract. Every caller-supplied ref must be rev-parse-resolved
+// (and rejected outright when it is option-like) BEFORE it reaches argv.
+//
+// These cases are written against the REQUIRED post-fix behavior and are
+// EXPECTED TO FAIL against the pre-fix code (ref passed to runGitAsync bare):
+// the pre-fix `git diff --output=<marker>` call actually creates the marker
+// file, which is exactly what `fs.existsSync(marker) === false` catches.
+// ---------------------------------------------------------------------------
+
+describe('GitDiffManager — ref option-injection guard (TASK-208)', () => {
+  function markerPath(uniq: string): string {
+    return path.join(os.tmpdir(), `cyboflow-pwn-${uniq}`);
+  }
+
+  it(
+    'getDiffStatsAgainstRef rejects a --output= injection ref before it reaches `git diff --numstat` (argv site :136)',
+    async () => {
+      await withTempDir('gitdiff-inject-numstat-', async (repo) => {
+        initRepoMain(repo);
+        commitFile(repo, 'a.txt', 'a1\n', 'base');
+
+        const marker = markerPath(`numstat-${Date.now()}`);
+        expect(fs.existsSync(marker)).toBe(false);
+
+        const manager = new GitDiffManager();
+        const maliciousRef = `--output=${marker}`;
+
+        try {
+          // Must not throw: an unresolvable/rejected ref is a fallback
+          // trigger, not an exception the caller has to handle.
+          const result = await manager.getDiffStatsAgainstRef(repo, maliciousRef);
+
+          expect(fs.existsSync(marker)).toBe(false);
+          // The malicious "ref" must never be treated as a real diff target.
+          expect(result.stats).toEqual({ additions: 0, deletions: 0, filesChanged: 0 });
+        } finally {
+          if (fs.existsSync(marker)) fs.unlinkSync(marker);
+        }
+      });
+    },
+  );
+
+  it(
+    'captureDiffAgainstRef rejects a --output= injection ref across its diff/changedFiles/stat legs (argv sites :468, :501, :527)',
+    async () => {
+      await withTempDir('gitdiff-inject-captureref-', async (repo) => {
+        initRepoMain(repo);
+        commitFile(repo, 'a.txt', 'a1\n', 'base');
+
+        const marker = markerPath(`captureref-${Date.now()}`);
+        expect(fs.existsSync(marker)).toBe(false);
+
+        const manager = new GitDiffManager();
+        const maliciousRef = `--output=${marker}`;
+
+        try {
+          const result = await manager.captureDiffAgainstRef(repo, maliciousRef);
+
+          // Site :468 (`git diff <ref>`) — must not have written the marker file.
+          expect(fs.existsSync(marker)).toBe(false);
+          // Site :501 (`git diff --name-only <ref>`) leg — no spurious entries
+          // from a "successful" injected option run.
+          expect(result.changedFiles).not.toContain(marker);
+          // Site :527 (`git diff --stat <ref>`) leg — stats fall back to a safe
+          // default rather than reflecting a garbage/empty stdout as "no changes
+          // vs a valid ref".
+          expect(result.stats).toEqual({ additions: 0, deletions: 0, filesChanged: 0 });
+        } finally {
+          if (fs.existsSync(marker)) fs.unlinkSync(marker);
+        }
+      });
+    },
+  );
+
+  it('getDiffStatsAgainstRef falls back without throwing for a benign but unresolvable ref', async () => {
+    await withTempDir('gitdiff-unresolvable-numstat-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'a.txt', 'a1\n', 'base');
+
+      const manager = new GitDiffManager();
+      // Pre-fix, an unresolvable ref propagates as a thrown git error instead
+      // of triggering the fallback — surface that as a normal assertion
+      // failure rather than an unhandled rejection.
+      await expect(manager.getDiffStatsAgainstRef(repo, 'no-such-branch')).resolves.toEqual(
+        expect.objectContaining({ stats: { additions: 0, deletions: 0, filesChanged: 0 } }),
+      );
+    });
+  });
+
+  it('captureDiffAgainstRef falls back without throwing for a benign but unresolvable ref', async () => {
+    await withTempDir('gitdiff-unresolvable-captureref-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'a.txt', 'a1\n', 'base');
+
+      const manager = new GitDiffManager();
+      const result = await manager.captureDiffAgainstRef(repo, 'no-such-branch');
+
+      expect(result).toBeDefined();
+      expect(result.changedFiles).toEqual([]);
+      expect(result.stats).toEqual({ additions: 0, deletions: 0, filesChanged: 0 });
+    });
+  });
+});
