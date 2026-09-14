@@ -1,5 +1,5 @@
 import * as fs from 'node:fs';
-import { runGitAsync, END_OF_OPTIONS } from '../utils/runGit';
+import { runGitAsync, END_OF_OPTIONS, assertNotOptionLike } from '../utils/runGit';
 import type { Logger } from '../utils/logger';
 
 export interface GitDiffStats {
@@ -430,6 +430,9 @@ export class GitDiffManager {
   private async resolveRefForDiff(worktreePath: string, ref: string): Promise<string | null> {
     if (!ref) return null;
     try {
+      // Belt-and-braces alongside END_OF_OPTIONS below: reject a `-`-prefixed
+      // ref locally rather than relying solely on git's own marker support.
+      assertNotOptionLike(ref, 'diff ref');
       const resolved = (
         await runGitAsync(worktreePath, ['rev-parse', '--verify', END_OF_OPTIONS, `${ref}^{commit}`])
       ).trim();

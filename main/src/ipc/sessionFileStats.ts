@@ -65,8 +65,9 @@ export async function resolveSessionDiffBaseRef(
       // --end-of-options forces the value position (TASK-208). Return the
       // RESOLVED sha (rev-parse's stdout), not the candidate string, so the
       // caller diffs against a concrete commit rather than a moving/ambiguous
-      // ref name. Fall back to the candidate itself in the (git-cannot-happen
-      // in practice, but harmless) case rev-parse succeeds with empty stdout.
+      // ref name. If rev-parse succeeds with empty stdout (git-cannot-happen
+      // in practice, but this function must never hand back the raw candidate
+      // string on any path), fall through and try the next candidate instead.
       const resolved = (
         await runGitAsync(worktreePath, [
           'rev-parse',
@@ -76,7 +77,7 @@ export async function resolveSessionDiffBaseRef(
           `${candidate}^{commit}`,
         ])
       ).trim();
-      return resolved || candidate;
+      if (resolved) return resolved;
     } catch {
       // Unresolvable in this worktree — try the next candidate.
     }

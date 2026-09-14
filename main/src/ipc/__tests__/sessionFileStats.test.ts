@@ -74,6 +74,7 @@ describe('resolveSessionDiffBaseRef', () => {
       const result = await resolveSessionDiffBaseRef(tmpDir, [`--output=${marker}`, 'main']);
 
       expect(result).toBe(sha);
+      expect(result).toMatch(/^[0-9a-f]{40}$/);
       expect(fs.existsSync(marker)).toBe(false);
     });
   });
