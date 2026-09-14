@@ -299,6 +299,7 @@ function makeServices(opts?: {
 
   const fakeTaskQueue = {
     createSession: vi.fn().mockResolvedValue({ id: 'job-001' }),
+    onSessionJobFailed: vi.fn(() => () => {}),
   };
 
   const fakeDatabaseService = {

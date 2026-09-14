@@ -734,6 +734,7 @@ export class API {
   };
 
 
+
   static models = {
     /** Snapshot of guarded-model (Fable 5.1) availability. Empty map = all usable. */
     async getAvailability() {

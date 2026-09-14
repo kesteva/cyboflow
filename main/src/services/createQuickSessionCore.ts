@@ -61,7 +61,11 @@ export interface QuickSessionJobData {
 
 /** The collaborators the core needs — structural so both IPC + boot wiring inject them. */
 export interface CreateQuickSessionCoreDeps {
-  taskQueue: { createSession(data: QuickSessionJobData): Promise<{ id: string }> };
+  taskQueue: {
+    createSession(data: QuickSessionJobData): Promise<{ id: string }>;
+    /** Job-failure feed (TaskQueue.onSessionJobFailed); returns the disposer. */
+    onSessionJobFailed(listener: (jobId: string, error: Error) => void): () => void;
+  };
   /** SessionManager EventEmitter surface (session-created fires when the worktree+row land). */
   sessionManager: {
     on(event: 'session-created', listener: (s: QuickSessionRow) => void): void;
@@ -181,6 +185,18 @@ export async function createQuickSessionCore(
   const branchName = opts.nameHint;
   const inPlace = opts.inPlace === true;
 
+  // Job failures are subscribed BEFORE the job is enqueued: the processor's
+  // throw is otherwise swallowed into a queue log line, and the only thing the
+  // caller would ever see is its own 30s timeout (that is how a missing git /
+  // git identity hid for a whole release). The id is not known until
+  // createSession resolves, so failures that land in between are parked by id
+  // and re-checked once it is.
+  const failedJobs = new Map<string, Error>();
+  let onJobFailed: (jobId: string, error: Error) => void = (jobId, error) => {
+    failedJobs.set(jobId, error);
+  };
+  const unsubscribeJobFailed = taskQueue.onSessionJobFailed((jobId, error) => onJobFailed(jobId, error));
+
   const job = await taskQueue.createSession({
     prompt: '',
     worktreeTemplate: branchName,
@@ -225,15 +241,28 @@ export async function createQuickSessionCore(
       // Claim the session id so a concurrent sibling call doesn't also resolve to it.
       if (claimedQuickSessionIds.has(createdSession.id)) return;
       claimedQuickSessionIds.add(createdSession.id);
-      clearTimeout(timeout);
-      sessionManager.removeListener('session-created', onCreated);
+      cleanup();
       resolve(createdSession);
     };
+    const failWith = (error: Error) => {
+      cleanup();
+      reject(new Error(`Quick session creation failed: ${error.message}`));
+    };
     const timeout = setTimeout(() => {
-      sessionManager.removeListener('session-created', onCreated);
+      cleanup();
       reject(new Error('Timed out waiting for quick session to be created'));
     }, opts.timeoutMs ?? 30_000);
+    const cleanup = () => {
+      clearTimeout(timeout);
+      sessionManager.removeListener('session-created', onCreated);
+      unsubscribeJobFailed();
+    };
     sessionManager.on('session-created', onCreated);
+    onJobFailed = (jobId, error) => {
+      if (jobId === job.id) failWith(error);
+    };
+    const alreadyFailed = failedJobs.get(job.id);
+    if (alreadyFailed) failWith(alreadyFailed);
   });
 
   // Everything past here runs AFTER the worktree + session row are provisioned, so

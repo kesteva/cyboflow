@@ -26,6 +26,7 @@ import type { WorkflowVariantRow, WorkflowVariantStatus } from '../../../../shar
 import type { AgentThread, AgentProposal, AgentProposalStatus } from '../../../../shared/types/agentThread';
 import type { ExecuteProposalResult } from '../agentThread/proposalExecutor';
 import type { ConfigOpsLike } from './contracts/configOps';
+import type { GitPrerequisiteOpsLike } from './contracts/gitPrerequisiteOps';
 import type { WorkspaceFileOpsLike } from './contracts/workspaceFileOps';
 import type { SessionGitOpsLike } from './contracts/sessionGitOps';
 import type { SessionOpsLike } from './contracts/sessionOps';
@@ -484,6 +485,15 @@ export interface ContextDeps {
   configOps?: ConfigOpsLike;
 
   /**
+   * The onboarding git probe + identity writer (the `gitPrerequisite`
+   * router's business logic). Injected from `main/src/index.ts` via
+   * `createGitPrerequisiteOps()` (main/src/ipc/gitPrerequisite.ts); the
+   * narrow {@link GitPrerequisiteOpsLike} keeps the standalone-typecheck
+   * invariant. `undefined` (the unit-test default) ⇒ PRECONDITION_FAILED.
+   */
+  gitPrerequisiteOps?: GitPrerequisiteOpsLike;
+
+  /**
    * Live workspace-file-ops implementation (the `workspaceFiles` router's
    * business logic — session-worktree and project-directory file I/O, plus
    * the worktree/project-scoped git mutations that have always lived
@@ -597,6 +607,7 @@ export function createContext(deps: ContextDeps = {}): {
   ompAriaMode?: () => boolean;
   verifyRunbookStatus?: VerifyRunbookStatusLike;
   configOps?: ConfigOpsLike;
+  gitPrerequisiteOps?: GitPrerequisiteOpsLike;
   workspaceFileOps?: WorkspaceFileOpsLike;
   sessionGitOps?: SessionGitOpsLike;
   sessionOps?: SessionOpsLike;
@@ -621,6 +632,7 @@ export function createContext(deps: ContextDeps = {}): {
     ompAriaMode,
     verifyRunbookStatus,
     configOps,
+    gitPrerequisiteOps,
     workspaceFileOps,
     sessionGitOps,
     sessionOps,
@@ -652,6 +664,7 @@ export function createContext(deps: ContextDeps = {}): {
     ompAriaMode,
     verifyRunbookStatus,
     configOps,
+    gitPrerequisiteOps,
     workspaceFileOps,
     sessionGitOps,
     sessionOps,
