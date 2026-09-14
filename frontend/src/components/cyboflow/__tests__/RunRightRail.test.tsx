@@ -203,6 +203,18 @@ vi.mock('../BaseSelector', () => ({
   ),
 }));
 
+// Stub WorktreeStrip (its own suite, TASK-219, covers its internals) so
+// rail-level Diff-tab tests stay deterministic and never fire the real
+// WorktreeStrip's own API.sessions.getCombinedDiff / trpc calls against an
+// unmocked utils/api module.
+vi.mock('../WorktreeStrip', () => ({
+  WorktreeStrip: ({ sessionId }: { sessionId: string | null }) => (
+    <div data-testid="worktree-strip-mock">
+      <span data-testid="worktree-strip-mock-session-id">{sessionId ?? ''}</span>
+    </div>
+  ),
+}));
+
 // The Artifacts tab renders the REAL ArtifactsPanel (its own suite covers its
 // internals) — only its data source is stubbed here so this file never fires
 // the real tRPC artifacts client. Empty list is enough to prove which arm of

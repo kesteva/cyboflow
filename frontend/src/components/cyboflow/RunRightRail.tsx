@@ -44,6 +44,7 @@ import { SessionFileExplorer } from './SessionFileExplorer';
 import { RunDiffTabPanel } from './RunDiffTabPanel';
 import { SessionDiffTabPanel } from './SessionDiffTabPanel';
 import { BaseSelector } from './BaseSelector';
+import { WorktreeStrip } from './WorktreeStrip';
 import { ArtifactsPanel } from './ArtifactsPanel';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
@@ -478,6 +479,9 @@ export function RunRightRail({
                 selectedRef={selectedComparisonRef}
                 onChange={handleComparisonBaseChange}
               />
+            </div>
+            <div className="shrink-0 border-b border-border-primary p-2">
+              <WorktreeStrip sessionId={selectedSessionId} />
             </div>
             <div className="flex-1 overflow-hidden">
               {activeRunId !== null ? (
