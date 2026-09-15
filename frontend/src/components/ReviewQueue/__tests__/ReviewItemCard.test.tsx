@@ -164,6 +164,43 @@ describe('ReviewItemCard', () => {
     expect(mockDismiss).not.toHaveBeenCalled();
   });
 
+  it('generic decision gates keep the plain Approve & resume / Reject copy', () => {
+    render(
+      <ReviewItemCard
+        item={makeItem('decision', { id: 'rvw_plan', blocking: true, source: 'gate:human-step:approve-plan' })}
+        surface="session"
+      />,
+    );
+    expect(screen.getByTestId('decision-resolve')).toHaveTextContent('Approve & resume');
+    expect(screen.getByTestId('decision-reject')).toHaveTextContent('Reject');
+  });
+
+  it("the approve-design gate (Tier 2, item 12b) relabels the buttons for its revision loop, by SOURCE", () => {
+    render(
+      <ReviewItemCard
+        item={makeItem('decision', { id: 'rvw_design', blocking: true, source: 'gate:human-step:approve-design' })}
+        surface="session"
+      />,
+    );
+    expect(screen.getByTestId('decision-resolve')).toHaveTextContent('Continue, log as findings');
+    expect(screen.getByTestId('decision-reject')).toHaveTextContent('Rerun planning with findings');
+  });
+
+  it('the approve-design gate also relabels by PAYLOAD when minted on the orchestrated plane (no gate:human-step source)', () => {
+    render(
+      <ReviewItemCard
+        item={makeItem(
+          'decision',
+          { id: 'rvw_design_orch', blocking: true, source: 'agent:planner' },
+          { kind: 'decision', gate: 'approve-design' } as unknown as ReviewItemPayload,
+        )}
+        surface="session"
+      />,
+    );
+    expect(screen.getByTestId('decision-resolve')).toHaveTextContent('Continue, log as findings');
+    expect(screen.getByTestId('decision-reject')).toHaveTextContent('Rerun planning with findings');
+  });
+
   it('ask-user-question-recovery gate renders the recovered options as answer buttons', () => {
     const item = makeItem(
       'decision',
