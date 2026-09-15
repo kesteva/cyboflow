@@ -29,6 +29,9 @@ import { LiveTail } from '../../chat/LiveTail';
 import { reduceLiveTail, hasVisibleTailContent } from '../../../utils/liveTailReducer';
 import { AGENT_PROVIDER_LABELS } from '../../../../../shared/types/agentRuntime';
 import { providerForRuntime } from '../../cyboflow/agentRuntimeUi';
+import { ClaudeSignInCard } from '../../session/ClaudeSignInCard';
+import { findClaudeLoginRequired } from '../../../utils/findClaudeLoginRequired';
+import { isClaudeLoginRequiredError } from '../../../../../shared/types/claudeAuth';
 
 // Sessions whose open-time resume prompt the user explicitly declined ("Start
 // fresh") this app run. Module-level so the decision survives ClaudePanel
@@ -331,6 +334,47 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // substrate, whose live xterm owns the conversation surface.
   const { messages, loadError } = useUnifiedPanelMessages(panel.id, !isInteractive);
 
+  // Expired Claude login → the in-app sign-in card at the end of the
+  // transcript. Two triggers, one card: the CLI's is_error RESULT (a projected
+  // system/error row — findClaudeLoginRequired) and a THROWN SDK error, which
+  // writes no transcript row at all and only lands on the session's `error`
+  // (events.ts 'error' handler) — invisible in the chat without this. Claude
+  // SDK sessions only: the interactive PTY owns its own /login, and Codex/OMP
+  // auth is theirs.
+  const claudeLoginRequired =
+    !isInteractive &&
+    paneProvider === 'claude' &&
+    (findClaudeLoginRequired(messages) ||
+      (paneSession?.status === 'error' && isClaudeLoginRequiredError(paneSession.error)));
+  // The prompt that failed, so a successful sign-in can hand it straight back
+  // to the composer instead of asking the user to retype it.
+  const lastUserPrompt = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (message.role !== 'user') continue;
+      const text = message.segments
+        .filter((segment): segment is Extract<typeof segment, { type: 'text' }> => segment.type === 'text')
+        .map((segment) => segment.content)
+        .join('\n')
+        .trim();
+      return text.length > 0 ? text : null;
+    }
+    return null;
+  }, [messages]);
+  const { setInput: hookSetInput, textareaRef: hookTextareaRef } = hook;
+  const restoreLastPrompt = useCallback(() => {
+    if (lastUserPrompt === null) return;
+    hookSetInput(lastUserPrompt);
+    hookTextareaRef.current?.focus();
+  }, [lastUserPrompt, hookSetInput, hookTextareaRef]);
+  const claudeSignInSlot = claudeLoginRequired ? (
+    <ClaudeSignInCard
+      onSignedIn={lastUserPrompt !== null ? restoreLastPrompt : undefined}
+      onRetry={lastUserPrompt !== null ? restoreLastPrompt : undefined}
+      retryLabel="Put it back in the composer"
+    />
+  ) : undefined;
+
   // Pending-send (optimistic echo) — keyed by panel.id (the same id passed as
   // railId + the QuickSessionComposer hostKey). Reconcile against the transcript
   // so a 'sending'/'queued' row is dropped once its real user turn appears.
@@ -616,6 +660,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
         loadError={loadError}
         isWaitingForResponse={isWaitingForResponse}
         liveTail={liveTail}
+        transcriptEndSlot={claudeSignInSlot}
         folderLabel={folderLabel}
         folderTitle={worktreePath}
         branchName={branchName}
