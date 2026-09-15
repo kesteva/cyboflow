@@ -71,6 +71,8 @@ function rethrowAsTRPCError(err: unknown): never {
       concurrency: 'CONFLICT',
       invalid_dependency: 'BAD_REQUEST',
       dependency_cycle: 'CONFLICT',
+      // executor is tasks-only (migration 137) — a caller bug, not a conflict.
+      invalid_executor: 'BAD_REQUEST',
       idea_needs_epic: 'CONFLICT',
       experiment_sandboxed: 'CONFLICT',
       experiment_sweep_failed: 'INTERNAL_SERVER_ERROR',
@@ -94,6 +96,8 @@ const taskTypeSchema = z.enum(['idea', 'epic', 'task']);
 const prioritySchema = z.enum(['P0', 'P1', 'P2', 'P3', 'P4', 'P5', 'P6']); // migration 117 widen
 const categorySchema = z.enum(['feature', 'bug', 'chore']);
 const scopeSchema = z.enum(['small', 'large']);
+/** WHO performs the task (migration 137) — tasks-only; the chokepoint rejects it elsewhere. */
+const executorSchema = z.enum(['agent', 'human']);
 
 /**
  * One idea file attachment (migration 028) — any file type, not just images.
@@ -255,6 +259,13 @@ export const tasksRouter = router({
         repo: z.string().nullable().optional(),
         /** Idea size hint — only meaningful on type='idea' (chokepoint ignores it otherwise). */
         scope: scopeSchema.nullable().optional(),
+        /**
+         * WHO performs the work (migration 137) — valid ONLY on type='task'; the
+         * chokepoint REJECTS it on an idea/epic (invalid_executor) rather than
+         * dropping it, because a dropped 'human' would put the work back in a
+         * sprint's path. Defaults to 'agent'.
+         */
+        executor: executorSchema.optional(),
         /** File attachments — only meaningful on type='idea' (chokepoint ignores it otherwise). */
         attachments: z.array(attachmentSchema).nullable().optional(),
         parentEpicId: z.string().nullable().optional(),
@@ -274,6 +285,7 @@ export const tasksRouter = router({
           category: input.category,
           repo: input.repo,
           scope: input.scope,
+          executor: input.executor,
           attachments: input.attachments,
           parentEpicId: input.parentEpicId,
           boardId: input.boardId,
@@ -308,6 +320,8 @@ export const tasksRouter = router({
         repo: z.string().nullable().optional(),
         /** Idea size hint — only meaningful on type='idea' (chokepoint ignores it otherwise). */
         scope: scopeSchema.nullable().optional(),
+        /** WHO performs the work (migration 137) — tasks-only; see `create`. */
+        executor: executorSchema.optional(),
         /** File attachments — whole-array replace; only meaningful on type='idea'. */
         attachments: z.array(attachmentSchema).nullable().optional(),
         parentEpicId: z.string().nullable().optional(),
@@ -329,6 +343,7 @@ export const tasksRouter = router({
             ...(input.category !== undefined ? { category: input.category } : {}),
             ...(input.repo !== undefined ? { repo: input.repo } : {}),
             ...(input.scope !== undefined ? { scope: input.scope } : {}),
+            ...(input.executor !== undefined ? { executor: input.executor } : {}),
             ...(input.attachments !== undefined ? { attachments: input.attachments } : {}),
             ...(input.sortOrder !== undefined ? { sortOrder: input.sortOrder } : {}),
           },
@@ -430,6 +445,42 @@ export const tasksRouter = router({
           taskId: input.taskId,
         });
         return { taskId };
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * Remove a task->task dependency edge. Forwards to the chokepoint's
+   * remove-dependency op as actor='user'.
+   *
+   * IDEMPOTENT — removing an edge that is already gone returns
+   * `{ removed: false }` rather than an error, because the only caller is a
+   * human clicking "Remove" on a dependency row (and any retry behind it).
+   *
+   * There is deliberately NO MCP counterpart: an agent that could cut its own
+   * prerequisites could unblock itself out of an ordering the dependency
+   * analysis put there on purpose. Cutting an edge is a human judgment.
+   */
+  removeDependency: protectedProcedure
+    .input(
+      z.object({
+        projectId: z.number().int().positive(),
+        /** The BLOCKED task — opaque id or display ref (e.g. TASK-001). */
+        taskId: z.string().min(1),
+        /** The PREREQUISITE whose edge to cut — opaque id or display ref. */
+        dependsOnTaskId: z.string().min(1),
+      }),
+    )
+    .mutation(async ({ input }): Promise<{ taskId: string; removed: boolean }> => {
+      try {
+        const result = await TaskChangeRouter.getInstance().applyChange(input.projectId, {
+          actor: 'user',
+          taskId: input.taskId,
+          dependsOnTaskId: input.dependsOnTaskId,
+          removeDependency: true,
+        });
+        return { taskId: result.taskId, removed: result.removed ?? false };
       } catch (err) {
         rethrowAsTRPCError(err);
       }

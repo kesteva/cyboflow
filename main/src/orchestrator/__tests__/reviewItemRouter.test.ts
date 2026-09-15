@@ -988,3 +988,99 @@ describe('ReviewItemRouter (unified review inbox)', () => {
 // Compile-time smoke: ReviewItemRouter satisfies a DatabaseLike-injected constructor.
 const _typecheck = (db: DatabaseLike): ReviewItemRouter => new ReviewItemRouter(db);
 void _typecheck;
+
+// ---------------------------------------------------------------------------
+// findPendingBySource + createIfNoPending (migration 137's standing human item)
+// ---------------------------------------------------------------------------
+
+describe('ReviewItemRouter — source-keyed idempotent create', () => {
+  const HUMAN_SOURCE = 'human-task:tsk_buy_domain';
+
+  function humanItem(): Parameters<ReviewItemRouter['createIfNoPending']>[1] {
+    return {
+      op: 'create',
+      actor: 'orchestrator',
+      kind: 'human_task',
+      title: 'Human work: TASK-009 Buy the domain',
+      body: 'TASK-012 depends on this work.',
+      blocking: false,
+      source: HUMAN_SOURCE,
+    };
+  }
+
+  it('findPendingBySource returns null when nothing matches, and the id once one exists', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    expect(router.findPendingBySource(1, HUMAN_SOURCE)).toBeNull();
+
+    const { reviewItemId } = await router.applyReviewItem(1, humanItem());
+    expect(router.findPendingBySource(1, HUMAN_SOURCE)).toBe(reviewItemId);
+    db.close();
+  });
+
+  it('findPendingBySource is project-scoped — another project\'s item does not match', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    await router.applyReviewItem(2, humanItem());
+    expect(router.findPendingBySource(1, HUMAN_SOURCE)).toBeNull();
+    db.close();
+  });
+
+  it('findPendingBySource ignores a RESOLVED item, so the work can be re-raised later', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const { reviewItemId } = await router.applyReviewItem(1, humanItem());
+    await router.applyReviewItem(1, { op: 'resolve', reviewItemId, actor: 'user' });
+    expect(router.findPendingBySource(1, HUMAN_SOURCE)).toBeNull();
+    db.close();
+  });
+
+  it('createIfNoPending mints once and reports created:false on every later call', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+
+    const first = await router.createIfNoPending(1, humanItem());
+    expect(first.created).toBe(true);
+
+    const second = await router.createIfNoPending(1, humanItem());
+    expect(second.created).toBe(false);
+    expect(second.reviewItemId).toBe(first.reviewItemId);
+
+    const rows = db
+      .prepare('SELECT COUNT(*) AS n FROM review_items WHERE source = ?')
+      .get(HUMAN_SOURCE) as { n: number };
+    expect(rows.n).toBe(1);
+    db.close();
+  });
+
+  it('CONCURRENT createIfNoPending calls on the same source still mint exactly one', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+
+    // The whole point of running check-and-create INSIDE the per-project queue:
+    // there is no unique index on `source`, so two racing callers that each did
+    // their own SELECT then create would both insert.
+    const results = await Promise.all([
+      router.createIfNoPending(1, humanItem()),
+      router.createIfNoPending(1, humanItem()),
+      router.createIfNoPending(1, humanItem()),
+    ]);
+
+    expect(results.filter((r) => r.created)).toHaveLength(1);
+    const rows = db
+      .prepare('SELECT COUNT(*) AS n FROM review_items WHERE source = ?')
+      .get(HUMAN_SOURCE) as { n: number };
+    expect(rows.n).toBe(1);
+    db.close();
+  });
+
+  it('rejects a create with no source — there is nothing to dedupe on', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    await expect(
+      router.createIfNoPending(1, { ...humanItem(), source: undefined }),
+    ).rejects.toMatchObject({ code: 'invalid_payload' });
+    db.close();
+  });
+});
+

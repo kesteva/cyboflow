@@ -195,7 +195,7 @@ import { resolveRunFanOutInner, runHasControllerVisualVerify } from '../laneChai
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 import { runStatusEvents } from '../trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../../../shared/types/cyboflow';
-import type { BacklogTaskItem, EntityCategory, IdeaAttachment, IdeaScope, Priority, TaskType } from '../../../../shared/types/tasks';
+import type { BacklogTaskItem, EntityCategory, IdeaAttachment, IdeaScope, Priority, TaskExecutor, TaskType } from '../../../../shared/types/tasks';
 import type { ExperimentArm, WorkflowVariantRow, WorkflowVariantStatus } from '../../../../shared/types/experiments';
 import type { QuestionPayload } from '../../../../shared/types/questions';
 import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
@@ -312,6 +312,13 @@ export type McpQueryMessage =
        * how scope is dropped on epic/task creates rather than rejected).
        */
       originatingIdeaId?: string;
+      /**
+       * WHO performs the work (migration 137) — taskType='task' ONLY. Unlike
+       * `scope`, a misplaced value is REJECTED by the chokepoint
+       * (invalid_executor) rather than dropped: silently re-agenting work the
+       * caller just marked human would put it back in a sprint's path.
+       */
+      executor?: TaskExecutor;
     }
   | {
       type: 'mcp-update-task';
@@ -335,6 +342,8 @@ export type McpQueryMessage =
       expectedVersion?: number;
       /** Idea size hint — only meaningful for idea entities (ignored on epic/task entities). */
       scope?: IdeaScope;
+      /** WHO performs the work (migration 137) — task entities ONLY; see 'mcp-create-task'. */
+      executor?: TaskExecutor;
     }
   | {
       type: 'mcp-set-task-stage';
@@ -2446,6 +2455,7 @@ export class McpQueryHandler {
       initialStageId: msg.initialStageId,
       scope: msg.scope,
       originatingIdeaId,
+      executor: msg.executor,
     };
 
     try {
@@ -2512,6 +2522,7 @@ export class McpQueryHandler {
         category: msg.category,
         repo: msg.repo,
         scope: msg.scope,
+        executor: msg.executor,
       },
       ...(msg.parentEpicId !== undefined ? { parentEpicId: msg.parentEpicId } : {}),
       expectedVersion: msg.expectedVersion,
@@ -2800,6 +2811,9 @@ export class McpQueryHandler {
       summary: item.summary,
       priority: item.priority,
       category: item.category,
+      // WHO performs the work (migration 137). 'human' work never becomes a
+      // sprint lane, so an agent reading this list knows not to plan around it.
+      executor: item.executor,
       stage_id: item.stage_id,
       stage_position: item.stage_position,
       parent_epic_id: item.parent_epic_id,
@@ -2814,6 +2828,12 @@ export class McpQueryHandler {
       // so an absent overlay defaults to "ready" rather than "unknown".
       ready_to_work: item.readyToWork ?? true,
       blocked_by: (item.blockedBy ?? []).map((dep) => dep.ref),
+      // The subset of blocked_by whose prerequisite is a HUMAN task (migration
+      // 137). Those edges are real but NON-GATING — they are already excluded
+      // from ready_to_work, and this field is why: without it an agent would see
+      // a task that is both `ready_to_work: true` and `blocked_by: [TASK-009]`
+      // and have no way to tell that contradiction from a bug.
+      waiting_on_human: item.waitingOnHuman ?? [],
       version: item.version,
       updated_at: item.updated_at,
     };
@@ -2843,6 +2863,8 @@ export class McpQueryHandler {
       body: item.body,
       priority: item.priority,
       category: item.category,
+      // WHO performs the work (migration 137) — 'agent' on every idea/epic.
+      executor: item.executor,
       repo: item.repo,
       parent_epic_id: item.parent_epic_id,
       originating_idea_id: item.originating_idea_id,
@@ -2859,6 +2881,10 @@ export class McpQueryHandler {
       blockedBy: item.blockedBy,
       relatedTo: item.relatedTo,
       readyToWork: item.readyToWork,
+      // The non-gating slice of blockedBy — prerequisites that are HUMAN tasks
+      // (migration 137). Present so a reader can reconcile a task that is
+      // readyToWork AND blockedBy something.
+      waitingOnHuman: item.waitingOnHuman,
       children: item.children,
       childCount: item.childCount,
       pendingTasks: item.pendingTasks,
