@@ -5,7 +5,7 @@
  * decision" body, which asks someone to approve a design while telling them
  * nothing about it. Meanwhile the adversarial reviewer's critique was written,
  * read by nobody, and discarded with the step's turn. Now the critique is a real
- * artifact (`adversarial-review`, migration 135) and this module turns it into the
+ * artifact (`adversarial-review`, migration 136) and this module turns it into the
  * gate's opening text: how many defects were raised, which ones are blocking, how
  * much revision budget is left, and — the part that is genuinely non-obvious —
  * what each button DOES.

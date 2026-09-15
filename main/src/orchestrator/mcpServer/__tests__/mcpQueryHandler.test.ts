@@ -1895,7 +1895,7 @@ describe('McpQueryHandler', () => {
       // `sessions`/`artifacts` tables (006 doesn't create them), so this seeds
       // ONLY the approved_designs table verbatim from migration 085 (its other
       // statements ALTER those two tables and would fail against this fixture),
-      // in its POST-133 shape: handoff_id/session_id NULLable, plus the
+      // in its POST-134 shape: handoff_id/session_id NULLable, plus the
       // `source`/`source_run_id` provenance columns the read model now SELECTs
       // (an omission here reads back as "no such column: source" on EVERY
       // mcp-get-task, not just the design ones).
@@ -2465,7 +2465,7 @@ describe('McpQueryHandler', () => {
           draft_revision: seeded.draftRevision,
           prototype_revision: seeded.prototypeRevision,
           snapshot_path: resolve(seeded.snapshotPath),
-          // Provenance (migration 133): a reading agent uses it to tell a
+          // Provenance (migration 134): a reading agent uses it to tell a
           // hand-refined Design Mode approval from a flow's generated concept
           // mockup. A design-mode row names no run.
           source: 'design-mode',

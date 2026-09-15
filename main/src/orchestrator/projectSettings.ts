@@ -4,7 +4,7 @@
  * owns.
  *
  * Today that is exactly one column: `projects.solution_thoroughness` (migration
- * 134), stamped when a Launch run's `approve-brief` gate is approved and read
+ * 135), stamped when a Launch run's `approve-brief` gate is approved and read
  * back by every later Sprint/Ship run and by the session wizard's tuning-level
  * default. It gets its own module rather than living inside `gateSideEffects`
  * because it is a genuine seam: a project-scoped write, issued from a run-scoped
@@ -101,7 +101,7 @@ export function stampSolutionThoroughness(
 
 /**
  * The project's stamped solution thoroughness, or null when never established
- * (or when the column is missing on a pre-134 DB — read fail-soft so a stale
+ * (or when the column is missing on a pre-135 DB — read fail-soft so a stale
  * schema degrades to "no default" rather than breaking the caller).
  */
 export function readSolutionThoroughness(

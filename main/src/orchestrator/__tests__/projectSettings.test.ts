@@ -2,7 +2,7 @@
  * projectSettings — the orchestrator's per-PROJECT settings writer.
  *
  * Driven against a real temp DB carrying the full migration chain, so the
- * `solution_thoroughness` CHECK (migration 134) and the `updated_at` bump behave
+ * `solution_thoroughness` CHECK (migration 135) and the `updated_at` bump behave
  * as in production.
  *
  * The load-bearing behaviours: a stamp writes AND notifies; a re-stamp of the

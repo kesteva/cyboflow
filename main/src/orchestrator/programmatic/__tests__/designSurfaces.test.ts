@@ -49,7 +49,7 @@ function buildDb(): Database.Database {
     CREATE TABLE artifacts (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, atype TEXT NOT NULL, label TEXT NOT NULL);
   `);
   applyMigration(d, '082_design_mode_v0.sql'); // approved_designs
-  applyMigration(d, '133_approved_designs_flow_source.sql'); // source / source_run_id
+  applyMigration(d, '134_approved_designs_flow_source.sql'); // source / source_run_id
 
   d.prepare(
     "INSERT INTO workflows (id, project_id, name) VALUES ('wf1', 1, 'sprint')",

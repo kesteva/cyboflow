@@ -966,7 +966,7 @@ export default function SessionStartWizard(): React.JSX.Element {
 
   /**
    * The selected project's row (carries `solution_thoroughness`, migration
-   * 134) — from the banner hook, which resolves the full row in BOTH locked
+   * 135) — from the banner hook, which resolves the full row in BOTH locked
    * and unlocked flows (unlike the `projects` step-② list above, which stays
    * empty while locked).
    */

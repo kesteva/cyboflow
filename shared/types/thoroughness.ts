@@ -8,7 +8,7 @@
  * what tuning level the session wizard defaults to. The brief carries the answer
  * as a `THOROUGHNESS:` flag line beside the existing `UI_PROTOTYPE:` /
  * `ARCH_DESIGN:` flags; the approve-brief gate parses it out and stamps it on the
- * PROJECT (migration 134), where it outlives the Launch run and every later
+ * PROJECT (migration 135), where it outlives the Launch run and every later
  * Sprint/Ship run reads it back.
  *
  * This module is the vocabulary ONLY — the level union, the flag parser, and the

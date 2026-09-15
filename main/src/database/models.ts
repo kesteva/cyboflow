@@ -27,7 +27,7 @@ export interface Project {
    */
   permission_trust?: 'trusted' | 'untrusted' | null;
   /**
-   * How finished the software this project builds has to be (migration 134).
+   * How finished the software this project builds has to be (migration 135).
    * NULL = never established (no Launch run has cleared its approve-brief gate
    * for this project, or its brief carried no `THOROUGHNESS:` flag). Stamped by
    * the Launch approve-brief gate side effect; read back by the step-prompt
@@ -967,11 +967,11 @@ export interface ApprovedDesignRow {
   project_id: number;
   /**
    * The `design_handoffs` row this approval came from — NULL for a
-   * `source='flow'` row (migration 133): a Launch/Planner/Ship gate approval has
+   * `source='flow'` row (migration 134): a Launch/Planner/Ship gate approval has
    * no draft, no CAS target, and therefore no handoff.
    */
   handoff_id: string | null;
-  /** The Design Mode session — NULL for a `source='flow'` row (migration 133). */
+  /** The Design Mode session — NULL for a `source='flow'` row (migration 134). */
   session_id: string | null;
   draft_revision: number;
   prototype_artifact_id: string;
@@ -980,7 +980,7 @@ export interface ApprovedDesignRow {
   approved_at: string;
   superseded_at: string | null;
   /**
-   * Which pathway approved this design (migration 133). 'design-mode' is the
+   * Which pathway approved this design (migration 134). 'design-mode' is the
    * Approve state machine; 'flow' is a Launch/Planner/Ship run whose
    * approve-design / approve-ideas gate cleared. A 'design-mode' row always
    * outranks a flow prototype — the flow binder skips an idea whose current row

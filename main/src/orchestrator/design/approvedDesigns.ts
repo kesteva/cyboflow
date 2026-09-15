@@ -29,7 +29,7 @@ export interface ApprovedDesign {
   id: string;
   ideaId: string;
   projectId: number;
-  /** NULL for a `source:'flow'` row — a flow approval has no design handoff (migration 133). */
+  /** NULL for a `source:'flow'` row — a flow approval has no design handoff (migration 134). */
   handoffId: string | null;
   /** NULL for a `source:'flow'` row — a flow approval has no Design Mode session. */
   sessionId: string | null;
@@ -40,7 +40,7 @@ export interface ApprovedDesign {
   approvedAt: string;
   supersededAt: string | null;
   /**
-   * Which pathway approved this design (migration 133). A 'design-mode' row
+   * Which pathway approved this design (migration 134). A 'design-mode' row
    * OUTRANKS a flow prototype: flowDesignBinding skips an idea whose current row
    * is design-mode rather than superseding it ("arrived with an approved design →
    * leave it alone").
@@ -50,7 +50,7 @@ export interface ApprovedDesign {
   sourceRunId: string | null;
 }
 
-/** The two pathways that can publish an approved design (migration 133). */
+/** The two pathways that can publish an approved design (migration 134). */
 export type ApprovedDesignSource = 'design-mode' | 'flow';
 
 /** Row shape as SELECTed with the aliased columns above. */
@@ -70,7 +70,7 @@ function shape(row: ApprovedDesignSelectRow): ApprovedDesign {
     snapshotPath: row.snapshotPath,
     approvedAt: row.approvedAt,
     supersededAt: row.supersededAt ?? null,
-    // Defensive defaults: a pre-133 row read through a stale connection would
+    // Defensive defaults: a pre-134 row read through a stale connection would
     // carry neither column. 'design-mode' is the safe reading — it makes the
     // binder LEAVE the row alone rather than overwrite an approval it cannot
     // classify.

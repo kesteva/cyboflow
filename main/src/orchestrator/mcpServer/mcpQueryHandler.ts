@@ -3313,7 +3313,7 @@ export class McpQueryHandler {
           // snapshotBaseDir is already an absolute CYBOFLOW_DIR path
           // (main/src/index.ts).
           snapshot_path: path.resolve(approvedDesign.snapshotPath),
-          // Provenance (migration 133): 'design-mode' is a Design Mode Approve;
+          // Provenance (migration 134): 'design-mode' is a Design Mode Approve;
           // 'flow' is a Launch/Planner/Ship run whose design gate cleared, with
           // `source_run_id` naming that run. A reading agent uses it to tell a
           // hand-refined design from a flow's generated concept mockup — and the

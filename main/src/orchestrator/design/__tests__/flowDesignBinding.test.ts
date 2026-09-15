@@ -1,6 +1,6 @@
 /**
  * Unit tests for flowDesignBinding — a FLOW run's prototype bound to its ideas as
- * a durable `approved_designs` row (migration 133, `source='flow'`).
+ * a durable `approved_designs` row (migration 134, `source='flow'`).
  *
  * Driven against a REAL temp DB carrying the full migration chain via
  * DatabaseService.initialize(), so ideas/artifacts/approved_designs/idea_components

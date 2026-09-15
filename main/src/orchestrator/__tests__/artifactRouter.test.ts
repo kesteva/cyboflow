@@ -118,11 +118,11 @@ function buildDb(): Database.Database {
   // component-ledger hub). Same ordering rule as above — each recreate carries
   // only the atypes it names, so this must run last.
   db.exec(readFileSync(join(migDir, '102_idea_summary_atype.sql'), 'utf-8'));
-  // Migration 135 widens the CHECK once more for 'adversarial-review' (the
+  // Migration 136 widens the CHECK once more for 'adversarial-review' (the
   // Launch/Planner/Ship critique doc). Same ordering rule as above — each
   // recreate carries only the atypes it names, so this must run last, and the
   // "accepts every atype in the union" loop below now iterates it too.
-  db.exec(readFileSync(join(migDir, '135_adversarial_review_atype.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '136_adversarial_review_atype.sql'), 'utf-8'));
   return db;
 }
 

@@ -28,7 +28,7 @@ function buildDb(): Database.Database {
       id TEXT PRIMARY KEY,
       idea_id TEXT NOT NULL,
       superseded_at TEXT,
-      -- Migration 133's provenance columns. Derivation is deliberately BLIND to
+      -- Migration 134's provenance columns. Derivation is deliberately BLIND to
       -- them (a current row completes 'prototype' whichever pathway wrote it);
       -- they are here so the flow-vs-design-mode test below can assert exactly
       -- that.
@@ -338,7 +338,7 @@ describe('resolveIdeaComponents / resolveIdeaComponentsBatch', () => {
   });
 
   it('a FLOW-sourced approved_designs row derives prototype exactly like a design-mode one', () => {
-    // Migration 133 added `source`; derivation must stay blind to it. The read
+    // Migration 134 added `source`; derivation must stay blind to it. The read
     // model's WHERE clause is `superseded_at IS NULL` and nothing else, so a
     // Launch/Planner/Ship bind completes the component the same way a Design
     // Mode approval does — the provenance only matters to the BINDER (which

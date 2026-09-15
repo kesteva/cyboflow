@@ -432,14 +432,14 @@ export function readGateResolutionNote(
 }
 
 /**
- * Read the project's stamped SOLUTION THOROUGHNESS (migration 134), for a run
+ * Read the project's stamped SOLUTION THOROUGHNESS (migration 135), for a run
  * whose project already carries one.
  *
  * Raw SQL rather than the project read model for the same reason
  * readProjectBriefMarkdown is: this runner holds a narrow DatabaseLike, not the
  * Database service, and a per-step read has to stay cheap and dependency-free.
  *
- * Fail-soft: a pre-134 DB (no column), a missing row, or an unexpected value all
+ * Fail-soft: a pre-135 DB (no column), a missing row, or an unexpected value all
  * yield undefined, and the step prompt simply omits its thoroughness section.
  */
 export function readProjectThoroughness(

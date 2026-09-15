@@ -67,7 +67,7 @@ export type ArtifactType =
    * sibling. Its existence is what lets the `approve-design` gate show the human
    * what they are approving, and what lets Approve file each remaining entry as
    * a non-blocking accepted-risk finding instead of losing it with the step's
-   * turn. Widened into the DB CHECK by migration 135.
+   * turn. Widened into the DB CHECK by migration 136.
    */
   | 'adversarial-review';
 

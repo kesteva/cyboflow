@@ -1,6 +1,6 @@
 /**
  * flowDesignBinding — bind a FLOW run's UI prototype to the ideas that run owns,
- * as a durable `approved_designs` row (migration 133, `source='flow'`).
+ * as a durable `approved_designs` row (migration 134, `source='flow'`).
  *
  * WHY THIS EXISTS. Until now "the design was approved" left no durable trace on a
  * Launch/Planner/Ship run: the gate resolved, the run advanced, and the only thing
@@ -310,7 +310,7 @@ async function publishFlowSnapshot(
 /**
  * Supersede the prior current row and insert the new flow-sourced one in ONE
  * transaction, so there is always exactly one `superseded_at IS NULL` row per idea
- * (the invariant migration 133's partial unique index now enforces). Mirrors
+ * (the invariant migration 134's partial unique index now enforces). Mirrors
  * designHandoffService's `runPublishStep` Step 3.
  */
 function publishFlowApprovedDesign(
