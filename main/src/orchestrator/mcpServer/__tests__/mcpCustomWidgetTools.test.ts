@@ -423,6 +423,47 @@ describe('mcp-widget-save', () => {
     expect(fakeCustomViews.draftEvents).toEqual([{ widgetId: 'w-42', authoringSessionId: 'sess-1', kind: 'published' }]);
   });
 
+  it('no session_id + publish:true publishes into the library under a minted library: session id', async () => {
+    const { socket, writes } = makeSocketDouble();
+    await handler.handleMessage(
+      {
+        type: 'mcp-widget-save',
+        requestId: 'r14b',
+        runId: AGENT_RUN_ID,
+        name: 'Rail widget',
+        specJson: VALID_SPEC_JSON,
+        publish: true,
+      },
+      socket,
+    );
+    const resp = parseLastWrite(writes);
+    expect(resp.ok).toBe(true);
+    expect(resp.data).toEqual({ widgetId: 'widget-1', revision: 1 });
+    expect(fakeCustomViews.lastSaveWidgetInput).toMatchObject({ name: 'Rail widget', publish: true });
+    expect(fakeCustomViews.lastSaveWidgetInput?.authoringSessionId).toMatch(/^library:[0-9a-f-]{36}$/);
+    expect(fakeCustomViews.draftEvents).toHaveLength(1);
+    expect(fakeCustomViews.draftEvents[0]).toMatchObject({ widgetId: 'widget-1', kind: 'published' });
+  });
+
+  it('no session_id + publish:false is refused with draft_needs_session without calling saveWidget', async () => {
+    const { socket, writes } = makeSocketDouble();
+    await handler.handleMessage(
+      {
+        type: 'mcp-widget-save',
+        requestId: 'r14c',
+        runId: AGENT_RUN_ID,
+        name: 'Rail widget',
+        specJson: VALID_SPEC_JSON,
+        publish: false,
+      },
+      socket,
+    );
+    const resp = parseLastWrite(writes);
+    expect(resp.ok).toBe(false);
+    expect(resp.error).toBe('draft_needs_session');
+    expect(fakeCustomViews.saveWidgetCallCount).toBe(0);
+  });
+
   it('rejects malformed JSON with invalid_json', async () => {
     const { socket, writes } = makeSocketDouble();
     await handler.handleMessage(

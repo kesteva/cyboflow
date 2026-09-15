@@ -689,6 +689,10 @@ export const useCustomViewsStore = create<CustomViewsState>((set, get) => {
     },
 
     onDraftEvent: (evt) => {
+      // The library refresh is unconditional: a session-less save from the
+      // chat rail (no authoring slot anywhere) still adds a widget to "Mine",
+      // and every surface's list would otherwise go stale until reload.
+      void get().refreshWidgets();
       const authoring = get().authoring;
       if (authoring === null || authoring.sessionId !== evt.authoringSessionId) return;
       if (authoring.widgetId !== null && authoring.widgetId !== evt.widgetId) return;
@@ -704,7 +708,6 @@ export const useCustomViewsStore = create<CustomViewsState>((set, get) => {
         );
         return { draft: { ...s.draft, layout: { ...s.draft.layout, items } }, authoring: nextAuthoring };
       });
-      void get().refreshWidgets();
     },
 
     publishAuthoringDraft: async () => {

@@ -565,13 +565,17 @@ describe('customViewsStore.onDraftEvent', () => {
     useCustomViewsStore.getState().enterCustomize('review-queue');
   });
 
-  it('ignores an event for a different (stale/superseded) session', () => {
+  it('ignores an event for a different (stale/superseded) session but still refreshes the library', async () => {
     const sessionId = useCustomViewsStore.getState().openAuthoring({ surface: 'review-queue', mode: 'create', at: 0 });
+    calls.length = 0;
     useCustomViewsStore.getState().onDraftEvent({ widgetId: 'w-x', authoringSessionId: 'someone-else', kind: 'draft' });
 
     expect(useCustomViewsStore.getState().authoring).toEqual(
       expect.objectContaining({ sessionId, widgetId: null, draftPreview: false }),
     );
+    // A session-less save from the chat rail publishes a widget nobody is
+    // authoring in a slot — "Mine" must still pick it up without a reload.
+    await vi.waitFor(() => expect(calls).toContain('listWidgets'));
   });
 
   it('a "draft" event binds the widgetId, marks the item, flips draftPreview, and refreshes the library', async () => {

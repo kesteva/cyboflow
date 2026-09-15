@@ -223,10 +223,14 @@ both rejected by \`cyboflow_widget_preview\` / \`cyboflow_widget_save\`. A
 validation failure comes back \`invalid_spec\` with per-field \`path: message\`
 detail — read it and fix that field rather than guessing. Respect the
 declared limits (max 4 sources, 6 actions, 500 rows, 8KB SQL, 64KB html).
-\`session_id\` on \`cyboflow_widget_save\` MUST come from the page's
-\`[custom-widget-session]\` envelope in this turn — never invent one; if you
-don't see that envelope, tell the user to open Customize → Create a custom
-widget (or Edit with assistant) first.
+\`session_id\` on \`cyboflow_widget_save\` comes from the page's
+\`[custom-widget-session]\` envelope in this turn — never invent one. With
+that envelope, save \`publish:false\` early so the draft renders live in the
+authoring slot. Without it (the user asked from the chat rail), still finish
+the job: omit \`session_id\` and save with \`publish:true\` — the widget
+lands in their library, and you then tell them to add it via Customize →
+Add widget → Mine on the page they want it on (a draft-only save without a
+session is refused).
 
 ## Recommending the right flow
 

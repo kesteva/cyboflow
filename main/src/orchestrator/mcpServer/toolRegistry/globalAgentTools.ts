@@ -256,12 +256,13 @@ export const GLOBAL_AGENT_SCOPE_TOOLS: readonly RegisteredTool[] = [
   defineTool({
     name: 'cyboflow_widget_save',
     description:
-      'THE SECOND write-shaped tool available to the global agent (disjoint from cyboflow_propose_action) — writes ONLY the user\'s custom-widget library (a custom_widgets row). It NEVER writes a view, a backlog entity, or a proposal, and needs no human confirmation: saving to your own draft library is not a project-state change. `session_id` MUST come from the page\'s `[custom-widget-session]` envelope — never invent one; if you see no such envelope, tell the user to start from Customize -> Create a custom widget (or Edit with assistant) first. `widget_id` omitted creates a new widget; passed, it updates that widget (a draft owned by a DIFFERENT live session is refused with session_mismatch). `spec_json` is the same WidgetSpec shape cyboflow_widget_preview validates — preview it first. `publish:false` saves a draft only, visible live in the authoring slot; `publish:true` saves AND promotes the draft to the published spec every other surface renders. Returns `{ widgetId, revision }`.',
+      'THE SECOND write-shaped tool available to the global agent (disjoint from cyboflow_propose_action) — writes ONLY the user\'s custom-widget library (a custom_widgets row). It NEVER writes a view, a backlog entity, or a proposal, and needs no human confirmation: saving to your own draft library is not a project-state change. `session_id` comes from the page\'s `[custom-widget-session]` envelope when the user started from Customize -> Create a custom widget / Edit with assistant — never invent one. If you see no such envelope, OMIT it and save with `publish:true`: the widget lands in the user\'s library (Customize -> Add widget -> Mine) with no live preview, so say where to find it. A draft-only save (`publish:false`) without a session is refused with draft_needs_session. `widget_id` omitted creates a new widget; passed, it updates that widget (a draft owned by a DIFFERENT live session is refused with session_mismatch). `spec_json` is the same WidgetSpec shape cyboflow_widget_preview validates — preview it first. `publish:false` saves a draft only, visible live in the authoring slot; `publish:true` saves AND promotes the draft to the published spec every other surface renders. Returns `{ widgetId, revision }`.',
     input: z.object({
       session_id: z
         .string()
         .min(1)
-        .describe('The authoring session id from the page\'s [custom-widget-session] envelope (required) — never invent one.'),
+        .describe('The authoring session id from the page\'s [custom-widget-session] envelope — never invent one. Omit when there is no envelope (the save then publishes straight into the library and publish must be true).')
+        .optional(),
       widget_id: z.string().min(1).describe('Optional — the widget id to update. Omit to create a new widget.').optional(),
       name: z.string().min(1).describe('Widget name shown in the library (required)'),
       description: z.string().describe('Optional short description shown in the library.').optional(),

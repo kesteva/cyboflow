@@ -81,6 +81,12 @@ describe('agentThreadPrompt', () => {
     }
   });
 
+  it('tells the agent a session-less widget request still saves (publish:true into the library)', () => {
+    const prompt = getAgentSystemPrompt();
+    expect(prompt).toMatch(/omit `session_id` and save with `publish:true`/);
+    expect(prompt).toMatch(/Add widget → Mine/);
+  });
+
   it('mentions every WidgetRender.shape literal and every TransformStep.op literal', () => {
     // Hardcoded rather than derived from shared/customViews/validate.ts: its
     // schemas are z.union([...]) trees of z.object({shape: z.literal(...)})

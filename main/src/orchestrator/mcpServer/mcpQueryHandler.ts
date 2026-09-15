@@ -74,7 +74,7 @@
  */
 import * as net from 'net';
 import * as path from 'path';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomUUID, createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, lstatSync, openSync, readSync, closeSync } from 'fs';
 import type { Dirent, Stats } from 'fs';
 import {
@@ -1035,7 +1035,12 @@ export type McpQueryMessage =
       type: 'mcp-widget-save';
       requestId: string;
       runId: string;
-      sessionId: string;
+      /** The page's authoring session (from the `[custom-widget-session]`
+       *  envelope). Omitted = a library-only save: the widget publishes
+       *  straight into the user's library with no live authoring slot, so
+       *  `publish` MUST be true (a draft nobody is watching is refused with
+       *  `draft_needs_session`). */
+      sessionId?: string;
       /** Optional — omitted creates a new widget; passed, updates that widget. */
       widgetId?: string;
       name: string;
@@ -7470,13 +7475,25 @@ export class McpQueryHandler {
       return;
     }
 
+    // No authoring session = the user asked from the rail, not from
+    // Customize -> Create a custom widget. Publish straight into the library
+    // under a throwaway session id: publishDraft clears authoring_session_id,
+    // so nothing is left claimed, and the library refresh the draft event
+    // triggers on every surface makes it show up under "Mine". A draft-only
+    // save has no slot to render in, so it is refused rather than orphaned.
+    if (msg.sessionId === undefined && !msg.publish) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'draft_needs_session' });
+      return;
+    }
+    const authoringSessionId = msg.sessionId ?? `library:${randomUUID()}`;
+
     try {
       const widget = customViews.saveWidget({
         id: msg.widgetId,
         name: msg.name,
         description: msg.description ?? null,
         spec: parsedSpec.data,
-        authoringSessionId: msg.sessionId,
+        authoringSessionId,
         threadId: ctx.threadId,
         publish: msg.publish,
       });
