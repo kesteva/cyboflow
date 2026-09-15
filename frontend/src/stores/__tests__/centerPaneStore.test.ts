@@ -151,6 +151,35 @@ describe('centerPaneStore', () => {
     expect(s.activeTabId).toBe('file:src/a.ts');
   });
 
+  it('opens an approved-design tab keyed by idea id, and dedupes on a second open', () => {
+    get().ensureSession(KEY);
+    get().openApprovedDesignTab(KEY, { ideaId: 'idea-1', ideaRef: 'IDEA-014', label: 'IDEA-014 · Design' });
+    let s = get().bySession[KEY];
+    expect(s.tabs).toHaveLength(2);
+    expect(s.activeTabId).toBe('design:idea-1');
+    expect(s.tabs[1]).toMatchObject({
+      kind: 'approved-design',
+      ideaId: 'idea-1',
+      ideaRef: 'IDEA-014',
+      label: 'IDEA-014 · Design',
+    });
+
+    // Re-open the same idea: no duplicate, refreshes label/ref, keeps focus.
+    get().openApprovedDesignTab(KEY, { ideaId: 'idea-1', ideaRef: 'IDEA-014', label: 'IDEA-014 · Design v2' });
+    s = get().bySession[KEY];
+    expect(s.tabs).toHaveLength(2);
+    expect(s.tabs[1].label).toBe('IDEA-014 · Design v2');
+  });
+
+  it('opens TWO approved-design tabs for two DISTINCT ideas', () => {
+    get().ensureSession(KEY);
+    get().openApprovedDesignTab(KEY, { ideaId: 'idea-1', ideaRef: 'IDEA-014', label: 'IDEA-014 · Design' });
+    get().openApprovedDesignTab(KEY, { ideaId: 'idea-2', ideaRef: 'IDEA-015', label: 'IDEA-015 · Design' });
+    const s = get().bySession[KEY];
+    expect(s.tabs.filter((t) => t.kind === 'approved-design')).toHaveLength(2);
+    expect(s.activeTabId).toBe('design:idea-2');
+  });
+
   it('closing the active tab focuses the previous tab', () => {
     get().ensureSession(KEY);
     get().openFileTab(KEY, { filePath: 'a.ts' });

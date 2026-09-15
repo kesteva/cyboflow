@@ -107,6 +107,15 @@ vi.mock('../../trpc/client', () => ({
         update: { mutate: (args: unknown) => mockTaskUpdate(args) },
         list: { query: (args: unknown) => mockTaskList(args) },
       },
+      // Every task/epic card mounts a DesignAffordance (Tier 2, item 8c) — no
+      // bound design by default so it renders nothing.
+      design: {
+        forEntity: { query: vi.fn().mockResolvedValue(null) },
+        snapshotHtml: { query: vi.fn().mockResolvedValue(null) },
+      },
+      ideaComponents: {
+        onComponentsChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+      },
     },
   },
 }));

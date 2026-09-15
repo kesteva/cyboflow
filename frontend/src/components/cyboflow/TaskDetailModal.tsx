@@ -34,6 +34,7 @@ import { Modal } from '../ui/Modal';
 import { MarkdownPreview } from '../MarkdownPreview';
 import { trpc } from '../../trpc/client';
 import { CATEGORY_LABEL } from '../Backlog/markers';
+import { DesignAffordance } from './DesignAffordance';
 import type { BacklogTaskItem, EntityCategory } from '../../../../shared/types/tasks';
 
 const CATEGORIES: EntityCategory[] = ['feature', 'bug', 'chore'];
@@ -160,6 +161,13 @@ export function TaskDetailModal({ task, onClose }: TaskDetailModalProps): ReactE
                 </option>
               ))}
             </select>
+            {/* Design affordance — opens the approved design bound to this
+                entity's originating idea (idea -> itself; epic/task -> its
+                idea). No sessionKey: this modal has no running-session
+                context, so it opens its own preview modal. */}
+            <span style={{ marginLeft: 'auto' }}>
+              <DesignAffordance entityId={active.id} projectId={active.project_id} />
+            </span>
           </div>
           {categoryError && (
             <p role="alert" style={{ fontSize: '10px', color: 'var(--color-status-error)', margin: '0 0 6px' }}>

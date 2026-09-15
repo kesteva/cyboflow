@@ -65,6 +65,7 @@ import { LedgerExpand } from './LedgerExpand';
 import { IdeaDetailEditor } from '../IdeaDetailEditor';
 import { EpicDetailEditor } from '../EpicDetailEditor';
 import { TaskDetailModal } from '../cyboflow/TaskDetailModal';
+import { DesignAffordance } from '../cyboflow/DesignAffordance';
 
 interface TaskBodyProps {
   task: BacklogTaskItem;
@@ -219,6 +220,14 @@ function CardFooter({
           <Pencil className="h-3 w-3" strokeWidth={2.5} />
           Edit
         </button>
+        {/* Design affordance — opens the approved design bound to this
+            epic/task's originating idea (Tier 2, item 8c). Ideas are excluded:
+            an idea's OWN design is reached via its "Open" home session, not a
+            back-link button. No sessionKey here (the Backlog board has no
+            running-session context), so the affordance opens its own preview
+            modal instead of a center-pane tab. Renders nothing until
+            forEntity resolves a bound design. */}
+        {!isIdea && <DesignAffordance entityId={task.id} projectId={task.project_id} />}
         {/* Ideas: "Open" — find-or-create the idea's persistent home session
             (idea sessions plan, Stage 4). Epics/tasks: "Run" — launch a new
             workflow run, unchanged. Same Play glyph + position; the label,

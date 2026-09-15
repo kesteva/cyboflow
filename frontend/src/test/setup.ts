@@ -99,6 +99,20 @@ vi.mock('../trpc/client', () => ({
         list: { query: vi.fn().mockResolvedValue([]) },
         onReviewItemChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
       },
+      // Approved-design lookup (Tier 2, item 8c) — DesignAffordance mounts
+      // unconditionally on every non-idea TaskCard/TaskDetailModal and, given a
+      // sessionKey, every sprint swimlane lane header. No bound design by
+      // default so it renders nothing without every test file needing its own
+      // mock.
+      design: {
+        forEntity: { query: vi.fn().mockResolvedValue(null) },
+        snapshotHtml: { query: vi.fn().mockResolvedValue(null) },
+      },
+      // Idea component ledger live channel — also read by DesignAffordance /
+      // ApprovedDesignTab for their live refresh. No-op by default.
+      ideaComponents: {
+        onComponentsChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+      },
     },
   },
 }));

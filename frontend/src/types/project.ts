@@ -24,6 +24,14 @@ export interface Project {
    * a fresh project. Absent on responses from other project endpoints.
    */
   established_repo?: boolean;
+  /**
+   * Solution-thoroughness level stamped from the Launch flow's interview
+   * (Tier 2, item 13a; migration 134). NULL/undefined = never stamped (no
+   * Launch brief has run for this project yet, or the project predates the
+   * feature). Drives the session wizard's default tuning level via
+   * `thoroughnessToTuningLevel` (`shared/types/thoroughness.ts`).
+   */
+  solution_thoroughness?: 'prototype' | 'v1' | 'production' | null;
 }
 
 export interface ProjectRunCommand {

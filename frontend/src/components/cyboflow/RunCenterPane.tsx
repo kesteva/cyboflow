@@ -21,6 +21,7 @@ import { RunBottomPane, type RunBottomTabKind } from './RunBottomPane';
 import { CenterPaneTabStrip } from './CenterPaneTabStrip';
 import { FileTabRenderer } from './FileTabRenderer';
 import { ArtifactTabRenderer } from './ArtifactTabRenderer';
+import { ApprovedDesignTab } from './ApprovedDesignTab';
 import { TerminalDock } from './TerminalDock';
 import { RunPendingInputStrip } from './RunPendingInputStrip';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
@@ -152,6 +153,8 @@ export function RunCenterPane({
           runId={activeRunId}
           phaseState={phaseState}
           sprintStatus={activeRun?.status}
+          projectId={projectId}
+          sessionKey={sessionKey}
         />
       );
     }
@@ -200,6 +203,15 @@ export function RunCenterPane({
       // The diff source is the pane's session key (the run's parent session).
       return (
         <FileTabRenderer sessionId={sessionKey} filePath={activeTab.filePath} status={activeTab.status} />
+      );
+    }
+    if (activeTab.kind === 'approved-design' && activeTab.ideaId) {
+      return (
+        <ApprovedDesignTab
+          ideaId={activeTab.ideaId}
+          ideaRef={activeTab.ideaRef ?? activeTab.label}
+          projectId={projectId}
+        />
       );
     }
     if (activeTab.kind === 'artifact') {
