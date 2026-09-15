@@ -84,6 +84,7 @@ function makeTask(overrides: Partial<BacklogTaskItem> & { id: string }): Backlog
     body: overrides.body ?? null,
     priority: overrides.priority ?? 'P2',
     category: overrides.category ?? 'feature',
+    executor: overrides.executor ?? 'agent',
     repo: overrides.repo ?? null,
     parent_epic_id: overrides.parent_epic_id ?? null,
     originating_idea_id: overrides.originating_idea_id ?? null,

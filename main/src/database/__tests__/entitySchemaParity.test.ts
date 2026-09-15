@@ -68,6 +68,8 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '069_run_eval_jury.sql'), 'utf-8'));
   // category classification (feature|bug|chore) on all three entity tables.
   db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
+  // tasks.executor (agent|human) — WHO performs the work, tasks-only.
+  db.exec(readFileSync(join(migDir, '137_task_executor.sql'), 'utf-8'));
   return db;
 }
 
@@ -136,6 +138,7 @@ describe('entity schema parity (migrations 015 + 024 + 028 + 034)', () => {
       'body',
       'priority',
       'category',
+      'executor',
       'repo',
       'board_id',
       'stage_id',
