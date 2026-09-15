@@ -32,6 +32,7 @@ import {
   shouldShowAgentRail,
 } from './AgentRail';
 import { useLayoutStore } from '../../stores/layoutStore';
+import { useNavigationStore } from '../../stores/navigationStore';
 
 const WIDTH_KEY = 'cyboflow.agentRail.width';
 const COLLAPSED_KEY = 'cyboflow.agentRail.collapsed';
@@ -64,6 +65,16 @@ describe('AgentRail — header', () => {
 });
 
 describe('AgentRail — body', () => {
+  it('the header gear opens global Settings on the Assistant tab', () => {
+    useNavigationStore.setState({ settingsOpen: false, settingsTab: 'general' });
+    render(<AgentRail />);
+
+    fireEvent.click(screen.getByTestId('agent-rail-settings'));
+
+    expect(useNavigationStore.getState().settingsOpen).toBe(true);
+    expect(useNavigationStore.getState().settingsTab).toBe('assistant');
+  });
+
   it('mounts AgentThreadView (the real thread/composer/chips)', () => {
     render(<AgentRail />);
 

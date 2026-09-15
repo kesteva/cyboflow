@@ -23,9 +23,10 @@
  */
 import { GUIDED_TARGETS } from '../onboarding/guided/GuidedLeader';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Settings } from 'lucide-react';
 import { AgentThreadView } from './AgentThreadView';
 import { useLayoutStore } from '../../stores/layoutStore';
+import { useNavigationStore } from '../../stores/navigationStore';
 
 /** Default expanded rail width. Wide enough for the thread view's composer
  * chrome on first run (users who drag it get their own persisted width). */
@@ -174,7 +175,7 @@ export function AgentRail() {
         style={{ background: isResizing ? 'var(--color-border-primary)' : 'transparent' }}
       />
 
-      {/* Header: collapse chevron, glyph mark, title/subtitle, GLOBAL chip. */}
+      {/* Header: collapse chevron, glyph mark, title/subtitle, GLOBAL chip, settings gear. */}
       <div
         className="flex items-center gap-2 border-b border-border-primary p-3"
         data-guided-target={GUIDED_TARGETS.assistantHeader}
@@ -211,6 +212,17 @@ export function AgentRail() {
             </span>
           </div>
         </div>
+        {/* Deep-link into Settings → Assistant (model, runtime, folder access). */}
+        <button
+          type="button"
+          data-testid="agent-rail-settings"
+          aria-label="Assistant settings"
+          title="Assistant settings"
+          onClick={() => useNavigationStore.getState().openSettings('assistant')}
+          className="flex h-6 w-6 shrink-0 items-center justify-center text-text-tertiary hover:text-text-primary"
+        >
+          <Settings size={14} />
+        </button>
       </div>
 
       {/* Body: the global-agent thread — transcript, composer, suggestion
