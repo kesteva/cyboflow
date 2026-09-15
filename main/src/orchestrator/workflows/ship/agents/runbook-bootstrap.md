@@ -121,7 +121,7 @@ runbook says how the project stands up, never what is being checked.
 
 Host-specific values are **placeholders, never resolved values**: `${PORT}` for a
 leased web port, `$VERIFY_DRIVER_PORT` for a debugging port in attach mode,
-`$VERIFY_ARTIFACTS_DIR` for a scratch dir. A literal port number in a committed
+`$VERIFY_DATA_DIR` for a fresh, empty, per-request state/profile dir (`$VERIFY_ARTIFACTS_DIR` is per-RUN and reused across attempts). A literal port number in a committed
 runbook is a promise about someone else's machine.
 
 ## The two levers the harness binds for you

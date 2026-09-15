@@ -282,3 +282,42 @@ describe('makeVerificationAgentQuery — sandbox wiring', () => {
     expect(allowed?.behavior).toBe('allow');
   });
 });
+
+describe('makeVerificationAgentQuery — the harness env reaches the deployed session', () => {
+  // F3 / RC4: the harness env is merged OVER process.env, which is what makes
+  // the runner's PATH the one the agent's Bash — and every serve child under it
+  // — actually sees. Without this precedence a packaged app's GUI PATH (no
+  // pnpm, no node) would win and the deploy would be worse off than a terminal.
+  // NODE_PATH is deliberately NOT in this env (round-2 review): the runner binds
+  // it in the $VERIFY_DRIVER wrapper instead, so the deliverable's build never
+  // resolves modules out of cyboflow's own install.
+  it('merges the harness env over process.env, harness keys winning', async () => {
+    install(makeFakeQuery([sdkResultSuccess({ structuredOutput: { version: 1 } })]));
+    const fn = makeVerificationAgentQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
+    const previousPath = process.env.PATH;
+    process.env.PATH = '/usr/bin:/bin';
+    process.env.CYBOFLOW_QUERY_ENV_PROBE = 'inherited';
+    try {
+      await fn({
+        prompt: 'p',
+        systemPrompt: 's',
+        cwd: '/wt',
+        allowedTools: ['Bash'],
+        env: {
+          PATH: '/opt/homebrew/bin:/usr/bin:/bin',
+          VERIFY_DATA_DIR: '/artifacts/data/vr-1',
+        },
+      });
+
+      const env = (lastOptions ?? {}).env as Record<string, string>;
+      expect(env.PATH).toBe('/opt/homebrew/bin:/usr/bin:/bin');
+      expect(env.VERIFY_DATA_DIR).toBe('/artifacts/data/vr-1');
+      // …and everything the process already had is still there.
+      expect(env.CYBOFLOW_QUERY_ENV_PROBE).toBe('inherited');
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      delete process.env.CYBOFLOW_QUERY_ENV_PROBE;
+    }
+  });
+});

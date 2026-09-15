@@ -55,8 +55,29 @@ describe('runbookBootstrapPreflight', () => {
   it('proceeds when the project has no runbook and the task derives an environment', async () => {
     await expect(runbookBootstrapPreflight(ARGS, deps())).resolves.toEqual({
       proceed: true,
+      mode: 'derive',
       adopt: false,
     });
+  });
+
+  it('a DRIFTED proof proceeds in REPROVE mode, and says so at INFO', async () => {
+    // F4 / Codex #2. Loud for the same reason 'proof-belongs-elsewhere' is: the
+    // two proceed modes are opposite actions against a human's runbook, and a
+    // log line that called both "would bootstrap" would hide the one distinction
+    // someone reading this log is trying to check.
+    const info = vi.fn();
+    const d = deps({
+      status: async () => ({ status: 'unproven-draft', reason: 'drifted' }),
+      logger: { info, warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+    });
+    await expect(runbookBootstrapPreflight(ARGS, d)).resolves.toEqual({
+      proceed: true,
+      mode: 'reprove',
+    });
+    expect(info).toHaveBeenCalledWith(
+      expect.stringContaining('re-prove the existing runbook'),
+      expect.objectContaining({ runbookReason: 'drifted' }),
+    );
   });
 
   it('does NOT read the runbook status when the feature is off', async () => {

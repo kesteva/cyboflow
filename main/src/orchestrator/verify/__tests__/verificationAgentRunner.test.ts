@@ -9,6 +9,7 @@
  * demotion), and that teardown (snapshot dispose + driver stop) runs on every path.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { delimiter, join } from 'node:path';
 import {
   VerificationAgentRunner,
   VerificationAgentQueryError,
@@ -33,8 +34,10 @@ import {
   type VerificationAgentRequest,
   type ResolvedVerifyAgent,
   type VerificationAgentQueryOutcome,
+  driverScriptBody,
 } from '../verificationAgentRunner';
 import { SnapshotProvisionError, type SnapshotProvision } from '../snapshotProvisioner';
+import { pathEnvKey } from '../harnessEnv';
 import type { PinnedRunbookRecord } from '../runbookStore';
 import type { VerifyRunbookV1 } from '../../../../../shared/types/verifyRunbook';
 import { setSeamErrorSink } from '../../telemetrySink';
@@ -45,6 +48,20 @@ import type {
 } from '../../../../../shared/types/visualVerification';
 
 const CLAUDE_DEFAULT = 'claude-opus-4-8';
+
+/**
+ * F3 / RC4 — the fake EXECUTION environment. The real seams shell out to a
+ * login shell and walk the filesystem; both are injected in {@link makeRunner}
+ * so this suite does neither.
+ */
+// Host-delimited: the harness splits/joins PATH on `path.delimiter`, so a
+// literal ':' string is a single opaque entry on Windows and every "is the node
+// dir already present" check drifts there.
+const FAKE_SHELL_PATH = ['/opt/homebrew/bin', '/usr/bin', '/bin'].join(delimiter);
+// VERIFY_DATA_DIR is composed with `path.join`, so the expected value must be
+// too — `/artifacts/data/x` is `\artifacts\data\x` on Windows.
+const dataDirOf = (segment: string) => join('/artifacts', 'data', segment);
+const FAKE_NODE_MODULES = '/app/node_modules';
 
 function makeAgent(overrides: Partial<EffectiveAgent> = {}): EffectiveAgent {
   return {
@@ -156,6 +173,9 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
   writeTranscript: ReturnType<typeof vi.fn>;
   attest: ReturnType<typeof vi.fn>;
   reapServe: ReturnType<typeof vi.fn>;
+  prepareDataDir: ReturnType<typeof vi.fn>;
+  writeDriverScript: ReturnType<typeof vi.fn>;
+  error: ReturnType<typeof vi.fn>;
 } {
   const dispose = vi.fn(async () => {});
   const stopDriver = vi.fn(async () => {});
@@ -164,6 +184,12 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
   const warn = vi.fn();
   const writeTranscript = vi.fn(async () => {});
   const reapServe = vi.fn();
+  const prepareDataDir = vi.fn(async () => {});
+  const error = vi.fn();
+  // F3 / RC4 (round-2 review): NODE_PATH is bound in the DRIVER WRAPPER, not in
+  // the agent's env, so the wrapper writer's arguments are where that contract
+  // is now observable.
+  const writeDriverScript = vi.fn(async () => '/artifacts/.driver/verify-driver.sh');
   // §7.1: the HARNESS's own probe, faked. It stands in for a live HTTP GET
   // against the surface the agent just drove — injected so the suite dials no
   // socket and every floor branch is driven explicitly. Note what it is NOT: a
@@ -189,7 +215,7 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
     claudeDefaultModel: CLAUDE_DEFAULT,
     resolveNode: async () => '/usr/bin/node',
     driverCliPath: '/app/driverCli.js',
-    logger: { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() },
+    logger: { info: vi.fn(), warn, error, debug: vi.fn() },
     provision,
     checkSnapshotMutated: async () => false,
     fileExists: async () => true,
@@ -198,7 +224,7 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
     // resolution / an always-free port) would drag playwright into this suite.
     resolveChromium: async () => '/opt/chromium',
     portFreeProbe: async () => true,
-    writeDriverScript: async () => '/artifacts/.driver/verify-driver.sh',
+    writeDriverScript,
     stopDriver,
     reapBrowser: vi.fn(),
     reapServe,
@@ -211,6 +237,12 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
     readServePid: async () => null,
     listeningPidForPort: async () => null,
     processInfo: async () => null,
+    // F3 / RC4 — the execution env. Faked so the suite spawns no login shell,
+    // walks no real node_modules, and writes no data dir; what each of them
+    // produces is asserted in the env suite below.
+    resolveShellPath: async () => FAKE_SHELL_PATH,
+    resolveNodeModulesRoot: async () => FAKE_NODE_MODULES,
+    prepareDataDir,
     ...overrides,
   };
   return {
@@ -223,6 +255,9 @@ function makeRunner(overrides: Partial<VerificationAgentRunnerDeps> = {}): {
     writeTranscript,
     attest,
     reapServe,
+    prepareDataDir,
+    writeDriverScript,
+    error,
   };
 }
 
@@ -1788,9 +1823,20 @@ describe('VerificationAgentRunner — the pinned runbook levers reach the agent 
   });
 
   // Rule 2 — a machine-authored name that configures execution is not a lever.
+  // PATH is now a HARNESS key (F3), so the assertion is that the harness value
+  // survives verbatim rather than that nothing was exported.
   it('drops a lever naming the execution environment', async () => {
     const { env } = await runWith({ portEnv: 'PATH' });
-    expect(env.PATH).toBeUndefined();
+    expect(env.PATH).toBe(FAKE_SHELL_PATH);
+    expect(env.PATH).not.toBe(env.VERIFY_PORT);
+  });
+
+  // F3 / RC4 — dataDirEnv completes the lever set: a project whose app keeps its
+  // state under an env var gets per-attempt isolation with no serve-command edit.
+  it('binds a declared dataDirEnv to this request fresh data dir', async () => {
+    const { env } = await runWith({ dataDirEnv: 'CYBOFLOW_DIR' });
+    expect(env.CYBOFLOW_DIR).toBe(env.VERIFY_DATA_DIR);
+    expect(env.CYBOFLOW_DIR).toContain('vr-1');
   });
 
   // An UNPINNED request has no runbook to read levers from; it must still run.
@@ -1807,6 +1853,178 @@ describe('VerificationAgentRunner — the pinned runbook levers reach the agent 
     const result = await runner.run(makeReq({ task: pinnedTask, runbookHash: HASH, runbookLocalVersion: 2 }));
     expect(result.runbookMismatch).toBe(true);
     expect(query).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F3 / RC4 — THE EXECUTION ENVIRONMENT
+//
+// The agent used to run with a WORSE environment than a terminal: the packaged
+// app's GUI PATH (no pnpm, no node), no NODE_PATH for the bundled driver to
+// require playwright from, and a data dir keyed on the RUN-scoped artifacts dir
+// that handed every attempt the previous attempt's state.
+// ---------------------------------------------------------------------------
+
+describe('VerificationAgentRunner — the harness execution env', () => {
+  const envOf = (query: ReturnType<typeof vi.fn>): Record<string, string> =>
+    query.mock.calls[0][0].env;
+
+  it('exports the login-shell PATH, not whatever this process inherited', async () => {
+    const { runner, query } = makeRunner();
+    await runner.run(makeReq());
+    expect(envOf(query).PATH).toBe(FAKE_SHELL_PATH);
+  });
+
+  it('puts the resolved node directory in front of that PATH', async () => {
+    const { runner, query } = makeRunner({
+      resolveNode: async () => '/Users/dev/.nvm/versions/node/v22.14.0/bin/node',
+    });
+    await runner.run(makeReq());
+    expect(envOf(query).PATH).toBe(['/Users/dev/.nvm/versions/node/v22.14.0/bin', FAKE_SHELL_PATH].join(delimiter));
+  });
+
+  // The lookup is deliberately NOT cached at this seam: getShellPath() owns the
+  // cache, and configManager CLEARS it when the user edits `additionalPaths` —
+  // the documented escape hatch for "pnpm not found". A runner-level memo (the
+  // runner is constructed once, at index.ts) made verification the one seam that
+  // escape hatch never reached (round-2 review).
+  it('re-resolves the shell PATH per request so a cleared PATH cache takes effect', async () => {
+    let current = '/first/bin';
+    const resolveShellPath = vi.fn(async () => current);
+    const { runner, query } = makeRunner({ resolveShellPath });
+    await runner.run(makeReq({ requestId: 'vr-1' }));
+    current = '/second/bin';
+    await runner.run(makeReq({ requestId: 'vr-2' }));
+    expect(resolveShellPath).toHaveBeenCalledTimes(2);
+    // '/usr/bin' is the resolveNode dir this harness prepends (see prependNodeDir).
+    expect(query.mock.calls[0][0].env.PATH).toBe(['/usr/bin', '/first/bin'].join(delimiter));
+    expect(query.mock.calls[1][0].env.PATH).toBe(['/usr/bin', '/second/bin'].join(delimiter));
+  });
+
+  // Windows spells the variable `Path`, and Node reports it that way. Writing a
+  // hardcoded `PATH` key leaves the consumer's `{ ...process.env, ...env }` with
+  // BOTH, and which one CreateProcess hands the child is undefined (round-2
+  // review). Driven through a fake base map so it pins on this macOS host.
+  it('writes PATH under the key case the process itself uses', async () => {
+    expect(pathEnvKey({ Path: '/gui/bin', SystemRoot: 'C:\\Windows' })).toBe('Path');
+    expect(pathEnvKey({ PATH: '/usr/bin' })).toBe('PATH');
+    expect(pathEnvKey({})).toBe('PATH');
+  });
+
+  // NODE_PATH is bound in the DRIVER WRAPPER and NOWHERE ELSE (round-2 review).
+  // In the agent's env it would put cyboflow's own node_modules on the CJS
+  // resolution fallback of the DELIVERABLE's build and serve child, so a
+  // snapshot whose dependency mirror never warmed (RC4's own 9/01 scenario)
+  // could resolve react/vite out of the running app's install and PASS.
+  it("binds NODE_PATH for the driver wrapper, never for the agent", async () => {
+    const { runner, query, writeDriverScript } = makeRunner();
+    await runner.run(makeReq());
+    expect(writeDriverScript).toHaveBeenCalledWith(
+      '/artifacts',
+      '/usr/bin/node',
+      '/app/driverCli.js',
+      FAKE_NODE_MODULES,
+    );
+    expect('NODE_PATH' in envOf(query)).toBe(false);
+  });
+
+  // The packaged shape until playwright is added to asarUnpack: an ABSENT
+  // NODE_PATH is honest, an empty one would just break module resolution.
+  it('binds no NODE_PATH at all when this build has no resolvable node_modules', async () => {
+    const { runner, writeDriverScript } = makeRunner({ resolveNodeModulesRoot: async () => null });
+    await runner.run(makeReq());
+    expect(writeDriverScript.mock.calls[0][3]).toBe(null);
+  });
+
+  it('never points NODE_PATH at the snapshot or the live worktree (Codex #4)', async () => {
+    const { runner, writeDriverScript } = makeRunner();
+    await runner.run(makeReq());
+    const nodePath: string = writeDriverScript.mock.calls[0][3];
+    expect(nodePath.startsWith('/snap')).toBe(false);
+    expect(nodePath.startsWith('/live/worktree')).toBe(false);
+  });
+
+  it('provisions a FRESH data dir per REQUEST and exports it', async () => {
+    const { runner, query, prepareDataDir } = makeRunner();
+    await runner.run(makeReq({ requestId: 'vr-abc' }));
+    expect(envOf(query).VERIFY_DATA_DIR).toBe(dataDirOf('vr-abc'));
+    expect(prepareDataDir).toHaveBeenCalledWith(dataDirOf('vr-abc'));
+  });
+
+  // macOS truncates a UNIX socket path at 104 bytes, and a data dir is where an
+  // app puts its sockets: a full `vr_<32 hex>` segment would push cyboflow's own
+  // orch.sock past the cap INSIDE the id, i.e. into a directory that does not
+  // exist. See verifyDataDirPath for the measurement.
+  it('keeps the data-dir segment short enough for a UNIX socket path', async () => {
+    const { runner, query } = makeRunner();
+    await runner.run(makeReq({ requestId: `vr_${'a'.repeat(32)}` }));
+    expect(envOf(query).VERIFY_DATA_DIR).toBe(dataDirOf('aaaaaaaa'));
+  });
+
+  // VERIFY_ARTIFACTS_DIR is RUN-scoped, so two attempts of the same lane share
+  // it — the data dir must not.
+  it('gives two requests under one artifacts dir DIFFERENT data dirs', async () => {
+    const { runner, query } = makeRunner();
+    await runner.run(makeReq({ requestId: 'vr-1' }));
+    await runner.run(makeReq({ requestId: 'vr-2' }));
+    const first = query.mock.calls[0][0].env.VERIFY_DATA_DIR;
+    const second = query.mock.calls[1][0].env.VERIFY_DATA_DIR;
+    expect(first).not.toBe(second);
+    expect(second).toContain('vr-2');
+  });
+
+  // Fail-soft, and the var is exported ANYWAY: a runbook that assigns its app's
+  // data-dir var from it must never expand it to the empty string and let the
+  // app fall back to the developer's real state directory.
+  // A dir the harness cannot create is HARNESS evidence, so it must arrive as
+  // a fail-open preflight skip with the check attached — never as a deployed
+  // agent's `launch_failed` (a blocking `ambiguous` that burns an attempt).
+  it('fails preflight (skipped, not deployed) when the data dir cannot be provisioned', async () => {
+    const { runner, query } = makeRunner({
+      prepareDataDir: async () => {
+        throw new Error('EROFS: read-only file system');
+      },
+    });
+    const result = await runner.run(makeReq());
+    expect(result.status).toBe('skipped');
+    expect(result.deployed).toBe(false);
+    expect(query).not.toHaveBeenCalled();
+    expect(result.preflight?.checks).toContainEqual(
+      expect.objectContaining({ id: 'data-dir', ok: false, detail: expect.stringContaining(dataDirOf('vr-1')) }),
+    );
+    expect(result.errorMessage).toContain('EROFS');
+  });
+
+  // The wrapper body, pinned on BOTH platforms from this macOS host.
+  describe('driverScriptBody', () => {
+    it('exports NODE_PATH for the driver process on POSIX', () => {
+      const body = driverScriptBody('/usr/bin/node', '/app/driverCli.js', '/repo/node_modules', 'darwin');
+      expect(body).toBe(
+        '#!/bin/sh\n'
+        + 'export ELECTRON_RUN_AS_NODE=1\n'
+        + 'export NODE_PATH="/repo/node_modules"\n'
+        + 'exec "/usr/bin/node" "/app/driverCli.js" "$@"\n',
+      );
+    });
+
+    it('sets it UNQUOTED on Windows, where quotes would join the value', () => {
+      const body = driverScriptBody('C:\\node.exe', 'C:\\driverCli.js', 'C:\\app\\node_modules', 'win32');
+      expect(body).toContain('set NODE_PATH=C:\\app\\node_modules\r\n');
+      expect(body).not.toContain('set NODE_PATH="');
+      expect(body.endsWith('%*\r\n')).toBe(true);
+    });
+
+    it('emits no NODE_PATH line at all when the build resolved no root', () => {
+      for (const platform of ['darwin', 'win32'] as const) {
+        expect(driverScriptBody('/n', '/d', null, platform)).not.toContain('NODE_PATH');
+      }
+    });
+  });
+
+  it('documents the harness vars to the agent, and tells it to leave NODE_PATH alone', () => {
+    expect(VERIFY_HARNESS_CONTRACT).toContain('VERIFY_DATA_DIR');
+    expect(VERIFY_HARNESS_CONTRACT).toContain('PATH is provided by the harness');
+    expect(VERIFY_HARNESS_CONTRACT).toContain('Do NOT set NODE_PATH');
   });
 });
 

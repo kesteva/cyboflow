@@ -197,18 +197,35 @@ export const VERIFY_NO_RUNBOOK_REASON =
  * record every other branch depends on (runbookStore's `registerDraft`),
  * breaking verification for the projects that configured it properly. The right
  * action is to merge the branch that already carries it.
+ *
+ * MOSTLY UNREACHABLE SINCE F10. The store's `statusDetail` no longer answers
+ * `'proven-file-absent-here'` for a genuinely absent file — the record, not the
+ * file, is what a proof executes, so the portable-hash conjunct is skipped and
+ * the branch is judged on its project inputs. Kept because the mapping is still
+ * total over {@link VerifyRunbookStatusDetail} and an injected/stubbed resolver
+ * may still produce that reason.
  */
 export const VERIFY_RUNBOOK_ELSEWHERE_REASON =
   'a proven verification runbook exists for this project but is not in this branch';
 
 /**
  * The §3.2 skip reason for a runbook that WAS proven and has since drifted —
- * its own content, the project inputs it builds through, or the host. The
- * record was demoted write-through by the read that produced this; what it needs
- * is re-proving, not re-deriving.
+ * its own content, the project inputs it builds through, or the host. Since F4
+ * (docs/proposals/visual-verification-brittleness-fixes.md) the read that
+ * produces this LEAVES THE RECORD INTACT and merely refuses: the drift is
+ * recomputed on every gate/badge read, so it can go away on its own (the inputs
+ * come back) or be cleared by a re-prove that re-stamps the provenance. What it
+ * needs is re-proving, never re-deriving.
  */
 export const VERIFY_RUNBOOK_DRIFTED_REASON =
   "this project's proven verification runbook no longer matches its inputs";
+// ONE STRING FOR BOTH DRIFTS, deliberately (F4 fix round). The store tells
+// provenance drift (`'drifted'`) from content drift (`'content-drifted'`)
+// because their REMEDIES differ — the first is re-proven automatically, the
+// second must be re-registered — but to a REQUEST they are the same fact, and
+// forking the skip text here would fork `runbookDeclineForSkipReason` below,
+// which reverse-maps the persisted string. `bootstrapEligibility` holds the
+// distinction; the gate stays coarse.
 
 /**
  * The §3.2 skip reason when the runbook record could not be READ at all (a
@@ -853,9 +870,10 @@ export const DELIVERY_RETRY_MAX_MS = 15 * 60 * 1000;
 /**
  * Default per-request deadline for an AGENT-engine row (redesign §5.4 step 6): 10
  * minutes — an agent deployment builds, serves, drives, and judges, so it needs far
- * longer than a single capture. `task.timeoutMs` may lower it; the ceiling below
- * caps any value. Applied through the SAME per-request abort/raceWithAbort machinery
- * as the legacy deadline.
+ * longer than a single capture. It is also the FLOOR: since F2 a composed
+ * `task.timeoutMs` may only RAISE the deadline (the ceiling below still caps any
+ * value) — see {@link VerificationScheduler.agentDeadlineMs}. Applied through the
+ * SAME per-request abort/raceWithAbort machinery as the legacy deadline.
  */
 export const DEFAULT_AGENT_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -1060,12 +1078,16 @@ export interface VerificationSchedulerDeps {
    * `'absent'` means none exists.
    *
    * ASYNC (phase 2): the real answer is a CONJUNCTION re-checked on every read —
-   * the portable file at the probe path must still parse and hash to the
-   * record's hash, a freshly computed project input-hash must match, and so must
-   * the host fingerprint (§5.3 "Any component changing demotes"). Two of those
-   * three are filesystem work, so the thunk cannot be synchronous without either
-   * blocking the drain on IO or answering from a cache that is exactly what
-   * drift detection must not rely on.
+   * a freshly computed project input-hash must match the stored one, so must the
+   * host fingerprint, and IF the probe path carries a portable file at all it
+   * must parse and hash to the record's hash (§5.3 "Any component changing
+   * demotes"). That last conjunct is conditional since F10: the record, not the
+   * file, is what a proof executes, so a tree that simply has not merged the
+   * export yet skips it and is judged on the other two — while a file that IS
+   * there and disagrees is content drift and still refuses. Two of the three are
+   * filesystem work, so the thunk cannot be synchronous without either blocking
+   * the drain on IO or answering from a cache that is exactly what drift
+   * detection must not rely on.
    *
    * `probePath` is the TREE to check, and the gate passes the REQUESTING RUN's
    * worktree (lane-runbook-bootstrap.md §3). It used to pass nothing, and the
@@ -2726,6 +2748,41 @@ export class VerificationScheduler {
    * a setup CTA, and for a degenerate pre-live task means nothing changes at
    * all.
    */
+  /**
+   * F5 ∘ F4 composition — does ANY runbook record (proven, drifted, or a
+   * registered/file-only draft) exist for this (project, modality) on the probed
+   * tree? `resolveProvenRunbook` answers only for a PROVEN one, and since F4 made
+   * drift non-writing a project can sit in `drifted` for a long stretch; an
+   * undeclared lane that consulted proven records alone would then resolve to
+   * `web` and the bootstrap would derive a rival web runbook next to the
+   * drifted cdp-app one. Presence lets the lane keep pointing at the modality
+   * that has a record, so the bootstrap takes F4's re-prove path (drifted) or
+   * the derive path (draft) for THAT modality. Same probe ladder as
+   * `resolveProvenRunbook`; never throws (a hiccup answers "absent").
+   */
+  async runbookRecordPresent(args: {
+    projectId: number;
+    runId: string;
+    modality: VerificationModality;
+    probePath?: string;
+  }): Promise<boolean> {
+    const probePath =
+      args.probePath ?? this.worktreePathForRun(args.runId) ?? this.projectPathFor(args.projectId);
+    if (probePath === null || probePath === undefined) return false;
+    try {
+      const detail = await this.runbookStatus(args.projectId, args.modality, probePath);
+      return detail.status !== 'absent';
+    } catch (err) {
+      this.logger?.debug('[VerificationScheduler] runbook presence probe failed (fail-soft: absent)', {
+        projectId: args.projectId,
+        runId: args.runId,
+        modality: args.modality,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }
+
   async resolveProvenRunbook(args: {
     projectId: number;
     runId: string;
@@ -2828,6 +2885,13 @@ export class VerificationScheduler {
    * other outcome the gate skips it with a reason that names the situation. The
    * bootstrap has no channel to fail a lane and must not grow one.
    *
+   * TWO THINGS IT MAY DECIDE TO DO (F4 / Codex #2). `decision.mode` carries
+   * through verbatim: `'derive'` authors (or adopts) a runbook and commits it,
+   * `'reprove'` re-runs the proof over a record that DRIFTED and writes nothing
+   * at all. The mode is not re-derived here from anything — computing it twice is
+   * how a drifted project ends up with a machine-authored rival over a human's
+   * runbook, which is precisely the case this seam is not allowed to get wrong.
+   *
    * NEVER THROWS. `runRunbookBootstrap` has its own catch-all, and this method
    * wraps the whole thing again because it is reached from the enqueue seam,
    * whose contract is that it cannot crash a lane.
@@ -2867,14 +2931,21 @@ export class VerificationScheduler {
     }
 
     try {
-      return await this.runbookBootstrap({
+      const common = {
         projectId: args.projectId,
         runId: args.runId,
         laneTaskRef: args.laneTaskRef,
         modality: args.modality,
         worktreePath: probePath,
-        adopt: decision.adopt,
-      });
+      };
+      // `adopt` travels only on the arm that has one: a reprove is not authoring
+      // anything, so there is no adopt-vs-author decision to pass it (F4 /
+      // Codex #2 — see RunbookBootstrapArgs).
+      return await this.runbookBootstrap(
+        decision.mode === 'derive'
+          ? { ...common, mode: 'derive', adopt: decision.adopt }
+          : { ...common, mode: 'reprove' },
+      );
     } catch (err) {
       this.logger?.warn('[VerificationScheduler] runbook bootstrap threw (degrading to today\'s skip)', {
         runId: args.runId,
@@ -3272,11 +3343,26 @@ export class VerificationScheduler {
       .run(id).changes;
   }
 
-  /** The agent row's effective deadline: `task.timeoutMs` (when positive) capped by the ceiling, else the default. */
+  /**
+   * The agent row's effective deadline: the composed `task.timeoutMs` (when
+   * positive) FLOORED at the configured default and capped by the ceiling.
+   *
+   * F2 (RC5, docs/proposals/visual-verification-brittleness-fixes.md) added the
+   * floor. The outer `timeoutMs` used to be able to LOWER the deadline without
+   * limit, while being documented on no composer-facing surface (only the
+   * nested `serve.readyWhen.timeoutMs` is) — so a task-verify composer that
+   * guessed `180000` had vr_addb4401 killed at 180s mid-attestation with the
+   * build passed and the app already booted; the identical task at `1200000`
+   * passed in 7m18s. 2 of the 7 all-time timeouts are that. A composer may now
+   * only ever RAISE the deadline toward the ceiling; it can never take it below
+   * the default the harness knows a real build → serve → drive → attest cycle
+   * needs. Tests inject a small `agentRequestTimeoutMs`, so the floor is that
+   * INJECTED default, not the 10-minute production constant.
+   */
   private agentDeadlineMs(task: VerificationTaskV1): number {
     const requested =
       typeof task.timeoutMs === 'number' && task.timeoutMs > 0 ? task.timeoutMs : this.agentRequestTimeoutMs;
-    return Math.min(requested, this.agentRequestCeilingMs);
+    return Math.min(this.agentRequestCeilingMs, Math.max(this.agentRequestTimeoutMs, requested));
   }
 
   /**
@@ -3651,7 +3737,7 @@ export class VerificationScheduler {
     // been decided", which is what every reader assumed it meant.
     if ((setupProof || bootstrapProof) && status === 'passed') {
       try {
-        this.recordRunbookProof(row, modality, result, snapshotSha);
+        await this.recordRunbookProof(row, modality, result, snapshotSha);
       } catch (err) {
         // Swallowed deliberately: the verdict below is the load-bearing act, and
         // a proof-recording failure may not prevent it from being written.
@@ -3782,13 +3868,25 @@ export class VerificationScheduler {
    * attests to content the record no longer holds. The verification itself still
    * passed and is written as such; only the promotion is declined, and the setup
    * flow re-proves against the newer revision.
+   *
+   * PROMOTION ALSO RE-STAMPS THE PROVENANCE (F4 —
+   * docs/proposals/visual-verification-brittleness-fixes.md). The record's
+   * `input_hash` / `host_fingerprint_json` are the baseline the drift check
+   * compares every later read against, and until now only `registerDraft` ever
+   * wrote them — so a proof taken in one tree, or on a host that has moved since
+   * the draft was written, was born already drifted. This path now observes both
+   * over the requesting run's worktree (else the project root — the same ladder
+   * the enqueue gate probes) and hands them to `markProven`. `portable_hash` is
+   * deliberately NOT re-stamped (Codex #1): it is the content address every pin
+   * resolves through. See the inline comment at the call for the failure
+   * handling — a probe that throws degrades to the old status-only flip.
    */
-  private recordRunbookProof(
+  private async recordRunbookProof(
     row: VerificationRequestRow,
     modality: VerificationModality,
     result: VerificationAgentRunResult,
     snapshotSha: string | null,
-  ): void {
+  ): Promise<void> {
     const store = this.runbookStore;
     if (!store) return;
     if (snapshotSha === null) {
@@ -3825,7 +3923,46 @@ export class VerificationScheduler {
         verifiedAt: new Date().toISOString(),
         requestId: row.id,
       });
-      const outcome = store.markProven(row.project_id, modality, pin.hash, pin.version, proofJson);
+      // F4 / Codex #1 — RE-STAMP THE PROVENANCE THE DRIFT CHECK COMPARES TO.
+      // The record's `input_hash` / `host_fingerprint_json` were written by
+      // `registerDraft`, over whatever tree and host were current when the DRAFT
+      // was written — for the setup flow, a flow worktree; for a record that has
+      // sat a while, a host that has since taken an Electron/playwright bump.
+      // The proof was obtained HERE, so the record should describe HERE. The
+      // probe path is deliberately the SAME ladder the enqueue gate probes
+      // (see resolveProvenRunbook): the requesting run's worktree, else the
+      // project root — stamping values from a tree the gate never reads would
+      // guarantee a drift on the very next request. NEVER `portable_hash`
+      // (Codex #1): it is the content address of `portable_json` and the target
+      // of every pin, and the snapshot this proof executed in is already
+      // disposed. Both CAS predicates are untouched inside `markProven`, and so
+      // is a stored `input_hash` when the probe could not observe this tree at
+      // all (F4 fix round): `markProven` re-stamps field by field, so a `null`
+      // input hash from a worktree that has already been cleaned up is DROPPED
+      // rather than written — writing it would make the promotion read as
+      // drifted on its very next check.
+      const probePath = this.worktreePathForRun(row.run_id) ?? this.projectPathFor(row.project_id);
+      let fresh: { inputHash: string | null; hostFingerprint: string } | undefined;
+      if (probePath !== null) {
+        try {
+          fresh = await store.freshProvenance(probePath);
+        } catch (err) {
+          // A provenance probe that blew up must never cost a proof its
+          // promotion: fall through to the status-only flip, which is exactly
+          // the pre-F4 behavior.
+          this.logger?.warn(
+            '[VerificationScheduler] fresh provenance probe failed; promoting without a re-stamp',
+            {
+              requestId: row.id,
+              projectId: row.project_id,
+              modality,
+              probePath,
+              error: err instanceof Error ? err.message : String(err),
+            },
+          );
+        }
+      }
+      const outcome = store.markProven(row.project_id, modality, pin.hash, pin.version, proofJson, fresh);
       if (outcome.ok) {
         this.logger?.info('[VerificationScheduler] setup proof recorded — runbook is now proven', {
           requestId: row.id,
@@ -3833,6 +3970,13 @@ export class VerificationScheduler {
           modality,
           runbookHash: pin.hash,
           runbookLocalVersion: pin.version,
+          // Which of the flips happened, so a later drift is diagnosable: a
+          // probe that threw re-stamps nothing, and one that could not read the
+          // tree still re-stamps the host half (`markProven` drops a null input
+          // hash rather than writing it over the stored baseline).
+          provenanceRestamped: fresh !== undefined,
+          inputHashObserved: fresh !== undefined ? fresh.inputHash !== null : null,
+          probePath,
         });
         return;
       }

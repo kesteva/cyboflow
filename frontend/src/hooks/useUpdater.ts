@@ -56,6 +56,9 @@ export function useUpdater(): Updater {
         case 'available':
           setState((prev) => (prev.status === 'idle' ? { status: 'available', version: event.version } : prev));
           break;
+        // The scheduled check auto-downloads, so a consumer sitting on
+        // 'available'/'up-to-date' will see progress then 'downloaded' arrive
+        // over this stream and flip to the install CTA without a click.
       }
     });
   }, []);
@@ -71,7 +74,14 @@ export function useUpdater(): Updater {
       if (!result.data.supported) {
         setState({ status: 'unsupported' });
       } else if (result.data.updateAvailable && result.data.latestVersion) {
-        setState({ status: 'available', version: result.data.latestVersion });
+        // A scheduled check may already have staged this version; then the
+        // only step left is the restart.
+        const staged = result.data.downloadedVersion === result.data.latestVersion;
+        setState(
+          staged
+            ? { status: 'downloaded', version: result.data.latestVersion }
+            : { status: 'available', version: result.data.latestVersion },
+        );
       } else {
         setState({ status: 'up-to-date' });
       }

@@ -199,8 +199,10 @@ export function FeatureControlsSettings({
             verification runbook that was proven by an actual run — which today only the Verify
             Setup flow produces. With this on, a sprint or ship run that hits that wall derives a
             runbook itself, commits it to its own branch, and proves it before verifying; if the
-            proof fails, the run advances exactly as it does now. Off by default: unlike the switch
-            above, this lets a run commit to your branch on its own.
+            proof fails, the run advances exactly as it does now. On by default (unlike the switch
+            above): without it, every project except one that already has a proven runbook stays
+            permanently unverifiable. Turn it off if you don't want a run committing to your branch
+            on its own.
           </p>
         </SettingsSection>
 

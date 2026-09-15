@@ -128,12 +128,15 @@ not put them in the JSON.
 
 Every host-specific value in the portable half is a **placeholder**, never a
 resolved value: `${PORT}` for a leased web port, `$VERIFY_DRIVER_PORT` for the
-debugging port in attach mode, `$VERIFY_ARTIFACTS_DIR` for a per-request scratch
-dir to anchor an isolated profile under. A literal port number in a committed
-runbook is a promise about someone else's machine.
+debugging port in attach mode, `$VERIFY_DATA_DIR` for the FRESH, EMPTY,
+per-request directory to anchor an isolated profile / state dir under
+(`$VERIFY_ARTIFACTS_DIR` is per-RUN and is reused across attempts — never put
+mutable app state there). A literal port number in a committed runbook is a
+promise about someone else's machine.
 
-**`portEnv` and `nonceEnv` are the two levers the harness EXPORTS**, bound to the
-port it leased and the nonce it minted for that request. Declare whatever names
+**`portEnv`, `nonceEnv` and `dataDirEnv` are the three levers the harness
+EXPORTS**, bound to the port it leased, the nonce it minted and the data dir it
+provisioned for that request. Declare whatever names
 the project's own code actually reads — a server doing `process.env.PORT`, a
 build stamping its marker from `process.env.APP_BUILD_ID` — and they arrive set.
 Leave them out and the same two facts fall to whatever the verification agent

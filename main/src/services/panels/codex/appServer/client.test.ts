@@ -14,12 +14,11 @@ import {
   type CodexAppServerClientOptions,
   type SpawnAppServerProcess,
 } from './client';
-import { collectDescendantPids } from '../../../processTable';
-import { listPidPpidTableSync } from '../../../../utils/platformProcess';
 import type { AppServerInitializeParams } from './protocol';
 import {
-  DETACHED_GRANDCHILD_SCRIPT,
   isAlive,
+  namedDetachedGrandchildStderrScript,
+  readNamedGrandchildPid,
   waitUntil,
 } from '../../../../__test_fixtures__/processTree';
 
@@ -634,7 +633,8 @@ describe('CodexAppServerClient — win32 tree teardown', () => {
       const spawn: SpawnAppServerProcess = () => {
         realChild = nodeSpawn(
           process.execPath,
-          ['-e', DETACHED_GRANDCHILD_SCRIPT],
+          // The grandchild names itself on stderr; the client owns stdout.
+          ['-e', namedDetachedGrandchildStderrScript()],
           { stdio: ['pipe', 'pipe', 'pipe'], detached: true },
         );
         return realChild as unknown as AppServerProcess;
@@ -644,20 +644,21 @@ describe('CodexAppServerClient — win32 tree teardown', () => {
       const pid = realChild?.pid;
       expect(pid).toBeTypeOf('number');
 
-      // Positive control via the shared process table: the grandchild exists.
-      let grandkids: number[] = [];
-      for (let i = 0; i < 15 && grandkids.length === 0; i++) {
-        await new Promise((r) => setTimeout(r, 200));
-        grandkids = collectDescendantPids(pid as number, listPidPpidTableSync());
-      }
-      expect(grandkids.length).toBeGreaterThanOrEqual(1);
+      // Assert over the tree this suite OWNS. The pid/ppid walk this replaced
+      // was both racy (Windows keeps a dead parent's pid as ParentProcessId and
+      // reissues pids fast, so an unrelated orphan gets walked as a descendant)
+      // and slow — enumerating the table shells out to PowerShell, which timed
+      // out outright on a loaded runner. See processTree.ts.
+      const grandchildPid = await readNamedGrandchildPid(realChild?.stderr ?? null);
+
+      // Positive control: both halves are up before the ladder runs.
+      expect(isAlive(pid as number)).toBe(true);
+      expect(isAlive(grandchildPid)).toBe(true);
 
       await client.stop();
 
       expect(await waitUntil(() => !isAlive(pid as number), 8000)).toBe(true);
-      for (const g of grandkids) {
-        expect(await waitUntil(() => !isAlive(g), 8000)).toBe(true);
-      }
+      expect(await waitUntil(() => !isAlive(grandchildPid), 8000)).toBe(true);
     },
     30000,
   );

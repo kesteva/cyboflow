@@ -8,24 +8,53 @@ import { ClaudePanelState } from '../../../shared/types/panels';
 import type { SessionOutput } from '../database/models';
 import { isAnyEffortLevel, type ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import { isCliSubstrate, type CliSubstrate } from '../../../shared/types/substrate';
-import { normalizeAgentModelSelection } from '../../../shared/types/agentModels';
+import { DEFAULT_CODEX_MODEL, normalizeAgentModelSelection } from '../../../shared/types/agentModels';
+import type { AgentProvider } from '../../../shared/types/agentRuntime';
 import { DEFAULT_QUICK_MODEL } from '../../../shared/types/sessionDefaults';
+import { providerForSession } from '../services/panelLane';
 
 /**
- * Normalize a resolved Claude-panel model candidate to the Claude family,
- * falling back to DEFAULT_QUICK_MODEL ('opus') for anything another
- * provider's family claims. Onboarding's Model step (step 3) can persist a
- * Codex catalog id into the GLOBAL `defaultLaunchModel` when Codex is the
- * chosen default runtime, and a per-panel setting can independently carry a
+ * Normalize a resolved panel model candidate to the family of the provider
+ * that OWNS the panel, flooring to that provider's quick default when another
+ * provider's family claims the value. Onboarding's Model step (step 3) can
+ * persist a Codex catalog id into the GLOBAL `defaultLaunchModel` when Codex is
+ * the chosen default runtime, and a per-panel setting can independently carry a
  * stale cross-provider id — either would otherwise flow straight into
- * ClaudePanelManager.startPanel, which is ALWAYS the Claude CLI. Applied to
- * the fully-resolved candidate (explicit arg / panel setting / global
- * default alike) at both `applySettingsDefaults` and `claude-panels:start`,
- * so neither fallback site has to duplicate the normalize-or-floor logic.
+ * ClaudePanelManager.startPanel, which is ALWAYS the Claude CLI.
+ *
+ * The provider is a parameter because every provider's chat rides a
+ * 'claude'-typed panel and therefore reads its model through THIS handler: a
+ * Codex or OMP quick session stores `gpt-5.4` / `openrouter/auto` in the same
+ * panel settings, and normalizing those against Claude's family threw the
+ * value away and floored to 'opus' — so the composer pill read "opus" over a
+ * turn that actually ran on the stored OMP model (2026-09-11).
+ *
+ * The floor is per provider: Claude has a curated alias to fall to, Codex has
+ * 'auto', and OMP/pi have no model flag to fall to (an omitted model means the
+ * vendor's own default, which the composer renders as "Default"), so they
+ * resolve to undefined rather than a value the spawn would not honor.
+ */
+function resolveQuickModelForProvider(provider: AgentProvider, candidate: unknown): string | undefined {
+  const value = typeof candidate === 'string' ? candidate : undefined;
+  const normalized = normalizeAgentModelSelection(provider, value);
+  if (normalized !== undefined) return normalized;
+  switch (provider) {
+    case 'claude':
+      return DEFAULT_QUICK_MODEL;
+    case 'codex':
+      return DEFAULT_CODEX_MODEL;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * The Claude-only arm, for `claude-panels:start` — that path is always the
+ * Claude CLI regardless of what the panel's session says, so it keeps the
+ * Claude floor unconditionally.
  */
 function resolveClaudeQuickModel(candidate: unknown): string {
-  const value = typeof candidate === 'string' ? candidate : undefined;
-  return normalizeAgentModelSelection('claude', value) ?? DEFAULT_QUICK_MODEL;
+  return resolveQuickModelForProvider('claude', candidate) ?? DEFAULT_QUICK_MODEL;
 }
 
 let claudePanelManager: ClaudePanelManager;
@@ -54,7 +83,22 @@ class ClaudePanelHandler extends BaseAIPanelHandler {
   /**
    * Apply Claude-specific default settings
    */
-  protected applySettingsDefaults(settings: Record<string, unknown>): Record<string, unknown> {
+  /**
+   * The provider owning a panel's session — the family its stored model is
+   * normalized against. Unknown panel / session (tests, a panel mid-delete)
+   * keeps the Claude floor, matching `providerForSession`'s own default.
+   */
+  private providerForPanel(panelId: string | undefined): AgentProvider {
+    if (!panelId) return 'claude';
+    const panel = panelManager.getPanel(panelId);
+    const dbSession = panel ? this.services.sessionManager.getDbSession(panel.sessionId) : undefined;
+    return providerForSession(dbSession);
+  }
+
+  protected applySettingsDefaults(
+    settings: Record<string, unknown>,
+    panelId?: string,
+  ): Record<string, unknown> {
     const { configManager } = this.services;
     const modelCandidate = settings.model || configManager.getDefaultLaunchModel('quick');
     return {
@@ -66,7 +110,7 @@ class ClaudePanelHandler extends BaseAIPanelHandler {
       // back over the normalized value below, defeating it for exactly the
       // case it exists to guard (a stale/cross-provider id already stored in
       // panel settings).
-      model: resolveClaudeQuickModel(modelCandidate),
+      model: resolveQuickModelForProvider(this.providerForPanel(panelId), modelCandidate),
     };
   }
 
@@ -170,7 +214,7 @@ class ClaudePanelHandler extends BaseAIPanelHandler {
         console.log('[IPC] claude-panels:get-model called for panelId:', panelId);
         
         const settings = databaseService.getPanelSettings(panelId);
-        const settingsWithDefaults = this.applySettingsDefaults(settings);
+        const settingsWithDefaults = this.applySettingsDefaults(settings, panelId);
         
         return { success: true, data: settingsWithDefaults.model };
       } catch (error) {
@@ -242,7 +286,7 @@ class ClaudePanelHandler extends BaseAIPanelHandler {
     this.ipcMain.handle('claude-panels:get-fast-mode', async (_event, panelId: string) => {
       try {
         const settings = databaseService.getPanelSettings(panelId);
-        const settingsWithDefaults = this.applySettingsDefaults(settings ?? {});
+        const settingsWithDefaults = this.applySettingsDefaults(settings ?? {}, panelId);
         return { success: true, data: settingsWithDefaults.fastMode === true };
       } catch (error) {
         console.error('Failed to get Claude panel fast mode:', error);

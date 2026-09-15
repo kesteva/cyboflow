@@ -66,20 +66,59 @@ export type BootstrapDeclineReason =
    * A proven record just drifted (inputs, host, or content moved). Its runbook
    * is presumably still correct and human-authored; what it needs is to be
    * re-PROVEN, not re-DERIVED, and re-deriving would throw away a working one.
+   *
+   * ONE of the two drifts is no longer a bootstrap decline (F4 / Codex #2, then
+   * narrowed in the F4 fix round). This stays what
+   * {@link declineForRunbookStatus} answers for BOTH — the GATE needs it,
+   * because a drifted record is exactly as unusable to a request as a missing
+   * one whichever conjunct failed, and the skip it writes has to name the real
+   * situation. What {@link decideRunbookBootstrap} does with it now depends on
+   * WHICH drift the store computed:
+   *
+   *  - `'drifted'` (PROVENANCE — the project inputs or the host moved) becomes
+   *    `{ proceed: true, mode: 'reprove' }`. With drift non-writing (F4 stage 1,
+   *    `runbookStore.drifted`) the record answers `'drifted'` on EVERY read
+   *    forever, so declining would strand the project — it could never verify
+   *    again — and the pre-F4 write-through demotion that used to un-strand it
+   *    did so by making the next read say `'draft'` and re-DERIVING over a
+   *    human-authored runbook, which lane-runbook-bootstrap.md §4 says is the
+   *    wrong answer. Re-proving re-stamps exactly the two columns that moved.
+   *  - `'content-drifted'` (this tree's portable file is not the record's
+   *    content) stays a DECLINE. A re-prove cannot clear it: promotion never
+   *    re-stamps `portable_hash` (Codex #1), so the proof would pass, the next
+   *    read would compute the same mismatch, `confirmProven` would answer false,
+   *    and the run would report "still not proven" about a runbook that just
+   *    proved — once per run, forever, each time spending a deployment and a
+   *    verification-budget charge. Deriving is equally wrong (it is a human's
+   *    runbook). The remedy is re-REGISTRATION of this tree's revision, which
+   *    only the Verify Setup flow does, which is what the text below says.
    */
   | 'stale-proof'
   /** The store could not observe enough to answer. Never write on a guess. */
   | 'unobservable';
 
 /**
- * `proceed: true` means the preflight may derive a runbook for this request.
- * `adopt` distinguishes the two ways that happens: `false` = author one from
- * scratch, `true` = this tree already CARRIES a parseable runbook (a teammate
- * committed it; this host merely never proved it), so the honest action is to
- * prove what is there rather than overwrite it with a machine-authored rival.
+ * `proceed: true` means the bootstrap may act on this request. `mode` says WHAT
+ * it may do, and the two are not variations of one operation — they touch
+ * different things and can fail for different reasons:
+ *
+ *  - `'derive'` — author (or adopt) a runbook, commit it, register it, prove it.
+ *    `adopt` distinguishes the two ways that happens: `false` = author one from
+ *    scratch, `true` = this tree already CARRIES a parseable runbook (a
+ *    teammate committed it; this host merely never proved it), so the honest
+ *    action is to prove what is there rather than overwrite it with a
+ *    machine-authored rival.
+ *  - `'reprove'` — a proven record DRIFTED (F4 / Codex #2). The runbook is
+ *    already written, already committed, already registered; the only thing
+ *    that expired is the proof. So this mode writes NOTHING — no draft, no
+ *    file, no commit, no registration — it re-runs the attestation proof
+ *    against the record as it stands. There is no `adopt` question to answer
+ *    here, which is why the field is absent rather than `false`: a reprove that
+ *    read an `adopt` flag would be reading a decision that was never made.
  */
 export type BootstrapDecision =
-  | { proceed: true; adopt: boolean }
+  | { proceed: true; mode: 'derive'; adopt: boolean }
+  | { proceed: true; mode: 'reprove' }
   | { proceed: false; reason: BootstrapDeclineReason };
 
 /**
@@ -113,7 +152,11 @@ export function declineForRunbookStatus(
   const { reason } = status;
   if (reason === 'proven') return 'already-proven';
   if (reason === 'proven-file-absent-here') return 'proof-belongs-elsewhere';
-  if (reason === 'drifted') return 'stale-proof';
+  // BOTH drifts collapse here on purpose: to a REQUEST they are the same fact
+  // (a proven record that cannot serve it) and the gate's skip string must not
+  // fork. They are told apart one level up, by `decideRunbookBootstrap`, which
+  // is the only caller that WRITES — see the `'stale-proof'` doc.
+  if (reason === 'drifted' || reason === 'content-drifted') return 'stale-proof';
   if (!BOOTSTRAPPABLE.has(reason)) return 'unobservable';
   return null;
 }
@@ -126,6 +169,33 @@ export function declineForRunbookStatus(
  * request that never needed a runbook at all, is never described in terms of its
  * runbook state — logging "no proven runbook" for a degenerate target-only task
  * would be true and completely misleading.
+ *
+ * ONE SITUATION PROCEEDS WITHOUT WRITING (F4 / Codex #2). A `'stale-proof'`
+ * whose underlying reason is `'drifted'` — the project inputs or the host moved
+ * out from under a proof — answers `{ proceed: true, mode: 'reprove' }`. It is
+ * the only `declineForRunbookStatus` answer that is not a refusal here, and the
+ * asymmetry is the whole point of stage 2: the gate still needs the decline
+ * reason (a drifted record cannot serve a request), while the bootstrap's honest
+ * response is to re-run the proof over the record that already exists. Deriving
+ * there would UPSERT a machine-authored rival over a human's runbook whose only
+ * defect is a stale proof, and declining there would strand the project forever
+ * now that drift is computed rather than persisted.
+ *
+ * AND THE OTHER DRIFT STILL DECLINES (F4 fix round). `'content-drifted'` — this
+ * tree carries a portable file that is not the record's content — reaches the
+ * same `'stale-proof'` decline reason and must NOT reach the reprove: nothing a
+ * proof can do changes `portable_hash` (promotion deliberately never re-stamps
+ * it, Codex #1), so a reprove would pass, fail its own `confirmProven` check,
+ * report "still not proven", and repeat on the next run — a self-renewing spend
+ * of a deployment and a budget charge that can never converge. Discriminating on
+ * `status.reason` rather than on the decline is deliberate: the decline is the
+ * GATE's vocabulary and must stay coarse; the mode is a WRITE decision and needs
+ * the finer fact.
+ *
+ * Every OTHER decline is unchanged, and a reason added to
+ * {@link VerifyRunbookStatusReason} later still defaults to not bootstrapping —
+ * in BOTH senses, since the reprove arm is keyed on an exact reason rather than
+ * on "not one of the others".
  */
 export function decideRunbookBootstrap(args: {
   /** The resolved toggle AND kill switch, already combined by the caller. */
@@ -137,8 +207,11 @@ export function decideRunbookBootstrap(args: {
   if (!args.derivesEnvironment) return { proceed: false, reason: 'no-environment' };
 
   const decline = declineForRunbookStatus(args.status);
+  if (decline === 'stale-proof' && args.status.reason === 'drifted') {
+    return { proceed: true, mode: 'reprove' };
+  }
   if (decline !== null) return { proceed: false, reason: decline };
-  return { proceed: true, adopt: args.status.reason === 'file-only' };
+  return { proceed: true, mode: 'derive', adopt: args.status.reason === 'file-only' };
 }
 
 /**
@@ -164,8 +237,9 @@ export function bootstrapRemedyText(reason: BootstrapDeclineReason): string | nu
       return (
         "This project's verification runbook was proven, but something it depended on has since " +
         'moved — its own content, the package scripts/lockfile it builds through, or this host. ' +
-        'The runbook itself is probably still right; it needs to be re-proven. Re-run verification ' +
-        'setup to prove the current revision.'
+        'The runbook itself is probably still right; it needs to be re-proven — and if the runbook ' +
+        'FILE is what changed, re-registered against this revision first. Re-run verification setup ' +
+        'to register and prove the current revision.'
       );
     case 'unobservable':
       return (

@@ -182,7 +182,7 @@ names a column the widget's own render source exposes (checked at runtime agains
 columns too); a catalog **section** may appear at most once per layout; template references
 in `params` may only name `row.<field>`, `setting.<declared>`, `context.projectId`.
 
-### 3.2 Tables — migration `132_custom_views.sql` (+ `schema.sql` in the same commit)
+### 3.2 Tables — migration `133_custom_views.sql` (+ `schema.sql` in the same commit)
 
 ```sql
 CREATE TABLE IF NOT EXISTS custom_views (
@@ -665,7 +665,7 @@ model to read errors from).
 ## 8. Files touched (summary)
 
 New: `shared/types/customViews.ts`, `shared/customViews/{transform,validate,widgetDocument}.ts`,
-`main/src/database/migrations/132_custom_views.sql`, `main/src/orchestrator/readOnlyQuery.ts`,
+`main/src/database/migrations/133_custom_views.sql`, `main/src/orchestrator/readOnlyQuery.ts`,
 `main/src/orchestrator/agentThread/prepareProposal.ts`,
 `main/src/orchestrator/customViews/{customViewsStore,sourceRunner,widgetDataService,widgetActionService,customViewsService}.ts`,
 `main/src/orchestrator/trpc/routers/customViews.ts`, `main/src/orchestrator/insightsInputSchemas.ts`,
@@ -692,7 +692,7 @@ Modified: `main/src/database/schema.sql`, `main/src/orchestrator/mcpServer/mcpQu
 | stage | scope | verification |
 |---|---|---|
 | S0 | Shared types, zod schemas + `resolveSpecSettings`, `applyTransform`, `buildWidgetDocument` | `shared` unit tests (`main` vitest) |
-| S1 | Migration 132 + `schema.sql`, `CustomViewsDbStore` (CAS, parse-based in-use, fail-closed), `listProposals` LEFT JOIN, replay test | store tests on a temp DB; `verify:schema`; `migrationPrefixes.test.ts`; agentThread store tests |
+| S1 | Migration 133 + `schema.sql`, `CustomViewsDbStore` (CAS, parse-based in-use, fail-closed), `listProposals` LEFT JOIN, replay test | store tests on a temp DB; `verify:schema`; `migrationPrefixes.test.ts`; agentThread store tests |
 | S2 | `readOnlyQuery.ts` extraction (MCP behaviour pinned), `prepareProposal.ts` extraction (propose-action replies pinned), `sourceRunner` + adapters, `widgetDataService` (cache, per-request freshness, coalescing, breaker, plan lines), `widgetActionService` (consent-free server core: revision check, row resolution, idempotent log, executor result passthrough) | `mcpDbQuery.test.ts` + propose-action tests unchanged and green; new unit tests |
 | S3 | tRPC router + `CustomViewsServiceLike` + context wiring + `index.ts`; `customWidgetServer` + preload/IPC + guard registration | router tests with fake ctx (`routers/__tests__` createCaller idiom); server tests modeled on `designPrototypeServer.test.ts`; guard test: off-origin navigation from a widget origin is blocked with no external open |
 | S4 | Renderer read path: store, catalog, `ViewSurface` tails in both pages (Default unchanged, chrome explicit, scroll guards), `WidgetHost`, shape renderers, sandbox frame (origin-checked bridge), actions (preview → confirm → execute, frame requests always confirm, disabled in draft) | RTL tests: every `QueuePageState` renders the same section order in default mode; custom layout renders WidgetHost; scroll-or-top; frame ignores wrong-origin messages; action flow incl. `stale_row` / `stale_view` / partial-failure display |

@@ -51,6 +51,7 @@ import type { BlockingItemsResolver } from './blockingItemsGate';
 import type { SystemicPauseResolver } from './systemicPauseGate';
 import { MonitorRegistry, type MonitorContext, type MonitorSession } from './monitor';
 import { readApproveIdeasDecisionLines } from '../resolveReviewItemHandler';
+import { ReviewItemRouter } from '../reviewItemRouter';
 import { hasReviewableDesignSurface } from '../runEntityOwnership';
 
 export interface DefaultProgrammaticRunnerDeps {
@@ -224,6 +225,39 @@ export interface DefaultProgrammaticRunnerDeps {
    */
   laneTriageFindingSink?: (runId: string, input: { title: string; body: string }) => Promise<void>;
   logger?: LoggerLike;
+}
+
+/**
+ * File the F8 "visual verification never reached the queue" finding through the
+ * ReviewItemRouter chokepoint (docs/proposals/visual-verification-brittleness-
+ * fixes.md §F8). NON-BLOCKING and severity 'warning': the lane already advanced
+ * fail-open, so parking the run here would punish a lane for a harness gap; the
+ * point is that a human SEES that no visual check ran.
+ *
+ * `source: 'visual-verify'` matches verdictDelivery's gate-side skip findings on
+ * purpose — pre-row drops and post-row skips are the same class of event to the
+ * reader, and grouping them means the review queue answers "did verification
+ * actually run on this sprint?" in one place.
+ *
+ * Fail-soft: an uninitialized router or a rejected write is logged by the caller
+ * (ProgrammaticRunHost) and never reaches the walk.
+ */
+async function fileVerificationSkipFinding(
+  projectId: number,
+  runId: string,
+  input: { title: string; body: string },
+): Promise<void> {
+  await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
+    op: 'create',
+    actor: 'orchestrator',
+    kind: 'finding',
+    title: input.title,
+    body: input.body,
+    blocking: false,
+    severity: 'warning',
+    source: 'visual-verify',
+    runId,
+  });
 }
 
 /**
@@ -560,6 +594,13 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
               laneTriageFindingSink(ctx.runId, input),
           }
         : {}),
+      // F8 "never skip silently" (docs/proposals/visual-verification-brittleness-
+      // fixes.md): a visual verification dropped BEFORE a request row exists
+      // reaches the human through the SAME ReviewItemRouter chokepoint + the same
+      // 'visual-verify' source tag verdictDelivery uses for the gate-side skips,
+      // so both kinds of "it did not run" land in one place in the review queue.
+      fileVerificationSkipFinding: (input: { title: string; body: string }) =>
+        fileVerificationSkipFinding(ctx.run.project_id, ctx.runId, input),
       logger: this.deps.logger,
     });
 

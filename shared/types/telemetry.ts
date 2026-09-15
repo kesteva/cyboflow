@@ -54,6 +54,10 @@ export interface TelemetryEventMap {
   onboarding_resumed: { step: number };
   onboarding_dismissed: { step: number; name: OnboardingStepName };
   onboarding_completed: { furthest_step: number };
+  // The git prerequisite card blocked the tour (shared/types/gitPrerequisite.ts):
+  // git not runnable, or runnable with no commit identity. Fired once per
+  // blocked state the boot probe (or a re-check) lands on, not per render.
+  onboarding_prerequisite_blocked: { prerequisite: 'git_missing' | 'git_identity' };
 
   // ── Tier 1 — activation + the core run funnel ───────────────────────────────
   app_started: { environment: TelemetryEnvironment };

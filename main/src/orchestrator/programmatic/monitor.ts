@@ -33,6 +33,7 @@ import { selectRunUnifiedMessages } from '../runUnifiedMessagesListing';
 import { StepResultStore, type StepResultRow } from '../stepResultStore';
 import { SprintLaneStore } from '../sprintLaneStore';
 import { buildUserTextEvent, buildAssistantTextEvent } from './syntheticEvents';
+import { isSystemicStepError } from './systemicError';
 
 // ---------------------------------------------------------------------------
 // Context + history reader
@@ -278,6 +279,15 @@ export interface LaneTriageRequest {
 export interface LaneGiveUpDecision {
   verdict: 'give_up';
   reason?: string;
+  /**
+   * Set ONLY when the triage exchange itself died on an environment-level
+   * condition (a spent session limit, an expired login) — the verbatim error
+   * text. The brain judged nothing here: it never got a turn. A host that reads
+   * this must PARK the fan-out on the text rather than settle the lane 'failed',
+   * or a dead quota silently converts every concurrent lane into a task defect
+   * (the 2026-09-05 sprint-2 cascade: 50 lanes failed in 13 ms this way).
+   */
+  systemicError?: string;
 }
 
 /** Re-drive the lane from `targetStepId` with `guidance`, leaving the task body alone. */
@@ -1617,12 +1627,20 @@ export class DefaultMonitorSession implements MonitorSession {
         stepId: req.stepId,
         error: message,
       });
+      // A triage consult that died on an ENVIRONMENT-level condition judged
+      // nothing — the brain never got a turn. Tag the give-up so the host parks
+      // the fan-out on the condition instead of failing this (and every
+      // concurrent) lane for something no lane did.
+      const systemic = isSystemicStepError(message);
       this.tryInject(
         buildAssistantTextEvent(
-          `⚠ ${req.taskRef}: lane triage could not run (${message}) — letting the lane fail.`,
+          systemic
+            ? `⚠ ${req.taskRef}: lane triage could not run (${message}) — that is an environment-level failure, so the run parks instead of failing the lane.`
+            : `⚠ ${req.taskRef}: lane triage could not run (${message}) — letting the lane fail.`,
         ),
       );
-      return laneGiveUp(LANE_TRIAGE_FAILED);
+      const decision = laneGiveUp(LANE_TRIAGE_FAILED);
+      return systemic ? { ...decision, systemicError: message } : decision;
     }
   }
 

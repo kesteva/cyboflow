@@ -390,10 +390,23 @@ export function makeCodexVerificationAgentQuery(
     const client = createClient({
       command: executable.executablePath,
       ...(args.cwd ? { cwd: args.cwd } : {}),
-      // The VERIFY_* vars from args.env MUST win so the agent's shell inherits
-      // VERIFY_ARTIFACTS_DIR / VERIFY_DRIVER / VERIFY_DRIVER_PORT / VERIFY_PORT /
-      // VERIFY_DRIVER_ATTACH_ONLY — spread them last, after the codex PATH prepend.
-      env: { ...prependCodexPathToEnvironment(process.env, executable.pathDir), ...args.env },
+      // The harness env from args.env MUST win over what this process inherited,
+      // so the agent's shell gets VERIFY_ARTIFACTS_DIR / VERIFY_DRIVER /
+      // VERIFY_DRIVER_PORT / VERIFY_PORT / VERIFY_DATA_DIR /
+      // VERIFY_DRIVER_ATTACH_ONLY — hence the merge FIRST.
+      //
+      // THE PREPEND MUST RUN OVER THAT MERGE, NOT UNDER IT (F3 / RC4 round-2
+      // review, blocker). args.env now also carries PATH — the runner exports
+      // the real login-shell PATH there, which is the whole point of F3 — and
+      // `prependCodexPathToEnvironment` writes the SAME key, so spreading
+      // args.env last silently DROPPED `executable.pathDir` and with it the
+      // bundled Codex helper binaries (ripgrep) the codex binary resolves from
+      // there. Composing this way keeps both properties: the harness PATH still
+      // beats the GUI PATH, and pathDir is still in front of it.
+      env: prependCodexPathToEnvironment(
+        { ...process.env, ...args.env },
+        executable.pathDir,
+      ),
       onNotification: (notification) => {
         turnSession?.handleNotification(notification);
         // Never allowed to throw: an exception escaping this handler reaches

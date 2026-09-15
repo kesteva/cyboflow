@@ -31,6 +31,7 @@ import type {
 } from '../../../../shared/types/agentThread';
 import type { ExecuteProposalResult } from '../agentThread/proposalExecutor';
 import type { ConfigOpsLike } from './contracts/configOps';
+import type { GitPrerequisiteOpsLike } from './contracts/gitPrerequisiteOps';
 import type { WorkspaceFileOpsLike } from './contracts/workspaceFileOps';
 import type { SessionGitOpsLike } from './contracts/sessionGitOps';
 import type { SessionOpsLike } from './contracts/sessionOps';
@@ -474,15 +475,19 @@ export interface ContextDeps {
    *
    * WHY THE PANEL MAY NOT READ `verify_runbook_local.status` DIRECTLY. That
    * column is one conjunct of the answer, not the answer. `'proven'` is
-   * re-checked on every read against the portable file in the probed tree, a
-   * fresh project input-hash, and the host fingerprint (runbookStore's class
-   * doc: "any component changing demotes"). A record can therefore read
-   * `'proven'` while the gate honestly refuses every request — most commonly
-   * because the setup flow committed the portable half on its own branch and
-   * that branch has not merged, so the project checkout does not carry the file
-   * at all. Reading the column alone renders a green "Set up" badge over exactly
-   * the failure the badge exists to warn about, which is the "green badge" the
-   * store's doc names as the thing this design was built to prevent.
+   * re-checked on every read (a PURE read since F4 — drift is computed, never
+   * written back): a portable file present in the probed tree must still hash
+   * to the record (`'content-drifted'` otherwise), and the project input-hash
+   * and host fingerprint must still match (`'drifted'` otherwise). A record can
+   * therefore read `'proven'` while the gate honestly refuses every request —
+   * most commonly because the project's scripts or lockfile moved on from what
+   * the proof was taken against, or the runbook file was edited after the proof.
+   * (A tree that simply does not carry the file is NOT such a case since F10:
+   * the proof executes the record's own copy, so only the other two conjuncts
+   * are checked there.) Reading the column alone renders a green "Set up"
+   * badge over exactly the failure the badge exists to warn about, which is
+   * the "green badge" the store's doc names as the thing this design was built
+   * to prevent.
    *
    * Injected from `main/src/index.ts` as the SAME closure the scheduler's
    * `runbookStatus` dependency gets, so the panel and the degrade gate cannot
@@ -511,6 +516,15 @@ export interface ContextDeps {
    * can omit it.
    */
   configOps?: ConfigOpsLike;
+
+  /**
+   * The onboarding git probe + identity writer (the `gitPrerequisite`
+   * router's business logic). Injected from `main/src/index.ts` via
+   * `createGitPrerequisiteOps()` (main/src/ipc/gitPrerequisite.ts); the
+   * narrow {@link GitPrerequisiteOpsLike} keeps the standalone-typecheck
+   * invariant. `undefined` (the unit-test default) ⇒ PRECONDITION_FAILED.
+   */
+  gitPrerequisiteOps?: GitPrerequisiteOpsLike;
 
   /**
    * Live workspace-file-ops implementation (the `workspaceFiles` router's
@@ -647,6 +661,7 @@ export function createContext(deps: ContextDeps = {}): {
   ompAriaMode?: () => boolean;
   verifyRunbookStatus?: VerifyRunbookStatusLike;
   configOps?: ConfigOpsLike;
+  gitPrerequisiteOps?: GitPrerequisiteOpsLike;
   workspaceFileOps?: WorkspaceFileOpsLike;
   sessionGitOps?: SessionGitOpsLike;
   sessionOps?: SessionOpsLike;
@@ -673,6 +688,7 @@ export function createContext(deps: ContextDeps = {}): {
     ompAriaMode,
     verifyRunbookStatus,
     configOps,
+    gitPrerequisiteOps,
     workspaceFileOps,
     sessionGitOps,
     sessionOps,
@@ -706,6 +722,7 @@ export function createContext(deps: ContextDeps = {}): {
     ompAriaMode,
     verifyRunbookStatus,
     configOps,
+    gitPrerequisiteOps,
     workspaceFileOps,
     sessionGitOps,
     sessionOps,

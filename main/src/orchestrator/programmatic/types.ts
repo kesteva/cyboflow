@@ -374,6 +374,12 @@ export interface LaneTriageFailure {
  *                 the task's body (the monitor's `adjust_and_retry`); a refused
  *                 edit is DOWNGRADED to a plain rescue with `adjusted: false`,
  *                 never to a give_up — the guidance still carries the substance.
+ *   - 'systemic' — the triage consult ITSELF died on an environment-level
+ *                 condition (a dead session limit, an expired login): the brain
+ *                 could not judge anything, so a give_up here would fail a lane
+ *                 the environment failed, not the lane. The controller parks the
+ *                 whole fan-out on `error` instead, exactly as it does for a
+ *                 systemic INNER-STEP failure. `error` is the systemic text.
  * `targetStepId` is guaranteed by the brain's parse ladder to be one of the
  * request's `innerStepIds` at or before the failing step, and `guidance` to be
  * non-blank; the controller still re-resolves the id against its own chain
@@ -381,6 +387,7 @@ export interface LaneTriageFailure {
  */
 export type LaneRescueOutcome =
   | { kind: 'give_up' }
+  | { kind: 'systemic'; error: string }
   | { kind: 'rescue'; targetStepId: string; guidance: string; adjusted: boolean };
 
 /**
@@ -630,6 +637,27 @@ export interface ControllerHost {
     laneTaskRef: string;
     attempt: number;
   }): Promise<TaskEnqueueResult>;
+
+  /**
+   * Optional NON-BLOCKING report that a lane's visual verification never even
+   * reached the queue (F8 "never skip silently",
+   * docs/proposals/visual-verification-brittleness-fixes.md).
+   *
+   * The gate-side skips already produce a `skipped` request row AND a finding via
+   * verdictDelivery. The two seams below produce NEITHER — nothing is persisted,
+   * so the verify queue and the DB show that nothing happened, which is
+   * indistinguishable from "this lane needed no visual check":
+   *   1. task-verify produced no result text (the substrate discarded it) ⇒ no
+   *      verification task could be composed at all;
+   *   2. the enqueue seam declined with a reason OTHER than the deliberate
+   *      'verification-disabled' off switch.
+   * Both raise ONE non-blocking finding naming the reason verbatim.
+   *
+   * Fire-and-forget by design (returns void): the controller must never await or
+   * be able to throw on the reporting of a skip. Absent (tests / hosts built
+   * without a review-queue sink) ⇒ the skip is logged only, exactly as before.
+   */
+  reportVerificationSkipped?(input: { runId: string; laneTaskRef: string; reason: string; detail?: string }): void;
 
   /** Optional structured log sink; absent ⇒ the controller stays silent. */
   log?(level: 'info' | 'warn' | 'error', message: string): void;

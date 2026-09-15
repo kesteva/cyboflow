@@ -12,6 +12,7 @@
  * built-ins so it can be imported anywhere.
  */
 import type { CliSubstrate } from './substrate';
+import type { RequestStatus, VerificationFailureClass } from './visualVerification';
 
 /** Lifecycle state of a whole batch. Terminal: completed | failed | canceled. */
 export type SprintBatchStatus =
@@ -265,7 +266,57 @@ export interface SprintLaneRow {
    * Computed on read in listLanes — NOT stored.
    */
   blockedByRefs: string[];
+  /**
+   * The lane's REAL visual-verification outcome, or null when no request row is
+   * attributable to it (F8 / Codex #9, docs/proposals/visual-verification-
+   * brittleness-fixes.md). Derived on read from the most recent non-proof
+   * `verification_requests` row keyed to this lane — NOT stored, no new column.
+   *
+   * Why it exists: `mergeGateLaneAdvance` integrates a lane on `passed`,
+   * `low_confidence`, `skipped` AND `timeout`, and the swimlane paints every
+   * step of an integrated lane green — so three of those four outcomes rendered
+   * as "Visual check ✓" when no visual check had actually run. The canvas reads
+   * this field to paint the visual-verify step from the outcome instead of from
+   * lane status alone.
+   */
+  visualVerification: SprintLaneVisualVerification | null;
   updatedAt: string;
+}
+
+/**
+ * The lane-attributable slice of a `verification_requests` row (F8). Carries the
+ * lifecycle `status` (the verdict category), the §3.1 failure classification and
+ * the concrete `errorMessage` so the UI can say WHY a check did not run rather
+ * than only that it did not.
+ */
+export interface SprintLaneVisualVerification {
+  status: RequestStatus;
+  failureClass: VerificationFailureClass | null;
+  errorMessage: string | null;
+  /**
+   * The LANE attempt this request was fired on, parsed from the request's
+   * `enqueue_key` (`${runId}:${taskRef}:${attempt}`) — the same parse
+   * `verdictDelivery.parseAttemptFromEnqueueKey` and the merge-gate's
+   * replay-safety check use. `null` when the key is absent or malformed (an
+   * MCP-fired request carries no enqueue_key at all).
+   *
+   * NOT `verification_requests.attempt`: that column is the chain's fall-forward
+   * counter and every INSERT hard-codes it to 0 (verificationScheduler's enqueue),
+   * so it can neither identify nor age a lane's fire. Naming the two "attempt" in
+   * one object graph was the bug — this is the lane counter, comparable with
+   * `SprintLaneRow.attempts`.
+   */
+  laneAttempt: number | null;
+  /**
+   * True when this verdict belongs to an EARLIER lane attempt than the lane is on
+   * now (`laneAttempt !== null && SprintLaneRow.attempts > laneAttempt`) — the
+   * exact supersession rule `mergeGateLaneAdvance` applies before writing a
+   * verdict. It happens when a later attempt's verification was dropped BEFORE a
+   * request row existed (the codex-substrate channel-unavailable drop F8 exists
+   * for), leaving the older row as the newest attributable one. A stale row must
+   * never be rendered as this attempt's outcome.
+   */
+  stale: boolean;
 }
 
 /**
@@ -281,5 +332,20 @@ export interface SprintLaneChangedEvent {
   currentStepId: string | null;
   /** The lane's current attempts counter (see SprintLaneRow.attempts). */
   attempts: number;
+  /**
+   * The lane's visual-verification outcome AS OF this write, carried on the event
+   * so a live-watched swimlane does not have to wait for a fresh snapshot query to
+   * learn a verdict landed (the round-1 F8 bug: the renderer fetches the snapshot
+   * once at mount, so a lane that later PASSED kept rendering "did not run" for
+   * the life of the mount).
+   *
+   * It is a READ-SIDE DERIVATION, not a stored column — the store fills it from
+   * the same `readLane` projection it already reads back before emitting, and the
+   * merge gate writes the lane through that chokepoint only AFTER the scheduler
+   * has committed the terminal row, so the integrating event carries the real
+   * verdict. `null` = no request row attributable to the lane (also the value on a
+   * lane REMOVAL event, whose lane no longer exists).
+   */
+  visualVerification: SprintLaneVisualVerification | null;
   timestamp: string;
 }

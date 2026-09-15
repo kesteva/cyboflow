@@ -3,6 +3,7 @@ import { mkdir } from 'fs/promises';
 import { withLock } from '../utils/mutex';
 import { appendCommitFooter } from '../utils/commitFooter';
 import { runGitCapture, assertNotOptionLike, END_OF_OPTIONS } from '../utils/runGit';
+import { gitIdentityFallbackArgs } from '../utils/gitIdentityFallback';
 import type { ConfigManager } from './configManager';
 
 // Interface for raw commit data
@@ -176,7 +177,12 @@ export class WorktreeManager {
         } catch {
           // Ignore add errors (no files to add)
         }
-        await runGitCapture(projectPath, ['commit', '-m', 'Initial commit', '--allow-empty']);
+        // A machine with no git identity would fail here with "Author identity
+        // unknown" — fill in only the missing halves, for this command only.
+        await runGitCapture(projectPath, [
+          ...(await gitIdentityFallbackArgs(projectPath)),
+          'commit', '-m', 'Initial commit', '--allow-empty',
+        ]);
       }
 
       // Check if branch already exists
@@ -973,12 +979,11 @@ export class WorktreeManager {
           console.log(`[WorktreeManager] Successfully fast-forwarded ${mainBranch} to ${branchName}`);
         } catch (error: unknown) {
           const err = error as Error & { stderr?: string; stdout?: string };
-          throw new Error(
-            `Failed to fast-forward ${mainBranch} to ${branchName}.\n\n` +
+          const gitOutput = err.stderr || err.stdout || err.message;
+          const hint =
             `This usually means ${mainBranch} has commits that ${branchName} doesn't have.\n` +
-            `You may need to rebase the worktree onto ${mainBranch} first, or reset ${mainBranch} to match origin.\n\n` +
-            `Git output: ${err.stderr || err.stdout || err.message}`
-          );
+            `You may need to rebase the worktree onto ${mainBranch} first, or reset ${mainBranch} to match origin.`;
+          throw new Error(`Failed to fast-forward ${mainBranch} to ${branchName}:\n${gitOutput}\n\n${hint}`);
         }
 
         console.log(`[WorktreeManager] Successfully squashed and merged worktree to ${mainBranch}`);
@@ -1070,12 +1075,11 @@ export class WorktreeManager {
           console.log(`[WorktreeManager] Successfully fast-forwarded ${mainBranch} to ${branchName}`);
         } catch (error: unknown) {
           const err = error as Error & { stderr?: string; stdout?: string };
-          throw new Error(
-            `Failed to fast-forward ${mainBranch} to ${branchName}.\n\n` +
+          const gitOutput = err.stderr || err.stdout || err.message;
+          const hint =
             `This usually means ${mainBranch} has commits that ${branchName} doesn't have.\n` +
-            `You may need to rebase the worktree onto ${mainBranch} first, or reset ${mainBranch} to match origin.\n\n` +
-            `Git output: ${err.stderr || err.stdout || err.message}`
-          );
+            `You may need to rebase the worktree onto ${mainBranch} first, or reset ${mainBranch} to match origin.`;
+          throw new Error(`Failed to fast-forward ${mainBranch} to ${branchName}:\n${gitOutput}\n\n${hint}`);
         }
 
         console.log(`[WorktreeManager] Successfully merged worktree to ${mainBranch} (without squashing)`);

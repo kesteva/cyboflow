@@ -48,6 +48,7 @@ import {
 } from './utils/windowState';
 import { registerIpcHandlers } from './ipc';
 import { QUICK_PTY_BRIEFING } from './ipc/quickSessionBriefings';
+import { restInteractiveSessionIdle } from './ipc/interactiveSessionRest';
 import { registerArtifactImageHandlers } from './ipc/artifactImages';
 import { registerArtifactHtmlHandlers, loadCanonicalPrototypeHtml } from './ipc/artifactHtml';
 import {
@@ -158,6 +159,7 @@ import type { VerifyHostProbesLike, VerifyRunbookStatusLike } from './orchestrat
 import type { SessionGitOpsLike } from './orchestrator/trpc/contracts/sessionGitOps';
 import type { SessionOpsLike } from './orchestrator/trpc/contracts/sessionOps';
 import { createConfigOps } from './ipc/configOps';
+import { createGitPrerequisiteOps } from './ipc/gitPrerequisite';
 import { createFileOps } from './ipc/fileOps';
 import { createGitOps } from './ipc/gitOps';
 import { createSessionOps } from './ipc/sessionOps';
@@ -1016,6 +1018,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
   // set CYBOFLOW_OMP_SUPERVISE, so every command is FORBIDDEN by default.
   const ompCommand = buildOmpCommandAdapter();
   const configOps = createConfigOps({ configManager, claudeCodeManager: defaultCliManager });
+  const gitPrerequisiteOps = createGitPrerequisiteOps();
   const workspaceFileOps = createFileOps({ sessionManager, databaseService, gitStatusManager, configManager });
   attachOrchestratorTrpc({
     window: win,
@@ -1024,6 +1027,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
       createContext({
         db,
         configOps,
+        gitPrerequisiteOps,
         workspaceFileOps,
         setDockBadge: (count) => dockBadgeService.setBadgeCount(count),
         workflowRegistry,
@@ -2102,7 +2106,13 @@ async function initializeServices(): Promise<boolean> {
   // block), and the runs-router lane dep-bag below. The cyboflow_update_sprint_task
   // MCP handler reaches it via getInstance(). Logger is REQUIRED here (CODE-PATTERNS.md
   // optional-logger rule) — omitting it silently no-ops all lane diagnostics.
-  const sprintLaneStore = SprintLaneStore.initialize(cyboflowDb, cyboflowLogger);
+  // `getSprintMaxTasks` (Item 7) wires createForRun's OWN batch-cap enforcement
+  // to the same live per-substrate override every other cap check already
+  // reads (runs.start, experiments.start, the MCP backstop) — never omit it,
+  // or the store's cap silently floors to the built-in defaults.
+  const sprintLaneStore = SprintLaneStore.initialize(cyboflowDb, cyboflowLogger, {
+    getSprintMaxTasks: () => configManager.getSprintMaxTasks(),
+  });
 
   // The human-gate run-pause manager (P4) pairs with the ReviewItemRouter
   // initialized above (the tracker sync loop needs that one at construction, so
@@ -2593,15 +2603,28 @@ async function initializeServices(): Promise<boolean> {
   };
 
   const verifyRunbookStore = new VerifyRunbookStore(cyboflowDb, {
-    // ABSENT vs UNREADABLE both answer null: the store's contract is that null
-    // means "this tree does not carry the file", which is the ordinary pre-merge
-    // state on every branch that has not landed the runbook yet, and must NOT
-    // demote a proven record.
+    // ABSENT AND UNREADABLE ARE NOT THE SAME ANSWER (F4/F10 + Codex #8 —
+    // docs/proposals/visual-verification-brittleness-fixes.md). `null` is the
+    // store's "this tree genuinely does not carry the file" — the ordinary
+    // pre-merge state on every branch that has not landed the runbook yet — and
+    // the store now treats it as RECORD-AUTHORITATIVE: it skips the
+    // portable-hash conjunct and judges the proof on the project input hash and
+    // the host fingerprint alone. That makes the narrowness load-bearing. This
+    // used to collapse EVERY fs error into `null`, which under the new gate
+    // would launder an unreadable tree (a permissions error, a truncated read,
+    // an IO fault) into a proof; so only the two codes that genuinely mean
+    // "nothing is there" answer `null`, and anything else REJECTS, landing in
+    // the store's own fail-soft catch as 'absent'/'indeterminate'.
     readPortableFile: async (dirPath: string): Promise<string | null> => {
       try {
         return await fs.promises.readFile(path.join(dirPath, VERIFY_RUNBOOK_RELATIVE_PATH), 'utf8');
-      } catch {
-        return null;
+      } catch (err) {
+        // ENOENT: no such file. ENOTDIR: a path component is not a directory —
+        // the same "there is nothing here" fact observed one level up (an
+        // unresolvable/stale worktree path), not a read failure.
+        const code = (err as NodeJS.ErrnoException | null)?.code;
+        if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+        throw err;
       }
     },
     computeInputHash: verifyComputeInputHash,
@@ -2758,7 +2781,8 @@ async function initializeServices(): Promise<boolean> {
   //
   // Gated twice before any of it runs — the project toggle and the kill switch
   // (combined in `evaluateRunbookBootstrap`), then §4's runbook-situation check.
-  // Default OFF.
+  // Default ON since F9 (visual-verification-brittleness-fixes.md); the kill
+  // switch is CYBOFLOW_DISABLE_RUNBOOK_BOOTSTRAP=1.
   // ------------------------------------------------------------------------
   const runbookBootstrapStamps = new RunbookBootstrapStampStore(cyboflowDb, cyboflowLogger);
   const runbookBootstrapSuppression = new BootstrapSuppressionStore(cyboflowDb, cyboflowLogger);
@@ -2827,6 +2851,12 @@ async function initializeServices(): Promise<boolean> {
         }),
       registerDraft: (projectId, worktreePath, modality) =>
         verifyRunbookStore.registerDraft(projectId, worktreePath, modality),
+      // The 'reprove' mode's only input (F4 / Codex #2): the record as it stands,
+      // content and pin together. It reads the DB, NOT this worktree's file —
+      // what a re-prove must prove is the revision the engine will execute, and
+      // a divergence between the two is itself one of the things that made the
+      // record drift.
+      currentRecord: (projectId, modality) => verifyRunbookStore.getCurrent(projectId, modality),
       setOrigin: (projectId, modality, origin) => verifyRunbookStore.setOrigin(projectId, modality, origin),
       // A passing proof and a proven record are two different facts: the engine
       // declines to promote a proof that ran in the dirty-worktree fallback,
@@ -3879,12 +3909,18 @@ async function initializeServices(): Promise<boolean> {
           over === 'tasks'
             ? sprintLaneStore
                 .listLanes(batchId)
-                // Crash-safe resume: skip lanes already settled (integrated/failed)
-                // so a re-entered fanOut step does not re-run completed work or flip
-                // a failed lane back to integrated — mirrors the monotonic-forward
-                // guard in deriveLaneFromTaskDispatch. On a fresh run all lanes are
+                // Crash-safe resume: skip lanes already settled (integrated/
+                // failed/blocked) so a re-entered fanOut step does not re-run
+                // completed work, flip a failed lane back to integrated, or
+                // let a BLOCKED child re-enter without its failed parent
+                // (Item 6, Codex C3 — a blocked lane never started and stays
+                // excluded until an explicit reset, e.g. resetFailedLanes,
+                // re-queues it) — mirrors the monotonic-forward guard in
+                // deriveLaneFromTaskDispatch. On a fresh run all lanes are
                 // 'queued', so every task is returned.
-                .filter((lane) => lane.status !== 'integrated' && lane.status !== 'failed')
+                .filter(
+                  (lane) => lane.status !== 'integrated' && lane.status !== 'failed' && lane.status !== 'blocked',
+                )
                 .map((lane) => lane.taskId)
             : [],
         // DAG ordering (2026-06-22): expose the batch's BLOCKING edges so the
@@ -6190,13 +6226,15 @@ app.whenReady().then(async () => {
                 chatPanel.id,
                 session.id,
                 session.worktreePath,
-                QUICK_PTY_BRIEFING,
+                '', // prompt — the briefing rides --append-system-prompt, so the REPL opens idle
                 session.permissionMode,
                 quickConfig.model,
                 undefined, // effort ('ultracode') — not part of the arm wire schema
                 undefined, // fastMode — not part of the arm wire schema
                 undefined, // resumeSessionId — fresh eager spawn
                 quickConfig.reasoningEffort,
+                undefined, // userAcknowledgedProviderDisabled — not a resume prompt
+                QUICK_PTY_BRIEFING, // session context, NOT a user turn
               )
               .catch((err: unknown) => {
                 // Fail-soft (mirrors create-quick): the arm stays usable — the
@@ -6206,8 +6244,10 @@ app.whenReady().then(async () => {
                   error: err instanceof Error ? err.message : String(err),
                 });
               });
-            // Mirror sessions:input — the REPL is live; show the session as running.
-            await sessionManager.updateSession(session.id, { status: 'running' });
+            // The REPL is live but IDLE — the briefing rides the system prompt, so
+            // this spawn starts no turn. See restInteractiveSessionIdle for why it
+            // rests at the turn-end value rather than 'running' or 'stopped'.
+            restInteractiveSessionIdle(sessionManager, session.id);
           } catch (err) {
             loggerLike.warn('[Main] experiment arm: interactive chat-panel seed failed', {
               sessionId: session.id,

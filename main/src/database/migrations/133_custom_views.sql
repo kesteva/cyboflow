@@ -1,4 +1,4 @@
--- Migration 132: Custom Views (docs/proposals/CUSTOM-VIEWS.md §3.2) — saved
+-- Migration 133: Custom Views (docs/proposals/CUSTOM-VIEWS.md §3.2) — saved
 -- per-surface widget layouts, the user's library of custom widgets, and an
 -- audit/idempotency side table for widget-triggered proposals.
 --
@@ -22,7 +22,7 @@
 --     NULL` (§4.4), and `operation_id` gives every widget-action click an
 --     idempotency key independent of the proposal id itself.
 --
--- 131 is the latest landed prefix, so 132 is the next free one — re-check
+-- 132 (run_usage_recompute) landed on main first, so this took 133 — re-check
 -- before merge (AGENTS.md). Idempotent per statement: every DDL statement
 -- uses `IF NOT EXISTS`, so a re-applied (or renumbered) file is a no-op.
 CREATE TABLE IF NOT EXISTS custom_views (

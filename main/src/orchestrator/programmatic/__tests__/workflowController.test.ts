@@ -1276,6 +1276,20 @@ describe('WorkflowController', () => {
         };
       }
 
+      /**
+       * Attach a recording F8 skip sink to the host and return the log
+       * (docs/proposals/visual-verification-brittleness-fixes.md §F8).
+       */
+      function recordSkips(
+        host: ControllerHost,
+      ): Array<{ runId: string; laneTaskRef: string; reason: string; detail?: string }> {
+        const skips: Array<{ runId: string; laneTaskRef: string; reason: string; detail?: string }> = [];
+        host.reportVerificationSkipped = (input) => {
+          skips.push(input);
+        };
+        return skips;
+      }
+
       /** A runner where task-verify returns a scripted resultText; other steps ok. */
       function verifyRunner(
         taskVerifyText: string | null,
@@ -1358,6 +1372,7 @@ describe('WorkflowController', () => {
         host.visualGate = makeVisualGate([]);
         const enqueue = makeEnqueue({ outcome: 'skipped', reason: 'verification-disabled' });
         host.enqueueVisualVerification = enqueue.fn;
+        const skips = recordSkips(host);
         const runner = verifyRunner(taskVerifyWithTask());
 
         const result = await new WorkflowController(runner, host).run('r', d);
@@ -1366,6 +1381,105 @@ describe('WorkflowController', () => {
         expect(enqueue.calls.length).toBe(1);
         // Skipped → never parked.
         expect(driver.lanes.some((l) => l.currentStepId === 'awaiting-verify')).toBe(false);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+        // F8: 'verification-disabled' is a DELIBERATE off switch — no finding.
+        expect(skips).toEqual([]);
+      });
+
+      // ── F8 "never skip silently" (docs/proposals/visual-verification-
+      //    brittleness-fixes.md): the two PRE-ROW drops raise a non-blocking
+      //    finding. Gate-side skips already write a 'skipped' row + a
+      //    verdictDelivery finding; these two write nothing at all. ──
+      it('F8: enqueue "skipped" for any OTHER reason files a non-blocking finding, lane still integrates', async () => {
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = makeVisualGate([]);
+        host.enqueueVisualVerification = makeEnqueue({ outcome: 'skipped', reason: 'scheduler-unavailable' }).fn;
+        const skips = recordSkips(host);
+        const runner = verifyRunner(taskVerifyWithTask());
+
+        const result = await new WorkflowController(runner, host).run('run-f8', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(skips.length).toBe(1);
+        expect(skips[0]).toMatchObject({ runId: 'run-f8', laneTaskRef: 't1', reason: 'scheduler-unavailable' });
+        // Advancement is untouched — the finding is strictly weaker than the walk.
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+      });
+
+      it('F8: files at most ONE finding per lane even when the lane loops back', async () => {
+        // Both F8 seams sit inside the fan-out INNER-STEP walk, which a lane
+        // re-enters on every loopback. On a substrate that never captures step
+        // text the channel-unavailable branch fires on EVERY attempt — without
+        // per-lane de-duplication an 8-lane sprint looping twice would post 24
+        // byte-identical review-queue cards, and these findings carry no
+        // requestId to correlate or supersede on (there is no request row).
+        const d = def([
+          phase('p1', [
+            step({
+              id: 'execute',
+              agent: 'orchestrate',
+              fanOut: {
+                over: 'tasks',
+                inner: [
+                  { id: 'implement', agent: 'implement' },
+                  { id: 'task-verify', agent: 'task-verify', loopback: 'implement' },
+                  { id: 'code-review', agent: 'code-review', loopback: 'implement' },
+                  { id: 'visual-verify', agent: 'visual-verify' },
+                ],
+              },
+            }),
+          ]),
+        ]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = makeVisualGate([]);
+        const skips = recordSkips(host);
+        // task-verify NEVER captures result text (the codex substrate), and
+        // code-review — which runs AFTER it — returns a blocking defect on its
+        // first pass, so the lane loops back and task-verify runs a second time.
+        const calls: string[] = [];
+        let reviewPass = 0;
+        const runner: StepRunner = {
+          async runStep(sp) {
+            calls.push(sp.id);
+            if (sp.id === 'task-verify') return { status: 'ok', resultText: null };
+            if (sp.id === 'code-review') {
+              reviewPass += 1;
+              return {
+                status: 'ok',
+                resultText: reviewPass === 1 ? '## Blocking defect\nfix it' : 'no blocking defects',
+              };
+            }
+            return { status: 'ok' };
+          },
+        };
+
+        const result = await new WorkflowController(runner, host).run('run-dupe', d);
+
+        expect(result.outcome).toBe('completed');
+        // The loopback really happened — task-verify dropped its task TWICE...
+        expect(calls.filter((id) => id === 'task-verify').length).toBeGreaterThan(1);
+        // ...and exactly ONE finding reached the human.
+        expect(skips.length).toBe(1);
+        expect(skips[0]).toMatchObject({ runId: 'run-dupe', laneTaskRef: 't1' });
+      });
+
+      it('F8: a THROWING finding sink never disturbs lane advancement', async () => {
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = makeVisualGate([]);
+        host.enqueueVisualVerification = makeEnqueue({ outcome: 'skipped', reason: 'scheduler-unavailable' }).fn;
+        host.reportVerificationSkipped = () => {
+          throw new Error('review queue down');
+        };
+        const runner = verifyRunner(taskVerifyWithTask());
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
         expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
       });
 
@@ -1522,6 +1636,7 @@ describe('WorkflowController', () => {
         host.visualGate = makeVisualGate([]);
         const enqueue = makeEnqueue();
         host.enqueueVisualVerification = enqueue.fn;
+        const skips = recordSkips(host);
         const runner = verifyRunner(null); // task-verify captured no text
 
         const result = await new WorkflowController(runner, host).run('r', d);
@@ -1530,6 +1645,25 @@ describe('WorkflowController', () => {
         expect(enqueue.calls.length).toBe(0);
         expect(driver.lanes.some((l) => l.currentStepId === 'awaiting-verify')).toBe(false);
         expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+        // F8: the drop happens BEFORE any request row exists, so it is invisible
+        // everywhere unless the controller says so.
+        expect(skips.length).toBe(1);
+        expect(skips[0].laneTaskRef).toBe('t1');
+        expect(skips[0].reason).toContain('no result text');
+      });
+
+      it('F8: an INACTIVE visual gate files no channel-unavailable finding', async () => {
+        const d = def([phase('p1', [verifyChain()])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        host.visualGate = makeVisualGate([], false); // present but inactive
+        host.enqueueVisualVerification = makeEnqueue().fn;
+        const skips = recordSkips(host);
+
+        const result = await new WorkflowController(verifyRunner(null), host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(skips).toEqual([]);
       });
 
       // ── Disabled-run verdict enforcement: the functional VERDICT channel is
@@ -2007,7 +2141,7 @@ describe('WorkflowController', () => {
       expect(new Set(integrated)).toEqual(new Set(['t1', 't2', 't3']));
     });
 
-    it('blocks (fails) a dependent task when its prerequisite fails — never dispatching it', async () => {
+    it("settles a dependent task 'blocked' (never 'failed') when its prerequisite fails", async () => {
       const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
       const base = makeFanOutDriver(['t1', 't2']);
       const driver: FanOutDriver = { ...base, dependencies: () => new Map([['t2', ['t1']]]) };
@@ -2025,11 +2159,129 @@ describe('WorkflowController', () => {
       expect(result.outcome).toBe('completed'); // a failed/blocked lane is non-terminal
       // t1 ran (and failed); t2 was NEVER dispatched (blocked by t1).
       expect(order).toEqual(['t1']);
-      const failedLanes = base.lanes.filter((l) => l.status === 'failed').map((l) => l.itemId);
-      expect(new Set(failedLanes)).toEqual(new Set(['t1', 't2']));
+      // Only the lane that actually ran is 'failed'. t2 never started, so it is
+      // 'blocked' — one real failure must not read as two.
+      expect(base.lanes.filter((l) => l.status === 'failed').map((l) => l.itemId)).toEqual(['t1']);
+      expect(base.lanes.filter((l) => l.status === 'blocked').map((l) => l.itemId)).toEqual(['t2']);
+      // …and the prune is DEFERRED: t2 is written only once nothing is
+      // dispatchable, i.e. after t1's wave settled, never during the readiness pass.
+      const t2Write = base.lanes.findIndex((l) => l.itemId === 't2' && l.status !== undefined);
+      const t1Failed = base.lanes.findIndex((l) => l.itemId === 't1' && l.status === 'failed');
+      expect(t2Write).toBeGreaterThan(t1Failed);
     });
 
-    it('fails tasks with unresolvable (cyclic) dependencies instead of spinning', async () => {
+    it('re-runs a SELF-looping first step at attempt 2 and integrates the lane', async () => {
+      // The built-in sprint/ship chains declare `loopback: 'implement'` on
+      // `implement` itself. Pin the controller behavior that makes that
+      // declaration worth having: a first-step failure is retried, not fatal.
+      const selfLoop = step({
+        id: 'execute',
+        agent: 'orchestrate',
+        fanOut: {
+          over: 'tasks',
+          inner: [{ id: 'implement', agent: 'implement', loopback: 'implement' }],
+        },
+      });
+      const d = def([phase('p1', [selfLoop])]);
+      const base = makeFanOutDriver(['t1']);
+      const attempts: number[] = [];
+      let calls = 0;
+      const runner: StepRunner = {
+        async runStep(_s, ctx) {
+          attempts.push(ctx.attempt);
+          calls += 1;
+          return calls === 1 ? { status: 'failed', error: 'spawn flaked' } : { status: 'ok' };
+        },
+      };
+
+      const result = await new WorkflowController(runner, makeFanHost(base)).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      expect(attempts).toEqual([1, 2]);
+      expect(base.lanes.some((l) => l.status === 'failed')).toBe(false);
+      expect(base.lanes.filter((l) => l.status === 'integrated').map((l) => l.itemId)).toEqual(['t1']);
+    });
+
+    it('still fails a SELF-looping first step once the lane attempt cap is spent', async () => {
+      const selfLoop = step({
+        id: 'execute',
+        agent: 'orchestrate',
+        fanOut: {
+          over: 'tasks',
+          inner: [{ id: 'implement', agent: 'implement', loopback: 'implement' }],
+        },
+      });
+      const d = def([phase('p1', [selfLoop])]);
+      const base = makeFanOutDriver(['t1']);
+      const attempts: number[] = [];
+      const runner: StepRunner = {
+        async runStep(_s, ctx) {
+          attempts.push(ctx.attempt);
+          return { status: 'failed', error: 'genuinely broken' };
+        },
+      };
+
+      await new WorkflowController(runner, makeFanHost(base)).run('r', d);
+
+      // The self-loopback grants retries up to the cap, then the lane settles.
+      expect(attempts).toEqual([1, 2, 3]);
+      expect(base.lanes.filter((l) => l.status === 'failed').map((l) => l.itemId)).toEqual(['t1']);
+    });
+
+    it('keeps dispatching independent lanes before pruning the ones a failure stranded', async () => {
+      // A→B plus an independent C, serialized (cap 1). The old readiness pass
+      // settled B the instant A failed; the deferred prune must let C run first,
+      // so an operator still has the whole fan-out's worth of time to rewind A.
+      const d = def([phase('p1', [fanStep('execute', ['implement'], 1)])]);
+      const base = makeFanOutDriver(['t1', 't2', 't3']);
+      const driver: FanOutDriver = { ...base, dependencies: () => new Map([['t2', ['t1']]]) };
+      const order: string[] = [];
+      const runner: StepRunner = {
+        async runStep(_s, ctx) {
+          if (ctx.item) order.push(ctx.item.id);
+          return ctx.item?.id === 't1' ? { status: 'failed', error: 'boom' } : { status: 'ok' };
+        },
+      };
+      const host = makeFanHost(driver);
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      // t3 ran even though t1 had already failed; t2 never did.
+      expect(order).toEqual(['t1', 't3']);
+      expect(base.lanes.filter((l) => l.status === 'blocked').map((l) => l.itemId)).toEqual(['t2']);
+      const t3Integrated = base.lanes.findIndex((l) => l.itemId === 't3' && l.status === 'integrated');
+      const t2Blocked = base.lanes.findIndex((l) => l.itemId === 't2' && l.status === 'blocked');
+      expect(t3Integrated).toBeGreaterThanOrEqual(0);
+      expect(t2Blocked).toBeGreaterThan(t3Integrated);
+    });
+
+    it('names the culprit transitively down a chain: A fails, B blocked by A, C blocked by B', async () => {
+      const d = def([phase('p1', [fanStep('execute', ['implement'], 1)])]);
+      const base = makeFanOutDriver(['t1', 't2', 't3']);
+      const driver: FanOutDriver = {
+        ...base,
+        dependencies: () =>
+          new Map([
+            ['t2', ['t1']],
+            ['t3', ['t2']],
+          ]),
+      };
+      const runner: StepRunner = {
+        async runStep(_s, ctx) {
+          return ctx.item?.id === 't1' ? { status: 'failed', error: 'boom' } : { status: 'ok' };
+        },
+      };
+      const host = makeFanHost(driver);
+
+      await new WorkflowController(runner, host).run('r', d);
+
+      // The whole tail is 'blocked' — a cycle diagnosis here would be a lie.
+      expect(base.lanes.filter((l) => l.status === 'blocked').map((l) => l.itemId)).toEqual(['t2', 't3']);
+      expect(base.lanes.filter((l) => l.status === 'failed').map((l) => l.itemId)).toEqual(['t1']);
+    });
+
+    it('blocks tasks with unresolvable (cyclic) dependencies instead of spinning', async () => {
       const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
       const base = makeFanOutDriver(['t1', 't2']);
       const driver: FanOutDriver = {
@@ -2047,8 +2299,10 @@ describe('WorkflowController', () => {
 
       expect(result.outcome).toBe('completed');
       expect(runner.calls.length).toBe(0); // neither task could ever run
-      const failedLanes = base.lanes.filter((l) => l.status === 'failed').map((l) => l.itemId);
-      expect(new Set(failedLanes)).toEqual(new Set(['t1', 't2']));
+      // Neither lane ever started, so neither is 'failed'.
+      const blockedLanes = base.lanes.filter((l) => l.status === 'blocked').map((l) => l.itemId);
+      expect(new Set(blockedLanes)).toEqual(new Set(['t1', 't2']));
+      expect(base.lanes.some((l) => l.status === 'failed')).toBe(false);
     });
 
     it('separates overlapping expected files into later waves while disjoint tasks still run concurrently', async () => {

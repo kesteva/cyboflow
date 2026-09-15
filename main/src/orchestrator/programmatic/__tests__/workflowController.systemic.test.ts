@@ -13,7 +13,11 @@
  * / DB / Electron), mirroring workflowController.test.ts's fakes.
  */
 import { describe, it, expect, vi } from 'vitest';
-import { WorkflowController, MAX_SYSTEMIC_PAUSES } from '../workflowController';
+import {
+  WorkflowController,
+  MAX_SYSTEMIC_PAUSES,
+  SAME_ERROR_CORROBORATION_MIN,
+} from '../workflowController';
 import type {
   ControllerHost,
   FanOutDriver,
@@ -131,6 +135,36 @@ const fanStep = (id: string, innerIds: string[]): WorkflowStep =>
     agent: 'orchestrate',
     fanOut: { over: 'tasks', inner: innerIds.map((iid) => ({ id: iid, agent: iid })) },
   });
+
+  /**
+   * Runner scripted per `${itemId}:${stepId}` (falling back to the bare step
+   * id), defaulting to ok once a queue drains. Keying by LANE is load-bearing
+   * for corroboration: the rule is about WHICH LANES failed with the same
+   * text, and a step-id-only script cannot express "these three of five".
+   */
+  function makeLaneRunner(scripts: Record<string, StepRunResult[]>): StepRunner & {
+    calls: Array<{ id: string; itemId: string | undefined }>;
+  } {
+    const queues: Record<string, StepRunResult[]> = {};
+    for (const [k, v] of Object.entries(scripts)) queues[k] = [...v];
+    const calls: Array<{ id: string; itemId: string | undefined }> = [];
+    return {
+      calls,
+      async runStep(s, ctx) {
+        const itemId = ctx.item?.id;
+        calls.push({ id: s.id, itemId });
+        const keyed = itemId ? queues[`${itemId}:${s.id}`] : undefined;
+        return keyed?.shift() ?? queues[s.id]?.shift() ?? { status: 'ok' };
+      },
+    };
+  }
+
+  /** A plain (NON-systemic) inner-step failure carrying `error`. */
+  const plainFail = (error: string): StepRunResult => ({ status: 'failed', error });
+
+  /** Every 'failed' lane write this driver saw, in write order. */
+  const failedLanes = (driver: ReturnType<typeof makeFanOutDriver>): string[] =>
+    driver.lanes.filter((l) => l.status === 'failed').map((l) => l.itemId);
 
 // ── tests ───────────────────────────────────────────────────────────────────
 
@@ -375,6 +409,219 @@ describe('WorkflowController — systemic-pause seam', () => {
       const failed = base.lanes.filter((l) => l.status === 'failed').map((l) => l.itemId);
       expect(new Set(failed)).toEqual(new Set(['t1', 't2']));
       expect(base.lanes.some((l) => l.status === 'integrated' && l.itemId === 't3')).toBe(true);
+    });
+  });
+
+  // ── systemic settlement stays 'failed', never 'blocked' ────────────────────
+  describe("systemic abandonment settles 'failed'", () => {
+    // A lane that PARKED ran real agent turns against a real condition. Whatever
+    // ends the park — a human giving up, a spent pause budget, or no pause seam
+    // at all — it must settle 'failed'; calling it "never started" would hide the
+    // failure the human is being asked about.
+    const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+    const alwaysSystemicT1: StepRunner = {
+      async runStep(_s, ctx) {
+        return ctx.item?.id === 't1' ? systemicFail('overloaded') : { status: 'ok' };
+      },
+    };
+
+    it("on a human 'giveup'", async () => {
+      const driver = makeFanOutDriver(['t1', 't2']);
+      const { host, pauseCalls } = makeSystemicHost({ verdicts: ['giveup'] });
+      host.fanOut = driver;
+
+      await new WorkflowController(alwaysSystemicT1, host).run('r', d);
+
+      expect(pauseCalls).toHaveLength(1);
+      expect(failedLanes(driver)).toEqual(['t1']);
+      expect(driver.lanes.some((l) => l.status === 'blocked')).toBe(false);
+    });
+
+    it('when the pause SEAM is absent entirely', async () => {
+      const driver = makeFanOutDriver(['t1', 't2']);
+      const host: ControllerHost = {
+        reportStep() {},
+        async requestHumanGate() {
+          return 'approve';
+        },
+        fanOut: driver,
+      };
+
+      await new WorkflowController(alwaysSystemicT1, host).run('r', d);
+
+      expect(failedLanes(driver)).toEqual(['t1']);
+      expect(driver.lanes.some((l) => l.status === 'blocked')).toBe(false);
+    });
+
+    it('when the per-step pause BUDGET is exhausted', async () => {
+      const driver = makeFanOutDriver(['t1', 't2']);
+      // Every park says 'retry', so the lane re-dispatches until MAX_SYSTEMIC_PAUSES
+      // is spent and the wave falls through to the settle path.
+      const { host, pauseCalls } = makeSystemicHost({
+        verdicts: Array.from({ length: MAX_SYSTEMIC_PAUSES }, () => 'retry' as SystemicPauseVerdict),
+      });
+      host.fanOut = driver;
+
+      await new WorkflowController(alwaysSystemicT1, host).run('r', d);
+
+      expect(pauseCalls).toHaveLength(MAX_SYSTEMIC_PAUSES);
+      expect(failedLanes(driver)).toEqual(['t1']);
+      expect(driver.lanes.some((l) => l.status === 'blocked')).toBe(false);
+    });
+  });
+
+  // ── same-error corroboration ────────────────────────────────────────────────
+  describe('same-error corroboration', () => {
+    /**
+     * The failure text three lanes share. Deliberately NOT a shape
+     * `isSystemicStepError` recognises — corroboration exists precisely for the
+     * environment failures nobody has written a regex for yet.
+     */
+    const SAME = "Error: EPERM: operation not permitted, open '/var/run/agent.sock'";
+    const ITEMS = ['t1', 't2', 't3', 't4', 't5'];
+    const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+
+    it('is three (the smallest count that is not a coincidence)', () => {
+      expect(SAME_ERROR_CORROBORATION_MIN).toBe(3);
+    });
+
+    it('parks — never fails — when THREE lanes of one wave fail with identical text', async () => {
+      const driver = makeFanOutDriver(ITEMS);
+      const runner = makeLaneRunner({
+        't1:implement': [plainFail(SAME)],
+        't2:implement': [plainFail(SAME)],
+        't3:implement': [plainFail(SAME)],
+      });
+      const { host, pauseCalls } = makeSystemicHost({ verdicts: ['retry'] });
+      host.fanOut = driver;
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      // ONE park, carrying the corroborated text.
+      expect(pauseCalls).toEqual([{ stepId: 'execute', error: SAME, attempt: 1 }]);
+      // The deferred write is what makes this observable: no lane was EVER
+      // stamped 'failed', so nothing emitted a lane-failed event either.
+      expect(failedLanes(driver)).toEqual([]);
+      // All three re-ran after 'retry' and integrated alongside the two that passed.
+      const integrated = driver.lanes.filter((l) => l.status === 'integrated').map((l) => l.itemId);
+      expect(new Set(integrated)).toEqual(new Set(ITEMS));
+      for (const id of ['t1', 't2', 't3']) {
+        expect(runner.calls.filter((c) => c.itemId === id)).toHaveLength(2);
+      }
+    });
+
+    it("persists a deferred 'failed' write when a SIBLING aborts the wave (cancel does not lose it)", async () => {
+      // Regression (Codex F3): the corroboration arm defers its write to the
+      // wave settle, but an aborted sibling returns before the settle runs —
+      // the completed failure must not be left 'running' in the lane store.
+      const driver = makeFanOutDriver(['t1', 't2']);
+      const runner = makeLaneRunner({
+        't1:implement': [plainFail('tsc: 4 errors in exporter.ts')],
+        't2:implement': [{ status: 'aborted' }],
+      });
+      const { host, pauseCalls } = makeSystemicHost({ verdicts: ['retry'] });
+      host.fanOut = driver;
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('canceled');
+      expect(pauseCalls).toEqual([]);
+      expect(failedLanes(driver)).toEqual(['t1']);
+      expect(driver.lanes.some((l) => l.itemId === 't2' && l.status === 'failed')).toBe(false);
+    });
+
+    it('does NOT park for TWO lanes with identical text — each is written failed exactly once', async () => {
+      // Two lanes failing alike is ordinary (a shared missing dependency, a bad
+      // base commit) and IS the run's problem to surface.
+      const driver = makeFanOutDriver(ITEMS);
+      const runner = makeLaneRunner({
+        't1:implement': [plainFail(SAME)],
+        't2:implement': [plainFail(SAME)],
+      });
+      const { host, pauseCalls } = makeSystemicHost({ verdicts: ['retry'] });
+      host.fanOut = driver;
+
+      await new WorkflowController(runner, host).run('r', d);
+
+      expect(pauseCalls).toEqual([]);
+      expect(failedLanes(driver)).toEqual(['t1', 't2']);
+    });
+
+    it('does NOT park for three DIFFERENT failure texts', async () => {
+      const driver = makeFanOutDriver(ITEMS);
+      const runner = makeLaneRunner({
+        't1:implement': [plainFail('tsc: 4 errors in exporter.ts')],
+        't2:implement': [plainFail('eslint: 2 problems in parser.ts')],
+        't3:implement': [plainFail('vitest: 1 failing assertion in api.test.ts')],
+      });
+      const { host, pauseCalls } = makeSystemicHost({ verdicts: ['retry'] });
+      host.fanOut = driver;
+
+      await new WorkflowController(runner, host).run('r', d);
+
+      expect(pauseCalls).toEqual([]);
+      expect(new Set(failedLanes(driver))).toEqual(new Set(['t1', 't2', 't3']));
+    });
+
+    it('lets ONE systemically-failed lane corroborate a single sibling with the same text', async () => {
+      // The classifier caught it on one lane and missed it on the other (a
+      // different wrapper, a different substrate). One corroborating systemic
+      // lane is enough — the environment is already proven down.
+      const driver = makeFanOutDriver(ITEMS);
+      const runner = makeLaneRunner({
+        't1:implement': [systemicFail(SAME)],
+        't2:implement': [plainFail(SAME)],
+      });
+      const { host, pauseCalls } = makeSystemicHost({ verdicts: ['retry'] });
+      host.fanOut = driver;
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      expect(pauseCalls).toEqual([{ stepId: 'execute', error: SAME, attempt: 1 }]);
+      expect(failedLanes(driver)).toEqual([]);
+      const integrated = driver.lanes.filter((l) => l.status === 'integrated').map((l) => l.itemId);
+      expect(new Set(integrated)).toEqual(new Set(ITEMS));
+    });
+
+    it("fails the corroborated lanes through the give-up path on a systemic 'giveup'", async () => {
+      const driver = makeFanOutDriver(ITEMS);
+      const runner = makeLaneRunner({
+        't1:implement': [plainFail(SAME)],
+        't2:implement': [plainFail(SAME)],
+        't3:implement': [plainFail(SAME)],
+      });
+      const { host, pauseCalls } = makeSystemicHost({ verdicts: ['giveup'] });
+      host.fanOut = driver;
+
+      await new WorkflowController(runner, host).run('r', d);
+
+      expect(pauseCalls).toHaveLength(1);
+      // The human gave up: the park's OWN settle path writes them failed (once).
+      expect(new Set(failedLanes(driver))).toEqual(new Set(['t1', 't2', 't3']));
+      expect(failedLanes(driver)).toHaveLength(3);
+    });
+
+    it('scopes the corroborated error to its WAVE: later unrelated failures do not re-park', async () => {
+      // Wave 1: three lanes share SAME ⇒ park. Wave 2: the re-dispatched lanes
+      // fail on something else entirely — only two of them, and with different
+      // text — so the stale quota-ish text must not corroborate anything.
+      const driver = makeFanOutDriver(ITEMS);
+      const runner = makeLaneRunner({
+        't1:implement': [plainFail(SAME), plainFail('REVIEW: BLOCKING — t1 defect')],
+        't2:implement': [plainFail(SAME), plainFail('REVIEW: BLOCKING — t2 defect')],
+        't3:implement': [plainFail(SAME)],
+      });
+      const { host, pauseCalls } = makeSystemicHost({ verdicts: ['retry'] });
+      host.fanOut = driver;
+
+      await new WorkflowController(runner, host).run('r', d);
+
+      // Exactly ONE park — wave 2's failures were genuine lane defects.
+      expect(pauseCalls).toEqual([{ stepId: 'execute', error: SAME, attempt: 1 }]);
+      expect(failedLanes(driver)).toEqual(['t1', 't2']);
+      expect(driver.lanes.some((l) => l.status === 'integrated' && l.itemId === 't3')).toBe(true);
     });
   });
 });

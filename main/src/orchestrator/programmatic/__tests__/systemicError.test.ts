@@ -19,6 +19,22 @@ describe('isSystemicStepError', () => {
     ['7-day window limit reached', '7-day limit reached ∙ resets at 9am'],
     ['weekly limit hit phrasing', 'Weekly limit hit, try again later'],
     ['session limit reached phrasing', 'Session limit reached'],
+    // Verb-first CLI wording — the exact text behind the 2026-09-05 sprint-2
+    // cascade, bare and in the wrapper the programmatic plane actually sees.
+    [
+      'verb-first session limit (2026-09-05 cascade fixture)',
+      "You've hit your session limit · resets 6pm (America/Los_Angeles)",
+    ],
+    [
+      'verb-first session limit wrapped in the SDK result prefix',
+      "Claude Code returned an error result: You've hit your session limit · resets 6pm (America/Los_Angeles)",
+    ],
+    [
+      'agent terminated early on a rate-limited API error',
+      'Agent terminated early due to an API error: Request was rate limited (error type rate_limit, HTTP 429 from api.anthropic.com)',
+    ],
+    ['verb-first weekly limit', 'You have reached your weekly limit'],
+    ['verb-first 5-hour limit', 'You have exceeded your 5-hour limit'],
     ['rate limit phrase', 'rate limit exceeded'],
     ['rate_limit_error subtype', 'rate_limit_error: too many requests'],
     ['Codex rate-limit provider code', 'Unhandled error. (rateLimitExceeded)'],
@@ -78,6 +94,10 @@ describe('isSystemicStepError', () => {
     ['usage limitation configuration label', 'usage limitation'],
     ['no usage limit configured', 'no usage limit configured'],
     ['ordinary tool/build failure', 'Command failed: eslint . --max-warnings=0'],
+    // The verb-first pattern's noun list is closed: a build tool's own limits
+    // must never park a run.
+    ['build tool file-size limit', 'Upload failed: hit the file size limit'],
+    ['bundler chunk limit', 'exceeded the chunk size limit of 500 kB'],
     ['model not found (availability, not systemic)', 'model not found: claude-fable-5'],
     ['model 404', 'Request failed with status code 404: model not available'],
     ['controller execution bound text', 'Step exceeded the execution bound of 30 minutes'],
@@ -109,6 +129,16 @@ describe('classifyErrorPattern', () => {
     ['bare usage-limit configuration label', 'usage limit', 'other'],
     ['usage limitation configuration label', 'usage limitation', 'other'],
     ['no usage limit configured', 'no usage limit configured', 'other'],
+    [
+      'verb-first session limit (2026-09-05 cascade fixture)',
+      "You've hit your session limit · resets 6pm (America/Los_Angeles)",
+      'limit-verb-first',
+    ],
+    [
+      'verb-first session limit wrapped in the SDK result prefix',
+      "Claude Code returned an error result: You've hit your session limit · resets 6pm (America/Los_Angeles)",
+      'limit-verb-first',
+    ],
     ['rate limit', 'rate_limit_error: too many requests', 'rate-limit'],
     ['http 429', 'Request failed with status code 429', 'http-429'],
     ['overloaded', 'overloaded_error: the server is overloaded', 'overloaded'],
@@ -166,7 +196,8 @@ describe('classifyErrorPattern', () => {
   it('only ever returns a low-cardinality label from the fixed set', () => {
     const known = new Set([
       // systemic names
-      'usage-limit-reached', 'window-limit-reached-or-hit', 'rate-limit', 'http-429',
+      'usage-limit-reached', 'window-limit-reached-or-hit', 'limit-verb-first',
+      'rate-limit', 'http-429',
       'overloaded', 'http-529', 'billing-credit-balance', 'billing-quota-exceeded',
       'auth-failed', 'auth-invalid-api-key', 'auth-401', 'auth-oauth-expired',
       'auth-authentication-error-type', 'auth-invalid-x-api-key',
@@ -241,6 +272,17 @@ describe('parseLimitResetDelayMs', () => {
   it('parses "resets at <ISO-8601>"', () => {
     const error = 'limit reached, resets at 2026-07-06T13:00:00Z';
     expect(parseLimitResetDelayMs(error, nowMs)).toBe(3600 * 1000);
+  });
+
+  it('parses the reset clock off the verb-first session-limit fixture', () => {
+    // The whole point of classifying this shape systemic is that the run can be
+    // resumed automatically when the window rolls over.
+    const now = new Date();
+    now.setHours(10, 0, 0, 0);
+    const error = "You've hit your session limit · resets 6pm (America/Los_Angeles)";
+    const delay = parseLimitResetDelayMs(error, now.getTime());
+    expect(delay).not.toBeNull();
+    expect(delay as number).toBeGreaterThan(0);
   });
 
   it('returns null when unparseable', () => {

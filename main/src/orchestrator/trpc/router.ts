@@ -19,6 +19,7 @@ import { dynamicWorkflowsRouter } from './routers/dynamicWorkflows';
 import { eventsRouter } from './routers/events';
 import { feedbackRouter } from './routers/feedback';
 import { filesRouter } from './routers/files';
+import { gitPrerequisiteRouter } from './routers/gitPrerequisite';
 import { healthRouter } from './routers/health';
 import { ideaComponentsRouter } from './routers/ideaComponents';
 import { insightsRouter } from './routers/insights';
@@ -56,6 +57,7 @@ export const appRouter = router({
     experiments: experimentsRouter,
     feedback: feedbackRouter,
     files: filesRouter,
+    gitPrerequisite: gitPrerequisiteRouter,
     health: healthRouter,
     ideaComponents: ideaComponentsRouter,
     insights: insightsRouter,

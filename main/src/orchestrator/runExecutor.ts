@@ -311,7 +311,7 @@ export interface ClaudeSpawnerLike {
   /**
    * Resolves the turn's typed step-output ({@link CliSpawnOutcome}) — the SDK
    * substrate captures the step agent's final result text at the spawn seam; the
-   * interactive/codex substrates resolve `void` (no capture). The programmatic
+   * interactive substrate resolves `void` (no capture). The programmatic
    * step runner reads `resultText` off this on the `ok` path (§5.3).
    */
   spawnCliProcess(options: ClaudeSpawnerOptions): Promise<CliSpawnOutcome | void>;

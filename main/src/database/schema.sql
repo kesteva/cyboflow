@@ -78,9 +78,9 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_status_created ON workflow_runs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_workflow_id ON workflow_runs(workflow_id);
 
--- Custom Views (migration 132, docs/proposals/CUSTOM-VIEWS.md §3.2): saved
+-- Custom Views (migration 133, docs/proposals/CUSTOM-VIEWS.md §3.2): saved
 -- per-surface widget layouts, the user's custom-widget library, and the
--- widget-action audit/idempotency side table. See 132's own header for why
+-- widget-action audit/idempotency side table. See 133's own header for why
 -- widget_action_log is a side table rather than a column on agent_proposals.
 CREATE TABLE IF NOT EXISTS custom_views (
   id TEXT PRIMARY KEY,

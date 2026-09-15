@@ -61,6 +61,17 @@ const SYSTEMIC_PATTERNS: SystemicPattern[] = [
     pattern: /\blimit\s+(reached|hit)\b/i,
   },
   {
+    // VERB-FIRST wording, where the noun follows the verb and therefore misses
+    // both patterns above: "You've hit your session limit · resets 6pm
+    // (America/Los_Angeles)" — harvested verbatim from the 2026-09-05 sprint-2
+    // cascade, where 24 lanes failed on it and not one was parked as systemic.
+    // The noun list is CLOSED so an ordinary build failure ("hit the file size
+    // limit", "exceeded the line limit") never parks a run.
+    name: 'limit-verb-first',
+    pattern:
+      /\b(?:hit|reached|exceeded)\s+(?:your|the|a)?\s*(?:session|usage|weekly|daily|monthly|plan|subscription|token|spend(?:ing)?|\d+[- ]?(?:hour|day|minute))\s+limit\b/i,
+  },
+  {
     // Also covers Codex's `rateLimitExceeded` provider code.
     name: 'rate-limit',
     pattern: /rate[\s_-]*limit(?:[\s_-]*(?:reached|hit|exceeded|exhausted))?/i,

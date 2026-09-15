@@ -242,7 +242,7 @@ function artifactFollowUp(
  * Idea-flag persistence contract for the steps that CREATE or REWRITE idea
  * bodies. The conditional design steps below (ui-prototype / architecture) and
  * the flow's build ordering key on flag lines (`SCOPE:` / `UI_PROTOTYPE:` /
- * `ARCH_DESIGN:` / `BUILD_ORDER:` / `INITIAL_BUILD:`) PERSISTED in each idea's
+ * `ARCH_DESIGN:` / `BUILD_ORDER:`) PERSISTED in each idea's
  * body — the long-form flow prose spells this out for the orchestrated plane,
  * but a scoped step turn never sees that prose. Without the contract inlined
  * here, the launch `ideas` step persisted stubs WITHOUT the subagent's flag
@@ -254,9 +254,47 @@ function artifactFollowUp(
 function ideaFlagContract(step: WorkflowStep): string {
   switch (step.id) {
     case 'ideas':
-      return `\n\n## Idea persistence contract\n\nYour subagent returns each idea with flag lines — \`SCOPE:\`, \`BUILD_ORDER:\`, \`INITIAL_BUILD:\`. When you persist an idea via \`cyboflow_create_task\`, its \`body\` MUST include those flag lines VERBATIM (keep them at the end of the stub), and pass \`scope\` as the entity field too. Later steps read the flags off the persisted body — an idea saved without them loses its build ordering and initial-build tier. Additionally: when the \`# Project brief\` section above carries an \`## Architecture design\` section, fold that section into the LOWEST \`BUILD_ORDER\` initial-build idea's body via \`cyboflow_update_task\` after creating it (replace any existing section, never stack a second copy) — the foundation idea carries the project's architecture from here on, and its arch-design tab derives from it automatically.`;
+      return `\n\n## Idea persistence contract\n\nYour subagent returns each idea with flag lines — \`SCOPE:\`, \`BUILD_ORDER:\`. When you persist an idea via \`cyboflow_create_task\`, its \`body\` MUST include those flag lines VERBATIM (keep them at the end of the stub), and pass \`scope\` as the entity field too. Later steps read the flags off the persisted body — an idea saved without them loses its build ordering. Additionally: when the \`# Project brief\` section above carries an \`## Architecture design\` section, fold that section into the LOWEST \`BUILD_ORDER\` idea's body via \`cyboflow_update_task\` after creating it (replace any existing section, never stack a second copy) — the foundation idea carries the project's architecture from here on, and its arch-design tab derives from it automatically.`;
     case 'expand-spec':
-      return `\n\n## Idea persistence contract\n\nIf an idea's current body carries flag lines (e.g. \`SCOPE:\` / \`BUILD_ORDER:\` / \`INITIAL_BUILD:\` / \`UI_PROTOTYPE:\` / \`ARCH_DESIGN:\`) or an \`## Architecture design\` section, the expanded body you write back via \`cyboflow_update_task\` MUST preserve those VERBATIM. Downstream steps read them off the persisted body — dropping them during expansion silently breaks design conditioning and build ordering.`;
+      return `\n\n## Idea persistence contract\n\nIf an idea's current body carries flag lines (e.g. \`SCOPE:\` / \`BUILD_ORDER:\` / \`UI_PROTOTYPE:\` / \`ARCH_DESIGN:\`) or an \`## Architecture design\` section, the expanded body you write back via \`cyboflow_update_task\` MUST preserve those VERBATIM. Downstream steps read them off the persisted body — dropping them during expansion silently breaks design conditioning and build ordering.`;
+    default:
+      return '';
+  }
+}
+
+/**
+ * Idea component-ledger contract for the LAUNCH steps that complete a ledger
+ * component. `launch.md` carries these obligations for the orchestrated plane,
+ * but a programmatic step turn never sees the flow markdown — it gets its
+ * `desc` plus the contracts composed here and nothing else — so on a
+ * programmatic run the ledger went entirely unwritten. Observed on the first
+ * multi-idea launch run (2026-09-04): the run specced an idea, built it 3
+ * epics and 8 tasks, and left `epics`/`stories` reading `incomplete`, so the
+ * idea presented to the next Planner run as four-fifths unplanned.
+ *
+ * The stamp must land AFTER the write it records: TaskChangeRouter's
+ * post-commit hook marks downstream components stale on a body change, and
+ * setComponentState clearing that flag is the whole point of the ordering.
+ *
+ * `prototype` is deliberately absent, and `epics` is deliberately deferred off
+ * the `epics` step — see the per-step strings for why.
+ *
+ * Launch-only by design: planner/ship carry the same obligations in their own
+ * prose and have the same programmatic blind spot, but their resume-gate
+ * semantics differ enough that copying these strings across would be wrong.
+ */
+function ideaLedgerContract(step: WorkflowStep, workflowName: string): string {
+  if (workflowName !== 'launch') return '';
+  const H = '\n\n## Component ledger (launch)\n\n';
+  switch (step.id) {
+    case 'ideas':
+      return `${H}After you fold the brief's \`## Architecture design\` section into the LOWEST \`BUILD_ORDER\` idea, stamp that idea: \`cyboflow_set_idea_component(idea_id: <that idea>, component: 'architecture', state: 'complete')\` — AFTER the \`cyboflow_update_task\` body write, never before (the body write is what marks downstream components stale, and the stamp is what clears the flag). Stamp \`architecture\` on that ONE idea only: the others carry no architecture section of their own, and a ledger reading \`complete\` over a body without the section sends the next run hunting for work that does not exist. Do NOT stamp \`prototype\` on any idea — launch's prototype pass ran once on the whole concept and lives in a run artifact belonging to no idea, so \`incomplete\` is the truthful state; \`skipped\` would read as "declared not applicable" and tell every later run never to prototype these ideas.`;
+    case 'expand-spec':
+      return `${H}For EACH idea you expand, immediately AFTER that idea's \`cyboflow_update_task\` body write lands — per idea as you finish it, never once at the end for the batch, and never before the write:\n\n- \`cyboflow_set_idea_component(idea_id: <the idea>, component: 'idea-spec', state: 'complete')\`.\n- On the ONE idea carrying the folded \`## Architecture design\` section, ALSO re-stamp \`component: 'architecture', state: 'complete'\`. This is not redundant with the \`ideas\` step's stamp: replacing the stub with \`## Idea spec\` registers as a spec change, which marks the whole downstream set (architecture, prototype, epics, stories) stale by MATERIALIZING a ledger row for each — and a materialized row wins over derivation permanently. The architecture section itself was preserved verbatim, so it is still valid; without the re-stamp the idea ends the run reading "architecture needs review" over a body that carries a perfectly good architecture section.\n\nAn unstamped component is indistinguishable from work never done, so the next Planner run on this idea rewrites the spec you just wrote.`;
+    case 'epics':
+      return `${H}Do NOT stamp the \`epics\` component here. An idea's epic situation is not settled until the \`tasks\` step, which mints a fallback epic for any idea that turns out to have more than one task — a \`skipped\` stamped now would be wrong for every idea that is about to get one. The \`tasks\` step stamps both \`epics\` and \`stories\`.`;
+    case 'tasks':
+      return `${H}Once an idea's tasks exist, stamp its ledger — AFTER the creates, per idea, never once for the batch:\n\n- \`cyboflow_set_idea_component(idea_id: <the idea>, component: 'stories', state: 'complete')\`.\n- \`cyboflow_set_idea_component(idea_id: <the idea>, component: 'epics', state: …)\` — \`'complete'\` when the idea ended up with an epic (delegated at the \`epics\` step or minted as the fallback here), \`'skipped'\` for a single-task idea that correctly got none.\n\nAn idea left reading \`incomplete\` for \`epics\` and \`stories\` sends the next Planner run to re-decompose tasks that already exist.`;
     default:
       return '';
   }
@@ -342,13 +380,21 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
   // verify-setup's `prove` is the one step in any flow whose work is WRITING,
   // committing, registering, and firing a verification — everything the generic
   // "delegate to the `cyboflow-<agent>` role" prose in step 1 sends to a role
-  // that is contractually read-only. It is also safety-sensitive (an
-  // uncommitted runbook makes every proof judge an empty tree), and the step's
-  // one-line `desc` cannot carry the procedure. Keyed on the flow + step id
-  // rather than the agent key, which `inspect`/`derive` share.
+  // that is contractually read-only. It is also safety-sensitive (it registers
+  // revisions, spends real verification budget, and must never claim a runbook
+  // proven itself), and the step's one-line `desc` cannot carry the procedure.
+  // Keyed on the flow + step id rather than the agent key, which
+  // `inspect`/`derive` share.
+  //
+  // F10 (docs/proposals/visual-verification-brittleness-fixes.md): the DB record
+  // is the authoritative store — the runner fetches the registered
+  // `portable_json` by content hash and never reads the snapshot's file — so
+  // this prose no longer tells the agent that an uncommitted runbook makes every
+  // proof judge an empty tree. Committing is what makes the runbook a
+  // reviewable EXPORT, and `committed: false` is a warning, not a blocker.
   const proveContract =
     workflowName === 'verify-setup' && step.id === 'prove'
-      ? `\n\n## Prove-step contract (verify-setup) — overrides step 1 above\n\nYou do this step YOURSELF. Do NOT delegate it: the \`cyboflow-verify-setup\` role is a read-only surveyor/drafter (\`tools: Read, Grep, Glob, Bash\`, and its own contract says it never writes repo files, never writes cyboflow state, and never commits), so handing it this step hands the work to a role that cannot perform it. Its drafting is already done — it lives in the approved proposal above.\n\nIn this order:\n\n1. **Write and commit the portable half.** Write \`.cyboflow/verify-runbook.json\` (the portable half ONLY — placeholders, never a resolved port or temp dir) plus the APPROVED rung-1/rung-2 changes, and commit atomically. **\`git add\` on this path silently does nothing in many projects**: \`.cyboflow/\` is where cyboflow keeps worktrees and local state, so it is very often in \`.gitignore\` or \`.git/info/exclude\`, and \`git add\` on an ignored path is a no-op that reports success. Stage it with \`git add -f .cyboflow/verify-runbook.json\` and CONFIRM the commit really contains it with \`git cat-file -e HEAD:.cyboflow/verify-runbook.json\` before going further. The verifier runs against a DETACHED SNAPSHOT at a commit, so an uncommitted runbook is invisible to it and every proof will be judged against a tree that has no runbook in it.\n2. **Register each approved modality** with \`cyboflow_register_verify_runbook\`, passing the machine-local \`bindings_json\` from the proposal. Quote the returned \`hash\` and \`version\` in your summary. If it returns \`committed: false\`, go back to step 1 — that is a blocker on proving, not a note.\n3. **Prove each modality by RUNNING it**, one at a time. Compose the \`VerificationTaskV1\` FROM the runbook you just committed — its build steps, its serve form, its attestation, verbatim — not from memory and not from what you would have preferred; a composed task that does not match the registered runbook is rejected as a \`runbook/sha mismatch\` and proves nothing. Fire \`cyboflow_request_verification\` with \`setup_proof: true\` and the \`runbook_hash\` + \`runbook_local_version\` you just got back, then BLOCK on \`cyboflow_await_verification\`. Do not poll, do not continue past the await, and do not fire the next modality until this one has returned.\n4. **Never mark a runbook proven.** Only a PASSING \`setup_proof\` request does, via the engine. Report what came back and claim nothing beyond it.\n5. **On FAIL, read \`failureClass\` first** — \`env\` means fix the ISOLATION lever, \`deliverable\` means fix the commands, \`ambiguous\` means narrow the proof — then re-write, re-commit, re-register (the hash changed), and re-prove. At most 3 rounds per modality. On exhaustion the unproven draft STAYS committed and registered: write the diagnosis into your summary and into the proposal artifact, and finish the step. That is a completed run, not a failure.\n\nRe-report the \`verify-runbook\` artifact at the end, enriching the approved proposal with the per-modality proof outcomes so the human's merge gate sees what actually happened.`
+      ? `\n\n## Prove-step contract (verify-setup) — overrides step 1 above\n\nYou do this step YOURSELF. Do NOT delegate it: the \`cyboflow-verify-setup\` role is a read-only surveyor/drafter (\`tools: Read, Grep, Glob, Bash\`, and its own contract says it never writes repo files, never writes cyboflow state, and never commits), so handing it this step hands the work to a role that cannot perform it. Its drafting is already done — it lives in the approved proposal above.\n\nIn this order:\n\n1. **Write and commit the portable half.** Write \`.cyboflow/verify-runbook.json\` (the portable half ONLY — placeholders, never a resolved port or temp dir) plus the APPROVED rung-1/rung-2 changes, and commit atomically. **\`git add\` on this path silently does nothing in many projects**: \`.cyboflow/\` is where cyboflow keeps worktrees and local state, so it is very often in \`.gitignore\` or \`.git/info/exclude\`, and \`git add\` on an ignored path is a no-op that reports success. Stage it with \`git add -f .cyboflow/verify-runbook.json\` and CONFIRM the commit really contains it with \`git cat-file -e HEAD:.cyboflow/verify-runbook.json\` before going further. The proof itself does NOT read this file: the runner executes the REGISTERED record's \`portable_json\`, fetched by content hash from the machine-local store, so an uncommitted runbook still proves. Commit it because the committed file is the human-reviewable EXPORT of what you registered — what a reviewer diffs and what another machine re-registers from — and because a file that exists only in your working tree drifts out of the record with nothing to catch it.\n2. **Register each approved modality** with \`cyboflow_register_verify_runbook\`, passing the machine-local \`bindings_json\` from the proposal. Quote the returned \`hash\` and \`version\` in your summary. A \`committed: false\` in the reply is a WARNING, not a blocker: proving works either way, but the reviewable export is not in HEAD — the usual cause is an ignored \`.cyboflow/\`, so re-stage with \`git add -f\`, commit, and register again so the committed file matches the record you are proving.\n3. **Prove each modality by RUNNING it**, one at a time. Compose the \`VerificationTaskV1\` FROM the runbook you just committed — its build steps, its serve form, its attestation, verbatim — not from memory and not from what you would have preferred; a composed task that does not match the registered runbook is rejected as a \`runbook/sha mismatch\` and proves nothing. Fire \`cyboflow_request_verification\` with \`setup_proof: true\` and the \`runbook_hash\` + \`runbook_local_version\` you just got back, then BLOCK on \`cyboflow_await_verification\`. Do not poll, do not continue past the await, and do not fire the next modality until this one has returned.\n4. **Never mark a runbook proven.** Only a PASSING \`setup_proof\` request does, via the engine. Report what came back and claim nothing beyond it.\n5. **On FAIL, read \`failureClass\` first** — \`env\` means fix the ISOLATION lever, \`deliverable\` means fix the commands, \`ambiguous\` means narrow the proof — then re-write, re-commit, re-register (the hash changed), and re-prove. At most 3 rounds per modality. On exhaustion the unproven draft STAYS committed and registered: write the diagnosis into your summary and into the proposal artifact, and finish the step. That is a completed run, not a failure.\n\nRe-report the \`verify-runbook\` artifact at the end, enriching the approved proposal with the per-modality proof outcomes so the human's merge gate sees what actually happened.`
       : '';
   const artifactNote =
     step.outputArtifact !== undefined ? artifactFollowUp(step.outputArtifact, workflowName) : '';
@@ -393,6 +439,7 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
       : '';
   const conditionalExecutionNote = conditionalExecution(step, workflowName, runOwnedIdeaIds.length > 0);
   const ideaFlagContractNote = ideaFlagContract(step);
+  const ideaLedgerContractNote = ideaLedgerContract(step, workflowName);
   // Compound review-queue discipline — applies to EVERY compound step, not just
   // the one that reports the artifact. The compounder surfaces below-bar
   // candidates in a `## Discarded` list; a step agent that faithfully "records
@@ -466,5 +513,5 @@ Do ONLY this step:
 2. **Commit file changes atomically.** If this step changes repository files, make ONE git commit (\`<type>: <what changed>\`), staging only the files this step touched. For DB-only, analysis, review, or artifact-reporting work, do not make a git commit. Never create an empty commit.
 3. **Stop.** Do NOT start any other step — the host orchestrator sequences the workflow and will invoke the next step itself. Report a one-line summary of what this step produced, then end your turn.
 
-The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${ideaFlagContractNote}${compoundGuard}${artifactNote}${proveContract}${taskVerifyRelayNote}${addressReviewNote}${bootstrapDenylistNote}${userGuidance}${contractError}${priorStepOutput}${loopbackFeedback}${retryNote}`;
+The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${ideaFlagContractNote}${ideaLedgerContractNote}${compoundGuard}${artifactNote}${proveContract}${taskVerifyRelayNote}${addressReviewNote}${bootstrapDenylistNote}${userGuidance}${contractError}${priorStepOutput}${loopbackFeedback}${retryNote}`;
 }

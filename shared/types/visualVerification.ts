@@ -387,7 +387,12 @@ export interface VerificationTaskV1 {
     requiresDrive?: boolean;
   }>;
   viewports?: ViewportSpec[];
-  /** Capped by scheduler config. */
+  /**
+   * Floored at the scheduler's default agent deadline and capped by its ceiling:
+   * a value BELOW the default is raised to it (F2/RC5 — a composed 180000 once
+   * killed a healthy run mid-attest). Prefer `serve.readyWhen.timeoutMs` to
+   * bound readiness; leave this unset.
+   */
   timeoutMs?: number;
 }
 
@@ -1294,15 +1299,24 @@ export interface VisualVerifyConfig {
    * when it does not have one, instead of skipping every build/serve check
    * forever (docs/proposals/lane-runbook-bootstrap.md).
    *
-   * Default OFF, and deliberately its own switch rather than riding on
-   * `enabled`. Turning it on grants a run something the master switch never did:
-   * permission to COMMIT to the branch — a runbook, and possibly one narrowly
-   * typed config edit — autonomously, mid-sprint. That is a different decision
-   * from "verify my UI", so it is a different toggle, and a project that only
-   * wants verification gets exactly what it asked for.
+   * Default ON (F9 / lane-runbook-bootstrap.md §12): without it, every project
+   * except the ones that already hand-authored a runbook stays permanently
+   * unverifiable, and rung-1 behavior is unchanged — a typed, denylisted config
+   * operation applied in its own commit with a review-queue finding naming the
+   * file, and the bootstrap has no channel to fail a lane. It is deliberately
+   * its own switch rather than riding on `enabled`: turning it OFF withdraws
+   * something the master switch never granted — permission to COMMIT to the
+   * branch — a runbook, and possibly one narrowly typed config edit —
+   * autonomously, mid-sprint. That is a different decision from "verify my UI",
+   * so it is a different toggle. Unlike `enabled`, this one is APP-WIDE only —
+   * `VerifyConfigFile` (the per-project `.cyboflow/verify.json` rung) carries no
+   * `autoBootstrapRunbook` field, so an installation that wants verification
+   * without autonomous commits turns this off GLOBALLY (Settings) while leaving
+   * `enabled` on per project; there is no per-project opt-out (F9 fix-round
+   * review).
    *
-   * The environment override `CYBOFLOW_DISABLE_RUNBOOK_BOOTSTRAP=1` forces this
-   * off regardless of what is persisted — see
+   * The environment override `CYBOFLOW_DISABLE_RUNBOOK_BOOTSTRAP=1` is the kill
+   * switch: it forces this off regardless of what is persisted — see
    * {@link runbookBootstrapKillSwitchEngaged}.
    */
   autoBootstrapRunbook?: boolean;
@@ -1369,8 +1383,13 @@ export const DEFAULT_VERIFY_AGENT_SLOTS = 2;
 /**
  * The floors ConfigManager.getVisualVerifyConfig() applies when a member of the
  * persisted block is absent. `enabled` floors to false (master switch OFF by
- * default); the rest mirror the design doc (#7). Kept here so the contract +
- * defaults live in one reviewed place.
+ * default); the rest mirror the design doc (#7), EXCEPT `autoBootstrapRunbook`,
+ * which floors to true (F9 / lane-runbook-bootstrap.md §12) — the master switch
+ * being off by default already gates whether verification runs at all, so this
+ * default only matters once a project has opted in, and at that point the
+ * bootstrap should not need a second opt-in just to stop skipping every check
+ * forever. `CYBOFLOW_DISABLE_RUNBOOK_BOOTSTRAP=1` is the kill switch. Kept here
+ * so the contract + defaults live in one reviewed place.
  */
 export const VISUAL_VERIFY_DEFAULTS: ResolvedVisualVerifyConfig = {
   enabled: false,
@@ -1381,7 +1400,7 @@ export const VISUAL_VERIFY_DEFAULTS: ResolvedVisualVerifyConfig = {
   simulatorDevices: [],
   queuedAgeCeilingMs: DEFAULT_QUEUED_AGE_CEILING_MS,
   agentSlots: DEFAULT_VERIFY_AGENT_SLOTS,
-  autoBootstrapRunbook: false,
+  autoBootstrapRunbook: true,
 };
 
 /**

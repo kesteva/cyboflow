@@ -25,6 +25,8 @@ export class FakePty {
   readonly rows = 30;
   readonly handleFlowControl = false;
   readonly writes: string[] = [];
+  /** The argv a testable manager's spawnPtyProcess override recorded for this pty (if it does). */
+  args: string[] = [];
   private dataListeners: Array<(d: string) => void> = [];
   private exitListeners: FakePtyExitListener[] = [];
   killed = false;

@@ -49,7 +49,7 @@ import * as path from 'node:path';
 import {
   VerificationScheduler,
   ResourceLeasePool,
-  VERIFY_NO_RUNBOOK_REASON,
+  VERIFY_RUNBOOK_DRIFTED_REASON,
   type VerificationSchedulerDeps,
 } from '../verificationScheduler';
 import {
@@ -65,7 +65,7 @@ import {
 import type { HarnessAttestationResult } from '../harnessAttestation';
 import { VerifyCapabilityStore, CAPABILITY_BREAKER_THRESHOLD } from '../capabilityStore';
 import { VerifyRunbookStore, type VerifyRunbookStoreDeps } from '../runbookStore';
-import { VerifyDepPreparer, defaultDepExec, type DepExec } from '../depPreparer';
+import { VerifyDepPreparer, makeDepExec, type DepExec } from '../depPreparer';
 import { captureSnapshotSha, provisionSnapshot, type SnapshotProvision } from '../snapshotProvisioner';
 import { prepareVerificationEnqueue } from '../enqueueFromTask';
 import { decideMergeGate, isMergeGateBlocking } from '../mergeGateLaneAdvance';
@@ -295,10 +295,15 @@ function passReport(overrides: Partial<VerificationReportV1> = {}): Verification
  * read, made mutable so a row can inject exactly one drift at a time. That
  * granularity is the point: §5.3 says "ANY component changing demotes", and a
  * matrix row that changed two at once could not tell which one the store
- * actually noticed.
+ * actually noticed. (Since F4 the demotion is COMPUTED per read rather than
+ * written through — the ANSWER is unchanged, the record is not destroyed.)
  */
 interface RunbookIo {
-  /** dirPath → portable runbook text. An absent key is the "this tree lacks the file" case (never a demotion). */
+  /**
+   * dirPath → portable runbook text. An absent key is the "this tree genuinely
+   * lacks the file" case, which since F10 is RECORD-AUTHORITATIVE: the
+   * portable-hash conjunct is skipped and the other two decide.
+   */
   files: Map<string, string>;
   inputHash: string | null;
   fingerprint: string;
@@ -538,6 +543,12 @@ function makeRunner(world: RunnerWorld): VerificationAgentRunner {
     claudeDefaultModel: 'claude-opus-4-8',
     resolveNode: async () => '/usr/bin/node',
     driverCliPath: '/app/driverCli.js',
+    // The three F3 seams, faked so the matrix neither spawns a login shell
+    // (`defaultResolveShellPath`) nor mkdirs under the fake '/artifacts' root —
+    // the latter would fail the 'data-dir' preflight on every deploying row.
+    resolveShellPath: async () => process.env.PATH ?? '/usr/bin:/bin',
+    resolveNodeModulesRoot: async () => null,
+    prepareDataDir: async () => {},
     provision: world.provision ?? fakeProvision,
     checkSnapshotMutated: async () => false,
     fileExists: world.fileExists ?? (async () => true),
@@ -764,10 +775,13 @@ async function initDepFixtureRepo(dir: string): Promise<void> {
  */
 const CLONE_CMD = process.platform === 'win32' ? 'robocopy' : 'cp';
 
+/** The production exec over THIS process's PATH — no login-shell resolution inside the unit gate. */
+const cloneDepExec: DepExec = makeDepExec(async () => process.env.PATH ?? '/usr/bin:/bin');
+
 function recordingDepExec(calls: Array<{ cmd: string; args: string[] }>): DepExec {
   return async (cmd, args, opts) => {
     calls.push({ cmd, args: [...args] });
-    if (cmd === 'cp') return defaultDepExec(cmd, args, opts);
+    if (cmd === 'cp') return cloneDepExec(cmd, args, opts);
     if (cmd === 'robocopy') {
       await fsPromises.cp(args[0], args[1], { recursive: true });
       return { code: 0, out: '' };
@@ -1257,8 +1271,8 @@ describe('§5.4 matrix — injected env fault (chromium removed)', () => {
 // Rows 8 + 9 — runbook drift
 // ===========================================================================
 
-describe('§5.4 matrix — runbook drift demotes a proven record', () => {
-  it("ROW 8: an edited dev script (project input-hash drift) demotes to 'unproven-draft' and the request skips with the setup CTA", async () => {
+describe('§5.4 matrix — runbook drift refuses a proven record', () => {
+  it("ROW 8: an edited dev script (project input-hash drift) reads 'unproven-draft' and the request skips with the setup CTA", async () => {
     const io = makeRunbookIo();
     const store = makeRunbookStore(db, io);
     await proveModality(store, 'web');
@@ -1277,20 +1291,26 @@ describe('§5.4 matrix — runbook drift demotes a proven record', () => {
     });
     const outcome = await scheduler.awaitTerminal(requestId, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
 
-    // The demotion is a WRITE-THROUGH on read: whoever asked next corrected the
-    // record, rather than leaving a green badge lying for a human to find.
-    expect(runbookRecord(db)?.status).toBe('unproven-draft');
+    // F4: the drift is COMPUTED on every read, not written through. The record
+    // is left intact — a lockfile bump must not destroy a proof — and the gate
+    // stays honest because it re-evaluates the same conjunction every time.
+    expect(runbookRecord(db)?.status).toBe('proven');
 
     const row = readRow(db, requestId);
     expect(outcome.status).toBe('skipped');
-    expect(row.error_message).toBe(VERIFY_NO_RUNBOOK_REASON); // the setup CTA
+    // The CTA now NAMES the drift. It used to read as the generic "no proven
+    // runbook" only because the write-through demotion had already flattened the
+    // record to a plain draft before the gate's own read; with F4 both reads see
+    // the same computed 'drifted', which is the more accurate remedy to show.
+    expect(row.error_message).toBe(VERIFY_RUNBOOK_DRIFTED_REASON);
     expect(row.failure_class).toBe('env');
-    // Unpinned, because the enqueue-side resolver asked the same demoted store.
+    // Unpinned, because the enqueue-side resolver asked the same store and got
+    // the same computed refusal.
     expect(row.runbook_hash).toBeNull();
     expect(world.deploys).toHaveLength(0);
   });
 
-  it('ROW 9: host-fingerprint drift demotes; a fresh derive + proof restores it and the build/serve task deploys again', async () => {
+  it('ROW 9: host-fingerprint drift refuses; a fresh derive + proof restores it and the build/serve task deploys again', async () => {
     const io = makeRunbookIo();
     const store = makeRunbookStore(db, io);
     const firstProof = await proveModality(store, 'web');
@@ -1308,8 +1328,9 @@ describe('§5.4 matrix — runbook drift demotes a proven record', () => {
       task: composedTask(),
     });
     await scheduler.awaitTerminal(demotedId, TERMINAL_DEADLINE_MS, TERMINAL_POLL_MS);
-    expect(readRow(db, demotedId).error_message).toBe(VERIFY_NO_RUNBOOK_REASON);
-    expect(runbookRecord(db)?.status).toBe('unproven-draft');
+    expect(readRow(db, demotedId).error_message).toBe(VERIFY_RUNBOOK_DRIFTED_REASON);
+    // F4: refused on this read, but the record itself survives untouched.
+    expect(runbookRecord(db)?.status).toBe('proven');
     expect(world.deploys).toHaveLength(0);
 
     // RE-PROOF on the new host: a fresh draft (bumping the CAS version so any
@@ -1896,11 +1917,14 @@ describe('§5.2 seam 3 — the pin checks the record, not only its content', () 
     await proveModality(store, 'web');
 
     // The demotion lands mid-flight: the request pinned a PROVEN revision at
-    // enqueue, and by the time the runner resolves the hash the store has
-    // write-through-demoted it (ROW 8 covers the store side; what this pins is
+    // enqueue, and by the time the runner resolves the hash the record reads
+    // 'unproven-draft'. Since F4 a DRIFT no longer produces that state (the
+    // record is left intact and the enqueue gate is the freshness check —
+    // Codex #2, accepted); a RE-REGISTRATION still does, which is what the
+    // injected resolver stands in for here. What this row pins either way is
     // that the RUNNER refuses to execute what it resolves as no-longer-proven —
-    // a content-only compare cannot see it, because a demotion changes the row's
-    // status and never its content address).
+    // a content-only compare cannot see it, because the status moves and the
+    // content address does not.
     const world = makeWorld({
       resolveRunbookByHash: (projectId, modality, hash) => {
         const record = store.getByHash(projectId, modality, hash);

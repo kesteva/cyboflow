@@ -46,6 +46,7 @@ import type { BlockingItemsResolver } from './blockingItemsGate';
 import type { SystemicPauseResolver } from './systemicPauseGate';
 import type { MonitorSession } from './monitor';
 import { buildAssistantTextEvent } from './syntheticEvents';
+import { isSystemicStepError } from './systemicError';
 
 /**
  * Rollback lever for autonomous LANE RESCUE (precedent: CYBOFLOW_DISABLE_WARM_SDK).
@@ -221,7 +222,36 @@ export interface ProgrammaticRunHostArgs {
    * throwing/absent sink never blocks the rescue it was supposed to audit.
    */
   fileLaneTriageFinding?: (input: { title: string; body: string }) => Promise<void>;
+  /**
+   * VISUAL-VERIFICATION PRE-ROW SKIP sink (F8 "never skip silently",
+   * docs/proposals/visual-verification-brittleness-fixes.md). Bound by the
+   * composition root to the SAME ReviewItemRouter chokepoint verdictDelivery
+   * files its verification findings on, so a lane whose check never reached the
+   * queue is as visible as one whose check ran and skipped. Absent ⇒ the skip is
+   * logged only (byte-identical to before F8).
+   */
+  fileVerificationSkipFinding?: (input: { title: string; body: string }) => Promise<void>;
   logger?: LoggerLike;
+}
+
+/** Longest untrusted `reason` rendered into a skip finding, in characters. */
+const SKIP_REASON_MAX_CHARS = 2000;
+
+/**
+ * Make an untrusted reason safe to drop inside a ``` fence in a review-item body:
+ * neutralize any backtick run that could CLOSE the fence early (and so let the
+ * text escape into markdown), and cap the length so an agent-composed rejection
+ * quoting a hundred commands cannot dominate the review queue. Truncation is
+ * announced rather than silent.
+ */
+function fenceSafeReason(reason: string): string {
+  const capped =
+    reason.length > SKIP_REASON_MAX_CHARS
+      ? `${reason.slice(0, SKIP_REASON_MAX_CHARS)}\n… (truncated, ${reason.length} chars total)`
+      : reason;
+  // U+200B between backticks breaks a ``` run without dropping any character the
+  // reader needs; a plain strip would silently rewrite the quoted command.
+  return capped.replace(/`{3,}/g, (run) => run.split('').join('\u200b'));
 }
 
 export class ProgrammaticRunHost implements ControllerHost {
@@ -394,6 +424,13 @@ export class ProgrammaticRunHost implements ControllerHost {
    * Fail-soft overall: `DefaultMonitorSession.triageLane` already never rejects,
    * so the try/catch is belt-and-braces — any escape still yields give_up, i.e.
    * exactly the behavior of a run without the seam.
+   *
+   * The ONE non-give_up failure arm is `{ kind: 'systemic' }`: a consult that
+   * died on an environment-level condition (the brain's own SDK turn hit the
+   * usage limit / a dead login) judged NOTHING, so settling the lane 'failed'
+   * would blame a task for the environment — and, with a whole wave failing at
+   * once, would convert one dead quota into a fan-out-wide cascade. The
+   * controller parks on it instead.
    */
   async triageLaneFailure(req: LaneTriageFailure): Promise<LaneRescueOutcome> {
     if (laneTriageDisabled()) {
@@ -444,7 +481,21 @@ export class ProgrammaticRunHost implements ControllerHost {
         },
         req.signal,
       );
-      if (decision.verdict === 'give_up') return { kind: 'give_up' };
+      if (decision.verdict === 'give_up') {
+        // The brain never judged anything — the consult itself died on an
+        // environment-level condition. Surface it so the controller parks the
+        // fan-out rather than settling this lane (and its siblings) 'failed'.
+        if (decision.systemicError !== undefined) {
+          this.args.logger?.warn('[ProgrammaticRunHost] lane triage died on a systemic condition; parking instead of failing the lane', {
+            runId: this.args.runId,
+            itemId: req.itemId,
+            stepId: req.stepId,
+            error: decision.systemicError,
+          });
+          return { kind: 'systemic', error: decision.systemicError };
+        }
+        return { kind: 'give_up' };
+      }
 
       let adjusted = false;
       let downgradeReason: string | undefined;
@@ -488,13 +539,22 @@ export class ProgrammaticRunHost implements ControllerHost {
 
       return { kind: 'rescue', targetStepId: decision.targetStepId, guidance: decision.guidance, adjusted };
     } catch (err) {
-      this.args.logger?.warn('[ProgrammaticRunHost] lane triage failed; letting the lane fail', {
-        runId: this.args.runId,
-        itemId: req.itemId,
-        stepId: req.stepId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return { kind: 'give_up' };
+      const message = err instanceof Error ? err.message : String(err);
+      // Same reasoning as the tagged give_up above, for an escape the monitor's
+      // own fail-soft did not catch.
+      const systemic = isSystemicStepError(message);
+      this.args.logger?.warn(
+        systemic
+          ? '[ProgrammaticRunHost] lane triage threw a systemic error; parking instead of failing the lane'
+          : '[ProgrammaticRunHost] lane triage failed; letting the lane fail',
+        {
+          runId: this.args.runId,
+          itemId: req.itemId,
+          stepId: req.stepId,
+          error: message,
+        },
+      );
+      return systemic ? { kind: 'systemic', error: message } : { kind: 'give_up' };
     }
   }
 
@@ -627,6 +687,57 @@ export class ProgrammaticRunHost implements ControllerHost {
    */
   get enqueueVisualVerification(): ControllerHost['enqueueVisualVerification'] {
     return this.args.enqueueVisualVerification;
+  }
+
+  /**
+   * File the NON-BLOCKING finding for a visual verification that never reached
+   * the queue (F8 "never skip silently"): the task-verify channel produced no
+   * result text, or the enqueue seam declined for a reason other than the
+   * deliberate off switch. Neither seam writes a `verification_requests` row, so
+   * without this the drop is invisible everywhere — the verify queue, the DB, and
+   * the swimlane all read as "this lane needed no visual check".
+   *
+   * Fire-and-forget (the ControllerHost method returns void): the controller must
+   * never await or be able to throw on reporting a skip. Both the async rejection
+   * and a synchronous throw degrade to a warn log; lane advancement is untouched.
+   *
+   * `reason` is UNTRUSTED TEXT and is fenced + capped before it enters the body
+   * (review round 2). On the enqueue-decline path it is `prepared.error`, which for
+   * a §7.2 forbidden-command rejection quotes every offending command out of the
+   * AGENT'S OWN composed task fence verbatim — multi-line, and free to contain
+   * markdown headings or its own fences. Interpolating that raw let a composed
+   * command restyle or spoof a review-queue card. Same treatment verdictDelivery
+   * already gives subprocess text (its build/launch log excerpt).
+   */
+  reportVerificationSkipped(input: { runId: string; laneTaskRef: string; reason: string; detail?: string }): void {
+    const sink = this.args.fileVerificationSkipFinding;
+    if (!sink) return;
+    const body = [
+      `Visual verification did not run for lane \`${input.laneTaskRef}\` in run \`${input.runId}\`, and no verification request was created — so this skip appears nowhere else (no request row, no verdict, no screenshots artifact).`,
+      'Reason:',
+      '```',
+      fenceSafeReason(input.reason),
+      '```',
+      ...(input.detail !== undefined ? [input.detail] : []),
+    ].join('\n\n');
+    try {
+      void sink({
+        title: `Visual verification did not run for ${input.laneTaskRef}`,
+        body,
+      }).catch((err: unknown) => {
+        this.args.logger?.warn('[ProgrammaticRunHost] verification-skip finding failed (fail-soft)', {
+          runId: input.runId,
+          laneTaskRef: input.laneTaskRef,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] verification-skip finding threw (fail-soft)', {
+        runId: input.runId,
+        laneTaskRef: input.laneTaskRef,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   log(level: 'info' | 'warn' | 'error', message: string): void {

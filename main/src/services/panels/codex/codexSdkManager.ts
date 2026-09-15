@@ -7,6 +7,7 @@ import type { ConfigManager } from '../../configManager';
 import type { SessionManager } from '../../sessionManager';
 import type { ConversationMessage } from '../../../database/models';
 import type { ClaudeSpawnerOptions } from '../../../orchestrator/runExecutor';
+import type { CliSpawnOutcome } from '../../../../../shared/types/cliPanels';
 import { AgentInvocationStore } from '../../../orchestrator/agentInvocationStore';
 import { agentStreamEventToClaudeStreamEvent, EventRouter, RawEventsSink } from '../../../../../shared/streamParser';
 import type {
@@ -144,6 +145,15 @@ interface CodexTurnContext {
   hidePromptFromTranscript: boolean | undefined;
   terminalResultEmitted: boolean;
   completedCleanly: boolean;
+  /**
+   * F1 / RC1: the LAST SUBSTANTIVE `item.completed` `agentMessage.text` of THIS
+   * turn — the turn's typed step output ({@link CliSpawnOutcome}). Per-turn,
+   * because the context is rebuilt for every logical turn, so a warm entry's
+   * turn B can never inherit turn A's text. Never a blank/whitespace-only string:
+   * `handleTurnEvent` skips those, so `null` here means "no text this turn" and
+   * downstream never sees a non-null, substance-less result.
+   */
+  lastAgentMessageText: string | null;
 }
 
 /**
@@ -582,7 +592,15 @@ export class CodexSdkManager extends AbstractCliManager {
     throw new Error('Codex app-server panel restart is workflow-only in this build');
   }
 
-  override async spawnCliProcess(options: ClaudeSpawnerOptions): Promise<void> {
+  /**
+   * Resolves the turn's typed step-output ({@link CliSpawnOutcome}) — F1 / RC1.
+   * `resultText` is the LAST completed `agentMessage.text` of the turn that had
+   * any substance, or `null` when a cleanly-completed turn produced no agent
+   * message (or only blank ones — never `''`). An aborted,
+   * interrupted, or errored turn resolves `void` (rejecting turns still reject),
+   * which the programmatic step runner reads as "no channel".
+   */
+  override async spawnCliProcess(options: ClaudeSpawnerOptions): Promise<CliSpawnOutcome | void> {
     // Provider-access gate (Settings → Integrations) — a switched-off provider
     // must refuse BEFORE any spawn bookkeeping, availability probe, or lock.
     this.assertProviderEnabled(options);
@@ -592,7 +610,7 @@ export class CodexSdkManager extends AbstractCliManager {
     }
     this.reservedSpawnKeys.add(spawnKey);
     try {
-      await this.spawnTrackedProcess(options, spawnKey);
+      return await this.spawnTrackedProcess(options, spawnKey);
     } finally {
       this.reservedSpawnKeys.delete(spawnKey);
     }
@@ -601,7 +619,7 @@ export class CodexSdkManager extends AbstractCliManager {
   private async spawnTrackedProcess(
     options: ClaudeSpawnerOptions,
     spawnKey: string,
-  ): Promise<void> {
+  ): Promise<CliSpawnOutcome | void> {
     const runId = options.runId ?? options.panelId;
     // A lane spawn (fan-out step: spawnKey !== panelId) is a single-shot turn of a
     // fresh conversation — it never parks warm. Same when the kill-switch is set.
@@ -624,8 +642,8 @@ export class CodexSdkManager extends AbstractCliManager {
       if (existing) {
         if (this.evaluateCodexWarmReuse(existing, options, fingerprint)) {
           this.clearWarmIdleTimer(existing);
-          await this.runOneTurnGuarded(existing, options, spawnKey, false);
-          return;
+          // Warm reuse returns the turn's own outcome — turn B's text, never A's.
+          return await this.runOneTurnGuarded(existing, options, spawnKey, false);
         }
         // Ineligible (fresh conversation / changed config / closing): drop the
         // parked process and cold-respawn below.
@@ -635,7 +653,7 @@ export class CodexSdkManager extends AbstractCliManager {
 
     const entry = this.buildColdEntry(options, runId, runtimeConfig, executable, fingerprint, warmEligible, isolationConfig);
     if (warmEligible) this.warmCodexRuns.set(spawnKey, entry);
-    await this.runOneTurnGuarded(entry, options, spawnKey, true);
+    return await this.runOneTurnGuarded(entry, options, spawnKey, true);
   }
 
   /**
@@ -651,9 +669,9 @@ export class CodexSdkManager extends AbstractCliManager {
     options: ClaudeSpawnerOptions,
     spawnKey: string,
     cold: boolean,
-  ): Promise<void> {
+  ): Promise<CliSpawnOutcome | void> {
     try {
-      await this.runOneTurn(entry, options, spawnKey, cold);
+      return await this.runOneTurn(entry, options, spawnKey, cold);
     } catch (error) {
       if (
         this.warmCodexRuns.get(spawnKey) === entry
@@ -835,13 +853,16 @@ export class CodexSdkManager extends AbstractCliManager {
    * per-turn invocation + init records, starts the turn, and on the finally either
    * PARKS the live process (clean completion) or closes it. Emits `spawned`/`exit`
    * per logical turn so the events layer is unchanged.
+   *
+   * Resolves the turn's typed step-output (F1 / RC1): `{ resultText }` on a clean,
+   * un-aborted completion, `void` on an abort/interrupt (the error path throws).
    */
   private async runOneTurn(
     entry: WarmCodexEntry,
     options: ClaudeSpawnerOptions,
     spawnKey: string,
     cold: boolean,
-  ): Promise<void> {
+  ): Promise<CliSpawnOutcome | void> {
     const displayPanelId = options.panelId;
     const runId = options.runId ?? options.panelId;
     // HERMETIC global-agent spawn — see buildColdEntry. `options.isolation` is
@@ -905,10 +926,17 @@ export class CodexSdkManager extends AbstractCliManager {
       hidePromptFromTranscript: options.hidePromptFromTranscript,
       terminalResultEmitted: false,
       completedCleanly: false,
+      lastAgentMessageText: null,
     };
     entry.currentContext = ctx;
 
     let exitCode = 0;
+    // F1 / RC1: captured INSIDE the try, off this turn's own ctx, before the
+    // finally nulls `entry.currentContext` — so the value can never be read from
+    // (or leak into) a sibling turn. Stays undefined on the abort path, which the
+    // step runner reads as "no channel". Declared `| undefined` (not `| void`) so
+    // TS's definite-assignment analysis accepts the unassigned abort path.
+    let outcome: CliSpawnOutcome | undefined;
 
     const activeRun: ActiveCodexRun = {
       abortController,
@@ -1037,6 +1065,13 @@ export class CodexSdkManager extends AbstractCliManager {
         'Codex app-server turn start',
       );
       await terminal.promise;
+      // A clean, un-aborted turn is the ONLY path with a result to hand back; a
+      // turn with no substantive agent message still resolves the shape, with
+      // `resultText: null` (F1 / RC1 — the latch never stores blank text, so this
+      // is never a non-null, substance-less string; see handleTurnEvent).
+      if (ctx.completedCleanly && !abortController.signal.aborted) {
+        outcome = { resultText: ctx.lastAgentMessageText };
+      }
     } catch (error) {
       if (abortController.signal.aborted) {
         this.logger?.info(`[CodexSdkManager] Codex app-server run aborted for panel ${displayPanelId}`);
@@ -1096,6 +1131,7 @@ export class CodexSdkManager extends AbstractCliManager {
         signal: null,
       });
     }
+    return outcome;
   }
 
   /** Turn-event handler bound to a warm entry — dispatches through its current turn. */
@@ -1108,6 +1144,31 @@ export class CodexSdkManager extends AbstractCliManager {
     }
     if (event.type === 'item.started' || event.type === 'item.completed') {
       ctx.approvalBridge.observeItem(event.item);
+    }
+    // F1 / RC1: latch this turn's final agent text for the typed step-output
+    // channel (§5.3). LAST SUBSTANTIVE completed agentMessage wins — the same
+    // event the eval jury latches off this stream (codexEvalJudgeQuery.ts:263).
+    // Without it spawnCliProcess resolved `void`, spawnStepRunner mapped that to
+    // `resultText: null`, and workflowController dropped task-verify's composed
+    // visual-verification task as "channel unavailable" — along with its
+    // `VERDICT: FAIL` loopback and Codex code-review's `## Blocking` sections.
+    //
+    // The blank guard is load-bearing, not hygiene: a whitespace-only message is
+    // not a message in this protocol (the projector drops it outright —
+    // appServer/eventProjector.ts:227 — the eval jury rejects the turn on it,
+    // codexEvalJudgeQuery.ts:271, and piSdkManager.ts:400 refuses to latch it).
+    // Latching `''` would resolve a NON-null, substance-less `resultText`, which
+    // workflowController.ts:1565 reads as a real verdict channel: it parses no
+    // `## Visual verification task` fence, treats that as a contract defect, and
+    // a second such turn FAILS the lane — turning today's fail-OPEN skip into a
+    // hard lane failure. Skipping the latch (rather than nulling the outcome)
+    // also keeps a substantive earlier message when a turn merely trails off.
+    if (
+      event.type === 'item.completed'
+      && event.item.type === 'agentMessage'
+      && event.item.text.trim().length > 0
+    ) {
+      ctx.lastAgentMessageText = event.item.text;
     }
     if (
       ctx.abortController.signal.aborted

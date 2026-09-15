@@ -187,10 +187,13 @@ export interface VerifyRunbookV1 {
    * reads this request's attestation nonce from. The VALUES bound to them are
    * request-scoped and resolved after lease acquisition.
    *
-   * `portEnv` and `nonceEnv` are the two the harness EXPORTS (see
-   * `resolveLeverEnv`); declaring either is what makes the runbook self-
-   * sufficient, because it moves the port binding and the attestation marker off
+   * `portEnv`, `nonceEnv` and `dataDirEnv` are the three the harness EXPORTS
+   * (see `resolveLeverEnv`; `dataDirEnv` is bound to the request-scoped
+   * `VERIFY_DATA_DIR`, a fresh empty directory per request — F3). Declaring them
+   * is what makes the runbook self-sufficient, because it moves the port
+   * binding, the attestation marker and the state-directory isolation off
    * whatever the verification agent inferred from `notes` and onto the harness.
+   * `cdpPortFlag` stays declarative (a CLI flag is not an env var).
    */
   levers?: {
     portEnv?: string;

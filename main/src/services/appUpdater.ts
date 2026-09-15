@@ -9,6 +9,9 @@ const EVENT_CHANNEL = 'updater:event';
 // Let the window finish loading before the first automatic check so the
 // 'available' event isn't dropped against a not-yet-ready webContents.
 const INITIAL_CHECK_DELAY_MS = 8_000;
+// Re-check the feed once a day for as long as the app stays open: users keep
+// cyboflow running for days and a single boot-time probe would never tell them.
+const PERIODIC_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 // One transport switch (Node -> electron.net) plus one session rebind is the
 // most any single operation can usefully recover from; past that the failure is
 // not about which stack carries the request.
@@ -46,6 +49,15 @@ export function isNewerVersion(latest: string, current: string): boolean {
 }
 
 /**
+ * Platforms `publish:r2` maintains a feed for. Each reads its own manifest under
+ * the same `<variant>/` prefix — `latest-mac.yml` on macOS, `latest.yml` on
+ * Windows (electron-updater picks the name per platform). Linux ships no build.
+ */
+export function hasUpdateFeed(platform: NodeJS.Platform): boolean {
+  return platform === 'darwin' || platform === 'win32';
+}
+
+/**
  * Wraps electron-updater for cyboflow. Reads the generic update feed baked into
  * the packaged app-update.yml — which feed (.../stable vs .../dev) is fixed at
  * build time per app variant, so there is no in-app channel switch (see
@@ -55,10 +67,12 @@ export function isNewerVersion(latest: string, current: string): boolean {
  * Design choices (deliberate):
  *  - No-op unless `app.isPackaged` — there is no feed in dev and electron-updater
  *    throws on an unpackaged app, so init() returns early.
- *  - `autoDownload` + `autoInstallOnAppQuit` are OFF. cyboflow runs long-lived
- *    orchestrator/agent sessions in worktrees; a silent download or
- *    quit-time install could interrupt one. The flow is explicit:
- *    check → download → quitAndInstall, all user-triggered from the UI.
+ *  - electron-updater's own `autoDownload` + `autoInstallOnAppQuit` are OFF.
+ *    cyboflow runs long-lived orchestrator/agent sessions in worktrees, so the
+ *    INSTALL is always explicit (quitAndInstall from the UI) — a quit-time
+ *    install could interrupt one. Downloading is harmless to a running session,
+ *    so the scheduled checks (boot + daily) stage the update themselves and the
+ *    renderer's CTA flips straight to "Restart to update" once it lands.
  */
 export class AppUpdater {
   private wired = false;
@@ -92,29 +106,37 @@ export class AppUpdater {
   // replaced before it is worth trying.
   private crashGeneration = 0;
   private electronSessionGeneration = 0;
+  // The version a scheduled check has already staged (electron-updater keeps
+  // the file cached), so the daily re-check does not download it again — and
+  // a later manual check can report it as ready instead of merely available.
+  private downloadedVersion: string | null = null;
+  private downloadInFlight = false;
+  private periodicTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly app: App,
     private readonly getMainWindow: () => BrowserWindow | null,
     private readonly logger?: Logger,
     /**
-     * Test seam: the host platform gates the updater (a feed exists for
-     * macOS only today), and tests must be deterministic on every host.
+     * Test seam: the host platform gates the updater (feeds exist for macOS
+     * and Windows only), and tests must be deterministic on every host.
      */
     private readonly platform: NodeJS.Platform = process.platform,
   ) {}
 
-  /** Wire events + kick off a delayed first check. Safe to call once at boot. */
+  /**
+   * Wire events, kick off a delayed first check, then re-check daily. Every
+   * scheduled check auto-downloads whatever it finds. Safe to call once at boot.
+   */
   init(): void {
     if (!this.app.isPackaged) {
       this.logger?.verbose('[AppUpdater] dev build — auto-updater disabled');
       return;
     }
-    if (this.platform !== 'darwin') {
-      // No update feed exists for non-macOS platforms yet (the R2 feed only
-      // carries macOS artifacts, and electron-updater would log a hard ENOENT
-      // for the missing app-update.yml on every interval). Log once, disable.
-      // Revisit when a Windows feed (latest.yml) ships.
+    if (!hasUpdateFeed(this.platform)) {
+      // No update feed exists for this platform (electron-updater would log a
+      // hard ENOENT for the missing app-update.yml on every interval). Log
+      // once, disable.
       this.logger?.verbose('[AppUpdater] no update feed for this platform — auto-updater disabled');
       return;
     }
@@ -124,11 +146,24 @@ export class AppUpdater {
     this.wireEvents();
     this.watchNetworkService();
 
-    setTimeout(() => {
-      void this.check().catch(() => {
-        /* fail-soft: initial check errors already surface via the 'error' event */
-      });
-    }, INITIAL_CHECK_DELAY_MS);
+    setTimeout(() => void this.scheduledCheck(), INITIAL_CHECK_DELAY_MS);
+    this.periodicTimer ??= setInterval(
+      () => void this.scheduledCheck(),
+      PERIODIC_CHECK_INTERVAL_MS,
+    );
+  }
+
+  /**
+   * The unattended check: probe the feed and, if it is ahead of the installed
+   * build, stage the download so the only step left for the user is the
+   * restart. Fail-soft — check()/download() never throw and already relay
+   * their errors to the renderer as UpdaterEvents.
+   */
+  private async scheduledCheck(): Promise<void> {
+    const result = await this.check();
+    if (!result.updateAvailable || !result.latestVersion) return;
+    if (result.downloadedVersion === result.latestVersion) return;
+    await this.download();
   }
 
   /**
@@ -137,9 +172,9 @@ export class AppUpdater {
    */
   async check(): Promise<UpdateCheckResult> {
     const currentVersion = this.app.getVersion();
-    if (!this.app.isPackaged || this.platform !== 'darwin') {
-      // Mirrors init(): no feed exists for non-macOS platforms (yet), so an
-      // updater verdict there is not "no update" but "not supported".
+    if (!this.app.isPackaged || !hasUpdateFeed(this.platform)) {
+      // Mirrors init(): no feed exists for this platform, so an updater
+      // verdict there is not "no update" but "not supported".
       return { supported: false, currentVersion, updateAvailable: false };
     }
     try {
@@ -148,7 +183,13 @@ export class AppUpdater {
       );
       const latestVersion = result?.updateInfo?.version;
       const updateAvailable = !!latestVersion && isNewerVersion(latestVersion, currentVersion);
-      return { supported: true, currentVersion, updateAvailable, latestVersion };
+      return {
+        supported: true,
+        currentVersion,
+        updateAvailable,
+        latestVersion,
+        ...(this.downloadedVersion ? { downloadedVersion: this.downloadedVersion } : {}),
+      };
     } catch (error) {
       this.logger?.error('[AppUpdater] check failed', error instanceof Error ? error : undefined);
       this.emit(this.errorEventOf(error));
@@ -156,14 +197,22 @@ export class AppUpdater {
     }
   }
 
-  /** Download the available update; progress arrives as UpdaterEvents. */
+  /**
+   * Download the available update; progress arrives as UpdaterEvents. A second
+   * call while one is in flight (a manual click racing the scheduled check)
+   * is a no-op — the running download's events serve both.
+   */
   async download(): Promise<void> {
     if (!this.app.isPackaged) return;
+    if (this.downloadInFlight) return;
+    this.downloadInFlight = true;
     try {
       await this.runWithRecovery('download', () => autoUpdater.downloadUpdate());
     } catch (error) {
       this.logger?.error('[AppUpdater] download failed', error instanceof Error ? error : undefined);
       this.emit(this.errorEventOf(error));
+    } finally {
+      this.downloadInFlight = false;
     }
   }
 
@@ -310,9 +359,10 @@ export class AppUpdater {
         bytesPerSecond: p.bytesPerSecond,
       }),
     );
-    autoUpdater.on('update-downloaded', (info: UpdateInfo) =>
-      this.emit({ kind: 'downloaded', version: info.version }),
-    );
+    autoUpdater.on('update-downloaded', (info: UpdateInfo) => {
+      this.downloadedVersion = info.version;
+      this.emit({ kind: 'downloaded', version: info.version });
+    });
     autoUpdater.on('error', (error: Error) => this.emit(this.errorEventOf(error)));
   }
 

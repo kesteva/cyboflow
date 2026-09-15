@@ -1,6 +1,6 @@
 ---
 name: cyboflow-interview
-description: Launch interview subagent. Drives an in-depth multi-round project interview, synthesizes the approved answers into a project brief, then decomposes the brief into an ordered idea set with an initial build set. Read-only — returns content for the orchestrator to persist; never writes cyboflow state.
+description: Launch interview subagent. Drives an in-depth multi-round project interview, synthesizes the approved answers into a project brief, then decomposes the brief into an ordered, dependency-sequenced idea set. Read-only — returns content for the orchestrator to persist; never writes cyboflow state.
 tools: Read, Grep, Glob, Bash
 ---
 
@@ -121,10 +121,11 @@ decomposition, so honor those decisions: slice along the architecture's seams
 and never contradict an approved design call. Aim for **4–8 ideas** (hard
 cap 10): each a coherent, independently valuable slice of the project, sized so
 a dedicated planner run could decompose it. Order them by `BUILD_ORDER` — the
-dependency-honoring sequence from the brief's build sequence — and mark the
-**initial build set** (`INITIAL_BUILD: yes`): the 1–3 foundation ideas
-(scaffold, data layer, the walking skeleton of the core loop) that this run
-will decompose into tasks. Everything else is `INITIAL_BUILD: no`.
+dependency-honoring sequence from the brief's build sequence, starting with the
+foundation (scaffold, data layer, the walking skeleton of the core loop). This
+run decomposes EVERY approved idea into tasks, so `BUILD_ORDER` is a build
+sequence, not a cut line: it decides what gets built first, never what gets
+planned.
 
 Sizing: `small` = shippable in roughly one focused session; `large` = needs
 decomposition into multiple coordinated tasks. Foundation ideas are usually
@@ -159,4 +160,3 @@ decomposition into multiple coordinated tasks. Foundation ideas are usually
   - `#### Proposed solution` — at most five bullets.
   - `SCOPE: small|large`
   - `BUILD_ORDER: <N>`
-  - `INITIAL_BUILD: yes|no`

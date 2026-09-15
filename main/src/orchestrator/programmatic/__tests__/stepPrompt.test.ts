@@ -679,7 +679,7 @@ describe('composeStepPrompt', () => {
     });
     expect(out).toContain('## Idea persistence contract');
     expect(out).toContain('BUILD_ORDER');
-    expect(out).toContain('INITIAL_BUILD');
+    expect(out).not.toContain('INITIAL_BUILD');
     expect(out).toContain('VERBATIM');
     // The brief-carried architecture folds into the foundation idea here.
     expect(out).toContain('## Architecture design');
@@ -694,6 +694,72 @@ describe('composeStepPrompt', () => {
     });
     expect(out).toContain('## Idea persistence contract');
     expect(out).toContain('MUST preserve those VERBATIM');
+  });
+
+  // -------------------------------------------------------------------------
+  // Component-ledger contract — launch's programmatic step turns never see
+  // launch.md, so the stamp obligations must be composed here or the ledger
+  // goes unwritten (observed: an idea with 3 epics + 8 tasks reading
+  // `incomplete` for `epics` and `stories`).
+  // -------------------------------------------------------------------------
+
+  it('tells the launch tasks step to stamp stories and epics', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'tasks', name: 'Fill out task details', agent: 'tasks' }),
+      workflowName: 'launch',
+      attempt: 1,
+    });
+    expect(out).toContain('## Component ledger (launch)');
+    expect(out).toContain('cyboflow_set_idea_component');
+    expect(out).toContain("component: 'stories', state: 'complete'");
+    expect(out).toContain("component: 'epics', state:");
+  });
+
+  it('tells the launch expand-spec step to stamp idea-spec after the body write', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'expand-spec', name: 'Complete idea specs', agent: 'context' }),
+      workflowName: 'launch',
+      attempt: 1,
+    });
+    expect(out).toContain("component: 'idea-spec', state: 'complete'");
+    expect(out).toContain('AFTER');
+    // The spec rewrite stales architecture by materializing a row, so the
+    // ideas-step stamp must be renewed here or it reads "needs review".
+    expect(out).toContain("component: 'architecture', state: 'complete'");
+  });
+
+  it('stamps architecture but never prototype on the launch ideas step', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'ideas', name: 'Decompose into ideas', agent: 'interview' }),
+      workflowName: 'launch',
+      attempt: 1,
+    });
+    expect(out).toContain("component: 'architecture', state: 'complete'");
+    expect(out).toContain('Do NOT stamp `prototype`');
+  });
+
+  it('defers the epics stamp off the launch epics step', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'epics', name: 'Create epics', agent: 'epics' }),
+      workflowName: 'launch',
+      attempt: 1,
+    });
+    expect(out).toContain('Do NOT stamp the `epics` component here');
+  });
+
+  it('omits the ledger contract outside launch and on unrelated launch steps', () => {
+    const planner = composeStepPrompt({
+      step: step({ id: 'tasks', name: 'Fill out task details', agent: 'tasks' }),
+      workflowName: 'planner',
+      attempt: 1,
+    });
+    expect(planner).not.toContain('## Component ledger');
+    const gate = composeStepPrompt({
+      step: step({ id: 'approve-plan', name: 'Approve task plan', agent: 'human' }),
+      workflowName: 'launch',
+      attempt: 1,
+    });
+    expect(gate).not.toContain('## Component ledger');
   });
 
   it('omits the persistence contract on unrelated steps', () => {
@@ -880,6 +946,15 @@ describe('composeStepPrompt', () => {
     expect(prove).toContain('runbook/sha mismatch');
     expect(prove).toContain('setup_proof: true');
     expect(prove).toContain('Never mark a runbook proven');
+    // F10 (docs/proposals/visual-verification-brittleness-fixes.md): the DB
+    // record is authoritative — the runner executes the REGISTERED
+    // `portable_json` by content hash and never reads the snapshot's file — so
+    // the prose must no longer claim an uncommitted runbook makes every proof
+    // judge an empty tree, and `committed: false` is a warning, not a blocker.
+    expect(prove).not.toContain('every proof will be judged against a tree that has no runbook in it');
+    expect(prove).not.toContain('that is a blocker on proving, not a note');
+    expect(prove).toContain("the REGISTERED record's `portable_json`");
+    expect(prove).toContain('is a WARNING, not a blocker');
 
     // inspect/derive share prove's agent key, so the contract must key on the step.
     const derive = composeStepPrompt({

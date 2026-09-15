@@ -6,9 +6,10 @@ import { ToolPanel, ToolPanelState } from './panels';
  * FINAL assistant result text, captured at the spawn seam per-turn (per-spawnKey,
  * so concurrent fan-out lanes never cross-attribute) and returned so the
  * programmatic controller can parse a step's typed output. `null` on a failed /
- * aborted turn and on substrates that do not capture it (interactive, codex).
- * The abstract/interactive path resolves `void` (no capture); the SDK manager
- * resolves this shape. Shared home so main-side spawner interfaces
+ * aborted turn and on a clean turn that produced no final text. The
+ * abstract/interactive path resolves `void` (no capture); the Claude, Codex
+ * and pi SDK managers resolve this shape (Codex since F1 of
+ * docs/proposals/visual-verification-brittleness-fixes.md). Shared home so main-side spawner interfaces
  * (ClaudeSpawnerLike, AbstractCliManager, SubstrateDispatchFacade) and the SDK
  * manager all reference one declaration.
  */

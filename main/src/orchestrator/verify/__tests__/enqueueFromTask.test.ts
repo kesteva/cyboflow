@@ -17,13 +17,22 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { VerificationScheduler } from '../verificationScheduler';
-import { enqueueTaskVerification, FORBIDDEN_DEP_COMMAND_ERROR } from '../enqueueFromTask';
+import {
+  declaredWebModality,
+  enqueueTaskVerification,
+  laneEnqueueKey,
+  laneEnqueueKeyFor,
+  prepareVerificationEnqueue,
+  resolveEnqueueModality,
+  FORBIDDEN_DEP_COMMAND_ERROR,
+} from '../enqueueFromTask';
 import { VerifyRunbookStore } from '../runbookStore';
 import { checkRunbookPin } from '../verificationAgentRunner';
 import { parseVerificationTaskV1 } from '../../../../../shared/types/visualVerification';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
-import type { VerificationTaskV1, ResolvedVisualVerifyConfig, VlmJudge } from '../../../../../shared/types/visualVerification';
-import type { VerifyRunbookV1 } from '../../../../../shared/types/verifyRunbook';
+import type { VerificationModality, VerificationTaskV1, ResolvedVisualVerifyConfig, VlmJudge } from '../../../../../shared/types/visualVerification';
+import type { VerifyRunbookModalityEntry, VerifyRunbookV1 } from '../../../../../shared/types/verifyRunbook';
+import type { ProvenRunbookRevision } from '../verificationScheduler';
 
 const fakeJudge: VlmJudge = {
   judge: async () => ({
@@ -274,7 +283,7 @@ describe('enqueueTaskVerification', () => {
     expect(db.prepare('SELECT COUNT(*) AS n FROM verification_requests').get()).toEqual({ n: 0 });
   });
 
-  it('a missing run → skipped(verification-disabled)', async () => {
+  it('a missing run → skipped(no-run-row)', async () => {
     initScheduler(db);
     const result = await enqueueTaskVerification({
       db: dbAdapter(db),
@@ -284,7 +293,7 @@ describe('enqueueTaskVerification', () => {
       attempt: 1,
       worktreePath: gitRepo,
     });
-    expect(result).toEqual({ outcome: 'skipped', reason: 'verification-disabled' });
+    expect(result).toEqual({ outcome: 'skipped', reason: 'no-run-row' });
   });
 
   it('an enabled run → enqueued: dual-writes deliverable_json + task_json, forces the lane ref, keys on runId:ref:attempt, captures the sha', async () => {
@@ -879,7 +888,10 @@ describe('enqueueTaskVerification — the runbook bootstrap', () => {
         task: serveTask,
         probePath: gitRepo,
       }),
-    ).resolves.toEqual({ proceed: true, adopt: false });
+    // `mode` since F4 stage 2 (Codex #2): a proceed now says WHICH action —
+    // 'derive' authors a runbook, 'reprove' re-proves a drifted record and writes
+    // nothing.
+    ).resolves.toEqual({ proceed: true, mode: 'derive', adopt: false });
   });
 
   it('declines with the toggle OFF, which is the shipped default', async () => {
@@ -1047,5 +1059,623 @@ describe('enqueueTaskVerification — the runbook bootstrap', () => {
         probePath: gitRepo,
       }),
     ).resolves.toEqual({ proceed: false, reason: 'no-environment' });
+  });
+});
+
+/**
+ * F5 / RC3 — the modality is resolved ONCE, from the DECLARATION first and the
+ * project's PROVEN RECORD second (docs/proposals/visual-verification-brittleness-fixes.md).
+ *
+ * The defect these pin: `resolveTaskModality` answers from the task's SHAPE
+ * alone, so an undeclared task on a project whose only proven runbook entry is
+ * `cdp-app` (cyboflow itself) asked for `web`, found no record, and was skipped
+ * by the degrade gate against a perfect proof — while the bootstrap, which ran
+ * FIRST on that same guess, derived and proved a rival `web` runbook over the
+ * shared file (Codex #3).
+ */
+describe('declaredWebModality — the pure precedence table', () => {
+  const cases: Array<{
+    name: string;
+    type: Parameters<typeof declaredWebModality>[0];
+    task: Parameters<typeof declaredWebModality>[1];
+    expected: VerificationModality | null;
+  }> = [
+    // (1) The run's TYPE owns the two modalities a task shape cannot express,
+    // and it outranks everything the composer wrote.
+    { name: 'native-desktop → native-screen', type: 'native-desktop', task: null, expected: 'native-screen' },
+    {
+      name: 'native-desktop beats a task-declared web',
+      type: 'native-desktop',
+      task: { modality: 'web' },
+      expected: 'native-screen',
+    },
+    { name: 'mobile-flow → mobile', type: 'mobile-flow', task: null, expected: 'mobile' },
+    // (2) The composer's own declaration, which resolveTaskModality ignores.
+    {
+      name: 'task.modality cdp-app wins over an absent attach',
+      type: 'interactive-web-behavior',
+      task: { modality: 'cdp-app' },
+      expected: 'cdp-app',
+    },
+    {
+      name: 'task.modality web wins over an attach:cdp shape',
+      type: 'interactive-web-behavior',
+      task: { modality: 'web', serve: { cmd: 'x', attach: 'cdp' } },
+      expected: 'web',
+    },
+    // A task-declared native-screen on a web-shaped run is NOT honoured: the
+    // run's type owns that axis, and the row's stamp is re-derived from it.
+    {
+      name: 'task.modality native-screen is not a web-axis declaration',
+      type: 'interactive-web-behavior',
+      task: { modality: 'native-screen' },
+      expected: null,
+    },
+    // (3) The legacy shape discriminant, still authoritative.
+    {
+      name: 'serve.attach cdp → cdp-app',
+      type: 'interactive-web-behavior',
+      task: { serve: { cmd: 'x', attach: 'cdp' } },
+      expected: 'cdp-app',
+    },
+    // Nothing declared at all — the ONLY case that consults the records.
+    { name: 'a bare web-shaped task declares nothing', type: 'interactive-web-behavior', task: { serve: { cmd: 'x' } }, expected: null },
+    { name: 'a null task declares nothing', type: 'static-render-snapshot', task: null, expected: null },
+  ];
+
+  for (const c of cases) {
+    it(c.name, () => {
+      expect(declaredWebModality(c.type, c.task)).toBe(c.expected);
+    });
+  }
+});
+
+describe('resolveEnqueueModality — declaration first, then the proven record', () => {
+  /**
+   * A task that DERIVES AN ENVIRONMENT (a serve step). Only such a task consults
+   * the records at all: a degenerate pre-live one is exempt from the degrade gate
+   * and merging a runbook into it would turn it into a different request.
+   */
+  const envTask: VerificationTaskV1 = { ...task, serve: { cmd: 'pnpm dev --port ${PORT}' } };
+  const revision: ProvenRunbookRevision = {
+    hash: 'hash-1',
+    version: 1,
+    entry: {
+      build: ['pnpm run build'],
+      serve: { cmd: 'pnpm start', attach: 'cdp' },
+      attestation: { kind: 'window-identity', titlePattern: 'App', app: 'App' },
+    },
+  };
+
+  /** A scheduler whose proven records are exactly `proven`, recording what it was asked. */
+  function fakeRecords(proven: VerificationModality[]): { asked: VerificationModality[] } {
+    const asked: VerificationModality[] = [];
+    vi.spyOn(VerificationScheduler.getInstance(), 'resolveProvenRunbook').mockImplementation(
+      async ({ modality }): Promise<ProvenRunbookRevision | null> => {
+        asked.push(modality);
+        return proven.includes(modality) ? revision : null;
+      },
+    );
+    return { asked };
+  }
+
+  beforeEach(() => {
+    seedRun(db, { runId: 'run-mod' });
+    initScheduler(db);
+  });
+
+  it('cdp-app proven only, nothing declared → cdp-app', async () => {
+    const { asked } = fakeRecords(['cdp-app']);
+    await expect(
+      resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
+    ).resolves.toBe('cdp-app');
+    // Probed in order, and stopped at the first proven one.
+    expect(asked).toEqual(['cdp-app']);
+  });
+
+  it('web proven only, nothing declared → web', async () => {
+    const { asked } = fakeRecords(['web']);
+    await expect(
+      resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
+    ).resolves.toBe('web');
+    expect(asked).toEqual(['cdp-app', 'web']);
+  });
+
+  it('BOTH proven, nothing declared → cdp-app (a project with a proven app entry is an app)', async () => {
+    fakeRecords(['cdp-app', 'web']);
+    await expect(
+      resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
+    ).resolves.toBe('cdp-app');
+  });
+
+  it('nothing proven, nothing declared → web (the pre-F5 default)', async () => {
+    fakeRecords([]);
+    await expect(
+      resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
+    ).resolves.toBe('web');
+  });
+
+  it('a DECLARED web on a web-shaped task never probes at all', async () => {
+    // The declaration MATCHES the shape, so the record cannot move the answer and
+    // is never read. Declared-but-not-proven then keeps today's behavior
+    // downstream: no merge, and the degrade gate skips naming that modality.
+    const { asked } = fakeRecords(['cdp-app']);
+    await expect(
+      resolveEnqueueModality({
+        type: 'interactive-web-behavior',
+        task: { ...envTask, modality: 'web' },
+        projectId: 1,
+        runId: 'run-mod',
+      }),
+    ).resolves.toBe('web');
+    expect(asked).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // STAMP CONSISTENCY (fix round, blocker). A declaration the task's own SHAPE
+  // does not express can only be adopted when a proven record backs it, because
+  // only the resulting merge makes `scheduler.enqueue`'s shape-derived stamp
+  // agree with it. Unbacked, it would leave the row stamped with the OTHER
+  // modality and the §3.2 degrade gate judging a request that was resolved for
+  // something else — and, wherever that other modality is proven, waving an
+  // UNPINNED composer-authored build/serve straight through.
+  // -------------------------------------------------------------------------
+
+  it('a DECLARED cdp-app on a web-shaped task is adopted when the cdp-app record is PROVEN', async () => {
+    const { asked } = fakeRecords(['cdp-app']);
+    await expect(
+      resolveEnqueueModality({
+        type: 'interactive-web-behavior',
+        task: { ...envTask, modality: 'cdp-app' },
+        projectId: 1,
+        runId: 'run-mod',
+      }),
+    ).resolves.toBe('cdp-app');
+    // Exactly one probe: the declaration narrows the candidate list to itself.
+    expect(asked).toEqual(['cdp-app']);
+  });
+
+  it('a DECLARED cdp-app on a web-shaped task falls back to the SHAPE when nothing backs it', async () => {
+    const { asked } = fakeRecords(['web']);
+    await expect(
+      resolveEnqueueModality({
+        type: 'interactive-web-behavior',
+        task: { ...envTask, modality: 'cdp-app' },
+        projectId: 1,
+        runId: 'run-mod',
+      }),
+    ).resolves.toBe('web');
+    // `web` is never probed here — it is the shape, and the injection will look
+    // it up itself; the declaration only ever buys ITS own record one read.
+    expect(asked).toEqual(['cdp-app']);
+  });
+
+  it('a DECLARED web on an attach:cdp task falls back to cdp-app when no web record backs it', async () => {
+    // The mirror case, and the one that matters on cyboflow itself: one word
+    // would otherwise route the request away from the modality this project has
+    // actually proven, while the row still stamped `cdp-app`.
+    const { asked } = fakeRecords(['cdp-app']);
+    await expect(
+      resolveEnqueueModality({
+        type: 'interactive-web-behavior',
+        task: { ...envTask, modality: 'web', serve: { cmd: 'electron .', attach: 'cdp' } },
+        projectId: 1,
+        runId: 'run-mod',
+      }),
+    ).resolves.toBe('cdp-app');
+    expect(asked).toEqual(['web']);
+  });
+
+  it('a DEGENERATE task (no build, no serve) never consults the records', async () => {
+    // It derives no environment, so it is exempt from the degrade gate and there
+    // is nothing for a runbook to describe; merging one in would turn the one
+    // request shape that passes in production into a build-and-launch run.
+    const { asked } = fakeRecords(['cdp-app']);
+    const degenerate: VerificationTaskV1 = { ...task, target: { htmlPath: 'dist/index.html' } };
+    await expect(
+      resolveEnqueueModality({
+        type: 'static-render-snapshot',
+        task: degenerate,
+        projectId: 1,
+        runId: 'run-mod',
+      }),
+    ).resolves.toBe('web');
+    expect(asked).toEqual([]);
+  });
+
+  it('an undeclared lane follows a DRIFTED/draft record over the shape (F4 ∘ F5): cdp-app present but not proven → cdp-app', async () => {
+    vi.spyOn(VerificationScheduler.getInstance(), 'resolveProvenRunbook').mockResolvedValue(null);
+    const asked: VerificationModality[] = [];
+    vi.spyOn(VerificationScheduler.getInstance(), 'runbookRecordPresent').mockImplementation(async (a) => {
+      asked.push(a.modality);
+      return a.modality === 'cdp-app';
+    });
+    await expect(
+      resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
+    ).resolves.toBe('cdp-app');
+    expect(asked).toEqual(['cdp-app']);
+  });
+
+  it('an undeclared lane with NO record of any kind → web (the shape)', async () => {
+    vi.spyOn(VerificationScheduler.getInstance(), 'resolveProvenRunbook').mockResolvedValue(null);
+    vi.spyOn(VerificationScheduler.getInstance(), 'runbookRecordPresent').mockResolvedValue(false);
+    await expect(
+      resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
+    ).resolves.toBe('web');
+  });
+
+  it('a THROWING record probe degrades to the shape instead of failing the enqueue', async () => {
+    vi.spyOn(VerificationScheduler.getInstance(), 'resolveProvenRunbook').mockImplementation(async () => {
+      throw new Error('store exploded');
+    });
+    await expect(
+      resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
+    ).resolves.toBe('web');
+  });
+
+  it('with NO scheduler wired at all → web', async () => {
+    VerificationScheduler._resetForTesting();
+    await expect(
+      resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
+    ).resolves.toBe('web');
+  });
+});
+
+describe('enqueueTaskVerification — one modality, resolved before the bootstrap', () => {
+  const CDP_ENTRY: VerifyRunbookModalityEntry = {
+    build: ['pnpm run build:main'],
+    serve: { cmd: 'pnpm start --remote-debugging-port=${VERIFY_DRIVER_PORT}', attach: 'cdp' },
+    attestation: { kind: 'window-identity', titlePattern: 'Cyboflow', app: 'Cyboflow' },
+  };
+  const WEB_ENTRY: VerifyRunbookModalityEntry = {
+    build: ['pnpm run build:web'],
+    serve: { cmd: 'pnpm run preview -- --port ${PORT}' },
+    attestation: { kind: 'http-endpoint', urlPath: '/__cyboflow_verify__' },
+  };
+
+  /**
+   * Wire a scheduler whose proven records are exactly `records`, recording the
+   * ORDER of every record read and bootstrap call so a test can assert what the
+   * bootstrap actually ran on — the fact the reviewer's finding turns on.
+   */
+  function wireRecords(records: Partial<Record<VerificationModality, ProvenRunbookRevision>>): string[] {
+    const order: string[] = [];
+    vi.spyOn(VerificationScheduler.getInstance(), 'resolveProvenRunbook').mockImplementation(
+      async ({ modality }): Promise<ProvenRunbookRevision | null> => {
+        order.push(`resolve:${modality}`);
+        return records[modality] ?? null;
+      },
+    );
+    vi.spyOn(VerificationScheduler.getInstance(), 'maybeBootstrapRunbook').mockImplementation(
+      async ({ modality }) => {
+        order.push(`bootstrap:${modality}`);
+        return { kind: 'not-attempted' } as Awaited<ReturnType<VerificationScheduler['maybeBootstrapRunbook']>>;
+      },
+    );
+    return order;
+  }
+
+  function readModalityRow(id: string): { taskJson: string; modality: string | null; hash: string | null } {
+    return db
+      .prepare('SELECT task_json AS taskJson, modality, runbook_hash AS hash FROM verification_requests WHERE id = ?')
+      .get(id) as { taskJson: string; modality: string | null; hash: string | null };
+  }
+
+  it('an undeclared task on a cdp-app-proven project bootstraps and prepares on THE SAME cdp-app', async () => {
+    // Codex #3 in one test: before F5 the order was bootstrap(web) → prepare(web),
+    // so this project's proven cdp-app record was never consulted and a rival web
+    // runbook was derived over the shared file. Now the record decides first, and
+    // BOTH consumers read that one answer.
+    seedRun(db, { runId: 'run-f5' });
+    initScheduler(db);
+    const order: string[] = [];
+
+    vi.spyOn(VerificationScheduler.getInstance(), 'resolveProvenRunbook').mockImplementation(
+      async ({ modality }): Promise<ProvenRunbookRevision | null> => {
+        order.push(`resolve:${modality}`);
+        return modality === 'cdp-app' ? { hash: 'h-cdp', version: 3, entry: CDP_ENTRY } : null;
+      },
+    );
+    const bootstrap = vi
+      .spyOn(VerificationScheduler.getInstance(), 'maybeBootstrapRunbook')
+      .mockImplementation(async ({ modality }) => {
+        order.push(`bootstrap:${modality}`);
+        return { kind: 'not-attempted' } as Awaited<ReturnType<VerificationScheduler['maybeBootstrapRunbook']>>;
+      });
+
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      // Neither `modality` nor `serve.attach` — the exact shape RC3 mis-routed.
+      task: { ...task, build: ['pnpm run build'], serve: { cmd: 'pnpm dev --port ${PORT}' } },
+      runId: 'run-f5',
+      laneTaskRef: 'TASK-009',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+
+    expect(result.outcome).toBe('enqueued');
+    if (result.outcome !== 'enqueued') return;
+    // The record is consulted BEFORE the bootstrap, and `web` is never asked for.
+    expect(order).toEqual(['resolve:cdp-app', 'bootstrap:cdp-app', 'resolve:cdp-app']);
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+
+    const row = db
+      .prepare('SELECT task_json AS taskJson, modality, runbook_hash AS hash FROM verification_requests WHERE id = ?')
+      .get(result.requestId) as { taskJson: string; modality: string | null; hash: string | null };
+    const persisted = JSON.parse(row.taskJson) as VerificationTaskV1;
+    // The cdp-app entry was merged, so the persisted task IS an attach task…
+    expect(persisted.serve?.attach).toBe('cdp');
+    expect(persisted.build).toEqual(['pnpm run build:main']);
+    // …and it carries the resolved modality the composer never declared, so the
+    // runner's `req.modality ?? task.modality` cross-check agrees with the shape.
+    expect(persisted.modality).toBe('cdp-app');
+    // The row stamp — re-derived at the INSERT — agrees too.
+    expect(row.modality).toBe('cdp-app');
+    expect(row.hash).toBe('h-cdp');
+  });
+
+  it('a DECLARED web on that same project stays web, unmerged and unpinned', async () => {
+    // Declared-but-not-proven: no record for `web`, so no merge and no pin, and
+    // the degrade gate downstream skips naming that modality — today's behavior,
+    // deliberately unchanged.
+    seedRun(db, { runId: 'run-f5b' });
+    initScheduler(db);
+    const asked: string[] = [];
+    vi.spyOn(VerificationScheduler.getInstance(), 'resolveProvenRunbook').mockImplementation(
+      async ({ modality }): Promise<ProvenRunbookRevision | null> => {
+        asked.push(modality);
+        return modality === 'cdp-app' ? { hash: 'h-cdp', version: 3, entry: CDP_ENTRY } : null;
+      },
+    );
+    vi.spyOn(VerificationScheduler.getInstance(), 'maybeBootstrapRunbook').mockImplementation(
+      async ({ modality }) => {
+        asked.push(`bootstrap:${modality}`);
+        return { kind: 'not-attempted' } as Awaited<ReturnType<VerificationScheduler['maybeBootstrapRunbook']>>;
+      },
+    );
+
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      task: { ...task, modality: 'web', serve: { cmd: 'pnpm dev --port ${PORT}' } },
+      runId: 'run-f5b',
+      laneTaskRef: 'TASK-010',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+
+    expect(result.outcome).toBe('enqueued');
+    if (result.outcome !== 'enqueued') return;
+    expect(asked).toEqual(['bootstrap:web', 'web']);
+    const row = db
+      .prepare('SELECT task_json AS taskJson, runbook_hash AS hash FROM verification_requests WHERE id = ?')
+      .get(result.requestId) as { taskJson: string; hash: string | null };
+    expect((JSON.parse(row.taskJson) as VerificationTaskV1).serve?.cmd).toBe('pnpm dev --port ${PORT}');
+    expect(row.hash).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // STAMP CONSISTENCY (fix round, blocker). `scheduler.enqueue` re-derives the
+  // row's modality from the PERSISTED task's shape, so an off-shape resolution
+  // that never merged would leave the gate judging a modality the request was
+  // never resolved for — and on a project where THAT modality is proven, the
+  // gate lets an unpinned, composer-authored build/serve execute. These three
+  // pin the rule: the resolved modality is either backed by a proven record (so
+  // the merge makes the shape agree) or it is the shape.
+  // -------------------------------------------------------------------------
+
+  it('a DECLARED cdp-app with a web-shaped serve, on a web-proven project, stamps web and pins the WEB runbook', async () => {
+    seedRun(db, { runId: 'run-f5d' });
+    initScheduler(db);
+    const order = wireRecords({ web: { hash: 'h-web', version: 7, entry: WEB_ENTRY } });
+
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      // The composer's one-word declaration, with no `attach` behind it.
+      task: { ...task, modality: 'cdp-app', build: ['pnpm run build'], serve: { cmd: 'pnpm dev --port ${PORT}' } },
+      runId: 'run-f5d',
+      laneTaskRef: 'TASK-012',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+
+    expect(result.outcome).toBe('enqueued');
+    if (result.outcome !== 'enqueued') return;
+    // The declaration bought exactly ONE record read; nothing backed it, so the
+    // shape took over BEFORE the bootstrap — which therefore never got the chance
+    // to derive a rival cdp-app runbook over this project's proven web one.
+    expect(order).toEqual(['resolve:cdp-app', 'bootstrap:web', 'resolve:web']);
+
+    const row = readModalityRow(result.requestId);
+    // Stamp, pin and persisted shape all agree — the pre-F5 answer for this task.
+    expect(row.modality).toBe('web');
+    expect(row.hash).toBe('h-web');
+    expect((JSON.parse(row.taskJson) as VerificationTaskV1).build).toEqual(['pnpm run build:web']);
+  });
+
+  it('a DECLARED web on an attach:cdp task, on a cdp-app-proven project, stamps cdp-app and pins the CDP runbook', async () => {
+    // The mirror, and the one that bites on cyboflow itself: pre-fix, this word
+    // routed the injection at `web` (nothing proven ⇒ unpinned) while the row
+    // still stamped `cdp-app`, whose record IS proven — so the degrade gate saw
+    // a proven project and ran the composer's own launch line unpinned.
+    seedRun(db, { runId: 'run-f5e' });
+    initScheduler(db);
+    const order = wireRecords({ 'cdp-app': { hash: 'h-cdp', version: 3, entry: CDP_ENTRY } });
+
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      task: { ...task, modality: 'web', build: ['pnpm run build'], serve: { cmd: 'electron .', attach: 'cdp' } },
+      runId: 'run-f5e',
+      laneTaskRef: 'TASK-013',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+
+    expect(result.outcome).toBe('enqueued');
+    if (result.outcome !== 'enqueued') return;
+    expect(order).toEqual(['resolve:web', 'bootstrap:cdp-app', 'resolve:cdp-app']);
+    const row = readModalityRow(result.requestId);
+    expect(row.modality).toBe('cdp-app');
+    expect(row.hash).toBe('h-cdp');
+  });
+
+  it('a record whose entry contradicts its own modality falls back to the SHAPE rather than stamping past the skipped injection', async () => {
+    // The injection's consistency guard drops a malformed record — and before the
+    // fix the resolved modality survived that drop, leaving the row stamped `web`
+    // while everything downstream had been resolved for `cdp-app`.
+    seedRun(db, { runId: 'run-f5f' });
+    initScheduler(db);
+    const order = wireRecords({
+      // Filed under cdp-app, but its serve form is a plain web one.
+      'cdp-app': { hash: 'h-bad', version: 1, entry: { ...WEB_ENTRY } },
+      web: { hash: 'h-web', version: 7, entry: WEB_ENTRY },
+    });
+
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      task: { ...task, build: ['pnpm run build'], serve: { cmd: 'pnpm dev --port ${PORT}' } },
+      runId: 'run-f5f',
+      laneTaskRef: 'TASK-014',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+
+    expect(result.outcome).toBe('enqueued');
+    if (result.outcome !== 'enqueued') return;
+    expect(order).toEqual(['resolve:cdp-app', 'bootstrap:cdp-app', 'resolve:cdp-app', 'resolve:web']);
+    const row = readModalityRow(result.requestId);
+    expect(row.modality).toBe('web');
+    expect(row.hash).toBe('h-web');
+  });
+});
+
+describe('prepareVerificationEnqueue — the MCP/orchestrated plane resolves the modality too', () => {
+  // `execution_model` defaults to `orchestrated`, and that plane enqueues through
+  // `mcpQueryHandler.handleRequestVerification`, which passes NO modality. If the
+  // shared preparation fell back to the shape-only derivation there, the
+  // task-verify prompt's promise — declare `modality`, or let the harness resolve
+  // an undeclared task against the project's proven runbook — would be false for
+  // most runs (fix round, reviewer finding on the prompt).
+  const CDP_ENTRY: VerifyRunbookModalityEntry = {
+    build: ['pnpm run build:main'],
+    serve: { cmd: 'pnpm start --remote-debugging-port=${VERIFY_DRIVER_PORT}', attach: 'cdp' },
+    attestation: { kind: 'window-identity', titlePattern: 'Cyboflow', app: 'Cyboflow' },
+  };
+
+  it('an undeclared web-shaped task resolves, merges and pins the project’s proven cdp-app runbook', async () => {
+    seedRun(db, { runId: 'run-mcp-plane' });
+    initScheduler(db);
+    const asked: VerificationModality[] = [];
+    vi.spyOn(VerificationScheduler.getInstance(), 'resolveProvenRunbook').mockImplementation(
+      async ({ modality }): Promise<ProvenRunbookRevision | null> => {
+        asked.push(modality);
+        return modality === 'cdp-app' ? { hash: 'h-cdp', version: 3, entry: CDP_ENTRY } : null;
+      },
+    );
+
+    const prepared = await prepareVerificationEnqueue({
+      projectId: 1,
+      runId: 'run-mcp-plane',
+      type: 'interactive-web-behavior',
+      task: { ...task, build: ['pnpm run build'], serve: { cmd: 'pnpm dev --port ${PORT}' } },
+      // No `modality` — exactly what the MCP handler passes.
+    });
+
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) return;
+    expect(prepared.modality).toBe('cdp-app');
+    expect(prepared.pin).toEqual({ hash: 'h-cdp', localVersion: 3 });
+    expect(prepared.task?.serve?.attach).toBe('cdp');
+    // The record decided it, then the injection re-read it — the same two-step
+    // the programmatic seam makes, just without the bootstrap in between.
+    expect(asked).toEqual(['cdp-app', 'cdp-app']);
+  });
+
+  it('a DEGENERATE pre-live task is left alone even on a cdp-app-proven project', async () => {
+    seedRun(db, { runId: 'run-mcp-degenerate' });
+    initScheduler(db);
+    const asked: VerificationModality[] = [];
+    vi.spyOn(VerificationScheduler.getInstance(), 'resolveProvenRunbook').mockImplementation(
+      async ({ modality }): Promise<ProvenRunbookRevision | null> => {
+        asked.push(modality);
+        return modality === 'cdp-app' ? { hash: 'h-cdp', version: 3, entry: CDP_ENTRY } : null;
+      },
+    );
+
+    const prepared = await prepareVerificationEnqueue({
+      projectId: 1,
+      runId: 'run-mcp-degenerate',
+      type: 'static-render-snapshot',
+      task: { ...task, target: { htmlPath: 'dist/index.html' } },
+    });
+
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) return;
+    expect(prepared.modality).toBe('web');
+    expect(prepared.pin).toBeUndefined();
+    // Only the shape's own record was ever asked for — never the cdp-app one,
+    // whose entry would have merged a full build + launch into a bare target.
+    expect(asked).toEqual(['web']);
+    expect(prepared.task?.build).toBeUndefined();
+  });
+});
+
+describe('enqueueTaskVerification — a proof request never probes the proven records', () => {
+  // A request carrying its own pin consults neither the bootstrap (excluded) nor
+  // a proven record (`prepareVerificationEnqueue` returns on the caller pin), so
+  // an F5 record probe would be pure cost on a proof's critical path — and every
+  // extra `status()` read is one that can demote a rival modality's record while
+  // the proof is in flight (RC2).
+  it('a bootstrap proof resolves from the shape alone', async () => {
+    seedRun(db, { runId: 'run-f5c' });
+    initScheduler(db);
+    const asked: string[] = [];
+    vi.spyOn(VerificationScheduler.getInstance(), 'resolveProvenRunbook').mockImplementation(
+      async ({ modality }): Promise<ProvenRunbookRevision | null> => {
+        asked.push(modality);
+        return null;
+      },
+    );
+
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      task: { ...task, serve: { cmd: 'pnpm dev --port ${PORT}' } },
+      runId: 'run-f5c',
+      laneTaskRef: 'TASK-011',
+      attempt: 1,
+      worktreePath: gitRepo,
+      bootstrapProof: true,
+      bootstrapRound: 1,
+      runbookHash: 'h-draft',
+      runbookLocalVersion: 2,
+    });
+
+    expect(result.outcome).toBe('enqueued');
+    expect(asked).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// laneEnqueueKey / laneEnqueueKeyFor — the one key shape, MCP-fired included
+// ---------------------------------------------------------------------------
+
+describe('laneEnqueueKeyFor (MCP-fired lane requests)', () => {
+  const lanes = [
+    { taskId: 'tsk_a', ref: 'TASK-001', attempts: 0 },
+    { taskId: 'tsk_b', ref: 'TASK-002', attempts: 2 },
+    { taskId: 'tsk_c', ref: null, attempts: 1 },
+  ];
+
+  it('keys a ref that names a lane to that lane\'s CURRENT attempt (the swimlane parses the last segment)', () => {
+    expect(laneEnqueueKeyFor('run-1', 'TASK-002', lanes)).toBe('run-1:TASK-002:2');
+    expect(laneEnqueueKeyFor('run-1', 'TASK-002', lanes)).toBe(laneEnqueueKey('run-1', 'TASK-002', 2));
+  });
+
+  it('matches a ref-less lane by task id (the spelling defaultTaskRefForRun falls back to)', () => {
+    expect(laneEnqueueKeyFor('run-1', 'tsk_c', lanes)).toBe('run-1:tsk_c:1');
+  });
+
+  it('is undefined for a ref naming no lane, so the request enqueues unkeyed as before', () => {
+    expect(laneEnqueueKeyFor('run-1', 'TASK-999', lanes)).toBeUndefined();
+    expect(laneEnqueueKeyFor('run-1', 'TASK-001', [])).toBeUndefined();
   });
 });

@@ -17,6 +17,10 @@
  *     after the write, with an ISO-8601 timestamp.
  *  6. markBatchTerminal — guarded UPDATE: non-terminal only (a second terminal
  *     flip is a no-op).
+ *  7. visualVerification derivation (F8) — the lane's latest NON-PROOF
+ *     verification_requests row, matched by enqueue_key on either the opaque
+ *     task id or the display ref; setup/bootstrap proofs excluded; a DB with no
+ *     verification schema degrades to null instead of throwing.
  *
  * Uses a migration-backed in-memory DB (006 → 011 → 014 → 015 → 022 → 023 →
  * 025), mirroring mcpQueryHandler.test.ts's buildTaskDb so the tasks LEFT JOIN
@@ -219,6 +223,66 @@ describe('SprintLaneStore', () => {
       } catch (err) {
         expect((err as SprintLaneError).code).toBe('bad_request');
       }
+    });
+
+    // -------------------------------------------------------------------------
+    // Batch cap (Item 7) — the store's OWN enforcement, independent of every
+    // pre-check its callers already run (runs.start, experiments.start, the
+    // MCP backstop). Default per-substrate caps: sdk=15, interactive=10
+    // (SPRINT_BATCH_MAX_TASKS_DEFAULTS).
+    // -------------------------------------------------------------------------
+
+    it('throws batch_too_large when the ELIGIBLE selection exceeds the default sdk cap (15)', () => {
+      const taskIds = Array.from({ length: 16 }, (_, i) => `tsk_${i}`);
+      expect(() => store.createForRun(1, 'sdk', taskIds)).toThrowError(SprintLaneError);
+      try {
+        store.createForRun(1, 'sdk', taskIds);
+      } catch (err) {
+        expect((err as SprintLaneError).code).toBe('batch_too_large');
+      }
+    });
+
+    it('passes at exactly the default sdk cap (15)', () => {
+      const taskIds = Array.from({ length: 15 }, (_, i) => `tsk_${i}`);
+      const { batchId } = store.createForRun(1, 'sdk', taskIds);
+      const count = db
+        .prepare('SELECT COUNT(*) AS n FROM sprint_batch_tasks WHERE batch_id = ?')
+        .get(batchId) as { n: number };
+      expect(count.n).toBe(15);
+    });
+
+    it('throws batch_too_large when the ELIGIBLE selection exceeds the default interactive cap (10)', () => {
+      const taskIds = Array.from({ length: 11 }, (_, i) => `tsk_${i}`);
+      expect(() => store.createForRun(1, 'interactive', taskIds)).toThrowError(SprintLaneError);
+    });
+
+    it('honours a getSprintMaxTasks override passed at initialize time', () => {
+      // Re-initialize the singleton (same db) with a tighter sdk cap of 2.
+      store = SprintLaneStore.initialize(dbAdapter(db), undefined, {
+        getSprintMaxTasks: () => ({ sdk: 2 }),
+      });
+
+      expect(() => store.createForRun(1, 'sdk', ['tsk_a', 'tsk_b', 'tsk_c'])).toThrowError(SprintLaneError);
+      try {
+        store.createForRun(1, 'sdk', ['tsk_a', 'tsk_b', 'tsk_c']);
+      } catch (err) {
+        expect((err as SprintLaneError).code).toBe('batch_too_large');
+      }
+
+      // At the overridden cap (2) it still passes.
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_x', 'tsk_y']);
+      const count = db
+        .prepare('SELECT COUNT(*) AS n FROM sprint_batch_tasks WHERE batch_id = ?')
+        .get(batchId) as { n: number };
+      expect(count.n).toBe(2);
+    });
+
+    it('with no getter, falls back to the built-in default rather than treating the cap as optional', () => {
+      // No deps passed at all (mirrors most of this file's `store`) — the cap
+      // must still apply, never silently disable.
+      const bareStore = SprintLaneStore.initialize(dbAdapter(db));
+      const taskIds = Array.from({ length: 16 }, (_, i) => `tsk_${i}`);
+      expect(() => bareStore.createForRun(1, 'sdk', taskIds)).toThrowError(SprintLaneError);
     });
   });
 
@@ -1423,6 +1487,23 @@ describe('SprintLaneStore', () => {
       expect(laneB?.currentStepId).toBe('implement');
     });
 
+    it('also re-queues a blocked lane (Item 6: blocked lanes never started and must rejoin a retry)', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a', 'tsk_b', 'tsk_c']);
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'failed', currentStepId: 'implement' });
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_b', status: 'blocked' });
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_c', status: 'running', currentStepId: 'implement' });
+      seedOwningRun(batchId);
+
+      const count = store.resetFailedLanes(batchId);
+
+      expect(count).toBe(2);
+      const lanes = store.listLanes(batchId);
+      expect(lanes.find((l) => l.taskId === 'tsk_a')?.status).toBe('queued');
+      expect(lanes.find((l) => l.taskId === 'tsk_b')?.status).toBe('queued');
+      // Untouched — 'tsk_c' was never failed/blocked.
+      expect(lanes.find((l) => l.taskId === 'tsk_c')?.status).toBe('running');
+    });
+
     it('emits a SprintLaneChangedEvent per reset lane on the owning run channel', () => {
       const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
       store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'failed', currentStepId: 'implement' });
@@ -1592,5 +1673,390 @@ describe('SprintLaneStore', () => {
   it('getInstance throws before initialize', () => {
     SprintLaneStore._resetForTesting();
     expect(() => SprintLaneStore.getInstance()).toThrow(/not been initialized/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F8 — SprintLaneRow.visualVerification is DERIVED from the lane's latest
+// non-proof verification_requests row (docs/proposals/visual-verification-
+// brittleness-fixes.md §F8 / Codex #9). No new column.
+// ---------------------------------------------------------------------------
+
+describe('SprintLaneStore — visualVerification derivation (F8)', () => {
+  let vdb: Database.Database;
+  let vstore: SprintLaneStore;
+
+  /** buildLaneDb + the verification-request schema (055 → 078 → 095 → 096 → 107). */
+  function buildVerifyLaneDb(): Database.Database {
+    const db = buildLaneDb();
+    const migDir = join(__dirname, '..', '..', 'database', 'migrations');
+    for (const file of [
+      '055_visual_verification.sql',
+      '078_verification_agent_requests.sql',
+      '095_verify_failure_classes.sql',
+      '096_verify_runbook_local.sql',
+      '107_bootstrap_proof.sql',
+    ]) {
+      db.exec(readFileSync(join(migDir, file), 'utf-8'));
+    }
+    return db;
+  }
+
+  /** The workflow_runs row that owns `batchId` (the lane→run link the derivation walks). */
+  function seedOwningRun(runId: string, batchId: string): void {
+    vdb
+      .prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf', 1, 'sprint', '{}')`)
+      .run();
+    vdb
+      .prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, batch_id) VALUES (?, 'wf', 1, 'running', ?)`,
+      )
+      .run(runId, batchId);
+  }
+
+  function seedRequest(args: {
+    id: string;
+    runId: string;
+    enqueueKey: string | null;
+    status: string;
+    enqueuedAt: string;
+    /** `deliverable_json` verbatim — the canonical lane link (`{"taskRef":"…"}`). */
+    deliverableJson?: string;
+    failureClass?: string | null;
+    errorMessage?: string | null;
+    /**
+     * `verification_requests.attempt` — the chain's FALL-FORWARD counter, which
+     * every production INSERT hard-codes to 0. It is deliberately NOT the lane
+     * attempt (that lives in the enqueue key) and nothing in the derivation reads
+     * it; kept here only so a seeded row is column-complete.
+     */
+    attempt?: number;
+    setupProof?: 0 | 1;
+    bootstrapProof?: 0 | 1;
+  }): void {
+    vdb
+      .prepare(
+        `INSERT INTO verification_requests
+           (id, run_id, project_id, status, verify_type, deliverable_json, attempt,
+            error_message, enqueued_at, enqueue_key, failure_class, setup_proof, bootstrap_proof)
+         VALUES (?, ?, 1, ?, 'static-render-snapshot', ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        args.id,
+        args.runId,
+        args.status,
+        args.deliverableJson ?? '{}',
+        args.attempt ?? 1,
+        args.errorMessage ?? null,
+        args.enqueuedAt,
+        args.enqueueKey,
+        args.failureClass ?? null,
+        args.setupProof ?? 0,
+        args.bootstrapProof ?? 0,
+      );
+  }
+
+  beforeEach(() => {
+    vdb = buildVerifyLaneDb();
+    vstore = SprintLaneStore.initialize(dbAdapter(vdb));
+  });
+
+  afterEach(() => {
+    SprintLaneStore._resetForTesting();
+    sprintLaneEvents.removeAllListeners();
+    vdb.close();
+  });
+
+  it('is null when the lane has no verification request at all', () => {
+    const { batchId } = vstore.createForRun(1, 'sdk', ['tsk_a']);
+    seedOwningRun('run-1', batchId);
+
+    expect(vstore.listLanes(batchId)[0].visualVerification).toBeNull();
+  });
+
+  it('derives status / failureClass / errorMessage / laneAttempt from the lane key', () => {
+    const { batchId } = vstore.createForRun(1, 'sdk', ['tsk_a']);
+    seedOwningRun('run-1', batchId);
+    seedRequest({
+      id: 'vr-1',
+      runId: 'run-1',
+      enqueueKey: 'run-1:tsk_a:1',
+      status: 'timeout',
+      enqueuedAt: '2026-09-01T00:00:00Z',
+      failureClass: 'env',
+      errorMessage: 'deadline exceeded',
+      attempt: 2,
+    });
+
+    expect(vstore.listLanes(batchId)[0].visualVerification).toEqual({
+      status: 'timeout',
+      failureClass: 'env',
+      errorMessage: 'deadline exceeded',
+      // Parsed from the enqueue KEY (…:1), never from the row's `attempt` column
+      // (seeded 2 above) — that column is the fall-forward counter and is always 0
+      // in production, so it could neither identify nor age a lane's fire.
+      laneAttempt: 1,
+      stale: false,
+    });
+  });
+
+  it('matches a key written with the task DISPLAY REF as well as the opaque id', () => {
+    seedTask(vdb, 'tsk_a', 'TASK-001', 'A');
+    const { batchId } = vstore.createForRun(1, 'sdk', ['tsk_a']);
+    seedOwningRun('run-1', batchId);
+    seedRequest({
+      id: 'vr-ref',
+      runId: 'run-1',
+      enqueueKey: 'run-1:TASK-001:1',
+      status: 'skipped',
+      enqueuedAt: '2026-09-01T00:00:00Z',
+      errorMessage: 'no proven runbook',
+    });
+
+    expect(vstore.listLanes(batchId)[0].visualVerification?.status).toBe('skipped');
+  });
+
+  it('takes the MOST RECENT request for the lane', () => {
+    const { batchId } = vstore.createForRun(1, 'sdk', ['tsk_a']);
+    seedOwningRun('run-1', batchId);
+    seedRequest({
+      id: 'vr-old',
+      runId: 'run-1',
+      enqueueKey: 'run-1:tsk_a:1',
+      status: 'failed',
+      enqueuedAt: '2026-09-01T00:00:00Z',
+    });
+    seedRequest({
+      id: 'vr-new',
+      runId: 'run-1',
+      enqueueKey: 'run-1:tsk_a:2',
+      status: 'passed',
+      enqueuedAt: '2026-09-02T00:00:00Z',
+    });
+
+    expect(vstore.listLanes(batchId)[0].visualVerification?.status).toBe('passed');
+  });
+
+  it('EXCLUDES setup proofs, bootstrap proofs, and :bootstrap: keys', () => {
+    const { batchId } = vstore.createForRun(1, 'sdk', ['tsk_a']);
+    seedOwningRun('run-1', batchId);
+    // A bootstrap proof carries the OWNING LANE's ref in its key, so a naive
+    // prefix match would read its verdict as the lane's.
+    seedRequest({
+      id: 'vr-boot',
+      runId: 'run-1',
+      enqueueKey: 'run-1:tsk_a:1:bootstrap:1',
+      status: 'passed',
+      enqueuedAt: '2026-09-03T00:00:00Z',
+      bootstrapProof: 1,
+    });
+    seedRequest({
+      id: 'vr-setup',
+      runId: 'run-1',
+      enqueueKey: 'run-1:tsk_a:1',
+      status: 'passed',
+      enqueuedAt: '2026-09-04T00:00:00Z',
+      setupProof: 1,
+    });
+    seedRequest({
+      id: 'vr-lane',
+      runId: 'run-1',
+      enqueueKey: 'run-1:tsk_a:1',
+      status: 'skipped',
+      enqueuedAt: '2026-09-01T00:00:00Z',
+      errorMessage: 'no proven runbook',
+    });
+
+    expect(vstore.listLanes(batchId)[0].visualVerification).toEqual({
+      status: 'skipped',
+      failureClass: null,
+      errorMessage: 'no proven runbook',
+      laneAttempt: 1,
+      stale: false,
+    });
+  });
+
+  it('never binds a SIBLING lane\'s request', () => {
+    const { batchId } = vstore.createForRun(1, 'sdk', ['tsk_a', 'tsk_b']);
+    seedOwningRun('run-1', batchId);
+    seedRequest({
+      id: 'vr-a',
+      runId: 'run-1',
+      enqueueKey: 'run-1:tsk_a:1',
+      status: 'passed',
+      enqueuedAt: '2026-09-01T00:00:00Z',
+    });
+
+    const lanes = vstore.listLanes(batchId);
+    expect(lanes.find((l) => l.taskId === 'tsk_a')?.visualVerification?.status).toBe('passed');
+    expect(lanes.find((l) => l.taskId === 'tsk_b')?.visualVerification).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // Round-2 review: attribution must not be enqueue_key-ONLY.
+  //
+  // There are exactly two enqueue producers and only one sets a key. The
+  // `cyboflow_request_verification` MCP path — the ONLY path on the default
+  // `orchestrated` execution model, and the path the controller ADOPTS a
+  // pre-fired request through — calls VerificationScheduler.enqueue with no
+  // `enqueueKey`, so its rows store NULL. Keying on the enqueue_key alone made
+  // every one of them invisible and told the user, of a lane that had PASSED,
+  // that no request was ever created for it.
+  // -------------------------------------------------------------------------
+
+  it('attributes an MCP-fired request (NULL enqueue_key) by deliverable_json.taskRef', () => {
+    seedTask(vdb, 'tsk_a', 'TASK-001', 'A');
+    const { batchId } = vstore.createForRun(1, 'sdk', ['tsk_a']);
+    seedOwningRun('run-1', batchId);
+    seedRequest({
+      id: 'vr-mcp',
+      runId: 'run-1',
+      enqueueKey: null,
+      deliverableJson: JSON.stringify({ taskRef: 'TASK-001' }),
+      status: 'passed',
+      enqueuedAt: '2026-09-01T00:00:00Z',
+    });
+
+    expect(vstore.listLanes(batchId)[0].visualVerification).toEqual({
+      status: 'passed',
+      failureClass: null,
+      errorMessage: null,
+      // No key ⇒ no lane attempt to parse ⇒ staleness is not assertable.
+      laneAttempt: null,
+      stale: false,
+    });
+  });
+
+  it('attributes a NULL-key request by the OPAQUE task id too', () => {
+    const { batchId } = vstore.createForRun(1, 'sdk', ['tsk_a']);
+    seedOwningRun('run-1', batchId);
+    seedRequest({
+      id: 'vr-mcp-id',
+      runId: 'run-1',
+      enqueueKey: null,
+      deliverableJson: JSON.stringify({ taskRef: 'tsk_a' }),
+      status: 'failed',
+      enqueuedAt: '2026-09-01T00:00:00Z',
+    });
+
+    expect(vstore.listLanes(batchId)[0].visualVerification?.status).toBe('failed');
+  });
+
+  it('still EXCLUDES a proof that carries no enqueue_key (the NOT LIKE is NULL-safe)', () => {
+    // A bare `enqueue_key NOT LIKE …` is NULL (not true) for a NULL key, which
+    // would have dropped every row this fix exists to admit; the predicate is
+    // written `IS NULL OR NOT LIKE`, so proof exclusion has to rest on the
+    // COLUMNS. Both proofs below are keyless and must be invisible.
+    const { batchId } = vstore.createForRun(1, 'sdk', ['tsk_a']);
+    seedOwningRun('run-1', batchId);
+    seedRequest({
+      id: 'vr-setup-nokey',
+      runId: 'run-1',
+      enqueueKey: null,
+      deliverableJson: JSON.stringify({ taskRef: 'tsk_a' }),
+      status: 'passed',
+      enqueuedAt: '2026-09-04T00:00:00Z',
+      setupProof: 1,
+    });
+    seedRequest({
+      id: 'vr-boot-nokey',
+      runId: 'run-1',
+      enqueueKey: null,
+      deliverableJson: JSON.stringify({ taskRef: 'tsk_a' }),
+      status: 'passed',
+      enqueuedAt: '2026-09-03T00:00:00Z',
+      bootstrapProof: 1,
+    });
+
+    expect(vstore.listLanes(batchId)[0].visualVerification).toBeNull();
+  });
+
+  it('does not bind a NULL-key request whose taskRef names a SIBLING lane', () => {
+    const { batchId } = vstore.createForRun(1, 'sdk', ['tsk_a', 'tsk_b']);
+    seedOwningRun('run-1', batchId);
+    seedRequest({
+      id: 'vr-a-only',
+      runId: 'run-1',
+      enqueueKey: null,
+      deliverableJson: JSON.stringify({ taskRef: 'tsk_a' }),
+      status: 'passed',
+      enqueuedAt: '2026-09-01T00:00:00Z',
+    });
+
+    const lanes = vstore.listLanes(batchId);
+    expect(lanes.find((l) => l.taskId === 'tsk_a')?.visualVerification?.status).toBe('passed');
+    expect(lanes.find((l) => l.taskId === 'tsk_b')?.visualVerification).toBeNull();
+  });
+
+  it('marks a verdict from an EARLIER lane attempt stale', () => {
+    // Attempt 1 FAILED; the lane looped back to attempt 2, whose verification was
+    // dropped BEFORE a request row existed (the codex channel-unavailable drop).
+    // The newest attributable row is still attempt 1's FAIL — it must not be
+    // rendered as attempt 2's outcome. Same supersession rule mergeGateLaneAdvance
+    // applies (`lane.attempts > requestAttempt`).
+    const { batchId } = vstore.createForRun(1, 'sdk', ['tsk_a']);
+    seedOwningRun('run-1', batchId);
+    seedRequest({
+      id: 'vr-old-fail',
+      runId: 'run-1',
+      enqueueKey: 'run-1:tsk_a:1',
+      status: 'failed',
+      enqueuedAt: '2026-09-01T00:00:00Z',
+      errorMessage: 'button missing',
+    });
+    vstore.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'integrated', attempt: 2 });
+
+    const v = vstore.listLanes(batchId)[0].visualVerification;
+    expect(v?.status).toBe('failed');
+    expect(v?.laneAttempt).toBe(1);
+    expect(v?.stale).toBe(true);
+  });
+
+  it('does NOT mark a verdict stale when the lane is still on that attempt', () => {
+    const { batchId } = vstore.createForRun(1, 'sdk', ['tsk_a']);
+    seedOwningRun('run-1', batchId);
+    seedRequest({
+      id: 'vr-current',
+      runId: 'run-1',
+      enqueueKey: 'run-1:tsk_a:2',
+      status: 'passed',
+      enqueuedAt: '2026-09-01T00:00:00Z',
+    });
+    vstore.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'integrated', attempt: 2 });
+
+    expect(vstore.listLanes(batchId)[0].visualVerification?.stale).toBe(false);
+  });
+
+  it('carries visualVerification on the SprintLaneChangedEvent (live-canvas seam)', () => {
+    // The renderer fires its snapshot query ONCE per mount; without the field on
+    // the event a lane that later PASSED kept the pre-verdict `null` for the life
+    // of the mount and painted "Visual check did not run".
+    const { batchId } = vstore.createForRun(1, 'sdk', ['tsk_a']);
+    seedOwningRun('run-1', batchId);
+    seedRequest({
+      id: 'vr-live',
+      runId: 'run-1',
+      enqueueKey: 'run-1:tsk_a:1',
+      status: 'passed',
+      enqueuedAt: '2026-09-01T00:00:00Z',
+    });
+
+    const events: SprintLaneChangedEvent[] = [];
+    sprintLaneEvents.on(sprintLaneChannel('run-1'), (e: SprintLaneChangedEvent) => events.push(e));
+    vstore.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'integrated' });
+
+    expect(events).toHaveLength(1);
+    expect(events[0].visualVerification?.status).toBe('passed');
+  });
+
+  it('degrades to null (never throws) on a DB that predates verification_requests', () => {
+    // buildLaneDb stops at 042 — no verification_requests table at all.
+    const bare = buildLaneDb();
+    SprintLaneStore._resetForTesting();
+    const bareStore = SprintLaneStore.initialize(dbAdapter(bare));
+    const { batchId } = bareStore.createForRun(1, 'sdk', ['tsk_a']);
+    expect(() => bareStore.listLanes(batchId)).not.toThrow();
+    expect(bareStore.listLanes(batchId)[0].visualVerification).toBeNull();
+    bare.close();
   });
 });

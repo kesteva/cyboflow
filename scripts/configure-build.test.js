@@ -17,6 +17,9 @@
  *                                    artifact needed on the test host)
  *   Case F2: probe reports wrong ABI → hard exit(1) with the fix-it command
  *   Case F3: CYBOFLOW_WIN_NPM_REBUILD=1 → the ABI probe is skipped entirely
+ *   Case G: win + full Azure env → win.azureSignOptions injected (and mac config untouched)
+ *   Case G2: win, no Azure env   → win.azureSignOptions ABSENT (key presence selects the signer)
+ *   Case G3: win + partial Azure env → hard exit(1) rather than a silently-unsigned build
  *
  * Every case also asserts that package.json on disk is byte-for-byte UNCHANGED (the whole
  * point of the generated-config approach) and that the on-disk generated file matches the
@@ -58,6 +61,15 @@ function runCase(label, envOverrides, assertFn, preConfigure) {
     'BUILD_VARIANT',
     'BUILD_ARCH',
     'BUILD_PLATFORM',
+    'AZURE_TENANT_ID',
+    'AZURE_CLIENT_ID',
+    'AZURE_CLIENT_SECRET',
+    'AZURE_CLIENT_CERTIFICATE_PATH',
+    'AZURE_USERNAME',
+    'CYBOFLOW_AZURE_PUBLISHER_NAME',
+    'CYBOFLOW_AZURE_ENDPOINT',
+    'CYBOFLOW_AZURE_ACCOUNT',
+    'CYBOFLOW_AZURE_PROFILE',
   ];
 
   for (const key of managedKeys) {
@@ -491,6 +503,115 @@ try {
   console.log('\nPASS: Case F3 (CYBOFLOW_WIN_NPM_REBUILD=1 skips the ABI probe)');
 } catch (err) {
   console.error('FAIL: Case F3 — ' + err.message);
+  failed = true;
+}
+
+try {
+  // Case G: a fully-credentialed Windows build carries azureSignOptions with
+  // exactly the four fields electron-builder's WindowsAzureSigningConfiguration
+  // requires. The env vars themselves are NOT copied into the config — they are
+  // read by electron-builder at sign time — so a leaked generated config holds
+  // no secret.
+  runCase(
+    'Case G: BUILD_PLATFORM=win + Azure credentials (signed posture)',
+    {
+      BUILD_PLATFORM: 'win',
+      CYBOFLOW_WIN_NPM_REBUILD: '1',
+      AZURE_TENANT_ID: 'tenant-guid',
+      AZURE_CLIENT_ID: 'client-guid',
+      AZURE_CLIENT_SECRET: 'shhh',
+    },
+    function (config) {
+      const opts = config.win.azureSignOptions;
+      assert(opts, 'azureSignOptions should be injected when Azure credentials are present');
+      assert(opts.publisherName === 'Raimundo Esteva', 'publisherName must match the certificate CN');
+      assert(
+        opts.endpoint === 'https://eus.codesigning.azure.net/',
+        'endpoint must match the signing account region'
+      );
+      assert(opts.codeSigningAccountName === 'cyboflowsigning', 'codeSigningAccountName mismatch');
+      assert(opts.certificateProfileName === 'cyboflow-public-trust', 'certificateProfileName mismatch');
+      assert(
+        config.win.signtoolOptions === undefined,
+        'signtoolOptions must stay absent — electron-builder refuses both signers at once'
+      );
+      const serialized = JSON.stringify(config);
+      assert(!serialized.includes('shhh'), 'the client secret must never reach the generated config');
+      assert(!serialized.includes('tenant-guid'), 'the tenant id must never reach the generated config');
+    }
+  );
+  console.log('PASS: Case G');
+} catch (err) {
+  console.error('FAIL: Case G — ' + err.message);
+  failed = true;
+}
+
+try {
+  // Case G2: the uncredentialed path. This is the one that MUST stay clean —
+  // electron-builder selects the Azure signer on key presence alone, so an
+  // empty-but-present azureSignOptions would break every local Windows build
+  // and the CI installer smoke.
+  runCase(
+    'Case G2: BUILD_PLATFORM=win, no Azure credentials (unsigned posture)',
+    { BUILD_PLATFORM: 'win', CYBOFLOW_WIN_NPM_REBUILD: '1' },
+    function (config) {
+      assert(
+        !('azureSignOptions' in config.win),
+        'azureSignOptions must be ABSENT (not null/empty) without credentials'
+      );
+    }
+  );
+  console.log('PASS: Case G2');
+} catch (err) {
+  console.error('FAIL: Case G2 — ' + err.message);
+  failed = true;
+}
+
+try {
+  // Case G3: half-configured credentials must hard-fail. Falling through to an
+  // unsigned build would be worse than useless: the release would look like it
+  // succeeded and ship unsigned.
+  const saved = {};
+  const keys = ['BUILD_PLATFORM', 'CYBOFLOW_WIN_NPM_REBUILD', 'AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET'];
+  for (const k of keys) { saved[k] = process.env[k]; delete process.env[k]; }
+  process.env.BUILD_PLATFORM = 'win';
+  process.env.CYBOFLOW_WIN_NPM_REBUILD = '1';
+  process.env.AZURE_TENANT_ID = 'tenant-guid';
+  // AZURE_CLIENT_ID and the credential deliberately omitted.
+
+  const packageJsonBefore = fs.readFileSync(PACKAGE_JSON, 'utf8');
+  const cbPath = require.resolve('./configure-build.js');
+  delete require.cache[cbPath];
+  const mod = require('./configure-build.js');
+
+  const realExit = process.exit;
+  let exitCode = null;
+  process.exit = function (code) {
+    exitCode = code;
+    throw new Error('PROCESS_EXIT');
+  };
+  try {
+    mod.configureBuild();
+    throw new Error('configureBuild should have exited on partial Azure credentials');
+  } catch (err) {
+    if (err.message !== 'PROCESS_EXIT') throw err;
+  } finally {
+    process.exit = realExit;
+    if (fs.existsSync(mod.GENERATED_CONFIG_PATH)) fs.unlinkSync(mod.GENERATED_CONFIG_PATH);
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  }
+
+  assert(exitCode === 1, 'partial Azure credentials must exit with code 1');
+  assert(
+    fs.readFileSync(PACKAGE_JSON, 'utf8') === packageJsonBefore,
+    'package.json must not be mutated on the Azure-credential failure path'
+  );
+  console.log('\nPASS: Case G3 (partial Azure credentials hard-fail)');
+} catch (err) {
+  console.error('FAIL: Case G3 — ' + err.message);
   failed = true;
 }
 

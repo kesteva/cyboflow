@@ -267,3 +267,43 @@ describe("runAgentPreflight — 'native-capture' applicability", () => {
     expect(result.ok).toBe(true);
   });
 });
+
+describe("runAgentPreflight — 'data-dir' (conditional, affirmative on throw)", () => {
+  const task = makeTask({ serve: { cmd: 'pnpm dev --port ${PORT}', attach: 'cdp' } });
+
+  it('does not run without a prepareDataDir probe, nor without a dataDir', async () => {
+    const noProbe = await runAgentPreflight(happyDeps(), { task, ...ARGS, dataDir: '/artifacts/data/abcd1234' });
+    expect(checkFor(noProbe, 'data-dir')).toBeUndefined();
+
+    const noPath = await runAgentPreflight(happyDeps({ prepareDataDir: async () => {} }), { task, ...ARGS });
+    expect(checkFor(noPath, 'data-dir')).toBeUndefined();
+  });
+
+  it('provisions the given path and records it', async () => {
+    const seen: string[] = [];
+    const deps = happyDeps({
+      prepareDataDir: async (dir) => {
+        seen.push(dir);
+      },
+    });
+    const result = await runAgentPreflight(deps, { task, ...ARGS, dataDir: '/artifacts/data/abcd1234' });
+    expect(seen).toEqual(['/artifacts/data/abcd1234']);
+    expect(checkFor(result, 'data-dir')).toEqual({ id: 'data-dir', ok: true, detail: 'provisioned /artifacts/data/abcd1234' });
+    expect(result.ok).toBe(true);
+  });
+
+  it('a throw is affirmative failure (like node, unlike every other probe)', async () => {
+    const deps = happyDeps({
+      prepareDataDir: async () => {
+        throw new Error('EROFS: read-only file system');
+      },
+    });
+    const result = await runAgentPreflight(deps, { task, ...ARGS, dataDir: '/artifacts/data/abcd1234' });
+    expect(result.ok).toBe(false);
+    expect(checkFor(result, 'data-dir')).toEqual({
+      id: 'data-dir',
+      ok: false,
+      detail: 'could not provision VERIFY_DATA_DIR at /artifacts/data/abcd1234: EROFS: read-only file system',
+    });
+  });
+});
