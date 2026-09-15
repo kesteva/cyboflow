@@ -916,7 +916,13 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             optional: true,
             human: true,
-            desc: 'You review the prototype and/or architecture before decomposition. Skipped when neither ran.',
+            // 'revise' at this gate re-runs the refine phase from `expand-spec`
+            // (intra-phase, so legal under the v1 loopback invariant) with the
+            // human's note + the adversarial-review artifact threaded into every
+            // re-run step. Without a target, 'revise' merely RE-PRESENTS the same
+            // gate — the reviewer presses Revise and nothing changes.
+            loopback: 'expand-spec',
+            desc: 'You review the prototype and/or architecture before decomposition. Revise re-runs the refine phase from the spec with your note and the adversarial review. Skipped when neither ran.',
           },
           {
             id: 'epics',
@@ -1246,17 +1252,23 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             optional: true,
             desc: 'Stress-test spec + prototype + architecture; must-fix auto-revised once, remaining critique surfaced (non-blocking) at the design gate. Runs only when a prototype or architecture exists.',
+            outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
           },
           {
             id: 'approve-design',
             name: 'Approve design',
             agent: 'human',
             mcps: [],
-            outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
             retries: 0,
             optional: true,
             human: true,
-            desc: 'You review the prototype and/or architecture before decomposition. Skipped when neither ran.',
+            // 'revise' at this gate re-runs the refine phase from `expand-spec`
+            // (intra-phase, so legal under the v1 loopback invariant) with the
+            // human's note + the adversarial-review artifact threaded into every
+            // re-run step. Without a target, 'revise' merely RE-PRESENTS the same
+            // gate — the reviewer presses Revise and nothing changes.
+            loopback: 'expand-spec',
+            desc: 'You review the prototype and/or architecture before decomposition. Revise re-runs the refine phase from the spec with your note and the adversarial review. Skipped when neither ran.',
           },
           {
             id: 'epics',
@@ -1595,6 +1607,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             optional: true,
             desc: 'Stress-test the brief + concept design surfaces; must-fix auto-revised once, remaining critique surfaced (non-blocking) at the design gate.',
+            outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
           },
           {
             id: 'approve-design',
@@ -1604,10 +1617,13 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             optional: true,
             human: true,
-            desc: 'You review the concept prototype and/or architecture before decomposition. Skipped when neither ran.',
+            // Launch's design phase has no spec step to return to — the brief was
+            // already approved at its own gate — so 'revise' re-runs the design
+            // pass itself from `ui-prototype` (same phase, legal target).
+            loopback: 'ui-prototype',
+            desc: 'You review the concept prototype and/or architecture before decomposition. Revise re-runs the design pass with your note and the adversarial review. Skipped when neither ran.',
           },
         ],
-            outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
       },
       {
         id: 'ideas',

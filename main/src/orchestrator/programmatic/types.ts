@@ -122,6 +122,24 @@ export interface ControllerStepContext {
    */
   loopbackFeedback?: string;
   /**
+   * A human gate's 'revise' decision, threaded into every step the gate's
+   * loopback re-drives — up to and including the gate's own re-presentation.
+   *
+   * The plain (non-fan-out) step walk had no feedback channel at all: a 'revise'
+   * jumped to the loopback target and the re-run step was handed exactly the
+   * prompt it got the first time, with no idea a human had rejected its output
+   * or why. It then reproduced the same work. `loopbackFeedback` could not serve
+   * this — it is populated only by the sprint fan-out's visual merge-gate and its
+   * prompt section is hardcoded to visual-verification wording, which would read
+   * as nonsense on a design revision.
+   *
+   * STICKY across the revisited region, deliberately: the note describes what the
+   * whole re-run must do differently, not one step's defect, and every step from
+   * the target forward is part of that re-run. Cleared once the gate is reached
+   * again. Absent on every normal turn (output unchanged).
+   */
+  gateRevision?: { gateStepId: string; note?: string };
+  /**
    * The final text of the most recent preceding AGENT step, forwarded to a step
    * whose definition sets `consumesPriorStepOutput` (see
    * `WorkflowStep.consumesPriorStepOutput` for why the channel exists). Human
@@ -520,6 +538,25 @@ export interface ControllerHost {
    * the gate — never silently skip a human review on an error).
    */
   shouldSkipHumanGate?(step: WorkflowStep, runId: string): string | null;
+
+  /**
+   * Optional read-back of the free text a human typed when resolving a gate.
+   *
+   * `requestHumanGate` returns only the four-way verdict — the resolver reduces
+   * the resolution string to approve/reject/revise/abort and the note is dropped
+   * on the floor. On a 'revise' that is the whole signal: "Revise" alone tells a
+   * re-run nothing, while "the spend screen has no way back to Home" tells it
+   * everything. The host holds the review-item id, so it is the only party that
+   * can recover the text; the controller threads what comes back into the
+   * re-driven steps' `gateRevision`.
+   *
+   * Returns undefined when there is no note, when the resolution is a bare
+   * verdict word, or when the host cannot read it — the section is then simply
+   * omitted rather than rendering an empty quote. Absent ⇒ a revision carries the
+   * gate id alone (still better than nothing: the re-run learns WHICH gate sent
+   * it back).
+   */
+  readGateResolutionNote?(stepId: string): string | undefined;
 
   /**
    * Optional monitor feed. The controller calls this at run/step boundaries.

@@ -2991,3 +2991,148 @@ describe('WorkflowController shouldSkipHumanGate (optional human gates)', () => 
     expect(host.gateCalls).toEqual(['approve-design']);
   });
 });
+
+describe('WorkflowController — gate revision threading', () => {
+  /**
+   * A design phase shaped like Planner's refine phase: a spec step, a design step,
+   * then a gate that loops back to the spec step.
+   */
+  function reviseDef(): WorkflowDefinition {
+    return def([
+      phase('refine', [
+        step({ id: 'expand-spec' }),
+        step({ id: 'ui-prototype' }),
+        step({ id: 'approve-design', agent: 'human', human: true, loopback: 'expand-spec' }),
+      ]),
+    ]);
+  }
+
+  /** Records the gateRevision each step turn actually received. */
+  function recordingRunner(): StepRunner & {
+    seen: Array<{ id: string; gateRevision?: { gateStepId: string; note?: string } }>;
+  } {
+    const seen: Array<{ id: string; gateRevision?: { gateStepId: string; note?: string } }> = [];
+    return {
+      seen,
+      async runStep(s, ctx) {
+        seen.push({
+          id: s.id,
+          ...(ctx.gateRevision ? { gateRevision: ctx.gateRevision } : {}),
+        });
+        return { status: 'ok' };
+      },
+    };
+  }
+
+  it("threads the human's note into every step the gate's loopback re-drives", async () => {
+    const runner = recordingRunner();
+    const base = makeHost({ 'approve-design': ['revise', 'approve'] });
+    const host: ControllerHost = {
+      ...base,
+      readGateResolutionNote: (stepId) =>
+        stepId === 'approve-design' ? 'the spend screen has no way back to Home' : undefined,
+    };
+
+    const result = await new WorkflowController(runner, host).run('run-rev', reviseDef());
+    expect(result.outcome).toBe('completed');
+
+    // First pass has no revision; the re-run of BOTH steps carries it, because the
+    // note describes what the whole re-run must do differently.
+    expect(runner.seen.map((s) => s.id)).toEqual([
+      'expand-spec',
+      'ui-prototype',
+      'expand-spec',
+      'ui-prototype',
+    ]);
+    expect(runner.seen[0].gateRevision).toBeUndefined();
+    expect(runner.seen[1].gateRevision).toBeUndefined();
+    for (const turn of runner.seen.slice(2)) {
+      expect(turn.gateRevision).toEqual({
+        gateStepId: 'approve-design',
+        note: 'the spend screen has no way back to Home',
+      });
+    }
+  });
+
+  it('re-presents the gate after the loop and clears the revision once it is answered', async () => {
+    // Two revisions in a row, with different notes: the second round must carry the
+    // SECOND note, never a stale first one, and an approve must leave nothing armed.
+    const runner = recordingRunner();
+    const notes = ['first note', 'second note'];
+    const base = makeHost({ 'approve-design': ['revise', 'revise', 'approve'] });
+    const host: ControllerHost = {
+      ...base,
+      readGateResolutionNote: () => notes.shift(),
+    };
+
+    const result = await new WorkflowController(runner, host).run('run-rev2', reviseDef());
+    expect(result.outcome).toBe('completed');
+    // The gate opened three times: once per round plus the final approve.
+    expect(base.gateCalls).toEqual(['approve-design', 'approve-design', 'approve-design']);
+    expect(runner.seen.map((s) => s.gateRevision?.note)).toEqual([
+      undefined,
+      undefined,
+      'first note',
+      'first note',
+      'second note',
+      'second note',
+    ]);
+  });
+
+  it('arms nothing when the gate has no loopback target, and survives a note read that throws', async () => {
+    // A targetless revise RE-PRESENTS the gate rather than re-running anything, so
+    // there is no step to hand feedback to; and a throwing host seam must degrade
+    // to "no note" rather than aborting a walk that is mid-loopback.
+    const noTarget = def([
+      phase('p', [step({ id: 'a' }), step({ id: 'gate', agent: 'human', human: true })]),
+    ]);
+    const runner = recordingRunner();
+    const base = makeHost({ gate: ['revise', 'approve'] });
+    let consulted = 0;
+    const host: ControllerHost = {
+      ...base,
+      readGateResolutionNote: () => {
+        consulted += 1;
+        throw new Error('db read failed');
+      },
+    };
+
+    const result = await new WorkflowController(runner, host).run('run-rev3', noTarget);
+    expect(result.outcome).toBe('completed');
+    // 'a' ran once — the targetless revise re-presented the gate at the same index.
+    expect(runner.seen.map((s) => s.id)).toEqual(['a']);
+    expect(runner.seen[0].gateRevision).toBeUndefined();
+    // Targetless ⇒ the seam is never consulted at all.
+    expect(consulted).toBe(0);
+  });
+
+  it('leaves the fan-out lane path untouched', async () => {
+    // Lanes carry their own per-lane channels (laneGuidance / loopbackFeedback);
+    // a run-level gate revision must never leak into an inner lane step.
+    const fanDef = def([
+      phase('exec', [
+        step({
+          id: 'execute-tasks',
+          agent: 'orchestrate',
+          fanOut: {
+            over: 'tasks',
+            maxConcurrency: 1,
+            inner: [{ id: 'implement', agent: 'implement', loopback: 'implement' }],
+          },
+        }),
+      ]),
+    ]);
+    const runner = recordingRunner();
+    const host = makeHost();
+    host.fanOut = { resolveItems: () => ['TASK-1', 'TASK-2'], driveLane: () => {} };
+
+    const result = await new WorkflowController(runner, host).run('run-fan', fanDef);
+    expect(result.outcome).toBe('completed');
+    // The fan-out really ran (one inner turn per lane), and no lane turn carried a
+    // run-level gate revision — lanes have their own per-lane channels.
+    expect(runner.seen.map((s) => s.id)).toEqual(['implement', 'implement']);
+    for (const turn of runner.seen) {
+      expect(turn.gateRevision).toBeUndefined();
+    }
+  });
+});

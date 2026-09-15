@@ -191,6 +191,16 @@ export interface ProgrammaticRunHostArgs {
    */
   humanGateSkip?: (step: WorkflowStep) => string | null;
   /**
+   * Read-back of the free text a human typed when resolving one of this run's
+   * gates (ControllerHost.readGateResolutionNote, run-bound by the runner). The
+   * gate resolver reduces a resolution to a four-way verdict and drops the note,
+   * which on a 'revise' is the entire signal — so the controller asks for it here
+   * when it arms a gate revision. Injected rather than read inline because this
+   * host holds no DB handle. MUST be fail-soft (return undefined, never throw).
+   * Absent ⇒ a revision carries the gate id alone.
+   */
+  readGateResolutionNote?: (stepId: string) => string | undefined;
+  /**
    * LANE-TRIAGE task reader. Resolves the ref / title / CURRENT body for a
    * fan-out item so `triageLaneFailure` can ENRICH the controller's bare
    * lane/failure facts into the monitor's full `LaneTriageRequest` — the brain
@@ -282,6 +292,25 @@ export class ProgrammaticRunHost implements ControllerHost {
 
   shouldSkipHumanGate(step: WorkflowStep): string | null {
     return this.args.humanGateSkip?.(step) ?? null;
+  }
+
+  /**
+   * The human's free-text note on a resolved gate, for the controller's gate
+   * revision. Fail-soft twice over: an absent reader and a throwing one both
+   * yield undefined, because a missing note degrades the re-run's prompt while a
+   * thrown read would abort a walk that is mid-loopback.
+   */
+  readGateResolutionNote(stepId: string): string | undefined {
+    try {
+      return this.args.readGateResolutionNote?.(stepId);
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] gate resolution note read failed (fail-soft)', {
+        runId: this.args.runId,
+        stepId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return undefined;
+    }
   }
 
   /**

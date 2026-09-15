@@ -71,6 +71,33 @@ export interface HumanGateOpener {
    * existing designed behavior, not a bug.
    */
   maybeResumeRun?(runId: string): Promise<boolean>;
+  /**
+   * Side-effects that must LAND before the walk wakes on a resolved gate.
+   *
+   * `ReviewItemRouter.emitChange` fires synchronously inside the resolve, and
+   * this resolver settles the controller's gate promise straight off that emit —
+   * so by the time `resolveReviewItem` returns to its own caller, the controller
+   * has already advanced and the next step is spawning. Anything that has to be
+   * TRUE for that next step (a design bound to the ideas it will read, a
+   * thoroughness level stamped on the project) therefore cannot live after the
+   * resolve: it races the resumed step and wins only because spawning an SDK turn
+   * happens to be slow. `settleResumed` is the one place that already owns
+   * "do this before waking the walk" — the same ordering `maybeResumeRun` needs —
+   * so the side-effects hang here.
+   *
+   * AWAITED before the verdict resolves, and fail-soft: a rejection is logged and
+   * the gate still resolves. A side-effect that throws must never strand a run at
+   * a gate the human already answered. Optional, so pre-existing openers/fakes
+   * keep compiling; absent ⇒ no side-effects (today's behavior).
+   */
+  onGateResolved?(args: {
+    runId: string;
+    stepId: string;
+    /** The raw resolution note; null on a dismissal or a note-less resolve. */
+    resolution: string | null;
+    /** True when the human DISMISSED the gate (a rejection) rather than resolving it. */
+    dismissed: boolean;
+  }): Promise<void>;
 }
 
 /**
@@ -147,28 +174,51 @@ export class ReviewQueueHumanGate implements HumanGateResolver {
       // Aggregate-unblock nuance: if another blocking item is still pending,
       // maybeResumeRun returns false and the walk still wakes — the
       // BlockingReviewItemsGate re-parks at the next step boundary (designed).
-      const settleResumed = (verdict: HumanGateDecision): void => {
+      const settleResumed = (
+        verdict: HumanGateDecision,
+        resolution: string | null = null,
+        dismissed = false,
+      ): void => {
         settled = true;
         cleanup();
+        // Gate side-effects run BEFORE the resume and before the verdict resolves:
+        // the resumed step must see the world the human's decision created (a
+        // bound design, a stamped level), and this is the last instant at which
+        // that is still guaranteed rather than a race against SDK spawn latency.
+        // Fail-soft — a throwing side-effect logs and the gate still resolves,
+        // because stranding a run at a gate the human already answered is worse
+        // than a missing side-effect.
+        const sideEffects = this.opener.onGateResolved
+          ? this.opener.onGateResolved({ runId, stepId: step.id, resolution, dismissed }).catch((err: unknown) => {
+              this.logger?.warn('[ReviewQueueHumanGate] gate side-effects failed (fail-soft)', {
+                runId,
+                stepId: step.id,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            })
+          : Promise.resolve();
         // .catch swallows a resume failure so the walk can never hang on it;
         // .finally guarantees the walk wakes exactly once the flip has landed.
-        if (this.opener.maybeResumeRun) {
-          void this.opener
-            .maybeResumeRun(runId)
-            .catch(() => undefined)
-            .finally(() => resolve(verdict));
-        } else {
+        void sideEffects.then(() => {
+          if (this.opener.maybeResumeRun) {
+            return this.opener
+              .maybeResumeRun(runId)
+              .catch(() => undefined)
+              .finally(() => resolve(verdict));
+          }
           resolve(verdict);
-        }
+          return undefined;
+        });
       };
       const onChange = (payload: unknown): void => {
         if (settled || targetId === null || !isReviewItemChangeLike(payload)) return;
         if (payload.reviewItemId !== targetId) return;
         if (payload.action === 'resolved') {
-          settleResumed(parseGateVerdict(payload.item?.resolution));
+          const resolution = payload.item?.resolution ?? null;
+          settleResumed(parseGateVerdict(resolution), resolution);
         } else if (payload.action === 'dismissed') {
           // A dismissed gate is treated as a rejection (the human declined it).
-          settleResumed('reject');
+          settleResumed('reject', null, true);
         }
       };
       // Cancel path: a canceled run aborts the awaiting Promise (settling to
