@@ -1,4 +1,47 @@
 import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { AgentThreadImageAttachment } from '../../../../../shared/types/agentThread';
+
+/**
+ * The `message.content` shape an `SDKUserMessage` accepts — a plain string, or
+ * an array of Anthropic content blocks. Derived from the SDK type rather than
+ * re-declared so a future SDK widening/narrowing fails the build here.
+ */
+type UserMessageContent = SDKUserMessage['message']['content'];
+type UserMessageBlocks = Exclude<UserMessageContent, string>;
+
+/** Per-message options shared by every builder/push seam. */
+export interface PromptMessageOptions {
+  /** Stamp `priority: 'now'` — the CLI steering queue's mid-turn interjection. */
+  steering?: boolean;
+  /**
+   * Image attachments to send as REAL content blocks alongside the text. Absent
+   * or empty ⇒ `message.content` stays the plain string it has always been (the
+   * byte-identical normal turn); present ⇒ content becomes a block array with
+   * the text block first, then one `image`/`base64` block per attachment.
+   */
+  images?: readonly AgentThreadImageAttachment[];
+}
+
+/**
+ * Build a turn's `message.content`.
+ *
+ * NO images ⇒ the bare string, byte-identical to every pre-attachment turn.
+ * With images ⇒ `[text?, ...image]` blocks. An EMPTY text is omitted rather
+ * than sent as an empty text block (the API rejects those), which is what makes
+ * an image-only turn legal.
+ */
+function buildUserContent(text: string, images?: readonly AgentThreadImageAttachment[]): UserMessageContent {
+  if (images === undefined || images.length === 0) return text;
+  const blocks: UserMessageBlocks = [];
+  if (text !== '') blocks.push({ type: 'text', text });
+  for (const image of images) {
+    blocks.push({
+      type: 'image',
+      source: { type: 'base64', media_type: image.mediaType, data: image.base64 },
+    });
+  }
+  return blocks;
+}
 
 /**
  * Streaming-input prompts for the Agent SDK `query()`.
@@ -49,7 +92,7 @@ export interface StreamingPromptInput {
    * while the generator is parked wakes it. Because the single-shot input still
    * closes at the turn's result event, a push is only meaningful DURING the turn.
    */
-  push(text: string, opts?: { steering?: boolean }): boolean;
+  push(text: string, opts?: PromptMessageOptions): boolean;
   /**
    * Release the input gate so the generator returns (stdin closes → CLI exits).
    * Idempotent — safe to call from the result-event, loop-exit, and abort paths.
@@ -77,7 +120,7 @@ export interface PersistentPromptInput {
    * is parked wakes it. Pass `{ steering: true }` to stamp `priority: 'now'` for a
    * mid-turn interjection (the operator-steer path) rather than a fresh turn.
    */
-  push(text: string, opts?: { steering?: boolean }): boolean;
+  push(text: string, opts?: PromptMessageOptions): boolean;
   /**
    * End the generator (stdin closes → CLI exits → the driving `for await`
    * drains). Idempotent — safe from the idle-TTL, process-death, and abort paths.
@@ -105,10 +148,10 @@ export interface PersistentPromptInput {
  * loop boundary (the same engine as typing while Claude works in the interactive
  * REPL). A normal turn omits `priority`, so its serialized bytes are unchanged.
  */
-function buildUserMessage(text: string, opts?: { steering?: boolean }): SDKUserMessage {
+function buildUserMessage(text: string, opts?: PromptMessageOptions): SDKUserMessage {
   return {
     type: 'user',
-    message: { role: 'user', content: text },
+    message: { role: 'user', content: buildUserContent(text, opts?.images) },
     parent_tool_use_id: null,
     session_id: '',
     origin: { kind: 'human' },
@@ -122,7 +165,7 @@ function buildUserMessage(text: string, opts?: { steering?: boolean }): SDKUserM
 /** A queued push: the text plus its (optional) steering flag, carried FIFO. */
 interface PendingPush {
   text: string;
-  opts?: { steering?: boolean };
+  opts?: PromptMessageOptions;
 }
 
 /**
@@ -134,9 +177,12 @@ interface PendingPush {
  * event; persistent keeps it open across turns). Factoring it here keeps the one
  * interleaving-safety argument (below) in a single place so the two cannot drift.
  */
-function createPushablePromptInput(initialText: string): {
+function createPushablePromptInput(
+  initialText: string,
+  initialImages?: readonly AgentThreadImageAttachment[],
+): {
   stream: AsyncGenerator<SDKUserMessage, void>;
-  push: (text: string, opts?: { steering?: boolean }) => boolean;
+  push: (text: string, opts?: PromptMessageOptions) => boolean;
   close: () => void;
 } {
   const pending: PendingPush[] = [];
@@ -151,7 +197,7 @@ function createPushablePromptInput(initialText: string): {
   };
 
   async function* generate(): AsyncGenerator<SDKUserMessage, void> {
-    yield buildUserMessage(initialText);
+    yield buildUserMessage(initialText, initialImages === undefined ? undefined : { images: initialImages });
     // Drain-then-park loop. The drain, the closed check, and the wake assignment
     // are all synchronous (no await between them), so push()/close() — which run
     // only while this generator is parked at the awaited promise — cannot
@@ -171,7 +217,7 @@ function createPushablePromptInput(initialText: string): {
 
   return {
     stream: generate(),
-    push: (text: string, opts?: { steering?: boolean }): boolean => {
+    push: (text: string, opts?: PromptMessageOptions): boolean => {
       if (closed) return false;
       pending.push({ text, opts });
       notify();
@@ -193,8 +239,11 @@ function createPushablePromptInput(initialText: string): {
  * turn — but it remains conceptually single-shot: the driver closes it at the
  * turn's result event, so it never spans turns the way the persistent variant does.
  */
-export function createStreamingPromptInput(text: string): StreamingPromptInput {
-  return createPushablePromptInput(text);
+export function createStreamingPromptInput(
+  text: string,
+  images?: readonly AgentThreadImageAttachment[],
+): StreamingPromptInput {
+  return createPushablePromptInput(text, images);
 }
 
 /**
@@ -204,6 +253,9 @@ export function createStreamingPromptInput(text: string): StreamingPromptInput {
  * {@link PersistentPromptInput.close} ends it. This keeps ONE `query()`/claude
  * subprocess alive for a warm session's whole lifetime.
  */
-export function createPersistentPromptInput(initialText: string): PersistentPromptInput {
-  return createPushablePromptInput(initialText);
+export function createPersistentPromptInput(
+  initialText: string,
+  images?: readonly AgentThreadImageAttachment[],
+): PersistentPromptInput {
+  return createPushablePromptInput(initialText, images);
 }

@@ -69,6 +69,12 @@ import {
   selectWorkflowName,
   getRunEval,
 } from '../../insightsQueries';
+import {
+  dailyUsageInputSchema,
+  projectIdSchema,
+  usageTrendInputSchema,
+  workflowStatsInputSchema,
+} from '../../insightsInputSchemas';
 
 // ---------------------------------------------------------------------------
 // db precondition guard
@@ -93,12 +99,11 @@ function requireDb(db: DatabaseLike | undefined, where: string): DatabaseLike {
 // Shared zod fragments
 //
 // `projectId: number | null` is the cross-project filter — null aggregates every
-// project, a positive integer scopes to one. Declared once so the four
-// project-scoped procedures cannot drift in their bounds (rejecting 0 / negatives
-// while still admitting null).
+// project, a positive integer scopes to one. Declared once (in
+// `../../insightsInputSchemas`, so the custom-views widget engine validates a
+// `query` source's input against the SAME bounds) so the project-scoped
+// procedures cannot drift (rejecting 0 / negatives while still admitting null).
 // ---------------------------------------------------------------------------
-
-const projectIdSchema = z.number().int().positive().nullable();
 
 /**
  * Build the zeroed RunUsageRollup returned when a run has no persisted usage yet
@@ -135,7 +140,7 @@ export const insightsRouter = router({
    * `projectId: null` aggregates every project; a number scopes to one.
    */
   workflowStats: protectedProcedure
-    .input(z.object({ projectId: projectIdSchema }))
+    .input(workflowStatsInputSchema)
     .query(({ ctx, input }): WorkflowRunStats[] => {
       const db = requireDb(ctx.db, 'workflowStats');
       return selectWorkflowRunStats(db, input.projectId);
@@ -245,13 +250,7 @@ export const insightsRouter = router({
    * omitted lets the helper apply its own default.
    */
   usageTrend: protectedProcedure
-    .input(
-      z.object({
-        workflowId: z.string().min(1).nullable(),
-        projectId: projectIdSchema,
-        days: z.number().int().min(1).max(90).optional(),
-      }),
-    )
+    .input(usageTrendInputSchema)
     .query(({ ctx, input }): UsageTrendPoint[] => {
       const db = requireDb(ctx.db, 'usageTrend');
       return selectUsageTrend(db, {
@@ -315,12 +314,7 @@ export const insightsRouter = router({
    * defaults to 30. The helper clamps `days` defensively as well.
    */
   dailyUsage: protectedProcedure
-    .input(
-      z.object({
-        projectId: projectIdSchema,
-        days: z.number().int().min(1).max(365).optional(),
-      }),
-    )
+    .input(dailyUsageInputSchema)
     .query(({ ctx, input }): DailyModelUsagePoint[] => {
       const db = requireDb(ctx.db, 'dailyUsage');
       return selectDailyModelUsage(db, input.projectId, input.days ?? 30);

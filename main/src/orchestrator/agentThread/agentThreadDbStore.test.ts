@@ -30,6 +30,11 @@ const MIGRATION =
   readFileSync(
     join(__dirname, '..', '..', 'database', 'migrations', '131_agent_thread_session_runtime.sql'),
     'utf-8',
+  ) +
+  '\n' +
+  readFileSync(
+    join(__dirname, '..', '..', 'database', 'migrations', '133_custom_views.sql'),
+    'utf-8',
   );
 
 function buildDb(): Database.Database {
@@ -298,6 +303,30 @@ describe('AgentThreadDbStore', () => {
 
       expect(store.listProposals('thread-1').map((p) => p.id)).toEqual(['p1', 'p2']);
       expect(store.listProposals('thread-1', { statuses: ['executing'] }).map((p) => p.id)).toEqual(['p2']);
+    });
+
+    it('listProposals excludes widget-originated proposals; listProposalsByStatus still returns them', () => {
+      const store = new AgentThreadDbStore(dbAdapter(db));
+      seedThread(store);
+      store.createProposal({
+        id: 'p1',
+        threadId: 'thread-1',
+        payload: { kind: 'launch-run', projectId: 1, workflowName: 'sprint' },
+      });
+      store.createProposal({
+        id: 'p2-widget',
+        threadId: 'thread-1',
+        payload: { kind: 'launch-run', projectId: 1, workflowName: 'planner' },
+      });
+      // migration 133's widget_action_log side table marks p2-widget as
+      // widget-originated without touching agent_proposals itself.
+      db.prepare(
+        `INSERT INTO widget_action_log (proposal_id, operation_id, view_id, view_revision, instance_id, action_id)
+         VALUES ('p2-widget', 'op-1', 'view-1', 1, 'instance-1', 'action-1')`,
+      ).run();
+
+      expect(store.listProposals('thread-1').map((p) => p.id)).toEqual(['p1']);
+      expect(store.listProposalsByStatus('proposed').map((p) => p.id).sort()).toEqual(['p1', 'p2-widget']);
     });
 
     it('claimProposal: first claim wins, second claim loses and does not overwrite the winner', () => {

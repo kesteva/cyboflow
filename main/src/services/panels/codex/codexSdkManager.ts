@@ -29,6 +29,8 @@ import {
   resolveCodexExecutablePath,
   type ResolvedCodexExecutable,
 } from './codexExecutablePath';
+import { getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
+import { buildCodexTurnInput } from './appServer/imageSpill';
 import {
   CODEX_APP_SERVER_APPROVAL_SOURCE,
   CodexAppServerApprovalBridge,
@@ -1047,8 +1049,18 @@ export class CodexSdkManager extends AbstractCliManager {
         this.buildSystemInitEvent(options, entry.threadId, entry.initializeResponse),
       );
 
+      // Image attachments (assistant composer only). The app-server takes images
+      // by PATH, never inline, so spill them next to the thread's other artifacts
+      // and send `localImage` items; a text-only turn keeps passing the bare
+      // prompt string and is byte-identical.
+      const turnInput =
+        buildCodexTurnInput(
+          options.prompt,
+          options.images,
+          getCyboflowSubdirectory('artifacts', 'agent-thread', options.sessionId.replace(/[^\w.-]/g, '_')),
+        ) ?? options.prompt;
       await withTimeout(
-        entry.turnSession.startTurn(options.prompt, buildCodexAppServerTurnOptions(options)),
+        entry.turnSession.startTurn(turnInput, buildCodexAppServerTurnOptions(options)),
         APP_SERVER_REQUEST_TIMEOUT_MS,
         'Codex app-server turn start',
       );

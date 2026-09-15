@@ -23,13 +23,39 @@ import type { RunGitDiff } from '../../../../shared/types/runFiles';
 import type { WorkflowDescriptor } from '../workflowRegistry';
 import type { AgentOverrideRow } from '../../database/models';
 import type { WorkflowVariantRow, WorkflowVariantStatus } from '../../../../shared/types/experiments';
-import type { AgentThread, AgentProposal, AgentProposalStatus } from '../../../../shared/types/agentThread';
+import type {
+  AgentThread,
+  AgentThreadImageAttachment,
+  AgentProposal,
+  AgentProposalStatus,
+} from '../../../../shared/types/agentThread';
 import type { ExecuteProposalResult } from '../agentThread/proposalExecutor';
 import type { ConfigOpsLike } from './contracts/configOps';
 import type { GitPrerequisiteOpsLike } from './contracts/gitPrerequisiteOps';
 import type { WorkspaceFileOpsLike } from './contracts/workspaceFileOps';
 import type { SessionGitOpsLike } from './contracts/sessionGitOps';
 import type { SessionOpsLike } from './contracts/sessionOps';
+import type { CustomViewsServiceLike } from '../customViews/customViewsService';
+
+/**
+ * Narrow structural interface for `CustomWidgetServerManager`
+ * (`main/src/services/customWidgetServer.ts`) — the tier-3 widget document
+ * server (docs/proposals/CUSTOM-VIEWS.md §5.4). Declared here (not the
+ * concrete class) so the tRPC subtree never imports `node:http` or the
+ * concrete manager, preserving the standalone-typecheck invariant.
+ *
+ * This is a tRPC mutation pair rather than raw `ipcMain.handle` (the shape
+ * §5.4 originally sketched) because `main/src/ipc/__tests__/noNewIpcHandlers.test.ts`
+ * freezes the legacy `ipcMain.handle` surface — every new renderer->main call
+ * goes through a tRPC router now (`cyboflow.customWidgetServer`, see
+ * `routers/customWidgetServer.ts`). `CustomWidgetServerManager.ensure`/`stop`
+ * already match this shape exactly, so `index.ts` passes the manager instance
+ * straight through with no adapter.
+ */
+export interface CustomWidgetServerLike {
+  ensure(): Promise<{ baseUrl: string; origin: string }>;
+  stop(): Promise<boolean>;
+}
 
 /**
  * Narrow structural interface for AgentOverrideRouter used in tRPC context.
@@ -187,8 +213,15 @@ export interface AgentThreadServiceLike {
   /** Load-or-create the single 'global' thread + ensure its neutral home dir. */
   ensureGlobalThread(): AgentThread;
   /** Send one turn (spawn/warm-continue). Also used to inject executor loopback turns.
-   *  Optional `contextHint` is prompt-only priming text, never persisted to the transcript. */
-  sendMessage(threadId: string, text: string, contextHint?: string): Promise<void>;
+   *  Optional `contextHint` is prompt-only priming text, never persisted to the transcript.
+   *  Optional `images` are composer attachments sent to the model as real content
+   *  blocks; the transcript records only a `📎 image:` line per attachment. */
+  sendMessage(
+    threadId: string,
+    text: string,
+    contextHint?: string,
+    images?: readonly AgentThreadImageAttachment[],
+  ): Promise<void>;
 }
 
 /**
@@ -552,6 +585,27 @@ export interface ContextDeps {
    * omit it.
    */
   sessionOps?: SessionOpsLike;
+
+  /**
+   * Live CustomViewsService (Custom Views, migration 132,
+   * docs/proposals/CUSTOM-VIEWS.md §4.6). Bundles the view/widget store, the
+   * query engine (cache/breaker/plan), and the action engine (proposal prep +
+   * executor) behind one narrow interface — the router never imports
+   * `DatabaseService`/`better-sqlite3` or a concrete store/service class.
+   *
+   * Injected from `main/src/index.ts` via `createCustomViewsService(...)`.
+   * Handlers must explicitly check `ctx.customViews` before use —
+   * `undefined` is the intentional default so unit tests that do not need
+   * Custom Views can omit it.
+   */
+  customViews?: CustomViewsServiceLike;
+
+  /**
+   * Live CustomWidgetServerManager (see {@link CustomWidgetServerLike}).
+   * Injected from `main/src/index.ts`. `undefined` ⇒ the `customWidgetServer`
+   * procedures throw PRECONDITION_FAILED.
+   */
+  customWidgetServer?: CustomWidgetServerLike;
 }
 
 /**
@@ -611,6 +665,8 @@ export function createContext(deps: ContextDeps = {}): {
   workspaceFileOps?: WorkspaceFileOpsLike;
   sessionGitOps?: SessionGitOpsLike;
   sessionOps?: SessionOpsLike;
+  customViews?: CustomViewsServiceLike;
+  customWidgetServer?: CustomWidgetServerLike;
 } {
   const {
     setDockBadge = (_count: number) => undefined,
@@ -636,6 +692,8 @@ export function createContext(deps: ContextDeps = {}): {
     workspaceFileOps,
     sessionGitOps,
     sessionOps,
+    customViews,
+    customWidgetServer,
   } = deps;
   // Resolve the principal NOW, once per request. Accepting a resolver here is
   // what makes an Aria-mode flip take effect on the next call in either
@@ -668,6 +726,8 @@ export function createContext(deps: ContextDeps = {}): {
     workspaceFileOps,
     sessionGitOps,
     sessionOps,
+    customViews,
+    customWidgetServer,
   };
 }
 

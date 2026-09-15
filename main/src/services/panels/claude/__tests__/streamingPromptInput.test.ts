@@ -23,6 +23,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { AgentThreadImageAttachment } from '../../../../../../shared/types/agentThread';
 import { createStreamingPromptInput, createPersistentPromptInput } from '../streamingPromptInput';
 
 /** A pending-state probe: has `promise` settled by the next microtask flush? */
@@ -178,5 +179,100 @@ describe('createPersistentPromptInput — steering opt parity', () => {
     expect(push('next turn')).toBe(true);
     const pushed = (await stream.next()).value as SDKUserMessage;
     expect(pushed.origin).toEqual({ kind: 'human' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Image attachments — the assistant composer's content blocks.
+//
+// The whole point of these builders' `content` branch is that a normal turn
+// keeps sending a bare STRING (the module's byte-identity contract) and only an
+// image turn switches to a block array. Both halves are pinned here.
+// ---------------------------------------------------------------------------
+
+const PNG: AgentThreadImageAttachment = {
+  name: 'shot.png',
+  mediaType: 'image/png',
+  base64: 'iVBORw0KGgo=',
+};
+const JPEG: AgentThreadImageAttachment = {
+  name: 'photo.jpg',
+  mediaType: 'image/jpeg',
+  base64: '/9j/4AAQSkZJRg==',
+};
+
+describe('prompt inputs — image attachments', () => {
+  it('a turn with NO images keeps message.content a plain string', async () => {
+    const { stream } = createStreamingPromptInput('just text');
+    const first = (await stream.next()).value as SDKUserMessage;
+    expect(first.message.content).toBe('just text');
+  });
+
+  it('an empty images array is treated as no images (still a plain string)', async () => {
+    const { stream } = createStreamingPromptInput('just text', []);
+    const first = (await stream.next()).value as SDKUserMessage;
+    expect(first.message.content).toBe('just text');
+  });
+
+  it('images turn message.content into a block array, text block first', async () => {
+    const { stream } = createStreamingPromptInput('look at this', [PNG, JPEG]);
+    const first = (await stream.next()).value as SDKUserMessage;
+
+    expect(first.message.content).toEqual([
+      { type: 'text', text: 'look at this' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG.base64 } },
+      { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: JPEG.base64 } },
+    ]);
+  });
+
+  it('an image-only turn omits the text block entirely (the API rejects empty text)', async () => {
+    const { stream } = createStreamingPromptInput('', [PNG]);
+    const first = (await stream.next()).value as SDKUserMessage;
+
+    expect(first.message.content).toEqual([
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG.base64 } },
+    ]);
+  });
+
+  it('an image turn still carries the human origin stamp', async () => {
+    const { stream } = createStreamingPromptInput('look', [PNG]);
+    const first = (await stream.next()).value as SDKUserMessage;
+    expect(first.origin).toEqual({ kind: 'human' });
+  });
+
+  it('createPersistentPromptInput carries images on its initial message', async () => {
+    const { stream } = createPersistentPromptInput('warm start', [PNG]);
+    const first = (await stream.next()).value as SDKUserMessage;
+
+    expect(first.message.content).toEqual([
+      { type: 'text', text: 'warm start' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG.base64 } },
+    ]);
+  });
+
+  it('a warm push with images sends blocks; the next plain push goes back to a string', async () => {
+    const { stream, push } = createPersistentPromptInput('turn one');
+    await stream.next();
+
+    expect(push('turn two', { images: [PNG] })).toBe(true);
+    const withImage = (await stream.next()).value as SDKUserMessage;
+    expect(withImage.message.content).toEqual([
+      { type: 'text', text: 'turn two' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG.base64 } },
+    ]);
+
+    expect(push('turn three')).toBe(true);
+    const plain = (await stream.next()).value as SDKUserMessage;
+    expect(plain.message.content).toBe('turn three');
+  });
+
+  it('images and steering compose on the same pushed message', async () => {
+    const { stream, push } = createPersistentPromptInput('turn one');
+    await stream.next();
+
+    expect(push('steer with a picture', { steering: true, images: [PNG] })).toBe(true);
+    const pushed = (await stream.next()).value as SDKUserMessage;
+    expect(pushed.priority).toBe('now');
+    expect(Array.isArray(pushed.message.content)).toBe(true);
   });
 });

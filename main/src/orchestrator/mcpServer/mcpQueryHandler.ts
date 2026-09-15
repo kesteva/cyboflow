@@ -74,7 +74,7 @@
  */
 import * as net from 'net';
 import * as path from 'path';
-import { createHash, randomBytes } from 'node:crypto';
+import { randomUUID, createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync, realpathSync, statSync, lstatSync, openSync, readSync, closeSync } from 'fs';
 import type { Dirent, Stats } from 'fs';
 import {
@@ -98,6 +98,17 @@ import {
 // invariant (unlike orchSocketServer.ts, which must stay import-clean of
 // 'better-sqlite3'/'electron' so runLauncher.ts's structural boundary holds).
 import BetterSqlite3Database from 'better-sqlite3';
+import { z } from 'zod';
+import {
+  AGENT_QUERY_LIMITS,
+  openReadonlySibling,
+  runReadonlyQuery,
+  validateReadonlySql,
+} from '../readOnlyQuery';
+import { scalarSchema, widgetSpecSchema } from '../../../../shared/customViews/validate';
+import { WIDGET_LIMITS, type Scalar } from '../../../../shared/types/customViews';
+import type { CustomViewsServiceLike } from '../customViews/customViewsService';
+import { CustomViewsStoreError } from '../customViews/types';
 import type { DatabaseLike, LoggerLike } from '../types';
 import { getCyboflowSubdirectory } from '../../utils/cyboflowDirectory';
 import {
@@ -138,28 +149,14 @@ import { PROTOTYPE_HTML_RELPATH, MAX_PROTOTYPE_HTML_BYTES, ARTIFACT_POLICIES } f
 import { QUICK_WORKFLOW_NAME, LEGACY_DROPPED_WORKFLOW_NAMES } from '../workflowRegistry';
 import { AgentThreadDbStore } from '../agentThread/agentThreadDbStore';
 import { computeSpecHash } from '../agentThread/specHash';
+import { prepareProposal, createPrepareProposalDeps } from '../agentThread/prepareProposal';
 import {
   extractTurnText,
   excerptAround,
   truncateHead,
   TURN_TEXT_MAX_CHARS,
 } from '../agentThread/transcriptSearch';
-import {
-  AGENT_PROPOSAL_KINDS,
-  AGENT_THREAD_SPAWN_PREFIX,
-  isAgentThreadSpawnId,
-  type AgentNavigationTarget,
-  type AgentProposalKind,
-  type AgentProposalPayload,
-  type AgentProposalPreconditions,
-  type CreateBacklogItem,
-  type CreateBacklogItemsProposalPayload,
-  type EditWorkflowProposalPayload,
-  type LaunchRunProposalPayload,
-  type OpenSessionProposalPayload,
-  type ReprioritizeBacklogItem,
-  type ReprioritizeBacklogProposalPayload,
-} from '../../../../shared/types/agentThread';
+import { AGENT_THREAD_SPAWN_PREFIX, isAgentThreadSpawnId } from '../../../../shared/types/agentThread';
 import {
   AGENT_REQUEST_TIMEOUT_CEILING_MS,
   VerificationScheduler,
@@ -195,7 +192,7 @@ import {
 } from '../../../../shared/types/sprintBatch';
 import type { SprintBatchTaskStatus } from '../../../../shared/types/sprintBatch';
 import { resolveRunFanOutInner, runHasControllerVisualVerify } from '../laneChainResolution';
-import { isCliSubstrate, type CliSubstrate } from '../../../../shared/types/substrate';
+import type { CliSubstrate } from '../../../../shared/types/substrate';
 import { runStatusEvents } from '../trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../../../shared/types/cyboflow';
 import type { BacklogTaskItem, EntityCategory, IdeaAttachment, IdeaScope, Priority, TaskType } from '../../../../shared/types/tasks';
@@ -988,6 +985,71 @@ export type McpQueryMessage =
       limit?: number;
     }
   | {
+      /**
+       * READ-ONLY schema introspection of the app database (docs/proposals/
+       * CUSTOM-VIEWS.md §7.2) — tables, columns (name/type/pk/notnull), and an
+       * approximate row count per table (COUNT(*); null for `raw_events`,
+       * where that is too expensive). Delegates to the injected
+       * `customViews.dbSchema()` — this handler touches no SQL directly.
+       * Absent `customViews` dep -> `custom_views_unavailable`.
+       */
+      type: 'mcp-db-schema';
+      requestId: string;
+      runId: string;
+      /** Optional — scope the reply to one table name. */
+      table?: string;
+    }
+  | {
+      /**
+       * Validates a custom-widget spec and runs its sources exactly as the
+       * page will (through `CustomViewsService.runWidget` / the §4.2/§4.3
+       * query engine), WITHOUT ever saving anything. `specJson`/`settingsJson`
+       * are plain JSON strings — the registry keeps them that way (finding
+       * #16: it may import only zod and its own siblings, not the shared
+       * union schemas), so THIS handler is where they are JSON.parsed and
+       * validated against the shared `widgetSpecSchema` / `scalarSchema`.
+       * Absent `customViews` dep -> `custom_views_unavailable`.
+       */
+      type: 'mcp-widget-preview';
+      requestId: string;
+      runId: string;
+      specJson: string;
+      /** Optional JSON-encoded `{name: value}` resolving the spec's `{setting:name}` references. */
+      settingsJson?: string;
+      /** Optional — the projectId `{context:'projectId'}` source params resolve to. */
+      projectId?: number;
+    }
+  | {
+      /**
+       * THE SECOND write-shaped global-agent tool (disjoint from
+       * mcp-propose-action) — writes ONLY the calling user's own
+       * custom-widget library (`custom_widgets` rows via
+       * `CustomViewsService.saveWidget`), never a view, never a backlog
+       * entity, never a proposal. `publish:false` saves a draft owned by
+       * `sessionId` (sourced from the page's `[custom-widget-session]`
+       * envelope, §7.1); `publish:true` saves and promotes it to the spec
+       * every other surface renders. A `widgetId` whose draft is owned by a
+       * different live session comes back `session_mismatch`. Emits
+       * `onWidgetDraft` for the renderer's session-bound live landing
+       * (§7.3). Absent `customViews` dep -> `custom_views_unavailable`.
+       */
+      type: 'mcp-widget-save';
+      requestId: string;
+      runId: string;
+      /** The page's authoring session (from the `[custom-widget-session]`
+       *  envelope). Omitted = a library-only save: the widget publishes
+       *  straight into the user's library with no live authoring slot, so
+       *  `publish` MUST be true (a draft nobody is watching is refused with
+       *  `draft_needs_session`). */
+      sessionId?: string;
+      /** Optional — omitted creates a new widget; passed, updates that widget. */
+      widgetId?: string;
+      name: string;
+      description?: string;
+      specJson: string;
+      publish: boolean;
+    }
+  | {
       type: 'shell-approval-request';
       requestId: string;
       runId: string;
@@ -1105,346 +1167,16 @@ interface HistoryTurn {
 }
 
 // ---------------------------------------------------------------------------
-// cyboflow_db_query statement-shape validation (S0.4 global-agent) — pure,
-// throws nothing. This is DEFENSE-IN-DEPTH: the primary read-only guarantee
-// comes from executing on a dedicated `{ readonly: true }` better-sqlite3
-// connection (see getGlobalAgentReadonlyDb below), which SQLite itself
-// refuses to write through regardless of what slips past this validator.
+// cyboflow_db_query statement-shape validation + execution (S0.4 global-agent).
+//
+// The pure pieces now live in `../readOnlyQuery` so the custom-views widget
+// engine (docs/proposals/CUSTOM-VIEWS.md §4.1) executes user SQL through
+// exactly the same validator, readonly sibling connection and iterate loop
+// rather than a second implementation. This handler keeps the observable
+// contract: scope check, the unavailable-database path, sanitization, the
+// non-reader empty response and the WARN logging.
 // ---------------------------------------------------------------------------
 
-const DB_QUERY_MAX_ROWS = 200;
-const DB_QUERY_MAX_PAYLOAD_BYTES = 100_000;
-const DB_QUERY_MAX_STRING_LEN = 2000;
-
-const READER_KEYWORD_RE = /^(SELECT|WITH|EXPLAIN)\b/i;
-const FORBIDDEN_KEYWORD_RE = /\b(ATTACH|PRAGMA)\b/i;
-
-/** Strips leading whitespace and leading `--`/`/* *\/` comments (repeatedly,
- * since a query may open with several comment lines before the keyword). */
-function stripLeadingSqlComments(sql: string): string {
-  let s = sql;
-  for (;;) {
-    const trimmed = s.replace(/^\s+/, '');
-    if (trimmed.startsWith('--')) {
-      const nl = trimmed.indexOf('\n');
-      s = nl === -1 ? '' : trimmed.slice(nl + 1);
-      continue;
-    }
-    if (trimmed.startsWith('/*')) {
-      const end = trimmed.indexOf('*/');
-      s = end === -1 ? '' : trimmed.slice(end + 2);
-      continue;
-    }
-    return trimmed;
-  }
-}
-
-/**
- * True when non-whitespace, non-comment SQL content follows the first
- * top-level `;` — i.e. more than one statement was submitted. Skips over
- * single-quoted string literals (SQL's `''` escape) and comments while
- * scanning so a `;` inside a string literal doesn't false-positive.
- */
-function hasTrailingStatement(sql: string): boolean {
-  let i = 0;
-  let inString = false;
-  while (i < sql.length) {
-    const ch = sql[i];
-    if (inString) {
-      if (ch === "'") {
-        if (sql[i + 1] === "'") { i += 2; continue; }
-        inString = false;
-      }
-      i += 1;
-      continue;
-    }
-    if (ch === "'") { inString = true; i += 1; continue; }
-    if (ch === '-' && sql[i + 1] === '-') {
-      const nl = sql.indexOf('\n', i);
-      i = nl === -1 ? sql.length : nl + 1;
-      continue;
-    }
-    if (ch === '/' && sql[i + 1] === '*') {
-      const end = sql.indexOf('*/', i + 2);
-      i = end === -1 ? sql.length : end + 2;
-      continue;
-    }
-    if (ch === ';') {
-      return stripLeadingSqlComments(sql.slice(i + 1)).length > 0;
-    }
-    i += 1;
-  }
-  return false;
-}
-
-type DbQueryValidation =
-  | { ok: true; sql: string }
-  | { ok: false; reason: 'empty_sql' | 'not_a_select' | 'multiple_statements' | 'forbidden_keyword' };
-
-function validateReadonlySql(rawSql: unknown): DbQueryValidation {
-  if (typeof rawSql !== 'string' || rawSql.trim().length === 0) {
-    return { ok: false, reason: 'empty_sql' };
-  }
-  const stripped = stripLeadingSqlComments(rawSql);
-  if (stripped.length === 0) {
-    return { ok: false, reason: 'empty_sql' };
-  }
-  if (!READER_KEYWORD_RE.test(stripped)) {
-    return { ok: false, reason: 'not_a_select' };
-  }
-  // Scanned over the WHOLE raw string (not just the stripped head) — ATTACH /
-  // PRAGMA are rejected wherever they appear, including mid-statement.
-  if (FORBIDDEN_KEYWORD_RE.test(rawSql)) {
-    return { ok: false, reason: 'forbidden_keyword' };
-  }
-  if (hasTrailingStatement(rawSql)) {
-    return { ok: false, reason: 'multiple_statements' };
-  }
-  return { ok: true, sql: rawSql };
-}
-
-/** Row-value sanitization shared by the cyboflow_db_query result path. */
-function sanitizeDbQueryValue(value: unknown): unknown {
-  if (typeof value === 'string') {
-    return value.length > DB_QUERY_MAX_STRING_LEN
-      ? `${value.slice(0, DB_QUERY_MAX_STRING_LEN)}…[truncated]`
-      : value;
-  }
-  if (typeof value === 'bigint') {
-    return Number.isSafeInteger(Number(value)) ? Number(value) : value.toString();
-  }
-  if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
-    return `<blob ${value.length} bytes>`;
-  }
-  return value;
-}
-
-function sanitizeDbQueryRow(row: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(row)) {
-    out[key] = sanitizeDbQueryValue(value);
-  }
-  return out;
-}
-
-// ---------------------------------------------------------------------------
-// cyboflow_propose_action payload validation (S0.4) — narrows an unknown JSON
-// value into an AgentProposalPayload, dispatching on `kind`. Every branch
-// extracts each field to a local const BEFORE narrowing it so TypeScript's
-// control-flow analysis reliably narrows a `Record<string, unknown>` property
-// access (narrowing a bare `raw.foo` expression across a guard is fragile;
-// binding it to a local first is not). Returns null (never throws) on any
-// malformed shape or unrecognized kind — the caller responds ok:false
-// 'invalid_payload' rather than propagate a parse exception.
-// ---------------------------------------------------------------------------
-
-function isStringArray(v: unknown): v is string[] {
-  return Array.isArray(v) && v.every((x) => typeof x === 'string');
-}
-
-function isAgentPriority(v: unknown): v is Priority {
-  return v === 'P0' || v === 'P1' || v === 'P2' || v === 'P3' || v === 'P4' || v === 'P5' || v === 'P6';
-}
-
-function isAgentTaskType(v: unknown): v is TaskType {
-  return v === 'idea' || v === 'epic' || v === 'task';
-}
-
-function isAgentCategory(v: unknown): v is EntityCategory {
-  return v === 'feature' || v === 'bug' || v === 'chore';
-}
-
-function isAgentIdeaScope(v: unknown): v is IdeaScope {
-  return v === 'small' || v === 'large';
-}
-
-/**
- * Ceiling on one create-backlog-items proposal. A proposal card is a single
- * human decision — a 50-entity dump is not reviewable, and the executor writes
- * them one chokepoint call at a time on the confirm path.
- */
-const CREATE_BACKLOG_MAX_ITEMS = 20;
-
-/**
- * Narrow one create-backlog-items entry. Every optional field is validated
- * strictly (a malformed member REJECTS the whole payload rather than being
- * dropped) — unlike the finding-extras parsers below, a create is a durable
- * entity write the human is being asked to approve, so a silently dropped
- * body/priority would have the card describe something other than what
- * Confirm would produce.
- */
-function parseCreateBacklogItem(raw: unknown): CreateBacklogItem | null {
-  if (!isRecord(raw)) return null;
-  const taskType = raw.taskType;
-  const title = raw.title;
-  if (!isAgentTaskType(taskType)) return null;
-  if (typeof title !== 'string' || title.trim().length === 0) return null;
-  const item: CreateBacklogItem = { taskType, title };
-
-  const summary = raw.summary;
-  if (summary !== undefined) {
-    if (typeof summary !== 'string') return null;
-    item.summary = summary;
-  }
-  const body = raw.body;
-  if (body !== undefined) {
-    if (typeof body !== 'string') return null;
-    item.body = body;
-  }
-  const priority = raw.priority;
-  if (priority !== undefined) {
-    if (!isAgentPriority(priority)) return null;
-    item.priority = priority;
-  }
-  const category = raw.category;
-  if (category !== undefined) {
-    if (!isAgentCategory(category)) return null;
-    item.category = category;
-  }
-  const scope = raw.scope;
-  if (scope !== undefined) {
-    if (!isAgentIdeaScope(scope)) return null;
-    item.scope = scope;
-  }
-  const parentEpicId = raw.parentEpicId;
-  if (parentEpicId !== undefined) {
-    if (typeof parentEpicId !== 'string' || parentEpicId.length === 0) return null;
-    item.parentEpicId = parentEpicId;
-  }
-  const originatingIdeaId = raw.originatingIdeaId;
-  if (originatingIdeaId !== undefined) {
-    if (typeof originatingIdeaId !== 'string' || originatingIdeaId.length === 0) return null;
-    item.originatingIdeaId = originatingIdeaId;
-  }
-  return item;
-}
-
-function parseAgentNavigationTarget(raw: unknown): AgentNavigationTarget | null {
-  if (!isRecord(raw)) return null;
-  const target = raw.target;
-  if (target === 'run') {
-    const runId = raw.runId;
-    if (typeof runId !== 'string' || runId.length === 0) return null;
-    return { target: 'run', runId };
-  }
-  if (target === 'quick-session') {
-    const sessionId = raw.sessionId;
-    if (typeof sessionId !== 'string' || sessionId.length === 0) return null;
-    const navRunId = raw.runId;
-    if (navRunId !== undefined && (typeof navRunId !== 'string' || navRunId.length === 0)) return null;
-    return navRunId !== undefined
-      ? { target: 'quick-session', sessionId, runId: navRunId }
-      : { target: 'quick-session', sessionId };
-  }
-  return null;
-}
-
-function parseAgentProposalPayload(raw: unknown): AgentProposalPayload | null {
-  if (!isRecord(raw)) return null;
-  const kindRaw = raw.kind;
-  if (typeof kindRaw !== 'string' || !(AGENT_PROPOSAL_KINDS as readonly string[]).includes(kindRaw)) {
-    return null;
-  }
-  const kind = kindRaw as AgentProposalKind;
-
-  switch (kind) {
-    case 'launch-run': {
-      const projectId = raw.projectId;
-      const workflowName = raw.workflowName;
-      if (typeof projectId !== 'number') return null;
-      if (typeof workflowName !== 'string' || !isCyboflowWorkflowName(workflowName)) return null;
-      const payload: LaunchRunProposalPayload = { kind: 'launch-run', projectId, workflowName };
-
-      const substrate = raw.substrate;
-      if (substrate !== undefined) {
-        if (!isCliSubstrate(substrate)) return null;
-        payload.substrate = substrate;
-      }
-      const taskIds = raw.taskIds;
-      if (taskIds !== undefined) {
-        if (!isStringArray(taskIds)) return null;
-        payload.taskIds = taskIds;
-      }
-      const ideaIds = raw.ideaIds;
-      if (ideaIds !== undefined) {
-        if (!isStringArray(ideaIds)) return null;
-        payload.ideaIds = ideaIds;
-      }
-      const findingIds = raw.findingIds;
-      if (findingIds !== undefined) {
-        if (!isStringArray(findingIds)) return null;
-        payload.findingIds = findingIds;
-      }
-      const note = raw.note;
-      if (note !== undefined) {
-        if (typeof note !== 'string') return null;
-        payload.note = note;
-      }
-      return payload;
-    }
-    case 'reprioritize-backlog': {
-      const projectId = raw.projectId;
-      const itemsRaw = raw.items;
-      if (typeof projectId !== 'number') return null;
-      if (!Array.isArray(itemsRaw) || itemsRaw.length === 0) return null;
-      const items: ReprioritizeBacklogItem[] = [];
-      for (const entryRaw of itemsRaw) {
-        if (!isRecord(entryRaw)) return null;
-        const taskId = entryRaw.taskId;
-        if (typeof taskId !== 'string' || taskId.length === 0) return null;
-        const item: ReprioritizeBacklogItem = { taskId };
-        const priority = entryRaw.priority;
-        if (priority !== undefined) {
-          if (!isAgentPriority(priority)) return null;
-          item.priority = priority;
-        }
-        const stageId = entryRaw.stageId;
-        if (stageId !== undefined) {
-          if (typeof stageId !== 'string' || stageId.length === 0) return null;
-          item.stageId = stageId;
-        }
-        if (item.priority === undefined && item.stageId === undefined) return null; // no-op row
-        items.push(item);
-      }
-      const payload: ReprioritizeBacklogProposalPayload = { kind: 'reprioritize-backlog', projectId, items };
-      return payload;
-    }
-    case 'edit-workflow': {
-      const workflowId = raw.workflowId;
-      const definitionJson = raw.definitionJson;
-      if (typeof workflowId !== 'string' || workflowId.length === 0) return null;
-      if (typeof definitionJson !== 'string' || definitionJson.length === 0) return null;
-      const payload: EditWorkflowProposalPayload = { kind: 'edit-workflow', workflowId, definitionJson };
-      const summary = raw.summary;
-      if (summary !== undefined) {
-        if (typeof summary !== 'string') return null;
-        payload.summary = summary;
-      }
-      return payload;
-    }
-    case 'open-session': {
-      const navigation = parseAgentNavigationTarget(raw.navigation);
-      if (!navigation) return null;
-      const payload: OpenSessionProposalPayload = { kind: 'open-session', navigation };
-      return payload;
-    }
-    case 'create-backlog-items': {
-      const projectId = raw.projectId;
-      const itemsRaw = raw.items;
-      if (typeof projectId !== 'number') return null;
-      if (!Array.isArray(itemsRaw) || itemsRaw.length === 0) return null;
-      if (itemsRaw.length > CREATE_BACKLOG_MAX_ITEMS) return null;
-      const items: CreateBacklogItem[] = [];
-      for (const entryRaw of itemsRaw) {
-        const item = parseCreateBacklogItem(entryRaw);
-        if (!item) return null;
-        items.push(item);
-      }
-      const payload: CreateBacklogItemsProposalPayload = { kind: 'create-backlog-items', projectId, items };
-      return payload;
-    }
-  }
-}
 
 
 // ---------------------------------------------------------------------------
@@ -1688,6 +1420,17 @@ export interface McpQueryHandlerDeps {
    * 'agent_thread_store_unavailable'; every other handler is unaffected.
    */
   agentThreadStore?: AgentThreadDbStore;
+
+  /**
+   * Custom Views service (migration 132, docs/proposals/CUSTOM-VIEWS.md §9
+   * row S6) — backs the three custom-widget-authoring global-agent tools
+   * (`cyboflow_db_schema` / `cyboflow_widget_preview` / `cyboflow_widget_save`).
+   * A narrow STRUCTURAL interface (mirroring the `workflowConfig` precedent
+   * above), not the concrete `CustomViewsService` class, so a test can hand
+   * in a fake built over its own fixtures. Absent -> every one of the three
+   * tools fails closed with `custom_views_unavailable`.
+   */
+  customViews?: CustomViewsServiceLike;
 
   /**
    * Extra absolute folder paths the global-agent filesystem tools
@@ -2085,6 +1828,15 @@ export class McpQueryHandler {
         case 'mcp-history':
           this.handleAgentHistory(msg, client);
           break;
+        case 'mcp-db-schema':
+          this.handleDbSchema(msg, client);
+          break;
+        case 'mcp-widget-preview':
+          await this.handleWidgetPreview(msg, client);
+          break;
+        case 'mcp-widget-save':
+          this.handleWidgetSave(msg, client);
+          break;
         case 'shell-approval-request':
           // Async-deferred — the FIRST handler that does NOT writeResponse
           // synchronously. It returns after kicking off requestApproval; only
@@ -2136,7 +1888,11 @@ export class McpQueryHandler {
       // a throw here is by construction a caller error and does not belong on
       // the channel reserved for app faults. Every other message type builds its
       // own SQL and keeps ERROR, where a throw IS ours.
-      const logAtWarn = msg.type === 'mcp-db-query';
+      //
+      // mcp-widget-preview extends the same exemption (docs/proposals/
+      // CUSTOM-VIEWS.md §7.2): its `sql` sources are agent-authored WidgetSpec
+      // content, same caller-error shape as mcp-db-query's raw SQL.
+      const logAtWarn = msg.type === 'mcp-db-query' || msg.type === 'mcp-widget-preview';
       const summary = `[Cyboflow MCP Query] ${msg.type} threw; returned to client as ok:false:`;
       if (logAtWarn) {
         console.warn(`${summary} ${error} (agent-authored SQL — caller error, not an app fault)`);
@@ -7524,136 +7280,12 @@ export class McpQueryHandler {
       this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_json' });
       return;
     }
-    const payload = parseAgentProposalPayload(raw);
-    if (!payload) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_payload' });
+    const prepared = prepareProposal(createPrepareProposalDeps(this.db), raw);
+    if (!prepared.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: prepared.error });
       return;
     }
-
-    // Preconditions are ALWAYS captured server-side here — the wire payload
-    // carries no precondition field for the caller to even attempt to spoof;
-    // this re-read is what makes that true rather than merely documented.
-    let preconditions: AgentProposalPreconditions | null = null;
-    if (payload.kind === 'edit-workflow') {
-      const row = this.readWorkflowRow(payload.workflowId);
-      if (!row) {
-        this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'workflow_not_found' });
-        return;
-      }
-      // The EFFECTIVE definition (migration 122) — must match what the proposal
-      // executor's `readEffectiveWorkflowSpec` re-reads at apply time, or the
-      // CAS hash never matches and every edit-workflow proposal is refused.
-      const definition = resolveEffectiveDefinition(row.name, row.spec_json, row.tuning_level);
-      if (definition === null) {
-        this.writeResponse(client, {
-          type: 'mcp-query-response',
-          requestId: msg.requestId,
-          ok: false,
-          error: 'workflow_unresolvable',
-        });
-        return;
-      }
-      preconditions = { kind: 'edit-workflow', specHash: computeSpecHash(definition) };
-    } else if (payload.kind === 'reprioritize-backlog') {
-      const expectedVersions: Record<string, number> = {};
-      for (const item of payload.items) {
-        const identity = this.readTaskIdentity(item.taskId);
-        if (!identity) {
-          this.writeResponse(client, {
-            type: 'mcp-query-response',
-            requestId: msg.requestId,
-            ok: false,
-            error: `task_not_found:${item.taskId}`,
-          });
-          return;
-        }
-        expectedVersions[item.taskId] = identity.version;
-      }
-      preconditions = { kind: 'reprioritize-backlog', expectedVersions };
-    } else if (payload.kind === 'open-session') {
-      // No preconditions (shared type contract), but the navigation target IS
-      // enriched here with its OWNING project, resolved server-side from the
-      // run/session row itself — never trust a caller-supplied projectId
-      // (parseAgentNavigationTarget never even copies one out of the wire
-      // payload, so this is the only source). The renderer
-      // (frontend/src/components/agentRail/proposalNavigation.ts) activates
-      // this project before dispatching navigation, since the global agent is
-      // cross-project by design and the target run/session may not belong to
-      // whatever project happens to be active when the card is confirmed. A
-      // target that does not resolve to a real row is an agent mistake, not
-      // something to persist as a broken card — reject the proposal outright
-      // rather than let it round-trip a stale/typo'd id.
-      const nav = payload.navigation;
-      if (nav.target === 'run') {
-        const row = this.db.prepare('SELECT project_id FROM workflow_runs WHERE id = ?').get(nav.runId) as
-          | { project_id?: unknown }
-          | undefined;
-        if (!row || typeof row.project_id !== 'number') {
-          this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'run_not_found' });
-          return;
-        }
-        payload.navigation = { target: 'run', runId: nav.runId, projectId: row.project_id };
-      } else {
-        const row = this.db.prepare('SELECT project_id FROM sessions WHERE id = ?').get(nav.sessionId) as
-          | { project_id?: unknown }
-          | undefined;
-        if (!row || typeof row.project_id !== 'number') {
-          this.writeResponse(client, {
-            type: 'mcp-query-response',
-            requestId: msg.requestId,
-            ok: false,
-            error: 'session_not_found',
-          });
-          return;
-        }
-        payload.navigation =
-          nav.runId !== undefined
-            ? { target: 'quick-session', sessionId: nav.sessionId, runId: nav.runId, projectId: row.project_id }
-            : { target: 'quick-session', sessionId: nav.sessionId, projectId: row.project_id };
-      }
-    } else if (payload.kind === 'create-backlog-items') {
-      // No preconditions (a create has no prior version to race against), but the
-      // project and every EXISTING entity the batch links to are validated here —
-      // and each link is normalized from a display ref to an opaque id, the same
-      // resolveBacklogRef pass handleCreateTask makes. Rejecting now, at propose
-      // time, is what keeps a confirmed card from dying on a typo'd parent long
-      // after the human approved it.
-      const projectExists =
-        this.db.prepare('SELECT 1 FROM projects WHERE id = ?').get(payload.projectId) !== undefined;
-      if (!projectExists) {
-        this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'project_not_found' });
-        return;
-      }
-      for (const item of payload.items) {
-        if (item.parentEpicId !== undefined) {
-          const resolved = this.resolveExistingEntity(payload.projectId, item.parentEpicId, 'epic');
-          if (!resolved) {
-            this.writeResponse(client, {
-              type: 'mcp-query-response',
-              requestId: msg.requestId,
-              ok: false,
-              error: `parent_epic_not_found:${item.parentEpicId}`,
-            });
-            return;
-          }
-          item.parentEpicId = resolved;
-        }
-        if (item.originatingIdeaId !== undefined) {
-          const resolved = this.resolveExistingEntity(payload.projectId, item.originatingIdeaId, 'idea');
-          if (!resolved) {
-            this.writeResponse(client, {
-              type: 'mcp-query-response',
-              requestId: msg.requestId,
-              ok: false,
-              error: `originating_idea_not_found:${item.originatingIdeaId}`,
-            });
-            return;
-          }
-          item.originatingIdeaId = resolved;
-        }
-      }
-    }
-    // launch-run carries no preconditions (shared type contract).
+    const { payload, preconditions } = prepared;
 
     const proposal = store.createProposal({ threadId: ctx.threadId, payload, preconditions });
     store.appendEvent(
@@ -7676,17 +7308,15 @@ export class McpQueryHandler {
    * absent/empty or ':memory:' — an in-memory or adapter-less DatabaseLike
    * has no on-disk file for a sibling connection to point at (this is the
    * common shape in unit tests that don't go through makeDatabaseLike/
-   * dbAdapter). Read-only is enforced BY CONSTRUCTION here via `{ readonly:
-   * true }` — SQLite itself refuses any write attempted through this handle,
-   * independent of validateReadonlySql's statement-shape checks.
+   * dbAdapter). Read-only is enforced BY CONSTRUCTION by `openReadonlySibling`
+   * via `{ readonly: true }` — SQLite itself refuses any write attempted
+   * through this handle, independent of validateReadonlySql's statement-shape
+   * checks. The handle is also cached on this instance because tests reach for
+   * `globalAgentReadonlyDb` directly to release the file lock.
    */
   private getGlobalAgentReadonlyDb(): BetterSqlite3Database.Database {
-    if (this.globalAgentReadonlyDb) return this.globalAgentReadonlyDb;
-    const dbPath = this.db.name;
-    if (!dbPath || dbPath === ':memory:') {
-      throw new Error('db_query_unavailable: no on-disk database file for this connection');
-    }
-    this.globalAgentReadonlyDb = new BetterSqlite3Database(dbPath, { readonly: true, fileMustExist: true });
+    if (this.globalAgentReadonlyDb?.open) return this.globalAgentReadonlyDb;
+    this.globalAgentReadonlyDb = openReadonlySibling(this.db);
     return this.globalAgentReadonlyDb;
   }
 
@@ -7700,7 +7330,7 @@ export class McpQueryHandler {
       return;
     }
 
-    const validation = validateReadonlySql(msg.sql);
+    const validation = validateReadonlySql(msg.sql, { profile: 'agent' });
     if (!validation.ok) {
       this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: validation.reason });
       return;
@@ -7712,9 +7342,9 @@ export class McpQueryHandler {
     // structured ok:false response carrying sqlite's message, same as every
     // other handler in this file.
     const readonlyDb = this.getGlobalAgentReadonlyDb();
-    const stmt = readonlyDb.prepare(validation.sql);
+    const result = runReadonlyQuery(readonlyDb, validation.sql, {}, AGENT_QUERY_LIMITS);
 
-    if (!stmt.reader) {
+    if (result.note !== undefined) {
       // A non-reader statement (e.g. a write form that slipped past
       // validateReadonlySql, such as `WITH x AS (SELECT 1) INSERT ...`) is
       // NEVER executed — calling .run() is exactly the write attempt the
@@ -7724,36 +7354,206 @@ export class McpQueryHandler {
         type: 'mcp-query-response',
         requestId: msg.requestId,
         ok: true,
-        data: { columns: [], rows: [], rowCount: 0, truncated: false, note: 'statement returned no rows' },
+        data: {
+          columns: result.columns,
+          rows: result.rows,
+          rowCount: result.rowCount,
+          truncated: result.truncated,
+          note: result.note,
+        },
       });
       return;
-    }
-
-    const columns = stmt.columns().map((c) => c.name);
-    const rows: Array<Record<string, unknown>> = [];
-    let truncated = false;
-    let payloadBytes = 0;
-    for (const rawRow of stmt.iterate()) {
-      if (rows.length >= DB_QUERY_MAX_ROWS) {
-        truncated = true;
-        break;
-      }
-      const sanitized = sanitizeDbQueryRow(rawRow as Record<string, unknown>);
-      const size = Buffer.byteLength(JSON.stringify(sanitized), 'utf8');
-      if (rows.length > 0 && payloadBytes + size > DB_QUERY_MAX_PAYLOAD_BYTES) {
-        truncated = true;
-        break;
-      }
-      rows.push(sanitized);
-      payloadBytes += size;
     }
 
     this.writeResponse(client, {
       type: 'mcp-query-response',
       requestId: msg.requestId,
       ok: true,
-      data: { columns, rows, rowCount: rows.length, truncated },
+      data: { columns: result.columns, rows: result.rows, rowCount: result.rowCount, truncated: result.truncated },
     });
+  }
+
+  // --------------------------------------------------------------------------
+  // Custom-widget authoring tools (cyboflow_db_schema / _widget_preview /
+  // _widget_save) — docs/proposals/CUSTOM-VIEWS.md §7.2 / §9 row S6. All three
+  // fail closed with 'custom_views_unavailable' when the `customViews` dep is
+  // absent, mirroring the workflowConfig / agentThreadStore precedent above.
+  // --------------------------------------------------------------------------
+
+  private handleDbSchema(
+    msg: Extract<McpQueryMessage, { type: 'mcp-db-schema' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+    const customViews = this.deps.customViews;
+    if (!customViews) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'custom_views_unavailable' });
+      return;
+    }
+    const tables = customViews.dbSchema();
+    const filtered = msg.table ? tables.filter((t) => t.table === msg.table) : tables;
+    this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: true, data: { tables: filtered } });
+  }
+
+  private async handleWidgetPreview(
+    msg: Extract<McpQueryMessage, { type: 'mcp-widget-preview' }>,
+    client: net.Socket,
+  ): Promise<void> {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+    const customViews = this.deps.customViews;
+    if (!customViews) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'custom_views_unavailable' });
+      return;
+    }
+
+    let rawSpec: unknown;
+    try {
+      rawSpec = JSON.parse(msg.specJson);
+    } catch {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_json' });
+      return;
+    }
+    const parsedSpec = widgetSpecSchema.safeParse(rawSpec);
+    if (!parsedSpec.success) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'invalid_spec',
+        data: { detail: parsedSpec.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`) },
+      });
+      return;
+    }
+
+    let settings: Record<string, Scalar> = {};
+    if (msg.settingsJson !== undefined) {
+      let rawSettings: unknown;
+      try {
+        rawSettings = JSON.parse(msg.settingsJson);
+      } catch {
+        this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_settings' });
+        return;
+      }
+      const parsedSettings = z.record(scalarSchema).safeParse(rawSettings);
+      if (!parsedSettings.success) {
+        this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_settings' });
+        return;
+      }
+      settings = parsedSettings.data;
+    }
+
+    // Errors from here (e.g. `invalid_spec:<message>` when a setting doesn't
+    // resolve against the spec's declared settings) propagate to
+    // handleMessage's outer try/catch, which — via the WARN exemption above —
+    // logs this as a caller error, not an app fault: the spec is agent-authored.
+    const payload = await customViews.runWidget({
+      widget: { inline: parsedSpec.data },
+      settings,
+      refreshSec: WIDGET_LIMITS.minRefreshSec,
+      context: { projectId: msg.projectId ?? null },
+    });
+
+    // Cap each source's rows to 50 for the transcript — the real page is not
+    // capped this way; this only bounds what goes back over the wire to the
+    // model.
+    const sources: Record<string, unknown> = {};
+    for (const [name, outcome] of Object.entries(payload.sources)) {
+      if ('error' in outcome) {
+        sources[name] = outcome;
+        continue;
+      }
+      const cappedRows = outcome.rows.slice(0, 50);
+      sources[name] = {
+        columns: outcome.columns,
+        rows: cappedRows,
+        truncated: outcome.truncated,
+        tookMs: outcome.tookMs,
+        ...(cappedRows.length < outcome.rows.length ? { truncatedForTranscript: true } : {}),
+      };
+    }
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { sources, warnings: payload.warnings, plan: payload.plan, paused: payload.paused },
+    });
+  }
+
+  private handleWidgetSave(
+    msg: Extract<McpQueryMessage, { type: 'mcp-widget-save' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+    const customViews = this.deps.customViews;
+    if (!customViews) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'custom_views_unavailable' });
+      return;
+    }
+
+    let rawSpec: unknown;
+    try {
+      rawSpec = JSON.parse(msg.specJson);
+    } catch {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_json' });
+      return;
+    }
+    const parsedSpec = widgetSpecSchema.safeParse(rawSpec);
+    if (!parsedSpec.success) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'invalid_spec',
+        data: { detail: parsedSpec.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`) },
+      });
+      return;
+    }
+
+    // No authoring session = the user asked from the rail, not from
+    // Customize -> Create a custom widget. Publish straight into the library
+    // under a throwaway session id: publishDraft clears authoring_session_id,
+    // so nothing is left claimed, and the library refresh the draft event
+    // triggers on every surface makes it show up under "Mine". A draft-only
+    // save has no slot to render in, so it is refused rather than orphaned.
+    if (msg.sessionId === undefined && !msg.publish) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'draft_needs_session' });
+      return;
+    }
+    const authoringSessionId = msg.sessionId ?? `library:${randomUUID()}`;
+
+    try {
+      const widget = customViews.saveWidget({
+        id: msg.widgetId,
+        name: msg.name,
+        description: msg.description ?? null,
+        spec: parsedSpec.data,
+        authoringSessionId,
+        threadId: ctx.threadId,
+        publish: msg.publish,
+      });
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { widgetId: widget.id, revision: widget.revision },
+      });
+    } catch (err) {
+      const error = err instanceof CustomViewsStoreError ? err.code : err instanceof Error ? err.message : String(err);
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error });
+    }
   }
 
   // --------------------------------------------------------------------------

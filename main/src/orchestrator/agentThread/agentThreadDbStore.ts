@@ -254,20 +254,30 @@ export class AgentThreadDbStore {
     return row ? this.toProposal(row) : null;
   }
 
+  /**
+   * Excludes widget-originated proposals (migration 132's `widget_action_log`
+   * side table, docs/proposals/CUSTOM-VIEWS.md §4.4) via a LEFT JOIN — the
+   * rail only shows assistant-authored proposal cards, never a widget click's.
+   * `listProposalsByStatus` is deliberately left unfiltered: recovery paths
+   * need to see every pending proposal regardless of origin.
+   */
   listProposals(threadId: string, opts?: { statuses?: AgentProposalStatus[] }): AgentProposal[] {
-    const clauses = ['thread_id = ?'];
+    const clauses = ['agent_proposals.thread_id = ?'];
     const params: unknown[] = [threadId];
     if (opts?.statuses && opts.statuses.length > 0) {
-      clauses.push(`status IN (${opts.statuses.map(() => '?').join(', ')})`);
+      clauses.push(`agent_proposals.status IN (${opts.statuses.map(() => '?').join(', ')})`);
       params.push(...opts.statuses);
     }
     const rows = this.db
       .prepare(
-        `SELECT id, thread_id, kind, payload_json, preconditions_json, status,
-                result_json, idempotency_key, created_at, decided_at
+        `SELECT agent_proposals.id, agent_proposals.thread_id, agent_proposals.kind,
+                agent_proposals.payload_json, agent_proposals.preconditions_json, agent_proposals.status,
+                agent_proposals.result_json, agent_proposals.idempotency_key,
+                agent_proposals.created_at, agent_proposals.decided_at
            FROM agent_proposals
-          WHERE ${clauses.join(' AND ')}
-          ORDER BY created_at ASC, id ASC`,
+           LEFT JOIN widget_action_log ON widget_action_log.proposal_id = agent_proposals.id
+          WHERE ${clauses.join(' AND ')} AND widget_action_log.proposal_id IS NULL
+          ORDER BY agent_proposals.created_at ASC, agent_proposals.id ASC`,
       )
       .all(...params) as ProposalRow[];
     return rows.map((row) => this.toProposal(row));
