@@ -38,6 +38,7 @@ import type { RunEventBridge, BridgeEventsOptions } from './runEventBridge';
 import { bridgeEvents as bridgeEventsImpl } from './runEventBridge';
 import type { StreamEventPublisher } from './runLauncher';
 import { rollupRunUsage } from './runUsageRollup';
+import { GateSideEffects } from './gateSideEffects';
 import { resolveRunAgentPermissionMode } from './permissionModeResolver';
 import { resolveRunFrozenSpec } from './runFrozenSpec';
 import { buildSeedTasksBlock } from './seedTasksBlock';
@@ -2330,6 +2331,45 @@ export class RunExecutor {
     // re-decide. AWAITed so the close-out completes before teardown; fail-soft
     // inside the helper.
     await this.compoundFindingsCloseOut(runId, phase);
+
+    // Design/brief gate settle reconciliation. A launch/planner/ship run that
+    // came to REST (phase 'drained' — the clean end, where the run parks in
+    // awaiting_review) re-runs the idempotent durable writes its gates should
+    // already have made: the approved prototype bound to each owned idea, and the
+    // project's solution thoroughness stamped from the brief.
+    //
+    // It exists for the paths no gate resolution covers. The ORCHESTRATED plane
+    // answers its single-idea design gate with an inline AskUserQuestion that
+    // never becomes a review item, so nothing server-side ever observes that
+    // approval; and a crash between a resolve and its side effect leaves the same
+    // hole. Both converge here.
+    //
+    // 'drained' ONLY — deliberately not failed/canceled. Binding a design for a
+    // run that died is asserting an approval that never happened. Files no
+    // findings either (see GateSideEffects.reconcileAtSettle): a settle is a
+    // machine noticing the run ended, not a human accepting a risk.
+    await this.reconcileGateSideEffects(runId, phase);
+  }
+
+  /**
+   * Terminal-seam dispatch to {@link GateSideEffects.reconcileAtSettle}.
+   *
+   * Skips every non-resting phase, and no-ops entirely when boot has not wired the
+   * singleton (tests that construct a RunExecutor directly). The reconciliation is
+   * itself fail-soft and never throws; this seam adds only the phase gate.
+   */
+  private async reconcileGateSideEffects(runId: string, phase: ExecutionPhase): Promise<void> {
+    if (phase !== 'drained') return;
+    const sideEffects = GateSideEffects.tryGetInstance();
+    if (!sideEffects) return;
+    try {
+      await sideEffects.reconcileAtSettle(runId);
+    } catch (err) {
+      this.logger.warn('[RunExecutor] gate side-effect reconciliation failed (fail-soft)', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**

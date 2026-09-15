@@ -131,6 +131,7 @@ import { ArtifactRouter } from './orchestrator/artifactRouter';
 import { setRunArtifactsDirResolver } from './orchestrator/autoMintArtifacts';
 import { resolveArtifactCommitDir } from './orchestrator/artifactSnapshot';
 import { DesignHandoffService } from './orchestrator/design/designHandoffService';
+import { GateSideEffects, gateDecisionFromResolution } from './orchestrator/gateSideEffects';
 import { recoverDesignHandoffs } from './orchestrator/design/designHandoffRecovery';
 import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
@@ -3583,7 +3584,33 @@ async function initializeServices(): Promise<boolean> {
         void buildStepTransitionEvent(runId, stepId, status, cyboflowDb, cyboflowLogger),
     },
     gate: new ReviewQueueHumanGate(
-      HumanStepManager.getInstance(),
+      // The opener is HumanStepManager plus ONE extra hook. `onGateResolved` is
+      // awaited inside ReviewQueueHumanGate.settleResumed BEFORE the gate promise
+      // resolves — the single seam the controller genuinely waits on, which is why
+      // the design bind lands here rather than after resolveReviewItem returns.
+      // Anything hung off the resolve would race the resumed walk: the review-item
+      // router's 'resolved' emit fires synchronously inside it and is what wakes
+      // the gate, so by the time the resolve returns the next step is already
+      // spawning and its `cyboflow_get_task` may see no approved_design at all.
+      // GateSideEffects.apply is idempotent and never throws, so awaiting it here
+      // can never hang a run at a gate the human already answered.
+      {
+        openHumanGate: (runId, stepId, stepName) =>
+          HumanStepManager.getInstance().openHumanGate(runId, stepId, stepName),
+        findPendingGate: (runId, stepId) => HumanStepManager.getInstance().findPendingGate(runId, stepId),
+        maybeResumeRun: (runId) => HumanStepManager.getInstance().maybeResumeRun(runId),
+        onGateResolved: (args) =>
+          GateSideEffects.getInstance().apply({
+            runId: args.runId,
+            stepId: args.stepId,
+            // The opener reports the raw resolution note; the same sniff the
+            // controller's own parseGateVerdict uses turns it into the verdict. A
+            // DISMISSED gate is a rejection (the resolver itself maps it so) — its
+            // null note must never sniff to 'approve' and bind a declined design.
+            decision: args.dismissed ? 'reject' : gateDecisionFromResolution(args.resolution),
+            resolution: args.resolution,
+          }),
+      },
       reviewItemChangeEvents,
       reviewItemProjectChannel,
       cyboflowLogger,
@@ -4624,6 +4651,39 @@ async function initializeServices(): Promise<boolean> {
     db: cyboflowDb,
     loadPrototypeHtml: (runId: string, atype: string) => loadCanonicalPrototypeHtml(services, runId, atype),
     snapshotBaseDir: getCyboflowSubdirectory('design-snapshots'),
+    logger: cyboflowLogger,
+  });
+  // Design/brief GATE side effects — the one place a human's "approve" at an
+  // approve-ideas / approve-design / approve-brief gate becomes durable state:
+  // the run's prototype bound to each approved idea as an `approved_designs` row
+  // (which survives the run's artifact cascade delete, unlike the artifact
+  // itself), the project's solution thoroughness stamped from the brief, and the
+  // adversarial reviewer's remaining entries logged as accepted-risk findings.
+  //
+  // A singleton for the same reason DesignHandoffService is one: three call sites
+  // reach it — the programmatic gate opener below, `resolveReviewItem` for the
+  // orchestrated plane, and runExecutor's settle — and two of those build their
+  // dependency bags in separate files. Threaded as an optional dep instead, it
+  // would compile at both and silently do nothing at one.
+  //
+  // Wired HERE (after DesignHandoffService) so it shares the SAME snapshot tree
+  // and prototype-byte reader: a flow-bound design and a Design Mode approval must
+  // be readable through one path. It initializes AFTER ReviewItemRouter /
+  // IdeaComponentRouter, whose getInstance() it captures.
+  GateSideEffects.initialize({
+    db: cyboflowDb,
+    snapshotBaseDir: getCyboflowSubdirectory('design-snapshots'),
+    loadPrototypeHtml: (runId: string, atype: string) => loadCanonicalPrototypeHtml(services, runId, atype),
+    ideaComponentRouter: IdeaComponentRouter.getInstance(),
+    reviewItemRouter: ReviewItemRouter.getInstance(),
+    // Reuses the EXISTING project-changed channel (the same one projects:update
+    // emits on) so the renderer refetches a thoroughness stamp with no new
+    // listener — and, critically, no new ipcMain.handle, which the
+    // noNewIpcHandlers ratchet would freeze.
+    emitProjectUpdated: (projectId: number) => {
+      const project = databaseService.getProject(projectId);
+      if (project) sessionManager.emit('project:updated', project);
+    },
     logger: cyboflowLogger,
   });
   // Design Mode v1 (design-mode.md "Design feedback v1 — acknowledged durable
