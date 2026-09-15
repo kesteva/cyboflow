@@ -1,7 +1,7 @@
 /**
- * Unit tests for CustomViewsDbStore (migration 132,
+ * Unit tests for CustomViewsDbStore (migration 133,
  * docs/proposals/CUSTOM-VIEWS.md §3.3) against a real better-sqlite3 temp
- * file DB with migration 132 applied directly (mirrors
+ * file DB with migration 133 applied directly (mirrors
  * agentThreadDbStore.test.ts's targeted-migration-file technique).
  *
  * `user_preferences` is created IMPERATIVELY by DatabaseService
@@ -18,7 +18,7 @@ import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { CustomViewsStoreError } from '../types';
 import type { ViewLayout, WidgetSpec } from '../../../../../shared/types/customViews';
 
-const MIGRATION_132 = readFileSync(join(__dirname, '..', '..', '..', 'database', 'migrations', '132_custom_views.sql'), 'utf-8');
+const MIGRATION_133 = readFileSync(join(__dirname, '..', '..', '..', 'database', 'migrations', '133_custom_views.sql'), 'utf-8');
 
 // Mirrors database.ts's imperative user_preferences DDL exactly.
 const USER_PREFERENCES_DDL = `
@@ -33,7 +33,7 @@ const USER_PREFERENCES_DDL = `
 
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
-  db.exec(MIGRATION_132);
+  db.exec(MIGRATION_133);
   db.exec(USER_PREFERENCES_DDL);
   return db;
 }

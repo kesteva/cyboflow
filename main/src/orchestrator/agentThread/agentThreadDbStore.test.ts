@@ -33,7 +33,7 @@ const MIGRATION =
   ) +
   '\n' +
   readFileSync(
-    join(__dirname, '..', '..', 'database', 'migrations', '132_custom_views.sql'),
+    join(__dirname, '..', '..', 'database', 'migrations', '133_custom_views.sql'),
     'utf-8',
   );
 
@@ -318,7 +318,7 @@ describe('AgentThreadDbStore', () => {
         threadId: 'thread-1',
         payload: { kind: 'launch-run', projectId: 1, workflowName: 'planner' },
       });
-      // migration 132's widget_action_log side table marks p2-widget as
+      // migration 133's widget_action_log side table marks p2-widget as
       // widget-originated without touching agent_proposals itself.
       db.prepare(
         `INSERT INTO widget_action_log (proposal_id, operation_id, view_id, view_revision, instance_id, action_id)
