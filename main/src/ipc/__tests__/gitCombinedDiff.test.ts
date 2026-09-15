@@ -245,3 +245,35 @@ describe('sessionGit ops getCombinedDiff (async git plumbing, real repo)', () =>
     });
   });
 });
+
+describe("sessionGit ops getCombinedDiff scope: 'untracked' — symlink containment (SEC-9)", () => {
+  it.runIf(process.platform !== 'win32')(
+    'an untracked symlink to a file outside the worktree is not rendered into the scoped blob',
+    async () => {
+      await withTempDir('combined-diff-symlink-outside-', async (outside) => {
+        const secretPath = path.join(outside, 'secret.txt');
+        fs.writeFileSync(secretPath, 'SUPER-SECRET-TOKEN-do-not-leak\n');
+
+        await withTempDir('combined-diff-symlink-repo-', async (repo) => {
+          initRepoMain(repo);
+          commitFile(repo, 'a.txt', 'a1\n', 'base');
+          fs.symlinkSync(secretPath, path.join(repo, 'leak.txt'));
+          fs.writeFileSync(path.join(repo, 'real.txt'), 'r1\n');
+
+          const ops = createGitOps(makeServices(repo));
+          const result = (await ops.getCombinedDiff({ sessionId: 's1', scope: 'untracked' })) as {
+            success: boolean;
+            data: { diff: string; stats: { additions: number } };
+          };
+
+          expect(result.success).toBe(true);
+          expect(result.data.diff).not.toContain('SUPER-SECRET-TOKEN');
+          expect(result.data.diff).not.toContain('+++ b/leak.txt');
+          expect(result.data.diff).toContain('+++ b/real.txt');
+          // real.txt = "r1\n" → 2 split elements; the link adds nothing.
+          expect(result.data.stats.additions).toBe(2);
+        });
+      });
+    },
+  );
+});

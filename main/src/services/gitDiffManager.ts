@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { runGitAsync, END_OF_OPTIONS, assertNotOptionLike } from '../utils/runGit';
 import type { Logger } from '../utils/logger';
 import { GitOperationalError } from './gitPlumbingCommands';
@@ -38,6 +39,37 @@ export interface DiffGroupsResult {
  * main process for as long as the file takes to load.
  */
 const MAX_UNTRACKED_READ_BYTES = 1024 * 1024;
+
+/**
+ * Read one untracked file's content for diff synthesis / line counting, or
+ * `null` when it must be skipped (symlink or other non-regular file, oversize,
+ * unreadable, missing).
+ *
+ * Symlink containment: `git ls-files --others` lists an untracked symlink as
+ * an entry, and `statSync`/`readFileSync` FOLLOW it — so an untracked link
+ * pointing at `~/.ssh/id_ed25519` or `/etc/passwd` would have that target's
+ * contents rendered into the returned diff blob and shipped to the renderer.
+ * `lstatSync` inspects the link itself, and only a regular file is read. Git
+ * does not descend into symlinked directories for `--others` (it lists the
+ * link), so guarding the leaf is sufficient. This is the ONE read path every
+ * untracked-content consumer (in this file and in ipc/gitOps.ts's scoped-blob
+ * builder) goes through, so the guard cannot drift between them.
+ */
+export function readUntrackedFileContent(worktreePath: string, relPath: string): string | null {
+  try {
+    const filePath = path.join(worktreePath, relPath);
+    const stat = fs.lstatSync(filePath);
+    if (!stat.isFile()) return null;
+    // Pre-flight size check matches the previous `maxBuffer: 1MB` bound from
+    // execSync — large files are skipped to avoid OOM / event-loop stalls.
+    if (stat.size > MAX_UNTRACKED_READ_BYTES) return null;
+    // Read the file directly — no shell involved, so filenames with $(...) /
+    // backticks / ${...} cannot inject commands.
+    return fs.readFileSync(filePath, 'utf8');
+  } catch {
+    return null;
+  }
+}
 
 export interface GitCommit {
   hash: string;
@@ -475,21 +507,13 @@ export class GitDiffManager {
     const fileStats: Record<string, { additions: number; deletions: number }> = {};
     for (const file of files) {
       if (!file || file.trim().length === 0) continue;
-      try {
-        const cleanFile = file.trim();
-        const filePath = `${worktreePath}/${cleanFile}`;
-        const stat = fs.statSync(filePath);
-        // Mirrors createDiffForUntrackedFiles: an oversize file is omitted
-        // from the diff blob entirely, so it contributes 0 here too.
-        if (stat.size > MAX_UNTRACKED_READ_BYTES) continue;
-        const content = fs.readFileSync(filePath, 'utf8');
-        const lines = content.split('\n').length;
-        additions += lines;
-        fileStats[file] = { additions: lines, deletions: 0 };
-      } catch {
-        // Skip files that can't be read (binary, permission denied, missing, etc.),
-        // mirroring createDiffForUntrackedFiles.
-      }
+      // Mirrors createDiffForUntrackedFiles: an oversize / symlink / unreadable
+      // file is omitted from the diff blob entirely, so it contributes 0 here too.
+      const content = readUntrackedFileContent(worktreePath, file.trim());
+      if (content === null) continue;
+      const lines = content.split('\n').length;
+      additions += lines;
+      fileStats[file] = { additions: lines, deletions: 0 };
     }
     return { scope: 'untracked', files, additions, deletions: 0, fileStats };
   }
@@ -1052,22 +1076,16 @@ export class GitDiffManager {
         continue;
       }
 
-      try {
-        const cleanFile = file.trim();
-        const filePath = `${worktreePath}/${cleanFile}`;
-        if (fs.statSync(filePath).size > MAX_UNTRACKED_READ_BYTES) {
-          this.logger?.verbose(`Skipping line count for oversize untracked file ${cleanFile}`);
-          continue;
-        }
-        // Read the file directly — no shell involved, so filenames with $(...) /
-        // backticks / ${...} cannot inject commands. Use 'utf8' to mirror the
-        // semantics of `wc -l`, which counts newline characters in text mode.
-        const content = fs.readFileSync(filePath, 'utf8');
-        // `wc -l` counts \n occurrences; match that exactly.
-        untrackedAdditions += (content.match(/\n/g) || []).length;
-      } catch {
-        // Skip files that can't be read (binary, permission denied, missing, etc.)
+      const cleanFile = file.trim();
+      // 'utf8' mirrors the semantics of `wc -l`, which counts newline
+      // characters in text mode. Oversize / symlink / unreadable → skipped.
+      const content = readUntrackedFileContent(worktreePath, cleanFile);
+      if (content === null) {
+        this.logger?.verbose(`Skipping line count for untracked file ${cleanFile}`);
+        continue;
       }
+      // `wc -l` counts \n occurrences; match that exactly.
+      untrackedAdditions += (content.match(/\n/g) || []).length;
     }
     return untrackedAdditions;
   }
@@ -1084,39 +1102,41 @@ export class GitDiffManager {
         continue;
       }
 
-      try {
-        const cleanFile = file.trim();
-        const filePath = `${worktreePath}/${cleanFile}`;
-        // Pre-flight size check matches the previous `maxBuffer: 1MB` bound from
-        // execSync — large files are skipped (caught below) to avoid OOM.
-        const stat = fs.statSync(filePath);
-        if (stat.size > MAX_UNTRACKED_READ_BYTES) {
-          throw new Error(`File too large: ${stat.size} bytes`);
-        }
-        const fileContent = fs.readFileSync(filePath, 'utf8');
-
-        // Create a diff-like format for the new file
-        diffOutput += `diff --git a/${cleanFile} b/${cleanFile}\n`;
-        diffOutput += `new file mode 100644\n`;
-        diffOutput += `index 0000000..0000000\n`;
-        diffOutput += `--- /dev/null\n`;
-        diffOutput += `+++ b/${cleanFile}\n`;
-
-        // Add the file content with '+' prefix for each line
-        const lines = fileContent.split('\n');
-        if (lines.length > 0) {
-          diffOutput += `@@ -0,0 +1,${lines.length} @@\n`;
-          for (const line of lines) {
-            diffOutput += `+${line}\n`;
-          }
-        }
-      } catch (error) {
-        // Skip files that can't be read (binary, oversize, permission denied, missing, etc.)
-        const cleanFile = file.trim();
-        this.logger?.verbose(`Could not read untracked file ${cleanFile}: ${error}`);
+      const cleanFile = file.trim();
+      const fileContent = readUntrackedFileContent(worktreePath, cleanFile);
+      if (fileContent === null) {
+        // Skip files that can't be read (symlink, binary, oversize, permission
+        // denied, missing, etc.)
+        this.logger?.verbose(`Could not read untracked file ${cleanFile}; omitted from diff`);
+        continue;
       }
+      diffOutput += createUntrackedFileDiffBlock(cleanFile, fileContent);
     }
 
     return diffOutput;
   }
+}
+
+/**
+ * Synthesize the `git diff`-shaped block for one untracked file: every line
+ * is an addition (one `+` row per `split('\n')` element — this is the count
+ * the frontend's parseFileHunks derives from the blob, and what getDiffGroups'
+ * untracked rollup must agree with). Shared with ipc/gitOps.ts's per-scope
+ * blob builder so the two never drift in header or hunk shape.
+ */
+export function createUntrackedFileDiffBlock(relPath: string, content: string): string {
+  let block = '';
+  block += `diff --git a/${relPath} b/${relPath}\n`;
+  block += `new file mode 100644\n`;
+  block += `index 0000000..0000000\n`;
+  block += `--- /dev/null\n`;
+  block += `+++ b/${relPath}\n`;
+  const lines = content.split('\n');
+  if (lines.length > 0) {
+    block += `@@ -0,0 +1,${lines.length} @@\n`;
+    for (const line of lines) {
+      block += `+${line}\n`;
+    }
+  }
+  return block;
 }

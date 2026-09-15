@@ -25,8 +25,13 @@
  * status snapshot in hand that contains no conflicted entry — an absent
  * snapshot (still loading, or the fetch failed) disables it rather than being
  * treated as "clean" — and the same check is re-run inside submission against
- * the LATEST snapshot, so a dialog opened earlier can never `git add -A` a
- * tree that has since turned conflicted.
+ * the LATEST snapshot. That is a UX courtesy, not the guarantee: the snapshot
+ * is only as fresh as the panel's last fetch, and an agent can conflict the
+ * tree between the dialog opening and submit. The AUTHORITATIVE guard is the
+ * `sessionGit.commit` op itself, which probes the live index
+ * (`git diff --diff-filter=U`) immediately before `git add -A` and returns
+ * `{ success: false, error }` on any unmerged path — surfaced here through
+ * CommitDialog exactly like any other commit failure.
  */
 import { useCallback, useState } from 'react';
 import type { ReactElement } from 'react';

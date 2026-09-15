@@ -27,6 +27,7 @@ import { PanelEventType, ToolPanelType, PanelEvent } from '../../../shared/types
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
 import type { Session } from '../types/session';
 import type { GitCommit } from '../services/gitDiffManager';
+import { readUntrackedFileContent, createUntrackedFileDiffBlock } from '../services/gitDiffManager';
 import type { ExecException } from 'child_process';
 import { TaskChangeRouter } from '../orchestrator/taskChangeRouter';
 import { ArtifactRouter } from '../orchestrator/artifactRouter';
@@ -48,14 +49,6 @@ import * as path from 'path';
 
 // Extended type for git system virtual panels
 type SystemPanelType = ToolPanelType | 'git';
-
-/**
- * Largest untracked file getCombinedDiff's own `scope: 'untracked'` blob
- * builder will read whole — mirrors GitDiffManager.MAX_UNTRACKED_READ_BYTES
- * (gitDiffManager.ts, private, do-not-touch per TASK-212's boundary), so the
- * two never disagree on what counts as "too large to render".
- */
-const MAX_UNTRACKED_READ_BYTES = 1024 * 1024;
 
 // Interface for custom git errors that contain additional context
 interface GitError extends Error {
@@ -682,27 +675,13 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
         for (const file of files) {
           const cleanFile = file.trim();
           if (!cleanFile) continue;
-          try {
-            const filePath = path.join(worktreePath, cleanFile);
-            const stat = fs.statSync(filePath);
-            if (stat.size > MAX_UNTRACKED_READ_BYTES) continue;
-            const content = fs.readFileSync(filePath, 'utf8');
-            diff += `diff --git a/${cleanFile} b/${cleanFile}\n`;
-            diff += `new file mode 100644\n`;
-            diff += `index 0000000..0000000\n`;
-            diff += `--- /dev/null\n`;
-            diff += `+++ b/${cleanFile}\n`;
-            const lines = content.split('\n');
-            additions += lines.length;
-            if (lines.length > 0) {
-              diff += `@@ -0,0 +1,${lines.length} @@\n`;
-              for (const line of lines) diff += `+${line}\n`;
-            }
-          } catch {
-            // Skip files that can't be read (binary, oversize, permission
-            // denied, missing, etc.), mirroring
-            // GitDiffManager.createDiffForUntrackedFiles.
-          }
+          // The shared reader refuses symlinks / non-regular / oversize files
+          // (returns null) — an untracked link to a file outside the worktree
+          // must never have its target's contents rendered into the blob.
+          const content = readUntrackedFileContent(worktreePath, cleanFile);
+          if (content === null) continue;
+          additions += content.split('\n').length;
+          diff += createUntrackedFileDiffBlock(cleanFile, content);
         }
         return { diff, stats: { additions, deletions: 0, filesChanged: files.length }, changedFiles: files };
       }
@@ -811,6 +790,25 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
 
       if (!status) {
         return { success: false, error: 'No changes to commit' };
+      }
+
+      // Refuse to stage a conflicted tree. `git add -A` happily stages files
+      // still carrying `<<<<<<<` markers and the commit below then records
+      // them. The renderer's WorktreeStrip disables Commit on a conflicted
+      // snapshot, but that snapshot is only as fresh as its last fetch — an
+      // agent can drive the tree into a conflict between the dialog opening
+      // and submit — so the authoritative check is HERE, at the mutation
+      // boundary, against the live index. Same probe as
+      // fastCheckWorkingDirectory (gitPlumbingCommands.ts).
+      const conflicted = runGit(session.worktreePath, ['diff', '--name-only', '--diff-filter=U'])
+        .trim()
+        .split('\n')
+        .filter(Boolean);
+      if (conflicted.length > 0) {
+        return {
+          success: false,
+          error: `Resolve conflicts before committing (${conflicted.length} unmerged: ${conflicted.slice(0, 5).join(', ')}${conflicted.length > 5 ? ', …' : ''})`,
+        };
       }
 
       // Stage all changes

@@ -961,3 +961,65 @@ describe('GitDiffManager.getDiffGroups', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Security: untracked symlink containment (eval SEC-9)
+// ---------------------------------------------------------------------------
+
+describe('GitDiffManager — untracked symlinks never leak their target (SEC-9)', () => {
+  // Symlink creation needs a privilege on Windows; the guard itself is
+  // platform-neutral (lstat), so cover it where a link can be made freely.
+  it.runIf(process.platform !== 'win32')(
+    'an untracked symlink to a file OUTSIDE the worktree contributes nothing to the diff blob, stats, or untracked rollup',
+    async () => {
+      await withTempDir('gitdiff-symlink-outside-', async (outside) => {
+        const secretPath = path.join(outside, 'secret.txt');
+        const SECRET = 'SUPER-SECRET-TOKEN-do-not-leak\n';
+        fs.writeFileSync(secretPath, SECRET);
+
+        await withTempDir('gitdiff-symlink-repo-', async (repo) => {
+          initRepoMain(repo);
+          commitFile(repo, 'a.txt', 'a\n', 'base');
+          fs.symlinkSync(secretPath, path.join(repo, 'leak.txt'));
+          // A genuine untracked file alongside it, so the path is exercised.
+          fs.writeFileSync(path.join(repo, 'real.txt'), 'r1\nr2\n');
+
+          const manager = new GitDiffManager();
+
+          // Blob (captureWorkingDirectoryDiff → createDiffForUntrackedFiles).
+          const blob = await manager.captureWorkingDirectoryDiff(repo);
+          expect(blob.diff).not.toContain('SUPER-SECRET-TOKEN');
+          expect(blob.diff).not.toContain('+++ b/leak.txt');
+          expect(blob.diff).toContain('+++ b/real.txt');
+
+          // Rollup (getDiffGroups → getUntrackedGroup): the link contributes
+          // no additions; only real.txt's 3 split-elements count.
+          const groups = await manager.getDiffGroups(repo, null);
+          const untracked = groups.groups.find((g) => g.scope === 'untracked')!;
+          expect(untracked.fileStats?.['leak.txt']).toBeUndefined();
+          expect(untracked.fileStats?.['real.txt']).toEqual({ additions: 3, deletions: 0 });
+          expect(untracked.additions).toBe(3);
+        });
+      });
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'an untracked symlink to a file INSIDE the worktree is also skipped (only regular files are read)',
+    async () => {
+      await withTempDir('gitdiff-symlink-inside-', async (repo) => {
+        initRepoMain(repo);
+        commitFile(repo, 'a.txt', 'a\n', 'base');
+        fs.writeFileSync(path.join(repo, 'target.txt'), 'INSIDE-TARGET\n');
+        fs.symlinkSync(path.join(repo, 'target.txt'), path.join(repo, 'link.txt'));
+
+        const manager = new GitDiffManager();
+        const blob = await manager.captureWorkingDirectoryDiff(repo);
+        // target.txt itself is rendered once; the link is not rendered at all.
+        expect(blob.diff).toContain('+++ b/target.txt');
+        expect(blob.diff).not.toContain('+++ b/link.txt');
+        expect(blob.diff.match(/INSIDE-TARGET/g) ?? []).toHaveLength(1);
+      });
+    },
+  );
+});
