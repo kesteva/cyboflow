@@ -21,6 +21,12 @@ real ordering constraint, for example:
 - **Foundation first** — B lays groundwork (schema, shared util, config) that A
   builds on per the acceptance criteria.
 
+- **Executability** — a prerequisite whose `executor` is `human` is recorded
+  exactly like any other blocking edge: it is truth about the work, and the
+  board needs it. It never gates a lane, though, so do not reorder agent work
+  around it, do not treat its dependents as blocked, and never propose a human
+  task as a lane of its own.
+
 Do **NOT** propose an edge when two tasks are independent — independent tasks run in
 parallel, which is the whole point of the sprint. When in doubt, leave tasks
 unordered. Keep the graph **acyclic**: never propose A → B and B → A.
