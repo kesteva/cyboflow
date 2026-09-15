@@ -319,11 +319,11 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     // spawn. The fake spawner cannot distinguish a prompt-directed optional skip.
     const stepPrompts = spawner.calls.map((c) => c.prompt);
     expect(spawner.calls).toHaveLength(7);
-    expect(stepPrompts.some((p) => p.includes('`context`'))).toBe(true);
-    expect(stepPrompts.some((p) => p.includes('`expand-spec`'))).toBe(true);
-    expect(stepPrompts.some((p) => p.includes('`adversarial-review`'))).toBe(true);
-    expect(stepPrompts.some((p) => p.includes('`epics`'))).toBe(true);
-    expect(stepPrompts.some((p) => p.includes('`tasks`'))).toBe(true);
+    expect(stepPrompts.some((p) => p.includes('(id: `context`)'))).toBe(true);
+    expect(stepPrompts.some((p) => p.includes('(id: `expand-spec`)'))).toBe(true);
+    expect(stepPrompts.some((p) => p.includes('(id: `adversarial-review`)'))).toBe(true);
+    expect(stepPrompts.some((p) => p.includes('(id: `epics`)'))).toBe(true);
+    expect(stepPrompts.some((p) => p.includes('(id: `tasks`)'))).toBe(true);
 
     // All four human gates were opened AND resolved (approve-idea +
     // approve-design + approve-plan + decompose).
@@ -364,7 +364,7 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     await expect(runner.run(ctxFor('run-rej'))).resolves.toBeUndefined();
 
     // The run did not reach the refine phase (epics never spawned).
-    expect(spawner.calls.some((c) => c.prompt.includes('`epics`'))).toBe(false);
+    expect(spawner.calls.some((c) => c.prompt.includes('(id: `epics`)'))).toBe(false);
 
     // A REJECTED gate rests awaiting the human's decision — it reports 'done', NOT
     // a 'failed'/'skipped' marker (decision 2 collapse). No persisted step_transition
@@ -392,7 +392,7 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
       calls: [],
       spawnCliProcess: vi.fn(async (o: ClaudeSpawnerOptions) => {
         spawner.calls.push(o);
-        if (o.prompt.includes('`context`') && !contextFailed) {
+        if (o.prompt.includes('(id: `context`)') && !contextFailed) {
           contextFailed = true;
           throw new Error('context step blew up');
         }
@@ -422,7 +422,7 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     // The context agent was attempted and failed; the run still completed (the
     // failure was escalated to the human queue and approved → skipped → advanced).
     expect(contextFailed).toBe(true);
-    expect(spawner.calls.some((c) => c.prompt.includes('`epics`'))).toBe(true); // reached refine phase
+    expect(spawner.calls.some((c) => c.prompt.includes('(id: `epics`)'))).toBe(true); // reached refine phase
     const finalStep = db.prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?').get('run-esc') as {
       current_step_id: string | null;
     };
@@ -455,7 +455,7 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
       calls: [],
       spawnCliProcess: vi.fn(async (o: ClaudeSpawnerOptions) => {
         spawner.calls.push(o);
-        if (o.prompt.includes('`epics`') && epicsFails === 0) {
+        if (o.prompt.includes('(id: `epics`)') && epicsFails === 0) {
           epicsFails += 1;
           throw new Error('epics transient blip');
         }
@@ -489,7 +489,7 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     // The monitor was consulted for the epics failure and chose retry → the run
     // completed (epics ran twice) rather than failing or escalating.
     expect(monitor.triage).toHaveBeenCalledTimes(1);
-    expect(spawner.calls.filter((c) => c.prompt.includes('`epics`')).length).toBe(2);
+    expect(spawner.calls.filter((c) => c.prompt.includes('(id: `epics`)')).length).toBe(2);
     const finalStep = db.prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?').get('run-sdk') as {
       current_step_id: string | null;
     };
@@ -519,10 +519,10 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     // must NOT re-run; the walk completes from 'epics' onward.
     await expect(runner.run({ ...ctxFor('run-res'), resumeFromStepId: 'epics' })).resolves.toBeUndefined();
 
-    expect(spawner.calls.some((c) => c.prompt.includes('`context`'))).toBe(false); // skipped
-    expect(spawner.calls.some((c) => c.prompt.includes('`expand-spec`'))).toBe(false); // skipped
-    expect(spawner.calls.some((c) => c.prompt.includes('`adversarial-review`'))).toBe(false); // skipped
-    expect(spawner.calls.some((c) => c.prompt.includes('`epics`'))).toBe(true); // resumed here
+    expect(spawner.calls.some((c) => c.prompt.includes('(id: `context`)'))).toBe(false); // skipped
+    expect(spawner.calls.some((c) => c.prompt.includes('(id: `expand-spec`)'))).toBe(false); // skipped
+    expect(spawner.calls.some((c) => c.prompt.includes('(id: `adversarial-review`)'))).toBe(false); // skipped
+    expect(spawner.calls.some((c) => c.prompt.includes('(id: `epics`)'))).toBe(true); // resumed here
     const finalStep = db.prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?').get('run-res') as {
       current_step_id: string | null;
     };
@@ -559,7 +559,7 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     // which we just removed) → zero leaked listeners.
     expect(reviewItemChangeEvents.listenerCount(reviewItemProjectChannel(1))).toBe(0);
     // The run never advanced past the plan phase into refine.
-    expect(spawner.calls.some((c) => c.prompt.includes('`epics`'))).toBe(false);
+    expect(spawner.calls.some((c) => c.prompt.includes('(id: `epics`)'))).toBe(false);
   });
 });
 
@@ -596,11 +596,15 @@ describe('programmatic integration — host-driven fanOut walk drives lanes to i
     await expect(runner.run(fanOutCtx('run-fan', specJson, 'batch-fan'))).resolves.toBeUndefined();
 
     // resolveItems is consulted for the fanOut step keyed 'tasks': once by the
-    // controller to enter fan-out, then RE-RESOLVED at each wave boundary (the
-    // add_task/remove_task live-steering enabler). This 3-item batch fits one wave
-    // (≤ cap, no deps), so it is exactly two calls — the entry resolve + one
-    // wave-boundary re-resolution — both keyed 'tasks'.
+    // controller to enter fan-out, then RE-RESOLVED at every iteration of the
+    // rolling dispatch pool (the add_task/remove_task live-steering enabler).
+    // The pool iterates once per lane SETTLE rather than once per wave — that is
+    // what lets a lane added mid-run take the next free slot instead of waiting
+    // for a batch boundary — so a 3-lane batch is the entry resolve plus one
+    // re-resolution per settle: four calls, all keyed 'tasks'.
     expect(driver.resolveCalls).toEqual([
+      { runId: 'run-fan', over: 'tasks' },
+      { runId: 'run-fan', over: 'tasks' },
       { runId: 'run-fan', over: 'tasks' },
       { runId: 'run-fan', over: 'tasks' },
     ]);

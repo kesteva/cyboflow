@@ -696,6 +696,15 @@ export interface ControllerHost {
    */
   reportVerificationSkipped?(input: { runId: string; laneTaskRef: string; reason: string; detail?: string }): void;
 
+  /**
+   * Optional wall clock, for the one place the controller needs one: the
+   * fan-out pool's corroboration window (SAME_ERROR_COHORT_MAX_MS), which bounds
+   * how long a lane's 'failed' write is held waiting for a sibling to corroborate
+   * it. Absent ⇒ `Date.now()`. Exists so a test can advance the ceiling without
+   * faking timers around real agent promises.
+   */
+  now?(): number;
+
   /** Optional structured log sink; absent ⇒ the controller stays silent. */
   log?(level: 'info' | 'warn' | 'error', message: string): void;
 }
