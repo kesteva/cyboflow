@@ -8,6 +8,7 @@
 import { router } from './trpc';
 import { agentThreadRouter } from './routers/agentThread';
 import { agentsRouter } from './routers/agents';
+import { claudeAuthRouter } from './routers/claudeAuth';
 import { configRouter } from './routers/config';
 import { designRouter } from './routers/design';
 import { runsRouter } from './routers/runs';
@@ -47,6 +48,7 @@ export const appRouter = router({
     approvals: approvalsRouter,
     design: designRouter,
     artifacts: artifactsRouter,
+    claudeAuth: claudeAuthRouter,
     config: configRouter,
     dynamicWorkflows: dynamicWorkflowsRouter,
     events: eventsRouter,
