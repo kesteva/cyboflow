@@ -88,6 +88,7 @@ function makeIdea(overrides: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
     body: null,
     priority: 'P1',
     category: 'feature',
+    executor: 'agent',
     repo: null,
     parent_epic_id: null,
     originating_idea_id: null,
@@ -451,3 +452,66 @@ describe('TaskCard matched-child evidence', () => {
     expect(screen.queryByTestId('matched-child-evidence')).not.toBeInTheDocument();
   });
 });
+
+describe('TaskCard human executor (migration 137)', () => {
+  it('renders the Human badge for an executor=human task', () => {
+    render(
+      <BoardCard
+        task={makeIdea({ type: 'task', ref: 'TASK-009', executor: 'human' })}
+        onRun={onRun}
+        launchingTaskId={null}
+        now={Date.now()}
+      />,
+    );
+    expect(screen.getByTestId('executor-badge')).toHaveTextContent('Human');
+  });
+
+  it('renders NO badge for the agent default — almost every task is one', () => {
+    render(
+      <BoardCard
+        task={makeIdea({ type: 'task', ref: 'TASK-010' })}
+        onRun={onRun}
+        launchingTaskId={null}
+        now={Date.now()}
+      />,
+    );
+    expect(screen.queryByTestId('executor-badge')).not.toBeInTheDocument();
+  });
+
+  it('surfaces a human prerequisite as neutral prose, naming every ref', () => {
+    const { rerender } = render(
+      <BoardCard
+        task={makeIdea({ type: 'task', ref: 'TASK-011', waitingOnHuman: ['TASK-009'] })}
+        onRun={onRun}
+        launchingTaskId={null}
+        now={Date.now()}
+      />,
+    );
+    expect(screen.getByTestId('waiting-on-human')).toHaveTextContent('waits on TASK-009 (human)');
+
+    rerender(
+      <BoardCard
+        task={makeIdea({ type: 'task', ref: 'TASK-011', waitingOnHuman: ['TASK-008', 'TASK-009'] })}
+        onRun={onRun}
+        launchingTaskId={null}
+        now={Date.now()}
+      />,
+    );
+    expect(screen.getByTestId('waiting-on-human')).toHaveTextContent(
+      'waits on TASK-008, TASK-009 (human)',
+    );
+  });
+
+  it('renders nothing when there are no human prerequisites', () => {
+    render(
+      <BoardCard
+        task={makeIdea({ type: 'task', ref: 'TASK-012', waitingOnHuman: [] })}
+        onRun={onRun}
+        launchingTaskId={null}
+        now={Date.now()}
+      />,
+    );
+    expect(screen.queryByTestId('waiting-on-human')).not.toBeInTheDocument();
+  });
+});
+

@@ -51,6 +51,7 @@ import {
   PriorityTag,
   CategoryTag,
   ScopeTag,
+  ExecutorBadge,
   ArchivedChip,
   ExperimentBadge,
   ProjectChip,
@@ -373,6 +374,8 @@ export function TaskBody({
         <PriorityTag priority={task.priority} />
         <CategoryTag category={task.category} />
         {task.scope !== null && <ScopeTag scope={task.scope} />}
+        {/* Human task (migration 137) — no badge on the 'agent' default. */}
+        {task.executor === 'human' && <ExecutorBadge />}
         {task.experimentSeed && <ExperimentBadge />}
         <span className="ml-auto font-mono text-[10px] text-text-tertiary">{task.ref}</span>
       </div>
@@ -390,6 +393,17 @@ export function TaskBody({
       )}
 
       <MarkerRow task={task} />
+
+      {/* Human prerequisites (migration 137). These edges are real but NON-gating
+          — nothing in a sprint moves a human task to Done — so they read as
+          neutral prose here, never as a blocked state. */}
+      {task.waitingOnHuman && task.waitingOnHuman.length > 0 && (
+        <p className="text-[10.5px] text-text-tertiary" data-testid="waiting-on-human">
+          {task.waitingOnHuman.length === 1
+            ? `waits on ${task.waitingOnHuman[0]} (human)`
+            : `waits on ${task.waitingOnHuman.join(', ')} (human)`}
+        </p>
+      )}
 
       {/* Title */}
       <div className="text-[13px] font-semibold leading-snug text-text-primary">{task.title}</div>
