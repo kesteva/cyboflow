@@ -40,6 +40,12 @@ import type { FanOutDriver, StepReport, VisualVerifyGate } from './types';
 import { WorkflowController } from './workflowController';
 import { createRunDirectives } from './runDirectives';
 import { SpawnStepRunner, programmaticDisallowedTools } from './spawnStepRunner';
+import { composeDesignSurfaces } from './designSurfaces';
+import {
+  isSolutionThoroughness,
+  parseThoroughnessFlag,
+  type SolutionThoroughness,
+} from '../../../../shared/types/thoroughness';
 import {
   ProgrammaticRunHost,
   type LaneTriageAdjustResult,
@@ -361,6 +367,99 @@ export function readApproveRunbookResolution(db: DatabaseLike, runId: string): s
   }
 }
 
+/**
+ * Read the run's `adversarial-review` artifact markdown — the design critique the
+ * approve-design gate was composed from.
+ *
+ * A gate 'revise' sends the design steps back to re-run, and a programmatic step
+ * turn is a fresh SDK session that remembers nothing: the re-run agent has never
+ * seen the review whose entries it is being asked to address. The artifact is the
+ * only durable copy (one per atype per run, ENRICHED by a re-review rather than
+ * duplicated), so the revision section quotes it back verbatim.
+ *
+ * Fail-soft like readProjectBriefMarkdown: a missing table or unparseable payload
+ * yields undefined and the revision section simply carries the note alone.
+ */
+export function readAdversarialReviewMarkdown(db: DatabaseLike, runId: string): string | undefined {
+  try {
+    const row = db
+      .prepare(
+        "SELECT payload_json AS payloadJson FROM artifacts WHERE run_id = ? AND atype = 'adversarial-review' LIMIT 1",
+      )
+      .get(runId) as { payloadJson?: string | null } | undefined;
+    if (typeof row?.payloadJson !== 'string' || row.payloadJson.length === 0) return undefined;
+    const parsed: unknown = JSON.parse(row.payloadJson);
+    if (typeof parsed !== 'object' || parsed === null) return undefined;
+    const markdown = (parsed as { markdown?: unknown }).markdown;
+    return typeof markdown === 'string' && markdown.trim().length > 0 ? markdown : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The raw resolution text of this run's most recent RESOLVED gate for `stepId`.
+ *
+ * The gate resolver reduces a resolution to approve/reject/revise/abort and drops
+ * the text; on a 'revise' that text is the only thing distinguishing "do it again"
+ * from "the spend screen has no way back to Home". Generalizes
+ * readApproveRunbookResolution's query to any gate step id.
+ *
+ * Returns undefined for a bare verdict word — rendering "> Revise" as the human's
+ * guidance is noise that reads like an instruction when there is none — and for
+ * any thrown query.
+ */
+export function readGateResolutionNote(
+  db: DatabaseLike,
+  runId: string,
+  stepId: string,
+): string | undefined {
+  try {
+    const row = db
+      .prepare(
+        `SELECT resolution FROM review_items
+          WHERE run_id = ? AND kind = 'decision' AND status = 'resolved'
+            AND source = ?
+          ORDER BY rowid DESC LIMIT 1`,
+      )
+      .get(runId, `gate:human-step:${stepId}`) as { resolution?: string | null } | undefined;
+    const resolution = (row?.resolution ?? '').trim();
+    if (resolution.length === 0) return undefined;
+    return /^(approve|approved|reject|rejected|revise|retry)$/i.test(resolution) ? undefined : resolution;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Read the project's stamped SOLUTION THOROUGHNESS (migration 134), for a run
+ * whose project already carries one.
+ *
+ * Raw SQL rather than the project read model for the same reason
+ * readProjectBriefMarkdown is: this runner holds a narrow DatabaseLike, not the
+ * Database service, and a per-step read has to stay cheap and dependency-free.
+ *
+ * Fail-soft: a pre-134 DB (no column), a missing row, or an unexpected value all
+ * yield undefined, and the step prompt simply omits its thoroughness section.
+ */
+export function readProjectThoroughness(
+  db: DatabaseLike,
+  runId: string,
+): SolutionThoroughness | undefined {
+  try {
+    const row = db
+      .prepare(
+        `SELECT p.solution_thoroughness AS level
+           FROM workflow_runs r JOIN projects p ON p.id = r.project_id
+          WHERE r.id = ? LIMIT 1`,
+      )
+      .get(runId) as { level?: unknown } | undefined;
+    return isSolutionThoroughness(row?.level) ? row.level : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export class DefaultProgrammaticRunner implements ProgrammaticRunner {
   constructor(private readonly deps: DefaultProgrammaticRunnerDeps) {}
 
@@ -424,6 +523,22 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       return readProjectBriefMarkdown(this.deps.db, ctx.runId);
     };
 
+    // Re-read this run's APPROVED DESIGN SURFACES per step (sprint / ship). The
+    // design was approved in a DIFFERENT run whose prototype artifact this run
+    // cannot read and which is cascade-deleted with it; what survives is the
+    // approved_designs snapshot path plus each idea's `## Design spec` section,
+    // and composeDesignSurfaces reads both off the batch's tasks. A thunk, not a
+    // snapshot, for the same reason taskScope is one: a lane added mid-run brings
+    // its own originating idea. Flow-gated by name — planner/launch have no batch,
+    // so the read would be a guaranteed miss, and every other flow's prompt stays
+    // byte-identical.
+    const designSurfaces = (): string | undefined => {
+      if ((ctx.workflow.name !== 'sprint' && ctx.workflow.name !== 'ship') || !this.deps.db) {
+        return undefined;
+      }
+      return composeDesignSurfaces(this.deps.db, ctx.runId);
+    };
+
     // Re-read the verify-setup run's approved runbook proposal + its gate note per
     // step. Naturally undefined on `inspect`/`derive` (they run BEFORE the artifact
     // exists) and on every other flow ⇒ no section, so all other prompts stay
@@ -438,6 +553,38 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       if (ctx.workflow.name !== VERIFY_SETUP_WORKFLOW_NAME || !this.deps.db) return undefined;
       return readApproveRunbookResolution(this.deps.db, ctx.runId);
     };
+
+    // The project's SOLUTION THOROUGHNESS, re-read per step. Two sources, because
+    // the level is stamped on the project only when Launch's approve-brief gate
+    // resolves: DURING a launch run the brief's own `THOROUGHNESS:` flag is the
+    // live answer (and is what the post-brief steps must obey), while every later
+    // sprint/ship run reads the stamped column. Reading the flag first on launch
+    // also makes the level available to the design steps that run before the
+    // stamp's gate side-effect has necessarily landed. Absent ⇒ no section, so
+    // every project predating the stamp keeps today's prompts byte-for-byte.
+    const solutionThoroughness = (): SolutionThoroughness | undefined => {
+      if (!this.deps.db) return undefined;
+      if (ctx.workflow.name === 'launch') {
+        const brief = readProjectBriefMarkdown(this.deps.db, ctx.runId);
+        return parseThoroughnessFlag(brief) ?? undefined;
+      }
+      if (ctx.workflow.name !== 'sprint' && ctx.workflow.name !== 'ship') return undefined;
+      return readProjectThoroughness(this.deps.db, ctx.runId);
+    };
+
+    // The design critique the approve-design gate reviewed, re-read per step. Only
+    // the gate-revision section renders it, and only on a run that reported the
+    // artifact — every other prompt is byte-identical.
+    const adversarialReviewMarkdown = (): string | undefined =>
+      this.deps.db ? readAdversarialReviewMarkdown(this.deps.db, ctx.runId) : undefined;
+
+    // The human's free-text note on a resolved gate, run-bound for the host. The
+    // controller asks for it when a gate 'revise' arms a loopback; the verdict
+    // channel itself carries only the four-way decision.
+    const gateResolutionNote = this.deps.db
+      ? (stepId: string): string | undefined =>
+          readGateResolutionNote(this.deps.db!, ctx.runId, stepId)
+      : undefined;
 
     // Live operator steering for this run (RunDirectives). RunExecutor owns the
     // per-run object and threads it in; absent (tests / no monitor wiring) ⇒ an
@@ -484,6 +631,9 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         runOwnedIdeaIds,
         approveIdeasDecisions,
         projectBrief,
+        designSurfaces,
+        solutionThoroughness,
+        adversarialReviewMarkdown,
         runbookProposal,
         approveRunbookResolution,
         bootstrapProtectedPaths,
@@ -571,6 +721,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       reporter: this.deps.reporter,
       gate: this.deps.gate,
       humanGateSkip,
+      ...(gateResolutionNote ? { readGateResolutionNote: gateResolutionNote } : {}),
       ...(this.deps.blockingGate ? { blockingGate: this.deps.blockingGate } : {}),
       ...(this.deps.systemicGate ? { systemicGate: this.deps.systemicGate } : {}),
       ...(monitor ? { monitor } : {}),
