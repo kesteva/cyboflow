@@ -48,6 +48,7 @@ import {
 } from './utils/windowState';
 import { registerIpcHandlers } from './ipc';
 import { QUICK_PTY_BRIEFING } from './ipc/quickSessionBriefings';
+import { restInteractiveSessionIdle } from './ipc/interactiveSessionRest';
 import { registerArtifactImageHandlers } from './ipc/artifactImages';
 import { registerArtifactHtmlHandlers, loadCanonicalPrototypeHtml } from './ipc/artifactHtml';
 import {
@@ -6127,13 +6128,15 @@ app.whenReady().then(async () => {
                 chatPanel.id,
                 session.id,
                 session.worktreePath,
-                QUICK_PTY_BRIEFING,
+                '', // prompt — the briefing rides --append-system-prompt, so the REPL opens idle
                 session.permissionMode,
                 quickConfig.model,
                 undefined, // effort ('ultracode') — not part of the arm wire schema
                 undefined, // fastMode — not part of the arm wire schema
                 undefined, // resumeSessionId — fresh eager spawn
                 quickConfig.reasoningEffort,
+                undefined, // userAcknowledgedProviderDisabled — not a resume prompt
+                QUICK_PTY_BRIEFING, // session context, NOT a user turn
               )
               .catch((err: unknown) => {
                 // Fail-soft (mirrors create-quick): the arm stays usable — the
@@ -6143,8 +6146,10 @@ app.whenReady().then(async () => {
                   error: err instanceof Error ? err.message : String(err),
                 });
               });
-            // Mirror sessions:input — the REPL is live; show the session as running.
-            await sessionManager.updateSession(session.id, { status: 'running' });
+            // The REPL is live but IDLE — the briefing rides the system prompt, so
+            // this spawn starts no turn. See restInteractiveSessionIdle for why it
+            // rests at the turn-end value rather than 'running' or 'stopped'.
+            restInteractiveSessionIdle(sessionManager, session.id);
           } catch (err) {
             loggerLike.warn('[Main] experiment arm: interactive chat-panel seed failed', {
               sessionId: session.id,

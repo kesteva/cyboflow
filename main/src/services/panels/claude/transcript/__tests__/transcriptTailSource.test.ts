@@ -254,6 +254,222 @@ describe('TranscriptTailSource', () => {
     expect(onLateBind).not.toHaveBeenCalled();
   });
 
+  describe('deferred discovery deadline (a spawn that starts no turn)', () => {
+    it('does NOT time out or give up while unarmed, however long the REPL sits idle', async () => {
+      // The bug this guards: `claude` writes no transcript until a turn begins,
+      // so a prompt-less REPL produced no `.jsonl` and the spawn-time clock timed
+      // the USER. Give-up is latched, so it permanently detached the structured
+      // pipeline from a session that was merely waiting to be typed into.
+      const logger = makeSpyLogger();
+      const onGiveUp = vi.fn();
+      const src = trackedSource({
+        worktreePath: WORKTREE,
+        projectsRoot: tmpRoot,
+        discoveryTimeoutMs: 20,
+        lateDiscoveryWindowMs: 20,
+        logger,
+        onGiveUp,
+        deferDeadlineUntilArmed: true,
+      });
+
+      await src.start(() => undefined);
+
+      // Well past soft timeout + extended window had they been running at start().
+      await new Promise((r) => setTimeout(r, 150));
+      expect(onGiveUp).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
+    });
+
+    it('UNPINNED: a file appearing while unarmed is a stranger\'s — absorbed, never bound', async () => {
+      // Every turn of ours passes through the arming edge first, so a new
+      // transcript while unarmed cannot be ours (an added chat panel, another
+      // in-place session, the user's terminal claude — all share the key dir).
+      // Binding it would persist a foreign uuid as this session's.
+      const onLateBind = vi.fn();
+      const received: unknown[] = [];
+      const src = trackedSource({
+        worktreePath: WORKTREE,
+        projectsRoot: tmpRoot,
+        discoveryTimeoutMs: 40,
+        lateDiscoveryWindowMs: 5000,
+        logger: makeSpyLogger(),
+        onLateBind,
+        deferDeadlineUntilArmed: true,
+      });
+
+      await src.start((obj) => received.push(obj));
+
+      const foreign = 'deadbeef-0000-1111-2222-333344445555';
+      fs.writeFileSync(path.join(keyDir, `${foreign}.jsonl`), assistantTextLine('not ours') + '\n');
+      await new Promise((r) => setTimeout(r, 150));
+      expect(src.getSessionUuid()).toBeUndefined();
+      expect(onLateBind).not.toHaveBeenCalled();
+
+      // Now OUR turn starts. The foreign file is already in the snapshot, so
+      // only the file that appears from here on is a candidate.
+      src.armDiscoveryDeadline();
+      const ours = '0ca11ed0-aaaa-bbbb-cccc-ddddeeeeffff';
+      fs.writeFileSync(path.join(keyDir, `${ours}.jsonl`), assistantTextLine('ours') + '\n');
+
+      await waitFor(() => received.length >= 1);
+      expect(src.getSessionUuid()).toBe(ours);
+      expect(onLateBind).toHaveBeenCalledWith(ours);
+    });
+
+    it('PINNED: binds exactly the expected file, even while unarmed, and ignores every other', async () => {
+      // The manager mints the uuid and passes it as `--session-id`, so the
+      // file's NAME is the proof of ownership — no snapshot, no arm state.
+      const onLateBind = vi.fn();
+      const received: unknown[] = [];
+      const ours = 'p1aced00-1234-5678-9abc-def012345678';
+      const src = trackedSource({
+        worktreePath: WORKTREE,
+        projectsRoot: tmpRoot,
+        discoveryTimeoutMs: 40,
+        lateDiscoveryWindowMs: 5000,
+        logger: makeSpyLogger(),
+        onLateBind,
+        deferDeadlineUntilArmed: true,
+        expectedSessionUuid: ours,
+      });
+
+      await src.start((obj) => received.push(obj));
+
+      // A stranger's file — even as the lone new candidate — is not ours.
+      fs.writeFileSync(path.join(keyDir, 'deadbeef-0000-1111-2222-333344445555.jsonl'), assistantTextLine('no') + '\n');
+      await new Promise((r) => setTimeout(r, 150));
+      expect(src.getSessionUuid()).toBeUndefined();
+
+      fs.writeFileSync(path.join(keyDir, `${ours}.jsonl`), assistantTextLine('yes') + '\n');
+      await waitFor(() => received.length >= 1);
+      expect(src.getSessionUuid()).toBe(ours);
+      expect(onLateBind).toHaveBeenCalledWith(ours);
+      const e0 = received[0] as { message: { content: Array<{ text: string }> } };
+      expect(e0.message.content[0].text).toBe('yes');
+    });
+
+    it('PINNED + armed: two candidates racing, only the pinned one binds', async () => {
+      // Codex's repro: an idle primary panel + an added chat in the SAME session,
+      // same key dir, same cwd — cwd matching cannot separate them; the pin can.
+      const ours = 'p1aced00-1234-5678-9abc-def012345679';
+      const src = trackedSource({
+        worktreePath: WORKTREE,
+        projectsRoot: tmpRoot,
+        discoveryTimeoutMs: 500,
+        lateDiscoveryWindowMs: 5000,
+        logger: makeSpyLogger(),
+        expectedSessionUuid: ours,
+      });
+      await src.start(() => undefined);
+      fs.writeFileSync(path.join(keyDir, 'a1b2c3d4-0000-1111-2222-333344445555.jsonl'), assistantTextLine('sibling') + '\n');
+      fs.writeFileSync(path.join(keyDir, `${ours}.jsonl`), assistantTextLine('ours') + '\n');
+      await src.waitForFirstLine(500);
+      expect(src.getSessionUuid()).toBe(ours);
+    });
+
+    it('an armed window that finds nothing re-defers instead of latching (slash command / paste)', async () => {
+      // The arming edge is a keystroke heuristic: `/help` submits a body but
+      // writes no transcript. A latched give-up here would permanently detach
+      // the pipeline from a session whose REAL first prompt is still to come.
+      const logger = makeSpyLogger();
+      const onGiveUp = vi.fn();
+      const onLateBind = vi.fn();
+      const received: unknown[] = [];
+      const src = trackedSource({
+        worktreePath: WORKTREE,
+        projectsRoot: tmpRoot,
+        discoveryTimeoutMs: 40,
+        lateDiscoveryWindowMs: 60,
+        logger,
+        onGiveUp,
+        onLateBind,
+        deferDeadlineUntilArmed: true,
+      });
+
+      await src.start((obj) => received.push(obj));
+
+      // First "turn": a slash command. Armed, then the whole window elapses.
+      src.armDiscoveryDeadline();
+      await new Promise((r) => setTimeout(r, 200));
+      expect(onGiveUp).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/returning to unarmed/));
+
+      // Second turn: the real first prompt. Arming works again and the
+      // transcript it produces is bound.
+      src.armDiscoveryDeadline();
+      const uuid = 'fee1dead-1111-2222-3333-444455556666';
+      fs.writeFileSync(path.join(keyDir, `${uuid}.jsonl`), assistantTextLine('real') + '\n');
+
+      await waitFor(() => received.length >= 1);
+      expect(src.getSessionUuid()).toBe(uuid);
+      expect(onLateBind).toHaveBeenCalledWith(uuid);
+    });
+
+    it('a NON-deferred source still gives up for real (the argv-prompt case is unchanged)', async () => {
+      const logger = makeSpyLogger();
+      const onGiveUp = vi.fn();
+      const src = trackedSource({
+        worktreePath: WORKTREE,
+        projectsRoot: tmpRoot,
+        discoveryTimeoutMs: 40,
+        lateDiscoveryWindowMs: 60,
+        logger,
+        onGiveUp,
+      });
+
+      await src.start(() => undefined);
+      await expect(src.waitForFirstLine(40)).rejects.toThrow(/discovery timeout/i);
+      await waitFor(() => onGiveUp.mock.calls.length >= 1);
+      expect(logger.error).toHaveBeenCalled();
+    });
+
+    it('arming is idempotent and inert once bound (later turns are no-ops)', async () => {
+      const logger = makeSpyLogger();
+      const onGiveUp = vi.fn();
+      const src = trackedSource({
+        worktreePath: WORKTREE,
+        projectsRoot: tmpRoot,
+        discoveryTimeoutMs: 40,
+        lateDiscoveryWindowMs: 40,
+        logger,
+        onGiveUp,
+        deferDeadlineUntilArmed: true,
+      });
+
+      await src.start(() => undefined);
+
+      // The first turn arms; its transcript binds.
+      src.armDiscoveryDeadline();
+      const uuid = 'cafebabe-9999-8888-7777-666655554444';
+      fs.writeFileSync(path.join(keyDir, `${uuid}.jsonl`), assistantTextLine('bound') + '\n');
+      await waitFor(() => src.getSessionUuid() !== undefined);
+
+      // Every subsequent turn calls this; none may resurrect a discovery timer.
+      src.armDiscoveryDeadline();
+      src.armDiscoveryDeadline();
+
+      await new Promise((r) => setTimeout(r, 150));
+      expect(onGiveUp).not.toHaveBeenCalled();
+      expect(logger.error).not.toHaveBeenCalled();
+    });
+
+    it('waitForFirstLine on an unarmed deferred source arms rather than hanging', async () => {
+      const src = trackedSource({
+        worktreePath: WORKTREE,
+        projectsRoot: tmpRoot,
+        discoveryTimeoutMs: 40,
+        lateDiscoveryWindowMs: 5000,
+        logger: makeSpyLogger(),
+        deferDeadlineUntilArmed: true,
+      });
+
+      await src.start(() => undefined);
+
+      await expect(src.waitForFirstLine(40)).rejects.toThrow(/discovery timeout/i);
+    });
+  });
+
   it('tails incrementally: split line reassembled, malformed line skipped, in order', async () => {
     const logger = makeSpyLogger();
     const received: unknown[] = [];
