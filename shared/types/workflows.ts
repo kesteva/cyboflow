@@ -906,6 +906,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             optional: true,
             desc: 'Stress-test spec + prototype + architecture; must-fix auto-revised once, remaining critique surfaced (non-blocking) at the design gate. Runs only when a prototype or architecture exists.',
+            outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
           },
           {
             id: 'approve-design',
@@ -1251,6 +1252,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             name: 'Approve design',
             agent: 'human',
             mcps: [],
+            outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
             retries: 0,
             optional: true,
             human: true,
@@ -1605,6 +1607,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             desc: 'You review the concept prototype and/or architecture before decomposition. Skipped when neither ran.',
           },
         ],
+            outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
       },
       {
         id: 'ideas',
