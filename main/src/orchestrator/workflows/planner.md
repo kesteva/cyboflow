@@ -358,7 +358,14 @@ a summary held only in your context.
    confirming the written file, surface it: call `cyboflow_report_artifact` with
    `atype: 'ui-prototype'`, a short label, and `payload_json`
    `{"fileName": "prototype/index.html"}` — the static mockup renders in a
-   sandboxed frame from that file. When the flag is `no`, skip the prototype *work* —
+   sandboxed frame from that file. The subagent ALSO returns a `## Design spec`
+   section; reporting the artifact does NOT persist it. Fold it into EACH covered
+   idea's body via `cyboflow_update_task` — REPLACE an existing `## Design spec`
+   section, never stack a second copy; for a combined mockup give each idea the
+   part describing ITS screens. That section is the design contract every later
+   builder reads (the prototype file is a run artifact no sprint lane can open),
+   and `## Design spec` is the idea's single design-prose section — whichever
+   pathway wrote it last owns it. When the flag is `no`, skip the prototype *work* —
    but the step's ledger obligation is not skippable: report the step and stamp
    `prototype` `skipped` before moving on.
    **Stamp** `prototype` `complete` once the artifact is reported — or `skipped` when
@@ -399,22 +406,33 @@ a summary held only in your context.
    present, and architecture section when present. **Batch branch:** when a
    combined prototype was built, run this once over that prototype plus all
    approved specs; the batch has no architecture surface.
-   - For each item in `### Blocking`, re-delegate the relevant spec or design
-     agent exactly ONCE with the concrete fix, then refresh the idea body and/or
-     prototype artifact. Never re-run the adversarial reviewer and never loop a
-     fix. Track a short note describing what was auto-fixed.
-   - Record every `### Findings` item — plus any must-fix defect that remains after
-     its one revision — with `cyboflow_report_finding` and **`blocking: false`**.
-     Never emit a blocking review item from this phase. Carry these non-blocking
-     findings into the design-gate preview.
+   - Compose ONE markdown doc from its `## Result` — a `## Blocking` section and a
+     `## Findings` section, every entry keeping its `#### AR-n — <title>` heading
+     and its Severity / Area / What / Why it matters / Fix fields verbatim, with
+     `None.` under an empty heading — and report it:
+     `cyboflow_report_artifact(atype: 'adversarial-review', label: 'Adversarial
+     review', payload_json: {"markdown": "<the doc>"})`. That doc is the ONLY
+     surface the `approve-design` gate reviews; re-reporting the same atype
+     ENRICHES the same tab, so a re-review after a revision replaces it.
+   - Do **NOT** call `cyboflow_report_finding` at this step — not for a blocking
+     entry, not for an advisory one. The `approve-design` gate decides what
+     becomes a finding: Approve logs every entry as an accepted-risk finding,
+     Revise re-runs the design steps against them. Filing them here pre-empts a
+     decision the very next gate is about to make.
 7. **approve-design** → **human gate — ONLY when `ui-prototype` or `architecture` ran.** When
    neither ran, do **not** ask — continue straight to epics.
-   - **Single idea (≤1 design surface):** inline **AskUserQuestion** (header
-     `Approve design`, options Approve / Revise ONLY; point the user at the
-     `ui-prototype` artifact tab for the mockup and/or put the architecture
-     section, all adversarial findings, and a short note of what was auto-fixed in
-     the option markdown preview).
-     - **Approve** → continue to epics.
+   - **Single idea (≤1 design surface):** open the gate as a blocking
+     `decision` review item — `cyboflow_report_finding(kind: 'decision',
+     blocking: true, payload_json: {"kind":"decision","gate":"approve-design"})`
+     — with a title and a body pointing at the `ui-prototype` artifact tab, the
+     architecture section, and the `Adversarial review` tab's `## Blocking`
+     entries by their `AR-n` ids. Then STOP and end the turn. Do NOT use an
+     inline AskUserQuestion here: an inline answer lives only in your context and
+     reaches no server seam, so the approved design never gets bound to the idea
+     and the accepted-risk findings are never filed. `approve-ideas` already
+     works this way, which is why its side-effects land on both planes.
+     - **Approve** → every adversarial-review entry is logged as a non-blocking,
+       accepted-risk finding linked to the review; continue to epics.
      - **Revise** → re-delegate the relevant subagent(s) with the feedback,
        re-fold the body (REPLACING the existing `## Architecture design` section)
        and/or refresh the prototype artifact (a repeat `cyboflow_report_artifact`
@@ -561,21 +579,29 @@ readable, cold, by the next run.
   tools; subagents return results and you persist them. Never write planning state
   to disk — no per-idea or per-task markdown files and no plugin state directory.
 - Use **AskUserQuestion** for every inline human gate (`approve-idea` on the
-  single-idea path, `approve-design` on the single-design path, `approve-plan`,
+  single-idea path, `approve-plan`,
   `decompose`) and any clarifying question; never silently proceed past a gate. The
-  **batch `approve-ideas` and `approve-designs` gates** are the exceptions — each is
+  **`approve-ideas`, `approve-designs` and `approve-design` gates** are the
+  exceptions — each is
   a blocking `decision` review item (there is no per-idea AskUserQuestion), whose
   Approve/Deny surface is an auto-created tab (you open it via
   `cyboflow_report_finding`, never `cyboflow_report_artifact`), and you resume on its
-  `# Approve-ideas decisions` / `# Approve-designs decisions` block.
+  decisions block. `approve-design` belongs with them on BOTH the single-design and
+  batch paths: it carries server-side side-effects — binding the approved design to
+  the ideas, filing the accepted-risk findings — that fire only when the decision
+  passes through that seam, so an inline question there silently drops them.
   `cyboflow_report_step` is observational only and never substitutes for a gate.
 - **Expansion is ungated and additive.** `expand-spec` must preserve the approved
-  stub's problem, solution, scope, and design flags. A required material change
-  reopens `approve-idea`; it is never folded in silently.
-- **Adversarial review never adds a gate.** It and `approve-design` run only when a
-  UI prototype or architecture ran. Auto-revise each must-fix once, never loop,
-  and report every remaining issue with `blocking: false` for the existing design
-  gate preview.
+  stub's problem, solution, scope, and design flags — plus any `## Architecture
+  design` or `## Design spec` section already on the body, VERBATIM. A required
+  material change reopens `approve-idea`; it is never folded in silently.
+- **Adversarial review never adds a gate, and never files a finding.** It and
+  `approve-design` run only when a UI prototype or architecture ran. The review
+  step REPORTS its result as the `adversarial-review` artifact and stops — it
+  does not auto-revise, does not loop, and does not call
+  `cyboflow_report_finding`. The `approve-design` gate is what routes: Approve
+  logs every entry as an accepted-risk finding, Revise re-runs the design steps
+  against them.
 - **Re-fetch entity bodies after every gate.** While you are parked at a human
   gate, the user can send in-artifact feedback that revises an idea's spec or
   `## Architecture design` section through a host-side revision agent — the body
