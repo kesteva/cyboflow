@@ -1359,6 +1359,7 @@ export const runsRouter = router({
         let taggedIds: string[] = [];
         let activeRunIds: string[] = [];
         let expSeedIds: string[] = [];
+        let humanIds: string[] = [];
         try {
           const store = SprintLaneStore.getInstance();
           // Reject a NORMAL sprint selection that names a hidden experiment-arm
@@ -1379,11 +1380,16 @@ export const runsRouter = router({
           // no run of their own; used to give a precise "reserved by live
           // experiment" reason instead of the generic ineligibility message.
           expSeedIds = store.findLiveExperimentSeedTaskIds(input.projectId, input.taskIds);
+          // Tasks dropped because their executor is 'human' (migration 137) —
+          // they are approved and ready-staged, so without this the message
+          // below would tell the user their task is neither, which is false.
+          humanIds = store.findHumanTaskIds(input.projectId, input.taskIds);
         } catch {
           eligibleIds = null;
           taggedIds = [];
           activeRunIds = [];
           expSeedIds = [];
+          humanIds = [];
         }
         if (taggedIds.length > 0) {
           throw new TRPCError({
@@ -1403,18 +1409,24 @@ export const runsRouter = router({
           if (eligibleIds.length < uniqueSelection.length) {
             const eligibleSet = new Set(eligibleIds);
             const ineligible = uniqueSelection.filter((id) => !eligibleSet.has(id));
-            // Partition the ineligible ids into three buckets, each with its own
+            // Partition the ineligible ids into four buckets, each with its own
             // reason: (1) an active run association -> "already in development";
             // (2) reserved by a live A/B experiment (Fix 2) -> "reserved by a live
-            // experiment"; (3) everything else -> the generic approval/stage
-            // message. inDev wins over reserved (a task can't be both — a live
-            // experiment's seed has no run of its own) but the exclusion keeps the
-            // buckets disjoint regardless.
+            // experiment"; (3) a HUMAN task (migration 137) -> "runs outside the
+            // sprint"; (4) everything else -> the generic approval/stage message.
+            // The buckets are kept disjoint by explicit exclusion so a task that
+            // somehow matched two reasons is reported once, under the first.
             const activeSet = new Set(activeRunIds);
             const expSeedSet = new Set(expSeedIds);
+            const humanSet = new Set(humanIds);
             const inDev = ineligible.filter((id) => activeSet.has(id));
             const reserved = ineligible.filter((id) => !activeSet.has(id) && expSeedSet.has(id));
-            const other = ineligible.filter((id) => !activeSet.has(id) && !expSeedSet.has(id));
+            const human = ineligible.filter(
+              (id) => !activeSet.has(id) && !expSeedSet.has(id) && humanSet.has(id),
+            );
+            const other = ineligible.filter(
+              (id) => !activeSet.has(id) && !expSeedSet.has(id) && !humanSet.has(id),
+            );
             const parts: string[] = [];
             if (inDev.length > 0) {
               parts.push(
@@ -1424,6 +1436,11 @@ export const runsRouter = router({
             if (reserved.length > 0) {
               parts.push(
                 `${reserved.length} reserved by a live experiment (${reserved.join(', ')}) — each is the seed of a running A/B experiment; decide or abandon it first`,
+              );
+            }
+            if (human.length > 0) {
+              parts.push(
+                `${human.length} human task(s) that run outside the sprint: ${human.join(', ')} — a human task is never given a lane; mark it done on the board when the work is finished`,
               );
             }
             if (other.length > 0) {

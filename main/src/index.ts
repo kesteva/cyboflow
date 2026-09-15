@@ -107,6 +107,7 @@ import { ApprovalRouter } from './orchestrator/approvalRouter';
 import { QuestionRouter } from './orchestrator/questionRouter';
 import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
 import { ReviewItemRouter, reviewItemChangeEvents, reviewItemProjectChannel } from './orchestrator/reviewItemRouter';
+import { surfaceHumanPrerequisites } from './orchestrator/humanPrerequisites';
 import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
 import { FleetRegistryReader } from './orchestrator/omp/fleetRegistryReader';
 import { OmpBridgeCommandAdapter } from './orchestrator/omp/ompBridgeCommandAdapter';
@@ -2111,8 +2112,25 @@ async function initializeServices(): Promise<boolean> {
   // to the same live per-substrate override every other cap check already
   // reads (runs.start, experiments.start, the MCP backstop) — never omit it,
   // or the store's cap silently floors to the built-in defaults.
+  // `onBatchMinted` (migration 137) fires AFTER createForRun commits and turns
+  // the batch's HUMAN prerequisites into standing, non-blocking review items —
+  // the only place that work becomes visible, since a human task never gets a
+  // lane and its blocking edge is deliberately non-gating. Async and fail-soft
+  // on BOTH sides (the store swallows a synchronous throw; the .catch below
+  // swallows a rejection), because a sprint that has already materialized must
+  // never be failed by a side-effect.
   const sprintLaneStore = SprintLaneStore.initialize(cyboflowDb, cyboflowLogger, {
     getSprintMaxTasks: () => configManager.getSprintMaxTasks(),
+    onBatchMinted: (args) => {
+      void surfaceHumanPrerequisites(cyboflowDb, reviewItemRouter, args, cyboflowLogger).catch(
+        (err: unknown) => {
+          cyboflowLogger.warn('[Cyboflow] human-prerequisite surfacing failed (ignored)', {
+            batchId: args.batchId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        },
+      );
+    },
   });
 
   // The human-gate run-pause manager (P4) pairs with the ReviewItemRouter
