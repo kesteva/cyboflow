@@ -1120,6 +1120,23 @@ export interface VerifyRunbookArtifactPayload {
 }
 
 /**
+ * Parsed `payload_json` shape of an `adversarial-review` artifact — the
+ * Launch/Planner/Ship adversarial reviewer's critique as ONE markdown doc
+ * (`## Blocking` / `## Findings`, each entry under its `#### AR-n` heading).
+ * Payload-backed exactly like {@link VerifyRunbookArtifactPayload}: the step
+ * agent composes the doc from the reviewer's `## Result` and reports it
+ * verbatim in `markdown`; one per run, ENRICHED on a post-Revise re-review.
+ * The approve-design gate summarises it and Approve logs its entries as
+ * accepted-risk findings (see main/src/orchestrator/gateSideEffects.ts);
+ * `parseAdversarialReviewDoc` (shared/types/adversarialReview.ts) reads it.
+ */
+export interface AdversarialReviewArtifactPayload {
+  /** The full critique doc, rendered through MarkdownPreview. */
+  markdown?: string;
+  [key: string]: unknown;
+}
+
+/**
  * Parsed `payload_json` shape of an `approve-ideas` artifact — the human-facing
  * half of the approve-ideas BATCH gate (IDEA-009). The planner reports this
  * artifact via the `cyboflow_report_artifact` MCP tool's `payload_json` when it

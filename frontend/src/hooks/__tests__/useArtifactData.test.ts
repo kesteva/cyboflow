@@ -459,6 +459,30 @@ describe('useArtifactData', () => {
     expect(runDecompositionQuerySpy).not.toHaveBeenCalled();
   });
 
+  it("resolves 'adversarial-review' synchronously from payload_json (no fetch, no source entity)", () => {
+    const { result } = renderHook(() =>
+      useArtifactData(
+        // sourceRef null: payload-backed like verify-runbook/eval-report, so it
+        // must NOT hit the no-source error path.
+        makeArtifact({
+          atype: 'adversarial-review',
+          sourceRef: null,
+          payloadJson: '{"markdown":"### AR-1 — Blocking finding"}',
+        }),
+        null,
+      ),
+    );
+
+    expect(result.current.loading).toBe(false);
+    expect(result.current.error).toBeNull();
+    expect(result.current.data).toEqual({
+      kind: 'adversarial-review',
+      payload: { markdown: '### AR-1 — Blocking finding' },
+    });
+    expect(getQuerySpy).not.toHaveBeenCalled();
+    expect(runDecompositionQuerySpy).not.toHaveBeenCalled();
+  });
+
   it("resolves 'project-brief' synchronously from payload_json (no fetch, no source entity)", () => {
     const { result } = renderHook(() =>
       useArtifactData(
