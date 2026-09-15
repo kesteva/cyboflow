@@ -70,7 +70,7 @@ export function SaveViewDialog({ isOpen, onClose, surface, initialName = '' }: S
   const serverError = draft?.saveError ?? null;
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} size="sm">
+    <Modal isOpen={isOpen} onClose={onClose} size="sm" showCloseButton={false}>
       <ModalHeader title="Save view" onClose={onClose} />
       <ModalBody>
         <div className="flex flex-col gap-3">

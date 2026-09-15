@@ -66,7 +66,7 @@ export function ManageViewsDialog({ isOpen, onClose, surface }: ManageViewsDialo
   };
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} size="sm">
+    <Modal isOpen={isOpen} onClose={onClose} size="sm" showCloseButton={false}>
       <ModalHeader title="Manage views" onClose={onClose} />
       <ModalBody>
         {views.length === 0 ? (

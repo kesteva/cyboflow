@@ -74,7 +74,7 @@ export function WidgetLibraryModal({
   };
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} size="xl">
+    <Modal isOpen={isOpen} onClose={onClose} size="xl" showCloseButton={false}>
       <ModalHeader title="Add a widget" onClose={onClose} />
       <ModalBody>
         <div className="flex flex-col gap-5">

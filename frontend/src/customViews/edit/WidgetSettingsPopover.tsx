@@ -96,7 +96,7 @@ export function WidgetSettingsPopover({
   };
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} size="sm">
+    <Modal isOpen={isOpen} onClose={onClose} size="sm" showCloseButton={false}>
       <ModalHeader title="Widget settings" onClose={onClose} />
       <ModalBody>
         <div className="flex flex-col gap-3">
