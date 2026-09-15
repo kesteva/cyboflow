@@ -386,7 +386,7 @@ describe('ViewSurface — customize mode / authoring', () => {
 
     // A resolved (non-null) spec is what makes WidgetHost fire runWidget at all.
     await waitFor(() => expect(runWidget).toHaveBeenCalled());
-    expect(runWidget.mock.calls[0][0]).toMatchObject({ widget: { type: 'custom', widgetId: 'w-1' } });
+    expect(runWidget.mock.calls[0][0]).toMatchObject({ widget: { draftOf: 'w-1' } }); // draft preview polls the DRAFT spec
     expect(screen.queryByTestId('widget-unavailable')).not.toBeInTheDocument();
   });
 
@@ -427,7 +427,7 @@ describe('ViewSurface — customize mode / authoring', () => {
 
     await waitFor(() => expect(screen.queryByTestId('widget-placeholder-body')).not.toBeInTheDocument());
     await waitFor(() => expect(runWidget).toHaveBeenCalled());
-    expect(runWidget.mock.calls[0][0]).toMatchObject({ widget: { type: 'custom', widgetId: 'w-2' } });
+    expect(runWidget.mock.calls[0][0]).toMatchObject({ widget: { draftOf: 'w-2' } }); // draft preview polls the DRAFT spec
   });
 
   it('a non-authoring custom item with no published spec still renders "unavailable"', async () => {
