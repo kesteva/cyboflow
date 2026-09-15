@@ -146,7 +146,15 @@ export function AgentComposer({
     const room = Math.max(0, AGENT_THREAD_IMAGE_LIMITS.maxImages - imagesRef.current.length);
     const admitted = accepted.slice(0, room);
     if (admitted.length < accepted.length) error = TOO_MANY_IMAGES_MESSAGE;
-    if (admitted.length > 0) setImages([...imagesRef.current, ...admitted]);
+    if (admitted.length > 0) {
+      // Advance the mirror HERE, not on the next render: two pastes whose
+      // `processImageFile` awaits resolve back-to-back both run this section
+      // before React re-renders, and the second must see the first's admits or
+      // the cap is applied against a stale count.
+      const next = [...imagesRef.current, ...admitted];
+      imagesRef.current = next;
+      setImages(next);
+    }
     setAttachError(error);
   }, []);
 

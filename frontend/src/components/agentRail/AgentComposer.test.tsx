@@ -197,11 +197,11 @@ describe('AgentComposer', () => {
   it('caps the strip at four images and says so', async () => {
     render(<AgentComposer onSend={vi.fn()} disabled={false} />);
 
+    // Fired back-to-back WITHOUT awaiting between them: the component must
+    // apply the cap against the live list even when the async attach paths
+    // overlap (a fast paste-paste-paste), not just when they are serialized.
     for (let i = 0; i < 5; i++) {
       pasteImage(imageFile(`shot-${i}.png`, 'image/png'));
-      // Serialized on purpose: each paste must observe the growing list, which
-      // is what the cap is applied against.
-      await screen.findByTestId('agent-composer-attachments');
     }
 
     await waitFor(() =>
@@ -209,7 +209,9 @@ describe('AgentComposer', () => {
         screen.getByTestId('agent-composer-attachments').querySelectorAll('img'),
       ).toHaveLength(4),
     );
-    expect(screen.getByTestId('agent-composer-attach-error')).toHaveTextContent('At most 4 images');
+    await waitFor(() =>
+      expect(screen.getByTestId('agent-composer-attach-error')).toHaveTextContent('At most 4 images'),
+    );
   });
 
   it('a text-only send still omits the images argument', () => {
