@@ -70,8 +70,8 @@ afterEach(() => {
   // tmpdir rm below, so release it before cleanup (production holds it for the
   // process lifetime, matching the main db connection — there is no public API).
   (
-    handler as unknown as { globalAgentReadonlyDb?: { close: () => void } }
-  ).globalAgentReadonlyDb?.close();
+    handler as unknown as { globalAgentTools: { globalAgentReadonlyDb?: { close: () => void } } }
+  ).globalAgentTools.globalAgentReadonlyDb?.close();
   rmSync(tmpDir, { recursive: true, force: true });
 });
 

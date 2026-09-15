@@ -27,7 +27,7 @@ import * as path from 'node:path';
  * families, then index.ts's verify/eval composition. Entries may decrease or
  * disappear, never grow. */
 const FROZEN_LINE_CAPS: Record<string, number> = {
-  'orchestrator/mcpServer/mcpQueryHandler.ts': 6977, // steps 1-2: type contract → mcpQueryMessages.ts; workflow-config family → handlers/
+  'orchestrator/mcpServer/mcpQueryHandler.ts': 6072, // steps 1-3: type contract → mcpQueryMessages.ts; workflow-config + global-agent read tools → handlers/
   'index.ts': 7166,
   'orchestrator/verify/verificationScheduler.ts': 5702,
   'services/panels/claude/claudeCodeManager.ts': 4794,
