@@ -676,6 +676,48 @@ export interface EnqueueTaskVerificationOptions {
  * enqueue quietly writing a row that would poison every sibling lane's
  * node_modules.
  */
+/**
+ * The lane `enqueue_key` — `${runId}:${laneTaskRef}:${attempt}` — composed in
+ * ONE place so the programmatic lane enqueue, the MCP-fired
+ * `cyboflow_request_verification` (via {@link laneEnqueueKeyFor}), and the
+ * swimlane's staleness parser (`sprintLaneStore.parseLaneAttemptFromEnqueueKey`,
+ * which reads the LAST `:`-segment as the lane attempt) can never disagree
+ * about the shape.
+ */
+export function laneEnqueueKey(runId: string, laneTaskRef: string, attempt: number): string {
+  return `${runId}:${laneTaskRef}:${attempt}`;
+}
+
+/**
+ * The lane `enqueue_key` for a request an AGENT fires through
+ * `cyboflow_request_verification` with a `taskRef`, or `undefined` when the
+ * ref names no lane of the run's batch (a quick chat, a verify-setup proof, a
+ * ref the agent invented) — those enqueue unkeyed, exactly as before.
+ *
+ * WHY THE MCP PATH IS KEYED AT ALL. The swimlane's "Visual check" reads a
+ * lane's LATEST verification row and marks it stale when the attempt encoded
+ * in its key is below the lane's current `attempts`; an unkeyed row has no
+ * attempt to compare, so an orchestrated sprint (where every request is
+ * MCP-fired) could never tell a verdict from the previous implement round
+ * apart from this one's. The attempt is the lane's current `attempts` counter
+ * at fire time — the merge gate bumps it on every FAIL loopback, so a re-fire
+ * after a failed verdict gets a fresh key, while a re-fire WITHIN the same
+ * attempt dedups onto the existing request (the scheduler's idempotent-enqueue
+ * contract, the same one the programmatic lane relies on).
+ *
+ * `lanes` matches by display ref first, then by task id — the two spellings
+ * `defaultTaskRefForRun` can hand out.
+ */
+export function laneEnqueueKeyFor(
+  runId: string,
+  taskRef: string,
+  lanes: readonly { taskId: string; ref: string | null; attempts: number }[],
+): string | undefined {
+  const lane = lanes.find((l) => l.ref === taskRef) ?? lanes.find((l) => l.taskId === taskRef);
+  if (!lane) return undefined;
+  return laneEnqueueKey(runId, taskRef, lane.attempts);
+}
+
 export async function enqueueTaskVerification(
   opts: EnqueueTaskVerificationOptions,
 ): Promise<TaskEnqueueResult> {
@@ -945,8 +987,8 @@ export async function enqueueTaskVerification(
   // incomplete step" rather than a bespoke state machine.
   const enqueueKey =
     opts.bootstrapProof === true
-      ? `${runId}:${laneTaskRef}:${attempt}:bootstrap:${opts.bootstrapRound ?? 1}`
-      : `${runId}:${laneTaskRef}:${attempt}`;
+      ? `${laneEnqueueKey(runId, laneTaskRef, attempt)}:bootstrap:${opts.bootstrapRound ?? 1}`
+      : laneEnqueueKey(runId, laneTaskRef, attempt);
 
   // (4) Enqueue on the singleton. Guard getInstance (+ the enqueue itself) so an
   // uninitialized scheduler or a transient enqueue error is a fail-open SKIP, never

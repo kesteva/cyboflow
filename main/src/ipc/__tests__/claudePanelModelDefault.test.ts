@@ -79,11 +79,12 @@ function makeServices(
   sdkManager: ReturnType<typeof makeCliManager>,
   interactiveManager: ReturnType<typeof makeCliManager>,
   panelSettings: Record<string, unknown>,
+  dbSession: Record<string, unknown> = { substrate: 'sdk' },
 ): AppServices {
   return {
     sessionManager: {
       getSession: vi.fn(() => ({ id: 'session-1', worktreePath: '/tmp/session-1' })),
-      getDbSession: vi.fn(() => ({ substrate: 'sdk' })),
+      getDbSession: vi.fn(() => dbSession),
       getPanelConversationMessages: vi.fn(() => []),
       addPanelConversationMessage: vi.fn(),
       getPanelOutputs: vi.fn(() => []),
@@ -386,6 +387,55 @@ describe('claude-panels model fallback sites resolve via getDefaultLaunchModel(\
 
     expect(result.success).toBe(true);
     expect(result.data).toBe('opus');
+  });
+});
+
+// Every provider's chat rides a 'claude'-typed panel and reads its model through
+// claude-panels:get-model, so the normalization family must follow the panel's
+// SESSION provider — not Claude's. Regression (2026-09-11): an OMP quick session
+// launched on `openrouter/auto` showed an "opus" pill because the OMP id was
+// normalized against Claude's family, dropped, and floored to DEFAULT_QUICK_MODEL.
+describe('claude-panels:get-model normalizes against the panel session\'s provider', () => {
+  function register(panelSettings: Record<string, unknown>, dbSession: Record<string, unknown>) {
+    const services = makeServices(configManager, makeCliManager(), makeCliManager(), panelSettings, dbSession);
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerClaudePanelHandlers(
+      ipcMain as unknown as Parameters<typeof registerClaudePanelHandlers>[0],
+      services,
+    );
+    return handlers;
+  }
+
+  it('keeps an OMP <provider>/<model> selection on an omp-sdk session', async () => {
+    const handlers = register({ model: 'openrouter/auto' }, { substrate: 'sdk', agent_runtime: 'omp-sdk' });
+    const result = (await invoke(handlers, 'claude-panels:get-model', 'panel-1')) as { success: boolean; data: unknown };
+    expect(result).toEqual({ success: true, data: 'openrouter/auto' });
+  });
+
+  it('keeps a Codex catalog id on a codex-sdk session', async () => {
+    const handlers = register({ model: 'gpt-5.2-codex' }, { substrate: 'sdk', agent_runtime: 'codex-sdk' });
+    const result = (await invoke(handlers, 'claude-panels:get-model', 'panel-1')) as { success: boolean; data: unknown };
+    expect(result).toEqual({ success: true, data: 'gpt-5.2-codex' });
+  });
+
+  it('floors a stale Claude alias to Codex\'s auto on a codex-sdk session', async () => {
+    const handlers = register({ model: 'opus' }, { substrate: 'sdk', agent_runtime: 'codex-sdk' });
+    const result = (await invoke(handlers, 'claude-panels:get-model', 'panel-1')) as { success: boolean; data: unknown };
+    expect(result).toEqual({ success: true, data: 'auto' });
+  });
+
+  it('resolves to no model (vendor default) on an omp-sdk session with nothing OMP-shaped stored', async () => {
+    // The global quick default is a Claude alias; OMP has no model to floor to,
+    // and an omitted model is what its spawn seam treats as "OMP's own default".
+    const handlers = register({}, { substrate: 'sdk', agent_runtime: 'omp-sdk' });
+    const result = (await invoke(handlers, 'claude-panels:get-model', 'panel-1')) as { success: boolean; data: unknown };
+    expect(result).toEqual({ success: true, data: undefined });
+  });
+
+  it('still floors an OMP-shaped id to opus on a Claude session', async () => {
+    const handlers = register({ model: 'openrouter/auto' }, { substrate: 'sdk', agent_runtime: 'claude-sdk' });
+    const result = (await invoke(handlers, 'claude-panels:get-model', 'panel-1')) as { success: boolean; data: unknown };
+    expect(result).toEqual({ success: true, data: 'opus' });
   });
 });
 

@@ -47,7 +47,9 @@ describe('resolveHarnessPath', () => {
       resolveShellPath: async () => {
         throw new Error('login shell unavailable');
       },
-      fallbackPath: '/usr/bin:/bin',
+      // Joined with the host delimiter: prependNodeDir splits on it, so a
+      // hardcoded ':' is ONE opaque entry on Windows and the assertion drifts.
+      fallbackPath: ['/usr/bin', '/bin'].join(delimiter),
     });
     expect(value).toBe(['/opt/node/bin', '/usr/bin', '/bin'].join(delimiter));
   });
@@ -86,24 +88,46 @@ describe('resolveHarnessNodePath', () => {
   });
 
   it('stops at the NEAREST directory carrying playwright', async () => {
-    const driverCli = '/repo/main/dist/driver/driverCli.js';
+    // Spelled through `join` like the sibling case: the walk probes
+    // `join(dir, marker)`, which is backslash-separated on Windows, so a fake
+    // tree keyed on POSIX literals is never hit there.
+    const repo = '/repo';
+    const driverCli = join(repo, 'main/dist/driver/driverCli.js');
     const found = await resolveHarnessNodePath(
       driverCli,
       world([
-        '/repo/main/node_modules/playwright/package.json',
-        '/repo/node_modules/playwright/package.json',
+        join(repo, 'main/node_modules/playwright/package.json'),
+        join(repo, 'node_modules/playwright/package.json'),
       ]),
     );
-    expect(found).toBe('/repo/main/node_modules');
+    expect(found).toBe(join(repo, 'main/node_modules'));
   });
 
-  // The packaged shape: asarUnpack unpacks the driver JS but NOT
-  // node_modules/playwright*, so the marker is nowhere on the walk. An absent
-  // NODE_PATH is the honest answer — see the function's caveat.
+  // The packaged shape: asarUnpack unpacks the driver JS AND node_modules/
+  // playwright*, so the walk from the unpacked driver reaches the unpacked
+  // node_modules (smoked against a real arm64 build, 9/10).
+  const UNPACKED = join('/Applications/Cyboflow.app/Contents/Resources', 'app.asar.unpacked');
+
+  it('finds the unpacked node_modules in a packaged app', async () => {
+    // Spelled through `join` like the sibling cases: the walk probes
+    // `join(dir, marker)`, which is backslash-separated on Windows, so a fake
+    // tree keyed on POSIX literals is never hit there.
+    const found = await resolveHarnessNodePath(
+      join(UNPACKED, 'main/dist/driver/driverCli.js'),
+      world([join(UNPACKED, 'node_modules/playwright/package.json')]),
+    );
+    expect(found).toBe(join(UNPACKED, 'node_modules'));
+  });
+
+  // A packaged build whose asarUnpack lost the playwright entries: the marker
+  // is nowhere on the walk (inside app.asar is unreadable to plain node), and
+  // an absent NODE_PATH is the honest answer — see the function's doc.
   it('answers null when no node_modules on the walk carries playwright', async () => {
     const found = await resolveHarnessNodePath(
-      '/Applications/Cyboflow.app/Contents/Resources/app.asar.unpacked/main/dist/driver/driverCli.js',
-      world(['/somewhere/else/node_modules/playwright/package.json']),
+      join(UNPACKED, 'main/dist/driver/driverCli.js'),
+      // Present, but off the walk. Spelled through `join` so this stays a real
+      // negative on Windows rather than passing because nothing can match.
+      world([join('/somewhere/else', 'node_modules/playwright/package.json')]),
     );
     expect(found).toBeNull();
   });

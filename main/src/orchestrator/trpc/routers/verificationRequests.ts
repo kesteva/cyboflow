@@ -493,12 +493,15 @@ async function readRunbooks(
  * `verify_runbook_local.status` column.
  *
  * The column is one conjunct. `VerifyRunbookStore.status()` re-checks the whole
- * conjunction on every read (portable file present in the probed tree AND
- * hashing to the record, AND matching project input-hash, AND matching host
- * fingerprint), and the degrade gate + the enqueue-time pin both go through it.
- * A record left reading `'proven'` while the file lives on an unmerged branch
- * is the exact case this indirection exists for: the gate skips every request
- * with "no proven verification runbook" while the panel shows a green "Set up".
+ * conjunction on every read — a portable file present in the probed tree must
+ * hash to the record, AND the project input-hash AND the host fingerprint must
+ * match (a tree with no file skips only the first conjunct: the proof executes
+ * the record's own copy, F10) — as a pure read that writes nothing back (F4),
+ * and the degrade gate + the enqueue-time pin both go through it. A record
+ * left reading `'proven'` after the lockfile moved on, or after the runbook
+ * file was edited, is the exact case this indirection exists for: the gate
+ * skips every request with "no proven verification runbook" while the panel
+ * shows a green "Set up".
  *
  * Unwired resolver ⇒ `'unproven-draft'`, never `'proven'` (see
  * {@link ContextDeps.verifyRunbookStatus}), and a THROWING resolver degrades the

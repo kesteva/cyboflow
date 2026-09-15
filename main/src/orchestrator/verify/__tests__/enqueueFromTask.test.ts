@@ -20,6 +20,8 @@ import { VerificationScheduler } from '../verificationScheduler';
 import {
   declaredWebModality,
   enqueueTaskVerification,
+  laneEnqueueKey,
+  laneEnqueueKeyFor,
   prepareVerificationEnqueue,
   resolveEnqueueModality,
   FORBIDDEN_DEP_COMMAND_ERROR,
@@ -1649,5 +1651,31 @@ describe('enqueueTaskVerification — a proof request never probes the proven re
 
     expect(result.outcome).toBe('enqueued');
     expect(asked).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// laneEnqueueKey / laneEnqueueKeyFor — the one key shape, MCP-fired included
+// ---------------------------------------------------------------------------
+
+describe('laneEnqueueKeyFor (MCP-fired lane requests)', () => {
+  const lanes = [
+    { taskId: 'tsk_a', ref: 'TASK-001', attempts: 0 },
+    { taskId: 'tsk_b', ref: 'TASK-002', attempts: 2 },
+    { taskId: 'tsk_c', ref: null, attempts: 1 },
+  ];
+
+  it('keys a ref that names a lane to that lane\'s CURRENT attempt (the swimlane parses the last segment)', () => {
+    expect(laneEnqueueKeyFor('run-1', 'TASK-002', lanes)).toBe('run-1:TASK-002:2');
+    expect(laneEnqueueKeyFor('run-1', 'TASK-002', lanes)).toBe(laneEnqueueKey('run-1', 'TASK-002', 2));
+  });
+
+  it('matches a ref-less lane by task id (the spelling defaultTaskRefForRun falls back to)', () => {
+    expect(laneEnqueueKeyFor('run-1', 'tsk_c', lanes)).toBe('run-1:tsk_c:1');
+  });
+
+  it('is undefined for a ref naming no lane, so the request enqueues unkeyed as before', () => {
+    expect(laneEnqueueKeyFor('run-1', 'TASK-999', lanes)).toBeUndefined();
+    expect(laneEnqueueKeyFor('run-1', 'TASK-001', [])).toBeUndefined();
   });
 });

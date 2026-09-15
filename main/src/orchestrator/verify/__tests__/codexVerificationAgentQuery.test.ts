@@ -7,6 +7,7 @@
  * executable-missing + logged-out unavailability, and the transcript accumulator.
  */
 import { describe, expect, it, vi } from 'vitest';
+import { delimiter } from 'node:path';
 import type {
   AppServerNotification,
   CodexAppServerClientOptions,
@@ -308,7 +309,9 @@ describe('makeCodexVerificationAgentQuery', () => {
     const client = clients[0];
     if (!client) throw new Error('fake client was not created');
     const path = client.options.env?.PATH ?? '';
-    expect(path).toBe('/app/codex/codex-path:/opt/homebrew/bin:/usr/bin:/bin');
+    // prependCodexPathToEnvironment joins with the HOST delimiter (';' on
+    // Windows); the tail is the caller's PATH verbatim, whatever it contained.
+    expect(path).toBe(['/app/codex/codex-path', '/opt/homebrew/bin:/usr/bin:/bin'].join(delimiter));
   });
 
   it('passes args.model through and skips model/list', async () => {

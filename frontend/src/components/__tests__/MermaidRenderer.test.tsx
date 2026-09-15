@@ -35,6 +35,7 @@ vi.mock('mermaid', () => ({
   },
 }));
 
+import mermaid from 'mermaid';
 import { MermaidRenderer } from '../MermaidRenderer';
 
 beforeEach(() => {
@@ -82,5 +83,36 @@ describe('MermaidRenderer', () => {
     await waitFor(() =>
       expect(container.querySelector('[data-chart="ok"]')).toBeInTheDocument(),
     );
+  });
+
+  it('initializes mermaid with securityLevel strict', async () => {
+    render(<MermaidRenderer chart="graph TD; A-->B" id="strict" />);
+
+    await waitFor(() => expect(renderCalls.length).toBe(1));
+    expect(mermaid.initialize).toHaveBeenCalledWith(
+      expect.objectContaining({ securityLevel: 'strict' }),
+    );
+  });
+
+  it('strips navigation anchors mermaid emits for click directives', async () => {
+    const { container } = render(<MermaidRenderer chart="graph TD; A-->B" id="click" />);
+
+    await waitFor(() => expect(renderCalls.length).toBe(1));
+    await act(async () => {
+      renderCalls[0].deferred.resolve({
+        svg: '<svg><g class="root"><a href="https://evil.example" xlink:href="https://evil.example" target="_blank" transform="translate(38, 18)"><g class="node" data-id="A"><rect></rect></g></a></g></svg>',
+      });
+    });
+
+    await waitFor(() =>
+      expect(container.querySelector('g.node[data-id="A"] rect')).toBeInTheDocument(),
+    );
+    const anchor = container.querySelector('a');
+    expect(anchor?.hasAttribute('href')).toBe(false);
+    expect(anchor?.hasAttribute('xlink:href')).toBe(false);
+    expect(anchor?.hasAttribute('target')).toBe(false);
+    // The <a> element itself must survive: mermaid puts the linked node's
+    // positioning transform on it, so unwrapping would move the node.
+    expect(anchor?.getAttribute('transform')).toBe('translate(38, 18)');
   });
 });

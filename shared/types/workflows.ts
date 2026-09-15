@@ -1492,8 +1492,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
 
   // launch — the super-planner for a brand-new project: an in-depth interview
   // produces a project brief, the brief decomposes into an ordered idea set,
-  // and the foundation ("initial build") ideas become execution-ready epics
-  // and tasks. Ends at the approved backlog — Launch never materializes a
+  // and every approved idea becomes execution-ready epics and tasks. Ends at the approved backlog — Launch never materializes a
   // sprint; Sprint/Ship run afterwards against the tasks it created. Reuses
   // planner's approve-plan / decompose step ids so the hidden-draft reveal and
   // idea-retirement machinery apply unchanged.
@@ -1555,7 +1554,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: ['filesystem'],
             retries: 1,
             optional: true,
-            desc: 'Optional project-level architecture (stack, repo layout, data model, seams) designed from the approved brief; recorded in the brief now and folded into the foundation idea at decomposition.',
+            desc: 'Optional project-level architecture (stack, repo layout, data model, seams) designed from the approved brief; recorded in the brief now and folded into the lowest-BUILD_ORDER idea at decomposition.',
             outputArtifact: { atype: 'arch-design', label: 'Architecture design' },
           },
           {
@@ -1590,7 +1589,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'interview',
             mcps: ['filesystem'],
             retries: 0,
-            desc: 'Split the approved brief + concept design into an ordered idea set (aim 4-8) with a 1-3 idea initial build set; each idea lands on the board with a short stub, and the architecture folds into the foundation idea.',
+            desc: 'Split the approved brief + concept design into an ordered idea set (aim 4-8) sequenced by BUILD_ORDER; each idea lands on the board with a short stub, and the architecture folds into the foundation idea.',
           },
           {
             id: 'approve-ideas',
@@ -1614,7 +1613,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'context',
             mcps: ['filesystem', 'web-search', 'context7'],
             retries: 0,
-            desc: 'Expand each approved initial-build idea into a full spec (ungated), preserving the approved stub; research the proposed stack as needed.',
+            desc: 'Expand every approved idea into a full spec (ungated), preserving the approved stub; research the proposed stack as needed.',
           },
           {
             id: 'epics',
@@ -1622,7 +1621,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'epics',
             mcps: ['filesystem'],
             retries: 0,
-            desc: 'Epic breakdown per initial-build idea — a full tree for a large idea; otherwise one fallback epic whenever an idea yields more than one task.',
+            desc: 'Epic breakdown per approved idea — a full tree for a large idea; otherwise one fallback epic whenever an idea yields more than one task.',
           },
           {
             id: 'tasks',
@@ -1630,7 +1629,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'tasks',
             mcps: ['filesystem'],
             retries: 0,
-            desc: 'Capture each initial-build task via cyboflow_create_task with acceptance criteria and idea lineage.',
+            desc: 'Capture every task via cyboflow_create_task with acceptance criteria and idea lineage.',
             outputArtifact: { atype: 'decomposed-stories', label: 'Decomposed stories' },
           },
           {
@@ -1640,7 +1639,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
-            desc: 'You sign off on the initial build plan before tasks queue for sprint.',
+            desc: 'You sign off on the whole task plan before tasks queue for sprint.',
           },
           {
             id: 'decompose',
@@ -1649,7 +1648,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
-            desc: 'Confirm archiving the decomposed foundation idea(s); later phase ideas stay on the backlog. Ends the run.',
+            desc: 'Confirm archiving the decomposed idea(s); denied ideas stay on the backlog. Ends the run.',
           },
         ],
       },

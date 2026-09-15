@@ -9,6 +9,7 @@
  * demotion), and that teardown (snapshot dispose + driver stop) runs on every path.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { delimiter, join } from 'node:path';
 import {
   VerificationAgentRunner,
   VerificationAgentQueryError,
@@ -53,7 +54,13 @@ const CLAUDE_DEFAULT = 'claude-opus-4-8';
  * login shell and walk the filesystem; both are injected in {@link makeRunner}
  * so this suite does neither.
  */
-const FAKE_SHELL_PATH = '/opt/homebrew/bin:/usr/bin:/bin';
+// Host-delimited: the harness splits/joins PATH on `path.delimiter`, so a
+// literal ':' string is a single opaque entry on Windows and every "is the node
+// dir already present" check drifts there.
+const FAKE_SHELL_PATH = ['/opt/homebrew/bin', '/usr/bin', '/bin'].join(delimiter);
+// VERIFY_DATA_DIR is composed with `path.join`, so the expected value must be
+// too — `/artifacts/data/x` is `\artifacts\data\x` on Windows.
+const dataDirOf = (segment: string) => join('/artifacts', 'data', segment);
 const FAKE_NODE_MODULES = '/app/node_modules';
 
 function makeAgent(overrides: Partial<EffectiveAgent> = {}): EffectiveAgent {
@@ -1873,7 +1880,7 @@ describe('VerificationAgentRunner — the harness execution env', () => {
       resolveNode: async () => '/Users/dev/.nvm/versions/node/v22.14.0/bin/node',
     });
     await runner.run(makeReq());
-    expect(envOf(query).PATH).toBe(`/Users/dev/.nvm/versions/node/v22.14.0/bin:${FAKE_SHELL_PATH}`);
+    expect(envOf(query).PATH).toBe(['/Users/dev/.nvm/versions/node/v22.14.0/bin', FAKE_SHELL_PATH].join(delimiter));
   });
 
   // The lookup is deliberately NOT cached at this seam: getShellPath() owns the
@@ -1890,8 +1897,8 @@ describe('VerificationAgentRunner — the harness execution env', () => {
     await runner.run(makeReq({ requestId: 'vr-2' }));
     expect(resolveShellPath).toHaveBeenCalledTimes(2);
     // '/usr/bin' is the resolveNode dir this harness prepends (see prependNodeDir).
-    expect(query.mock.calls[0][0].env.PATH).toBe('/usr/bin:/first/bin');
-    expect(query.mock.calls[1][0].env.PATH).toBe('/usr/bin:/second/bin');
+    expect(query.mock.calls[0][0].env.PATH).toBe(['/usr/bin', '/first/bin'].join(delimiter));
+    expect(query.mock.calls[1][0].env.PATH).toBe(['/usr/bin', '/second/bin'].join(delimiter));
   });
 
   // Windows spells the variable `Path`, and Node reports it that way. Writing a
@@ -1940,8 +1947,8 @@ describe('VerificationAgentRunner — the harness execution env', () => {
   it('provisions a FRESH data dir per REQUEST and exports it', async () => {
     const { runner, query, prepareDataDir } = makeRunner();
     await runner.run(makeReq({ requestId: 'vr-abc' }));
-    expect(envOf(query).VERIFY_DATA_DIR).toBe('/artifacts/data/vr-abc');
-    expect(prepareDataDir).toHaveBeenCalledWith('/artifacts/data/vr-abc');
+    expect(envOf(query).VERIFY_DATA_DIR).toBe(dataDirOf('vr-abc'));
+    expect(prepareDataDir).toHaveBeenCalledWith(dataDirOf('vr-abc'));
   });
 
   // macOS truncates a UNIX socket path at 104 bytes, and a data dir is where an
@@ -1951,7 +1958,7 @@ describe('VerificationAgentRunner — the harness execution env', () => {
   it('keeps the data-dir segment short enough for a UNIX socket path', async () => {
     const { runner, query } = makeRunner();
     await runner.run(makeReq({ requestId: `vr_${'a'.repeat(32)}` }));
-    expect(envOf(query).VERIFY_DATA_DIR).toBe('/artifacts/data/aaaaaaaa');
+    expect(envOf(query).VERIFY_DATA_DIR).toBe(dataDirOf('aaaaaaaa'));
   });
 
   // VERIFY_ARTIFACTS_DIR is RUN-scoped, so two attempts of the same lane share
@@ -1969,19 +1976,23 @@ describe('VerificationAgentRunner — the harness execution env', () => {
   // Fail-soft, and the var is exported ANYWAY: a runbook that assigns its app's
   // data-dir var from it must never expand it to the empty string and let the
   // app fall back to the developer's real state directory.
-  it('still exports the data dir when provisioning it failed, and logs an error', async () => {
-    const { runner, query, error } = makeRunner({
+  // A dir the harness cannot create is HARNESS evidence, so it must arrive as
+  // a fail-open preflight skip with the check attached — never as a deployed
+  // agent's `launch_failed` (a blocking `ambiguous` that burns an attempt).
+  it('fails preflight (skipped, not deployed) when the data dir cannot be provisioned', async () => {
+    const { runner, query } = makeRunner({
       prepareDataDir: async () => {
         throw new Error('EROFS: read-only file system');
       },
     });
     const result = await runner.run(makeReq());
-    expect(result.status).toBe('passed');
-    expect(envOf(query).VERIFY_DATA_DIR).toBe('/artifacts/data/vr-1');
-    expect(error).toHaveBeenCalledWith(
-      '[VerificationAgentRunner] could not provision VERIFY_DATA_DIR',
-      expect.objectContaining({ dataDir: '/artifacts/data/vr-1' }),
+    expect(result.status).toBe('skipped');
+    expect(result.deployed).toBe(false);
+    expect(query).not.toHaveBeenCalled();
+    expect(result.preflight?.checks).toContainEqual(
+      expect.objectContaining({ id: 'data-dir', ok: false, detail: expect.stringContaining(dataDirOf('vr-1')) }),
     );
+    expect(result.errorMessage).toContain('EROFS');
   });
 
   // The wrapper body, pinned on BOTH platforms from this macOS host.

@@ -1,5 +1,5 @@
 ---
-description: Bootstrap a brand-new project — an in-depth interview produces a project brief, the whole concept gets an optional prototype + architecture pass, the brief decomposes into an ordered idea set along the approved design, and the foundation ideas become execution-ready epics and tasks.
+description: Bootstrap a brand-new project — an in-depth interview produces a project brief, the whole concept gets an optional prototype + architecture pass, the brief decomposes into an ordered idea set along the approved design, and every approved idea becomes execution-ready epics and tasks.
 ---
 
 # Launch
@@ -9,15 +9,14 @@ very first planning pass. The user arrives with little more than a raw project
 idea (often against an empty or nearly empty repository). You interview them in
 depth, synthesize a **project brief**, design the **whole concept** (an optional
 prototype + project-level architecture, before any decomposition), decompose the
-project into an ordered set of **ideas** along that design, and turn the
-foundation ideas into execution-ready **epics and tasks** — persisting
+project into an ordered set of **ideas** along that design, and turn every
+approved idea into execution-ready **epics and tasks** — persisting
 everything to the cyboflow database through the `cyboflow_*` MCP tools. You do **not** write planning files to disk — the
 database is the single source of truth.
 
 Launch ends at an approved backlog: it never materializes a sprint or executes
 tasks. The user runs **Sprint** or **Ship** afterwards against the tasks you
-created, and dedicated **Planner** runs later decompose the ideas you left as
-stubs.
+created.
 
 ## How to run this flow
 
@@ -38,24 +37,62 @@ The pattern for every phase:
    to the database via the `cyboflow_*` tools. **Subagents never write cyboflow
    state — that is your job**, so single-writer invariants hold.
 
-## The two-tier decomposition
+## Full decomposition
 
-Launch plans a whole project, so it deliberately does NOT task-decompose
-everything. The `ideas` step splits the project into an ordered idea set and
-marks a small **initial build set** (`INITIAL_BUILD: yes`, typically 1–3 ideas —
-the scaffold, the data foundation, the walking skeleton of the core loop). Only
-the initial build set gets full spec expansion and epic/task decomposition in
-this run (design happened earlier, on the whole concept — never per idea).
-Every other approved idea is a **later
-phase idea**: it keeps its approved stub on the backlog (a `cyboflow_update_task`
-fold, nothing more) and a dedicated Planner run decomposes it when its turn
-comes. Do NOT expand, design, or task-plan a later phase idea here, and do NOT
-mint guard findings for them — they are ordinary backlog ideas, not blocked work.
+Launch plans a whole project end to end. The `ideas` step splits the project
+into an ordered idea set, and **EVERY approved idea** then gets full spec
+expansion and epic/task decomposition in this run — the run ends with the whole
+project task-planned, not just its foundation. `BUILD_ORDER` is a build
+sequence, not a cut line: it decides what gets built first, never what gets
+planned. Design is the one thing that does NOT repeat per idea — it happened
+earlier, ONCE, on the whole concept.
+
+Work the ideas in `BUILD_ORDER`, and expect the plan phase to be the long part
+of the run: a 4–8 idea set means 4–8 spec expansions and 4–8 epic/task
+breakdowns. That is the intended cost — never silently narrow the set to save
+time. Denied ideas are the ONLY ones you skip: they stay on the backlog
+untouched (never archive them, never mint guard findings for them), and a
+dedicated Planner run can decompose one later if the user changes their mind.
 
 **Lineage is mandatory everywhere.** A Launch run always owns multiple ideas, so
 the write chokepoint will NOT guess which idea a new epic/task belongs to. Pass
 `originating_idea_id: "<the idea's id or ref>"` on EVERY `cyboflow_create_task`
 for an epic or task, attributing each to the idea it decomposes.
+
+## Stamp the component ledger as you go
+
+Every idea carries the same five-piece component ledger Planner uses
+(`idea-spec` / `prototype` / `architecture` / `epics` / `stories` — see
+`planner.md` "The component ledger" for the full state model). Launch creates
+its ideas fresh and plans them in one continuous run, so it needs none of
+Planner's resume-gate machinery — but it still WRITES the ledger, so a later
+Planner or design-mode run that picks one of these ideas back up sees Launch's
+work as done instead of redoing it.
+
+Stamp with `cyboflow_set_idea_component`, always **after** the body write or
+the child creates that complete the component, never before — a body write
+marks downstream components stale, and stamping afterwards is what clears the
+flag. Stamp per idea as you finish it, never once at the end for the batch.
+The per-step stamps are called out below; by `approve-plan`, every approved
+idea must carry `idea-spec`, `epics`, and `stories` settled, plus
+`architecture` on the idea that carries that section.
+
+**Re-stamp after a later write that stales you.** A body write marks
+downstream components stale by MATERIALIZING a ledger row for them, including
+for components that until then had no row and were merely deriving as
+complete. That row then wins over derivation permanently. So a component
+stamped at an early step and staled by a later step's body write stays
+`incomplete` unless the later step re-stamps it — the ordering rule above is
+not "stamp once", it is "stamp after the last write that touches you".
+
+**`prototype` is the one component Launch never stamps.** The prototype and
+architecture passes run ONCE on the whole concept, before any idea exists. The
+architecture ends up in a real idea body (the lowest `BUILD_ORDER` idea) and so
+does stamp there; the concept prototype ends up in a run artifact that belongs
+to no idea. Leave `prototype` alone on every idea — `incomplete` is the truth
+(no per-idea prototype exists) and it keeps a later design-mode run free to
+build one. Do NOT stamp it `skipped`: that reads as "declared not applicable"
+and tells every later run never to prototype these ideas.
 
 ### Phase 1 — Interview
 
@@ -138,7 +175,8 @@ own design. There are no per-idea design flags.
    payload_json: {"markdown": "<the full brief incl. the architecture
    section>"})` — until ideas exist, the brief is where the architecture
    lives. (At the `ideas` step you will ALSO fold this section into the
-   foundation idea's body, which is what derives the `arch-design` tab.)
+   lowest `BUILD_ORDER` idea's body, which is what derives the `arch-design`
+   tab.)
 6. **adversarial-review** (optional) → run ONLY when `ui-prototype` OR
    `architecture` ran. Delegate to `cyboflow-adversarial-review` with the
    brief (including its architecture section) and the prototype notes. For
@@ -172,16 +210,18 @@ own design. There are no per-idea design flags.
    drops it. It returns an
    ordered `## Idea set` — aim for 4–8 ideas, hard cap 10 — each with a short
    stub (`#### Problem definition` / `#### Proposed solution`, ≤5 bullets
-   each), a one-line caption, `SCOPE:`, `BUILD_ORDER: N`, and
-   `INITIAL_BUILD: yes|no`. Persist each idea as it arrives:
+   each), a one-line caption, `SCOPE:`, and `BUILD_ORDER: N`. Persist each
+   idea as it arrives:
    `cyboflow_create_task(task_type='idea', title=<title>, body=<the full stub
    plus its flag lines>, summary=<one-line caption>, scope=<sized value>)`.
    Then fold the brief's `## Architecture design` section (when one exists)
-   into the LOWEST `BUILD_ORDER` initial-build idea's body via
-   `cyboflow_update_task` — the foundation idea carries the project's
-   architecture from here on, and its `arch-design` tab derives
-   automatically. Check `cyboflow_list_tasks(task_type='idea')` first and
-   fold into any pre-existing duplicate instead of creating a second card.
+   into the LOWEST `BUILD_ORDER` idea's body via `cyboflow_update_task` —
+   that foundation idea carries the project's architecture from here on, and
+   its `arch-design` tab derives automatically. **Stamp** `architecture`
+   `complete` on that idea after the fold lands — on that ONE idea only, since
+   the others carry no architecture section of their own. Check
+   `cyboflow_list_tasks(task_type='idea')` first and fold into any
+   pre-existing duplicate instead of creating a second card.
    Keep each created idea's `id` and `ref` — you need them for lineage and
    the gates.
 9. **approve-ideas** → **human gate — the batch gate.** You cannot
@@ -195,17 +235,13 @@ own design. There are no per-idea design flags.
    one `- IDEA-XXX: approve|deny` line per idea. **Proceed with approved refs
    only.** Denied ideas stay on the backlog untouched (never archive them). If
    every idea is denied, skip to the `decompose` gate prose ending: end the
-   turn — nothing further lands. If every INITIAL_BUILD idea was denied but
-   later phase ideas were approved, ask the user (AskUserQuestion) which
-   approved idea(s) to promote into the initial build set before continuing —
-   never invent an initial build set the user didn't approve. If the
-   architecture's foundation idea was denied, re-fold the brief's
-   architecture section into the new lowest-`BUILD_ORDER` approved
-   initial-build idea before continuing.
+   turn — nothing further lands. If the architecture's foundation idea was
+   denied, re-fold the brief's architecture section into the new
+   lowest-`BUILD_ORDER` approved idea before continuing.
 
-### Phase 4 — Plan (initial build set only)
+### Phase 4 — Plan (every approved idea)
 
-10. **expand-spec** → for EACH approved initial-build idea, delegate to
+10. **expand-spec** → for EACH approved idea, in `BUILD_ORDER`, delegate to
     `cyboflow-context` with `MODE: EXPAND`, that idea's approved stub, and the
     approved brief. The approved problem definition, proposed solution, scope,
     flags, and any folded `## Architecture design` section are immutable;
@@ -220,6 +256,15 @@ own design. There are no per-idea design flags.
     expansion emits `MATERIAL_CHANGE: yes`, reopen the affected decision with
     the user (AskUserQuestion, referencing the brief) before continuing —
     never silently mutate approved intent.
+    - **Stamp**, after each idea's body write lands: `idea-spec` `complete`,
+      and — on the one idea carrying the folded `## Architecture design`
+      section — `architecture` `complete` AGAIN. Re-stamping architecture here
+      is not redundant: replacing the stub with `## Idea spec` counts as a spec
+      change, which marks the whole downstream set (architecture, prototype,
+      epics, stories) stale, so the step-8 stamp has just been invalidated. The
+      section itself was preserved verbatim, so it is still valid — say so with
+      the stamp, or the idea ends the run reading "architecture needs review"
+      over a body that carries a perfectly good architecture section.
 
 The epics/tasks you create here land as **hidden drafts** (`approved_at`
 unset — board-invisible and sprint-ineligible) until `approve-plan` returns
@@ -229,12 +274,14 @@ Approve, so nothing user-visible lands before sign-off. Create each proposal
 11. **epics** → **INVARIANT: an idea that decomposes into more than one task
     ALWAYS gets an epic** — never leave two or more of an idea's tasks parented
     straight to the idea; only a single-task idea is epic-free.
-    - `large` initial-build idea → delegate to `cyboflow-epics` with its spec
+    - `large` idea → delegate to `cyboflow-epics` with its spec
       (plus the brief); create each returned epic via `cyboflow_create_task`
       as it arrives, with `originating_idea_id` set to that idea.
-    - `small` initial-build idea → do not delegate and create nothing yet;
+    - `small` idea → do not delegate and create nothing yet;
       apply the **fallback epic** rule at step 12.
-12. **tasks** → for EACH initial-build idea, delegate to `cyboflow-tasks` with
+    - **Do not stamp** the `epics` component here — an idea's epic situation is
+      not settled until step 12 mints any fallback epic. Step 12 stamps it.
+12. **tasks** → for EACH approved idea, delegate to `cyboflow-tasks` with
     its spec (and its epics, when any); create each returned task via
     `cyboflow_create_task` as it arrives (title, body, acceptance criteria,
     file/dependency hints, `parent_epic_id` linkage, and **always**
@@ -244,19 +291,21 @@ Approve, so nothing user-visible lands before sign-off. Create each proposal
       (`task_type='epic'`, `originating_idea_id=<the idea>`) FIRST, then every
       task with `parent_epic_id` set to it; **exactly 1** → create that task
       with no `parent_epic_id`, linked to the idea.
+    - **Stamp**, after an idea's tasks exist: `stories` `complete`, and `epics`
+      `complete` when the idea ended up with an epic (delegated at step 11 or
+      minted as the fallback here) or `skipped` for a single-task idea that
+      correctly got none.
 13. **approve-plan** → **human gate, inline.** **AskUserQuestion** (header
     `Approve plan`, options **Approve** / **Revise** / **Reject** — labels
     exactly those words, since the backend matches an `'approve'`/`'reject'`
     prefix on the presented labels). Present ONE combined gate: every draft
     grouped by originating idea, with scope, ordering, and acceptance criteria
-    in the preview, plus a one-line reminder of which later phase ideas remain
-    as stubs. Do **not** proceed until the user answers:
+    in the preview. Do **not** proceed until the user answers:
     - **Approve** → the backend reveals every draft (tasks land at **Ready for
       development**) before your turn resumes — do NOT re-create anything.
       Approving also stamps `decomposed_at` on exactly the ideas that received
-      run-created children (the initial build set); later phase ideas and
-      denied ideas stay on the board automatically — never archive them by
-      hand. Proceed to `decompose`.
+      run-created children; childless and denied ideas stay on the board
+      automatically — never archive them by hand. Proceed to `decompose`.
     - **Revise** → reconcile the existing drafts in place (`cyboflow_update_task`
       for changes, `cyboflow_create_task` for genuinely new drafts, repurpose
       surplus drafts rather than orphaning them), then re-present the gate.
@@ -265,9 +314,9 @@ Approve, so nothing user-visible lands before sign-off. Create each proposal
       remain on the board as approved stubs.
 14. **decompose** → **final human gate, inline — the run-completion gate.**
     **AskUserQuestion** (header `Archive idea`, options `Archive & finish` /
-    `Keep ideas & finish`; list the planned initial-build idea(s) and,
-    separately, the later phase ideas staying on the backlog). Either choice
-    ends the run; `Archive & finish` re-asserts the lineage-filtered
+    `Keep ideas & finish`; list the decomposed idea(s) and, separately, any
+    denied ideas staying on the backlog). Either choice ends the run;
+    `Archive & finish` re-asserts the lineage-filtered
     retirement (a no-op when approval already stamped it). Do **not** call any
     further tools after this gate.
 
@@ -287,9 +336,16 @@ Approve, so nothing user-visible lands before sign-off. Create each proposal
 - **The brief is the constitution.** Every idea stub, spec, and architecture
   call must trace to the approved brief. A downstream discovery that
   contradicts it reopens the question with the user — never a silent rewrite.
-- **Two-tier discipline.** Later phase ideas get a stub fold and NOTHING else —
-  no spec expansion, no design work, no epics/tasks, no guard findings. The
-  initial build set gets the full treatment. Never blur the tiers.
+- **Decompose everything approved.** Every approved idea gets the full
+  treatment — spec expansion, epics, tasks. Never stop after the foundation
+  ideas and never skip an approved idea to save run time. Denied ideas get
+  nothing: no expansion, no epics/tasks, no guard findings.
+- **Stamp the ledger as you go.** `idea-spec` after each expand-spec body
+  write, `architecture` on the one idea carrying the folded section, `epics`
+  and `stories` once an idea's children exist — always AFTER the write, never
+  before, and per idea rather than once for the batch. Leave `prototype`
+  unstamped. An unstamped component looks exactly like work never done to
+  whoever picks the idea up next.
 - **Lineage is mandatory.** Pass `originating_idea_id` on EVERY epic/task
   create — the write chokepoint refuses to guess, and a missing link lands
   NULL with a warning.

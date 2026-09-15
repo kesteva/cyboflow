@@ -230,6 +230,78 @@ function __setAbiProbeForTesting(fn) {
   abiProbe = fn;
 }
 
+/**
+ * Azure Artifact Signing (formerly Trusted Signing) — the Windows counterpart
+ * to the Apple credentials above.
+ *
+ * None of these four values is a secret: every one of them is readable from
+ * any signed binary we ship, so they live here rather than in CI config. The
+ * SECRETS are the Microsoft Entra ID env vars (AZURE_*), which electron-builder
+ * reads directly and which never touch this file.
+ *
+ * The endpoint's region prefix must match the region the signing account and
+ * certificate profile were created in (eastus -> eus); a mismatch authenticates
+ * fine and then fails at sign time.
+ */
+const WIN_AZURE_SIGN_DEFAULTS = {
+  publisherName: 'Raimundo Esteva',
+  endpoint: 'https://eus.codesigning.azure.net/',
+  codeSigningAccountName: 'cyboflowsigning',
+  certificateProfileName: 'cyboflow-public-trust',
+};
+
+/**
+ * Resolve `win.azureSignOptions`, or null to leave the build unsigned.
+ *
+ * Presence of the key is what SELECTS the signer: electron-builder picks
+ * WindowsSignAzureManager whenever `azureSignOptions != null` and then hard-fails
+ * initialize() if the Entra env vars are incomplete. So an unsigned build must
+ * omit the key entirely — emitting it "just in case" would break every local and
+ * CI Windows build that has no credentials.
+ *
+ * electron-builder requires AZURE_TENANT_ID + AZURE_CLIENT_ID plus ONE of three
+ * credential shapes (client secret / client certificate / username+password);
+ * we gate on the same set so a half-configured host fails here, with a readable
+ * message, instead of deep inside a PowerShell module install.
+ */
+function getWinAzureSignOptions() {
+  if (process.env.CSC_DISABLE === 'true') return null;
+
+  const hasTenant = !!process.env.AZURE_TENANT_ID;
+  const hasClient = !!process.env.AZURE_CLIENT_ID;
+  const hasCredential = !!(
+    process.env.AZURE_CLIENT_SECRET ||
+    process.env.AZURE_CLIENT_CERTIFICATE_PATH ||
+    process.env.AZURE_USERNAME
+  );
+
+  if (!hasTenant && !hasClient && !hasCredential) return null;
+
+  if (!hasTenant || !hasClient || !hasCredential) {
+    console.error(
+      'Error: Azure signing is partially configured. electron-builder needs ' +
+        'AZURE_TENANT_ID and AZURE_CLIENT_ID plus one of AZURE_CLIENT_SECRET, ' +
+        'AZURE_CLIENT_CERTIFICATE_PATH, or AZURE_USERNAME+AZURE_PASSWORD.'
+    );
+    console.error(
+      `  - AZURE_TENANT_ID: ${hasTenant ? 'set' : 'MISSING'}\n` +
+        `  - AZURE_CLIENT_ID: ${hasClient ? 'set' : 'MISSING'}\n` +
+        `  - credential: ${hasCredential ? 'set' : 'MISSING'}`
+    );
+    console.error('Unset all three to build unsigned, or supply the full set to sign.');
+    process.exit(1);
+  }
+
+  return {
+    publisherName: process.env.CYBOFLOW_AZURE_PUBLISHER_NAME || WIN_AZURE_SIGN_DEFAULTS.publisherName,
+    endpoint: process.env.CYBOFLOW_AZURE_ENDPOINT || WIN_AZURE_SIGN_DEFAULTS.endpoint,
+    codeSigningAccountName:
+      process.env.CYBOFLOW_AZURE_ACCOUNT || WIN_AZURE_SIGN_DEFAULTS.codeSigningAccountName,
+    certificateProfileName:
+      process.env.CYBOFLOW_AZURE_PROFILE || WIN_AZURE_SIGN_DEFAULTS.certificateProfileName,
+  };
+}
+
 function configureBuild() {
   console.log('Configuring build for current environment...');
 
@@ -317,6 +389,21 @@ function configureBuild() {
     config.npmRebuild = winNpmRebuild;
     console.log(`Windows packaging: npmRebuild=${config.npmRebuild}` +
       (winNpmRebuild ? '' : ' (prebuilt .node files are packaged as-is; set CYBOFLOW_WIN_NPM_REBUILD=1 to rebuild)'));
+
+    // Windows code signing via Azure Artifact Signing. Injected here rather than
+    // declared in package.json because the key's mere PRESENCE selects the Azure
+    // signer (see getWinAzureSignOptions), so an uncredentialed build — every
+    // local build, and the CI installer smoke — must not carry it.
+    const azureSignOptions = getWinAzureSignOptions();
+    if (azureSignOptions) {
+      config.win.azureSignOptions = azureSignOptions;
+      console.log(
+        `Windows signing: Azure Artifact Signing as "${azureSignOptions.publisherName}" ` +
+          `(${azureSignOptions.codeSigningAccountName}/${azureSignOptions.certificateProfileName}).`
+      );
+    } else {
+      console.log('Windows signing: disabled (no Azure credentials); the installer will be unsigned.');
+    }
 
     // With npmRebuild off the .node files ship exactly as they sit in
     // node_modules. Since better-sqlite3 v13 (the Electron 44 upgrade) its

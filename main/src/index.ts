@@ -159,6 +159,7 @@ import type { VerifyHostProbesLike, VerifyRunbookStatusLike } from './orchestrat
 import type { SessionGitOpsLike } from './orchestrator/trpc/contracts/sessionGitOps';
 import type { SessionOpsLike } from './orchestrator/trpc/contracts/sessionOps';
 import { createConfigOps } from './ipc/configOps';
+import { createGitPrerequisiteOps } from './ipc/gitPrerequisite';
 import { createFileOps } from './ipc/fileOps';
 import { createGitOps } from './ipc/gitOps';
 import { createSessionOps } from './ipc/sessionOps';
@@ -997,6 +998,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
   // set CYBOFLOW_OMP_SUPERVISE, so every command is FORBIDDEN by default.
   const ompCommand = buildOmpCommandAdapter();
   const configOps = createConfigOps({ configManager, claudeCodeManager: defaultCliManager });
+  const gitPrerequisiteOps = createGitPrerequisiteOps();
   const workspaceFileOps = createFileOps({ sessionManager, databaseService, gitStatusManager, configManager });
   attachOrchestratorTrpc({
     window: win,
@@ -1005,6 +1007,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
       createContext({
         db,
         configOps,
+        gitPrerequisiteOps,
         workspaceFileOps,
         setDockBadge: (count) => dockBadgeService.setBadgeCount(count),
         workflowRegistry,
