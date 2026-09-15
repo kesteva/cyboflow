@@ -188,6 +188,14 @@ export interface SpawnStepRunnerOptions {
   runbookProposal?: () => string | undefined;
   approveRunbookResolution?: () => string | undefined;
   /**
+   * The COMPOUND run's human-curated `# Selected findings` block body (migration
+   * 034's `seed_finding_ids`, rendered). A thunk for consistency with every other
+   * resolver here, though the seed itself is stamped at launch and never changes
+   * mid-run. Undefined on an unseeded compound run and on every other flow ⇒ no
+   * section and no seeded branch (byte-identical prompts).
+   */
+  selectedFindings?: () => string | undefined;
+  /**
    * Provider/runtime prompt envelope for this run. Claude is identity; Codex gets
    * the compatibility adapter around each fresh per-step prompt.
    */
@@ -289,6 +297,9 @@ export class SpawnStepRunner implements StepRunner {
     // practice only `prove` receives them.
     const runbookProposal = this.opts.runbookProposal?.();
     const approveRunbookResolution = this.opts.approveRunbookResolution?.();
+    // Re-read the compound run's human-curated seed per step. Undefined on every
+    // unseeded compound run and on every other flow ⇒ no section, no seeded branch.
+    const selectedFindings = this.opts.selectedFindings?.();
     // Re-resolve the bootstrap's written paths per step: the bootstrap fires
     // mid-run at a lane's visual-verify, so a value read at construction would be
     // empty on exactly the run that needs the denylist.
@@ -343,6 +354,7 @@ export class SpawnStepRunner implements StepRunner {
       attempt: ctx.attempt,
       ...(ctx.item ? { item: ctx.item } : {}),
       ...(taskScope ? { taskScope } : {}),
+      ...(selectedFindings ? { selectedFindings } : {}),
       ...(runOwnedIdeaIds && runOwnedIdeaIds.length > 0 ? { runOwnedIdeaIds } : {}),
       ...(approveIdeasDecisions ? { approveIdeasDecisions } : {}),
       ...(projectBrief ? { projectBrief } : {}),

@@ -57,6 +57,8 @@ import type { BlockingItemsResolver } from './blockingItemsGate';
 import type { SystemicPauseResolver } from './systemicPauseGate';
 import { MonitorRegistry, type MonitorContext, type MonitorSession } from './monitor';
 import { readApproveIdeasDecisionLines } from '../resolveReviewItemHandler';
+import { selectFindingForSeed } from '../reviewItemListing';
+import { findingBucket, type FindingTagBucket } from '../../../../shared/types/reviews';
 import { ReviewItemRouter } from '../reviewItemRouter';
 import { hasReviewableDesignSurface } from '../runEntityOwnership';
 
@@ -337,6 +339,91 @@ export function readRunbookProposalMarkdown(db: DatabaseLike, runId: string): st
 }
 
 /**
+ * Render the COMPOUND run's `# Selected findings` block body from its
+ * `seed_finding_ids` (migration 034) — the human's explicit selection from the
+ * review-queue triage tray.
+ *
+ * REPLICATES `RunExecutor.buildSelectedFindingsBlock`, deliberately rather than
+ * sharing it: that method is private to an executor the programmatic plane does
+ * not hold, it resolves findings through an injected `FindingReaderLike` wired
+ * only for the orchestrated prompt path, and widening either to reach here would
+ * put an orchestrated-prompt collaborator on the controller's critical path. Both
+ * render from the SAME two sources — the run's `seed_finding_ids` and
+ * `selectFindingForSeed` — and both emit the same heading, ordering, and
+ * per-finding shape, which is what `compound.md` keys its seeded branch on.
+ *
+ * Ordering matches the orchestrated block: priority (P0 < P1 < P2, null LAST)
+ * then bucket (quick < doc < task), with the seeded order as the stable tiebreak.
+ *
+ * Fail-soft at every step like its siblings above: no ids, unparseable JSON, or
+ * a finding that no longer resolves ⇒ that finding is skipped, and an empty
+ * result yields undefined so the step prompt simply omits the section.
+ */
+export function readSelectedFindingsBlock(
+  db: DatabaseLike,
+  rawSeedFindingIds: string | null | undefined,
+): string | undefined {
+  if (!rawSeedFindingIds) return undefined;
+  let ids: string[];
+  try {
+    const parsed: unknown = JSON.parse(rawSeedFindingIds);
+    if (!Array.isArray(parsed)) return undefined;
+    ids = parsed.filter((v): v is string => typeof v === 'string' && v.length > 0);
+  } catch {
+    return undefined;
+  }
+  if (ids.length === 0) return undefined;
+
+  type ResolvedFinding = NonNullable<ReturnType<typeof selectFindingForSeed>>;
+  const resolved: ResolvedFinding[] = [];
+  for (const id of ids) {
+    try {
+      const finding = selectFindingForSeed(db, id);
+      if (finding) resolved.push(finding);
+    } catch {
+      // Fail-soft per id — one unresolvable finding never sinks the prompt.
+    }
+  }
+  if (resolved.length === 0) return undefined;
+
+  const priorityRank = (p: 'P0' | 'P1' | 'P2' | null): number =>
+    p === 'P0' ? 0 : p === 'P1' ? 1 : p === 'P2' ? 2 : 3;
+  const bucketRank: Record<FindingTagBucket, number> = { quick: 0, doc: 1, task: 2 };
+  resolved.sort((a, b) => {
+    const byPriority = priorityRank(a.priority) - priorityRank(b.priority);
+    if (byPriority !== 0) return byPriority;
+    return bucketRank[findingBucket(a.proposedTarget)] - bucketRank[findingBucket(b.proposedTarget)];
+  });
+
+  const sections = resolved.map((f) => {
+    const badge = f.priority ?? '—';
+    const title = f.title?.trim() || '(untitled finding)';
+    const bucket = findingBucket(f.proposedTarget);
+    const sourceTail = f.source?.trim() || 'unknown';
+    const parts: string[] = [
+      `## ${badge} ${title}`,
+      `Target: ${bucket} · Source: ${sourceTail} · id: \`${f.id}\``,
+    ];
+    const body = f.body?.trim();
+    if (body) parts.push(body);
+    const suggestedFix = f.suggestedFix?.trim();
+    if (suggestedFix) parts.push(`### Suggested fix\n${suggestedFix}`);
+    const locations = (f.locations ?? []).filter((l) => l.path?.trim());
+    if (locations.length > 0) {
+      const lines = locations.map(
+        (l) => `- ${l.path.trim()}${typeof l.line === 'number' ? `:${l.line}` : ''}`,
+      );
+      parts.push(['### Locations', ...lines].join('\n'));
+    }
+    return parts.join('\n\n');
+  });
+
+  const directive =
+    'Act ONLY on these findings, in the order listed. For each, apply the action for its target bucket, then IMMEDIATELY call `cyboflow_resolve_finding` with its id and the matching resolution kind — do not batch resolves to the end.';
+  return [directive, ...sections].join('\n\n');
+}
+
+/**
  * Read the raw resolution string of this run's RESOLVED `approve-runbook` gate.
  *
  * Unlike launch's approve-ideas fold there is nothing structured to parse: the
@@ -554,6 +641,17 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       return readApproveRunbookResolution(this.deps.db, ctx.runId);
     };
 
+    // Re-render the COMPOUND run's human-curated seed per step. Flow-gated by
+    // name for the same reason designSurfaces is: only compound is ever launched
+    // with `seed_finding_ids`, and gating keeps every other flow's prompt
+    // byte-identical without paying for a guaranteed-miss read. The ids come off
+    // the run row snapshot because the launcher stamps them once at launch and
+    // nothing ever rewrites them mid-run.
+    const selectedFindings = (): string | undefined => {
+      if (ctx.workflow.name !== 'compound' || !this.deps.db) return undefined;
+      return readSelectedFindingsBlock(this.deps.db, ctx.run.seed_finding_ids);
+    };
+
     // The project's SOLUTION THOROUGHNESS, re-read per step. Two sources, because
     // the level is stamped on the project only when Launch's approve-brief gate
     // resolves: DURING a launch run the brief's own `THOROUGHNESS:` flag is the
@@ -636,6 +734,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         adversarialReviewMarkdown,
         runbookProposal,
         approveRunbookResolution,
+        selectedFindings,
         bootstrapProtectedPaths,
         ...(resolveStepAgent ? { resolveStepAgent } : {}),
       },
