@@ -72,8 +72,11 @@ interface GroupRow {
 /**
  * Build the row list for one scope. Primarily keyed off the rollup's own
  * `files` membership (per-scope, may legitimately overlap with other
- * scopes — no dedup); per-file +/- and change-type come from `parseFileDiffs`
- * (falling back to 0/0 when a path isn't part of the combined diff blob).
+ * scopes — no dedup); per-file +/- come from the rollup's SCOPE-SPECIFIC
+ * `fileStats` when the producer supplied them (a file both Staged and
+ * Unstaged has different deltas in each), falling back to `parseFileDiffs`'
+ * base-relative numbers only when absent; change-type comes from
+ * `parseFileDiffs` (0/0 + 'modified' when a path isn't in the blob at all).
  * Unstaged additionally folds in any conflicted entries not already present
  * in the rollup; Staged defensively excludes conflicted entries (conflicted
  * paths never render there per the epic).
@@ -105,12 +108,13 @@ function buildGroupRows(
   return paths.map((path, i) => {
     const parsed = parsedByPath.get(path);
     const entry = entryByPath.get(path);
+    const scoped = rollup.fileStats?.[path];
     return {
       key: `${scope}-${path}-${i}`,
       path,
       type: parsed?.type ?? 'modified',
-      additions: parsed?.additions ?? 0,
-      deletions: parsed?.deletions ?? 0,
+      additions: scoped?.additions ?? parsed?.additions ?? 0,
+      deletions: scoped?.deletions ?? parsed?.deletions ?? 0,
       conflicted: entry?.conflicted ?? false,
     };
   });

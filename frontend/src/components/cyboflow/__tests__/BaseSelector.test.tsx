@@ -265,4 +265,132 @@ describe('BaseSelector', () => {
     expect(refEl.className).toMatch(/truncate/);
     expect(refEl.getAttribute('title')).toBe('d809dc1');
   });
+
+  it('keeps the menu contained within a 640px (rail ceiling) container and the closed label intact', async () => {
+    const { container } = render(
+      <div data-testid="rail-640" style={{ width: 640 }}>
+        <BaseSelector sessionId="s1" projectId="p1" selectedRef={null} onChange={vi.fn()} />
+      </div>,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId('base-selector-trigger').textContent).toBe('vs branch point · d809dc1');
+    });
+    expect(container.querySelector('[data-testid="rail-640"]')).toBeTruthy();
+    expect(screen.getByTestId('base-selector-vs-label').textContent).toBe('vs branch point');
+
+    await openMenu();
+    const menu = screen.getByTestId('base-selector-menu');
+    // The menu is anchored to BOTH edges of its rail-width container (never a
+    // fixed/min width that could exceed the rail) and clips its own overflow.
+    expect(menu.className).toMatch(/\bleft-0\b/);
+    expect(menu.className).toMatch(/\bright-0\b/);
+    expect(menu.className).toMatch(/\boverflow-hidden\b/);
+    expect(menu.className).not.toMatch(/\bmin-w-/);
+    expect(screen.getByTestId('rail-640').contains(menu)).toBe(true);
+  });
+
+  it('"Another branch" selection: keeps "vs" fixed and puts the (long) branch name in the truncating ref element at 240px', async () => {
+    const longBranch = 'feature/an-extremely-long-branch-name-that-cannot-possibly-fit-in-a-240px-rail-column';
+    render(
+      <div style={{ width: 240 }}>
+        <BaseSelector sessionId="s1" projectId="p1" selectedRef={longBranch} onChange={vi.fn()} />
+      </div>,
+    );
+    await waitFor(() => expect(mockGetComparisonBases).toHaveBeenCalled());
+
+    const vsLabel = screen.getByTestId('base-selector-vs-label');
+    // The non-shrinking, nowrap span must NOT carry the long branch name.
+    expect(vsLabel.className).toMatch(/shrink-0/);
+    expect(vsLabel.textContent).not.toContain(longBranch);
+    expect(vsLabel.textContent).toBe('vs branch');
+
+    const refEl = screen.getByTestId('base-selector-ref');
+    expect(refEl.textContent).toBe(longBranch);
+    expect(refEl.className).toMatch(/truncate/);
+    expect(refEl.getAttribute('title')).toBe(longBranch);
+  });
+
+  it('re-queries branches for a NEW projectId on the same mount and drops a stale in-flight response for the old one', async () => {
+    let resolveP1: (v: typeof BRANCH_LIST) => void = () => {};
+    const p1Pending = new Promise<typeof BRANCH_LIST>((resolve) => {
+      resolveP1 = resolve;
+    });
+    mockListBranches.mockImplementation((projectId: string) =>
+      projectId === 'p1'
+        ? p1Pending
+        : Promise.resolve({
+            success: true,
+            data: [{ name: 'p2-only-branch', isCurrent: false, hasWorktree: false }],
+          }),
+    );
+
+    const { rerender } = render(
+      <BaseSelector sessionId="s1" projectId="p1" selectedRef={null} onChange={vi.fn()} />,
+    );
+    await waitFor(() => expect(mockGetComparisonBases).toHaveBeenCalled());
+    await openMenu();
+    fireEvent.click(screen.getByTestId('base-selector-option-another-branch'));
+    await waitFor(() => expect(mockListBranches).toHaveBeenCalledWith('p1'));
+
+    // Switch project while p1's request is still in flight. The menu itself
+    // stays open across the switch; only the "Another branch" sub-panel (and
+    // its cache) is reset, so it must be re-expanded.
+    rerender(<BaseSelector sessionId="s1" projectId="p2" selectedRef={null} onChange={vi.fn()} />);
+    expect(screen.getByTestId('base-selector-menu')).toBeTruthy();
+    expect(screen.queryByTestId('base-selector-another-branch-panel')).toBeNull();
+    fireEvent.click(screen.getByTestId('base-selector-option-another-branch'));
+    await waitFor(() => expect(mockListBranches).toHaveBeenCalledWith('p2'));
+    expect(mockListBranches).toHaveBeenCalledTimes(2);
+    await screen.findByText('p2-only-branch');
+
+    // p1's late response must NOT populate p2's menu.
+    resolveP1(BRANCH_LIST);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(screen.queryByText('feature/foo')).toBeNull();
+    expect(screen.getByText('p2-only-branch')).toBeTruthy();
+  });
+
+  it('uses the lifted resolvedDefaultBase (not the session branchPoint) for the branch-point short SHA, and enables Branch point from it alone', async () => {
+    mockGetComparisonBases.mockResolvedValue(NO_DEFAULT_BASES);
+    const { rerender } = render(
+      <BaseSelector
+        sessionId="s1"
+        projectId="p1"
+        selectedRef={null}
+        onChange={vi.fn()}
+        resolvedDefaultBase="0123456789abcdef0123456789abcdef01234567"
+      />,
+    );
+    await waitFor(() => expect(mockGetComparisonBases).toHaveBeenCalled());
+    // Closed label: the run/panel base's short SHA, not the session's d809dc1.
+    await waitFor(() => {
+      expect(screen.getByTestId('base-selector-trigger').textContent).toBe('vs branch point · 0123456');
+    });
+    await openMenu();
+    const branchPoint = screen.getByTestId('base-selector-option-branch-point') as HTMLButtonElement;
+    expect(branchPoint.textContent).toContain('0123456');
+    expect(branchPoint.disabled).toBe(false);
+
+    // A session with NO baseCommit but a run with a launch base: still selectable.
+    mockGetComparisonBases.mockResolvedValue({
+      success: true,
+      data: { branchPoint: null, defaultBranch: null, localDefault: null, originDefault: null },
+    });
+    rerender(
+      <BaseSelector
+        sessionId="s2"
+        projectId="p1"
+        selectedRef="origin/main"
+        onChange={vi.fn()}
+        resolvedDefaultBase="fedcba9876543210fedcba9876543210fedcba98"
+      />,
+    );
+    await waitFor(() => expect(mockGetComparisonBases).toHaveBeenCalledWith({ sessionId: 's2' }));
+    // The menu is still open from above (open state survives a rerender).
+    await screen.findByTestId('base-selector-menu');
+    const branchPoint2 = screen.getByTestId('base-selector-option-branch-point') as HTMLButtonElement;
+    expect(branchPoint2.disabled).toBe(false);
+    expect(branchPoint2.textContent).toContain('fedcba9');
+  });
 });

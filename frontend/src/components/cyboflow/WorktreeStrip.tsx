@@ -3,88 +3,89 @@
  * (TASK-219), mounted directly below BaseSelector and above the file groups
  * in the Diff tab body.
  *
- * A self-contained sub-component (mirrors BaseSelector's shape): it fetches
- * its OWN `WorktreeStatusPayload` via `API.sessions.getCombinedDiff` rather
- * than receiving data lifted from a sibling panel — this repo's established
- * pattern for rail sub-components. Wires two EXISTING tRPC procedures:
+ * It renders the `WorktreeStatusPayload` the ACTIVE diff panel fetched
+ * (lifted by the rail via the panel's `onWorktree` echo) rather than issuing
+ * its own second `getCombinedDiff` — so the count is always the SAME snapshot
+ * the grouped list below it renders (TASK-218 D-8), including for a
+ * parentless flow run whose worktree only the run-scoped panel can see.
+ * Wires two EXISTING tRPC procedures:
  *   - `sessionGit.commit` (via the reusable CommitDialog) — stages everything
  *     (`git add -A`) and commits with a user-entered message.
  *   - `workspaceFiles.gitRestore` — destructive (`git clean -fd` + checkout),
  *     gated behind a `window.confirm`.
+ * After either succeeds it calls `onMutated`, which the rail turns into a
+ * refetch of the panel (and therefore of this strip's own snapshot).
  *
  * The uncommitted count is simply `entries.length`: `WorktreeStatusPayload`'s
  * `entries` is already the exact distinct-uncommitted-porcelain-paths list
  * (one entry per path; Committed-only paths never appear here), so no extra
  * dedup/group-membership arithmetic is needed or correct.
+ *
+ * Conflict guard (TASK-219 iv): Commit is enabled ONLY with a successful
+ * status snapshot in hand that contains no conflicted entry — an absent
+ * snapshot (still loading, or the fetch failed) disables it rather than being
+ * treated as "clean" — and the same check is re-run inside submission against
+ * the LATEST snapshot, so a dialog opened earlier can never `git add -A` a
+ * tree that has since turned conflicted.
  */
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import type { ReactElement } from 'react';
 import { trpc } from '../../trpc/client';
-import { API } from '../../utils/api';
 import { CommitDialog } from '../CommitDialog';
 import type { WorktreeStatusPayload } from '../../../../shared/types/runFiles';
 
 export interface WorktreeStripProps {
   /**
    * The session backing this strip's actions — null disables Commit/Restore
-   * with an explanatory title. All three tRPC procedures this strip touches
-   * are sessionId-keyed; flow runs have workflow_runs.session_id = NULL, so a
-   * run with no parent session correctly renders both actions disabled.
+   * with an explanatory title. Both tRPC procedures this strip touches are
+   * sessionId-keyed; flow runs have workflow_runs.session_id = NULL, so a
+   * run with no parent session correctly renders both actions disabled
+   * (its COUNT still comes from the lifted `worktree`).
    */
   sessionId: string | null;
+  /**
+   * The active panel's working-tree snapshot, lifted by the rail. `undefined`
+   * = no successful snapshot yet (loading, or the last fetch failed) — the
+   * count reads as unknown and Commit is disabled.
+   */
+  worktree: WorktreeStatusPayload | undefined;
+  /** Called after a successful Commit / Restore so the rail can refetch. */
+  onMutated?: () => void;
 }
 
-export function WorktreeStrip({ sessionId }: WorktreeStripProps): ReactElement {
-  const [status, setStatus] = useState<WorktreeStatusPayload | undefined>(undefined);
+const NO_CONFLICT_ERROR = 'Resolve conflicts before committing';
+const NO_STATUS_ERROR = 'Working-tree status is not available yet';
+
+export function WorktreeStrip({ sessionId, worktree, onMutated }: WorktreeStripProps): ReactElement {
   const [commitDialogOpen, setCommitDialogOpen] = useState(false);
 
-  const fetchStatus = useCallback(() => {
-    if (sessionId === null) {
-      setStatus(undefined);
-      return () => {};
-    }
-    let cancelled = false;
-    API.sessions.getCombinedDiff(sessionId).then(
-      (res) => {
-        if (cancelled) return;
-        setStatus(res.success ? res.data.worktree : undefined);
-      },
-      () => {
-        if (cancelled) return;
-        setStatus(undefined);
-      },
-    );
-    return () => {
-      cancelled = true;
-    };
-  }, [sessionId]);
-
-  useEffect(() => {
-    const cleanup = fetchStatus();
-    return cleanup;
-  }, [fetchStatus]);
-
-  const entries = status?.entries ?? [];
+  const entries = worktree?.entries ?? [];
   const hasConflict = entries.some((e) => e.conflicted);
 
   const commitDisabledReason =
     sessionId === null
       ? 'Select a session to commit changes'
-      : hasConflict
-        ? 'Resolve conflicts before committing'
-        : null;
+      : worktree === undefined
+        ? NO_STATUS_ERROR
+        : hasConflict
+          ? NO_CONFLICT_ERROR
+          : null;
   const restoreDisabledReason = sessionId === null ? 'Select a session to restore changes' : null;
 
   const handleCommit = useCallback(
     async (message: string) => {
       if (sessionId === null) return;
+      // Re-check against the LATEST snapshot at submission time — the dialog
+      // may have been opened before a conflicted/failed status arrived.
+      if (worktree === undefined) throw new Error(NO_STATUS_ERROR);
+      if (worktree.entries.some((e) => e.conflicted)) throw new Error(NO_CONFLICT_ERROR);
       const result = await trpc.cyboflow.sessionGit.commit.mutate({ sessionId, message });
       if (!result.success) {
         throw new Error(result.error || 'Failed to commit changes');
       }
-      fetchStatus();
+      onMutated?.();
     },
-    [sessionId, fetchStatus],
+    [sessionId, worktree, onMutated],
   );
 
   const handleRestore = useCallback(() => {
@@ -98,10 +99,10 @@ export function WorktreeStrip({ sessionId }: WorktreeStripProps): ReactElement {
     }
     trpc.cyboflow.workspaceFiles.gitRestore.mutate({ sessionId }).then((result) => {
       if (result.success) {
-        fetchStatus();
+        onMutated?.();
       }
     });
-  }, [sessionId, fetchStatus]);
+  }, [sessionId, onMutated]);
 
   return (
     <div
@@ -109,7 +110,7 @@ export function WorktreeStrip({ sessionId }: WorktreeStripProps): ReactElement {
       className="flex items-center justify-between gap-2 border-l-2 border-status-warning bg-bg-primary px-2 py-1.5 text-sm"
     >
       <span data-testid="worktree-strip-count" className="text-text-secondary">
-        {entries.length} uncommitted
+        {worktree === undefined ? '… uncommitted' : `${entries.length} uncommitted`}
       </span>
       <div className="flex shrink-0 items-center gap-2">
         <button

@@ -146,6 +146,66 @@ describe('RunDiffFileList grouped rendering', () => {
     expect(within(committedHeader).getByText('−1')).toBeInTheDocument();
   });
 
+  it('a row shows its group\'s SCOPE-SPECIFIC per-file numbers (fileStats), not the combined-diff totals', () => {
+    // src/both.ts is staged (+1) AND unstaged (+2/-1); the combined diff blob
+    // would report one base-relative pair (+3/-1) for it.
+    const diff = [
+      'diff --git a/src/both.ts b/src/both.ts',
+      'index 1111111..2222222 100644',
+      '--- a/src/both.ts',
+      '+++ b/src/both.ts',
+      '@@ -1,2 +1,4 @@',
+      ' context',
+      '-old',
+      '+one',
+      '+two',
+      '+three',
+      '',
+    ].join('\n');
+    const groups: WorktreeStatusPayload = {
+      entries: [{ path: 'src/both.ts', staged: true, unstaged: true, untracked: false, conflicted: false }],
+      groups: [
+        {
+          scope: 'unstaged',
+          files: ['src/both.ts'],
+          additions: 2,
+          deletions: 1,
+          fileStats: { 'src/both.ts': { additions: 2, deletions: 1 } },
+        },
+        {
+          scope: 'staged',
+          files: ['src/both.ts'],
+          additions: 1,
+          deletions: 0,
+          fileStats: { 'src/both.ts': { additions: 1, deletions: 0 } },
+        },
+        { scope: 'untracked', files: [], additions: 0, deletions: 0 },
+        { scope: 'committed', files: [], additions: 0, deletions: 0 },
+      ],
+      committedUnavailable: false,
+    };
+
+    render(<RunDiffFileList diff={diff} groups={groups} onOpenFile={vi.fn()} />);
+
+    const unstagedRow = within(screen.getByTestId('run-diff-group-unstaged')).getByTestId('run-diff-file-row');
+    expect(within(unstagedRow).getByText('+2')).toBeInTheDocument();
+    expect(within(unstagedRow).getByText('−1')).toBeInTheDocument();
+    expect(within(unstagedRow).queryByText('+3')).not.toBeInTheDocument();
+
+    const stagedRow = within(screen.getByTestId('run-diff-group-staged')).getByTestId('run-diff-file-row');
+    expect(within(stagedRow).getByText('+1')).toBeInTheDocument();
+    expect(within(stagedRow).queryByText('−1')).not.toBeInTheDocument();
+    expect(within(stagedRow).queryByText('+3')).not.toBeInTheDocument();
+  });
+
+  it('falls back to the combined-diff numbers for a row when the rollup carries no fileStats', () => {
+    render(<RunDiffFileList diff={GROUPED_DIFF} groups={GROUPS} onOpenFile={vi.fn()} />);
+    const unstagedSection = screen.getByTestId('run-diff-group-unstaged');
+    const aRow = within(unstagedSection).getByText('src/a.ts').closest('button')!;
+    expect(within(aRow).getByText('+1')).toBeInTheDocument();
+    expect(within(aRow).getByText('−1')).toBeInTheDocument();
+  });
+
   it('renders a file present in two groups as two separate rows (no dedup)', () => {
     render(<RunDiffFileList diff={GROUPED_DIFF} groups={GROUPS} onOpenFile={vi.fn()} />);
     expect(screen.getAllByText('src/shared.ts')).toHaveLength(2);
@@ -225,5 +285,31 @@ describe('RunDiffFileList grouped rendering', () => {
     expect(within(unstagedHeader).getByText('2 files')).toBeInTheDocument();
     expect(within(unstagedHeader).getByText('+5')).toBeInTheDocument();
     expect(within(unstagedHeader).getByText('−2')).toBeInTheDocument();
+  });
+
+  it('still shows the file count and rollup numbers at the rail ceiling (640px) width, with the header sized to its container', () => {
+    const { container } = render(
+      <div data-testid="rail-640" style={{ width: 640 }}>
+        <RunDiffFileList diff={GROUPED_DIFF} groups={GROUPS} onOpenFile={vi.fn()} />
+      </div>,
+    );
+    expect(container.querySelector('[data-testid="rail-640"]')).toBeTruthy();
+
+    for (const scope of ['unstaged', 'staged', 'untracked', 'committed'] as const) {
+      const header = screen.getByTestId(`run-diff-group-header-${scope}`);
+      // Full-width, min-w-0 and wrap-capable: the header never sets its own
+      // fixed width, so it can neither overflow 640px nor fall short of it.
+      expect(header.className).toMatch(/\bw-full\b/);
+      expect(header.className).toMatch(/\bmin-w-0\b/);
+      expect(header.className).toMatch(/\bflex-wrap\b/);
+    }
+    const unstagedHeader = screen.getByTestId('run-diff-group-header-unstaged');
+    expect(within(unstagedHeader).getByText('2 files')).toBeInTheDocument();
+    expect(within(unstagedHeader).getByText('+5')).toBeInTheDocument();
+    expect(within(unstagedHeader).getByText('−2')).toBeInTheDocument();
+    const committedHeader = screen.getByTestId('run-diff-group-header-committed');
+    expect(within(committedHeader).getByText('1 file')).toBeInTheDocument();
+    expect(within(committedHeader).getByText('+8')).toBeInTheDocument();
+    expect(within(committedHeader).getByText('−1')).toBeInTheDocument();
   });
 });

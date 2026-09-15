@@ -18,7 +18,7 @@
  */
 import type { AppServices } from './types';
 import type { SessionGitOpsLike, SessionGitDiffStats } from '../orchestrator/trpc/contracts/sessionGitOps';
-import { runGit, runGitAsync, END_OF_OPTIONS, assertNotOptionLike } from '../utils/runGit';
+import { runGit, runGitAsync, END_OF_OPTIONS } from '../utils/runGit';
 import { appendCommitFooter } from '../utils/commitFooter';
 import { panelManager } from '../services/panelManager';
 import { mainWindow } from '../index';
@@ -1999,20 +1999,26 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
   };
 
   /**
-   * `git rev-list --count HEAD..<ref>` — how many commits `ref` has that HEAD
-   * lacks. `ref` must already be PROVEN to resolve by the caller (the local
-   * existence check, or getOriginBranch's own successful return), so no
-   * option-like guard is needed on `ref` itself here: the `HEAD..` prefix also
-   * makes it structurally impossible for the resulting argv token to start
-   * with `-`. Degrades to 0 on any failure rather than throwing.
+   * `git rev-list --count HEAD..<sha>` — how many commits `sha` has that HEAD
+   * lacks. `sha` must be a RESOLVED commit sha from resolveSessionDiffBaseRef
+   * (never a raw branch/ref name — resolving first pins the count to the
+   * same commit the response labels, and removes the verify-then-use window
+   * in which a ref could move or vanish). The `HEAD..` prefix additionally
+   * makes it structurally impossible for the argv token to start with `-`.
+   *
+   * Returns `null` — never a fabricated `0` — when git cannot answer (an
+   * unborn HEAD, a sha that no longer resolves, unparsable output): the
+   * per-leg contract in SessionGitOpsLike.getComparisonBases is that an
+   * unanswerable leg is `null`, and a confident `behind: 0` is the opposite
+   * of that.
    */
-  async function countBehind(worktreePath: string, ref: string): Promise<number> {
+  async function countBehind(worktreePath: string, sha: string): Promise<number | null> {
     try {
-      const out = await runGitAsync(worktreePath, ['rev-list', '--count', END_OF_OPTIONS, `HEAD..${ref}`]);
+      const out = await runGitAsync(worktreePath, ['rev-list', '--count', END_OF_OPTIONS, `HEAD..${sha}`]);
       const n = parseInt(out.trim(), 10);
-      return Number.isFinite(n) ? n : 0;
+      return Number.isFinite(n) ? n : null;
     } catch {
-      return 0;
+      return null;
     }
   }
 
@@ -2080,29 +2086,25 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
       let originDefault: { ref: string; behind: number; fetchedAt: string | null } | null = null;
 
       if (defaultBranch) {
-        try {
-          assertNotOptionLike(defaultBranch, 'default branch');
-          await runGitAsync(worktreePath, [
-            'rev-parse',
-            '--verify',
-            '--quiet',
-            END_OF_OPTIONS,
-            `${defaultBranch}^{commit}`,
-          ]);
-          localDefault = { ref: defaultBranch, behind: await countBehind(worktreePath, defaultBranch) };
-        } catch {
-          localDefault = null;
+        // Both legs: resolve the DERIVED ref name to a sha first (option-like
+        // guard + `rev-parse --verify --end-of-options`, the TASK-208
+        // discipline), feed only that sha to the behind query, and keep the
+        // human-readable name solely as the response label. A leg whose ref
+        // does not resolve, or whose count git cannot answer, is `null`.
+        const localSha = await resolveSessionDiffBaseRef(worktreePath, [defaultBranch]);
+        if (localSha) {
+          const behind = await countBehind(worktreePath, localSha);
+          localDefault = behind === null ? null : { ref: defaultBranch, behind };
         }
 
         const originRef = await worktreeManager.getOriginBranch(worktreePath, defaultBranch);
-        if (originRef) {
-          originDefault = {
-            ref: originRef,
-            behind: await countBehind(worktreePath, originRef),
-            fetchedAt: await getFetchedAt(worktreePath),
-          };
-        } else {
-          originDefault = null;
+        const originSha = originRef ? await resolveSessionDiffBaseRef(worktreePath, [originRef]) : null;
+        if (originRef && originSha) {
+          const behind = await countBehind(worktreePath, originSha);
+          originDefault =
+            behind === null
+              ? null
+              : { ref: originRef, behind, fetchedAt: await getFetchedAt(worktreePath) };
         }
       }
 

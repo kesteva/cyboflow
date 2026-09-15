@@ -2,7 +2,9 @@
  * BaseSelector — the comparison-base control for the session/run diff surface.
  *
  * A controlled, self-contained form-field-style row: closed it shows
- * `vs <label> · <ref>`; clicking it opens a rail-width dropdown with exactly
+ * `vs <label> · <ref>` (the fixed `vs <label>` never shrinks; only `<ref>`
+ * truncates, so a long arbitrary branch name lives in `<ref>`); clicking it
+ * opens a rail-width dropdown with exactly
  * four entries (Branch point / <default> (local) / origin/<default> / Another
  * branch). Selecting an entry calls `onChange` with the resolved ref (or
  * `null` for "Branch point", the default).
@@ -53,6 +55,18 @@ export interface BaseSelectorProps {
   /** null = "Branch point" (the default comparison base). */
   selectedRef: string | null;
   onChange: (ref: string | null) => void;
+  /**
+   * The SHA the ACTIVE diff panel's DEFAULT base ("Branch point", i.e. a
+   * `null` selection) actually resolved to — lifted by the rail from the
+   * panel's `onResolvedBase` echo (TASK-214). When present it is THE source
+   * of truth for the branch-point short SHA (closed label + menu entry) and
+   * for whether "Branch point" is selectable: a run-scoped panel diffs
+   * against the run's own launch base, which can differ from — or exist
+   * without — the session's recorded `baseCommit` that getComparisonBases
+   * reports. Falls back to getComparisonBases' `branchPoint` when absent
+   * (no default fetch has completed yet).
+   */
+  resolvedDefaultBase?: string | null;
 }
 
 /** Human-readable freshness for the origin fetch timestamp. Best-effort only. */
@@ -70,13 +84,32 @@ function relativeFetchLabel(fetchedAt: string | null): string | null {
   return `fetched ${days}d ago`;
 }
 
-/** The closed-state `<label>` / `<ref>` pair for the current selection. */
+/**
+ * The branch-point short SHA to display: the panel's lifted default base
+ * wins over getComparisonBases' session-derived branch point (see
+ * BaseSelectorProps.resolvedDefaultBase). null when neither is known.
+ */
+function branchPointShortSha(
+  bases: ComparisonBases,
+  resolvedDefaultBase: string | null | undefined,
+): string | null {
+  if (resolvedDefaultBase) return resolvedDefaultBase.slice(0, 7);
+  return bases.branchPoint?.shortSha ?? null;
+}
+
+/**
+ * The closed-state `<label>` / `<ref>` pair for the current selection. `label`
+ * is always a SHORT fixed phrase; `ref` (nullable) is the part that may be
+ * long and is the ONLY part the closed trigger truncates — so "Another
+ * branch" puts the branch name in `ref`, never in `label`.
+ */
 function closedState(
   selectedRef: string | null,
   bases: ComparisonBases,
+  resolvedDefaultBase: string | null | undefined,
 ): { label: string; ref: string | null } {
   if (selectedRef === null) {
-    return { label: 'branch point', ref: bases.branchPoint?.shortSha ?? null };
+    return { label: 'branch point', ref: branchPointShortSha(bases, resolvedDefaultBase) };
   }
   if (bases.localDefault && selectedRef === bases.localDefault.ref) {
     return {
@@ -90,7 +123,7 @@ function closedState(
       ref: selectedRef,
     };
   }
-  return { label: selectedRef, ref: null };
+  return { label: 'branch', ref: selectedRef };
 }
 
 /** Narrow an unknown branches-listing entry down to its name, if present. */
@@ -107,14 +140,35 @@ export function BaseSelector({
   projectId,
   selectedRef,
   onChange,
+  resolvedDefaultBase,
 }: BaseSelectorProps): ReactElement {
   const [open, setOpen] = useState(false);
   const [bases, setBases] = useState<ComparisonBases>(EMPTY_BASES);
   const [branches, setBranches] = useState<string[]>([]);
-  const [branchesLoaded, setBranchesLoaded] = useState(false);
+  // The projectId the cached `branches` (and any in-flight listBranches
+  // request) belong to — null = nothing fetched yet. Keying the cache by
+  // project (rather than a plain "loaded once" boolean) is what lets a
+  // same-mount projectId change both re-query AND discard a stale in-flight
+  // response for the previous project.
+  const [branchesProjectId, setBranchesProjectId] = useState<string | null>(null);
   const [branchFilter, setBranchFilter] = useState('');
   const [otherBranchOpen, setOtherBranchOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const projectIdRef = useRef<string | null>(projectId);
+  projectIdRef.current = projectId;
+  const cachedForProjectRef = useRef<string | null>(projectId);
+
+  // A project switch invalidates the cached branch list and the picker's
+  // transient state — the next "Another branch" expand re-queries for the
+  // NEW project instead of reusing the previous project's branches.
+  useEffect(() => {
+    if (cachedForProjectRef.current === projectId) return;
+    cachedForProjectRef.current = projectId;
+    setBranches([]);
+    setBranchesProjectId(null);
+    setBranchFilter('');
+    setOtherBranchOpen(false);
+  }, [projectId]);
 
   // Fetch the resolved comparison bases on mount / whenever sessionId changes.
   // Every leg degrades independently server-side, so a thrown promise (the
@@ -142,12 +196,16 @@ export function BaseSelector({
   }, [sessionId]);
 
   // Lazy branch fetch — only when "Another branch" is expanded, and never for
-  // a session with no associated project. Fetched at most once per mount.
+  // a session with no associated project. Fetched at most once per project
+  // per mount; a response that arrives after projectId has moved on is
+  // dropped rather than populating the wrong project's menu.
   const loadBranches = useCallback(() => {
-    if (projectId === null || branchesLoaded) return;
-    setBranchesLoaded(true);
-    API.projects.listBranches(projectId).then(
+    if (projectId === null || branchesProjectId === projectId) return;
+    const requestedFor = projectId;
+    setBranchesProjectId(requestedFor);
+    API.projects.listBranches(requestedFor).then(
       (res: { success: boolean; data?: unknown }) => {
+        if (projectIdRef.current !== requestedFor) return;
         if (!res.success || !Array.isArray(res.data)) return;
         const names = res.data
           .map(branchName)
@@ -159,7 +217,7 @@ export function BaseSelector({
         /* branches stay empty — the picker renders only the disabled state */
       },
     );
-  }, [projectId, branchesLoaded]);
+  }, [projectId, branchesProjectId]);
 
   // Click-outside closes the menu (and its "Another branch" sub-section).
   useEffect(() => {
@@ -175,7 +233,8 @@ export function BaseSelector({
     return () => document.removeEventListener('mousedown', onDocMouseDown);
   }, [open]);
 
-  const { label: closedLabel, ref: closedRef } = closedState(selectedRef, bases);
+  const { label: closedLabel, ref: closedRef } = closedState(selectedRef, bases, resolvedDefaultBase);
+  const branchPointSha = branchPointShortSha(bases, resolvedDefaultBase);
 
   const filteredBranches = useMemo(() => {
     const needle = branchFilter.trim().toLowerCase();
@@ -242,14 +301,14 @@ export function BaseSelector({
           <button
             type="button"
             data-testid="base-selector-option-branch-point"
-            disabled={!bases.branchPoint}
-            title={bases.branchPoint ? undefined : 'No branch point could be resolved'}
+            disabled={branchPointSha === null}
+            title={branchPointSha !== null ? undefined : 'No branch point could be resolved'}
             onClick={() => handleSelect(null)}
             className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm font-medium text-text-secondary hover:bg-bg-tertiary disabled:cursor-not-allowed disabled:opacity-50"
           >
             <span>Branch point</span>
-            {bases.branchPoint && (
-              <span className="text-text-tertiary">{bases.branchPoint.shortSha}</span>
+            {branchPointSha !== null && (
+              <span className="text-text-tertiary">{branchPointSha}</span>
             )}
           </button>
 

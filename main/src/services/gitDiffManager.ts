@@ -317,8 +317,9 @@ export class GitDiffManager {
   /**
    * Parse `git diff --numstat` output (`additions \t deletions \t path` per
    * line, `-`/`-` for a binary file) into aggregate stats + the file list.
-   * Shared by getDiffStatsAgainstRef and the per-scope rollups in
-   * getDiffGroups (TASK-210) so the two never drift on numstat semantics.
+   * Used by getDiffStatsAgainstRef; the per-scope rollups in getDiffGroups
+   * (TASK-210) use the `-z` twin parseNumstatZ below, whose membership paths
+   * must be openable/joinable (rename destination, no C-quoting).
    */
   private parseNumstat(output: string): { additions: number; deletions: number; files: string[] } {
     let additions = 0;
@@ -335,6 +336,68 @@ export class GitDiffManager {
       if (deleted !== '-') deletions += parseInt(deleted, 10) || 0;
     }
     return { additions, deletions, files };
+  }
+
+  /**
+   * Parse `git diff --numstat -z` output into per-scope group membership +
+   * aggregate stats (TASK-210 staged/unstaged scopes). Distinct from
+   * parseNumstat (the non-`-z` twin) in two ways that matter for a
+   * membership list whose paths are later OPENED and joined against
+   * `getWorktreeStatus` entries:
+   *
+   *   • A rename/copy row is `<add>\t<del>\t\0<old>\0<new>\0` under `-z`
+   *     (an EMPTY path field, then old and new as separate NUL fields) — the
+   *     destination path is recorded, never the human-readable
+   *     `old => new` / `dir/{old => new}` display expression the non-`-z`
+   *     form prints (which is not a path anything can open).
+   *   • `-z` never C-quotes a path with spaces/specials, so the membership
+   *     path is byte-identical to the porcelain `-z` status path.
+   *
+   * Membership is UNIQUE per scope: an unmerged (conflicted) path is emitted
+   * as two numstat rows by `git diff` (one per merge side), which would
+   * otherwise list — and count — the same file twice inside one group. The
+   * numbers are still aggregated across every row.
+   */
+  private parseNumstatZ(output: string): {
+    additions: number;
+    deletions: number;
+    files: string[];
+    fileStats: Record<string, { additions: number; deletions: number }>;
+  } {
+    let additions = 0;
+    let deletions = 0;
+    const files: string[] = [];
+    const seen = new Set<string>();
+    const fileStats: Record<string, { additions: number; deletions: number }> = {};
+    if (!output) return { additions, deletions, files, fileStats };
+
+    const fields = output.split('\0');
+    for (let i = 0; i < fields.length; i++) {
+      const record = fields[i];
+      if (!record) continue;
+      const [added, deleted, ...pathParts] = record.split('\t');
+      if (added === undefined || deleted === undefined) continue;
+      let filePath = pathParts.join('\t');
+      if (filePath === '') {
+        // Rename/copy: the path field is empty and the next two NUL fields
+        // are <old> then <new>. Consume both; the NEW path is the member.
+        i += 2;
+        filePath = fields[i] ?? '';
+      }
+      if (!filePath) continue;
+      const a = added !== '-' ? parseInt(added, 10) || 0 : 0;
+      const d = deleted !== '-' ? parseInt(deleted, 10) || 0 : 0;
+      additions += a;
+      deletions += d;
+      const stat = fileStats[filePath] ?? { additions: 0, deletions: 0 };
+      stat.additions += a;
+      stat.deletions += d;
+      fileStats[filePath] = stat;
+      if (seen.has(filePath)) continue;
+      seen.add(filePath);
+      files.push(filePath);
+    }
+    return { additions, deletions, files, fileStats };
   }
 
   /**
@@ -374,18 +437,18 @@ export class GitDiffManager {
     };
   }
 
-  /** Staged scope: index vs HEAD. */
+  /** Staged scope: index vs HEAD. `-z` so a rename yields its real destination path (see parseNumstatZ). */
   private async getStagedGroup(worktreePath: string): Promise<DiffGroupRollup> {
-    const output = await runGitAsync(worktreePath, ['diff', '--cached', '--numstat']);
-    const { additions, deletions, files } = this.parseNumstat(output);
-    return { scope: 'staged', files, additions, deletions };
+    const output = await runGitAsync(worktreePath, ['diff', '--cached', '--numstat', '-z']);
+    const { additions, deletions, files, fileStats } = this.parseNumstatZ(output);
+    return { scope: 'staged', files, additions, deletions, fileStats };
   }
 
   /** Unstaged scope: working tree vs index. No caller-supplied ref involved. */
   private async getUnstagedGroup(worktreePath: string): Promise<DiffGroupRollup> {
-    const output = await runGitAsync(worktreePath, ['diff', '--numstat']);
-    const { additions, deletions, files } = this.parseNumstat(output);
-    return { scope: 'unstaged', files, additions, deletions };
+    const output = await runGitAsync(worktreePath, ['diff', '--numstat', '-z']);
+    const { additions, deletions, files, fileStats } = this.parseNumstatZ(output);
+    return { scope: 'unstaged', files, additions, deletions, fileStats };
   }
 
   /**
@@ -409,6 +472,7 @@ export class GitDiffManager {
   private async getUntrackedGroup(worktreePath: string): Promise<DiffGroupRollup> {
     const files = await this.getUntrackedFiles(worktreePath);
     let additions = 0;
+    const fileStats: Record<string, { additions: number; deletions: number }> = {};
     for (const file of files) {
       if (!file || file.trim().length === 0) continue;
       try {
@@ -419,13 +483,15 @@ export class GitDiffManager {
         // from the diff blob entirely, so it contributes 0 here too.
         if (stat.size > MAX_UNTRACKED_READ_BYTES) continue;
         const content = fs.readFileSync(filePath, 'utf8');
-        additions += content.split('\n').length;
+        const lines = content.split('\n').length;
+        additions += lines;
+        fileStats[file] = { additions: lines, deletions: 0 };
       } catch {
         // Skip files that can't be read (binary, permission denied, missing, etc.),
         // mirroring createDiffForUntrackedFiles.
       }
     }
-    return { scope: 'untracked', files, additions, deletions: 0 };
+    return { scope: 'untracked', files, additions, deletions: 0, fileStats };
   }
 
   /**
@@ -470,10 +536,10 @@ export class GitDiffManager {
       const nameOutput = await runGitAsync(worktreePath, ['diff', '--name-only', END_OF_OPTIONS, range]);
       const files = nameOutput.trim().split('\n').filter((f) => f.length > 0);
 
-      const numstatOutput = await runGitAsync(worktreePath, ['diff', '--numstat', END_OF_OPTIONS, range]);
-      const { additions, deletions } = this.parseNumstat(numstatOutput);
+      const numstatOutput = await runGitAsync(worktreePath, ['diff', '--numstat', '-z', END_OF_OPTIONS, range]);
+      const { additions, deletions, fileStats } = this.parseNumstatZ(numstatOutput);
 
-      return { group: { scope: 'committed', files, additions, deletions }, unavailable: false };
+      return { group: { scope: 'committed', files, additions, deletions, fileStats }, unavailable: false };
     } catch {
       return { group: empty, unavailable: true };
     }

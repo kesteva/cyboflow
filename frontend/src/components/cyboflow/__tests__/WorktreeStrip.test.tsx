@@ -15,43 +15,20 @@ vi.mock('../../../trpc/client', () => ({
   },
 }));
 
-// --- API mock ---------------------------------------------------------------
-vi.mock('../../../utils/api', () => ({
-  API: {
-    sessions: {
-      getCombinedDiff: vi.fn(),
-    },
-  },
-}));
-
 import { WorktreeStrip } from '../WorktreeStrip';
 import { trpc } from '../../../trpc/client';
-import { API } from '../../../utils/api';
-import type { WorktreeStatusEntry } from '../../../../../shared/types/runFiles';
+import type { WorktreeStatusEntry, WorktreeStatusPayload } from '../../../../../shared/types/runFiles';
 
 const mockCommit = vi.mocked(trpc.cyboflow.sessionGit.commit.mutate);
 const mockGitRestore = vi.mocked(trpc.cyboflow.workspaceFiles.gitRestore.mutate);
-const mockGetCombinedDiff = vi.mocked(API.sessions.getCombinedDiff);
 
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
-function diffResponse(entries: WorktreeStatusEntry[]) {
-  return {
-    success: true as const,
-    data: {
-      diff: '',
-      stats: { additions: 0, deletions: 0, filesChanged: entries.length },
-      changedFiles: entries.map((e) => e.path),
-      resolvedBase: null,
-      worktree: {
-        entries,
-        groups: [],
-        committedUnavailable: false,
-      },
-    },
-  };
+/** The lifted panel snapshot the strip renders (its `worktree` prop). */
+function worktreeOf(entries: WorktreeStatusEntry[]): WorktreeStatusPayload {
+  return { entries, groups: [], committedUnavailable: false };
 }
 
 const MIXED_ENTRIES: WorktreeStatusEntry[] = [
@@ -75,29 +52,22 @@ const CONFLICTED_ENTRIES: WorktreeStatusEntry[] = [
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockGetCombinedDiff.mockResolvedValue(diffResponse(MIXED_ENTRIES));
 });
 
 describe('WorktreeStrip', () => {
-  it('renders a count equal to entries.length for a mixed-flags fixture', async () => {
-    render(<WorktreeStrip sessionId="s1" />);
-    await waitFor(() => expect(mockGetCombinedDiff).toHaveBeenCalledWith('s1'));
-    await waitFor(() => {
-      expect(screen.getByTestId('worktree-strip-count').textContent).toBe('3 uncommitted');
-    });
+  it('renders a count equal to entries.length of the LIFTED snapshot for a mixed-flags fixture (no fetch of its own)', () => {
+    render(<WorktreeStrip sessionId="s1" worktree={worktreeOf(MIXED_ENTRIES)} />);
+    expect(screen.getByTestId('worktree-strip-count').textContent).toBe('3 uncommitted');
   });
 
-  it('counts a two-group file (staged AND unstaged) ONCE, not per group membership', async () => {
-    mockGetCombinedDiff.mockResolvedValue(diffResponse(TWO_GROUP_ENTRIES));
-    render(<WorktreeStrip sessionId="s1" />);
-    await waitFor(() => {
-      expect(screen.getByTestId('worktree-strip-count').textContent).toBe('2 uncommitted');
-    });
+  it('counts a two-group file (staged AND unstaged) ONCE, not per group membership', () => {
+    render(<WorktreeStrip sessionId="s1" worktree={worktreeOf(TWO_GROUP_ENTRIES)} />);
+    expect(screen.getByTestId('worktree-strip-count').textContent).toBe('2 uncommitted');
   });
 
-  it('disables both buttons with explanatory titles when sessionId is null', async () => {
-    render(<WorktreeStrip sessionId={null} />);
-    expect(mockGetCombinedDiff).not.toHaveBeenCalled();
+  it('a parentless run (sessionId null) still shows the lifted snapshot count, with both actions disabled', () => {
+    render(<WorktreeStrip sessionId={null} worktree={worktreeOf(MIXED_ENTRIES)} />);
+    expect(screen.getByTestId('worktree-strip-count').textContent).toBe('3 uncommitted');
 
     const commitBtn = screen.getByTestId('worktree-strip-commit') as HTMLButtonElement;
     const restoreBtn = screen.getByTestId('worktree-strip-restore') as HTMLButtonElement;
@@ -107,12 +77,9 @@ describe('WorktreeStrip', () => {
     expect(restoreBtn.getAttribute('title')).toBe('Select a session to restore changes');
   });
 
-  it('disables Commit… (with a title) but keeps Restore enabled when a conflicted entry is present', async () => {
-    mockGetCombinedDiff.mockResolvedValue(diffResponse(CONFLICTED_ENTRIES));
-    render(<WorktreeStrip sessionId="s1" />);
-    await waitFor(() => {
-      expect(screen.getByTestId('worktree-strip-count').textContent).toBe('2 uncommitted');
-    });
+  it('disables Commit… (with a title) but keeps Restore enabled when a conflicted entry is present', () => {
+    render(<WorktreeStrip sessionId="s1" worktree={worktreeOf(CONFLICTED_ENTRIES)} />);
+    expect(screen.getByTestId('worktree-strip-count').textContent).toBe('2 uncommitted');
 
     const commitBtn = screen.getByTestId('worktree-strip-commit') as HTMLButtonElement;
     const restoreBtn = screen.getByTestId('worktree-strip-restore') as HTMLButtonElement;
@@ -121,37 +88,99 @@ describe('WorktreeStrip', () => {
     expect(restoreBtn.disabled).toBe(false);
   });
 
-  it('Restore: confirms, then calls gitRestore.mutate({ sessionId })', async () => {
+  it('with NO snapshot yet (loading / failed fetch) the count is unknown and Commit is disabled — never treated as clean', () => {
+    render(<WorktreeStrip sessionId="s1" worktree={undefined} />);
+    expect(screen.getByTestId('worktree-strip-count').textContent).toBe('… uncommitted');
+
+    const commitBtn = screen.getByTestId('worktree-strip-commit') as HTMLButtonElement;
+    expect(commitBtn.disabled).toBe(true);
+    expect(commitBtn.getAttribute('title')).toBe('Working-tree status is not available yet');
+    // Restore only needs a session.
+    expect((screen.getByTestId('worktree-strip-restore') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('a pending snapshot followed by a conflicted one: Commit stays disabled throughout', () => {
+    const { rerender } = render(<WorktreeStrip sessionId="s1" worktree={undefined} />);
+    expect((screen.getByTestId('worktree-strip-commit') as HTMLButtonElement).disabled).toBe(true);
+
+    rerender(<WorktreeStrip sessionId="s1" worktree={worktreeOf(CONFLICTED_ENTRIES)} />);
+    const commitBtn = screen.getByTestId('worktree-strip-commit') as HTMLButtonElement;
+    expect(commitBtn.disabled).toBe(true);
+    expect(commitBtn.getAttribute('title')).toBe('Resolve conflicts before committing');
+  });
+
+  it('submission re-checks the LATEST snapshot: a dialog opened while clean refuses to commit once the tree is conflicted', async () => {
+    const { rerender } = render(<WorktreeStrip sessionId="s1" worktree={worktreeOf(MIXED_ENTRIES)} />);
+    fireEvent.click(screen.getByTestId('worktree-strip-commit'));
+    const textarea = await screen.findByPlaceholderText('Enter commit message...');
+    fireEvent.change(textarea, { target: { value: 'oops' } });
+
+    // The tree turns conflicted while the dialog is open.
+    rerender(<WorktreeStrip sessionId="s1" worktree={worktreeOf(CONFLICTED_ENTRIES)} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Commit' }));
+
+    await screen.findByText('Resolve conflicts before committing');
+    expect(mockCommit).not.toHaveBeenCalled();
+  });
+
+  it('submission refuses to commit when the snapshot has been lost (undefined) since the dialog opened', async () => {
+    const { rerender } = render(<WorktreeStrip sessionId="s1" worktree={worktreeOf(MIXED_ENTRIES)} />);
+    fireEvent.click(screen.getByTestId('worktree-strip-commit'));
+    const textarea = await screen.findByPlaceholderText('Enter commit message...');
+    fireEvent.change(textarea, { target: { value: 'oops' } });
+
+    rerender(<WorktreeStrip sessionId="s1" worktree={undefined} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Commit' }));
+
+    await screen.findByText('Working-tree status is not available yet');
+    expect(mockCommit).not.toHaveBeenCalled();
+  });
+
+  it('Restore: confirms, calls gitRestore.mutate({ sessionId }), then signals onMutated', async () => {
     mockGitRestore.mockResolvedValue({ success: true });
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
-    render(<WorktreeStrip sessionId="s1" />);
-    await waitFor(() => expect(mockGetCombinedDiff).toHaveBeenCalled());
+    const onMutated = vi.fn();
+    render(<WorktreeStrip sessionId="s1" worktree={worktreeOf(MIXED_ENTRIES)} onMutated={onMutated} />);
 
     fireEvent.click(screen.getByTestId('worktree-strip-restore'));
     expect(confirmSpy).toHaveBeenCalled();
     await waitFor(() => {
       expect(mockGitRestore).toHaveBeenCalledWith({ sessionId: 's1' });
     });
+    await waitFor(() => expect(onMutated).toHaveBeenCalledTimes(1));
     confirmSpy.mockRestore();
   });
 
-  it('Restore: declining the confirm calls no mutation', async () => {
+  it('Restore: declining the confirm calls no mutation and no onMutated', () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false);
-    render(<WorktreeStrip sessionId="s1" />);
-    await waitFor(() => expect(mockGetCombinedDiff).toHaveBeenCalled());
+    const onMutated = vi.fn();
+    render(<WorktreeStrip sessionId="s1" worktree={worktreeOf(MIXED_ENTRIES)} onMutated={onMutated} />);
 
     fireEvent.click(screen.getByTestId('worktree-strip-restore'));
     expect(confirmSpy).toHaveBeenCalled();
     expect(mockGitRestore).not.toHaveBeenCalled();
+    expect(onMutated).not.toHaveBeenCalled();
     confirmSpy.mockRestore();
   });
 
-  it('Commit…: opens CommitDialog, typing a message and confirming calls commit.mutate({ sessionId, message })', async () => {
+  it('Restore: a failed mutation does NOT signal onMutated', async () => {
+    mockGitRestore.mockResolvedValue({ success: false, error: 'nope' });
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const onMutated = vi.fn();
+    render(<WorktreeStrip sessionId="s1" worktree={worktreeOf(MIXED_ENTRIES)} onMutated={onMutated} />);
+
+    fireEvent.click(screen.getByTestId('worktree-strip-restore'));
+    await waitFor(() => expect(mockGitRestore).toHaveBeenCalled());
+    await Promise.resolve();
+    expect(onMutated).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
+  });
+
+  it('Commit…: opens CommitDialog, typing a message and confirming calls commit.mutate({ sessionId, message }) and signals onMutated', async () => {
     mockCommit.mockResolvedValue({ success: true });
-    render(<WorktreeStrip sessionId="s1" />);
-    await waitFor(() => {
-      expect(screen.getByTestId('worktree-strip-count').textContent).toBe('3 uncommitted');
-    });
+    const onMutated = vi.fn();
+    render(<WorktreeStrip sessionId="s1" worktree={worktreeOf(MIXED_ENTRIES)} onMutated={onMutated} />);
+    expect(screen.getByTestId('worktree-strip-count').textContent).toBe('3 uncommitted');
 
     fireEvent.click(screen.getByTestId('worktree-strip-commit'));
 
@@ -163,5 +192,6 @@ describe('WorktreeStrip', () => {
     await waitFor(() => {
       expect(mockCommit).toHaveBeenCalledWith({ sessionId: 's1', message: 'my commit message' });
     });
+    await waitFor(() => expect(onMutated).toHaveBeenCalledTimes(1));
   });
 });

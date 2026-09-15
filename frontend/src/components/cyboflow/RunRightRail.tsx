@@ -50,7 +50,7 @@ import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
-import type { DiffGroupScope } from '../../../../shared/types/runFiles';
+import type { DiffGroupScope, WorktreeStatusPayload } from '../../../../shared/types/runFiles';
 
 type TabId = 'workflow-progress' | 'file-explorer' | 'diff' | 'artifacts';
 
@@ -211,8 +211,38 @@ export function RunRightRail({
   // Absent an entry (no fetch has completed yet) resolves to null, the
   // representable "session default" base.
   const [resolvedBaseBySession, setResolvedBaseBySession] = useState<Record<string, string | null>>({});
-  const handleResolvedBase = useCallback((sessionKey: string, base: string | null) => {
+  // The DEFAULT base ("Branch point", a null selection) each panel most
+  // recently resolved, keyed like resolvedBaseBySession. Only echoes that
+  // arrive while the selection is null land here (a fetch for a non-null
+  // selection resolves THAT ref, not the default), so BaseSelector can keep
+  // labelling / offering "Branch point" with the panel's own default even
+  // while a different base is selected.
+  const [defaultBaseBySession, setDefaultBaseBySession] = useState<Record<string, string | null>>({});
+  const handleResolvedBase = useCallback((sessionKey: string, base: string | null, isDefaultSelection: boolean) => {
     setResolvedBaseBySession((prev) => ({ ...prev, [sessionKey]: base }));
+    if (isDefaultSelection) {
+      setDefaultBaseBySession((prev) => ({ ...prev, [sessionKey]: base }));
+    }
+  }, []);
+
+  // The working-tree snapshot the active Diff-tab panel most recently
+  // fetched (its `onWorktree` echo), keyed like resolvedBaseBySession —
+  // lifted into WorktreeStrip so the strip's count is the SAME response the
+  // grouped list renders (TASK-218 D-8), never a second, separately-timed
+  // request; and available for a parentless run (no session) too.
+  const [worktreeBySession, setWorktreeBySession] = useState<Record<string, WorktreeStatusPayload | undefined>>(
+    {},
+  );
+  const handleWorktree = useCallback((sessionKey: string, worktree: WorktreeStatusPayload | undefined) => {
+    setWorktreeBySession((prev) => ({ ...prev, [sessionKey]: worktree }));
+  }, []);
+
+  // Bumped after WorktreeStrip's Commit / Restore succeeds; both panels key
+  // their fetch effect on it, so the grouped list and the lifted snapshot
+  // above refresh together from ONE new response.
+  const [worktreeRefreshNonce, setWorktreeRefreshNonce] = useState(0);
+  const handleWorktreeMutated = useCallback(() => {
+    setWorktreeRefreshNonce((n) => n + 1);
   }, []);
 
   // The user's comparison-base SELECTION (TASK-218, BaseSelector) — distinct
@@ -478,25 +508,38 @@ export function RunRightRail({
                 projectId={baseSelectorProjectId}
                 selectedRef={selectedComparisonRef}
                 onChange={handleComparisonBaseChange}
+                resolvedDefaultBase={defaultBaseBySession[selectedSessionId ?? ''] ?? null}
               />
             </div>
             <div className="shrink-0 border-b border-border-primary p-2">
-              <WorktreeStrip sessionId={selectedSessionId} />
+              <WorktreeStrip
+                sessionId={selectedSessionId}
+                worktree={worktreeBySession[selectedSessionId ?? '']}
+                onMutated={handleWorktreeMutated}
+              />
             </div>
             <div className="flex-1 overflow-hidden">
               {activeRunId !== null ? (
                 <RunDiffTabPanel
                   runId={activeRunId}
                   comparisonRef={selectedComparisonRef}
+                  refreshNonce={worktreeRefreshNonce}
                   onOpenFile={openDiffFile}
-                  onResolvedBase={(base) => handleResolvedBase(selectedSessionId ?? '', base)}
+                  onResolvedBase={(base) =>
+                    handleResolvedBase(selectedSessionId ?? '', base, selectedComparisonRef === null)
+                  }
+                  onWorktree={(worktree) => handleWorktree(selectedSessionId ?? '', worktree)}
                 />
               ) : selectedSessionId !== null ? (
                 <SessionDiffTabPanel
                   sessionId={selectedSessionId}
                   comparisonRef={selectedComparisonRef}
+                  refreshNonce={worktreeRefreshNonce}
                   onOpenFile={openDiffFile}
-                  onResolvedBase={(base) => handleResolvedBase(selectedSessionId, base)}
+                  onResolvedBase={(base) =>
+                    handleResolvedBase(selectedSessionId, base, selectedComparisonRef === null)
+                  }
+                  onWorktree={(worktree) => handleWorktree(selectedSessionId, worktree)}
                 />
               ) : (
                 <div

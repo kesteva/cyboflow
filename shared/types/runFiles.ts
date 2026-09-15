@@ -105,6 +105,15 @@ export interface DiffGroupRollup {
   files: string[];
   additions: number;
   deletions: number;
+  /**
+   * Per-file +/- for THIS scope, keyed by the same worktree-relative path as
+   * `files` — the scope-specific numbers a grouped row shows (a file that is
+   * both Staged and Unstaged has different deltas in each, which the
+   * base-relative combined diff cannot express). Optional on the wire so an
+   * older/stub producer (e.g. main/src/index.ts's empty payload) stays
+   * valid; consumers fall back to the combined-diff numbers when absent.
+   */
+  fileStats?: Record<string, { additions: number; deletions: number }>;
 }
 
 /**

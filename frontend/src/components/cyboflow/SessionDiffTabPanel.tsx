@@ -30,8 +30,10 @@ const INITIAL_STATE: SessionDiffState = { diff: '', worktree: undefined, isLoadi
 export function SessionDiffTabPanel({
   sessionId,
   comparisonRef,
+  refreshNonce,
   onOpenFile,
   onResolvedBase,
+  onWorktree,
 }: {
   sessionId: string;
   /**
@@ -52,6 +54,18 @@ export function SessionDiffTabPanel({
    * twin for the rationale (lifts the SAME base into openFileTab).
    */
   onResolvedBase?: (base: string | null) => void;
+  /**
+   * Bumped by the rail after a working-tree MUTATION (WorktreeStrip's Commit
+   * / Restore) so this panel refetches the same [sessionId, comparisonRef]
+   * and the grouped list + the strip's count move together.
+   */
+  refreshNonce?: number;
+  /**
+   * Echoes the fetched response's `worktree` payload (the SAME snapshot the
+   * grouped list renders) so the rail can lift it into WorktreeStrip. Called
+   * with `undefined` on BOTH failure arms (see RunDiffTabPanel's twin).
+   */
+  onWorktree?: (worktree: WorktreeStatusPayload | undefined) => void;
 }): ReactElement {
   const [state, setState] = useState<SessionDiffState>(INITIAL_STATE);
 
@@ -64,10 +78,12 @@ export function SessionDiffTabPanel({
         if (cancelled) return;
         if (!res.success) {
           setState({ diff: '', worktree: undefined, isLoading: false, error: res.error ?? 'Failed to load diff' });
+          onWorktree?.(undefined);
           return;
         }
         setState({ diff: res.data.diff ?? '', worktree: res.data.worktree, isLoading: false, error: null });
         onResolvedBase?.(res.data.resolvedBase ?? null);
+        onWorktree?.(res.data.worktree);
       },
       (err: unknown) => {
         if (cancelled) return;
@@ -77,18 +93,20 @@ export function SessionDiffTabPanel({
           isLoading: false,
           error: err instanceof Error ? err.message : 'Failed to load diff',
         });
+        onWorktree?.(undefined);
       },
     );
 
     return () => {
       cancelled = true;
     };
-    // onResolvedBase is a per-render callback from the rail; keying the fetch
-    // on it would refetch on every rail render (D-8: single fetch per
-    // [sessionId, comparisonRef] pair). comparisonRef IS a dep on purpose — a
-    // new selection must refetch.
+    // onResolvedBase/onWorktree are per-render callbacks from the rail; keying
+    // the fetch on them would refetch on every rail render (D-8: single fetch
+    // per [sessionId, comparisonRef] pair). comparisonRef IS a dep on purpose
+    // — a new selection must refetch — as is refreshNonce (a post-mutation
+    // refetch signal).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId, comparisonRef]);
+  }, [sessionId, comparisonRef, refreshNonce]);
 
   if (state.isLoading) {
     return (

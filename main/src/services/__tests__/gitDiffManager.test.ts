@@ -716,6 +716,33 @@ describe('GitDiffManager.getDiffGroups', () => {
       // Unstaged: worktree vs index adds exactly 2 lines ("working-a", "working-b").
       expect(unstaged.additions).toBe(2);
       expect(staged.additions).not.toBe(unstaged.additions);
+      // Per-file, scope-specific numbers (what a grouped ROW shows) carry the
+      // same distinct deltas — never one shared base-relative pair.
+      expect(staged.fileStats?.['f.txt']).toEqual({ additions: 1, deletions: 0 });
+      expect(unstaged.fileStats?.['f.txt']).toEqual({ additions: 2, deletions: 0 });
+    });
+  });
+
+  it('untracked and committed groups also carry per-file fileStats keyed by membership path', async () => {
+    await withTempDir('gitdiff-groups-filestats-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'base.txt', 'base\n', 'base');
+      const baseSha = headSha2(repo);
+      commitFile(repo, 'base.txt', 'base\nc1\nc2\n', 'committed since base');
+      fs.writeFileSync(path.join(repo, 'new.txt'), 'a\nb\n');
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, baseSha);
+      const untracked = result.groups.find((g) => g.scope === 'untracked')!;
+      const committed = result.groups.find((g) => g.scope === 'committed')!;
+
+      expect(untracked.files).toEqual(['new.txt']);
+      // Mirrors the blob-based split('\n').length arithmetic (3 for "a\nb\n").
+      expect(untracked.fileStats?.['new.txt']).toEqual({ additions: 3, deletions: 0 });
+      expect(untracked.additions).toBe(3);
+
+      expect(committed.files).toEqual(['base.txt']);
+      expect(committed.fileStats?.['base.txt']).toEqual({ additions: 2, deletions: 0 });
     });
   });
 
@@ -848,6 +875,89 @@ describe('GitDiffManager.getDiffGroups', () => {
       expect(staged.files).toContain('seed.txt');
       expect(unstaged.files).toContain('other.txt');
       expect(untracked.files).toContain('untracked.txt');
+    });
+  });
+
+  it('a staged rename is listed under its DESTINATION path (openable, joins the status entry), never the numstat "old => new" display expression', async () => {
+    await withTempDir('gitdiff-groups-rename-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'old-name.txt', 'renamed content that is long enough to be detected as a rename\n', 'base');
+      const baseSha = headSha2(repo);
+      execSync('git mv old-name.txt new-name.txt', { cwd: repo, stdio: 'pipe' });
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, baseSha);
+      const staged = result.groups.find((g) => g.scope === 'staged')!;
+
+      expect(staged.files).toEqual(['new-name.txt']);
+      expect(staged.files.some((f) => f.includes('=>'))).toBe(false);
+      // The membership path joins the porcelain status entry for the same file.
+      const entries = await manager.getWorktreeStatus(repo);
+      expect(entries.find((e) => e.path === staged.files[0])?.oldPath).toBe('old-name.txt');
+    });
+  });
+
+  it('a staged rename inside a directory (the "dir/{old => new}" brace form) still records the plain destination path', async () => {
+    await withTempDir('gitdiff-groups-rename-dir-', async (repo) => {
+      initRepoMain(repo);
+      fs.mkdirSync(path.join(repo, 'dir'));
+      commitFile(repo, 'dir/old-name.txt', 'renamed content that is long enough to be detected as a rename\n', 'base');
+      execSync('git mv dir/old-name.txt dir/new-name.txt', { cwd: repo, stdio: 'pipe' });
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, null);
+      const staged = result.groups.find((g) => g.scope === 'staged')!;
+
+      expect(staged.files).toEqual(['dir/new-name.txt']);
+    });
+  });
+
+  it('a real UU conflict appears EXACTLY ONCE in Unstaged membership (git emits one numstat row per merge side)', async () => {
+    await withTempDir('gitdiff-groups-conflict-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'f.txt', 'base\n', 'base');
+      execSync('git checkout -b feature', { cwd: repo, stdio: 'pipe' });
+      commitFile(repo, 'f.txt', 'feature line\n', 'feature edit');
+      execSync('git checkout main', { cwd: repo, stdio: 'pipe' });
+      commitFile(repo, 'f.txt', 'main line\n', 'main edit');
+      try {
+        execSync('git merge feature --no-edit', { cwd: repo, stdio: 'pipe' });
+      } catch {
+        // Expected — the conflicting merge makes `git merge` exit non-zero.
+      }
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, null);
+      const unstaged = result.groups.find((g) => g.scope === 'unstaged')!;
+      const staged = result.groups.find((g) => g.scope === 'staged')!;
+
+      expect(unstaged.files.filter((f) => f === 'f.txt')).toHaveLength(1);
+      expect(staged.files.filter((f) => f === 'f.txt').length).toBeLessThanOrEqual(1);
+      // The conflict-marker lines are still counted in the rollup.
+      expect(unstaged.additions).toBeGreaterThan(0);
+    });
+  });
+
+  it('staged/unstaged membership paths with spaces and shell metacharacters are NOT C-quoted (join the porcelain status path exactly)', async () => {
+    await withTempDir('gitdiff-groups-quoting-', async (repo) => {
+      initRepoMain(repo);
+      const spaceName = 'sp ace file.txt';
+      const metaName = '$(weird)`file`.txt';
+      fs.writeFileSync(path.join(repo, spaceName), 'a\n');
+      fs.writeFileSync(path.join(repo, metaName), 'b\n');
+      execSync('git add -A', { cwd: repo, stdio: 'pipe' });
+      execSync('git commit -m "base"', { cwd: repo, stdio: 'pipe' });
+      fs.writeFileSync(path.join(repo, spaceName), 'a\nstaged\n');
+      execSync('git add -- "sp ace file.txt"', { cwd: repo, stdio: 'pipe' });
+      fs.writeFileSync(path.join(repo, metaName), 'b\nunstaged\n');
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, null);
+      const staged = result.groups.find((g) => g.scope === 'staged')!;
+      const unstaged = result.groups.find((g) => g.scope === 'unstaged')!;
+
+      expect(staged.files).toEqual([spaceName]);
+      expect(unstaged.files).toEqual([metaName]);
     });
   });
 });

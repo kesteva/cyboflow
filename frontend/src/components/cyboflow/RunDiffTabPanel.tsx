@@ -29,7 +29,7 @@ import type { ReactElement } from 'react';
 import type { inferRouterOutputs } from '@trpc/server';
 import { trpc } from '../../trpc/client';
 import type { AppRouter } from '../../../../shared/types/trpc';
-import type { DiffGroupScope } from '../../../../shared/types/runFiles';
+import type { DiffGroupScope, WorktreeStatusPayload } from '../../../../shared/types/runFiles';
 import { RunDiffFileList } from './RunDiffFileList';
 
 type RouterOutputs = inferRouterOutputs<AppRouter>;
@@ -51,8 +51,10 @@ const INITIAL_STATE: RunDiffState = {
 export function RunDiffTabPanel({
   runId,
   comparisonRef,
+  refreshNonce,
   onOpenFile,
   onResolvedBase,
+  onWorktree,
 }: {
   runId: string;
   /**
@@ -75,6 +77,21 @@ export function RunDiffTabPanel({
    * base the rail is currently showing, not a separately-derived one.
    */
   onResolvedBase?: (base: string | null) => void;
+  /**
+   * Bumped by the rail after a working-tree MUTATION (WorktreeStrip's Commit
+   * / Restore) so this panel refetches the same [runId, comparisonRef] and
+   * the grouped list + the strip's count move together. Undefined/unchanged
+   * = no extra fetch.
+   */
+  refreshNonce?: number;
+  /**
+   * Echoes the fetched response's `worktree` payload (the SAME snapshot the
+   * grouped list renders) so the rail can lift it into WorktreeStrip instead
+   * of the strip issuing a second, possibly disagreeing, request. Unlike
+   * onResolvedBase this IS called on the error arm — with `undefined` — so a
+   * consumer never keeps a stale snapshot that would enable Commit.
+   */
+  onWorktree?: (worktree: WorktreeStatusPayload | undefined) => void;
 }): ReactElement {
   const [state, setState] = useState<RunDiffState>(INITIAL_STATE);
 
@@ -87,23 +104,26 @@ export function RunDiffTabPanel({
         if (cancelled) return;
         setState({ diff: result, isLoading: false, error: null });
         onResolvedBase?.(result?.resolvedBase ?? null);
+        onWorktree?.(result?.worktree);
       },
       (err: unknown) => {
         if (cancelled) return;
         const error = err instanceof Error ? err : new Error(String(err));
         setState({ diff: null, isLoading: false, error });
+        onWorktree?.(undefined);
       },
     );
 
     return () => {
       cancelled = true;
     };
-    // onResolvedBase is a per-render callback from the rail; keying the fetch
-    // on it would refetch on every rail render (D-8: single fetch per
-    // [runId, comparisonRef] pair). comparisonRef IS a dep on purpose — a new
-    // selection must refetch.
+    // onResolvedBase/onWorktree are per-render callbacks from the rail; keying
+    // the fetch on them would refetch on every rail render (D-8: single fetch
+    // per [runId, comparisonRef] pair). comparisonRef IS a dep on purpose — a
+    // new selection must refetch — as is refreshNonce (a post-mutation
+    // refetch signal).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId, comparisonRef]);
+  }, [runId, comparisonRef, refreshNonce]);
 
   if (state.isLoading) {
     return (

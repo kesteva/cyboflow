@@ -13,13 +13,43 @@
  * no-origin-symref acceptance criteria are only testable against the real
  * `getProjectMainBranch`/`getOriginBranch` behavior.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { execSync } from 'child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { withTempDir } from '../../__test_fixtures__/tmp';
 import { GitDiffManager } from '../../services/gitDiffManager';
 import { WorktreeManager } from '../../services/worktreeManager';
+
+// Instrument the git invocation boundary WITHOUT changing behavior: every
+// runner in utils/runGit is wrapped in a pass-through vi.fn so tests can
+// inspect the exact argv the code under test handed to git (the no-fetch and
+// resolved-sha proofs below), while git itself still really runs.
+vi.mock('../../utils/runGit', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../utils/runGit')>();
+  return {
+    ...actual,
+    runGit: vi.fn(actual.runGit),
+    runGitAsync: vi.fn(actual.runGitAsync),
+    runGitCapture: vi.fn(actual.runGitCapture),
+  };
+});
+import { runGit, runGitAsync, runGitCapture } from '../../utils/runGit';
+
+/** Every git argv issued through utils/runGit since the last mockClear. */
+function recordedGitArgv(): string[][] {
+  return [
+    ...vi.mocked(runGit).mock.calls,
+    ...vi.mocked(runGitAsync).mock.calls,
+    ...vi.mocked(runGitCapture).mock.calls,
+  ].map(([, args]) => args);
+}
+
+beforeEach(() => {
+  vi.mocked(runGit).mockClear();
+  vi.mocked(runGitAsync).mockClear();
+  vi.mocked(runGitCapture).mockClear();
+});
 
 vi.mock('electron', () => ({
   ipcMain: { handle: vi.fn() },
@@ -235,11 +265,13 @@ describe('sessionGit ops getComparisonBases (real repos)', () => {
     });
   });
 
-  it('never issues a git fetch: originDefault.fetchedAt is byte-identical across two calls (nothing re-fetched between them)', async () => {
+  it('never issues a git fetch: no recorded git argv has `fetch` as its subcommand, and fetchedAt is byte-identical across two calls', async () => {
     // The implementation only ever READS FETCH_HEAD's mtime — it has no
-    // `git fetch` call anywhere on its path. Proven here behaviorally: fetch
-    // ONCE in test setup, then call getComparisonBases twice and assert the
-    // reported fetchedAt never moves (a re-fetch would bump the file's mtime).
+    // `git fetch` call anywhere on its path. Proven two ways: (1) directly, by
+    // inspecting every argv handed to git through utils/runGit during the
+    // calls (none may start with `fetch`); (2) behaviorally: fetch ONCE in
+    // test setup, then call getComparisonBases twice and assert the reported
+    // fetchedAt never moves (a re-fetch would bump the file's mtime).
     await withTempDir('cb-no-fetch-', async (root) => {
       const workDir = path.join(root, 'work');
       fs.mkdirSync(workDir);
@@ -256,11 +288,95 @@ describe('sessionGit ops getComparisonBases (real repos)', () => {
       execSync('git fetch origin', { cwd: sessionDir, stdio: 'pipe' });
 
       const ops = createGitOps(makeServices(sessionDir));
+      vi.mocked(runGitAsync).mockClear();
+      vi.mocked(runGitCapture).mockClear();
+      vi.mocked(runGit).mockClear();
       const first = (await ops.getComparisonBases({ sessionId: 's1' })) as ComparisonBasesResult;
       const second = (await ops.getComparisonBases({ sessionId: 's1' })) as ComparisonBasesResult;
 
+      const argv = recordedGitArgv();
+      expect(argv.length).toBeGreaterThan(0);
+      expect(argv.filter((args) => args[0] === 'fetch')).toEqual([]);
+      // Nor any other network-touching subcommand.
+      expect(argv.filter((args) => ['pull', 'remote', 'ls-remote'].includes(args[0]))).toEqual([]);
+
       expect(first.data?.originDefault?.fetchedAt).not.toBeNull();
       expect(second.data?.originDefault?.fetchedAt).toBe(first.data?.originDefault?.fetchedAt);
+    });
+  });
+
+  it('behind-count argv carries the RESOLVED 40-char sha for both legs, never the raw branch / origin ref name', async () => {
+    await withTempDir('cb-sha-argv-', async (root) => {
+      const workDir = path.join(root, 'work');
+      fs.mkdirSync(workDir);
+      initRepoBranch(workDir, 'main');
+      commitFile(workDir, 'base.txt', 'base\n', 'base');
+
+      const remoteDir = path.join(root, 'remote.git');
+      execSync(`git clone --bare "${workDir}" "${remoteDir}"`, { stdio: 'pipe' });
+
+      const sessionDir = path.join(root, 'session');
+      execSync(`git clone "${remoteDir}" "${sessionDir}"`, { stdio: 'pipe' });
+      configureIdentity(sessionDir);
+      execSync('git checkout -b feature', { cwd: sessionDir, stdio: 'pipe' });
+      // Advance local main by one commit so the two legs point at DIFFERENT shas.
+      execSync('git checkout main', { cwd: sessionDir, stdio: 'pipe' });
+      commitFile(sessionDir, 'b.txt', 'b1\n', 'local B');
+      execSync('git checkout feature', { cwd: sessionDir, stdio: 'pipe' });
+
+      const localMainSha = execSync('git rev-parse main', { cwd: sessionDir, encoding: 'utf8' }).trim();
+      const originMainSha = execSync('git rev-parse origin/main', { cwd: sessionDir, encoding: 'utf8' }).trim();
+      expect(localMainSha).not.toBe(originMainSha);
+
+      const ops = createGitOps(makeServices(sessionDir));
+      vi.mocked(runGitAsync).mockClear();
+      const result = (await ops.getComparisonBases({ sessionId: 's1' })) as ComparisonBasesResult;
+
+      expect(result.success).toBe(true);
+      // Labels stay human-readable...
+      expect(result.data?.localDefault).toEqual({ ref: 'main', behind: 1 });
+      expect(result.data?.originDefault?.ref).toBe('origin/main');
+      expect(result.data?.originDefault?.behind).toBe(0);
+
+      // ...but every rev-list argv names a resolved sha, never the raw name.
+      const revLists = vi
+        .mocked(runGitAsync)
+        .mock.calls.map(([, args]) => args)
+        .filter((args) => args[0] === 'rev-list');
+      expect(revLists).toHaveLength(2);
+      const ranges = revLists.map((args) => args[args.length - 1]);
+      expect(ranges).toContain(`HEAD..${localMainSha}`);
+      expect(ranges).toContain(`HEAD..${originMainSha}`);
+      expect(ranges).not.toContain('HEAD..main');
+      expect(ranges).not.toContain('HEAD..origin/main');
+    });
+  });
+
+  it('unborn HEAD with a resolvable default branch: legs whose behind-count git cannot answer are null, never a fabricated 0', async () => {
+    await withTempDir('cb-unborn-', async (root) => {
+      const workDir = path.join(root, 'work');
+      fs.mkdirSync(workDir);
+      initRepoBranch(workDir, 'main');
+      commitFile(workDir, 'base.txt', 'base\n', 'base');
+
+      const remoteDir = path.join(root, 'remote.git');
+      execSync(`git clone --bare "${workDir}" "${remoteDir}"`, { stdio: 'pipe' });
+
+      const sessionDir = path.join(root, 'session');
+      execSync(`git clone "${remoteDir}" "${sessionDir}"`, { stdio: 'pipe' });
+      configureIdentity(sessionDir);
+      // An UNBORN branch: origin/HEAD + origin/main + local main all resolve,
+      // but `HEAD` does not, so `rev-list --count HEAD..<sha>` fails.
+      execSync('git checkout --orphan unborn', { cwd: sessionDir, stdio: 'pipe' });
+      execSync('git rm -rf --quiet .', { cwd: sessionDir, stdio: 'pipe' });
+
+      const ops = createGitOps(makeServices(sessionDir));
+      const result = (await ops.getComparisonBases({ sessionId: 's1' })) as ComparisonBasesResult;
+
+      expect(result.success).toBe(true);
+      expect(result.data?.defaultBranch).toBe('main');
+      expect(result.data?.localDefault).toBeNull();
+      expect(result.data?.originDefault).toBeNull();
     });
   });
 });
