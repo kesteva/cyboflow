@@ -884,3 +884,200 @@ describe('resolveReviewItem — refusals', () => {
     await expect(resolveReviewItem(baseInput({ reviewItemId: 'rvw_boom' }), deps)).rejects.toThrow('unexpected');
   });
 });
+
+// ---------------------------------------------------------------------------
+// P20 — approve-plan REJECT unwinds the run's ideas' epics/stories ledger
+// components back to `incomplete`. The draft delete was already CODE; the ledger
+// rows the decomposition steps stamped `complete` are a SEPARATE store with no
+// foreign key to them, so a leftover `complete` over an idea that now has no
+// epics and no tasks makes the NEXT run skip exactly the decomposition the reject
+// asked for.
+// ---------------------------------------------------------------------------
+
+describe('resolveReviewItem — approve-plan reject unwinds the plan ledger', () => {
+  /** Add the entity/lineage tables listRunDecomposedIdeaIds reads. */
+  function seedDecomposition(
+    db: Database.Database,
+    runId: string,
+    rows: Array<{ ideaId: string; epicId?: string; taskId?: string }>,
+  ): void {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS entity_events (
+        entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, kind TEXT NOT NULL,
+        actor TEXT, run_id TEXT
+      );
+      CREATE TABLE IF NOT EXISTS epics (id TEXT PRIMARY KEY, originating_idea_id TEXT);
+      CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, originating_idea_id TEXT);
+    `);
+    db.prepare('ALTER TABLE workflow_runs ADD COLUMN seed_idea_id TEXT').run();
+    db.prepare('ALTER TABLE workflow_runs ADD COLUMN seed_idea_ids TEXT').run();
+    db.prepare('UPDATE workflow_runs SET seed_idea_ids = ? WHERE id = ?').run(
+      JSON.stringify(rows.map((r) => r.ideaId)),
+      runId,
+    );
+    for (const r of rows) {
+      if (r.epicId) {
+        db.prepare('INSERT INTO epics (id, originating_idea_id) VALUES (?, ?)').run(r.epicId, r.ideaId);
+        db.prepare(
+          "INSERT INTO entity_events (entity_type, entity_id, kind, run_id) VALUES ('epic', ?, 'created', ?)",
+        ).run(r.epicId, runId);
+      }
+      if (r.taskId) {
+        db.prepare('INSERT INTO tasks (id, originating_idea_id) VALUES (?, ?)').run(r.taskId, r.ideaId);
+        db.prepare(
+          "INSERT INTO entity_events (entity_type, entity_id, kind, run_id) VALUES ('task', ?, 'created', ?)",
+        ).run(r.taskId, runId);
+      }
+    }
+  }
+
+  it('sets epics + stories back to incomplete for every DECOMPOSED idea', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_unwind',
+      kind: 'decision',
+      source: 'gate:human-step:approve-plan',
+      blocking: true,
+      runId: 'run-unwind',
+    });
+    // Two seeded ideas; only IDEA-1 actually got children this run.
+    seedDecomposition(db, 'run-unwind', [
+      { ideaId: 'idea-1', epicId: 'epic-1', taskId: 'task-1' },
+      { ideaId: 'idea-2' },
+    ]);
+    const setIdeaComponentState = vi.fn().mockResolvedValue(undefined);
+    const deps = { ...makeDeps(db), setIdeaComponentState };
+
+    await resolveReviewItem(baseInput({ reviewItemId: 'rvw_unwind', outcome: 'reject' }), deps);
+
+    expect(setIdeaComponentState).toHaveBeenCalledTimes(2);
+    for (const component of ['epics', 'stories']) {
+      expect(setIdeaComponentState).toHaveBeenCalledWith(1, {
+        op: 'set-component-state',
+        ideaId: 'idea-1',
+        component,
+        state: 'incomplete',
+        source: 'flow',
+        sourceRunId: 'run-unwind',
+      });
+    }
+    // A seeded-but-never-decomposed idea is left alone — nothing claimed it was done.
+    expect(
+      setIdeaComponentState.mock.calls.some(([, change]) => change.ideaId === 'idea-2'),
+    ).toBe(false);
+  });
+
+  it('never touches idea-spec / architecture / prototype — the reject declined the PLAN', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_scope',
+      kind: 'decision',
+      source: 'gate:human-step:approve-plan',
+      blocking: true,
+      runId: 'run-scope',
+    });
+    seedDecomposition(db, 'run-scope', [{ ideaId: 'idea-1', taskId: 'task-1' }]);
+    const setIdeaComponentState = vi.fn().mockResolvedValue(undefined);
+    const deps = { ...makeDeps(db), setIdeaComponentState };
+
+    await resolveReviewItem(baseInput({ reviewItemId: 'rvw_scope', outcome: 'reject' }), deps);
+
+    const touched = setIdeaComponentState.mock.calls.map(([, change]) => change.component);
+    expect(new Set(touched)).toEqual(new Set(['epics', 'stories']));
+  });
+
+  it('resolves the idea set BEFORE the delete, and unwinds BEFORE the item resolves', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_order',
+      kind: 'decision',
+      source: 'gate:human-step:approve-plan',
+      blocking: true,
+      runId: 'run-order',
+    });
+    seedDecomposition(db, 'run-order', [{ ideaId: 'idea-1', taskId: 'task-1' }]);
+    const setIdeaComponentState = vi.fn().mockResolvedValue(undefined);
+    // The delete tears down the very lineage the projection reads, so a read
+    // AFTER it would always come back empty and the ledger would stay complete.
+    const deps = { ...makeDeps(db), setIdeaComponentState };
+    deps.deleteRunCreatedEntities.mockImplementation(async () => {
+      db.prepare('DELETE FROM entity_events').run();
+      db.prepare('DELETE FROM tasks').run();
+    });
+
+    await resolveReviewItem(baseInput({ reviewItemId: 'rvw_order', outcome: 'reject' }), deps);
+
+    expect(setIdeaComponentState).toHaveBeenCalledTimes(2);
+    // Same ordering guarantee the delete has: before the resolve, so it beats
+    // the controller advancing off the gate.
+    expect(setIdeaComponentState.mock.invocationCallOrder[0]).toBeLessThan(
+      deps.applyReviewItemResolve.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('does not unwind on approve, on a non-approve-plan gate, or on a bare finding', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_ok',
+      kind: 'decision',
+      source: 'gate:human-step:approve-plan',
+      blocking: true,
+      runId: 'run-ok',
+    });
+    seedItem(db, {
+      id: 'rvw_other',
+      kind: 'decision',
+      source: 'gate:human-step:approve-idea',
+      blocking: true,
+      runId: 'run-other',
+    });
+    seedItem(db, { id: 'rvw_find', kind: 'finding', source: 'agent:code-review', runId: 'run-find' });
+    seedDecomposition(db, 'run-ok', [{ ideaId: 'idea-1', taskId: 'task-1' }]);
+    const setIdeaComponentState = vi.fn().mockResolvedValue(undefined);
+    const deps = { ...makeDeps(db), setIdeaComponentState };
+
+    await resolveReviewItem(baseInput({ reviewItemId: 'rvw_ok', outcome: 'approve' }), deps);
+    await resolveReviewItem(baseInput({ reviewItemId: 'rvw_other', outcome: 'reject' }), deps);
+    await resolveReviewItem(baseInput({ reviewItemId: 'rvw_find', resolution: 'done' }), deps);
+
+    expect(setIdeaComponentState).not.toHaveBeenCalled();
+  });
+
+  it('is fail-soft — a throwing ledger write never blocks the resolve', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_soft',
+      kind: 'decision',
+      source: 'gate:human-step:approve-plan',
+      blocking: true,
+      runId: 'run-soft',
+    });
+    seedDecomposition(db, 'run-soft', [{ ideaId: 'idea-1', taskId: 'task-1' }]);
+    const setIdeaComponentState = vi.fn().mockRejectedValue(new Error('ledger exploded'));
+    const deps = { ...makeDeps(db), setIdeaComponentState };
+
+    const result = await resolveReviewItem(baseInput({ reviewItemId: 'rvw_soft', outcome: 'reject' }), deps);
+
+    // Both components attempted, and the resolve still landed.
+    expect(setIdeaComponentState).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ ok: true, gateStepId: 'approve-plan', outcome: 'reject' });
+  });
+
+  it('un-booted (no dep, no router) is a silent no-op, not a throw', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_unbooted',
+      kind: 'decision',
+      source: 'gate:human-step:approve-plan',
+      blocking: true,
+      runId: 'run-unbooted',
+    });
+    seedDecomposition(db, 'run-unbooted', [{ ideaId: 'idea-1', taskId: 'task-1' }]);
+    // No setIdeaComponentState override ⇒ the singleton default, which is un-booted here.
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_unbooted', outcome: 'reject' }),
+      makeDeps(db),
+    );
+    expect(result).toMatchObject({ ok: true, outcome: 'reject' });
+  });
+});
