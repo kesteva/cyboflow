@@ -46,6 +46,20 @@ export function AgentThreadView({
 
   const { messages, loadError } = useUnifiedAgentThreadMessages(thread?.id ?? null);
 
+  // The model actually answering: every projected assistant turn carries the
+  // SDK's resolved model id (messageProjection stamps metadata.model), so the
+  // last one is the truth. Before any turn has run, the per-thread override
+  // (rarely set) or "default" — the ConfigManager alias is not exposed here.
+  const activeModel = useMemo((): string => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role === 'assistant' && typeof m.metadata?.model === 'string' && m.metadata.model !== '') {
+        return m.metadata.model;
+      }
+    }
+    return thread?.model ?? 'default';
+  }, [messages, thread?.model]);
+
   // One-shot onboarding greeting (see ./onboardingGreeting). Read once in a
   // state initializer — NON-destructively, because StrictMode double-invokes
   // initializers — and cleared by the mount effect below, so it shows on this
@@ -106,6 +120,13 @@ export function AgentThreadView({
             prefill={composerDraft}
             onPrefillConsumed={() => setComposerDraft(null)}
           />
+          <div
+            data-testid="agent-model-badge"
+            title="The model running this assistant (from its last turn; change it under Settings → Assistant)"
+            className="text-right text-[9px] uppercase tracking-[0.1em] text-text-tertiary"
+          >
+            model · {activeModel}
+          </div>
         </div>
       }
     />
