@@ -448,6 +448,25 @@ export class TaskQueue {
     return job;
   }
 
+  /**
+   * Subscribe to session-creation job failures (the worktree/session processor
+   * threw — no git, no identity for the initial commit, a bad base branch …).
+   * Returns the disposer. A caller awaiting `session-created` for a job it
+   * enqueued MUST also listen here: the queue swallows the throw into a log
+   * line, so without it the caller only ever sees its own timeout.
+   */
+  onSessionJobFailed(listener: (jobId: string, error: Error) => void): () => void {
+    const wrapped = (...args: unknown[]) => {
+      const job = args[0] as { id: string | number };
+      const err = args[1];
+      listener(String(job.id), err instanceof Error ? err : new Error(String(err)));
+    };
+    this.sessionQueue.on('failed', wrapped);
+    return () => {
+      this.sessionQueue.off('failed', wrapped);
+    };
+  }
+
   async createMultipleSessions(
     prompt: string,
     worktreeTemplate: string,

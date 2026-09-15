@@ -118,7 +118,8 @@ describe('pendingSendStore — reconcile (eastern-TZ SQLite timestamps)', () => 
     process.env.TZ = 'Asia/Kolkata'; // UTC+5:30
   });
   afterEach(() => {
-    process.env.TZ = savedTZ;
+    if (savedTZ === undefined) delete process.env.TZ;
+    else process.env.TZ = savedTZ;
   });
 
   it('reconciles a space-separated UTC turn stamped ~now (no TZ shift stranding)', () => {

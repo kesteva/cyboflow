@@ -1,18 +1,21 @@
 # In-app updates (Cloudflare R2 host)
 
-Cyboflow ships signed, notarized macOS builds and updates them in place via
+Cyboflow ships signed, notarized macOS builds and Authenticode-signed Windows
+installers, and updates them in place via
 [`electron-updater`](https://www.electron.build/auto-update). The app polls a
 public manifest, compares versions, and downloads only the changed bytes. No git,
 no GitHub — just HTTPS GETs against a static host.
 
 ```
 Installed app (vX)
-   │  GET https://updates.cyboflow.com/<variant>/latest-mac.yml   (poll)
+   │  GET https://updates.cyboflow.com/<variant>/latest-mac.yml   (macOS poll)
+   │  GET https://updates.cyboflow.com/<variant>/latest.yml       (Windows poll)
    ▼
 Cloudflare R2  ──►  version: Y   →   app sees Y > X
-   │  GET the .zip (+ .blockmap delta) → verify sha512 + Developer ID signature
+   │  macOS:   GET the .zip (+ .blockmap delta) → verify sha512 + Developer ID signature
+   │  Windows: GET the .exe (+ .blockmap delta) → verify sha512 + Authenticode publisher
    ▼
-swap bundle → "Restart to update"
+swap bundle / run the NSIS installer → "Restart to update"
 ```
 
 `<variant>` is `stable` or `dev` — Cyboflow ships as **two separate side-by-side
@@ -21,7 +24,9 @@ build time, baked into the packaged `app-update.yml`; there is no in-app channel
 switch.
 
 The artifacts live in a **Cloudflare R2** bucket served at `updates.cyboflow.com`,
-under `stable/` and `dev/` prefixes. R2 is S3-compatible (so we publish with the
+under `stable/` and `dev/` prefixes. macOS and Windows share each prefix:
+electron-updater reads a per-platform manifest name (`latest-mac.yml` /
+`latest.yml`), so one feed per variant serves both platforms. R2 is S3-compatible (so we publish with the
 S3 SDK) but serves public downloads with **zero egress fees** and **no credentials
 in the app** — the source repo stays private. See
 [`scripts/publish-update.mjs`](../scripts/publish-update.mjs).
@@ -110,14 +115,37 @@ just-published DMG (see `latestAliasName()` in
 links *those*, so a version bump never requires a site edit. The versioned
 files still exist alongside them in the bucket.
 - `https://updates.cyboflow.com/stable/Cyboflow-latest-macOS-arm64.dmg` (and `-x64.dmg` for Intel)
+- `https://updates.cyboflow.com/stable/Cyboflow-latest-Windows-x64.exe`
 - `https://updates.cyboflow.com/dev/Cyboflow-Dev-latest-macOS-arm64.dmg` (and `-x64.dmg` for Intel)
+- `https://updates.cyboflow.com/dev/Cyboflow-Dev-latest-Windows-x64.exe`
+
+### Windows
+
+The Windows installer is built and signed **only on the `windows-latest` CI
+runner** (`.github/workflows/windows.yml`, one dispatch per variant — Azure
+Artifact Signing needs a Windows host; see `docs/WINDOWS-BUILD.md`). The runner
+uploads `Cyboflow[-Dev]-<v>-Windows-x64.exe`, its `.blockmap`, and the
+electron-builder-generated `latest.yml` as a workflow artifact; the release
+downloads that into `dist-electron/` and publishes it with the same
+`publish:r2` + `PUBLISH_ONLY` recipe as the macOS files. There is no
+`gen-latest-yml` step for Windows — it is a single-arch build, so the manifest
+electron-builder writes is already complete.
+
+On the client, `electron-updater`'s NSIS path downloads the new installer,
+checks its Authenticode signature against the `publisherName` baked into the
+installed app's `app-update.yml` (electron-builder copies it from
+`win.azureSignOptions.publisherName` — "Raimundo Esteva"), and runs it on
+"Restart to update". An unsigned installer, or one signed by a different CN,
+is **rejected** — which is why an unsigned CI artifact must never be published.
 
 ---
 
 ## How the app consumes it
 
 - `main/src/services/appUpdater.ts` wraps `electron-updater`. It is a **no-op in
-  dev** (`app.isPackaged === false`) and only runs in packaged builds.
+  dev** (`app.isPackaged === false`) and only runs in packaged builds, on the
+  platforms a feed exists for (`hasUpdateFeed`: macOS and Windows; Linux reports
+  "not supported" rather than ENOENT-ing on every interval).
 - The app checks the feed **8 s after boot and then once every 24 h** while it
   stays open. A scheduled check that finds a newer version **downloads it
   unattended** (a download is harmless to a running session), and the bottom-left
@@ -199,7 +227,8 @@ polls. Neither dedupes to humans across months — that gap is Aptabase's job.
 
 | Concern | Detail |
 |---|---|
-| **Signing identity must be stable** | Auto-update only accepts a build signed by the *same* Developer ID. Don't rotate the cert between releases. |
+| **Signing identity must be stable** | macOS: auto-update only accepts a build signed by the *same* Developer ID. Windows: the updater checks the installer's Authenticode CN against the `publisherName` baked into the installed app — a rename of the Azure identity is a breaking change for every installed Windows app. Don't rotate either between releases. |
+| **Two manifests per feed** | `latest-mac.yml` (macOS) and `latest.yml` (Windows) live side by side in each `<variant>/` prefix. Both variants' Windows artifacts carry a file literally named `latest.yml` — keep them in separate dirs until the moment each feed is published. |
 | **`.zip` is required** | `mac.target: "default"` produces `.dmg` **and** `.zip`. The updater needs the `.zip`; the `.dmg` is only for first install. |
 | **Manifest must not be cached** | `latest-mac.yml` is uploaded `no-cache`. If you front it with extra CDN caching, the app won't see new releases until the cache expires. |
 | **First install is still manual** | The updater upgrades an installed app only. New users download the `.dmg` from the website. |
@@ -222,6 +251,7 @@ that differs is fixed at build time by `build:mac:dev`:
 | Data dir | `~/.cyboflow` | `~/.cyboflow_dev_dmg` (isolated) |
 | Update feed | `updates.cyboflow.com/stable` | `updates.cyboflow.com/dev` |
 | Artifact name | `Cyboflow-<v>-…` | `Cyboflow-Dev-<v>-…` |
+| Windows install dir | `%LOCALAPPDATA%\Programs\Cyboflow` | `%LOCALAPPDATA%\Programs\Cyboflow Dev` |
 
 **Why separate apps (not a channel setting):** distinct `appId`/name lets Dev install
 side-by-side with Stable, the way VS Code Insiders does, and each app only ever updates

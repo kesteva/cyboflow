@@ -1,6 +1,7 @@
 import * as path from 'path';
 import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
 import * as fs from 'fs';
+import { randomUUID } from 'crypto';
 import type Database from 'better-sqlite3';
 import type * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import type { Logger } from '../../../utils/logger';
@@ -132,12 +133,17 @@ import { isClaudeEffortLevel, type ReasoningEffort } from '../../../../../shared
  *                      (bindKnownFileFromEnd) to keep the structured pipeline (token
  *                      meter) flowing; the live xterm rides the raw PTY byte path.
  *   systemPromptAppend: the `options.systemPromptAppend` field is intentionally
- *                      UNREAD on this substrate (the interactive REPL has no SDK
- *                      `systemPrompt.append` channel). The workflow prompt appends
- *                      — step-reporting (S6/TASK-811) AND the derived fan-out
- *                      execution instructions — are delivered instead via a
- *                      prompt-body PREPEND in `composePromptBody`, both resolved
- *                      from the run's frozen effective definition.
+ *                      UNREAD on this substrate. It is NOT a dead parity stub:
+ *                      RunExecutor.buildOptionsOverrides sets it on EVERY run
+ *                      with the workflow appends (step-reporting + fan-out) that
+ *                      the SDK substrate consumes via `systemPrompt.append`. This
+ *                      substrate delivers those SAME appends — with the richer
+ *                      dispatch/workflowName resolution — via a prompt-body
+ *                      PREPEND in `composePromptBody`. Emitting the field as
+ *                      `--append-system-prompt` too would hand a workflow run the
+ *                      instructions twice, with the degraded copy in the system
+ *                      prompt. Session context that genuinely belongs on the
+ *                      system prompt has its OWN field: `sessionBriefing`.
  * ------------------------------------------------------------------------- */
 
 /** CLI spawn options accepted by the interactive substrate. */
@@ -209,10 +215,30 @@ interface InteractiveClaudeSpawnOptions {
   /** When true, `--strict-mcp-config` is threaded (see parity table). */
   strictMcpConfig?: boolean;
   /**
-   * NO interactive append channel — delivered via prompt-body prepend in
-   * S6/TASK-811. Accepted for parity; not consumed here.
+   * The session uuid cyboflow MINTED for a fresh spawn, emitted as
+   * `--session-id <uuid>` so claude names its transcript `<uuid>.jsonl`. Set by
+   * spawnCliProcess (never by callers) and mutually exclusive with
+   * `resumeSessionId`, which reopens an existing file instead. Pins transcript
+   * discovery to that one file — see TranscriptTailSourceOptions.expectedSessionUuid
+   * for why snapshot-diff discovery is unsafe for a long-lived source.
+   */
+  sessionUuid?: string;
+  /**
+   * UNREAD here — see the parity table. Carries the per-run WORKFLOW appends
+   * that this substrate delivers through composePromptBody's prepend instead.
+   * Never emit it as a flag: it would duplicate those instructions.
    */
   systemPromptAppend?: string;
+  /**
+   * Session context appended to the CLI's system prompt via
+   * `--append-system-prompt`: the quick-session briefing from ipc/session.ts —
+   * who is hosting the agent, what the worktree is, which MCP servers exist.
+   * Set by the quick-session spawn seams only; never by RunExecutor. Invisible
+   * in the transcript, which is the point: delivering it as the first positional
+   * prompt made it render as a user message and spend the session's first turn
+   * being acknowledged. Omitted / blank → no flag.
+   */
+  sessionBriefing?: string;
   [key: string]: unknown;
 }
 
@@ -649,11 +675,33 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // (token meter) flowing. Pushed before the end-of-options `--` separator.
     if (options.resumeSessionId) {
       args.push('--resume', options.resumeSessionId);
+    } else if (options.sessionUuid) {
+      // Fresh spawn: WE name the transcript. claude writes
+      // `~/.claude/projects/<key>/<sessionUuid>.jsonl` (verified 2.1.267:
+      // the file lands under the given uuid with a matching top-level
+      // sessionId), so the tail source waits for that exact file instead of
+      // guessing at the first new one in a directory other processes share.
+      args.push('--session-id', options.sessionUuid);
     }
 
     // strictMcpConfig: isolate to per-run .mcp.json servers only.
     if (options.strictMcpConfig) {
       args.push('--strict-mcp-config');
+    }
+
+    // sessionBriefing → the CLI's `--append-system-prompt`. This is session
+    // CONTEXT (who is hosting the agent, what the worktree is, which MCP servers
+    // are connected), not something the user asked for, so it belongs in the
+    // system prompt — the SDK lane delivers its briefing via `systemPrompt.append`
+    // and Codex via `developerInstructions`. This lane used to spend the
+    // session's FIRST TURN on it: the briefing went out as the positional prompt,
+    // rendered in the transcript, and burned a turn on an acknowledgement nobody
+    // asked for. Deliberately NOT `options.systemPromptAppend` — see the parity
+    // table: that field carries the workflow appends this lane already prepends
+    // to the prompt body. Pushed before the load-bearing `--` separator.
+    const briefing = options.sessionBriefing?.trim();
+    if (briefing) {
+      args.push('--append-system-prompt', briefing);
     }
 
     // agentPermissionMode 'auto': hand gating to NATIVE Claude auto-mode via the
@@ -1162,8 +1210,14 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // (In-place sessions get theirs in the app data dir — never the checkout.)
     await this.writeInteractiveMcpConfig(worktreePath, runId, sessionId);
 
+    // A fresh spawn mints its own transcript uuid (→ `--session-id`), so
+    // discovery below is pinned to a file we named rather than to "the first
+    // new *.jsonl" in a key dir shared with sibling panels, in-place sessions,
+    // and the user's own terminal claude. A resume reopens a known file instead.
+    const sessionUuid = options.resumeSessionId ? undefined : this.mintSessionUuid();
+
     // Build args + env via the abstract hooks.
-    const args = this.buildCommandArgs({ ...options, runId });
+    const args = this.buildCommandArgs({ ...options, runId, sessionUuid });
 
     // Pass the initial prompt as claude's POSITIONAL argument so claude processes
     // it as the first REPL turn NATIVELY — replacing the former post-spawn PTY
@@ -1193,6 +1247,16 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     if (composedPrompt.length > 0) {
       args.push('--', composedPrompt);
     }
+
+    // Does this spawn START A TURN? Only an argv prompt does. It decides whether
+    // the transcript-discovery deadline is meaningful at spawn time: `claude`
+    // writes its `.jsonl` when a turn begins, NOT when the REPL opens (verified —
+    // an idle prompt-less REPL produces no file at all). With a prompt, spawn and
+    // first turn coincide and the deadline bounds a real race. Without one, the
+    // clock would be timing the USER, and its give-up would permanently detach
+    // the structured pipeline (token meter + claude_session_id persistence) from
+    // a session that is merely waiting to be typed into. See armDiscoveryDeadline.
+    const spawnStartsTurn = composedPrompt.trim().length > 0;
 
     const cliEnv = await this.initializeCliEnvironment({ ...options, runId });
     const extraEnv = await this.getCliEnvironment({ ...options, runId });
@@ -1263,8 +1327,9 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // ROB-5: a non-empty initial prompt rides claude's POSITIONAL argument (see
     // the note below waitForFirstLine), so the FIRST turn is already in flight
     // the moment the PTY exists — no sendInput ever sees it. An empty prompt
-    // (eager resume) starts no turn.
-    if (typeof options.prompt === 'string' && options.prompt.trim().length > 0) {
+    // (eager resume, or a briefing-only quick spawn) starts no turn. Same
+    // predicate as the discovery deadline: what was actually pushed as argv.
+    if (spawnStartsTurn) {
       this.turnInFlightPanelIds.add(panelId);
     }
 
@@ -1322,6 +1387,12 @@ export class InteractiveClaudeManager extends AbstractCliManager {
             outcome: 'gave-up',
           },
         ),
+      // A prompt-less spawn has no turn to time yet — defer the deadline to the
+      // turn-start edge (sendInput) so the give-up above keeps meaning "claude
+      // never engaged a turn it was given", not "the user hadn't typed yet".
+      deferDeadlineUntilArmed: !spawnStartsTurn,
+      // Fresh spawn: bind ONLY the file claude was told to write.
+      expectedSessionUuid: sessionUuid,
     });
     this.tailSources.set(panelId, tailSource);
 
@@ -1375,6 +1446,20 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // settled above, so this resolves immediately.)
     //
     // Now await transcript discovery (claude is engaging the argv prompt) — loud on timeout.
+    //
+    // A spawn that starts NO turn is the exception: there is nothing in flight to
+    // wait for, so we do not await (and do not arm the deadline — see the
+    // `spawnStartsTurn` note above). Discovery keeps watching in the background at
+    // the low-frequency cadence; the first user turn arms the clock, and the bind
+    // it produces arrives out of band through onLateBind, which persists
+    // claude_session_id exactly as the awaited path does.
+    if (!spawnStartsTurn) {
+      this.logger?.verbose(
+        `[InteractiveClaudeManager] panel ${panelId} spawned with no initial turn — transcript discovery deferred to the first user turn`,
+      );
+      this.persistDiscoveredSessionId(sessionId, tailSource);
+      return spawnPromise;
+    }
     try {
       await tailSource.waitForFirstLine(DISCOVERY_TIMEOUT_MS);
     } catch (discoveryErr) {
@@ -1539,6 +1624,14 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     callbacks?: {
       onLateBind?: (sessionUuid: string) => void;
       onGiveUp?: () => void;
+      /**
+       * Set when the spawn starts NO turn (a prompt-less REPL). See
+       * TranscriptTailSourceOptions.deferDeadlineUntilArmed: the deadline is
+       * armed on the turn-start edge instead of at spawn.
+       */
+      deferDeadlineUntilArmed?: boolean;
+      /** The minted `--session-id` of a fresh spawn; pins discovery to its file. */
+      expectedSessionUuid?: string;
     },
   ): TranscriptSource {
     if (this.logger === undefined) {
@@ -1550,7 +1643,18 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       logger: this.logger,
       onLateBind: callbacks?.onLateBind,
       onGiveUp: callbacks?.onGiveUp,
+      deferDeadlineUntilArmed: callbacks?.deferDeadlineUntilArmed === true,
+      expectedSessionUuid: callbacks?.expectedSessionUuid,
     });
+  }
+
+  /**
+   * Mint the transcript uuid a fresh spawn hands claude as `--session-id`.
+   * Overridable seam (like createTranscriptSource / spawnPtyProcess) so a
+   * real-stack test can make its fake claude write a deterministic file.
+   */
+  protected mintSessionUuid(): string {
+    return randomUUID();
   }
 
   /**
@@ -1720,6 +1824,13 @@ export class InteractiveClaudeManager extends AbstractCliManager {
         const wasInFlight = this.turnInFlightPanelIds.has(panelId);
         this.turnInFlightPanelIds.add(panelId);
         const run = this.interactiveRuns.get(panelId);
+        // Turn-start edge = the first moment a transcript is actually expected.
+        // A source spawned without an initial prompt deferred its discovery
+        // deadline to here; arming it now makes the timeout bound the real
+        // spawn->transcript race instead of the user's typing latency. Inert on
+        // an already-armed or already-bound source, so every later turn is a
+        // no-op and the optional-method guard covers non-tail sources.
+        if (!wasInFlight) this.tailSources.get(panelId)?.armDiscoveryDeadline?.();
         if (!wasInFlight && run) {
           const payload: InteractiveTurnStartPayload = {
             panelId,
@@ -2069,6 +2180,14 @@ export class InteractiveClaudeManager extends AbstractCliManager {
      * (see AbstractCliManager.assertProviderEnabled).
      */
     userAcknowledgedProviderDisabled?: boolean,
+    /**
+     * Session context for `--append-system-prompt` (the quick-session briefing).
+     * Kept SEPARATE from `prompt` on purpose: it is not a turn the user took, so
+     * it must not open the transcript as a message and must not consume the
+     * session's first turn. A caller that has a briefing passes an empty `prompt`
+     * alongside it, which spawns a bare REPL that waits for the user.
+     */
+    sessionBriefing?: string,
   ): Promise<void> {
     await this.spawnCliProcess({
       panelId,
@@ -2079,6 +2198,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       effort,
       fastMode,
       reasoningEffort,
+      ...(sessionBriefing ? { sessionBriefing } : {}),
       ...(userAcknowledgedProviderDisabled ? { userAcknowledgedProviderDisabled } : {}),
       // When set, buildCommandArgs emits a plain `--resume <uuid>` (no fork) so the
       // prior conversation reopens live — eager resume passes an empty prompt.

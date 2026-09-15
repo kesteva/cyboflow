@@ -62,6 +62,22 @@ export interface TranscriptSource {
   getSessionUuid?(): string | undefined;
 
   /**
+   * Arm the discovery deadline NOW, when the source was constructed to defer it.
+   *
+   * Discovery's clock exists to bound the spawn -> first-`.jsonl` race, but the
+   * event it waits for is caused by the session's FIRST TURN, not by the spawn:
+   * `claude` writes no transcript at all while its REPL sits idle. A source
+   * spawned WITHOUT an initial prompt therefore has nothing to time — starting
+   * the clock at spawn would measure how long the user took to type and report
+   * that as a failed launch. Such a source defers, and the manager calls this on
+   * the turn-start arming edge, at which point the deadline means what it says.
+   *
+   * Idempotent and safe to call on an already-bound / already-armed / stopped
+   * source. Optional: a source with no discovery deadline may omit it.
+   */
+  armDiscoveryDeadline?(): void;
+
+  /**
    * Bind a KNOWN, pre-existing transcript file by its session UUID and tail from
    * its CURRENT END (no-fork resume). Normal discovery binds only NEW files
    * (snapshot-diff), but a plain `claude --resume <uuid>` reopens the SAME id and

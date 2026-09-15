@@ -64,6 +64,9 @@ interface InteractivePtyManagerLike extends PtyManagerLike {
     fastMode?: boolean,
     resumeSessionId?: string,
     reasoningEffort?: ReasoningEffort,
+    userAcknowledgedProviderDisabled?: boolean,
+    /** Session context for `--append-system-prompt` — never a user turn. */
+    sessionBriefing?: string,
   ): Promise<void>;
 }
 
@@ -214,6 +217,13 @@ export async function relayOrSpawnPtyPanel(
   const markRunning = async (): Promise<void> => {
     if (restsViaSessionStatus) await deps.sessionManager.updateSession(panel.sessionId, { status: 'running' });
   };
+  // Does the spawn below actually START a turn? The vendor TUI lanes always do
+  // (their briefing IS the first prompt). The Claude lane does so only when the
+  // caller handed us a real user turn — its briefing rides
+  // `--append-system-prompt` now, so an eager spawn opens an idle REPL. Marking
+  // an idle session 'running' would strand it showing "working" forever, since
+  // only a turn-end rests it; the 'turn-start' seam marks it when the user types.
+  const spawnStartsTurn = !isClaudePty || input !== null;
 
   const manager: PtyManagerLike = isClaudePty
     ? deps.interactiveCliManager
@@ -236,7 +246,16 @@ export async function relayOrSpawnPtyPanel(
   // than falling back to the session's shared chat sentinel (which another panel
   // may own). ⚠️ NEVER await startPanel: the persistent REPL's spawn promise
   // resolves only when the process EXITS.
+  // Vendor TUI lanes have no system-prompt channel, so their briefing is still
+  // delivered as the spawn's first turn (an eager spawn with no user input yet).
   const firstPrompt = input ?? PTY_LANE_BRIEFINGS[lane] ?? QUICK_PTY_BRIEFING;
+  // The Claude lane has one: `--append-system-prompt`. Its briefing is session
+  // context, not a turn, so it rides the flag and the prompt slot carries ONLY a
+  // real user turn (empty on an eager spawn → a bare REPL that waits). This also
+  // fixes the reverse gap: keying the briefing off `input ?? …` meant a panel
+  // spawned BY a user turn — the common add-a-chat path — silently got no
+  // briefing at all.
+  const claudeBriefing = PTY_LANE_BRIEFINGS['claude-interactive'];
   if (!isClaudePty) {
     // runId — align the vendor's gate/MCP id with the session's chat sentinel
     // (matches the primary panel); the live channel is keyed by panelId. Resolve
@@ -283,18 +302,20 @@ export async function relayOrSpawnPtyPanel(
         panel.id,
         panel.sessionId,
         worktreePath,
-        firstPrompt,
+        input ?? '', // prompt — a real user turn only; empty opens an idle REPL
         session.permissionMode,
         model,
         undefined, // effort ('ultracode') — added chats do not carry the launch card setting
         fastMode,
         undefined, // resumeSessionId — a fresh spawn, not an explicit resume
         reasoningEffort,
+        undefined, // userAcknowledgedProviderDisabled — not a resume prompt
+        claudeBriefing, // session context, NOT a user turn
       )
       .catch((err: unknown) => {
         console.error(`[ptyPanelDispatch] Interactive REPL spawn failed for panel ${panel.id}:`, err);
       });
   }
-  await markRunning();
+  if (spawnStartsTurn) await markRunning();
   return true;
 }

@@ -167,6 +167,15 @@ class ItestInteractiveClaudeManager extends InteractiveClaudeManager {
     return fake as unknown as IPty;
   }
 
+  /**
+   * The fixture's "claude" writes its transcript under TRANSCRIPT_UUID, so the
+   * manager must hand it exactly that id as `--session-id` — which is what pins
+   * discovery to that file in production too.
+   */
+  protected override mintSessionUuid(): string {
+    return TRANSCRIPT_UUID;
+  }
+
   /** Test accessors for the private per-panel maps (leak checks). */
   publicTailSources(): Map<string, TranscriptSource> {
     return (this as unknown as { tailSources: Map<string, TranscriptSource> }).tailSources;
@@ -331,9 +340,12 @@ describe('interactive (PTY) Claude substrate — real-stack spawn integration', 
   });
 
   /**
-   * Write the turn's transcript once the manager's TranscriptTailSource has taken
-   * its start() snapshot — discovery binds a file that is NEW relative to that
-   * snapshot, so a file written earlier would never be discovered.
+   * Write the turn's transcript once the manager's TranscriptTailSource has
+   * started. Discovery is PINNED to `<--session-id>.jsonl` (the id
+   * mintSessionUuid handed claude), so ordering is no longer load-bearing for
+   * correctness — but writing after start() still exercises the real
+   * "file appears while the source is watching" path rather than a pre-existing
+   * file.
    *
    * `spawned` is emitted synchronously immediately BEFORE `createTranscriptSource`
    * + `start()`, and `start()`'s body runs to completion synchronously, so a
@@ -505,6 +517,9 @@ describe('interactive (PTY) Claude substrate — real-stack spawn integration', 
     // The interactive argv never carries the headless print / stream-json flags.
     expect(args).not.toContain('-p');
     expect(args).not.toContain('--output-format');
+    // The transcript pin: claude is told which file to write, before `--`.
+    expect(args[args.indexOf('--session-id') + 1]).toBe(TRANSCRIPT_UUID);
+    expect(args.indexOf('--session-id')).toBeLessThan(args.indexOf('--'));
     // The prompt is the lone positional operand behind an end-of-options `--`
     // (otherwise the variadic `--mcp-config` swallows it and claude exits 1).
     expect(args[args.length - 2]).toBe('--');

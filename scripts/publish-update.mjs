@@ -12,14 +12,25 @@
  * the source repo private and ships NO token inside the app bundle.
  *
  * It mirrors the release artifacts in dist-electron under a per-variant prefix
- * (stable/ or beta/) so the two app variants have independent feeds in one bucket:
- *   - <variant>/latest-mac.yml      (the manifest the updater polls — must NOT be cached)
- *   - <variant>/*.zip / *.zip.blockmap   (what the updater downloads + delta map)
- *   - <variant>/*.dmg / *.dmg.blockmap   (first-install download for the website)
+ * (stable/ or dev/) so the two app variants have independent feeds in one bucket.
+ * macOS and Windows share the prefix — electron-updater reads a per-platform
+ * manifest name, so the files never collide:
+ *   - <variant>/latest-mac.yml      (macOS manifest the updater polls — must NOT be cached)
+ *   - <variant>/latest.yml          (Windows manifest — same rule)
+ *   - <variant>/*.zip / *.zip.blockmap   (what the macOS updater downloads + delta map)
+ *   - <variant>/*.dmg / *.dmg.blockmap   (macOS first-install download for the website)
+ *   - <variant>/*.exe / *.exe.blockmap   (Windows: the NSIS installer is BOTH the
+ *                                    first-install download and what the updater fetches)
  *   - <variant>/<product>-latest-macOS-<arch>.dmg
- *                                   (stable, version-less alias the website links to —
- *                                    server-side copied from the new .dmg every release so
- *                                    a version bump never requires editing the site)
+ *     <variant>/<product>-latest-Windows-<arch>.exe
+ *                                   (stable, version-less aliases the website links to —
+ *                                    server-side copied from the new .dmg/.exe every
+ *                                    release so a version bump never requires editing
+ *                                    the site)
+ *
+ * The Windows installer is built only on the windows-latest CI runner (signing needs a
+ * Windows host — docs/WINDOWS-BUILD.md), so its files reach dist-electron via
+ * `gh run download`, not a local build; see docs/RELEASE-RUNBOOK.md.
  *
  * The prefix MUST match the build's --config.publish.url path (see package.json
  * build:mac / build:mac:dev) or the updater won't resolve the artifacts.
@@ -63,8 +74,12 @@ const CONTENT_TYPES = {
   '.yml': 'text/yaml; charset=utf-8',
   '.zip': 'application/zip',
   '.dmg': 'application/x-apple-diskimage',
+  '.exe': 'application/vnd.microsoft.portable-executable',
   '.blockmap': 'application/octet-stream',
 };
+
+/** The first-install download per platform — the one file that gets a `-latest-` alias. */
+const INSTALLER_EXTS = new Set(['.dmg', '.exe']);
 
 function fail(message) {
   console.error(`\n✗ ${message}\n`);
@@ -72,15 +87,19 @@ function fail(message) {
 }
 
 /**
- * Map a versioned .dmg name to its stable, version-less website alias:
+ * Map a versioned installer name to its stable, version-less website alias:
  *   Cyboflow-0.1.4-macOS-arm64.dmg      -> Cyboflow-latest-macOS-arm64.dmg      (stable feed)
  *   Cyboflow-Dev-0.1.4-macOS-arm64.dmg  -> Cyboflow-Dev-latest-macOS-arm64.dmg  (dev feed)
+ *   Cyboflow-0.3.3-Windows-x64.exe      -> Cyboflow-latest-Windows-x64.exe
  * The /download (stable) and /dev pages link at these per-variant alias keys, so a
  * version bump never requires editing the site. Returns null when the name carries no
  * recognizable version (then aliasing is skipped rather than guessed).
  */
 function latestAliasName(name) {
-  const aliased = name.replace(/-\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?-macOS-/, '-latest-macOS-');
+  const aliased = name.replace(
+    /-\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?-(macOS|Windows)-/,
+    '-latest-$1-',
+  );
   return aliased === name ? null : aliased;
 }
 
@@ -132,7 +151,7 @@ const artifacts = entries
   .filter((name) => !onlySet || onlySet.has(name));
 
 if (artifacts.length === 0) {
-  fail(`No publishable artifacts (.yml/.zip/.dmg/.blockmap) found in ${DIST_DIR}.`);
+  fail(`No publishable artifacts (.yml/.zip/.dmg/.exe/.blockmap) found in ${DIST_DIR}.`);
 }
 
 // If an allowlist was given, surface any names that did not match a real file so
@@ -176,7 +195,7 @@ for (const name of artifacts) {
 
   if (dryRun) {
     console.log(`  • ${name}  (${sizeMb} MB, ${contentType}, cache=${cacheControl})`);
-    if (ext === '.dmg') {
+    if (INSTALLER_EXTS.has(ext)) {
       const aliasName = latestAliasName(name);
       console.log(
         aliasName
@@ -209,7 +228,7 @@ for (const name of artifacts) {
   // server-side copy (no re-upload of the bytes). The alias content changes every
   // release, so it must NOT inherit the source's immutable cache — give it
   // `no-cache` so clients always revalidate (a cheap 304 until the next release).
-  if (ext === '.dmg') {
+  if (INSTALLER_EXTS.has(ext)) {
     const aliasName = latestAliasName(name);
     if (aliasName) {
       // eslint-disable-next-line no-await-in-loop -- must follow the upload it aliases
@@ -230,4 +249,4 @@ for (const name of artifacts) {
   }
 }
 
-console.log(`\n✓ Published. The app polls ${PUBLIC_BASE}/latest-mac.yml\n`);
+console.log(`\n✓ Published. The app polls ${PUBLIC_BASE}/latest-mac.yml (macOS) / ${PUBLIC_BASE}/latest.yml (Windows)\n`);

@@ -37,10 +37,12 @@ const ORIGIN = 'https://updates.cyboflow.com';
 
 /**
  * Strict allowlist. This is the open-redirect guard: only a feed prefix plus a
- * plain .dmg basename is redirectable, so no traversal, no query passthrough, and
- * no way to steer the Location header at an arbitrary host.
+ * plain .dmg or .exe basename is redirectable, so no traversal, no query
+ * passthrough, and no way to steer the Location header at an arbitrary host.
+ * .exe joined in 0.4.0, the first Windows release — the site links
+ * Cyboflow-latest-Windows-x64.exe through this redirector like the DMGs.
  */
-const ARTIFACT_RE = /^\/(stable|dev)\/[A-Za-z0-9._-]+\.dmg$/;
+const ARTIFACT_RE = /^\/(stable|dev)\/[A-Za-z0-9._-]+\.(dmg|exe)$/;
 
 /**
  * Obvious cloud/hosting networks. A starter heuristic, NOT a filter — the flag is

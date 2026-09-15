@@ -21,7 +21,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DevServerManager, interpolatePort } from '../devServerManager';
 import type { DeliverableVerifyConfig } from '../../../../../shared/types/visualVerification';
-import { isAlive, spawnDetachedGrandchildTree, waitUntil } from '../../../__test_fixtures__/processTree';
+import {
+  isAlive,
+  spawnNamedDetachedGrandchildTree,
+  waitUntil,
+} from '../../../__test_fixtures__/processTree';
 
 /**
  * Write the script body to a real file and reference it as `node "<path>"`.
@@ -315,27 +319,23 @@ describe('DevServerManager — win32 tree teardown', () => {
     async () => {
       const { spawn } = await import('node:child_process');
       const mgr = new DevServerManager(FAST);
-      // A REAL node child that spawns its own long-lived detached grandchild.
-      const child = spawnDetachedGrandchildTree();
-      const pid = child.pid;
+      // A REAL node child that spawns its own long-lived detached grandchild,
+      // which names itself so this suite asserts over the tree it OWNS — a
+      // pid/ppid walk sweeps up phantoms on Windows (see processTree.ts).
+      const tree = await spawnNamedDetachedGrandchildTree();
+      const pid = tree.child.pid;
       expect(pid).toBeTypeOf('number');
 
-      // Positive control via the shared process table: the grandchild exists.
-      const { collectDescendantPids } = await import('../../processTable');
-      const { listPidPpidTableSync } = await import('../../../utils/platformProcess');
-      let grandkids: number[] = [];
-      for (let i = 0; i < 15 && grandkids.length === 0; i++) {
-        await new Promise((r) => setTimeout(r, 200));
-        grandkids = collectDescendantPids(pid as number, listPidPpidTableSync());
-      }
-      expect(grandkids.length).toBeGreaterThanOrEqual(1);
+      // Positive control: both halves are up before the ladder runs.
+      expect(isAlive(pid as number)).toBe(true);
+      expect(isAlive(tree.grandchildPid)).toBe(true);
 
       (mgr as unknown as {
         signalTree: (child: { pid?: number }, sig: NodeJS.Signals) => void;
-      }).signalTree(child, 'SIGTERM');
+      }).signalTree(tree.child, 'SIGTERM');
 
       const allDead = await waitUntil(
-        () => !isAlive(pid as number) && grandkids.every((g) => !isAlive(g)),
+        () => !isAlive(pid as number) && !isAlive(tree.grandchildPid),
         8000,
       );
       expect(allDead).toBe(true);
