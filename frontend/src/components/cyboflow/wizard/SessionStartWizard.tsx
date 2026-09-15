@@ -112,6 +112,7 @@ import { variantSelectionToStartInput, type VariantSelection } from '../variantS
 import { TuningLevelSelector } from './TuningLevelSelector';
 import { RuntimeMixSelector } from './RuntimeMixSelector';
 import { TUNING_LEVELS, type TuningLevel } from '../../../../../shared/tuning/workflowTuning';
+import { thoroughnessToTuningLevel } from '../../../../../shared/types/thoroughness';
 import {
   DEFAULT_RUNTIME_MIX,
   RUNTIME_MIX_LABELS,
@@ -246,24 +247,54 @@ function AddProjectCard({ onClick }: { onClick: () => void }): React.JSX.Element
 /**
  * The `tuningLevel` field a workflow launch payload carries (migration 126).
  *
- * An explicit per-run override always wins. Beyond that, a PINNED variant makes
- * the level load-bearing even when the user never diverged from the saved stamp:
- * a variant belongs to exactly ONE level's pool, so sending the level the wizard
- * was DISPLAYING lets createRun's containment guard reject a pin from a
- * different level LOUDLY, instead of silently running that variant's frozen
- * graph under the displayed level's name. The level control clears a stale pin
- * on its own (see its onChange); this is the backstop for any path that does
- * not go through it. Rotation/baseline selections carry no such pin, so they
- * keep sending nothing when there is no override.
+ * Precedence (Tier 2, item 13c, [C8]): explicit override -> pinned variant's
+ * DISPLAYED level -> project's solution-thoroughness stamp -> workflow's own
+ * stamped level. The caller resolves the last three rungs into `defaultLevel`
+ * (see {@link resolveDefaultTuningLevel}) — the level the wizard is currently
+ * DISPLAYING absent an override — so this function has two cases beyond the
+ * override: send it explicitly whenever staying silent would launch at a
+ * level OTHER than the one displayed —
+ *   - a PINNED variant: a variant belongs to exactly ONE level's pool, so
+ *     sending the displayed level lets createRun's containment guard reject a
+ *     pin from a different level LOUDLY, instead of silently running that
+ *     variant's frozen graph under the displayed level's name; and
+ *   - a project stamp that DIVERGES from the workflow's own stored level:
+ *     omitting the field would have the backend fall back to the workflow's
+ *     raw stamp, silently launching a different level than the one the
+ *     selector showed as picked.
+ * Whenever neither applies (no pin, and the displayed level already equals the
+ * workflow's own stamp — the common case) staying silent is equivalent, so
+ * rotation/baseline selections with no stamp divergence keep sending nothing.
+ * The level control clears a stale variant pin on its own (see its onChange);
+ * this is the backstop for any path that does not go through it.
  */
 function tuningLevelPayload(
   meta: { isBuiltIn: boolean; tuningLevel: TuningLevel } | undefined,
+  defaultLevel: TuningLevel | undefined,
   override: TuningLevel | null,
   variantSelection: VariantSelection,
 ): { tuningLevel?: TuningLevel } {
   if (override !== null) return { tuningLevel: override };
-  if (variantSelection.mode !== 'variant') return {};
-  return meta?.isBuiltIn === true ? { tuningLevel: meta.tuningLevel } : {};
+  if (meta?.isBuiltIn !== true || defaultLevel === undefined) return {};
+  const mustBeExplicit = variantSelection.mode === 'variant' || defaultLevel !== meta.tuningLevel;
+  return mustBeExplicit ? { tuningLevel: defaultLevel } : {};
+}
+
+/**
+ * Resolves the level the wizard DISPLAYS for the selected built-in workflow
+ * absent an explicit per-run override (Tier 2, item 13c, [C8]): the project's
+ * solution-thoroughness stamp when one exists, else the workflow's own stamped
+ * level. `undefined` for a non-built-in selection (no level control at all) or
+ * when nothing is selected yet.
+ */
+function resolveDefaultTuningLevel(
+  meta: { isBuiltIn: boolean; tuningLevel: TuningLevel } | undefined,
+  project: Project | null | undefined,
+): TuningLevel | undefined {
+  if (meta?.isBuiltIn !== true) return undefined;
+  const stamped = project?.solution_thoroughness;
+  if (stamped !== undefined && stamped !== null) return thoroughnessToTuningLevel(stamped);
+  return meta.tuningLevel;
 }
 
 /**
@@ -769,6 +800,7 @@ export default function SessionStartWizard(): React.JSX.Element {
       ? undefined
       : workflowMetas.find((m) => m.id === selectedWorkflowId);
 
+
   // ── The derived launch route (workflow-runtime-mix.md D4) ────────────────
   // ONE derivation feeding the selector, the Mode row's visibility, the summary
   // and BOTH launch payloads, so a second, subtly different notion of "the mix
@@ -931,6 +963,31 @@ export default function SessionStartWizard(): React.JSX.Element {
   // the hook fetches name/path/branch itself. Declared BEFORE useQuickSession so
   // the success toast can read the resolved project name.
   const banner = useActiveProjectBanner(selectedProjectId, projects);
+
+  /**
+   * The selected project's row (carries `solution_thoroughness`, migration
+   * 134) — from the banner hook, which resolves the full row in BOTH locked
+   * and unlocked flows (unlike the `projects` step-② list above, which stays
+   * empty while locked).
+   */
+  const selectedProject: Project | null = banner.project;
+  /**
+   * The level the wizard DISPLAYS absent an explicit per-run override (Tier 2,
+   * item 13c, [C8]): project's solution-thoroughness stamp -> workflow's own
+   * stamped level. `undefined` for a non-built-in selection. Drives the
+   * TuningLevelSelector's shown value, its onChange's "does this pick diverge
+   * from the default" check, `launchTuningLevel`, and the pinned-variant arm of
+   * `tuningLevelPayload` — one source so all four never drift apart.
+   */
+  const defaultTuningLevel = resolveDefaultTuningLevel(selectedMeta, selectedProject);
+  /**
+   * True when `defaultTuningLevel` came from the project stamp rather than the
+   * workflow's own stamped level — drives the selector's one-line hint.
+   */
+  const tuningLevelFromProjectStamp =
+    selectedMeta?.isBuiltIn === true &&
+    selectedProject?.solution_thoroughness !== undefined &&
+    selectedProject?.solution_thoroughness !== null;
 
   // ── Quick session hook (bound to the locked project) ─────────────────────
   // Constructed unconditionally at top level (rules of hooks); only USED when
@@ -1227,9 +1284,12 @@ export default function SessionStartWizard(): React.JSX.Element {
             ? { findingIds: selectedFindingIds }
             : {}),
           // Per-run tuning level (D4 + migration 126) — the override when the
-          // user diverged from the stamp, else the displayed level whenever a
-          // variant is pinned. See tuningLevelPayload.
-          ...tuningLevelPayload(meta, tuningLevelOverride, variantSelection),
+          // user diverged from the default, else the displayed level whenever a
+          // variant is pinned. `meta` is THIS launch's workflow (may differ from
+          // the wizard's currently-selected card on a duplicate/idea-seeded
+          // launch), so its default is resolved fresh rather than reusing the
+          // outer `defaultTuningLevel`. See tuningLevelPayload.
+          ...tuningLevelPayload(meta, resolveDefaultTuningLevel(meta, selectedProject), tuningLevelOverride, variantSelection),
           // Per-run runtime mix (D4 + migration 128) — see runtimeMixPayload.
           ...runtimeMixPayload(runtimeMixOverride, effectiveRuntimeMix),
           ...variantSelectionToStartInput(variantSelection),
@@ -1273,7 +1333,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, selectedFindingIds, variantSelection, tuningLevelOverride, runtimeMixOverride, effectiveRuntimeMix, cleanupUnusedHostedSession, baseBranchOverride],
+    [selectedProjectId, selectedProject, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, selectedFindingIds, variantSelection, tuningLevelOverride, runtimeMixOverride, effectiveRuntimeMix, cleanupUnusedHostedSession, baseBranchOverride],
   );
 
   // Sprint launch — ONE session-hosted run seeded with the multi-selected task
@@ -1339,6 +1399,7 @@ export default function SessionStartWizard(): React.JSX.Element {
           // Per-run tuning level (D4 + migration 126) — see launchRun's identical spread.
           ...tuningLevelPayload(
             workflowMetas.find((m) => m.id === workflowId),
+            resolveDefaultTuningLevel(workflowMetas.find((m) => m.id === workflowId), selectedProject),
             tuningLevelOverride,
             variantSelection,
           ),
@@ -1374,7 +1435,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, variantSelection, tuningLevelOverride, runtimeMixOverride, effectiveRuntimeMix, cleanupUnusedHostedSession, baseBranchOverride],
+    [selectedProjectId, selectedProject, workflowMetas, banner.name, agentRuntime, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, variantSelection, tuningLevelOverride, runtimeMixOverride, effectiveRuntimeMix, cleanupUnusedHostedSession, baseBranchOverride],
   );
 
   // Design launch — fires from the idea-picker confirm callback
@@ -1632,7 +1693,7 @@ export default function SessionStartWizard(): React.JSX.Element {
   // level dimension was missing). Changing the level re-seeds the variant
   // selection inside VariantSelector, which keys its one-shot seed on this.
   const launchTuningLevel: TuningLevel | null =
-    selectedMeta?.isBuiltIn === true ? tuningLevelOverride ?? selectedMeta.tuningLevel : null;
+    selectedMeta?.isBuiltIn === true ? tuningLevelOverride ?? defaultTuningLevel ?? selectedMeta.tuningLevel : null;
   let ctaLabel: string;
   if (selection === null) {
     ctaLabel = 'Select a workflow';
@@ -2167,13 +2228,20 @@ export default function SessionStartWizard(): React.JSX.Element {
                 picks the POOL); changing it clears a stale pin instead. */}
             {selection.kind === 'workflow' && selectedMeta?.isBuiltIn === true && (
               <TuningLevelSelector
-                value={tuningLevelOverride ?? selectedMeta.tuningLevel}
+                value={tuningLevelOverride ?? defaultTuningLevel ?? selectedMeta.tuningLevel}
                 customSlotAvailable={selectedMeta.hasCustomSlot}
+                stampHint={
+                  tuningLevelFromProjectStamp && tuningLevelOverride === null && defaultTuningLevel !== undefined
+                    ? `Defaulted from project thoroughness: ${selectedProject?.solution_thoroughness} → ${defaultTuningLevel}`
+                    : undefined
+                }
                 onChange={(level) => {
-                  // Picking the saved level back CLEARS the override (D3/D4:
-                  // only a genuine divergence from the stamp is an override);
+                  // Picking the currently-displayed DEFAULT back CLEARS the
+                  // override (D3/D4: only a genuine divergence from it is an
+                  // override) — the default is the project stamp when one is
+                  // in effect, else the workflow's own stamped level ([C8]);
                   // any other pick sets a per-run override.
-                  setTuningLevelOverride(level === selectedMeta.tuningLevel ? null : level);
+                  setTuningLevelOverride(level === (defaultTuningLevel ?? selectedMeta.tuningLevel) ? null : level);
                   // Changing the level changes the POOL (migration 126), so any
                   // pinned variant belongs to the level we just left. Clear it
                   // HERE rather than in an effect: this control is always
@@ -2700,6 +2768,15 @@ interface ProjectBanner {
   name: string;
   path: string | null;
   branch: string | null;
+  /**
+   * The resolved project ROW itself (Tier 2, item 13c) — `null` while
+   * resolving or when `projectId` is null. Exposed alongside the display
+   * fields above so callers needing a column beyond name/path/branch (e.g.
+   * `solution_thoroughness`) don't need a second, differently-gated fetch:
+   * this hook already resolves the full row in BOTH locked and unlocked
+   * flows (`fromLoaded` vs. the one-shot `getAll` below).
+   */
+  project: Project | null;
 }
 
 function useActiveProjectBanner(
@@ -2768,5 +2845,6 @@ function useActiveProjectBanner(
     name: effective?.name ?? 'Project',
     path,
     branch,
+    project: effective,
   };
 }

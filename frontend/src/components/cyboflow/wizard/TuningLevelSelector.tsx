@@ -53,6 +53,15 @@ export interface TuningLevelSelectorProps {
   /** Optional per-level token-estimate seam (plan §5 phase 7) — no query wired yet. */
   estimateLabels?: Partial<Record<TuningLevel, string>>;
   id?: string;
+  /**
+   * One-line note shown when `value` is defaulting from the project's
+   * solution-thoroughness stamp rather than an explicit per-run override or
+   * the workflow's own stamped level (Tier 2, item 13c), e.g. "Defaulted from
+   * project thoroughness: v1 → standard". Omit when the stamp isn't in
+   * effect (no thoroughness stamp, or an override/workflow stamp already
+   * explains the displayed value).
+   */
+  stampHint?: string;
 }
 
 export function TuningLevelSelector({
@@ -61,6 +70,7 @@ export function TuningLevelSelector({
   onChange,
   estimateLabels,
   id = 'wizard-tuning-level',
+  stampHint,
 }: TuningLevelSelectorProps): React.JSX.Element {
   return (
     <div className="flex flex-col gap-1.5" data-testid="wizard-tuning-level">
@@ -107,6 +117,12 @@ export function TuningLevelSelector({
       <p className="text-xs text-text-tertiary" data-testid="wizard-tuning-level-desc">
         {TUNING_LEVEL_DESCRIPTIONS[value]}
       </p>
+
+      {stampHint !== undefined && (
+        <p className="text-xs italic text-text-tertiary" data-testid="wizard-tuning-level-stamp-hint">
+          {stampHint}
+        </p>
+      )}
 
       {estimateLabels !== undefined && Object.keys(estimateLabels).length > 0 && (
         <p className="text-xs text-text-tertiary" data-testid="wizard-tuning-estimate-caption">
