@@ -3308,10 +3308,18 @@ export class McpQueryHandler {
           prototype_revision: approvedDesign.prototypeRevision,
           // RESOLVED absolute on-disk path (mirrors toMcpAttachments below) so a
           // planner/sprint agent can Read the file directly with no export step.
-          // Host-written only (Approve's snapshot step, never agent-supplied),
-          // so no containment check is needed here — snapshotBaseDir is already
-          // an absolute CYBOFLOW_DIR path (main/src/index.ts).
+          // Host-written only (Approve's snapshot step OR flowDesignBinding's,
+          // never agent-supplied), so no containment check is needed here —
+          // snapshotBaseDir is already an absolute CYBOFLOW_DIR path
+          // (main/src/index.ts).
           snapshot_path: path.resolve(approvedDesign.snapshotPath),
+          // Provenance (migration 133): 'design-mode' is a Design Mode Approve;
+          // 'flow' is a Launch/Planner/Ship run whose design gate cleared, with
+          // `source_run_id` naming that run. A reading agent uses it to tell a
+          // hand-refined design from a flow's generated concept mockup — and the
+          // flow binder uses it to leave a design-mode approval alone.
+          source: approvedDesign.source,
+          source_run_id: approvedDesign.sourceRunId,
         };
       }
 

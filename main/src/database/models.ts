@@ -955,8 +955,14 @@ export interface ApprovedDesignRow {
   id: string;
   idea_id: string;
   project_id: number;
-  handoff_id: string;
-  session_id: string;
+  /**
+   * The `design_handoffs` row this approval came from — NULL for a
+   * `source='flow'` row (migration 133): a Launch/Planner/Ship gate approval has
+   * no draft, no CAS target, and therefore no handoff.
+   */
+  handoff_id: string | null;
+  /** The Design Mode session — NULL for a `source='flow'` row (migration 133). */
+  session_id: string | null;
   draft_revision: number;
   prototype_artifact_id: string;
   prototype_revision: number;
@@ -973,6 +979,16 @@ export interface ApprovedDesignRow {
  * which can only ever yield 'complete'|'incomplete' — never 'skipped', since
  * that state is unfalsifiable from absence and only ever set explicitly (see
  * migration 101's header comment). `source` therefore only ever persists
+  /**
+   * Which pathway approved this design (migration 133). 'design-mode' is the
+   * Approve state machine; 'flow' is a Launch/Planner/Ship run whose
+   * approve-design / approve-ideas gate cleared. A 'design-mode' row always
+   * outranks a flow prototype — the flow binder skips an idea whose current row
+   * is design-mode rather than superseding it.
+   */
+  source: 'design-mode' | 'flow';
+  /** The workflow run that bound a `source='flow'` row; NULL for design-mode. */
+  source_run_id: string | null;
  * 'flow'|'manual' here; 'derived' is a read-time-only marker for a component
  * with no row (shared/types/ideaComponents.ts `IdeaComponentSource`).
  * `stale_at` carries "reset means re-verify, NOT discard": non-NULL means
