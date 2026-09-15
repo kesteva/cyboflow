@@ -331,6 +331,15 @@ advances to **Done** when the session is actually merged, and reverts to its ent
 stage if the run ends without merging. Do **not** move task board stages by hand;
 the lane (and the Sessions / Runs view) is where live per-task status lives.
 
+**Shared build breaks.** Lanes share ONE worktree, so a break another lane
+introduced — a half-written module, a renamed export, a test runner that will not
+start — lands in every lane at once. A lane subagent that hits one returns a
+`## Build break` section instead of routing around it; file that as a finding with
+`category: 'build-break'`, title `Build break: <first error line verbatim>`, and
+`locations` at the offending file, then let the lane carry on if it can. Identical
+reports from separate lanes are what let the run's supervisor see ONE shared cause
+rather than N unrelated lane failures.
+
 **Lane discipline:** every lane transition goes through
 `cyboflow_update_sprint_task` at the moment it happens — when a task starts, when
 its stage changes, when it commits, when it fails. The lanes are the UI's only
@@ -390,7 +399,8 @@ Run steps 14-16 normally ONLY when every lane is `integrated`.
        repair or revert its own fixes — at most **once** — and re-run
        sprint-verify. If it STILL fails, file a **blocking** finding via
        `cyboflow_report_finding` (`blocking: true`, category
-       `address-review-regression`) carrying the failing tests and what changed,
+       `address-review-regression`) titled exactly `address-review left the tree
+       red` and naming the failing spec, carrying the failing tests and what changed,
        and surface it at the human gate rather than merging a red tree — the
        blocking finding is what actually parks the run, prose in a summary is not.
        This is the ONE exception to "do not file new findings from this step", and
