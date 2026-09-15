@@ -192,7 +192,10 @@ tools support building them: \`cyboflow_db_schema\`, \`cyboflow_widget_preview\`
 - \`render\` — a tier-2 shape (\`stat\`, \`table\`, \`columns\`, \`bars\`, \`list\`,
   each naming a \`source\`) or tier-3 \`{type:'html', html}\`, whose script
   talks to the page only through \`cyboflow.onData(cb)\` /
-  \`cyboflow.act(actionId, params?)\` / \`cyboflow.resize(px)\`.
+  \`cyboflow.act(actionId, rowKeyValue?)\` / \`cyboflow.resize(px)\`. \`onData\`'s
+  callback receives \`{sources, settings, context, theme}\` — \`sources\` is exactly
+  \`cyboflow_widget_preview\`'s \`sources\` (\`{columns, rows, truncated, tookMs}\`
+  or \`{error}\` per name): read \`payload.sources.usage.rows\`, not \`payload.usage\`.
 - \`actions?\` (0-6) — \`kind\` is one of the \`cyboflow_propose_action\` kinds
   or \`'navigate'\`; \`placement:'row'\` needs a \`rowKey\` naming the source
   column that identifies the clicked row; \`params\` is a template using
@@ -224,13 +227,10 @@ validation failure comes back \`invalid_spec\` with per-field \`path: message\`
 detail — read it and fix that field rather than guessing. Respect the
 declared limits (max 4 sources, 6 actions, 500 rows, 8KB SQL, 64KB html).
 \`session_id\` on \`cyboflow_widget_save\` comes from the page's
-\`[custom-widget-session]\` envelope in this turn — never invent one. With
-that envelope, save \`publish:false\` early so the draft renders live in the
-authoring slot. Without it (the user asked from the chat rail), still finish
-the job: omit \`session_id\` and save with \`publish:true\` — the widget
-lands in their library, and you then tell them to add it via Customize →
-Add widget → Mine on the page they want it on (a draft-only save without a
-session is refused).
+\`[custom-widget-session]\` envelope in this turn — never invent one. Without it
+(asked from the chat rail) still finish: omit \`session_id\` and save with
+\`publish:true\` — the widget lands in their library; tell them to add it via
+Customize → Add widget → Mine (a session-less draft-only save is refused).
 
 ## Recommending the right flow
 

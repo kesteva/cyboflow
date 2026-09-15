@@ -81,9 +81,15 @@ describe('agentThreadPrompt', () => {
     }
   });
 
+  it('documents the onData payload shape for tier-3 html widgets (sources.<name>.rows)', () => {
+    const prompt = getAgentSystemPrompt();
+    expect(prompt).toMatch(/onData.*callback receives `\{sources, settings, context, theme\}`/s);
+    expect(prompt).toContain('payload.sources.usage.rows');
+  });
+
   it('tells the agent a session-less widget request still saves (publish:true into the library)', () => {
     const prompt = getAgentSystemPrompt();
-    expect(prompt).toMatch(/omit `session_id` and save with `publish:true`/);
+    expect(prompt).toMatch(/omit `session_id` and save with\s+`publish:true`/);
     expect(prompt).toMatch(/Add widget → Mine/);
   });
 
