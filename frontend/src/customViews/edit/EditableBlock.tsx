@@ -18,8 +18,8 @@
  *
  * While THIS item is the open authoring slot's (`customViewsStore.authoring`)
  * and it is showing an unpublished draft (`authoring.draftPreview`), the
- * header row grows a "Draft" chip plus Publish / Discard draft buttons
- * (§7.3) — Publish promotes the widget (kept open for more iteration),
+ * header row grows a "Draft" chip plus Save widget / Discard draft buttons
+ * (§7.3) — Save widget (the primary CTA; §7.3 calls it Publish) promotes the widget (kept open for more iteration),
  * Discard draft abandons it (and, for `mode:'create'`, drops the placeholder
  * item entirely — see `customViewsStore.discardAuthoringDraft`). A custom
  * widget's settings popover also gets an "Edit with assistant" footer button
@@ -29,7 +29,7 @@
  */
 import React, { useState } from 'react';
 import { Eye, EyeOff, GripVertical, Settings, Trash2 } from 'lucide-react';
-import { Chip, GhostButton } from '../../components/landing/QueuePrimitives';
+import { Chip, GhostButton, PrimaryButton } from '../../components/landing/QueuePrimitives';
 import { useCustomViewsStore } from '../../stores/customViewsStore';
 import { useAgentThreadStore } from '../../stores/agentThreadStore';
 import { useLayoutStore } from '../../stores/layoutStore';
@@ -161,17 +161,18 @@ export function EditableBlock({
           <>
             <Chip tone="warning">Draft</Chip>
             <GhostButton
-              onClick={() => void useCustomViewsStore.getState().publishAuthoringDraft()}
-              data-testid={`editable-draft-publish-${item.instanceId}`}
-            >
-              Publish
-            </GhostButton>
-            <GhostButton
               onClick={() => useCustomViewsStore.getState().discardAuthoringDraft()}
               data-testid={`editable-draft-discard-${item.instanceId}`}
             >
               Discard draft
             </GhostButton>
+            <PrimaryButton
+              onClick={() => void useCustomViewsStore.getState().publishAuthoringDraft()}
+              title="Save this widget to your library so it renders on every surface"
+              data-testid={`editable-draft-publish-${item.instanceId}`}
+            >
+              Save widget
+            </PrimaryButton>
           </>
         )}
         <GhostButton

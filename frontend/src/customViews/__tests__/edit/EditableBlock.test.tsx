@@ -159,7 +159,7 @@ describe('EditableBlock — Draft chip', () => {
     expect(screen.queryByTestId('editable-draft-publish-c1')).toBeNull();
   });
 
-  it('renders the Draft chip + Publish/Discard buttons while this item is the authoring slot and unpublished', () => {
+  it('renders the Draft chip + Save widget / Discard buttons while this item is the authoring slot and unpublished', () => {
     useCustomViewsStore.setState({
       authoring: { sessionId: 's1', instanceId: 'c1', mode: 'create', widgetId: 'w-1', draftPreview: true },
     });
@@ -169,7 +169,7 @@ describe('EditableBlock — Draft chip', () => {
       </EditableBlock>,
     );
     expect(screen.getByText('Draft')).toBeInTheDocument();
-    expect(screen.getByTestId('editable-draft-publish-c1')).toBeInTheDocument();
+    expect(screen.getByTestId('editable-draft-publish-c1')).toHaveTextContent('Save widget');
     expect(screen.getByTestId('editable-draft-discard-c1')).toBeInTheDocument();
   });
 
@@ -185,7 +185,7 @@ describe('EditableBlock — Draft chip', () => {
     expect(screen.queryByText('Draft')).toBeNull();
   });
 
-  it('Publish calls publishDraft (via publishAuthoringDraft)', async () => {
+  it('Save widget calls publishDraft (via publishAuthoringDraft)', async () => {
     const user = userEvent.setup();
     useCustomViewsStore.setState({
       authoring: { sessionId: 's1', instanceId: 'c1', mode: 'create', widgetId: 'w-1', draftPreview: true },
