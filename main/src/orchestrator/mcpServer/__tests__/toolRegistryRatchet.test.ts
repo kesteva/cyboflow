@@ -51,6 +51,10 @@ function locateMcpServerDir(): string {
 const MCP_DIR = locateMcpServerDir();
 const SERVER_SRC = fs.readFileSync(path.join(MCP_DIR, 'cyboflowMcpServer.ts'), 'utf8');
 const HANDLER_SRC = fs.readFileSync(path.join(MCP_DIR, 'mcpQueryHandler.ts'), 'utf8');
+// McpQueryMessage / McpQueryResponse were extracted out of mcpQueryHandler.ts
+// into mcpQueryMessages.ts (issue #19, the god-file split) — declaredEnvelopes()
+// below scans THIS source, not the handler's.
+const MESSAGES_SRC = fs.readFileSync(path.join(MCP_DIR, 'mcpQueryMessages.ts'), 'utf8');
 
 /**
  * Envelopes the main process dispatches that NO tool produces. These are the
@@ -91,11 +95,11 @@ function dispatchedEnvelopes(): Set<string> {
 
 /** Every envelope the `McpQueryMessage` union declares a member for. */
 function declaredEnvelopes(): Set<string> {
-  const start = HANDLER_SRC.indexOf('export type McpQueryMessage =');
-  const end = HANDLER_SRC.indexOf('export interface McpQueryResponse');
+  const start = MESSAGES_SRC.indexOf('export type McpQueryMessage =');
+  const end = MESSAGES_SRC.indexOf('export interface McpQueryResponse');
   expect(start, 'McpQueryMessage moved — this ratchet scans the wrong region').toBeGreaterThan(-1);
   expect(end).toBeGreaterThan(start);
-  const union = HANDLER_SRC.slice(start, end);
+  const union = MESSAGES_SRC.slice(start, end);
   return new Set([...union.matchAll(/type: '([a-z-]+)';/g)].map((match) => match[1]));
 }
 
