@@ -146,6 +146,20 @@ describe('WidgetHost', () => {
     expect(runWidget).not.toHaveBeenCalled();
   });
 
+  it('a draft preview polls with {draftOf} so the server runs the draft spec, not the (absent) published one', async () => {
+    runWidget.mockResolvedValue(payload([{ totalTokens: 1 }]));
+    render(
+      <WidgetHost
+        item={{ ...ITEM, widget: { type: 'custom', widgetId: 'w-9' } }}
+        spec={STAT_SPEC}
+        draft
+        context={{ projectId: 12 }}
+      />,
+    );
+    await screen.findByTestId('widget-stat');
+    expect(runWidget).toHaveBeenCalledWith(expect.objectContaining({ widget: { draftOf: 'w-9' } }));
+  });
+
   it('passes the item refresh override through to the query, clamped to the shared limits', async () => {
     runWidget.mockResolvedValue(payload([{ totalTokens: 1 }]));
     render(

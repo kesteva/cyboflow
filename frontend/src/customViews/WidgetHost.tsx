@@ -109,12 +109,18 @@ export function WidgetHost({
   // OUTSIDE the effect, and both must be able to invalidate each other.
   const generationRef = useRef(0);
 
+  // A draft preview polls the DRAFT spec (`{draftOf}` is the only server
+  // path that reads draft_spec_json); the plain `{type:'custom'}` ref always
+  // resolves the published spec, which a never-published widget lacks
+  // (`draft_only`). Actions stay off the draft path (§4.4).
+  const widgetRef = draft && item.widget.type === 'custom' ? { draftOf: item.widget.widgetId } : item.widget;
+
   const fetchData = useCallback(async (): Promise<void> => {
     if (spec === null) return;
     const generation = ++generationRef.current;
     try {
       const next = await trpc.cyboflow.customViews.runWidget.query({
-        widget: item.widget,
+        widget: widgetRef,
         settings: item.settings,
         context,
         refreshSec,
@@ -131,7 +137,7 @@ export function WidgetHost({
     // `item.settings` is compared by its serialization (settingsKey) — a fresh
     // object with identical values must not re-fire the poll.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [context.projectId, item.widget.type, refreshSec, settingsKey, spec]);
+  }, [context.projectId, item.widget.type, draft, refreshSec, settingsKey, spec]);
 
   // Mount + interval, suspended while the document is hidden.
   useEffect(() => {
@@ -176,7 +182,7 @@ export function WidgetHost({
     void (async (): Promise<void> => {
       try {
         await trpc.cyboflow.customViews.resetBreaker.mutate({
-          widget: item.widget,
+          widget: widgetRef,
           settings: item.settings,
           context,
         });
@@ -186,7 +192,7 @@ export function WidgetHost({
       }
       await fetchData();
     })();
-  }, [context, fetchData, item.settings, item.widget]);
+  }, [context, fetchData, item.settings, widgetRef]);
 
   const actions = useWidgetActions({ instanceId: item.instanceId, spec, context });
 
