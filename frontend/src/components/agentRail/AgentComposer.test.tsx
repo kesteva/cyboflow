@@ -1,8 +1,20 @@
 import '@testing-library/jest-dom';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
 import { useState } from 'react';
 import { AgentComposer } from './AgentComposer';
+
+/** A minimal real File the jsdom FileReader can read into a data URL. */
+function imageFile(name: string, type: string, bytes = 4): File {
+  return new File([new Uint8Array(bytes).fill(137)], name, { type });
+}
+
+/** Paste an image through the clipboard, the way a screenshot arrives. */
+function pasteImage(file: File): void {
+  fireEvent.paste(screen.getByTestId('agent-composer-input'), {
+    clipboardData: { items: [{ type: file.type, getAsFile: () => file }] },
+  });
+}
 
 describe('AgentComposer', () => {
   it('renders the placeholder and no model chip', () => {
@@ -24,7 +36,7 @@ describe('AgentComposer', () => {
     fireEvent.click(screen.getByTestId('agent-composer-send'));
 
     expect(onSend).toHaveBeenCalledTimes(1);
-    expect(onSend).toHaveBeenCalledWith('where is everything?');
+    expect(onSend).toHaveBeenCalledWith('where is everything?', undefined);
     expect(input).toHaveValue('');
   });
 
@@ -36,7 +48,7 @@ describe('AgentComposer', () => {
     fireEvent.change(input, { target: { value: 'triage the backlog' } });
     fireEvent.keyDown(input, { key: 'Enter', metaKey: true });
 
-    expect(onSend).toHaveBeenCalledWith('triage the backlog');
+    expect(onSend).toHaveBeenCalledWith('triage the backlog', undefined);
   });
 
   it('does not send an empty/whitespace-only draft', () => {
@@ -66,7 +78,7 @@ describe('AgentComposer', () => {
     fireEvent.change(input, { target: { value: 'line one\nline two\nline three\nline four\nline five' } });
     fireEvent.click(screen.getByTestId('agent-composer-send'));
 
-    expect(onSend).toHaveBeenCalledWith('line one\nline two\nline three\nline four\nline five');
+    expect(onSend).toHaveBeenCalledWith('line one\nline two\nline three\nline four\nline five', undefined);
     expect(input).toHaveValue('');
   });
 
@@ -80,6 +92,134 @@ describe('AgentComposer', () => {
     fireEvent.keyDown(screen.getByTestId('agent-composer-input'), { key: 'Enter', metaKey: true });
 
     expect(onSend).not.toHaveBeenCalled();
+  });
+
+  // ---------------------------------------------------------------------
+  // Image attachments
+  //
+  // The assistant runs with `tools: []`, so an attached image has to leave this
+  // component as a real base64 content block — there is no path for it to read.
+  // ---------------------------------------------------------------------
+
+  it('pasting an image adds a thumbnail', async () => {
+    render(<AgentComposer onSend={vi.fn()} disabled={false} />);
+
+    pasteImage(imageFile('shot.png', 'image/png'));
+
+    const strip = await screen.findByTestId('agent-composer-attachments');
+    expect(strip.querySelectorAll('img')).toHaveLength(1);
+  });
+
+  it('the × button removes a thumbnail', async () => {
+    render(<AgentComposer onSend={vi.fn()} disabled={false} />);
+    pasteImage(imageFile('shot.png', 'image/png'));
+    await screen.findByTestId('agent-composer-attachments');
+
+    fireEvent.click(screen.getByLabelText('Remove shot.png'));
+
+    await waitFor(() =>
+      expect(screen.queryByTestId('agent-composer-attachments')).not.toBeInTheDocument(),
+    );
+  });
+
+  it('picking a file through the paperclip input adds it too', async () => {
+    render(<AgentComposer onSend={vi.fn()} disabled={false} />);
+
+    fireEvent.change(screen.getByTestId('agent-composer-file-input'), {
+      target: { files: [imageFile('picked.png', 'image/png')] },
+    });
+
+    const strip = await screen.findByTestId('agent-composer-attachments');
+    expect(strip.querySelectorAll('img')).toHaveLength(1);
+  });
+
+  it('dropping a file adds it', async () => {
+    render(<AgentComposer onSend={vi.fn()} disabled={false} />);
+
+    fireEvent.drop(screen.getByTestId('agent-composer'), {
+      dataTransfer: { files: [imageFile('dropped.png', 'image/png')] },
+    });
+
+    await screen.findByTestId('agent-composer-attachments');
+  });
+
+  it('send passes the wire-shaped images and clears them', async () => {
+    const onSend = vi.fn();
+    render(<AgentComposer onSend={onSend} disabled={false} />);
+    fireEvent.change(screen.getByTestId('agent-composer-input'), { target: { value: 'what is this?' } });
+    pasteImage(imageFile('shot.png', 'image/png'));
+    await screen.findByTestId('agent-composer-attachments');
+
+    fireEvent.click(screen.getByTestId('agent-composer-send'));
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+    const [text, images] = onSend.mock.calls[0] as [string, Array<Record<string, string>>];
+    expect(text).toBe('what is this?');
+    expect(images).toHaveLength(1);
+    expect(images[0].name).toBe('shot.png');
+    expect(images[0].mediaType).toBe('image/png');
+    // The raw payload only — a `data:` prefix here would be sent verbatim to the
+    // API as image bytes and fail the turn.
+    expect(images[0].base64).not.toContain('data:');
+    expect(images[0].base64.length).toBeGreaterThan(0);
+
+    expect(screen.getByTestId('agent-composer-input')).toHaveValue('');
+    await waitFor(() =>
+      expect(screen.queryByTestId('agent-composer-attachments')).not.toBeInTheDocument(),
+    );
+  });
+
+  it('an image with no text can be sent (the picture IS the message)', async () => {
+    const onSend = vi.fn();
+    render(<AgentComposer onSend={onSend} disabled={false} />);
+    pasteImage(imageFile('shot.png', 'image/png'));
+    await screen.findByTestId('agent-composer-attachments');
+
+    expect(screen.getByTestId('agent-composer-send')).not.toBeDisabled();
+    fireEvent.click(screen.getByTestId('agent-composer-send'));
+
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend.mock.calls[0][0]).toBe('');
+    expect(onSend.mock.calls[0][1]).toHaveLength(1);
+  });
+
+  it('refuses an image type the model cannot receive, inline and at attach time', async () => {
+    render(<AgentComposer onSend={vi.fn()} disabled={false} />);
+
+    pasteImage(imageFile('diagram.svg', 'image/svg+xml'));
+
+    expect(await screen.findByTestId('agent-composer-attach-error')).toHaveTextContent(
+      'Only PNG, JPEG, GIF, and WebP images',
+    );
+    expect(screen.queryByTestId('agent-composer-attachments')).not.toBeInTheDocument();
+  });
+
+  it('caps the strip at four images and says so', async () => {
+    render(<AgentComposer onSend={vi.fn()} disabled={false} />);
+
+    for (let i = 0; i < 5; i++) {
+      pasteImage(imageFile(`shot-${i}.png`, 'image/png'));
+      // Serialized on purpose: each paste must observe the growing list, which
+      // is what the cap is applied against.
+      await screen.findByTestId('agent-composer-attachments');
+    }
+
+    await waitFor(() =>
+      expect(
+        screen.getByTestId('agent-composer-attachments').querySelectorAll('img'),
+      ).toHaveLength(4),
+    );
+    expect(screen.getByTestId('agent-composer-attach-error')).toHaveTextContent('At most 4 images');
+  });
+
+  it('a text-only send still omits the images argument', () => {
+    const onSend = vi.fn();
+    render(<AgentComposer onSend={onSend} disabled={false} />);
+
+    fireEvent.change(screen.getByTestId('agent-composer-input'), { target: { value: 'plain' } });
+    fireEvent.click(screen.getByTestId('agent-composer-send'));
+
+    expect(onSend).toHaveBeenCalledWith('plain', undefined);
   });
 
   // ---------------------------------------------------------------------

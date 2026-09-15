@@ -33,7 +33,11 @@ import { create } from 'zustand';
 import type { inferRouterOutputs } from '@trpc/server';
 import { trpc } from '../trpc/client';
 import type { AppRouter } from '../../../shared/types/trpc';
-import type { AgentThread, AgentProposal } from '../../../shared/types/agentThread';
+import type {
+  AgentThread,
+  AgentProposal,
+  AgentThreadImageAttachment,
+} from '../../../shared/types/agentThread';
 
 type RouterOutputs = inferRouterOutputs<AppRouter>;
 
@@ -97,7 +101,10 @@ export interface AgentThreadState {
    *  `opts.contextHint` is optional prompt-only priming text (e.g. onboarding
    *  context) prepended to what the model sees — never part of the recorded
    *  transcript turn. */
-  sendMessage: (text: string, opts?: { contextHint?: string }) => Promise<void>;
+  sendMessage: (
+    text: string,
+    opts?: { contextHint?: string; images?: AgentThreadImageAttachment[] },
+  ) => Promise<void>;
   /** The user's Confirm click (S1.3 consumes this) — propagates failures so
    *  the proposal card can render them, and refreshes `proposals` afterward. */
   confirmProposal: (proposalId: string) => Promise<ConfirmProposalResult>;
@@ -199,7 +206,10 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
       return unsubscribe;
     },
 
-    sendMessage: async (text: string, opts?: { contextHint?: string }) => {
+    sendMessage: async (
+      text: string,
+      opts?: { contextHint?: string; images?: AgentThreadImageAttachment[] },
+    ) => {
       const threadId = get().thread?.id;
       if (threadId === undefined) {
         console.warn('[agentThreadStore] sendMessage called before the thread loaded — dropped');
@@ -218,6 +228,9 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
           threadId,
           text,
           ...(contextHint !== undefined ? { contextHint } : {}),
+          // Omitted on a text-only turn so the mutation payload is unchanged
+          // for every existing caller.
+          ...(opts?.images !== undefined && opts.images.length > 0 ? { images: opts.images } : {}),
         });
       } catch (err: unknown) {
         console.error('[agentThreadStore] sendMessage failed:', err);

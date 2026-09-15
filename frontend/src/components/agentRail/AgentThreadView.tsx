@@ -15,6 +15,7 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import type { UnifiedMessage } from '../../../../shared/types/unifiedMessage';
+import type { AgentThreadImageAttachment } from '../../../../shared/types/agentThread';
 import { UnifiedChatView } from '../cyboflow/unified/UnifiedChatView';
 import { GUIDED_TARGETS } from '../onboarding/guided/GuidedLeader';
 import { useUnifiedAgentThreadMessages } from '../cyboflow/unified/useUnifiedAgentThreadMessages';
@@ -88,8 +89,8 @@ export function AgentThreadView({
     ];
   }, [greeting, greetingAt, messages]);
 
-  const handleSend = (text: string): void => {
-    void sendMessage(text);
+  const handleSend = (text: string, images?: AgentThreadImageAttachment[]): void => {
+    void sendMessage(text, images !== undefined && images.length > 0 ? { images } : undefined);
   };
 
   return (

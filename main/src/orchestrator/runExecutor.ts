@@ -27,6 +27,7 @@ import {
 import { providerLabel, providerSupportsOrchestrated } from './providerExecutionSupport';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import type { CliSpawnOutcome } from '../../../shared/types/cliPanels';
+import type { AgentThreadImageAttachment } from '../../../shared/types/agentThread';
 import { AgentInvocationStore } from './agentInvocationStore';
 import type { ClaudeStreamEvent } from '../../../shared/types/claudeStream';
 // Type-only (erased by tsc) — the standalone-typecheck invariant above forbids a
@@ -171,6 +172,15 @@ export interface ClaudeSpawnerOptions {
   sessionId: string;
   worktreePath: string;
   prompt: string;
+  /**
+   * Per-turn image attachments — the spawner-side twin of
+   * {@link ClaudeSpawnOptions.images} (claudeCodeManager.ts). Set ONLY by the
+   * global assistant's composer path; every run/lane spawn omits it. The Claude
+   * SDK substrate sends them as Anthropic `image`/`base64` content blocks; the
+   * Codex app-server substrate spills them to disk and sends `localImage` input
+   * items. Absent ⇒ byte-identical to a text-only turn.
+   */
+  images?: readonly AgentThreadImageAttachment[];
   /**
    * The prompt is orchestration plumbing, not a user-authored chat turn. Codex
    * app-server echoes every turn input as a userMessage; its manager uses this

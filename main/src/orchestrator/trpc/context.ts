@@ -23,7 +23,12 @@ import type { RunGitDiff } from '../../../../shared/types/runFiles';
 import type { WorkflowDescriptor } from '../workflowRegistry';
 import type { AgentOverrideRow } from '../../database/models';
 import type { WorkflowVariantRow, WorkflowVariantStatus } from '../../../../shared/types/experiments';
-import type { AgentThread, AgentProposal, AgentProposalStatus } from '../../../../shared/types/agentThread';
+import type {
+  AgentThread,
+  AgentThreadImageAttachment,
+  AgentProposal,
+  AgentProposalStatus,
+} from '../../../../shared/types/agentThread';
 import type { ExecuteProposalResult } from '../agentThread/proposalExecutor';
 import type { ConfigOpsLike } from './contracts/configOps';
 import type { WorkspaceFileOpsLike } from './contracts/workspaceFileOps';
@@ -207,8 +212,15 @@ export interface AgentThreadServiceLike {
   /** Load-or-create the single 'global' thread + ensure its neutral home dir. */
   ensureGlobalThread(): AgentThread;
   /** Send one turn (spawn/warm-continue). Also used to inject executor loopback turns.
-   *  Optional `contextHint` is prompt-only priming text, never persisted to the transcript. */
-  sendMessage(threadId: string, text: string, contextHint?: string): Promise<void>;
+   *  Optional `contextHint` is prompt-only priming text, never persisted to the transcript.
+   *  Optional `images` are composer attachments sent to the model as real content
+   *  blocks; the transcript records only a `📎 image:` line per attachment. */
+  sendMessage(
+    threadId: string,
+    text: string,
+    contextHint?: string,
+    images?: readonly AgentThreadImageAttachment[],
+  ): Promise<void>;
 }
 
 /**

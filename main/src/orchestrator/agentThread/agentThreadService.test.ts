@@ -15,9 +15,17 @@ import {
 } from './agentThreadService';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import type {
+  AgentThreadImageAttachment,
   AssistantContextRetention,
   AssistantRuntime,
 } from '../../../../shared/types/agentThread';
+
+/** A ~600-byte PNG stand-in: enough base64 to prove the row never carries it. */
+const PNG_ATTACHMENT: AgentThreadImageAttachment = {
+  name: 'shot.png',
+  mediaType: 'image/png',
+  base64: 'iVBORw0KGgo='.repeat(64),
+};
 
 /** One local calendar day, in ms — advance the clock past it to cross the retention day boundary. */
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -287,6 +295,103 @@ describe('AgentThreadService', () => {
         message: { content: Array<{ type: string; text: string }> };
       };
       expect(persisted.message.content).toEqual([{ type: 'text', text: 'hello' }]);
+    });
+
+    // -----------------------------------------------------------------------
+    // Image attachments
+    // -----------------------------------------------------------------------
+
+    it('image attachments reach the spawn options verbatim', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueInit('sess-1');
+
+      await h.service.sendMessage(thread.id, 'what is this?', undefined, [PNG_ATTACHMENT]);
+
+      expect(h.manager.calls[0].images).toEqual([PNG_ATTACHMENT]);
+    });
+
+    it('a text-only turn leaves the spawn options with no images key at all', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueInit('sess-1');
+
+      await h.service.sendMessage(thread.id, 'hello');
+
+      expect('images' in h.manager.calls[0]).toBe(false);
+    });
+
+    it('an empty images array is treated as a text-only turn', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueInit('sess-1');
+
+      await h.service.sendMessage(thread.id, 'hello', undefined, []);
+
+      expect('images' in h.manager.calls[0]).toBe(false);
+    });
+
+    it('the persisted user turn records a lean attachment line and NEVER the base64', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueInit('sess-1');
+
+      await h.service.sendMessage(thread.id, 'what is this?', undefined, [PNG_ATTACHMENT]);
+
+      const userRow = h.store.listEvents(thread.id).find((r) => r.eventType === 'user');
+      expect(userRow).toBeDefined();
+      const persisted = JSON.parse(userRow!.payloadJson) as {
+        message: { content: Array<{ type: string; text: string }> };
+      };
+      const text = persisted.message.content[0].text;
+      expect(text).toContain('what is this?');
+      expect(text).toContain('📎 image: shot.png');
+      // The whole point of the lean row: the transcript is replayed in full on
+      // every thread load, so the bytes must live only on the wire.
+      expect(userRow!.payloadJson).not.toContain(PNG_ATTACHMENT.base64);
+    });
+
+    it('an image-only turn is accepted and persists just the attachment line', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueInit('sess-1');
+
+      await h.service.sendMessage(thread.id, '', undefined, [PNG_ATTACHMENT]);
+
+      expect(h.manager.calls).toHaveLength(1);
+      expect(h.manager.calls[0].images).toEqual([PNG_ATTACHMENT]);
+      const userRow = h.store.listEvents(thread.id).find((r) => r.eventType === 'user');
+      const persisted = JSON.parse(userRow!.payloadJson) as {
+        message: { content: Array<{ type: string; text: string }> };
+      };
+      expect(persisted.message.content[0].text).toBe('📎 image: shot.png (1 kB)');
+    });
+
+    it('a turn with neither text nor an image is refused before any spawn', async () => {
+      const thread = h.service.ensureGlobalThread();
+
+      await expect(h.service.sendMessage(thread.id, '   ')).rejects.toThrow(/text or at least one image/);
+      expect(h.manager.calls).toHaveLength(0);
+    });
+
+    it('a contextHint prepends to the TEXT only, leaving the images untouched', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueInit('sess-1');
+
+      await h.service.sendMessage(thread.id, 'describe it', 'HINT', [PNG_ATTACHMENT]);
+
+      expect(h.manager.calls[0].prompt).toBe('HINT\n\ndescribe it');
+      expect(h.manager.calls[0].images).toEqual([PNG_ATTACHMENT]);
+    });
+
+    it('the stale-resume retry re-sends the same images on the fresh spawn', async () => {
+      const thread = h.service.ensureGlobalThread();
+      h.manager.queueInit('sess-1');
+      await h.service.sendMessage(thread.id, 'first');
+
+      h.manager.queueThrow('resume failed: session not found');
+      h.manager.queueInit('sess-2');
+      await h.service.sendMessage(thread.id, 'second', undefined, [PNG_ATTACHMENT]);
+
+      expect(h.manager.calls).toHaveLength(3);
+      expect(h.manager.calls[1].images).toEqual([PNG_ATTACHMENT]);
+      expect(h.manager.calls[2].images).toEqual([PNG_ATTACHMENT]);
+      expect(h.manager.calls[2].resumeSessionId).toBeUndefined();
     });
 
     it('warm continuation threads the stored session id as resumeSessionId on turn 2', async () => {

@@ -270,6 +270,23 @@ describe('sendMessage', () => {
     warnSpy.mockRestore();
   });
 
+  it('forwards image attachments to the mutation', async () => {
+    useAgentThreadStore.setState({ thread: makeThread() });
+    const images = [{ name: 'shot.png', mediaType: 'image/png' as const, base64: 'iVBORw0KGgo=' }];
+
+    await useAgentThreadStore.getState().sendMessage('', { images });
+
+    expect(mockSendMessageMutate).toHaveBeenCalledWith({ threadId: 'thread-1', text: '', images });
+  });
+
+  it('omits the images key entirely on a text-only turn', async () => {
+    useAgentThreadStore.setState({ thread: makeThread() });
+
+    await useAgentThreadStore.getState().sendMessage('hello', { images: [] });
+
+    expect(mockSendMessageMutate).toHaveBeenCalledWith({ threadId: 'thread-1', text: 'hello' });
+  });
+
   it('clears sending even when the mutation rejects', async () => {
     useAgentThreadStore.setState({ thread: makeThread() });
     mockSendMessageMutate = vi.fn().mockRejectedValue(new Error('spawn failed'));

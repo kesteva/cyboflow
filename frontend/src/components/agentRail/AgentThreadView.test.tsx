@@ -142,7 +142,24 @@ describe('AgentThreadView — composer + chips wiring', () => {
     });
     fireEvent.click(screen.getByTestId('agent-composer-send'));
 
-    expect(mockSendMessage).toHaveBeenCalledWith('hello agent');
+    expect(mockSendMessage).toHaveBeenCalledWith('hello agent', undefined);
+  });
+
+  it('forwards the composer image attachments into the store opts', async () => {
+    mockThread = makeThread();
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+
+    // Drive the real AgentComposer's attach path (it is not stubbed here) so
+    // this proves the whole composer → view → store hop, not just the callback.
+    const file = new File([Uint8Array.from([137, 80, 78, 71])], 'shot.png', { type: 'image/png' });
+    fireEvent.change(screen.getByTestId('agent-composer-file-input'), { target: { files: [file] } });
+    await screen.findByTestId('agent-composer-attachments');
+    fireEvent.click(screen.getByTestId('agent-composer-send'));
+
+    expect(mockSendMessage).toHaveBeenCalledWith('', {
+      images: [expect.objectContaining({ name: 'shot.png', mediaType: 'image/png' })],
+    });
   });
 
   it('a suggestion chip calls store.sendMessage with its canned prompt', async () => {
@@ -152,7 +169,7 @@ describe('AgentThreadView — composer + chips wiring', () => {
 
     fireEvent.click(screen.getByText('Status update'));
 
-    expect(mockSendMessage).toHaveBeenCalledWith('Status update');
+    expect(mockSendMessage).toHaveBeenCalledWith('Status update', undefined);
   });
 
   it('disables the composer before the thread has loaded', async () => {

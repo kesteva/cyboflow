@@ -45,7 +45,26 @@ import type {
   AgentNavigationTarget,
   OpenSessionProposalPayload,
 } from '../../../../../shared/types/agentThread';
+import {
+  AGENT_THREAD_IMAGE_LIMITS,
+  AGENT_THREAD_IMAGE_MAX_BASE64_CHARS,
+  AGENT_THREAD_IMAGE_MEDIA_TYPES,
+} from '../../../../../shared/types/agentThread';
 import type { ExecuteProposalResult } from '../../agentThread/proposalExecutor';
+
+/**
+ * Wire schema for one composer image attachment. The media type is re-validated
+ * here (not just at the composer) because this is the LAST gate before the bytes
+ * reach a provider: an unsupported `media_type` fails the Anthropic call
+ * mid-turn, where the user sees only a dead turn. `base64` is bounded in CHARS —
+ * that is what actually crosses IPC — and the count/`maxImages` cap stops a
+ * renderer bug from pushing an unbounded payload through the main process.
+ */
+const imageAttachmentSchema = z.object({
+  name: z.string().max(512),
+  mediaType: z.enum(AGENT_THREAD_IMAGE_MEDIA_TYPES),
+  base64: z.string().min(1).max(AGENT_THREAD_IMAGE_MAX_BASE64_CHARS),
+});
 
 // ---------------------------------------------------------------------------
 // Event emitters (module-level singletons — the bridge in main/src/index.ts and
@@ -182,9 +201,16 @@ export const agentThreadRouter = router({
    *  prompt-only priming text (e.g. onboarding context) — prepended to what
    *  the model sees but never recorded in the transcript. */
   sendMessage: protectedProcedure
-    .input(z.object({ threadId: z.string(), text: z.string(), contextHint: z.string().max(4000).optional() }))
+    .input(
+      z.object({
+        threadId: z.string(),
+        text: z.string(),
+        contextHint: z.string().max(4000).optional(),
+        images: z.array(imageAttachmentSchema).max(AGENT_THREAD_IMAGE_LIMITS.maxImages).optional(),
+      }),
+    )
     .mutation(async ({ ctx, input }): Promise<{ ok: true }> => {
-      await requireService(ctx).sendMessage(input.threadId, input.text, input.contextHint);
+      await requireService(ctx).sendMessage(input.threadId, input.text, input.contextHint, input.images);
       return { ok: true };
     }),
 
