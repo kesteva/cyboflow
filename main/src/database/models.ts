@@ -26,6 +26,16 @@ export interface Project {
    * main/src/orchestrator/permissionRules.ts's trust-model doc comment.
    */
   permission_trust?: 'trusted' | 'untrusted' | null;
+  /**
+   * How finished the software this project builds has to be (migration 134).
+   * NULL = never established (no Launch run has cleared its approve-brief gate
+   * for this project, or its brief carried no `THOROUGHNESS:` flag). Stamped by
+   * the Launch approve-brief gate side effect; read back by the step-prompt
+   * budget renderer and the session wizard's tuning-level default
+   * (prototype→efficient, v1→standard, production→thorough). See
+   * shared/types/thoroughness.ts.
+   */
+  solution_thoroughness?: 'prototype' | 'v1' | 'production' | null;
 }
 
 export interface ProjectRunCommand {
@@ -969,16 +979,6 @@ export interface ApprovedDesignRow {
   snapshot_path: string;
   approved_at: string;
   superseded_at: string | null;
-}
-
-/**
- * `idea_components` row (migration 101) — one row per (idea, component) pair
- * tracking the idea component ledger's HYBRID truth model: when present, this
- * row is authoritative; a (idea, component) pair with NO row falls back to
- * derivation from the DB (body headings, approved_designs, child entities),
- * which can only ever yield 'complete'|'incomplete' — never 'skipped', since
- * that state is unfalsifiable from absence and only ever set explicitly (see
- * migration 101's header comment). `source` therefore only ever persists
   /**
    * Which pathway approved this design (migration 133). 'design-mode' is the
    * Approve state machine; 'flow' is a Launch/Planner/Ship run whose
@@ -989,6 +989,16 @@ export interface ApprovedDesignRow {
   source: 'design-mode' | 'flow';
   /** The workflow run that bound a `source='flow'` row; NULL for design-mode. */
   source_run_id: string | null;
+}
+
+/**
+ * `idea_components` row (migration 101) — one row per (idea, component) pair
+ * tracking the idea component ledger's HYBRID truth model: when present, this
+ * row is authoritative; a (idea, component) pair with NO row falls back to
+ * derivation from the DB (body headings, approved_designs, child entities),
+ * which can only ever yield 'complete'|'incomplete' — never 'skipped', since
+ * that state is unfalsifiable from absence and only ever set explicitly (see
+ * migration 101's header comment). `source` therefore only ever persists
  * 'flow'|'manual' here; 'derived' is a read-time-only marker for a component
  * with no row (shared/types/ideaComponents.ts `IdeaComponentSource`).
  * `stale_at` carries "reset means re-verify, NOT discard": non-NULL means
