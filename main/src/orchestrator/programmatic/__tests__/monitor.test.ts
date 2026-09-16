@@ -1770,9 +1770,17 @@ function laneReq(p: Partial<LaneTriageRequest> = {}): LaneTriageRequest {
 }
 
 describe('MONITOR_LANE_TRIAGE_SCHEMA', () => {
-  it('enforces the three-verdict enum, requires verdict + reason, and forbids extra fields', () => {
-    const props = MONITOR_LANE_TRIAGE_SCHEMA.properties as Record<string, { enum?: string[] }>;
-    expect(props.verdict.enum).toEqual(['give_up', 'retry', 'adjust_and_retry']);
+  it('enforces the four-verdict enum, requires verdict + reason, and forbids extra fields', () => {
+    const props = MONITOR_LANE_TRIAGE_SCHEMA.properties as Record<
+      string,
+      { enum?: string[]; description?: string }
+    >;
+    expect(props.verdict.enum).toEqual(['give_up', 'retry', 'adjust_and_retry', 'append_correction']);
+    // The enum's own description is what the model reads first, so it must say
+    // what append_correction COSTS (nothing) and what give_up is FOR (escalation).
+    expect(props.verdict.description).toContain('append_correction');
+    expect(props.verdict.description).toContain('no rescue budget');
+    expect(props.verdict.description).toContain('escalate to the human gate');
     expect(MONITOR_LANE_TRIAGE_SCHEMA.required).toEqual(['verdict', 'reason']);
     expect(MONITOR_LANE_TRIAGE_SCHEMA.additionalProperties).toBe(false);
     // The rescue-only fields exist but are NOT schema-required — parseLaneTriageOutput
@@ -1814,19 +1822,37 @@ describe('buildLaneTriagePrompt', () => {
     expect(p).toContain('Read/Grep/Glob'); // read-only investigation encouraged
   });
 
-  it('states the verdict contract with give_up as the default and guidance required', () => {
+  it('offers all four verdicts and keeps the guidance / minimal-edit contracts', () => {
     const p = buildLaneTriagePrompt(sprintCtx, history, laneReq());
     expect(p).toContain('"give_up"');
     expect(p).toContain('"retry"');
     expect(p).toContain('"adjust_and_retry"');
-    expect(p).toContain('the DEFAULT');
-    expect(p).toContain('Choose this whenever you are unsure');
+    expect(p).toContain('"append_correction"');
     expect(p).toContain('"try again" is not guidance');
     // adjust_and_retry's evidence + minimal-edit contract.
-    expect(p).toContain('CONFLICT with repo reality');
+    expect(p).toContain('CONFLICT');
     expect(p).toContain('file:line');
     expect(p).toContain('FULL replacement body');
     expect(p).toContain('never silently drop a security- or correctness-relevant one');
+  });
+
+  it('draws the ESCALATION LINE: give_up is an escalation, not the safe default', () => {
+    // The old prompt called give_up "the DEFAULT ... whenever you are unsure",
+    // and an agent told a verdict is the safe default takes it — throwing away
+    // diagnoses it had actually made. The menu now names what give_up is FOR and
+    // offers append_correction as the cheap way to decline a rescue.
+    const p = buildLaneTriagePrompt(sprintCtx, history, laneReq());
+    expect(p).not.toContain('the DEFAULT');
+    expect(p).not.toContain('Choose this whenever you are unsure');
+    expect(p).toContain('ESCALATE to the human');
+    expect(p).toContain('a product decision the task brief does not settle');
+    expect(p).toContain("needs a human's own hands or account");
+    expect(p).toContain('TWO autonomous corrections have already failed');
+    expect(p).toContain('bias hard toward resolving');
+    expect(p).toContain('give_up" is an escalation, not a safe default');
+    // append_correction's two load-bearing properties.
+    expect(p).toContain('costs NO rescue budget');
+    expect(p).toContain('recorded as a non-blocking finding');
   });
 
   it('carries the autonomous-execution notice and the targetStepId constraint', () => {
@@ -1890,6 +1916,52 @@ describe('parseLaneTriageOutput (fail-safe downgrade ladder)', () => {
       reason: 'genuinely broken',
     });
     expect(parseLaneTriageOutput({ verdict: 'give_up' }, laneReq())).toEqual({ verdict: 'give_up' });
+  });
+
+  it('accepts append_correction on its reason alone — it names no step and re-drives nothing', () => {
+    expect(
+      parseLaneTriageOutput(
+        { verdict: 'append_correction', reason: 'the shared fixture writes UTC only in CI' },
+        laneReq(),
+      ),
+    ).toEqual({ verdict: 'append_correction', reason: 'the shared fixture writes UTC only in CI' });
+  });
+
+  it('keeps append_correction\'s optional guidance and drops a blank one', () => {
+    expect(
+      parseLaneTriageOutput(
+        { verdict: 'append_correction', reason: 'r', guidance: 'pin the TZ in the fixture' },
+        laneReq(),
+      ),
+    ).toEqual({ verdict: 'append_correction', reason: 'r', guidance: 'pin the TZ in the fixture' });
+    for (const guidance of [undefined, '', '   ', 42]) {
+      expect(parseLaneTriageOutput({ verdict: 'append_correction', reason: 'r', guidance }, laneReq())).toEqual(
+        { verdict: 'append_correction', reason: 'r' },
+      );
+    }
+  });
+
+  it('does NOT apply the rescue constraints to append_correction', () => {
+    // No targetStepId, an unusable one, and one AFTER the failing step are all
+    // fine: nothing is re-driven, so there is no step to constrain.
+    for (const targetStepId of [undefined, 'not-a-step', 'implement']) {
+      expect(
+        parseLaneTriageOutput({ verdict: 'append_correction', reason: 'r', targetStepId }, laneReq()).verdict,
+      ).toBe('append_correction');
+    }
+    // An empty inner chain forces every RESCUE verdict to give_up; this one survives.
+    expect(
+      parseLaneTriageOutput({ verdict: 'append_correction', reason: 'r' }, laneReq({ innerStepIds: [] }))
+        .verdict,
+    ).toBe('append_correction');
+  });
+
+  it('downgrades append_correction with a blank reason to give_up (nothing to record)', () => {
+    for (const reason of [undefined, '', '   ', 42]) {
+      const d = parseLaneTriageOutput({ verdict: 'append_correction', reason }, laneReq());
+      expect(d.verdict).toBe('give_up');
+      expect(d.reason).toContain('no diagnosis');
+    }
   });
 
   it('downgrades malformed / unknown output to give_up', () => {

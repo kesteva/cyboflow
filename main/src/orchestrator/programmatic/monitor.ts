@@ -206,14 +206,14 @@ export const MONITOR_LANE_TRIAGE_SCHEMA: Record<string, unknown> = {
   properties: {
     verdict: {
       type: 'string',
-      enum: ['give_up', 'retry', 'adjust_and_retry'],
+      enum: ['give_up', 'retry', 'adjust_and_retry', 'append_correction'],
       description:
-        'give_up = let the lane fail (the DEFAULT when unsure); retry = re-drive the lane with new guidance; adjust_and_retry = also replace the task body first.',
+        'retry = re-drive the lane with new guidance; adjust_and_retry = also replace the task body first; append_correction = record a diagnosis worth keeping WITHOUT re-driving (costs no rescue budget; the lane still settles failed); give_up = escalate to the human gate, for a product decision the brief does not settle, work that needs a human, or after two failed autonomous corrections.',
     },
     reason: {
       type: 'string',
       description:
-        '2-4 sentences: why this verdict. For adjust_and_retry, cite the file:line evidence that the task’s criteria conflict with repo reality.',
+        '2-4 sentences: why this verdict. For adjust_and_retry, cite the file:line evidence that the task’s criteria conflict with repo reality. For append_correction, this IS the diagnosis that gets recorded — make it specific and evidence-backed.',
     },
     targetStepId: {
       type: 'string',
@@ -223,7 +223,7 @@ export const MONITOR_LANE_TRIAGE_SCHEMA: Record<string, unknown> = {
     guidance: {
       type: 'string',
       description:
-        'retry / adjust_and_retry (REQUIRED in practice): what the lane must do DIFFERENTLY on the next attempt. "Try again" is not guidance.',
+        'retry / adjust_and_retry (REQUIRED in practice): what the lane must do DIFFERENTLY on the next attempt. "Try again" is not guidance. OPTIONAL for append_correction, where it is the corrective note recorded alongside the diagnosis.',
     },
     taskBody: {
       type: 'string',
@@ -311,8 +311,32 @@ export interface LaneAdjustAndRetryDecision {
   reason: string;
 }
 
+/**
+ * Record a diagnosis WITHOUT re-driving the lane — the cheapest verdict, and the
+ * one that closes a real hole: a supervisor that investigates a failure, works
+ * out a genuine cross-lane cause, and then gives up leaves NO record of what it
+ * found (a plain `give_up` files nothing, because the lane's failure already
+ * reaches the human at the run's gate). The diagnosis died with the consult.
+ *
+ * The host files it as a non-blocking advisory finding and then returns the
+ * give-up outcome, so the lane settles `failed` exactly as before. It costs NO
+ * rescue budget — the controller reserves budget before the consult and releases
+ * it on every non-rescue arm, and this is one.
+ */
+export interface LaneAppendCorrectionDecision {
+  verdict: 'append_correction';
+  /** The diagnosis. REQUIRED and non-blank — a blank one downgrades to give_up. */
+  reason: string;
+  /** Optional corrective note recorded alongside the diagnosis. */
+  guidance?: string;
+}
+
 /** The parsed, host-safe lane-triage verdict (every field a rescue needs is present). */
-export type LaneTriageDecision = LaneGiveUpDecision | LaneRetryDecision | LaneAdjustAndRetryDecision;
+export type LaneTriageDecision =
+  | LaneGiveUpDecision
+  | LaneRetryDecision
+  | LaneAdjustAndRetryDecision
+  | LaneAppendCorrectionDecision;
 
 /** Build the fail-safe `give_up` decision carrying a machine-authored reason. */
 function laneGiveUp(reason: string): LaneGiveUpDecision {
@@ -349,6 +373,10 @@ function resolveLaneTargetStep(raw: unknown, req: LaneTriageRequest): string | n
  * always available and a half-specified rescue is not:
  *
  *   1. non-object / null / unknown `verdict`            ⇒ give_up
+ *   1b. `append_correction` with a blank `reason`       ⇒ give_up (there is
+ *      nothing to record); otherwise it is VALID AS GIVEN and never downgraded
+ *      further — it names no step and re-drives nothing, so none of the rescue
+ *      constraints below apply to it
  *   2. `give_up`                                        ⇒ give_up (reason kept when present)
  *   3. `retry`/`adjust_and_retry` with blank `guidance` ⇒ give_up (a rescue with
  *      nothing to do differently is just a wasted attempt)
@@ -366,6 +394,19 @@ export function parseLaneTriageOutput(structured: unknown, req: LaneTriageReques
   const o = structured as Record<string, unknown>;
   if (o.verdict === 'give_up') {
     return { verdict: 'give_up', ...(isNonEmptyString(o.reason) ? { reason: o.reason } : {}) };
+  }
+  if (o.verdict === 'append_correction') {
+    // The ONE verdict that names no step and re-drives nothing: the target-step
+    // allow-list and the guidance requirement are both meaningless for it. Its
+    // only precondition is that there is something to record.
+    if (!isNonEmptyString(o.reason)) {
+      return laneGiveUp('lane triage asked to record a correction with no diagnosis — letting the lane fail');
+    }
+    return {
+      verdict: 'append_correction',
+      reason: o.reason,
+      ...(isNonEmptyString(o.guidance) ? { guidance: o.guidance } : {}),
+    };
   }
   if (o.verdict !== 'retry' && o.verdict !== 'adjust_and_retry') {
     return laneGiveUp('unrecognized lane triage verdict — letting the lane fail');
@@ -549,7 +590,14 @@ const LANE_FAILURE_KIND_LABELS: Record<LaneFailureKind, string> = {
  *
  * Three things the prompt must be explicit about, because the host acts on the answer
  * with NO human confirmation:
- *   - the give_up DEFAULT (an unsure monitor must not burn a rescue),
+ *   - the ESCALATION LINE. `give_up` was once described to the model as "the
+ *     DEFAULT when unsure", and an agent told a verdict is the safe default takes
+ *     it: real diagnoses were reached and then thrown away, because the only way
+ *     to decline a rescue was a verdict that records nothing. The menu now names
+ *     what `give_up` is FOR (a product decision the brief does not settle, work
+ *     needing a human's own hands or account, or a lane where two autonomous
+ *     corrections already failed) and offers `append_correction` as the cheap way
+ *     to decline a rescue while keeping the finding;
  *   - the AUTONOMOUS-EXECUTION notice (nothing here is a suggestion; it also states
  *     the audit trail + the one-rescue-per-lane budget, so the model can calibrate),
  *   - the `targetStepId` constraint (an inner id, at or before the failing step),
@@ -562,7 +610,7 @@ export function buildLaneTriagePrompt(
 ): string {
   const chain = req.innerStepIds.length > 0 ? req.innerStepIds.map((id) => `\`${id}\``).join(' → ') : '(unknown)';
   const defaultTarget = req.innerStepIds[0] ?? '(none)';
-  return `You are the SUPERVISOR of a "${ctx.workflowName}" workflow run executing in this git worktree. You do NOT run the steps — host code does. One TASK LANE of this run's fan-out has exhausted its automatic budget, and you must decide whether to RESCUE it or let it fail.
+  return `You are the SUPERVISOR of a "${ctx.workflowName}" workflow run executing in this git worktree. You do NOT run the steps — host code does. One TASK LANE of this run's fan-out has exhausted its automatic budget, and you must decide what to do about it.
 
 Failing lane: **${req.taskRef}** — ${req.taskTitle}
 Failure kind: \`${req.failureKind}\` — ${LANE_FAILURE_KIND_LABELS[req.failureKind]}
@@ -584,13 +632,16 @@ Recent conversation:
 ${digestConversation(history.conversation)}
 
 Investigate the worktree with your read-only tools (Read/Grep/Glob) BEFORE deciding — check whether the code, the tests, and repo reality actually match what this task asks for. Then decide ONE verdict and return it as structured output:
-- "give_up"          — the DEFAULT. The failure looks genuine, and another attempt — even with fresh guidance — would not change the outcome. Choose this whenever you are unsure; the run's human gate picks the task up from there.
 - "retry"            — a concrete, DIFFERENT approach is likely to succeed. \`guidance\` is REQUIRED and must say what to do DIFFERENTLY; "try again" is not guidance and the host will reject it (downgrading your verdict to give_up).
-- "adjust_and_retry" — ONLY when you have concrete evidence that the task's acceptance criteria CONFLICT with repo reality (cite the file:line evidence in \`reason\`). Set \`taskBody\` to the FULL replacement body, MINIMALLY edited: narrow or clarify the conflicting criterion — never silently drop a security- or correctness-relevant one. \`guidance\` is still REQUIRED.
+- "adjust_and_retry" — the task body CONFLICTS with repo reality and you have the file:line evidence (cite it in \`reason\`). Set \`taskBody\` to the FULL replacement body, MINIMALLY edited: narrow or clarify the conflicting criterion — never silently drop a security- or correctness-relevant one. \`guidance\` is still REQUIRED.
+- "append_correction" — you worked out something worth KEEPING (a real cause, a cross-lane interaction, a wrong assumption in the task) but re-driving this lane would not fix it. Put the diagnosis in \`reason\`; add the corrective note in \`guidance\` if you have one. This costs NO rescue budget and the lane still settles failed — it exists so a diagnosis you actually made does not die with this consult.
+- "give_up"          — ESCALATE to the human. Use it ONLY for: a product decision the task brief does not settle; work that needs a human's own hands or account (a credential, an external approval, a device); or a lane where TWO autonomous corrections have already failed.
+
+RESOLVE IT YOURSELF WHERE YOU CAN. Between those four, bias hard toward resolving: "retry" when you can name a concrete different approach, "adjust_and_retry" when the brief is what is wrong, "append_correction" when neither will help but you learned something. "give_up" is an escalation, not a safe default — reach for it when the decision is genuinely not yours to make, not merely when you are unsure. Every autonomous correction is recorded as a non-blocking finding in the run's review queue, so nothing you do here is unaudited.
 
 AUTONOMOUS EXECUTION: whatever you return is executed by the host IMMEDIATELY, with no human confirmation. A rescue rewinds this lane and re-runs it with your guidance; an adjusted body replaces the task's body for every later step spawn of that lane. Every intervention is recorded in the run's review queue and audited at the run's human gate before anything merges — but the budget is bounded (a lane is rescued at most once), so spend it only where it will genuinely change the outcome.
 
-\`targetStepId\` — the inner step to re-drive this lane from — is REQUIRED for "retry" and "adjust_and_retry". It MUST be one of the inner step ids listed above AND at or before the failing step; default to the FIRST inner step (\`${defaultTarget}\`) unless you have a specific reason to resume later. An unknown or later-than-the-failure step id is rejected and your verdict is downgraded to give_up.
+\`targetStepId\` — the inner step to re-drive this lane from — is REQUIRED for "retry" and "adjust_and_retry" (and is IGNORED for "append_correction", which re-drives nothing). It MUST be one of the inner step ids listed above AND at or before the failing step; default to the FIRST inner step (\`${defaultTarget}\`) unless you have a specific reason to resume later. An unknown or later-than-the-failure step id is rejected and your verdict is downgraded to give_up.
 
 Return only the structured { verdict, reason, targetStepId?, guidance?, taskBody? } object. \`reason\` should be 2-4 sentences explaining your decision (and, for "adjust_and_retry", the file:line evidence for the conflict).`;
 }
@@ -1499,6 +1550,10 @@ function laneDecisionSummary(req: LaneTriageRequest, decision: LaneTriageDecisio
       return `▶ **${req.taskRef}**: rescue — re-drive the lane from \`${decision.targetStepId}\`. ${decision.reason}\n\nGuidance: ${decision.guidance}`;
     case 'adjust_and_retry':
       return `▶ **${req.taskRef}**: rescue with an ADJUSTED task body — re-drive the lane from \`${decision.targetStepId}\`. ${decision.reason}\n\nGuidance: ${decision.guidance}`;
+    case 'append_correction':
+      // Advisory: no re-drive, no budget spent. Say so plainly, or the reader
+      // assumes the lane got another attempt.
+      return `✎ **${req.taskRef}**: no rescue — recording a correction instead (advisory, no rescue spent). ${decision.reason}${decision.guidance !== undefined ? `\n\nSuggested correction: ${decision.guidance}` : ''}`;
   }
 }
 

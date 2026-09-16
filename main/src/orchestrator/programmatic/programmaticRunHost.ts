@@ -551,6 +551,27 @@ export class ProgrammaticRunHost implements ControllerHost {
           this.injectMonitorTurn(
             `⚠ **${taskRef}**: the requirements adjustment could NOT be applied (${downgradeReason ?? 'unknown reason'}) — re-driving the lane with the guidance alone, task body unchanged.`,
           );
+      if (decision.verdict === 'append_correction') {
+        // ADVISORY, NOT A RESCUE. The brain investigated, reached a diagnosis, and
+        // judged that re-driving this lane would not act on it. Before this arm
+        // that judgement had only one expressible form — a plain `give_up`, which
+        // files NOTHING — so the diagnosis died with the consult. Record it, then
+        // return the give-up outcome so the lane settles `failed` exactly as it
+        // always did.
+        //
+        // COSTS NO RESCUE BUDGET: the controller RESERVES budget before the
+        // consult and releases it on every arm whose outcome is not `rescue`
+        // (see consultLaneTriage's releaseReservation) — this outcome is
+        // `give_up`, so the reservation is released like any other non-rescue.
+        await this.fileLaneCorrectionFinding({
+          taskRef,
+          req,
+          reason: decision.reason,
+          ...(decision.guidance !== undefined ? { guidance: decision.guidance } : {}),
+        });
+        return { kind: 'give_up' };
+      }
+
         }
       }
 
@@ -686,6 +707,51 @@ export class ProgrammaticRunHost implements ControllerHost {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  /**
+   * File the NON-BLOCKING ADVISORY record for an `append_correction` verdict —
+   * a diagnosis the supervisor reached and deliberately did NOT act on.
+   *
+   * Routed through the SAME sink as a rescue finding (one channel for every
+   * autonomous lane intervention, so the human reads them in one place), but the
+   * body says plainly that nothing was re-driven and no budget was spent — the
+   * rescue card's reader would otherwise assume this lane got another attempt.
+   * Fail-soft for the same reason: losing the paper trail must not change the
+   * lane's outcome.
+   */
+  private async fileLaneCorrectionFinding(args: {
+    taskRef: string;
+    req: LaneTriageFailure;
+    reason: string;
+    guidance?: string;
+  }): Promise<void> {
+    if (!this.args.fileLaneTriageFinding) return;
+    try {
+      const lines = [
+        `The run supervisor diagnosed task **${args.taskRef}** after its lane exhausted an automatic budget, and recorded the diagnosis WITHOUT re-driving the lane.`,
+        '',
+        `- Failure: \`${args.req.failureKind}\` at step \`${args.req.stepId}\` (attempt ${args.req.attempt})`,
+        '- Verdict: append_correction — **advisory (no rescue spent)**. The lane was NOT re-run and the task body was NOT changed; the lane settles failed and reaches you at the run\'s gate.',
+        '',
+        '## Diagnosis',
+        '',
+        args.reason.trim().length > 0 ? args.reason.trim() : '(none given)',
+      ];
+      if (args.guidance !== undefined && args.guidance.trim().length > 0) {
+        lines.push('', '## Suggested correction', '', args.guidance.trim());
+      }
+      await this.args.fileLaneTriageFinding({
+        title: `Monitor diagnosis for ${args.taskRef} (${args.req.failureKind}) — advisory`,
+        body: lines.join('\n'),
+      });
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] lane-correction finding failed (fail-soft)', {
+        runId: this.args.runId,
+        taskRef: args.taskRef,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   }
 
   /**
