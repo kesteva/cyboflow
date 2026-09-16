@@ -125,6 +125,30 @@ start — lands in every lane at once. A lane subagent that hits one returns a
 reports from separate lanes are what let the run's supervisor see ONE shared cause
 rather than N unrelated lane failures.
 
+**Verification posture is a RUN-level fact, declared once.** Before the first lane
+is dispatched, the controller resolves whether ANY verification modality can serve
+this run. Three answers: the visual verifier is switched OFF (nothing is filed and
+nothing changes); a modality is available (every lane enqueues and parks at the
+merge gate as usual); or NO modality can serve the run — the run is stamped for the
+deferred mobile modality, or for `native-desktop` with no proven `native-screen`
+runbook. In that last case exactly ONE
+`No verifiable modality for this project` finding is filed for the whole run, every
+lane skips the enqueue without parking, and the per-lane
+`Visual verification did not run for …` findings are suppressed, because filing one
+per lane buries the reasons that genuinely ARE per-lane. Lanes are otherwise
+untouched: they implement, review and verify their acceptance criteria exactly as
+they would under an available posture, and `task-verify` still composes its
+verification task. Do not tell a lane to build and drive the deliverable itself
+instead — only the central verifier does that.
+
+**Shared build breaks are grouped for you.** When two or more `build-break`
+findings in a run normalize to the same error text (paths, line/column numbers and
+build hashes stripped), the supervisor files ONE additional
+`Shared build break (N lanes): …` advisory naming the group and the original
+findings. It is a DETECTOR only: the run is never paused and nothing is fixed
+automatically. Keep filing your own per-break findings — the grouping is what turns
+N of them into one readable fact, and it needs them to exist.
+
 **Lane discipline:** every lane transition goes through
 `cyboflow_update_sprint_task` at the moment it happens — when a task starts, when
 its stage changes, when it commits, when it fails. The lanes are the UI's only
