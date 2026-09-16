@@ -11,9 +11,48 @@ import { describe, it, expect } from 'vitest';
 import {
   SOLUTION_THOROUGHNESS_LEVELS,
   isSolutionThoroughness,
+  parseThoroughnessDeclaration,
   parseThoroughnessFlag,
   thoroughnessToTuningLevel,
 } from '../thoroughness';
+
+describe('parseThoroughnessDeclaration', () => {
+  const SMOKE_BRIEF = [
+    '# Pocket List — Project Brief',
+    '',
+    '## Vision',
+    'A tiny to-do page. Production quality is not the goal.',
+    '',
+    '## Solution thoroughness',
+    'This is a prototype: throwaway, built to prove the interaction feels right. A v1 comes later.',
+    '',
+    '## Problem & users',
+    'One user, production someday.',
+  ].join('\n');
+
+  it('prefers the THOROUGHNESS: flag line when both channels exist', () => {
+    expect(parseThoroughnessDeclaration(`THOROUGHNESS: production\n${SMOKE_BRIEF}`)).toBe('production');
+  });
+
+  it('falls back to the first level word of the "Solution thoroughness" section (the 2026-09-15 smoke brief)', () => {
+    expect(parseThoroughnessDeclaration(SMOKE_BRIEF)).toBe('prototype');
+  });
+
+  it('reads the section at any heading level and any case', () => {
+    expect(parseThoroughnessDeclaration('### SOLUTION THOROUGHNESS (declared)\nWe ship a V1 here.')).toBe('v1');
+  });
+
+  it('never reads a level word outside that section', () => {
+    expect(parseThoroughnessDeclaration('## Vision\nThis is a prototype.\n## Users\nproduction users')).toBeNull();
+    expect(parseThoroughnessDeclaration('## Solution thoroughness\n\n## Next\nprototype')).toBeNull();
+  });
+
+  it('returns null for empty input', () => {
+    expect(parseThoroughnessDeclaration('')).toBeNull();
+    expect(parseThoroughnessDeclaration(null)).toBeNull();
+    expect(parseThoroughnessDeclaration(undefined)).toBeNull();
+  });
+});
 
 describe('SOLUTION_THOROUGHNESS_LEVELS', () => {
   it('is the three levels in increasing order of finish', () => {
