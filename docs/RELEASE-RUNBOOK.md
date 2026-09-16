@@ -165,6 +165,14 @@ their artifacts. The branch is deleted in §6.
 
 ### macOS
 
+> **Hosted alternative (experimental, dispatch-only):** `.github/workflows/macos.yml`
+> builds one DMG per native runner (`macos-latest` = arm64, `macos-15-intel` = x64),
+> signs + notarizes from the five `CSC_*`/`APPLE_*` GitHub secrets, runs the §4
+> checks as assertions, and uploads `cyboflow-macos-<arch>-dmg[-dev]`. It is not
+> yet the release path — compare its DMGs against a local build first (signature,
+> stapler, agent-binary inventory) before relying on it. Dispatch with
+> `gh workflow run macos.yml -f variant=dev -f arch=both`.
+
 Source signing creds into each build subprocess (`set -a; . ~/Developer/cyboflow/.envrc.local; set +a`).
 Both native addons are N-API (better-sqlite3 ≥ 13, node-pty), so no ABI flip is
 involved any more. What the builds DO leave behind is an **arch** problem: the
