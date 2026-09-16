@@ -338,6 +338,7 @@ function renderRail(
     collapsed?: boolean;
     onToggleCollapse?: () => void;
     quickSessionProjectId?: number | null;
+    sessionProjectId?: number | null;
   },
 ) {
   return render(
@@ -346,6 +347,7 @@ function renderRail(
       collapsed={opts?.collapsed ?? false}
       onToggleCollapse={opts?.onToggleCollapse ?? (() => {})}
       quickSessionProjectId={opts?.quickSessionProjectId}
+      sessionProjectId={opts?.sessionProjectId}
     />,
   );
 }
@@ -674,7 +676,10 @@ describe('RunRightRail — TASK-214 resolvedBase lift', () => {
       useCyboflowStore.setState({ selectedSessionId: 'sess-lift-003' });
     });
 
-    renderRail(EMPTY_PHASE_STATE);
+    // A worktree-backed quick session: CyboflowRoot threads
+    // quickSessionProjectId exactly when it mounts QuickSessionCenterPane,
+    // i.e. when a tabbed center pane exists for the tab to land in.
+    renderRail(EMPTY_PHASE_STATE, { quickSessionProjectId: 9 });
 
     fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
     fireEvent.click(screen.getByTestId('mock-session-diff-open-file'));
@@ -686,6 +691,23 @@ describe('RunRightRail — TASK-214 resolvedBase lift', () => {
       baseRef: SESSION_PANEL_RESOLVED_BASE,
       scope: 'staged',
     });
+  });
+
+  it('the bare main-repo session (no tabbed center pane) renders diff rows NON-interactive instead of writing an unrenderable tab', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-mainrepo-001' });
+    });
+
+    // CyboflowRoot nulls quickSessionProjectId for isMainRepo (panels-only
+    // layout — no QuickSessionCenterPane), while sessionProjectId still
+    // carries the project. Pre-fix the rail handed the list an onOpenFile
+    // that wrote a file tab into a centerPaneStore bucket nothing renders —
+    // a silent no-op click.
+    renderRail(EMPTY_PHASE_STATE, { quickSessionProjectId: null, sessionProjectId: 9 });
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+
+    expect(screen.queryByTestId('mock-session-diff-open-file')).toBeNull();
+    expect(useCenterPaneStore.getState().bySession['sess-mainrepo-001']?.tabs ?? []).toHaveLength(0);
   });
 
   it('before any diff fetch resolves, the lifted base is null (the representable session default)', () => {
@@ -915,6 +937,20 @@ describe('RunRightRail — comparison-base selection persistence (TASK-218)', ()
 
   beforeEach(() => {
     localStorage.removeItem(COMPARISON_BASE_KEY);
+  });
+
+  it('BaseSelector gets the session\'s project id from sessionProjectId — also for the main-repo session, whose quickSessionProjectId is null', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-base-mainrepo' });
+    });
+
+    renderRail(EMPTY_PHASE_STATE, { quickSessionProjectId: null, sessionProjectId: 42 });
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+
+    // Pre-fix this read quickSessionProjectId and rendered '' here, so the
+    // selector disabled "Another branch" with "No project is associated with
+    // this session" on a session that plainly belongs to a project.
+    expect(screen.getByTestId('base-selector-mock-project-id')).toHaveTextContent('42');
   });
 
   it('persists the selection keyed by selectedSessionId when a session is selected', () => {

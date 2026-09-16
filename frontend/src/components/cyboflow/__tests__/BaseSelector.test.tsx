@@ -185,6 +185,33 @@ describe('BaseSelector', () => {
     expect(screen.queryByText('origin/main')).toBeNull();
   });
 
+  it('a local-default selection shows the RESOLVED short sha in the ref slot, never the branch name twice', async () => {
+    mockGetComparisonBases.mockResolvedValue(TRUNK_BASES);
+    render(
+      <BaseSelector
+        sessionId="s1"
+        projectId="p1"
+        selectedRef="trunk"
+        onChange={vi.fn()}
+        resolvedSelectedBase="8ab35dd0123456789abcdef0123456789abcdef0"
+      />,
+    );
+    await waitFor(() => expect(mockGetComparisonBases).toHaveBeenCalled());
+
+    // Pre-fix: `vs trunk (local) · trunk`.
+    expect(screen.getByTestId('base-selector-vs-label').textContent).toBe('vs trunk (local)');
+    expect(screen.getByTestId('base-selector-ref').textContent).toBe('8ab35dd');
+  });
+
+  it('a local-default selection omits the ref slot until the panel has resolved it (no name echo)', async () => {
+    mockGetComparisonBases.mockResolvedValue(TRUNK_BASES);
+    render(<BaseSelector sessionId="s1" projectId="p1" selectedRef="trunk" onChange={vi.fn()} />);
+    await waitFor(() => expect(mockGetComparisonBases).toHaveBeenCalled());
+
+    expect(screen.getByTestId('base-selector-vs-label').textContent).toBe('vs trunk (local)');
+    expect(screen.queryByTestId('base-selector-ref')).toBeNull();
+  });
+
   it('disables the local and origin entries (with a title) when defaultBranch is null', async () => {
     mockGetComparisonBases.mockResolvedValue(NO_DEFAULT_BASES);
     render(<BaseSelector sessionId="s1" projectId="p1" selectedRef={null} onChange={vi.fn()} />);

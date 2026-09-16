@@ -177,6 +177,16 @@ interface RunRightRailProps {
    * (read directly from the store below) for the session-scoped ArtifactsPanel.
    */
   quickSessionProjectId?: number | null;
+  /**
+   * The selected session's project id REGARDLESS of its center-pane layout —
+   * i.e. also set for the bare main-repo session, which `quickSessionProjectId`
+   * deliberately nulls (that prop doubles as "a tabbed center pane exists").
+   * Feeds BaseSelector's "Another branch" list, which only needs a project to
+   * list branches from and has nothing to do with the center pane; without
+   * this the main-repo session's selector disabled that entry with a
+   * misleading "No project is associated with this session".
+   */
+  sessionProjectId?: number | null;
 }
 
 export function RunRightRail({
@@ -184,6 +194,7 @@ export function RunRightRail({
   collapsed,
   onToggleCollapse,
   quickSessionProjectId,
+  sessionProjectId,
 }: RunRightRailProps) {
   const [activeTab, setActiveTab] = useState<TabId>('workflow-progress');
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
@@ -328,25 +339,36 @@ export function RunRightRail({
     [comparisonBaseKey],
   );
   // BaseSelector's projectId: the active run's project when a run is active,
-  // else the quick-session project (threaded in by CyboflowRoot), else null —
-  // converted to a string (BaseSelector's projectId prop is `string | null`).
+  // else the selected session's project (`sessionProjectId`, set for EVERY
+  // session incl. the main-repo one — not the layout-gated
+  // `quickSessionProjectId`), else null — converted to a string
+  // (BaseSelector's projectId prop is `string | null`).
   const baseSelectorProjectId =
     activeRunId !== null
       ? activeRunProjectId !== null
         ? String(activeRunProjectId)
         : null
-      : quickSessionProjectId != null
-        ? String(quickSessionProjectId)
+      : sessionProjectId != null
+        ? String(sessionProjectId)
         : null;
+
+  // Whether a tabbed center pane exists to render a file tab into: an active
+  // run (RunCenterPane) or a worktree-backed quick session
+  // (QuickSessionCenterPane — CyboflowRoot threads `quickSessionProjectId`
+  // only when it mounts that pane). The bare main-repo session has a
+  // panels-only layout: a tab written into its centerPaneStore bucket would
+  // never render, so a row click there must NOT pretend to open anything.
+  const hasTabbedCenterPane = activeRunId !== null || quickSessionProjectId != null;
 
   // Clicking a file in the Diff tab opens it as a center-pane file tab (keyed by
   // the selected session, like the File Explorer launcher). Undefined when no
-  // session backs the center pane (e.g. a parentless flow run) — the diff then
-  // keeps its click = toggle behavior. Carries the panel's own last-echoed
-  // resolvedBase (AR-11) plus the clicked row's group scope, so the tab
-  // resolves against the SAME base the rail is currently showing.
+  // session backs the center pane (e.g. a parentless flow run) OR no tabbed
+  // center pane exists to show the tab (the main-repo session) — the list then
+  // renders its rows as non-interactive instead of a silent no-op. Carries the
+  // panel's own last-echoed resolvedBase (AR-11) plus the clicked row's group
+  // scope, so the tab resolves against the SAME base the rail is showing.
   const openDiffFile =
-    selectedSessionId !== null
+    selectedSessionId !== null && hasTabbedCenterPane
       ? (filePath: string, scope?: DiffGroupScope) =>
           openFileTab(selectedSessionId, {
             filePath,
@@ -509,6 +531,7 @@ export function RunRightRail({
                 selectedRef={selectedComparisonRef}
                 onChange={handleComparisonBaseChange}
                 resolvedDefaultBase={defaultBaseBySession[selectedSessionId ?? ''] ?? null}
+                resolvedSelectedBase={resolvedBaseBySession[selectedSessionId ?? ''] ?? null}
               />
             </div>
             <div className="shrink-0 border-b border-border-primary p-2">

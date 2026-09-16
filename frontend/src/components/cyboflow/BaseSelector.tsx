@@ -67,6 +67,17 @@ export interface BaseSelectorProps {
    * (no default fetch has completed yet).
    */
   resolvedDefaultBase?: string | null;
+  /**
+   * The SHA the ACTIVE diff panel resolved the CURRENT selection to — the
+   * rail's last-echoed `resolvedBase` for whatever `selectedRef` is (TASK-214
+   * lift). Drives the closed-state ref for the local / origin default entries,
+   * whose `label` already names the branch: showing its short SHA there
+   * (`vs main (local) · 8ab35dd`) instead of the ref name again
+   * (`vs main (local) · main`) keeps the trigger informative rather than
+   * redundant. Absent / null until that fetch completes — the ref is then
+   * omitted rather than echoed.
+   */
+  resolvedSelectedBase?: string | null;
 }
 
 /** Human-readable freshness for the origin fetch timestamp. Best-effort only. */
@@ -107,22 +118,29 @@ function closedState(
   selectedRef: string | null,
   bases: ComparisonBases,
   resolvedDefaultBase: string | null | undefined,
+  resolvedSelectedBase: string | null | undefined,
 ): { label: string; ref: string | null } {
   if (selectedRef === null) {
     return { label: 'branch point', ref: branchPointShortSha(bases, resolvedDefaultBase) };
   }
+  // For the two default-branch entries the label already carries the branch
+  // name, so the ref slot shows the resolved short SHA (or nothing until the
+  // panel has resolved it) — never the same name twice.
+  const selectedShortSha = resolvedSelectedBase ? resolvedSelectedBase.slice(0, 7) : null;
   if (bases.localDefault && selectedRef === bases.localDefault.ref) {
     return {
       label: bases.defaultBranch ? `${bases.defaultBranch} (local)` : selectedRef,
-      ref: selectedRef,
+      ref: selectedShortSha,
     };
   }
   if (bases.originDefault && selectedRef === bases.originDefault.ref) {
     return {
       label: bases.defaultBranch ? `origin/${bases.defaultBranch}` : selectedRef,
-      ref: selectedRef,
+      ref: selectedShortSha,
     };
   }
+  // "Another branch": the name IS the information — the fixed label is the
+  // generic 'branch' and the (possibly long) name is the truncating ref.
   return { label: 'branch', ref: selectedRef };
 }
 
@@ -141,6 +159,7 @@ export function BaseSelector({
   selectedRef,
   onChange,
   resolvedDefaultBase,
+  resolvedSelectedBase,
 }: BaseSelectorProps): ReactElement {
   const [open, setOpen] = useState(false);
   const [bases, setBases] = useState<ComparisonBases>(EMPTY_BASES);
@@ -233,7 +252,12 @@ export function BaseSelector({
     return () => document.removeEventListener('mousedown', onDocMouseDown);
   }, [open]);
 
-  const { label: closedLabel, ref: closedRef } = closedState(selectedRef, bases, resolvedDefaultBase);
+  const { label: closedLabel, ref: closedRef } = closedState(
+    selectedRef,
+    bases,
+    resolvedDefaultBase,
+    resolvedSelectedBase,
+  );
   const branchPointSha = branchPointShortSha(bases, resolvedDefaultBase);
 
   const filteredBranches = useMemo(() => {

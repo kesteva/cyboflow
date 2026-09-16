@@ -176,6 +176,46 @@ describe('WorktreeStrip', () => {
     confirmSpy.mockRestore();
   });
 
+  it('Commit…: a REFUSED commit (success:false) still signals onMutated so the stale snapshot is refetched', async () => {
+    // The backend's live-index probe refused the commit (a conflict arrived
+    // after this strip's last fetch). The strip's snapshot is now known-stale
+    // — it must ask the rail to refetch instead of leaving Commit… enabled
+    // beside a conflicted tree.
+    mockCommit.mockResolvedValue({ success: false, error: 'Resolve conflicts before committing (1 unmerged: f.txt)' });
+    const onMutated = vi.fn();
+    render(<WorktreeStrip sessionId="s1" worktree={worktreeOf(MIXED_ENTRIES)} onMutated={onMutated} />);
+
+    fireEvent.click(screen.getByTestId('worktree-strip-commit'));
+    const textarea = await screen.findByPlaceholderText('Enter commit message...');
+    fireEvent.change(textarea, { target: { value: 'wip' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Commit' }));
+
+    await waitFor(() => expect(mockCommit).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onMutated).toHaveBeenCalledTimes(1));
+    // ...and the error still reaches the dialog.
+    expect(await screen.findByText(/Resolve conflicts before committing/)).toBeTruthy();
+  });
+
+  it('width discipline (240px rail minimum): the count is the yielding element (min-w-0 truncate + title), the buttons never wrap', () => {
+    render(
+      <div style={{ width: 240 }}>
+        <WorktreeStrip sessionId="s1" worktree={worktreeOf(MIXED_ENTRIES)} />
+      </div>,
+    );
+    const strip = screen.getByTestId('worktree-strip');
+    expect(strip.className).toMatch(/\bmin-w-0\b/);
+    expect(strip.className).toMatch(/\boverflow-hidden\b/);
+
+    const count = screen.getByTestId('worktree-strip-count');
+    expect(count.className).toMatch(/\btruncate\b/);
+    expect(count.className).toMatch(/\bmin-w-0\b/);
+    expect(count.getAttribute('title')).toBe('3 uncommitted');
+
+    for (const id of ['worktree-strip-commit', 'worktree-strip-restore']) {
+      expect(screen.getByTestId(id).className).toMatch(/\bwhitespace-nowrap\b/);
+    }
+  });
+
   it('Commit…: opens CommitDialog, typing a message and confirming calls commit.mutate({ sessionId, message }) and signals onMutated', async () => {
     mockCommit.mockResolvedValue({ success: true });
     const onMutated = vi.fn();

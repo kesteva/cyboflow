@@ -54,7 +54,12 @@ export interface WorktreeStripProps {
    * count reads as unknown and Commit is disabled.
    */
   worktree: WorktreeStatusPayload | undefined;
-  /** Called after a successful Commit / Restore so the rail can refetch. */
+  /**
+   * Called after a successful Commit / Restore — and after a REFUSED commit —
+   * so the rail can refetch. A refusal means the backend saw a tree this
+   * strip's snapshot did not (e.g. a conflict that arrived after the last
+   * fetch), so the snapshot is known-stale and must be refreshed.
+   */
   onMutated?: () => void;
 }
 
@@ -66,6 +71,7 @@ export function WorktreeStrip({ sessionId, worktree, onMutated }: WorktreeStripP
 
   const entries = worktree?.entries ?? [];
   const hasConflict = entries.some((e) => e.conflicted);
+  const countLabel = worktree === undefined ? '… uncommitted' : `${entries.length} uncommitted`;
 
   const commitDisabledReason =
     sessionId === null
@@ -86,6 +92,12 @@ export function WorktreeStrip({ sessionId, worktree, onMutated }: WorktreeStripP
       if (worktree.entries.some((e) => e.conflicted)) throw new Error(NO_CONFLICT_ERROR);
       const result = await trpc.cyboflow.sessionGit.commit.mutate({ sessionId, message });
       if (!result.success) {
+        // A refused commit is itself evidence the snapshot is stale — the
+        // backend's live-index probe saw something (a conflict that arrived
+        // after the last fetch) this strip did not. Refetch so the count and
+        // the Commit… disabled state catch up to the real tree instead of
+        // leaving an enabled button beside a conflicted worktree.
+        onMutated?.();
         throw new Error(result.error || 'Failed to commit changes');
       }
       onMutated?.();
@@ -112,19 +124,30 @@ export function WorktreeStrip({ sessionId, worktree, onMutated }: WorktreeStripP
   return (
     <div
       data-testid="worktree-strip"
-      className="flex items-center justify-between gap-2 border-l-2 border-status-warning bg-bg-primary px-2 py-1.5 text-sm"
+      className="flex min-w-0 items-center justify-between gap-1.5 overflow-hidden border-l-2 border-status-warning bg-bg-primary px-2 py-1.5 text-sm"
     >
-      <span data-testid="worktree-strip-count" className="text-text-secondary">
-        {worktree === undefined ? '… uncommitted' : `${entries.length} uncommitted`}
+      {/*
+        Width discipline at the 240px rail minimum (RAIL_MIN_WIDTH): the two
+        buttons are the fixed-width side (`shrink-0`, `whitespace-nowrap`), so
+        the COUNT is the element that yields — `min-w-0 truncate` lets it clip
+        to an ellipsis instead of wrapping to a second line or pushing Restore
+        past the rail edge. The full text stays reachable via `title`.
+      */}
+      <span
+        data-testid="worktree-strip-count"
+        className="min-w-0 truncate text-text-secondary"
+        title={countLabel}
+      >
+        {countLabel}
       </span>
-      <div className="flex shrink-0 items-center gap-2">
+      <div className="flex shrink-0 items-center gap-1.5">
         <button
           type="button"
           data-testid="worktree-strip-commit"
           disabled={commitDisabledReason !== null}
           title={commitDisabledReason ?? undefined}
           onClick={() => setCommitDialogOpen(true)}
-          className="rounded-button border border-border-primary bg-bg-primary px-2 py-1 text-xs font-medium text-text-primary hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
+          className="whitespace-nowrap rounded-button border border-border-primary bg-bg-primary px-1.5 py-1 text-xs font-medium text-text-primary hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
         >
           Commit…
         </button>
@@ -134,7 +157,7 @@ export function WorktreeStrip({ sessionId, worktree, onMutated }: WorktreeStripP
           disabled={restoreDisabledReason !== null}
           title={restoreDisabledReason ?? undefined}
           onClick={handleRestore}
-          className="rounded-button border border-border-primary bg-bg-primary px-2 py-1 text-xs font-medium text-text-primary hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
+          className="whitespace-nowrap rounded-button border border-border-primary bg-bg-primary px-1.5 py-1 text-xs font-medium text-text-primary hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
         >
           Restore
         </button>
