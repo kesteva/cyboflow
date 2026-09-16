@@ -47,8 +47,12 @@ mirror the app never reads.**
   cross-arch install **with `--force`** (see
   `[[project_cross_arch_build_foreign_binaries]]` / the memory note):
   ```bash
-  ls -d node_modules/@anthropic-ai/claude-agent-sdk-darwin-{arm64,x64} \
-        node_modules/@openai/codex-darwin-{arm64,x64}
+  # Test the BINARIES, not the package dirs: the node_modules entries are pnpm
+  # symlinks that survive a prune as DANGLING links, so `ls -d` on them passes
+  # while the x64 build dies at preflight ("the x64 Claude Code binary is
+  # missing") — 0.4.1, 9/16.
+  ls -l node_modules/@anthropic-ai/claude-agent-sdk-darwin-{arm64,x64}/claude \
+        node_modules/@openai/codex-darwin-{arm64,x64}/vendor/*-apple-darwin/bin/codex
   # if missing:
   pnpm install --config.supportedArchitectures.os=darwin \
     --config.supportedArchitectures.cpu=x64 \
