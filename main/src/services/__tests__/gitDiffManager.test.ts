@@ -932,9 +932,40 @@ describe('GitDiffManager.getDiffGroups', () => {
       const staged = result.groups.find((g) => g.scope === 'staged')!;
 
       expect(unstaged.files.filter((f) => f === 'f.txt')).toHaveLength(1);
-      expect(staged.files.filter((f) => f === 'f.txt').length).toBeLessThanOrEqual(1);
+      // A conflict lives ONLY in Unstaged on the wire: `git diff --cached`
+      // would otherwise emit a `0 0 f.txt` row for the unmerged entry, and the
+      // renderer (AR-3) never shows a conflict under Staged.
+      expect(staged.files).not.toContain('f.txt');
+      expect(staged.fileStats?.['f.txt']).toBeUndefined();
       // The conflict-marker lines are still counted in the rollup.
       expect(unstaged.additions).toBeGreaterThan(0);
+    });
+  });
+
+  it('a conflicted path is excluded from Staged while a separately staged file in the same conflicted tree is kept', async () => {
+    await withTempDir('gitdiff-groups-conflict-staged-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'f.txt', 'base\n', 'base');
+      commitFile(repo, 'g.txt', 'g1\n', 'g');
+      execSync('git checkout -b feature', { cwd: repo, stdio: 'pipe' });
+      commitFile(repo, 'f.txt', 'feature line\n', 'feature edit');
+      execSync('git checkout main', { cwd: repo, stdio: 'pipe' });
+      commitFile(repo, 'f.txt', 'main line\n', 'main edit');
+      try {
+        execSync('git merge feature --no-edit', { cwd: repo, stdio: 'pipe' });
+      } catch {
+        // Expected — conflicting merge.
+      }
+      fs.writeFileSync(path.join(repo, 'g.txt'), 'g1\ng2-staged\n');
+      execSync('git add g.txt', { cwd: repo, stdio: 'pipe' });
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, null);
+      const staged = result.groups.find((g) => g.scope === 'staged')!;
+
+      expect(staged.files).toEqual(['g.txt']);
+      expect(staged.fileStats?.['g.txt']).toEqual({ additions: 1, deletions: 0 });
+      expect(staged.additions).toBe(1);
     });
   });
 

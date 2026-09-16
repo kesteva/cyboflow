@@ -639,10 +639,16 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
         return { diff, stats, changedFiles };
       }
       case 'staged': {
-        const diff = await runGitAsync(worktreePath, ['diff', '--cached']);
-        const changedFiles = (await runGitAsync(worktreePath, ['diff', '--cached', '--name-only']))
+        // `--diff-filter=u` (lowercase = exclude unmerged) mirrors
+        // GitDiffManager.getStagedGroup: a conflicted path belongs to
+        // Unstaged only, so the staged blob must not carry its "Unmerged
+        // path" stub either.
+        const diff = await runGitAsync(worktreePath, ['diff', '--cached', '--diff-filter=u']);
+        const changedFiles = (await runGitAsync(worktreePath, ['diff', '--cached', '--name-only', '--diff-filter=u']))
           .trim().split('\n').filter(Boolean);
-        const stats = gitDiffManager.parseDiffStats(await runGitAsync(worktreePath, ['diff', '--cached', '--stat']));
+        const stats = gitDiffManager.parseDiffStats(
+          await runGitAsync(worktreePath, ['diff', '--cached', '--stat', '--diff-filter=u']),
+        );
         return { diff, stats, changedFiles };
       }
       case 'committed': {

@@ -469,9 +469,17 @@ export class GitDiffManager {
     };
   }
 
-  /** Staged scope: index vs HEAD. `-z` so a rename yields its real destination path (see parseNumstatZ). */
+  /**
+   * Staged scope: index vs HEAD. `-z` so a rename yields its real destination
+   * path (see parseNumstatZ). `--diff-filter=u` (lowercase = EXCLUDE unmerged)
+   * keeps a conflicted path out of this group: `git diff --cached` otherwise
+   * emits a `0 0 <path>` row for every unmerged entry, which would put the
+   * conflict into Staged membership on the wire — the renderer renders a
+   * conflict ONLY under Unstaged (AR-3), so the payload must agree with it
+   * rather than rely on the list filtering it back out.
+   */
   private async getStagedGroup(worktreePath: string): Promise<DiffGroupRollup> {
-    const output = await runGitAsync(worktreePath, ['diff', '--cached', '--numstat', '-z']);
+    const output = await runGitAsync(worktreePath, ['diff', '--cached', '--numstat', '-z', '--diff-filter=u']);
     const { additions, deletions, files, fileStats } = this.parseNumstatZ(output);
     return { scope: 'staged', files, additions, deletions, fileStats };
   }
