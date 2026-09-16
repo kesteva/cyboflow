@@ -61,7 +61,7 @@ import {
   type AdversarialFinding,
 } from '../../../shared/types/adversarialReview';
 import { parseIdeaVerdictMap, parseDesignVerdictMap } from '../../../shared/types/reviews';
-import { parseThoroughnessFlag } from '../../../shared/types/thoroughness';
+import { parseThoroughnessDeclaration } from '../../../shared/types/thoroughness';
 
 // ---------------------------------------------------------------------------
 // Vocabulary
@@ -260,8 +260,19 @@ export class GateSideEffects {
     try {
       const meta = this.resolveRunMeta(runId);
       if (!meta || !DESIGN_FLOWS.has(meta.workflowName)) return;
-      await this.bind(runId, meta.projectId, listRunOwnedIdeaIds(this.deps.db, runId));
-      if (meta.workflowName === 'launch') this.stampThoroughness(runId, meta.projectId);
+      // A gate the human answered with anything but an approve is NOT converged
+      // on by the settle: the 2026-09-15 smoke bound a design the human had just
+      // sent back for rework because the settle re-ran the bind unconditionally.
+      // Only a gate that was never minted (the orchestrated inline-question path
+      // this reconciliation exists for) or one resolved 'approve' reaches the writes.
+      const designGate = this.latestGateResolution(runId, APPROVE_DESIGN);
+      if (designGate === null || gateDecisionFromResolution(designGate) === 'approve') {
+        await this.bind(runId, meta.projectId, listRunOwnedIdeaIds(this.deps.db, runId));
+      }
+      const briefGate = this.latestGateResolution(runId, APPROVE_BRIEF);
+      if (meta.workflowName === 'launch' && (briefGate === null || gateDecisionFromResolution(briefGate) === 'approve')) {
+        this.stampThoroughness(runId, meta.projectId);
+      }
     } catch (err) {
       this.deps.logger?.warn('[gateSideEffects] settle reconciliation failed (fail-soft)', {
         runId,
@@ -339,8 +350,12 @@ export class GateSideEffects {
    */
   private stampThoroughness(runId: string, projectId: number): void {
     const brief = this.readArtifactMarkdown(runId, 'project-brief');
-    const level = parseThoroughnessFlag(brief);
-    if (level === null) return;
+    const level = parseThoroughnessDeclaration(brief);
+    if (level === null) {
+      this.deps.logger?.warn('[gateSideEffects] brief declares no solution thoroughness; project not stamped', { runId, projectId });
+      return;
+    }
+    this.deps.logger?.info('[gateSideEffects] solution thoroughness stamped', { runId, projectId, level });
     const settingsDeps: ProjectSettingsDeps = {
       db: this.deps.db,
       ...(this.deps.emitProjectUpdated ? { emitProjectUpdated: this.deps.emitProjectUpdated } : {}),
@@ -449,6 +464,28 @@ export class GateSideEffects {
   // -------------------------------------------------------------------------
 
   /** The run's workflow name + project id, or null when the run row is gone. */
+  /**
+   * The stored resolution of the run's most recent `gate:human-step:<stepId>`
+   * decision item, or null when no such item was ever minted (the orchestrated
+   * inline-question path) or the read fails. A pending item reads as null too —
+   * a settle that arrives while a gate is still open has nothing to converge on.
+   */
+  private latestGateResolution(runId: string, stepId: string): string | null {
+    try {
+      const row = this.deps.db
+        .prepare(
+          `SELECT resolution FROM review_items
+            WHERE run_id = ? AND kind = 'decision' AND source = ? AND status <> 'pending'
+            ORDER BY created_at DESC LIMIT 1`,
+        )
+        .get(runId, `gate:human-step:${stepId}`) as { resolution?: string | null } | undefined;
+      if (!row) return null;
+      return typeof row.resolution === 'string' ? row.resolution : '';
+    } catch {
+      return null;
+    }
+  }
+
   private resolveRunMeta(runId: string): { workflowName: string; projectId: number } | null {
     try {
       const row = this.deps.db
