@@ -32,6 +32,11 @@ interface GitStatusCache {
  * — no other code needs to move. The manual/on-demand paths (getGitStatus IPC,
  * project-refresh button, post-rebase updateProjectGitStatusAfterMainUpdate) stay
  * live regardless; only the automatic hammering is gated.
+ *
+ * The right-rail Diff tab's liveness does NOT go through here: it uses
+ * WorktreeChangeNotifier (services/worktreeChangeNotifier.ts), which watches
+ * ONE worktree per open Diff tab via the `sessionGit.onWorktreeChanged`
+ * subscription and stops when the tab closes — not every active session.
  */
 const GIT_STATUS_BADGE_ENABLED = false;
 

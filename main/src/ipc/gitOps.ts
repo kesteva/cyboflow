@@ -28,6 +28,7 @@ import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
 import type { Session } from '../types/session';
 import type { GitCommit } from '../services/gitDiffManager';
 import { readUntrackedFileContent, createUntrackedFileDiffBlock } from '../services/gitDiffManager';
+import { WorktreeChangeNotifier } from '../services/worktreeChangeNotifier';
 import type { ExecException } from 'child_process';
 import { TaskChangeRouter } from '../orchestrator/taskChangeRouter';
 import { ArtifactRouter } from '../orchestrator/artifactRouter';
@@ -2044,6 +2045,25 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
   }
 
   /**
+   * Live "worktree changed" feed for the rail's Diff tab — see
+   * {@link SessionGitOpsLike.subscribeWorktreeChanges} and
+   * WorktreeChangeNotifier. One notifier per ops bag (one per app); it holds
+   * no watcher until the first subscriber arrives.
+   */
+  const worktreeChangeNotifier = new WorktreeChangeNotifier();
+  const subscribeWorktreeChanges = async (
+    { sessionId }: OpsInput<'subscribeWorktreeChanges'>,
+    listener: () => void,
+  ): Promise<OpsResult<'subscribeWorktreeChanges'>> => {
+    const session = await sessionManager.getSession(sessionId);
+    if (!session || !session.worktreePath) {
+      return { success: false, error: 'Session or worktree path not found' };
+    }
+    const unsubscribe = worktreeChangeNotifier.subscribe(sessionId, session.worktreePath, listener);
+    return { success: true, unsubscribe };
+  };
+
+  /**
    * Backs the future BaseSelector menu (TASK-216): every candidate base the
    * picker can offer, resolved server-side so the renderer never runs git
    * itself. See {@link SessionGitOpsLike.getComparisonBases} for the per-leg
@@ -2259,5 +2279,6 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
     getGitStatus,
     cancelStatusForProject,
     getComparisonBases,
+    subscribeWorktreeChanges,
   };
 }

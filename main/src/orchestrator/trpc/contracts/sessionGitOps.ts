@@ -406,4 +406,22 @@ export interface SessionGitOpsLike {
       }
     | SessionGitError
   >;
+
+  /**
+   * Start delivering "this session's worktree changed" notifications to
+   * `listener` — files edited/created/removed in the worktree, and index /
+   * HEAD / MERGE_HEAD movement in its git dir (`git add`, commit, a merge
+   * starting or ending). The listener carries no payload: the consumer
+   * refetches `getCombinedDiff` and lets THAT response be the truth.
+   *
+   * The returned `unsubscribe` tears the watcher down when the last listener
+   * for the session leaves — the `sessionGit.onWorktreeChanged` subscription
+   * calls it on abort, so a watcher lives exactly as long as a Diff tab is
+   * mounted for that session and never for a session nobody is looking at.
+   * `success: false` when the session or its worktree cannot be found.
+   */
+  subscribeWorktreeChanges(
+    request: { sessionId: string },
+    listener: () => void,
+  ): Promise<{ success: true; unsubscribe: () => void } | SessionGitError>;
 }

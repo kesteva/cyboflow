@@ -29,9 +29,11 @@
  * Standalone-typecheck invariant: no imports from 'electron',
  * 'better-sqlite3', or main/src/services/*.
  */
+import { EventEmitter } from 'events';
 import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure } from '../trpc';
+import { eventToAsyncIterable } from './events';
 import type {
   MergeToMainResult,
   PullPushGitError,
@@ -238,6 +240,37 @@ export const sessionGitRouter = router({
       | SessionGitError
     > => {
       return requireOps(ctx.sessionGitOps).getComparisonBases(input);
+    }),
+
+  /**
+   * Live "this session's worktree changed" stream for the rail's Diff tab.
+   * The SUBSCRIPTION'S LIFETIME IS THE WATCH: subscribing starts the
+   * per-worktree watcher (via SessionGitOpsLike.subscribeWorktreeChanges) and
+   * the abort signal — the client's unsubscribe, or the tRPC link dropping —
+   * tears it down. Events carry no payload: the consumer refetches
+   * getCombinedDiff and lets that response be the truth. A session whose
+   * worktree cannot be resolved rejects the subscription (PRECONDITION_FAILED)
+   * rather than silently never emitting.
+   */
+  onWorktreeChanged: protectedProcedure
+    .input(sessionInput)
+    .subscription(async function* ({ ctx, input, signal }): AsyncGenerator<{ sessionId: string }> {
+      const abortSignal = signal ?? new AbortController().signal;
+      const emitter = new EventEmitter();
+      const started = await requireOps(ctx.sessionGitOps).subscribeWorktreeChanges(input, () => {
+        emitter.emit('change', { sessionId: input.sessionId });
+      });
+      if (!started.success) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: started.error });
+      }
+      try {
+        const source = eventToAsyncIterable<{ sessionId: string }>(emitter, 'change', abortSignal);
+        for await (const ev of source) {
+          yield ev;
+        }
+      } finally {
+        started.unsubscribe();
+      }
     }),
 
   getCurrentBranch: protectedProcedure

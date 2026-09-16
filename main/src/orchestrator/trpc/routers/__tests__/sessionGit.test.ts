@@ -96,6 +96,7 @@ function makeFakeOps(): FakeOps {
         originDefault: { ref: 'origin/main', behind: 0, fetchedAt: '2026-09-14T00:00:00.000Z' },
       },
     }),
+    subscribeWorktreeChanges: vi.fn(),
     getRemoteUrl: vi.fn().mockResolvedValue({ success: true, data: { remoteUrl: '', branchName: '' } }),
     getGitStatus: vi.fn().mockResolvedValue({ success: true, gitStatus: { state: 'clean' } }),
     cancelStatusForProject: vi.fn().mockResolvedValue({ success: true }),
@@ -254,6 +255,46 @@ describe('cyboflow.sessionGit', () => {
           originDefault: { ref: 'origin/main', behind: 0, fetchedAt: '2026-09-14T00:00:00.000Z' },
         },
       });
+    });
+
+    it('onWorktreeChanged: the subscription IS the watch — subscribing starts it via ops, each listener call yields one event, and ending the iteration unsubscribes', async () => {
+      const sessionGitOps = makeFakeOps();
+      const unsubscribe = vi.fn();
+      let listener: (() => void) | null = null;
+      sessionGitOps.subscribeWorktreeChanges.mockImplementation(
+        async (_req: { sessionId: string }, l: () => void) => {
+          listener = l;
+          return { success: true, unsubscribe };
+        },
+      );
+      const caller = appRouter.createCaller(createContext({ sessionGitOps }));
+      const iterable = await caller.cyboflow.sessionGit.onWorktreeChanged({ sessionId: 's1' });
+      const iterator = iterable[Symbol.asyncIterator]();
+
+      // Pull the first event: the generator awaits ops.subscribeWorktreeChanges
+      // and then parks on the emitter until the listener fires.
+      const first = iterator.next();
+      await vi.waitFor(() => expect(sessionGitOps.subscribeWorktreeChanges).toHaveBeenCalledWith(
+        { sessionId: 's1' },
+        expect.any(Function),
+      ));
+      await vi.waitFor(() => expect(listener).not.toBeNull());
+      listener!();
+      expect(await first).toEqual({ done: false, value: { sessionId: 's1' } });
+      expect(unsubscribe).not.toHaveBeenCalled();
+
+      // Ending the iteration (what the client's unsubscribe / link abort does)
+      // runs the generator's finally → the watcher is torn down.
+      await iterator.return?.(undefined);
+      expect(unsubscribe).toHaveBeenCalledTimes(1);
+    });
+
+    it('onWorktreeChanged: a session whose worktree cannot be resolved rejects the subscription instead of silently never emitting', async () => {
+      const sessionGitOps = makeFakeOps();
+      sessionGitOps.subscribeWorktreeChanges.mockResolvedValue({ success: false, error: 'Session or worktree path not found' });
+      const caller = appRouter.createCaller(createContext({ sessionGitOps }));
+      const iterable = await caller.cyboflow.sessionGit.onWorktreeChanged({ sessionId: 'nope' });
+      await expect(iterable[Symbol.asyncIterator]().next()).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
     });
 
     it('a plain failure envelope also passes through untouched', async () => {
