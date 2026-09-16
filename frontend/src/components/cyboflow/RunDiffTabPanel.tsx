@@ -97,7 +97,10 @@ export function RunDiffTabPanel({
 
   useEffect(() => {
     let cancelled = false;
-    setState({ ...INITIAL_STATE, isLoading: true });
+    // Keep the last successful result on screen while refetching (see
+    // SessionDiffTabPanel's twin) — the placeholder shows only until the
+    // FIRST result lands.
+    setState((prev) => ({ ...prev, isLoading: true, error: null }));
 
     trpc.cyboflow.runs.gitDiff.query({ runId, comparisonRef: comparisonRef ?? undefined }).then(
       (result) => {
@@ -125,7 +128,7 @@ export function RunDiffTabPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId, comparisonRef, refreshNonce]);
 
-  if (state.isLoading) {
+  if (state.isLoading && state.diff === null) {
     return (
       <div
         data-testid="run-right-rail-diff-loading"

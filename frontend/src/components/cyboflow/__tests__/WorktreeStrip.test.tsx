@@ -216,6 +216,19 @@ describe('WorktreeStrip', () => {
     }
   });
 
+  it('↻ Refresh: rendered only when onRefresh is supplied, and clicking it calls onRefresh (no mutation)', () => {
+    const { unmount } = render(<WorktreeStrip sessionId="s1" worktree={worktreeOf(MIXED_ENTRIES)} />);
+    expect(screen.queryByTestId('worktree-strip-refresh')).toBeNull();
+    unmount();
+
+    const onRefresh = vi.fn();
+    render(<WorktreeStrip sessionId="s1" worktree={worktreeOf(MIXED_ENTRIES)} onRefresh={onRefresh} />);
+    fireEvent.click(screen.getByTestId('worktree-strip-refresh'));
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+    expect(mockCommit).not.toHaveBeenCalled();
+    expect(mockGitRestore).not.toHaveBeenCalled();
+  });
+
   it('Commit…: opens CommitDialog, typing a message and confirming calls commit.mutate({ sessionId, message }) and signals onMutated', async () => {
     mockCommit.mockResolvedValue({ success: true });
     const onMutated = vi.fn();

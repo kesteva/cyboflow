@@ -85,6 +85,13 @@ vi.mock('../trpc/client', () => ({
       approvals: {
         listPending: { query: vi.fn().mockResolvedValue([]) },
       },
+      // Right-rail Diff tab liveness — RunRightRail subscribes to worktree
+      // changes for the selected session while its Diff tab is mounted. Inert
+      // by default (never emits) so any test that opens the Diff tab renders
+      // without a per-file mock; files asserting on the subscription override.
+      sessionGit: {
+        onWorktreeChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+      },
       // Live AskUserQuestion queue (questionStore) — RunPendingInputStrip mounts
       // unconditionally inside RunCenterPane, so any test rendering it needs this
       // stubbed even without a dedicated trpc mock. Empty by default.

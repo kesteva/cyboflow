@@ -35,6 +35,7 @@
  */
 import { useCallback, useState } from 'react';
 import type { ReactElement } from 'react';
+import { RefreshCw } from 'lucide-react';
 import { trpc } from '../../trpc/client';
 import { CommitDialog } from '../CommitDialog';
 import type { WorktreeStatusPayload } from '../../../../shared/types/runFiles';
@@ -61,12 +62,18 @@ export interface WorktreeStripProps {
    * fetch), so the snapshot is known-stale and must be refreshed.
    */
   onMutated?: () => void;
+  /**
+   * Manual refetch (the ↻ button). The rail refetches on its own on
+   * worktree-change events and window focus; this is the explicit fallback
+   * for whatever those miss.
+   */
+  onRefresh?: () => void;
 }
 
 const NO_CONFLICT_ERROR = 'Resolve conflicts before committing';
 const NO_STATUS_ERROR = 'Working-tree status is not available yet';
 
-export function WorktreeStrip({ sessionId, worktree, onMutated }: WorktreeStripProps): ReactElement {
+export function WorktreeStrip({ sessionId, worktree, onMutated, onRefresh }: WorktreeStripProps): ReactElement {
   const [commitDialogOpen, setCommitDialogOpen] = useState(false);
 
   const entries = worktree?.entries ?? [];
@@ -141,6 +148,18 @@ export function WorktreeStrip({ sessionId, worktree, onMutated }: WorktreeStripP
         {countLabel}
       </span>
       <div className="flex shrink-0 items-center gap-1.5">
+        {onRefresh && (
+          <button
+            type="button"
+            data-testid="worktree-strip-refresh"
+            aria-label="Refresh diff"
+            title="Refresh diff"
+            onClick={onRefresh}
+            className="rounded-button border border-border-primary bg-bg-primary p-1 text-text-secondary hover:bg-bg-hover hover:text-text-primary"
+          >
+            <RefreshCw size={12} />
+          </button>
+        )}
         <button
           type="button"
           data-testid="worktree-strip-commit"

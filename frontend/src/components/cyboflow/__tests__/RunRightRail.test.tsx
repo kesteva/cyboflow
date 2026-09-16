@@ -923,6 +923,117 @@ describe('RunRightRail — width resize', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Diff-tab liveness — the rail keeps the Diff tab current WITHOUT polling:
+//   1. `sessionGit.onWorktreeChanged` subscription whose lifetime IS the
+//      per-worktree watch (subscribe on Diff tab + session, unsubscribe on
+//      tab/session change), each event bumping the panels' refreshNonce;
+//   2. window focus / visibility as the fallback refetch;
+//   3. the strip's ↻ (onRefresh) — covered in WorktreeStrip.test.tsx.
+// The SessionDiffTabPanel mock above exposes the refreshNonce it received,
+// which is how "the panel was told to refetch" is observed here.
+// ---------------------------------------------------------------------------
+
+type OnWorktreeChangedMock = {
+  subscribe: ReturnType<typeof vi.fn>;
+};
+
+describe('RunRightRail — Diff-tab liveness (worktree-change subscription + focus refetch)', () => {
+  let subscribeMock: ReturnType<typeof vi.fn>;
+  let unsubscribeMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    unsubscribeMock = vi.fn();
+    subscribeMock = vi.fn().mockReturnValue({ unsubscribe: unsubscribeMock });
+    (trpc.cyboflow.sessionGit as unknown as { onWorktreeChanged: OnWorktreeChangedMock }).onWorktreeChanged = {
+      subscribe: subscribeMock,
+    };
+  });
+
+  const nonceShown = () =>
+    Number(screen.getByTestId('session-diff-tab-panel-mock-refresh-nonce').textContent);
+
+  it('subscribes for the selected session ONLY while the Diff tab is mounted, and unsubscribes when the tab changes', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-live-001' });
+    });
+    renderRail(EMPTY_PHASE_STATE, { quickSessionProjectId: 9 });
+    // Workflow Progress is the default tab — no watcher yet.
+    expect(subscribeMock).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    expect(subscribeMock).toHaveBeenCalledTimes(1);
+    expect(subscribeMock).toHaveBeenCalledWith({ sessionId: 'sess-live-001' }, expect.objectContaining({ onData: expect.any(Function) }));
+    expect(unsubscribeMock).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'File Explorer' }));
+    expect(unsubscribeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-subscribes for the NEW session when the selection changes while the Diff tab is open', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-live-a' });
+    });
+    renderRail(EMPTY_PHASE_STATE, { quickSessionProjectId: 9 });
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    expect(subscribeMock).toHaveBeenLastCalledWith({ sessionId: 'sess-live-a' }, expect.anything());
+
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-live-b' });
+    });
+    expect(unsubscribeMock).toHaveBeenCalledTimes(1);
+    expect(subscribeMock).toHaveBeenCalledTimes(2);
+    expect(subscribeMock).toHaveBeenLastCalledWith({ sessionId: 'sess-live-b' }, expect.anything());
+  });
+
+  it('does not subscribe with no selected session (nothing to watch), even on the Diff tab', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: null });
+    });
+    renderRail(EMPTY_PHASE_STATE);
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    expect(subscribeMock).not.toHaveBeenCalled();
+  });
+
+  it('each worktree-change event bumps the refreshNonce the panel refetches on', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-live-002' });
+    });
+    renderRail(EMPTY_PHASE_STATE, { quickSessionProjectId: 9 });
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    const before = nonceShown();
+
+    const { onData } = subscribeMock.mock.calls[0][1] as { onData: () => void };
+    act(() => onData());
+    expect(nonceShown()).toBe(before + 1);
+    act(() => onData());
+    expect(nonceShown()).toBe(before + 2);
+  });
+
+  it('window focus bumps the refreshNonce while the Diff tab is open — and NOT while another tab is', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-live-003' });
+    });
+    renderRail(EMPTY_PHASE_STATE, { quickSessionProjectId: 9 });
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    const before = nonceShown();
+
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    expect(nonceShown()).toBe(before + 1);
+
+    // Leave the Diff tab: the focus listener is gone; come back and the
+    // remount fetch (not a stale focus bump) is what refreshes.
+    fireEvent.click(screen.getByRole('tab', { name: 'File Explorer' }));
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    expect(nonceShown()).toBe(before + 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // TASK-218 — BaseSelector selection persistence (D-7). Selection state lives
 // in RunRightRail, keyed by selectedSessionId when present, else the active
 // run id, else never persisted — mirrors the width-resize describe's
@@ -1425,6 +1536,64 @@ describe('RunDiffTabPanel / SessionDiffTabPanel — comparisonRef refetch + grou
       runId: 'run-real-comp-001',
       comparisonRef: 'origin/main',
     });
+  });
+
+  it('SessionDiffTabPanel: a refreshNonce bump keeps the PREVIOUS list on screen while the refetch is in flight (no "Loading diff…" flash on a live tree)', async () => {
+    const { SessionDiffTabPanel: RealSessionDiffTabPanel } =
+      await vi.importActual<typeof import('../SessionDiffTabPanel')>('../SessionDiffTabPanel');
+
+    let resolveSecond: ((v: unknown) => void) | null = null;
+    const getCombinedDiffQuery = vi
+      .fn()
+      .mockResolvedValueOnce({
+        success: true,
+        data: {
+          diff: '',
+          stats: { additions: 0, deletions: 0, filesChanged: 0 },
+          changedFiles: [],
+          resolvedBase: 'sha-live',
+          worktree: NONTRIVIAL_WORKTREE_STATUS,
+        },
+      })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveSecond = resolve;
+          }),
+      );
+    (trpc.cyboflow as unknown as { sessionGit: SessionGitWithCombinedDiffMock }).sessionGit = {
+      getCombinedDiff: { query: getCombinedDiffQuery },
+    };
+
+    const { rerender } = render(<RealSessionDiffTabPanel sessionId="sess-live-panel" refreshNonce={0} />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId('session-diff-loading')).toBeNull();
+    expect(screen.getByTestId('run-right-rail-session-diff')).toBeInTheDocument();
+
+    // The live-tree refetch: the second request is still pending…
+    rerender(<RealSessionDiffTabPanel sessionId="sess-live-panel" refreshNonce={1} />);
+    expect(getCombinedDiffQuery).toHaveBeenCalledTimes(2);
+    // …and the list from the FIRST response is still rendered, not a placeholder.
+    expect(screen.queryByTestId('session-diff-loading')).toBeNull();
+    expect(screen.getByTestId('run-right-rail-session-diff')).toBeInTheDocument();
+
+    await act(async () => {
+      resolveSecond?.({
+        success: true,
+        data: {
+          diff: '',
+          stats: { additions: 0, deletions: 0, filesChanged: 0 },
+          changedFiles: [],
+          resolvedBase: 'sha-live',
+          worktree: NONTRIVIAL_WORKTREE_STATUS,
+        },
+      });
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId('run-right-rail-session-diff')).toBeInTheDocument();
   });
 
   it('SessionDiffTabPanel: refetches with the new comparisonRef on prop change, exactly one request per render', async () => {

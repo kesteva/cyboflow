@@ -46,6 +46,7 @@ import { SessionDiffTabPanel } from './SessionDiffTabPanel';
 import { BaseSelector } from './BaseSelector';
 import { WorktreeStrip } from './WorktreeStrip';
 import { ArtifactsPanel } from './ArtifactsPanel';
+import { trpc } from '../../trpc/client';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
@@ -248,13 +249,54 @@ export function RunRightRail({
     setWorktreeBySession((prev) => ({ ...prev, [sessionKey]: worktree }));
   }, []);
 
-  // Bumped after WorktreeStrip's Commit / Restore succeeds; both panels key
-  // their fetch effect on it, so the grouped list and the lifted snapshot
-  // above refresh together from ONE new response.
+  // Bumped whenever the Diff tab must refetch — after WorktreeStrip's Commit
+  // / Restore (or a refused commit), on the ↻ button, when the window regains
+  // focus, and on every `sessionGit.onWorktreeChanged` event (below). Both
+  // panels key their fetch effect on it, so the grouped list and the lifted
+  // snapshot above refresh together from ONE new response.
   const [worktreeRefreshNonce, setWorktreeRefreshNonce] = useState(0);
   const handleWorktreeMutated = useCallback(() => {
     setWorktreeRefreshNonce((n) => n + 1);
   }, []);
+
+  // Liveness for the Diff tab. The panels fetch once per mount and never
+  // poll (D-8), so without a push signal every edit that lands on disk while
+  // the tab is open — an agent writing files, `git add` in a terminal — stays
+  // invisible until the tab is remounted. Two complementary signals, both
+  // scoped to "the Diff tab is showing a session's tree", so nothing runs
+  // for a tree nobody is looking at:
+  //   1. `sessionGit.onWorktreeChanged` — a tRPC subscription whose LIFETIME
+  //      IS THE WATCH: subscribing starts a per-worktree file + git-dir
+  //      watcher in main, unsubscribing (tab change, session change, unmount)
+  //      tears it down. Events carry no payload; we just refetch.
+  //   2. Window focus / visibility — the fallback for whatever the watcher
+  //      misses (or for the run-scoped arm of a parentless run, which has no
+  //      session to subscribe on): coming back to the app refetches once.
+  const diffTabLive = activeTab === 'diff';
+  useEffect(() => {
+    if (!diffTabLive || selectedSessionId === null) return;
+    const sub = trpc.cyboflow.sessionGit.onWorktreeChanged.subscribe(
+      { sessionId: selectedSessionId },
+      {
+        onData: () => setWorktreeRefreshNonce((n) => n + 1),
+        onError: (err: unknown) => console.warn('[RunRightRail] onWorktreeChanged error:', err),
+      },
+    );
+    return () => sub.unsubscribe();
+  }, [diffTabLive, selectedSessionId]);
+  useEffect(() => {
+    if (!diffTabLive) return;
+    const onFocus = () => setWorktreeRefreshNonce((n) => n + 1);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') onFocus();
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [diffTabLive]);
 
   // The user's comparison-base SELECTION (TASK-218, BaseSelector) — distinct
   // from resolvedBaseBySession above (the RESOLVED base a panel's fetch
@@ -539,6 +581,7 @@ export function RunRightRail({
                 sessionId={selectedSessionId}
                 worktree={worktreeBySession[selectedSessionId ?? '']}
                 onMutated={handleWorktreeMutated}
+                onRefresh={handleWorktreeMutated}
               />
             </div>
             <div className="flex-1 overflow-hidden">

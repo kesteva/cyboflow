@@ -7,8 +7,11 @@
  * panel it renders the flat RunDiffFileList — clicking a file opens it in the
  * center pane (Diff / Split / Preview).
  *
- * Snapshot fetch: an effect keyed by `[sessionId, comparisonRef]` (TASK-218 —
- * selecting a new comparison base refetches) with a `cancelled` guard.
+ * Snapshot fetch: an effect keyed by `[sessionId, comparisonRef, refreshNonce]`
+ * (TASK-218 — selecting a new comparison base refetches; the rail bumps the
+ * nonce on worktree-change events, window focus, ↻, and its own mutations)
+ * with a `cancelled` guard. A refetch keeps the previous snapshot on screen
+ * until the new one lands — no "Loading diff…" flash on a live tree.
  */
 import { useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
@@ -71,7 +74,11 @@ export function SessionDiffTabPanel({
 
   useEffect(() => {
     let cancelled = false;
-    setState({ ...INITIAL_STATE, isLoading: true });
+    // Keep the last successful snapshot on screen while refetching — the
+    // rail refetches on every worktree-change event and window focus, and
+    // blanking the list to "Loading diff…" on each would make a live tree
+    // flicker. The placeholder shows only until the FIRST snapshot lands.
+    setState((prev) => ({ ...prev, isLoading: true, error: null }));
 
     API.sessions.getCombinedDiff(sessionId, undefined, comparisonRef ?? undefined).then(
       (res) => {
@@ -108,7 +115,7 @@ export function SessionDiffTabPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, comparisonRef, refreshNonce]);
 
-  if (state.isLoading) {
+  if (state.isLoading && state.worktree === undefined && state.diff === '') {
     return (
       <div data-testid="session-diff-loading" className="p-4 text-sm text-text-secondary">
         Loading diff…
