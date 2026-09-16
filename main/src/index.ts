@@ -4136,6 +4136,15 @@ async function initializeServices(): Promise<boolean> {
         : Promise.resolve({ ok: false, reason: 'backlog edits are not wired yet' }),
     laneTriageFindingSink: (runId, input) =>
       laneTriageActions ? laneTriageActions.fileFinding(runId, input) : Promise.resolve(),
+    // RUN-LEVEL verification posture (CD1) reads the runbook through the SAME
+    // closure the scheduler's §3.2 degrade gate and the health panel's badge use
+    // — there must never be a third reading of `verify_runbook_local.status`.
+    // Read LAZILY through the module holder (it is assigned inside
+    // initializeServices, like every other late-bound probe): an unset holder
+    // resolves `null`, which the posture reads as UNKNOWN and answers 'available'
+    // for, never as "this project has no runbook".
+    verifyRunbookStatus: async (projectId, modality, probePath) =>
+      verifyRunbookStatus ? verifyRunbookStatus(projectId, modality, probePath) : null,
     // Per-step result sink (migration 033): persist each settled step so results
     // are queryable + crash-safe resume can skip individually-completed steps.
     stepResultRecorder: (runId, report) =>

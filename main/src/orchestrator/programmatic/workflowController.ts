@@ -38,7 +38,12 @@ import type { VerificationTaskV1 } from '../../../../shared/types/visualVerifica
 // keeps the controller unit-testable with no new mocks, honoring the spirit of
 // the standalone-typecheck invariant (heavy imports only).
 import { parseVisualTaskSection } from '../verify/visualTaskSection';
+// Pure text predicate over an enqueue-seam decline reason (no DB/electron deps) —
+// see isNoModalityDeclineReason for why this is a text match and not an import
+// of the strings themselves.
+import { isNoModalityDeclineReason } from '../verify/verificationPosture';
 import type {
+  BuildBreakGroup,
   CommitIntegrityProbe,
   ControllerHost,
   ControllerResult,
@@ -49,6 +54,7 @@ import type {
   StepReport,
   StepRunner,
   SupervisorEvent,
+  VerificationPosture,
   VisualGateOutcome,
 } from './types';
 import { FAN_OUT_LANE_ATTEMPT_CAP } from './types';
@@ -323,6 +329,28 @@ export class WorkflowController {
    * Instance-scoped and never cleared: one controller instance walks one run.
    */
   private readonly reportedVerificationSkips = new Set<string>();
+
+  /**
+   * runId → the RUN-LEVEL verification posture, resolved ONCE at fan-out start
+   * (see `ControllerHost.resolveVerificationPosture`). A Map rather than a plain
+   * field because a walk can enter more than one fan-out step, and because it
+   * keys the same way `reportedVerificationSkips` does.
+   *
+   * ABSENT means "not resolved yet", which every read treats as 'available' —
+   * i.e. exactly the behaviour of a controller without this seam.
+   */
+  private readonly verificationPostures = new Map<string, VerificationPosture>();
+
+  /** runIds whose single "no verifiable modality" finding has already been filed. */
+  private readonly reportedNoModality = new Set<string>();
+
+  /**
+   * `${runId}:${normalizedText}` keys whose shared-build-break group has already
+   * been announced. The sweep runs at every quiesced instant AND at fan-out end,
+   * and a group only grows, so without this the same group would file a card per
+   * sweep.
+   */
+  private readonly reportedBuildBreakGroups = new Set<string>();
 
   /**
    * Walk `def` to a terminal result. Resolves with the outcome + the ordered
@@ -833,6 +861,11 @@ export class WorkflowController {
    * drop the same way for the same reason.
    */
   private reportVerificationSkipped(runId: string, laneTaskRef: string, reason: string, detail?: string): void {
+    // RUN-LEVEL declaration wins: once this run has been declared as having no
+    // verifiable modality at all, every per-lane finding would repeat that one
+    // structural fact once per lane — which is the whole reason the run-level
+    // declaration exists. Suppress them for the rest of the walk.
+    if (this.verificationPostures.get(runId)?.kind === 'unavailable') return;
     // At most one finding per lane per run — see reportedVerificationSkips.
     const key = `${runId}:${laneTaskRef}`;
     if (this.reportedVerificationSkips.has(key)) return;
@@ -846,6 +879,116 @@ export class WorkflowController {
       });
     } catch {
       // A broken finding sink must never affect the walk.
+    }
+  }
+
+  /**
+   * The run's verification posture, defaulting to 'available' until (and unless)
+   * the host resolves one. 'available' is the correct default in every unresolved
+   * case: it is precisely the behaviour of a controller with no posture seam.
+   */
+  private posture(runId: string): VerificationPosture {
+    return this.verificationPostures.get(runId) ?? { kind: 'available' };
+  }
+
+  /**
+   * Resolve the run-level verification posture ONCE, at fan-out start, and file
+   * the single "nothing here can be verified" finding when it is 'unavailable'.
+   *
+   * EAGER, not lazy — see `ControllerHost.resolveVerificationPosture`. Fail-soft
+   * in both halves: a throwing resolver leaves the posture unset (read as
+   * 'available'), and a throwing sink loses the card, never the walk.
+   */
+  private async ensureVerificationPosture(runId: string): Promise<VerificationPosture> {
+    const known = this.verificationPostures.get(runId);
+    if (known !== undefined) return known;
+    if (!this.host.resolveVerificationPosture) return { kind: 'available' };
+    let resolved: VerificationPosture;
+    try {
+      resolved = await this.host.resolveVerificationPosture(runId);
+    } catch (err) {
+      this.host.log?.(
+        'warn',
+        `verification posture could not be resolved (${err instanceof Error ? err.message : String(err)}); proceeding as if verification were available`,
+      );
+      return { kind: 'available' };
+    }
+    this.verificationPostures.set(runId, resolved);
+    if (resolved.kind === 'unavailable') this.declareNoVerifiableModality(runId, resolved.reason);
+    return resolved;
+  }
+
+  /**
+   * File the ONE non-blocking "no verifiable modality" card for this run.
+   * Idempotent per run here AND at the sink (which dedupes on `source` through
+   * `ReviewItemRouter.createIfNoPending`), so neither a second fan-out step nor a
+   * crash-resume can double-file.
+   */
+  private declareNoVerifiableModality(runId: string, reason: string): void {
+    if (this.reportedNoModality.has(runId)) return;
+    this.reportedNoModality.add(runId);
+    this.host.log?.('warn', `run '${runId}': no verifiable modality — ${reason}`);
+    try {
+      this.host.reportNoVerifiableModality?.({ runId, reason });
+    } catch {
+      // A broken finding sink must never affect the walk.
+    }
+  }
+
+  /**
+   * MID-FLIGHT FLIP. The eager probe said 'available' and reality disagreed: an
+   * enqueue declined for a reason that names a modality/runbook problem, i.e. a
+   * fact about the RUN, not about this lane. Flip the posture so later lanes skip
+   * the enqueue and their per-lane findings collapse into the one card filed here.
+   *
+   * DOCUMENTED GAP: lanes already PAST their enqueue when the flip happens are
+   * unaffected — they neither park nor get the declaration, and the first of them
+   * has already filed its own per-lane finding (which is what triggered this).
+   * That is accepted: the eager probe is the primary mechanism and this arm only
+   * catches the case it could not predict.
+   *
+   * Returns true when the reason was a run-level one (the caller then skips its
+   * per-lane finding, which `reportVerificationSkipped` would suppress anyway).
+   */
+  private maybeFlipPostureUnavailable(runId: string, reason: string): boolean {
+    if (!isNoModalityDeclineReason(reason)) return false;
+    if (this.posture(runId).kind !== 'available') return false;
+    this.verificationPostures.set(runId, { kind: 'unavailable', reason });
+    this.declareNoVerifiableModality(runId, reason);
+    return true;
+  }
+
+  /**
+   * Sweep this run's pending build-break findings and announce each NEW group.
+   * Called at the dispatch pool's quiesced instant and once at fan-out end (see
+   * `ControllerHost.sweepBuildBreaks` for why not per lane settle). Detector
+   * only: one advisory card per group, no pause, no fix agent. Fail-soft.
+   */
+  private async sweepBuildBreaks(runId: string): Promise<void> {
+    if (!this.host.sweepBuildBreaks) return;
+    let groups: BuildBreakGroup[];
+    try {
+      groups = await this.host.sweepBuildBreaks(runId);
+    } catch (err) {
+      this.host.log?.(
+        'warn',
+        `build-break sweep failed (${err instanceof Error ? err.message : String(err)}); continuing`,
+      );
+      return;
+    }
+    for (const group of groups) {
+      const key = `${runId}:${group.normalized}`;
+      if (this.reportedBuildBreakGroups.has(key)) continue;
+      this.reportedBuildBreakGroups.add(key);
+      this.host.log?.(
+        'warn',
+        `run '${runId}': ${group.count} lane report(s) share one build break: ${group.sampleTitle.slice(0, 120)}`,
+      );
+      try {
+        this.host.reportBuildBreakGroup?.({ runId, group });
+      } catch {
+        // A broken finding sink must never affect the walk.
+      }
     }
   }
 
@@ -960,6 +1103,12 @@ export class WorkflowController {
 
     const inner = fanOut.inner;
     const allowedStepIds: readonly string[] = inner.map((s) => s.id);
+    // RUN-LEVEL verification posture, resolved ONCE here — BEFORE the first lane
+    // is dispatched, so every lane's implement/task-verify runs under a known
+    // posture. Resolving it lazily (from the first lane whose enqueue declined)
+    // reaches almost nobody: under the rolling pool the set of lanes whose
+    // prompts are already composed is permanently cap-sized.
+    await this.ensureVerificationPosture(runId);
     // PARK-EPOCH LATCH (defined ⇒ latched): set to the error text the moment one
     // lane's triage consult dies on a systemic condition. Lanes run concurrently
     // and the consults are serialized on the monitor's send chain, so without it
@@ -1376,6 +1525,17 @@ export class WorkflowController {
             // Verification inactive for the run → skip (never park), as today.
             continue;
           }
+          if (this.posture(runId).kind === 'unavailable') {
+            // No modality can serve this RUN — declared once at fan-out start (or
+            // flipped mid-flight below). Mirror the inactive-gate short-circuit
+            // exactly: advance the lane WITHOUT enqueuing and WITHOUT parking. No
+            // per-lane finding either; the run-level card already says it.
+            this.host.log?.(
+              'info',
+              `fan-out item '${itemId}': no verifiable modality for this run; skipping visual-verify`,
+            );
+            continue;
+          }
           if (visualVerifyTask === undefined && !adoptedPreFiredRequest) {
             // NOT-APPLICABLE / channel-unavailable / task-verify operator-skipped ⇒
             // nothing to verify: skip the step entirely (no request, no park).
@@ -1405,6 +1565,12 @@ export class WorkflowController {
               // surprise, and filing one finding per lane per run for it would
               // bury the reasons that are.
               if (enqueueOutcome.reason !== VERIFY_DISABLED_ENQUEUE_REASON) {
+                // A decline that names a MODALITY or a RUNBOOK is a fact about the
+                // run, not about this lane: flip the posture so the remaining
+                // lanes skip the enqueue and their per-lane findings collapse into
+                // the single run-level card. (The eager probe at fan-out start is
+                // the primary mechanism; this catches what it could not predict.)
+                this.maybeFlipPostureUnavailable(runId, enqueueOutcome.reason);
                 this.reportVerificationSkipped(
                   runId,
                   itemId,
@@ -2180,6 +2346,20 @@ export class WorkflowController {
         if (remaining.size === 0 && inFlight.size === 0) break;
       }
 
+      // ── SHARED BUILD-BREAK SWEEP: the quiesced instant ────────────────────
+      // Nothing is in flight, so every lane that has settled has had time for its
+      // `cyboflow_report_finding` write to reach the ReviewItemRouter queue. That
+      // timing is the whole reason this is not a per-lane-settle sweep: the MCP
+      // handler replies ok:true WITHOUT awaiting the per-project queue, so with
+      // two lanes the second one's finding — exactly the one the threshold needs
+      // — is exactly the one most likely to be missing at its own settle.
+      //
+      // Runs BEFORE dispatch (and so before the park/prune decision further down
+      // this iteration) and is idempotent per run on the group's normalized text,
+      // so repeating it at every quiesce costs one indexed read and files nothing
+      // twice. DETECTOR ONLY: it changes no dispatch, park or prune decision.
+      if (inFlight.size === 0) await this.sweepBuildBreaks(runId);
+
       // ── DISPATCH ──────────────────────────────────────────────────────────
       // Fill every free slot, in resolve order, with lanes that are READY (all
       // in-scope blocking prerequisites INTEGRATED — never merely settled), not
@@ -2430,6 +2610,10 @@ export class WorkflowController {
       if (systemicSeen.length > 0) systemicSeen = systemicSeen.filter((seen) => seen.at > windowStart);
     }
 
+    // One last sweep over the settled tree: the drain sweep above runs before the
+    // final lanes' findings have necessarily committed, and this one is free
+    // (idempotent per run on the group's normalized text).
+    await this.sweepBuildBreaks(runId);
     return { terminal: false, incompleteCount };
   }
 

@@ -453,6 +453,71 @@ export type TaskEnqueueResult =
   | { outcome: 'skipped'; reason: string };
 
 /**
+ * The RUN-LEVEL verification posture, resolved ONCE at fan-out start (never per
+ * lane) so a project with nothing verifiable declares that fact one time
+ * instead of discovering it N times, once per lane.
+ *
+ *   - 'disabled'    — the run's immutable stamp says `verify_enabled = 0`. The
+ *                     user turned the visual verifier OFF. This is EXACTLY
+ *                     today's behaviour, byte for byte: no finding, no prompt
+ *                     change, the existing `visualGate.isActive` short-circuit
+ *                     does all the work. It is deliberately NOT folded into
+ *                     'unavailable' — a deliberate off switch is not a surprise,
+ *                     and the enqueue seam was changed specifically to STOP
+ *                     filing a finding for it (see VERIFY_DISABLED_ENQUEUE_REASON
+ *                     in workflowController.ts).
+ *   - 'available'   — a modality this host can actually verify. Unchanged
+ *                     behaviour: lanes enqueue, park at the merge gate, and a
+ *                     per-lane skip still files its own finding.
+ *   - 'unavailable' — verification is ON but NO modality can serve this run
+ *                     (the stamped type is the deferred mobile one, or a
+ *                     native-desktop run with no proven native-screen runbook).
+ *                     The controller files ONE finding for the whole run, skips
+ *                     the enqueue for every lane, and SUPPRESSES the per-lane
+ *                     skip findings that would otherwise repeat the same
+ *                     conclusion once per lane.
+ *
+ * Canonical HERE rather than in verify/verificationPosture.ts (which re-exports
+ * it) for the same reason `LaneFailureKind` is canonical here: this module is
+ * the controller/host protocol and carries the standalone-typecheck invariant
+ * (shared types only), so it cannot import from a module that reaches the
+ * runbook store. The resolver imports the type from here instead.
+ */
+export type VerificationPosture =
+  | { kind: 'disabled' }
+  | { kind: 'available' }
+  | { kind: 'unavailable'; reason: string };
+
+/**
+ * One group of BUILD-BREAK findings that at least two lanes of a run filed with
+ * the same normalized error text — the signal that the tree, not any single
+ * task, is broken.
+ *
+ * `count` is the number of DISTINCT review items in the group, NOT the number of
+ * distinct lanes: `cyboflow_report_finding` stamps `source` as `agent:<step
+ * label>` (every lane's `implement` turn files as `agent:implement`), and the
+ * build-break contract does not ask the agent for an entity link, so the row
+ * carries no lane identity to group by. `laneRefs` is best-effort — the
+ * `entity_id`s of any findings that DID carry an `entity_type: 'task'` link, and
+ * frequently empty. Two findings from ONE lane's two attempts would therefore
+ * count as two; the normalizer's job is to make that rare (a re-filed identical
+ * break is what the contract tells the agent not to do) and the consequence is
+ * one extra advisory card, never a paused run.
+ */
+export interface BuildBreakGroup {
+  /** The normalized (path/line/hex-stripped, lowercased) error text. */
+  normalized: string;
+  /** Distinct `review_items.id`s in the group (see the count caveat above). */
+  itemIds: string[];
+  /** How many distinct review items the group holds — `itemIds.length`. */
+  count: number;
+  /** Best-effort lane refs recovered from `entity_type = 'task'` links. */
+  laneRefs: string[];
+  /** The first-seen ORIGINAL title, kept verbatim for the finding body. */
+  sampleTitle: string;
+}
+
+/**
  * Awaits the async visual merge-gate verdict for one lane so the PROGRAMMATIC
  * controller can actuate the loopback (re-dispatch implement) instead of leaving a
  * FAILed lane parked. Injected on `ControllerHost.visualGate` (absent ⇒ the
@@ -695,6 +760,55 @@ export interface ControllerHost {
    * without a review-queue sink) ⇒ the skip is logged only, exactly as before.
    */
   reportVerificationSkipped?(input: { runId: string; laneTaskRef: string; reason: string; detail?: string }): void;
+
+  /**
+   * Optional RUN-LEVEL verification posture resolver, consulted ONCE at fan-out
+   * start (before the first lane is dispatched) and cached run-scoped by the
+   * controller.
+   *
+   * EAGER on purpose. The posture used to be discovered lazily, by the first
+   * lane whose enqueue declined — but that lane had already run `implement` and
+   * `task-verify`, and under a rolling dispatch pool the set of lanes whose
+   * prompts are already composed is permanently cap-sized, so a lazily-flipped
+   * latch reaches almost nobody. Resolving before dispatch is what makes the
+   * declaration cover the whole batch.
+   *
+   * Absent (tests, orchestrated hosts) ⇒ the controller behaves as 'available',
+   * i.e. exactly as it did before this seam existed. MUST be fail-soft (resolve,
+   * never reject); a throw is caught and read as 'available' for the same reason.
+   */
+  resolveVerificationPosture?(runId: string): Promise<VerificationPosture>;
+
+  /**
+   * Optional NON-BLOCKING declaration that this run has NO verifiable modality
+   * at all — the run-scoped sibling of {@link reportVerificationSkipped}.
+   *
+   * Filed at most ONCE per run (the controller holds the run-scoped set, and the
+   * production sink also dedupes on `source` through
+   * `ReviewItemRouter.createIfNoPending`, so a resumed walk cannot double-file).
+   * Fire-and-forget by design: the whole point is VISIBILITY, so it must be
+   * strictly weaker than the walk it observes.
+   */
+  reportNoVerifiableModality?(input: { runId: string; reason: string }): void;
+
+  /**
+   * Optional BUILD-BREAK sweep: read this run's pending `build-break` findings
+   * and return the groups whose normalized error text at least two of them
+   * share. Called at the dispatch pool's QUIESCED instant (nothing in flight) and
+   * once more at fan-out end — never per lane settle, because
+   * `cyboflow_report_finding` replies `ok:true` WITHOUT awaiting the
+   * ReviewItemRouter queue, so a lane can settle before its own finding commits.
+   *
+   * Read-only and fail-soft (resolve, never reject). Absent ⇒ no sweep.
+   */
+  sweepBuildBreaks?(runId: string): Promise<BuildBreakGroup[]>;
+
+  /**
+   * Optional NON-BLOCKING report that N lanes hit the SAME build break. Detector
+   * only: this files one advisory card naming the group; it never pauses the run
+   * and never deploys a fix agent. Fire-and-forget, like the two seams above.
+   */
+  reportBuildBreakGroup?(input: { runId: string; group: BuildBreakGroup }): void;
 
   /**
    * Optional wall clock, for the one place the controller needs one: the

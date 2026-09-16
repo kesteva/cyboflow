@@ -32,10 +32,19 @@ import {
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 import type { ReasoningEffort } from '../../../../shared/types/reasoningEffort';
-import type { VerificationTaskV1 } from '../../../../shared/types/visualVerification';
+import {
+  isVerificationType,
+  type VerificationTaskV1,
+} from '../../../../shared/types/visualVerification';
 import type { ClaudeSpawnerLike, ProgrammaticRunner, ProgrammaticRunContext } from '../runExecutor';
 import type { DatabaseLike, LoggerLike } from '../types';
 import { enqueueTaskVerification } from '../verify/enqueueFromTask';
+import {
+  resolveVerificationPosture,
+  type VerificationRunStamp,
+  type VerificationPostureDeps,
+} from '../verify/verificationPosture';
+import { sweepBuildBreaks } from './buildBreakDetector';
 import type { FanOutDriver, StepReport, VisualVerifyGate } from './types';
 import { WorkflowController } from './workflowController';
 import { createRunDirectives } from './runDirectives';
@@ -232,7 +241,82 @@ export interface DefaultProgrammaticRunnerDeps {
    * always reaches the human's review queue. Absent ⇒ rescues are logged only.
    */
   laneTriageFindingSink?: (runId: string, input: { title: string; body: string }) => Promise<void>;
+  /**
+   * The project's runbook-status resolver — the SAME closure the scheduler's
+   * `runbookStatus` dependency and the verify health panel share (index.ts builds
+   * one and hands it to all three). Feeds the RUN-LEVEL verification posture
+   * (CD1); absent ⇒ the posture never reads a runbook, so a `native-desktop` run
+   * resolves 'available' and behaves exactly as it did before the seam.
+   */
+  verifyRunbookStatus?: VerificationPostureDeps['runbookStatus'];
   logger?: LoggerLike;
+}
+
+/**
+ * Read the run's IMMUTABLE verification stamp (migration 055) plus the worktree
+ * the runbook probe should look at — the input half of the run-level posture.
+ *
+ * Fail-soft to `null`, which the posture resolver reads as 'available': an
+ * unreadable stamp is not evidence that a project cannot be verified.
+ */
+export function readVerificationRunStamp(db: DatabaseLike, runId: string): VerificationRunStamp | null {
+  try {
+    const row = db
+      .prepare(
+        `SELECT project_id AS projectId, verify_enabled AS verifyEnabled,
+                verify_type AS verifyType, worktree_path AS worktreePath
+           FROM workflow_runs WHERE id = ?`,
+      )
+      .get(runId) as
+      | {
+          projectId?: number | null;
+          verifyEnabled?: number | boolean | null;
+          verifyType?: string | null;
+          worktreePath?: string | null;
+        }
+      | undefined;
+    if (!row || typeof row.projectId !== 'number') return null;
+    const worktreePath =
+      typeof row.worktreePath === 'string' && row.worktreePath.trim().length > 0 ? row.worktreePath : null;
+    const rawType: unknown = row.verifyType;
+    return {
+      projectId: row.projectId,
+      verifyEnabled: row.verifyEnabled === 1 || row.verifyEnabled === true,
+      verifyType: isVerificationType(rawType) ? rawType : null,
+      worktreePath,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * File one RUN-SCOPED declaration through `ReviewItemRouter.createIfNoPending`,
+ * whose check-and-create runs as ONE task on the per-project queue.
+ *
+ * `source` IS the dedupe key (there is no unique index behind it), which is why
+ * it is a parameter: the two callers — the "no verifiable modality" declaration
+ * and a shared-build-break group — need the same once-only guarantee under
+ * different keys. NON-BLOCKING and severity 'warning' for the same reason the
+ * F8 skip finding is: these describe something a human should SEE, never
+ * something the run should stop for.
+ */
+async function fileRunScopedFinding(
+  projectId: number,
+  runId: string,
+  input: { source: string; title: string; body: string },
+): Promise<void> {
+  await ReviewItemRouter.getInstance().createIfNoPending(projectId, {
+    op: 'create',
+    actor: 'orchestrator',
+    kind: 'finding',
+    title: input.title,
+    body: input.body,
+    blocking: false,
+    severity: 'warning',
+    source: input.source,
+    runId,
+  });
 }
 
 /**
@@ -813,6 +897,11 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     const laneTriageTaskReader = this.deps.laneTriageTaskReader;
     const laneTriageAdjustTask = this.deps.laneTriageAdjustTask;
     const laneTriageFindingSink = this.deps.laneTriageFindingSink;
+    // Narrowed once here so the two conditional spreads below close over a
+    // definitely-defined handle rather than re-narrowing `this.deps` inside a
+    // callback (where TS cannot keep the narrowing).
+    const postureDb = this.deps.db;
+    const verifyRunbookStatus = this.deps.verifyRunbookStatus;
 
     const host = new ProgrammaticRunHost({
       runId: ctx.runId,
@@ -851,6 +940,32 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       // so both kinds of "it did not run" land in one place in the review queue.
       fileVerificationSkipFinding: (input: { title: string; body: string }) =>
         fileVerificationSkipFinding(ctx.run.project_id, ctx.runId, input),
+      // CD1/CD3 — the two RUN-SCOPED declarations, both deduped on `source`
+      // through createIfNoPending. Wired unconditionally (the sink itself is
+      // cheap and idempotent); the POSTURE resolver and the BUILD-BREAK sweep are
+      // each gated on the dep they actually need, so a runner built without a DB
+      // (or without the shared runbook-status closure) keeps its pre-seam
+      // behaviour rather than resolving a posture from nothing.
+      fileRunScopedFinding: (input: { source: string; title: string; body: string }) =>
+        fileRunScopedFinding(ctx.run.project_id, ctx.runId, input),
+      ...(postureDb !== undefined && verifyRunbookStatus !== undefined
+        ? {
+            resolveVerificationPosture: () =>
+              resolveVerificationPosture(
+                {
+                  readRunStamp: (runId: string) => readVerificationRunStamp(postureDb, runId),
+                  runbookStatus: verifyRunbookStatus,
+                },
+                ctx.runId,
+              ),
+          }
+        : {}),
+      ...(postureDb !== undefined
+        ? {
+            sweepBuildBreaks: () =>
+              sweepBuildBreaks(postureDb, { runId: ctx.runId, projectId: ctx.run.project_id }),
+          }
+        : {}),
       logger: this.deps.logger,
     });
 
