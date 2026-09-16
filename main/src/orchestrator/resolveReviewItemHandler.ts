@@ -449,7 +449,7 @@ export interface ResolveReviewItemInput {
   /** Free-text resolution. Ignored when `outcome` is set (outcome wins, deterministic verdict). */
   resolution?: string | null;
   /** Explicit gate verdict for a `gate:human-step:*` decision item (drives verdict + approve-plan reveal/decline). */
-  outcome?: 'approve' | 'reject';
+  outcome?: 'approve' | 'reject' | 'revise';
   /**
    * Per-idea verdict map for an approve-ideas OR approve-designs BATCH gate (the
    * "Submit decisions" payload). ONLY consumed when the item is one of those batch
@@ -477,7 +477,7 @@ export type ResolveReviewItemResult =
       /** The programmatic human-gate step id for a `gate:human-step:*` item; null otherwise. */
       gateStepId: string | null;
       /** The explicit verdict when supplied (monitor can echo it back). */
-      outcome?: 'approve' | 'reject';
+      outcome?: 'approve' | 'reject' | 'revise';
     }
   | { ok: false; reason: ReviewItemErrorCode; message: string };
 

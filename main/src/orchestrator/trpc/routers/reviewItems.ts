@@ -808,7 +808,7 @@ export const reviewItemsRouter = router({
          * deterministic, not a free-text sniff) AND the approve-plan reveal /
          * decline. Meaningless (but harmless) for non-gate items.
          */
-        outcome: z.enum(['approve', 'reject']).optional(),
+        outcome: z.enum(['approve', 'reject', 'revise']).optional(),
         /**
          * Per-idea verdict map for an approve-ideas OR approve-designs BATCH gate —
          * the "Submit decisions" payload, keyed by idea display ref. ONLY consumed

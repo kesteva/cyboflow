@@ -186,6 +186,20 @@ describe('ReviewItemCard', () => {
     expect(screen.getByTestId('decision-reject')).toHaveTextContent('Rerun planning with findings');
   });
 
+  it("the approve-design gate's rerun button resolves with outcome=revise, never reject (a reject ends the run)", async () => {
+    render(
+      <ReviewItemCard
+        item={makeItem('decision', { id: 'rvw_design_rr', blocking: true, source: 'gate:human-step:approve-design' })}
+        surface="session"
+      />,
+    );
+    fireEvent.click(screen.getByTestId('decision-reject'));
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_design_rr', outcome: 'revise' }),
+    );
+    expect(mockDismiss).not.toHaveBeenCalled();
+  });
+
   it('the approve-design gate also relabels by PAYLOAD when minted on the orchestrated plane (no gate:human-step source)', () => {
     render(
       <ReviewItemCard
