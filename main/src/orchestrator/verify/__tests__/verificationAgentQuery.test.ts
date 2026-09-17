@@ -281,6 +281,31 @@ describe('makeVerificationAgentQuery — sandbox wiring', () => {
     const allowed = await decide(canUseTool, 'Bash', { command: 'pnpm run build' });
     expect(allowed?.behavior).toBe('allow');
   });
+
+  // Property, not a list: whatever the runner hands over, NO `mcp__*` name may
+  // ever be auto-approved (an allowedTools entry bypasses canUseTool entirely),
+  // while the availability list may carry it. Inert today — nothing composes an
+  // MCP server into this query — so a future grant lands on a closed trap.
+  it('never auto-approves an mcp__ tool, and canUseTool denies it per call', async () => {
+    install(makeFakeQuery([sdkResultSuccess({ structuredOutput: { version: 1 } })]));
+    const fn = makeVerificationAgentQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
+    const handed = ['Bash', 'Read', 'mcp__xcode__GetBuildLog', 'Grep', 'mcp__xcode__DocumentationSearch'];
+
+    await fn({ prompt: 'p', systemPrompt: 's', cwd: '/wt', allowedTools: handed, env: {} });
+
+    const opts = lastOptions ?? {};
+    expect(opts.tools).toEqual(handed);
+    const autoApproved = opts.allowedTools as string[];
+    expect(autoApproved).toEqual(['Read', 'Grep']);
+    expect(autoApproved.some((t) => t.startsWith('mcp__'))).toBe(false);
+
+    const canUseTool = opts.canUseTool as CanUseTool | undefined;
+    if (!canUseTool) throw new Error('expected canUseTool to be installed');
+    const denied = await decide(canUseTool, 'mcp__xcode__GetBuildLog', {});
+    expect(denied?.behavior).toBe('deny');
+    const read = await decide(canUseTool, 'Read', {});
+    expect(read?.behavior).toBe('allow');
+  });
 });
 
 describe('makeVerificationAgentQuery — the harness env reaches the deployed session', () => {

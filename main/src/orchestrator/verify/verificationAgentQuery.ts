@@ -381,6 +381,14 @@ export function makeDependencyCommandCanUseTool(
         message: `The '${toolName}' tool is not part of the verification harness. Use only: ${allowed.join(', ')}. You are JUDGING code, not changing it.`,
       };
     }
+    if (toolName.startsWith('mcp__')) {
+      // No MCP server is composed into this query today (`mcpServers: {}`), so
+      // this arm is inert — it exists so a future grant (the Stage-3 Xcode MCP,
+      // docs/proposals/mobile-verification-tier.md §11) lands on an explicit
+      // per-call deny-by-default instead of the bare allow below.
+      logger?.warn('[verificationAgentQuery] denied an MCP tool — no grant composes one', { toolName });
+      return { behavior: 'deny', message: `The '${toolName}' MCP tool is not granted to the verification harness.` };
+    }
     if (toolName !== 'Bash') return { behavior: 'allow', updatedInput: input };
 
     const command = input.command;
@@ -437,8 +445,10 @@ export function makeVerificationAgentQuery(
           // Auto-approve ONLY the read-only tools. 'Bash' is deliberately EXCLUDED:
           // an allowedTools entry is auto-approved WITHOUT consulting canUseTool
           // (SDK contract), which would silently bypass the §7.2 dependency guard —
-          // every Bash call must route through the handler below instead.
-          allowedTools: allowedTools.filter((t) => t !== 'Bash'),
+          // every Bash call must route through the handler below instead. Any
+          // `mcp__*` name is excluded for the same reason: auto-approving it
+          // would bypass the handler's per-call MCP deny arm (inert today).
+          allowedTools: allowedTools.filter((t) => t !== 'Bash' && !t.startsWith('mcp__')),
           // The agent's Bash inherits these so `$VERIFY_DRIVER` / VERIFY_PORT resolve.
           env: { ...process.env, ...env },
           // Hermetic sandbox — an edited agent prompt cannot widen it.
