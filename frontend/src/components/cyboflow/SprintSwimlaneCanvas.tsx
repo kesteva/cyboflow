@@ -37,6 +37,7 @@ import { effectiveMaxConcurrency } from '../../../../shared/types/workflows';
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 import { WorkflowStepCard } from './WorkflowStepCard';
 import type { StepStatus } from './WorkflowStepCard';
+import { DesignAffordance } from './DesignAffordance';
 import {
   SPRINT_LANE_STEP_IDS,
   SPRINT_BATCH_CAP,
@@ -55,6 +56,15 @@ export interface SprintSwimlaneCanvasProps {
   phaseState: UseWorkflowPhaseStateResult;
   /** The run's raw lifecycle status (activeRun.status) for the summary row. */
   sprintStatus?: string;
+  /**
+   * The pane's project id + center-pane session key — when both are known,
+   * each lane header shows a {@link DesignAffordance} that opens the lane
+   * task's originating idea's approved design in THIS session's center pane
+   * (Tier 2, item 8c). Omitted in a context with no session (none today —
+   * this canvas is only ever mounted inside a running session's own pane).
+   */
+  projectId?: number | null;
+  sessionKey?: string;
 }
 
 /**
@@ -442,6 +452,8 @@ export function SprintSwimlaneCanvas({
   runId,
   phaseState,
   sprintStatus,
+  projectId = null,
+  sessionKey,
 }: SprintSwimlaneCanvasProps) {
   const { lanes } = useSprintLanes(runId);
   const definition = phaseState.definition;
@@ -689,6 +701,9 @@ export function SprintSwimlaneCanvas({
                       </span>
                     )}
                     <span style={{ flex: 1 }} />
+                    {sessionKey !== undefined && (
+                      <DesignAffordance entityId={lane.taskId} projectId={projectId} sessionKey={sessionKey} />
+                    )}
                     {contextLabel !== null && (
                       <span
                         style={{

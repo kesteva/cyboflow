@@ -20,7 +20,7 @@
  *      human-review step).
  */
 import '@testing-library/jest-dom';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { SprintLaneRow } from '../../../../../shared/types/sprintBatch';
 import type { UseWorkflowPhaseStateResult } from '../../../hooks/useWorkflowPhaseState';
@@ -30,10 +30,14 @@ import type { UseWorkflowPhaseStateResult } from '../../../hooks/useWorkflowPhas
 // SprintLanesPanel.test.tsx's bare-spy pattern.
 // ---------------------------------------------------------------------------
 
-const { unsubscribeSpy, subscribeSpy, lanesQuerySpy } = vi.hoisted(() => ({
+const { unsubscribeSpy, subscribeSpy, lanesQuerySpy, forEntityQuerySpy } = vi.hoisted(() => ({
   unsubscribeSpy: vi.fn(),
   subscribeSpy: vi.fn(),
   lanesQuerySpy: vi.fn(),
+  // Design affordance (Tier 2, item 8c) — a lane header mounts one only when a
+  // sessionKey is passed; default to null (no button) so tests that don't
+  // pass one are unaffected.
+  forEntityQuerySpy: vi.fn().mockResolvedValue(null),
 }));
 
 vi.mock('../../../trpc/client', () => ({
@@ -42,6 +46,13 @@ vi.mock('../../../trpc/client', () => ({
       runs: {
         sprintLanes: { query: lanesQuerySpy },
         onSprintLaneChanged: { subscribe: subscribeSpy },
+      },
+      design: {
+        forEntity: { query: forEntityQuerySpy },
+        snapshotHtml: { query: vi.fn().mockResolvedValue(null) },
+      },
+      ideaComponents: {
+        onComponentsChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
       },
     },
   },
@@ -183,9 +194,14 @@ beforeEach(() => {
   lanesQuerySpy.mockResolvedValue(LANES);
 });
 
-async function renderCanvas() {
+async function renderCanvas(props: { projectId?: number | null; sessionKey?: string } = {}) {
   render(
-    <SprintSwimlaneCanvas runId="run-1" phaseState={PHASE_STATE} sprintStatus="running" />,
+    <SprintSwimlaneCanvas
+      runId="run-1"
+      phaseState={PHASE_STATE}
+      sprintStatus="running"
+      {...props}
+    />,
   );
   // Wait for the lane snapshot to land.
   await screen.findByTestId('swimlane-lane-t1');
@@ -193,6 +209,40 @@ async function renderCanvas() {
 
 const stepStatus = (taskId: string, stepId: string): string | null =>
   screen.getByTestId(`swimlane-step-${taskId}-${stepId}`).getAttribute('data-status');
+
+describe('SprintSwimlaneCanvas — lane header Design affordance (Tier 2, item 8c)', () => {
+  it('renders no Design affordance when no sessionKey is passed (default)', async () => {
+    await renderCanvas();
+    expect(screen.queryByTestId('design-affordance')).not.toBeInTheDocument();
+    expect(forEntityQuerySpy).not.toHaveBeenCalled();
+  });
+
+  it('renders no Design affordance for a lane with no bound design, given a sessionKey', async () => {
+    await renderCanvas({ projectId: 7, sessionKey: 'sess-1' });
+    await waitFor(() => expect(forEntityQuerySpy).toHaveBeenCalled());
+    expect(screen.queryByTestId('design-affordance')).not.toBeInTheDocument();
+  });
+
+  it('renders the Design affordance for lanes whose task has a bound design, given a sessionKey', async () => {
+    forEntityQuerySpy.mockImplementation((args: { entityId: string }) =>
+      Promise.resolve(
+        args.entityId === 't1'
+          ? {
+              ideaId: 'idea-1',
+              ideaRef: 'IDEA-014',
+              ideaTitle: 'Spend flow',
+              approvedAt: '2026-09-10T00:00:00.000Z',
+              source: 'flow',
+              sourceRunId: 'run-1',
+            }
+          : null,
+      ),
+    );
+    await renderCanvas({ projectId: 7, sessionKey: 'sess-1' });
+
+    await waitFor(() => expect(screen.getAllByTestId('design-affordance')).toHaveLength(1));
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Tests

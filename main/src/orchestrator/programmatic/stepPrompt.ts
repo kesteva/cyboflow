@@ -45,7 +45,10 @@
  * resolves them via the host's human-gate path, not the runner).
  */
 import type { WorkflowStep } from '../../../../shared/types/workflows';
-import { PROTOTYPE_HTML_RELPATH } from '../../../../shared/types/artifacts';
+import { DESIGN_SPEC_SECTION_HEADING, PROTOTYPE_HTML_RELPATH } from '../../../../shared/types/artifacts';
+import type { SolutionThoroughness } from '../../../../shared/types/thoroughness';
+import { THOROUGHNESS_BUDGETS } from '../../../../shared/types/thoroughnessBudgets';
+import type { ThoroughnessBudgetAgent } from '../../../../shared/types/thoroughnessBudgets';
 
 export interface ComposeStepPromptArgs {
   step: WorkflowStep;
@@ -100,6 +103,40 @@ export interface ComposeStepPromptArgs {
    * non-verify-setup flow).
    */
   runbookProposal?: string;
+  /**
+   * The APPROVED DESIGNS covering this sprint/ship run's batch — the pre-rendered
+   * `# Design surfaces` block (composeDesignSurfaces), resolved live by the host
+   * for each fresh step turn.
+   *
+   * A design is approved in one run and built in another. The prototype is a RUN
+   * artifact — cascade-deleted with the run that drew it, and unreadable by any
+   * MCP tool a sprint lane holds — so without this section the lane implementing
+   * the screens has never seen the design it must match, and ships placeholders
+   * where the approved mockup shows a finished flow. What survives is the
+   * approved_designs snapshot path plus the idea body's `## Design spec`
+   * section, and this block carries both.
+   *
+   * Rendered for EVERY step of the run, not just implement: task-verify judges
+   * fidelity, sprint-review judges reachability, code-review and address-review
+   * all benefit from knowing what was designed. Absent / empty ⇒ no section, so
+   * a run with no approved design is byte-identical to before this existed.
+   */
+  designSurfaces?: string;
+  /**
+   * The project's declared SOLUTION THOROUGHNESS — the level Launch's interview
+   * captured and the approve-brief gate stamped on the project.
+   *
+   * It exists because every agent in this repo carries a fixed default rigour,
+   * and a fixed default is wrong at both ends: a throwaway prototype gets a
+   * 120-line architecture document and tasks with rollback criteria, while a
+   * production system gets the same review bar as a weekend experiment. The level
+   * is the human's answer to "how finished does this have to be", and rendering
+   * it as a per-agent BUDGET is what makes the answer bind.
+   *
+   * Absent ⇒ no section — every project that predates the stamp, and every flow
+   * that never asked, keeps today's defaults byte-for-byte.
+   */
+  solutionThoroughness?: SolutionThoroughness;
   /**
    * The human's raw `approve-runbook` gate resolution string, when it carries
    * more than a bare verdict. The programmatic plane's gate is an all-or-nothing
@@ -162,6 +199,20 @@ export interface ComposeStepPromptArgs {
    */
   loopbackFeedback?: string;
   /**
+   * A human gate's 'revise' decision, threaded into every step that gate's
+   * loopback re-drives: the gate's id, the human's verbatim note, and the run's
+   * current adversarial-review markdown.
+   *
+   * Deliberately NOT `loopbackFeedback`: that section's wording is hardcoded to
+   * visual verification ("The visual verification of your previous attempt
+   * FAILED"), which on a design revision would be a lie, and the two can in
+   * principle both be live. A distinct heading also lets the re-run agent tell
+   * "a machine check failed" from "a human sent this back".
+   *
+   * Absent on every normal turn ⇒ no section (output unchanged).
+   */
+  gateRevision?: { gateStepId: string; note?: string; reviewMarkdown?: string };
+  /**
    * The most recent preceding AGENT step's final text, for a step whose
    * definition sets `consumesPriorStepOutput`. Rendered as a
    * `## Previous step output` section. Absent ⇒ no section.
@@ -217,8 +268,20 @@ function artifactFollowUp(
   workflowName: string,
 ): string {
   switch (outputArtifact.atype) {
-    case 'ui-prototype':
-      return `\n\n## Artifact to report\n\nYour \`cyboflow-ui-prototype\` subagent writes ONE self-contained static HTML+CSS document — no \`<script>\`, no JS, no dev server — to \`$CYBOFLOW_RUN_ARTIFACTS_DIR/${PROTOTYPE_HTML_RELPATH}\`. When it returns its \`## Prototype\` section confirming that file, call \`cyboflow_report_artifact\` yourself with \`atype: 'ui-prototype'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"fileName": "${PROTOTYPE_HTML_RELPATH}"}\` — that call is the ONLY thing that mints this run's UI-prototype tab. Skipping it leaves the tab permanently empty.`;
+    case 'ui-prototype': {
+      // The subagent returns TWO sections and they have DIFFERENT destinations.
+      // `## Prototype` confirms a file that becomes a RUN artifact — it dies with
+      // the run's artifact cascade and no later flow can read it. `## Design spec`
+      // is the design CONTRACT, and it only outlives the run if this step folds it
+      // into a durable body (the idea, or — on launch, where no idea exists yet —
+      // the brief). Reporting the artifact and dropping the spec is the whole
+      // failure this addendum exists to prevent.
+      const fold =
+        workflowName === 'launch'
+          ? `\n\nThe subagent ALSO returns a \`## ${DESIGN_SPEC_SECTION_HEADING}\` section, and reporting the prototype artifact does NOT persist it. No idea exists yet on this flow, so the brief carries it: take the \`# Project brief\` section above, append the returned \`## ${DESIGN_SPEC_SECTION_HEADING}\` section to it (REPLACE any existing \`## ${DESIGN_SPEC_SECTION_HEADING}\` section, never stack a second copy), and re-report the brief: \`cyboflow_report_artifact\` with \`atype: 'project-brief'\`, label \`"Project brief"\`, and \`payload_json\` \`{"markdown": "<the full updated brief>"}\`. The later ideas step splits that spec across the ideas it creates; without this re-report the prototype's design prose is lost the moment this run's artifacts are cleaned up.`
+          : `\n\nThe subagent ALSO returns a \`## ${DESIGN_SPEC_SECTION_HEADING}\` section, and reporting the prototype artifact does NOT persist it. Fold it into EACH covered idea's body yourself via \`cyboflow_update_task\`: when the body already carries a \`## ${DESIGN_SPEC_SECTION_HEADING}\` section, REPLACE that section (never stack a second copy); otherwise append it. For a combined multi-idea mockup, give each idea the part of the spec describing ITS screens, not the whole document. This section is the design contract every later builder reads — the prototype file itself is a run artifact that no sprint lane can open, so an unfolded spec is a design nobody downstream will ever see.`;
+      return `\n\n## Artifact to report\n\nYour \`cyboflow-ui-prototype\` subagent writes ONE self-contained static HTML+CSS document — no \`<script>\`, no JS, no dev server — to \`$CYBOFLOW_RUN_ARTIFACTS_DIR/${PROTOTYPE_HTML_RELPATH}\`. When it returns its \`## Prototype\` section confirming that file, call \`cyboflow_report_artifact\` yourself with \`atype: 'ui-prototype'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"fileName": "${PROTOTYPE_HTML_RELPATH}"}\` — that call is the ONLY thing that mints this run's UI-prototype tab. Skipping it leaves the tab permanently empty.${fold}`;
+    }
     case 'arch-design':
       // Launch designs the whole concept BEFORE ideas exist, so the section
       // cannot fold into an idea yet — it lives in the project-brief artifact
@@ -229,6 +292,14 @@ function artifactFollowUp(
       return `\n\n## Artifact to report\n\nWhen your \`cyboflow-architecture\` subagent returns its \`## Architecture design\` section, fold it into the IDEA's body yourself via \`cyboflow_update_task\`: if the body already has an \`## Architecture design\` section, REPLACE that section (never stack a second copy); otherwise append it. The arch-design deliverable tab derives from the body automatically, so you do not report an artifact for this step.`;
     case 'project-brief':
       return `\n\n## Artifact to report\n\nWhen your \`cyboflow-interview\` subagent returns its \`## Project brief\`, call \`cyboflow_report_artifact\` yourself with \`atype: 'project-brief'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"markdown": "<the full brief markdown>"}\` — that call is the ONLY thing that mints this run's Project brief tab, and the approve-brief gate has nothing to review without it. Re-report the same atype after any revision to enrich the same tab.`;
+    case 'adversarial-review':
+      // The review's entries are NOT findings at this step. The approve-design
+      // gate is what decides which of them a human accepts as risk, and filing
+      // them here would both pre-empt that decision and park the run behind a
+      // queue of items the very next gate is about to triage. The artifact IS the
+      // channel: it is what the gate body is composed from, and — being one per
+      // atype per run — what a revision round enriches rather than duplicates.
+      return `\n\n## Artifact to report\n\nWhen your \`cyboflow-adversarial-review\` subagent returns its \`## Result\`, compose ONE markdown doc from it and report it — that doc is the ONLY surface the \`approve-design\` gate reviews, and the gate has nothing to show without it.\n\nCompose it with exactly two top-level sections, in this order:\n\n- \`## Blocking\` — the subagent's \`### Blocking\` entries.\n- \`## Findings\` — its \`### Findings\` entries.\n\nCarry every entry across VERBATIM, keeping its \`#### AR-n — <title>\` heading and its \`**Severity:**\` / \`**Area:**\` / \`**What:**\` / \`**Why it matters:**\` / \`**Fix:**\` fields. Do not renumber, merge, summarize, or re-rank them: the \`AR-n\` ids are how the gate's revision round reports back what it resolved, and a re-numbered entry breaks that thread. Keep a section's heading with \`None.\` under it when it is empty.\n\nThen call \`cyboflow_report_artifact\` yourself with \`atype: 'adversarial-review'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"markdown": "<the doc>"}\`. Re-reporting the same atype ENRICHES the same tab, so a re-review after a revision replaces the document rather than stacking a second one.\n\nDo NOT call \`cyboflow_report_finding\` at this step — not for a blocking entry, not for an advisory one, not as a \`decision\`. The approve-design gate decides what becomes a finding: on Approve every entry is logged as an accepted-risk finding, and on Revise the design steps re-run against them. Filing them here pre-empts that decision and buries the human under items the very next gate was about to triage. Likewise do not "auto-fix" a blocking entry yourself by editing a spec or re-running a design step — this step reviews and reports; the gate routes.`;
     case 'verify-runbook':
       return `\n\n## Artifact to report\n\nWhen your \`cyboflow-verify-setup\` subagent returns its \`## Runbook draft\`, \`## Rung ladder\`, and \`## Open risks\` sections, compose ONE proposal doc — the ONLY surface the \`approve-runbook\` gate reviews — with exactly these three top-level sections, in this order:\n\n- \`## Runbook\` — per declared modality: the \`build\` steps, the \`serve\` form, the REQUIRED \`attestation\` spec, and the behaviors that will serve as the proof. Show the PORTABLE half verbatim (it is what gets committed) and list the machine-local bindings separately, saying plainly that those stay on this machine. Levers stay as \${PORT}-style placeholders — never a resolved port, never a temp dir, never an install or native-rebuild command.\n- \`## Repo changes\` — grouped \`### Rung 0 (no change)\` / \`### Rung 1 (config only)\` / \`### Rung 2 (proposed diff)\`, in that order. Keep every heading even when a rung is empty and write \`None.\` — the human should SEE which rungs you cleared, not guess. Every rung-2 entry names the exact file, what it replaces, and the verbatim proposed change.\n- \`## Risks\` — what could still make the proof fail, and what the fallback is.\n\nThen call \`cyboflow_report_artifact\` yourself with \`atype: 'verify-runbook'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"markdown": "<the doc>"}\`. That call is the ONLY thing that mints this run's proposal tab, and the approve-runbook gate has nothing to review without it. It is also the ONLY channel by which the later \`prove\` step can see what you drafted: every step is a fresh agent turn with no memory of this one and no tool that can read your prose, so anything you leave out of this doc is lost.\n\nThis is NOT a Compound run: do not compose \`## Act on\` / \`## Discarded\` sections, do not delegate to \`cyboflow-compounder\`, and do not propose CLAUDE.md or docs edits. Write NOTHING to the repo at this step — nothing is registered and nothing is committed until the human approves.`;
     case 'compound-recommendations':
@@ -254,9 +325,17 @@ function artifactFollowUp(
 function ideaFlagContract(step: WorkflowStep): string {
   switch (step.id) {
     case 'ideas':
-      return `\n\n## Idea persistence contract\n\nYour subagent returns each idea with flag lines — \`SCOPE:\`, \`BUILD_ORDER:\`. When you persist an idea via \`cyboflow_create_task\`, its \`body\` MUST include those flag lines VERBATIM (keep them at the end of the stub), and pass \`scope\` as the entity field too. Later steps read the flags off the persisted body — an idea saved without them loses its build ordering. Additionally: when the \`# Project brief\` section above carries an \`## Architecture design\` section, fold that section into the LOWEST \`BUILD_ORDER\` idea's body via \`cyboflow_update_task\` after creating it (replace any existing section, never stack a second copy) — the foundation idea carries the project's architecture from here on, and its arch-design tab derives from it automatically.`;
+      return `\n\n## Idea persistence contract\n\nYour subagent returns each idea with flag lines — \`SCOPE:\`, \`BUILD_ORDER:\`. When you persist an idea via \`cyboflow_create_task\`, its \`body\` MUST include those flag lines VERBATIM (keep them at the end of the stub), and pass \`scope\` as the entity field too. Later steps read the flags off the persisted body — an idea saved without them loses its build ordering. Additionally: when the \`# Project brief\` section above carries an \`## Architecture design\` section, fold that section into the LOWEST \`BUILD_ORDER\` idea's body via \`cyboflow_update_task\` after creating it (replace any existing section, never stack a second copy) — the foundation idea carries the project's architecture from here on, and its arch-design tab derives from it automatically.\n\nWhen the brief carries a \`## ${DESIGN_SPEC_SECTION_HEADING}\` section (the design phase's prototype pass wrote it there), EVERY idea you create whose scope includes one of its screens MUST carry its OWN \`## ${DESIGN_SPEC_SECTION_HEADING}\` section listing just that idea's screens, copied from the brief's spec — the same screen name, navigation path, states, and verbatim copy strings. Split the brief's spec across the ideas; do not paste the whole document into each one, and do not leave it only in the brief (a sprint lane reads the IDEA, never the brief). Every screen the brief's design spec names must end up owned by exactly one idea, and an idea that owns a screen must say in its body that the screen is reachable from the app's entry point — never write that a control is a placeholder, does nothing, or performs no navigation.`;
     case 'expand-spec':
-      return `\n\n## Idea persistence contract\n\nIf an idea's current body carries flag lines (e.g. \`SCOPE:\` / \`BUILD_ORDER:\` / \`UI_PROTOTYPE:\` / \`ARCH_DESIGN:\`) or an \`## Architecture design\` section, the expanded body you write back via \`cyboflow_update_task\` MUST preserve those VERBATIM. Downstream steps read them off the persisted body — dropping them during expansion silently breaks design conditioning and build ordering.`;
+      // The preserve-list is a CLOSED enumeration, so anything absent from it is
+      // clobbered by the rewrite. `## Design spec` is named here because on launch
+      // the design phase runs BEFORE this step: the ideas step writes each idea's
+      // design prose and expand-spec rewrites that same body afterwards, so an
+      // unnamed section is written and then destroyed on exactly the flow it was
+      // built for. Worse than the text loss, the rewrite MATERIALIZES stale ledger
+      // rows for the whole downstream set (see the component-ledger contract), and
+      // a materialized row beats derivation permanently.
+      return `\n\n## Idea persistence contract\n\nIf an idea's current body carries flag lines (e.g. \`SCOPE:\` / \`BUILD_ORDER:\` / \`UI_PROTOTYPE:\` / \`ARCH_DESIGN:\`), an \`## Architecture design\` section, or a \`## ${DESIGN_SPEC_SECTION_HEADING}\` section, the expanded body you write back via \`cyboflow_update_task\` MUST preserve those VERBATIM. Downstream steps read them off the persisted body — dropping them during expansion silently breaks design conditioning and build ordering, and discards the design contract the builders match their screens against.`;
     default:
       return '';
   }
@@ -288,9 +367,19 @@ function ideaLedgerContract(step: WorkflowStep, workflowName: string): string {
   const H = '\n\n## Component ledger (launch)\n\n';
   switch (step.id) {
     case 'ideas':
-      return `${H}After you fold the brief's \`## Architecture design\` section into the LOWEST \`BUILD_ORDER\` idea, stamp that idea: \`cyboflow_set_idea_component(idea_id: <that idea>, component: 'architecture', state: 'complete')\` — AFTER the \`cyboflow_update_task\` body write, never before (the body write is what marks downstream components stale, and the stamp is what clears the flag). Stamp \`architecture\` on that ONE idea only: the others carry no architecture section of their own, and a ledger reading \`complete\` over a body without the section sends the next run hunting for work that does not exist. Do NOT stamp \`prototype\` on any idea — launch's prototype pass ran once on the whole concept and lives in a run artifact belonging to no idea, so \`incomplete\` is the truthful state; \`skipped\` would read as "declared not applicable" and tell every later run never to prototype these ideas.`;
+      // `prototype` stays narrowed even though the approve-ideas gate now binds an
+      // approved_designs row to EVERY approved idea (gateSideEffects). The bind's
+      // durable value is the SNAPSHOT PATH — it survives the run's artifact cascade
+      // delete, which is what a later builder actually needs. The ledger is a
+      // different claim: a ledger ROW is authoritative over derivation (migration
+      // 101), so stamping every approved idea `complete` off ONE whole-concept
+      // mockup permanently tells every later Planner run that idea #7's screens are
+      // designed when the concept mockup may not show them at all. The stamp is
+      // therefore gated on the idea carrying its OWN design-spec section, which is
+      // the only evidence that THIS idea's screens were designed.
+      return `${H}After you fold the brief's \`## Architecture design\` section into the LOWEST \`BUILD_ORDER\` idea, stamp that idea: \`cyboflow_set_idea_component(idea_id: <that idea>, component: 'architecture', state: 'complete')\` — AFTER the \`cyboflow_update_task\` body write, never before (the body write is what marks downstream components stale, and the stamp is what clears the flag). Stamp \`architecture\` on that ONE idea only: the others carry no architecture section of their own, and a ledger reading \`complete\` over a body without the section sends the next run hunting for work that does not exist.\n\nFor \`prototype\`: stamp \`complete\` ONLY on an idea whose body you gave its own \`## ${DESIGN_SPEC_SECTION_HEADING}\` section above — for that idea the claim "this idea's screens are designed" is true and evidenced by the section. Leave every OTHER idea unstamped: launch's prototype pass ran once over the whole concept, and \`incomplete\` is the truthful state for an idea it never drew, while \`skipped\` would read as "declared not applicable" and tell every later run never to prototype it. Never stamp \`prototype\` on an idea with no design-spec section of its own, however the gate resolved.`;
     case 'expand-spec':
-      return `${H}For EACH idea you expand, immediately AFTER that idea's \`cyboflow_update_task\` body write lands — per idea as you finish it, never once at the end for the batch, and never before the write:\n\n- \`cyboflow_set_idea_component(idea_id: <the idea>, component: 'idea-spec', state: 'complete')\`.\n- On the ONE idea carrying the folded \`## Architecture design\` section, ALSO re-stamp \`component: 'architecture', state: 'complete'\`. This is not redundant with the \`ideas\` step's stamp: replacing the stub with \`## Idea spec\` registers as a spec change, which marks the whole downstream set (architecture, prototype, epics, stories) stale by MATERIALIZING a ledger row for each — and a materialized row wins over derivation permanently. The architecture section itself was preserved verbatim, so it is still valid; without the re-stamp the idea ends the run reading "architecture needs review" over a body that carries a perfectly good architecture section.\n\nAn unstamped component is indistinguishable from work never done, so the next Planner run on this idea rewrites the spec you just wrote.`;
+      return `${H}For EACH idea you expand, immediately AFTER that idea's \`cyboflow_update_task\` body write lands — per idea as you finish it, never once at the end for the batch, and never before the write:\n\n- \`cyboflow_set_idea_component(idea_id: <the idea>, component: 'idea-spec', state: 'complete')\`.\n- On the ONE idea carrying the folded \`## Architecture design\` section, ALSO re-stamp \`component: 'architecture', state: 'complete'\`. This is not redundant with the \`ideas\` step's stamp: replacing the stub with \`## Idea spec\` registers as a spec change, which marks the whole downstream set (architecture, prototype, epics, stories) stale by MATERIALIZING a ledger row for each — and a materialized row wins over derivation permanently. The architecture section itself was preserved verbatim, so it is still valid; without the re-stamp the idea ends the run reading "architecture needs review" over a body that carries a perfectly good architecture section.\n- On EACH idea that both carries a \`## ${DESIGN_SPEC_SECTION_HEADING}\` section (you preserved it verbatim per the persistence contract) and already has an approved design bound to it — \`cyboflow_get_task\` reports one under \`approved_design\` — ALSO re-stamp \`component: 'prototype', state: 'complete'\`, for exactly the reason above: your rewrite marked it stale, the design it refers to did not change, and leaving it stale sends the next run to re-prototype a screen that is already designed and approved. Do NOT stamp \`prototype\` on an idea missing either half.\n\nAn unstamped component is indistinguishable from work never done, so the next Planner run on this idea rewrites the spec you just wrote.`;
     case 'epics':
       return `${H}Do NOT stamp the \`epics\` component here. An idea's epic situation is not settled until the \`tasks\` step, which mints a fallback epic for any idea that turns out to have more than one task — a \`skipped\` stamped now would be wrong for every idea that is about to get one. The \`tasks\` step stamps both \`epics\` and \`stories\`.`;
     case 'tasks':
@@ -364,6 +453,29 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
     args.projectBrief !== undefined && args.projectBrief.trim().length > 0
       ? `\n\n# Project brief\n\nThe run's APPROVED project brief — the constitution every post-brief step grounds in (a programmatic step turn cannot read artifacts, so it is threaded here):\n\n${args.projectBrief.trim()}`
       : '';
+  // Rendered immediately AFTER `# Project brief`: both are run-level grounding a
+  // fresh step turn cannot fetch for itself, and the brief (when present) is the
+  // wider context the designs sit inside.
+  const designSurfaces =
+    args.designSurfaces !== undefined && args.designSurfaces.trim().length > 0
+      ? `\n\n${args.designSurfaces.trim()}`
+      : '';
+  // Only the budget lines for THIS step's agent render: an implement turn has no
+  // use for the architecture ceiling, and a prompt that lists every agent's budget
+  // teaches the agent to skim the section it actually has to obey. An agent with
+  // no entry at this level renders the level line alone — still useful context,
+  // and honest about there being no extra constraint.
+  const thoroughness = args.solutionThoroughness;
+  const thoroughnessBudget =
+    thoroughness !== undefined
+      ? THOROUGHNESS_BUDGETS[thoroughness][step.agent as ThoroughnessBudgetAgent]
+      : undefined;
+  const solutionThoroughness =
+    thoroughness === undefined
+      ? ''
+      : `\n\n# Solution thoroughness: ${thoroughness}\n\nThe human set this project's thoroughness to **${thoroughness}**. It is a deliberate choice about how finished this software has to be, not a hint${
+          thoroughnessBudget !== undefined ? ', and the budget below OVERRIDES your role\'s defaults wherever the two disagree' : ''
+        }.${thoroughnessBudget !== undefined ? `\n\n${thoroughnessBudget}` : ''}`;
   const runbookProposal =
     args.runbookProposal !== undefined && args.runbookProposal.trim().length > 0
       ? `\n\n# Approved runbook proposal\n\nThis run's \`derive\` step published this proposal and the human APPROVED it at the \`approve-runbook\` gate. It is authoritative — write the runbook, the machine-local bindings, and the rung-1/rung-2 edits exactly as they stand here. Do NOT re-derive, re-survey, or "improve" any command, attestation, or lever: a proposal the human approved and a runbook you re-invented are different documents, and only the first was reviewed. If something in it is genuinely wrong, say so in your summary and fire the proof against it anyway so the failure is diagnosed against what was approved.\n\n` + args.runbookProposal.trim()
@@ -503,9 +615,30 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
       ? `\n\n## Visual verification failed (previous attempt)\n\nThe visual verification of your previous attempt FAILED. Fix the issues it reports before re-running — here is its report verbatim:\n\n${args.loopbackFeedback.trim()}`
       : '';
 
+  // Human gate 'revise' feedback. Distinct from loopbackFeedback (visual
+  // verification) on purpose — see ComposeStepPromptArgs.gateRevision. Byte-gated:
+  // absent on every turn no gate sent back.
+  const revision = args.gateRevision;
+  const revisionNote = (revision?.note ?? '').trim();
+  const revisionReview = (revision?.reviewMarkdown ?? '').trim();
+  const gateRevision =
+    revision === undefined
+      ? ''
+      : `\n\n## Design gate: revision requested\n\nA human reviewed this run's design at the \`${revision.gateStepId}\` gate and sent it back. You are part of the RE-RUN: your previous output was not accepted, and repeating it unchanged wastes the revision. Produce a revised result that answers what is below, and say plainly in your summary what you changed.${
+          revisionNote.length > 0
+            ? `\n\nThe reviewer's own words, verbatim — this is the authoritative instruction and it outranks the review below where the two disagree:\n\n> ${revisionNote.replace(/\n/g, '\n> ')}`
+            : revisionReview.length > 0
+              ? `\n\nThe reviewer left no note beyond the decision, so the adversarial review below is your specification for what to fix.`
+              : `\n\nThe reviewer left no note and this run has no adversarial review to work from, so you have the decision and nothing else. Re-examine your previous output against the spec and the brief, fix what you judge weakest, and state that judgement explicitly in your summary — do NOT re-emit the same result and do NOT ask a question; nothing in this step can answer one.`
+        }${
+          revisionReview.length > 0
+            ? `\n\n### Adversarial review of the previous round\n\nAddress EVERY entry under \`## Blocking\`. State in your output which \`AR-n\` ids you resolved and how; an id you deliberately did not resolve must be named with your reason, never silently dropped. Entries under \`## Findings\` are advisory — fix them when cheap.\n\n${revisionReview}`
+            : ''
+        }`;
+
   return `You are executing **one step** of the "${workflowName}" workflow in this git worktree.
 
-Step: **${step.name}** (id: \`${step.id}\`)${desc}${itemNote}${taskScope}${projectBrief}${runbookProposal}${approveRunbookResolution}${runOwnedIdeaScope}${approveIdeasDecisions}
+Step: **${step.name}** (id: \`${step.id}\`)${desc}${itemNote}${taskScope}${solutionThoroughness}${projectBrief}${designSurfaces}${runbookProposal}${approveRunbookResolution}${runOwnedIdeaScope}${approveIdeasDecisions}
 
 Do ONLY this step:
 
@@ -513,5 +646,5 @@ Do ONLY this step:
 2. **Commit file changes atomically.** If this step changes repository files, make ONE git commit (\`<type>: <what changed>\`), staging only the files this step touched. For DB-only, analysis, review, or artifact-reporting work, do not make a git commit. Never create an empty commit.
 3. **Stop.** Do NOT start any other step — the host orchestrator sequences the workflow and will invoke the next step itself. Report a one-line summary of what this step produced, then end your turn.
 
-The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${ideaFlagContractNote}${ideaLedgerContractNote}${compoundGuard}${artifactNote}${proveContract}${taskVerifyRelayNote}${addressReviewNote}${bootstrapDenylistNote}${userGuidance}${contractError}${priorStepOutput}${loopbackFeedback}${retryNote}`;
+The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${conditionalExecutionNote}${ideaFlagContractNote}${ideaLedgerContractNote}${compoundGuard}${artifactNote}${proveContract}${taskVerifyRelayNote}${addressReviewNote}${bootstrapDenylistNote}${userGuidance}${gateRevision}${contractError}${priorStepOutput}${loopbackFeedback}${retryNote}`;
 }

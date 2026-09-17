@@ -1894,22 +1894,30 @@ describe('McpQueryHandler', () => {
       // that never touch design sessions. The fixture's minimal schema has no
       // `sessions`/`artifacts` tables (006 doesn't create them), so this seeds
       // ONLY the approved_designs table verbatim from migration 085 (its other
-      // statements ALTER those two tables and would fail against this fixture).
+      // statements ALTER those two tables and would fail against this fixture),
+      // in its POST-134 shape: handoff_id/session_id NULLable, plus the
+      // `source`/`source_run_id` provenance columns the read model now SELECTs
+      // (an omission here reads back as "no such column: source" on EVERY
+      // mcp-get-task, not just the design ones).
       db.exec(`
         CREATE TABLE approved_designs (
           id TEXT PRIMARY KEY,
           idea_id TEXT NOT NULL,
           project_id INTEGER NOT NULL,
-          handoff_id TEXT NOT NULL,
-          session_id TEXT NOT NULL,
-          draft_revision INTEGER NOT NULL,
+          handoff_id TEXT,
+          session_id TEXT,
+          draft_revision INTEGER NOT NULL DEFAULT 0,
           prototype_artifact_id TEXT NOT NULL,
           prototype_revision INTEGER NOT NULL,
           snapshot_path TEXT NOT NULL,
           approved_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          superseded_at DATETIME
+          superseded_at DATETIME,
+          source TEXT NOT NULL DEFAULT 'design-mode' CHECK (source IN ('design-mode','flow')),
+          source_run_id TEXT
         );
         CREATE INDEX idx_approved_designs_idea ON approved_designs(idea_id);
+        CREATE UNIQUE INDEX idx_approved_designs_current
+          ON approved_designs(idea_id) WHERE superseded_at IS NULL;
       `);
       // Migration 101 (idea component ledger): handleGetTask now unconditionally
       // resolves cyboflow_get_task's 'components' for every idea via
@@ -2457,10 +2465,43 @@ describe('McpQueryHandler', () => {
           draft_revision: seeded.draftRevision,
           prototype_revision: seeded.prototypeRevision,
           snapshot_path: resolve(seeded.snapshotPath),
+          // Provenance (migration 134): a reading agent uses it to tell a
+          // hand-refined Design Mode approval from a flow's generated concept
+          // mockup. A design-mode row names no run.
+          source: 'design-mode',
+          source_run_id: null,
         });
         expect(isAbsolute((data.task['approved_design'] as Record<string, unknown>)['snapshot_path'] as string)).toBe(
           true,
         );
+      });
+
+      it('surfaces the FLOW provenance for a design a workflow run bound', async () => {
+        listSeedRun(listDb, 'run-get-des-flow');
+        const idea = await createEntity('run-get-des-flow', 'Idea a flow designed');
+        listDb
+          .prepare(
+            `INSERT INTO approved_designs
+               (id, idea_id, project_id, handoff_id, session_id, draft_revision,
+                prototype_artifact_id, prototype_revision, snapshot_path, approved_at,
+                superseded_at, source, source_run_id)
+             VALUES ('apd_flow', ?, 1, NULL, NULL, 0, 'art_flow', 4,
+                     '/tmp/design-snapshots/flow.html', '2026-09-15T00:00:00.000Z', NULL,
+                     'flow', 'run-get-des-flow')`,
+          )
+          .run(idea.id);
+
+        const { socket, writes } = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-get-task', requestId: 'gt-des-flow', runId: 'run-get-des-flow', taskId: idea.id },
+          socket,
+        );
+
+        const data = parseLastWrite(writes).data as { task: Record<string, unknown> };
+        expect(data.task['approved_design']).toMatchObject({
+          source: 'flow',
+          source_run_id: 'run-get-des-flow',
+        });
       });
 
       it('omits approved_design for an idea that has never been approved', async () => {

@@ -131,6 +131,7 @@ import { ArtifactRouter } from './orchestrator/artifactRouter';
 import { setRunArtifactsDirResolver } from './orchestrator/autoMintArtifacts';
 import { resolveArtifactCommitDir } from './orchestrator/artifactSnapshot';
 import { DesignHandoffService } from './orchestrator/design/designHandoffService';
+import { GateSideEffects, gateDecisionFromResolution } from './orchestrator/gateSideEffects';
 import { recoverDesignHandoffs } from './orchestrator/design/designHandoffRecovery';
 import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
@@ -274,7 +275,7 @@ import { makePairwiseJudgeQuery } from './orchestrator/eval/pairwiseJudgeQuery';
 import { handleTerminalStatusEvent } from './orchestrator/terminalEvalSubscriber';
 import { resolveRunFrozenSpec } from './orchestrator/runFrozenSpec';
 import type { WorkflowStepTransitionEvent } from '../../shared/types/workflows';
-import type { RunGitDiff } from '../../shared/types/runFiles';
+import type { RunGitDiff, WorktreeStatusPayload } from '../../shared/types/runFiles';
 import type { RunStatusChangedEvent } from '../../shared/types/cyboflow';
 import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../shared/types/cyboflow';
 import { cancelRunHandler } from './orchestrator/cancelRunHandler';
@@ -289,6 +290,12 @@ import {
   type ProposalExecutorDeps,
   type TaskFieldsSnapshot,
 } from './orchestrator/agentThread/proposalExecutor';
+import { prepareProposal, createPrepareProposalDeps } from './orchestrator/agentThread/prepareProposal';
+import { CustomViewsDbStore } from './orchestrator/customViews/customViewsStore';
+import { createCustomViewsService, type CustomViewsServiceLike } from './orchestrator/customViews/customViewsService';
+import { CATALOG_WIDGET_SPECS } from '../../shared/customViews/catalogSpecs';
+import { WIDGET_THEME_TOKENS } from '../../shared/customViews/theme';
+import { CustomWidgetServerManager } from './services/customWidgetServer';
 import {
   DESIGN_MODE_KICKOFF_PROMPT,
   finishDesignSessionCreate,
@@ -352,7 +359,7 @@ import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs, flushDevDebugLogs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
 import { getBootDatabasePath, getDemoBootEnvironment, getDemoBootError } from './services/demo/demoBootstrap';
-import { runGitAsync } from './utils/runGit';
+import { runGitAsync, END_OF_OPTIONS, assertNotOptionLike } from './utils/runGit';
 import { resolveGitCommand } from './utils/gitExeFinder';
 import { setStreamParserPerfBump } from '../../shared/streamParser';
 import { setProjectPermissionTrustResolver } from './orchestrator/permissionRules';
@@ -532,6 +539,15 @@ let runExecutor: RunExecutor;
 // guards on it.
 let agentThreadStore: AgentThreadDbStore;
 let agentThreadService: AgentThreadService | null = null;
+// Custom Views (migration 132, docs/proposals/CUSTOM-VIEWS.md §9 row S3).
+// Built in initializeServices() right after agentThreadStore (same cyboflowDb,
+// same "store before anything reaches for it" ordering) and read later by the
+// tRPC createContext block + the widget server's loadWidget — hence module
+// scope. customViewsService closes over agentThreadStore/agentThreadService
+// LAZILY (ensureGlobalThreadId reads the module var at call time), so it is
+// safe to construct before agentThreadService exists.
+let customViewsStore: CustomViewsDbStore | null = null;
+let customViewsService: CustomViewsServiceLike | null = null;
 // Monitor-actuation seam (retry_step): bound in the tRPC dep-wiring block —
 // where db/runQueues/runExecutor are all live — to the SAME retryRunHandler
 // chokepoint the runs.retryStep mutation uses. The monitorFactory (built earlier,
@@ -677,6 +693,11 @@ const prototypeServerReaper = new PrototypeServerReaper();
 // instance. Constructed in initializeServices (its HTML loader needs `services`),
 // so it is null until boot finishes wiring.
 let designPrototypeServerManager: DesignPrototypeServerManager | null = null;
+// Custom Views tier-3 widget document server (docs/proposals/CUSTOM-VIEWS.md
+// §5.4) — a single PROCESS-GLOBAL server, unlike the per-run prototype server
+// above. Constructed alongside it (same watchdog) so both share one frame
+// watchdog instance; stopped at the same two teardown sites.
+let customWidgetServerManager: CustomWidgetServerManager | null = null;
 
 // Design Mode v1 design-feedback delivery pipeline (design-mode.md "Design
 // feedback v1 — acknowledged durable outbox"). Module-level so the deferred boot
@@ -980,6 +1001,46 @@ let sessionGitOps: SessionGitOpsLike | undefined;
 let sessionOps: SessionOpsLike | undefined;
 
 /**
+ * Resolve a caller-supplied ref (branch, tag, sha) to a concrete commit sha for
+ * the run-scoped `gitDiff` context closure (TASK-211), or `null` when the ref is
+ * falsy or fails to resolve. Mirrors GitDiffManager's private
+ * `resolveRefForDiff` (TASK-208 ref-safety discipline) rather than reaching into
+ * that class's internals: `END_OF_OPTIONS` forces the ref into a value position
+ * and `^{commit}` forces a commit-ish resolution that an option-like string can
+ * never satisfy.
+ */
+async function resolveGitRefToSha(worktreePath: string, ref: string | undefined): Promise<string | null> {
+  if (!ref) return null;
+  try {
+    assertNotOptionLike(ref, 'diff ref');
+    const resolved = (
+      await runGitAsync(worktreePath, ['rev-parse', '--verify', END_OF_OPTIONS, `${ref}^{commit}`])
+    ).trim();
+    return resolved || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A `WorktreeStatusPayload` stub for callers that capture a `RunGitDiff` but
+ * have no meaningful worktree status to report (e.g. the eval snapshot's
+ * fail-soft closure, TASK-211). Still declares all four `DiffGroupScope`
+ * groups (zeroed) per WorktreeStatusPayload's fixed-shape doc comment, rather
+ * than an empty `groups` array.
+ */
+const EMPTY_WORKTREE_STATUS: WorktreeStatusPayload = {
+  entries: [],
+  groups: [
+    { scope: 'unstaged', files: [], additions: 0, deletions: 0 },
+    { scope: 'staged', files: [], additions: 0, deletions: 0 },
+    { scope: 'untracked', files: [], additions: 0, deletions: 0 },
+    { scope: 'committed', files: [], additions: 0, deletions: 0 },
+  ],
+  committedUnavailable: true,
+};
+
+/**
  * Bind the single orchestrator tRPC IPC handler to a BrowserWindow.
  *
  * Called from createWindow() BEFORE the renderer loads (the first window) and
@@ -1033,15 +1094,35 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         getSprintMaxTasks: () => configManager.getSprintMaxTasks(),
         // Run-scoped Diff tab: closure over GitDiffManager keeps the standalone
         // runs router free of a services/* import. Narrow the GitDiffResult down
-        // to the RunGitDiff wire shape (diff + stats + changedFiles).
-        gitDiff: async (worktreePath: string, baseRef?: string) => {
-          // With the run's base_sha, diff the working tree against it so commits
-          // made since launch (e.g. sprint/ship merging task lanes) show too;
-          // without it, fall back to the working-directory diff (vs HEAD).
-          const result = baseRef
-            ? await gitDiffManager.captureDiffAgainstRef(worktreePath, baseRef)
-            : await gitDiffManager.captureWorkingDirectoryDiff(worktreePath);
-          return { diff: result.diff, stats: result.stats, changedFiles: result.changedFiles };
+        // to the RunGitDiff wire shape (diff + stats + changedFiles + resolvedBase
+        // + worktree). `comparisonRef` (TASK-211) takes priority over `baseRef`
+        // when both are supplied.
+        gitDiff: async (worktreePath: string, baseRef?: string, comparisonRef?: string) => {
+          // Resolve whichever ref was requested to a concrete sha FIRST, so
+          // `resolvedBase` and the diff/groups below are all computed against the
+          // exact same base by construction.
+          const resolvedBase = await resolveGitRefToSha(worktreePath, comparisonRef ?? baseRef);
+          // With a resolved ref, diff the working tree against it so commits made
+          // since launch (e.g. sprint/ship merging task lanes) show too; without
+          // one, fall back to the working-directory diff (vs HEAD).
+          const [result, entries, diffGroups] = await Promise.all([
+            resolvedBase
+              ? gitDiffManager.captureDiffAgainstRef(worktreePath, resolvedBase)
+              : gitDiffManager.captureWorkingDirectoryDiff(worktreePath),
+            gitDiffManager.getWorktreeStatus(worktreePath),
+            gitDiffManager.getDiffGroups(worktreePath, resolvedBase),
+          ]);
+          return {
+            diff: result.diff,
+            stats: result.stats,
+            changedFiles: result.changedFiles,
+            resolvedBase,
+            worktree: {
+              entries,
+              groups: diffGroups.groups,
+              committedUnavailable: diffGroups.committedUnavailable,
+            },
+          };
         },
         // Global-agent chat thread (migration 074). The service is null only when
         // the default CLI manager is not a ClaudeCodeManager; the router guards on
@@ -1064,6 +1145,15 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         // initializeServices.
         sessionGitOps,
         sessionOps,
+        // Custom Views (migration 132). Built in initializeServices(), read
+        // from the module-scope holder at REQUEST time — same lazy pattern as
+        // sessionGitOps/sessionOps above.
+        customViews: customViewsService ?? undefined,
+        // Custom Views tier-3 widget document server — built alongside the
+        // design-prototype server below (module-scope holder read lazily, same
+        // pattern). CustomWidgetServerManager.ensure/stop already match
+        // CustomWidgetServerLike's shape, so no adapter is needed.
+        customWidgetServer: customWidgetServerManager ?? undefined,
       }),
   });
 }
@@ -1383,6 +1473,10 @@ async function createWindow() {
     // gone). Fail-soft and out-of-band, so it fires server-stopped for any still
     // alive; the renderer is already down, so those notifies are no-ops.
     void designPrototypeServerManager?.stopAll();
+    // The Custom Views widget server is process-global, not window-scoped, but
+    // no frame can reach it once the window is gone — stop it alongside the
+    // prototype servers rather than leave it listening on an orphaned port.
+    void customWidgetServerManager?.stop();
     mainWindow = null;
   });
 
@@ -3009,10 +3103,20 @@ async function initializeServices(): Promise<boolean> {
     baseRef?: string,
   ): Promise<RunGitDiff | null> => {
     try {
-      const result = baseRef
-        ? await gitDiffManager.captureDiffAgainstRef(worktreePath, baseRef)
+      // Resolve to a sha for `resolvedBase` (TASK-211) even though this closure
+      // has no meaningful worktree-status view to report — see
+      // EMPTY_WORKTREE_STATUS above.
+      const resolvedBase = await resolveGitRefToSha(worktreePath, baseRef);
+      const result = resolvedBase
+        ? await gitDiffManager.captureDiffAgainstRef(worktreePath, resolvedBase)
         : await gitDiffManager.captureWorkingDirectoryDiff(worktreePath);
-      return { diff: result.diff, stats: result.stats, changedFiles: result.changedFiles };
+      return {
+        diff: result.diff,
+        stats: result.stats,
+        changedFiles: result.changedFiles,
+        resolvedBase,
+        worktree: EMPTY_WORKTREE_STATUS,
+      };
     } catch (err) {
       cyboflowLogger?.warn?.(
         `[eval] gitDiff closure failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -3252,6 +3356,31 @@ async function initializeServices(): Promise<boolean> {
   // (app.whenReady, below) and injected into the tRPC context — one store, one DB.
   agentThreadStore = new AgentThreadDbStore(cyboflowDb);
 
+  // Custom Views service (migration 132, docs/proposals/CUSTOM-VIEWS.md §9 row
+  // S3) — built right here so index.ts wiring stays the ONE call
+  // createCustomViewsService documents: the store (this DB), the built-in
+  // catalog specs (shared, so the widget action service can resolve a
+  // `{type:'catalog'}` ref the same way runWidget does), and the three
+  // proposal-preparation closures the widget action service shares with the
+  // MCP cyboflow_propose_action handler (prepareProposal.ts). Every closure
+  // below reads its module-scope target LAZILY (agentThreadService may not
+  // exist yet; the executor deps holder is set later in app.whenReady), so
+  // construction order here is safe.
+  customViewsStore = new CustomViewsDbStore(cyboflowDb);
+  customViewsService = createCustomViewsService({
+    db: cyboflowDb,
+    store: customViewsStore,
+    catalogSpecs: CATALOG_WIDGET_SPECS,
+    ensureGlobalThreadId: () => {
+      if (!agentThreadService) throw new Error('assistant_unavailable');
+      return agentThreadService.ensureGlobalThread().id;
+    },
+    createProposal: (input) => agentThreadStore.createProposal(input),
+    prepare: (raw) => prepareProposal(createPrepareProposalDeps(cyboflowDb), raw),
+    execute: (proposalId) => executeProposal(getProposalExecutorDeps(), proposalId),
+    getProposal: (id) => agentThreadStore.getProposal(id),
+  });
+
   // OrchSocketServer — the orchestrator-side half of the Cyboflow MCP IPC link.
   // Stands up the Unix-domain socket under ~/.cyboflow/sockets/orch.sock that the
   // spawned cyboflowMcpServer subprocess(es) connect back to so the cyboflow_*
@@ -3275,6 +3404,13 @@ async function initializeServices(): Promise<boolean> {
       // handler fails closed (returns an error) — so it must be the SAME instance
       // the executor + tRPC context read.
       agentThreadStore,
+      // Custom-widget-authoring global-agent tools (cyboflow_db_schema /
+      // _widget_preview / _widget_save, docs/proposals/CUSTOM-VIEWS.md §9 row
+      // S6): the SAME `customViewsService` instance constructed above, so a
+      // saved widget draft is visible to the exact service the renderer's
+      // tRPC router reads. Absent only if this handler runs before boot
+      // wiring completes (never the case in production).
+      customViews: customViewsService ?? undefined,
       // Global-agent scoped filesystem tools (cyboflow_fs_read / _list / _grep):
       // the always-included roots are the registered project paths; this dep
       // supplies the user-configured EXTRA folders on top. Absent ⇒ [] (project
@@ -3583,7 +3719,33 @@ async function initializeServices(): Promise<boolean> {
         void buildStepTransitionEvent(runId, stepId, status, cyboflowDb, cyboflowLogger),
     },
     gate: new ReviewQueueHumanGate(
-      HumanStepManager.getInstance(),
+      // The opener is HumanStepManager plus ONE extra hook. `onGateResolved` is
+      // awaited inside ReviewQueueHumanGate.settleResumed BEFORE the gate promise
+      // resolves — the single seam the controller genuinely waits on, which is why
+      // the design bind lands here rather than after resolveReviewItem returns.
+      // Anything hung off the resolve would race the resumed walk: the review-item
+      // router's 'resolved' emit fires synchronously inside it and is what wakes
+      // the gate, so by the time the resolve returns the next step is already
+      // spawning and its `cyboflow_get_task` may see no approved_design at all.
+      // GateSideEffects.apply is idempotent and never throws, so awaiting it here
+      // can never hang a run at a gate the human already answered.
+      {
+        openHumanGate: (runId, stepId, stepName) =>
+          HumanStepManager.getInstance().openHumanGate(runId, stepId, stepName),
+        findPendingGate: (runId, stepId) => HumanStepManager.getInstance().findPendingGate(runId, stepId),
+        maybeResumeRun: (runId) => HumanStepManager.getInstance().maybeResumeRun(runId),
+        onGateResolved: (args) =>
+          GateSideEffects.getInstance().apply({
+            runId: args.runId,
+            stepId: args.stepId,
+            // The opener reports the raw resolution note; the same sniff the
+            // controller's own parseGateVerdict uses turns it into the verdict. A
+            // DISMISSED gate is a rejection (the resolver itself maps it so) — its
+            // null note must never sniff to 'approve' and bind a declined design.
+            decision: args.dismissed ? 'reject' : gateDecisionFromResolution(args.resolution),
+            resolution: args.resolution,
+          }),
+      },
       reviewItemChangeEvents,
       reviewItemProjectChannel,
       cyboflowLogger,
@@ -4576,7 +4738,11 @@ async function initializeServices(): Promise<boolean> {
   // manager start/stops the watchdog), so the watchdog closes over the
   // module-level manager var, which is assigned on the next line.
   const designFrameWatchdog = new DesignFrameWatchdog({
-    getTargets: () => designPrototypeServerManager?.getTargets() ?? [],
+    // Both loopback servers share this ONE watchdog instance — the Custom
+    // Views tier-3 widget server (docs/proposals/CUSTOM-VIEWS.md §5.4) is a
+    // second, process-global source of scripted frames, so its live target is
+    // concatenated onto the design-prototype server's per-run ones.
+    getTargets: () => [...(designPrototypeServerManager?.getTargets() ?? []), ...(customWidgetServerManager?.getTargets() ?? [])],
     getFrames: () => {
       const win = mainWindow;
       if (!win || win.isDestroyed()) return [];
@@ -4614,6 +4780,23 @@ async function initializeServices(): Promise<boolean> {
     logger: cyboflowLogger,
   });
   registerDesignPrototypeServerHandlers(ipcMain, designPrototypeServerManager);
+  // Custom Views tier-3 widget document server (docs/proposals/CUSTOM-VIEWS.md
+  // §5.4) — the SAME watchdog as the prototype server above (its getTargets
+  // already concatenates both managers). loadWidget reads the store built in
+  // initializeServices(); customViewsStore is non-null by the time a widget
+  // frame can request one (it is constructed before this window-bound wiring
+  // ever runs), but the closure guards it defensively anyway.
+  customWidgetServerManager = new CustomWidgetServerManager({
+    loadWidget: (widgetId: string) => customViewsStore?.getWidget(widgetId) ?? null,
+    theme: WIDGET_THEME_TOKENS,
+    watchdog: designFrameWatchdog,
+    logger: cyboflowLogger,
+  });
+  // No ipcMain.handle registration here — customWidgetServerManager.ensure/stop
+  // are exposed as the cyboflow.customWidgetServer tRPC router (ratchet-blocked
+  // otherwise: main/src/ipc/__tests__/noNewIpcHandlers.test.ts). Wired into
+  // createContext via `customWidgetServer: customWidgetServerManager ?? undefined`
+  // below, alongside `customViews`.
   // Design Mode v0 (design-mode.md) — the Approve intent-first state machine. The
   // cyboflow.design tRPC router (standalone-typecheck-clean) reaches this singleton
   // via getInstance(); boot recovery reads its deps bag. The prototype-byte reader
@@ -4624,6 +4807,39 @@ async function initializeServices(): Promise<boolean> {
     db: cyboflowDb,
     loadPrototypeHtml: (runId: string, atype: string) => loadCanonicalPrototypeHtml(services, runId, atype),
     snapshotBaseDir: getCyboflowSubdirectory('design-snapshots'),
+    logger: cyboflowLogger,
+  });
+  // Design/brief GATE side effects — the one place a human's "approve" at an
+  // approve-ideas / approve-design / approve-brief gate becomes durable state:
+  // the run's prototype bound to each approved idea as an `approved_designs` row
+  // (which survives the run's artifact cascade delete, unlike the artifact
+  // itself), the project's solution thoroughness stamped from the brief, and the
+  // adversarial reviewer's remaining entries logged as accepted-risk findings.
+  //
+  // A singleton for the same reason DesignHandoffService is one: three call sites
+  // reach it — the programmatic gate opener below, `resolveReviewItem` for the
+  // orchestrated plane, and runExecutor's settle — and two of those build their
+  // dependency bags in separate files. Threaded as an optional dep instead, it
+  // would compile at both and silently do nothing at one.
+  //
+  // Wired HERE (after DesignHandoffService) so it shares the SAME snapshot tree
+  // and prototype-byte reader: a flow-bound design and a Design Mode approval must
+  // be readable through one path. It initializes AFTER ReviewItemRouter /
+  // IdeaComponentRouter, whose getInstance() it captures.
+  GateSideEffects.initialize({
+    db: cyboflowDb,
+    snapshotBaseDir: getCyboflowSubdirectory('design-snapshots'),
+    loadPrototypeHtml: (runId: string, atype: string) => loadCanonicalPrototypeHtml(services, runId, atype),
+    ideaComponentRouter: IdeaComponentRouter.getInstance(),
+    reviewItemRouter: ReviewItemRouter.getInstance(),
+    // Reuses the EXISTING project-changed channel (the same one projects:update
+    // emits on) so the renderer refetches a thoroughness stamp with no new
+    // listener — and, critically, no new ipcMain.handle, which the
+    // noNewIpcHandlers ratchet would freeze.
+    emitProjectUpdated: (projectId: number) => {
+      const project = databaseService.getProject(projectId);
+      if (project) sessionManager.emit('project:updated', project);
+    },
     logger: cyboflowLogger,
   });
   // Design Mode v1 (design-mode.md "Design feedback v1 — acknowledged durable
@@ -7056,6 +7272,11 @@ async function drainOnQuit(): Promise<void> {
     console.log('[Main] Stopping design prototype servers...');
     await designPrototypeServerManager.stopAll();
     console.log('[Main] Design prototype servers stopped');
+  }
+  if (customWidgetServerManager) {
+    console.log('[Main] Stopping custom widget server...');
+    await customWidgetServerManager.stop();
+    console.log('[Main] Custom widget server stopped');
   }
 
   // Close task queue

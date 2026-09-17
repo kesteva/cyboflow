@@ -74,6 +74,11 @@ import type {
   LoadArtifactHtmlAtype,
   TaskVerificationReportEntry,
 } from '../../../../shared/types/artifacts';
+// adversarial-review's payload shape isn't imported by name — it's read the
+// same way verify-runbook's is (a laundered Record<string, unknown> off
+// useArtifactData, narrowed with typeof), so no extra type import is needed
+// here beyond ARTIFACT_COLORS['adversarial-review'] resolving once Lane B
+// lands the atype on the shared union.
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
 import { IDEA_COMPONENT_KEYS, IDEA_COMPONENT_LABELS } from '../../../../shared/types/ideaComponents';
 import type { IdeaComponentKey, IdeaComponentState } from '../../../../shared/types/ideaComponents';
@@ -983,6 +988,70 @@ function VerifyRunbookBody({ artifact, projectId }: { artifact: Artifact; projec
           ) : (
             <div data-testid="artifact-verify-runbook-empty" style={{ fontSize: '12px', color: FAINT, fontStyle: 'italic' }}>
               No runbook drafted yet.
+            </div>
+          )}
+        </div>
+      </div>
+    </Shell>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// adversarial-review — the planner/launch/ship reviewer's machine-parseable
+// `## Blocking` / `## Findings` doc (item 12a). Same markdown-doc chrome as
+// verify-runbook/compound-recommendations, its own accent. Payload-backed: the
+// orchestrator composes ONE doc from the subagent's `## Result` section and
+// reports it into payload_json.markdown; a later re-review ENRICHES the same
+// artifact in place (one per run, per the report-artifact contract), so the
+// tab always shows the current revision. The approve-design gate reads this
+// same artifact for its body and its accepted-risk findings — this tab is the
+// human-readable twin of that machine parse, never a separate source.
+// ---------------------------------------------------------------------------
+function AdversarialReviewBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
+  const accent = ARTIFACT_COLORS['adversarial-review'];
+  const { data } = useArtifactData(artifact, projectId);
+  // `markdown` comes verbatim from orchestrator-supplied payload_json (laundered
+  // through parsePayload as Record<string, unknown>), so narrow to a string.
+  const markdown =
+    data?.kind === 'adversarial-review' && typeof data.payload.markdown === 'string'
+      ? data.payload.markdown
+      : '';
+
+  return (
+    <Shell testid="artifact-adversarial-review">
+      <ArtifactHeader
+        artifact={artifact}
+        projectId={projectId}
+        accent={accent}
+        eyebrow="Artifact · adversarial review"
+        meta={artifact.stepOrigin ?? 'adversarial-review'}
+      />
+      <div style={{ flex: 1 }}>
+        <div
+          data-testid="artifact-adversarial-review-doc"
+          style={{
+            maxWidth: 680,
+            margin: '0 auto',
+            background: 'var(--color-surface-primary)',
+            border: `1px solid ${HAIRLINE}`,
+            padding: '34px 40px 56px',
+            marginTop: 18,
+            marginBottom: 18,
+          }}
+        >
+          <div
+            style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '.16em', textTransform: 'uppercase', color: accent, marginBottom: 8 }}
+          >
+            Design review
+          </div>
+          <h1 style={{ fontSize: '22px', fontWeight: 700, lineHeight: 1.25, color: INK, margin: '0 0 18px' }}>
+            Adversarial review
+          </h1>
+          {markdown ? (
+            <MarkdownPreview content={markdown} />
+          ) : (
+            <div data-testid="artifact-adversarial-review-empty" style={{ fontSize: '12px', color: FAINT, fontStyle: 'italic' }}>
+              No adversarial review filed yet.
             </div>
           )}
         </div>
@@ -3535,6 +3604,8 @@ export function ArtifactTabRenderer({ artifact, projectId }: ArtifactTabRenderer
       return <RecommendationsBody artifact={artifact} projectId={projectId} />;
     case 'verify-runbook':
       return <VerifyRunbookBody artifact={artifact} projectId={projectId} />;
+    case 'adversarial-review':
+      return <AdversarialReviewBody artifact={artifact} projectId={projectId} />;
     case 'eval-report':
       return <EvalReportBody artifact={artifact} projectId={projectId} />;
     case 'project-brief':

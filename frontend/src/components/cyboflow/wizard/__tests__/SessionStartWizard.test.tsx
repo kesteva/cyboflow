@@ -232,6 +232,7 @@ import { API } from '../../../../utils/api';
 import { trpc } from '../../../../trpc/client';
 import { ensureSessionForLaunch } from '../../../../utils/ensureSessionForLaunch';
 import type { AppConfig } from '../../../../types/config';
+import type { Project } from '../../../../types/project';
 import type { WorkflowRow } from '../../../../../../shared/types/workflows';
 import type { WorkflowVariantRow } from '../../../../../../shared/types/experiments';
 import type { RunTypeDefaults, RunTypeDefaultsOp } from '../../../../../../shared/types/sessionDefaults';
@@ -3829,6 +3830,152 @@ describe('SessionStartWizard — tuning-level override (D4)', () => {
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
     expect(screen.queryByTestId('wizard-tuning-level')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tuning-level default from the project's solution-thoroughness stamp
+// (Tier 2, item 13c, [C8]) — precedence: override -> pinned variant's
+// displayed level -> project stamp -> workflow's own stamped level.
+//
+// COMPOUND_THOROUGH_ROW is stamped 'thorough' on the WORKFLOW; every test here
+// stamps the PROJECT 'v1' (-> 'standard'), a deliberate divergence from the
+// workflow's own level so the assertions prove the stamp actually took over
+// the display and the payload, not merely echoed the workflow's own default.
+// ---------------------------------------------------------------------------
+/** A full `Project` row for `API.projects.getAll` mocks (the strictly-typed call site outside the vi.mock factory needs every required field). */
+function makeProjectRow(overrides: Partial<Project> = {}): Project {
+  return {
+    id: 1,
+    name: 'Proj',
+    path: '/tmp/p',
+    active: true,
+    created_at: '2026-01-01T00:00:00.000Z',
+    updated_at: '2026-01-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+describe("SessionStartWizard — tuning level defaults from the project's thoroughness stamp (Tier 2, item 13c, [C8])", () => {
+  const mockGetAllProjects = vi.mocked(API.projects.getAll);
+  const mockVariantsList = vi.mocked(trpc.cyboflow.variants.list.query);
+
+  beforeEach(() => {
+    mockVariantsList.mockResolvedValue([]);
+    act(() => {
+      useVariantsStore.setState({
+        byWorkflowId: {},
+        baselineByWorkflowId: {},
+        loadedWorkflowIds: {},
+        loading: {},
+        error: {},
+      });
+    });
+  });
+
+  afterEach(() => {
+    // Restore the file-wide default (no stamp) so later describe blocks in
+    // this file are unaffected by the override set here.
+    mockGetAllProjects.mockResolvedValue({ success: true, data: [makeProjectRow()] });
+  });
+
+  it('stamp alone: drives the displayed level, shows the hint, and reaches the launch payload', async () => {
+    mockGetAllProjects.mockResolvedValue({
+      success: true,
+      data: [makeProjectRow({ solution_thoroughness: 'v1' })],
+    });
+    mockWorkflowsList.mockResolvedValue([COMPOUND_THOROUGH_ROW]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    // Displayed value follows the STAMP (standard), not the workflow's own
+    // stored level (thorough).
+    await waitFor(() =>
+      expect(screen.getByTestId('wizard-tuning-level-standard')).toHaveAttribute('aria-checked', 'true'),
+    );
+    expect(screen.getByTestId('wizard-tuning-level-thorough')).toHaveAttribute('aria-checked', 'false');
+    expect(screen.getByTestId('wizard-tuning-level-stamp-hint')).toHaveTextContent(
+      'Defaulted from project thoroughness: v1 → standard',
+    );
+    // No genuine per-run override was made — the shared Save-as-default CTA
+    // stays hidden.
+    expect(screen.queryByTestId('wizard-save-default')).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    // The divergence from the workflow's own stamp must actually take effect
+    // at launch — omitting the field would silently run 'thorough' instead.
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ tuningLevel: 'standard' }));
+  });
+
+  it('override beats the stamp', async () => {
+    mockGetAllProjects.mockResolvedValue({
+      success: true,
+      data: [makeProjectRow({ solution_thoroughness: 'v1' })],
+    });
+    mockWorkflowsList.mockResolvedValue([COMPOUND_THOROUGH_ROW]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+    await waitFor(() =>
+      expect(screen.getByTestId('wizard-tuning-level-standard')).toHaveAttribute('aria-checked', 'true'),
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-tuning-level-efficient'));
+    });
+    // A genuine divergence from the DISPLAYED default (standard, not thorough)
+    // is what makes this an override — the shared CTA appears, and the hint is
+    // gone (the override, not the stamp, now explains the display).
+    expect(screen.getByTestId('wizard-save-default')).toBeInTheDocument();
+    expect(screen.queryByTestId('wizard-tuning-level-stamp-hint')).not.toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ tuningLevel: 'efficient' }));
+  });
+
+  it('stamp + a pinned variant: the pin is scoped to the STAMPED pool, and both reach the launch payload', async () => {
+    mockGetAllProjects.mockResolvedValue({
+      success: true,
+      data: [makeProjectRow({ solution_thoroughness: 'v1' })],
+    });
+    mockWorkflowsList.mockResolvedValue([COMPOUND_THOROUGH_ROW]);
+    // A variant in the STAMPED pool (standard) and a decoy in the workflow's
+    // own raw pool (thorough) — only the stamped pool's variant may be offered
+    // if the selector really is keying off the stamp-aware default.
+    mockVariantsList.mockResolvedValue([
+      makeVariantRow({ id: 'wfv_standard', label: 'Standard A', tuning_level: 'standard' }),
+      makeVariantRow({ id: 'wfv_thorough', label: 'Thorough A', tuning_level: 'thorough' }),
+    ]);
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+    await waitFor(() =>
+      expect(screen.getByTestId('wizard-tuning-level-standard')).toHaveAttribute('aria-checked', 'true'),
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-workflow-advanced-toggle'));
+    });
+    const picker = (): HTMLSelectElement =>
+      screen.getByLabelText('Select workflow variant') as HTMLSelectElement;
+    await screen.findByLabelText('Select workflow variant');
+    expect(Array.from(picker().options).map((o) => o.value)).toContain('wfv_standard');
+    expect(Array.from(picker().options).map((o) => o.value)).not.toContain('wfv_thorough');
+
+    await act(async () => {
+      fireEvent.change(picker(), { target: { value: 'wfv_standard' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    // No override was made (the pin sits inside the STAMP's own pool), yet the
+    // pin makes the stamped level load-bearing — sent explicitly alongside it.
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.objectContaining({ tuningLevel: 'standard', variantId: 'wfv_standard' }),
+    );
   });
 });
 

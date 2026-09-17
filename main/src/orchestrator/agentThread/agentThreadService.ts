@@ -50,10 +50,14 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type {
   AgentThread,
+  AgentThreadImageAttachment,
   AssistantContextRetention,
   AssistantRuntime,
 } from '../../../../shared/types/agentThread';
-import { DEFAULT_ASSISTANT_CONTEXT_RETENTION } from '../../../../shared/types/agentThread';
+import {
+  agentThreadImageByteLength,
+  DEFAULT_ASSISTANT_CONTEXT_RETENTION,
+} from '../../../../shared/types/agentThread';
 import type { CliSpawnOutcome } from '../../../../shared/types/cliPanels';
 import type { ClaudeSpawnOptions } from '../../services/panels/claude/claudeCodeManager';
 import type { LoggerLike } from '../types';
@@ -93,6 +97,7 @@ export type AgentSpawnOptions = Pick<
   | 'sessionId'
   | 'worktreePath'
   | 'prompt'
+  | 'images'
   | 'hidePromptFromTranscript'
   | 'isolation'
   | 'tools'
@@ -222,6 +227,30 @@ function errMessage(err: unknown): string {
 }
 
 /**
+ * The text persisted for the human's own turn when the message carried images.
+ *
+ * The transcript row stays LEAN on purpose: the bytes go to the model as
+ * content blocks, but `agent_thread_events` must not accumulate megabytes of
+ * base64 (it is replayed in full on every thread load). One `📎 image:` line
+ * per attachment is enough for the reader to see what they sent, and it needs
+ * no new `UnifiedMessage` segment kind — MessageProjection renders it as
+ * ordinary user text. An image-only turn persists the lines alone.
+ */
+export function transcriptTurnText(
+  text: string,
+  images: readonly AgentThreadImageAttachment[],
+): string {
+  if (images.length === 0) return text;
+  const lines = images
+    .map(
+      (image) =>
+        `📎 image: ${image.name} (${Math.max(1, Math.round(agentThreadImageByteLength(image.base64) / 1024))} kB)`,
+    )
+    .join('\n');
+  return text.trim() === '' ? lines : `${text}\n\n${lines}`;
+}
+
+/**
  * True when two epoch-ms instants fall on the same LOCAL calendar day. The
  * day-boundary context-retention check is a human-facing "once per day" notion,
  * so it is anchored to the machine's local day (a boot at 00:30 is a new day),
@@ -301,9 +330,20 @@ export class AgentThreadService {
    * never recorded in the transcript — `recordUserTurn` always stores the raw
    * `text` the human actually typed.
    */
-  async sendMessage(threadId: string, text: string, contextHint?: string): Promise<void> {
+  async sendMessage(
+    threadId: string,
+    text: string,
+    contextHint?: string,
+    images?: readonly AgentThreadImageAttachment[],
+  ): Promise<void> {
     if (!this.deps.enabled()) {
       throw new Error('assistant is disabled in settings');
+    }
+    const attachments = images ?? [];
+    // An image-only turn is legal (the picture IS the message); a turn with
+    // neither text nor an image is not — it would spend a spawn on nothing.
+    if (text.trim() === '' && attachments.length === 0) {
+      throw new Error('AgentThreadService: a turn needs text or at least one image');
     }
     let thread = this.deps.store.getThread(threadId);
     if (thread === null) {
@@ -318,7 +358,7 @@ export class AgentThreadService {
     // immediately rather than only once the assistant's first event lands. Never
     // repeated on the stale-resume retry below (which re-enters `spawn`, not this).
     try {
-      const userEvent = this.sink.recordUserTurn(threadId, text);
+      const userEvent = this.sink.recordUserTurn(threadId, transcriptTurnText(text, attachments));
       this.deps.publish(threadId, this.toEnvelope(userEvent));
     } catch (err) {
       // Fail-soft: a transcript-echo failure must never block the actual turn.
@@ -368,7 +408,7 @@ export class AgentThreadService {
         : text;
 
     try {
-      await this.spawn(threadId, prompt, model, resumeSessionId, runtime);
+      await this.spawn(threadId, prompt, model, resumeSessionId, runtime, attachments);
     } catch (err) {
       if (resumeSessionId !== undefined && isResumeError(err)) {
         this.deps.logger?.warn(
@@ -376,7 +416,7 @@ export class AgentThreadService {
         );
         this.deps.store.updateClaudeSessionId(threadId, null);
         try {
-          await this.spawn(threadId, prompt, model, undefined, runtime);
+          await this.spawn(threadId, prompt, model, undefined, runtime, attachments);
         } catch (retryErr) {
           this.recordSpawnFailure(threadId, retryErr);
           throw retryErr;
@@ -514,6 +554,7 @@ export class AgentThreadService {
     model: string | undefined,
     resumeSessionId: string | undefined,
     runtime: AssistantRuntime,
+    images?: readonly AgentThreadImageAttachment[],
   ): Promise<void> {
     const identity = agentSpawnIdentity(threadId);
     const options: AgentSpawnOptions = {
@@ -537,6 +578,9 @@ export class AgentThreadService {
       // reach the transcript). The Claude manager suppresses its own synthesized
       // echo whenever `eventsSink` is set, so the flag is left off there.
       ...(runtime === 'codex-sdk' ? { hidePromptFromTranscript: true } : {}),
+      // Omitted entirely on a text-only turn, so every non-attachment spawn's
+      // options object is byte-identical to before.
+      ...(images !== undefined && images.length > 0 ? { images } : {}),
       ...(model !== undefined ? { model } : {}),
       ...(resumeSessionId !== undefined ? { resumeSessionId } : {}),
     };

@@ -207,6 +207,7 @@ export interface DecisionPayload {
   kind: 'decision';
   gate:
     | 'approve-idea'
+    | 'approve-design'
     | 'approve-ideas'
     | 'approve-designs'
     | 'approve-plan'

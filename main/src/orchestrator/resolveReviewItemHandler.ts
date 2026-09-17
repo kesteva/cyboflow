@@ -53,6 +53,7 @@
  */
 import type { DatabaseLike, LoggerLike } from './types';
 import { ReviewItemError, type ReviewItemErrorCode } from './reviewItemRouter';
+import { GateSideEffects, gateDecisionFromResolution } from './gateSideEffects';
 import { listApproveIdeasBatchRows } from './runEntityOwnership';
 import {
   isIdeaVerdict,
@@ -470,6 +471,46 @@ export type ResolveReviewItemResult =
     }
   | { ok: false; reason: ReviewItemErrorCode; message: string };
 
+/**
+ * The gate discriminants whose ORCHESTRATED-plane resolution earns durable side
+ * effects. `approve-design` (singular) is the inline single-idea design gate; the
+ * plural pair are the batch gates.
+ */
+const SIDE_EFFECT_GATES = new Set(['approve-ideas', 'approve-designs', 'approve-design']);
+
+/**
+ * Fire {@link GateSideEffects} for an orchestrated-plane decision gate, or do
+ * nothing. See the call site for why the programmatic plane is excluded here.
+ *
+ * Fail-soft on every axis: an un-booted singleton, an unrecognized gate, a missing
+ * run binding, and a throwing side effect all end as a silent no-op — a resolve
+ * that already committed must never be turned into a refusal by an enrichment.
+ */
+async function maybeApplyOrchestratedGateSideEffects(
+  before: { runId?: string | null; kind?: string; source?: string | null; payloadJson?: string | null } | undefined,
+  gateStepId: string | null,
+  resolution: string | null,
+): Promise<void> {
+  // A programmatic gate (source `gate:human-step:*`) is the opener's business.
+  if (gateStepId !== null) return;
+  if (!before?.runId || before.kind !== 'decision') return;
+  const gate = parseDecisionGate(before.payloadJson);
+  if (gate === null || !SIDE_EFFECT_GATES.has(gate)) return;
+  const sideEffects = GateSideEffects.tryGetInstance();
+  if (!sideEffects) return;
+  try {
+    await sideEffects.apply({
+      runId: before.runId,
+      stepId: gate,
+      decision: gateDecisionFromResolution(resolution),
+      resolution,
+    });
+  } catch {
+    // GateSideEffects.apply is itself fail-soft; this catch is the belt to its
+    // braces, because the resolve above has already committed.
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
@@ -596,6 +637,25 @@ export async function resolveReviewItem(
       actor: 'user',
       ...(resolution !== undefined ? { resolution } : {}),
     });
+
+    // ORCHESTRATED-PLANE design/brief gate side effects (durably bind the approved
+    // prototype, stamp the project's solution thoroughness, log the adversarial
+    // reviewer's remaining entries as accepted risks).
+    //
+    // This arm covers ONLY the gates the flow minted itself via
+    // cyboflow_report_finding kind:'decision' — recognized by the payload `gate`
+    // discriminant and the ABSENCE of a `gate:human-step:` source. A programmatic
+    // gate carries that source and is handled by HumanGateOpener.onGateResolved,
+    // which the controller actually waits on; firing here too would double-run
+    // every side effect on that plane.
+    //
+    // Ordering is BEST-EFFORT and not claimed otherwise: there is no controller
+    // walk on the orchestrated plane to order against, and the resumed SDK
+    // conversation is woken by the router's own synchronous emit inside the
+    // resolve above. Awaited anyway so the writes are in flight before this call
+    // returns. GateSideEffects.apply is idempotent and never throws; tryGetInstance
+    // keeps every hand-built dep bag in the unit suite working un-booted.
+    await maybeApplyOrchestratedGateSideEffects(before, gateStepId, resolution ?? null);
 
     // Aggregate-unblock auto-resume for a blocking, run-bound item. An explicit REJECT
     // never auto-resumes: the programmatic controller owns the terminal 'rejected'

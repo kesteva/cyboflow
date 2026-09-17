@@ -33,7 +33,11 @@ import { create } from 'zustand';
 import type { inferRouterOutputs } from '@trpc/server';
 import { trpc } from '../trpc/client';
 import type { AppRouter } from '../../../shared/types/trpc';
-import type { AgentThread, AgentProposal } from '../../../shared/types/agentThread';
+import type {
+  AgentThread,
+  AgentProposal,
+  AgentThreadImageAttachment,
+} from '../../../shared/types/agentThread';
 
 type RouterOutputs = inferRouterOutputs<AppRouter>;
 
@@ -64,6 +68,28 @@ export interface AgentThreadState {
   liveTailTick: number;
 
   /**
+   * A one-shot pre-fill for the composer (Custom Views §7.1's authoring
+   * kickoff — `startAuthoring` sets it, `AgentComposer`/`AgentThreadView`
+   * apply it once via `onPrefillConsumed` and it is expected to be cleared
+   * back to `null` right after). `null` the rest of the time.
+   */
+  composerDraft: string | null;
+  /** Set (or clear with `null`) the composer's one-shot pre-fill text. */
+  setComposerDraft: (text: string | null) => void;
+
+  /**
+   * A `contextHint` envelope queued for the NEXT `sendMessage` call (Custom
+   * Views §7.1) — `startAuthoring` sets this so the turn the user actually
+   * sends carries the `[custom-widget-session]` envelope, without the
+   * composer or its caller having to thread it through explicitly.
+   * `sendMessage` consumes and clears it automatically; an explicit
+   * `opts.contextHint` on the call still wins over it.
+   */
+  pendingContextHint: string | null;
+  /** Set (or clear with `null`) the pending `contextHint` for the next `sendMessage`. */
+  setPendingContextHint: (hint: string | null) => void;
+
+  /**
    * Bootstrap: fetch getThread + listProposals, then wire the two
    * subscriptions above. Idempotent (closure-guarded); returns an unsubscribe
    * that tears down both subscriptions and any pending debounce timer.
@@ -75,7 +101,10 @@ export interface AgentThreadState {
    *  `opts.contextHint` is optional prompt-only priming text (e.g. onboarding
    *  context) prepended to what the model sees — never part of the recorded
    *  transcript turn. */
-  sendMessage: (text: string, opts?: { contextHint?: string }) => Promise<void>;
+  sendMessage: (
+    text: string,
+    opts?: { contextHint?: string; images?: AgentThreadImageAttachment[] },
+  ) => Promise<void>;
   /** The user's Confirm click (S1.3 consumes this) — propagates failures so
    *  the proposal card can render them, and refreshes `proposals` afterward. */
   confirmProposal: (proposalId: string) => Promise<ConfirmProposalResult>;
@@ -103,6 +132,11 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
     loading: false,
     sending: false,
     liveTailTick: 0,
+    composerDraft: null,
+    pendingContextHint: null,
+
+    setComposerDraft: (text) => set({ composerDraft: text }),
+    setPendingContextHint: (hint) => set({ pendingContextHint: hint }),
 
     init: () => {
       if (initialized) return cachedUnsubscribe!;
@@ -172,18 +206,31 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
       return unsubscribe;
     },
 
-    sendMessage: async (text: string, opts?: { contextHint?: string }) => {
+    sendMessage: async (
+      text: string,
+      opts?: { contextHint?: string; images?: AgentThreadImageAttachment[] },
+    ) => {
       const threadId = get().thread?.id;
       if (threadId === undefined) {
         console.warn('[agentThreadStore] sendMessage called before the thread loaded — dropped');
         return;
       }
+      // An explicit opts.contextHint wins; otherwise a queued authoring
+      // kickoff hint (§7.1) rides this turn — one-shot, cleared regardless
+      // of whether the mutation succeeds (a failed send does not owe a
+      // second attempt at the same hint; the user can just try again).
+      const pendingHint = get().pendingContextHint;
+      const contextHint = opts?.contextHint ?? pendingHint ?? undefined;
+      if (pendingHint !== null) set({ pendingContextHint: null });
       set({ sending: true });
       try {
         await trpc.cyboflow.agentThread.sendMessage.mutate({
           threadId,
           text,
-          ...(opts?.contextHint !== undefined ? { contextHint: opts.contextHint } : {}),
+          ...(contextHint !== undefined ? { contextHint } : {}),
+          // Omitted on a text-only turn so the mutation payload is unchanged
+          // for every existing caller.
+          ...(opts?.images !== undefined && opts.images.length > 0 ? { images: opts.images } : {}),
         });
       } catch (err: unknown) {
         console.error('[agentThreadStore] sendMessage failed:', err);

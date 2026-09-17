@@ -12,6 +12,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { ComponentType, ReactNode } from 'react';
 import type { AgentThread, AgentProposal } from '../../../../shared/types/agentThread';
+import type { UnifiedMessage } from '../../../../shared/types/unifiedMessage';
 
 // -- UnifiedChatView stub: captures mode/running and renders bottomSlot verbatim. --
 interface UnifiedChatViewStubProps {
@@ -28,8 +29,9 @@ vi.mock('../cyboflow/unified/UnifiedChatView', () => ({
   ),
 }));
 
+let mockMessages: UnifiedMessage[] = [];
 vi.mock('../cyboflow/unified/useUnifiedAgentThreadMessages', () => ({
-  useUnifiedAgentThreadMessages: () => ({ messages: [], isLoading: false, loadError: null }),
+  useUnifiedAgentThreadMessages: () => ({ messages: mockMessages, isLoading: false, loadError: null }),
 }));
 
 // -- ProposalCardList stub: this file tests AgentThreadView's OWN wiring (the
@@ -89,6 +91,7 @@ beforeEach(() => {
   mockThread = null;
   mockSending = false;
   mockProposals = [];
+  mockMessages = [];
 });
 
 describe('AgentThreadView — UnifiedChatView wiring', () => {
@@ -139,7 +142,24 @@ describe('AgentThreadView — composer + chips wiring', () => {
     });
     fireEvent.click(screen.getByTestId('agent-composer-send'));
 
-    expect(mockSendMessage).toHaveBeenCalledWith('hello agent');
+    expect(mockSendMessage).toHaveBeenCalledWith('hello agent', undefined);
+  });
+
+  it('forwards the composer image attachments into the store opts', async () => {
+    mockThread = makeThread();
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+
+    // Drive the real AgentComposer's attach path (it is not stubbed here) so
+    // this proves the whole composer → view → store hop, not just the callback.
+    const file = new File([Uint8Array.from([137, 80, 78, 71])], 'shot.png', { type: 'image/png' });
+    fireEvent.change(screen.getByTestId('agent-composer-file-input'), { target: { files: [file] } });
+    await screen.findByTestId('agent-composer-attachments');
+    fireEvent.click(screen.getByTestId('agent-composer-send'));
+
+    expect(mockSendMessage).toHaveBeenCalledWith('', {
+      images: [expect.objectContaining({ name: 'shot.png', mediaType: 'image/png' })],
+    });
   });
 
   it('a suggestion chip calls store.sendMessage with its canned prompt', async () => {
@@ -149,7 +169,7 @@ describe('AgentThreadView — composer + chips wiring', () => {
 
     fireEvent.click(screen.getByText('Status update'));
 
-    expect(mockSendMessage).toHaveBeenCalledWith('Status update');
+    expect(mockSendMessage).toHaveBeenCalledWith('Status update', undefined);
   });
 
   it('disables the composer before the thread has loaded', async () => {
@@ -158,5 +178,32 @@ describe('AgentThreadView — composer + chips wiring', () => {
     render(<AgentThreadView />);
 
     expect(screen.getByTestId('agent-composer-input')).toBeDisabled();
+  });
+});
+
+describe('AgentThreadView — model badge', () => {
+  function msg(role: UnifiedMessage['role'], model?: string): UnifiedMessage {
+    return {
+      id: `m-${role}-${model ?? 'none'}`,
+      role,
+      timestamp: '2026-07-17T00:00:00.000Z',
+      segments: [{ type: 'text', content: 'hi' }],
+      ...(model !== undefined ? { metadata: { model } } : {}),
+    } as UnifiedMessage;
+  }
+
+  it('shows "default" before any assistant turn has run and no per-thread override is set', async () => {
+    mockThread = makeThread();
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+    expect(screen.getByTestId('agent-model-badge')).toHaveTextContent('model · default');
+  });
+
+  it('shows the model stamped on the LAST assistant turn, ignoring user turns after it', async () => {
+    mockThread = makeThread({ model: 'opus' });
+    mockMessages = [msg('assistant', 'claude-opus-5'), msg('assistant', 'claude-sonnet-5'), msg('user')];
+    const AgentThreadView = await loadAgentThreadView();
+    render(<AgentThreadView />);
+    expect(screen.getByTestId('agent-model-badge')).toHaveTextContent('model · claude-sonnet-5');
   });
 });

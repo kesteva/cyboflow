@@ -17,6 +17,7 @@
  */
 import { create } from 'zustand';
 import { isPerEntityArtifact, type ArtifactType } from '../../../shared/types/artifacts';
+import type { DiffGroupScope } from '../../../shared/types/runFiles';
 import { pathBasename } from '../utils/pathBasename';
 import {
   type CenterPaneSessionState,
@@ -27,6 +28,7 @@ import {
   makeFlowTab,
   fileTabId,
   artifactTabId,
+  approvedDesignTabId,
 } from '../../../shared/types/centerPane';
 
 /** A freshly-seeded session: the pinned Flow tab, dock open, Workflow steps rail. */
@@ -57,6 +59,14 @@ export interface OpenFileTabArgs {
   status?: FileTabStatus;
   /** Optional label override; defaults to the file's basename. */
   label?: string;
+  /**
+   * Base ref/SHA to diff the file against. `null`/`undefined` selects the
+   * default (working-directory-vs-HEAD) base. Written unconditionally on
+   * both open and re-open, so reverting to the default base is representable.
+   */
+  baseRef?: string | null;
+  /** Which diff-group scope the tab's diff belongs to. */
+  scope?: DiffGroupScope;
 }
 
 /** Params to open (or focus) an artifact tab. */
@@ -88,6 +98,13 @@ export interface OpenArtifactTabArgs {
   focus?: boolean;
 }
 
+/** Params to open (or focus) an approved-design tab. */
+export interface OpenApprovedDesignTabArgs {
+  ideaId: string;
+  ideaRef: string;
+  label: string;
+}
+
 interface CenterPaneStore {
   bySession: Record<string, CenterPaneSessionState>;
   /** Seed a session entry (idempotent — no state change if it already exists). */
@@ -100,6 +117,8 @@ interface CenterPaneStore {
   openFileTab: (key: string, args: OpenFileTabArgs) => void;
   /** Open (or focus) an artifact tab. */
   openArtifactTab: (key: string, args: OpenArtifactTabArgs) => void;
+  /** Open (or focus) an approved-design tab (one per idea per session). */
+  openApprovedDesignTab: (key: string, args: OpenApprovedDesignTabArgs) => void;
   /** Toggle the terminal dock expanded/collapsed. */
   toggleTerminal: (key: string) => void;
   /** Set the terminal dock expanded state explicitly. */
@@ -161,11 +180,15 @@ export const useCenterPaneStore = create<CenterPaneStore>((set) => {
         const id = fileTabId(args.filePath);
         const existing = cur.tabs.find((t) => t.id === id);
         if (existing) {
-          // Refresh the status letter (the file may have changed) and focus.
+          // Refresh the status letter (the file may have changed), the base/scope
+          // (written unconditionally so reverting to the default base — undefined
+          // /null — is representable), and focus.
           return {
             ...cur,
             activeTabId: id,
-            tabs: cur.tabs.map((t) => (t.id === id ? { ...t, status: args.status } : t)),
+            tabs: cur.tabs.map((t) =>
+              t.id === id ? { ...t, status: args.status, baseRef: args.baseRef, scope: args.scope } : t,
+            ),
           };
         }
         const tab: TabItem = {
@@ -174,6 +197,8 @@ export const useCenterPaneStore = create<CenterPaneStore>((set) => {
           label: args.label ?? basename(args.filePath),
           filePath: args.filePath,
           status: args.status,
+          baseRef: args.baseRef,
+          scope: args.scope,
         };
         return { ...cur, tabs: [...cur.tabs, tab], activeTabId: id };
       }),
@@ -264,6 +289,30 @@ export const useCenterPaneStore = create<CenterPaneStore>((set) => {
           ...(external ? { external: true } : {}),
         };
         return { ...cur, tabs: [...cur.tabs, tab], activeTabId: focus ? targetId : cur.activeTabId };
+      }),
+
+    openApprovedDesignTab: (key, args) =>
+      mutate(key, (cur) => {
+        const id = approvedDesignTabId(args.ideaId);
+        const existing = cur.tabs.find((t) => t.id === id);
+        if (existing) {
+          // Already open — just focus it (label/ref may have refreshed).
+          return {
+            ...cur,
+            activeTabId: id,
+            tabs: cur.tabs.map((t) =>
+              t.id === id ? { ...t, label: args.label, ideaRef: args.ideaRef } : t,
+            ),
+          };
+        }
+        const tab: TabItem = {
+          id,
+          kind: 'approved-design',
+          label: args.label,
+          ideaId: args.ideaId,
+          ideaRef: args.ideaRef,
+        };
+        return { ...cur, tabs: [...cur.tabs, tab], activeTabId: id };
       }),
 
     toggleTerminal: (key) => mutate(key, (cur) => ({ ...cur, terminalOpen: !cur.terminalOpen })),

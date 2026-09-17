@@ -51,7 +51,7 @@ describe('agentThreadPrompt', () => {
     }
   });
 
-  it('is dense but not padded — within the ~60-260 line target', () => {
+  it('is dense but not padded — within the ~60-300 line target', () => {
     // Ceiling widened from 130 → 160 when the "What cyboflow is" product
     // overview + the cyboflow_reference tool bullet were added, then 160 → 230
     // when the "Recommending the right flow" section (decision map + compound
@@ -59,9 +59,56 @@ describe('agentThreadPrompt', () => {
     // semantics were added; the prompt now carries proactive flow-recommendation
     // guidance on top of the tool/contract/recap guidance. Widened again 230 →
     // 260 for the create-backlog-items payload shape + its quality-bar bullet.
+    // Widened again 260 → 300 for the "Custom widgets" section (S6,
+    // docs/proposals/CUSTOM-VIEWS.md §7.4): the WidgetSpec contract summary,
+    // the schema→preview→save workflow, two worked-example specs, and the
+    // authoring rules (session_id provenance, SQL restrictions, limits).
     const lines = getAgentSystemPrompt().split('\n').length;
     expect(lines).toBeGreaterThanOrEqual(60);
-    expect(lines).toBeLessThanOrEqual(260);
+    expect(lines).toBeLessThanOrEqual(300);
+  });
+
+  it('mentions Custom widgets and the two disjoint write-shaped tools', () => {
+    const prompt = getAgentSystemPrompt();
+    expect(prompt).toMatch(/## Custom widgets/);
+    expect(prompt).toMatch(/two write-shaped tools/i);
+  });
+
+  it('documents the three custom-widget-authoring tools by exact name', () => {
+    const prompt = getAgentSystemPrompt();
+    for (const tool of ['cyboflow_db_schema', 'cyboflow_widget_preview', 'cyboflow_widget_save']) {
+      expect(prompt).toContain(tool);
+    }
+  });
+
+  it('documents the onData payload shape for tier-3 html widgets (sources.<name>.rows)', () => {
+    const prompt = getAgentSystemPrompt();
+    expect(prompt).toMatch(/onData.*callback receives `\{sources, settings, context, theme\}`/s);
+    expect(prompt).toContain('payload.sources.usage.rows');
+  });
+
+  it('tells the agent a session-less widget request still saves (publish:true into the library)', () => {
+    const prompt = getAgentSystemPrompt();
+    expect(prompt).toMatch(/omit `session_id` and save with\s+`publish:true`/);
+    expect(prompt).toMatch(/Add widget → Mine/);
+  });
+
+  it('mentions every WidgetRender.shape literal and every TransformStep.op literal', () => {
+    // Hardcoded rather than derived from shared/customViews/validate.ts: its
+    // schemas are z.union([...]) trees of z.object({shape: z.literal(...)})
+    // members, not z.enum, so there is no single `.options` array of bare
+    // literal strings to read off — see shared/types/customViews.ts
+    // WidgetRender / TransformStep for the source of truth these mirror.
+    const WIDGET_RENDER_SHAPES = ['stat', 'table', 'columns', 'bars', 'list']; // WidgetRender shape literals (excludes 'html', which carries no 'shape' field)
+    const TRANSFORM_STEP_OPS = ['filter', 'sort', 'limit', 'bucketDate', 'group', 'derive']; // TransformStep op literals
+
+    const prompt = getAgentSystemPrompt();
+    for (const shape of WIDGET_RENDER_SHAPES) {
+      expect(prompt, `render shape '${shape}' missing from prompt`).toContain(shape);
+    }
+    for (const op of TRANSFORM_STEP_OPS) {
+      expect(prompt, `transform op '${op}' missing from prompt`).toContain(op);
+    }
   });
 
   it('mentions recommending the right flow', () => {

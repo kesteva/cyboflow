@@ -22,6 +22,7 @@ import type { SprintBatchTaskStatus, SprintMaxTasksOverrides } from '../../../..
 import type { VerificationType, ResolvedVisualVerifyConfig } from '../../../../shared/types/visualVerification';
 import type { TaskDependencyKind } from '../taskChangeRouter';
 import type { AgentThreadDbStore } from '../agentThread/agentThreadDbStore';
+import type { CustomViewsServiceLike } from '../customViews/customViewsService';
 import type { AdHocSnapshotResult } from '../eval/snapshotRunForEval';
 import type { VerifyRunbookStore } from '../verify/runbookStore';
 
@@ -736,6 +737,71 @@ export type McpQueryMessage =
       limit?: number;
     }
   | {
+      /**
+       * READ-ONLY schema introspection of the app database (docs/proposals/
+       * CUSTOM-VIEWS.md §7.2) — tables, columns (name/type/pk/notnull), and an
+       * approximate row count per table (COUNT(*); null for `raw_events`,
+       * where that is too expensive). Delegates to the injected
+       * `customViews.dbSchema()` — this handler touches no SQL directly.
+       * Absent `customViews` dep -> `custom_views_unavailable`.
+       */
+      type: 'mcp-db-schema';
+      requestId: string;
+      runId: string;
+      /** Optional — scope the reply to one table name. */
+      table?: string;
+    }
+  | {
+      /**
+       * Validates a custom-widget spec and runs its sources exactly as the
+       * page will (through `CustomViewsService.runWidget` / the §4.2/§4.3
+       * query engine), WITHOUT ever saving anything. `specJson`/`settingsJson`
+       * are plain JSON strings — the registry keeps them that way (finding
+       * #16: it may import only zod and its own siblings, not the shared
+       * union schemas), so THIS handler is where they are JSON.parsed and
+       * validated against the shared `widgetSpecSchema` / `scalarSchema`.
+       * Absent `customViews` dep -> `custom_views_unavailable`.
+       */
+      type: 'mcp-widget-preview';
+      requestId: string;
+      runId: string;
+      specJson: string;
+      /** Optional JSON-encoded `{name: value}` resolving the spec's `{setting:name}` references. */
+      settingsJson?: string;
+      /** Optional — the projectId `{context:'projectId'}` source params resolve to. */
+      projectId?: number;
+    }
+  | {
+      /**
+       * THE SECOND write-shaped global-agent tool (disjoint from
+       * mcp-propose-action) — writes ONLY the calling user's own
+       * custom-widget library (`custom_widgets` rows via
+       * `CustomViewsService.saveWidget`), never a view, never a backlog
+       * entity, never a proposal. `publish:false` saves a draft owned by
+       * `sessionId` (sourced from the page's `[custom-widget-session]`
+       * envelope, §7.1); `publish:true` saves and promotes it to the spec
+       * every other surface renders. A `widgetId` whose draft is owned by a
+       * different live session comes back `session_mismatch`. Emits
+       * `onWidgetDraft` for the renderer's session-bound live landing
+       * (§7.3). Absent `customViews` dep -> `custom_views_unavailable`.
+       */
+      type: 'mcp-widget-save';
+      requestId: string;
+      runId: string;
+      /** The page's authoring session (from the `[custom-widget-session]`
+       *  envelope). Omitted = a library-only save: the widget publishes
+       *  straight into the user's library with no live authoring slot, so
+       *  `publish` MUST be true (a draft nobody is watching is refused with
+       *  `draft_needs_session`). */
+      sessionId?: string;
+      /** Optional — omitted creates a new widget; passed, updates that widget. */
+      widgetId?: string;
+      name: string;
+      description?: string;
+      specJson: string;
+      publish: boolean;
+    }
+  | {
       type: 'shell-approval-request';
       requestId: string;
       runId: string;
@@ -832,6 +898,17 @@ export interface McpQueryHandlerDeps {
    * 'agent_thread_store_unavailable'; every other handler is unaffected.
    */
   agentThreadStore?: AgentThreadDbStore;
+
+  /**
+   * Custom Views service (migration 132, docs/proposals/CUSTOM-VIEWS.md §9
+   * row S6) — backs the three custom-widget-authoring global-agent tools
+   * (`cyboflow_db_schema` / `cyboflow_widget_preview` / `cyboflow_widget_save`).
+   * A narrow STRUCTURAL interface (mirroring the `workflowConfig` precedent
+   * above), not the concrete `CustomViewsService` class, so a test can hand
+   * in a fake built over its own fixtures. Absent -> every one of the three
+   * tools fails closed with `custom_views_unavailable`.
+   */
+  customViews?: CustomViewsServiceLike;
 
   /**
    * Extra absolute folder paths the global-agent filesystem tools

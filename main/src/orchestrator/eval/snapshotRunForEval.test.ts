@@ -71,6 +71,17 @@ const fakeDiff: RunGitDiff = {
   diff: 'diff --git a/x b/x',
   stats: { additions: 3, deletions: 1, filesChanged: 1 },
   changedFiles: ['x'],
+  resolvedBase: null,
+  worktree: {
+    entries: [],
+    groups: [
+      { scope: 'unstaged', files: [], additions: 0, deletions: 0 },
+      { scope: 'staged', files: [], additions: 0, deletions: 0 },
+      { scope: 'untracked', files: [], additions: 0, deletions: 0 },
+      { scope: 'committed', files: [], additions: 0, deletions: 0 },
+    ],
+    committedUnavailable: true,
+  },
 };
 
 function makeDeps(db: DatabaseLike, over: Partial<SnapshotDeps> = {}): SnapshotDeps {

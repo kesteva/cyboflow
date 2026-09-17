@@ -361,6 +361,13 @@ export class WorkflowController {
     // sticky per-lane rescue guidance). Created here rather than per fan-out step
     // so both caps bound the WHOLE walk, and threaded into runFanOut by reference.
     const laneRescues: LaneRescueState = { perItem: new Map(), runTotal: 0, guidance: new Map() };
+    // The human's most recent gate 'revise', threaded into every step the gate's
+    // loopback re-drives. Walk-scoped and STICKY: set when applyGateDecision takes
+    // a revise WITH a jump target, carried on every baseCtx from that target
+    // forward, and cleared the moment the walk reaches the gate again (the gate
+    // having re-opened, the revision has been answered). The fan-out path never
+    // reads it — lanes carry their own per-lane channels.
+    let pendingGateRevision: { gateStepId: string; note?: string } | undefined;
     // Crash-resume skip set, copied into a MUTABLE local. It only fast-forwards PAST
     // work completed BEFORE the restart; the instant the walk deliberately REVISITS a
     // region (a loopback jump or a gate revise), that region's pre-restart history no
@@ -630,6 +637,9 @@ export class WorkflowController {
           phaseId: phase.id,
           stepIndex: i,
           signal,
+          // Sticky across the revisited region: the human's note describes what
+          // the whole re-run must do differently, not one step's defect.
+          ...(pendingGateRevision !== undefined ? { gateRevision: pendingGateRevision } : {}),
           // Prior-step handoff, opt-in per step. Only a step that declares it
           // receives the previous agent's text; every other step's prompt is
           // byte-identical to before.
@@ -645,6 +655,11 @@ export class WorkflowController {
           const decision = await this.host.requestHumanGate(step, { ...baseCtx, attempt: 1 });
           const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, remainingCompleted, steps, i);
           if (next.terminal) return this.finish(next.result, runId);
+          // Every gate decision REPLACES the pending revision: a revise-with-target
+          // arms a fresh one, and anything else (approve, or a revise that only
+          // re-presents) clears it. Reaching this gate again is exactly what
+          // "the revision has been answered" means, so no separate clear is needed.
+          pendingGateRevision = next.gateRevision;
           i = next.i;
           continue;
         }
@@ -737,6 +752,7 @@ export class WorkflowController {
             const decision = await this.host.requestHumanGate(step, { ...baseCtx, attempt });
             const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, remainingCompleted, steps, i, attempt);
             if (next.terminal) return this.finish(next.result, runId);
+            pendingGateRevision = next.gateRevision;
             i = next.i;
             continue;
           }
@@ -2304,6 +2320,15 @@ export class WorkflowController {
    *               (i unchanged), or — when the budget is exhausted — END the run
    *               GRACEFULLY as 'rejected' (NOT by tripping the defensive
    *               execution-bound throw, which was the prior behavior).
+   *
+   * A non-terminal result carries `gateRevision`: set ONLY on a 'revise' that
+   * actually JUMPS to a loopback target, carrying the gate's id and the human's
+   * note (read back through the host, since the verdict alone drops the text).
+   * The plain walk threads it into every re-driven step's context. It is
+   * deliberately ABSENT on a targetless revise — that re-presents the same gate
+   * rather than re-running anything, so there is nothing to hand feedback to —
+   * and on approve/reject/abort, where the caller assigning it clears whatever
+   * the previous round armed.
    */
   private applyGateDecision(
     decision: HumanGateDecision,
@@ -2315,7 +2340,9 @@ export class WorkflowController {
     steps: StepReport[],
     i: number,
     attempts = 1,
-  ): { terminal: true; result: ControllerResult } | { terminal: false; i: number } {
+  ):
+    | { terminal: true; result: ControllerResult }
+    | { terminal: false; i: number; gateRevision?: { gateStepId: string; note?: string } } {
     if (decision === 'approve') {
       this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'done', attempts });
       this.host.reportStep(step.id, 'done');
@@ -2359,7 +2386,23 @@ export class WorkflowController {
     // actually re-runs — otherwise a resume mid-revise would fast-forward past the
     // revisit steps and silently bypass the gate itself.
     this.clearCompletedFrom(remainingCompleted, phaseSteps, nextIndex);
-    return { terminal: false, i: nextIndex };
+    if (targetIndex < 0) return { terminal: false, i: nextIndex };
+    // A real jump: recover the human's note (the verdict channel dropped it) and
+    // arm it for every step the jump re-drives. A host without the seam, or a
+    // resolution that is a bare verdict word, yields undefined — the re-run then
+    // learns WHICH gate sent it back and nothing more, which still beats silence.
+    let note: string | undefined;
+    try {
+      note = this.host.readGateResolutionNote?.(step.id);
+    } catch {
+      note = undefined;
+    }
+    const trimmed = (note ?? '').trim();
+    return {
+      terminal: false,
+      i: nextIndex,
+      gateRevision: { gateStepId: step.id, ...(trimmed.length > 0 ? { note: trimmed } : {}) },
+    };
   }
 
   /**

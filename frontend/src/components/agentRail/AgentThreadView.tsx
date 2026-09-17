@@ -15,6 +15,7 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import type { UnifiedMessage } from '../../../../shared/types/unifiedMessage';
+import type { AgentThreadImageAttachment } from '../../../../shared/types/agentThread';
 import { UnifiedChatView } from '../cyboflow/unified/UnifiedChatView';
 import { GUIDED_TARGETS } from '../onboarding/guided/GuidedLeader';
 import { useUnifiedAgentThreadMessages } from '../cyboflow/unified/useUnifiedAgentThreadMessages';
@@ -41,8 +42,24 @@ export function AgentThreadView({
   const sending = useAgentThreadStore((s) => s.sending);
   const sendMessage = useAgentThreadStore((s) => s.sendMessage);
   const proposals = useAgentThreadStore((s) => s.proposals);
+  const composerDraft = useAgentThreadStore((s) => s.composerDraft);
+  const setComposerDraft = useAgentThreadStore((s) => s.setComposerDraft);
 
   const { messages, loadError } = useUnifiedAgentThreadMessages(thread?.id ?? null);
+
+  // The model actually answering: every projected assistant turn carries the
+  // SDK's resolved model id (messageProjection stamps metadata.model), so the
+  // last one is the truth. Before any turn has run, the per-thread override
+  // (rarely set) or "default" — the ConfigManager alias is not exposed here.
+  const activeModel = useMemo((): string => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role === 'assistant' && typeof m.metadata?.model === 'string' && m.metadata.model !== '') {
+        return m.metadata.model;
+      }
+    }
+    return thread?.model ?? 'default';
+  }, [messages, thread?.model]);
 
   // One-shot onboarding greeting (see ./onboardingGreeting). Read once in a
   // state initializer — NON-destructively, because StrictMode double-invokes
@@ -72,8 +89,8 @@ export function AgentThreadView({
     ];
   }, [greeting, greetingAt, messages]);
 
-  const handleSend = (text: string): void => {
-    void sendMessage(text);
+  const handleSend = (text: string, images?: AgentThreadImageAttachment[]): void => {
+    void sendMessage(text, images !== undefined && images.length > 0 ? { images } : undefined);
   };
 
   return (
@@ -101,7 +118,16 @@ export function AgentThreadView({
             onSend={handleSend}
             disabled={sending || thread === null}
             placeholder={composerPlaceholder}
+            prefill={composerDraft}
+            onPrefillConsumed={() => setComposerDraft(null)}
           />
+          <div
+            data-testid="agent-model-badge"
+            title="The model running this assistant (from its last turn; change it under Settings → Assistant)"
+            className="text-right text-[9px] uppercase tracking-[0.1em] text-text-tertiary"
+          >
+            model · {activeModel}
+          </div>
         </div>
       }
     />

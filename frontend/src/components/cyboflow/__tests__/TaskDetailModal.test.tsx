@@ -20,15 +20,30 @@ vi.mock('../../MarkdownPreview', () => ({
   MarkdownPreview: ({ content }: { content: string }) => <div data-testid="md-preview">{content}</div>,
 }));
 
-const { mockUpdate } = vi.hoisted(() => ({ mockUpdate: vi.fn() }));
+const { mockUpdate, mockForEntity } = vi.hoisted(() => ({
+  mockUpdate: vi.fn(),
+  mockForEntity: vi.fn(),
+}));
 vi.mock('../../../trpc/client', () => ({
-  trpc: { cyboflow: { tasks: { update: { mutate: mockUpdate } } } },
+  trpc: {
+    cyboflow: {
+      tasks: { update: { mutate: mockUpdate } },
+      // DesignAffordance (mounted in the header row) resolves via
+      // design.forEntity — default to null (no button) so existing assertions
+      // below are unaffected; its own tests override this.
+      design: { forEntity: { query: mockForEntity }, snapshotHtml: { query: vi.fn() } },
+      ideaComponents: {
+        onComponentsChanged: { subscribe: () => ({ unsubscribe: vi.fn() }) },
+      },
+    },
+  },
 }));
 
 beforeEach(() => {
   // Matches the real tRPC contract: tasks.update returns { taskId } only (the
   // component does not read the return — it bumps the version locally).
   mockUpdate.mockReset().mockResolvedValue({ taskId: 'TASK-1' });
+  mockForEntity.mockReset().mockResolvedValue(null);
 });
 
 function makeTask(overrides: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
@@ -81,6 +96,28 @@ describe('TaskDetailModal', () => {
     expect(screen.getByTestId('task-detail-summary')).toHaveTextContent('Tab strip across the top.');
     expect(screen.getByTestId('md-preview')).toHaveTextContent('Render a horizontal tab strip.');
     expect(screen.queryByTestId('task-detail-nobody')).not.toBeInTheDocument();
+  });
+
+  it('shows the Design affordance once a bound design resolves for this entity', async () => {
+    mockForEntity.mockResolvedValue({
+      ideaId: 'idea-1',
+      ideaRef: 'IDEA-018',
+      ideaTitle: 'Spend flow',
+      approvedAt: '2026-01-01T00:00:00.000Z',
+      source: 'flow',
+      sourceRunId: 'run-1',
+    });
+    render(<TaskDetailModal task={makeTask()} onClose={vi.fn()} />);
+
+    expect(await screen.findByTestId('design-affordance')).toBeInTheDocument();
+    expect(mockForEntity).toHaveBeenCalledWith({ entityId: 'TASK-1' });
+  });
+
+  it('renders no Design affordance when the entity has no bound design', async () => {
+    render(<TaskDetailModal task={makeTask()} onClose={vi.fn()} />);
+
+    await waitFor(() => expect(mockForEntity).toHaveBeenCalled());
+    expect(screen.queryByTestId('design-affordance')).not.toBeInTheDocument();
   });
 
   it('shows the No-additional-detail state for a null body', () => {

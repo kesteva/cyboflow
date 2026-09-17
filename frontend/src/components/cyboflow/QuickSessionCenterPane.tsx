@@ -49,6 +49,7 @@ import { IdeaSessionCanvas } from './IdeaSessionCanvas';
 import { CenterPaneTabStrip } from './CenterPaneTabStrip';
 import { FileTabRenderer } from './FileTabRenderer';
 import { ArtifactTabRenderer } from './ArtifactTabRenderer';
+import { ApprovedDesignTab } from './ApprovedDesignTab';
 import { TerminalDock } from './TerminalDock';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
 import { FLOW_TAB_ID } from '../../../../shared/types/centerPane';
@@ -138,9 +139,27 @@ export function QuickSessionCenterPane({
 
   const renderActiveTab = (): ReactElement => {
     if (activeTab && activeTab.kind === 'file' && activeTab.filePath) {
-      // The diff/content source is the pane's session key — sessionId alone is
-      // sufficient (no run / base-sha needed); see FileTabRenderer.
-      return <FileTabRenderer sessionId={sessionKey} filePath={activeTab.filePath} status={activeTab.status} />;
+      // The diff/content source is the pane's session key; an optional
+      // baseRef/scope on the tab (base-propagation channel) is forwarded through
+      // to FileTabRenderer so the diff can be computed against a supplied base.
+      return (
+        <FileTabRenderer
+          sessionId={sessionKey}
+          filePath={activeTab.filePath}
+          status={activeTab.status}
+          baseRef={activeTab.baseRef}
+          scope={activeTab.scope}
+        />
+      );
+    }
+    if (activeTab && activeTab.kind === 'approved-design' && activeTab.ideaId) {
+      return (
+        <ApprovedDesignTab
+          ideaId={activeTab.ideaId}
+          ideaRef={activeTab.ideaRef ?? activeTab.label}
+          projectId={projectId}
+        />
+      );
     }
     if (activeTab && activeTab.kind === 'artifact' && externalTarget !== null) {
       // Cross-run (idea-scoped) artifact — resolved by artifacts.get against the

@@ -28,7 +28,13 @@ vi.mock('../../../stores/backlogStore', () => {
   return { useBacklogStore };
 });
 
-const { setStateMock } = vi.hoisted(() => ({ setStateMock: vi.fn() }));
+const { setStateMock, forEntityMock } = vi.hoisted(() => ({
+  setStateMock: vi.fn(),
+  // DesignAffordance (mounted in the epic/task card footer) resolves via
+  // design.forEntity — default to null (no button) so existing card assertions
+  // below are unaffected.
+  forEntityMock: vi.fn().mockResolvedValue(null),
+}));
 
 vi.mock('../../../trpc/client', () => ({
   trpc: {
@@ -43,6 +49,11 @@ vi.mock('../../../trpc/client', () => ({
       },
       ideaComponents: {
         setState: { mutate: setStateMock },
+        onComponentsChanged: { subscribe: () => ({ unsubscribe: vi.fn() }) },
+      },
+      design: {
+        forEntity: { query: forEntityMock },
+        snapshotHtml: { query: vi.fn() },
       },
     },
   },
@@ -181,6 +192,54 @@ describe('TaskCard "Open" button (idea sessions plan, Stage 4)', () => {
   it('is disabled (in-flight guard) while launchingTaskId matches this idea, with no glyph/label change beyond the spinner', () => {
     render(<BoardCard task={makeIdea()} onRun={onRun} launchingTaskId="idea_1" now={Date.now()} />);
     expect(screen.getByTestId('task-open-button')).toBeDisabled();
+  });
+});
+
+describe('TaskCard Design affordance (Tier 2, item 8c)', () => {
+  it('renders the Design button for a task once forEntity resolves a bound design', async () => {
+    forEntityMock.mockClear();
+    forEntityMock.mockResolvedValueOnce({
+      ideaId: 'idea-1',
+      ideaRef: 'IDEA-014',
+      ideaTitle: 'Spend flow',
+      approvedAt: '2026-01-01T00:00:00.000Z',
+      source: 'flow',
+      sourceRunId: 'run-1',
+    });
+    render(
+      <BoardCard task={makeIdea({ type: 'task', ref: 'TASK-001' })} onRun={onRun} launchingTaskId={null} now={Date.now()} />,
+    );
+
+    expect(await screen.findByTestId('design-affordance')).toBeInTheDocument();
+  });
+
+  it('renders no Design button for a task with no bound design', async () => {
+    forEntityMock.mockClear();
+    render(
+      <BoardCard task={makeIdea({ type: 'task', ref: 'TASK-001' })} onRun={onRun} launchingTaskId={null} now={Date.now()} />,
+    );
+
+    await waitFor(() => expect(forEntityMock).toHaveBeenCalled());
+    expect(screen.queryByTestId('design-affordance')).not.toBeInTheDocument();
+  });
+
+  it('never renders the Design button on an idea card (its own home covers that)', async () => {
+    forEntityMock.mockClear();
+    forEntityMock.mockResolvedValueOnce({
+      ideaId: 'idea-1',
+      ideaRef: 'IDEA-014',
+      ideaTitle: 'Spend flow',
+      approvedAt: '2026-01-01T00:00:00.000Z',
+      source: 'flow',
+      sourceRunId: 'run-1',
+    });
+    render(<BoardCard task={makeIdea()} onRun={onRun} launchingTaskId={null} now={Date.now()} />);
+
+    // Give the (never-called, since the component isn't mounted for ideas)
+    // resolution a tick, then assert the button is absent.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.queryByTestId('design-affordance')).not.toBeInTheDocument();
+    expect(forEntityMock).not.toHaveBeenCalled();
   });
 });
 

@@ -92,6 +92,19 @@ here. A failed lane never stops the sprint: the remaining lanes keep running and
 the failure is surfaced at the human gate. Batch integration of the shared worktree
 is held until **all** lanes reach `integrated`.
 
+**Pass each task's approved design down to its lane.** Before you delegate
+`implement` or `task-verify` for a task, fetch its originating idea with
+`cyboflow_get_task` (the task's own `originating_idea_id`, else its epic's). When
+the idea reports an `approved_design`, put its `snapshot_path` AND the idea body's
+`## Design spec` section into the delegation prompt verbatim. The design was
+approved in an EARLIER run whose prototype artifact this run cannot read and which
+is deleted with it — the snapshot path and the spec are the only things that
+survive, and a subagent given neither has never seen the design it is building.
+Tell the lane the same contract the design carries: match the layout and the copy
+strings, wire real navigation so every screen is reachable from the entry point,
+and never leave a placeholder where the design shows a working screen.
+
+
 **On task success** — when the task's chain drains clean (all checks pass):
 
 - Make **ONE git commit** for that task's changes in the session worktree, with a

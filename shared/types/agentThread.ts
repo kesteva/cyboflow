@@ -369,3 +369,69 @@ export interface AgentProposal {
   createdAt: string;
   decidedAt: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Composer image attachments
+// ---------------------------------------------------------------------------
+
+/**
+ * The image media types the assistant composer accepts — exactly the set the
+ * Anthropic Messages API's base64 `image` content block supports. Narrowed at
+ * the composer (attach time) AND re-validated by the tRPC input schema, so a
+ * renderer bug can never hand the SDK a `media_type` it will reject mid-turn.
+ */
+export const AGENT_THREAD_IMAGE_MEDIA_TYPES = [
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+] as const;
+
+export type AgentThreadImageMediaType = (typeof AGENT_THREAD_IMAGE_MEDIA_TYPES)[number];
+
+export function isAgentThreadImageMediaType(value: unknown): value is AgentThreadImageMediaType {
+  return (AGENT_THREAD_IMAGE_MEDIA_TYPES as readonly unknown[]).includes(value);
+}
+
+/**
+ * One image attached to an assistant turn.
+ *
+ * This is a TRUE content block, not the "write the file, cite its path, let the
+ * agent Read it" convention every other attachment path in the app uses: the
+ * assistant spawns with `tools: []` and folder-scoped MCP reads only, so it can
+ * never open a cited path. `base64` is therefore the RAW base64 payload with
+ * NO `data:<media-type>;base64,` prefix — exactly what the Anthropic
+ * `{ type: 'image', source: { type: 'base64', ... } }` block wants.
+ *
+ * `name` is display-only (the transcript's `📎 image: …` line); nothing resolves
+ * it as a path.
+ */
+export interface AgentThreadImageAttachment {
+  name: string;
+  mediaType: AgentThreadImageMediaType;
+  base64: string;
+}
+
+/**
+ * Per-turn attachment limits. `maxBytesEach` bounds the DECODED image; the wire
+ * schema bounds the base64 string instead (see
+ * {@link AGENT_THREAD_IMAGE_MAX_BASE64_CHARS}) because that is what actually
+ * crosses IPC.
+ */
+export const AGENT_THREAD_IMAGE_LIMITS = {
+  maxImages: 4,
+  maxBytesEach: 5 * 1024 * 1024,
+} as const;
+
+/**
+ * Wire-side cap on one attachment's base64 string. Base64 inflates by 4/3 plus
+ * padding, so a 5 MB file encodes to ~6.67 MB; 7 MB leaves headroom without
+ * admitting a materially larger image.
+ */
+export const AGENT_THREAD_IMAGE_MAX_BASE64_CHARS = 7 * 1024 * 1024;
+
+/** Decoded byte count of a base64 payload (padding-aware). Display/limit use only. */
+export function agentThreadImageByteLength(base64: string): number {
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
+  return Math.max(0, Math.floor((base64.length * 3) / 4) - padding);
+}

@@ -21,17 +21,19 @@ import * as path from 'node:path';
  */
 
 /** Frozen 2026-09-15 at the sizes of local main `df1706b48` (v0.4.0 + the
- * Distractodo Tier 0+1 merge). The planned extractions, in order (see the
+ * Distractodo Tier 0+1 merge), then re-based 2026-09-17 on local main
+ * `9439bd5cf` (custom views + the grouped diff rail landed in between, before
+ * this ratchet existed on main). The planned extractions, in order (see the
  * plan on issue #19): the McpQueryMessage/Deps type contract out of
  * mcpQueryHandler (~950 lines), then its workflow-config and global-agent
  * families, then index.ts's verify/eval composition. Entries may decrease or
  * disappear, never grow. */
 const FROZEN_LINE_CAPS: Record<string, number> = {
-  'orchestrator/mcpServer/mcpQueryHandler.ts': 6072, // steps 1-3: type contract → mcpQueryMessages.ts; workflow-config + global-agent read tools → handlers/
-  'index.ts': 7166,
+  'orchestrator/mcpServer/mcpQueryHandler.ts': 5928, // steps 1-3: type contract → mcpQueryMessages.ts; workflow-config + global-agent read tools → handlers/
+  'index.ts': 7387,
   'orchestrator/verify/verificationScheduler.ts': 5702,
-  'services/panels/claude/claudeCodeManager.ts': 4794,
-  'database/database.ts': 4245,
+  'services/panels/claude/claudeCodeManager.ts': 4818,
+  'database/database.ts': 4249,
   'ipc/session.ts': 3732,
 };
 

@@ -45,6 +45,7 @@ const LEGACY_RENDER_MODE: Record<ArtifactType, 'template' | 'canvas'> = {
   'eval-report': 'template',
   'verify-runbook': 'template',
   'idea-summary': 'template',
+  'adversarial-review': 'template',
 };
 const LEGACY_COLORS: Record<ArtifactType, string> = {
   'idea-spec': '#3b6dd6',
@@ -61,6 +62,7 @@ const LEGACY_COLORS: Record<ArtifactType, string> = {
   'eval-report': '#f59e0b',
   'verify-runbook': '#1f8f7a',
   'idea-summary': '#6b6b6b',
+  'adversarial-review': '#c2415f',
 };
 const LEGACY_GLYPHS: Record<ArtifactType, string> = {
   'idea-spec': '▤',
@@ -77,6 +79,7 @@ const LEGACY_GLYPHS: Record<ArtifactType, string> = {
   'eval-report': '◎',
   'verify-runbook': '▨',
   'idea-summary': '◈',
+  'adversarial-review': '⚑',
 };
 
 const ALL_ATYPES = Object.keys(LEGACY_RENDER_MODE) as ArtifactType[];
@@ -131,6 +134,8 @@ describe('ARTIFACT_POLICIES registry', () => {
       // Appended LAST (registry order) so every historically-advertised atype
       // keeps its position in the MCP report tool's enum.
       'verify-runbook',
+      // Appended after verify-runbook for the same reason.
+      'adversarial-review',
     ]);
     // arch-design / approve-designs are auto-mint-only (never agent-reportable);
     // eval-report is likewise system-minted only (EvalWorker); idea-summary is
