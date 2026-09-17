@@ -570,8 +570,16 @@ describe('WorkflowEditorModal — edit mode', () => {
       fireEvent.click(screen.getByTestId('flow-name-confirm'));
     });
 
-    const alert = await screen.findByTestId('editor-error');
-    expect(alert).toHaveTextContent('A global workflow named "ship" already exists.');
+    // The rejection must be visible INSIDE the still-open name dialog — the
+    // dialog's own overlay covers the editor's error banner, so a message only
+    // on the outer modal would be hidden behind the active dialog (TASK-220).
+    const dialogAlert = await screen.findByTestId('flow-name-server-error');
+    expect(dialogAlert).toHaveTextContent('A global workflow named "ship" already exists.');
+    // The outer editor banner mirrors it (the dialog's overlay hides it while
+    // the dialog is open, but it remains once the dialog is cancelled).
+    expect(screen.getByTestId('editor-error')).toHaveTextContent(
+      'A global workflow named "ship" already exists.',
+    );
     // The failed save neither lands a new row nor closes the editor — the user
     // can correct the name/scope and retry.
     expect(onSaved).not.toHaveBeenCalled();
@@ -595,6 +603,40 @@ describe('WorkflowEditorModal — edit mode', () => {
     expect(mockCreateCustom.mock.calls[1][0].name).toBe('ship');
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith(NEW_CUSTOM_ROW.id, expect.any(String)));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('a createCustom rejection shown in the name dialog is hidden once the user edits the name, and re-shown by a failed retry', async () => {
+    mockCreateCustom.mockRejectedValueOnce(new Error('"ship" is a reserved built-in name.'));
+    await renderEditMode();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('editor-save-as-new-button'));
+    });
+
+    const nameInput = await screen.findByTestId('flow-name-input');
+    fireEvent.change(nameInput, { target: { value: 'ship' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('flow-name-confirm'));
+    });
+    const dialogAlert = await screen.findByTestId('flow-name-server-error');
+    expect(dialogAlert).toHaveTextContent('"ship" is a reserved built-in name.');
+
+    // Editing the name is the user acting on the message — it clears from the
+    // dialog (the scope select behaves the same way).
+    fireEvent.change(nameInput, { target: { value: 'ship-2' } });
+    expect(screen.queryByTestId('flow-name-server-error')).not.toBeInTheDocument();
+
+    // A retry that fails again (same or different text) re-surfaces the error
+    // inside the dialog.
+    mockCreateCustom.mockRejectedValueOnce(new Error('"ship" is a reserved built-in name.'));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('flow-name-confirm'));
+    });
+    expect(mockCreateCustom).toHaveBeenCalledTimes(2);
+    expect(mockCreateCustom.mock.calls[1][0].name).toBe('ship-2');
+    expect(await screen.findByTestId('flow-name-server-error')).toHaveTextContent(
+      '"ship" is a reserved built-in name.',
+    );
   });
 
   it('cancelling the "Save as new flow" dialog does not call createCustom', async () => {

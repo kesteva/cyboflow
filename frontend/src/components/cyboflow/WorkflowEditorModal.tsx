@@ -1135,6 +1135,13 @@ export function WorkflowEditorModal({
         defaultScopeProjectId={sourceProjectId}
         onConfirm={(name, scopeProjectId) => void handleNameConfirm(name, scopeProjectId)}
         onClose={handleNameDialogClose}
+        // A failed save-as-new (createCustom name guards) keeps this dialog
+        // open and must show the rejection INSIDE it — the dialog's overlay
+        // covers the editor's own error banner (TASK-220). `handleSaveAsNew` /
+        // `handleRunWithModifications` clear `error` before opening, and
+        // `handleNameConfirm` clears it before each attempt, so nothing stale
+        // from an earlier action leaks in here.
+        serverError={nameDialogOpen ? error : null}
       />
 
       {/* Save-target choice (edit mode): overwrite / project copy / new flow /

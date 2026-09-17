@@ -43,6 +43,16 @@ interface FlowNameDialogProps {
    */
   onConfirm: (name: string, scopeProjectId: number | null) => void;
   onClose: () => void;
+  /**
+   * A failure reported by the caller AFTER `onConfirm` (e.g. the `createCustom`
+   * reserved-name / name-collision guards, TASK-220). Rendered inside the
+   * dialog — which stays open with the typed name and chosen scope intact —
+   * since this modal's overlay covers any error banner the host renders
+   * behind it. Hidden again as soon as the user edits the name or scope; a
+   * retry that fails with the same text re-shows it because the caller
+   * clears and re-sets it around each attempt.
+   */
+  serverError?: string | null;
 }
 
 /** Sentinel `<option>` value for the GLOBAL (null scope) choice. */
@@ -57,10 +67,18 @@ export function FlowNameDialog({
   defaultScopeProjectId = null,
   onConfirm,
   onClose,
+  serverError = null,
 }: FlowNameDialogProps): React.JSX.Element {
   const [name, setName] = useState(defaultValue);
   const [error, setError] = useState<string | null>(null);
   const [scopeProjectId, setScopeProjectId] = useState<number | null>(defaultScopeProjectId);
+  // Whether the caller's `serverError` is still shown: an edit to the name or
+  // scope hides it (the user is acting on it); a NEW serverError value re-shows.
+  const [showServerError, setShowServerError] = useState(true);
+
+  useEffect(() => {
+    setShowServerError(true);
+  }, [serverError]);
 
   // Re-seed the input each time the dialog (re)opens, so a fresh open never
   // shows the previous entry.
@@ -91,7 +109,10 @@ export function FlowNameDialog({
             <input
               type="text"
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => {
+                setName(e.target.value);
+                setShowServerError(false);
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   e.preventDefault();
@@ -113,11 +134,12 @@ export function FlowNameDialog({
                 aria-label="Scope for the new workflow"
                 data-testid="flow-name-scope-select"
                 value={scopeProjectId === null ? GLOBAL_SCOPE_VALUE : String(scopeProjectId)}
-                onChange={(e) =>
+                onChange={(e) => {
                   setScopeProjectId(
                     e.target.value === GLOBAL_SCOPE_VALUE ? null : Number(e.target.value),
-                  )
-                }
+                  );
+                  setShowServerError(false);
+                }}
                 className="rounded-button border border-border-primary bg-bg-primary px-2.5 py-1.5 font-mono text-xs text-text-secondary transition-colors hover:border-border-emphasized hover:text-text-primary focus:border-border-emphasized focus:outline-none"
               >
                 <option value={GLOBAL_SCOPE_VALUE}>All projects (global)</option>
@@ -133,6 +155,16 @@ export function FlowNameDialog({
           {error && (
             <p className="text-xs text-status-error" role="alert">
               {error}
+            </p>
+          )}
+
+          {!error && showServerError && serverError && (
+            <p
+              className="text-xs text-status-error"
+              role="alert"
+              data-testid="flow-name-server-error"
+            >
+              {serverError}
             </p>
           )}
         </div>
