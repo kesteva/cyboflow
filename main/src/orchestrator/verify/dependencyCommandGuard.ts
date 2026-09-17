@@ -91,6 +91,27 @@ import type { VerificationTaskV1 } from '../../../../shared/types/visualVerifica
  *     tool's name. Both belong to the §7.2 dependency PREPARER (keyed by
  *     lockfile hash / platform / arch / node major / electron ABI / browser
  *     build, built outside any snapshot), never to a task's build step.
+ *  5. `pod install` / `pod update` / `pod repo update` — CocoaPods' dependency
+ *     mutation verbs, the mobile tier's equivalent of family (1).
+ *  6. `swift package resolve` / `swift package update` — SwiftPM's own
+ *     dependency-resolution SUBCOMMAND, invoked directly rather than as a
+ *     side effect of building.
+ *  7. `xcodebuild … -resolvePackageDependencies` — the explicit "fetch my
+ *     SwiftPM graph now" flag on an xcodebuild invocation.
+ *
+ * WHY AN ORDINARY `xcodebuild build …` IS NOT AMONG THEM. A build step that
+ * needs SwiftPM resolves it IMPLICITLY, into that build's own
+ * `-clonedSourcePackagesDirPath` (a directory scoped to the request's own
+ * DerivedData, never a shared checkout or `~/Library/Caches/org.swift.swiftpm`
+ * the host's Xcode reuses). It therefore has the identical property that
+ * keeps a plain `pnpm build` off the (1) list despite `pnpm build` also
+ * touching a build cache: the mutation is real but PRIVATE to the request.
+ * Forbidding it here would reject the ordinary mobile build step task-verify
+ * composes, for a hazard the private directory has already closed off — the
+ * three families above are specifically the ones that reach OUTSIDE that
+ * private scope (a system-wide Pods checkout, the shared SwiftPM cache, or an
+ * explicit re-resolve into it) or bypass it (families 5-6 run standalone,
+ * with no clonedSourcePackagesDirPath to scope them at all).
  */
 export const FORBIDDEN_DEP_COMMAND_PATTERN = new RegExp(
   [
@@ -101,6 +122,12 @@ export const FORBIDDEN_DEP_COMMAND_PATTERN = new RegExp(
     // (3) + (4) electron native-ABI rebuilds.
     String.raw`\belectron-rebuild\b`,
     String.raw`\belectron-builder\s+install-app-deps\b`,
+    // (5) CocoaPods dependency mutation.
+    String.raw`\bpod\s+(?:install|update|repo\s+update)\b`,
+    // (6) SwiftPM's own resolve/update subcommand, run standalone.
+    String.raw`\bswift\s+package\s+(?:resolve|update)\b`,
+    // (7) xcodebuild's explicit SwiftPM re-resolve flag.
+    String.raw`-resolvePackageDependencies\b`,
   ].join('|'),
   'i',
 );
