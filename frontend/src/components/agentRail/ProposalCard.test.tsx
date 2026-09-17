@@ -27,6 +27,7 @@ import type {
   EditWorkflowProposalPayload,
   OpenSessionProposalPayload,
   CreateBacklogItemsProposalPayload,
+  CreateWorkflowProposalPayload,
   AgentProposalStatus,
 } from '../../../../shared/types/agentThread';
 
@@ -129,6 +130,35 @@ function makeCreateBacklogProposal(overrides: {
   };
   return baseProposal({
     kind: 'create-backlog-items',
+    payload,
+    status: overrides.status ?? 'proposed',
+    result: overrides.result ?? null,
+  });
+}
+
+function makeCreateWorkflowProposal(overrides: {
+  status?: AgentProposalStatus;
+  result?: unknown;
+  payload?: Partial<CreateWorkflowProposalPayload>;
+} = {}): AgentProposal {
+  const payload: CreateWorkflowProposalPayload = {
+    kind: 'create-workflow',
+    projectId: 1,
+    name: 'Docs Review',
+    summary: 'A docs-review flow with its own writer',
+    definitionJson: JSON.stringify({
+      id: 'docs-review',
+      phases: [{ id: 'review', label: 'Review', color: '#3b6dd6', steps: [{ id: 'write' }, { id: 'approve' }] }],
+    }),
+    permissionMode: 'acceptEdits',
+    agents: [
+      { name: 'Docs Writer', description: 'Writes docs.', systemPrompt: 'Write docs.', tools: ['Read', 'Edit'] },
+      { name: 'Docs Checker', description: 'Checks docs.', systemPrompt: 'Check docs.', tools: ['Read'] },
+    ],
+    ...overrides.payload,
+  };
+  return baseProposal({
+    kind: 'create-workflow',
     payload,
     status: overrides.status ?? 'proposed',
     result: overrides.result ?? null,
@@ -406,6 +436,86 @@ describe('ProposalCard — create-backlog-items', () => {
 
     expect(screen.getByTestId('proposal-card-resolved-row')).toHaveTextContent('Dismissed.');
     expect(screen.queryByTestId('create-backlog-row')).not.toBeInTheDocument();
+  });
+});
+
+describe('ProposalCard — create-workflow', () => {
+  it('open state: summary, name, parsed phase/step counts, permission mode, and one row per new agent', () => {
+    render(<ProposalCard proposal={makeCreateWorkflowProposal()} />);
+
+    expect(screen.getByTestId('proposal-card')).toHaveTextContent('create workflow');
+    expect(screen.getByText('A docs-review flow with its own writer')).toBeInTheDocument();
+    expect(screen.getByText('Docs Review')).toBeInTheDocument();
+    expect(screen.getByText('1 phase · 2 steps')).toBeInTheDocument();
+    expect(screen.getByText('acceptEdits')).toBeInTheDocument();
+    expect(screen.getByText('2 agents')).toBeInTheDocument();
+    const rows = screen.getAllByTestId('create-workflow-agent-row');
+    expect(rows).toHaveLength(2);
+    expect(within(rows[0]).getByTestId('create-workflow-agent-tools')).toHaveTextContent('Read · Edit');
+    expect(screen.queryByTestId('create-workflow-agent-outcome')).not.toBeInTheDocument();
+  });
+
+  it('open state: a global-scoped flow says so instead of naming a project', () => {
+    render(<ProposalCard proposal={makeCreateWorkflowProposal({ payload: { scope: 'global', agents: [], summary: undefined } })} />);
+
+    expect(screen.getByText('Create workflow "Docs Review"')).toBeInTheDocument();
+    expect(screen.getByText('Global — every project')).toBeInTheDocument();
+    expect(screen.queryByTestId('create-workflow-agent-row')).not.toBeInTheDocument();
+  });
+
+  it('resolved executed: the minted workflow id and a ✓ + key per agent', () => {
+    const proposal = makeCreateWorkflowProposal({
+      status: 'executed',
+      result: {
+        kind: 'create-workflow',
+        status: 'executed',
+        name: 'Docs Review',
+        workflowId: 'wf-1-custom-abcd1234',
+        agents: [
+          { index: 0, name: 'Docs Writer', ok: true, agentKey: 'docs-writer' },
+          { index: 1, name: 'Docs Checker', ok: true, agentKey: 'docs-checker' },
+        ],
+      },
+    });
+    render(<ProposalCard proposal={proposal} />);
+
+    expect(screen.getByText('Workflow "Docs Review" created with 2 agents.')).toBeInTheDocument();
+    expect(screen.getByText('wf-1-custom-abcd1234')).toBeInTheDocument();
+    const rows = screen.getAllByTestId('create-workflow-agent-row');
+    expect(within(rows[0]).getByTestId('create-workflow-agent-key')).toHaveTextContent('docs-writer');
+    expect(within(rows[1]).getByTestId('create-workflow-agent-outcome')).toHaveAttribute('data-ok', 'true');
+  });
+
+  it('resolved failed: the error, per-agent ✓/✕, and whether the unwind completed', () => {
+    const proposal = makeCreateWorkflowProposal({
+      status: 'failed',
+      result: {
+        kind: 'create-workflow',
+        status: 'failed',
+        name: 'Docs Review',
+        error: 'agent "Docs Checker" was not created: duplicate_key',
+        agents: [
+          { index: 0, name: 'Docs Writer', ok: true, agentKey: 'docs-writer' },
+          { index: 1, name: 'Docs Checker', ok: false, error: 'duplicate_key' },
+        ],
+        compensations: [{ agentKey: 'docs-writer', ok: false, error: 'referenced' }],
+      },
+    });
+    render(<ProposalCard proposal={proposal} />);
+
+    expect(screen.getByText('Workflow not created.')).toBeInTheDocument();
+    expect(screen.getByText('agent "Docs Checker" was not created: duplicate_key')).toBeInTheDocument();
+    const rows = screen.getAllByTestId('create-workflow-agent-row');
+    expect(within(rows[0]).getByTestId('create-workflow-agent-outcome')).toHaveAttribute('data-ok', 'true');
+    expect(within(rows[1]).getByTestId('create-workflow-agent-outcome')).toHaveAttribute('data-ok', 'false');
+    expect(screen.getByTestId('proposal-create-workflow-unwind')).toHaveTextContent('could not be removed again');
+  });
+
+  it('dismissed collapses to the neutral resolved line without agent rows', () => {
+    render(<ProposalCard proposal={makeCreateWorkflowProposal({ status: 'dismissed' })} />);
+
+    expect(screen.getByTestId('proposal-card-resolved-row')).toHaveTextContent('Dismissed.');
+    expect(screen.queryByTestId('create-workflow-agent-row')).not.toBeInTheDocument();
   });
 });
 
