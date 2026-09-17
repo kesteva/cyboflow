@@ -191,3 +191,27 @@ export async function surfaceHumanPrerequisites(
   }
   return created;
 }
+
+/**
+ * The SprintLaneStore `onBatchMinted` hook, ready to inject: fires AFTER
+ * createForRun commits and turns the batch's human prerequisites into standing
+ * review items — the only place that work becomes visible, since a human task
+ * never gets a lane and its blocking edge is deliberately non-gating. Async and
+ * fail-soft on BOTH sides (the store swallows a synchronous throw; the .catch
+ * here swallows a rejection), because a sprint that has already materialized
+ * must never be failed by a side-effect.
+ */
+export function humanPrerequisiteSink(
+  db: DatabaseLike,
+  reviewRouter: Pick<ReviewItemRouter, 'createIfNoPending'>,
+  logger?: LoggerLike,
+): (args: SurfaceHumanPrerequisitesArgs) => void {
+  return (args) => {
+    void surfaceHumanPrerequisites(db, reviewRouter, args, logger).catch((err: unknown) => {
+      logger?.warn('[Cyboflow] human-prerequisite surfacing failed (ignored)', {
+        batchId: args.batchId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  };
+}
