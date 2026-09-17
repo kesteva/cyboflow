@@ -292,6 +292,7 @@ import {
   type TaskFieldsSnapshot,
 } from './orchestrator/agentThread/proposalExecutor';
 import { prepareProposal, createPrepareProposalDeps } from './orchestrator/agentThread/prepareProposal';
+import { buildProposalExecutorWorkflowDeps } from './orchestrator/agentThread/proposalExecutorWorkflowDeps';
 import { CustomViewsDbStore } from './orchestrator/customViews/customViewsStore';
 import { createCustomViewsService, type CustomViewsServiceLike } from './orchestrator/customViews/customViewsService';
 import { CATALOG_WIDGET_SPECS } from '../../shared/customViews/catalogSpecs';
@@ -6643,11 +6644,8 @@ app.whenReady().then(async () => {
         return row ?? null;
       },
       runInTransaction: <T>(fn: () => T): T => experimentsDb.transaction(fn)() as T,
-      // The EFFECTIVE definition (migration 122) — the tuning level's graph, not
-      // the raw slot. Must stay the SAME resolution the proposal's CAS hash was
-      // captured from (mcpQueryHandler's edit-workflow precondition).
-      readEffectiveWorkflowSpec: (workflowId) => workflowRegistry.getEffectiveDefinition(workflowId),
-      applyWorkflowSpec: (workflowId, definition) => workflowRegistry.updateSpec(workflowId, definition),
+      // edit-workflow + create-workflow: WorkflowRegistry / AgentOverrideRouter closures.
+      ...buildProposalExecutorWorkflowDeps({ workflowRegistry, agentOverrideRouter: AgentOverrideRouter.getInstance(), db: experimentsDb }),
       logger: loggerLike,
     };
     setProposalExecutorDeps(proposalExecutorDeps);
