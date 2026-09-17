@@ -137,8 +137,16 @@ export interface ControllerStepContext {
    * whole re-run must do differently, not one step's defect, and every step from
    * the target forward is part of that re-run. Cleared once the gate is reached
    * again. Absent on every normal turn (output unchanged).
+   *
+   * `source` names who sent the region back. Absent ⇒ a human gate 'revise'
+   * (the original channel, rendered unchanged). `'adversarial-review'` ⇒ the
+   * controller's AUTOMATIC revision: an adversarial-review step whose result
+   * carried `REVIEW: BLOCKING` looped back to its declared target before the
+   * human ever saw the design gate, and `note` holds the review's `## Blocking`
+   * section. The prompt renders a different heading for it, so the re-run agent
+   * never reads a machine verdict as "a human rejected this".
    */
-  gateRevision?: { gateStepId: string; note?: string };
+  gateRevision?: { gateStepId: string; note?: string; source?: 'adversarial-review' };
   /**
    * The final text of the most recent preceding AGENT step, forwarded to a step
    * whose definition sets `consumesPriorStepOutput` (see

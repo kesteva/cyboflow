@@ -905,7 +905,14 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: ['filesystem'],
             retries: 0,
             optional: true,
-            desc: 'Stress-test spec + prototype + architecture; must-fix auto-revised once, remaining critique surfaced (non-blocking) at the design gate. Runs only when a prototype or architecture exists.',
+            // A `REVIEW: BLOCKING` result re-runs the refine phase from `expand-spec`
+            // AUTOMATICALLY (once — MAX_REVIEW_AUTO_REVISIONS) with the review's
+            // `## Blocking` entries threaded into every re-run step, before the
+            // human sees the design gate; a second BLOCKING falls through to the
+            // gate. Being optional, a review that merely FAILS still skips rather
+            // than taking this edge.
+            loopback: 'expand-spec',
+            desc: 'Stress-test spec + prototype + architecture; a blocking verdict re-runs the refine phase once automatically, remaining critique surfaced (non-blocking) at the design gate. Runs only when a prototype or architecture exists.',
             outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
           },
           {

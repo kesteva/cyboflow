@@ -121,6 +121,34 @@ function extractBlockingSection(text: string): string | null {
 }
 
 /**
+ * Whether a `## Blocking` section carries actual entries. The adversarial-review
+ * doc keeps the heading with `None.` under it when the reviewer found nothing (so
+ * the human can SEE it looked), which `extractBlockingSection` returns as a
+ * non-null body — treating that as blocking would loop the design phase on a
+ * clean review. An entry is a `#### AR-n` heading; failing that, any body that is
+ * not the literal `None.` placeholder counts (a reviewer that dropped the heading
+ * shape still wrote a defect).
+ */
+function blockingSectionHasEntries(text: string): boolean {
+  const body = extractBlockingSection(text);
+  if (body === null) return false;
+  if (/^####\s+AR-\d+/m.test(body)) return true;
+  return !/^none\.?$/i.test(body.trim());
+}
+
+/**
+ * Maximum number of AUTOMATIC design revisions an adversarial-review step may
+ * trigger per run: a `REVIEW: BLOCKING` result loops the refine phase back to the
+ * step's declared `loopback` target this many times, each re-run threaded with the
+ * review's `## Blocking` entries; the next BLOCKING verdict falls through to the
+ * human design gate, which presents the surviving entries. One round is the
+ * deliberate bound — the reviewer is a critic, not the arbiter of the design, and
+ * a second disagreement is the human's call, not another automated lap through
+ * prototype + architecture.
+ */
+export const MAX_REVIEW_AUTO_REVISIONS = 1;
+
+/**
  * Maximum number of intra-phase loopback JUMPS allowed per step id across a whole
  * run, bounding both agent-step loopbacks and human-gate revises so a flapping
  * step or an indecisive reviewer can never spin forever. Distinct from a step's
@@ -418,7 +446,11 @@ export class WorkflowController {
     // forward, and cleared the moment the walk reaches the gate again (the gate
     // having re-opened, the revision has been answered). The fan-out path never
     // reads it — lanes carry their own per-lane channels.
-    let pendingGateRevision: { gateStepId: string; note?: string } | undefined;
+    let pendingGateRevision: { gateStepId: string; note?: string; source?: 'adversarial-review' } | undefined;
+    // Per-step-id count of AUTOMATIC adversarial-review revisions taken this walk
+    // (bounded by MAX_REVIEW_AUTO_REVISIONS). Separate from `loopbacks` so the
+    // one automatic lap never eats into the human gate's own revise budget.
+    const reviewAutoRevisions = new Map<string, number>();
     // Crash-resume skip set, copied into a MUTABLE local. It only fast-forwards PAST
     // work completed BEFORE the restart; the instant the walk deliberately REVISITS a
     // region (a loopback jump or a gate revise), that region's pre-restart history no
@@ -796,6 +828,33 @@ export class WorkflowController {
               ? { text: okResultText }
               : {}),
           };
+          // Adversarial-review verdict routing: a review step that declares a
+          // `loopback` and returned `REVIEW: BLOCKING` (or a populated `## Blocking`
+          // section with no trailer) sends the refine phase back AUTOMATICALLY —
+          // the same verdict-driven loopback the sprint lane's code-review takes —
+          // instead of parking the run at the design gate with defects the flow
+          // could have fixed itself. Bounded by MAX_REVIEW_AUTO_REVISIONS; past it
+          // the step advances and the human gate presents the surviving entries.
+          const reviewJump = this.tryAdversarialReviewLoopback(
+            step, phase.steps, okResultText, reviewAutoRevisions,
+          );
+          if (reviewJump !== null) {
+            this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'done', attempts: attempt });
+            this.host.reportStep(step.id, 'done');
+            this.host.log?.(
+              'warn',
+              `step '${step.id}' returned REVIEW: BLOCKING; looping back to '${phase.steps[reviewJump.index].id}' for an automatic revision (${reviewJump.round}/${MAX_REVIEW_AUTO_REVISIONS})`,
+            );
+            // Deliberate revisit — same purge the gate's revise performs.
+            this.clearCompletedFrom(remainingCompleted, phase.steps, reviewJump.index);
+            pendingGateRevision = {
+              gateStepId: step.id,
+              source: 'adversarial-review',
+              ...(reviewJump.blocking !== null ? { note: reviewJump.blocking } : {}),
+            };
+            i = reviewJump.index;
+            continue;
+          }
           // Agent succeeded. If the step ALSO carries a human checkpoint, open the
           // gate now (agent-then-gate); otherwise advance.
           if (hasTrailingGate(step)) {
@@ -813,8 +872,13 @@ export class WorkflowController {
           continue;
         }
 
-        // Retries exhausted — try an intra-phase loopback before escalating.
-        const jumped = this.tryLoopback(step, phase.steps, loopbacks);
+        // Retries exhausted — try an intra-phase loopback before escalating. An
+        // OPTIONAL step never takes it: optional means "skippable on failure", and
+        // its `loopback` exists for a verdict-driven jump (adversarial-review's
+        // REVIEW: BLOCKING above), not to re-run the whole phase because the
+        // reviewer itself crashed. No built-in ever paired the two before, so this
+        // is byte-identical for every existing definition.
+        const jumped = step.optional === true ? null : this.tryLoopback(step, phase.steps, loopbacks);
         if (jumped !== null) {
           this.host.log?.('warn', `step '${step.id}' failed; looping back to '${phase.steps[jumped].id}'`);
           this.host.reportStep(step.id, 'done');
@@ -2802,6 +2866,54 @@ export class WorkflowController {
     for (let k = fromIndex; k < phaseSteps.length; k++) {
       remainingCompleted.delete(phaseSteps[k].id);
     }
+  }
+
+  /**
+   * Resolve the AUTOMATIC adversarial-review loopback for a step that just
+   * succeeded: returns the jump target, the round number, and the extracted
+   * `## Blocking` section when ALL of these hold — the step's agent is
+   * `adversarial-review`, it declares a resolvable intra-phase `loopback`, its
+   * captured result says `REVIEW: BLOCKING` (or, with no trailer, carries a
+   * populated `## Blocking` section — the same no-trailer tolerance the fan-out
+   * code-review path has), and MAX_REVIEW_AUTO_REVISIONS is not yet spent for
+   * this step id. Null otherwise, so every other step — and a review whose
+   * result could not be captured — advances exactly as before.
+   *
+   * Keyed on the AGENT rather than on `loopback` alone so a custom flow that
+   * puts an on-failure loopback on some other agent step never has its clean
+   * result re-parsed as a review verdict.
+   */
+  private tryAdversarialReviewLoopback(
+    step: WorkflowStep,
+    phaseSteps: WorkflowStep[],
+    resultText: string | null | undefined,
+    reviewAutoRevisions: Map<string, number>,
+  ): { index: number; round: number; blocking: string | null } | null {
+    if (step.agent !== 'adversarial-review') return null;
+    if (step.loopback === undefined || step.loopback.length === 0) return null;
+    if (typeof resultText !== 'string' || resultText.trim().length === 0) return null;
+    const verdict = parseCodeReviewVerdict(resultText);
+    const blocking =
+      verdict === 'blocking' || (verdict === null && blockingSectionHasEntries(resultText));
+    if (!blocking) return null;
+    const targetIndex = phaseSteps.findIndex((s) => s.id === step.loopback);
+    if (targetIndex < 0) return null; // unresolved (validation should prevent this)
+    const used = reviewAutoRevisions.get(step.id) ?? 0;
+    if (used >= MAX_REVIEW_AUTO_REVISIONS) {
+      this.host.log?.(
+        'warn',
+        `step '${step.id}' returned REVIEW: BLOCKING again after ${used} automatic revision(s); advancing to the design gate`,
+      );
+      return null;
+    }
+    reviewAutoRevisions.set(step.id, used + 1);
+    return {
+      index: targetIndex,
+      round: used + 1,
+      // Only a section with real entries is worth quoting — a `REVIEW: BLOCKING`
+      // trailer over a `None.` section hands the re-run the artifact instead.
+      blocking: blockingSectionHasEntries(resultText) ? extractBlockingSection(resultText) : null,
+    };
   }
 
   /**
