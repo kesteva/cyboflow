@@ -22,7 +22,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join, isAbsolute, resolve } from 'node:path';
 import * as os from 'node:os';
 import { setCyboflowDirectory, getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
@@ -7360,8 +7360,21 @@ describe('bootstrap_proof is not a wire field (migration 107 tripwire)', () => {
    * schema "for symmetry with setup_proof". A behavioral test would pass right
    * up until that happens and then start testing the new path instead.
    */
-  it('the MCP query handler never references the bootstrap-proof flag', () => {
-    const source = readFileSync(join(__dirname, '..', 'mcpQueryHandler.ts'), 'utf-8');
+  // The handler family, not just mcpQueryHandler.ts: the wire contract
+  // (McpQueryMessage) lives in mcpQueryMessages.ts and the extracted handler
+  // modules under handlers/ since the issue-#19 split, and threading the flag
+  // through any of them would defeat the invariant just the same.
+  const HANDLER_FAMILY = [
+    'mcpQueryHandler.ts',
+    'mcpQueryMessages.ts',
+    'globalAgentContext.ts',
+    ...readdirSync(join(__dirname, '..', 'handlers'))
+      .filter((name) => name.endsWith('.ts'))
+      .map((name) => join('handlers', name)),
+  ];
+
+  it.each(HANDLER_FAMILY)('%s never references the bootstrap-proof flag', (rel) => {
+    const source = readFileSync(join(__dirname, '..', rel), 'utf-8');
     // Comments are allowed to NAME it (explaining why it is absent is useful);
     // strip line comments and block comments before scanning for real references.
     const code = source
@@ -7369,6 +7382,12 @@ describe('bootstrap_proof is not a wire field (migration 107 tripwire)', () => {
       .replace(/^\s*\/\/.*$/gm, '');
     expect(code).not.toMatch(/bootstrap_proof/);
     expect(code).not.toMatch(/bootstrapProof/);
+  });
+
+  it('the handler family scan covers every extracted handler module', () => {
+    // Guards the list above against a new handlers/ file that is not a .ts
+    // source, and against the directory moving out from under it.
+    expect(HANDLER_FAMILY.length).toBeGreaterThanOrEqual(5);
   });
 
   it('the MCP server tool schema never exposes a bootstrap-proof input', () => {
