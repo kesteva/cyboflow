@@ -13,8 +13,15 @@ import {
   FALLBACK_CHAINS,
   REQUEST_STATUS,
   VERIFICATION_TYPES,
+  VERIFICATION_MODALITIES,
+  VISUAL_VERIFY_DEFAULTS,
+  DEFAULT_MOBILE_SIM_SLOTS,
+  DEFAULT_MOBILE_DEADLINE_FLOOR_MS,
   isVerificationType,
+  isVerificationModality,
+  resolveTaskModality,
   type VerificationType,
+  type VerifyProbeId,
   type VisualBackendId,
   type VerifyConfigFile,
   type DeliverableVerifyConfig,
@@ -205,7 +212,50 @@ describe('visualVerification shared seam', () => {
     });
   });
 
-  describe('isVerificationType', () => {
+  describe('the mobile modality widening (iOS Simulator — xcodebuild + simctl)', () => {
+  it('keeps the four-member modality roster and its guard in step', () => {
+    expect([...VERIFICATION_MODALITIES]).toEqual(['web', 'cdp-app', 'native-screen', 'mobile']);
+    for (const m of VERIFICATION_MODALITIES) {
+      expect(isVerificationModality(m)).toBe(true);
+    }
+    expect(isVerificationModality('ios-simulator')).toBe(false);
+  });
+
+  it('resolves an app-shaped task to mobile without widening the type space', () => {
+    expect(
+      resolveTaskModality('static-render-snapshot', {
+        app: { platform: 'ios-simulator', bundleId: 'com.example.demo', scheme: 'Demo' },
+      }),
+    ).toBe('mobile');
+    // The VerificationType taxonomy is untouched by the modality widening.
+    expect(new Set(VERIFICATION_TYPES).size).toBe(5);
+  });
+
+  it('adds the mobile-simulator probe row to VerifyProbeId', () => {
+    const rows: VerifyProbeId[] = [
+      'browser-driving',
+      'screen-recording',
+      'accessibility',
+      'mobile-simulator',
+    ];
+    expect(rows).toHaveLength(4);
+  });
+
+  it('floors the mobile config members without disturbing the existing defaults', () => {
+    expect(VISUAL_VERIFY_DEFAULTS.mobileSimSlots).toBe(DEFAULT_MOBILE_SIM_SLOTS);
+    expect(DEFAULT_MOBILE_SIM_SLOTS).toBe(1);
+    expect(VISUAL_VERIFY_DEFAULTS.mobileSimDeviceType).toBe('');
+    expect(VISUAL_VERIFY_DEFAULTS.mobileSimRuntime).toBe('');
+    expect(VISUAL_VERIFY_DEFAULTS.mobileDeadlineFloorMs).toBe(DEFAULT_MOBILE_DEADLINE_FLOOR_MS);
+    expect(DEFAULT_MOBILE_DEADLINE_FLOOR_MS).toBe(900_000);
+    // Pre-existing floors unchanged.
+    expect(VISUAL_VERIFY_DEFAULTS.enabled).toBe(false);
+    expect(VISUAL_VERIFY_DEFAULTS.agentSlots).toBe(2);
+    expect(VISUAL_VERIFY_DEFAULTS.simulatorDevices).toEqual([]);
+  });
+});
+
+describe('isVerificationType', () => {
     it('accepts every union member', () => {
       for (const t of VERIFICATION_TYPES) {
         expect(isVerificationType(t)).toBe(true);

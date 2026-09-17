@@ -61,10 +61,11 @@
  */
 import type {
   AttestationSpec,
+  MobileAppSpec,
   VerificationModality,
   ViewportSpec,
 } from './visualVerification';
-import { isAttestationSpec } from './visualVerification';
+import { isAttestationSpec, parseMobileAppSpec } from './visualVerification';
 
 /**
  * The project-root-relative path of the portable runbook half. A single
@@ -77,33 +78,40 @@ import { isAttestationSpec } from './visualVerification';
 export const VERIFY_RUNBOOK_RELATIVE_PATH = '.cyboflow/verify-runbook.json';
 
 /**
- * The modality keys a PORTABLE runbook may declare — the subset of
- * {@link VerificationModality} a project can actually describe today. `mobile`
- * is excluded by construction: §4's scope decision defers it entirely (it rests
- * in the phase-0 `unsupported` state with reason "deferred — pending Xcode
- * MCP"), so a runbook claiming to declare it would be claiming a capability no
- * code path can honor. `Extract<...>` rather than a re-spelled union so the two
- * stay pinned together — widening `VerificationModality` without revisiting this
- * line is a compile error, not a silent divergence.
+ * The modality keys a PORTABLE runbook may declare — every member of
+ * {@link VerificationModality}, `mobile` included.
+ *
+ * `mobile` means an iOS Simulator stood up on Apple's own command-line
+ * toolchain: `xcodebuild` builds into this request's private DerivedData and
+ * `simctl` creates, boots, installs and launches. It is declared through the
+ * entry's {@link VerifyRunbookModalityEntry.app} block rather than `serve`
+ * (there is no port and nothing to attach to) and attested by
+ * `bundle-identity`. No Xcode MCP is involved — the verification agent shells
+ * out exactly as it does for a web build.
+ *
+ * `Extract<...>` rather than a re-spelled union so the two stay pinned together
+ * — widening `VerificationModality` without revisiting this line is a compile
+ * error, not a silent divergence.
  */
 export type VerifyRunbookModality = Extract<
   VerificationModality,
-  'web' | 'cdp-app' | 'native-screen'
+  'web' | 'cdp-app' | 'native-screen' | 'mobile'
 >;
 
 /**
- * The three declarable modality keys, for iteration (validators, UI pickers,
+ * The four declarable modality keys, for iteration (validators, UI pickers,
  * the setup wizard's per-modality loop) without re-listing the union by hand.
  */
 export const VERIFY_RUNBOOK_MODALITIES: readonly VerifyRunbookModality[] = [
   'web',
   'cdp-app',
   'native-screen',
+  'mobile',
 ] as const;
 
 /** Runtime guard for one of {@link VERIFY_RUNBOOK_MODALITIES}. */
 export function isVerifyRunbookModality(v: unknown): v is VerifyRunbookModality {
-  return v === 'web' || v === 'cdp-app' || v === 'native-screen';
+  return v === 'web' || v === 'cdp-app' || v === 'native-screen' || v === 'mobile';
 }
 
 /**
@@ -138,6 +146,20 @@ export interface VerifyRunbookModalityEntry {
     attach?: 'cdp';
     readyWhen?: { urlPath?: string; timeoutMs?: number };
   };
+  /**
+   * The iOS-Simulator stand-up, for the `mobile` entry ONLY: `xcodebuild` builds
+   * into this request's private `$VERIFY_DERIVED_DATA` and `simctl` creates,
+   * boots, installs and launches. See {@link MobileAppSpec}.
+   *
+   * It REPLACES `serve` rather than joining it — a simulator run has no port to
+   * lease and no endpoint to attach to — and the parser enforces that: a
+   * `mobile` entry must carry `app` and must NOT carry `serve`, and a non-mobile
+   * entry must not carry `app` at all. `mobile` also pins its attestation to
+   * `bundle-identity` with a `bundleId` matching this block's, because that is
+   * the one channel that can prove the installed executable IS the product this
+   * request staged.
+   */
+  app?: MobileAppSpec;
   /**
    * REQUIRED — the verified-artifact-identity channel for this modality (§7.1).
    * Not optional the way `VerificationTaskV1.attestation` is: a composed TASK
@@ -194,12 +216,32 @@ export interface VerifyRunbookV1 {
    * binding, the attestation marker and the state-directory isolation off
    * whatever the verification agent inferred from `notes` and onto the harness.
    * `cdpPortFlag` stays declarative (a CLI flag is not an env var).
+   *
+   * `simUdidEnv` and `derivedDataEnv` are the mobile tier's two levers — the
+   * booted simulator's UDID and this request's private `xcodebuild` DerivedData
+   * directory. Names only, on the same rule as the rest: both VALUES are minted
+   * per request (the simulator is created after the slot is leased; the
+   * DerivedData directory is fresh and private so exactly one `.app` is staged,
+   * which is what makes the `bundle-identity` comparison meaningful).
    */
   levers?: {
     portEnv?: string;
     dataDirEnv?: string;
     cdpPortFlag?: string;
     nonceEnv?: string;
+    /**
+     * The env var the mobile build/launch steps read this request's booted
+     * simulator UDID from (the `simctl` target). A NAME only — the UDID itself
+     * is request-scoped, minted when the scheduler creates the simulator.
+     */
+    simUdidEnv?: string;
+    /**
+     * The env var naming this request's private `xcodebuild` DerivedData
+     * directory — the one {@link MobileAppSpec.productGlob} is resolved
+     * against, and the staging area the `bundle-identity` attestation compares
+     * the installed executable to. A NAME only; the directory is request-scoped.
+     */
+    derivedDataEnv?: string;
     notes?: string;
   };
 }
@@ -237,6 +279,7 @@ function isStringArray(value: unknown): value is string[] {
 function parseModalityEntry(
   value: unknown,
   path: string,
+  modality: VerifyRunbookModality,
 ): { ok: true; entry: VerifyRunbookModalityEntry } | { ok: false; error: string } {
   if (!isRecord(value)) return { ok: false, error: `${path}: expected an object` };
 
@@ -287,6 +330,35 @@ function parseModalityEntry(
     };
   }
 
+  let app: MobileAppSpec | undefined;
+  if (value.app !== undefined) {
+    // An `app` block on a web/cdp-app/native-screen entry is not a harmless
+    // extra: it would declare a simulator stand-up for a modality that has no
+    // simulator, and the request would run the OTHER form while claiming this
+    // one. Reject at authoring time, where the mistake is fixable.
+    if (modality !== 'mobile') {
+      return { ok: false, error: `${path}.app: app is only valid on the mobile modality` };
+    }
+    const parsedApp = parseMobileAppSpec(value.app, `${path}.app`);
+    if (!parsedApp.ok) return { ok: false, error: parsedApp.error };
+    app = parsedApp.app;
+  }
+
+  // Cross-field invariants for the mobile entry. A simulator run has nothing to
+  // serve and exactly one channel that can prove what it installed, so these
+  // are structural, not stylistic.
+  if (modality === 'mobile') {
+    if (app === undefined) {
+      return { ok: false, error: `${path}.app: required on the mobile modality` };
+    }
+    if (serve !== undefined) {
+      return {
+        ok: false,
+        error: `${path}.serve: not valid on the mobile modality (a simulator run has no port to serve on — use app)`,
+      };
+    }
+  }
+
   // REQUIRED — see VerifyRunbookModalityEntry.attestation's doc (§7.1).
   if (value.attestation === undefined) {
     return { ok: false, error: `${path}.attestation: required (no attestation channel means no verification can pass)` };
@@ -302,6 +374,22 @@ function parseModalityEntry(
     };
   }
   const attestation: AttestationSpec = value.attestation;
+
+  if (modality === 'mobile') {
+    if (attestation.kind !== 'bundle-identity') {
+      return {
+        ok: false,
+        error: `${path}.attestation.kind: expected 'bundle-identity' on the mobile modality`,
+      };
+    }
+    // `app` is non-undefined here — the invariant above returned otherwise.
+    if (app !== undefined && attestation.bundleId !== app.bundleId) {
+      return {
+        ok: false,
+        error: `${path}.attestation.bundleId: must equal ${path}.app.bundleId`,
+      };
+    }
+  }
 
   let notes: string | undefined;
   if (value.notes !== undefined) {
@@ -341,6 +429,7 @@ function parseModalityEntry(
       attestation,
       ...(build !== undefined ? { build } : {}),
       ...(serve !== undefined ? { serve } : {}),
+      ...(app !== undefined ? { app } : {}),
       ...(notes !== undefined ? { notes } : {}),
       ...(viewports !== undefined ? { viewports } : {}),
     },
@@ -376,7 +465,7 @@ export function parseVerifyRunbookV1(
   for (const key of VERIFY_RUNBOOK_MODALITIES) {
     const raw = value.modalities[key];
     if (raw === undefined) continue;
-    const parsed = parseModalityEntry(raw, `modalities["${key}"]`);
+    const parsed = parseModalityEntry(raw, `modalities["${key}"]`, key);
     if (!parsed.ok) return { ok: false, error: parsed.error };
     modalities[key] = parsed.entry;
   }
@@ -391,7 +480,15 @@ export function parseVerifyRunbookV1(
   if (value.levers !== undefined) {
     if (!isRecord(value.levers)) return { ok: false, error: 'levers: expected an object' };
     const l = value.levers;
-    for (const field of ['portEnv', 'dataDirEnv', 'cdpPortFlag', 'nonceEnv', 'notes'] as const) {
+    for (const field of [
+      'portEnv',
+      'dataDirEnv',
+      'cdpPortFlag',
+      'nonceEnv',
+      'simUdidEnv',
+      'derivedDataEnv',
+      'notes',
+    ] as const) {
       if (l[field] !== undefined && typeof l[field] !== 'string') {
         return { ok: false, error: `levers.${field}: expected string` };
       }
@@ -401,6 +498,8 @@ export function parseVerifyRunbookV1(
       ...(typeof l.dataDirEnv === 'string' ? { dataDirEnv: l.dataDirEnv } : {}),
       ...(typeof l.cdpPortFlag === 'string' ? { cdpPortFlag: l.cdpPortFlag } : {}),
       ...(typeof l.nonceEnv === 'string' ? { nonceEnv: l.nonceEnv } : {}),
+      ...(typeof l.simUdidEnv === 'string' ? { simUdidEnv: l.simUdidEnv } : {}),
+      ...(typeof l.derivedDataEnv === 'string' ? { derivedDataEnv: l.derivedDataEnv } : {}),
       ...(typeof l.notes === 'string' ? { notes: l.notes } : {}),
     };
   }
