@@ -6,30 +6,61 @@
  * NewTaskDialog pattern: managed name/error state, trim + non-empty validation
  * with an inline error. Enter = confirm / Esc = cancel are handled by Modal's
  * keyboard handling.
+ *
+ * Optional SCOPE selector (TASK-220): when `scopeProjects` is passed, an
+ * inline Global/project `<select>` (mirroring {@link GalleryNew}'s scope
+ * control) sits alongside the name input, and `onConfirm`'s second argument
+ * carries the chosen target (`null` ⇒ global). Without `scopeProjects` the
+ * selector is omitted and the second argument is always `null` — the create-
+ * mode "Run with modifications" name prompt doesn't need it (its scope was
+ * already decided in GalleryNew).
  */
 import { useEffect, useState } from 'react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/Modal';
+
+/** A project the new flow can be scoped to — the minimal shape the picker needs. */
+export interface FlowNameDialogScopeProject {
+  id: number;
+  name: string;
+}
 
 interface FlowNameDialogProps {
   isOpen: boolean;
   title: string;
   defaultValue: string;
   confirmLabel: string;
-  /** Called with the trimmed, validated (non-empty) name. */
-  onConfirm: (name: string) => void;
+  /**
+   * Projects offered by the scope selector. `undefined` ⇒ no selector is
+   * shown (the caller doesn't need a scope choice); an array (even empty)
+   * shows the selector with Global plus these project options.
+   */
+  scopeProjects?: FlowNameDialogScopeProject[];
+  /** Preselected scope for the selector — typically the source flow's own scope. */
+  defaultScopeProjectId?: number | null;
+  /**
+   * Called with the trimmed, validated (non-empty) name and the chosen scope
+   * (`null` ⇒ global). The scope is always `null` when no selector is shown.
+   */
+  onConfirm: (name: string, scopeProjectId: number | null) => void;
   onClose: () => void;
 }
+
+/** Sentinel `<option>` value for the GLOBAL (null scope) choice. */
+const GLOBAL_SCOPE_VALUE = 'global';
 
 export function FlowNameDialog({
   isOpen,
   title,
   defaultValue,
   confirmLabel,
+  scopeProjects,
+  defaultScopeProjectId = null,
   onConfirm,
   onClose,
 }: FlowNameDialogProps): React.JSX.Element {
   const [name, setName] = useState(defaultValue);
   const [error, setError] = useState<string | null>(null);
+  const [scopeProjectId, setScopeProjectId] = useState<number | null>(defaultScopeProjectId);
 
   // Re-seed the input each time the dialog (re)opens, so a fresh open never
   // shows the previous entry.
@@ -37,8 +68,9 @@ export function FlowNameDialog({
     if (isOpen) {
       setName(defaultValue);
       setError(null);
+      setScopeProjectId(defaultScopeProjectId);
     }
-  }, [isOpen, defaultValue]);
+  }, [isOpen, defaultValue, defaultScopeProjectId]);
 
   const handleConfirm = (): void => {
     const trimmed = name.trim();
@@ -46,7 +78,7 @@ export function FlowNameDialog({
       setError('A workflow name is required.');
       return;
     }
-    onConfirm(trimmed);
+    onConfirm(trimmed, scopeProjectId);
   };
 
   return (
@@ -73,6 +105,30 @@ export function FlowNameDialog({
               autoFocus
             />
           </label>
+
+          {scopeProjects !== undefined && (
+            <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
+              Scope
+              <select
+                aria-label="Scope for the new workflow"
+                data-testid="flow-name-scope-select"
+                value={scopeProjectId === null ? GLOBAL_SCOPE_VALUE : String(scopeProjectId)}
+                onChange={(e) =>
+                  setScopeProjectId(
+                    e.target.value === GLOBAL_SCOPE_VALUE ? null : Number(e.target.value),
+                  )
+                }
+                className="rounded-button border border-border-primary bg-bg-primary px-2.5 py-1.5 font-mono text-xs text-text-secondary transition-colors hover:border-border-emphasized hover:text-text-primary focus:border-border-emphasized focus:outline-none"
+              >
+                <option value={GLOBAL_SCOPE_VALUE}>All projects (global)</option>
+                {scopeProjects.map((project) => (
+                  <option key={project.id} value={String(project.id)}>
+                    Only {project.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
 
           {error && (
             <p className="text-xs text-status-error" role="alert">
