@@ -227,7 +227,12 @@ afterEach(() => {
  * on the SIMPLE (tuning) page — the default for a built-in flow like the
  * 'planner' fixture.
  */
-async function renderTuningPage(onSaved = vi.fn(), onClose = vi.fn(), onMutated = vi.fn()) {
+async function renderTuningPage(
+  onSaved = vi.fn(),
+  onClose = vi.fn(),
+  onMutated = vi.fn(),
+  projects?: { id: number; name: string }[],
+) {
   render(
     <WorkflowEditorModal
       isOpen
@@ -237,6 +242,7 @@ async function renderTuningPage(onSaved = vi.fn(), onClose = vi.fn(), onMutated 
       mode="edit"
       onSaved={onSaved}
       onMutated={onMutated}
+      projects={projects}
     />,
   );
   await screen.findByTestId('workflow-tuning-page');
@@ -248,8 +254,12 @@ async function renderTuningPage(onSaved = vi.fn(), onClose = vi.fn(), onMutated 
  * editor). A built-in flow now opens on the tuning dial, so the graph-editing
  * tests below take the one click that gets there.
  */
-async function renderEditMode(onSaved = vi.fn(), onClose = vi.fn()) {
-  const handles = await renderTuningPage(onSaved, onClose);
+async function renderEditMode(
+  onSaved = vi.fn(),
+  onClose = vi.fn(),
+  projects?: { id: number; name: string }[],
+) {
+  const handles = await renderTuningPage(onSaved, onClose, vi.fn(), projects);
   await openAdvanced();
   return handles;
 }
@@ -394,7 +404,7 @@ describe('WorkflowEditorModal — edit mode', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
-  it('"Save as new flow" opens the name dialog and calls createCustom', async () => {
+  it('"Save as new flow" opens the name dialog (defaulting scope to the SOURCE flow\'s own scope) and calls createCustom', async () => {
     const { onSaved, onClose } = await renderEditMode();
 
     await act(async () => {
@@ -405,6 +415,13 @@ describe('WorkflowEditorModal — edit mode', () => {
     const nameInput = await screen.findByTestId('flow-name-input');
     // Edit-mode "Save as new flow" FORKS the current flow → defaults to <name>-copy.
     expect((nameInput as HTMLInputElement).value).toBe('planner-copy');
+
+    // TASK-220: the scope selector defaults to the SOURCE row's own scope
+    // (SEED_ROW.project_id === 1 — the lone enumerated "This project" fallback,
+    // since no explicit `projects` list was passed to the editor).
+    const scopeSelect = screen.getByTestId('flow-name-scope-select') as HTMLSelectElement;
+    expect(scopeSelect).toHaveValue('1');
+
     fireEvent.change(nameInput, { target: { value: 'my-flow' } });
     await act(async () => {
       fireEvent.click(screen.getByTestId('flow-name-confirm'));
@@ -416,11 +433,210 @@ describe('WorkflowEditorModal — edit mode', () => {
     expect(arg.name).toBe('my-flow');
     expect(arg.definition.phases[0].steps[0].id).toBe('context');
 
-    // onSaved fires with the NEW row id, and the modal closes.
-    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(NEW_CUSTOM_ROW.id));
+    // onSaved fires with the NEW row id AND names where it landed, and the
+    // modal closes.
+    await waitFor(() =>
+      expect(onSaved).toHaveBeenCalledWith(NEW_CUSTOM_ROW.id, expect.stringContaining('This project')),
+    );
     expect(onClose).toHaveBeenCalled();
     // updateSpec must NOT have been used for a "save as new".
     expect(mockUpdateSpec).not.toHaveBeenCalled();
+  });
+
+  it('"Save as new flow" — choosing GLOBAL in the scope selector forks a global copy', async () => {
+    const { onSaved } = await renderEditMode();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('editor-save-as-new-button'));
+    });
+
+    const nameInput = await screen.findByTestId('flow-name-input');
+    fireEvent.change(nameInput, { target: { value: 'my-flow' } });
+
+    const scopeSelect = screen.getByTestId('flow-name-scope-select') as HTMLSelectElement;
+    fireEvent.change(scopeSelect, { target: { value: 'global' } });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('flow-name-confirm'));
+    });
+
+    expect(mockCreateCustom).toHaveBeenCalledOnce();
+    const arg = mockCreateCustom.mock.calls[0][0];
+    expect(arg.projectId).toBeNull();
+    expect(arg.name).toBe('my-flow');
+
+    await waitFor(() =>
+      expect(onSaved).toHaveBeenCalledWith(NEW_CUSTOM_ROW.id, expect.stringContaining('Global')),
+    );
+  });
+
+  it('"Save as new flow" — choosing a THIRD, non-default, non-global project from a multi-project list forks into that project', async () => {
+    const PROJECTS = [
+      { id: 1, name: 'Alpha' },
+      { id: 2, name: 'Bravo' },
+      { id: 3, name: 'Charlie' },
+    ];
+    const CHARLIE_NEW_ROW: WorkflowRow = {
+      ...structuredClone(NEW_CUSTOM_ROW),
+      id: 'wf-3-custom-c1c2c3c4',
+      project_id: 3,
+    };
+    mockCreateCustom.mockResolvedValueOnce(CHARLIE_NEW_ROW);
+    const { onSaved } = await renderEditMode(vi.fn(), vi.fn(), PROJECTS);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('editor-save-as-new-button'));
+    });
+
+    const nameInput = await screen.findByTestId('flow-name-input');
+    // SEED_ROW.project_id === 1 — the default preselected scope is "Alpha",
+    // not the "Charlie" project this test picks.
+    const scopeSelect = screen.getByTestId('flow-name-scope-select') as HTMLSelectElement;
+    expect(scopeSelect).toHaveValue('1');
+
+    fireEvent.change(nameInput, { target: { value: 'my-flow' } });
+    fireEvent.change(scopeSelect, { target: { value: '3' } });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('flow-name-confirm'));
+    });
+
+    expect(mockCreateCustom).toHaveBeenCalledOnce();
+    const arg = mockCreateCustom.mock.calls[0][0];
+    expect(arg.projectId).toBe(3);
+    expect(arg.name).toBe('my-flow');
+
+    await waitFor(() =>
+      expect(onSaved).toHaveBeenCalledWith(CHARLIE_NEW_ROW.id, expect.stringContaining('Charlie')),
+    );
+    // Never the default project's or global's label.
+    expect(onSaved).not.toHaveBeenCalledWith(expect.anything(), expect.stringContaining('This project'));
+    expect(onSaved).not.toHaveBeenCalledWith(expect.anything(), expect.stringContaining('Global'));
+  });
+
+  it('a GLOBAL source flow defaults "Save as new flow" scope to Global, and lands a wf-global-custom-* row without leaving the editor', async () => {
+    seedRow({ project_id: null });
+    // A GLOBAL landing row carries the real `wf-global-custom-<hex>` id shape
+    // the backend mints (workflows.ts createCustom) — assert against that
+    // shape rather than the shared per-project NEW_CUSTOM_ROW fixture id.
+    const GLOBAL_NEW_ROW: WorkflowRow = {
+      ...structuredClone(NEW_CUSTOM_ROW),
+      id: 'wf-global-custom-a1b2c3d4',
+      project_id: null,
+    };
+    mockCreateCustom.mockResolvedValueOnce(GLOBAL_NEW_ROW);
+    const { onSaved, onClose } = await renderEditMode();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('editor-save-as-new-button'));
+    });
+
+    const scopeSelect = (await screen.findByTestId(
+      'flow-name-scope-select',
+    )) as HTMLSelectElement;
+    expect(scopeSelect).toHaveValue('global');
+
+    const nameInput = screen.getByTestId('flow-name-input');
+    fireEvent.change(nameInput, { target: { value: 'my-flow' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('flow-name-confirm'));
+    });
+
+    expect(mockCreateCustom).toHaveBeenCalledOnce();
+    expect(mockCreateCustom.mock.calls[0][0].projectId).toBeNull();
+    // The save-as-new happens in-app: no navigation away, just onSaved (with the
+    // real global row id shape) followed by the modal's own onClose.
+    await waitFor(() =>
+      expect(onSaved).toHaveBeenCalledWith(GLOBAL_NEW_ROW.id, expect.stringContaining('Global')),
+    );
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('surfaces a createCustom name-guard rejection (reserved name / collision) as an inline error and keeps the modal open for retry', async () => {
+    mockCreateCustom.mockRejectedValueOnce(
+      new Error('A global workflow named "ship" already exists.'),
+    );
+    const { onSaved, onClose } = await renderEditMode();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('editor-save-as-new-button'));
+    });
+
+    const nameInput = await screen.findByTestId('flow-name-input');
+    fireEvent.change(nameInput, { target: { value: 'ship' } });
+    // Keep the default (project-scoped) selection — the guard rejection should
+    // surface regardless of which scope was chosen.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('flow-name-confirm'));
+    });
+
+    // The rejection must be visible INSIDE the still-open name dialog — the
+    // dialog's own overlay covers the editor's error banner, so a message only
+    // on the outer modal would be hidden behind the active dialog (TASK-220).
+    const dialogAlert = await screen.findByTestId('flow-name-server-error');
+    expect(dialogAlert).toHaveTextContent('A global workflow named "ship" already exists.');
+    // The outer editor banner mirrors it (the dialog's overlay hides it while
+    // the dialog is open, but it remains once the dialog is cancelled).
+    expect(screen.getByTestId('editor-error')).toHaveTextContent(
+      'A global workflow named "ship" already exists.',
+    );
+    // The failed save neither lands a new row nor closes the editor — the user
+    // can correct the name/scope and retry.
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+
+    // The FlowNameDialog itself must stay OPEN (not just the outer modal) with
+    // the previously typed name preserved — the user should not have to retype
+    // it after a failed save (TASK-220 gap fix).
+    const preservedNameInput = screen.getByTestId('flow-name-input') as HTMLInputElement;
+    expect(preservedNameInput).toBeInTheDocument();
+    expect(preservedNameInput.value).toBe('ship');
+    expect(screen.getByTestId('flow-name-scope-select')).toBeInTheDocument();
+
+    // Resubmitting WITHOUT retyping now succeeds.
+    mockCreateCustom.mockResolvedValueOnce(structuredClone(NEW_CUSTOM_ROW));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('flow-name-confirm'));
+    });
+
+    expect(mockCreateCustom).toHaveBeenCalledTimes(2);
+    expect(mockCreateCustom.mock.calls[1][0].name).toBe('ship');
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(NEW_CUSTOM_ROW.id, expect.any(String)));
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('a createCustom rejection shown in the name dialog is hidden once the user edits the name, and re-shown by a failed retry', async () => {
+    mockCreateCustom.mockRejectedValueOnce(new Error('"ship" is a reserved built-in name.'));
+    await renderEditMode();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('editor-save-as-new-button'));
+    });
+
+    const nameInput = await screen.findByTestId('flow-name-input');
+    fireEvent.change(nameInput, { target: { value: 'ship' } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('flow-name-confirm'));
+    });
+    const dialogAlert = await screen.findByTestId('flow-name-server-error');
+    expect(dialogAlert).toHaveTextContent('"ship" is a reserved built-in name.');
+
+    // Editing the name is the user acting on the message — it clears from the
+    // dialog (the scope select behaves the same way).
+    fireEvent.change(nameInput, { target: { value: 'ship-2' } });
+    expect(screen.queryByTestId('flow-name-server-error')).not.toBeInTheDocument();
+
+    // A retry that fails again (same or different text) re-surfaces the error
+    // inside the dialog.
+    mockCreateCustom.mockRejectedValueOnce(new Error('"ship" is a reserved built-in name.'));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('flow-name-confirm'));
+    });
+    expect(mockCreateCustom).toHaveBeenCalledTimes(2);
+    expect(mockCreateCustom.mock.calls[1][0].name).toBe('ship-2');
+    expect(await screen.findByTestId('flow-name-server-error')).toHaveTextContent(
+      '"ship" is a reserved built-in name.',
+    );
   });
 
   it('cancelling the "Save as new flow" dialog does not call createCustom', async () => {
@@ -1509,6 +1725,40 @@ describe('WorkflowEditorModal — save-target prompt', () => {
     expect(mockVariantCreate).not.toHaveBeenCalled();
   });
 
+  it('the SaveScopeDialog "new-flow" path carries the CHOSEN scope through to createCustom (TASK-220)', async () => {
+    const { onSaved } = await renderDirtyAdvanced();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('save-scope-new-flow-radio'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('save-scope-confirm'));
+    });
+
+    const nameInput = await screen.findByTestId('flow-name-input');
+    fireEvent.change(nameInput, { target: { value: 'my-flow' } });
+
+    // Default scope selection equals the SOURCE flow's own scope
+    // (SEED_ROW.project_id === 1).
+    const scopeSelect = screen.getByTestId('flow-name-scope-select') as HTMLSelectElement;
+    expect(scopeSelect).toHaveValue('1');
+    // Explicitly switch to Global — this choice, not the launch projectId,
+    // must reach createCustom.
+    fireEvent.change(scopeSelect, { target: { value: 'global' } });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('flow-name-confirm'));
+    });
+
+    expect(mockCreateCustom).toHaveBeenCalledOnce();
+    const arg = mockCreateCustom.mock.calls[0][0];
+    expect(arg.name).toBe('my-flow');
+    expect(arg.projectId).toBeNull();
+    await waitFor(() =>
+      expect(onSaved).toHaveBeenCalledWith(NEW_CUSTOM_ROW.id, expect.stringContaining('Global')),
+    );
+  });
+
   it('cancelling the prompt mutates nothing', async () => {
     await renderDirtyAdvanced();
 
@@ -1596,8 +1846,11 @@ describe('WorkflowEditorModal — create mode', () => {
       fireEvent.click(screen.getByTestId('editor-save-as-new-button'));
     });
 
-    // The in-app name dialog collects the new flow name.
+    // The in-app name dialog collects the new flow name. Create mode's scope
+    // was already chosen in GalleryNew (createScopeProjectId), so the name
+    // dialog shows NO scope selector here.
     const nameInput = await screen.findByTestId('flow-name-input');
+    expect(screen.queryByTestId('flow-name-scope-select')).toBeNull();
     fireEvent.change(nameInput, { target: { value: 'new-flow' } });
     await act(async () => {
       fireEvent.click(screen.getByTestId('flow-name-confirm'));
@@ -1605,7 +1858,11 @@ describe('WorkflowEditorModal — create mode', () => {
 
     expect(mockCreateCustom).toHaveBeenCalledOnce();
     expect(mockCreateCustom.mock.calls[0][0].name).toBe('new-flow');
-    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(NEW_CUSTOM_ROW.id));
+    // onSaved's second arg still names the landing scope (Global here — no
+    // createScopeProjectId was passed, defaulting to global).
+    await waitFor(() =>
+      expect(onSaved).toHaveBeenCalledWith(NEW_CUSTOM_ROW.id, expect.stringContaining('Global')),
+    );
   });
 
   it('"Run with modifications" in CREATE mode resolves the model against the FRESHLY-MINTED id', async () => {

@@ -188,7 +188,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
 
   useEditWorkflowShortcut(handleOpenEditor, { enabled: canEditWorkflow });
 
-  const handleEditorSaved = useCallback(() => {
+  const handleEditorSaved = useCallback((_workflowId: string, savedAsNewScopeNote?: string) => {
     setIsEditorOpen(false);
     // Force the canvas to re-resolve its phase state: clear + reselect the run so
     // useWorkflowPhaseState re-runs getPhaseState (which re-reads spec_json).
@@ -201,6 +201,13 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
       const parentSessionId = store.selectedSessionId;
       store.clearActiveRun();
       store.setActiveRun(activeRunId, parentSessionId);
+    }
+    // "Save as new flow" reports where the copy landed (Global vs a project) —
+    // surface it via the same toast every other lifecycle action in this file
+    // uses. Every other save path (overwrite, project-copy fork, reset) passes
+    // no note and must stay silent.
+    if (savedAsNewScopeNote !== undefined) {
+      setToastMessage(savedAsNewScopeNote);
     }
   }, [activeRunId]);
 

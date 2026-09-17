@@ -38,6 +38,7 @@ import { WorkflowsProjectFilter } from './WorkflowsProjectFilter';
 import { WorkflowEditorModal } from '../cyboflow/WorkflowEditorModal';
 import { AgentEditorModal } from '../cyboflow/agents/AgentEditorModal';
 import { ABTestLaunchModal } from '../cyboflow/ABTestLaunchModal';
+import { SessionActionToast } from '../cyboflow/SessionActionToast';
 import type { WorkflowGalleryEntry, AgentGalleryEntry } from '../../stores/workflowsStore';
 import {
   isCyboflowWorkflowName,
@@ -179,6 +180,15 @@ export function WorkflowsView(): React.JSX.Element {
     createScopeProjectId?: number | null;
   }
   const [wfEditor, setWfEditor] = useState<WfEditorState | null>(null);
+
+  /**
+   * "Where did it land" toast (TASK-220): the workflow editor's "Save as new
+   * flow" path now closes the modal AND names the resulting scope (Global or
+   * a project) in its `onSaved` second argument — a project-scoped result is
+   * never silent. Rendered after the editor closes, since the modal itself
+   * unmounts before a toast inside it could ever be seen.
+   */
+  const [savedFlowNotice, setSavedFlowNotice] = useState<string | null>(null);
 
   /** "New workflow" template picker; carries the project the new flow lands in. */
   const [newWorkflowProjectId, setNewWorkflowProjectId] = useState<number | null>(null);
@@ -566,8 +576,12 @@ export function WorkflowsView(): React.JSX.Element {
           initialName={wfEditor.initialName}
           createScopeProjectId={wfEditor.createScopeProjectId}
           onClose={() => setWfEditor(null)}
-          onSaved={() => {
+          onSaved={(_workflowId, savedAsNewScopeNote) => {
             setWfEditor(null);
+            // Only "save as new flow" passes a scope note (TASK-220) — every
+            // other save path (overwrite, project-copy fork, reset) is either
+            // an explicit user choice already or stays on the same row.
+            if (savedAsNewScopeNote !== undefined) setSavedFlowNotice(savedAsNewScopeNote);
             void useWorkflowsStore.getState().refresh();
           }}
           // Tuning-dial stamps / custom-slot deletes: refresh the gallery cards
@@ -661,6 +675,20 @@ export function WorkflowsView(): React.JSX.Element {
             void useWorkflowsStore.getState().refresh();
           }}
         />
+      )}
+
+      {/* "Save as new flow" landing toast (TASK-220) — names the scope
+          (Global or a project) a project-scoped result is never silent. */}
+      {savedFlowNotice !== null && (
+        <div className="pointer-events-none fixed inset-x-0 bottom-6 z-50 flex justify-center">
+          <div className="pointer-events-auto">
+            <SessionActionToast
+              message={savedFlowNotice}
+              isVisible={savedFlowNotice !== null}
+              onDismiss={() => setSavedFlowNotice(null)}
+            />
+          </div>
+        </div>
       )}
     </div>
   );

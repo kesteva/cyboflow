@@ -343,6 +343,15 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
   // Blueprint editor — opened in 'edit' (selected flow) or 'create' (new flow) mode.
   const [editorMode, setEditorMode] = useState<'edit' | 'create' | null>(null);
 
+  /**
+   * "Where did it land" notice (TASK-220): the editor's "Save as new flow" path
+   * names the resulting scope (Global or a project) in its `onSaved` second
+   * argument. Rendered as a toast AFTER the editor closes — the modal unmounts
+   * before anything inside it could be seen — so a project-scoped landing from
+   * this host is never silent (WorkflowsView / CyboflowRoot do the same).
+   */
+  const [editorSavedNotice, setEditorSavedNotice] = useState<string | null>(null);
+
   // Planner pre-launch idea-selection gate (migration 017). When the selected
   // workflow is the Planner, "Start Run" opens this picker first; the chosen
   // idea id is threaded into runs.start.mutate({ ideaId }).
@@ -426,8 +435,11 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
   }, [selectedId]);
 
   const handleEditorSaved = useCallback(
-    (savedId: string) => {
+    (savedId: string, savedAsNewScopeNote?: string) => {
       setEditorMode(null);
+      // Only "save as new flow" passes a scope note (TASK-220) — every other
+      // save path (overwrite, project-copy fork, reset) stays silent here.
+      if (savedAsNewScopeNote !== undefined) setEditorSavedNotice(savedAsNewScopeNote);
       void loadWorkflows(savedId);
     },
     [loadWorkflows],
@@ -1018,6 +1030,21 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           Quick Session
         </button>
       </div>
+
+      {/* "Save as new flow" landing notice (TASK-220) — names the scope
+          (Global or a project) so a project-scoped result is never silent. */}
+      {editorSavedNotice !== null && (
+        <div
+          className="fixed bottom-4 right-4 z-50"
+          data-testid="workflow-picker-editor-saved-toast"
+        >
+          <SessionActionToast
+            message={editorSavedNotice}
+            isVisible
+            onDismiss={() => setEditorSavedNotice(null)}
+          />
+        </div>
+      )}
 
       {/* Save-as-default outcome. Undo is offered ONLY for a write the store
           confirmed landed — a failure toast carries no Undo, because replaying
