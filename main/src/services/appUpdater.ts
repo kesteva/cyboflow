@@ -24,6 +24,36 @@ function releaseTriple(version: string): [number, number, number] | null {
 }
 
 /**
+ * The dot-separated prerelease identifiers after the triple (`0.4.3-dev.12` →
+ * `['dev', '12']`), `[]` for a plain release, null when the suffix is not a
+ * prerelease (`+build` metadata, or anything unparseable).
+ */
+function prereleaseIds(version: string): string[] | null {
+  const m = /^\d+\.\d+\.\d+(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(version.trim());
+  if (!m) return null;
+  return m[1] ? m[1].split('.') : [];
+}
+
+/** semver §11: numeric ids compare numerically, else lexically; numeric < alphanumeric. */
+function comparePrereleaseIds(a: string[], b: string[]): number {
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if (i >= a.length) return -1;
+    if (i >= b.length) return 1;
+    const an = /^\d+$/.test(a[i]);
+    const bn = /^\d+$/.test(b[i]);
+    if (an && bn) {
+      const d = Number(a[i]) - Number(b[i]);
+      if (d !== 0) return d;
+    } else if (an !== bn) {
+      return an ? -1 : 1;
+    } else if (a[i] !== b[i]) {
+      return a[i] < b[i] ? -1 : 1;
+    }
+  }
+  return 0;
+}
+
+/**
  * True when `latest` is strictly newer than `current`.
  *
  * A plain `latest !== current` is wrong: the update feed can legitimately sit
@@ -32,11 +62,12 @@ function releaseTriple(version: string): [number, number, number] | null {
  * downgrade. Offering one produces a Download button that can only ever fail
  * with "Please check update first".
  *
- * Comparison is on the numeric release triple only. If the triples tie but the
- * full strings differ (a prerelease/build suffix on one side), or either string
- * has no parseable triple, fall back to inequality — cyboflow ships plain
- * MAJOR.MINOR.PATCH today, and this keeps an unfamiliar future format
- * offerable rather than silently unreachable.
+ * Comparison is semver: the numeric release triple first, then the prerelease
+ * suffix — a release outranks any prerelease of the same triple, and
+ * prerelease ids compare per semver §11, so the dev feed's `0.4.3-dev.12`
+ * beats the installed `0.4.3-dev.9` and NOT the other way round. Only when a
+ * string has no parseable triple do we fall back to inequality, which keeps an
+ * unfamiliar future format offerable rather than silently unreachable.
  */
 export function isNewerVersion(latest: string, current: string): boolean {
   const a = releaseTriple(latest);
@@ -45,7 +76,12 @@ export function isNewerVersion(latest: string, current: string): boolean {
   for (let i = 0; i < 3; i++) {
     if (a[i] !== b[i]) return a[i] > b[i];
   }
-  return latest !== current;
+  const pa = prereleaseIds(latest);
+  const pb = prereleaseIds(current);
+  if (!pa || !pb) return latest !== current;
+  if (pa.length === 0) return pb.length > 0; // release beats any prerelease
+  if (pb.length === 0) return false; // prerelease never beats the release
+  return comparePrereleaseIds(pa, pb) > 0;
 }
 
 /**
