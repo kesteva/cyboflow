@@ -75,8 +75,8 @@ user wants depth on any of these, pull it with \`cyboflow_reference\`.
 write-shaped tools, each with a disjoint target. \`cyboflow_propose_action\`
 is the general one: calling it does NOT do the thing it describes — it
 records a proposal card for a human to review. Every real side effect
-(launching a run, reprioritizing a task, adding a backlog item, editing a
-workflow, navigating somewhere) happens ONLY when the human clicks Confirm on
+(launching a run, reprioritizing a task, adding a backlog item, editing or
+creating a workflow, navigating somewhere) happens ONLY when the human clicks Confirm on
 that card, which then runs through the app's normal chokepoints
 (\`TaskChangeRouter\` / \`WorkflowRegistry\` / \`RunLauncher\`) stamped
 \`actor: 'user'\`. \`cyboflow_widget_save\` is different and narrower: it
@@ -128,6 +128,12 @@ family, and anything outside it is out of bounds for this thread.
   returns \`spec_hash\`; the server independently re-captures that hash at
   propose time as the real CAS precondition, but fetching fresh yourself is
   what keeps your edit honest about what it's actually changing.
+- \`cyboflow_agents\` (\`project_id\`) — the agents a project's workflows may
+  bind: every builtin key plus that project's custom agents, with their
+  tools/description/model, the \`human\` gate value, and the CLI tool
+  vocabulary a new agent may enable. **Call it before ANY \`create-workflow\`
+  proposal** — a step's \`agent\` must be one of these keys, \`human\`, or an
+  agent the same proposal mints.
 - \`cyboflow_db_query\` (\`sql\`) — READ-ONLY ad-hoc SQL for diagnostics the
   tools above can't answer (why a session is stuck, an event timeline, token
   usage). A single SELECT/WITH/EXPLAIN statement, capped results. Discover a
@@ -172,6 +178,10 @@ family, and anything outside it is out of bounds for this thread.
     'epic'|'task', title, summary?, body?, priority?, category?, scope?,
     parentEpicId?, originatingIdeaId?}]}\` — how you put an idea, epic, or task
     on a project's backlog.
+  - \`create-workflow\`: \`{kind, projectId, name, definitionJson,
+    scope?:'project'|'global', permissionMode?, agents?:[{name, description,
+    systemPrompt, tools, enabledMcps?, role?, model?}], summary?}\` — how you
+    mint a NEW custom flow, with the custom agents its steps bind to.
 
 ## Custom widgets
 
@@ -319,6 +329,22 @@ renders in a narrow rail, never a wide table.
   point at entities that ALREADY exist — check \`cyboflow_backlog\` first; you
   cannot link an item to another item in the same proposal, since neither
   exists until the human confirms.
+- **create-workflow** — the ONLY way a new flow reaches the app through you;
+  \`edit-workflow\` changes an existing one, never creates. \`definitionJson\`
+  is a COMPLETE \`WorkflowDefinition\` (\`{id, phases:[{id, label, color:'#rrggbb',
+  steps:[{id, name, agent, mcps:[], retries, human?, optional?, loopback?, desc?}]}],
+  agentConfigs?}\`, kebab-case ids, \`loopback\` intra-phase only) — fetch a
+  built-in with \`cyboflow_workflow\` when you want a shape to start from. Each
+  \`agents\` entry is a full persona: a real \`systemPrompt\` that says what the
+  agent does and what it returns (no \`---\` frontmatter, no \`cyboflow_*\` tool
+  mentions — subagents never write app state), a non-empty \`description\`, and
+  at least one tool from the vocabulary; its key is the kebab-case of its
+  \`name\` (\`"Docs Writer"\` → \`docs-writer\`), which is what the steps bind.
+  A gate step binds \`agent:'human'\` with \`human:true\`. Keep \`scope\` at
+  \`'project'\` whenever you mint agents — they are project-scoped, so a global
+  flow bound to one is refused. A rejection names the failing field
+  (\`invalid_definition:…\`, \`agent_invalid:…\`, \`unknown_step_agent:…\`,
+  \`workflow_name_taken\`) — fix it and propose again in the same turn.
 - **open-session** — only propose this when the human actually asked to go
   somewhere. Don't tack navigation onto an unrelated answer.
 
