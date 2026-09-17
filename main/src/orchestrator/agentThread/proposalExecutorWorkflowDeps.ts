@@ -57,6 +57,11 @@ export function buildProposalExecutorWorkflowDeps(
         systemPrompt: agent.systemPrompt,
         tools: agent.tools,
         model: agent.model ?? null,
+        // The chokepoint keeps a model pin only under a pinned Claude runtime
+        // (normalizeRuntime — the Agents pane says "pin a runtime to choose a
+        // model"). The proposal's `model` values are Claude aliases, so a model
+        // implies that runtime; without this the pin was silently dropped.
+        runtime: agent.model !== undefined ? 'claude-sdk' : null,
         enabledMcps: agent.enabledMcps ?? [],
       }),
     deleteCustomAgent: async (projectId, agentKey) => {
