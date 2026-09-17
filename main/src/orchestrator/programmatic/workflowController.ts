@@ -38,7 +38,12 @@ import type { VerificationTaskV1 } from '../../../../shared/types/visualVerifica
 // keeps the controller unit-testable with no new mocks, honoring the spirit of
 // the standalone-typecheck invariant (heavy imports only).
 import { parseVisualTaskSection } from '../verify/visualTaskSection';
+// Pure text predicate over an enqueue-seam decline reason (no DB/electron deps) —
+// see isNoModalityDeclineReason for why this is a text match and not an import
+// of the strings themselves.
+import { isNoModalityDeclineReason } from '../verify/verificationPosture';
 import type {
+  BuildBreakGroup,
   CommitIntegrityProbe,
   ControllerHost,
   ControllerResult,
@@ -49,6 +54,7 @@ import type {
   StepReport,
   StepRunner,
   SupervisorEvent,
+  VerificationPosture,
   VisualGateOutcome,
 } from './types';
 import { FAN_OUT_LANE_ATTEMPT_CAP } from './types';
@@ -113,6 +119,34 @@ function extractBlockingSection(text: string): string | null {
   const joined = body.join('\n').trim();
   return joined.length > 0 ? joined : null;
 }
+
+/**
+ * Whether a `## Blocking` section carries actual entries. The adversarial-review
+ * doc keeps the heading with `None.` under it when the reviewer found nothing (so
+ * the human can SEE it looked), which `extractBlockingSection` returns as a
+ * non-null body — treating that as blocking would loop the design phase on a
+ * clean review. An entry is a `#### AR-n` heading; failing that, any body that is
+ * not the literal `None.` placeholder counts (a reviewer that dropped the heading
+ * shape still wrote a defect).
+ */
+function blockingSectionHasEntries(text: string): boolean {
+  const body = extractBlockingSection(text);
+  if (body === null) return false;
+  if (/^####\s+AR-\d+/m.test(body)) return true;
+  return !/^none\.?$/i.test(body.trim());
+}
+
+/**
+ * Maximum number of AUTOMATIC design revisions an adversarial-review step may
+ * trigger per run: a `REVIEW: BLOCKING` result loops the refine phase back to the
+ * step's declared `loopback` target this many times, each re-run threaded with the
+ * review's `## Blocking` entries; the next BLOCKING verdict falls through to the
+ * human design gate, which presents the surviving entries. One round is the
+ * deliberate bound — the reviewer is a critic, not the arbiter of the design, and
+ * a second disagreement is the human's call, not another automated lap through
+ * prototype + architecture.
+ */
+export const MAX_REVIEW_AUTO_REVISIONS = 1;
 
 /**
  * Maximum number of intra-phase loopback JUMPS allowed per step id across a whole
@@ -182,6 +216,29 @@ export const MONITOR_RUN_RESCUE_CAP = 4;
  * `Cannot find module "<x>"` failures into one park.
  */
 export const SAME_ERROR_CORROBORATION_MIN = 3;
+
+/**
+ * Wall-clock ceiling on how long ONE lane's 'failed' write may be HELD waiting
+ * for a sibling to corroborate it (2 minutes).
+ *
+ * The wave loop got its corroboration window for free: a wave ended, everything
+ * settled, and the hold was bounded by the wave's slowest lane. A rolling pool
+ * has no such boundary — a 40-minute lane in the last slot would hold three
+ * minute-one failures open for 40 minutes, during which the lane rows read
+ * 'running' on the board, the partial-sprint gate summary misses them, and a
+ * crash-resume re-dispatches a lane that already failed.
+ *
+ * So a hold ends at whichever comes FIRST: its cohort drains (nobody is left who
+ * could still corroborate it), SAME_ERROR_CORROBORATION_MIN is reached, or this
+ * ceiling elapses. The same ceiling ages out remembered SYSTEMIC texts, so a
+ * park that never opens cannot leave a minute-one quota error corroborating a
+ * minute-fifty review failure.
+ *
+ * Two minutes is long enough to cover the spread between lanes that fail on one
+ * shared environment condition (they fail within seconds of each other) and far
+ * short of the time any real lane takes.
+ */
+export const SAME_ERROR_COHORT_MAX_MS = 120_000;
 
 /**
  * What one lane's walk ended as. Carries the failure text on the OUTCOME (never
@@ -302,6 +359,28 @@ export class WorkflowController {
   private readonly reportedVerificationSkips = new Set<string>();
 
   /**
+   * runId → the RUN-LEVEL verification posture, resolved ONCE at fan-out start
+   * (see `ControllerHost.resolveVerificationPosture`). A Map rather than a plain
+   * field because a walk can enter more than one fan-out step, and because it
+   * keys the same way `reportedVerificationSkips` does.
+   *
+   * ABSENT means "not resolved yet", which every read treats as 'available' —
+   * i.e. exactly the behaviour of a controller without this seam.
+   */
+  private readonly verificationPostures = new Map<string, VerificationPosture>();
+
+  /** runIds whose single "no verifiable modality" finding has already been filed. */
+  private readonly reportedNoModality = new Set<string>();
+
+  /**
+   * `${runId}:${normalizedText}` keys whose shared-build-break group has already
+   * been announced. The sweep runs at every quiesced instant AND at fan-out end,
+   * and a group only grows, so without this the same group would file a card per
+   * sweep.
+   */
+  private readonly reportedBuildBreakGroups = new Set<string>();
+
+  /**
    * Walk `def` to a terminal result. Resolves with the outcome + the ordered
    * execution trace; it never throws for a normal step failure (that is a
    * 'failed'/'rejected'/'canceled' outcome), only for an internal invariant
@@ -367,7 +446,11 @@ export class WorkflowController {
     // forward, and cleared the moment the walk reaches the gate again (the gate
     // having re-opened, the revision has been answered). The fan-out path never
     // reads it — lanes carry their own per-lane channels.
-    let pendingGateRevision: { gateStepId: string; note?: string } | undefined;
+    let pendingGateRevision: { gateStepId: string; note?: string; source?: 'adversarial-review' } | undefined;
+    // Per-step-id count of AUTOMATIC adversarial-review revisions taken this walk
+    // (bounded by MAX_REVIEW_AUTO_REVISIONS). Separate from `loopbacks` so the
+    // one automatic lap never eats into the human gate's own revise budget.
+    const reviewAutoRevisions = new Map<string, number>();
     // Crash-resume skip set, copied into a MUTABLE local. It only fast-forwards PAST
     // work completed BEFORE the restart; the instant the walk deliberately REVISITS a
     // region (a loopback jump or a gate revise), that region's pre-restart history no
@@ -745,6 +828,33 @@ export class WorkflowController {
               ? { text: okResultText }
               : {}),
           };
+          // Adversarial-review verdict routing: a review step that declares a
+          // `loopback` and returned `REVIEW: BLOCKING` (or a populated `## Blocking`
+          // section with no trailer) sends the refine phase back AUTOMATICALLY —
+          // the same verdict-driven loopback the sprint lane's code-review takes —
+          // instead of parking the run at the design gate with defects the flow
+          // could have fixed itself. Bounded by MAX_REVIEW_AUTO_REVISIONS; past it
+          // the step advances and the human gate presents the surviving entries.
+          const reviewJump = this.tryAdversarialReviewLoopback(
+            step, phase.steps, okResultText, reviewAutoRevisions,
+          );
+          if (reviewJump !== null) {
+            this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'done', attempts: attempt });
+            this.host.reportStep(step.id, 'done');
+            this.host.log?.(
+              'warn',
+              `step '${step.id}' returned REVIEW: BLOCKING; looping back to '${phase.steps[reviewJump.index].id}' for an automatic revision (${reviewJump.round}/${MAX_REVIEW_AUTO_REVISIONS})`,
+            );
+            // Deliberate revisit — same purge the gate's revise performs.
+            this.clearCompletedFrom(remainingCompleted, phase.steps, reviewJump.index);
+            pendingGateRevision = {
+              gateStepId: step.id,
+              source: 'adversarial-review',
+              ...(reviewJump.blocking !== null ? { note: reviewJump.blocking } : {}),
+            };
+            i = reviewJump.index;
+            continue;
+          }
           // Agent succeeded. If the step ALSO carries a human checkpoint, open the
           // gate now (agent-then-gate); otherwise advance.
           if (hasTrailingGate(step)) {
@@ -762,8 +872,13 @@ export class WorkflowController {
           continue;
         }
 
-        // Retries exhausted — try an intra-phase loopback before escalating.
-        const jumped = this.tryLoopback(step, phase.steps, loopbacks);
+        // Retries exhausted — try an intra-phase loopback before escalating. An
+        // OPTIONAL step never takes it: optional means "skippable on failure", and
+        // its `loopback` exists for a verdict-driven jump (adversarial-review's
+        // REVIEW: BLOCKING above), not to re-run the whole phase because the
+        // reviewer itself crashed. No built-in ever paired the two before, so this
+        // is byte-identical for every existing definition.
+        const jumped = step.optional === true ? null : this.tryLoopback(step, phase.steps, loopbacks);
         if (jumped !== null) {
           this.host.log?.('warn', `step '${step.id}' failed; looping back to '${phase.steps[jumped].id}'`);
           this.host.reportStep(step.id, 'done');
@@ -810,6 +925,11 @@ export class WorkflowController {
    * drop the same way for the same reason.
    */
   private reportVerificationSkipped(runId: string, laneTaskRef: string, reason: string, detail?: string): void {
+    // RUN-LEVEL declaration wins: once this run has been declared as having no
+    // verifiable modality at all, every per-lane finding would repeat that one
+    // structural fact once per lane — which is the whole reason the run-level
+    // declaration exists. Suppress them for the rest of the walk.
+    if (this.verificationPostures.get(runId)?.kind === 'unavailable') return;
     // At most one finding per lane per run — see reportedVerificationSkips.
     const key = `${runId}:${laneTaskRef}`;
     if (this.reportedVerificationSkips.has(key)) return;
@@ -823,6 +943,116 @@ export class WorkflowController {
       });
     } catch {
       // A broken finding sink must never affect the walk.
+    }
+  }
+
+  /**
+   * The run's verification posture, defaulting to 'available' until (and unless)
+   * the host resolves one. 'available' is the correct default in every unresolved
+   * case: it is precisely the behaviour of a controller with no posture seam.
+   */
+  private posture(runId: string): VerificationPosture {
+    return this.verificationPostures.get(runId) ?? { kind: 'available' };
+  }
+
+  /**
+   * Resolve the run-level verification posture ONCE, at fan-out start, and file
+   * the single "nothing here can be verified" finding when it is 'unavailable'.
+   *
+   * EAGER, not lazy — see `ControllerHost.resolveVerificationPosture`. Fail-soft
+   * in both halves: a throwing resolver leaves the posture unset (read as
+   * 'available'), and a throwing sink loses the card, never the walk.
+   */
+  private async ensureVerificationPosture(runId: string): Promise<VerificationPosture> {
+    const known = this.verificationPostures.get(runId);
+    if (known !== undefined) return known;
+    if (!this.host.resolveVerificationPosture) return { kind: 'available' };
+    let resolved: VerificationPosture;
+    try {
+      resolved = await this.host.resolveVerificationPosture(runId);
+    } catch (err) {
+      this.host.log?.(
+        'warn',
+        `verification posture could not be resolved (${err instanceof Error ? err.message : String(err)}); proceeding as if verification were available`,
+      );
+      return { kind: 'available' };
+    }
+    this.verificationPostures.set(runId, resolved);
+    if (resolved.kind === 'unavailable') this.declareNoVerifiableModality(runId, resolved.reason);
+    return resolved;
+  }
+
+  /**
+   * File the ONE non-blocking "no verifiable modality" card for this run.
+   * Idempotent per run here AND at the sink (which dedupes on `source` through
+   * `ReviewItemRouter.createIfNoPending`), so neither a second fan-out step nor a
+   * crash-resume can double-file.
+   */
+  private declareNoVerifiableModality(runId: string, reason: string): void {
+    if (this.reportedNoModality.has(runId)) return;
+    this.reportedNoModality.add(runId);
+    this.host.log?.('warn', `run '${runId}': no verifiable modality — ${reason}`);
+    try {
+      this.host.reportNoVerifiableModality?.({ runId, reason });
+    } catch {
+      // A broken finding sink must never affect the walk.
+    }
+  }
+
+  /**
+   * MID-FLIGHT FLIP. The eager probe said 'available' and reality disagreed: an
+   * enqueue declined for a reason that names a modality/runbook problem, i.e. a
+   * fact about the RUN, not about this lane. Flip the posture so later lanes skip
+   * the enqueue and their per-lane findings collapse into the one card filed here.
+   *
+   * DOCUMENTED GAP: lanes already PAST their enqueue when the flip happens are
+   * unaffected — they neither park nor get the declaration, and the first of them
+   * has already filed its own per-lane finding (which is what triggered this).
+   * That is accepted: the eager probe is the primary mechanism and this arm only
+   * catches the case it could not predict.
+   *
+   * Returns true when the reason was a run-level one (the caller then skips its
+   * per-lane finding, which `reportVerificationSkipped` would suppress anyway).
+   */
+  private maybeFlipPostureUnavailable(runId: string, reason: string): boolean {
+    if (!isNoModalityDeclineReason(reason)) return false;
+    if (this.posture(runId).kind !== 'available') return false;
+    this.verificationPostures.set(runId, { kind: 'unavailable', reason });
+    this.declareNoVerifiableModality(runId, reason);
+    return true;
+  }
+
+  /**
+   * Sweep this run's pending build-break findings and announce each NEW group.
+   * Called at the dispatch pool's quiesced instant and once at fan-out end (see
+   * `ControllerHost.sweepBuildBreaks` for why not per lane settle). Detector
+   * only: one advisory card per group, no pause, no fix agent. Fail-soft.
+   */
+  private async sweepBuildBreaks(runId: string): Promise<void> {
+    if (!this.host.sweepBuildBreaks) return;
+    let groups: BuildBreakGroup[];
+    try {
+      groups = await this.host.sweepBuildBreaks(runId);
+    } catch (err) {
+      this.host.log?.(
+        'warn',
+        `build-break sweep failed (${err instanceof Error ? err.message : String(err)}); continuing`,
+      );
+      return;
+    }
+    for (const group of groups) {
+      const key = `${runId}:${group.normalized}`;
+      if (this.reportedBuildBreakGroups.has(key)) continue;
+      this.reportedBuildBreakGroups.add(key);
+      this.host.log?.(
+        'warn',
+        `run '${runId}': ${group.count} lane report(s) share one build break: ${group.sampleTitle.slice(0, 120)}`,
+      );
+      try {
+        this.host.reportBuildBreakGroup?.({ runId, group });
+      } catch {
+        // A broken finding sink must never affect the walk.
+      }
     }
   }
 
@@ -937,17 +1167,31 @@ export class WorkflowController {
 
     const inner = fanOut.inner;
     const allowedStepIds: readonly string[] = inner.map((s) => s.id);
-    // WAVE-SCOPED LATCH (defined ⇒ latched): set to the error text the moment one
-    // lane's triage consult dies on a systemic condition, cleared immediately
-    // before each wave dispatches. Lanes run concurrently and the consults are
-    // serialized on the monitor's send chain, so without it a five-lane wave
-    // makes five doomed consults against a dead quota — and the ones past
-    // MONITOR_RUN_RESCUE_CAP get no consult at all and settle 'failed' on an
-    // environment condition. With it, the first systemic verdict parks every
-    // later lane of the same wave for free. Every OTHER systemic/failure text
-    // rides on the lane's own outcome, so nothing about one wave's errors can
-    // leak into the next wave's corroboration.
-    let waveSystemicTriageError: string | undefined;
+    // RUN-LEVEL verification posture, resolved ONCE here — BEFORE the first lane
+    // is dispatched, so every lane's implement/task-verify runs under a known
+    // posture. Resolving it lazily (from the first lane whose enqueue declined)
+    // reaches almost nobody: under the rolling pool the set of lanes whose
+    // prompts are already composed is permanently cap-sized.
+    await this.ensureVerificationPosture(runId);
+    // PARK-EPOCH LATCH (defined ⇒ latched): set to the error text the moment one
+    // lane's triage consult dies on a systemic condition. Lanes run concurrently
+    // and the consults are serialized on the monitor's send chain, so without it
+    // five concurrently-failing lanes make five doomed consults against a dead
+    // quota — and the ones past MONITOR_RUN_RESCUE_CAP get no consult at all and
+    // settle 'failed' on an environment condition. With it, the first systemic
+    // verdict parks every later lane of the same epoch for free.
+    //
+    // THE EPOCH IS THE PARK, not a dispatch generation: a rolling pool has no
+    // wave boundary to clear this at, and clearing it per dispatch would restore
+    // the N-doomed-consults bug the latch exists to prevent. It is therefore
+    // cleared on EVERY path that settles a park — the human's 'retry', and
+    // equally the give-up / spent-budget / no-seam paths, which end the park with
+    // no resume event. Leaving it latched on those three would silently strip
+    // lane triage from every later lane of the run because ONE consult once hit a
+    // transient quota error. Every OTHER systemic/failure text rides on the
+    // lane's own outcome, so nothing about one epoch's errors leaks into the
+    // next epoch's corroboration.
+    let systemicTriageLatch: string | undefined;
     /**
      * Lane-triage consults are SERIALIZED through this chain so the latch above
      * is re-read AFTER the previous consult resolved. Lanes fail concurrently:
@@ -1278,12 +1522,12 @@ export class WorkflowController {
           // declaration): park without consulting and without reserving budget.
           // Read INSIDE the serialized turn, so a lane that failed while a
           // sibling's consult was in flight sees that sibling's verdict.
-          if (waveSystemicTriageError !== undefined) {
+          if (systemicTriageLatch !== undefined) {
             this.host.log?.(
               'warn',
-              `fan-out item '${itemId}': a sibling lane's triage already died on a systemic condition this wave; parking without consulting`,
+              `fan-out item '${itemId}': a sibling lane's triage already died on a systemic condition; parking without consulting`,
             );
-            return { systemic: waveSystemicTriageError };
+            return { systemic: systemicTriageLatch };
           }
           const verdict = await consultLaneTriage(
             itemId,
@@ -1292,7 +1536,7 @@ export class WorkflowController {
             failureKind,
             errorExcerpt,
           );
-          if (verdict !== null && typeof verdict === 'object') waveSystemicTriageError = verdict.systemic;
+          if (verdict !== null && typeof verdict === 'object') systemicTriageLatch = verdict.systemic;
           return verdict;
         };
         const turn = triageConsultChain.then(consult, consult);
@@ -1345,6 +1589,17 @@ export class WorkflowController {
             // Verification inactive for the run → skip (never park), as today.
             continue;
           }
+          if (this.posture(runId).kind === 'unavailable') {
+            // No modality can serve this RUN — declared once at fan-out start (or
+            // flipped mid-flight below). Mirror the inactive-gate short-circuit
+            // exactly: advance the lane WITHOUT enqueuing and WITHOUT parking. No
+            // per-lane finding either; the run-level card already says it.
+            this.host.log?.(
+              'info',
+              `fan-out item '${itemId}': no verifiable modality for this run; skipping visual-verify`,
+            );
+            continue;
+          }
           if (visualVerifyTask === undefined && !adoptedPreFiredRequest) {
             // NOT-APPLICABLE / channel-unavailable / task-verify operator-skipped ⇒
             // nothing to verify: skip the step entirely (no request, no park).
@@ -1374,6 +1629,12 @@ export class WorkflowController {
               // surprise, and filing one finding per lane per run for it would
               // bury the reasons that are.
               if (enqueueOutcome.reason !== VERIFY_DISABLED_ENQUEUE_REASON) {
+                // A decline that names a MODALITY or a RUNBOOK is a fact about the
+                // run, not about this lane: flip the posture so the remaining
+                // lanes skip the enqueue and their per-lane findings collapse into
+                // the single run-level card. (The eager probe at fan-out start is
+                // the primary mechanism; this catches what it could not predict.)
+                this.maybeFlipPostureUnavailable(runId, enqueueOutcome.reason);
                 this.reportVerificationSkipped(
                   runId,
                   itemId,
@@ -1991,22 +2252,115 @@ export class WorkflowController {
       incompleteCount += 1;
     };
 
-    while (remaining.size > 0) {
-      if (signal?.aborted) return { terminal: true, incompleteCount };
+    // ── ROLLING DISPATCH POOL ─────────────────────────────────────────────────
+    // Lanes are dispatched the MOMENT a slot frees, not at a wave boundary: the
+    // old `Promise.all` barrier made every lane of a generation wait for its
+    // slowest sibling, so a 40-minute lane in slot 5 idled four agents and
+    // stranded its dependents behind work they did not depend on.
+    //
+    // Everything the wave barrier used to provide for free is re-provided here
+    // explicitly, because "the wave" meant four different things:
+    //   - a CONCURRENCY window        → `inFlight` + the per-iteration cap read;
+    //   - a FILE-EXCLUSION window     → `claimedFiles`, released on settle;
+    //   - a CORROBORATION window      → `deferred` cohorts + SAME_ERROR_COHORT_MAX_MS;
+    //   - a QUIESCED instant at which
+    //     the park / prune / flush were
+    //     provably safe                → the `inFlight.size === 0` drain below.
+
+    /** Wall clock, seam-injected so the cohort ceiling is testable. */
+    const nowMs = (): number => this.host.now?.() ?? Date.now();
+
+    /** itemId → its live walk. Resolves to `[itemId, outcome]` so `race` names the winner. */
+    const inFlight = new Map<string, Promise<[string, LaneWalkOutcome]>>();
+    /**
+     * Expected file path → the IN-FLIGHT lane holding it. The wave loop's
+     * exclusion set was per-wave; here a claim is taken at dispatch and released
+     * at settle, so a lane blocked on `src/shared.ts` starts the instant its
+     * holder finishes rather than at the next wave boundary.
+     */
+    const claimedFiles = new Map<string, string>();
+    /**
+     * Lanes whose 'failed' write is HELD pending corroboration (the
+     * `persisted: false` arm). `cohort` is the set of lanes that were still in
+     * flight when this one settled: while any of them is live, an identical text
+     * may still arrive and prove the failure environmental. The hold ends when
+     * the cohort drains, when SAME_ERROR_CORROBORATION_MIN is reached, or when
+     * SAME_ERROR_COHORT_MAX_MS elapses — whichever comes first.
+     */
+    const deferred = new Map<string, { error: string; cohort: Set<string>; heldSince: number }>();
+    /**
+     * Systemic failure texts inside the live corroboration window, so a lane that
+     * the classifier caught can still corroborate a sibling the classifier missed
+     * (the `group.systemic > 0` arm). Bounded by the SAME ceiling as a cohort and
+     * cleared on every park settlement: without a bound, a minute-1 quota text
+     * would corroborate a minute-50 review failure.
+     */
+    let systemicSeen: Array<{ error: string; at: number }> = [];
+    /**
+     * Lanes settled on a SYSTEMIC condition (or reclassified as one by
+     * corroboration), waiting for the pool to quiesce so the human is asked once.
+     * They stay in `remaining`, uncounted, and re-dispatch on 'retry'.
+     */
+    let parkPending: { error?: string; items: Set<string> } | undefined;
+    /** No new lane may be dispatched: a systemic park is open, or the walk is aborting. */
+    let holdDispatch = false;
+    /** A lane returned 'aborted', or the signal fired — the walk is terminal. */
+    let sawAborted = false;
+
+    /** Persist a lane's own 'failed' verdict (the write the hold was deferring). */
+    const settleFailed = (itemId: string, countIncomplete: boolean): void => {
+      driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
+      remaining.delete(itemId);
+      failed.add(itemId);
+      if (countIncomplete) incompleteCount += 1;
+    };
+
+    /**
+     * Release ONE held 'failed' write. Deletes the map entry first, so every path
+     * that can reach a deferred item (settle flush, drain, abort) writes it at
+     * most once — invariant: a deferred write is flushed exactly once, never lost.
+     */
+    const flushDeferred = (itemId: string, countIncomplete: boolean): void => {
+      if (!deferred.delete(itemId)) return;
+      settleFailed(itemId, countIncomplete);
+    };
+
+    /** Wrap a lane walk so a THROW fails that lane alone (never the whole pool). */
+    const runLane = (itemId: string): Promise<[string, LaneWalkOutcome]> =>
+      driveItem(itemId).then(
+        (outcome): [string, LaneWalkOutcome] => [itemId, outcome],
+        (err): [string, LaneWalkOutcome] => [
+          itemId,
+          {
+            kind: 'failed',
+            error: err instanceof Error ? err.message : String(err),
+            persisted: false,
+          },
+        ],
+      );
+
+    while (remaining.size > 0 || inFlight.size > 0) {
+      // 1 ── Cancellation stops DISPATCH, not the loop: in-flight lanes are drained
+      // below so their held writes are flushed before the walk returns.
+      if (signal?.aborted) {
+        sawAborted = true;
+        holdDispatch = true;
+      }
 
       // ── Live fan-out re-resolution (add_task / remove_task enabler) ─────────
-      // Re-resolve the item set at each wave boundary so a lane ADDED or REMOVED
-      // mid-run is honored on the NEXT wave, rather than the frozen `items`
+      // Re-resolve the item set at each pool iteration so a lane ADDED or REMOVED
+      // mid-run is honored at the next free slot, rather than the frozen `items`
       // snapshot the caller passed. Recompute `remaining` = fresh − settled,
-      // iterating `fresh` in resolve order so wave composition (the cap-sized
-      // slice) is preserved. For a STATIC batch `fresh` equals `items` on every
-      // call, so `remaining` equals `items − settled` — byte-identical to the
-      // incremental mutation this replaces: a settled lane sits in
-      // `integrated`/`failed`; a systemic-paused lane (DB status still 'running',
-      // so the production driver keeps returning it) stays in `fresh` and is
-      // preserved; a removed queued lane vanishes from `fresh` before dispatch; an
-      // added lane appears and joins a later wave. Already-settled lanes are never
-      // re-dispatched or un-settled (they are excluded by the settled filter).
+      // iterating `fresh` in resolve order so dispatch order is preserved. For a
+      // STATIC batch `fresh` equals `items` on every call, so `remaining` equals
+      // `items − settled`: a settled lane sits in `integrated`/`failed`; a
+      // systemic-paused or corroboration-held lane (DB status still 'running', so
+      // the production driver keeps returning it) stays in `fresh` and is
+      // preserved; a removed QUEUED lane vanishes from `fresh` before dispatch; an
+      // added lane appears and joins the pool. Already-settled lanes are never
+      // re-dispatched or un-settled (they are excluded by the settled filter), and
+      // an IN-FLIGHT lane is re-added unconditionally — a lane removed from the
+      // set while it is running must still settle its own bookkeeping.
       // Fail-soft: a throw keeps the current set (degrade to the frozen snapshot
       // rather than crash the walk), mirroring the caller's resolveItems contract.
       let fresh: string[] | undefined;
@@ -2019,10 +2373,11 @@ export class WorkflowController {
         );
       }
       if (fresh !== undefined) {
-        // Newly-appeared lanes (added since the last wave): extend the in-scope
-        // set + resolve their blocking prereqs ONCE so they are DAG-gated like any
-        // other lane. Guarded on ACTUAL growth so a static batch never re-reads
-        // dependencies (and a fan-out whose driver exposes none is untouched).
+        // Newly-appeared lanes (added since the last iteration): extend the
+        // in-scope set + resolve their blocking prereqs ONCE so they are DAG-gated
+        // like any other lane. Guarded on ACTUAL growth so a static batch never
+        // re-reads dependencies (and a fan-out whose driver exposes none is
+        // untouched).
         const appeared = fresh.filter((id) => !inScope.has(id));
         if (appeared.length > 0) {
           for (const id of fresh) inScope.add(id);
@@ -2046,193 +2401,283 @@ export class WorkflowController {
         }
         // Rebuild the working set: keep only not-yet-settled lanes, in resolve
         // order (a removed queued lane is simply absent from `fresh`; a settled
-        // lane is filtered by integrated/failed).
+        // lane is filtered by integrated/failed/blocked).
         remaining = new Set(
           fresh.filter((id) => !integrated.has(id) && !failed.has(id) && !blocked.has(id)),
         );
-        if (remaining.size === 0) break;
+        // A live lane is never dropped from bookkeeping by a mid-flight removal.
+        for (const liveId of inFlight.keys()) remaining.add(liveId);
+        if (remaining.size === 0 && inFlight.size === 0) break;
       }
 
-      // Readiness is a PURE read: a lane whose prerequisite died is simply not
-      // ready. Nothing is written here. Settling a descendant the moment its
-      // parent fails is what made one failure look like many — and it is
-      // premature besides, since an operator can still rewind or reset the parent
-      // while the fan-out is dispatching other work.
-      const ready: string[] = [];
-      for (const itemId of remaining) {
-        const ps = prereqs.get(itemId) ?? [];
-        if (ps.some((p) => failed.has(p) || blocked.has(p))) continue;
-        if (ps.every((p) => integrated.has(p))) ready.push(itemId);
-        // else: still waiting on a pending prerequisite.
-      }
+      // ── SHARED BUILD-BREAK SWEEP: the quiesced instant ────────────────────
+      // Nothing is in flight, so every lane that has settled has had time for its
+      // `cyboflow_report_finding` write to reach the ReviewItemRouter queue. That
+      // timing is the whole reason this is not a per-lane-settle sweep: the MCP
+      // handler replies ok:true WITHOUT awaiting the per-project queue, so with
+      // two lanes the second one's finding — exactly the one the threshold needs
+      // — is exactly the one most likely to be missing at its own settle.
+      //
+      // Runs BEFORE dispatch (and so before the park/prune decision further down
+      // this iteration) and is idempotent per run on the group's normalized text,
+      // so repeating it at every quiesce costs one indexed read and files nothing
+      // twice. DETECTOR ONLY: it changes no dispatch, park or prune decision.
+      if (inFlight.size === 0) await this.sweepBuildBreaks(runId);
 
-      if (ready.length === 0) {
-        // NOTHING is dispatchable and lanes remain: only now is a lane's wait
-        // provably permanent. Prune to a fixpoint so a chain A→B→C names the
-        // right culprit at each link (B waits on a FAILED A, C on a BLOCKED B)
-        // instead of collapsing everything into "cycle?".
-        let progressed = true;
-        while (progressed) {
-          progressed = false;
-          for (const itemId of [...remaining]) {
-            const ps = prereqs.get(itemId) ?? [];
-            const dead = ps.find((p) => failed.has(p) || blocked.has(p));
-            if (dead === undefined) continue;
-            markBlocked(
-              itemId,
-              failed.has(dead)
-                ? `never started: prerequisite '${dead}' failed`
-                : `never started: prerequisite '${dead}' was never started`,
-            );
-            progressed = true;
-          }
+      // ── DISPATCH ──────────────────────────────────────────────────────────
+      // Fill every free slot, in resolve order, with lanes that are READY (all
+      // in-scope blocking prerequisites INTEGRATED — never merely settled), not
+      // already live, not held by corroboration, not parked, and whose expected
+      // files no LIVE lane holds. Readiness stays a PURE read: a lane whose
+      // prerequisite died is simply not dispatched — nothing is written here.
+      // Settling a descendant the moment its parent fails is what made one failure
+      // look like many, and it is premature besides, since an operator can still
+      // rewind or reset the parent while the pool runs other work.
+      // Resolve order is preserved: a file-overlapping lane is skipped while later
+      // disjoint lanes still fill the pool. No expected-file data means every ready
+      // lane is eligible. The cap is re-read every iteration, so a live spec edit
+      // takes effect at the next slot.
+      const cap = effectiveMaxConcurrency(fanOut);
+      if (!holdDispatch) {
+        for (const itemId of remaining) {
+          if (inFlight.size >= cap) break;
+          if (inFlight.has(itemId) || deferred.has(itemId)) continue;
+          if (parkPending?.items.has(itemId) === true) continue;
+          const ps = prereqs.get(itemId) ?? [];
+          if (ps.some((p) => failed.has(p) || blocked.has(p))) continue;
+          if (!ps.every((p) => integrated.has(p))) continue;
+          const files = expectedFiles?.get(itemId) ?? [];
+          if (files.some((filePath) => claimedFiles.has(filePath))) continue;
+          for (const filePath of files) claimedFiles.set(filePath, itemId);
+          // A re-dispatched lane is no longer a settled failure: drop its own held
+          // entry AND its membership of every other lane's cohort, so nothing can
+          // flush a 'failed' write for a lane that is running, and no cohort is
+          // held open by a lane that re-entered the pool.
+          deferred.delete(itemId);
+          for (const held of deferred.values()) held.cohort.delete(itemId);
+          inFlight.set(itemId, runLane(itemId));
         }
-        // Whatever is left waits on a prerequisite that is neither settled nor
-        // dispatchable — a cycle, or a prereq outside this fan-out that never runs.
-        for (const itemId of [...remaining]) {
-          markBlocked(itemId, 'unresolvable blocking dependencies (cycle?)');
+      }
+
+      // ── DRAIN: the quiesced instant ───────────────────────────────────────
+      // Nothing is live, so a park, a prune and a flush are all provably safe
+      // here and nowhere else. Order is load-bearing: abort wins over everything
+      // (the run is terminal either way), then the systemic park, and only then
+      // the prune — a park evaluated AFTER the prune would let the last in-flight
+      // lane's systemic failure be relabelled "unresolvable dependencies (cycle?)"
+      // and the human would never be asked.
+      if (inFlight.size === 0) {
+        // Any hold whose cohort cannot grow again is over: flush before deciding
+        // anything, so no held lane is ever mistaken for a stranded one.
+        for (const itemId of [...deferred.keys()]) {
+          if (parkPending?.items.has(itemId) === true) continue;
+          flushDeferred(itemId, true);
+        }
+
+        if (sawAborted) {
+          // Cancellation: persist the held writes (a lane left 'running' in the
+          // store forever is the failure mode this exists for), then stop. No
+          // corroboration and no park — the run is terminal either way.
+          for (const itemId of [...deferred.keys()]) flushDeferred(itemId, false);
+          return { terminal: true, incompleteCount };
+        }
+
+        if (parkPending !== undefined) {
+          // One or more lanes settled on a SYSTEMIC condition. Park the WHOLE
+          // fan-out on it (bounded per outer step id by MAX_SYSTEMIC_PAUSES)
+          // rather than failing them — the condition is environment-level, not a
+          // per-task defect.
+          const parked = [...parkPending.items];
+          const parkError = parkPending.error;
+          const used = systemicPauses.get(step.id) ?? 0;
+          // Park only when budget remains AND the human has not already GIVEN UP
+          // on this outer step's systemic pause. Once giveup is latched, a later
+          // systemic hit on the SAME outer step skips the pause and fails its
+          // parked lanes directly — no second blocking pause item to dismiss.
+          if (this.host.awaitSystemicPause && used < MAX_SYSTEMIC_PAUSES && !systemicGiveUps.has(step.id)) {
+            systemicPauses.set(step.id, used + 1);
+            this.host.log?.(
+              'warn',
+              `fan-out '${step.id}' hit a systemic failure on ${parked.length} lane(s); pausing the run: ${parkError ?? '(no error text)'}`,
+            );
+            const verdict = await this.host.awaitSystemicPause(step, { ...baseCtx, attempt: 1 }, parkError);
+            if (verdict === 'canceled' || signal?.aborted) return { terminal: true, incompleteCount };
+            if (verdict === 'retry') {
+              // Un-park: the still-in-`remaining` items re-dispatch next iteration.
+              // v1 simplification: driveItem restarts a paused lane from inner step
+              // 0 (re-running any already-passed inner steps) — safe because step
+              // agents observe the worktree state rather than in-memory progress.
+              parkPending = undefined;
+              holdDispatch = false;
+              systemicTriageLatch = undefined;
+              systemicSeen = [];
+              continue;
+            }
+            // 'giveup' — latch it so a later systemic hit on this outer step does
+            // NOT re-park, then fall through and fail the still-parked lanes.
+            systemicGiveUps.add(step.id);
+          }
+          // Seam absent, budget exhausted, or 'giveup': these lanes EXECUTED and
+          // hit a real condition, so they settle 'failed' (markFailed) — never
+          // 'blocked', which would report an agent turn that actually ran against
+          // a dead environment as a lane that never started.
+          for (const itemId of parked) {
+            if (remaining.has(itemId)) markFailed(itemId, 'systemic failure — gave up waiting');
+          }
+          // The park is OVER even though no human resumed it. Clearing the triage
+          // latch and the systemic-text window here is what keeps one dead consult
+          // from silently parking (and then failing) every later lane of the run:
+          // the next lane to exhaust a budget gets a real consult again.
+          parkPending = undefined;
+          holdDispatch = false;
+          systemicTriageLatch = undefined;
+          systemicSeen = [];
+          continue;
+        }
+
+        if (remaining.size > 0) {
+          // NOTHING is dispatchable, nothing is live, and lanes remain: only now
+          // is a lane's wait provably permanent. Prune to a fixpoint so a chain
+          // A→B→C names the right culprit at each link (B waits on a FAILED A, C
+          // on a BLOCKED B) instead of collapsing everything into "cycle?".
+          let progressed = true;
+          while (progressed) {
+            progressed = false;
+            for (const itemId of [...remaining]) {
+              const ps = prereqs.get(itemId) ?? [];
+              const dead = ps.find((p) => failed.has(p) || blocked.has(p));
+              if (dead === undefined) continue;
+              markBlocked(
+                itemId,
+                failed.has(dead)
+                  ? `never started: prerequisite '${dead}' failed`
+                  : `never started: prerequisite '${dead}' was never started`,
+              );
+              progressed = true;
+            }
+          }
+          // Whatever is left waits on a prerequisite that is neither settled nor
+          // dispatchable — a cycle, or a prereq outside this fan-out that never runs.
+          for (const itemId of [...remaining]) {
+            markBlocked(itemId, 'unresolvable blocking dependencies (cycle?)');
+          }
         }
         break;
       }
 
-      // Dispatch ONE cap-sized, file-conflict-free wave, then re-evaluate (tasks
-      // unblocked by this wave's integrations join the next wave). Ready order is
-      // preserved: an overlapping task is deferred while later disjoint tasks can
-      // still fill the current wave, preserving useful concurrency in the shared
-      // worktree. No expected-file data means every ready task remains eligible.
-      const wave: string[] = [];
-      const waveFiles = new Set<string>();
-      const cap = effectiveMaxConcurrency(fanOut);
-      for (const itemId of ready) {
-        if (wave.length >= cap) break;
-        const files = expectedFiles?.get(itemId) ?? [];
-        if (files.some((filePath) => waveFiles.has(filePath))) continue;
-        wave.push(itemId);
-        for (const filePath of files) waveFiles.add(filePath);
+      // ── SETTLE one lane ───────────────────────────────────────────────────
+      const [settledId, outcome] = await Promise.race(inFlight.values());
+      inFlight.delete(settledId);
+      for (const [filePath, owner] of [...claimedFiles]) {
+        if (owner === settledId) claimedFiles.delete(filePath);
       }
-      // Reset the systemic-triage latch: it bounds ONE wave's doomed consults,
-      // and a wave that dispatches after a resumed pause deserves a fresh read of
-      // whether the environment is still down.
-      waveSystemicTriageError = undefined;
-      const outcomes = await Promise.all(wave.map((itemId) => driveItem(itemId)));
-      if (outcomes.some((o) => o.kind === 'aborted') || signal?.aborted) {
-        // Cancellation ends the walk here, BEFORE the settle below — so a lane
-        // that already failed this wave and deferred its 'failed' write (the
-        // corroboration arm) would otherwise stay 'running' in the lane store
-        // forever. Persist those writes now; no corroboration and no park, the
-        // run is terminal either way.
-        wave.forEach((itemId, idx) => {
-          const outcome = outcomes[idx];
-          if (outcome.kind !== 'failed' || outcome.persisted) return;
-          driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
-          remaining.delete(itemId);
-          failed.add(itemId);
-        });
-        return { terminal: true, incompleteCount };
+      // This lane can no longer corroborate anyone: close it out of every cohort.
+      for (const held of deferred.values()) held.cohort.delete(settledId);
+
+      const settledAt = nowMs();
+      if (outcome.kind === 'aborted') {
+        sawAborted = true;
+        holdDispatch = true;
+      } else if (outcome.kind === 'systemic') {
+        const park = parkPending ?? { items: new Set<string>() };
+        park.items.add(settledId);
+        // Prefer a genuinely systemic lane's own text for the park (last wins,
+        // as the wave loop's reduce did); a corroborated group only fills in
+        // below when no systemic lane supplied one.
+        if (outcome.error !== undefined) park.error = outcome.error;
+        parkPending = park;
+        const text = outcome.error?.trim();
+        if (text !== undefined && text.length > 0) systemicSeen.push({ error: text, at: settledAt });
+        // A systemic condition quiesces the pool: no lane may be dispatched into
+        // a dead environment while the human is being asked about it.
+        holdDispatch = true;
+      } else if (outcome.kind === 'failed') {
+        const text = outcome.error?.trim();
+        if (outcome.persisted) {
+          remaining.delete(settledId);
+          failed.add(settledId);
+          incompleteCount += 1;
+        } else if (text === undefined || text.length === 0) {
+          // Nothing to corroborate against — settle it now, exactly as the wave
+          // loop's settle pass did for a text-less outcome.
+          settleFailed(settledId, true);
+        } else {
+          deferred.set(settledId, {
+            error: text,
+            cohort: new Set(inFlight.keys()),
+            heldSince: settledAt,
+          });
+        }
+      } else {
+        remaining.delete(settledId);
+        integrated.add(settledId);
       }
 
-      // ── CORROBORATION ────────────────────────────────────────────────────
-      // Group this wave's UNPERSISTED failures (and its systemic lanes) by EXACT
-      // trimmed error text. A group is corroborated when it holds at least
-      // SAME_ERROR_CORROBORATION_MIN lanes, or when one of its members already
-      // failed systemically — independent lanes cannot produce byte-identical
-      // failure text by coincidence, whatever the classifier makes of the words.
-      // A corroborated failure is reclassified systemic: never written 'failed',
-      // it stays in `remaining` and re-runs once the condition clears.
+      // ── CORROBORATION ─────────────────────────────────────────────────────
+      // Group the HELD failures (and the systemic texts still inside the window)
+      // by EXACT trimmed error text. A group is corroborated when it holds at
+      // least SAME_ERROR_CORROBORATION_MIN lanes, or when one of its members
+      // already failed systemically — independent lanes cannot produce
+      // byte-identical failure text by coincidence, whatever the classifier makes
+      // of the words. A corroborated failure is reclassified systemic: never
+      // written 'failed', it stays in `remaining` and re-runs once the condition
+      // clears.
       //
-      // The whole pass reads ONLY this wave's outcomes, so a previous wave's
-      // quota text can never corroborate this wave's review failures.
+      // The window is what the wave barrier used to supply for free. Only holds
+      // and systemic texts younger than SAME_ERROR_COHORT_MAX_MS take part, so
+      // failures far apart in time can never fuse.
+      const windowStart = settledAt - SAME_ERROR_COHORT_MAX_MS;
       const groups = new Map<string, { items: string[]; systemic: number }>();
-      wave.forEach((itemId, idx) => {
-        const outcome = outcomes[idx];
-        if (outcome.kind === 'failed' && outcome.persisted) return;
-        if (outcome.kind !== 'failed' && outcome.kind !== 'systemic') return;
-        const text = outcome.error?.trim();
-        if (text === undefined || text.length === 0) return;
-        const group = groups.get(text) ?? { items: [], systemic: 0 };
-        if (outcome.kind === 'systemic') group.systemic += 1;
-        else group.items.push(itemId);
-        groups.set(text, group);
-      });
-      const corroborated = new Set<string>();
-      // Prefer a genuinely systemic lane's own text for the park; fall back to a
-      // corroborated group's text when the whole wave failed by corroboration.
-      let waveSystemicError = outcomes.reduce<string | undefined>(
-        (acc, outcome) => (outcome.kind === 'systemic' && outcome.error !== undefined ? outcome.error : acc),
-        undefined,
-      );
+      for (const [itemId, held] of deferred) {
+        if (parkPending?.items.has(itemId) === true) continue;
+        if (held.heldSince <= windowStart) continue;
+        const group = groups.get(held.error) ?? { items: [], systemic: 0 };
+        group.items.push(itemId);
+        groups.set(held.error, group);
+      }
+      for (const seen of systemicSeen) {
+        if (seen.at <= windowStart) continue;
+        const group = groups.get(seen.error) ?? { items: [], systemic: 0 };
+        group.systemic += 1;
+        groups.set(seen.error, group);
+      }
       for (const [text, group] of groups) {
         if (group.items.length === 0) continue;
         if (group.systemic === 0 && group.items.length < SAME_ERROR_CORROBORATION_MIN) continue;
-        for (const itemId of group.items) corroborated.add(itemId);
-        waveSystemicError ??= text;
+        const park = parkPending ?? { items: new Set<string>() };
+        for (const itemId of group.items) {
+          deferred.delete(itemId);
+          park.items.add(itemId);
+        }
+        park.error ??= text;
+        parkPending = park;
+        holdDispatch = true;
         this.host.log?.(
           'warn',
           `fan-out '${step.id}': ${group.items.length} lane(s) failed with the SAME error${group.systemic > 0 ? ' as a systemically-failed lane' : ''}; treating it as environmental rather than as ${group.items.length} task defects: ${text.slice(0, 120)}`,
         );
       }
 
-      // Settle each lane. A 'systemic' lane (or a corroborated failure) is NEITHER
-      // integrated NOR failed: it STAYS in `remaining` (uncounted) so it
-      // re-dispatches after the pause clears.
-      const pausedThisWave: string[] = [];
-      wave.forEach((itemId, idx) => {
-        const outcome = outcomes[idx];
-        if (outcome.kind === 'systemic' || corroborated.has(itemId)) {
-          pausedThisWave.push(itemId);
-          return; // leave in `remaining`
-        }
-        remaining.delete(itemId);
-        if (outcome.kind === 'failed') {
-          // The deferred write for a lane corroboration judged a genuine defect.
-          if (!outcome.persisted) {
-            driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
-          }
-          failed.add(itemId);
-          incompleteCount += 1;
-        } else {
-          integrated.add(itemId);
-        }
-      });
-
-      // One or more lanes parked on a SYSTEMIC condition. Park the WHOLE fan-out on
-      // it (bounded per outer step id by MAX_SYSTEMIC_PAUSES) rather than failing
-      // those lanes — the condition is environment-level, not a per-task defect.
-      if (pausedThisWave.length > 0) {
-        const used = systemicPauses.get(step.id) ?? 0;
-        // Park only when budget remains AND the human has not already GIVEN UP on
-        // this outer step's systemic pause. Once giveup is latched, a later wave that
-        // re-hits systemic on the SAME outer step skips the pause and fails its paused
-        // lanes directly — no second blocking pause item for the human to dismiss.
-        if (this.host.awaitSystemicPause && used < MAX_SYSTEMIC_PAUSES && !systemicGiveUps.has(step.id)) {
-          systemicPauses.set(step.id, used + 1);
-          this.host.log?.(
-            'warn',
-            `fan-out '${step.id}' hit a systemic failure on ${pausedThisWave.length} lane(s); pausing the run: ${waveSystemicError ?? '(no error text)'}`,
-          );
-          const verdict = await this.host.awaitSystemicPause(step, { ...baseCtx, attempt: 1 }, waveSystemicError);
-          if (verdict === 'canceled' || signal?.aborted) return { terminal: true, incompleteCount };
-          if (verdict === 'retry') {
-            // Un-park: the still-in-`remaining` items re-dispatch on the next loop.
-            // v1 simplification: driveItem restarts a paused lane from inner step 0
-            // (re-running any already-passed inner steps) — safe because step agents
-            // observe the worktree state rather than in-memory progress.
-            continue;
-          }
-          // 'giveup' — latch it so a later wave on this outer step does NOT re-park,
-          // then fall through and fail the still-paused lanes below.
-          systemicGiveUps.add(step.id);
-        }
-        // Seam absent, budget exhausted, or 'giveup': these lanes EXECUTED and
-        // hit a real condition, so they settle 'failed' (markFailed) — never
-        // 'blocked', which would report an agent turn that actually ran against a
-        // dead environment as a lane that never started.
-        for (const itemId of pausedThisWave) {
-          if (remaining.has(itemId)) markFailed(itemId, 'systemic failure — gave up waiting');
-        }
+      // ── FLUSH ─────────────────────────────────────────────────────────────
+      // A hold ends when its cohort has drained (nobody left who could still
+      // corroborate it) or when the ceiling elapses — whichever first. Without
+      // the ceiling the hold would be bounded by the pool's slowest lane, which
+      // leaves a failed lane reading 'running' on the board (and re-dispatchable
+      // on a crash-resume) for as long as that lane takes.
+      for (const [itemId, held] of [...deferred]) {
+        if (parkPending?.items.has(itemId) === true) continue;
+        if (held.cohort.size > 0 && held.heldSince > windowStart) continue;
+        flushDeferred(itemId, true);
       }
+      // Systemic texts age out on the same clock, so a park that never opened
+      // cannot leave a minute-1 quota error corroborating a minute-50 failure.
+      if (systemicSeen.length > 0) systemicSeen = systemicSeen.filter((seen) => seen.at > windowStart);
     }
 
+    // One last sweep over the settled tree: the drain sweep above runs before the
+    // final lanes' findings have necessarily committed, and this one is free
+    // (idempotent per run on the group's normalized text).
+    await this.sweepBuildBreaks(runId);
     return { terminal: false, incompleteCount };
   }
 
@@ -2421,6 +2866,54 @@ export class WorkflowController {
     for (let k = fromIndex; k < phaseSteps.length; k++) {
       remainingCompleted.delete(phaseSteps[k].id);
     }
+  }
+
+  /**
+   * Resolve the AUTOMATIC adversarial-review loopback for a step that just
+   * succeeded: returns the jump target, the round number, and the extracted
+   * `## Blocking` section when ALL of these hold — the step's agent is
+   * `adversarial-review`, it declares a resolvable intra-phase `loopback`, its
+   * captured result says `REVIEW: BLOCKING` (or, with no trailer, carries a
+   * populated `## Blocking` section — the same no-trailer tolerance the fan-out
+   * code-review path has), and MAX_REVIEW_AUTO_REVISIONS is not yet spent for
+   * this step id. Null otherwise, so every other step — and a review whose
+   * result could not be captured — advances exactly as before.
+   *
+   * Keyed on the AGENT rather than on `loopback` alone so a custom flow that
+   * puts an on-failure loopback on some other agent step never has its clean
+   * result re-parsed as a review verdict.
+   */
+  private tryAdversarialReviewLoopback(
+    step: WorkflowStep,
+    phaseSteps: WorkflowStep[],
+    resultText: string | null | undefined,
+    reviewAutoRevisions: Map<string, number>,
+  ): { index: number; round: number; blocking: string | null } | null {
+    if (step.agent !== 'adversarial-review') return null;
+    if (step.loopback === undefined || step.loopback.length === 0) return null;
+    if (typeof resultText !== 'string' || resultText.trim().length === 0) return null;
+    const verdict = parseCodeReviewVerdict(resultText);
+    const blocking =
+      verdict === 'blocking' || (verdict === null && blockingSectionHasEntries(resultText));
+    if (!blocking) return null;
+    const targetIndex = phaseSteps.findIndex((s) => s.id === step.loopback);
+    if (targetIndex < 0) return null; // unresolved (validation should prevent this)
+    const used = reviewAutoRevisions.get(step.id) ?? 0;
+    if (used >= MAX_REVIEW_AUTO_REVISIONS) {
+      this.host.log?.(
+        'warn',
+        `step '${step.id}' returned REVIEW: BLOCKING again after ${used} automatic revision(s); advancing to the design gate`,
+      );
+      return null;
+    }
+    reviewAutoRevisions.set(step.id, used + 1);
+    return {
+      index: targetIndex,
+      round: used + 1,
+      // Only a section with real entries is worth quoting — a `REVIEW: BLOCKING`
+      // trailer over a `None.` section hands the re-run the artifact instead.
+      blocking: blockingSectionHasEntries(resultText) ? extractBlockingSection(resultText) : null,
+    };
   }
 
   /**

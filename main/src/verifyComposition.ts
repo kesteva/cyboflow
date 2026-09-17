@@ -48,6 +48,10 @@ import { commitPathspec } from './orchestrator/verify/bootstrapCommit';
 import { enqueueTaskVerification } from './orchestrator/verify/enqueueFromTask';
 import { VERIFY_RUNBOOK_RELATIVE_PATH } from '../../shared/types/verifyRunbook';
 import { probeChromiumExecutable } from './orchestrator/verify/driver/driverCore';
+import {
+  computeVerifyInputHash,
+  computeVerifyHostFingerprint,
+} from './services/visualVerify/verifyDriftProbes';
 import { makeVerificationAgentQuery } from './orchestrator/verify/verificationAgentQuery';
 import { makeCodexVerificationAgentQuery } from './orchestrator/verify/codexVerificationAgentQuery';
 import { CapturePageBackend } from './services/visualVerify/capturePageBackend';
@@ -71,7 +75,6 @@ import { StaticServerManager } from './services/visualVerify/staticServerManager
 import { comparePngFiles } from './services/visualVerify/pixelDiff';
 import { resolveDeliverableContext, resolveStaticHtmlContext } from './orchestrator/verifyConfigLoader';
 import type { DeliverableVerifyConfig, VerdictV1, VlmJudge } from '../../shared/types/visualVerification';
-import { createHash } from 'node:crypto';
 import * as fs from 'fs';
 import { runGitAsync } from './utils/runGit';
 import type { ConfigManager } from './services/configManager';
@@ -387,73 +390,15 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
   // itself stays SDK/electron-free. (The driver-CLI path itself is INJECTED — see
   // `driverCliPath` on the deps: it is resolved against index.ts's own __dirname.)
   // Phase 2 (docs/proposals/verification-setup-flow.md §5.2 seam 1 + §5.3): the
-  // MACHINE-LOCAL half of the runbook contract. The store is DB + policy; the
-  // three environment probes below are its IO, injected here so the store itself
-  // stays fs-free (its standalone-typecheck invariant).
-  //
-  // computeInputHash / hostFingerprint are what make a proof EXPIRE. §5.3's rule
-  // is "any component changing demotes", so both must be (a) stable across calls
-  // on an unchanged host — they are compared for equality, not merely stored —
-  // and (b) cheap, since `status()` recomputes them on every gated request.
-  // The §5.3 drift probes, hoisted OUT of the store literal so the runbook
-  // BOOTSTRAP keys its §10 suppression on the IDENTICAL hashes the store
-  // demotes a proof on. A suppression is honored only while both still match,
-  // so a second implementation of either would produce one that never expires
-  // or one that never holds.
-  // The §5.3 project INPUT hash: the things that change what "build and serve
-  // this project" MEANS — the package scripts the runbook's commands invoke,
-  // the lockfile (a dependency bump can break a dev server), and the two ABI
-  // facts §1's root cause (c) turned on. Deliberately NOT a hash of the whole
-  // tree: every commit would then demote the runbook, which would make the
-  // proof worthless by expiring it constantly.
-  const verifyComputeInputHash = async (dirPath: string): Promise<string | null> => {
-    try {
-      const raw = await fs.promises.readFile(path.join(dirPath, 'package.json'), 'utf8');
-      const parsed: unknown = JSON.parse(raw);
-      const pkg = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
-      const hash = createHash('sha256');
-      hash.update(JSON.stringify(pkg.scripts ?? null));
-      hash.update(String(pkg.packageManager ?? ''));
-      for (const lockfile of ['pnpm-lock.yaml', 'package-lock.json', 'yarn.lock', 'bun.lockb']) {
-        try {
-          hash.update(await fs.promises.readFile(path.join(dirPath, lockfile)));
-        } catch {
-          // absent lockfile — nothing to fold in.
-        }
-      }
-      hash.update(process.versions.node.split('.')[0]);
-      hash.update(process.versions.modules);
-      return hash.digest('hex');
-    } catch {
-      // Could not observe the inputs. The store treats null as "cannot tell",
-      // which fails soft to 'absent' WITHOUT demoting — an inability to look is
-      // not evidence that something changed.
-      return null;
-    }
-  };
-
-  // The §5.3 host fingerprint. The chromium path is the driver's OWN resolution
-  // (the same probe preflight uses), so a chromium that moved or vanished
-  // demotes the proof rather than surfacing ten minutes into a deploy. The TCC
-  // grant state is deliberately excluded: probing it shells the peekaboo binary
-  // on EVERY gated request, and the per-modality capability ledger (§3.3)
-  // already owns grant regressions.
-  const verifyHostFingerprint = async (): Promise<string> => {
-    let chromium: string | null = null;
-    try {
-      chromium = await probeChromiumExecutable();
-    } catch {
-      chromium = null;
-    }
-    return JSON.stringify({
-      chromium,
-      node: process.versions.node.split('.')[0],
-      electronAbi: process.versions.modules,
-      platform: process.platform,
-      arch: process.arch,
-      appPath: app.getPath('exe'),
+  // The §5.3 drift probes (services/visualVerify/verifyDriftProbes.ts), hoisted
+  // OUT of the store literal so the runbook BOOTSTRAP keys its §10 suppression
+  // on the IDENTICAL hashes the store demotes a proof on.
+  const verifyComputeInputHash = computeVerifyInputHash;
+  const verifyHostFingerprint = (): Promise<string> =>
+    computeVerifyHostFingerprint({
+      probeChromium: probeChromiumExecutable,
+      appExePath: app.getPath('exe'),
     });
-  };
 
   const verifyRunbookStore = new VerifyRunbookStore(cyboflowDb, {
     // ABSENT AND UNREADABLE ARE NOT THE SAME ANSWER (F4/F10 + Codex #8 —

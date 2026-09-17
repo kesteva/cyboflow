@@ -46,6 +46,7 @@ describe('agentThreadPrompt', () => {
       'cyboflow_fs_list',
       'cyboflow_fs_grep',
       'cyboflow_history',
+      'cyboflow_agents',
     ]) {
       expect(prompt).toContain(tool);
     }
@@ -63,9 +64,12 @@ describe('agentThreadPrompt', () => {
     // docs/proposals/CUSTOM-VIEWS.md §7.4): the WidgetSpec contract summary,
     // the schema→preview→save workflow, two worked-example specs, and the
     // authoring rules (session_id provenance, SQL restrictions, limits).
+    // Widened again 300 → 330 for the create-workflow proposal kind: its
+    // payload shape, the cyboflow_agents tool bullet, and the quality-bar
+    // bullet spelling out the definition shape + agent persona rules.
     const lines = getAgentSystemPrompt().split('\n').length;
     expect(lines).toBeGreaterThanOrEqual(60);
-    expect(lines).toBeLessThanOrEqual(300);
+    expect(lines).toBeLessThanOrEqual(330);
   });
 
   it('mentions Custom widgets and the two disjoint write-shaped tools', () => {
@@ -113,6 +117,14 @@ describe('agentThreadPrompt', () => {
 
   it('mentions recommending the right flow', () => {
     expect(getAgentSystemPrompt()).toMatch(/recommending the right flow/i);
+  });
+
+  it('documents the create-workflow proposal kind and the agents read that precedes it', () => {
+    const prompt = getAgentSystemPrompt();
+    expect(prompt).toMatch(/create-workflow/);
+    expect(prompt).toMatch(/\*\*create-workflow\*\*/);
+    expect(prompt).toMatch(/kebab-case of its/);
+    expect(prompt).toMatch(/Call it before ANY `create-workflow`\s+proposal/);
   });
 
   it('documents the create-backlog-items proposal kind (the assistant CAN add backlog items)', () => {

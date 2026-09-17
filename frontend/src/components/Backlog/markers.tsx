@@ -4,6 +4,9 @@
  *   - PriorityTag  (P0 | P1 | P2)
  *   - CategoryTag  (feature | bug | chore — migration 059)
  *   - ScopeTag     (S = small, L = large — idea scope hint; hidden when unset)
+ *   - ExecutorBadge (neutral "Human" — a task only a person can do, migration
+ *                  137; hidden for the 'agent' default, which is every other
+ *                  task and every idea/epic)
  *   - ArchivedChip (neutral "Archived" — archive-in-place items, only visible
  *                  while the header Archived toggle is on)
  *   - ProjectChip  (project name — cross-project "All projects" view only)
@@ -29,7 +32,7 @@
  * The breathing-glow on an in-flight card honours prefers-reduced-motion via
  * the `motion-reduce:` Tailwind variant (drops the pulse animation).
  */
-import { User, Bug, Sparkles, Wrench, FlaskConical } from 'lucide-react';
+import { User, Bug, Sparkles, Wrench, FlaskConical, UserRound } from 'lucide-react';
 import type { EntityCategory, FlowOverlay, IdeaScope, Priority, TaskType } from '../../../../shared/types/tasks';
 import { IDEA_COMPONENT_LABELS } from '../../../../shared/types/ideaComponents';
 import type { IdeaComponentState } from '../../../../shared/types/ideaComponents';
@@ -170,6 +173,29 @@ export function ExperimentBadge(): React.JSX.Element {
     >
       <FlaskConical className="h-2.5 w-2.5" strokeWidth={2.5} />
       In experiment
+    </span>
+  );
+}
+
+/**
+ * "Human" badge for a task whose executor is 'human' (migration 137) — work only
+ * a person can do, which no sprint will ever pick up.
+ *
+ * Deliberately NEUTRAL (the same muted border/surface the chore CategoryTag
+ * uses), not a warning colour: a human task is a normal, healthy state of the
+ * backlog, not a problem. Callers render it only for `executor === 'human'`;
+ * the 'agent' default has no badge, because almost everything is an agent task
+ * and a badge on all of them would carry no information.
+ */
+export function ExecutorBadge(): React.JSX.Element {
+  return (
+    <span
+      className="eyebrow inline-flex items-center gap-1 rounded-[3px] border border-border-primary bg-bg-tertiary px-1.5 py-px text-text-secondary"
+      title="Human task — only a person can do this work; it never runs in a sprint"
+      data-testid="executor-badge"
+    >
+      <UserRound className="h-2.5 w-2.5" strokeWidth={2.5} />
+      Human
     </span>
   );
 }

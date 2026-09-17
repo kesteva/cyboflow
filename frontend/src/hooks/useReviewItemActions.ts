@@ -59,7 +59,7 @@ export interface ReviewItemActionsState {
   resolve: (
     projectId: number,
     reviewItemId: string,
-    opts?: { resolution?: string; outcome?: 'approve' | 'reject'; verdicts?: IdeaVerdictMap },
+    opts?: { resolution?: string; outcome?: 'approve' | 'reject' | 'revise'; verdicts?: IdeaVerdictMap },
   ) => Promise<{ resumed: boolean } | null>;
   /**
    * Accept a finding whose proposedTarget is a manual ('docs' | 'prompt') edit:
@@ -125,7 +125,7 @@ export function useReviewItemActions(): ReviewItemActionsState {
     async (
       projectId: number,
       reviewItemId: string,
-      opts?: { resolution?: string; outcome?: 'approve' | 'reject'; verdicts?: IdeaVerdictMap },
+      opts?: { resolution?: string; outcome?: 'approve' | 'reject' | 'revise'; verdicts?: IdeaVerdictMap },
     ): Promise<{ resumed: boolean } | null> => {
       setError(null);
       setPendingItemId(reviewItemId);

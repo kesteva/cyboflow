@@ -363,10 +363,11 @@ export function ABTestLaunchModal({
           !terminalStageIds.has(r.stage_id);
         const groups = groupTasksByEpic(rows, isEligible);
         setSeedGroups(groups);
-        // Prune any prior selection to what's still eligible + not in-flight.
+        // Prune any prior selection to what's still eligible + not in-flight +
+        // not a human task (migration 137 — readSeedTask rejects those server-side).
         const eligibleSet = new Set(
           flattenGroups(groups)
-            .filter((t) => t.inFlow.length === 0)
+            .filter((t) => t.inFlow.length === 0 && t.executor !== 'human')
             .map((t) => t.id),
         );
         setSelectedTaskIds((prev) => new Set(Array.from(prev).filter((id) => eligibleSet.has(id))));
@@ -391,8 +392,14 @@ export function ABTestLaunchModal({
     seededForWorkflowId.current = null;
   };
 
-  // Eligible (selectable) seed tasks: not already in-flight in another run.
-  const selectableTasks = useMemo(() => seedTasks.filter((t) => t.inFlow.length === 0), [seedTasks]);
+  // Eligible (selectable) seed tasks: not already in-flight in another run, and
+  // not a HUMAN task (migration 137). An experiment's premise is that both arms
+  // RUN the task two ways; there is no way to run work only a person can do, so
+  // readSeedTask rejects a human seed server-side and the picker must not offer it.
+  const selectableTasks = useMemo(
+    () => seedTasks.filter((t) => t.inFlow.length === 0 && t.executor !== 'human'),
+    [seedTasks],
+  );
   const atTaskCap = selectedTaskIds.size >= seedTaskCap;
 
   const toggleTask = (taskId: string): void => {
@@ -429,10 +436,12 @@ export function ABTestLaunchModal({
   const renderSeedTaskRow = (t: BacklogTaskItem): React.ReactNode => {
     const inFlight = t.inFlow.length > 0;
     const checked = selectedTaskIds.has(t.id);
-    const disabled = inFlight || (!checked && atTaskCap);
+    const isHuman = t.executor === 'human';
+    const disabled = inFlight || isHuman || (!checked && atTaskCap);
     return (
       <label
         data-testid={`ab-test-seed-task-item-${t.id}`}
+        data-human={isHuman ? 'true' : undefined}
         className={`flex items-start gap-2 rounded-button border px-2 py-1.5 text-sm ${
           disabled
             ? 'cursor-not-allowed border-border-primary bg-bg-secondary opacity-60'
@@ -453,6 +462,14 @@ export function ABTestLaunchModal({
           {inFlight && (
             <span className="rounded-full bg-bg-tertiary px-1.5 py-0.5 text-[10px] font-medium text-text-tertiary">
               in flight
+            </span>
+          )}
+          {isHuman && (
+            <span
+              data-testid={`ab-test-seed-task-human-${t.id}`}
+              className="rounded-full bg-bg-tertiary px-1.5 py-0.5 text-[10px] font-medium text-text-tertiary"
+            >
+              Human · runs outside the sprint
             </span>
           )}
         </span>
@@ -711,7 +728,7 @@ export function ABTestLaunchModal({
                     <EpicGroupedTaskList
                       groups={seedGroups}
                       selectedIds={selectedTaskIds}
-                      isSelectable={(t) => t.inFlow.length === 0}
+                      isSelectable={(t) => t.inFlow.length === 0 && t.executor !== 'human'}
                       onToggleGroup={toggleSeedGroup}
                       renderTask={renderSeedTaskRow}
                       testIdPrefix="ab-test-seed-task"

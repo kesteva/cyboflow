@@ -54,7 +54,9 @@
 import type { DatabaseLike, LoggerLike } from './types';
 import { ReviewItemError, type ReviewItemErrorCode } from './reviewItemRouter';
 import { GateSideEffects, gateDecisionFromResolution } from './gateSideEffects';
-import { listApproveIdeasBatchRows } from './runEntityOwnership';
+import { listApproveIdeasBatchRows, listRunDecomposedIdeaIds } from './runEntityOwnership';
+import { IdeaComponentRouter } from './ideaComponents/ideaComponentRouter';
+import type { IdeaComponentKey } from '../../../shared/types/ideaComponents';
 import {
   isIdeaVerdict,
   serializeIdeaVerdictMap,
@@ -425,6 +427,14 @@ export interface ResolveReviewItemDeps {
    * unset defaults to `() => false` (legacy: always resume).
    */
   wouldStrandEndedWalk?: (runId: string) => boolean;
+  /**
+   * Idea-component ledger write (P20 — approve-plan REJECT unwinds `epics` /
+   * `stories` back to `incomplete`). Optional: unset defaults to the initialized
+   * `IdeaComponentRouter` singleton, which is a no-op when the router has not
+   * been booted, so neither composition root needs re-wiring and every hand-built
+   * test dep bag keeps compiling. Tests inject a spy.
+   */
+  setIdeaComponentState?: SetIdeaComponentState;
   /** Reserved for future structured logging; the load-bearing diagnostics stay on console.warn. */
   logger?: LoggerLike;
 }
@@ -439,7 +449,7 @@ export interface ResolveReviewItemInput {
   /** Free-text resolution. Ignored when `outcome` is set (outcome wins, deterministic verdict). */
   resolution?: string | null;
   /** Explicit gate verdict for a `gate:human-step:*` decision item (drives verdict + approve-plan reveal/decline). */
-  outcome?: 'approve' | 'reject';
+  outcome?: 'approve' | 'reject' | 'revise';
   /**
    * Per-idea verdict map for an approve-ideas OR approve-designs BATCH gate (the
    * "Submit decisions" payload). ONLY consumed when the item is one of those batch
@@ -467,7 +477,7 @@ export type ResolveReviewItemResult =
       /** The programmatic human-gate step id for a `gate:human-step:*` item; null otherwise. */
       gateStepId: string | null;
       /** The explicit verdict when supplied (monitor can echo it back). */
-      outcome?: 'approve' | 'reject';
+      outcome?: 'approve' | 'reject' | 'revise';
     }
   | { ok: false; reason: ReviewItemErrorCode; message: string };
 
@@ -511,6 +521,97 @@ async function maybeApplyOrchestratedGateSideEffects(
   }
 }
 
+/**
+ * The two ledger components an approve-plan REJECT invalidates: the ones whose
+ * `complete` was earned by the very draft epics/tasks the reject tears down.
+ *
+ * `idea-spec`, `architecture` and `prototype` are deliberately NOT here. Those
+ * were produced by earlier phases and survive the reject untouched — the human
+ * declined the PLAN, not the spec or the design — so unwinding them would throw
+ * away work that is still valid and send the next run to redo it.
+ */
+const PLAN_LEDGER_COMPONENTS: readonly IdeaComponentKey[] = ['epics', 'stories'];
+
+/**
+ * P20 — approve-plan REJECT unwinds the run's ideas' `epics` / `stories` ledger
+ * components back to `incomplete`.
+ *
+ * `deleteRunCreatedEntities` already tears the rejected draft epics/tasks down,
+ * but the ledger rows the decomposition steps stamped `complete` are a SEPARATE
+ * store with no foreign key to them (migration 101), so nothing removed or
+ * corrected those. A ledger row WINS over derivation permanently, so a leftover
+ * `complete` over an idea that now has no epics and no tasks tells every later
+ * Planner run that this idea is already decomposed — and the run skips exactly
+ * the work the reject asked for. The draft delete is CODE; this is the other
+ * half of it.
+ *
+ * Fires from the SAME place and with the same ordering guarantee as the delete:
+ * inside the approve-plan arm, BEFORE the item resolves, so it wins the race with
+ * the WorkflowController advancing off the gate.
+ *
+ * `ideaIds` MUST be resolved by the caller BEFORE the delete runs — the
+ * decomposed-idea projection is derived from the child entities' lineage, which
+ * the delete removes.
+ *
+ * Fail-soft and per-idea: the resolve has real work to do afterwards, and an
+ * un-unwound ledger row is a planning-efficiency bug, never a correctness one.
+ */
+async function unwindPlanLedgerForReject(
+  projectId: number,
+  runId: string,
+  ideaIds: readonly string[],
+  setIdeaComponentState: SetIdeaComponentState,
+): Promise<void> {
+  for (const ideaId of ideaIds) {
+    for (const component of PLAN_LEDGER_COMPONENTS) {
+      try {
+        await setIdeaComponentState(projectId, {
+          op: 'set-component-state',
+          ideaId,
+          component,
+          state: 'incomplete',
+          source: 'flow',
+          sourceRunId: runId,
+        });
+      } catch {
+        // Per (idea, component) — one failure never blocks the rest or the resolve.
+      }
+    }
+  }
+}
+
+/**
+ * The ledger write seam used by {@link unwindPlanLedgerForReject}. Optional on
+ * the dep bag with a singleton-backed default (mirroring
+ * `GateSideEffects.tryGetInstance()` above) so neither composition root has to be
+ * re-wired and every hand-built test dep bag keeps compiling; tests inject a spy.
+ */
+type SetIdeaComponentState = (
+  projectId: number,
+  change: {
+    op: 'set-component-state';
+    ideaId: string;
+    component: IdeaComponentKey;
+    state: 'incomplete';
+    source: 'flow';
+    sourceRunId: string;
+  },
+) => Promise<unknown>;
+
+/** The default seam: the initialized IdeaComponentRouter, or a no-op when un-booted. */
+function defaultSetIdeaComponentState(): SetIdeaComponentState {
+  return async (projectId, change) => {
+    let router: IdeaComponentRouter;
+    try {
+      router = IdeaComponentRouter.getInstance();
+    } catch {
+      // Un-booted (unit tests / standalone) — nothing to write.
+      return;
+    }
+    await router.applyChange(projectId, change);
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
@@ -534,6 +635,7 @@ export async function resolveReviewItem(
     maybeResumeRun,
   } = deps;
   const wouldStrandEndedWalk = deps.wouldStrandEndedWalk ?? (() => false);
+  const setIdeaComponentState = deps.setIdeaComponentState ?? defaultSetIdeaComponentState();
 
   // Read the item's run binding + blocking flag + gate provenance BEFORE resolving
   // (the resolve changes none of them) so we know whether to apply aggregate-unblock
@@ -626,9 +728,23 @@ export async function resolveReviewItem(
       if (input.outcome === 'approve') {
         await promotePendingDraftsForRun(before.runId);
       } else if (input.outcome === 'reject') {
+        // P20: resolve the decomposed-idea set BEFORE the delete. The projection
+        // is derived from the lineage of the very child entities the delete
+        // removes, so reading it afterwards would always return an empty set and
+        // the ledger would silently stay `complete`.
+        const decomposedIdeaIds = listRunDecomposedIdeaIds(db, before.runId);
         await deleteRunCreatedEntities(input.projectId, before.runId).catch(() => {
           /* self-gated + best-effort — never block the reject resolve */
         });
+        // The other half of the teardown: the drafts are gone, so the ledger rows
+        // claiming they exist must go back to `incomplete` or the next run skips
+        // the decomposition this reject asked for.
+        await unwindPlanLedgerForReject(
+          input.projectId,
+          before.runId,
+          decomposedIdeaIds,
+          setIdeaComponentState,
+        );
       }
     }
 

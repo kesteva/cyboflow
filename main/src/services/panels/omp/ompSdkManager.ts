@@ -1113,7 +1113,9 @@ export class OmpSdkManager extends AbstractCliManager {
         exitCode = 1;
         const message = error instanceof Error ? error.message : String(error);
         this.logger?.error(`[OmpSdkManager] OMP RPC run error for panel ${displayPanelId}: ${message}`);
-        if (message !== ctx.questionBridgeError) {
+        // Same guard as surfaceError: an unlistened 'error' throws and would
+        // pre-empt the failure-result projection below.
+        if (message !== ctx.questionBridgeError && this.listenerCount('error') > 0) {
           this.emit('error', { panelId: displayPanelId, sessionId: options.sessionId, error: message });
         }
         if (!ctx.terminalResultEmitted) {

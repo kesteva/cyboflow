@@ -77,7 +77,9 @@ Instead:
 
 1. Fold its refined stub into the idea with `scope="large"` (`cyboflow_update_task`)
    so whoever picks it up next sees the sharpened intent.
-2. Mint a blocking guard decision:
+2. Mint a blocking guard decision, titled exactly `idea-size-guard: <the idea's
+   ref>` so the card is recognizable at a glance and every plane mints the same
+   title:
    `cyboflow_report_finding(kind: 'decision', blocking: true, entity_type: 'idea',
    entity_id: "<the idea's opaque id from its <idea id=…> attribute>", payload_json:
    {"kind":"decision","gate":"idea-size-guard","ideaRef":"IDEA-XXX"})` (with a clear
@@ -136,6 +138,11 @@ the distinction that matters most:
 - **skipped** — deliberately declared not-applicable, by a flow or by the user.
   Leave it skipped. If you believe it should run after all, raise that at a gate
   rather than silently overriding a human's call.
+
+**Read the ledger BEFORE you plan, at the `context` step**, not when you reach the
+step that would produce a component. The three states above decide what this run
+actually has to do, and reading them late means the decision arrives after the work
+it should have prevented.
 
 **Stamp every component as you finish it**, with `cyboflow_set_idea_component`. Do it
 **after** the body write that completes it, never before — a body write marks
@@ -419,6 +426,26 @@ a summary held only in your context.
      becomes a finding: Approve logs every entry as an accepted-risk finding,
      Revise re-runs the design steps against them. Filing them here pre-empts a
      decision the very next gate is about to make.
+   - **Automatic revision on a blocking review — ONCE.** When the reported doc's
+     `## Blocking` section has one or more entries and this is the FIRST review
+     round of the run, do not open the gate over them yet: loop back to step 3
+     (`expand-spec`) and re-run steps 3–6 with the review as the specification.
+     Re-fetch the idea body first (`cyboflow_get_task` — a gate may not have
+     opened, but the body is still the source of truth), then re-delegate each
+     step's subagent with the full `## Blocking` list (and `## Findings` as
+     advisory), telling it which `AR-n` entries fall in its remit: an entry with
+     `Area: spec|criteria` goes to `cyboflow-context` (re-fold the spec, preserving
+     the approved stub's problem/solution/scope/flags), `Area: prototype` to
+     `cyboflow-ui-prototype` (re-report the `ui-prototype` artifact — same atype
+     enriches the tab — and re-fold the design spec), `Area: architecture` to
+     `cyboflow-architecture` (REPLACE the `## Architecture design` section). Then
+     re-run `cyboflow-adversarial-review` over the revised surfaces as a RE-REVIEW
+     (pass the previous round's doc and tell it so), re-report the
+     `adversarial-review` artifact, and re-stamp the touched components. A second
+     round that is STILL blocking does **not** loop again — proceed to the gate
+     with the refreshed doc; a second disagreement is the human's call, not another
+     automated lap through the design steps. A clean first round proceeds to the
+     gate directly.
 7. **approve-design** → **human gate — ONLY when `ui-prototype` or `architecture` ran.** When
    neither ran, do **not** ask — continue straight to epics.
    - **Single idea (≤1 design surface):** open the gate as a blocking
@@ -597,11 +624,12 @@ readable, cold, by the next run.
   material change reopens `approve-idea`; it is never folded in silently.
 - **Adversarial review never adds a gate, and never files a finding.** It and
   `approve-design` run only when a UI prototype or architecture ran. The review
-  step REPORTS its result as the `adversarial-review` artifact and stops — it
-  does not auto-revise, does not loop, and does not call
-  `cyboflow_report_finding`. The `approve-design` gate is what routes: Approve
-  logs every entry as an accepted-risk finding, Revise re-runs the design steps
-  against them.
+  step REPORTS its result as the `adversarial-review` artifact and never calls
+  `cyboflow_report_finding`. A BLOCKING first round loops the refine phase back
+  to `expand-spec` exactly ONCE, automatically, with the review as the
+  specification (step 6); after that the `approve-design` gate is what routes:
+  Approve logs every entry as an accepted-risk finding, Revise re-runs the design
+  steps against them.
 - **Re-fetch entity bodies after every gate.** While you are parked at a human
   gate, the user can send in-artifact feedback that revises an idea's spec or
   `## Architecture design` section through a host-side revision agent — the body

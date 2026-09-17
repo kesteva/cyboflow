@@ -207,6 +207,7 @@ export const RUN_SCOPE_TOOLS: readonly RegisteredTool[] = [
       initial_stage_id: z.string().describe('Optional initial stage id; defaults to the board\'s first idea stage').optional(),
       scope: z.enum(['small', 'large']).describe('Optional idea size hint; only meaningful for task_type=\'idea\' (ignored on epic/task entities)').optional(),
       originating_idea_id: z.string().describe('Optional project-scoped idea ref-or-id (e.g. \'IDEA-009\' or its opaque id) this epic/task originates from — only meaningful for task_type=\'epic\'|\'task\' (ignored on idea creates). REQUIRED practice on a multi-idea planner run: an epic/task created without this on a run seeded with more than one idea is left with lineage NULL rather than guessed.').optional(),
+      executor: z.enum(['agent', 'human']).describe('Optional EXECUTOR — who performs the work (task_type=\'task\' only; rejected with error invalid_executor on an idea/epic). \'agent\' (the default) means a sprint lane drives it. \'human\' means work only a person can do (accounts, purchases, physical devices, legal sign-off, credentials the agent must not hold); a human task NEVER becomes a sprint lane; agent tasks that need its output still record a blocking edge to it — the edge does not gate the sprint, it surfaces the human work as a standing review item.').optional(),
     }),
     envelope: 'mcp-create-task',
     expected: { priority: PRIORITY_EXPECTED },
@@ -223,6 +224,7 @@ export const RUN_SCOPE_TOOLS: readonly RegisteredTool[] = [
       initialStageId: args.initial_stage_id,
       scope: args.scope,
       originatingIdeaId: args.originating_idea_id,
+      executor: args.executor,
     }),
   }),
 
@@ -241,6 +243,7 @@ export const RUN_SCOPE_TOOLS: readonly RegisteredTool[] = [
       parent_epic_id: z.string().describe('Optional parent epic id (re-parent)').optional(),
       expected_version: z.number().describe('Optional expected version for optimistic concurrency').optional(),
       scope: z.enum(['small', 'large']).describe('Optional idea size hint; only meaningful for idea entities (ignored on epic/task entities)').optional(),
+      executor: z.enum(['agent', 'human']).describe('Optional new EXECUTOR — who performs the work (task entities only; rejected with error invalid_executor on an idea/epic). \'agent\' (the default) means a sprint lane drives it. \'human\' means work only a person can do (accounts, purchases, physical devices, legal sign-off, credentials the agent must not hold); a human task NEVER becomes a sprint lane; agent tasks that need its output still record a blocking edge to it — the edge does not gate the sprint, it surfaces the human work as a standing review item.').optional(),
     }),
     envelope: 'mcp-update-task',
     expected: { priority: PRIORITY_EXPECTED },
@@ -255,6 +258,7 @@ export const RUN_SCOPE_TOOLS: readonly RegisteredTool[] = [
       parentEpicId: args.parent_epic_id,
       expectedVersion: args.expected_version,
       scope: args.scope,
+      executor: args.executor,
     }),
   }),
 

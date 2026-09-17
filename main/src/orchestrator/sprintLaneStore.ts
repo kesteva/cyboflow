@@ -259,6 +259,19 @@ function parseLaneAttemptFromEnqueueKey(enqueueKey: string | null): number | nul
  */
 export interface SprintLaneStoreDeps {
   getSprintMaxTasks?: () => SprintMaxTasksOverrides;
+  /**
+   * Fired once, AFTER `createForRun`'s transaction commits, with the batch that
+   * was just minted. The hook exists so work that must observe a materialized
+   * batch — surfacing the HUMAN prerequisites its tasks depend on as standing
+   * review items (migration 137) — can run without this store taking a
+   * dependency on the review-item chokepoint.
+   *
+   * FAIL-SOFT by contract: the store wraps the call in try/catch and swallows
+   * anything it throws. A batch that materialized must never be undone by a
+   * side-effect, and a sprint must never fail to launch because a review item
+   * could not be written.
+   */
+  onBatchMinted?: (args: { projectId: number; batchId: string; taskIds: string[] }) => void;
 }
 
 export class SprintLaneStore {
@@ -283,6 +296,9 @@ export class SprintLaneStore {
    * is created per DB, so a cached true/false can never go stale within a process.
    */
   private readonly tableExistsCache = new Map<string, boolean>();
+
+  /** Cached column-existence checks. Same rationale as {@link tableExistsCache}. */
+  private readonly columnExistsCache = new Map<string, boolean>();
 
   constructor(
     private readonly db: DatabaseLike,
@@ -309,6 +325,28 @@ export class SprintLaneStore {
       exists = false;
     }
     this.tableExistsCache.set(table, exists);
+    return exists;
+  }
+
+  /**
+   * True when `table.column` exists. Gates the `executor != 'human'` clause in
+   * filterEligibleTaskIds (migration 137) for the SAME reason tableExists gates
+   * the experiment-seed clause: a pre-137 schema must keep filtering on
+   * approval/stage/active-run, not fall into the permissive catch and disable
+   * every guard at once. Fail-closed to false on any error.
+   */
+  private columnExists(table: string, column: string): boolean {
+    const key = `${table}.${column}`;
+    const cached = this.columnExistsCache.get(key);
+    if (cached !== undefined) return cached;
+    let exists = false;
+    try {
+      const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: unknown }>;
+      exists = rows.some((r) => r.name === column);
+    } catch {
+      exists = false;
+    }
+    this.columnExistsCache.set(key, exists);
     return exists;
   }
 
@@ -450,6 +488,21 @@ export class SprintLaneStore {
       tasks: eligibleTaskIds.length,
       dropped: uniqueTaskIds.length - eligibleTaskIds.length,
     });
+
+    // POST-COMMIT HOOK (migration 137): the batch exists and its lanes are
+    // durable, so a consumer may now read it. FAIL-SOFT by contract — a batch
+    // that materialized must not be undone, and no side-effect may stop a sprint
+    // from launching, so anything this throws is logged and swallowed.
+    try {
+      this.deps?.onBatchMinted?.({ projectId, batchId, taskIds: eligibleTaskIds });
+    } catch (err) {
+      this.logger?.warn('[SprintLaneStore] onBatchMinted hook failed (ignored)', {
+        batchId,
+        projectId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     return { batchId };
   }
 
@@ -461,8 +514,11 @@ export class SprintLaneStore {
    * (archived_at IS NULL), and sitting at a ready-or-later, NON-terminal board
    * stage (board_stages.position >= 6 — '>= 6' tolerates in-dev movement per the
    * ship promote-before-batch ordering — AND is_terminal = 0, which drops both
-   * 'Done' (pos 9) and 'Won't do' (pos 10)). Candidate ids with no tasks row are
-   * dropped (inner JOIN). Input order is preserved; duplicates are collapsed.
+   * 'Done' (pos 9) and 'Won't do' (pos 10)), and driven by an AGENT
+   * (tasks.executor != 'human', migration 137 — human work never becomes a lane;
+   * see findHumanTaskIds for the reason the launch boundary reports separately).
+   * Candidate ids with no tasks row are dropped (inner JOIN). Input order is
+   * preserved; duplicates are collapsed.
    *
    * Called by createForRun (the materialization chokepoint) and the runs.start
    * pre-check. On a pre-042 schema lacking approved_at/archived_at the filter
@@ -483,6 +539,12 @@ export class SprintLaneStore {
       // GATED on experiment_seed_tasks existing so a post-042 / pre-049 schema keeps
       // filtering the OTHER predicates instead of tripping the permissive catch (the
       // A/B tables being merely absent must not disable approval/stage/run guards).
+      // HUMAN EXECUTOR (migration 137). Gated on the column existing for the same
+      // reason as expSeedClause below: on a pre-137 schema the OTHER guards must
+      // keep working rather than the whole filter degrading permissively.
+      const humanClause = this.columnExists('tasks', 'executor')
+        ? "AND t.executor != 'human'"
+        : '';
       const expSeedClause = this.tableExists('experiment_seed_tasks')
         ? `AND NOT EXISTS (
                 SELECT 1 FROM experiment_seed_tasks est
@@ -505,6 +567,7 @@ export class SprintLaneStore {
               AND t.id IN (${placeholders})
               AND t.approved_at IS NOT NULL
               AND t.archived_at IS NULL
+              ${humanClause}
               AND bs.position >= 6
               AND bs.is_terminal = 0
               AND NOT EXISTS (
@@ -524,7 +587,7 @@ export class SprintLaneStore {
       return unique.filter((id) => eligible.has(id));
     } catch (err) {
       if (err instanceof Error && /no such (column|table)/i.test(err.message)) {
-        this.logger?.debug('[SprintLaneStore] eligibility filter skipped (pre-042/pre-022/pre-049 schema)', {
+        this.logger?.debug('[SprintLaneStore] eligibility filter skipped (pre-042/pre-022/pre-049/pre-137 schema)', {
           error: err.message,
         });
         return unique;
@@ -569,6 +632,45 @@ export class SprintLaneStore {
     } catch (err) {
       if (err instanceof Error && /no such (column|table)/i.test(err.message)) {
         this.logger?.debug('[SprintLaneStore] live-experiment-seed scope skipped (pre-049/051 schema)', {
+          error: err.message,
+        });
+        return [];
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Return the subset of `taskIds` whose executor is 'human' (migration 137).
+   *
+   * Used ONLY by the runs.start launch boundary. `filterEligibleTaskIds` now
+   * drops human tasks, and without this query they would fall into the
+   * pre-check's generic `other` bucket and be reported as "must be approved + at
+   * 'Ready for development' or later, not archived/done" — which is false for an
+   * approved, ready-staged human task and sends the user looking for a state
+   * problem that is not there. Same fail-soft separate-query shape as
+   * findActiveRunTaskIds / findLiveExperimentSeedTaskIds; degrades to EMPTY on a
+   * pre-137 schema, which is correct (no task can be human before the column).
+   */
+  findHumanTaskIds(projectId: number, taskIds: string[]): string[] {
+    const unique = [...new Set(taskIds)];
+    if (unique.length === 0) return [];
+    try {
+      const placeholders = unique.map(() => '?').join(', ');
+      const rows = this.db
+        .prepare(
+          `SELECT t.id AS id
+             FROM tasks t
+            WHERE t.project_id = ?
+              AND t.id IN (${placeholders})
+              AND t.executor = 'human'`,
+        )
+        .all(projectId, ...unique) as Array<{ id: string }>;
+      const human = new Set(rows.map((r) => r.id));
+      return unique.filter((id) => human.has(id));
+    } catch (err) {
+      if (err instanceof Error && /no such (column|table)/i.test(err.message)) {
+        this.logger?.debug('[SprintLaneStore] human-task scope skipped (pre-137 schema)', {
           error: err.message,
         });
         return [];

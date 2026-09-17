@@ -12,9 +12,11 @@
  * (main process AND renderer).
  */
 
-import type { CyboflowWorkflowName } from './workflows';
+import type { CyboflowWorkflowName, PermissionMode } from './workflows';
 import type { CliSubstrate } from './substrate';
 import type { EntityCategory, IdeaScope, Priority, TaskType } from './tasks';
+import type { CliTool } from './cliTools';
+import type { AgentModelAlias } from './agents';
 import {
   isAgentRuntime,
   PROVIDER_DEFAULT_RUNTIME,
@@ -101,6 +103,7 @@ export const AGENT_PROPOSAL_KINDS = [
   'edit-workflow',
   'open-session',
   'create-backlog-items',
+  'create-workflow',
 ] as const;
 
 export type AgentProposalKind = (typeof AGENT_PROPOSAL_KINDS)[number];
@@ -322,12 +325,78 @@ export interface CreateBacklogItemsProposalPayload {
   items: CreateBacklogItem[];
 }
 
+/**
+ * The scope a create-workflow proposal mints its flow in. `'project'` (the
+ * default) pins the flow to `projectId`, which is also where its agents live;
+ * `'global'` shares the flow across every project — only sensible when the
+ * definition binds NO new agents, since custom agents are project-scoped
+ * (`agent_overrides`) and a global flow bound to one would only spawn in the
+ * project that owns it.
+ */
+export type CreateWorkflowScope = 'project' | 'global';
+
+/**
+ * One custom agent the assistant proposes CREATING alongside a new workflow.
+ * Field names mirror the `AgentOverrideRouter` createCustom-path fields
+ * (`main/src/orchestrator/agentOverrideRouter.ts` `AgentCreateCustomChange`)
+ * so the executor's mapping onto that chokepoint is one-to-one.
+ *
+ * The agent KEY the workflow's steps bind to is DERIVED from `name` the same
+ * way the chokepoint derives it (lower-case, non-alphanumerics collapsed to
+ * single hyphens) — `"Docs Writer"` → `docs-writer`. The propose handler
+ * derives the same key and checks every step binding against it, so a
+ * confirmed card never mints an agent no step can reach.
+ */
+export interface CreateWorkflowAgent {
+  /** Display name; the kebab agent key is derived from it. */
+  name: string;
+  /** Non-empty one-liner (rendered as the subagent's description). */
+  description: string;
+  /** The full system prompt (no frontmatter fence; must not reference cyboflow_* writers). */
+  systemPrompt: string;
+  /** At least one CLI tool. */
+  tools: CliTool[];
+  /** MCP server names this agent may call; defaults to none. */
+  enabledMcps?: string[];
+  /** Optional role caption. */
+  role?: string;
+  /** Pinned model alias; omitted inherits the run model. */
+  model?: AgentModelAlias;
+}
+
+/**
+ * Create a brand-new CUSTOM workflow, optionally minting the custom agents its
+ * steps bind to in the same confirm. The definition is validated with the
+ * strict write-path schema at PROPOSE time (so a malformed graph is rejected
+ * before a card exists, not after the human confirms it), and every step's
+ * `agent` must resolve to a builtin key, the `human` gate, an EXISTING custom
+ * agent of `projectId`, or one of `agents`.
+ */
+export interface CreateWorkflowProposalPayload {
+  kind: 'create-workflow';
+  /** The project whose agents the flow binds; also the flow's home when scope is 'project'. */
+  projectId: number;
+  /** The flow's display name (Windows-safe, not a built-in name, unique in scope). */
+  name: string;
+  /** JSON-encoded WorkflowDefinition (the complete graph, never a partial). */
+  definitionJson: string;
+  /** Defaults to 'project'. */
+  scope?: CreateWorkflowScope;
+  /** Defaults to 'default'. */
+  permissionMode?: PermissionMode;
+  /** Custom agents to create BEFORE the flow, so its bindings resolve on first run. */
+  agents?: CreateWorkflowAgent[];
+  /** One-line human summary rendered on the card. */
+  summary?: string;
+}
+
 export type AgentProposalPayload =
   | LaunchRunProposalPayload
   | ReprioritizeBacklogProposalPayload
   | EditWorkflowProposalPayload
   | OpenSessionProposalPayload
-  | CreateBacklogItemsProposalPayload;
+  | CreateBacklogItemsProposalPayload
+  | CreateWorkflowProposalPayload;
 
 // ---------------------------------------------------------------------------
 // Per-kind proposal preconditions
@@ -346,9 +415,11 @@ export interface ReprioritizeBacklogPreconditions {
 }
 
 /**
- * launch-run, open-session, and create-backlog-items carry no preconditions —
- * nothing to CAS-check (a create has no prior version to race against; the
- * parent/lineage links it references are validated at propose time instead).
+ * launch-run, open-session, create-backlog-items, and create-workflow carry no
+ * preconditions — nothing to CAS-check (a create has no prior version to race
+ * against; the parent/lineage links and agent bindings it references are
+ * validated at propose time instead, and a name that gets taken in between is
+ * a plain executor failure).
  */
 export type AgentProposalPreconditions = EditWorkflowPreconditions | ReprioritizeBacklogPreconditions;
 

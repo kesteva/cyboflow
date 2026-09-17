@@ -97,6 +97,7 @@ import { ApprovalRouter } from './orchestrator/approvalRouter';
 import { QuestionRouter } from './orchestrator/questionRouter';
 import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
 import { ReviewItemRouter, reviewItemChangeEvents, reviewItemProjectChannel } from './orchestrator/reviewItemRouter';
+import { humanPrerequisiteSink } from './orchestrator/humanPrerequisites';
 import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
 import { FleetRegistryReader } from './orchestrator/omp/fleetRegistryReader';
 import { OmpBridgeCommandAdapter } from './orchestrator/omp/ompBridgeCommandAdapter';
@@ -151,6 +152,7 @@ import type { SessionGitOpsLike } from './orchestrator/trpc/contracts/sessionGit
 import type { SessionOpsLike } from './orchestrator/trpc/contracts/sessionOps';
 import { createConfigOps } from './ipc/configOps';
 import { createGitPrerequisiteOps } from './ipc/gitPrerequisite';
+import { createClaudeAuthOps } from './ipc/claudeAuth';
 import { createFileOps } from './ipc/fileOps';
 import { createGitOps } from './ipc/gitOps';
 import { createSessionOps } from './ipc/sessionOps';
@@ -230,6 +232,7 @@ import {
   type TaskFieldsSnapshot,
 } from './orchestrator/agentThread/proposalExecutor';
 import { prepareProposal, createPrepareProposalDeps } from './orchestrator/agentThread/prepareProposal';
+import { buildProposalExecutorWorkflowDeps } from './orchestrator/agentThread/proposalExecutorWorkflowDeps';
 import { CustomViewsDbStore } from './orchestrator/customViews/customViewsStore';
 import { createCustomViewsService, type CustomViewsServiceLike } from './orchestrator/customViews/customViewsService';
 import { CATALOG_WIDGET_SPECS } from '../../shared/customViews/catalogSpecs';
@@ -263,11 +266,11 @@ import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, No
 import { VariantResolver } from './orchestrator/variantResolver';
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
-import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReaderLike, FindingReaderLike, WorkflowPromptReaderLike } from './orchestrator/runExecutor';
+import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReaderLike, WorkflowPromptReaderLike } from './orchestrator/runExecutor';
 import { buildSeedTasksBlock } from './orchestrator/seedTasksBlock';
 import { listRunOwnedIdeaIds } from './orchestrator/runEntityOwnership';
 import { selectTaskById, selectIdeaAttachments } from './orchestrator/taskListing';
-import { selectFindingForSeed } from './orchestrator/reviewItemListing';
+import { createSeededFindingReader } from './orchestrator/seededFindingReader';
 import { buildStepTransitionEvent, resolveRunLevelStepId } from './orchestrator/stepTransitionBridge';
 import {
   transitionToRunning,
@@ -483,6 +486,9 @@ let runExecutor: RunExecutor;
 // guards on it.
 let agentThreadStore: AgentThreadDbStore;
 let agentThreadService: AgentThreadService | null = null;
+// The in-app Claude sign-in runner (main/src/ipc/claudeAuth.ts). Module-level
+// so before-quit can kill a `claude auth login` still waiting on its stdin.
+let claudeAuthOps: ReturnType<typeof createClaudeAuthOps> | null = null;
 // Custom Views (migration 132, docs/proposals/CUSTOM-VIEWS.md §9 row S3).
 // Built in initializeServices() right after agentThreadStore (same cyboflowDb,
 // same "store before anything reaches for it" ordering) and read later by the
@@ -1006,6 +1012,10 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
   const ompCommand = buildOmpCommandAdapter();
   const configOps = createConfigOps({ configManager, claudeCodeManager: defaultCliManager });
   const gitPrerequisiteOps = createGitPrerequisiteOps();
+  claudeAuthOps = createClaudeAuthOps({
+    getConfiguredClaudePath: () => configManager.getConfig()?.claudeExecutablePath,
+    log: (message) => logger.info(message),
+  });
   const workspaceFileOps = createFileOps({ sessionManager, databaseService, gitStatusManager, configManager });
   attachOrchestratorTrpc({
     window: win,
@@ -1015,6 +1025,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         db,
         configOps,
         gitPrerequisiteOps,
+        claudeAuthOps: claudeAuthOps ?? undefined,
         workspaceFileOps,
         setDockBadge: (count) => dockBadgeService.setBadgeCount(count),
         workflowRegistry,
@@ -2117,8 +2128,11 @@ async function initializeServices(): Promise<boolean> {
   // to the same live per-substrate override every other cap check already
   // reads (runs.start, experiments.start, the MCP backstop) — never omit it,
   // or the store's cap silently floors to the built-in defaults.
+  // `onBatchMinted` (migration 137) surfaces the batch's HUMAN prerequisites as
+  // standing review items — see humanPrerequisiteSink for the fail-soft contract.
   const sprintLaneStore = SprintLaneStore.initialize(cyboflowDb, cyboflowLogger, {
     getSprintMaxTasks: () => configManager.getSprintMaxTasks(),
+    onBatchMinted: humanPrerequisiteSink(cyboflowDb, reviewItemRouter, cyboflowLogger),
   });
 
   // The human-gate run-pause manager (P4) pairs with the ReviewItemRouter
@@ -3205,6 +3219,15 @@ async function initializeServices(): Promise<boolean> {
         : Promise.resolve({ ok: false, reason: 'backlog edits are not wired yet' }),
     laneTriageFindingSink: (runId, input) =>
       laneTriageActions ? laneTriageActions.fileFinding(runId, input) : Promise.resolve(),
+    // RUN-LEVEL verification posture (CD1) reads the runbook through the SAME
+    // closure the scheduler's §3.2 degrade gate and the health panel's badge use
+    // — there must never be a third reading of `verify_runbook_local.status`.
+    // Read LAZILY through the module holder (it is assigned inside
+    // initializeServices, like every other late-bound probe): an unset holder
+    // resolves `null`, which the posture reads as UNKNOWN and answers 'available'
+    // for, never as "this project has no runbook".
+    verifyRunbookStatus: async (projectId, modality, probePath) =>
+      verifyRunbookStatus ? verifyRunbookStatus(projectId, modality, probePath) : null,
     // Per-step result sink (migration 033): persist each settled step so results
     // are queryable + crash-safe resume can skip individually-completed steps.
     stepResultRecorder: (runId, report) =>
@@ -3220,32 +3243,10 @@ async function initializeServices(): Promise<boolean> {
     logger: cyboflowLogger,
   });
 
-  // Selected-finding reader (migration 034): resolves a compound run's
-  // seed_finding_ids to each finding's content via selectFindingForSeed (which
-  // already SELECTs only kind='finding' rows and lifts proposedTarget /
-  // suggestedFix / locations from payload_json). Injected as the trailing
-  // RunExecutor arg so getPrompt can prepend a `# Selected findings` block, and
-  // so the terminal-seam close-out can read seeded-finding status. Reads through
-  // the narrow DatabaseLike adapter (cyboflowDb) — the same handle the review
-  // routers use. Returns null when the row is missing or not a finding.
-  const findingReader: FindingReaderLike = {
-    read: (id) => {
-      const finding = selectFindingForSeed(cyboflowDb, id);
-      return finding
-        ? {
-            id: finding.id,
-            title: finding.title,
-            body: finding.body,
-            severity: finding.severity,
-            priority: finding.priority,
-            proposedTarget: finding.proposedTarget,
-            source: finding.source,
-            suggestedFix: finding.suggestedFix,
-            locations: finding.locations,
-          }
-        : null;
-    },
-  };
+  // Selected-finding reader (migration 034) — injected as the trailing
+  // RunExecutor arg; reads through the same narrow DatabaseLike adapter the
+  // review routers use.
+  const findingReader = createSeededFindingReader(cyboflowDb);
 
   runExecutor = new RunExecutor(
     substrateFacade,
@@ -5669,11 +5670,8 @@ app.whenReady().then(async () => {
         return row ?? null;
       },
       runInTransaction: <T>(fn: () => T): T => experimentsDb.transaction(fn)() as T,
-      // The EFFECTIVE definition (migration 122) — the tuning level's graph, not
-      // the raw slot. Must stay the SAME resolution the proposal's CAS hash was
-      // captured from (mcpQueryHandler's edit-workflow precondition).
-      readEffectiveWorkflowSpec: (workflowId) => workflowRegistry.getEffectiveDefinition(workflowId),
-      applyWorkflowSpec: (workflowId, definition) => workflowRegistry.updateSpec(workflowId, definition),
+      // edit-workflow + create-workflow: WorkflowRegistry / AgentOverrideRouter closures.
+      ...buildProposalExecutorWorkflowDeps({ workflowRegistry, agentOverrideRouter: AgentOverrideRouter.getInstance(), db: experimentsDb }),
       logger: loggerLike,
     };
     setProposalExecutorDeps(proposalExecutorDeps);
@@ -6340,6 +6338,13 @@ app.on('before-quit', (event) => {
     tryGetProviderUsageStore()?.flush();
   } catch (error) {
     console.warn('[Main] providerUsage flush on quit failed:', error);
+  }
+
+  // A `claude auth login` parked on its code prompt would outlive the app.
+  try {
+    claudeAuthOps?.dispose();
+  } catch (error) {
+    console.warn('[Main] claude sign-in dispose on quit failed:', error);
   }
 
   // Check if there are active archive tasks

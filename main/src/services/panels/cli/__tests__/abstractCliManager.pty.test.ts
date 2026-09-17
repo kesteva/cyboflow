@@ -154,6 +154,20 @@ function cleanEnv(extra: Record<string, string> = {}): { [key: string]: string }
 // Test lifecycle — track spawned pids/pty and reap them defensively.
 // ---------------------------------------------------------------------------
 
+/**
+ * Every case in this file drives REAL processes through the kill ladder, and on
+ * Windows that ladder shells out to System32 PowerShell (the pid/ppid table) and
+ * `taskkill` — several process spawns whose cost is dominated by host load, not
+ * by the code under test. A tight per-case budget therefore reports a LOADED CI
+ * runner as a product failure: the 15 s budget these cases carried flaked
+ * `killProcessTree` on three separate Windows runs (0.4.1 and 0.4.2 release
+ * gates) while the ladder itself was correct. Same rule as the real-git suites:
+ * give a real-process case a budget generous enough that only a genuine hang
+ * can exhaust it, and let the in-test `waitUntil` probes — which assert rather
+ * than time out — be the ones that actually fail a broken ladder.
+ */
+const REAL_PROCESS_TIMEOUT_MS = 60_000;
+
 const spawnedChildren: ChildProcess[] = [];
 const spawnedPtys: IPty[] = [];
 
@@ -227,7 +241,7 @@ describe('AbstractCliManager.killProcessTree', () => {
       const gone = await waitUntil(() => !isAlive(k), 5000);
       expect(gone).toBe(true);
     }
-  }, 15000);
+  }, REAL_PROCESS_TIMEOUT_MS);
 
   it('escalates SIGTERM -> SIGKILL against a SIGTERM-ignoring child', async () => {
     const mgr = new TestCliManager();
@@ -263,7 +277,7 @@ describe('AbstractCliManager.killProcessTree', () => {
     await mgr.killTree(pid);
     const gone = await waitUntil(() => !isAlive(pid), 5000);
     expect(gone).toBe(true);
-  }, 15000);
+  }, REAL_PROCESS_TIMEOUT_MS);
 
   it('resolves without throwing when the pid has already exited', async () => {
     const mgr = new TestCliManager();
@@ -282,7 +296,7 @@ describe('AbstractCliManager.killProcessTree', () => {
 
     // Killing an already-dead pid must not throw; returns true (no survivors).
     await expect(mgr.killTree(pid)).resolves.toBe(true);
-  }, 15000);
+  }, REAL_PROCESS_TIMEOUT_MS);
 
   it.skipIf(process.platform !== 'win32')(
     'win32: tears down a real node tree via the taskkill ladder (parent + descendants gone)',
@@ -319,7 +333,7 @@ describe('AbstractCliManager.killProcessTree', () => {
         reapDetachedGrandchildTree(tree);
       }
     },
-    30000,
+    REAL_PROCESS_TIMEOUT_MS,
   );
 });
 
@@ -350,7 +364,7 @@ describe('AbstractCliManager.getAllDescendantPids', () => {
     for (const k of independentlyFound) {
       expect(found).toContain(k);
     }
-  }, 10000);
+  }, REAL_PROCESS_TIMEOUT_MS);
 
   it.skipIf(process.platform !== 'win32')(
     'win32: finds a real node tree (parent + detached grandchild) via the process table',
@@ -384,7 +398,7 @@ describe('AbstractCliManager.getAllDescendantPids', () => {
         reapDetachedGrandchildTree(tree);
       }
     },
-    15000,
+    REAL_PROCESS_TIMEOUT_MS,
   );
 
   it('returns an empty array for a childless pid', async () => {
@@ -400,7 +414,7 @@ describe('AbstractCliManager.getAllDescendantPids', () => {
 
     // The interval process genuinely has no children.
     expect(await mgr.descendants(pid)).toEqual([]);
-  }, 10000);
+  }, REAL_PROCESS_TIMEOUT_MS);
 });
 
 // ---------------------------------------------------------------------------
@@ -437,7 +451,7 @@ describe('AbstractCliManager.spawnPtyProcess', () => {
     expect(output).toContain(cwd);
     // ... and so did the injected environment variable.
     expect(output).toContain('pty-env-marker-123');
-  }, 15000);
+  }, REAL_PROCESS_TIMEOUT_MS);
 
   it('surfaces an absent command as a nonzero child exit', async () => {
     const mgr = new TestCliManager();
@@ -465,5 +479,5 @@ describe('AbstractCliManager.spawnPtyProcess', () => {
       pty.onExit((e) => resolve(e));
     });
     expect(exit.exitCode).not.toBe(0);
-  }, 15000);
+  }, REAL_PROCESS_TIMEOUT_MS);
 });

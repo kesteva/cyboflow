@@ -39,6 +39,12 @@ export interface UnifiedMessage {
     cost?: number;
     systemSubtype?: string;
     sessionInfo?: SessionInfoData;
+    /**
+     * The SDK's structured cause on a synthetic error message
+     * (SDKAssistantMessageError — 'authentication_failed', 'rate_limit', …),
+     * copied verbatim from the assistant event. Absent on ordinary turns.
+     */
+    assistantError?: string;
     [key: string]: unknown;
   };
 }

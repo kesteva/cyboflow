@@ -16,6 +16,8 @@ import type {
   AgentProposalKind,
   CreateBacklogItem,
   CreateBacklogItemsProposalPayload,
+  CreateWorkflowAgent,
+  CreateWorkflowProposalPayload,
   LaunchRunProposalPayload,
   ReprioritizeBacklogItem,
   ReprioritizeBacklogProposalPayload,
@@ -28,6 +30,7 @@ import { useLandingStore } from '../../stores/landingStore';
 import {
   parseWorkflowDefinitionSummary,
   type CreateBacklogResultJson,
+  type CreateWorkflowResultJson,
   type ReprioritizeResultJson,
 } from './proposalResultTypes';
 
@@ -43,6 +46,7 @@ export const PROPOSAL_KIND_LABEL: Record<AgentProposalKind, string> = {
   'edit-workflow': 'edit workflow',
   'open-session': 'open session',
   'create-backlog-items': 'add to backlog',
+  'create-workflow': 'create workflow',
 };
 
 const ENTITY_TYPE_LABEL: Record<CreateBacklogItem['taskType'], string> = {
@@ -334,6 +338,96 @@ export function CreateBacklogItemsBody({
       </div>
       <div className="text-[10px] text-text-tertiary">{projectName}</div>
       <CreateBacklogRows items={payload.items} result={null} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// create-workflow
+// ---------------------------------------------------------------------------
+
+function createdAgentResult(
+  result: CreateWorkflowResultJson | null,
+  index: number,
+): { ok: boolean; agentKey?: string; error?: string } | null {
+  if (result === null) return null;
+  const found = result.agents.find((a) => a.index === index);
+  return found ? { ok: found.ok, agentKey: found.agentKey, error: found.error } : null;
+}
+
+/**
+ * Shared by the OPEN and RESOLVED paths, mirroring {@link CreateBacklogRows}:
+ * one row per agent the proposal mints, with its derived key and tools, and —
+ * once resolved — a ✓/✕ per row so a confirm that died on agent 2 of 3 reads
+ * as exactly that.
+ */
+export function CreateWorkflowAgentRows({
+  agents,
+  result,
+}: {
+  agents: CreateWorkflowAgent[];
+  result: CreateWorkflowResultJson | null;
+}): React.ReactElement | null {
+  if (agents.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-1.5 text-[11px]" data-testid="proposal-body-create-workflow-agents">
+      {agents.map((agent, index) => {
+        const outcome = createdAgentResult(result, index);
+        return (
+          <div key={`${index}-${agent.name}`} className="flex items-baseline gap-2" data-testid="create-workflow-agent-row">
+            <span className="w-8 shrink-0 text-[9px] uppercase tracking-[0.1em] text-text-tertiary">Agent</span>
+            <span className="flex-1 truncate text-text-primary" title={agent.description}>
+              {agent.name}
+            </span>
+            <span className="shrink-0 text-text-tertiary" data-testid="create-workflow-agent-tools">
+              {agent.tools.join(' · ')}
+            </span>
+            {outcome?.agentKey != null && (
+              <span className="shrink-0 font-mono text-text-secondary" data-testid="create-workflow-agent-key">
+                {outcome.agentKey}
+              </span>
+            )}
+            {outcome !== null && (
+              <span
+                className={`shrink-0 font-bold ${outcome.ok ? 'text-status-success' : 'text-status-error'}`}
+                data-testid="create-workflow-agent-outcome"
+                data-ok={String(outcome.ok)}
+                title={outcome.error}
+              >
+                {outcome.ok ? '✓' : '✕'}
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+export function CreateWorkflowBody({ payload }: { payload: CreateWorkflowProposalPayload }): React.ReactElement {
+  const projectName = useProjectName(payload.projectId);
+  const summary = parseWorkflowDefinitionSummary(payload.definitionJson);
+  const agents = payload.agents ?? [];
+  return (
+    <div className="flex flex-col gap-2 text-[11px]" data-testid="proposal-body-create-workflow">
+      <div className="text-[13px] font-bold text-text-primary">
+        {payload.summary != null && payload.summary !== '' ? payload.summary : `Create workflow "${payload.name}"`}
+      </div>
+      <div className="text-[10px] text-text-tertiary">
+        {payload.scope === 'global' ? 'Global — every project' : projectName}
+      </div>
+      <Row label="name" value={payload.name} />
+      {summary && (
+        <Row
+          label="definition"
+          value={`${summary.phaseCount} phase${summary.phaseCount === 1 ? '' : 's'} · ${summary.stepCount} step${summary.stepCount === 1 ? '' : 's'}`}
+        />
+      )}
+      {payload.permissionMode != null && <Row label="permissions" value={payload.permissionMode} />}
+      {agents.length > 0 && (
+        <Row label="new agents" value={`${agents.length} agent${agents.length === 1 ? '' : 's'}`} />
+      )}
+      <CreateWorkflowAgentRows agents={agents} result={null} />
     </div>
   );
 }

@@ -32,6 +32,7 @@ import type { WorkflowDefinition, WorkflowStep } from '../../../shared/types/wor
 import { CANONICAL_AGENT_KEYS } from '../../../shared/types/agentIdentity';
 import {
   AgentOverrideError,
+  deriveAgentKey,
   ensureResultSection,
   validateAgentDraft,
   type AgentDraft,
@@ -199,15 +200,6 @@ function normalizeRuntime(
       : null;
   const m = isClaudeRuntime ? (model ?? null) : null;
   return { runtime: r, providerModel: pm, model: m };
-}
-
-/** Slugify a display name to a canonical kebab key. */
-function kebab(name: string): string {
-  return name
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
 }
 
 /** Narrow row of the workflows table needed for the referential guard. */
@@ -421,7 +413,7 @@ export class AgentOverrideRouter {
   // --------------------------------------------------------------------------
 
   private runCreateCustom(projectId: number, change: AgentCreateCustomChange): { agentKey: string } {
-    const agentKey = kebab(change.name);
+    const agentKey = deriveAgentKey(change.name);
 
     const draft: AgentDraft = {
       agentKey,

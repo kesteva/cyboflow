@@ -32,10 +32,19 @@ import {
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 import type { ReasoningEffort } from '../../../../shared/types/reasoningEffort';
-import type { VerificationTaskV1 } from '../../../../shared/types/visualVerification';
+import {
+  isVerificationType,
+  type VerificationTaskV1,
+} from '../../../../shared/types/visualVerification';
 import type { ClaudeSpawnerLike, ProgrammaticRunner, ProgrammaticRunContext } from '../runExecutor';
 import type { DatabaseLike, LoggerLike } from '../types';
 import { enqueueTaskVerification } from '../verify/enqueueFromTask';
+import {
+  resolveVerificationPosture,
+  type VerificationRunStamp,
+  type VerificationPostureDeps,
+} from '../verify/verificationPosture';
+import { sweepBuildBreaks } from './buildBreakDetector';
 import type { FanOutDriver, StepReport, VisualVerifyGate } from './types';
 import { WorkflowController } from './workflowController';
 import { createRunDirectives } from './runDirectives';
@@ -57,6 +66,8 @@ import type { BlockingItemsResolver } from './blockingItemsGate';
 import type { SystemicPauseResolver } from './systemicPauseGate';
 import { MonitorRegistry, type MonitorContext, type MonitorSession } from './monitor';
 import { readApproveIdeasDecisionLines } from '../resolveReviewItemHandler';
+import { selectFindingForSeed } from '../reviewItemListing';
+import { findingBucket, type FindingTagBucket } from '../../../../shared/types/reviews';
 import { ReviewItemRouter } from '../reviewItemRouter';
 import { hasReviewableDesignSurface } from '../runEntityOwnership';
 
@@ -230,7 +241,82 @@ export interface DefaultProgrammaticRunnerDeps {
    * always reaches the human's review queue. Absent ⇒ rescues are logged only.
    */
   laneTriageFindingSink?: (runId: string, input: { title: string; body: string }) => Promise<void>;
+  /**
+   * The project's runbook-status resolver — the SAME closure the scheduler's
+   * `runbookStatus` dependency and the verify health panel share (index.ts builds
+   * one and hands it to all three). Feeds the RUN-LEVEL verification posture
+   * (CD1); absent ⇒ the posture never reads a runbook, so a `native-desktop` run
+   * resolves 'available' and behaves exactly as it did before the seam.
+   */
+  verifyRunbookStatus?: VerificationPostureDeps['runbookStatus'];
   logger?: LoggerLike;
+}
+
+/**
+ * Read the run's IMMUTABLE verification stamp (migration 055) plus the worktree
+ * the runbook probe should look at — the input half of the run-level posture.
+ *
+ * Fail-soft to `null`, which the posture resolver reads as 'available': an
+ * unreadable stamp is not evidence that a project cannot be verified.
+ */
+export function readVerificationRunStamp(db: DatabaseLike, runId: string): VerificationRunStamp | null {
+  try {
+    const row = db
+      .prepare(
+        `SELECT project_id AS projectId, verify_enabled AS verifyEnabled,
+                verify_type AS verifyType, worktree_path AS worktreePath
+           FROM workflow_runs WHERE id = ?`,
+      )
+      .get(runId) as
+      | {
+          projectId?: number | null;
+          verifyEnabled?: number | boolean | null;
+          verifyType?: string | null;
+          worktreePath?: string | null;
+        }
+      | undefined;
+    if (!row || typeof row.projectId !== 'number') return null;
+    const worktreePath =
+      typeof row.worktreePath === 'string' && row.worktreePath.trim().length > 0 ? row.worktreePath : null;
+    const rawType: unknown = row.verifyType;
+    return {
+      projectId: row.projectId,
+      verifyEnabled: row.verifyEnabled === 1 || row.verifyEnabled === true,
+      verifyType: isVerificationType(rawType) ? rawType : null,
+      worktreePath,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * File one RUN-SCOPED declaration through `ReviewItemRouter.createIfNoPending`,
+ * whose check-and-create runs as ONE task on the per-project queue.
+ *
+ * `source` IS the dedupe key (there is no unique index behind it), which is why
+ * it is a parameter: the two callers — the "no verifiable modality" declaration
+ * and a shared-build-break group — need the same once-only guarantee under
+ * different keys. NON-BLOCKING and severity 'warning' for the same reason the
+ * F8 skip finding is: these describe something a human should SEE, never
+ * something the run should stop for.
+ */
+async function fileRunScopedFinding(
+  projectId: number,
+  runId: string,
+  input: { source: string; title: string; body: string },
+): Promise<void> {
+  await ReviewItemRouter.getInstance().createIfNoPending(projectId, {
+    op: 'create',
+    actor: 'orchestrator',
+    kind: 'finding',
+    title: input.title,
+    body: input.body,
+    blocking: false,
+    severity: 'warning',
+    source: input.source,
+    runId,
+  });
 }
 
 /**
@@ -334,6 +420,91 @@ export function readRunbookProposalMarkdown(db: DatabaseLike, runId: string): st
     }
   };
   return read('verify-runbook') ?? read('compound-recommendations');
+}
+
+/**
+ * Render the COMPOUND run's `# Selected findings` block body from its
+ * `seed_finding_ids` (migration 034) — the human's explicit selection from the
+ * review-queue triage tray.
+ *
+ * REPLICATES `RunExecutor.buildSelectedFindingsBlock`, deliberately rather than
+ * sharing it: that method is private to an executor the programmatic plane does
+ * not hold, it resolves findings through an injected `FindingReaderLike` wired
+ * only for the orchestrated prompt path, and widening either to reach here would
+ * put an orchestrated-prompt collaborator on the controller's critical path. Both
+ * render from the SAME two sources — the run's `seed_finding_ids` and
+ * `selectFindingForSeed` — and both emit the same heading, ordering, and
+ * per-finding shape, which is what `compound.md` keys its seeded branch on.
+ *
+ * Ordering matches the orchestrated block: priority (P0 < P1 < P2, null LAST)
+ * then bucket (quick < doc < task), with the seeded order as the stable tiebreak.
+ *
+ * Fail-soft at every step like its siblings above: no ids, unparseable JSON, or
+ * a finding that no longer resolves ⇒ that finding is skipped, and an empty
+ * result yields undefined so the step prompt simply omits the section.
+ */
+export function readSelectedFindingsBlock(
+  db: DatabaseLike,
+  rawSeedFindingIds: string | null | undefined,
+): string | undefined {
+  if (!rawSeedFindingIds) return undefined;
+  let ids: string[];
+  try {
+    const parsed: unknown = JSON.parse(rawSeedFindingIds);
+    if (!Array.isArray(parsed)) return undefined;
+    ids = parsed.filter((v): v is string => typeof v === 'string' && v.length > 0);
+  } catch {
+    return undefined;
+  }
+  if (ids.length === 0) return undefined;
+
+  type ResolvedFinding = NonNullable<ReturnType<typeof selectFindingForSeed>>;
+  const resolved: ResolvedFinding[] = [];
+  for (const id of ids) {
+    try {
+      const finding = selectFindingForSeed(db, id);
+      if (finding) resolved.push(finding);
+    } catch {
+      // Fail-soft per id — one unresolvable finding never sinks the prompt.
+    }
+  }
+  if (resolved.length === 0) return undefined;
+
+  const priorityRank = (p: 'P0' | 'P1' | 'P2' | null): number =>
+    p === 'P0' ? 0 : p === 'P1' ? 1 : p === 'P2' ? 2 : 3;
+  const bucketRank: Record<FindingTagBucket, number> = { quick: 0, doc: 1, task: 2 };
+  resolved.sort((a, b) => {
+    const byPriority = priorityRank(a.priority) - priorityRank(b.priority);
+    if (byPriority !== 0) return byPriority;
+    return bucketRank[findingBucket(a.proposedTarget)] - bucketRank[findingBucket(b.proposedTarget)];
+  });
+
+  const sections = resolved.map((f) => {
+    const badge = f.priority ?? '—';
+    const title = f.title?.trim() || '(untitled finding)';
+    const bucket = findingBucket(f.proposedTarget);
+    const sourceTail = f.source?.trim() || 'unknown';
+    const parts: string[] = [
+      `## ${badge} ${title}`,
+      `Target: ${bucket} · Source: ${sourceTail} · id: \`${f.id}\``,
+    ];
+    const body = f.body?.trim();
+    if (body) parts.push(body);
+    const suggestedFix = f.suggestedFix?.trim();
+    if (suggestedFix) parts.push(`### Suggested fix\n${suggestedFix}`);
+    const locations = (f.locations ?? []).filter((l) => l.path?.trim());
+    if (locations.length > 0) {
+      const lines = locations.map(
+        (l) => `- ${l.path.trim()}${typeof l.line === 'number' ? `:${l.line}` : ''}`,
+      );
+      parts.push(['### Locations', ...lines].join('\n'));
+    }
+    return parts.join('\n\n');
+  });
+
+  const directive =
+    'Act ONLY on these findings, in the order listed. For each, apply the action for its target bucket, then IMMEDIATELY call `cyboflow_resolve_finding` with its id and the matching resolution kind — do not batch resolves to the end.';
+  return [directive, ...sections].join('\n\n');
 }
 
 /**
@@ -554,6 +725,17 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       return readApproveRunbookResolution(this.deps.db, ctx.runId);
     };
 
+    // Re-render the COMPOUND run's human-curated seed per step. Flow-gated by
+    // name for the same reason designSurfaces is: only compound is ever launched
+    // with `seed_finding_ids`, and gating keeps every other flow's prompt
+    // byte-identical without paying for a guaranteed-miss read. The ids come off
+    // the run row snapshot because the launcher stamps them once at launch and
+    // nothing ever rewrites them mid-run.
+    const selectedFindings = (): string | undefined => {
+      if (ctx.workflow.name !== 'compound' || !this.deps.db) return undefined;
+      return readSelectedFindingsBlock(this.deps.db, ctx.run.seed_finding_ids);
+    };
+
     // The project's SOLUTION THOROUGHNESS, re-read per step. Two sources, because
     // the level is stamped on the project only when Launch's approve-brief gate
     // resolves: DURING a launch run the brief's own `THOROUGHNESS:` flag is the
@@ -636,6 +818,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         adversarialReviewMarkdown,
         runbookProposal,
         approveRunbookResolution,
+        selectedFindings,
         bootstrapProtectedPaths,
         ...(resolveStepAgent ? { resolveStepAgent } : {}),
       },
@@ -714,6 +897,11 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     const laneTriageTaskReader = this.deps.laneTriageTaskReader;
     const laneTriageAdjustTask = this.deps.laneTriageAdjustTask;
     const laneTriageFindingSink = this.deps.laneTriageFindingSink;
+    // Narrowed once here so the two conditional spreads below close over a
+    // definitely-defined handle rather than re-narrowing `this.deps` inside a
+    // callback (where TS cannot keep the narrowing).
+    const postureDb = this.deps.db;
+    const verifyRunbookStatus = this.deps.verifyRunbookStatus;
 
     const host = new ProgrammaticRunHost({
       runId: ctx.runId,
@@ -752,6 +940,32 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       // so both kinds of "it did not run" land in one place in the review queue.
       fileVerificationSkipFinding: (input: { title: string; body: string }) =>
         fileVerificationSkipFinding(ctx.run.project_id, ctx.runId, input),
+      // CD1/CD3 — the two RUN-SCOPED declarations, both deduped on `source`
+      // through createIfNoPending. Wired unconditionally (the sink itself is
+      // cheap and idempotent); the POSTURE resolver and the BUILD-BREAK sweep are
+      // each gated on the dep they actually need, so a runner built without a DB
+      // (or without the shared runbook-status closure) keeps its pre-seam
+      // behaviour rather than resolving a posture from nothing.
+      fileRunScopedFinding: (input: { source: string; title: string; body: string }) =>
+        fileRunScopedFinding(ctx.run.project_id, ctx.runId, input),
+      ...(postureDb !== undefined && verifyRunbookStatus !== undefined
+        ? {
+            resolveVerificationPosture: () =>
+              resolveVerificationPosture(
+                {
+                  readRunStamp: (runId: string) => readVerificationRunStamp(postureDb, runId),
+                  runbookStatus: verifyRunbookStatus,
+                },
+                ctx.runId,
+              ),
+          }
+        : {}),
+      ...(postureDb !== undefined
+        ? {
+            sweepBuildBreaks: () =>
+              sweepBuildBreaks(postureDb, { runId: ctx.runId, projectId: ctx.run.project_id }),
+          }
+        : {}),
       logger: this.deps.logger,
     });
 

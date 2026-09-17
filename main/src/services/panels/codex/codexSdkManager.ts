@@ -1079,7 +1079,16 @@ export class CodexSdkManager extends AbstractCliManager {
         exitCode = 1;
         const message = error instanceof Error ? error.message : String(error);
         this.logger?.error(`[CodexSdkManager] Codex app-server run error for panel ${displayPanelId}: ${message}`);
-        this.emit('error', { panelId: displayPanelId, sessionId: options.sessionId, error: message });
+        // EventEmitter THROWS on an unlistened 'error', and in production nothing
+        // subscribes to this manager's 'error' (ClaudePanelManager only forwards
+        // the Claude SDK + interactive managers' events). An unguarded emit here
+        // replaced the real failure with ERR_UNHANDLED_ERROR and skipped the
+        // failure-result projection below, so the panel never learned its turn
+        // died (2026-09-16 smoke: a thread/start timeout left the session
+        // 'pending' with no result row).
+        if (this.listenerCount('error') > 0) {
+          this.emit('error', { panelId: displayPanelId, sessionId: options.sessionId, error: message });
+        }
         if (!ctx.terminalResultEmitted) {
           ctx.terminalResultEmitted = true;
           this.emitProjected(

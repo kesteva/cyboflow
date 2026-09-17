@@ -6,6 +6,101 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.2] — 2026-09-17
+
+### Added
+
+- **Grouped diff rail with a comparison base.** The session rail's Diff tab now renders four sticky
+  collapsible sections — Unstaged, Staged, Untracked, Committed — each with its own `+n/-n` rollup,
+  so a file dirty in two scopes shows each scope's real numbers instead of one shared base-relative
+  blob. A BaseSelector above them offers *Branch point*, the local and `origin` default branches
+  (with behind-counts and fetch freshness resolved server-side, never by issuing a `git fetch`) and
+  an arbitrary branch, persisted per session/run. A working-tree strip carries the uncommitted-file
+  count with Commit… and Restore. The base a diff actually resolved against is lifted out of both
+  diff panels, so a file tab opened from the rail always diffs against what the rail is showing.
+- **The rail's diff updates itself.** A per-worktree `sessionGit.onWorktreeChanged` subscription —
+  live only while the Diff tab is mounted — fuses the file watcher (in a new `always` mode, minus
+  the dirty-check that swallowed the "tree just became clean" transition) with a non-recursive watch
+  on the resolved git dir filtered to `index` / `HEAD` / `MERGE_HEAD`, coalesced to one signal every
+  300 ms. Window focus is the fallback for whatever the watcher misses, and there is an explicit ↻.
+  Both panels hold the previous snapshot on screen while a refetch is in flight, so a live tree
+  updates in place instead of flickering.
+- **In-app Claude sign-in.** An expired Claude Code OAuth session passes every credential probe and
+  then fails the first turn with advice the SDK substrate cannot act on. The chat now renders a
+  "Claude sign-in required" card instead of a bare Session Error: it drives the bundled CLI's
+  `auth login` over a new `cyboflow.claudeAuth` router — opens the browser, takes the pasted code,
+  confirms with `auth status` — and puts a quick session's failed prompt back in the composer. The
+  code is never logged or persisted, and the attempt is killed on quit or after a 10-minute stall.
+- **The assistant can create a flow.** A `create-workflow` proposal kind (migration 138) carries a
+  custom flow definition plus the custom agents its steps bind to; a new `cyboflow_agents` read tool
+  gives the assistant the agent vocabulary to compose one. Proposals are validated at propose time —
+  name, definition schema, each agent draft, and every step binding including fan-out inner steps — and
+  executed as a saga: agents first, then the flow, unwinding the agents it minted if anything later
+  fails. The proposal card shows scope, phase/step counts, permission mode and one row per agent.
+- **Human tasks.** Tasks carry an executor (migration 137) surfaced as a badge and toggle on the
+  backlog; a human task never becomes a sprint lane, and each human prerequisite instead surfaces as
+  a standing item. Dependencies can be removed from a task, and human prerequisites do not clear
+  `readyToWork`.
+- **Windows unit tests run in the main gate.** The Windows unit job is a reusable workflow called by
+  both the quality gate (every PR and every push to `main`) and the Windows workflow, with a per-ref
+  concurrency group so batched pushes never stack runners. A dispatch-only hosted macOS DMG build
+  lands alongside it — one native runner per arch, signing posture derived from the five
+  `CSC_*`/`APPLE_*` secrets with an all-or-nothing preflight. Experimental; not yet the release path.
+
+### Changed
+
+- **Rolling dispatch replaces the per-wave barrier** in fan-out: lanes start as capacity frees
+  instead of waiting for the slowest member of their wave.
+- **Verification posture is declared once per run**, and build breaks shared across lanes are
+  grouped into one finding rather than repeated per lane. Lane triage gains an `append_correction`
+  verdict that records a diagnosis without spending a rescue.
+- **The step prompts mirror the programmatic contracts.** The planner/ship ledger, size guard,
+  decompose-everything, no-design-fork, address-review re-verify and build-break rules now appear in
+  the scoped step turns instead of living only in flow prose the programmatic plane never reads. The
+  Compound selected-findings seed is threaded through too.
+- **The two largest main-process files are under a size ratchet.** A test freezes the six largest
+  `main/` sources at their line counts, and `mcpQueryHandler.ts` came down from 8,357 to 5,717 lines
+  by extracting the message/deps type contract, the workflow and variant config handlers, and the
+  global-agent db-query/fs/history tools into siblings. The rule is extract, never bump the cap.
+
+### Fixed
+
+- **The assistant rail could stop rendering replies until a reload.** `trpc-electron`'s
+  `did-start-navigation` handler aborted every subscription whose key began with
+  `${webContentsId}-${frame.routingId}`, but frame routing ids are only unique per renderer process
+  — so an out-of-process iframe (a sandboxed widget frame) sharing the main frame's id silently
+  ended every live-tail subscription in the window. The patched handler ignores subframe navigations
+  and matches the exact key segment. The rail's own subscriptions now reopen on `stopped`/`complete`
+  /`error`, and a settled turn always refetches its proposals.
+- **A Codex or OMP turn failure was replaced by "Unhandled error."** Nothing subscribes to
+  `CodexSdkManager`'s `error` event, so emitting it threw `ERR_UNHANDLED_ERROR` and skipped the
+  failure-result projection, leaving the panel with no result and the session stuck `pending`. Both
+  managers now emit only when a listener exists.
+- **An untracked symlink leaked its target's contents** into the diff shipped to the renderer: every
+  untracked-content reader used `statSync` + `readFileSync`, which follow links. All four sites now
+  go through one reader that `lstat`s and reads only regular files.
+- **A stale snapshot could commit a conflicted tree.** The commit op probes the live index
+  immediately before staging and refuses, naming the unmerged paths, instead of `git add -A`-ing
+  conflict markers. A conflicted path also no longer appears in the Staged group on the wire
+  (`git diff --cached --numstat` emits a `0 0` row for every unmerged entry).
+- **Caller-supplied git refs are resolved before they reach argv.** A `--output=`-shaped ref could
+  be treated as an option at four `GitDiffManager` sites; every ref now goes through
+  `rev-parse --verify --end-of-options <ref>^{commit}` first, and an unresolvable ref falls back to
+  the empty result.
+- **A session with no commits of its own showed an empty diff** even when it had real uncommitted
+  edits — exactly the case that view exists for. The branch point is now resolved directly rather
+  than through the commit history.
+- **The approve-design rerun button resolved with `reject`**, which maps to a terminal reject, so
+  "Rerun planning with findings" ended the run instead of looping back to the design steps. It
+  resolves with `revise`. An approve-plan reject now also unwinds the run's epics and stories ledger
+  components, settle reconciliation never binds a design or stamps a brief the human sent back, and
+  thoroughness falls back to the brief's Solution section when the flag line is missing.
+- A create-workflow proposal accepts an object-shaped `definitionJson` instead of returning an
+  opaque `invalid_payload`, and an agent's model pin survives by pinning the `claude-sdk` runtime.
+- The rail's working-tree strip fits the 240px rail minimum, a bare main-repo session gets its
+  project for the base selector, a refused commit refetches instead of keeping its stale snapshot,
+  and a default-branch base no longer renders its name twice.
+
 ## [0.4.1] — 2026-09-16
 
 ### Added

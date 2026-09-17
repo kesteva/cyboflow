@@ -273,6 +273,7 @@ function makeReadyTask(overrides: Partial<BacklogTaskItem> & { id: string }): Ba
     body: null,
     priority: 'P2',
     category: 'feature',
+    executor: 'agent',
     repo: null,
     parent_epic_id: null,
     originating_idea_id: null,

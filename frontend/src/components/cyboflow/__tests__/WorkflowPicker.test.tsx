@@ -160,6 +160,35 @@ vi.mock('../../../utils/api', () => ({
   },
 }));
 
+// WorkflowEditorModal stub (TASK-220): the real editor needs the whole
+// workflows.get / definition pipeline. The picker's contract with it is just
+// `onSaved(id, savedAsNewScopeNote?)`, so the stub exposes two buttons that
+// fire that callback with and without the scope note.
+vi.mock('../WorkflowEditorModal', () => ({
+  WorkflowEditorModal: ({
+    onSaved,
+  }: {
+    onSaved?: (workflowId: string, savedAsNewScopeNote?: string) => void;
+  }) => (
+    <div data-testid="workflow-editor-modal-stub">
+      <button
+        type="button"
+        data-testid="stub-save-as-new"
+        onClick={() => onSaved?.('wf-global-custom-abcd1234', 'Saved “ship-copy” as a new flow (Global).')}
+      >
+        stub save as new
+      </button>
+      <button
+        type="button"
+        data-testid="stub-save-overwrite"
+        onClick={() => onSaved?.('wf-1')}
+      >
+        stub overwrite
+      </button>
+    </div>
+  ),
+}));
+
 // Import after mocks so vi.mock hoisting is in effect
 import { WorkflowPicker } from '../WorkflowPicker';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
@@ -889,7 +918,7 @@ describe('WorkflowPicker — Planner idea-selection gate (migration 017)', () =>
     mockTasksList.mockResolvedValue([
       {
         id: 'IDEA-9', project_id: 1, type: 'idea', ref: 'IDEA-9', title: 'Seed idea', summary: null,
-        body: 'prose', priority: 'P2', category: 'feature', repo: null, parent_epic_id: null, originating_idea_id: null,
+        body: 'prose', priority: 'P2', category: 'feature', executor: 'agent', repo: null, parent_epic_id: null, originating_idea_id: null,
         scope: null, board_id: 'b', stage_id: 'idea', archived_at: null, decomposed_at: null, approved_at: null, sort_order: null, stage_position: 1,
         version: 1, inFlow: [], awaitingReview: false, isDone: false, memberships: [], created_at: '', updated_at: '',
       },
@@ -928,13 +957,13 @@ describe('WorkflowPicker — Planner idea-selection gate (migration 017)', () =>
     mockTasksList.mockResolvedValue([
       {
         id: 'IDEA-9', project_id: 1, type: 'idea', ref: 'IDEA-9', title: 'First idea', summary: null,
-        body: null, priority: 'P2', category: 'feature' as const, repo: null, parent_epic_id: null, originating_idea_id: null,
+        body: null, priority: 'P2', category: 'feature' as const, executor: 'agent' as const, repo: null, parent_epic_id: null, originating_idea_id: null,
         scope: null, board_id: 'b', stage_id: 'idea', archived_at: null, decomposed_at: null, approved_at: null, sort_order: null, stage_position: 1,
         version: 1, inFlow: [], awaitingReview: false, isDone: false, memberships: [], created_at: '', updated_at: '',
       },
       {
         id: 'IDEA-10', project_id: 1, type: 'idea', ref: 'IDEA-10', title: 'Second idea', summary: null,
-        body: null, priority: 'P2', category: 'feature' as const, repo: null, parent_epic_id: null, originating_idea_id: null,
+        body: null, priority: 'P2', category: 'feature' as const, executor: 'agent' as const, repo: null, parent_epic_id: null, originating_idea_id: null,
         scope: null, board_id: 'b', stage_id: 'idea', archived_at: null, decomposed_at: null, approved_at: null, sort_order: null, stage_position: 1,
         version: 1, inFlow: [], awaitingReview: false, isDone: false, memberships: [], created_at: '', updated_at: '',
       },
@@ -975,14 +1004,14 @@ describe('WorkflowPicker — Planner idea-selection gate (migration 017)', () =>
     mockTasksList.mockResolvedValue([
       {
         id: 'IDEA-9', project_id: 1, type: 'idea', ref: 'IDEA-9', title: 'Small idea', summary: null,
-        body: null, priority: 'P2', category: 'feature' as const, repo: null, parent_epic_id: null, originating_idea_id: null,
+        body: null, priority: 'P2', category: 'feature' as const, executor: 'agent' as const, repo: null, parent_epic_id: null, originating_idea_id: null,
         scope: null, board_id: 'b', stage_id: 'idea', archived_at: null, decomposed_at: null, approved_at: null, sort_order: null, stage_position: 1,
         version: 1, inFlow: [], awaitingReview: false, isDone: false, memberships: [], created_at: '', updated_at: '',
       },
       {
         id: 'IDEA-10', project_id: 1, type: 'idea', ref: 'IDEA-10', title: 'Big idea', summary: null,
         body: null, priority: 'P2', repo: null, parent_epic_id: null, originating_idea_id: null,
-        scope: 'large' as const, category: 'feature' as const, board_id: 'b', stage_id: 'idea', archived_at: null, decomposed_at: null, approved_at: null, sort_order: null, stage_position: 1,
+        scope: 'large' as const, category: 'feature' as const, executor: 'agent' as const, board_id: 'b', stage_id: 'idea', archived_at: null, decomposed_at: null, approved_at: null, sort_order: null, stage_position: 1,
         version: 1, inFlow: [], awaitingReview: false, isDone: false, memberships: [], created_at: '', updated_at: '',
       },
     ]);
@@ -1164,7 +1193,7 @@ describe('WorkflowPicker — Ship idea-selection gate (feat/ship-workflow)', () 
     mockTasksList.mockResolvedValue([
       {
         id: 'IDEA-9', project_id: 1, type: 'idea', ref: 'IDEA-9', title: 'Seed idea', summary: null,
-        body: 'prose', priority: 'P2', category: 'feature', repo: null, parent_epic_id: null, originating_idea_id: null,
+        body: 'prose', priority: 'P2', category: 'feature', executor: 'agent', repo: null, parent_epic_id: null, originating_idea_id: null,
         scope: null, board_id: 'b', stage_id: 'idea', archived_at: null, decomposed_at: null, approved_at: null, sort_order: null, stage_position: 1,
         version: 1, inFlow: [], awaitingReview: false, isDone: false, memberships: [], created_at: '', updated_at: '',
       },
@@ -2226,7 +2255,7 @@ describe('WorkflowPicker — Sprint parallel-batch gate (feat/parallel-sprint)',
     mockTasksList.mockResolvedValue([
       {
         id: 'TASK-1', project_id: 1, type: 'task', ref: 'TASK-1', title: 'Do a thing', summary: null,
-        body: null, priority: 'P2', category: 'feature', repo: null, parent_epic_id: null, originating_idea_id: null,
+        body: null, priority: 'P2', category: 'feature', executor: 'agent', repo: null, parent_epic_id: null, originating_idea_id: null,
         scope: null, board_id: 'b', stage_id: 'ready', archived_at: null, decomposed_at: null, approved_at: '2026-01-01T00:00:00.000Z', sort_order: null, version: 1,
         stage_position: 6, inFlow: [], awaitingReview: false,
         isDone: false, memberships: [], readyToWork: true, created_at: '', updated_at: '',
@@ -2639,5 +2668,56 @@ describe('WorkflowPicker — global launch defaults (defaultLaunchModel / defaul
       agentRuntime: 'claude-interactive',
       claudeConfig: { model: 'opus', fastMode: false },
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-220 — the editor's "Save as new flow" reports where the copy landed
+// (Global vs a project) via onSaved's second argument; this host must surface
+// it, since the editor closes before anything inside it could be seen.
+// ---------------------------------------------------------------------------
+
+describe('WorkflowPicker — editor "Save as new flow" scope notice (TASK-220)', () => {
+  beforeEach(() => {
+    mockWorkflowsList.mockResolvedValue([
+      { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', tuning_level: 'standard', runtime_mix: 'claude', created_at: '', archived_at: null },
+    ]);
+    useConfigStore.setState({ config: null });
+  });
+
+  async function openEditor(): Promise<void> {
+    render(<WorkflowPicker projectId={1} />);
+    const editBtn = await screen.findByTestId('workflow-picker-edit');
+    await waitFor(() => expect(editBtn).toBeEnabled());
+    await act(async () => {
+      fireEvent.click(editBtn);
+    });
+    await screen.findByTestId('workflow-editor-modal-stub');
+  }
+
+  it('surfaces the scope note as a toast after the editor closes on a save-as-new landing', async () => {
+    await openEditor();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('stub-save-as-new'));
+    });
+
+    // Editor closed, notice shown with the scope the editor reported.
+    expect(screen.queryByTestId('workflow-editor-modal-stub')).not.toBeInTheDocument();
+    const toast = await screen.findByTestId('workflow-picker-editor-saved-toast');
+    expect(toast).toHaveTextContent('Saved “ship-copy” as a new flow (Global).');
+    // The picker reloads its rows selecting the new id.
+    expect(mockWorkflowsList).toHaveBeenCalled();
+  });
+
+  it('stays silent for a save that reports no scope note (overwrite / reset)', async () => {
+    await openEditor();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('stub-save-overwrite'));
+    });
+
+    expect(screen.queryByTestId('workflow-editor-modal-stub')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('workflow-picker-editor-saved-toast')).not.toBeInTheDocument();
   });
 });

@@ -159,6 +159,24 @@ work never done. The per-step stamps are called out below.
      becomes a finding: Approve logs every entry as an accepted-risk finding,
      Revise re-runs the design steps against them. Filing them here pre-empts a
      decision the very next gate is about to make.
+   - **Automatic revision on a blocking review — ONCE.** When the reported doc's
+     `## Blocking` section has one or more entries and this is the FIRST review
+     round of the run, do not open the gate over them yet: loop back to step 3
+     (`expand-spec`) and re-run steps 3–6 with the review as the specification.
+     Re-fetch the idea body first (`cyboflow_get_task`), then re-delegate each
+     step's subagent with the full `## Blocking` list (and `## Findings` as
+     advisory), telling it which `AR-n` entries fall in its remit: `Area:
+     spec|criteria` → `cyboflow-context` (re-fold the spec, preserving the
+     approved stub's problem/solution/scope/flags), `Area: prototype` →
+     `cyboflow-ui-prototype` (re-report the `ui-prototype` artifact and re-fold
+     the design spec), `Area: architecture` → `cyboflow-architecture` (REPLACE
+     the `## Architecture design` section). Then re-run
+     `cyboflow-adversarial-review` over the revised surfaces as a RE-REVIEW (pass
+     the previous round's doc and tell it so), re-report the `adversarial-review`
+     artifact, and re-stamp the touched components. A second round that is STILL
+     blocking does **not** loop again — proceed to the gate with the refreshed
+     doc; a second disagreement is the human's call. A clean first round proceeds
+     to the gate directly.
 7. **approve-design** → **human gate, inline — ONLY when `ui-prototype` or `architecture` ran.** When
    neither ran, do **not** ask — continue straight to epics. Open the gate as a
    blocking `decision` review item — `cyboflow_report_finding(kind: 'decision',
@@ -331,6 +349,39 @@ advances to **Done** when the session is actually merged, and reverts to its ent
 stage if the run ends without merging. Do **not** move task board stages by hand;
 the lane (and the Sessions / Runs view) is where live per-task status lives.
 
+**Shared build breaks.** Lanes share ONE worktree, so a break another lane
+introduced — a half-written module, a renamed export, a test runner that will not
+start — lands in every lane at once. A lane subagent that hits one returns a
+`## Build break` section instead of routing around it; file that as a finding with
+`category: 'build-break'`, title `Build break: <first error line verbatim>`, and
+`locations` at the offending file, then let the lane carry on if it can. Identical
+reports from separate lanes are what let the run's supervisor see ONE shared cause
+rather than N unrelated lane failures.
+
+**Verification posture is a RUN-level fact, declared once.** Before the first lane
+is dispatched, the controller resolves whether ANY verification modality can serve
+this run. Three answers: the visual verifier is switched OFF (nothing is filed and
+nothing changes); a modality is available (every lane enqueues and parks at the
+merge gate as usual); or NO modality can serve the run — the run is stamped for the
+deferred mobile modality, or for `native-desktop` with no proven `native-screen`
+runbook. In that last case exactly ONE
+`No verifiable modality for this project` finding is filed for the whole run, every
+lane skips the enqueue without parking, and the per-lane
+`Visual verification did not run for …` findings are suppressed, because filing one
+per lane buries the reasons that genuinely ARE per-lane. Lanes are otherwise
+untouched: they implement, review and verify their acceptance criteria exactly as
+they would under an available posture, and `task-verify` still composes its
+verification task. Do not tell a lane to build and drive the deliverable itself
+instead — only the central verifier does that.
+
+**Shared build breaks are grouped for you.** When two or more `build-break`
+findings in a run normalize to the same error text (paths, line/column numbers and
+build hashes stripped), the supervisor files ONE additional
+`Shared build break (N lanes): …` advisory naming the group and the original
+findings. It is a DETECTOR only: the run is never paused and nothing is fixed
+automatically. Keep filing your own per-break findings — the grouping is what turns
+N of them into one readable fact, and it needs them to exist.
+
 **Lane discipline:** every lane transition goes through
 `cyboflow_update_sprint_task` at the moment it happens — when a task starts, when
 its stage changes, when it commits, when it fails. The lanes are the UI's only
@@ -390,7 +441,8 @@ Run steps 14-16 normally ONLY when every lane is `integrated`.
        repair or revert its own fixes — at most **once** — and re-run
        sprint-verify. If it STILL fails, file a **blocking** finding via
        `cyboflow_report_finding` (`blocking: true`, category
-       `address-review-regression`) carrying the failing tests and what changed,
+       `address-review-regression`) titled exactly `address-review left the tree
+       red` and naming the failing spec, carrying the failing tests and what changed,
        and surface it at the human gate rather than merging a red tree — the
        blocking finding is what actually parks the run, prose in a summary is not.
        This is the ONE exception to "do not file new findings from this step", and
@@ -472,11 +524,12 @@ Run steps 14-16 normally ONLY when every lane is `integrated`.
   material change reopens `approve-idea`; it is never folded in silently.
 - **Adversarial review never adds a gate, and never files a finding.** It and
   `approve-design` run only when a UI prototype or architecture ran. The review
-  step REPORTS its result as the `adversarial-review` artifact and stops — it
-  does not auto-revise, does not loop, and does not call
-  `cyboflow_report_finding`. The `approve-design` gate is what routes: Approve
-  logs every entry as an accepted-risk finding, Revise re-runs the design steps
-  against them.
+  step REPORTS its result as the `adversarial-review` artifact and never calls
+  `cyboflow_report_finding`. A BLOCKING first round loops the refine phase back
+  to `expand-spec` exactly ONCE, automatically, with the review as the
+  specification (step 6); after that the `approve-design` gate is what routes:
+  Approve logs every entry as an accepted-risk finding, Revise re-runs the design
+  steps against them.
 - **No design fork.** `cyboflow-context` may return `DESIGN_MODE: yes` (it is the
   same subagent Planner uses) — ignore it. Ship never offers a design-mode option
   at `approve-idea`; forking to an interactive design session mid-flow would split

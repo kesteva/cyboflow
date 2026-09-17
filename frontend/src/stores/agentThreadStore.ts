@@ -28,6 +28,21 @@
  *
  * Failures are caught and `console.warn`/`console.error`-ed, never thrown out
  * of a subscription handler (mirrors every other store's resync path).
+ *
+ * ## Subscription self-healing
+ *
+ * Both subscriptions are opened through {@link openResilientSubscription}: a
+ * subscription the SERVER ends (`stopped`/`complete` — trpc-electron aborts
+ * every subscription of a frame on its `did-start-navigation`, and a
+ * main-side generator that returns ends the same way) or that errors is
+ * reopened after a short backoff instead of being left dead. Before this, a
+ * server-side stop was completely silent (`onStopped`/`onComplete` were not
+ * even observed): the assistant's replies and fresh proposals then never
+ * reached the rail until the whole window was reloaded, while the composer's
+ * `sending` flag — driven by the mutation promise, not the subscription —
+ * kept behaving normally. Belt-and-braces, `sendMessage` also forces one
+ * transcript + proposals refetch when its turn settles, so a reply can never
+ * be stranded behind a subscription gap however short.
  */
 import { create } from 'zustand';
 import type { inferRouterOutputs } from '@trpc/server';
@@ -41,6 +56,13 @@ import type {
 
 type RouterOutputs = inferRouterOutputs<AppRouter>;
 
+/** onProposalUpdate's yielded payload, inferred from the router (same rule) —
+ *  a subscription's inferred output is its AsyncGenerator, so unwrap the yield. */
+type AgentProposalUpdateEvent =
+  RouterOutputs['cyboflow']['agentThread']['onProposalUpdate'] extends AsyncIterable<infer T>
+    ? T
+    : never;
+
 /** AppRouter-inferred result shapes — these discriminated unions live only on
  *  the router (main/src/orchestrator/trpc/routers/agentThread.ts), not in
  *  shared/types, so they are pulled in via inference rather than a hand
@@ -49,6 +71,83 @@ export type ConfirmProposalResult = RouterOutputs['cyboflow']['agentThread']['co
 
 /** Debounce window for the onThreadEvent-driven refetch (messages signal + proposals). */
 const LIVE_TAIL_DEBOUNCE_MS = 150;
+
+/** Backoff before reopening a subscription the server ended or that errored. */
+const RESUBSCRIBE_DELAY_MS = 1_000;
+
+/** The subset of tRPC's subscription observer this store wires. */
+interface SubscriptionHandlers<T> {
+  onData: (value: T) => void;
+}
+
+/**
+ * Open `subscribe` and keep it open: whenever the subscription ends for any
+ * reason other than the returned `close()` (server `stopped`, link `complete`,
+ * or an error), log why and reopen it after {@link RESUBSCRIBE_DELAY_MS}.
+ * `subscribe` is invoked afresh on every (re)open so it can read current
+ * state (e.g. the thread id) each time.
+ */
+export function openResilientSubscription<T>(
+  label: string,
+  subscribe: (handlers: {
+    onData: (value: T) => void;
+    onError: (err: unknown) => void;
+    onStopped: () => void;
+    onComplete: () => void;
+  }) => { unsubscribe: () => void },
+  handlers: SubscriptionHandlers<T>,
+): { close: () => void } {
+  let closed = false;
+  let current: { unsubscribe: () => void } | null = null;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const scheduleReopen = (reason: string): void => {
+    if (closed || retryTimer !== null) return;
+    console.warn(`[agentThreadStore] ${label} subscription ended (${reason}); reopening`);
+    current = null;
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      open();
+    }, RESUBSCRIBE_DELAY_MS);
+  };
+
+  const open = (): void => {
+    if (closed) return;
+    // Identity guard: a callback from a superseded subscription (one that was
+    // already replaced) must not schedule a second reopen.
+    let self: { unsubscribe: () => void } | null = null;
+    const isLive = (): boolean => !closed && current === self;
+    self = subscribe({
+      onData: (value) => {
+        if (isLive()) handlers.onData(value);
+      },
+      onError: (err) => {
+        if (isLive()) scheduleReopen(`error: ${err instanceof Error ? err.message : String(err)}`);
+      },
+      onStopped: () => {
+        if (isLive()) scheduleReopen('stopped by server');
+      },
+      onComplete: () => {
+        if (isLive()) scheduleReopen('completed');
+      },
+    });
+    current = self;
+  };
+
+  open();
+
+  return {
+    close: () => {
+      closed = true;
+      if (retryTimer !== null) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+      current?.unsubscribe();
+      current = null;
+    },
+  };
+}
 
 export interface AgentThreadState {
   /** The single 'global' thread row. Null until `init()`'s bootstrap resolves. */
@@ -143,8 +242,11 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
       initialized = true;
       set({ loading: true });
 
-      let threadEventSub: { unsubscribe: () => void } | null = null;
+      let threadEventSub: { close: () => void } | null = null;
       let refetchTimer: ReturnType<typeof setTimeout> | null = null;
+      // Set by `unsubscribe` so a bootstrap that resolves after teardown does
+      // not open a subscription nothing will ever close.
+      let tornDown = false;
 
       /** Debounced onThreadEvent handler: bump the live-tail tick + refetch proposals. */
       const scheduleLiveTailRefresh = (threadId: string): void => {
@@ -163,13 +265,12 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
           const thread = await trpc.cyboflow.agentThread.getThread.query();
           set({ thread });
           await refreshProposals(thread.id);
-          threadEventSub = trpc.cyboflow.agentThread.onThreadEvent.subscribe(
-            { threadId: thread.id },
-            {
-              onData: () => scheduleLiveTailRefresh(thread.id),
-              onError: (err: unknown) =>
-                console.warn('[agentThreadStore] onThreadEvent subscription error:', err),
-            },
+          if (tornDown) return;
+          threadEventSub = openResilientSubscription(
+            'onThreadEvent',
+            (handlers) =>
+              trpc.cyboflow.agentThread.onThreadEvent.subscribe({ threadId: thread.id }, handlers),
+            { onData: () => scheduleLiveTailRefresh(thread.id) },
           );
         } catch (err: unknown) {
           console.error('[agentThreadStore] init bootstrap failed:', err);
@@ -181,24 +282,27 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
 
       // onProposalUpdate carries no input — it is the all-threads feed — so it
       // can subscribe immediately; filter to THIS thread once known.
-      const proposalEventSub = trpc.cyboflow.agentThread.onProposalUpdate.subscribe(undefined, {
-        onData: (event) => {
-          const threadId = get().thread?.id;
-          if (threadId !== undefined && event.threadId === threadId) {
-            void refreshProposals(threadId);
-          }
+      const proposalEventSub = openResilientSubscription<AgentProposalUpdateEvent>(
+        'onProposalUpdate',
+        (handlers) => trpc.cyboflow.agentThread.onProposalUpdate.subscribe(undefined, handlers),
+        {
+          onData: (event) => {
+            const threadId = get().thread?.id;
+            if (threadId !== undefined && event.threadId === threadId) {
+              void refreshProposals(threadId);
+            }
+          },
         },
-        onError: (err: unknown) =>
-          console.warn('[agentThreadStore] onProposalUpdate subscription error:', err),
-      });
+      );
 
       const unsubscribe = (): void => {
+        tornDown = true;
         if (refetchTimer !== null) {
           clearTimeout(refetchTimer);
           refetchTimer = null;
         }
-        threadEventSub?.unsubscribe();
-        proposalEventSub.unsubscribe();
+        threadEventSub?.close();
+        proposalEventSub.close();
         initialized = false;
         cachedUnsubscribe = null;
       };
@@ -235,7 +339,12 @@ export const useAgentThreadStore = create<AgentThreadState>((set, get) => {
       } catch (err: unknown) {
         console.error('[agentThreadStore] sendMessage failed:', err);
       } finally {
-        set({ sending: false });
+        // The turn has settled either way (the mutation resolves at the result
+        // boundary, or the spawn failed and an error event was recorded).
+        // Force one transcript + proposals refetch here rather than trusting
+        // the live tail alone — see "Subscription self-healing" above.
+        set((s) => ({ sending: false, liveTailTick: s.liveTailTick + 1 }));
+        void refreshProposals(threadId);
       }
     },
 

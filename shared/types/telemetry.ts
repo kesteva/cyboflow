@@ -95,6 +95,7 @@ export interface TelemetryEventMap {
       | 'promote_to_task'
       | 'approve'
       | 'reject'
+      | 'revise'
       | 'launch_separate_planner'
       | 'return_idea_to_backlog';
     blocking?: boolean;

@@ -4,6 +4,7 @@ import {
   parseReprioritizeResult,
   parseEditWorkflowResult,
   parseCreateBacklogResult,
+  parseCreateWorkflowResult,
   parseWorkflowDefinitionSummary,
 } from './proposalResultTypes';
 
@@ -250,5 +251,51 @@ describe('parseCreateBacklogResult', () => {
       reconciled: true,
     });
     expect(parsed?.reconciled).toBe(true);
+  });
+});
+
+describe('parseCreateWorkflowResult', () => {
+  it('parses an executed result with its workflow id and per-agent keys', () => {
+    expect(
+      parseCreateWorkflowResult({
+        kind: 'create-workflow',
+        status: 'executed',
+        name: 'Docs Review',
+        workflowId: 'wf-1',
+        agents: [{ index: 0, name: 'Docs Writer', ok: true, agentKey: 'docs-writer' }],
+      }),
+    ).toEqual({
+      kind: 'create-workflow',
+      status: 'executed',
+      name: 'Docs Review',
+      workflowId: 'wf-1',
+      agents: [{ index: 0, name: 'Docs Writer', ok: true, agentKey: 'docs-writer' }],
+      error: undefined,
+      compensations: undefined,
+      reconciled: undefined,
+    });
+  });
+
+  it('keeps the error + compensations of a failed result and drops malformed entries', () => {
+    const parsed = parseCreateWorkflowResult({
+      kind: 'create-workflow',
+      status: 'failed',
+      name: 'Docs Review',
+      error: 'boom',
+      agents: [{ index: 0, name: 'Docs Writer', ok: true }, { nope: true }],
+      compensations: [{ agentKey: 'docs-writer', ok: false, error: 'referenced' }, 'junk'],
+      reconciled: true,
+    });
+    expect(parsed?.error).toBe('boom');
+    expect(parsed?.agents).toEqual([{ index: 0, name: 'Docs Writer', ok: true }]);
+    expect(parsed?.compensations).toEqual([{ agentKey: 'docs-writer', ok: false, error: 'referenced' }]);
+    expect(parsed?.reconciled).toBe(true);
+  });
+
+  it('returns null for another kind, a bad status, a missing name, or a non-array agents', () => {
+    expect(parseCreateWorkflowResult({ kind: 'edit-workflow', status: 'executed', name: 'x', agents: [] })).toBeNull();
+    expect(parseCreateWorkflowResult({ kind: 'create-workflow', status: 'superseded', name: 'x', agents: [] })).toBeNull();
+    expect(parseCreateWorkflowResult({ kind: 'create-workflow', status: 'executed', agents: [] })).toBeNull();
+    expect(parseCreateWorkflowResult({ kind: 'create-workflow', status: 'executed', name: 'x', agents: 'none' })).toBeNull();
   });
 });

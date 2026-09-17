@@ -35,6 +35,8 @@ let deps: PrepareProposalDeps;
 let workflows: Map<string, WorkflowRow>;
 let identities: Map<string, { ref: string; stage_id: string; version: number; type: TaskType }>;
 let existing: Map<string, string>;
+let takenWorkflowNames: Set<string>;
+let customAgents: Set<string>;
 
 beforeEach(() => {
   rawDb = new Database(':memory:');
@@ -50,12 +52,16 @@ beforeEach(() => {
   workflows = new Map();
   identities = new Map();
   existing = new Map();
+  takenWorkflowNames = new Set();
+  customAgents = new Set();
 
   deps = {
     db: dbAdapter(rawDb),
     readWorkflowRow: (workflowId) => workflows.get(workflowId) ?? null,
     readTaskIdentity: (taskId) => identities.get(taskId),
     resolveExistingEntity: (projectId, refOrId, type) => existing.get(`${projectId}:${refOrId}:${type}`) ?? null,
+    workflowNameTaken: (projectId, name) => takenWorkflowNames.has(`${projectId ?? 'global'}:${name}`),
+    customAgentExists: (projectId, agentKey) => customAgents.has(`${projectId}:${agentKey}`),
   };
 });
 
@@ -230,6 +236,203 @@ describe('prepareProposal — server-side enrichment', () => {
       kind: 'create-backlog-items',
       projectId: 1,
       items: [{ taskType: 'task', title: 'x', parentEpicId: 'epc_opaque', originatingIdeaId: 'ida_opaque' }],
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// create-workflow — propose-time validation (no preconditions)
+// ---------------------------------------------------------------------------
+
+/** A strict-schema-valid definition binding one builtin, the human gate, and one NEW agent. */
+const NEW_FLOW = {
+  id: 'docs-review',
+  phases: [
+    {
+      id: 'review',
+      label: 'Review',
+      color: '#3b6dd6',
+      steps: [
+        { id: 'survey', name: 'Survey', agent: 'implement', mcps: [], retries: 0 },
+        { id: 'write', name: 'Write', agent: 'docs-writer', mcps: [], retries: 1 },
+        { id: 'approve', name: 'Approve', agent: 'human', mcps: [], retries: 0, human: true },
+      ],
+    },
+  ],
+};
+
+const DOCS_WRITER = {
+  name: 'Docs Writer',
+  description: 'Writes the docs for a change.',
+  systemPrompt: 'You write documentation. Return a summary.',
+  tools: ['Read', 'Edit'],
+};
+
+function createWorkflowPayload(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    kind: 'create-workflow',
+    projectId: 1,
+    name: 'Docs Review',
+    definitionJson: JSON.stringify(NEW_FLOW),
+    agents: [DOCS_WRITER],
+    ...over,
+  };
+}
+
+describe('parseAgentProposalPayload — create-workflow', () => {
+  it('narrows a full payload, keeping the optional fields it was given', () => {
+    const parsed = parseAgentProposalPayload(
+      createWorkflowPayload({ scope: 'project', permissionMode: 'acceptEdits', summary: 'A docs flow' }),
+    );
+    expect(parsed).toEqual({
+      kind: 'create-workflow',
+      projectId: 1,
+      name: 'Docs Review',
+      definitionJson: JSON.stringify(NEW_FLOW),
+      agents: [DOCS_WRITER],
+      scope: 'project',
+      permissionMode: 'acceptEdits',
+      summary: 'A docs flow',
+    });
+  });
+
+  it('rejects a malformed scope, permission mode, tool, model, or agent member', () => {
+    expect(parseAgentProposalPayload(createWorkflowPayload({ scope: 'everywhere' }))).toBeNull();
+    expect(parseAgentProposalPayload(createWorkflowPayload({ permissionMode: 'yolo' }))).toBeNull();
+    expect(parseAgentProposalPayload(createWorkflowPayload({ agents: [{ ...DOCS_WRITER, tools: ['Task'] }] }))).toBeNull();
+    expect(parseAgentProposalPayload(createWorkflowPayload({ agents: [{ ...DOCS_WRITER, model: 'gpt-5' }] }))).toBeNull();
+    expect(parseAgentProposalPayload(createWorkflowPayload({ agents: [{ name: 'x' }] }))).toBeNull();
+    expect(parseAgentProposalPayload(createWorkflowPayload({ agents: 'docs-writer' }))).toBeNull();
+    expect(parseAgentProposalPayload(createWorkflowPayload({ definitionJson: '' }))).toBeNull();
+  });
+
+  // The live smoke's first attempt nested the definition as an object inside
+  // payload_json (the natural way to compose it) and got 'invalid_payload' five
+  // times running — an object is re-encoded, not rejected, on both arms.
+  it('accepts definitionJson as a plain object and re-encodes it (create-workflow and edit-workflow)', () => {
+    expect(parseAgentProposalPayload(createWorkflowPayload({ definitionJson: NEW_FLOW }))).toMatchObject({
+      kind: 'create-workflow',
+      definitionJson: JSON.stringify(NEW_FLOW),
+    });
+    expect(parseAgentProposalPayload({ kind: 'edit-workflow', workflowId: 'wf-1', definitionJson: NEW_FLOW })).toEqual({
+      kind: 'edit-workflow',
+      workflowId: 'wf-1',
+      definitionJson: JSON.stringify(NEW_FLOW),
+    });
+    expect(parseAgentProposalPayload(createWorkflowPayload({ definitionJson: [NEW_FLOW] }))).toBeNull();
+    expect(parseAgentProposalPayload(createWorkflowPayload({ definitionJson: null }))).toBeNull();
+  });
+});
+
+describe('prepareProposal — create-workflow validation', () => {
+  it('accepts a valid flow + agent, normalizing the definition and trimming the name', () => {
+    const result = prepareProposal(deps, createWorkflowPayload({ name: '  Docs Review ' }));
+    expect(result.ok).toBe(true);
+    expect(result.ok === true && result.preconditions).toBeNull();
+    expect(result.ok === true && result.payload).toMatchObject({ kind: 'create-workflow', name: 'Docs Review' });
+    expect(result.ok === true && result.payload.kind === 'create-workflow' && JSON.parse(result.payload.definitionJson)).toEqual(
+      NEW_FLOW,
+    );
+  });
+
+  it('rejects an unknown project', () => {
+    expect(prepareProposal(deps, createWorkflowPayload({ projectId: 42 }))).toEqual({ ok: false, error: 'project_not_found' });
+  });
+
+  it('rejects a Windows-unsafe, reserved, or already-taken name', () => {
+    expect(prepareProposal(deps, createWorkflowPayload({ name: 'docs/review' }))).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/^workflow_name_invalid:/),
+    });
+    expect(prepareProposal(deps, createWorkflowPayload({ name: 'sprint' }))).toEqual({ ok: false, error: 'workflow_name_reserved' });
+    expect(prepareProposal(deps, createWorkflowPayload({ name: '__quick__' }))).toEqual({ ok: false, error: 'workflow_name_reserved' });
+
+    takenWorkflowNames.add('1:Docs Review');
+    expect(prepareProposal(deps, createWorkflowPayload())).toEqual({ ok: false, error: 'workflow_name_taken' });
+  });
+
+  it('checks a global-scoped name against the global namespace, not the project', () => {
+    takenWorkflowNames.add('1:Solo');
+    const noAgentsFlow = { ...NEW_FLOW, phases: [{ ...NEW_FLOW.phases[0], steps: NEW_FLOW.phases[0].steps.filter((s) => s.agent !== 'docs-writer') }] };
+    expect(
+      prepareProposal(deps, createWorkflowPayload({ name: 'Solo', scope: 'global', agents: [], definitionJson: JSON.stringify(noAgentsFlow) })),
+    ).toMatchObject({ ok: true });
+    takenWorkflowNames.add('global:Solo');
+    expect(
+      prepareProposal(deps, createWorkflowPayload({ name: 'Solo', scope: 'global', agents: [], definitionJson: JSON.stringify(noAgentsFlow) })),
+    ).toEqual({ ok: false, error: 'workflow_name_taken' });
+  });
+
+  it('refuses a global flow that mints project-scoped agents', () => {
+    expect(prepareProposal(deps, createWorkflowPayload({ scope: 'global' }))).toEqual({
+      ok: false,
+      error: 'global_scope_with_agents',
+    });
+  });
+
+  it('rejects a definition the strict write-path schema refuses, naming the field', () => {
+    expect(prepareProposal(deps, createWorkflowPayload({ definitionJson: '{not json' }))).toEqual({
+      ok: false,
+      error: 'invalid_definition:definitionJson is not valid JSON',
+    });
+    const badColor = { ...NEW_FLOW, phases: [{ ...NEW_FLOW.phases[0], color: 'blue' }] };
+    expect(prepareProposal(deps, createWorkflowPayload({ definitionJson: JSON.stringify(badColor) }))).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/^invalid_definition:phases\.0\.color: /),
+    });
+  });
+
+  it('runs each new agent through the chokepoint draft checks and the reserved/duplicate key guards', () => {
+    expect(
+      prepareProposal(deps, createWorkflowPayload({ agents: [{ ...DOCS_WRITER, systemPrompt: 'Call cyboflow_create_task.' }] })),
+    ).toMatchObject({ ok: false, error: expect.stringMatching(/^agent_invalid:docs-writer:/) });
+    expect(prepareProposal(deps, createWorkflowPayload({ agents: [{ ...DOCS_WRITER, tools: [] }] }))).toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/^agent_invalid:docs-writer:/),
+    });
+    expect(prepareProposal(deps, createWorkflowPayload({ agents: [{ ...DOCS_WRITER, name: 'Implement' }] }))).toEqual({
+      ok: false,
+      error: 'agent_key_reserved:implement',
+    });
+    expect(prepareProposal(deps, createWorkflowPayload({ agents: [DOCS_WRITER, { ...DOCS_WRITER, name: 'docs writer' }] }))).toEqual({
+      ok: false,
+      error: 'agent_key_taken:docs-writer',
+    });
+    customAgents.add('1:docs-writer');
+    expect(prepareProposal(deps, createWorkflowPayload())).toEqual({ ok: false, error: 'agent_key_taken:docs-writer' });
+  });
+
+  it('rejects a step bound to an agent nothing provides, but accepts an EXISTING custom agent', () => {
+    expect(prepareProposal(deps, createWorkflowPayload({ agents: [] }))).toEqual({
+      ok: false,
+      error: 'unknown_step_agent:docs-writer',
+    });
+    customAgents.add('1:docs-writer');
+    expect(prepareProposal(deps, createWorkflowPayload({ agents: [] }))).toMatchObject({ ok: true });
+  });
+
+  it('checks fan-out inner step bindings too', () => {
+    const fanOut = {
+      ...NEW_FLOW,
+      phases: [
+        {
+          ...NEW_FLOW.phases[0],
+          steps: [
+            {
+              id: 'lanes',
+              name: 'Lanes',
+              agent: 'implement',
+              mcps: [],
+              retries: 0,
+              fanOut: { over: 'tasks', inner: [{ id: 'lane-review', agent: 'ghost-reviewer' }] },
+            },
+          ],
+        },
+      ],
+    };
+    expect(prepareProposal(deps, createWorkflowPayload({ agents: [], definitionJson: JSON.stringify(fanOut) }))).toEqual({
+      ok: false,
+      error: 'unknown_step_agent:ghost-reviewer',
     });
   });
 });

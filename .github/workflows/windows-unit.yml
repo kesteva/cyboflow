@@ -1,0 +1,65 @@
+name: Windows unit tests
+
+# Reusable job: the headless unit chain on a Windows runner. Every
+# `skipIf(process.platform !== 'win32')` test (afterSign cases Y–AA, the
+# named-pipe orch socket, the PowerShell process table, taskkill, the cmd.exe
+# quoting probes) executes ONLY here — no other CI host is Windows.
+#
+# Called from two places, so the job body lives once:
+#   - quality.yml  → part of the main gate (every PR + every push to main)
+#   - windows.yml  → the path-filtered branch-push run and manual dispatch
+#
+# Known flake: `ompRpcClient.test.ts › win32 tree teardown` — the PowerShell
+# Get-CimInstance spawnSync hits the 15 s product timeout when ≥4 Windows
+# runner jobs overlap. quality.yml's concurrency group keeps main pushes from
+# stacking; if it still trips, re-run the job rather than chasing it.
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  unit:
+    name: Unit tests (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 75
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.15.1'
+          cache: 'pnpm'
+
+      # Root postinstall = apply-pty-napi-prebuilds.js (places node-pty's
+      # N-API alias so electron-rebuild skips node-gyp) + electron-builder
+      # install-app-deps. Both native modules are prebuilt; no MSVC involved.
+      - name: Install dependencies
+        run: pnpm install
+
+      # Same step as the ubuntu `test` job. better-sqlite3 v13 has no install
+      # script, so the rebuild is a no-op; the value is the :memory: load probe
+      # that proves prebuilds/win32-x64.node opens under host Node before the
+      # DB suites depend on it.
+      - name: Rebuild better-sqlite3 for host Node ABI
+        run: node scripts/rebuild-better-sqlite3-host.mjs
+
+      # The cyboflowMcpServer subprocess tests spawn the BUILT bundle and
+      # hard-fail under CI=true when it is absent (see quality.yml).
+      - name: Build main (MCP server bundle for subprocess tests)
+        run: pnpm build:main
+
+      # Headless unit chain: main + frontend vitest, schema parity, release
+      # scripts, ABI + build tests. Windows runners are roughly 2× slower than
+      # the ubuntu job's ~10-minute vitest legs, hence the larger ceiling.
+      - name: Run unit tests
+        run: pnpm test:unit
+        env:
+          CI: true
+        timeout-minutes: 60

@@ -47,6 +47,15 @@ You run in your own context window, do **not** write cyboflow state, and do **no
 fix anything — you return a verdict the orchestrator acts on (it loops back to the
 implement subagent on FAIL, up to 3× before escalating).
 
+**Build breaks outside your task.** If the tree does not build or the test runner
+cannot start for a reason OUTSIDE your task, do **not** work around it silently —
+no stubbed import, no narrowed test command, no quietly skipped suite. Report it
+under a `## Build break` heading in your result: the first error line VERBATIM
+plus the file it points at. Then continue with your task if you can. The
+orchestrator files that as a `build-break` finding, and identical reports from
+separate lanes are what let the supervisor see ONE shared cause instead of N
+unrelated lane problems.
+
 ## Result
 
 Return:
@@ -263,3 +272,22 @@ tooling, docs). Emit instead the single line below, bare (no backticks, no
 heading), with your reason after the dash:
 
 VISUAL-VERIFICATION: NOT-APPLICABLE — backend-only change, no rendered UI
+
+## When the run has no verifiable modality
+
+The controller resolves ONE verification posture for the whole run, once, before
+any lane is dispatched — not per lane. When no modality can serve this project
+(the run is stamped for the deferred mobile modality, or for `native-desktop`
+with no proven `native-screen` runbook), it files a single
+`No verifiable modality for this project` finding for the run, skips the
+enqueue for every lane, and SUPPRESSES the per-lane
+`Visual verification did not run for …` findings that would otherwise repeat
+that one fact once per lane.
+
+Nothing about your job changes. Compose Form A or Form B exactly as above: you
+cannot see the run's posture, the composed fence costs nothing when it is not
+enqueued, and a lane that composed one is the lane that gets verified first once
+the project's runbook is in place. Never add a note about verification being
+unavailable, never downgrade a UI change to Form B because you suspect it will
+not be verified, and never try to build and drive the deliverable yourself in
+place of the central verifier.

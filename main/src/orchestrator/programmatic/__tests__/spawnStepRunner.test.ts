@@ -672,4 +672,34 @@ describe('programmaticDisallowedTools', () => {
     };
     expect(programmaticDisallowedTools(def)).toEqual([]);
   });
+  it('threads the compound SELECTED-FINDINGS seed per step and omits it when absent', async () => {
+    // The seeded branch (compound.md) reached the orchestrated plane only: the
+    // block is a main-prompt prepend and a programmatic step turn has no main
+    // prompt. Threaded as a thunk like every other resolver here.
+    const spawner = makeSpawner();
+    const seed = 'Act ONLY on these findings.\n\n## P0 Null deref in parser';
+    const resolveSeed = vi.fn<() => string | undefined>(() => seed);
+    const runner = new SpawnStepRunner(spawner, {
+      ...opts,
+      workflowName: 'compound',
+      selectedFindings: resolveSeed,
+    });
+
+    await runner.runStep(step({ id: 'load-sprint', agent: 'compound-load' }), ctx);
+    expect(resolveSeed).toHaveBeenCalledTimes(1);
+    const seeded = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as ClaudeSpawnerOptions;
+    expect(seeded.prompt).toContain('# Selected findings');
+    expect(seeded.prompt).toContain('P0 Null deref in parser');
+    expect(seeded.prompt).toContain('This run is SEEDED');
+
+    // No thunk ⇒ no section and no branch (byte-identical to before).
+    const bareSpawner = makeSpawner();
+    const bare = new SpawnStepRunner(bareSpawner, { ...opts, workflowName: 'compound' });
+    await bare.runStep(step({ id: 'load-sprint', agent: 'compound-load' }), ctx);
+    const unseeded = (bareSpawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as ClaudeSpawnerOptions;
+    expect(unseeded.prompt).not.toContain('# Selected findings');
+    expect(unseeded.prompt).not.toContain('This run is SEEDED');
+  });
 });

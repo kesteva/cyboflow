@@ -7,6 +7,14 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+# One in-flight run per ref. Main is pushed in batches from local merges, so
+# without this a burst of pushes stacks a run per SHA — and ≥4 overlapping
+# Windows runner jobs is exactly the condition that trips the ompRpcClient
+# teardown flake (see windows-unit.yml). Only the newest SHA's verdict matters.
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   quality-checks:
     name: Quality Checks
@@ -90,6 +98,14 @@ jobs:
       # scripts + ABI + build tests. On ubuntu runners the two vitest legs
       # alone approach 10 minutes; 10 was a timeout, not a pass.
       timeout-minutes: 25
+
+  # The same unit chain on a Windows host — the only place the win32-gated
+  # suites run. Gated on quality-checks like `test` so a lint failure never
+  # spends a Windows runner; runs in parallel with the ubuntu legs.
+  windows-unit:
+    name: Unit tests (Windows)
+    needs: quality-checks
+    uses: ./.github/workflows/windows-unit.yml
 
   # Blocking mocked-SDK integration tier (Tier-3). Runs in PARALLEL with `test`
   # (both only need `quality-checks`), so the PR critical path stays at

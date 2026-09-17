@@ -44,6 +44,8 @@ import { useCenterPaneStore } from '../../stores/centerPaneStore';
 import { useArtifactsList } from '../../hooks/useArtifactsList';
 import { AskUserQuestionCard } from '../AskUserQuestion/AskUserQuestionCard';
 import { PendingApprovalsForRun } from '../ReviewQueue/PendingApprovalsForRun';
+import { ClaudeSignInCard } from '../session/ClaudeSignInCard';
+import { findClaudeLoginRequired } from '../../utils/findClaudeLoginRequired';
 import type { Artifact } from '../../../../shared/types/artifacts';
 
 /**
@@ -246,23 +248,34 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
     ),
     [questionQueue, runId, transcriptToolCallIds],
   );
+  // A Claude login that expired mid-run: the programmatic plane parks the run
+  // as systemic, but the transcript still ends in the CLI's "run /login"
+  // advice. Offer the in-app sign-in there (Claude-provider runs only — a
+  // Codex/OMP run's auth is its own).
+  const claudeLoginRequired =
+    (run?.agent_provider ?? DEFAULT_AGENT_PROVIDER) === 'claude' && findClaudeLoginRequired(messages);
   const unanchoredQuestionSlot = useMemo(
-    () => unanchoredQuestions.length > 0 ? (
-      <div
-        className="overflow-hidden border border-border-primary bg-bg-secondary"
-        data-testid="run-chat-unanchored-questions"
-      >
-        {unanchoredQuestions.map((question) => (
-          <AskUserQuestionCard
-            key={question.id}
-            item={question}
-            onOpenArtifact={onOpenArtifact}
-            openArtifactLabel={primaryArtifact?.label}
-          />
-        ))}
-      </div>
+    () => unanchoredQuestions.length > 0 || claudeLoginRequired ? (
+      <>
+        {unanchoredQuestions.length > 0 && (
+          <div
+            className="overflow-hidden border border-border-primary bg-bg-secondary"
+            data-testid="run-chat-unanchored-questions"
+          >
+            {unanchoredQuestions.map((question) => (
+              <AskUserQuestionCard
+                key={question.id}
+                item={question}
+                onOpenArtifact={onOpenArtifact}
+                openArtifactLabel={primaryArtifact?.label}
+              />
+            ))}
+          </div>
+        )}
+        {claudeLoginRequired && <ClaudeSignInCard />}
+      </>
     ) : undefined,
-    [unanchoredQuestions, onOpenArtifact, primaryArtifact],
+    [unanchoredQuestions, onOpenArtifact, primaryArtifact, claudeLoginRequired],
   );
 
   // -------------------------------------------------------------------------
