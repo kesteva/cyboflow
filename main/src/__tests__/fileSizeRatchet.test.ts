@@ -82,7 +82,7 @@ describe('file-size ratchet (issue #19)', () => {
     const slack: string[] = [];
     for (const [rel, cap] of Object.entries(FROZEN_LINE_CAPS)) {
       const lines = countLines(path.join(root, rel));
-      if (cap > Math.ceil(lines * 1.02)) slack.push(`${rel}: cap ${cap} vs ${lines} lines`);
+      if (cap > Math.floor(lines * 1.02)) slack.push(`${rel}: cap ${cap} vs ${lines} lines`);
     }
     expect(slack, `Lower these caps to the current size:\n${slack.join('\n')}`).toEqual([]);
   });

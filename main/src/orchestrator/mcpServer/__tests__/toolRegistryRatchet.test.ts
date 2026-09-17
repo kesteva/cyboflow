@@ -85,12 +85,18 @@ const CROSS_FIELD_REQUIRED: ReadonlyMap<string, string> = new Map([
   ],
 ]);
 
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+}
+
 /** Every envelope `handleMessage`'s switch has an arm for. */
 function dispatchedEnvelopes(): Set<string> {
   const start = HANDLER_SRC.indexOf('async handleMessage(');
   expect(start, 'handleMessage moved — this ratchet scans the wrong region').toBeGreaterThan(-1);
-  const body = HANDLER_SRC.slice(start);
-  return new Set([...body.matchAll(/case '([a-z-]+)':/g)].map((match) => match[1]));
+  // Strip comments first: a `case` arm demoted to a comment must count as
+  // REMOVED, not still dispatched.
+  const body = stripComments(HANDLER_SRC.slice(start));
+  return new Set([...body.matchAll(/case ['"]([a-z-]+)['"]:/g)].map((match) => match[1]));
 }
 
 /** Every envelope the `McpQueryMessage` union declares a member for. */
@@ -99,8 +105,8 @@ function declaredEnvelopes(): Set<string> {
   const end = MESSAGES_SRC.indexOf('export interface McpQueryResponse');
   expect(start, 'McpQueryMessage moved — this ratchet scans the wrong region').toBeGreaterThan(-1);
   expect(end).toBeGreaterThan(start);
-  const union = MESSAGES_SRC.slice(start, end);
-  return new Set([...union.matchAll(/type: '([a-z-]+)';/g)].map((match) => match[1]));
+  const union = stripComments(MESSAGES_SRC.slice(start, end));
+  return new Set([...union.matchAll(/type: ['"]([a-z-]+)['"];/g)].map((match) => match[1]));
 }
 
 describe('MCP tool registry ratchet: every surface derives from one entry', () => {

@@ -861,8 +861,9 @@ export interface McpQueryHandlerDeps {
    * itself because EvalWorker's boot wiring reaches main/src/services
    * (GitDiffManager, ConfigManager, ReviewItemRouter) and the ORCHESTRATOR
    * LAYERING RULE forbids importing those from here. The result TYPE is imported
-   * (type-only, from the orchestrator-layer eval module) purely so the mapping
-   * below is exhaustively checked.
+   * (type-only, from the orchestrator-layer eval module) purely so the
+   * `AD_HOC_EVAL_REJECTION_ERRORS` mapping in mcpQueryHandler.ts is
+   * exhaustively checked.
    *
    * FIRE-AND-CONTINUE: the callback resolves as soon as the snapshot lands and
    * the jury is enqueued — never after the verdict. Absent ⇒ 'eval_unavailable'

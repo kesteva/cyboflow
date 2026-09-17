@@ -712,7 +712,6 @@ export class McpQueryHandler {
     private readonly deps: McpQueryHandlerDeps = {},
   ) {
     this.workflowConfigCtx = {
-      db: this.db,
       logger: this.logger,
       deps: this.deps,
       writeResponse: (client, response) => this.writeResponse(client, response),

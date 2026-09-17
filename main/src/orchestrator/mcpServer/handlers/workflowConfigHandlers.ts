@@ -30,7 +30,6 @@ import { workflowDefinitionSchema } from '../../workflowDefinitionSchema';
  * `workflowConfigCtx` there).
  */
 export interface WorkflowConfigHandlerContext {
-  readonly db: DatabaseLike;
   readonly logger?: LoggerLike;
   readonly deps: McpQueryHandlerDeps;
   writeResponse(client: net.Socket, response: McpQueryResponse): void;
@@ -57,7 +56,7 @@ export interface WorkflowConfigHandlerContext {
  * missing / terminal runs). Returns the config surface + projectId, or null
  * after writing the appropriate ok:false response.
  */
-export function resolveWorkflowConfig(
+function resolveWorkflowConfig(
   ctx: WorkflowConfigHandlerContext,
   msg: Extract<McpQueryMessage, { runId: string; requestId: string }>,
   client: net.Socket,
@@ -111,7 +110,7 @@ export function toCompactWorkflow(row: WorkflowRow): Record<string, unknown> {
 }
 
 /** Compact variant projection (omits the spec_json / agent_overrides_json blobs). */
-export function toCompactVariant(row: WorkflowVariantRow): Record<string, unknown> {
+function toCompactVariant(row: WorkflowVariantRow): Record<string, unknown> {
   return {
     id: row.id,
     workflow_id: row.workflow_id,
@@ -133,7 +132,7 @@ export function toCompactVariant(row: WorkflowVariantRow): Record<string, unknow
  * or null after writing an ok:false response (bad JSON → 'invalid_json',
  * schema violation → 'invalid_definition').
  */
-export function parseDefinitionJson(
+function parseDefinitionJson(
   ctx: WorkflowConfigHandlerContext,
   definitionJson: string,
   requestId: string,
@@ -171,7 +170,7 @@ export function parseDefinitionJson(
  *   'already exists' → already_exists; 'reserved' → reserved;
  *   otherwise → workflow_config_failed (logged).
  */
-export function writeWorkflowConfigError(
+function writeWorkflowConfigError(
   ctx: WorkflowConfigHandlerContext,
   client: net.Socket,
   requestId: string,
