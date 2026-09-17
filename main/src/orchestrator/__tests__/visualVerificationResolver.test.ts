@@ -327,6 +327,10 @@ describe('resolveVisualVerification — default AGENT engine stamp (redesign §5
       'interactive-web-behavior',
       'native-desktop',
       'responsive-multi-viewport',
+      // The mobile tier the title has always claimed to cover: under the legacy
+      // engine `mobile-flow` intersects to ['maestro'], which the MVP does not
+      // have, so it was exactly the type most at risk of collapsing to [].
+      'mobile-flow',
     ] as const) {
       const r = resolveVisualVerification({ globalDefaultEnabled: true, globalDefaultType: type });
       expect(r.chain).toEqual(['agent']);
