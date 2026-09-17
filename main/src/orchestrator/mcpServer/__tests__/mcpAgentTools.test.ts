@@ -108,8 +108,10 @@ function buildDb(): Database.Database {
   apply('074_agent_threads.sql');
   // 130 adds agent_threads.session_runtime, which AgentThreadDbStore SELECTs.
   apply('131_agent_thread_session_runtime.sql');
-  // ...and 125, which widens agent_proposals.kind to admit 'create-backlog-items'.
+  // ...and 125, which widens agent_proposals.kind to admit 'create-backlog-items',
+  // then 138, which widens it again for 'create-workflow'.
   apply('125_agent_proposal_create_backlog_kind.sql');
+  apply('138_agent_proposal_create_workflow_kind.sql');
   // readWorkflowRow / handleAgentWorkflows now SELECT workflows.archived_at.
   apply('079_workflow_archived_at.sql');
   // ...and workflows.tuning_level, which also decides WHICH definition
@@ -118,6 +120,13 @@ function buildDb(): Database.Database {
   // ...and workflows.runtime_mix + workflow_runs.runtime_mix, which
   // readWorkflowRow's projection now names (migration 128).
   apply('128_workflow_runtime_mix.sql');
+  // agent_overrides — cyboflow_agents lists a project's custom agents from it,
+  // and the create-workflow propose path checks step bindings against it.
+  apply('029_agent_overrides.sql');
+  apply('036_agent_override_model.sql');
+  apply('038_agent_mcp_access.sql');
+  apply('070_agent_override_runtime.sql');
+  apply('104_agent_override_provider_model.sql');
 
   // sessions predates the numbered migrations (database.ts inline bootstrap) —
   // hand-rolled with only the columns cyboflow_overview's SELECT touches.
@@ -300,6 +309,39 @@ const CUSTOM_DEFINITION: WorkflowDefinition = {
     },
   ],
 };
+
+/** A strict-schema-valid flow binding a builtin, the human gate, and a NEW agent. */
+const DOCS_FLOW: WorkflowDefinition = {
+  id: 'docs-review',
+  phases: [
+    {
+      id: 'review',
+      label: 'Review',
+      color: '#3b6dd6',
+      steps: [
+        { id: 'survey', name: 'Survey', agent: 'implement', mcps: [], retries: 0 },
+        { id: 'write', name: 'Write', agent: 'docs-writer', mcps: [], retries: 0 },
+        { id: 'approve', name: 'Approve', agent: 'human', mcps: [], retries: 0, human: true },
+      ],
+    },
+  ],
+};
+
+const DOCS_WRITER = {
+  name: 'Docs Writer',
+  description: 'Writes the docs for a change.',
+  systemPrompt: 'You write documentation. Return a summary.',
+  tools: ['Read', 'Edit'],
+};
+
+/** Seed one custom agent row the way AgentOverrideRouter.createCustom would. */
+function seedCustomAgent(db: Database.Database, projectId: number, agentKey: string): void {
+  db.prepare(
+    `INSERT INTO agent_overrides
+       (id, project_id, agent_key, base_agent_key, name, role, description, system_prompt, tools_json, enabled_mcps_json, is_custom, version)
+     VALUES (?, ?, ?, NULL, ?, NULL, 'A custom agent', 'Do the thing.', '["Read"]', '[]', 1, 1)`,
+  ).run(`ago_${agentKey}`, projectId, agentKey, `cyboflow-${agentKey}`);
+}
 
 /** Create an entity via the real mcp-create-task handler; returns its id + ref. */
 async function createEntity(
@@ -580,6 +622,44 @@ describe('McpQueryHandler global-agent tool family', () => {
       const { socket, writes } = makeSocketDouble();
       await handler.handleMessage({ type: 'mcp-queue', requestId: 'r1', runId: 'run-abc' }, socket);
       expect(parseLastWrite(writes)).toMatchObject({ ok: false, error: 'not_a_global_agent_run' });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // cyboflow_agents
+  // -------------------------------------------------------------------------
+
+  describe('mcp-agents', () => {
+    it('lists every builtin key plus the project\'s custom agents, with the gate + tool vocabulary', async () => {
+      seedCustomAgent(db, 1, 'docs-writer');
+      seedCustomAgent(db, 2, 'other-project-agent');
+
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage({ type: 'mcp-agents', requestId: 'r1', runId: 'agent:thread-1', projectId: 1 }, socket);
+      const res = parseLastWrite(writes);
+      expect(res.ok).toBe(true);
+      const data = res.data as {
+        agents: Array<{ agent_key: string; source: string; tools: string[] }>;
+        human_gate_agent: string;
+        tool_vocabulary: string[];
+      };
+      const byKey = new Map(data.agents.map((a) => [a.agent_key, a]));
+      expect(byKey.get('implement')).toMatchObject({ source: 'builtin' });
+      expect(byKey.get('docs-writer')).toMatchObject({ source: 'custom', tools: ['Read'] });
+      // Custom agents are project-scoped — another project's never leaks in.
+      expect(byKey.has('other-project-agent')).toBe(false);
+      expect(data.human_gate_agent).toBe('human');
+      expect(data.tool_vocabulary).toContain('Bash');
+    });
+
+    it('rejects an unknown project and a run-scoped runId', async () => {
+      const unknown = makeSocketDouble();
+      await handler.handleMessage({ type: 'mcp-agents', requestId: 'r1', runId: 'agent:thread-1', projectId: 4242 }, unknown.socket);
+      expect(parseLastWrite(unknown.writes)).toMatchObject({ ok: false, error: 'project_not_found' });
+
+      const runScoped = makeSocketDouble();
+      await handler.handleMessage({ type: 'mcp-agents', requestId: 'r2', runId: 'run-1', projectId: 1 }, runScoped.socket);
+      expect(parseLastWrite(runScoped.writes).ok).toBe(false);
     });
   });
 
@@ -1069,6 +1149,67 @@ describe('McpQueryHandler global-agent tool family', () => {
         socket,
       );
       expect(parseLastWrite(writes)).toMatchObject({ ok: false, error: 'project_not_found' });
+    });
+
+    it('create-workflow: stores the flow + agents with null preconditions, trimming the name', async () => {
+      const payload = {
+        kind: 'create-workflow',
+        projectId: 1,
+        name: ' Docs Review ',
+        definitionJson: JSON.stringify(DOCS_FLOW),
+        agents: [DOCS_WRITER],
+        summary: 'A docs-review flow',
+      };
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        { type: 'mcp-propose-action', requestId: 'r1', runId: 'agent:thread-1', payloadJson: JSON.stringify(payload) },
+        socket,
+      );
+      const res = parseLastWrite(writes);
+      expect(res).toMatchObject({ ok: true });
+      const { proposalId } = res.data as { proposalId: string };
+      const proposal = store.getProposal(proposalId) as AgentProposal;
+      expect(proposal.kind).toBe('create-workflow');
+      expect(proposal.preconditions).toBeNull();
+      expect(proposal.payload).toEqual({ ...payload, name: 'Docs Review' });
+      // Proposing NEVER mints anything — the flow and agent land only on Confirm.
+      expect(db.prepare("SELECT COUNT(*) AS n FROM workflows WHERE name = 'Docs Review'").get()).toEqual({ n: 0 });
+      expect(db.prepare('SELECT COUNT(*) AS n FROM agent_overrides').get()).toEqual({ n: 0 });
+    });
+
+    it('create-workflow: rejects a step bound to nothing, but accepts an EXISTING custom agent of the project', async () => {
+      const payload = { kind: 'create-workflow', projectId: 1, name: 'Docs Review', definitionJson: JSON.stringify(DOCS_FLOW) };
+      const first = makeSocketDouble();
+      await handler.handleMessage(
+        { type: 'mcp-propose-action', requestId: 'r1', runId: 'agent:thread-1', payloadJson: JSON.stringify(payload) },
+        first.socket,
+      );
+      expect(parseLastWrite(first.writes)).toMatchObject({ ok: false, error: 'unknown_step_agent:docs-writer' });
+
+      seedCustomAgent(db, 1, 'docs-writer');
+      const second = makeSocketDouble();
+      await handler.handleMessage(
+        { type: 'mcp-propose-action', requestId: 'r2', runId: 'agent:thread-1', payloadJson: JSON.stringify(payload) },
+        second.socket,
+      );
+      expect(parseLastWrite(second.writes).ok).toBe(true);
+    });
+
+    it('create-workflow: rejects a name a project or global flow already uses', async () => {
+      seedWorkflowRow(db, 'wf-taken', 1, 'Docs Review', CUSTOM_DEFINITION);
+      const payload = {
+        kind: 'create-workflow',
+        projectId: 1,
+        name: 'Docs Review',
+        definitionJson: JSON.stringify(DOCS_FLOW),
+        agents: [DOCS_WRITER],
+      };
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        { type: 'mcp-propose-action', requestId: 'r1', runId: 'agent:thread-1', payloadJson: JSON.stringify(payload) },
+        socket,
+      );
+      expect(parseLastWrite(writes)).toMatchObject({ ok: false, error: 'workflow_name_taken' });
     });
 
     it('create-backlog-items: rejects an unknown taskType / empty title / empty batch with invalid_payload', async () => {

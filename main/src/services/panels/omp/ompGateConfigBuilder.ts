@@ -118,6 +118,7 @@ export const CYBOFLOW_MCP_SERVER_NAME = 'cyboflow';
  */
 export const CYBOFLOW_MCP_TOOL_NAMES: readonly string[] = [
   'cyboflow_add_task_dependency',
+  'cyboflow_agents',
   'cyboflow_await_verification',
   'cyboflow_backlog',
   'cyboflow_commit_artifact',

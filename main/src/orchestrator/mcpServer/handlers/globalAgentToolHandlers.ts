@@ -2,7 +2,8 @@
  * globalAgentToolHandlers — the cyboflow_db_query / cyboflow_fs_read /
  * cyboflow_fs_list / cyboflow_fs_grep / cyboflow_history MCP handler family,
  * extracted from mcpQueryHandler.ts (GitHub issue #19, the god-file split,
- * step 3).
+ * step 3), plus the cyboflow_workflows / cyboflow_workflow / cyboflow_agents /
+ * cyboflow_propose_action family that followed it out.
  *
  * A CLASS rather than free functions (contrast workflowConfigHandlers.ts):
  * this family owns process-lifetime state, the lazily-opened readonly sibling
@@ -42,6 +43,17 @@ import {
   GREP_SKIP_DIRS,
 } from '../fsAccessGuard';
 import { extractTurnText, excerptAround, truncateHead, TURN_TEXT_MAX_CHARS } from '../../agentThread/transcriptSearch';
+import { resolveEffectiveDefinition } from '../../../../../shared/tuning/workflowTuning';
+import type { WorkflowRow } from '../../../../../shared/types/workflows';
+import { CLI_TOOLS } from '../../../../../shared/types/cliTools';
+import { HUMAN_GATE_AGENT } from '../../../../../shared/types/agentIdentity';
+import type { AgentOverrideRow } from '../../../database/models';
+import { QUICK_WORKFLOW_NAME, LEGACY_DROPPED_WORKFLOW_NAMES } from '../../workflowRegistry';
+import { computeSpecHash } from '../../agentThread/specHash';
+import { prepareProposal, createPrepareProposalDeps } from '../../agentThread/prepareProposal';
+import { computeEffectiveAgents } from '../../agents/effectiveAgents';
+import { loadBuiltInAgents } from '../../agents/agentCatalogue';
+import { readWorkflowRow, toCompactWorkflow } from './workflowConfigHandlers';
 
 /**
  * Everything the global-agent tool handlers need from McpQueryHandler, built
@@ -781,6 +793,187 @@ export class GlobalAgentToolHandlers {
         nextBeforeId: truncated ? lastProcessedId : null,
         scanned,
       },
+    });
+  }
+  // --------------------------------------------------------------------------
+  // cyboflow_workflows / cyboflow_workflow / cyboflow_agents / cyboflow_propose_action
+  // — moved here from mcpQueryHandler.ts (issue #19, the god-file split) when
+  // the create-workflow proposal kind + the agents read landed.
+  // --------------------------------------------------------------------------
+
+  /**
+   * READ-ONLY: the agent vocabulary a workflow definition may bind for ONE
+   * project — every builtin key merged with the project's Agents-pane
+   * overrides, plus its custom agents, exactly as `resolveRunEffectiveAgents`
+   * would spawn them. This is what lets the assistant compose a create-workflow
+   * proposal whose step bindings resolve: a step's `agent` must be one of these
+   * keys, the `human` gate, or an agent the same proposal mints.
+   */
+  handleAgentAgents(
+    msg: Extract<McpQueryMessage, { type: 'mcp-agents' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.ctx.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+    const projectExists = this.ctx.db.prepare('SELECT 1 FROM projects WHERE id = ?').get(msg.projectId) !== undefined;
+    if (!projectExists) {
+      this.ctx.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'project_not_found' });
+      return;
+    }
+    const overrides = this.ctx.db
+      .prepare('SELECT * FROM agent_overrides WHERE project_id = ? ORDER BY agent_key')
+      .all(msg.projectId) as AgentOverrideRow[];
+    const effective = computeEffectiveAgents(loadBuiltInAgents(), overrides);
+    this.ctx.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: {
+        agents: effective.map((agent) => ({
+          agent_key: agent.agentKey,
+          source: agent.source,
+          role: agent.role,
+          description: agent.description,
+          tools: agent.tools,
+          enabled_mcps: agent.enabledMcps,
+          model: agent.model,
+        })),
+        human_gate_agent: HUMAN_GATE_AGENT,
+        tool_vocabulary: CLI_TOOLS,
+      },
+    });
+  }
+
+  handleAgentWorkflows(
+    msg: Extract<McpQueryMessage, { type: 'mcp-workflows' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.ctx.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+
+    // Same exclusion + "must resolve to a usable definition" filter as
+    // WorkflowRegistry.listByProject, but scanning every project at once
+    // (or one project when msg.projectId narrows) rather than unioning
+    // (project_id = ? OR project_id IS NULL) per-project — there is no
+    // per-project repetition to dedupe here.
+    const excluded = [QUICK_WORKFLOW_NAME, ...LEGACY_DROPPED_WORKFLOW_NAMES];
+    const placeholders = excluded.map(() => '?').join(', ');
+    const clauses = [`name NOT IN (${placeholders})`];
+    const params: unknown[] = [...excluded];
+    if (msg.projectId !== undefined) {
+      clauses.push('(project_id = ? OR project_id IS NULL)');
+      params.push(msg.projectId);
+    }
+    const rows = this.ctx.db
+      .prepare(
+        `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, tuning_level, runtime_mix, created_at, archived_at
+           FROM workflows
+          WHERE ${clauses.join(' AND ')}
+          ORDER BY name`,
+      )
+      .all(...params) as WorkflowRow[];
+    const usable = rows.filter(
+      (row) => resolveEffectiveDefinition(row.name, row.spec_json, row.tuning_level) !== null,
+    );
+
+    this.ctx.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { workflows: usable.map((r) => toCompactWorkflow(r)) },
+    });
+  }
+
+  handleAgentWorkflow(
+    msg: Extract<McpQueryMessage, { type: 'mcp-workflow' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.ctx.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+
+    const row = readWorkflowRow(this.ctx.db, msg.workflowId);
+    if (!row) {
+      this.ctx.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'not_found' });
+      return;
+    }
+    const definition = resolveEffectiveDefinition(row.name, row.spec_json, row.tuning_level);
+    const baselineRow = this.ctx.db
+      .prepare(
+        'SELECT baseline_in_rotation AS inRotation, baseline_rotation_weight AS weight FROM workflows WHERE id = ?',
+      )
+      .get(msg.workflowId) as { inRotation: number; weight: number } | undefined;
+
+    this.ctx.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: {
+        workflow: toCompactWorkflow(row),
+        definition,
+        baseline_rotation: baselineRow ? { inRotation: baselineRow.inRotation === 1, weight: baselineRow.weight } : null,
+        // CAS material for a future cyboflow_propose_action{kind:'edit-workflow'}
+        // call — null only when the row is a broken custom flow with no
+        // resolvable definition (definition is also null in that case).
+        spec_hash: definition !== null ? computeSpecHash(definition) : null,
+      },
+    });
+  }
+
+  handleProposeAction(
+    msg: Extract<McpQueryMessage, { type: 'mcp-propose-action' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.ctx.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+    const store = this.ctx.deps.agentThreadStore;
+    if (!store) {
+      this.ctx.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'agent_thread_store_unavailable',
+      });
+      return;
+    }
+
+    let raw: unknown;
+    try {
+      raw = JSON.parse(msg.payloadJson);
+    } catch {
+      this.ctx.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_json' });
+      return;
+    }
+    const prepared = prepareProposal(createPrepareProposalDeps(this.ctx.db), raw);
+    if (!prepared.ok) {
+      this.ctx.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: prepared.error });
+      return;
+    }
+    const { payload, preconditions } = prepared;
+
+    const proposal = store.createProposal({ threadId: ctx.threadId, payload, preconditions });
+    store.appendEvent(
+      ctx.threadId,
+      'proposal-created',
+      JSON.stringify({ proposalId: proposal.id, kind: proposal.kind }),
+    );
+
+    this.ctx.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { proposalId: proposal.id },
     });
   }
 }

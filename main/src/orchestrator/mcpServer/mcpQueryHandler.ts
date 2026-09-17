@@ -87,9 +87,8 @@ import {
   isPermissionMode,
   VERIFY_SETUP_WORKFLOW_NAME,
 } from '../../../../shared/types/workflows';
-import { resolveEffectiveDefinition } from '../../../../shared/tuning/workflowTuning';
 import { resolveRunFrozenSpec } from '../runFrozenSpec';
-import type { PermissionMode, WorkflowRow } from '../../../../shared/types/workflows';
+import type { PermissionMode } from '../../../../shared/types/workflows';
 import { buildStepTransitionEvent } from '../stepTransitionBridge';
 import { handleEntityWrite } from '../autoMintArtifacts';
 import { listRunDecomposedIdeaIds, listRunCreatedTaskIds } from '../runEntityOwnership';
@@ -113,9 +112,7 @@ import { FeedbackRouter, FeedbackError } from '../feedbackRouter';
 import type { ArtifactActor } from '../artifactRouter';
 import type { ArtifactType } from '../../../../shared/types/artifacts';
 import { PROTOTYPE_HTML_RELPATH, MAX_PROTOTYPE_HTML_BYTES, ARTIFACT_POLICIES } from '../../../../shared/types/artifacts';
-import { QUICK_WORKFLOW_NAME, LEGACY_DROPPED_WORKFLOW_NAMES } from '../workflowRegistry';
-import { computeSpecHash } from '../agentThread/specHash';
-import { prepareProposal, createPrepareProposalDeps } from '../agentThread/prepareProposal';
+import { QUICK_WORKFLOW_NAME } from '../workflowRegistry';
 import {
   AGENT_REQUEST_TIMEOUT_CEILING_MS,
   VerificationScheduler,
@@ -179,8 +176,6 @@ import {
   handleSetVariantStatus,
   handleDeleteVariant,
   handleSetBaselineRotation,
-  readWorkflowRow,
-  toCompactWorkflow,
 } from './handlers/workflowConfigHandlers';
 import { GlobalAgentToolHandlers } from './handlers/globalAgentToolHandlers';
 export type { McpQueryMessage, McpQueryResponse, McpQueryHandlerDeps, WorkflowConfigLike } from './mcpQueryMessages';
@@ -690,13 +685,16 @@ export class McpQueryHandler {
           this.handleAgentQueue(msg, client);
           break;
         case 'mcp-workflows':
-          this.handleAgentWorkflows(msg, client);
+          this.globalAgentTools.handleAgentWorkflows(msg, client);
           break;
         case 'mcp-workflow':
-          this.handleAgentWorkflow(msg, client);
+          this.globalAgentTools.handleAgentWorkflow(msg, client);
+          break;
+        case 'mcp-agents':
+          this.globalAgentTools.handleAgentAgents(msg, client);
           break;
         case 'mcp-propose-action':
-          this.handleProposeAction(msg, client);
+          this.globalAgentTools.handleProposeAction(msg, client);
           break;
         case 'mcp-db-query':
           this.globalAgentTools.handleAgentDbQuery(msg, client);
@@ -5523,136 +5521,6 @@ export class McpQueryHandler {
       requestId: msg.requestId,
       ok: true,
       data: { items, total: items.length },
-    });
-  }
-
-  private handleAgentWorkflows(
-    msg: Extract<McpQueryMessage, { type: 'mcp-workflows' }>,
-    client: net.Socket,
-  ): void {
-    const ctx = resolveGlobalAgentContext(msg.runId);
-    if (!ctx.ok) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
-      return;
-    }
-
-    // Same exclusion + "must resolve to a usable definition" filter as
-    // WorkflowRegistry.listByProject, but scanning every project at once
-    // (or one project when msg.projectId narrows) rather than unioning
-    // (project_id = ? OR project_id IS NULL) per-project — there is no
-    // per-project repetition to dedupe here.
-    const excluded = [QUICK_WORKFLOW_NAME, ...LEGACY_DROPPED_WORKFLOW_NAMES];
-    const placeholders = excluded.map(() => '?').join(', ');
-    const clauses = [`name NOT IN (${placeholders})`];
-    const params: unknown[] = [...excluded];
-    if (msg.projectId !== undefined) {
-      clauses.push('(project_id = ? OR project_id IS NULL)');
-      params.push(msg.projectId);
-    }
-    const rows = this.db
-      .prepare(
-        `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, tuning_level, runtime_mix, created_at, archived_at
-           FROM workflows
-          WHERE ${clauses.join(' AND ')}
-          ORDER BY name`,
-      )
-      .all(...params) as WorkflowRow[];
-    const usable = rows.filter(
-      (row) => resolveEffectiveDefinition(row.name, row.spec_json, row.tuning_level) !== null,
-    );
-
-    this.writeResponse(client, {
-      type: 'mcp-query-response',
-      requestId: msg.requestId,
-      ok: true,
-      data: { workflows: usable.map((r) => toCompactWorkflow(r)) },
-    });
-  }
-
-  private handleAgentWorkflow(
-    msg: Extract<McpQueryMessage, { type: 'mcp-workflow' }>,
-    client: net.Socket,
-  ): void {
-    const ctx = resolveGlobalAgentContext(msg.runId);
-    if (!ctx.ok) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
-      return;
-    }
-
-    const row = readWorkflowRow(this.db, msg.workflowId);
-    if (!row) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'not_found' });
-      return;
-    }
-    const definition = resolveEffectiveDefinition(row.name, row.spec_json, row.tuning_level);
-    const baselineRow = this.db
-      .prepare(
-        'SELECT baseline_in_rotation AS inRotation, baseline_rotation_weight AS weight FROM workflows WHERE id = ?',
-      )
-      .get(msg.workflowId) as { inRotation: number; weight: number } | undefined;
-
-    this.writeResponse(client, {
-      type: 'mcp-query-response',
-      requestId: msg.requestId,
-      ok: true,
-      data: {
-        workflow: toCompactWorkflow(row),
-        definition,
-        baseline_rotation: baselineRow ? { inRotation: baselineRow.inRotation === 1, weight: baselineRow.weight } : null,
-        // CAS material for a future cyboflow_propose_action{kind:'edit-workflow'}
-        // call — null only when the row is a broken custom flow with no
-        // resolvable definition (definition is also null in that case).
-        spec_hash: definition !== null ? computeSpecHash(definition) : null,
-      },
-    });
-  }
-
-  private handleProposeAction(
-    msg: Extract<McpQueryMessage, { type: 'mcp-propose-action' }>,
-    client: net.Socket,
-  ): void {
-    const ctx = resolveGlobalAgentContext(msg.runId);
-    if (!ctx.ok) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
-      return;
-    }
-    const store = this.deps.agentThreadStore;
-    if (!store) {
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: false,
-        error: 'agent_thread_store_unavailable',
-      });
-      return;
-    }
-
-    let raw: unknown;
-    try {
-      raw = JSON.parse(msg.payloadJson);
-    } catch {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_json' });
-      return;
-    }
-    const prepared = prepareProposal(createPrepareProposalDeps(this.db), raw);
-    if (!prepared.ok) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: prepared.error });
-      return;
-    }
-    const { payload, preconditions } = prepared;
-
-    const proposal = store.createProposal({ threadId: ctx.threadId, payload, preconditions });
-    store.appendEvent(
-      ctx.threadId,
-      'proposal-created',
-      JSON.stringify({ proposalId: proposal.id, kind: proposal.kind }),
-    );
-
-    this.writeResponse(client, {
-      type: 'mcp-query-response',
-      requestId: msg.requestId,
-      ok: true,
-      data: { proposalId: proposal.id },
     });
   }
 
