@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
 import type { ChildProcess } from 'child_process';
+import path from 'node:path';
 import {
   ClaudeAuthLoginService,
   parseAuthStatus,
@@ -263,8 +264,11 @@ describe('binary resolution', () => {
       expect(spec).toBe('@anthropic-ai/claude-agent-sdk-darwin-arm64/package.json');
       return '/repo/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/package.json';
     };
+    // Built with path.join, not a literal: the resolver joins with the HOST's
+    // separator, so a hard-coded POSIX expectation fails on a Windows runner
+    // while the production path is correct there.
     expect(resolveDevBundledClaudePath(resolver, 'darwin', 'arm64')).toBe(
-      '/repo/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude',
+      path.join('/repo/node_modules/@anthropic-ai/claude-agent-sdk-darwin-arm64', 'claude'),
     );
     expect(resolveDevBundledClaudePath(() => { throw new Error('MODULE_NOT_FOUND'); }, 'win32', 'x64')).toBeUndefined();
   });
