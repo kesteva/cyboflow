@@ -305,6 +305,23 @@ describe('parseAgentProposalPayload — create-workflow', () => {
     expect(parseAgentProposalPayload(createWorkflowPayload({ agents: 'docs-writer' }))).toBeNull();
     expect(parseAgentProposalPayload(createWorkflowPayload({ definitionJson: '' }))).toBeNull();
   });
+
+  // The live smoke's first attempt nested the definition as an object inside
+  // payload_json (the natural way to compose it) and got 'invalid_payload' five
+  // times running — an object is re-encoded, not rejected, on both arms.
+  it('accepts definitionJson as a plain object and re-encodes it (create-workflow and edit-workflow)', () => {
+    expect(parseAgentProposalPayload(createWorkflowPayload({ definitionJson: NEW_FLOW }))).toMatchObject({
+      kind: 'create-workflow',
+      definitionJson: JSON.stringify(NEW_FLOW),
+    });
+    expect(parseAgentProposalPayload({ kind: 'edit-workflow', workflowId: 'wf-1', definitionJson: NEW_FLOW })).toEqual({
+      kind: 'edit-workflow',
+      workflowId: 'wf-1',
+      definitionJson: JSON.stringify(NEW_FLOW),
+    });
+    expect(parseAgentProposalPayload(createWorkflowPayload({ definitionJson: [NEW_FLOW] }))).toBeNull();
+    expect(parseAgentProposalPayload(createWorkflowPayload({ definitionJson: null }))).toBeNull();
+  });
 });
 
 describe('prepareProposal — create-workflow validation', () => {
