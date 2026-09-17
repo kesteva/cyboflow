@@ -61,8 +61,11 @@ When a section has no entries, keep its heading and write `None.` under it — t
 human should SEE that you looked and found nothing, not have to infer it from a
 missing heading.
 
-If the prompt carries a `## Design gate: revision requested` section, this is a
-RE-REVIEW: the surfaces changed in response to your previous round. Review what
+If the prompt carries a `## Design gate: revision requested` or an
+`## Adversarial review: revision requested` section — or the orchestrator
+otherwise tells you this is a re-review — this is a RE-REVIEW: the surfaces
+changed in response to your previous round (a human's Revise at the design gate,
+or the workflow's automatic revision on your own blocking verdict). Review what
 is in front of you now, from scratch. Say for each previously-blocking `AR-n`
 whether it is resolved, and number any NEW entries continuing from the highest id
 you used before so the two rounds can be read together.
