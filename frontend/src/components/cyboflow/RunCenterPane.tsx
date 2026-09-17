@@ -202,7 +202,13 @@ export function RunCenterPane({
     if (activeTab.kind === 'file' && activeTab.filePath) {
       // The diff source is the pane's session key (the run's parent session).
       return (
-        <FileTabRenderer sessionId={sessionKey} filePath={activeTab.filePath} status={activeTab.status} />
+        <FileTabRenderer
+          sessionId={sessionKey}
+          filePath={activeTab.filePath}
+          status={activeTab.status}
+          baseRef={activeTab.baseRef}
+          scope={activeTab.scope}
+        />
       );
     }
     if (activeTab.kind === 'approved-design' && activeTab.ideaId) {

@@ -2509,7 +2509,7 @@ export const runsRouter = router({
    * adds a ctx.gitDiff precondition (PRECONDITION_FAILED until wired at boot).
    */
   gitDiff: protectedProcedure
-    .input(z.object({ runId: z.string().min(1) }))
+    .input(z.object({ runId: z.string().min(1), comparisonRef: z.string().min(1).optional() }))
     .query(async ({ ctx, input }): Promise<RunGitDiff | null> => {
       if (!ctx.db) {
         throw new TRPCError({
@@ -2536,8 +2536,10 @@ export const runsRouter = router({
       // Diff against the run's base_sha (worktree HEAD at launch) so committed
       // work — sprint/ship runs merge parallel task lanes back to the branch —
       // shows alongside uncommitted/untracked changes. Legacy runs without a
-      // base_sha fall back to the working-directory diff.
-      return ctx.gitDiff(row.worktree_path, row.base_sha ?? undefined);
+      // base_sha fall back to the working-directory diff. `comparisonRef`
+      // (TASK-211), when supplied, overrides base_sha for this one call — SHA
+      // resolution and the priority between the two is the backend closure's job.
+      return ctx.gitDiff(row.worktree_path, row.base_sha ?? undefined, input.comparisonRef);
     }),
 
   /**

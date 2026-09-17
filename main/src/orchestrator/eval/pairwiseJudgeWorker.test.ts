@@ -85,6 +85,17 @@ const diffFor = (path: string, text: string): RunGitDiff => ({
   diff: text,
   stats: { additions: 1, deletions: 0, filesChanged: 1 },
   changedFiles: [path],
+  resolvedBase: null,
+  worktree: {
+    entries: [],
+    groups: [
+      { scope: 'unstaged', files: [], additions: 0, deletions: 0 },
+      { scope: 'staged', files: [], additions: 0, deletions: 0 },
+      { scope: 'untracked', files: [], additions: 0, deletions: 0 },
+      { scope: 'committed', files: [], additions: 0, deletions: 0 },
+    ],
+    committedUnavailable: true,
+  },
 });
 
 class FakeJudge implements PairwiseJudgeClient {

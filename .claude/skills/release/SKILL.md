@@ -53,10 +53,14 @@ Work through the phases **in order** and do not skip verification.
 5. Confirm all four agent binaries are present (a plain install prunes to host
    arch):
    ```bash
-   ls -d node_modules/@anthropic-ai/claude-agent-sdk-darwin-{arm64,x64} \
-         node_modules/@openai/codex-darwin-{arm64,x64}
+   ls -l node_modules/@anthropic-ai/claude-agent-sdk-darwin-{arm64,x64}/claude \
+         node_modules/@openai/codex-darwin-{arm64,x64}/vendor/*-apple-darwin/bin/codex
    ```
-   If any are missing, run the cross-arch install **with `--force`** (see runbook).
+   Test the **binaries**, never `ls -d` on the package dirs — those are pnpm
+   symlinks that outlive a prune as dangling links and pass the check while the
+   x64 build dies at preflight (0.4.1). If any are missing, run the cross-arch
+   install **with `--force`** (see runbook), then `node node_modules/electron/install.js`
+   — the forced install strips `electron/dist`, which `gen-mac-latest-yml.mjs` needs.
 6. Windows leg prerequisites: `gh auth status` is logged in (dispatching
    `windows.yml` + downloading its artifacts), `osslsigncode` is installed
    (`brew install osslsigncode`), and the repo has the `AZURE_TENANT_ID` /

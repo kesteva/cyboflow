@@ -6,6 +6,77 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-09-16
+
+### Added
+
+- **Custom views.** A customize mode for the project surfaces: a draft lifecycle with a header
+  switcher, editable blocks, a widget library with a built-in catalog, per-widget settings, and
+  save/manage dialogs. Widgets render in a sandboxed frame served from a loopback document server
+  and read the backlog through a read-only query executor with a data cache and circuit breaker.
+  The assistant can author widgets too — `db_schema`, `widget_preview` and `widget_save` tools, a
+  placeholder slot with a live draft preview, publish/discard, and a composer kickoff carrying the
+  context hint; a session-less widget can request publish into the library. (Migration 133.)
+- **Two-way approve-design gate.** The Planner, Ship and Launch flows' approve-design gate now
+  declares a loopback: *Revise* re-runs the design pass with the reviewer's note threaded into every
+  re-run step, *Approve* continues. The gate body is built from the adversarial review and every
+  human gate shows its pending-findings count; the review-queue buttons are labelled as
+  continue-and-log vs rerun-planning. A gate side-effects singleton binds designs on
+  approve-ideas/approve-design, stamps thoroughness, files accepted-risk findings and reconciles at
+  settle. `approved_designs` accepts flow-sourced rows (migration 134).
+- **Solution thoroughness.** Launch stamps a per-project thoroughness level (prototype → efficient,
+  v1 → standard, production → thorough; migration 135), the wizard defaults its tuning level from
+  it, and the step-prompt contracts carry thoroughness budgets, Design spec folds and design
+  surfaces. An approved design opens from task/epic cards, task detail and sprint lanes.
+- **Adversarial review artifact.** A machine-parseable adversarial-review artifact type
+  (migration 136) with its own parser, rendered as a tab on the artifacts view.
+- **Onboarding checks for git.** A machine without git — or with git but no `user.name` /
+  `user.email` — used to fail 30 s into the first session with a generic quick-session timeout.
+  The tour now probes git at boot (over tRPC) and blocks on a prerequisite card with per-platform
+  install lines and a "Check again" that re-resolves PATH; the worktree's initial commit also gets
+  a fallback identity when git has none, and session-creation job errors surface immediately
+  instead of after the 30 s timeout.
+- **Assistant composer image attachments**, with a cap applied against the live list when pastes
+  overlap; the composer shows which model is running the assistant, and the rail header's gear
+  deep-links to Settings → Assistant.
+
+### Changed
+
+- **Quick-session briefing rides the system prompt.** The Claude PTY lane spent every quick
+  session's first turn acknowledging its own briefing, sent as the argv prompt. It now goes out on
+  `--append-system-prompt` (its own `sessionBriefing` option — `systemPromptAppend` remains the
+  workflow channel), the prompt slot carries only a real user turn, idle spawns rest at the
+  turn-end status, and resume/respawn receive the briefing too.
+- **Transcript discovery is pinned to a minted `--session-id`** instead of binding the first new
+  `*.jsonl` in a directory shared by every process with the same cwd — which could adopt a
+  stranger's conversation. Discovery arms on the first turn, and a deferred deadline re-defers
+  instead of latching.
+### Fixed
+
+- **Blocked ≠ failed in the programmatic plane.** A lane whose prerequisite failed was written
+  `failed`, so blocking spread transitively ("55 failed" for 4 real failures). Lanes now carry a
+  separate `blocked` state, the partial-sprint gate lists never-started lanes with the prerequisite
+  they wait on, and the built-in Sprint/Ship definitions self-loop `implement` once so a first-step
+  failure costs one attempt, not the lane.
+- **Systemic errors park the fan-out instead of failing lanes.** Verb-first session/usage-limit
+  errors ("hit your session limit") classify as systemic; three lanes failing with byte-identical
+  error text corroborate into the park-and-resume path; lane-triage consults serialize behind the
+  systemic latch; deferred failures persist on cancel; and a fan-out whose triage itself dies on a
+  systemic error is parked rather than failed.
+- **Run cost no longer overcounts resumed sessions.** `total_cost_usd` is cumulative per SDK
+  process, so summing every result inflated any resumed run ($1,976.97 shown for ~$125 real). Cost
+  is now laddered per (run, session) segment; migration 132 drops the stale `run_usage` rows so
+  the boot backfill recomputes them. An empty or partial `modelUsage` is treated as not comparable.
+- **Cyboflow's git excludes live in `.git/info/exclude`**, written by one shared helper, instead of
+  being appended to the project's tracked `.gitignore` (which left an untracked file that blocked
+  the in-app fast-forward merge). Merge failures now lead with git's own output.
+- The Sprint batch cap is enforced inside the lane store, so the assistant's launch-run seam can no
+  longer bypass it (`ship_batch_too_large`).
+- The custom-views draft Save widget is a primary CTA; the customize dialogs lose their doubled
+  close button; the draft preview polls the draft spec for authoring.
+- The `dl.cyboflow.com` redirector serves the Windows installer (its allowlist was per-extension
+  and only knew `.dmg`).
+
 ## [0.4.0] — 2026-09-14
 
 ### Added

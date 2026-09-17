@@ -180,6 +180,31 @@ describe('centerPaneStore', () => {
     expect(s.activeTabId).toBe('design:idea-2');
   });
 
+  it('re-opening the same file path with a different baseRef updates the existing tab (no duplicate)', () => {
+    get().ensureSession(KEY);
+    get().openFileTab(KEY, { filePath: 'src/a.ts', status: 'M', baseRef: 'main', scope: 'unstaged' });
+    let s = get().bySession[KEY];
+    expect(s.tabs.filter((t) => t.kind === 'file')).toHaveLength(1);
+    expect(s.tabs.find((t) => t.kind === 'file')).toMatchObject({ baseRef: 'main', scope: 'unstaged' });
+
+    // Re-open the SAME path with a DIFFERENT base — still exactly one file tab,
+    // and its stored baseRef/scope updates to the new values.
+    get().openFileTab(KEY, { filePath: 'src/a.ts', status: 'M', baseRef: 'feature-branch', scope: 'staged' });
+    s = get().bySession[KEY];
+    expect(s.tabs.filter((t) => t.kind === 'file')).toHaveLength(1);
+    expect(s.tabs.find((t) => t.kind === 'file')).toMatchObject({ baseRef: 'feature-branch', scope: 'staged' });
+    // Path-keyed id stays unchanged — no second tab minted per base flip.
+    expect(s.tabs.find((t) => t.kind === 'file')?.id).toBe('file:src/a.ts');
+
+    // Reverting to the default base (null) after a non-null value actually
+    // stores null — proves the write is unconditional, not skipped when falsy.
+    get().openFileTab(KEY, { filePath: 'src/a.ts', status: 'M', baseRef: null });
+    s = get().bySession[KEY];
+    expect(s.tabs.filter((t) => t.kind === 'file')).toHaveLength(1);
+    const tab = s.tabs.find((t) => t.kind === 'file');
+    expect(tab?.baseRef).toBeNull();
+  });
+
   it('closing the active tab focuses the previous tab', () => {
     get().ensureSession(KEY);
     get().openFileTab(KEY, { filePath: 'a.ts' });

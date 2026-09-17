@@ -401,16 +401,19 @@ export interface ContextDeps {
    * base_sha) it diffs the working tree against that ref — surfacing committed,
    * uncommitted, and untracked changes since launch — which is what a flow that
    * COMMITS its work (sprint/ship merging task lanes) needs; without it, it falls
-   * back to the working-directory diff (vs HEAD, uncommitted only).
+   * back to the working-directory diff (vs HEAD, uncommitted only). `comparisonRef`
+   * (TASK-211), when supplied, takes priority over `baseRef` — it lets a caller
+   * compare against an arbitrary ref rather than the run's launch base.
    *
    * Backs cyboflow.runs.gitDiff (the run-scoped Diff tab). Injected from
    * `main/src/index.ts` as a closure over GitDiffManager — kept as a plain
    * function (like `setDockBadge`) so the standalone-typecheck invariant holds
    * (the router never imports 'main/src/services/gitDiffManager'). Returns the raw
-   * unified diff + aggregate stats. When omitted (unit tests that don't need it),
-   * the gitDiff procedure throws PRECONDITION_FAILED.
+   * unified diff + aggregate stats + the resolved base sha + the grouped worktree
+   * status payload. When omitted (unit tests that don't need it), the gitDiff
+   * procedure throws PRECONDITION_FAILED.
    */
-  gitDiff?: (worktreePath: string, baseRef?: string) => Promise<RunGitDiff>;
+  gitDiff?: (worktreePath: string, baseRef?: string, comparisonRef?: string) => Promise<RunGitDiff>;
 
   /**
    * Live AgentThreadService (global-agent chat thread, migration 071).
@@ -647,7 +650,7 @@ export function createContext(deps: ContextDeps = {}): {
   agentOverrideRouter?: AgentOverrideRouterLike;
   getForcedSubstrate: () => CliSubstrate | null;
   getSprintMaxTasks: () => SprintMaxTasksOverrides;
-  gitDiff?: (worktreePath: string, baseRef?: string) => Promise<RunGitDiff>;
+  gitDiff?: (worktreePath: string, baseRef?: string, comparisonRef?: string) => Promise<RunGitDiff>;
   agentThreadService?: AgentThreadServiceLike;
   agentThreadStore?: AgentThreadStoreLike;
   agentProposalExecutor?: AgentProposalExecutorLike;

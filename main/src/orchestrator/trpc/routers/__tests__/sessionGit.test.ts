@@ -26,19 +26,43 @@ function isBadRequest(err: unknown): boolean {
 
 type FakeOps = SessionGitOpsLike & Record<keyof SessionGitOpsLike, ReturnType<typeof vi.fn>>;
 
+/** A minimal WorktreeStatusPayload for the SessionGitDiffResult mocks below. */
+const emptyWorktree = { entries: [], groups: [], committedUnavailable: true };
+
 function makeFakeOps(): FakeOps {
   return {
     getExecutions: vi.fn().mockResolvedValue({ success: true, data: [] }),
-    getExecutionDiff: vi
-      .fn()
-      .mockResolvedValue({ success: true, data: { diff: '', stats: { additions: 0, deletions: 0, filesChanged: 0 }, changedFiles: [] } }),
+    getExecutionDiff: vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        diff: '',
+        stats: { additions: 0, deletions: 0, filesChanged: 0 },
+        changedFiles: [],
+        resolvedBase: null,
+        worktree: emptyWorktree,
+      },
+    }),
     commit: vi.fn().mockResolvedValue({ success: true }),
-    diff: vi
-      .fn()
-      .mockResolvedValue({ success: true, data: { diff: '', stats: { additions: 0, deletions: 0, filesChanged: 0 }, changedFiles: [] } }),
-    getCombinedDiff: vi
-      .fn()
-      .mockResolvedValue({ success: true, data: { diff: '', stats: { additions: 0, deletions: 0, filesChanged: 0 }, changedFiles: [] } }),
+    diff: vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        diff: '',
+        stats: { additions: 0, deletions: 0, filesChanged: 0 },
+        changedFiles: [],
+        resolvedBase: null,
+        worktree: emptyWorktree,
+      },
+    }),
+    getCombinedDiff: vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        diff: '',
+        stats: { additions: 0, deletions: 0, filesChanged: 0 },
+        changedFiles: [],
+        resolvedBase: null,
+        worktree: emptyWorktree,
+      },
+    }),
     rebaseMainIntoWorktree: vi.fn().mockResolvedValue({ success: true, data: { message: 'ok' } }),
     abortRebaseAndUseClaude: vi.fn().mockResolvedValue({ success: true, data: { message: 'ok', panelId: 'p1' } }),
     squashAndRebaseToMain: vi.fn().mockResolvedValue({ success: true, data: { message: 'merged' } }),
@@ -63,6 +87,16 @@ function makeFakeOps(): FakeOps {
       },
     }),
     getCurrentBranch: vi.fn().mockResolvedValue({ success: true, data: { branch: 'feature' } }),
+    getComparisonBases: vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        branchPoint: { ref: 'a'.repeat(40), shortSha: 'a'.repeat(7) },
+        defaultBranch: 'main',
+        localDefault: { ref: 'main', behind: 0 },
+        originDefault: { ref: 'origin/main', behind: 0, fetchedAt: '2026-09-14T00:00:00.000Z' },
+      },
+    }),
+    subscribeWorktreeChanges: vi.fn(),
     getRemoteUrl: vi.fn().mockResolvedValue({ success: true, data: { remoteUrl: '', branchName: '' } }),
     getGitStatus: vi.fn().mockResolvedValue({ success: true, gitStatus: { state: 'clean' } }),
     cancelStatusForProject: vi.fn().mockResolvedValue({ success: true }),
@@ -95,6 +129,25 @@ describe('cyboflow.sessionGit', () => {
       const caller = appRouter.createCaller(createContext({ sessionGitOps }));
       await caller.cyboflow.sessionGit.getCombinedDiff({ sessionId: 's1', executionIds: [1, 2] });
       expect(sessionGitOps.getCombinedDiff).toHaveBeenCalledWith({ sessionId: 's1', executionIds: [1, 2] });
+    });
+
+    // TASK-212 (Seam B): comparisonRef and scope are wire fields, not merely
+    // hook arguments — zod must NOT strip either before the resolver reaches
+    // them (the critical silent-drop trap the zod schema change guards
+    // against).
+    it('getCombinedDiff forwards its optional comparisonRef and scope', async () => {
+      const sessionGitOps = makeFakeOps();
+      const caller = appRouter.createCaller(createContext({ sessionGitOps }));
+      await caller.cyboflow.sessionGit.getCombinedDiff({
+        sessionId: 's1',
+        comparisonRef: 'abc123',
+        scope: 'staged',
+      });
+      expect(sessionGitOps.getCombinedDiff).toHaveBeenCalledWith({
+        sessionId: 's1',
+        comparisonRef: 'abc123',
+        scope: 'staged',
+      });
     });
 
     it('squashAndRebaseToMain', async () => {
@@ -188,6 +241,62 @@ describe('cyboflow.sessionGit', () => {
       expect(result).toEqual({ success: true, data: { branch: 'feature' } });
     });
 
+    it('getComparisonBases', async () => {
+      const sessionGitOps = makeFakeOps();
+      const caller = appRouter.createCaller(createContext({ sessionGitOps }));
+      const result = await caller.cyboflow.sessionGit.getComparisonBases({ sessionId: 's1' });
+      expect(sessionGitOps.getComparisonBases).toHaveBeenCalledWith({ sessionId: 's1' });
+      expect(result).toEqual({
+        success: true,
+        data: {
+          branchPoint: { ref: 'a'.repeat(40), shortSha: 'a'.repeat(7) },
+          defaultBranch: 'main',
+          localDefault: { ref: 'main', behind: 0 },
+          originDefault: { ref: 'origin/main', behind: 0, fetchedAt: '2026-09-14T00:00:00.000Z' },
+        },
+      });
+    });
+
+    it('onWorktreeChanged: the subscription IS the watch — subscribing starts it via ops, each listener call yields one event, and ending the iteration unsubscribes', async () => {
+      const sessionGitOps = makeFakeOps();
+      const unsubscribe = vi.fn();
+      let listener: (() => void) | null = null;
+      sessionGitOps.subscribeWorktreeChanges.mockImplementation(
+        async (_req: { sessionId: string }, l: () => void) => {
+          listener = l;
+          return { success: true, unsubscribe };
+        },
+      );
+      const caller = appRouter.createCaller(createContext({ sessionGitOps }));
+      const iterable = await caller.cyboflow.sessionGit.onWorktreeChanged({ sessionId: 's1' });
+      const iterator = iterable[Symbol.asyncIterator]();
+
+      // Pull the first event: the generator awaits ops.subscribeWorktreeChanges
+      // and then parks on the emitter until the listener fires.
+      const first = iterator.next();
+      await vi.waitFor(() => expect(sessionGitOps.subscribeWorktreeChanges).toHaveBeenCalledWith(
+        { sessionId: 's1' },
+        expect.any(Function),
+      ));
+      await vi.waitFor(() => expect(listener).not.toBeNull());
+      listener!();
+      expect(await first).toEqual({ done: false, value: { sessionId: 's1' } });
+      expect(unsubscribe).not.toHaveBeenCalled();
+
+      // Ending the iteration (what the client's unsubscribe / link abort does)
+      // runs the generator's finally → the watcher is torn down.
+      await iterator.return?.(undefined);
+      expect(unsubscribe).toHaveBeenCalledTimes(1);
+    });
+
+    it('onWorktreeChanged: a session whose worktree cannot be resolved rejects the subscription instead of silently never emitting', async () => {
+      const sessionGitOps = makeFakeOps();
+      sessionGitOps.subscribeWorktreeChanges.mockResolvedValue({ success: false, error: 'Session or worktree path not found' });
+      const caller = appRouter.createCaller(createContext({ sessionGitOps }));
+      const iterable = await caller.cyboflow.sessionGit.onWorktreeChanged({ sessionId: 'nope' });
+      await expect(iterable[Symbol.asyncIterator]().next()).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
+    });
+
     it('a plain failure envelope also passes through untouched', async () => {
       const sessionGitOps = makeFakeOps();
       sessionGitOps.getExecutions.mockResolvedValue({ success: false, error: 'Session or worktree path not found' });
@@ -274,6 +383,11 @@ describe('cyboflow.sessionGit', () => {
     it('cancelStatusForProject', async () => {
       const caller = appRouter.createCaller(createContext());
       await expect(caller.cyboflow.sessionGit.cancelStatusForProject({ projectId: 1 })).rejects.toSatisfy(isPrecond);
+    });
+
+    it('getComparisonBases', async () => {
+      const caller = appRouter.createCaller(createContext());
+      await expect(caller.cyboflow.sessionGit.getComparisonBases({ sessionId: 's1' })).rejects.toSatisfy(isPrecond);
     });
   });
 });
