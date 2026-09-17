@@ -841,9 +841,7 @@ export function WorkflowEditorModal({
    * run-with-modifications via persistAndRun).
    */
   const handleNameConfirm = useCallback(async (name: string, scopeProjectId: number | null) => {
-    setNameDialogOpen(false);
     const action = pendingAction;
-    setPendingAction(null);
 
     if (action === 'save-as-new') {
       if (actionInFlightRef.current) return;
@@ -863,6 +861,13 @@ export function WorkflowEditorModal({
           targetProjectId === null
             ? 'Global'
             : (saveScopeProjects.find((p) => p.id === targetProjectId)?.name ?? `project ${targetProjectId}`);
+        // Only close the dialog / clear the pending action on SUCCESS — a
+        // failed save-as-new (reserved-name guard, name collision, network
+        // blip) must leave the dialog open with the user's typed name and
+        // chosen scope intact so they can correct and resubmit without
+        // retyping from scratch.
+        setNameDialogOpen(false);
+        setPendingAction(null);
         onSaved?.(newId, `Saved “${name}” as a new flow (${scopeLabel}).`);
         onClose();
       } catch (err: unknown) {
@@ -872,6 +877,8 @@ export function WorkflowEditorModal({
         actionInFlightRef.current = false;
       }
     } else if (action === 'run-with-modifications') {
+      setNameDialogOpen(false);
+      setPendingAction(null);
       await persistAndRun(async () => await saveCustom(name, saveAsNewTargetProjectId));
     }
   }, [pendingAction, saveCustom, saveAsNewTargetProjectId, mode, saveScopeProjects, onSaved, onClose, persistAndRun]);
