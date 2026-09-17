@@ -460,9 +460,18 @@ describe('WorkflowEditorModal — edit mode', () => {
     );
   });
 
-  it('a GLOBAL source flow defaults "Save as new flow" scope to Global', async () => {
+  it('a GLOBAL source flow defaults "Save as new flow" scope to Global, and lands a wf-global-custom-* row without leaving the editor', async () => {
     seedRow({ project_id: null });
-    const { onSaved } = await renderEditMode();
+    // A GLOBAL landing row carries the real `wf-global-custom-<hex>` id shape
+    // the backend mints (workflows.ts createCustom) — assert against that
+    // shape rather than the shared per-project NEW_CUSTOM_ROW fixture id.
+    const GLOBAL_NEW_ROW: WorkflowRow = {
+      ...structuredClone(NEW_CUSTOM_ROW),
+      id: 'wf-global-custom-a1b2c3d4',
+      project_id: null,
+    };
+    mockCreateCustom.mockResolvedValueOnce(GLOBAL_NEW_ROW);
+    const { onSaved, onClose } = await renderEditMode();
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('editor-save-as-new-button'));
@@ -481,9 +490,38 @@ describe('WorkflowEditorModal — edit mode', () => {
 
     expect(mockCreateCustom).toHaveBeenCalledOnce();
     expect(mockCreateCustom.mock.calls[0][0].projectId).toBeNull();
+    // The save-as-new happens in-app: no navigation away, just onSaved (with the
+    // real global row id shape) followed by the modal's own onClose.
     await waitFor(() =>
-      expect(onSaved).toHaveBeenCalledWith(NEW_CUSTOM_ROW.id, expect.stringContaining('Global')),
+      expect(onSaved).toHaveBeenCalledWith(GLOBAL_NEW_ROW.id, expect.stringContaining('Global')),
     );
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it('surfaces a createCustom name-guard rejection (reserved name / collision) as an inline error and keeps the modal open for retry', async () => {
+    mockCreateCustom.mockRejectedValueOnce(
+      new Error('A global workflow named "ship" already exists.'),
+    );
+    const { onSaved, onClose } = await renderEditMode();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('editor-save-as-new-button'));
+    });
+
+    const nameInput = await screen.findByTestId('flow-name-input');
+    fireEvent.change(nameInput, { target: { value: 'ship' } });
+    // Keep the default (project-scoped) selection — the guard rejection should
+    // surface regardless of which scope was chosen.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('flow-name-confirm'));
+    });
+
+    const alert = await screen.findByTestId('editor-error');
+    expect(alert).toHaveTextContent('A global workflow named "ship" already exists.');
+    // The failed save neither lands a new row nor closes the editor — the user
+    // can correct the name/scope and retry.
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it('cancelling the "Save as new flow" dialog does not call createCustom', async () => {
