@@ -4,6 +4,7 @@ import { useErrorStore } from '../stores/errorStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useCyboflowStore } from '../stores/cyboflowStore';
 import { isTerminalRunStatus, useActiveRunsStore, type ActiveRunRow } from '../stores/activeRunsStore';
+import { classifyRun } from '../utils/homeClassify';
 import { useSessionStore } from '../stores/sessionStore';
 import { useOnboardingStore } from '../stores/onboardingStore';
 import { ONBOARDING_PROJECT_HOME_STEP } from '../utils/onboarding';
@@ -1750,6 +1751,32 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                 (r) => r.session_id == null || !sessionIdSet.has(r.session_id),
               );
               const parentlessRunCount = parentlessRuns.length;
+              // Collapsed-header badge counts (TASK-223) — a running-agents count so a
+              // running agent is never fully invisible once its project is collapsed,
+              // not just at boot. Reuses `classifyRun` (homeClassify), the SAME
+              // active/blocked/terminal split the landing page's Working section uses,
+              // so the badge and the review-home page always agree on what "running"
+              // means. A session already spoken for by one of its own non-terminal runs
+              // is not double-counted off its raw `session.status` — the run IS the
+              // thing being reported (mirrors LandingHome's workingRows dedup).
+              const runSessionIdsNonTerminal = new Set(
+                visibleRunRows
+                  .filter((r) => classifyRun(r.status) !== 'terminal')
+                  .map((r) => r.session_id)
+                  .filter((id): id is string => id != null),
+              );
+              let collapsedRunningCount = 0;
+              let collapsedBlockedCount = 0;
+              for (const run of visibleRunRows) {
+                const activity = classifyRun(run.status);
+                if (activity === 'active') collapsedRunningCount += 1;
+                else if (activity === 'blocked') collapsedBlockedCount += 1;
+              }
+              for (const session of projectSessions) {
+                if (runSessionIdsNonTerminal.has(session.id)) continue;
+                if (session.status === 'running') collapsedRunningCount += 1;
+                else if (session.status === 'waiting') collapsedBlockedCount += 1;
+              }
               // A/B experiment group rows: collapse an experiment's two arm sessions
               // into ONE parent group (see railExperimentGrouping). Claimed arm
               // sessions drop out of the flat `flatSessions` list, but `sessionIdSet`
@@ -1851,6 +1878,41 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                         />
                       )}
                     </div>
+
+                    {/* Collapsed-header running/blocked badges (TASK-223) — only shown
+                        while collapsed; the rows themselves carry this state once
+                        expanded, so showing it twice would be noise. */}
+                    {!isExpanded && (collapsedRunningCount > 0 || collapsedBlockedCount > 0) && (
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        {collapsedRunningCount > 0 && (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); e.preventDefault(); toggleProject(project.id, e); }}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            className="rounded-badge flex items-center gap-1 border border-border-primary bg-bg-secondary px-1.5 py-px text-[10px] font-medium text-text-secondary hover:bg-surface-hover transition-colors"
+                            title={`${collapsedRunningCount} agent${collapsedRunningCount === 1 ? '' : 's'} running — click to expand`}
+                          >
+                            <span
+                              className="h-1.5 w-1.5 rounded-full bg-status-success animate-pulse"
+                              aria-hidden="true"
+                            />
+                            {collapsedRunningCount}
+                          </button>
+                        )}
+                        {collapsedBlockedCount > 0 && (
+                          <button
+                            type="button"
+                            onClick={(e) => { e.stopPropagation(); e.preventDefault(); toggleProject(project.id, e); }}
+                            onMouseDown={(e) => e.stopPropagation()}
+                            className="rounded-badge flex items-center gap-1 border border-border-primary bg-bg-secondary px-1.5 py-px text-[10px] font-medium text-status-warning hover:bg-surface-hover transition-colors"
+                            title={`${collapsedBlockedCount} awaiting you — click to expand`}
+                          >
+                            <span className="h-1.5 w-1.5 rounded-full bg-status-warning" aria-hidden="true" />
+                            {collapsedBlockedCount}
+                          </button>
+                        )}
+                      </div>
+                    )}
 
                     <button
                       onClick={(e) => handleRefreshProjectGitStatus(project, e)}
