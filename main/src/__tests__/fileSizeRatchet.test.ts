@@ -30,7 +30,7 @@ import * as path from 'node:path';
  * disappear, never grow. */
 const FROZEN_LINE_CAPS: Record<string, number> = {
   'orchestrator/mcpServer/mcpQueryHandler.ts': 5717, // steps 1-3: type contract → mcpQueryMessages.ts; workflow-config + global-agent read/propose tools → handlers/; backlog projections → backlogProjection.ts
-  'index.ts': 7376, // seeded-finding reader → orchestrator/seededFindingReader.ts; onBatchMinted hook → humanPrerequisiteSink; workflow-shaped proposal deps → agentThread/proposalExecutorWorkflowDeps.ts
+  'index.ts': 7338, // seeded-finding reader → orchestrator/seededFindingReader.ts; onBatchMinted hook → humanPrerequisiteSink; workflow-shaped proposal deps → agentThread/proposalExecutorWorkflowDeps.ts; §5.3 drift probes → services/visualVerify/verifyDriftProbes.ts
   'orchestrator/verify/verificationScheduler.ts': 5702,
   'services/panels/claude/claudeCodeManager.ts': 4818,
   'database/database.ts': 4249,
