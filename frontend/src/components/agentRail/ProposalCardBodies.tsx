@@ -33,6 +33,7 @@ import {
   type CreateWorkflowResultJson,
   type ReprioritizeResultJson,
 } from './proposalResultTypes';
+import { useProposalEntityLabels, type ResolvedProposalEntity, type ResolvedStage } from './useProposalEntityLabels';
 
 // ---------------------------------------------------------------------------
 // Label maps — keyed on the shared-type discriminant so a new kind/workflow
@@ -64,6 +65,18 @@ const WORKFLOW_LABEL: Record<CyboflowWorkflowName, string> = {
   'verify-setup': 'Verify Setup',
 };
 
+/**
+ * Resolve a workflow's display name: the built-in {@link WORKFLOW_LABEL} map
+ * when `name` is one of the six built-ins, else the raw name verbatim — a
+ * custom workflow (e.g. "speedboat") has no entry in that map but is still a
+ * perfectly good label on its own.
+ */
+export function workflowNameLabel(name: string): string {
+  return Object.prototype.hasOwnProperty.call(WORKFLOW_LABEL, name)
+    ? WORKFLOW_LABEL[name as CyboflowWorkflowName]
+    : name;
+}
+
 // ---------------------------------------------------------------------------
 // Small shared row primitive
 // ---------------------------------------------------------------------------
@@ -86,27 +99,98 @@ function useProjectName(projectId: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// Resolved-entity label primitive — shared by launch-run's seed rows and
+// reprioritize-backlog's rows. The opaque id is kept ONLY in `title=`/
+// `data-id` (tooltip + test hook); an id this hook could not resolve degrades
+// to a muted "unresolved" marker rather than a blank cell (TASK-221).
+// ---------------------------------------------------------------------------
+
+export function EntityRefLabel({
+  id,
+  entity,
+  className = '',
+}: {
+  id: string;
+  entity: ResolvedProposalEntity | undefined;
+  className?: string;
+}): React.ReactElement {
+  if (entity === undefined) {
+    return (
+      <span
+        className={`truncate italic text-text-tertiary ${className}`}
+        data-testid="proposal-entity-unresolved"
+        data-id={id}
+        title={id}
+      >
+        {id} (unresolved)
+      </span>
+    );
+  }
+  if (entity.type === 'finding') {
+    return (
+      <span className={`truncate text-text-primary ${className}`} data-testid="proposal-entity-label" data-id={id} title={entity.title}>
+        {entity.title}
+      </span>
+    );
+  }
+  return (
+    <span className={`truncate ${className}`} data-testid="proposal-entity-label" data-id={id} title={entity.title}>
+      <span className="font-bold text-text-primary">{entity.ref}</span>{' '}
+      <span className="text-text-tertiary">{entity.title}</span>
+    </span>
+  );
+}
+
+/** Board-stage badge: a color dot + the stage's label (falls back to the raw stage id, muted, if unresolved). */
+export function StageBadge({ stageId, stage }: { stageId: string; stage: ResolvedStage | undefined }): React.ReactElement {
+  return (
+    <span className="flex shrink-0 items-center gap-1 text-text-tertiary" data-testid="reprioritize-stage" title={stageId}>
+      &rarr;
+      {stage ? (
+        <>
+          <span aria-hidden="true" className="h-2 w-2 rounded-full" style={{ backgroundColor: stage.colorOklch }} />
+          {stage.label}
+        </>
+      ) : (
+        <span className="italic" data-testid="proposal-stage-unresolved">
+          {stageId} (unresolved)
+        </span>
+      )}
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // launch-run
 // ---------------------------------------------------------------------------
 
 export function LaunchRunBody({ payload }: { payload: LaunchRunProposalPayload }): React.ReactElement {
   const projectName = useProjectName(payload.projectId);
-  const seedRows: { label: string; ids: string[] }[] = [
+  const seedGroups: { label: string; ids: string[] }[] = [
     { label: 'tasks', ids: payload.taskIds ?? [] },
     { label: 'ideas', ids: payload.ideaIds ?? [] },
     { label: 'findings', ids: payload.findingIds ?? [] },
   ].filter((r) => r.ids.length > 0);
+  const allSeedIds = [...(payload.taskIds ?? []), ...(payload.ideaIds ?? []), ...(payload.findingIds ?? [])];
+  const { entities } = useProposalEntityLabels(allSeedIds);
 
   return (
     <div className="flex flex-col gap-2 text-[11px]" data-testid="proposal-body-launch-run">
       <div className="text-[13px] font-bold text-text-primary">
-        Launch {WORKFLOW_LABEL[payload.workflowName]}
+        Launch {workflowNameLabel(payload.workflowName)}
       </div>
-      <div className="flex flex-col gap-1">
+      <div className="flex flex-col gap-1.5">
         <Row label="project" value={projectName} />
         <Row label="substrate" value={payload.substrate ?? 'sdk (default)'} />
-        {seedRows.map((r) => (
-          <Row key={r.label} label={r.label} value={r.ids.join(', ')} />
+        {seedGroups.map((group) => (
+          <div key={group.label} className="flex flex-col gap-0.5" data-testid="launch-run-seed-group" data-seed-kind={group.label}>
+            <span className="text-text-tertiary">{group.label}</span>
+            <div className="flex flex-col gap-0.5 pl-2">
+              {group.ids.map((id) => (
+                <EntityRefLabel key={id} id={id} entity={entities.get(id)} />
+              ))}
+            </div>
+          </div>
         ))}
       </div>
       {payload.note != null && payload.note !== '' && (
@@ -154,6 +238,47 @@ function itemResult(
   return found ? { ok: found.ok, error: found.error } : null;
 }
 
+/** One rendered reprioritize row, at a given tree depth (0 = top level, 1 = nested under its epic). */
+interface ReprioritizeRowPlan {
+  item: ReprioritizeBacklogItem;
+  depth: number;
+}
+
+/**
+ * Order `items` into a flat render plan that nests a task under its parent
+ * epic when BOTH are present in the same payload — so a batch touching an
+ * epic and its children reads as a tree (EPIC-033 -> 3 tasks) instead of a
+ * flat list of unrelated-looking rows. An item whose parent epic is NOT also
+ * in this payload stays exactly where it was (nothing to group against).
+ */
+function planReprioritizeRows(
+  items: ReprioritizeBacklogItem[],
+  entities: Map<string, ResolvedProposalEntity>,
+): ReprioritizeRowPlan[] {
+  const idSet = new Set(items.map((i) => i.taskId));
+  const childrenByEpic = new Map<string, ReprioritizeBacklogItem[]>();
+  for (const item of items) {
+    const parentEpicId = entities.get(item.taskId)?.parentEpicId;
+    if (parentEpicId != null && idSet.has(parentEpicId)) {
+      const bucket = childrenByEpic.get(parentEpicId) ?? [];
+      bucket.push(item);
+      childrenByEpic.set(parentEpicId, bucket);
+    }
+  }
+  const nested = new Set(
+    [...childrenByEpic.values()].flatMap((children) => children.map((c) => c.taskId)),
+  );
+  const plan: ReprioritizeRowPlan[] = [];
+  for (const item of items) {
+    if (nested.has(item.taskId)) continue; // rendered under its epic below, not at top level
+    plan.push({ item, depth: 0 });
+    for (const child of childrenByEpic.get(item.taskId) ?? []) {
+      plan.push({ item: child, depth: 1 });
+    }
+  }
+  return plan;
+}
+
 export function ReprioritizeBacklogRows({
   items,
   result,
@@ -161,27 +286,30 @@ export function ReprioritizeBacklogRows({
   items: ReprioritizeBacklogItem[];
   result: ReprioritizeResultJson | null;
 }): React.ReactElement {
+  const { entities, stages } = useProposalEntityLabels(items.map((i) => i.taskId));
+  const plan = planReprioritizeRows(items, entities);
   return (
     <div className="flex flex-col gap-1.5 text-[11px]" data-testid="proposal-body-reprioritize">
-      {items.map((item, index) => {
+      {plan.map(({ item, depth }, index) => {
         const outcome = itemResult(result, item.taskId);
         const glyph = item.priority != null ? priorityGlyph(item.priority) : null;
         return (
-          <div key={item.taskId} className="flex items-baseline gap-2" data-testid="reprioritize-row" data-task-id={item.taskId}>
+          <div
+            key={item.taskId}
+            className="flex items-baseline gap-2"
+            data-testid="reprioritize-row"
+            data-task-id={item.taskId}
+            data-depth={depth}
+            style={depth > 0 ? { marginLeft: '1.25rem' } : undefined}
+          >
             <span className="w-4 shrink-0 text-right font-bold text-interactive">{index + 1}</span>
-            <span className="flex-1 truncate text-text-primary" title={item.taskId}>
-              {item.taskId}
-            </span>
+            <EntityRefLabel id={item.taskId} entity={entities.get(item.taskId)} className="flex-1" />
             {item.priority != null && glyph && (
               <span className={`shrink-0 ${glyph.className}`} data-testid="reprioritize-priority">
                 {item.priority} {glyph.glyph}
               </span>
             )}
-            {item.stageId != null && (
-              <span className="shrink-0 text-text-tertiary" data-testid="reprioritize-stage">
-                &rarr; {item.stageId}
-              </span>
-            )}
+            {item.stageId != null && <StageBadge stageId={item.stageId} stage={stages.get(item.stageId)} />}
             {outcome !== null && (
               <span
                 className={`shrink-0 font-bold ${outcome.ok ? 'text-status-success' : 'text-status-error'}`}

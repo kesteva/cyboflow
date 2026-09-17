@@ -40,6 +40,7 @@ import { useCallback, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import type { AgentProposal, AgentProposalStatus } from '../../../../shared/types/agentThread';
 import { useAgentThreadStore } from '../../stores/agentThreadStore';
+import { useRunSessionMap } from '../../stores/landingStore';
 import {
   PROPOSAL_KIND_LABEL,
   LaunchRunBody,
@@ -51,6 +52,7 @@ import {
   CreateBacklogRows,
   CreateWorkflowBody,
   CreateWorkflowAgentRows,
+  workflowNameLabel,
 } from './ProposalCardBodies';
 import {
   parseLaunchRunResult,
@@ -127,6 +129,7 @@ function ResolvedLine({
 // ---------------------------------------------------------------------------
 
 function LaunchRunResolved({ proposal }: { proposal: AgentProposal }): React.ReactElement {
+  const sessionMap = useRunSessionMap();
   if (proposal.status === 'dismissed') {
     return <ResolvedLine tone="neutral" glyph="✕" verb="Dismissed." />;
   }
@@ -135,7 +138,35 @@ function LaunchRunResolved({ proposal }: { proposal: AgentProposal }): React.Rea
     return <ResolvedLine tone={proposal.status === 'failed' ? 'error' : 'success'} verb="Resolved." glyph={proposal.status === 'failed' ? '✕' : '✓'} />;
   }
   if (r.status === 'executed') {
-    return <ResolvedLine tone="success" glyph="✓" verb="Run launched." detail={r.runId != null ? `run ${r.runId}` : undefined} />;
+    const payload = proposal.payload.kind === 'launch-run' ? proposal.payload : null;
+    const sessionName = r.runId != null ? (sessionMap[r.runId]?.sessionName ?? null) : null;
+    const workflowLabel = payload != null ? workflowNameLabel(payload.workflowName) : null;
+    const detail =
+      sessionName != null
+        ? workflowLabel != null
+          ? `${sessionName} · ${workflowLabel}`
+          : sessionName
+        : r.runId != null
+          ? `run ${r.runId}`
+          : undefined;
+    if (r.runId != null) {
+      const runId = r.runId;
+      return (
+        <button
+          type="button"
+          onClick={() => navigateToProposalTarget({ target: 'run', runId, projectId: payload?.projectId })}
+          data-testid="proposal-card-resolved-row"
+          className="flex w-full items-center gap-2.5 p-2.5 text-left hover:bg-surface-secondary"
+        >
+          <StatusCircle tone="success" glyph="✓" />
+          <div className="text-[11px] leading-snug">
+            <span className="font-bold text-text-primary">Run launched.</span>
+            {detail != null && detail !== '' && <span className="text-text-tertiary"> {detail}</span>}
+          </div>
+        </button>
+      );
+    }
+    return <ResolvedLine tone="success" glyph="✓" verb="Run launched." detail={detail} />;
   }
   return <ResolvedLine tone="error" glyph="✕" verb="Launch failed." detail={r.error} />;
 }

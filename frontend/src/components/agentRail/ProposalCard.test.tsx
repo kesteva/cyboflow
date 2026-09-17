@@ -30,6 +30,9 @@ import type {
   CreateWorkflowProposalPayload,
   AgentProposalStatus,
 } from '../../../../shared/types/agentThread';
+import type { BacklogTaskItem, Board } from '../../../../shared/types/tasks';
+import type { ActiveRunRow } from '../../stores/activeRunsStore';
+import type { Session } from '../../types/session';
 
 // ---------------------------------------------------------------------------
 // agentThreadStore stub — confirmProposal/dismissProposal spies only.
@@ -51,6 +54,92 @@ vi.mock('../../stores/agentThreadStore', () => ({
 import { ProposalCard } from './ProposalCard';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { useBacklogStore } from '../../stores/backlogStore';
+import { useActiveRunsStore } from '../../stores/activeRunsStore';
+import { useSessionStore } from '../../stores/sessionStore';
+
+// ---------------------------------------------------------------------------
+// backlogStore / activeRunsStore / sessionStore fixtures — TASK-221's
+// resolver hook reads task/epic/idea refs+titles and board-stage labels off
+// the REAL (unmocked) backlogStore, and the launch-run resolved row's session
+// name off the REAL activeRunsStore/sessionStore, mirroring how ProposalCard
+// already exercises the real cyboflowStore/navigationStore above.
+// ---------------------------------------------------------------------------
+
+function makeBacklogTask(overrides: Partial<BacklogTaskItem> & { id: string; ref: string; title: string }): BacklogTaskItem {
+  return {
+    project_id: 1,
+    type: 'task',
+    summary: null,
+    body: null,
+    priority: 'P2',
+    category: 'feature',
+    executor: 'agent',
+    repo: null,
+    parent_epic_id: null,
+    originating_idea_id: null,
+    scope: null,
+    board_id: 'board-1',
+    stage_id: 'ready',
+    archived_at: null,
+    decomposed_at: null,
+    approved_at: '2026-07-01T00:00:00.000Z',
+    sort_order: null,
+    version: 1,
+    stage_position: 6,
+    inFlow: [],
+    awaitingReview: false,
+    isDone: false,
+    memberships: [],
+    created_at: '2026-07-01T00:00:00.000Z',
+    updated_at: '2026-07-01T00:00:00.000Z',
+    ...overrides,
+  };
+}
+
+function makeBoard(overrides: Partial<Board> = {}): Board {
+  return {
+    id: 'board-1',
+    project_id: 1,
+    name: 'Default',
+    kind: 'default',
+    is_default: true,
+    stages: [
+      { id: 'done', label: 'Done', color_oklch: 'oklch(0.7 0.15 145)', hint: null, position: 9, write_policy: 'asserted', is_terminal: true, hidden_by_default: false },
+    ],
+    ...overrides,
+  };
+}
+
+function makeActiveRun(overrides: Partial<ActiveRunRow> & { id: string }): ActiveRunRow {
+  return {
+    workflow_id: 'wf-1',
+    project_id: 1,
+    status: 'running',
+    worktree_path: '/wt',
+    branch_name: 'sprint/x',
+    permission_mode_snapshot: 'default',
+    workflowName: 'Sprint',
+    created_at: '2026-07-06T12:00:00.000Z',
+    updated_at: '2026-07-06T12:30:00.000Z',
+    started_at: '2026-07-06T12:00:00.000Z',
+    ended_at: null,
+    stuck_reason: null,
+    ...overrides,
+  };
+}
+
+function makeSession(overrides: Partial<Session> & { id: string; name: string }): Session {
+  return {
+    worktreePath: '/wt',
+    prompt: '',
+    status: 'running',
+    createdAt: '2026-07-06T12:00:00.000Z',
+    output: [],
+    jsonMessages: [],
+    ...overrides,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -204,6 +293,11 @@ function makeOpenSessionProposal(overrides: {
 beforeEach(() => {
   mockConfirmProposal.mockReset();
   mockDismissProposal.mockReset();
+  // Reset to empty on every test so an unresolved-id assertion in one test
+  // never rides on a fixture a PRIOR test seeded.
+  useBacklogStore.setState({ tasks: [], boards: [] });
+  useActiveRunsStore.setState({ runsByProject: {} });
+  useSessionStore.setState({ sessions: [] });
 });
 
 // ---------------------------------------------------------------------------
@@ -211,25 +305,118 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('ProposalCard — open state, per-kind body', () => {
-  it('launch-run: workflow, project fallback label, substrate, seed refs, note', () => {
+  it('launch-run: workflow, project fallback label, substrate, unresolved seed ids, note', () => {
     render(<ProposalCard proposal={makeLaunchRunProposal()} />);
 
     expect(screen.getByTestId('proposal-body-launch-run')).toHaveTextContent('Launch Sprint');
     expect(screen.getByText('Project #1')).toBeInTheDocument();
     expect(screen.getByText('sdk')).toBeInTheDocument();
-    expect(screen.getByText('TASK-041, TASK-042')).toBeInTheDocument();
+    // Neither seed id is in the (empty) backlogStore — both degrade to the
+    // muted unresolved marker, never a blank cell.
+    const unresolved = screen.getAllByTestId('proposal-entity-unresolved');
+    expect(unresolved).toHaveLength(2);
+    expect(unresolved[0]).toHaveTextContent('TASK-041 (unresolved)');
+    expect(unresolved[0]).toHaveAttribute('data-id', 'TASK-041');
+    expect(unresolved[1]).toHaveTextContent('TASK-042 (unresolved)');
     expect(screen.getByText('seeded from the top of the backlog')).toBeInTheDocument();
   });
 
-  it('reprioritize-backlog: ranked rows with priority/stage badges', () => {
+  it('launch-run: resolves seed ids to refs + titles, and a custom (non-built-in) workflow name to itself', () => {
+    useBacklogStore.setState({
+      tasks: [
+        makeBacklogTask({ id: 'tsk_041', ref: 'TASK-041', title: 'Fix the flaky retry test' }),
+        makeBacklogTask({ id: 'idea_008', ref: 'IDEA-008', title: 'Faster cold start', type: 'idea' }),
+      ],
+    });
+    const proposal = makeLaunchRunProposal({
+      payload: {
+        taskIds: ['tsk_041'],
+        ideaIds: ['idea_008'],
+        workflowName: 'speedboat' as unknown as LaunchRunProposalPayload['workflowName'],
+      },
+    });
+    render(<ProposalCard proposal={proposal} />);
+
+    expect(screen.getByTestId('proposal-body-launch-run')).toHaveTextContent('Launch speedboat');
+    const labels = screen.getAllByTestId('proposal-entity-label');
+    expect(labels[0]).toHaveTextContent('TASK-041');
+    expect(labels[0]).toHaveTextContent('Fix the flaky retry test');
+    expect(labels[0]).toHaveAttribute('title', 'Fix the flaky retry test');
+    expect(labels[1]).toHaveTextContent('IDEA-008');
+    expect(labels[1]).toHaveTextContent('Faster cold start');
+    expect(screen.queryByTestId('proposal-entity-unresolved')).not.toBeInTheDocument();
+  });
+
+  it('reprioritize-backlog: ranked rows with priority/stage badges, resolved to refs + titles + stage labels', () => {
+    useBacklogStore.setState({
+      tasks: [
+        makeBacklogTask({ id: 'TASK-1', ref: 'TASK-001', title: 'Promote the flaky-test fix' }),
+        makeBacklogTask({ id: 'TASK-2', ref: 'TASK-002', title: 'Move to in-progress', stage_id: 'in-progress' }),
+      ],
+      boards: [
+        makeBoard({
+          stages: [
+            { id: 'in-progress', label: 'In progress', color_oklch: 'oklch(0.7 0.15 250)', hint: null, position: 7, write_policy: 'asserted', is_terminal: false, hidden_by_default: false },
+          ],
+        }),
+      ],
+    });
     render(<ProposalCard proposal={makeReprioritizeProposal()} />);
 
     const rows = screen.getAllByTestId('reprioritize-row');
     expect(rows).toHaveLength(2);
     expect(within(rows[0]).getByTestId('reprioritize-priority')).toHaveTextContent('P0 ↑');
-    expect(within(rows[1]).getByTestId('reprioritize-stage')).toHaveTextContent('in-progress');
+    expect(within(rows[0]).getByTestId('proposal-entity-label')).toHaveTextContent('TASK-001');
+    expect(within(rows[0]).getByTestId('proposal-entity-label')).toHaveTextContent('Promote the flaky-test fix');
+    expect(within(rows[1]).getByTestId('reprioritize-stage')).toHaveTextContent('In progress');
+    expect(within(rows[1]).getByTestId('proposal-entity-label')).toHaveTextContent('TASK-002');
+    // The opaque id only ever surfaces in a tooltip/data attribute, never as row text.
+    expect(rows[1]).toHaveAttribute('data-task-id', 'TASK-2');
+    expect(screen.queryByText('TASK-2', { exact: false })).not.toBeInTheDocument();
     // No result yet — no per-row outcome markers in the open state.
     expect(screen.queryByTestId('reprioritize-outcome')).not.toBeInTheDocument();
+  });
+
+  it('reprioritize-backlog: an id absent from the backlog degrades to a muted unresolved marker, never a blank cell', () => {
+    render(<ProposalCard proposal={makeReprioritizeProposal()} />);
+
+    const rows = screen.getAllByTestId('reprioritize-row');
+    expect(within(rows[0]).getByTestId('proposal-entity-unresolved')).toHaveTextContent('TASK-1 (unresolved)');
+    expect(within(rows[1]).getByTestId('proposal-stage-unresolved')).toHaveTextContent('in-progress (unresolved)');
+  });
+
+  it('reprioritize-backlog: groups a task under its parent epic when both are in the payload', () => {
+    useBacklogStore.setState({
+      tasks: [
+        makeBacklogTask({
+          id: 'epc_1',
+          ref: 'EPIC-033',
+          title: 'Onboarding rework',
+          type: 'epic',
+          children: [
+            makeBacklogTask({ id: 'tsk_a', ref: 'TASK-201', title: 'Step one', parent_epic_id: 'epc_1' }),
+            makeBacklogTask({ id: 'tsk_b', ref: 'TASK-202', title: 'Step two', parent_epic_id: 'epc_1' }),
+          ],
+        }),
+      ],
+    });
+    const proposal = makeReprioritizeProposal({
+      items: [
+        { taskId: 'epc_1', priority: 'P1' },
+        { taskId: 'tsk_a', stageId: 'done' },
+        { taskId: 'tsk_b', stageId: 'done' },
+      ],
+    });
+    render(<ProposalCard proposal={proposal} />);
+
+    const rows = screen.getAllByTestId('reprioritize-row');
+    expect(rows).toHaveLength(3);
+    expect(within(rows[0]).getByTestId('proposal-entity-label')).toHaveTextContent('EPIC-033');
+    expect(rows[0]).toHaveAttribute('data-depth', '0');
+    expect(within(rows[1]).getByTestId('proposal-entity-label')).toHaveTextContent('TASK-201');
+    expect(rows[1]).toHaveAttribute('data-depth', '1');
+    expect(within(rows[2]).getByTestId('proposal-entity-label')).toHaveTextContent('TASK-202');
+    expect(rows[2]).toHaveAttribute('data-depth', '1');
   });
 
   it('edit-workflow: summary, workflowId, parsed phase/step counts', () => {
@@ -388,6 +575,55 @@ describe('ProposalCard — reprioritize-backlog resolved', () => {
     expect(rows).toHaveLength(2);
     expect(within(rows[0]).getByTestId('reprioritize-outcome')).toHaveAttribute('data-ok', 'true');
     expect(within(rows[1]).getByTestId('reprioritize-outcome')).toHaveAttribute('data-ok', 'false');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// launch-run resolved — names the session/workflow instead of the raw run id,
+// and is clickable to open the run.
+// ---------------------------------------------------------------------------
+
+describe('ProposalCard — launch-run resolved', () => {
+  const realSetActiveRun = useCyboflowStore.getState().setActiveRun;
+
+  afterEach(() => {
+    useCyboflowStore.setState({ setActiveRun: realSetActiveRun });
+    useNavigationStore.setState({ view: 'home' });
+  });
+
+  it('names the session + workflow and opens the run on click', () => {
+    useActiveRunsStore.setState({
+      runsByProject: { 1: [makeActiveRun({ id: 'run-9', session_id: 'sess-9', workflowName: 'Sprint' })] },
+    });
+    useSessionStore.setState({ sessions: [makeSession({ id: 'sess-9', name: 'brisk-otter' })] });
+    const setActiveRun = vi.fn();
+    useCyboflowStore.setState({ setActiveRun });
+
+    const proposal = makeLaunchRunProposal({
+      status: 'executed',
+      result: { kind: 'launch-run', status: 'executed', runId: 'run-9' },
+    });
+    render(<ProposalCard proposal={proposal} />);
+
+    const row = screen.getByTestId('proposal-card-resolved-row');
+    expect(row).toHaveTextContent('Run launched.');
+    expect(row).toHaveTextContent('brisk-otter');
+    expect(row).toHaveTextContent('Sprint');
+    expect(row).not.toHaveTextContent('run-9');
+
+    fireEvent.click(row);
+    expect(setActiveRun).toHaveBeenCalledWith('run-9');
+    expect(useNavigationStore.getState().view).toBe('session');
+  });
+
+  it('falls back to the raw run id (muted) when no session identity resolves', () => {
+    const proposal = makeLaunchRunProposal({
+      status: 'executed',
+      result: { kind: 'launch-run', status: 'executed', runId: 'run-unknown' },
+    });
+    render(<ProposalCard proposal={proposal} />);
+
+    expect(screen.getByTestId('proposal-card-resolved-row')).toHaveTextContent('run run-unknown');
   });
 });
 

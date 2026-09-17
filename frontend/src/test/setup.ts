@@ -104,6 +104,10 @@ vi.mock('../trpc/client', () => ({
       // unconditionally inside RunCenterPane via RunPendingInputStrip.
       reviewItems: {
         list: { query: vi.fn().mockResolvedValue([]) },
+        // Proposal-card finding resolution (TASK-221's useProposalEntityLabels) —
+        // null by default so an unmocked finding id degrades to "unresolved"
+        // rather than every test needing its own stub.
+        get: { query: vi.fn().mockResolvedValue(null) },
         onReviewItemChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
       },
       // Approved-design lookup (Tier 2, item 8c) — DesignAffordance mounts
