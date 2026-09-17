@@ -141,6 +141,7 @@ import type {
 } from '../../../../shared/types/visualVerification';
 import type { AdHocSnapshotResult } from '../eval/snapshotRunForEval';
 import { SprintLaneStore, SprintLaneError } from '../sprintLaneStore';
+import { toCompactTask, toFullTask } from './backlogProjection';
 import type { SprintLaneRow } from '../../../../shared/types/sprintBatch';
 import { resolveSprintMaxTasks, AWAITING_VERIFY_STEP } from '../../../../shared/types/sprintBatch';
 import { resolveRunFanOutInner, runHasControllerVisualVerify } from '../laneChainResolution';
@@ -1330,6 +1331,7 @@ export class McpQueryHandler {
       initialStageId: msg.initialStageId,
       scope: msg.scope,
       originatingIdeaId,
+      executor: msg.executor,
     };
 
     try {
@@ -1396,6 +1398,7 @@ export class McpQueryHandler {
         category: msg.category,
         repo: msg.repo,
         scope: msg.scope,
+        executor: msg.executor,
       },
       ...(msg.parentEpicId !== undefined ? { parentEpicId: msg.parentEpicId } : {}),
       expectedVersion: msg.expectedVersion,
@@ -1670,88 +1673,6 @@ export class McpQueryHandler {
   // --------------------------------------------------------------------------
 
   /**
-   * The compact projection cyboflow_list_tasks returns per item — deliberately
-   * WITHOUT `body` / `inFlow` / `children` (an agent enumerating the backlog
-   * does not need the full markdown spec or the live-run overlay for every
-   * row; cyboflow_get_task fetches one item's full body on demand).
-   */
-  private static toCompactTask(item: BacklogTaskItem): Record<string, unknown> {
-    return {
-      id: item.id,
-      ref: item.ref,
-      type: item.type,
-      title: item.title,
-      summary: item.summary,
-      priority: item.priority,
-      category: item.category,
-      stage_id: item.stage_id,
-      stage_position: item.stage_position,
-      parent_epic_id: item.parent_epic_id,
-      originating_idea_id: item.originating_idea_id,
-      archived: item.archived_at !== null,
-      decomposed: item.decomposed_at !== null,
-      approved: item.approved_at !== null,
-      is_done: item.isDone,
-      awaiting_review: item.awaitingReview,
-      // Only tasks carry a computed dependency overlay (selectProjectBacklog
-      // applies it to type='task' rows only); ideas/epics are never blocked,
-      // so an absent overlay defaults to "ready" rather than "unknown".
-      ready_to_work: item.readyToWork ?? true,
-      blocked_by: (item.blockedBy ?? []).map((dep) => dep.ref),
-      version: item.version,
-      updated_at: item.updated_at,
-    };
-  }
-
-  /**
-   * Project a full BacklogTaskItem for cyboflow_get_task. A CURATED ALLOW-LIST,
-   * not a pass-through: the fields below are the tool's external contract, and a
-   * field newly added to `BacklogTaskItem` is absent here until it is added
-   * DELIBERATELY. It does include `body`, `blockedBy`/`relatedTo`/`readyToWork`
-   * and (for an epic) `children`/`childCount`/`pendingTasks`.
-   *
-   * Deliberately omitted:
-   *  - `inFlow` — an internal live-run overlay with no stable external contract;
-   *  - `memberships` (sprint/experiment labels, TASK-190) — a backlog-UI filter
-   *    overlay; no flow agent consumes it, and widening an agent-facing payload
-   *    is a product decision, not a projection detail.
-   */
-  private static toFullTask(item: BacklogTaskItem): Record<string, unknown> {
-    return {
-      id: item.id,
-      project_id: item.project_id,
-      type: item.type,
-      ref: item.ref,
-      title: item.title,
-      summary: item.summary,
-      body: item.body,
-      priority: item.priority,
-      category: item.category,
-      repo: item.repo,
-      parent_epic_id: item.parent_epic_id,
-      originating_idea_id: item.originating_idea_id,
-      scope: item.scope,
-      board_id: item.board_id,
-      stage_id: item.stage_id,
-      archived_at: item.archived_at,
-      decomposed_at: item.decomposed_at,
-      approved_at: item.approved_at,
-      version: item.version,
-      stage_position: item.stage_position,
-      awaitingReview: item.awaitingReview,
-      isDone: item.isDone,
-      blockedBy: item.blockedBy,
-      relatedTo: item.relatedTo,
-      readyToWork: item.readyToWork,
-      children: item.children,
-      childCount: item.childCount,
-      pendingTasks: item.pendingTasks,
-      created_at: item.created_at,
-      updated_at: item.updated_at,
-    };
-  }
-
-  /**
    * Project an idea's image attachments (migration 028) into the MCP read shape
    * for cyboflow_get_task: [{ id, label, mimeType, path }], `path` RESOLVED to
    * an absolute on-disk path — never base64/dataURLs (flow agents fetch bytes
@@ -1840,7 +1761,7 @@ export class McpQueryHandler {
       return true;
     });
 
-    const tasks = filtered.map((item) => McpQueryHandler.toCompactTask(item));
+    const tasks = filtered.map((item) => toCompactTask(item));
 
     this.writeResponse(client, {
       type: 'mcp-query-response',
@@ -1925,7 +1846,7 @@ export class McpQueryHandler {
       }
     }
 
-    const task = McpQueryHandler.toFullTask(item);
+    const task = toFullTask(item);
     // Ideas-only (migration 028 / IDEA-006): epics/tasks carry no attachments
     // column at all, so they get no `attachments` key; an idea with none gets
     // the empty array (a stable, documented shape either way).
@@ -5517,7 +5438,7 @@ export class McpQueryHandler {
     // toCompactTask omits it — a single-project caller already knows its own
     // project); spread + add rather than duplicate the whole projection.
     const tasks = filtered.map((item) => ({
-      ...McpQueryHandler.toCompactTask(item),
+      ...toCompactTask(item),
       project_id: item.project_id,
     }));
 
@@ -5562,7 +5483,7 @@ export class McpQueryHandler {
       return;
     }
 
-    const task = McpQueryHandler.toFullTask(item);
+    const task = toFullTask(item);
     if (item.type === 'idea') {
       const attachments = selectIdeaAttachments(this.db, item.id);
       task['attachments'] = McpQueryHandler.toMcpAttachments(attachments);

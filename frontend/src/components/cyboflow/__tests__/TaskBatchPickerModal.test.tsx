@@ -67,6 +67,7 @@ function makeItem(overrides: Partial<BacklogTaskItem>): BacklogTaskItem {
     body: null,
     priority: 'P2',
     category: 'feature',
+    executor: 'agent',
     repo: null,
     parent_epic_id: null,
     originating_idea_id: null,
@@ -475,3 +476,76 @@ describe('TaskBatchPickerModal — cap enforcement', () => {
     expect(ids).toHaveLength(10);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 5. Human tasks (migration 137) — listed, disabled, badged, never counted
+// ---------------------------------------------------------------------------
+
+describe('TaskBatchPickerModal — human tasks', () => {
+  it('lists a human task DISABLED with the "runs outside the sprint" badge', async () => {
+    await renderOpen([
+      makeItem({ id: 'TASK-1', ref: 'TASK-1' }),
+      makeItem({ id: 'TASK-H', ref: 'TASK-H', executor: 'human' }),
+    ]);
+
+    // It is shown (context matters — the user picked it for a reason)…
+    const row = screen.getByTestId('task-batch-picker-item-TASK-H');
+    expect(row).toHaveAttribute('data-human', 'true');
+    expect(screen.getByTestId('task-batch-picker-human-TASK-H')).toHaveTextContent(
+      'Human · runs outside the sprint',
+    );
+    // …but it can never be selected, because the server would drop it anyway.
+    expect(screen.getByLabelText('Select TASK-H')).toBeDisabled();
+    expect(screen.getByLabelText('Select TASK-1')).toBeEnabled();
+  });
+
+  it('excludes human tasks from "Select all eligible"', async () => {
+    const { onPicked } = await renderOpen([
+      makeItem({ id: 'TASK-1', ref: 'TASK-1' }),
+      makeItem({ id: 'TASK-H', ref: 'TASK-H', executor: 'human' }),
+    ]);
+
+    fireEvent.click(screen.getByTestId('task-batch-picker-select-all'));
+    fireEvent.click(screen.getByTestId('task-batch-picker-launch'));
+
+    expect(onPicked).toHaveBeenCalledWith(['TASK-1']);
+  });
+
+  it('a task waiting ONLY on a human prerequisite shows neutral prose, never the blocked chip', async () => {
+    await renderOpen([
+      makeItem({ id: 'TASK-H', ref: 'TASK-H', executor: 'human' }),
+      makeItem({
+        id: 'TASK-W',
+        ref: 'TASK-W',
+        // The server keeps it READY: a human prereq is truth, not a gate.
+        readyToWork: true,
+        blockedBy: [{ taskId: 'TASK-H', ref: 'TASK-H', title: 'Human work' }],
+        waitingOnHuman: ['TASK-H'],
+      }),
+    ]);
+
+    expect(screen.queryByTestId('task-batch-picker-blocked-TASK-W')).toBeNull();
+    expect(screen.getByTestId('task-batch-picker-waiting-human-TASK-W')).toHaveTextContent(
+      'waits on TASK-H (human)',
+    );
+    // Still selectable — nothing is stopping this task from running.
+    expect(screen.getByLabelText('Select TASK-W')).toBeEnabled();
+  });
+
+  it('an AGENT prerequisite still renders the blocked chip', async () => {
+    await renderOpen([
+      makeItem({ id: 'TASK-1', ref: 'TASK-1' }),
+      makeItem({
+        id: 'TASK-B',
+        ref: 'TASK-B',
+        readyToWork: false,
+        blockedBy: [{ taskId: 'TASK-1', ref: 'TASK-1', title: 'A task' }],
+      }),
+    ]);
+
+    expect(screen.getByTestId('task-batch-picker-blocked-TASK-B')).toHaveTextContent(
+      'blocked by TASK-1',
+    );
+  });
+});
+

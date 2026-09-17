@@ -54,6 +54,12 @@ time. Denied ideas are the ONLY ones you skip: they stay on the backlog
 untouched (never archive them, never mint guard findings for them), and a
 dedicated Planner run can decompose one later if the user changes their mind.
 
+This rule binds at each of the three steps that could narrow the set —
+`ideas`, `expand-spec`, and `tasks` — not only here as a whole-flow preamble. A
+step that sees an ordered idea list and no instruction to the contrary reads the
+ordering as a priority ranking and quietly plans the top of it; every one of the
+three has to be told that `BUILD_ORDER` is a build sequence, not a cut line.
+
 **Lineage is mandatory everywhere.** A Launch run always owns multiple ideas, so
 the write chokepoint will NOT guess which idea a new epic/task belongs to. Pass
 `originating_idea_id: "<the idea's id or ref>"` on EVERY `cyboflow_create_task`

@@ -509,6 +509,47 @@ describe('GateSideEffects.reconcileAtSettle', () => {
     ).toBe(1);
   });
 
+  it('never binds a design the human sent back — a resolved reject/revise gate is not converged on', async () => {
+    for (const resolution of ['reject', 'revise']) {
+      const h = setup();
+      const idea = await makeIdea(h, 'Idea');
+      const runId = `run-${resolution}`;
+      seedRun(h, runId, 'launch', idea.id);
+      seedPrototype(h, runId);
+      seedArtifact(h, runId, 'project-brief', { markdown: BRIEF });
+      h.db
+        .prepare(
+          `INSERT INTO review_items (id, project_id, run_id, kind, status, blocking, title, source, resolution)
+           VALUES (?, ?, ?, 'decision', 'resolved', 1, 'Human gate: Approve design', 'gate:human-step:approve-design', ?)`,
+        )
+        .run(`rvw-${resolution}`, h.projectId, runId, resolution);
+      GateSideEffects.initialize(makeDeps(h));
+
+      await GateSideEffects.getInstance().reconcileAtSettle(runId);
+
+      expect(getCurrentApprovedDesign(h.db, idea.id)).toBeNull();
+      // The brief gate was never minted here, so the stamp still converges.
+      expect(readSolutionThoroughness(h.db, h.projectId)).toBe('production');
+    }
+  });
+
+  it('still converges when the design gate resolved approve', async () => {
+    const h = setup();
+    const idea = await makeIdea(h, 'Idea');
+    seedRun(h, 'run-ok', 'launch', idea.id);
+    seedPrototype(h, 'run-ok');
+    h.db
+      .prepare(
+        `INSERT INTO review_items (id, project_id, run_id, kind, status, blocking, title, source, resolution)
+         VALUES ('rvw-ok', ?, 'run-ok', 'decision', 'resolved', 1, 'Human gate: Approve design', 'gate:human-step:approve-design', 'approve')`,
+      )
+      .run(h.projectId);
+    GateSideEffects.initialize(makeDeps(h));
+
+    await GateSideEffects.getInstance().reconcileAtSettle('run-ok');
+    expect(getCurrentApprovedDesign(h.db, idea.id)?.sourceRunId).toBe('run-ok');
+  });
+
   it('ignores a non-design flow', async () => {
     const h = setup();
     const idea = await makeIdea(h, 'Idea');

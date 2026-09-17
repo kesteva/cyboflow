@@ -667,9 +667,9 @@ describe('WorkflowController — autonomous lane rescue', () => {
     expect(runner.calls.filter((c) => c.id === 'implement')).toHaveLength(2);
   });
 
-  it('LATCHES the systemic verdict for the whole wave: five failing lanes, one pause, no lane failed', async () => {
-    // Regression: MONITOR_RUN_RESCUE_CAP is 4, so without the latch a five-lane
-    // wave makes four doomed consults against a dead quota and the fifth lane —
+  it('LATCHES the systemic verdict for the whole park epoch: five failing lanes, one pause, no lane failed', async () => {
+    // Regression: MONITOR_RUN_RESCUE_CAP is 4, so without the latch five concurrent
+    // lanes make four doomed consults against a dead quota and the fifth lane —
     // refused a consult because the budget is "spent" — settles 'failed' on an
     // environment condition no task caused.
     const items = ['t1', 't2', 't3', 't4', 't5'];
@@ -699,7 +699,7 @@ describe('WorkflowController — autonomous lane rescue', () => {
     // The siblings park on the latch instead of consulting (and instead of
     // burning the run's rescue budget on a monitor that cannot answer).
     expect(consults.length).toBeLessThanOrEqual(2);
-    // ONE park for the whole wave, carrying the triage error.
+    // ONE park for the whole epoch, carrying the triage error.
     expect(pauseCalls).toEqual([{ stepId: 'execute', error: LIMIT }]);
     // No lane blamed for the environment — including the one past the cap.
     expect(failedWrites(driver.lanes)).toEqual([]);
@@ -733,6 +733,35 @@ describe('WorkflowController — autonomous lane rescue', () => {
     expect(pauseCalls).toEqual([{ stepId: 'execute', error: LIMIT }]);
     expect(failedWrites(driver.lanes)).toEqual([]);
     for (const id of items) expect(laneStatus(driver.lanes, id)).toBe('integrated');
+  });
+
+  it('CLEARS the latch when a park ends WITHOUT a resume: a later unrelated failure is still consulted', async () => {
+    // The park arm is skipped entirely when there is no `awaitSystemicPause`
+    // seam (and equally when the pause budget is spent, or give-up has latched):
+    // the parked lanes fall straight through to 'failed' with no resume event.
+    // If the triage latch survived that, every later lane in the run would park
+    // un-consulted and then fail — a 15-lane sprint losing lane triage for lanes
+    // 3-15 because lane 2's consult hit a transient quota error once.
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+    const runner = makeRunner({
+      't1:implement': [{ status: 'failed', error: 'tsc: 4 errors' }],
+      't2:implement': [{ status: 'failed', error: 'eslint: 2 problems' }],
+    });
+    // No `pauses` ⇒ no awaitSystemicPause seam at all. t1's consult dies
+    // systemically; t2 then fails for an entirely unrelated reason.
+    const { host, driver, consults } = makeTriageHost({
+      items: ['t1', 't2'],
+      outcomes: [{ kind: 'systemic', error: LIMIT }, { kind: 'give_up' }],
+    });
+
+    const result = await new WorkflowController(runner, host).run('r', d);
+
+    expect(result.outcome).toBe('completed');
+    // TWO consults: t1's (which died) and t2's, which the cleared latch allowed.
+    expect(consults).toHaveLength(2);
+    expect(consults.map((c) => c.itemId)).toEqual(['t1', 't2']);
+    // Both settled failed — t1 through the seam-less park, t2 through its consult.
+    expect(failedWrites(driver.lanes)).toEqual(['t1', 't2']);
   });
 
   it('treats a systemic triage verdict at the MERGE GATE exactly like a give_up', async () => {

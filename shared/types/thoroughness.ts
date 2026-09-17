@@ -76,6 +76,45 @@ export function parseThoroughnessFlag(briefMarkdown: string | null | undefined):
   return found;
 }
 
+/**
+ * Matches a `Solution thoroughness` heading (any level, any trailing text) — the
+ * brief section the interview contract makes MANDATORY.
+ */
+const THOROUGHNESS_SECTION_HEADING_RE = /^[ \t]*#{1,6}[ \t]*solution[ \t]+thoroughness\b/i;
+const ANY_HEADING_RE = /^[ \t]*#{1,6}[ \t]+\S/;
+const THOROUGHNESS_LEVEL_WORD_RE = /\b(prototype|v1|production)\b/i;
+
+/**
+ * The solution thoroughness a brief DECLARES, read from either channel the
+ * interview contract mandates: the `THOROUGHNESS:` flag line first, and — only
+ * when no flag line exists — the opening of the brief's own `## Solution
+ * thoroughness` section ("This is a prototype: …").
+ *
+ * The section fallback is NOT prose guessing: it reads only the section whose
+ * sole purpose is to declare the level, and only its first level word. It exists
+ * because the 2026-09-15 launch smoke produced a brief whose agent wrote the
+ * mandated section and dropped the machine flag line, so the approve-brief stamp
+ * silently did nothing and the sprint wizard kept its default. Anything outside
+ * that section still returns null — the safe answer every caller is built around.
+ */
+export function parseThoroughnessDeclaration(briefMarkdown: string | null | undefined): SolutionThoroughness | null {
+  const flagged = parseThoroughnessFlag(briefMarkdown);
+  if (flagged !== null) return flagged;
+  if (typeof briefMarkdown !== 'string' || briefMarkdown.length === 0) return null;
+  const lines = briefMarkdown.split(/\r?\n/);
+  const start = lines.findIndex((line) => THOROUGHNESS_SECTION_HEADING_RE.test(line));
+  if (start < 0) return null;
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (ANY_HEADING_RE.test(line)) break;
+    const m = THOROUGHNESS_LEVEL_WORD_RE.exec(line);
+    if (!m) continue;
+    const value = m[1].toLowerCase();
+    return isSolutionThoroughness(value) ? value : null;
+  }
+  return null;
+}
+
 /** The workflow tuning levels a thoroughness maps onto (mirrors TuningLevel's preset arms). */
 export type ThoroughnessTuningLevel = 'efficient' | 'standard' | 'thorough';
 

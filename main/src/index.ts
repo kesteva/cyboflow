@@ -107,6 +107,7 @@ import { ApprovalRouter } from './orchestrator/approvalRouter';
 import { QuestionRouter } from './orchestrator/questionRouter';
 import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
 import { ReviewItemRouter, reviewItemChangeEvents, reviewItemProjectChannel } from './orchestrator/reviewItemRouter';
+import { humanPrerequisiteSink } from './orchestrator/humanPrerequisites';
 import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
 import { FleetRegistryReader } from './orchestrator/omp/fleetRegistryReader';
 import { OmpBridgeCommandAdapter } from './orchestrator/omp/ompBridgeCommandAdapter';
@@ -325,11 +326,11 @@ import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, No
 import { VariantResolver } from './orchestrator/variantResolver';
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
-import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReaderLike, FindingReaderLike, WorkflowPromptReaderLike } from './orchestrator/runExecutor';
+import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReaderLike, WorkflowPromptReaderLike } from './orchestrator/runExecutor';
 import { buildSeedTasksBlock } from './orchestrator/seedTasksBlock';
 import { listRunOwnedIdeaIds } from './orchestrator/runEntityOwnership';
 import { selectTaskById, selectIdeaAttachments } from './orchestrator/taskListing';
-import { selectFindingForSeed } from './orchestrator/reviewItemListing';
+import { createSeededFindingReader } from './orchestrator/seededFindingReader';
 import { buildStepTransitionEvent, resolveRunLevelStepId } from './orchestrator/stepTransitionBridge';
 import {
   transitionToRunning,
@@ -2171,8 +2172,11 @@ async function initializeServices(): Promise<boolean> {
   // to the same live per-substrate override every other cap check already
   // reads (runs.start, experiments.start, the MCP backstop) — never omit it,
   // or the store's cap silently floors to the built-in defaults.
+  // `onBatchMinted` (migration 137) surfaces the batch's HUMAN prerequisites as
+  // standing review items — see humanPrerequisiteSink for the fail-soft contract.
   const sprintLaneStore = SprintLaneStore.initialize(cyboflowDb, cyboflowLogger, {
     getSprintMaxTasks: () => configManager.getSprintMaxTasks(),
+    onBatchMinted: humanPrerequisiteSink(cyboflowDb, reviewItemRouter, cyboflowLogger),
   });
 
   // The human-gate run-pause manager (P4) pairs with the ReviewItemRouter
@@ -4188,6 +4192,15 @@ async function initializeServices(): Promise<boolean> {
         : Promise.resolve({ ok: false, reason: 'backlog edits are not wired yet' }),
     laneTriageFindingSink: (runId, input) =>
       laneTriageActions ? laneTriageActions.fileFinding(runId, input) : Promise.resolve(),
+    // RUN-LEVEL verification posture (CD1) reads the runbook through the SAME
+    // closure the scheduler's §3.2 degrade gate and the health panel's badge use
+    // — there must never be a third reading of `verify_runbook_local.status`.
+    // Read LAZILY through the module holder (it is assigned inside
+    // initializeServices, like every other late-bound probe): an unset holder
+    // resolves `null`, which the posture reads as UNKNOWN and answers 'available'
+    // for, never as "this project has no runbook".
+    verifyRunbookStatus: async (projectId, modality, probePath) =>
+      verifyRunbookStatus ? verifyRunbookStatus(projectId, modality, probePath) : null,
     // Per-step result sink (migration 033): persist each settled step so results
     // are queryable + crash-safe resume can skip individually-completed steps.
     stepResultRecorder: (runId, report) =>
@@ -4203,32 +4216,10 @@ async function initializeServices(): Promise<boolean> {
     logger: cyboflowLogger,
   });
 
-  // Selected-finding reader (migration 034): resolves a compound run's
-  // seed_finding_ids to each finding's content via selectFindingForSeed (which
-  // already SELECTs only kind='finding' rows and lifts proposedTarget /
-  // suggestedFix / locations from payload_json). Injected as the trailing
-  // RunExecutor arg so getPrompt can prepend a `# Selected findings` block, and
-  // so the terminal-seam close-out can read seeded-finding status. Reads through
-  // the narrow DatabaseLike adapter (cyboflowDb) — the same handle the review
-  // routers use. Returns null when the row is missing or not a finding.
-  const findingReader: FindingReaderLike = {
-    read: (id) => {
-      const finding = selectFindingForSeed(cyboflowDb, id);
-      return finding
-        ? {
-            id: finding.id,
-            title: finding.title,
-            body: finding.body,
-            severity: finding.severity,
-            priority: finding.priority,
-            proposedTarget: finding.proposedTarget,
-            source: finding.source,
-            suggestedFix: finding.suggestedFix,
-            locations: finding.locations,
-          }
-        : null;
-    },
-  };
+  // Selected-finding reader (migration 034) — injected as the trailing
+  // RunExecutor arg; reads through the same narrow DatabaseLike adapter the
+  // review routers use.
+  const findingReader = createSeededFindingReader(cyboflowDb);
 
   runExecutor = new RunExecutor(
     substrateFacade,

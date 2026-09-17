@@ -702,4 +702,27 @@ describe('ABTestLaunchModal — sprint (task-driven) workflow', () => {
     );
     expect(screen.queryByTestId('ab-test-project')).not.toBeInTheDocument();
   });
+
+  it('lists a HUMAN task disabled and badged, and excludes it from select-all (migration 137)', async () => {
+    mockTasksList.mockResolvedValue([
+      eligibleTask('t1', 'TSK-1', 'Agent work'),
+      { ...eligibleTask('th', 'TSK-H', 'Buy the domain'), executor: 'human' } as unknown as BacklogTaskItem,
+    ]);
+    render(<ABTestLaunchModal tuningLevel={null} isOpen projectId={1} workflowId="wf-1" workflowName="sprint" onClose={vi.fn()} />);
+
+    // Shown for context — an experiment CANNOT run work only a person can do,
+    // and readSeedTask rejects it server-side, so it must not look selectable.
+    const row = await screen.findByTestId('ab-test-seed-task-item-th');
+    expect(row).toHaveAttribute('data-human', 'true');
+    expect(screen.getByTestId('ab-test-seed-task-human-th')).toHaveTextContent(
+      'Human · runs outside the sprint',
+    );
+    expect(screen.getByLabelText('Select TSK-H')).toBeDisabled();
+
+    fireEvent.click(screen.getByTestId('ab-test-select-all-tasks'));
+    fireEvent.click(screen.getByTestId('ab-test-submit'));
+    await waitFor(() => expect(mockStartSideBySide).toHaveBeenCalledTimes(1));
+    expect(mockStartSideBySide.mock.calls[0][0].seedTaskIds).toEqual(['t1']);
+  });
+
 });

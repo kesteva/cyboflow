@@ -233,6 +233,7 @@ function makeIdea(overrides: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
     body: '# Problem\n\nThe center column stacks.',
     priority: 'P1',
     category: 'feature',
+    executor: 'agent',
     repo: null,
     parent_epic_id: null,
     originating_idea_id: null,

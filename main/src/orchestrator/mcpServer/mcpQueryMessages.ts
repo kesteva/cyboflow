@@ -14,7 +14,7 @@ import type { PermissionMode, WorkflowDefinition, WorkflowRow } from '../../../.
 import type { TuningLevel } from '../../../../shared/tuning/workflowTuning';
 import type { IdeaComponentKey, IdeaComponentStateValue } from '../../../../shared/types/ideaComponents';
 import type { ArtifactType } from '../../../../shared/types/artifacts';
-import type { Priority, TaskType, IdeaScope, EntityCategory } from '../../../../shared/types/tasks';
+import type { Priority, TaskType, IdeaScope, EntityCategory, TaskExecutor } from '../../../../shared/types/tasks';
 import type { WorkflowVariantRow, WorkflowVariantStatus } from '../../../../shared/types/experiments';
 import type { QuestionPayload } from '../../../../shared/types/questions';
 import type { ReviewItemEntityType, ReviewItemKind, ReviewItemSeverity } from '../../../../shared/types/reviews';
@@ -64,6 +64,13 @@ export type McpQueryMessage =
        * how scope is dropped on epic/task creates rather than rejected).
        */
       originatingIdeaId?: string;
+      /**
+       * WHO performs the work (migration 137) — taskType='task' ONLY. Unlike
+       * `scope`, a misplaced value is REJECTED by the chokepoint
+       * (invalid_executor) rather than dropped: silently re-agenting work the
+       * caller just marked human would put it back in a sprint's path.
+       */
+      executor?: TaskExecutor;
     }
   | {
       type: 'mcp-update-task';
@@ -87,6 +94,8 @@ export type McpQueryMessage =
       expectedVersion?: number;
       /** Idea size hint — only meaningful for idea entities (ignored on epic/task entities). */
       scope?: IdeaScope;
+      /** WHO performs the work (migration 137) — task entities ONLY; see 'mcp-create-task'. */
+      executor?: TaskExecutor;
     }
   | {
       type: 'mcp-set-task-stage';

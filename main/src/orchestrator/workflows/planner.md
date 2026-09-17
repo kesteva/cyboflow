@@ -77,7 +77,9 @@ Instead:
 
 1. Fold its refined stub into the idea with `scope="large"` (`cyboflow_update_task`)
    so whoever picks it up next sees the sharpened intent.
-2. Mint a blocking guard decision:
+2. Mint a blocking guard decision, titled exactly `idea-size-guard: <the idea's
+   ref>` so the card is recognizable at a glance and every plane mints the same
+   title:
    `cyboflow_report_finding(kind: 'decision', blocking: true, entity_type: 'idea',
    entity_id: "<the idea's opaque id from its <idea id=…> attribute>", payload_json:
    {"kind":"decision","gate":"idea-size-guard","ideaRef":"IDEA-XXX"})` (with a clear
@@ -136,6 +138,11 @@ the distinction that matters most:
 - **skipped** — deliberately declared not-applicable, by a flow or by the user.
   Leave it skipped. If you believe it should run after all, raise that at a gate
   rather than silently overriding a human's call.
+
+**Read the ledger BEFORE you plan, at the `context` step**, not when you reach the
+step that would produce a component. The three states above decide what this run
+actually has to do, and reading them late means the decision arrives after the work
+it should have prevented.
 
 **Stamp every component as you finish it**, with `cyboflow_set_idea_component`. Do it
 **after** the body write that completes it, never before — a body write marks

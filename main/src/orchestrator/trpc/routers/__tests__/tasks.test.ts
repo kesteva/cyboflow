@@ -81,6 +81,9 @@ function buildDb(): Database.Database {
   // in the chokepoint's INSERT/SELECT (mirrors priority) — every curated buildDb
   // must carry it or the router's `no such column: category` on create.
   db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
+  // Migration 137: tasks.executor (agent|human) — create/update thread it and
+  // the read-side UNION projects it.
+  db.exec(readFileSync(join(migDir, '137_task_executor.sql'), 'utf-8'));
   return db;
 }
 
@@ -118,6 +121,7 @@ function fakeItem(taskId: string, projectId: number): BacklogTaskItem {
     body: null,
     priority: 'P2',
     category: 'feature',
+    executor: 'agent',
     repo: null,
     parent_epic_id: null,
     originating_idea_id: null,
@@ -398,3 +402,165 @@ describe('cyboflow.tasks router (nullable scope, archive, delete, global subscri
     expect(received.taskId).toBe('task_expected_project');
   }, 10000);
 });
+
+// ---------------------------------------------------------------------------
+// executor + removeDependency (migration 137)
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.tasks — executor', () => {
+  afterEach(() => {
+    TaskChangeRouter._resetForTesting();
+    taskChangeEvents.removeAllListeners();
+  });
+
+  function executorOf(db: Database.Database, taskId: string): string {
+    return (db.prepare('SELECT executor FROM tasks WHERE id = ?').get(taskId) as {
+      executor: string;
+    }).executor;
+  }
+
+  it('create threads executor through (default agent) and update flips it', async () => {
+    const db = buildDb();
+    const caller = buildCaller(db);
+
+    const { taskId: agentId } = await caller.cyboflow.tasks.create({
+      projectId: 1,
+      type: 'task',
+      title: 'Agent work',
+    });
+    const { taskId: humanId } = await caller.cyboflow.tasks.create({
+      projectId: 1,
+      type: 'task',
+      title: 'Buy the domain',
+      executor: 'human',
+    });
+
+    expect(executorOf(db, agentId)).toBe('agent');
+    expect(executorOf(db, humanId)).toBe('human');
+
+    await caller.cyboflow.tasks.update({ projectId: 1, taskId: agentId, executor: 'human' });
+    expect(executorOf(db, agentId)).toBe('human');
+    db.close();
+  });
+
+  it('maps invalid_executor to a BAD_REQUEST TRPCError on an idea', async () => {
+    const db = buildDb();
+    const caller = buildCaller(db);
+    await expect(
+      caller.cyboflow.tasks.create({
+        projectId: 1,
+        type: 'idea',
+        title: 'An idea',
+        executor: 'human',
+      }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
+    db.close();
+  });
+
+  it('list projects executor, and a human prerequisite does not clear readyToWork', async () => {
+    const db = buildDb();
+    const caller = buildCaller(db);
+    const { taskId: consumerId } = await caller.cyboflow.tasks.create({
+      projectId: 1,
+      type: 'task',
+      title: 'Consumer',
+    });
+    const { taskId: humanId } = await caller.cyboflow.tasks.create({
+      projectId: 1,
+      type: 'task',
+      title: 'Human work',
+      executor: 'human',
+    });
+    db.prepare(
+      "INSERT INTO task_dependencies (task_id, depends_on_task_id, kind) VALUES (?, ?, 'blocking')",
+    ).run(consumerId, humanId);
+
+    const rows: BacklogTaskItem[] = await caller.cyboflow.tasks.list({ projectId: 1 });
+    const consumer = rows.find((r) => r.id === consumerId)!;
+    expect(rows.find((r) => r.id === humanId)!.executor).toBe('human');
+    expect(consumer.readyToWork).toBe(true);
+    expect(consumer.blockedBy).toHaveLength(1);
+    expect(consumer.waitingOnHuman).toHaveLength(1);
+    db.close();
+  });
+});
+
+describe('cyboflow.tasks.removeDependency', () => {
+  afterEach(() => {
+    TaskChangeRouter._resetForTesting();
+    taskChangeEvents.removeAllListeners();
+  });
+
+  async function seedEdge(
+    db: Database.Database,
+  ): Promise<{ caller: ReturnType<typeof buildCaller>; blockedId: string; prereqId: string }> {
+    const caller = buildCaller(db);
+    const { taskId: blockedId } = await caller.cyboflow.tasks.create({
+      projectId: 1,
+      type: 'task',
+      title: 'Consumer',
+    });
+    const { taskId: prereqId } = await caller.cyboflow.tasks.create({
+      projectId: 1,
+      type: 'task',
+      title: 'Producer',
+    });
+    db.prepare(
+      "INSERT INTO task_dependencies (task_id, depends_on_task_id, kind) VALUES (?, ?, 'blocking')",
+    ).run(blockedId, prereqId);
+    return { caller, blockedId, prereqId };
+  }
+
+  function edgeCount(db: Database.Database): number {
+    return (db.prepare('SELECT COUNT(*) AS n FROM task_dependencies').get() as { n: number }).n;
+  }
+
+  it('removes the edge and reports removed: true', async () => {
+    const db = buildDb();
+    const { caller, blockedId, prereqId } = await seedEdge(db);
+
+    const result = await caller.cyboflow.tasks.removeDependency({
+      projectId: 1,
+      taskId: blockedId,
+      dependsOnTaskId: prereqId,
+    });
+
+    expect(result).toEqual({ taskId: blockedId, removed: true });
+    expect(edgeCount(db)).toBe(0);
+    db.close();
+  });
+
+  it('is idempotent — a repeat call resolves with removed: false instead of erroring', async () => {
+    const db = buildDb();
+    const { caller, blockedId, prereqId } = await seedEdge(db);
+    await caller.cyboflow.tasks.removeDependency({
+      projectId: 1,
+      taskId: blockedId,
+      dependsOnTaskId: prereqId,
+    });
+
+    await expect(
+      caller.cyboflow.tasks.removeDependency({
+        projectId: 1,
+        taskId: blockedId,
+        dependsOnTaskId: prereqId,
+      }),
+    ).resolves.toEqual({ taskId: blockedId, removed: false });
+    db.close();
+  });
+
+  it('maps an unknown endpoint to a BAD_REQUEST TRPCError', async () => {
+    const db = buildDb();
+    const { caller, blockedId } = await seedEdge(db);
+    await expect(
+      caller.cyboflow.tasks.removeDependency({
+        projectId: 1,
+        taskId: blockedId,
+        dependsOnTaskId: 'TASK-999',
+      }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
+    expect(edgeCount(db)).toBe(1);
+    db.close();
+  });
+});
+

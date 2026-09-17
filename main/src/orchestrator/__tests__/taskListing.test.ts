@@ -69,6 +69,10 @@ function buildDb(): Database.Database {
   // NOT NULL DEFAULT 'feature'); the UNION now selects it bare (not NULL AS ...)
   // on every branch, so every fixture row needs the column.
   db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
+  // Migration 137 adds tasks.executor (agent|human). The UNION and the
+  // dependency-overlay JOIN both project it (columnExists-gated), so the fixture
+  // carries it to exercise the PRESENT path rather than the pre-137 fallback.
+  db.exec(readFileSync(join(migDir, '137_task_executor.sql'), 'utf-8'));
   // 017 (seed_idea_id) + 061 (seed_idea_ids) are needed by selectRunDecomposition's
   // listRunOwnedOrBatchIdeaIds resolution (the run-owned-ideas fixtures below).
   db.exec(readFileSync(join(migDir, '017_run_seed_idea.sql'), 'utf-8'));
@@ -1641,5 +1645,88 @@ describe('taskListing — experiment membership overlay', () => {
     const memberships = backlog.find((t) => t.id === 'tsk_orig')!.memberships;
     expect(memberships).toHaveLength(2);
     expect(memberships.map((m) => m.kind).sort()).toEqual(['experiment', 'sprint']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Human prerequisites (migration 137) — recorded, but NON-gating
+// ---------------------------------------------------------------------------
+
+describe('taskListing — human prerequisites do not gate readiness', () => {
+  function makeHuman(db: Database.Database, id: string): void {
+    db.prepare("UPDATE tasks SET executor = 'human' WHERE id = ?").run(id);
+  }
+
+  it('a blocking prereq that is a HUMAN task keeps the dependent readyToWork and names it in waitingOnHuman', () => {
+    const db = buildDb();
+    seedTask(db, 'tsk_a', 'TASK-001', 6);
+    seedTask(db, 'tsk_h', 'TASK-009', 5); // NOT at Done — an agent prereq here would block.
+    makeHuman(db, 'tsk_h');
+    addEdge(db, 'tsk_a', 'tsk_h');
+
+    const a = selectProjectBacklog(dbAdapter(db), 1).find((t) => t.id === 'tsk_a')!;
+    // The edge is still TRUTH — it stays in blockedBy.
+    expect(a.blockedBy).toEqual([{ taskId: 'tsk_h', ref: 'TASK-009', title: 'Title TASK-009' }]);
+    // …but it is not a gate.
+    expect(a.readyToWork).toBe(true);
+    expect(a.waitingOnHuman).toEqual(['TASK-009']);
+  });
+
+  it('an AGENT prereq still blocks, even alongside a human one', () => {
+    const db = buildDb();
+    seedTask(db, 'tsk_a', 'TASK-001', 6);
+    seedTask(db, 'tsk_h', 'TASK-009', 5);
+    seedTask(db, 'tsk_b', 'TASK-002', 5);
+    makeHuman(db, 'tsk_h');
+    addEdge(db, 'tsk_a', 'tsk_h');
+    addEdge(db, 'tsk_a', 'tsk_b');
+
+    const a = selectProjectBacklog(dbAdapter(db), 1).find((t) => t.id === 'tsk_a')!;
+    expect(a.readyToWork).toBe(false);
+    expect(a.waitingOnHuman).toEqual(['TASK-009']);
+    expect(a.blockedBy!.map((d) => d.ref).sort()).toEqual(['TASK-002', 'TASK-009']);
+  });
+
+  it('a RELATED edge to a human task is advisory only — not in blockedBy, not in waitingOnHuman', () => {
+    const db = buildDb();
+    seedTask(db, 'tsk_a', 'TASK-001', 6);
+    seedTask(db, 'tsk_h', 'TASK-009', 5);
+    makeHuman(db, 'tsk_h');
+    addEdge(db, 'tsk_a', 'tsk_h', 'related');
+
+    const a = selectProjectBacklog(dbAdapter(db), 1).find((t) => t.id === 'tsk_a')!;
+    expect(a.blockedBy).toEqual([]);
+    expect(a.waitingOnHuman).toEqual([]);
+    expect(a.relatedTo!.map((d) => d.ref)).toEqual(['TASK-009']);
+  });
+
+  it('selectTaskById carries the same waitingOnHuman overlay, and projects executor on the row', () => {
+    const db = buildDb();
+    seedTask(db, 'tsk_a', 'TASK-001', 6);
+    seedTask(db, 'tsk_h', 'TASK-009', 5);
+    makeHuman(db, 'tsk_h');
+    addEdge(db, 'tsk_a', 'tsk_h');
+
+    const a = selectTaskById(dbAdapter(db), 'tsk_a')!;
+    expect(a.executor).toBe('agent');
+    expect(a.readyToWork).toBe(true);
+    expect(a.waitingOnHuman).toEqual(['TASK-009']);
+
+    const h = selectTaskById(dbAdapter(db), 'tsk_h')!;
+    expect(h.executor).toBe('human');
+  });
+
+  it('ideas and epics project executor agent (they have no such column)', () => {
+    const db = buildDb();
+    const { ideaId, epicId } = seedFixture(db);
+    expect(selectTaskById(dbAdapter(db), ideaId)!.executor).toBe('agent');
+    expect(selectTaskById(dbAdapter(db), epicId)!.executor).toBe('agent');
+  });
+
+  it('a task with no dependencies reads waitingOnHuman as []', () => {
+    const db = buildDb();
+    seedTask(db, 'tsk_a', 'TASK-001', 6);
+    const a = selectProjectBacklog(dbAdapter(db), 1).find((t) => t.id === 'tsk_a')!;
+    expect(a.waitingOnHuman).toEqual([]);
   });
 });

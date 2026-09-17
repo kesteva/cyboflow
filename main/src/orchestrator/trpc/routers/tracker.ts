@@ -219,6 +219,8 @@ function rethrowAsTRPCError(err: unknown): never {
       concurrency: 'CONFLICT',
       invalid_dependency: 'BAD_REQUEST',
       dependency_cycle: 'CONFLICT',
+      // executor is tasks-only (migration 137) — a caller bug, not a conflict.
+      invalid_executor: 'BAD_REQUEST',
       idea_needs_epic: 'CONFLICT',
       experiment_sandboxed: 'CONFLICT',
       experiment_sweep_failed: 'INTERNAL_SERVER_ERROR',
