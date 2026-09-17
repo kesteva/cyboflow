@@ -91,6 +91,7 @@ function item(over: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
     body: null,
     priority: 'P1',
     category: 'feature',
+    executor: 'agent',
     repo: null,
     parent_epic_id: null,
     originating_idea_id: null,

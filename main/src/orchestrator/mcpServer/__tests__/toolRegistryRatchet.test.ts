@@ -51,6 +51,10 @@ function locateMcpServerDir(): string {
 const MCP_DIR = locateMcpServerDir();
 const SERVER_SRC = fs.readFileSync(path.join(MCP_DIR, 'cyboflowMcpServer.ts'), 'utf8');
 const HANDLER_SRC = fs.readFileSync(path.join(MCP_DIR, 'mcpQueryHandler.ts'), 'utf8');
+// McpQueryMessage / McpQueryResponse were extracted out of mcpQueryHandler.ts
+// into mcpQueryMessages.ts (issue #19, the god-file split) — declaredEnvelopes()
+// below scans THIS source, not the handler's.
+const MESSAGES_SRC = fs.readFileSync(path.join(MCP_DIR, 'mcpQueryMessages.ts'), 'utf8');
 
 /**
  * Envelopes the main process dispatches that NO tool produces. These are the
@@ -81,22 +85,28 @@ const CROSS_FIELD_REQUIRED: ReadonlyMap<string, string> = new Map([
   ],
 ]);
 
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+}
+
 /** Every envelope `handleMessage`'s switch has an arm for. */
 function dispatchedEnvelopes(): Set<string> {
   const start = HANDLER_SRC.indexOf('async handleMessage(');
   expect(start, 'handleMessage moved — this ratchet scans the wrong region').toBeGreaterThan(-1);
-  const body = HANDLER_SRC.slice(start);
-  return new Set([...body.matchAll(/case '([a-z-]+)':/g)].map((match) => match[1]));
+  // Strip comments first: a `case` arm demoted to a comment must count as
+  // REMOVED, not still dispatched.
+  const body = stripComments(HANDLER_SRC.slice(start));
+  return new Set([...body.matchAll(/case ['"]([a-z-]+)['"]:/g)].map((match) => match[1]));
 }
 
 /** Every envelope the `McpQueryMessage` union declares a member for. */
 function declaredEnvelopes(): Set<string> {
-  const start = HANDLER_SRC.indexOf('export type McpQueryMessage =');
-  const end = HANDLER_SRC.indexOf('export interface McpQueryResponse');
+  const start = MESSAGES_SRC.indexOf('export type McpQueryMessage =');
+  const end = MESSAGES_SRC.indexOf('export interface McpQueryResponse');
   expect(start, 'McpQueryMessage moved — this ratchet scans the wrong region').toBeGreaterThan(-1);
   expect(end).toBeGreaterThan(start);
-  const union = HANDLER_SRC.slice(start, end);
-  return new Set([...union.matchAll(/type: '([a-z-]+)';/g)].map((match) => match[1]));
+  const union = stripComments(MESSAGES_SRC.slice(start, end));
+  return new Set([...union.matchAll(/type: ['"]([a-z-]+)['"];/g)].map((match) => match[1]));
 }
 
 describe('MCP tool registry ratchet: every surface derives from one entry', () => {

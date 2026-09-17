@@ -54,8 +54,19 @@ const CONFIG_SECTION = [
   '+    "verify:serve": "vite preview"',
 ].join('\n');
 
+const EMPTY_WORKTREE: RunGitDiff['worktree'] = {
+  entries: [],
+  groups: [
+    { scope: 'unstaged', files: [], additions: 0, deletions: 0 },
+    { scope: 'staged', files: [], additions: 0, deletions: 0 },
+    { scope: 'untracked', files: [], additions: 0, deletions: 0 },
+    { scope: 'committed', files: [], additions: 0, deletions: 0 },
+  ],
+  committedUnavailable: true,
+};
+
 function captured(sections: string[], stats: RunGitDiff['stats'], files: string[]): RunGitDiff {
-  return { diff: sections.join('\n'), stats, changedFiles: files };
+  return { diff: sections.join('\n'), stats, changedFiles: files, resolvedBase: null, worktree: EMPTY_WORKTREE };
 }
 
 describe('exciseBootstrapDiff', () => {
@@ -113,12 +124,20 @@ describe('exciseBootstrapDiff', () => {
       diff: 'something that is not a unified diff at all',
       stats: { additions: 0, deletions: 0, filesChanged: 0 },
       changedFiles: [],
+      resolvedBase: null,
+      worktree: EMPTY_WORKTREE,
     };
     expect(exciseBootstrapDiff(input, [RUNBOOK_PATH])).toBe(input);
   });
 
   it('returns the input unchanged for an empty diff', () => {
-    const input: RunGitDiff = { diff: '', stats: { additions: 0, deletions: 0, filesChanged: 0 }, changedFiles: [] };
+    const input: RunGitDiff = {
+      diff: '',
+      stats: { additions: 0, deletions: 0, filesChanged: 0 },
+      changedFiles: [],
+      resolvedBase: null,
+      worktree: EMPTY_WORKTREE,
+    };
     expect(exciseBootstrapDiff(input, [RUNBOOK_PATH])).toBe(input);
   });
 
@@ -163,6 +182,8 @@ describe('exciseBootstrapDiff', () => {
       diff: `some preamble\n${RUNBOOK_SECTION}\n${LANE_SECTION}`,
       stats: { additions: 4, deletions: 1, filesChanged: 2 },
       changedFiles: ['src/app.ts', RUNBOOK_PATH],
+      resolvedBase: null,
+      worktree: EMPTY_WORKTREE,
     };
     const result = exciseBootstrapDiff(input, [RUNBOOK_PATH]);
     expect(result.diff.startsWith('some preamble')).toBe(true);

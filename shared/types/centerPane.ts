@@ -24,6 +24,7 @@
  * rather than riding `artifact`'s atype-keyed identity.
  */
 import { isPerEntityArtifact, type ArtifactType } from './artifacts';
+import type { DiffGroupScope } from './runFiles';
 
 /** Tab kind discriminant. */
 export type TabKind = 'flow' | 'file' | 'artifact' | 'approved-design';
@@ -60,6 +61,13 @@ export interface TabItem {
   filePath?: string;
   /** Git status letter for the glyph (file tabs). */
   status?: FileTabStatus;
+  /**
+   * Base ref/SHA the file's diff should be computed against (file tabs).
+   * `null`/`undefined` means the default (working-directory-vs-HEAD) base.
+   */
+  baseRef?: string | null;
+  /** Which diff-group scope the tab's diff belongs to (file tabs). */
+  scope?: DiffGroupScope;
 
   // --- artifact tabs ---
   /** Artifact kind (artifact tabs). */

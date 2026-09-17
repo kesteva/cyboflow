@@ -32,6 +32,15 @@ sets your budget for this project — obey it over the defaults above wherever t
 two disagree. It is the human's deliberate choice about how finished this
 software has to be, made once and applied everywhere.
 
+**Build breaks outside your task.** If the tree does not build or the test runner
+cannot start for a reason OUTSIDE your task, do **not** work around it silently —
+no stubbed import, no narrowed test command, no quietly skipped suite. Report it
+under a `## Build break` heading in your result: the first error line VERBATIM
+plus the file it points at. Then continue with your task if you can. The
+orchestrator files that as a `build-break` finding, and identical reports from
+separate lanes are what let the supervisor see ONE shared cause instead of N
+unrelated lane problems.
+
 ## Result
 
 Return a `## Implementation` section: the files touched and what changed in each,

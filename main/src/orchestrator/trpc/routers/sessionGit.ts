@@ -29,9 +29,11 @@
  * Standalone-typecheck invariant: no imports from 'electron',
  * 'better-sqlite3', or main/src/services/*.
  */
+import { EventEmitter } from 'events';
 import { z } from 'zod';
 import { TRPCError } from '@trpc/server';
 import { router, protectedProcedure } from '../trpc';
+import { eventToAsyncIterable } from './events';
 import type {
   MergeToMainResult,
   PullPushGitError,
@@ -82,7 +84,17 @@ export const sessionGitRouter = router({
     }),
 
   getCombinedDiff: protectedProcedure
-    .input(z.object({ sessionId: z.string().min(1), executionIds: z.array(z.number().int()).optional() }))
+    .input(
+      z.object({
+        sessionId: z.string().min(1),
+        executionIds: z.array(z.number().int()).optional(),
+        // TASK-212 (Seam B): both wire fields, forwarded into the ops call
+        // below — zod strips anything NOT declared here before the resolver
+        // ever sees it, so omitting either would silently drop it.
+        comparisonRef: z.string().min(1).optional(),
+        scope: z.enum(['unstaged', 'staged', 'untracked', 'committed']).optional(),
+      }),
+    )
     .query(async ({ ctx, input }): Promise<{ success: true; data: SessionGitDiffResult } | SessionGitError> => {
       return requireOps(ctx.sessionGitOps).getCombinedDiff(input);
     }),
@@ -201,6 +213,64 @@ export const sessionGitRouter = router({
       | SessionGitError
     > => {
       return requireOps(ctx.sessionGitOps).getGitCommands(input);
+    }),
+
+  /**
+   * New (TASK-216): the future BaseSelector menu's data source — every
+   * candidate base the picker can offer, resolved server-side. See
+   * SessionGitOpsLike.getComparisonBases for the per-leg degradation
+   * contract (each leg is `null`, never fabricated, when it can't be
+   * answered).
+   */
+  getComparisonBases: protectedProcedure
+    .input(sessionInput)
+    .query(async ({
+      ctx,
+      input,
+    }): Promise<
+      | {
+          success: true;
+          data: {
+            branchPoint: { ref: string; shortSha: string } | null;
+            defaultBranch: string | null;
+            localDefault: { ref: string; behind: number } | null;
+            originDefault: { ref: string; behind: number; fetchedAt: string | null } | null;
+          };
+        }
+      | SessionGitError
+    > => {
+      return requireOps(ctx.sessionGitOps).getComparisonBases(input);
+    }),
+
+  /**
+   * Live "this session's worktree changed" stream for the rail's Diff tab.
+   * The SUBSCRIPTION'S LIFETIME IS THE WATCH: subscribing starts the
+   * per-worktree watcher (via SessionGitOpsLike.subscribeWorktreeChanges) and
+   * the abort signal — the client's unsubscribe, or the tRPC link dropping —
+   * tears it down. Events carry no payload: the consumer refetches
+   * getCombinedDiff and lets that response be the truth. A session whose
+   * worktree cannot be resolved rejects the subscription (PRECONDITION_FAILED)
+   * rather than silently never emitting.
+   */
+  onWorktreeChanged: protectedProcedure
+    .input(sessionInput)
+    .subscription(async function* ({ ctx, input, signal }): AsyncGenerator<{ sessionId: string }> {
+      const abortSignal = signal ?? new AbortController().signal;
+      const emitter = new EventEmitter();
+      const started = await requireOps(ctx.sessionGitOps).subscribeWorktreeChanges(input, () => {
+        emitter.emit('change', { sessionId: input.sessionId });
+      });
+      if (!started.success) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: started.error });
+      }
+      try {
+        const source = eventToAsyncIterable<{ sessionId: string }>(emitter, 'change', abortSignal);
+        for await (const ev of source) {
+          yield ev;
+        }
+      } finally {
+        started.unsubscribe();
+      }
     }),
 
   getCurrentBranch: protectedProcedure

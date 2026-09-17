@@ -472,6 +472,77 @@ describe('ProgrammaticRunHost', () => {
       expect(fileLaneTriageFinding).not.toHaveBeenCalled();
     });
 
+    // ── append_correction (advisory, no rescue spent) ───────────────────────
+
+    const CORRECTION: LaneTriageDecision = {
+      verdict: 'append_correction',
+      reason: 'the shared fixture writes local timestamps, so every lane touching it fails the same way',
+      guidance: 'pin TZ=UTC in the shared fixture rather than in each test',
+    };
+
+    it('files an ADVISORY finding for append_correction and still settles the lane (give_up)', async () => {
+      // The hole this closes: a plain give_up files NOTHING, so a monitor that
+      // diagnosed a real cross-lane cause and declined to re-drive left no record.
+      const adjustRunTask = vi.fn().mockResolvedValue({ ok: true });
+      const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);
+      const injected: ClaudeStreamEvent[] = [];
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor: makeLaneMonitor(CORRECTION),
+        injectEvent: (e) => injected.push(e),
+        readLaneTask: () => ({ taskRef: 'TASK-014', taskTitle: 'T', taskBody: '## Old body' }),
+        adjustRunTask,
+        fileLaneTriageFinding,
+      });
+
+      const outcome = await host.triageLaneFailure(failure);
+
+      // The lane settles exactly as it did before this verdict existed...
+      expect(outcome).toEqual({ kind: 'give_up' });
+      // ...nothing is re-driven and NO task body is touched...
+      expect(adjustRunTask).not.toHaveBeenCalled();
+      // ...the brain's own turn already announced the decision, so no host turn...
+      expect(injected).toHaveLength(0);
+      // ...and the diagnosis survives.
+      const finding = fileLaneTriageFinding.mock.calls[0][0] as { title: string; body: string };
+      expect(finding.title).toBe('Monitor diagnosis for TASK-014 (inner-step) — advisory');
+      expect(finding.body).toContain('advisory (no rescue spent)');
+      expect(finding.body).toContain('WITHOUT re-driving');
+      expect(finding.body).toContain('## Diagnosis');
+      expect(finding.body).toContain('shared fixture writes local timestamps');
+      expect(finding.body).toContain('## Suggested correction');
+      expect(finding.body).toContain('pin TZ=UTC');
+    });
+
+    it('omits the correction section when append_correction carried no guidance', async () => {
+      const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);
+      const host = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor: makeLaneMonitor({ verdict: 'append_correction', reason: 'a real cause' }),
+        readLaneTask: () => ({ taskRef: 'TASK-014', taskTitle: 'T', taskBody: '' }),
+        fileLaneTriageFinding,
+      });
+
+      expect(await host.triageLaneFailure(failure)).toEqual({ kind: 'give_up' });
+      const finding = fileLaneTriageFinding.mock.calls[0][0] as { body: string };
+      expect(finding.body).not.toContain('## Suggested correction');
+    });
+
+    it('still settles the lane when the append_correction finding sink is absent or throws', async () => {
+      const bare = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor: makeLaneMonitor(CORRECTION),
+      });
+      expect(await bare.triageLaneFailure(failure)).toEqual({ kind: 'give_up' });
+
+      const broken = new ProgrammaticRunHost({
+        runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'),
+        monitor: makeLaneMonitor(CORRECTION),
+        fileLaneTriageFinding: vi.fn().mockRejectedValue(new Error('review queue down')),
+      });
+      expect(await broken.triageLaneFailure(failure)).toEqual({ kind: 'give_up' });
+    });
+
     it('applies the adjust_and_retry body edit and reports adjusted:true', async () => {
       const adjustRunTask = vi.fn().mockResolvedValue({ ok: true });
       const fileLaneTriageFinding = vi.fn().mockResolvedValue(undefined);

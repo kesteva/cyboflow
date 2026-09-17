@@ -28,6 +28,16 @@
  * stale concurrent edit; on success the local `active` entity is patched with
  * the new category + bumped version so the chip reflects the save without
  * waiting on a store round-trip.
+ *
+ * The EXECUTOR chip beside it (migration 137) mirrors that pattern exactly —
+ * same select shape, same optimistic patch, same expectedVersion guard — and is
+ * rendered for TASKS only, because only tasks execute and the chokepoint rejects
+ * an executor on an idea/epic.
+ *
+ * Dependencies are listed below the body with a Remove affordance per row,
+ * calling `cyboflow.tasks.removeDependency`. There is deliberately no MCP
+ * counterpart for that mutation: cutting a prerequisite is a human judgment, not
+ * something an agent should be able to do to unblock itself.
  */
 import { useEffect, useState, type ReactElement } from 'react';
 import { Modal } from '../ui/Modal';
@@ -35,9 +45,15 @@ import { MarkdownPreview } from '../MarkdownPreview';
 import { trpc } from '../../trpc/client';
 import { CATEGORY_LABEL } from '../Backlog/markers';
 import { DesignAffordance } from './DesignAffordance';
-import type { BacklogTaskItem, EntityCategory } from '../../../../shared/types/tasks';
+import type { BacklogTaskItem, EntityCategory, TaskExecutor } from '../../../../shared/types/tasks';
+import { TASK_EXECUTORS } from '../../../../shared/types/tasks';
 
 const CATEGORIES: EntityCategory[] = ['feature', 'bug', 'chore'];
+
+const EXECUTOR_LABEL: Record<TaskExecutor, string> = {
+  agent: 'Agent',
+  human: 'Human',
+};
 
 const HAIRLINE = 'var(--color-border-primary)';
 const SOFT = 'var(--color-border-tertiary)';
@@ -62,6 +78,11 @@ export function TaskDetailModal({ task, onClose }: TaskDetailModalProps): ReactE
   }, [task]);
   const [savingCategory, setSavingCategory] = useState(false);
   const [categoryError, setCategoryError] = useState<string | null>(null);
+  const [savingExecutor, setSavingExecutor] = useState(false);
+  const [executorError, setExecutorError] = useState<string | null>(null);
+  /** The prerequisite id currently being removed — disables just that row. */
+  const [removingDepId, setRemovingDepId] = useState<string | null>(null);
+  const [dependencyError, setDependencyError] = useState<string | null>(null);
 
   if (!task || !active) return null;
 
@@ -84,7 +105,53 @@ export function TaskDetailModal({ task, onClose }: TaskDetailModalProps): ReactE
     }
   };
 
+  const handleExecutorChange = async (next: TaskExecutor): Promise<void> => {
+    if (next === active.executor || savingExecutor) return;
+    setSavingExecutor(true);
+    setExecutorError(null);
+    try {
+      await trpc.cyboflow.tasks.update.mutate({
+        projectId: active.project_id,
+        taskId: active.id,
+        executor: next,
+        expectedVersion: active.version,
+      });
+      setActive({ ...active, executor: next, version: active.version + 1 });
+    } catch (err: unknown) {
+      setExecutorError(err instanceof Error ? err.message : 'Failed to save executor');
+    } finally {
+      setSavingExecutor(false);
+    }
+  };
+
+  const handleRemoveDependency = async (dependsOnTaskId: string): Promise<void> => {
+    if (removingDepId !== null) return;
+    setRemovingDepId(dependsOnTaskId);
+    setDependencyError(null);
+    try {
+      await trpc.cyboflow.tasks.removeDependency.mutate({
+        projectId: active.project_id,
+        taskId: active.id,
+        dependsOnTaskId,
+      });
+      // Optimistic: drop the row locally (and its waits-on-human entry, if any)
+      // so the list reflects the cut without waiting on a store round-trip.
+      const removed = (active.blockedBy ?? []).find((d) => d.taskId === dependsOnTaskId);
+      setActive({
+        ...active,
+        blockedBy: (active.blockedBy ?? []).filter((d) => d.taskId !== dependsOnTaskId),
+        waitingOnHuman: (active.waitingOnHuman ?? []).filter((ref) => ref !== removed?.ref),
+      });
+    } catch (err: unknown) {
+      setDependencyError(err instanceof Error ? err.message : 'Failed to remove dependency');
+    } finally {
+      setRemovingDepId(null);
+    }
+  };
+
   const body = active.body?.trim() ?? '';
+  const blockedBy = active.blockedBy ?? [];
+  const waitingOnHuman = new Set(active.waitingOnHuman ?? []);
   // A decomposed idea is OFF the board but stays navigable: list its spawned
   // epics + direct tasks (selectIdeaDecomposition nests both under
   // idea.children). Only ideas carry this list — epics/tasks render plainly.
@@ -161,6 +228,33 @@ export function TaskDetailModal({ task, onClose }: TaskDetailModalProps): ReactE
                 </option>
               ))}
             </select>
+            {/* Executor chip (migration 137) — TASKS only: only tasks execute,
+                and the chokepoint rejects an executor on an idea/epic. */}
+            {active.type === 'task' && (
+              <select
+                value={active.executor}
+                onChange={(e) => void handleExecutorChange(e.target.value as TaskExecutor)}
+                disabled={savingExecutor}
+                data-testid="task-detail-executor"
+                aria-label="Task executor"
+                title="Who performs this task. A human task never runs in a sprint."
+                style={{
+                  fontSize: '9px',
+                  fontWeight: 700,
+                  color: FAINT,
+                  border: `1px solid ${SOFT}`,
+                  borderRadius: 2,
+                  padding: '1px 4px',
+                  background: 'var(--color-bg-primary)',
+                }}
+              >
+                {TASK_EXECUTORS.map((x) => (
+                  <option key={x} value={x}>
+                    {EXECUTOR_LABEL[x]}
+                  </option>
+                ))}
+              </select>
+            )}
             {/* Design affordance — opens the approved design bound to this
                 entity's originating idea (idea -> itself; epic/task -> its
                 idea). No sessionKey: this modal has no running-session
@@ -172,6 +266,11 @@ export function TaskDetailModal({ task, onClose }: TaskDetailModalProps): ReactE
           {categoryError && (
             <p role="alert" style={{ fontSize: '10px', color: 'var(--color-status-error)', margin: '0 0 6px' }}>
               {categoryError}
+            </p>
+          )}
+          {executorError && (
+            <p role="alert" style={{ fontSize: '10px', color: 'var(--color-status-error)', margin: '0 0 6px' }}>
+              {executorError}
             </p>
           )}
           <h2
@@ -200,6 +299,77 @@ export function TaskDetailModal({ task, onClose }: TaskDetailModalProps): ReactE
             </div>
           )}
         </div>
+
+        {/* Blocking prerequisites, each removable. A prerequisite that is itself
+            a HUMAN task (migration 137) is labelled and reads as neutral: the
+            edge is real, but it never gates this task, so it must not look like
+            a blocked state. */}
+        {blockedBy.length > 0 && (
+          <div
+            data-testid="task-detail-dependencies"
+            style={{ padding: '14px 24px 18px', borderTop: `1px solid ${HAIRLINE}` }}
+          >
+            <div style={{ fontSize: '9px', fontWeight: 700, color: FAINT, letterSpacing: '.06em', textTransform: 'uppercase', marginBottom: 10 }}>
+              Depends on
+            </div>
+            <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {blockedBy.map((dep) => (
+                <li
+                  key={dep.taskId}
+                  data-testid={`task-detail-dependency-${dep.taskId}`}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'baseline',
+                    gap: 8,
+                    border: `1px solid ${SOFT}`,
+                    borderRadius: 4,
+                    padding: '7px 10px',
+                  }}
+                >
+                  <span style={{ fontSize: '9px', fontWeight: 700, color: STORIES, letterSpacing: '.04em', flexShrink: 0 }}>
+                    {dep.ref}
+                  </span>
+                  <span style={{ fontSize: '12px', color: INK, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {dep.title}
+                  </span>
+                  {waitingOnHuman.has(dep.ref) && (
+                    <span
+                      data-testid={`task-detail-dependency-human-${dep.taskId}`}
+                      style={{ fontSize: '10px', color: FAINT, flexShrink: 0 }}
+                    >
+                      human · does not block
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void handleRemoveDependency(dep.taskId)}
+                    disabled={removingDepId !== null}
+                    data-testid={`task-detail-dependency-remove-${dep.taskId}`}
+                    aria-label={`Remove dependency on ${dep.ref}`}
+                    style={{
+                      marginLeft: 'auto',
+                      flexShrink: 0,
+                      background: 'none',
+                      border: 'none',
+                      padding: 0,
+                      cursor: removingDepId !== null ? 'not-allowed' : 'pointer',
+                      fontSize: '10px',
+                      fontWeight: 600,
+                      color: MUTED,
+                    }}
+                  >
+                    {removingDepId === dep.taskId ? 'Removing…' : 'Remove'}
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {dependencyError && (
+              <p role="alert" style={{ fontSize: '10px', color: 'var(--color-status-error)', margin: '8px 0 0' }}>
+                {dependencyError}
+              </p>
+            )}
+          </div>
+        )}
 
         {/* Decomposition children (idea only) — the idea's spawned epics + direct
             tasks, each a button that drills into its detail in this modal. */}

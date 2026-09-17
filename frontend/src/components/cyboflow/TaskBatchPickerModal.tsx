@@ -198,7 +198,14 @@ export function TaskBatchPickerModal({
 
   // Eligible tasks (selectable): not in-flight. In-flight tasks are still
   // rendered (disabled) for context.
-  const eligible = useMemo(() => tasks.filter((t) => t.inFlow.length === 0), [tasks]);
+  // Selectable = not already in another run AND not a HUMAN task (migration
+  // 137). A human task is shown for context but can never seed a sprint — the
+  // server's filterEligibleTaskIds drops it, so offering it here would only let
+  // the user pick something that silently disappears from their batch.
+  const eligible = useMemo(
+    () => tasks.filter((t) => t.inFlow.length === 0 && t.executor !== 'human'),
+    [tasks],
+  );
 
   const atCap = selectedIds.size >= cap;
 
@@ -252,10 +259,15 @@ export function TaskBatchPickerModal({
   const renderTaskRow = (t: BacklogTaskItem): React.ReactNode => {
     const inFlight = t.inFlow.length > 0;
     const checked = selectedIds.has(t.id);
+    const isHuman = t.executor === 'human';
     const blocked = t.readyToWork === false;
-    // Disabled if in-flight OR (not yet checked AND already at cap).
-    const disabled = inFlight || (!checked && atCap);
+    // Disabled if in-flight OR a human task OR (not yet checked AND at cap).
+    const disabled = inFlight || isHuman || (!checked && atCap);
     const blockedRefs = (t.blockedBy ?? []).map((d) => d.ref).join(', ');
+    // Non-gating human prerequisites (migration 137) — neutral prose, NEVER the
+    // orange blocked chip: nothing in the sprint will move a human task to Done,
+    // so calling its dependents "blocked" would be a permanent lie.
+    const waitingOnHuman = t.waitingOnHuman ?? [];
     // The hosting session's name when known, else the short run id — mirrors
     // FlowMarker's label so the picker reads consistently with the board card.
     const inFlightLabel = inFlight
@@ -266,6 +278,7 @@ export function TaskBatchPickerModal({
         data-testid={`task-batch-picker-item-${t.id}`}
         data-blocked={blocked ? 'true' : undefined}
         data-inflight={inFlight ? 'true' : undefined}
+        data-human={isHuman ? 'true' : undefined}
         className={`flex items-start gap-2 rounded-button border px-2 py-1.5 text-sm ${
           disabled
             ? 'cursor-not-allowed border-border-primary bg-bg-secondary opacity-60'
@@ -294,12 +307,28 @@ export function TaskBatchPickerModal({
                 {inFlightLabel}
               </span>
             )}
+            {isHuman && (
+              <span
+                data-testid={`task-batch-picker-human-${t.id}`}
+                className="rounded-full bg-bg-tertiary px-1.5 py-0.5 text-[10px] font-medium text-text-tertiary"
+              >
+                Human · runs outside the sprint
+              </span>
+            )}
             {blocked && (
               <span
                 data-testid={`task-batch-picker-blocked-${t.id}`}
                 className="rounded-full bg-status-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-status-warning"
               >
                 blocked{blockedRefs ? ` by ${blockedRefs}` : ''}
+              </span>
+            )}
+            {waitingOnHuman.length > 0 && (
+              <span
+                data-testid={`task-batch-picker-waiting-human-${t.id}`}
+                className="text-[10px] text-text-tertiary"
+              >
+                waits on {waitingOnHuman.join(', ')} (human)
               </span>
             )}
           </span>
@@ -360,7 +389,7 @@ export function TaskBatchPickerModal({
             <EpicGroupedTaskList
               groups={groups}
               selectedIds={selectedIds}
-              isSelectable={(t) => t.inFlow.length === 0}
+              isSelectable={(t) => t.inFlow.length === 0 && t.executor !== 'human'}
               onToggleGroup={toggleGroup}
               renderTask={renderTaskRow}
               testIdPrefix="task-batch-picker"

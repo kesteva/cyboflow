@@ -30,6 +30,7 @@ import type { WorkflowStep, WorkflowStepReportStatus } from '../../../../shared/
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { LoggerLike } from '../types';
 import type {
+  BuildBreakGroup,
   ControllerHost,
   ControllerStepContext,
   FanOutDriver,
@@ -39,6 +40,7 @@ import type {
   StepReport,
   SystemicPauseVerdict,
   TriageDecision,
+  VerificationPosture,
   VisualVerifyGate,
 } from './types';
 import type { HumanGateResolver } from './humanGate';
@@ -47,6 +49,7 @@ import type { SystemicPauseResolver } from './systemicPauseGate';
 import type { MonitorSession } from './monitor';
 import { buildAssistantTextEvent } from './syntheticEvents';
 import { isSystemicStepError } from './systemicError';
+import { buildBreakGroupKey } from './buildBreakDetector';
 
 /**
  * Rollback lever for autonomous LANE RESCUE (precedent: CYBOFLOW_DISABLE_WARM_SDK).
@@ -241,6 +244,28 @@ export interface ProgrammaticRunHostArgs {
    * logged only (byte-identical to before F8).
    */
   fileVerificationSkipFinding?: (input: { title: string; body: string }) => Promise<void>;
+  /**
+   * RUN-LEVEL verification posture resolver (CD1), bound by the composition root
+   * to `verify/verificationPosture.ts` fed with the run stamp + the SAME
+   * runbook-status closure the scheduler's §3.2 degrade gate consults. Absent ⇒
+   * the controller behaves as 'available', i.e. exactly as before this seam.
+   */
+  resolveVerificationPosture?: () => Promise<VerificationPosture>;
+  /**
+   * RUN-SCOPED, SOURCE-DEDUPED finding sink: the two declarations this host makes
+   * about the run as a whole — "no verifiable modality" (CD1) and "N lanes share
+   * one build break" (CD3) — are both statements that must appear exactly once,
+   * so both are filed through `ReviewItemRouter.createIfNoPending`, which runs
+   * the check-and-create as ONE task on the per-project queue. Passing `source`
+   * explicitly (rather than baking it in) is what lets one sink serve both: the
+   * source IS the dedupe key. Absent ⇒ the declaration is logged only.
+   */
+  fileRunScopedFinding?: (input: { source: string; title: string; body: string }) => Promise<void>;
+  /**
+   * SHARED BUILD-BREAK sweep (CD3) — bound to `buildBreakDetector.sweepBuildBreaks`
+   * over this run's DB. Absent ⇒ no sweep runs (every host without a DB).
+   */
+  sweepBuildBreaks?: () => BuildBreakGroup[];
   logger?: LoggerLike;
 }
 
@@ -526,6 +551,27 @@ export class ProgrammaticRunHost implements ControllerHost {
         return { kind: 'give_up' };
       }
 
+      if (decision.verdict === 'append_correction') {
+        // ADVISORY, NOT A RESCUE. The brain investigated, reached a diagnosis, and
+        // judged that re-driving this lane would not act on it. Before this arm
+        // that judgement had only one expressible form — a plain `give_up`, which
+        // files NOTHING — so the diagnosis died with the consult. Record it, then
+        // return the give-up outcome so the lane settles `failed` exactly as it
+        // always did.
+        //
+        // COSTS NO RESCUE BUDGET: the controller RESERVES budget before the
+        // consult and releases it on every arm whose outcome is not `rescue`
+        // (see consultLaneTriage's releaseReservation) — this outcome is
+        // `give_up`, so the reservation is released like any other non-rescue.
+        await this.fileLaneCorrectionFinding({
+          taskRef,
+          req,
+          reason: decision.reason,
+          ...(decision.guidance !== undefined ? { guidance: decision.guidance } : {}),
+        });
+        return { kind: 'give_up' };
+      }
+
       let adjusted = false;
       let downgradeReason: string | undefined;
       if (decision.verdict === 'adjust_and_retry') {
@@ -661,6 +707,51 @@ export class ProgrammaticRunHost implements ControllerHost {
     }
   }
 
+  /**
+   * File the NON-BLOCKING ADVISORY record for an `append_correction` verdict —
+   * a diagnosis the supervisor reached and deliberately did NOT act on.
+   *
+   * Routed through the SAME sink as a rescue finding (one channel for every
+   * autonomous lane intervention, so the human reads them in one place), but the
+   * body says plainly that nothing was re-driven and no budget was spent — the
+   * rescue card's reader would otherwise assume this lane got another attempt.
+   * Fail-soft for the same reason: losing the paper trail must not change the
+   * lane's outcome.
+   */
+  private async fileLaneCorrectionFinding(args: {
+    taskRef: string;
+    req: LaneTriageFailure;
+    reason: string;
+    guidance?: string;
+  }): Promise<void> {
+    if (!this.args.fileLaneTriageFinding) return;
+    try {
+      const lines = [
+        `The run supervisor diagnosed task **${args.taskRef}** after its lane exhausted an automatic budget, and recorded the diagnosis WITHOUT re-driving the lane.`,
+        '',
+        `- Failure: \`${args.req.failureKind}\` at step \`${args.req.stepId}\` (attempt ${args.req.attempt})`,
+        '- Verdict: append_correction — **advisory (no rescue spent)**. The lane was NOT re-run and the task body was NOT changed; the lane settles failed and reaches you at the run\'s gate.',
+        '',
+        '## Diagnosis',
+        '',
+        args.reason.trim().length > 0 ? args.reason.trim() : '(none given)',
+      ];
+      if (args.guidance !== undefined && args.guidance.trim().length > 0) {
+        lines.push('', '## Suggested correction', '', args.guidance.trim());
+      }
+      await this.args.fileLaneTriageFinding({
+        title: `Monitor diagnosis for ${args.taskRef} (${args.req.failureKind}) — advisory`,
+        body: lines.join('\n'),
+      });
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] lane-correction finding failed (fail-soft)', {
+        runId: this.args.runId,
+        taskRef: args.taskRef,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   /** Render a monitor turn into the run's Chat pane. Fail-soft — never abort the walk. */
   private injectMonitorTurn(text: string): void {
     if (!this.args.injectEvent) return;
@@ -764,6 +855,127 @@ export class ProgrammaticRunHost implements ControllerHost {
       this.args.logger?.warn('[ProgrammaticRunHost] verification-skip finding threw (fail-soft)', {
         runId: input.runId,
         laneTaskRef: input.laneTaskRef,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * RUN-LEVEL verification posture (CD1). Resolved ONCE by the controller at
+   * fan-out start; this is a straight delegation to the injected resolver, which
+   * already never rejects. An absent resolver means the controller keeps its
+   * pre-seam behaviour ('available').
+   */
+  async resolveVerificationPosture(): Promise<VerificationPosture> {
+    if (!this.args.resolveVerificationPosture) return { kind: 'available' };
+    try {
+      return await this.args.resolveVerificationPosture();
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] verification-posture resolve failed (fail-soft)', {
+        runId: this.args.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return { kind: 'available' };
+    }
+  }
+
+  /**
+   * The ONE "nothing here can be verified" card for the whole run — the
+   * run-scoped sibling of {@link reportVerificationSkipped}, which the controller
+   * suppresses for every lane once this has fired.
+   *
+   * `source` is run-scoped (`verification-posture:<runId>`), so
+   * `createIfNoPending` collapses a repeat from a second fan-out step or a
+   * crash-resume into the existing card. Fire-and-forget, like every other
+   * finding this host files.
+   */
+  reportNoVerifiableModality(input: { runId: string; reason: string }): void {
+    const sink = this.args.fileRunScopedFinding;
+    if (!sink) return;
+    const body = [
+      `No verification modality can serve run \`${input.runId}\`, so NO lane of this run enqueues a visual verification and no verification request rows exist for it.`,
+      'Reason:',
+      '```',
+      fenceSafeReason(input.reason),
+      '```',
+      'This is declared ONCE for the run rather than once per lane. The lanes themselves are unaffected — they implement, review and verify their acceptance criteria as usual, and the sprint proceeds; only the VISUAL check is absent. To restore it, fix the reason above (run verification setup, merge the branch carrying the runbook, or re-prove a drifted one) and re-run verification for the deliverables you care about.',
+    ].join('\n\n');
+    try {
+      void sink({
+        source: `verification-posture:${input.runId}`,
+        title: `No verifiable modality for this project: ${input.reason}`,
+        body,
+      }).catch((err: unknown) => {
+        this.args.logger?.warn('[ProgrammaticRunHost] no-modality finding failed (fail-soft)', {
+          runId: input.runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] no-modality finding threw (fail-soft)', {
+        runId: input.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * SHARED BUILD-BREAK sweep (CD3). Synchronous underneath (one indexed read of
+   * `review_items`); wrapped in a promise because the controller's seam is async
+   * and a future sweep may not be. Fail-soft → no groups.
+   */
+  async sweepBuildBreaks(): Promise<BuildBreakGroup[]> {
+    if (!this.args.sweepBuildBreaks) return [];
+    try {
+      return this.args.sweepBuildBreaks();
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] build-break sweep failed (fail-soft)', {
+        runId: this.args.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
+  }
+
+  /**
+   * Announce ONE shared build break. DETECTOR ONLY: this is an advisory card, not
+   * a pause and not a fix — the lanes that reported the break have already dealt
+   * with it however they could, and the card exists so a human reading N lane
+   * findings sees the one fact behind them.
+   *
+   * Deduped on a source derived from the group's NORMALIZED text, so the sweep
+   * can run at every quiesced instant without re-filing.
+   */
+  reportBuildBreakGroup(input: { runId: string; group: BuildBreakGroup }): void {
+    const sink = this.args.fileRunScopedFinding;
+    if (!sink) return;
+    const { group } = input;
+    const body = [
+      `${group.count} build-break report(s) filed by this run's lanes normalize to the SAME error, which means the tree — not any single task — is what broke.`,
+      'First reported as:',
+      '```',
+      fenceSafeReason(group.sampleTitle),
+      '```',
+      group.laneRefs.length > 0
+        ? `Lanes that linked a task: ${group.laneRefs.map((ref) => `\`${ref}\``).join(', ')}.`
+        : 'None of the reports carried a task link, so the individual lanes are not recoverable from the rows — open the findings below to see which steps filed them.',
+      `Original findings: ${group.itemIds.map((id) => `\`${id}\``).join(', ')}.`,
+      'This is an ADVISORY detection only: the run was not paused and nothing was fixed automatically. Fix the break at its source and the individual lane reports become resolvable together.',
+    ].join('\n\n');
+    try {
+      void sink({
+        source: `build-break-group:${input.runId}:${buildBreakGroupKey(group.normalized)}`,
+        title: `Shared build break (${group.count} lanes): ${group.sampleTitle}`,
+        body,
+      }).catch((err: unknown) => {
+        this.args.logger?.warn('[ProgrammaticRunHost] build-break-group finding failed (fail-soft)', {
+          runId: input.runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] build-break-group finding threw (fail-soft)', {
+        runId: input.runId,
         error: err instanceof Error ? err.message : String(err),
       });
     }

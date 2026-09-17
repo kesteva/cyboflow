@@ -36,6 +36,26 @@ real navigation, with the design's copy strings rendered. A screen the design
 shows and no task owns is a gap you are responsible for closing here — nothing
 downstream will notice it.
 
+## Executability
+
+Every task also declares **who does it**. Return `executor: human` on a task
+(the orchestrator records it) when its acceptance criteria can only be met by a
+person: creating or approving an account, making a purchase, acting on a
+physical device, obtaining legal or compliance sign-off, or holding a credential
+the agent must never see. Everything else is `executor: 'agent'` (the default) —
+do not reach for `human` merely because a task looks hard or ambiguous.
+
+A human task is a real task: give it acceptance criteria phrased for a person to
+satisfy, and no expected files (there is no diff for it to produce).
+
+An agent task that consumes a human task's output STILL records a blocking
+dependency on it — that edge is the truth about the work and belongs on the
+board. It does not stall the sprint: a human task never becomes a lane, so the
+edge never gates anything. Say in the agent task's body what it should do while
+the human work is outstanding — read from an environment variable, ship behind a
+feature flag, stub the integration at the seam — so the lane has a real
+instruction instead of a reason to stop.
+
 You run in your own context window and do **not** write cyboflow state — the
 orchestrator creates each task and retires the decomposed idea. When you return more
 than one task for an idea that has no epics, the orchestrator files them all under a

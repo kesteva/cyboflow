@@ -116,6 +116,39 @@ advances to **Done** when the session is actually merged, and reverts to its ent
 stage if the run ends without merging. Do **not** move task board stages by hand;
 the lane (and the Sessions / Runs view) is where live per-task status lives.
 
+**Shared build breaks.** Lanes share ONE worktree, so a break another lane
+introduced — a half-written module, a renamed export, a test runner that will not
+start — lands in every lane at once. A lane subagent that hits one returns a
+`## Build break` section instead of routing around it; file that as a finding with
+`category: 'build-break'`, title `Build break: <first error line verbatim>`, and
+`locations` at the offending file, then let the lane carry on if it can. Identical
+reports from separate lanes are what let the run's supervisor see ONE shared cause
+rather than N unrelated lane failures.
+
+**Verification posture is a RUN-level fact, declared once.** Before the first lane
+is dispatched, the controller resolves whether ANY verification modality can serve
+this run. Three answers: the visual verifier is switched OFF (nothing is filed and
+nothing changes); a modality is available (every lane enqueues and parks at the
+merge gate as usual); or NO modality can serve the run — the run is stamped for the
+deferred mobile modality, or for `native-desktop` with no proven `native-screen`
+runbook. In that last case exactly ONE
+`No verifiable modality for this project` finding is filed for the whole run, every
+lane skips the enqueue without parking, and the per-lane
+`Visual verification did not run for …` findings are suppressed, because filing one
+per lane buries the reasons that genuinely ARE per-lane. Lanes are otherwise
+untouched: they implement, review and verify their acceptance criteria exactly as
+they would under an available posture, and `task-verify` still composes its
+verification task. Do not tell a lane to build and drive the deliverable itself
+instead — only the central verifier does that.
+
+**Shared build breaks are grouped for you.** When two or more `build-break`
+findings in a run normalize to the same error text (paths, line/column numbers and
+build hashes stripped), the supervisor files ONE additional
+`Shared build break (N lanes): …` advisory naming the group and the original
+findings. It is a DETECTOR only: the run is never paused and nothing is fixed
+automatically. Keep filing your own per-break findings — the grouping is what turns
+N of them into one readable fact, and it needs them to exist.
+
 **Lane discipline:** every lane transition goes through
 `cyboflow_update_sprint_task` at the moment it happens — when a task starts, when
 its stage changes, when it commits, when it fails. The lanes are the UI's only
@@ -200,7 +233,8 @@ is `integrated`.
       repair or revert its own fixes — at most **once** — and re-run
       sprint-verify. If it STILL fails, file a **blocking** finding via
       `cyboflow_report_finding` (`blocking: true`, category
-      `address-review-regression`) carrying the failing tests and what changed,
+      `address-review-regression`) titled exactly `address-review left the tree
+      red` and naming the failing spec, carrying the failing tests and what changed,
       and surface it at the human gate rather than merging a red tree — the
       blocking finding is what actually parks the run, prose in a summary is not.
       This is the ONE exception to "do not file new findings from this step", and

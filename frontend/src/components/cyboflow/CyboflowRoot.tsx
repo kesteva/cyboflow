@@ -543,6 +543,11 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
             quickSessionProjectId={
               effectiveSession && !effectiveSession.isMainRepo ? projectId : null
             }
+            // The Diff tab's BaseSelector needs the project for its
+            // "Another branch" list regardless of layout — so the main-repo
+            // session gets it too (the !isMainRepo gate above is about the
+            // center pane, not the project).
+            sessionProjectId={effectiveSession ? projectId : null}
           />
         </PerfProfiler>
       </div>

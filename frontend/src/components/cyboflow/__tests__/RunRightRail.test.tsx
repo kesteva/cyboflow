@@ -36,6 +36,38 @@ import { render, screen, fireEvent, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
+// Fixture bases for the RunDiffTabPanel/SessionDiffTabPanel mocks below (TASK-214).
+// Declared via vi.hoisted so they're initialized before vitest hoists the
+// vi.mock() factory calls that reference them above the imports. DELIBERATELY
+// distinct values — the whole point of TASK-214's default-case test is that the
+// run-scoped panel and the session-scoped panel can (today, pre-fix) resolve
+// DIFFERENT bases for the "same" diff, and the rail must forward whichever
+// panel is actually showing, never a value derived independently.
+// ---------------------------------------------------------------------------
+
+const { RUN_PANEL_RESOLVED_BASE, SESSION_PANEL_RESOLVED_BASE, RUN_PANEL_WORKTREE, SESSION_PANEL_WORKTREE } =
+  vi.hoisted(() => ({
+    RUN_PANEL_RESOLVED_BASE: 'sha-run-base-sha',
+    SESSION_PANEL_RESOLVED_BASE: 'sha-session-derived',
+    // The worktree snapshot each panel mock echoes via onWorktree on mount —
+    // with NONEMPTY entries so a rail-level test can prove the strip's count
+    // comes from the lifted panel snapshot (not a request of its own).
+    RUN_PANEL_WORKTREE: {
+      entries: [
+        { path: 'run-a.ts', staged: false, unstaged: true, untracked: false, conflicted: false },
+        { path: 'run-b.ts', staged: false, unstaged: false, untracked: true, conflicted: false },
+      ],
+      groups: [],
+      committedUnavailable: false,
+    },
+    SESSION_PANEL_WORKTREE: {
+      entries: [{ path: 'sess-a.ts', staged: true, unstaged: false, untracked: false, conflicted: false }],
+      groups: [],
+      committedUnavailable: false,
+    },
+  }));
+
+// ---------------------------------------------------------------------------
 // Mock cyboflowApi — WorkflowProgressTimeline reads streamEvents from the store
 // which is seeded via subscribeToStreamEvents.
 // ---------------------------------------------------------------------------
@@ -71,19 +103,163 @@ vi.mock('../SessionFileExplorer', () => ({
 }));
 
 // Stub RunDiffTabPanel so the Diff-tab test can assert the rail mounts it (keyed
-// by the active run) WITHOUT firing real tRPC (gitDiff.query).
+// by the active run) WITHOUT firing real tRPC (gitDiff.query). Also exposes the
+// onOpenFile/onResolvedBase callbacks the rail wires in (TASK-214) as buttons so
+// tests can drive them deterministically — the mock echoes a FIXED fixture base
+// (RUN_PANEL_RESOLVED_BASE) on "mount" (a simulated single successful fetch),
+// distinct from the session panel's fixture base below, to exercise the
+// default-case desync the real bug is about. Also renders the `comparisonRef`
+// prop (TASK-218) as text so rail-level tests can assert the rail forwards the
+// selected base down into the panel.
 vi.mock('../RunDiffTabPanel', () => ({
-  RunDiffTabPanel: ({ runId }: { runId: string }) => (
-    <div data-testid="run-diff-tab-panel-mock">{runId}</div>
-  ),
+  RunDiffTabPanel: ({
+    runId,
+    comparisonRef,
+    refreshNonce,
+    onOpenFile,
+    onResolvedBase,
+    onWorktree,
+  }: {
+    runId: string;
+    comparisonRef?: string | null;
+    refreshNonce?: number;
+    onOpenFile?: (filePath: string, scope?: string) => void;
+    onResolvedBase?: (base: string | null) => void;
+    onWorktree?: (worktree: unknown) => void;
+  }) => {
+    React.useEffect(() => {
+      // Echo per "fetch" — mount, each comparisonRef change, and each
+      // refreshNonce bump, mirroring the real panel's effect deps. A
+      // non-default selection resolves to THAT ref's sha, not the default.
+      onResolvedBase?.(comparisonRef ? `sha-of-${comparisonRef}` : RUN_PANEL_RESOLVED_BASE);
+      onWorktree?.(RUN_PANEL_WORKTREE);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [comparisonRef, refreshNonce]);
+    return (
+      <div data-testid="run-diff-tab-panel-mock">
+        {runId}
+        <span data-testid="run-diff-tab-panel-mock-comparison-ref">{comparisonRef ?? ''}</span>
+        <span data-testid="run-diff-tab-panel-mock-refresh-nonce">{String(refreshNonce ?? '')}</span>
+        {onOpenFile && (
+          <button
+            data-testid="mock-run-diff-open-file"
+            onClick={() => onOpenFile('src/x.ts', 'unstaged')}
+          >
+            open file
+          </button>
+        )}
+      </div>
+    );
+  },
 }));
 
 // Stub SessionDiffTabPanel (the session-scoped diff body) so the at-rest Diff-tab
 // fallback test can assert the rail mounts it keyed by the selected session
-// WITHOUT firing the real session-diff IPC.
+// WITHOUT firing the real session-diff IPC. Mirrors the RunDiffTabPanel mock's
+// onResolvedBase echo, with its OWN fixture base (SESSION_PANEL_RESOLVED_BASE) —
+// distinct from the run panel's — since the two paths resolve bases independently.
+// Also renders the `comparisonRef` prop (TASK-218) as text, mirroring the
+// RunDiffTabPanel mock above.
 vi.mock('../SessionDiffTabPanel', () => ({
-  SessionDiffTabPanel: ({ sessionId }: { sessionId: string }) => (
-    <div data-testid="session-diff-tab-panel-mock">{sessionId}</div>
+  SessionDiffTabPanel: ({
+    sessionId,
+    comparisonRef,
+    refreshNonce,
+    onOpenFile,
+    onResolvedBase,
+    onWorktree,
+  }: {
+    sessionId: string;
+    comparisonRef?: string | null;
+    refreshNonce?: number;
+    onOpenFile?: (filePath: string, scope?: string) => void;
+    onResolvedBase?: (base: string | null) => void;
+    onWorktree?: (worktree: unknown) => void;
+  }) => {
+    React.useEffect(() => {
+      onResolvedBase?.(comparisonRef ? `sha-of-${comparisonRef}` : SESSION_PANEL_RESOLVED_BASE);
+      onWorktree?.(SESSION_PANEL_WORKTREE);
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [comparisonRef, refreshNonce]);
+    return (
+      <div data-testid="session-diff-tab-panel-mock">
+        {sessionId}
+        <span data-testid="session-diff-tab-panel-mock-comparison-ref">{comparisonRef ?? ''}</span>
+        <span data-testid="session-diff-tab-panel-mock-refresh-nonce">{String(refreshNonce ?? '')}</span>
+        {onOpenFile && (
+          <button
+            data-testid="mock-session-diff-open-file"
+            onClick={() => onOpenFile('src/x.ts', 'staged')}
+          >
+            open file
+          </button>
+        )}
+      </div>
+    );
+  },
+}));
+
+// Stub BaseSelector (its own suite, TASK-217, covers its internals) so
+// rail-level tests can drive the comparison-base SELECTION deterministically
+// without wiring real trpc.cyboflow.sessionGit.getComparisonBases /
+// API.projects.listBranches calls. Exposes the props the rail passes in as
+// text, plus two buttons that call `onChange` with a fixed ref / null so
+// tests can exercise both a selection and a reset back to the default.
+vi.mock('../BaseSelector', () => ({
+  BaseSelector: ({
+    sessionId,
+    projectId,
+    selectedRef,
+    onChange,
+    resolvedDefaultBase,
+  }: {
+    sessionId: string | null;
+    projectId: string | null;
+    selectedRef: string | null;
+    onChange: (ref: string | null) => void;
+    resolvedDefaultBase?: string | null;
+  }) => (
+    <div data-testid="base-selector-mock">
+      <span data-testid="base-selector-mock-session-id">{sessionId ?? ''}</span>
+      <span data-testid="base-selector-mock-project-id">{projectId ?? ''}</span>
+      <span data-testid="base-selector-mock-selected-ref">{selectedRef ?? ''}</span>
+      <span data-testid="base-selector-mock-resolved-default-base">{resolvedDefaultBase ?? ''}</span>
+      <button data-testid="base-selector-mock-select-a" onClick={() => onChange('origin/main')}>
+        select origin/main
+      </button>
+      <button data-testid="base-selector-mock-select-b" onClick={() => onChange('feature/other')}>
+        select feature/other
+      </button>
+      <button data-testid="base-selector-mock-clear" onClick={() => onChange(null)}>
+        clear
+      </button>
+    </div>
+  ),
+}));
+
+// Stub WorktreeStrip (its own suite, TASK-219, covers its internals) so
+// rail-level Diff-tab tests stay deterministic and never fire the real
+// WorktreeStrip's own API.sessions.getCombinedDiff / trpc calls against an
+// unmocked utils/api module.
+vi.mock('../WorktreeStrip', () => ({
+  WorktreeStrip: ({
+    sessionId,
+    worktree,
+    onMutated,
+  }: {
+    sessionId: string | null;
+    worktree: { entries: unknown[] } | undefined;
+    onMutated?: () => void;
+  }) => (
+    <div data-testid="worktree-strip-mock">
+      <span data-testid="worktree-strip-mock-session-id">{sessionId ?? ''}</span>
+      <span data-testid="worktree-strip-mock-count">
+        {worktree === undefined ? 'none' : String(worktree.entries.length)}
+      </span>
+      <button data-testid="worktree-strip-mock-mutated" onClick={() => onMutated?.()}>
+        mutated
+      </button>
+    </div>
   ),
 }));
 
@@ -102,8 +278,10 @@ vi.mock('../../../hooks/useArtifactsList', () => ({
 import { RunRightRail, initialRunRightRailWidth } from '../RunRightRail';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { useCenterPaneStore } from '../../../stores/centerPaneStore';
+import { trpc } from '../../../trpc/client';
 import type { UseWorkflowPhaseStateResult } from '../../../hooks/useWorkflowPhaseState';
 import type { StreamEvent } from '../../../utils/cyboflowApi';
+import type { RunGitDiff, WorktreeStatusPayload } from '../../../../../shared/types/runFiles';
 
 // ---------------------------------------------------------------------------
 // Phase state fixtures
@@ -160,6 +338,7 @@ function renderRail(
     collapsed?: boolean;
     onToggleCollapse?: () => void;
     quickSessionProjectId?: number | null;
+    sessionProjectId?: number | null;
   },
 ) {
   return render(
@@ -168,6 +347,7 @@ function renderRail(
       collapsed={opts?.collapsed ?? false}
       onToggleCollapse={opts?.onToggleCollapse ?? (() => {})}
       quickSessionProjectId={opts?.quickSessionProjectId}
+      sessionProjectId={opts?.sessionProjectId}
     />,
   );
 }
@@ -333,6 +513,219 @@ describe('RunRightRail', () => {
     expect(screen.getByTestId('run-right-rail-diff-empty-norun')).toBeInTheDocument();
     expect(screen.queryByTestId('run-diff-tab-panel-mock')).not.toBeInTheDocument();
     expect(screen.queryByTestId('session-diff-tab-panel-mock')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-214 — lift resolvedBase from the diff panels to the rail, into both
+// openFileTab call sites. The RunDiffTabPanel/SessionDiffTabPanel mocks above
+// echo a FIXED, panel-specific fixture base (RUN_PANEL_RESOLVED_BASE /
+// SESSION_PANEL_RESOLVED_BASE) via onResolvedBase on mount, simulating each
+// panel's single successful fetch — deliberately DIFFERENT values, since the
+// live bug (RunDiffTabPanel diffs against row.base_sha; SessionDiffTabPanel/
+// useFileDiffData resolve their own base with no base passed in) means the two
+// paths really can disagree about what "the" base is.
+// ---------------------------------------------------------------------------
+
+describe('RunRightRail — worktree snapshot lift + post-mutation refresh (address-review)', () => {
+  it('a PARENTLESS run (no session) feeds the run panel\'s nonempty worktree into WorktreeStrip — never a 0 count', async () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-parentless-001', null);
+      useCyboflowStore.setState({ selectedSessionId: null });
+    });
+    renderRail(EMPTY_PHASE_STATE);
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId('worktree-strip-mock-session-id')).toHaveTextContent('');
+    expect(screen.getByTestId('worktree-strip-mock-count')).toHaveTextContent(
+      String(RUN_PANEL_WORKTREE.entries.length),
+    );
+  });
+
+  it('with a selected session and no run, the SESSION panel\'s snapshot reaches the strip', async () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-wt-001' });
+    });
+    renderRail(EMPTY_PHASE_STATE);
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId('worktree-strip-mock-count')).toHaveTextContent(
+      String(SESSION_PANEL_WORKTREE.entries.length),
+    );
+  });
+
+  it('the strip\'s onMutated bumps the refreshNonce handed to the active panel (one refetch per mutation)', async () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-wt-002' });
+    });
+    renderRail(EMPTY_PHASE_STATE);
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId('session-diff-tab-panel-mock-refresh-nonce')).toHaveTextContent('0');
+
+    fireEvent.click(screen.getByTestId('worktree-strip-mock-mutated'));
+    expect(screen.getByTestId('session-diff-tab-panel-mock-refresh-nonce')).toHaveTextContent('1');
+    fireEvent.click(screen.getByTestId('worktree-strip-mock-mutated'));
+    expect(screen.getByTestId('session-diff-tab-panel-mock-refresh-nonce')).toHaveTextContent('2');
+  });
+
+  it('BaseSelector receives the active panel\'s DEFAULT resolved base (run panel during a run), and keeps it while a non-default ref is selected', async () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-bs-001', 'sess-bs-001');
+    });
+    renderRail(EMPTY_PHASE_STATE);
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId('base-selector-mock-resolved-default-base')).toHaveTextContent(
+      RUN_PANEL_RESOLVED_BASE,
+    );
+
+    // Selecting a different base refetches (the panel now resolves THAT ref)
+    // but does not overwrite the remembered default...
+    fireEvent.click(screen.getByTestId('base-selector-mock-select-a'));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId('base-selector-mock-selected-ref')).toHaveTextContent('origin/main');
+    expect(screen.getByTestId('base-selector-mock-resolved-default-base')).toHaveTextContent(
+      RUN_PANEL_RESOLVED_BASE,
+    );
+    // ...while openFileTab still gets the CURRENT resolved base (origin/main's sha).
+    fireEvent.click(screen.getByTestId('mock-run-diff-open-file'));
+    const fileTab = useCenterPaneStore.getState().bySession['sess-bs-001'].tabs.find((t) => t.kind === 'file');
+    expect(fileTab).toMatchObject({ filePath: 'src/x.ts', baseRef: 'sha-of-origin/main' });
+  });
+});
+
+describe('RunRightRail — TASK-214 resolvedBase lift', () => {
+  it('AC1 (default case / live bug): the run panel\'s echoed resolvedBase — not a separately-derived one — flows into openFileTab', async () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-lift-001', 'session-lift-001');
+    });
+
+    renderRail(EMPTY_PHASE_STATE);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    // The mounted RunDiffTabPanel mock has already echoed RUN_PANEL_RESOLVED_BASE
+    // via its mount effect (simulating its one successful fetch).
+    fireEvent.click(screen.getByTestId('mock-run-diff-open-file'));
+
+    const session = useCenterPaneStore.getState().bySession['session-lift-001'];
+    expect(session).toBeDefined();
+    const fileTab = session.tabs.find((t) => t.kind === 'file');
+    // Pre-fix, RunRightRail's openDiffFile called openFileTab with only
+    // `{ filePath }` — baseRef would be undefined here, and this assertion
+    // would fail: that is exactly the live default-base desync this task closes.
+    expect(fileTab).toMatchObject({
+      filePath: 'src/x.ts',
+      baseRef: RUN_PANEL_RESOLVED_BASE,
+      scope: 'unstaged',
+    });
+  });
+
+  it('AC2 / R-9: the File-Explorer arm passes the SAME lifted base as the diff-opened tab, never undefined', async () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-lift-002', 'session-lift-002');
+    });
+
+    renderRail(EMPTY_PHASE_STATE);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // Open the file from the Diff tab first, so a resolvedBase has been
+    // echoed and a file tab already carries it.
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    fireEvent.click(screen.getByTestId('mock-run-diff-open-file'));
+
+    let session = useCenterPaneStore.getState().bySession['session-lift-002'];
+    let fileTab = session.tabs.find((t) => t.kind === 'file');
+    expect(fileTab?.baseRef).toBe(RUN_PANEL_RESOLVED_BASE);
+
+    // Now re-open the SAME path from the File-Explorer arm. An unconditional
+    // store write of `undefined` here would silently reset the tab's base —
+    // the File Explorer must forward the SAME lifted base instead.
+    fireEvent.click(screen.getByRole('tab', { name: 'File Explorer' }));
+    fireEvent.click(screen.getByTestId('mock-open-file'));
+
+    session = useCenterPaneStore.getState().bySession['session-lift-002'];
+    fileTab = session.tabs.find((t) => t.kind === 'file');
+    expect(fileTab).toMatchObject({
+      filePath: 'src/x.ts',
+      baseRef: RUN_PANEL_RESOLVED_BASE,
+    });
+    // The File-Explorer arm omits scope (it isn't a diff-group click).
+    expect(fileTab?.scope).toBeUndefined();
+  });
+
+  it('AC4: forwards the clicked row\'s scope from the session-scoped panel too', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-lift-003' });
+    });
+
+    // A worktree-backed quick session: CyboflowRoot threads
+    // quickSessionProjectId exactly when it mounts QuickSessionCenterPane,
+    // i.e. when a tabbed center pane exists for the tab to land in.
+    renderRail(EMPTY_PHASE_STATE, { quickSessionProjectId: 9 });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    fireEvent.click(screen.getByTestId('mock-session-diff-open-file'));
+
+    const session = useCenterPaneStore.getState().bySession['sess-lift-003'];
+    const fileTab = session.tabs.find((t) => t.kind === 'file');
+    expect(fileTab).toMatchObject({
+      filePath: 'src/x.ts',
+      baseRef: SESSION_PANEL_RESOLVED_BASE,
+      scope: 'staged',
+    });
+  });
+
+  it('the bare main-repo session (no tabbed center pane) renders diff rows NON-interactive instead of writing an unrenderable tab', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-mainrepo-001' });
+    });
+
+    // CyboflowRoot nulls quickSessionProjectId for isMainRepo (panels-only
+    // layout — no QuickSessionCenterPane), while sessionProjectId still
+    // carries the project. Pre-fix the rail handed the list an onOpenFile
+    // that wrote a file tab into a centerPaneStore bucket nothing renders —
+    // a silent no-op click.
+    renderRail(EMPTY_PHASE_STATE, { quickSessionProjectId: null, sessionProjectId: 9 });
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+
+    expect(screen.queryByTestId('mock-session-diff-open-file')).toBeNull();
+    expect(useCenterPaneStore.getState().bySession['sess-mainrepo-001']?.tabs ?? []).toHaveLength(0);
+  });
+
+  it('before any diff fetch resolves, the lifted base is null (the representable session default)', () => {
+    // No Diff tab click at all — no panel has mounted, so onResolvedBase has
+    // never fired. Opening straight from the File Explorer (a run WITH no
+    // Diff-tab visit yet) must still write baseRef: null, not undefined.
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-lift-004', 'session-lift-004');
+    });
+
+    renderRail(EMPTY_PHASE_STATE);
+
+    fireEvent.click(screen.getByRole('tab', { name: 'File Explorer' }));
+    fireEvent.click(screen.getByTestId('mock-open-file'));
+
+    const session = useCenterPaneStore.getState().bySession['session-lift-004'];
+    const fileTab = session.tabs.find((t) => t.kind === 'file');
+    expect(fileTab).toMatchObject({ filePath: 'src/x.ts', baseRef: null });
   });
 });
 
@@ -530,6 +923,247 @@ describe('RunRightRail — width resize', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Diff-tab liveness — the rail keeps the Diff tab current WITHOUT polling:
+//   1. `sessionGit.onWorktreeChanged` subscription whose lifetime IS the
+//      per-worktree watch (subscribe on Diff tab + session, unsubscribe on
+//      tab/session change), each event bumping the panels' refreshNonce;
+//   2. window focus / visibility as the fallback refetch;
+//   3. the strip's ↻ (onRefresh) — covered in WorktreeStrip.test.tsx.
+// The SessionDiffTabPanel mock above exposes the refreshNonce it received,
+// which is how "the panel was told to refetch" is observed here.
+// ---------------------------------------------------------------------------
+
+type OnWorktreeChangedMock = {
+  subscribe: ReturnType<typeof vi.fn>;
+};
+
+describe('RunRightRail — Diff-tab liveness (worktree-change subscription + focus refetch)', () => {
+  let subscribeMock: ReturnType<typeof vi.fn>;
+  let unsubscribeMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    unsubscribeMock = vi.fn();
+    subscribeMock = vi.fn().mockReturnValue({ unsubscribe: unsubscribeMock });
+    (trpc.cyboflow.sessionGit as unknown as { onWorktreeChanged: OnWorktreeChangedMock }).onWorktreeChanged = {
+      subscribe: subscribeMock,
+    };
+  });
+
+  const nonceShown = () =>
+    Number(screen.getByTestId('session-diff-tab-panel-mock-refresh-nonce').textContent);
+
+  it('subscribes for the selected session ONLY while the Diff tab is mounted, and unsubscribes when the tab changes', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-live-001' });
+    });
+    renderRail(EMPTY_PHASE_STATE, { quickSessionProjectId: 9 });
+    // Workflow Progress is the default tab — no watcher yet.
+    expect(subscribeMock).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    expect(subscribeMock).toHaveBeenCalledTimes(1);
+    expect(subscribeMock).toHaveBeenCalledWith({ sessionId: 'sess-live-001' }, expect.objectContaining({ onData: expect.any(Function) }));
+    expect(unsubscribeMock).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'File Explorer' }));
+    expect(unsubscribeMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-subscribes for the NEW session when the selection changes while the Diff tab is open', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-live-a' });
+    });
+    renderRail(EMPTY_PHASE_STATE, { quickSessionProjectId: 9 });
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    expect(subscribeMock).toHaveBeenLastCalledWith({ sessionId: 'sess-live-a' }, expect.anything());
+
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-live-b' });
+    });
+    expect(unsubscribeMock).toHaveBeenCalledTimes(1);
+    expect(subscribeMock).toHaveBeenCalledTimes(2);
+    expect(subscribeMock).toHaveBeenLastCalledWith({ sessionId: 'sess-live-b' }, expect.anything());
+  });
+
+  it('does not subscribe with no selected session (nothing to watch), even on the Diff tab', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: null });
+    });
+    renderRail(EMPTY_PHASE_STATE);
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    expect(subscribeMock).not.toHaveBeenCalled();
+  });
+
+  it('each worktree-change event bumps the refreshNonce the panel refetches on', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-live-002' });
+    });
+    renderRail(EMPTY_PHASE_STATE, { quickSessionProjectId: 9 });
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    const before = nonceShown();
+
+    const { onData } = subscribeMock.mock.calls[0][1] as { onData: () => void };
+    act(() => onData());
+    expect(nonceShown()).toBe(before + 1);
+    act(() => onData());
+    expect(nonceShown()).toBe(before + 2);
+  });
+
+  it('window focus bumps the refreshNonce while the Diff tab is open — and NOT while another tab is', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-live-003' });
+    });
+    renderRail(EMPTY_PHASE_STATE, { quickSessionProjectId: 9 });
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    const before = nonceShown();
+
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    expect(nonceShown()).toBe(before + 1);
+
+    // Leave the Diff tab: the focus listener is gone; come back and the
+    // remount fetch (not a stale focus bump) is what refreshes.
+    fireEvent.click(screen.getByRole('tab', { name: 'File Explorer' }));
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    expect(nonceShown()).toBe(before + 1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-218 — BaseSelector selection persistence (D-7). Selection state lives
+// in RunRightRail, keyed by selectedSessionId when present, else the active
+// run id, else never persisted — mirrors the width-resize describe's
+// seed/persist localStorage pattern above, using the BaseSelector mock's
+// buttons (defined at module scope) to drive selections deterministically
+// instead of the real dropdown (BaseSelector's own suite, TASK-217, already
+// covers its internals).
+// ---------------------------------------------------------------------------
+
+describe('RunRightRail — comparison-base selection persistence (TASK-218)', () => {
+  const COMPARISON_BASE_KEY = 'cyboflow.runRightRail.comparisonBase';
+
+  beforeEach(() => {
+    localStorage.removeItem(COMPARISON_BASE_KEY);
+  });
+
+  it('BaseSelector gets the session\'s project id from sessionProjectId — also for the main-repo session, whose quickSessionProjectId is null', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-base-mainrepo' });
+    });
+
+    renderRail(EMPTY_PHASE_STATE, { quickSessionProjectId: null, sessionProjectId: 42 });
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+
+    // Pre-fix this read quickSessionProjectId and rendered '' here, so the
+    // selector disabled "Another branch" with "No project is associated with
+    // this session" on a session that plainly belongs to a project.
+    expect(screen.getByTestId('base-selector-mock-project-id')).toHaveTextContent('42');
+  });
+
+  it('persists the selection keyed by selectedSessionId when a session is selected', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-base-001' });
+    });
+
+    renderRail(EMPTY_PHASE_STATE);
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    fireEvent.click(screen.getByTestId('base-selector-mock-select-a'));
+
+    const stored = JSON.parse(localStorage.getItem(COMPARISON_BASE_KEY) ?? '{}');
+    expect(stored).toMatchObject({ 'sess-base-001': 'origin/main' });
+  });
+
+  it('persists the selection keyed by the active run id when no session is selected', () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-base-001');
+    });
+
+    renderRail(EMPTY_PHASE_STATE);
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    fireEvent.click(screen.getByTestId('base-selector-mock-select-a'));
+
+    const stored = JSON.parse(localStorage.getItem(COMPARISON_BASE_KEY) ?? '{}');
+    expect(stored).toMatchObject({ 'run-base-001': 'origin/main' });
+  });
+
+  it('writes NOTHING to localStorage when neither a session nor a run is active', () => {
+    renderRail(EMPTY_PHASE_STATE);
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    fireEvent.click(screen.getByTestId('base-selector-mock-select-a'));
+
+    expect(localStorage.getItem(COMPARISON_BASE_KEY)).toBeNull();
+  });
+
+  it('rehydrates a persisted selection on mount, keyed by the matching session', () => {
+    localStorage.setItem(COMPARISON_BASE_KEY, JSON.stringify({ 'sess-base-002': 'feature/other' }));
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-base-002' });
+    });
+
+    renderRail(EMPTY_PHASE_STATE);
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+
+    expect(screen.getByTestId('base-selector-mock-selected-ref')).toHaveTextContent('feature/other');
+  });
+
+  it('keeps different sessions scoped to their own selection', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-base-003' });
+    });
+    const { unmount } = renderRail(EMPTY_PHASE_STATE);
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    fireEvent.click(screen.getByTestId('base-selector-mock-select-a'));
+    unmount();
+
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-base-004' });
+    });
+    renderRail(EMPTY_PHASE_STATE);
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+
+    // A different session key has no stored selection of its own yet, so the
+    // selector shows the default (no text), not the OTHER session's pick.
+    expect(screen.getByTestId('base-selector-mock-selected-ref')).toHaveTextContent('');
+
+    const stored = JSON.parse(localStorage.getItem(COMPARISON_BASE_KEY) ?? '{}');
+    expect(stored['sess-base-003']).toBe('origin/main');
+    expect(stored['sess-base-004']).toBeUndefined();
+  });
+
+  it('forwards the selected comparisonRef down into RunDiffTabPanel', () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-base-forward-001', 'sess-base-forward-001');
+    });
+
+    renderRail(EMPTY_PHASE_STATE);
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    fireEvent.click(screen.getByTestId('base-selector-mock-select-b'));
+
+    expect(screen.getByTestId('run-diff-tab-panel-mock-comparison-ref')).toHaveTextContent(
+      'feature/other',
+    );
+  });
+
+  it('forwards the selected comparisonRef down into SessionDiffTabPanel', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-base-forward-002' });
+    });
+
+    renderRail(EMPTY_PHASE_STATE);
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+    fireEvent.click(screen.getByTestId('base-selector-mock-select-b'));
+
+    expect(screen.getByTestId('session-diff-tab-panel-mock-comparison-ref')).toHaveTextContent(
+      'feature/other',
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Q3 panel-preservation parity (IDEA-013 / TASK-812)
 //
 // The structured panel renders interactive-substrate runs WITHOUT any change
@@ -602,5 +1236,461 @@ describe('RunRightRail — Q3 panel preservation (substrate parity)', () => {
     expect(interactiveHtml).toBe(sdkHtml);
     // Sanity: the timeline actually mounted (phase section present in the HTML).
     expect(sdkHtml).toContain('phase-section-phase-1');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-214 AC3 — onResolvedBase call-count contract on the REAL panels (the
+// vi.mock() stubs above intentionally short-circuit the fetch, so they cannot
+// exercise this). Bypasses the file's own RunDiffTabPanel/SessionDiffTabPanel
+// mocks via vi.importActual and mounts each panel standalone (not through
+// RunRightRail — no need for the rail's unrelated tRPC surface). `trpc` here
+// is the SAME globally-mocked object from src/test/setup.ts (this file never
+// overrides '../../../trpc/client'); `gitDiff` / `sessionGit` are added onto it
+// per-test since setup.ts's stub doesn't define them.
+// ---------------------------------------------------------------------------
+
+/** Minimal valid WorktreeStatusPayload — its content is irrelevant to these
+ * tests, only its presence (RunGitDiff/SessionGitDiffResult require it). */
+const EMPTY_WORKTREE_STATUS: WorktreeStatusPayload = {
+  entries: [],
+  groups: [
+    { scope: 'unstaged', files: [], additions: 0, deletions: 0 },
+    { scope: 'staged', files: [], additions: 0, deletions: 0 },
+    { scope: 'untracked', files: [], additions: 0, deletions: 0 },
+    { scope: 'committed', files: [], additions: 0, deletions: 0 },
+  ],
+  committedUnavailable: true,
+};
+
+/** A non-trivial WorktreeStatusPayload — one unstaged file — used by the
+ * "groups prop derived from response" tests below to prove `worktree` reaches
+ * RunDiffFileList's `groups` prop and renders the GROUPED output (a "Unstaged"
+ * section header with its file count), not the flat list. */
+const NONTRIVIAL_WORKTREE_STATUS: WorktreeStatusPayload = {
+  entries: [{ path: 'a.ts', staged: false, unstaged: true, untracked: false, conflicted: false }],
+  groups: [
+    { scope: 'unstaged', files: ['a.ts'], additions: 3, deletions: 1 },
+    { scope: 'staged', files: [], additions: 0, deletions: 0 },
+    { scope: 'untracked', files: [], additions: 0, deletions: 0 },
+    { scope: 'committed', files: [], additions: 0, deletions: 0 },
+  ],
+  committedUnavailable: false,
+};
+
+function makeRunGitDiffFixture(resolvedBase: string | null): RunGitDiff {
+  return {
+    diff: '',
+    stats: { additions: 0, deletions: 0, filesChanged: 0 },
+    changedFiles: [],
+    resolvedBase,
+    worktree: EMPTY_WORKTREE_STATUS,
+  };
+}
+
+/** Structural shape of `trpc.cyboflow.runs` once `gitDiff` is mocked in. Only
+ * covers what these tests touch — never a substitute for AppRouter's real type. */
+interface RunsWithGitDiffMock {
+  gitDiff: { query: (input: { runId: string; comparisonRef?: string }) => Promise<RunGitDiff | null> };
+}
+
+/** Structural shape of `trpc.cyboflow.sessionGit` once mocked in — see above. */
+interface SessionGitWithCombinedDiffMock {
+  getCombinedDiff: {
+    query: (input: {
+      sessionId: string;
+      executionIds?: number[];
+      comparisonRef?: string;
+      scope?: string;
+    }) => Promise<
+      | { success: true; data: { diff: string; stats: { additions: number; deletions: number; filesChanged: number }; changedFiles: string[]; resolvedBase: string | null; worktree: WorktreeStatusPayload } }
+      | { success: false; error: string }
+    >;
+  };
+}
+
+describe('RunDiffTabPanel / SessionDiffTabPanel — onResolvedBase fetch contract (TASK-214 AC3)', () => {
+  it('RunDiffTabPanel: calls onResolvedBase exactly once after a successful fetch, issuing exactly one query', async () => {
+    const { RunDiffTabPanel: RealRunDiffTabPanel } =
+      await vi.importActual<typeof import('../RunDiffTabPanel')>('../RunDiffTabPanel');
+
+    const gitDiffQuery = vi.fn().mockResolvedValue(makeRunGitDiffFixture('sha-real-run-001'));
+    (trpc.cyboflow.runs as unknown as RunsWithGitDiffMock).gitDiff = { query: gitDiffQuery };
+
+    const onResolvedBase = vi.fn();
+    render(<RealRunDiffTabPanel runId="run-real-001" onResolvedBase={onResolvedBase} />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(gitDiffQuery).toHaveBeenCalledTimes(1);
+    expect(onResolvedBase).toHaveBeenCalledTimes(1);
+    expect(onResolvedBase).toHaveBeenCalledWith('sha-real-run-001');
+  });
+
+  it('RunDiffTabPanel: does NOT call onResolvedBase on a failed fetch', async () => {
+    const { RunDiffTabPanel: RealRunDiffTabPanel } =
+      await vi.importActual<typeof import('../RunDiffTabPanel')>('../RunDiffTabPanel');
+
+    const gitDiffQuery = vi.fn().mockRejectedValue(new Error('boom'));
+    (trpc.cyboflow.runs as unknown as RunsWithGitDiffMock).gitDiff = { query: gitDiffQuery };
+
+    const onResolvedBase = vi.fn();
+    render(<RealRunDiffTabPanel runId="run-real-002" onResolvedBase={onResolvedBase} />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(gitDiffQuery).toHaveBeenCalledTimes(1);
+    expect(onResolvedBase).not.toHaveBeenCalled();
+  });
+
+  it('SessionDiffTabPanel: calls onResolvedBase exactly once after a successful fetch, issuing exactly one query', async () => {
+    const { SessionDiffTabPanel: RealSessionDiffTabPanel } =
+      await vi.importActual<typeof import('../SessionDiffTabPanel')>('../SessionDiffTabPanel');
+
+    const getCombinedDiffQuery = vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        diff: '',
+        stats: { additions: 0, deletions: 0, filesChanged: 0 },
+        changedFiles: [],
+        resolvedBase: 'sha-real-session-001',
+        worktree: EMPTY_WORKTREE_STATUS,
+      },
+    });
+    (trpc.cyboflow as unknown as { sessionGit: SessionGitWithCombinedDiffMock }).sessionGit = {
+      getCombinedDiff: { query: getCombinedDiffQuery },
+    };
+
+    const onResolvedBase = vi.fn();
+    render(<RealSessionDiffTabPanel sessionId="sess-real-001" onResolvedBase={onResolvedBase} />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getCombinedDiffQuery).toHaveBeenCalledTimes(1);
+    expect(onResolvedBase).toHaveBeenCalledTimes(1);
+    expect(onResolvedBase).toHaveBeenCalledWith('sha-real-session-001');
+  });
+
+  it('RunDiffTabPanel: echoes the response worktree via onWorktree on success, and `undefined` on a failed fetch', async () => {
+    const { RunDiffTabPanel: RealRunDiffTabPanel } =
+      await vi.importActual<typeof import('../RunDiffTabPanel')>('../RunDiffTabPanel');
+
+    const gitDiffQuery = vi.fn().mockResolvedValue({ ...makeRunGitDiffFixture('sha-wt'), worktree: NONTRIVIAL_WORKTREE_STATUS });
+    (trpc.cyboflow.runs as unknown as RunsWithGitDiffMock).gitDiff = { query: gitDiffQuery };
+
+    const onWorktree = vi.fn();
+    const { unmount } = render(<RealRunDiffTabPanel runId="run-real-wt-001" onWorktree={onWorktree} />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onWorktree).toHaveBeenCalledTimes(1);
+    expect(onWorktree).toHaveBeenCalledWith(NONTRIVIAL_WORKTREE_STATUS);
+    unmount();
+
+    gitDiffQuery.mockRejectedValue(new Error('boom'));
+    const onWorktreeErr = vi.fn();
+    render(<RealRunDiffTabPanel runId="run-real-wt-002" onWorktree={onWorktreeErr} />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onWorktreeErr).toHaveBeenCalledTimes(1);
+    expect(onWorktreeErr).toHaveBeenCalledWith(undefined);
+  });
+
+  it('RunDiffTabPanel: a refreshNonce bump refetches the SAME [runId, comparisonRef] exactly once', async () => {
+    const { RunDiffTabPanel: RealRunDiffTabPanel } =
+      await vi.importActual<typeof import('../RunDiffTabPanel')>('../RunDiffTabPanel');
+
+    const gitDiffQuery = vi.fn().mockResolvedValue(makeRunGitDiffFixture('sha-nonce'));
+    (trpc.cyboflow.runs as unknown as RunsWithGitDiffMock).gitDiff = { query: gitDiffQuery };
+
+    const { rerender } = render(<RealRunDiffTabPanel runId="run-real-nonce-001" refreshNonce={0} />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(gitDiffQuery).toHaveBeenCalledTimes(1);
+
+    rerender(<RealRunDiffTabPanel runId="run-real-nonce-001" refreshNonce={1} />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(gitDiffQuery).toHaveBeenCalledTimes(2);
+    expect(gitDiffQuery.mock.calls[1][0]).toMatchObject({ runId: 'run-real-nonce-001' });
+
+    // Same nonce again → no extra fetch.
+    rerender(<RealRunDiffTabPanel runId="run-real-nonce-001" refreshNonce={1} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(gitDiffQuery).toHaveBeenCalledTimes(2);
+  });
+
+  it('SessionDiffTabPanel: echoes the response worktree via onWorktree on success, `undefined` on success:false, and refetches on a refreshNonce bump', async () => {
+    const { SessionDiffTabPanel: RealSessionDiffTabPanel } =
+      await vi.importActual<typeof import('../SessionDiffTabPanel')>('../SessionDiffTabPanel');
+
+    const getCombinedDiffQuery = vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        diff: '',
+        stats: { additions: 0, deletions: 0, filesChanged: 0 },
+        changedFiles: [],
+        resolvedBase: 'sha-sess-wt',
+        worktree: NONTRIVIAL_WORKTREE_STATUS,
+      },
+    });
+    (trpc.cyboflow as unknown as { sessionGit: SessionGitWithCombinedDiffMock }).sessionGit = {
+      getCombinedDiff: { query: getCombinedDiffQuery },
+    };
+
+    const onWorktree = vi.fn();
+    const { rerender } = render(
+      <RealSessionDiffTabPanel sessionId="sess-real-wt-001" refreshNonce={0} onWorktree={onWorktree} />,
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(getCombinedDiffQuery).toHaveBeenCalledTimes(1);
+    expect(onWorktree).toHaveBeenCalledTimes(1);
+    expect(onWorktree).toHaveBeenCalledWith(NONTRIVIAL_WORKTREE_STATUS);
+
+    getCombinedDiffQuery.mockResolvedValue({ success: false, error: 'nope' });
+    rerender(<RealSessionDiffTabPanel sessionId="sess-real-wt-001" refreshNonce={1} onWorktree={onWorktree} />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(getCombinedDiffQuery).toHaveBeenCalledTimes(2);
+    expect(onWorktree).toHaveBeenCalledTimes(2);
+    expect(onWorktree).toHaveBeenLastCalledWith(undefined);
+  });
+
+  it('SessionDiffTabPanel: does NOT call onResolvedBase when the fetch resolves with success:false', async () => {
+    const { SessionDiffTabPanel: RealSessionDiffTabPanel } =
+      await vi.importActual<typeof import('../SessionDiffTabPanel')>('../SessionDiffTabPanel');
+
+    const getCombinedDiffQuery = vi.fn().mockResolvedValue({ success: false, error: 'nope' });
+    (trpc.cyboflow as unknown as { sessionGit: SessionGitWithCombinedDiffMock }).sessionGit = {
+      getCombinedDiff: { query: getCombinedDiffQuery },
+    };
+
+    const onResolvedBase = vi.fn();
+    render(<RealSessionDiffTabPanel sessionId="sess-real-002" onResolvedBase={onResolvedBase} />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getCombinedDiffQuery).toHaveBeenCalledTimes(1);
+    expect(onResolvedBase).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-218 AC — both panels refetch when `comparisonRef` changes, and the
+// response's `worktree` payload reaches RunDiffFileList's `groups` prop.
+// Bypasses this file's rail-level RunDiffTabPanel/SessionDiffTabPanel mocks
+// via vi.importActual (same pattern as the onResolvedBase contract suite
+// above) since these need the REAL panel implementations — the rail-level
+// mocks above short-circuit both the fetch and the RunDiffFileList render.
+// ---------------------------------------------------------------------------
+
+describe('RunDiffTabPanel / SessionDiffTabPanel — comparisonRef refetch + groups prop (TASK-218)', () => {
+  it('RunDiffTabPanel: refetches with the new comparisonRef on prop change, exactly one request per render', async () => {
+    const { RunDiffTabPanel: RealRunDiffTabPanel } =
+      await vi.importActual<typeof import('../RunDiffTabPanel')>('../RunDiffTabPanel');
+
+    const gitDiffQuery = vi.fn().mockResolvedValue(makeRunGitDiffFixture('sha-a'));
+    (trpc.cyboflow.runs as unknown as RunsWithGitDiffMock).gitDiff = { query: gitDiffQuery };
+
+    const { rerender } = render(<RealRunDiffTabPanel runId="run-real-comp-001" />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(gitDiffQuery).toHaveBeenCalledTimes(1);
+    expect(gitDiffQuery.mock.calls[0][0]).toMatchObject({ runId: 'run-real-comp-001' });
+    expect(gitDiffQuery.mock.calls[0][0].comparisonRef).toBeUndefined();
+
+    rerender(<RealRunDiffTabPanel runId="run-real-comp-001" comparisonRef="origin/main" />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // A SECOND request, not a duplicate/parallel one alongside the first.
+    expect(gitDiffQuery).toHaveBeenCalledTimes(2);
+    expect(gitDiffQuery.mock.calls[1][0]).toMatchObject({
+      runId: 'run-real-comp-001',
+      comparisonRef: 'origin/main',
+    });
+  });
+
+  it('SessionDiffTabPanel: a refreshNonce bump keeps the PREVIOUS list on screen while the refetch is in flight (no "Loading diff…" flash on a live tree)', async () => {
+    const { SessionDiffTabPanel: RealSessionDiffTabPanel } =
+      await vi.importActual<typeof import('../SessionDiffTabPanel')>('../SessionDiffTabPanel');
+
+    let resolveSecond: ((v: unknown) => void) | null = null;
+    const getCombinedDiffQuery = vi
+      .fn()
+      .mockResolvedValueOnce({
+        success: true,
+        data: {
+          diff: '',
+          stats: { additions: 0, deletions: 0, filesChanged: 0 },
+          changedFiles: [],
+          resolvedBase: 'sha-live',
+          worktree: NONTRIVIAL_WORKTREE_STATUS,
+        },
+      })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveSecond = resolve;
+          }),
+      );
+    (trpc.cyboflow as unknown as { sessionGit: SessionGitWithCombinedDiffMock }).sessionGit = {
+      getCombinedDiff: { query: getCombinedDiffQuery },
+    };
+
+    const { rerender } = render(<RealSessionDiffTabPanel sessionId="sess-live-panel" refreshNonce={0} />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId('session-diff-loading')).toBeNull();
+    expect(screen.getByTestId('run-right-rail-session-diff')).toBeInTheDocument();
+
+    // The live-tree refetch: the second request is still pending…
+    rerender(<RealSessionDiffTabPanel sessionId="sess-live-panel" refreshNonce={1} />);
+    expect(getCombinedDiffQuery).toHaveBeenCalledTimes(2);
+    // …and the list from the FIRST response is still rendered, not a placeholder.
+    expect(screen.queryByTestId('session-diff-loading')).toBeNull();
+    expect(screen.getByTestId('run-right-rail-session-diff')).toBeInTheDocument();
+
+    await act(async () => {
+      resolveSecond?.({
+        success: true,
+        data: {
+          diff: '',
+          stats: { additions: 0, deletions: 0, filesChanged: 0 },
+          changedFiles: [],
+          resolvedBase: 'sha-live',
+          worktree: NONTRIVIAL_WORKTREE_STATUS,
+        },
+      });
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId('run-right-rail-session-diff')).toBeInTheDocument();
+  });
+
+  it('SessionDiffTabPanel: refetches with the new comparisonRef on prop change, exactly one request per render', async () => {
+    const { SessionDiffTabPanel: RealSessionDiffTabPanel } =
+      await vi.importActual<typeof import('../SessionDiffTabPanel')>('../SessionDiffTabPanel');
+
+    const getCombinedDiffQuery = vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        diff: '',
+        stats: { additions: 0, deletions: 0, filesChanged: 0 },
+        changedFiles: [],
+        resolvedBase: 'sha-b',
+        worktree: EMPTY_WORKTREE_STATUS,
+      },
+    });
+    (trpc.cyboflow as unknown as { sessionGit: SessionGitWithCombinedDiffMock }).sessionGit = {
+      getCombinedDiff: { query: getCombinedDiffQuery },
+    };
+
+    const { rerender } = render(<RealSessionDiffTabPanel sessionId="sess-real-comp-001" />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getCombinedDiffQuery).toHaveBeenCalledTimes(1);
+    expect(getCombinedDiffQuery.mock.calls[0][0]).toMatchObject({ sessionId: 'sess-real-comp-001' });
+    expect(getCombinedDiffQuery.mock.calls[0][0].comparisonRef).toBeUndefined();
+
+    rerender(<RealSessionDiffTabPanel sessionId="sess-real-comp-001" comparisonRef="feature/other" />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // A SECOND request, not a duplicate/parallel one alongside the first.
+    expect(getCombinedDiffQuery).toHaveBeenCalledTimes(2);
+    expect(getCombinedDiffQuery.mock.calls[1][0]).toMatchObject({
+      sessionId: 'sess-real-comp-001',
+      comparisonRef: 'feature/other',
+    });
+  });
+
+  it('RunDiffTabPanel: passes the response worktree payload into RunDiffFileList as groups (grouped rendering)', async () => {
+    const { RunDiffTabPanel: RealRunDiffTabPanel } =
+      await vi.importActual<typeof import('../RunDiffTabPanel')>('../RunDiffTabPanel');
+
+    const gitDiffQuery = vi.fn().mockResolvedValue({
+      diff: '',
+      stats: { additions: 3, deletions: 1, filesChanged: 1 },
+      changedFiles: ['a.ts'],
+      resolvedBase: 'sha-groups-run',
+      worktree: NONTRIVIAL_WORKTREE_STATUS,
+    });
+    (trpc.cyboflow.runs as unknown as RunsWithGitDiffMock).gitDiff = { query: gitDiffQuery };
+
+    render(<RealRunDiffTabPanel runId="run-real-groups-001" />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Grouped rendering (not the flat list) — proves `groups` reached RunDiffFileList.
+    expect(screen.getByTestId('run-diff-file-list-grouped')).toBeInTheDocument();
+    const header = screen.getByTestId('run-diff-group-header-unstaged');
+    expect(header).toHaveTextContent('Unstaged');
+    expect(header).toHaveTextContent('1 file');
+  });
+
+  it('SessionDiffTabPanel: passes the response worktree payload into RunDiffFileList as groups (grouped rendering)', async () => {
+    const { SessionDiffTabPanel: RealSessionDiffTabPanel } =
+      await vi.importActual<typeof import('../SessionDiffTabPanel')>('../SessionDiffTabPanel');
+
+    const getCombinedDiffQuery = vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        diff: '',
+        stats: { additions: 3, deletions: 1, filesChanged: 1 },
+        changedFiles: ['a.ts'],
+        resolvedBase: 'sha-groups-session',
+        worktree: NONTRIVIAL_WORKTREE_STATUS,
+      },
+    });
+    (trpc.cyboflow as unknown as { sessionGit: SessionGitWithCombinedDiffMock }).sessionGit = {
+      getCombinedDiff: { query: getCombinedDiffQuery },
+    };
+
+    render(<RealSessionDiffTabPanel sessionId="sess-real-groups-001" />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId('run-diff-file-list-grouped')).toBeInTheDocument();
+    const header = screen.getByTestId('run-diff-group-header-unstaged');
+    expect(header).toHaveTextContent('Unstaged');
+    expect(header).toHaveTextContent('1 file');
   });
 });

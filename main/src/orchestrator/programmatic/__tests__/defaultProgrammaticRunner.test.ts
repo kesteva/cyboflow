@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { DefaultProgrammaticRunner } from '../defaultProgrammaticRunner';
+import { DefaultProgrammaticRunner, readSelectedFindingsBlock } from '../defaultProgrammaticRunner';
+import type { DatabaseLike } from '../../types';
 import type { StepReporter } from '../programmaticRunHost';
 import type { HumanGateResolver } from '../humanGate';
 import { MonitorRegistry, type MonitorContext, type MonitorSession } from '../monitor';
@@ -709,5 +710,128 @@ describe('DefaultProgrammaticRunner', () => {
       expect.anything(),
     );
     expect(vi.mocked(driver.driveLane).mock.calls.some(([a]) => a.status === 'failed')).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readSelectedFindingsBlock — the programmatic half of compound's seeded branch
+// (survey D C1). Mirrors RunExecutor.buildSelectedFindingsBlock's ordering and
+// per-finding shape; a programmatic step turn has no main prompt to prepend to.
+// ---------------------------------------------------------------------------
+
+describe('readSelectedFindingsBlock', () => {
+  interface FakeFinding {
+    id: string;
+    title: string;
+    body: string | null;
+    severity: null;
+    priority: 'P0' | 'P1' | 'P2' | null;
+    source: string | null;
+    proposedTarget: 'backlog' | 'docs' | 'prompt' | 'fix' | null;
+    suggestedFix: string | null;
+    locations: Array<{ path: string; line?: number }> | null;
+  }
+
+  function finding(p: Partial<FakeFinding> & { id: string }): FakeFinding {
+    return {
+      title: p.id,
+      body: null,
+      severity: null,
+      priority: null,
+      source: null,
+      proposedTarget: null,
+      suggestedFix: null,
+      locations: null,
+      ...p,
+    };
+  }
+
+  /** A DatabaseLike whose review_items reads resolve out of `rows`. */
+  function dbWith(rows: Record<string, FakeFinding>): DatabaseLike {
+    return {
+      prepare: (sql: string) => ({
+        get: (...args: unknown[]) => {
+          // selectFindingForSeed gates on hasReviewItemsTable first.
+          if (sql.includes('sqlite_master')) return { name: 'review_items' };
+          if (!sql.includes('review_items')) return undefined;
+          const row = rows[String(args[0])];
+          if (!row) return undefined;
+          return {
+            id: row.id,
+            title: row.title,
+            body: row.body,
+            severity: row.severity,
+            priority: row.priority,
+            source: row.source,
+            payloadJson: JSON.stringify({
+              proposedTarget: row.proposedTarget,
+              suggestedFix: row.suggestedFix,
+              locations: row.locations,
+            }),
+          };
+        },
+        all: () => [],
+        run: () => ({ changes: 0 }),
+      }),
+      transaction: (fn: (...a: unknown[]) => unknown) => (...a: unknown[]) => fn(...a),
+    } as unknown as DatabaseLike;
+  }
+
+  it('renders the directive + one section per resolved finding', () => {
+    const db = dbWith({
+      a: finding({ id: 'a', title: 'Null deref', body: 'It throws.', priority: 'P1', source: 'agent:code-review', proposedTarget: 'fix', suggestedFix: 'Guard it.', locations: [{ path: 'src/a.ts', line: 12 }] }),
+    });
+    const out = readSelectedFindingsBlock(db, JSON.stringify(['a']));
+    expect(out).toBeDefined();
+    expect(out).toContain('Act ONLY on these findings, in the order listed.');
+    expect(out).toContain('## P1 Null deref');
+    expect(out).toContain('Target: quick · Source: agent:code-review · id: `a`');
+    expect(out).toContain('It throws.');
+    expect(out).toContain('### Suggested fix\nGuard it.');
+    expect(out).toContain('- src/a.ts:12');
+  });
+
+  it('orders by priority (null LAST) then bucket', () => {
+    const db = dbWith({
+      lo: finding({ id: 'lo', title: 'Unprioritized', priority: null, proposedTarget: 'fix' }),
+      p2doc: finding({ id: 'p2doc', title: 'P2 doc', priority: 'P2', proposedTarget: 'docs' }),
+      p0: finding({ id: 'p0', title: 'P0 urgent', priority: 'P0', proposedTarget: 'backlog' }),
+      p2fix: finding({ id: 'p2fix', title: 'P2 fix', priority: 'P2', proposedTarget: 'fix' }),
+    });
+    const out = readSelectedFindingsBlock(db, JSON.stringify(['lo', 'p2doc', 'p0', 'p2fix'])) ?? '';
+    const order = ['P0 urgent', 'P2 fix', 'P2 doc', 'Unprioritized'].map((t) => out.indexOf(t));
+    expect(order.every((i) => i >= 0)).toBe(true);
+    expect([...order].sort((x, y) => x - y)).toEqual(order);
+  });
+
+  it('is fail-soft on every miss', () => {
+    const db = dbWith({ a: finding({ id: 'a' }) });
+    expect(readSelectedFindingsBlock(db, null)).toBeUndefined();
+    expect(readSelectedFindingsBlock(db, '')).toBeUndefined();
+    expect(readSelectedFindingsBlock(db, 'not json')).toBeUndefined();
+    expect(readSelectedFindingsBlock(db, '{"not":"an array"}')).toBeUndefined();
+    expect(readSelectedFindingsBlock(db, '[]')).toBeUndefined();
+    // Every id unresolvable ⇒ undefined, not an empty block.
+    expect(readSelectedFindingsBlock(db, JSON.stringify(['gone']))).toBeUndefined();
+    // One resolvable among misses still renders.
+    expect(readSelectedFindingsBlock(db, JSON.stringify(['gone', 'a']))).toContain('## — a');
+  });
+
+  it('survives a throwing read for one id without sinking the block', () => {
+    const base = dbWith({ ok: finding({ id: 'ok', title: 'Fine' }) });
+    const db = {
+      ...base,
+      prepare: (sql: string) => {
+        const stmt = base.prepare(sql);
+        return {
+          ...stmt,
+          get: (...args: unknown[]) => {
+            if (args[0] === 'boom') throw new Error('db exploded');
+            return stmt.get(...args);
+          },
+        };
+      },
+    } as unknown as DatabaseLike;
+    expect(readSelectedFindingsBlock(db, JSON.stringify(['boom', 'ok']))).toContain('Fine');
   });
 });

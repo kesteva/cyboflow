@@ -365,7 +365,11 @@ export function ReviewItemCard({
   // 'reject' tears down rejected drafts and lets the controller end the run
   // 'rejected'. Both route through reviewItems.resolve via the `outcome` field so
   // the WorkflowController's parseGateVerdict is deterministic, not a free-text sniff.
-  const handleGateDecision = (outcome: 'approve' | 'reject'): void => {
+  // 'revise' is the approve-design gate's SECOND choice ("Rerun planning with
+  // findings"): the controller loops back to the design steps with the
+  // adversarial review threaded in. It is never 'reject' — that verdict ends the
+  // run, which the 2026-09-15 launch smoke hit from this very button.
+  const handleGateDecision = (outcome: 'approve' | 'reject' | 'revise'): void => {
     void resolve(item.project_id, item.id, { outcome }).then((r) => {
       if (r !== null) {
         trackEvent('review_item_resolved', { kind: item.kind, action: outcome, blocking: item.blocking });
@@ -729,7 +733,7 @@ export function ReviewItemCard({
             <Button variant="primary" size="sm" disabled={busy} onClick={() => handleGateDecision('approve')} data-testid="decision-resolve">
               {isApproveDesignGateItem(item) ? 'Continue, log as findings' : 'Approve & resume'}
             </Button>
-            <Button variant="secondary" size="sm" disabled={busy} onClick={() => handleGateDecision('reject')} data-testid="decision-reject">
+            <Button variant="secondary" size="sm" disabled={busy} onClick={() => handleGateDecision(isApproveDesignGateItem(item) ? 'revise' : 'reject')} data-testid="decision-reject">
               {isApproveDesignGateItem(item) ? 'Rerun planning with findings' : 'Reject'}
             </Button>
           </>

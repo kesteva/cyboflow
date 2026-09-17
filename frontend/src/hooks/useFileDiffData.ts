@@ -2,19 +2,23 @@
  * useFileDiffData — resolve a single file's parsed diff for a center-pane file
  * tab.
  *
- * Reads the run's working diff via `API.sessions.getCombinedDiff(sessionId)`
- * (all changes) and extracts the one file with `findFileDiff`. The `sessionId`
- * is the center pane's session key (the run's parent session); the file-open
- * entry point (File Explorer) only renders with a resolved session, so there is
- * no null-session window to guard here.
+ * Reads the run's working diff via
+ * `API.sessions.getCombinedDiff(sessionId, undefined, comparisonRef, scope)`
+ * (all changes, optionally against a supplied base/scope) and extracts the one
+ * file with `findFileDiff`. The `sessionId` is the center pane's session key
+ * (the run's parent session); the file-open entry point (File Explorer) only
+ * renders with a resolved session, so there is no null-session window to guard
+ * here.
  *
- * Snapshot semantics: fetched on mount / when sessionId|filePath change. The file
- * tab content remounts on tab focus, so switching back re-fetches; live
- * streaming of the diff while the agent works is out of scope for this slice.
+ * Snapshot semantics: fetched on mount / when sessionId|filePath|comparisonRef|
+ * scope change — a base-ref flip on the owning tab must refetch. The file tab
+ * content remounts on tab focus, so switching back re-fetches; live streaming
+ * of the diff while the agent works is out of scope for this slice.
  */
 import { useEffect, useState } from 'react';
 import { API } from '../utils/api';
 import { findFileDiff, type ParsedFileDiff } from '../utils/parseFileHunks';
+import type { DiffGroupScope } from '../../../shared/types/runFiles';
 
 export interface FileDiffData {
   loading: boolean;
@@ -23,14 +27,19 @@ export interface FileDiffData {
   fileDiff: ParsedFileDiff | null;
 }
 
-export function useFileDiffData(sessionId: string, filePath: string): FileDiffData {
+export function useFileDiffData(
+  sessionId: string,
+  filePath: string,
+  comparisonRef?: string,
+  scope?: DiffGroupScope,
+): FileDiffData {
   const [state, setState] = useState<FileDiffData>({ loading: true, error: null, fileDiff: null });
 
   useEffect(() => {
     let cancelled = false;
     setState({ loading: true, error: null, fileDiff: null });
 
-    API.sessions.getCombinedDiff(sessionId).then(
+    API.sessions.getCombinedDiff(sessionId, undefined, comparisonRef, scope).then(
       (res) => {
         if (cancelled) return;
         if (!res.success) {
@@ -52,7 +61,7 @@ export function useFileDiffData(sessionId: string, filePath: string): FileDiffDa
     return () => {
       cancelled = true;
     };
-  }, [sessionId, filePath]);
+  }, [sessionId, filePath, comparisonRef, scope]);
 
   return state;
 }

@@ -389,3 +389,668 @@ describe('GitDiffManager.hasChanges (async)', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// TASK-208: caller-supplied `ref` reaching the four `runGitAsync(['diff', ...,
+// ref])` argv sites bare is a `git diff` OPTION-INJECTION hole — a ref of
+// `--output=<path>` is a valid `git diff` option that writes an arbitrary
+// file and returns empty stdout, silently defeating the "unresolvable ref
+// falls back" contract. Every caller-supplied ref must be rev-parse-resolved
+// (and rejected outright when it is option-like) BEFORE it reaches argv.
+//
+// These cases are written against the REQUIRED post-fix behavior and are
+// EXPECTED TO FAIL against the pre-fix code (ref passed to runGitAsync bare):
+// the pre-fix `git diff --output=<marker>` call actually creates the marker
+// file, which is exactly what `fs.existsSync(marker) === false` catches.
+// ---------------------------------------------------------------------------
+
+describe('GitDiffManager — ref option-injection guard (TASK-208)', () => {
+  function markerPath(uniq: string): string {
+    return path.join(os.tmpdir(), `cyboflow-pwn-${uniq}`);
+  }
+
+  it(
+    'getDiffStatsAgainstRef rejects a --output= injection ref before it reaches `git diff --numstat` (argv site :136)',
+    async () => {
+      await withTempDir('gitdiff-inject-numstat-', async (repo) => {
+        initRepoMain(repo);
+        commitFile(repo, 'a.txt', 'a1\n', 'base');
+
+        const marker = markerPath(`numstat-${Date.now()}`);
+        expect(fs.existsSync(marker)).toBe(false);
+
+        const manager = new GitDiffManager();
+        const maliciousRef = `--output=${marker}`;
+
+        try {
+          // Must not throw: an unresolvable/rejected ref is a fallback
+          // trigger, not an exception the caller has to handle.
+          const result = await manager.getDiffStatsAgainstRef(repo, maliciousRef);
+
+          expect(fs.existsSync(marker)).toBe(false);
+          // The malicious "ref" must never be treated as a real diff target.
+          expect(result.stats).toEqual({ additions: 0, deletions: 0, filesChanged: 0 });
+        } finally {
+          if (fs.existsSync(marker)) fs.unlinkSync(marker);
+        }
+      });
+    },
+  );
+
+  it(
+    'captureDiffAgainstRef rejects a --output= injection ref across its diff/changedFiles/stat legs (argv sites :468, :501, :527)',
+    async () => {
+      await withTempDir('gitdiff-inject-captureref-', async (repo) => {
+        initRepoMain(repo);
+        commitFile(repo, 'a.txt', 'a1\n', 'base');
+
+        const marker = markerPath(`captureref-${Date.now()}`);
+        expect(fs.existsSync(marker)).toBe(false);
+
+        const manager = new GitDiffManager();
+        const maliciousRef = `--output=${marker}`;
+
+        try {
+          const result = await manager.captureDiffAgainstRef(repo, maliciousRef);
+
+          // Site :468 (`git diff <ref>`) — must not have written the marker file.
+          expect(fs.existsSync(marker)).toBe(false);
+          // Site :501 (`git diff --name-only <ref>`) leg — no spurious entries
+          // from a "successful" injected option run.
+          expect(result.changedFiles).not.toContain(marker);
+          // Site :527 (`git diff --stat <ref>`) leg — stats fall back to a safe
+          // default rather than reflecting a garbage/empty stdout as "no changes
+          // vs a valid ref".
+          expect(result.stats).toEqual({ additions: 0, deletions: 0, filesChanged: 0 });
+        } finally {
+          if (fs.existsSync(marker)) fs.unlinkSync(marker);
+        }
+      });
+    },
+  );
+
+  it('getDiffStatsAgainstRef falls back without throwing for a benign but unresolvable ref', async () => {
+    await withTempDir('gitdiff-unresolvable-numstat-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'a.txt', 'a1\n', 'base');
+
+      const manager = new GitDiffManager();
+      // Pre-fix, an unresolvable ref propagates as a thrown git error instead
+      // of triggering the fallback — surface that as a normal assertion
+      // failure rather than an unhandled rejection.
+      await expect(manager.getDiffStatsAgainstRef(repo, 'no-such-branch')).resolves.toEqual(
+        expect.objectContaining({ stats: { additions: 0, deletions: 0, filesChanged: 0 } }),
+      );
+    });
+  });
+
+  it('captureDiffAgainstRef falls back without throwing for a benign but unresolvable ref', async () => {
+    await withTempDir('gitdiff-unresolvable-captureref-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'a.txt', 'a1\n', 'base');
+
+      const manager = new GitDiffManager();
+      const result = await manager.captureDiffAgainstRef(repo, 'no-such-branch');
+
+      expect(result).toBeDefined();
+      expect(result.changedFiles).toEqual([]);
+      expect(result.stats).toEqual({ additions: 0, deletions: 0, filesChanged: 0 });
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-209: GitDiffManager.getWorktreeStatus parses
+// `git status --porcelain=v1 -z --untracked-files=all` into a per-path flag
+// record (staged / unstaged / untracked / conflicted). Real temp repos, no
+// mocking of fs or git.
+// ---------------------------------------------------------------------------
+
+describe('GitDiffManager.getWorktreeStatus', () => {
+  it('classifies staged-only (M ) and unstaged-only ( M) as mutually exclusive flags, and both (MM) as BOTH flags set', async () => {
+    await withTempDir('gitdiff-status-mm-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'staged.txt', 'v1\n', 'base staged');
+      commitFile(repo, 'unstaged.txt', 'v1\n', 'base unstaged');
+      commitFile(repo, 'both.txt', 'v1\n', 'base both');
+
+      // staged-only: modify + `git add` (index differs from HEAD; worktree matches index).
+      fs.writeFileSync(path.join(repo, 'staged.txt'), 'v2\n');
+      execSync('git add staged.txt', { cwd: repo, stdio: 'pipe' });
+
+      // unstaged-only: modify, never staged.
+      fs.writeFileSync(path.join(repo, 'unstaged.txt'), 'v2\n');
+
+      // both: stage one edit, then edit again unstaged — the MM case.
+      fs.writeFileSync(path.join(repo, 'both.txt'), 'v2\n');
+      execSync('git add both.txt', { cwd: repo, stdio: 'pipe' });
+      fs.writeFileSync(path.join(repo, 'both.txt'), 'v3\n');
+
+      const manager = new GitDiffManager();
+      const entries = await manager.getWorktreeStatus(repo);
+      const byPath = (p: string) => entries.find((e) => e.path === p);
+
+      expect(byPath('staged.txt')).toEqual({
+        path: 'staged.txt', staged: true, unstaged: false, untracked: false, conflicted: false,
+      });
+      expect(byPath('unstaged.txt')).toEqual({
+        path: 'unstaged.txt', staged: false, unstaged: true, untracked: false, conflicted: false,
+      });
+      // The proof this is a flag record and not an enum: both bits are set together.
+      expect(byPath('both.txt')).toEqual({
+        path: 'both.txt', staged: true, unstaged: true, untracked: false, conflicted: false,
+      });
+    });
+  });
+
+  it('classifies an untracked file (??) and a staged new file (A )', async () => {
+    await withTempDir('gitdiff-status-a-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'base.txt', 'base\n', 'base');
+
+      fs.writeFileSync(path.join(repo, 'untracked.txt'), 'new\n');
+
+      fs.writeFileSync(path.join(repo, 'added.txt'), 'new\n');
+      execSync('git add added.txt', { cwd: repo, stdio: 'pipe' });
+
+      const manager = new GitDiffManager();
+      const entries = await manager.getWorktreeStatus(repo);
+      const byPath = (p: string) => entries.find((e) => e.path === p);
+
+      expect(byPath('untracked.txt')).toEqual({
+        path: 'untracked.txt', staged: false, unstaged: false, untracked: true, conflicted: false,
+      });
+      expect(byPath('added.txt')).toEqual({
+        path: 'added.txt', staged: true, unstaged: false, untracked: false, conflicted: false,
+      });
+    });
+  });
+
+  it('classifies a deleted (unstaged) file', async () => {
+    await withTempDir('gitdiff-status-deleted-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'gone.txt', 'bye\n', 'base');
+      fs.unlinkSync(path.join(repo, 'gone.txt'));
+
+      const manager = new GitDiffManager();
+      const entries = await manager.getWorktreeStatus(repo);
+      const entry = entries.find((e) => e.path === 'gone.txt');
+
+      expect(entry).toEqual({
+        path: 'gone.txt', staged: false, unstaged: true, untracked: false, conflicted: false,
+      });
+    });
+  });
+
+  it('classifies a staged rename (R ), asserting oldPath and the -z new-path-first field order', async () => {
+    await withTempDir('gitdiff-status-rename-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'old-name.txt', 'renamed content that is long enough to be detected as a rename\n', 'base');
+      execSync('git mv old-name.txt new-name.txt', { cwd: repo, stdio: 'pipe' });
+
+      const manager = new GitDiffManager();
+      const entries = await manager.getWorktreeStatus(repo);
+      const entry = entries.find((e) => e.path === 'new-name.txt');
+
+      expect(entry).toBeDefined();
+      // A parser written naively from the human-readable `R  old -> new` docs
+      // example gets `-z`'s field order backwards (it emits new-path first) —
+      // this pins that oldPath resolves to the OLD name, not the new one.
+      expect(entry?.oldPath).toBe('old-name.txt');
+      expect(entry?.staged).toBe(true);
+      expect(entry?.unstaged).toBe(false);
+      expect(entry?.conflicted).toBe(false);
+      expect(entries.find((e) => e.path === 'old-name.txt')).toBeUndefined();
+    });
+  });
+
+  it('joins a path with a space and a path with shell metacharacters to the same path the diff blob reports', async () => {
+    await withTempDir('gitdiff-status-join-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'base.txt', 'base\n', 'base');
+
+      const spaceName = 'sp ace file.txt';
+      const metaName = '$(weird)`file`.txt';
+      fs.writeFileSync(path.join(repo, spaceName), 'space content\n');
+      fs.writeFileSync(path.join(repo, metaName), 'meta content\n');
+
+      const manager = new GitDiffManager();
+      const statusEntries = await manager.getWorktreeStatus(repo);
+      // getChangedFiles (via the public diff capture) reports the same
+      // unquoted, un-C-escaped path as the `diff --git a/<path> …` blob.
+      const diffResult = await manager.captureWorkingDirectoryDiff(repo);
+
+      for (const name of [spaceName, metaName]) {
+        expect(diffResult.changedFiles).toContain(name);
+        const statusEntry = statusEntries.find((e) => e.path === name);
+        expect(statusEntry).toBeDefined();
+        expect(statusEntry?.untracked).toBe(true);
+        // Not merely "parsed without throwing" — the join key matches exactly.
+        expect(statusEntry?.path).toBe(name);
+      }
+    });
+  });
+
+  it('lists every file inside an untracked directory as its own entry (the -uall proof)', async () => {
+    await withTempDir('gitdiff-status-untracked-dir-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'base.txt', 'base\n', 'base');
+
+      fs.mkdirSync(path.join(repo, 'newdir'));
+      fs.writeFileSync(path.join(repo, 'newdir', 'a.txt'), 'a\n');
+      fs.writeFileSync(path.join(repo, 'newdir', 'b.txt'), 'b\n');
+
+      const manager = new GitDiffManager();
+      const entries = await manager.getWorktreeStatus(repo);
+
+      // Without -uall this would collapse to a single 'newdir/' row.
+      expect(entries.find((e) => e.path === 'newdir/')).toBeUndefined();
+      expect(entries.find((e) => e.path === 'newdir')).toBeUndefined();
+      expect(entries.find((e) => e.path === 'newdir/a.txt')).toEqual({
+        path: 'newdir/a.txt', staged: false, unstaged: false, untracked: true, conflicted: false,
+      });
+      expect(entries.find((e) => e.path === 'newdir/b.txt')).toEqual({
+        path: 'newdir/b.txt', staged: false, unstaged: false, untracked: true, conflicted: false,
+      });
+    });
+  });
+
+  it('sets conflicted=true (and staged=false, unstaged=false) for a real UU merge conflict', async () => {
+    await withTempDir('gitdiff-status-conflict-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'f.txt', 'base\n', 'base');
+      execSync('git checkout -b feature', { cwd: repo, stdio: 'pipe' });
+      commitFile(repo, 'f.txt', 'feature line\n', 'feature edit');
+      execSync('git checkout main', { cwd: repo, stdio: 'pipe' });
+      commitFile(repo, 'f.txt', 'main line\n', 'main edit');
+      try {
+        execSync('git merge feature --no-edit', { cwd: repo, stdio: 'pipe' });
+      } catch {
+        // Expected — the conflicting merge makes `git merge` exit non-zero.
+      }
+
+      const manager = new GitDiffManager();
+      const entries = await manager.getWorktreeStatus(repo);
+      const entry = entries.find((e) => e.path === 'f.txt');
+
+      expect(entry).toEqual({
+        path: 'f.txt', staged: false, unstaged: false, untracked: false, conflicted: true,
+      });
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-210: GitDiffManager.getDiffGroups — per-scope diff rollups
+// (unstaged/staged/untracked/committed) and merge-base (three-dot) Committed
+// membership. Real temp repos, no mocking of fs or git.
+// ---------------------------------------------------------------------------
+
+function headSha2(dir: string): string {
+  return execSync('git rev-parse HEAD', { cwd: dir, encoding: 'utf8' }).trim();
+}
+
+describe('GitDiffManager.getDiffGroups', () => {
+  it('gives a file staged AND separately dirty DIFFERENT +n/-n in Staged vs Unstaged', async () => {
+    await withTempDir('gitdiff-groups-staged-vs-unstaged-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'f.txt', 'line1\n', 'base');
+      const baseSha = headSha2(repo);
+
+      // Stage one version of the file...
+      fs.writeFileSync(path.join(repo, 'f.txt'), 'line1\nstaged-line\n');
+      execSync('git add f.txt', { cwd: repo, stdio: 'pipe' });
+      // ...then dirty the working tree further, on top of the staged content.
+      fs.writeFileSync(path.join(repo, 'f.txt'), 'line1\nstaged-line\nworking-a\nworking-b\n');
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, baseSha);
+
+      const staged = result.groups.find((g) => g.scope === 'staged')!;
+      const unstaged = result.groups.find((g) => g.scope === 'unstaged')!;
+
+      expect(staged.files).toContain('f.txt');
+      expect(unstaged.files).toContain('f.txt');
+      // Staged: index vs HEAD adds exactly 1 line ("staged-line").
+      expect(staged.additions).toBe(1);
+      // Unstaged: worktree vs index adds exactly 2 lines ("working-a", "working-b").
+      expect(unstaged.additions).toBe(2);
+      expect(staged.additions).not.toBe(unstaged.additions);
+      // Per-file, scope-specific numbers (what a grouped ROW shows) carry the
+      // same distinct deltas — never one shared base-relative pair.
+      expect(staged.fileStats?.['f.txt']).toEqual({ additions: 1, deletions: 0 });
+      expect(unstaged.fileStats?.['f.txt']).toEqual({ additions: 2, deletions: 0 });
+    });
+  });
+
+  it('untracked and committed groups also carry per-file fileStats keyed by membership path', async () => {
+    await withTempDir('gitdiff-groups-filestats-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'base.txt', 'base\n', 'base');
+      const baseSha = headSha2(repo);
+      commitFile(repo, 'base.txt', 'base\nc1\nc2\n', 'committed since base');
+      fs.writeFileSync(path.join(repo, 'new.txt'), 'a\nb\n');
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, baseSha);
+      const untracked = result.groups.find((g) => g.scope === 'untracked')!;
+      const committed = result.groups.find((g) => g.scope === 'committed')!;
+
+      expect(untracked.files).toEqual(['new.txt']);
+      // Mirrors the blob-based split('\n').length arithmetic (3 for "a\nb\n").
+      expect(untracked.fileStats?.['new.txt']).toEqual({ additions: 3, deletions: 0 });
+      expect(untracked.additions).toBe(3);
+
+      expect(committed.files).toEqual(['base.txt']);
+      expect(committed.fileStats?.['base.txt']).toEqual({ additions: 2, deletions: 0 });
+    });
+  });
+
+  it('a file committed-since-base AND separately dirty appears in Committed AND Unstaged with independent numbers', async () => {
+    await withTempDir('gitdiff-groups-committed-and-dirty-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'seed.txt', 'seed\n', 'base');
+      const baseSha = headSha2(repo);
+
+      // Committed since base: a new file landing 3 lines.
+      commitFile(repo, 'f.txt', 'a\nb\nc\n', 'add f since base');
+
+      // Separately dirty on top of the committed version.
+      fs.writeFileSync(path.join(repo, 'f.txt'), 'a\nb\nc\nworking\n');
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, baseSha);
+
+      const committed = result.groups.find((g) => g.scope === 'committed')!;
+      const unstaged = result.groups.find((g) => g.scope === 'unstaged')!;
+
+      expect(committed.files).toContain('f.txt');
+      expect(unstaged.files).toContain('f.txt');
+      expect(committed.additions).toBe(3);
+      expect(unstaged.additions).toBe(1);
+      expect(committed.additions).not.toBe(unstaged.additions);
+      expect(result.committedUnavailable).toBe(false);
+    });
+  });
+
+  it("an untracked newline-terminated file's addition count matches the blob-based (split('\\n').length) count, not the wc-l style count", async () => {
+    await withTempDir('gitdiff-groups-untracked-count-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'seed.txt', 'seed\n', 'base');
+      const baseSha = headSha2(repo);
+
+      // "a\nb\n".split('\n') === ['a', 'b', ''] → length 3. The wc-l style
+      // \n-occurrence count (countUntrackedAdditions) would report 2.
+      fs.writeFileSync(path.join(repo, 'new.txt'), 'a\nb\n');
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, baseSha);
+      const untracked = result.groups.find((g) => g.scope === 'untracked')!;
+
+      expect(untracked.files).toContain('new.txt');
+      expect(untracked.additions).toBe(3);
+      expect(untracked.additions).not.toBe(2);
+    });
+  });
+
+  it('a base "ahead" of HEAD does not fill Committed with reverse deletions for untouched files', async () => {
+    await withTempDir('gitdiff-groups-base-ahead-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'a.txt', 'a1\n', 'c1');
+      const midSha = headSha2(repo);
+      commitFile(repo, 'b.txt', 'b1\n', 'c2 - later commit');
+      const aheadSha = headSha2(repo);
+
+      // HEAD now points BEHIND aheadSha — aheadSha is "ahead" of HEAD.
+      execSync(`git reset --hard ${midSha}`, { cwd: repo, stdio: 'pipe' });
+      expect(headSha2(repo)).toBe(midSha);
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, aheadSha);
+      const committed = result.groups.find((g) => g.scope === 'committed')!;
+
+      // b.txt was introduced only by the now-unreachable aheadSha commit —
+      // HEAD never touched it. A raw two-dot `aheadSha..HEAD` diff would
+      // report it as a reverse deletion; the merge-base anchor must not.
+      expect(committed.files).not.toContain('b.txt');
+      expect(committed.files).toEqual([]);
+      expect(committed.additions).toBe(0);
+      expect(committed.deletions).toBe(0);
+      expect(result.committedUnavailable).toBe(false);
+    });
+  });
+
+  it('two commits with no common ancestor (unrelated histories) → Committed EMPTY and committedUnavailable=true, never the whole tree', async () => {
+    await withTempDir('gitdiff-groups-unrelated-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'a.txt', 'a\n', 'base');
+      const baseSha = headSha2(repo);
+
+      execSync('git checkout --orphan other', { cwd: repo, stdio: 'pipe' });
+      execSync('git rm -rf .', { cwd: repo, stdio: 'pipe' });
+      commitFile(repo, 'c.txt', 'c\n', 'orphan commit');
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, baseSha);
+      const committed = result.groups.find((g) => g.scope === 'committed')!;
+
+      expect(result.committedUnavailable).toBe(true);
+      expect(committed.files).toEqual([]);
+      expect(committed.additions).toBe(0);
+      expect(committed.deletions).toBe(0);
+    });
+  });
+
+  it('resolvedBase === null → Committed empty + committedUnavailable=true, and staged/unstaged/untracked stay fully populated', async () => {
+    await withTempDir('gitdiff-groups-null-base-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'seed.txt', 'seed\n', 'base');
+      commitFile(repo, 'other.txt', 'x\n', 'add other');
+
+      // Staged.
+      fs.writeFileSync(path.join(repo, 'seed.txt'), 'seed\nstaged\n');
+      execSync('git add seed.txt', { cwd: repo, stdio: 'pipe' });
+      // Unstaged.
+      fs.writeFileSync(path.join(repo, 'other.txt'), 'x\ny\n');
+      // Untracked.
+      fs.writeFileSync(path.join(repo, 'untracked.txt'), 'z\n');
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, null);
+
+      expect(result.groups).toHaveLength(4);
+      expect(result.groups.map((g) => g.scope).sort()).toEqual([
+        'committed', 'staged', 'unstaged', 'untracked',
+      ]);
+
+      expect(result.committedUnavailable).toBe(true);
+      const committed = result.groups.find((g) => g.scope === 'committed')!;
+      expect(committed.files).toEqual([]);
+      expect(committed.additions).toBe(0);
+      expect(committed.deletions).toBe(0);
+
+      const staged = result.groups.find((g) => g.scope === 'staged')!;
+      const unstaged = result.groups.find((g) => g.scope === 'unstaged')!;
+      const untracked = result.groups.find((g) => g.scope === 'untracked')!;
+      expect(staged.files).toContain('seed.txt');
+      expect(unstaged.files).toContain('other.txt');
+      expect(untracked.files).toContain('untracked.txt');
+    });
+  });
+
+  it('a staged rename is listed under its DESTINATION path (openable, joins the status entry), never the numstat "old => new" display expression', async () => {
+    await withTempDir('gitdiff-groups-rename-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'old-name.txt', 'renamed content that is long enough to be detected as a rename\n', 'base');
+      const baseSha = headSha2(repo);
+      execSync('git mv old-name.txt new-name.txt', { cwd: repo, stdio: 'pipe' });
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, baseSha);
+      const staged = result.groups.find((g) => g.scope === 'staged')!;
+
+      expect(staged.files).toEqual(['new-name.txt']);
+      expect(staged.files.some((f) => f.includes('=>'))).toBe(false);
+      // The membership path joins the porcelain status entry for the same file.
+      const entries = await manager.getWorktreeStatus(repo);
+      expect(entries.find((e) => e.path === staged.files[0])?.oldPath).toBe('old-name.txt');
+    });
+  });
+
+  it('a staged rename inside a directory (the "dir/{old => new}" brace form) still records the plain destination path', async () => {
+    await withTempDir('gitdiff-groups-rename-dir-', async (repo) => {
+      initRepoMain(repo);
+      fs.mkdirSync(path.join(repo, 'dir'));
+      commitFile(repo, 'dir/old-name.txt', 'renamed content that is long enough to be detected as a rename\n', 'base');
+      execSync('git mv dir/old-name.txt dir/new-name.txt', { cwd: repo, stdio: 'pipe' });
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, null);
+      const staged = result.groups.find((g) => g.scope === 'staged')!;
+
+      expect(staged.files).toEqual(['dir/new-name.txt']);
+    });
+  });
+
+  it('a real UU conflict appears EXACTLY ONCE in Unstaged membership (git emits one numstat row per merge side)', async () => {
+    await withTempDir('gitdiff-groups-conflict-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'f.txt', 'base\n', 'base');
+      execSync('git checkout -b feature', { cwd: repo, stdio: 'pipe' });
+      commitFile(repo, 'f.txt', 'feature line\n', 'feature edit');
+      execSync('git checkout main', { cwd: repo, stdio: 'pipe' });
+      commitFile(repo, 'f.txt', 'main line\n', 'main edit');
+      try {
+        execSync('git merge feature --no-edit', { cwd: repo, stdio: 'pipe' });
+      } catch {
+        // Expected — the conflicting merge makes `git merge` exit non-zero.
+      }
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, null);
+      const unstaged = result.groups.find((g) => g.scope === 'unstaged')!;
+      const staged = result.groups.find((g) => g.scope === 'staged')!;
+
+      expect(unstaged.files.filter((f) => f === 'f.txt')).toHaveLength(1);
+      // A conflict lives ONLY in Unstaged on the wire: `git diff --cached`
+      // would otherwise emit a `0 0 f.txt` row for the unmerged entry, and the
+      // renderer (AR-3) never shows a conflict under Staged.
+      expect(staged.files).not.toContain('f.txt');
+      expect(staged.fileStats?.['f.txt']).toBeUndefined();
+      // The conflict-marker lines are still counted in the rollup.
+      expect(unstaged.additions).toBeGreaterThan(0);
+    });
+  });
+
+  it('a conflicted path is excluded from Staged while a separately staged file in the same conflicted tree is kept', async () => {
+    await withTempDir('gitdiff-groups-conflict-staged-', async (repo) => {
+      initRepoMain(repo);
+      commitFile(repo, 'f.txt', 'base\n', 'base');
+      commitFile(repo, 'g.txt', 'g1\n', 'g');
+      execSync('git checkout -b feature', { cwd: repo, stdio: 'pipe' });
+      commitFile(repo, 'f.txt', 'feature line\n', 'feature edit');
+      execSync('git checkout main', { cwd: repo, stdio: 'pipe' });
+      commitFile(repo, 'f.txt', 'main line\n', 'main edit');
+      try {
+        execSync('git merge feature --no-edit', { cwd: repo, stdio: 'pipe' });
+      } catch {
+        // Expected — conflicting merge.
+      }
+      fs.writeFileSync(path.join(repo, 'g.txt'), 'g1\ng2-staged\n');
+      execSync('git add g.txt', { cwd: repo, stdio: 'pipe' });
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, null);
+      const staged = result.groups.find((g) => g.scope === 'staged')!;
+
+      expect(staged.files).toEqual(['g.txt']);
+      expect(staged.fileStats?.['g.txt']).toEqual({ additions: 1, deletions: 0 });
+      expect(staged.additions).toBe(1);
+    });
+  });
+
+  it('staged/unstaged membership paths with spaces and shell metacharacters are NOT C-quoted (join the porcelain status path exactly)', async () => {
+    await withTempDir('gitdiff-groups-quoting-', async (repo) => {
+      initRepoMain(repo);
+      const spaceName = 'sp ace file.txt';
+      const metaName = '$(weird)`file`.txt';
+      fs.writeFileSync(path.join(repo, spaceName), 'a\n');
+      fs.writeFileSync(path.join(repo, metaName), 'b\n');
+      execSync('git add -A', { cwd: repo, stdio: 'pipe' });
+      execSync('git commit -m "base"', { cwd: repo, stdio: 'pipe' });
+      fs.writeFileSync(path.join(repo, spaceName), 'a\nstaged\n');
+      execSync('git add -- "sp ace file.txt"', { cwd: repo, stdio: 'pipe' });
+      fs.writeFileSync(path.join(repo, metaName), 'b\nunstaged\n');
+
+      const manager = new GitDiffManager();
+      const result = await manager.getDiffGroups(repo, null);
+      const staged = result.groups.find((g) => g.scope === 'staged')!;
+      const unstaged = result.groups.find((g) => g.scope === 'unstaged')!;
+
+      expect(staged.files).toEqual([spaceName]);
+      expect(unstaged.files).toEqual([metaName]);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Security: untracked symlink containment (eval SEC-9)
+// ---------------------------------------------------------------------------
+
+describe('GitDiffManager — untracked symlinks never leak their target (SEC-9)', () => {
+  // Symlink creation needs a privilege on Windows; the guard itself is
+  // platform-neutral (lstat), so cover it where a link can be made freely.
+  it.runIf(process.platform !== 'win32')(
+    'an untracked symlink to a file OUTSIDE the worktree contributes nothing to the diff blob, stats, or untracked rollup',
+    async () => {
+      await withTempDir('gitdiff-symlink-outside-', async (outside) => {
+        const secretPath = path.join(outside, 'secret.txt');
+        const SECRET = 'SUPER-SECRET-TOKEN-do-not-leak\n';
+        fs.writeFileSync(secretPath, SECRET);
+
+        await withTempDir('gitdiff-symlink-repo-', async (repo) => {
+          initRepoMain(repo);
+          commitFile(repo, 'a.txt', 'a\n', 'base');
+          fs.symlinkSync(secretPath, path.join(repo, 'leak.txt'));
+          // A genuine untracked file alongside it, so the path is exercised.
+          fs.writeFileSync(path.join(repo, 'real.txt'), 'r1\nr2\n');
+
+          const manager = new GitDiffManager();
+
+          // Blob (captureWorkingDirectoryDiff → createDiffForUntrackedFiles).
+          const blob = await manager.captureWorkingDirectoryDiff(repo);
+          expect(blob.diff).not.toContain('SUPER-SECRET-TOKEN');
+          expect(blob.diff).not.toContain('+++ b/leak.txt');
+          expect(blob.diff).toContain('+++ b/real.txt');
+
+          // Rollup (getDiffGroups → getUntrackedGroup): the link contributes
+          // no additions; only real.txt's 3 split-elements count.
+          const groups = await manager.getDiffGroups(repo, null);
+          const untracked = groups.groups.find((g) => g.scope === 'untracked')!;
+          expect(untracked.fileStats?.['leak.txt']).toBeUndefined();
+          expect(untracked.fileStats?.['real.txt']).toEqual({ additions: 3, deletions: 0 });
+          expect(untracked.additions).toBe(3);
+        });
+      });
+    },
+  );
+
+  it.runIf(process.platform !== 'win32')(
+    'an untracked symlink to a file INSIDE the worktree is also skipped (only regular files are read)',
+    async () => {
+      await withTempDir('gitdiff-symlink-inside-', async (repo) => {
+        initRepoMain(repo);
+        commitFile(repo, 'a.txt', 'a\n', 'base');
+        fs.writeFileSync(path.join(repo, 'target.txt'), 'INSIDE-TARGET\n');
+        fs.symlinkSync(path.join(repo, 'target.txt'), path.join(repo, 'link.txt'));
+
+        const manager = new GitDiffManager();
+        const blob = await manager.captureWorkingDirectoryDiff(repo);
+        // target.txt itself is rendered once; the link is not rendered at all.
+        expect(blob.diff).toContain('+++ b/target.txt');
+        expect(blob.diff).not.toContain('+++ b/link.txt');
+        expect(blob.diff.match(/INSIDE-TARGET/g) ?? []).toHaveLength(1);
+      });
+    },
+  );
+});

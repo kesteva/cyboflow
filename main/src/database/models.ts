@@ -397,6 +397,11 @@ export interface TaskRow {
   body: string | null;
   priority: 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6'; // migration 117 widen
   category: 'feature' | 'bug' | 'chore'; // 059 ALTER appends
+  /**
+   * WHO performs the work (migration 137): 'agent' (the default — a sprint lane
+   * drives it) or 'human' (work only a person can do; never becomes a lane).
+   */
+  executor: 'agent' | 'human'; // 137 ALTER appends
   repo: string | null;
   board_id: string;
   stage_id: string;

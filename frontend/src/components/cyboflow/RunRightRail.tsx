@@ -13,7 +13,7 @@
  *     (RunDiffTabPanel; flow runs are keyed by runId since workflow_runs.session_id
  *     is NULL, so it fetches cyboflow.runs.gitDiff, worktree_path-resolved). With no
  *     active run but a selected session it falls back to the session-scoped combined
- *     diff (RunRightRailDiff → CombinedDiffView) — the at-rest experience.
+ *     diff (SessionDiffTabPanel) — the at-rest experience.
  *   - Artifacts — the "RUN DELIVERABLES" reopen surface (ArtifactsPanel); lists
  *     every artifact the run produced so closed center-pane tabs can be reopened.
  *     Two scopes, mirroring the Diff tab:
@@ -43,11 +43,15 @@ import { SprintLanesPanel } from './SprintLanesPanel';
 import { SessionFileExplorer } from './SessionFileExplorer';
 import { RunDiffTabPanel } from './RunDiffTabPanel';
 import { SessionDiffTabPanel } from './SessionDiffTabPanel';
+import { BaseSelector } from './BaseSelector';
+import { WorktreeStrip } from './WorktreeStrip';
 import { ArtifactsPanel } from './ArtifactsPanel';
+import { trpc } from '../../trpc/client';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
+import type { DiffGroupScope, WorktreeStatusPayload } from '../../../../shared/types/runFiles';
 
 type TabId = 'workflow-progress' | 'file-explorer' | 'diff' | 'artifacts';
 
@@ -93,6 +97,31 @@ const RAIL_MIN_WIDTH = 240;
 const RAIL_MAX_ABS_WIDTH = 640;
 /** localStorage key for the persisted rail width. Brand-new key — no migration. */
 const RAIL_WIDTH_KEY = 'cyboflow.runRightRail.width';
+/**
+ * localStorage key for the persisted comparison-base SELECTION (TASK-218,
+ * BaseSelector). Brand-new key — no migration. Holds a JSON-serialized
+ * `Record<string, string | null>` map keyed by `selectedSessionId` when
+ * present, else the active run id — never a single scalar, since different
+ * sessions/runs can each have their own selection. This is the raw
+ * SELECTION the user picked, never the RESOLVED base a panel's fetch echoes
+ * back via onResolvedBase (see `resolvedBaseBySession` below) — the two
+ * must never be conflated.
+ */
+const COMPARISON_BASE_KEY = 'cyboflow.runRightRail.comparisonBase';
+
+/** Best-effort read of the persisted comparison-base selection map. Any
+ * malformed/absent value degrades to an empty map, never a throw. */
+function loadComparisonBaseMap(): Record<string, string | null> {
+  if (typeof localStorage === 'undefined') return {};
+  const raw = localStorage.getItem(COMPARISON_BASE_KEY);
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, string | null>) : {};
+  } catch {
+    return {};
+  }
+}
 
 /** Upper resize bound: absolute cap, but never more than ~50% of the viewport. */
 function maxRailWidth(): number {
@@ -149,6 +178,16 @@ interface RunRightRailProps {
    * (read directly from the store below) for the session-scoped ArtifactsPanel.
    */
   quickSessionProjectId?: number | null;
+  /**
+   * The selected session's project id REGARDLESS of its center-pane layout —
+   * i.e. also set for the bare main-repo session, which `quickSessionProjectId`
+   * deliberately nulls (that prop doubles as "a tabbed center pane exists").
+   * Feeds BaseSelector's "Another branch" list, which only needs a project to
+   * list branches from and has nothing to do with the center pane; without
+   * this the main-repo session's selector disabled that entry with a
+   * misleading "No project is associated with this session".
+   */
+  sessionProjectId?: number | null;
 }
 
 export function RunRightRail({
@@ -156,6 +195,7 @@ export function RunRightRail({
   collapsed,
   onToggleCollapse,
   quickSessionProjectId,
+  sessionProjectId,
 }: RunRightRailProps) {
   const [activeTab, setActiveTab] = useState<TabId>('workflow-progress');
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
@@ -173,6 +213,99 @@ export function RunRightRail({
   const [isResizing, setIsResizing] = useState(false);
   const startXRef = useRef<number>(0);
   const startWidthRef = useRef<number>(0);
+
+  // The base each Diff-tab panel most recently echoed via onResolvedBase,
+  // keyed by the centerPane session key (selectedSessionId) both openFileTab
+  // call sites below key on. This is the RESOLVED base the panel actually
+  // diffed against (AR-11) — never the raw selection (a later task's
+  // concern) — so a file tab opened from either the diff row or the File
+  // Explorer resolves against the SAME base the rail is currently showing.
+  // Absent an entry (no fetch has completed yet) resolves to null, the
+  // representable "session default" base.
+  const [resolvedBaseBySession, setResolvedBaseBySession] = useState<Record<string, string | null>>({});
+  // The DEFAULT base ("Branch point", a null selection) each panel most
+  // recently resolved, keyed like resolvedBaseBySession. Only echoes that
+  // arrive while the selection is null land here (a fetch for a non-null
+  // selection resolves THAT ref, not the default), so BaseSelector can keep
+  // labelling / offering "Branch point" with the panel's own default even
+  // while a different base is selected.
+  const [defaultBaseBySession, setDefaultBaseBySession] = useState<Record<string, string | null>>({});
+  const handleResolvedBase = useCallback((sessionKey: string, base: string | null, isDefaultSelection: boolean) => {
+    setResolvedBaseBySession((prev) => ({ ...prev, [sessionKey]: base }));
+    if (isDefaultSelection) {
+      setDefaultBaseBySession((prev) => ({ ...prev, [sessionKey]: base }));
+    }
+  }, []);
+
+  // The working-tree snapshot the active Diff-tab panel most recently
+  // fetched (its `onWorktree` echo), keyed like resolvedBaseBySession —
+  // lifted into WorktreeStrip so the strip's count is the SAME response the
+  // grouped list renders (TASK-218 D-8), never a second, separately-timed
+  // request; and available for a parentless run (no session) too.
+  const [worktreeBySession, setWorktreeBySession] = useState<Record<string, WorktreeStatusPayload | undefined>>(
+    {},
+  );
+  const handleWorktree = useCallback((sessionKey: string, worktree: WorktreeStatusPayload | undefined) => {
+    setWorktreeBySession((prev) => ({ ...prev, [sessionKey]: worktree }));
+  }, []);
+
+  // Bumped whenever the Diff tab must refetch — after WorktreeStrip's Commit
+  // / Restore (or a refused commit), on the ↻ button, when the window regains
+  // focus, and on every `sessionGit.onWorktreeChanged` event (below). Both
+  // panels key their fetch effect on it, so the grouped list and the lifted
+  // snapshot above refresh together from ONE new response.
+  const [worktreeRefreshNonce, setWorktreeRefreshNonce] = useState(0);
+  const handleWorktreeMutated = useCallback(() => {
+    setWorktreeRefreshNonce((n) => n + 1);
+  }, []);
+
+  // Liveness for the Diff tab. The panels fetch once per mount and never
+  // poll (D-8), so without a push signal every edit that lands on disk while
+  // the tab is open — an agent writing files, `git add` in a terminal — stays
+  // invisible until the tab is remounted. Two complementary signals, both
+  // scoped to "the Diff tab is showing a session's tree", so nothing runs
+  // for a tree nobody is looking at:
+  //   1. `sessionGit.onWorktreeChanged` — a tRPC subscription whose LIFETIME
+  //      IS THE WATCH: subscribing starts a per-worktree file + git-dir
+  //      watcher in main, unsubscribing (tab change, session change, unmount)
+  //      tears it down. Events carry no payload; we just refetch.
+  //   2. Window focus / visibility — the fallback for whatever the watcher
+  //      misses (or for the run-scoped arm of a parentless run, which has no
+  //      session to subscribe on): coming back to the app refetches once.
+  const diffTabLive = activeTab === 'diff';
+  useEffect(() => {
+    if (!diffTabLive || selectedSessionId === null) return;
+    const sub = trpc.cyboflow.sessionGit.onWorktreeChanged.subscribe(
+      { sessionId: selectedSessionId },
+      {
+        onData: () => setWorktreeRefreshNonce((n) => n + 1),
+        onError: (err: unknown) => console.warn('[RunRightRail] onWorktreeChanged error:', err),
+      },
+    );
+    return () => sub.unsubscribe();
+  }, [diffTabLive, selectedSessionId]);
+  useEffect(() => {
+    if (!diffTabLive) return;
+    const onFocus = () => setWorktreeRefreshNonce((n) => n + 1);
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') onFocus();
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [diffTabLive]);
+
+  // The user's comparison-base SELECTION (TASK-218, BaseSelector) — distinct
+  // from resolvedBaseBySession above (the RESOLVED base a panel's fetch
+  // echoed back). Persisted per key (selectedSessionId, else the active run
+  // id, else never persisted — see COMPARISON_BASE_KEY). Seeded once from
+  // localStorage on mount.
+  const [comparisonBaseByKey, setComparisonBaseByKey] = useState<Record<string, string | null>>(() =>
+    loadComparisonBaseMap(),
+  );
 
   // The width is written to storage only from the drag handler below, never
   // from an effect on [width] — a mount, a React.StrictMode double-mount, or
@@ -225,13 +358,65 @@ export function RunRightRail({
   // (legacy parentless runs) — matches RunCenterPane's keying.
   const artifactsSessionKey = selectedSessionId ?? activeRunId ?? '';
 
+  // The comparison-base selection's persistence key: selectedSessionId when
+  // present, else the active run id, else null (never persisted — see
+  // COMPARISON_BASE_KEY's doc comment).
+  const comparisonBaseKey = selectedSessionId ?? activeRunId ?? null;
+  const selectedComparisonRef =
+    comparisonBaseKey !== null ? (comparisonBaseByKey[comparisonBaseKey] ?? null) : null;
+  const handleComparisonBaseChange = useCallback(
+    (ref: string | null) => {
+      if (comparisonBaseKey === null) {
+        // Nothing to key persistence off of (D-7) — no session, no run.
+        return;
+      }
+      setComparisonBaseByKey((prev) => {
+        const next = { ...prev, [comparisonBaseKey]: ref };
+        if (typeof localStorage !== 'undefined') {
+          localStorage.setItem(COMPARISON_BASE_KEY, JSON.stringify(next));
+        }
+        return next;
+      });
+    },
+    [comparisonBaseKey],
+  );
+  // BaseSelector's projectId: the active run's project when a run is active,
+  // else the selected session's project (`sessionProjectId`, set for EVERY
+  // session incl. the main-repo one — not the layout-gated
+  // `quickSessionProjectId`), else null — converted to a string
+  // (BaseSelector's projectId prop is `string | null`).
+  const baseSelectorProjectId =
+    activeRunId !== null
+      ? activeRunProjectId !== null
+        ? String(activeRunProjectId)
+        : null
+      : sessionProjectId != null
+        ? String(sessionProjectId)
+        : null;
+
+  // Whether a tabbed center pane exists to render a file tab into: an active
+  // run (RunCenterPane) or a worktree-backed quick session
+  // (QuickSessionCenterPane — CyboflowRoot threads `quickSessionProjectId`
+  // only when it mounts that pane). The bare main-repo session has a
+  // panels-only layout: a tab written into its centerPaneStore bucket would
+  // never render, so a row click there must NOT pretend to open anything.
+  const hasTabbedCenterPane = activeRunId !== null || quickSessionProjectId != null;
+
   // Clicking a file in the Diff tab opens it as a center-pane file tab (keyed by
   // the selected session, like the File Explorer launcher). Undefined when no
-  // session backs the center pane (e.g. a parentless flow run) — the diff then
-  // keeps its click = toggle behavior.
+  // session backs the center pane (e.g. a parentless flow run) OR no tabbed
+  // center pane exists to show the tab (the main-repo session) — the list then
+  // renders its rows as non-interactive instead of a silent no-op. Carries the
+  // panel's own last-echoed resolvedBase (AR-11) plus the clicked row's group
+  // scope, so the tab resolves against the SAME base the rail is showing.
   const openDiffFile =
-    selectedSessionId !== null
-      ? (filePath: string) => openFileTab(selectedSessionId, { filePath })
+    selectedSessionId !== null && hasTabbedCenterPane
+      ? (filePath: string, scope?: DiffGroupScope) =>
+          openFileTab(selectedSessionId, {
+            filePath,
+            baseRef: resolvedBaseBySession[selectedSessionId] ?? null,
+            scope,
+          })
       : undefined;
 
   const currentTab = TABS.find((t) => t.id === activeTab) ?? TABS[0];
@@ -345,7 +530,17 @@ export function RunRightRail({
               // the explorer uses its own takeover viewer.
               onOpenFile={
                 activeRunId !== null
-                  ? (filePath) => openFileTab(selectedSessionId, { filePath })
+                  ? (filePath) =>
+                      // R-9: pass the SAME lifted base as the Diff tab's
+                      // openDiffFile (scope omitted — File Explorer opens
+                      // aren't scoped to a diff group), never `undefined` —
+                      // openFileTab writes baseRef unconditionally, so an
+                      // undefined here would silently reset a diff-opened
+                      // tab's base back to the default.
+                      openFileTab(selectedSessionId, {
+                        filePath,
+                        baseRef: resolvedBaseBySession[selectedSessionId] ?? null,
+                      })
                   : undefined
               }
             />
@@ -358,27 +553,70 @@ export function RunRightRail({
             </div>
           )
         ) : currentTab.id === 'diff' ? (
-          // Diff tab — two scopes:
+          // Diff tab — a full-width BaseSelector row directly under the rail
+          // tab bar (TASK-218), then two scopes for the body below it:
           //  • Active run → run-scoped working-directory diff (keyed by runId,
           //    since flow runs have session_id NULL).
           //  • No run but a session is selected → session-scoped combined diff
           //    (the at-rest experience for quick / session-hosted sessions). The
           //    earlier change wired only the run path and regressed this case to
           //    a dead-end "No active run".
-          activeRunId !== null ? (
-            <div className="h-full overflow-hidden">
-              <RunDiffTabPanel runId={activeRunId} onOpenFile={openDiffFile} />
+          // BaseSelector's `sessionId` is ALWAYS `selectedSessionId` (its own
+          // getComparisonBases resolves off a session even for the run-scoped
+          // arm); it renders disabled when that's null, which BaseSelector
+          // already handles.
+          <div className="flex h-full flex-col overflow-hidden">
+            <div className="shrink-0 border-b border-border-primary p-2">
+              <BaseSelector
+                sessionId={selectedSessionId}
+                projectId={baseSelectorProjectId}
+                selectedRef={selectedComparisonRef}
+                onChange={handleComparisonBaseChange}
+                resolvedDefaultBase={defaultBaseBySession[selectedSessionId ?? ''] ?? null}
+                resolvedSelectedBase={resolvedBaseBySession[selectedSessionId ?? ''] ?? null}
+              />
             </div>
-          ) : selectedSessionId !== null ? (
-            <SessionDiffTabPanel sessionId={selectedSessionId} onOpenFile={openDiffFile} />
-          ) : (
-            <div
-              data-testid="run-right-rail-diff-empty-norun"
-              className="p-4 text-sm text-text-secondary"
-            >
-              Select a session to view its diff.
+            <div className="shrink-0 border-b border-border-primary p-2">
+              <WorktreeStrip
+                sessionId={selectedSessionId}
+                worktree={worktreeBySession[selectedSessionId ?? '']}
+                onMutated={handleWorktreeMutated}
+                onRefresh={handleWorktreeMutated}
+              />
             </div>
-          )
+            <div className="flex-1 overflow-hidden">
+              {activeRunId !== null ? (
+                <RunDiffTabPanel
+                  runId={activeRunId}
+                  comparisonRef={selectedComparisonRef}
+                  refreshNonce={worktreeRefreshNonce}
+                  onOpenFile={openDiffFile}
+                  onResolvedBase={(base) =>
+                    handleResolvedBase(selectedSessionId ?? '', base, selectedComparisonRef === null)
+                  }
+                  onWorktree={(worktree) => handleWorktree(selectedSessionId ?? '', worktree)}
+                />
+              ) : selectedSessionId !== null ? (
+                <SessionDiffTabPanel
+                  sessionId={selectedSessionId}
+                  comparisonRef={selectedComparisonRef}
+                  refreshNonce={worktreeRefreshNonce}
+                  onOpenFile={openDiffFile}
+                  onResolvedBase={(base) =>
+                    handleResolvedBase(selectedSessionId, base, selectedComparisonRef === null)
+                  }
+                  onWorktree={(worktree) => handleWorktree(selectedSessionId, worktree)}
+                />
+              ) : (
+                <div
+                  data-testid="run-right-rail-diff-empty-norun"
+                  className="p-4 text-sm text-text-secondary"
+                >
+                  Select a session to view its diff.
+                </div>
+              )}
+            </div>
+          </div>
         ) : (
           // Artifacts tab — two scopes, mirroring the Diff tab:
           //  • Active run → run-scoped (existing behavior, keyed by the run's
