@@ -107,11 +107,12 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Re
 }
 
 describe('cyboflowMcpServer ListTools (CYBOFLOW_MCP_SCOPE=global-agent)', () => {
-  it('advertises EXACTLY the 16-tool global-agent family — no run-scoped tool leaks in', async () => {
+  it('advertises EXACTLY the 17-tool global-agent family — no run-scoped tool leaks in', async () => {
     const tools = await listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(
       [
+        'cyboflow_agents',
         'cyboflow_backlog',
         'cyboflow_db_query',
         'cyboflow_db_schema',

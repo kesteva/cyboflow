@@ -629,6 +629,19 @@ export type McpQueryMessage =
     }
   | {
       /**
+       * READ-ONLY: the agent vocabulary ONE project's workflows may bind —
+       * every builtin key merged with the project's overrides plus its custom
+       * agents (the same set resolveRunEffectiveAgents spawns). The assistant
+       * reads this before composing a create-workflow proposal so each step's
+       * `agent` resolves.
+       */
+      type: 'mcp-agents';
+      requestId: string;
+      runId: string;
+      projectId: number;
+    }
+  | {
+      /**
        * THE ONLY write-shaped global-agent tool. payloadJson is a JSON-encoded
        * AgentProposalPayload (shared/types/agentThread.ts) — validated + narrowed
        * server-side by kind; preconditions (spec hash / task versions) are ALWAYS
