@@ -79,6 +79,11 @@ const findingCache = new Map<string, ResolvedProposalEntity | null>();
 const findingInflight = new Map<string, Promise<void>>();
 
 function fetchFinding(id: string): Promise<void> {
+  // Already resolved (success OR not-found) by a prior fetch — per this
+  // module's contract, never re-query. Without this check a fresh mount
+  // referencing an already-cached finding id would re-fire the query, since
+  // `findingInflight` alone only dedupes CONCURRENT fetches, not resolved ones.
+  if (findingCache.has(id)) return Promise.resolve();
   const cached = findingInflight.get(id);
   if (cached) return cached;
   const promise = trpc.cyboflow.reviewItems.get

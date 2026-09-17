@@ -57,6 +57,12 @@ import { useNavigationStore } from '../../stores/navigationStore';
 import { useBacklogStore } from '../../stores/backlogStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { useSessionStore } from '../../stores/sessionStore';
+import { trpc } from '../../trpc/client';
+
+// setup.ts stubs `reviewItems.get` to resolve `null` by default (see its
+// comment) — findings tests below override that per-call with
+// mockResolvedValueOnce so they never leak into other tests in this file.
+const mockReviewItemsGet = vi.mocked(trpc.cyboflow.reviewItems.get.query);
 
 // ---------------------------------------------------------------------------
 // backlogStore / activeRunsStore / sessionStore fixtures — TASK-221's
@@ -347,6 +353,38 @@ describe('ProposalCard — open state, per-kind body', () => {
     expect(screen.queryByTestId('proposal-entity-unresolved')).not.toBeInTheDocument();
   });
 
+  it('launch-run: a finding seed id resolves its title (no ref) via a batched reviewItems.get fetch', async () => {
+    // A distinct id (module-scoped findingCache in useProposalEntityLabels
+    // persists across tests in this file) so a cache hit from another test
+    // can never mask this one actually calling the query.
+    mockReviewItemsGet.mockResolvedValueOnce({
+      id: 'rvw_findings_test',
+      title: 'Stale worktree lock leaks on crash',
+    } as unknown as Awaited<ReturnType<typeof trpc.cyboflow.reviewItems.get.query>>);
+    const proposal = makeLaunchRunProposal({
+      payload: { taskIds: [], findingIds: ['rvw_findings_test'] },
+    });
+    render(<ProposalCard proposal={proposal} />);
+
+    expect(mockReviewItemsGet).toHaveBeenCalledWith({ reviewItemId: 'rvw_findings_test' });
+    const label = await screen.findByTestId('proposal-entity-label');
+    expect(label).toHaveTextContent('Stale worktree lock leaks on crash');
+    // Findings have no ref — the bold-ref span used for tasks/epics/ideas
+    // must not appear for a finding row.
+    expect(within(label).queryByText(/^TASK-|^IDEA-|^EPIC-/)).not.toBeInTheDocument();
+  });
+
+  it('launch-run: an unresolvable finding id degrades to the muted unresolved marker, not a blank cell', async () => {
+    // setup.ts's default resolves `null`, i.e. "not found" — no override needed.
+    const proposal = makeLaunchRunProposal({
+      payload: { taskIds: [], findingIds: ['rvw_findings_missing'] },
+    });
+    render(<ProposalCard proposal={proposal} />);
+
+    await waitFor(() => expect(mockReviewItemsGet).toHaveBeenCalledWith({ reviewItemId: 'rvw_findings_missing' }));
+    expect(await screen.findByTestId('proposal-entity-unresolved')).toHaveTextContent('rvw_findings_missing (unresolved)');
+  });
+
   it('reprioritize-backlog: ranked rows with priority/stage badges, resolved to refs + titles + stage labels', () => {
     useBacklogStore.setState({
       tasks: [
@@ -575,6 +613,52 @@ describe('ProposalCard — reprioritize-backlog resolved', () => {
     expect(rows).toHaveLength(2);
     expect(within(rows[0]).getByTestId('reprioritize-outcome')).toHaveAttribute('data-ok', 'true');
     expect(within(rows[1]).getByTestId('reprioritize-outcome')).toHaveAttribute('data-ok', 'false');
+  });
+
+  it('narrow-rail layout: a long title truncates while the rank column and the ✓/✕ overlay stay fixed-width alongside priority/stage', () => {
+    useBacklogStore.setState({
+      tasks: [
+        makeBacklogTask({
+          id: 'TASK-1',
+          ref: 'TASK-001',
+          title:
+            'A deliberately very long task title that would overflow the narrow agent rail column if it were not truncated by the row layout',
+          stage_id: 'in-progress',
+        }),
+      ],
+      boards: [
+        makeBoard({
+          stages: [
+            { id: 'in-progress', label: 'In progress', color_oklch: 'oklch(0.7 0.15 250)', hint: null, position: 7, write_policy: 'asserted', is_terminal: false, hidden_by_default: false },
+          ],
+        }),
+      ],
+    });
+    const proposal = makeReprioritizeProposal({
+      status: 'executed',
+      items: [{ taskId: 'TASK-1', priority: 'P0', stageId: 'in-progress' }],
+      result: {
+        kind: 'reprioritize-backlog',
+        status: 'executed',
+        items: [{ taskId: 'TASK-1', ok: true }],
+      },
+    });
+    render(<ProposalCard proposal={proposal} />);
+
+    const row = screen.getByTestId('reprioritize-row');
+    // Rank number and the ✓/✕ overlay are fixed-width (shrink-0) so a long
+    // title never squeezes them out of the row.
+    expect(within(row).getByText('1')).toHaveClass('shrink-0');
+    expect(within(row).getByTestId('reprioritize-outcome')).toHaveClass('shrink-0');
+    // The ref/title label truncates (flex-1 so it's the column that yields).
+    const label = within(row).getByTestId('proposal-entity-label');
+    expect(label).toHaveClass('truncate');
+    expect(label).toHaveClass('flex-1');
+    // Priority and stage badges still render alongside the outcome overlay —
+    // all four columns coexist in the same row without one crowding another out.
+    expect(within(row).getByTestId('reprioritize-priority')).toHaveTextContent('P0 ↑');
+    expect(within(row).getByTestId('reprioritize-stage')).toHaveTextContent('In progress');
+    expect(within(row).getByTestId('reprioritize-outcome')).toHaveAttribute('data-ok', 'true');
   });
 });
 
