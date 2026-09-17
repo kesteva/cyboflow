@@ -509,7 +509,15 @@ locally-served tool (`cyboflow_reference`, whose content is compiled in).
 
 The global-agent family carries exactly TWO write-shaped tools with disjoint targets:
 `cyboflow_propose_action` (an `agent_proposals` row a human confirms) and `cyboflow_widget_save`
-(the user's own `custom_widgets` library — never a view, an entity, or a proposal). The
+(the user's own `custom_widgets` library — never a view, an entity, or a proposal). The proposal
+kinds are `launch-run`, `reprioritize-backlog`, `edit-workflow`, `open-session`,
+`create-backlog-items`, and `create-workflow`; a confirmed proposal executes through
+`agentThread/proposalExecutor.ts` against the same chokepoints every other write uses.
+`create-workflow` mints a custom flow (`WorkflowRegistry.createCustom`) together with the custom
+agents its steps bind (`AgentOverrideRouter` `createCustom`, agents first so the bindings resolve,
+unwound again if a later step fails); `prepareProposal` validates the definition, the agent
+drafts, and every step binding at propose time, and the read tool `cyboflow_agents` is what hands
+the assistant the bindable vocabulary (builtins + the project's custom agents). The
 custom-widget authoring tools (`cyboflow_db_schema`, `cyboflow_widget_preview`,
 `cyboflow_widget_save`) route through `CustomViewsService` so a preview runs the exact query path
 the page will (see "Custom views" under Data Model and `docs/proposals/CUSTOM-VIEWS.md`).
@@ -1043,8 +1051,9 @@ means a workflow A/B variant here). Three tables:
   earlier session cannot bind to a newer slot.
 - `widget_action_log` — a 1:1 side table on `agent_proposals` marking proposals created by a
   widget CTA (`operation_id` UNIQUE makes each click idempotent across transport retries).
-  `agent_proposals` itself is NOT altered: migration 125 recreates it from a fixed column list, so
-  an added column would not survive a ledger-wiped replay. `AgentThreadDbStore.listProposals`
+  `agent_proposals` itself is NOT altered: migrations 125 and 138 recreate it from a fixed column
+  list (each widening the `kind` CHECK), so an added column would not survive a ledger-wiped
+  replay — and any future recreate must run with foreign keys OFF, or this table's FK cascades. `AgentThreadDbStore.listProposals`
   LEFT JOINs this table to keep widget clicks off the assistant rail; `listProposalsByStatus`
   (crash recovery) stays unfiltered.
 
