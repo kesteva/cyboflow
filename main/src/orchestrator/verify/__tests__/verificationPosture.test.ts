@@ -11,7 +11,6 @@ import { describe, it, expect } from 'vitest';
 import {
   resolveVerificationPosture,
   isNoModalityDeclineReason,
-  MOBILE_DEFERRED_REASON,
   type VerificationPostureDeps,
   type VerificationRunStamp,
 } from '../verificationPosture';
@@ -53,14 +52,65 @@ describe('resolveVerificationPosture', () => {
     expect(deps.probes).toHaveLength(0);
   });
 
-  it('reports `unavailable` for a mobile-flow run, naming the deferral', async () => {
-    const deps = makeDeps(stamp({ verifyType: 'mobile-flow' }));
-    await expect(resolveVerificationPosture(deps, 'r1')).resolves.toEqual({
-      kind: 'unavailable',
-      reason: MOBILE_DEFERRED_REASON,
+  // ── mobile: the structural twin of native-desktop, since the iOS-Simulator
+  //    tier replaced the unconditional deferral (mobile-verification-tier §7 (4))
+  it('reports `available` for a mobile-flow run with a PROVEN mobile runbook', async () => {
+    const deps = makeDeps(stamp({ verifyType: 'mobile-flow' }), {
+      status: 'proven',
+      reason: 'proven',
     });
-    // Nothing to probe: no runbook can make the deferred modality work.
-    expect(deps.probes).toHaveLength(0);
+    await expect(resolveVerificationPosture(deps, 'r1')).resolves.toEqual({ kind: 'available' });
+    // The probe IS called now — the old short-circuit asserted it never was.
+    expect(deps.probes).toEqual([{ projectId: 7, modality: 'mobile', probePath: '/tmp/wt' }]);
+  });
+
+  it('reports `unavailable` + the runbook decline CODE for a mobile-flow run with no runbook', async () => {
+    const deps = makeDeps(stamp({ verifyType: 'mobile-flow' }), {
+      status: 'absent',
+      reason: 'no-record',
+    });
+    const posture = await resolveVerificationPosture(deps, 'r1');
+    expect(posture).toEqual({
+      kind: 'unavailable',
+      reason: expect.stringContaining('no proven mobile verification runbook'),
+      declineCode: 'no-verification-runbook',
+    });
+    expect(deps.probes).toHaveLength(1);
+  });
+
+  it('distinguishes the mobile runbook DECLINE reasons, and every one says "verification runbook"', async () => {
+    const cases: Array<[VerifyRunbookStatusDetail, string]> = [
+      [{ status: 'absent', reason: 'proven-file-absent-here' }, 'merge the branch'],
+      [{ status: 'absent', reason: 'drifted' }, 're-proven'],
+      [{ status: 'absent', reason: 'indeterminate' }, 'could not be read'],
+      [{ status: 'absent', reason: 'no-record' }, 'run verification setup'],
+    ];
+    for (const [status, fragment] of cases) {
+      const posture = await resolveVerificationPosture(
+        makeDeps(stamp({ verifyType: 'mobile-flow' }), status),
+        'r1',
+      );
+      expect(posture.kind).toBe('unavailable');
+      const reason = posture.kind === 'unavailable' ? posture.reason : '';
+      expect(reason).toContain(fragment);
+      // Belt and braces for the string-only callers (M6).
+      expect(reason).toContain('verification runbook');
+      expect(isNoModalityDeclineReason(reason)).toBe(true);
+    }
+  });
+
+  it('reports `available` for a mobile-flow run when the probe is unwired (null) or throws', async () => {
+    await expect(
+      resolveVerificationPosture(makeDeps(stamp({ verifyType: 'mobile-flow' }), null), 'r1'),
+    ).resolves.toEqual({ kind: 'available' });
+    await expect(
+      resolveVerificationPosture(
+        makeDeps(stamp({ verifyType: 'mobile-flow' }), () => {
+          throw new Error('probe exploded');
+        }),
+        'r1',
+      ),
+    ).resolves.toEqual({ kind: 'available' });
   });
 
   it('reports `available` for a native-desktop run with a PROVEN native-screen runbook', async () => {
@@ -82,6 +132,7 @@ describe('resolveVerificationPosture', () => {
     const posture = await resolveVerificationPosture(deps, 'r1');
     expect(posture.kind).toBe('unavailable');
     expect(posture.kind === 'unavailable' && posture.reason).toContain('no proven native-screen runbook');
+    expect(posture.kind === 'unavailable' && posture.declineCode).toBe('no-verification-runbook');
   });
 
   it('distinguishes the runbook DECLINE reasons, because their remedies differ', async () => {
@@ -157,6 +208,36 @@ describe('resolveVerificationPosture', () => {
 });
 
 describe('isNoModalityDeclineReason', () => {
+  it('keys on the CODE when one is present, whatever the wording (M6)', () => {
+    // The point of the code: a reason nobody would have matched by substring
+    // still classifies as a run-level fact.
+    expect(
+      isNoModalityDeclineReason({ reason: 'reworded beyond recognition', declineCode: 'no-verification-runbook' }),
+    ).toBe(true);
+    expect(
+      isNoModalityDeclineReason({ reason: 'nothing here matches', declineCode: 'unsupported-modality' }),
+    ).toBe(true);
+    expect(
+      isNoModalityDeclineReason({ reason: 'nothing here matches', declineCode: 'modality-deferred' }),
+    ).toBe(true);
+  });
+
+  it('falls back to the substrings for a coded object with NO code, and for a bare string', () => {
+    expect(isNoModalityDeclineReason({ reason: 'a per-lane accident' })).toBe(false);
+    expect(isNoModalityDeclineReason({ reason: 'no proven verification runbook here' })).toBe(true);
+  });
+
+  it('classifies the REAL mobile runbook prose true, through both call shapes', async () => {
+    const posture = await resolveVerificationPosture(
+      makeDeps(stamp({ verifyType: 'mobile-flow' }), { status: 'absent', reason: 'drifted' }),
+      'r1',
+    );
+    expect(posture.kind).toBe('unavailable');
+    if (posture.kind !== 'unavailable') return;
+    expect(isNoModalityDeclineReason(posture)).toBe(true);
+    expect(isNoModalityDeclineReason(posture.reason)).toBe(true);
+  });
+
   it('matches the modality / runbook declines that are facts about the RUN', () => {
     expect(isNoModalityDeclineReason("unsupported modality 'mobile': deferred")).toBe(true);
     expect(

@@ -218,8 +218,13 @@ export interface VerificationAgentRequest {
   artifactsDir: string;
   /** The leased dev-server port, exported as VERIFY_PORT only when the task implies a server; else null. */
   verifyPort: number | null;
-  /** The CDP port for the bundled driver (VERIFY_DRIVER_PORT) — always present. */
-  verifyDriverPort: number;
+  /**
+   * The CDP port for the bundled driver (VERIFY_DRIVER_PORT). Present for every
+   * port-using modality; `null` for mobile — no ports at all (the iOS-Simulator
+   * tier serves nothing over HTTP and drives no CDP endpoint, so the scheduler
+   * leases it neither port and VERIFY_DRIVER_PORT is omitted from its env).
+   */
+  verifyDriverPort: number | null;
   /**
    * The scheduler's effective per-request deadline in ms (`agentDeadlineMs`:
    * task.timeoutMs capped by the ceiling, else the default). Threaded into the
@@ -1187,12 +1192,15 @@ function truncateDetail(value: string, max = 200): string {
 export function serveBindingTarget(
   task: VerificationTaskV1,
   spec: AttestationSpec,
-  ports: { verifyPort: number | null; driverPort: number },
+  ports: { verifyPort: number | null; driverPort: number | null },
 ): { serveCmd: string; probedPort: number | null; portLever: number | null } | null {
   const serveCmd = task.serve?.cmd;
   if (typeof serveCmd !== 'string' || serveCmd.trim().length === 0) return null;
   if (!PORT_MEDIATED_CHANNELS.has(spec.kind)) return null;
   const attach = task.serve?.attach === 'cdp';
+  // A port-mediated channel with no port to mediate it is not a binding — an
+  // attach-mode task on a portless (mobile) request has nothing to probe.
+  if (attach && ports.driverPort === null) return null;
   return {
     serveCmd: serveCmd.trim(),
     probedPort: attach ? ports.driverPort : ports.verifyPort,
@@ -2124,7 +2132,11 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       {
         task: req.task,
         driverCliPath: this.deps.driverCliPath,
-        leasedPort: req.verifyPort ?? req.verifyDriverPort - 1,
+        // `runAgentPreflight.leasedPort` is still `number`: it is read ONLY by
+        // the `port-free` check, which a portless (mobile) request cannot reach
+        // — that check is gated on `task.serve`, and a mobile task declares an
+        // `app` block and no serve. The 0 is therefore never probed.
+        leasedPort: req.verifyPort ?? (req.verifyDriverPort === null ? 0 : req.verifyDriverPort - 1),
         driverPort: req.verifyDriverPort,
         modality,
         dataDir: verifyDataDirPath(req.artifactsDir, req.requestId),
@@ -2370,7 +2382,9 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         // second, case-variant PATH key there is a coin flip (round-2 review).
         [pathEnvKey()]: pathEnv,
         VERIFY_DATA_DIR: dataDir,
-        VERIFY_DRIVER_PORT: String(req.verifyDriverPort),
+        ...(req.verifyDriverPort === null
+          ? {}
+          : { VERIFY_DRIVER_PORT: String(req.verifyDriverPort) }),
         VERIFY_DRIVER: driverScriptPath,
         // Never reused and never derived from anything the deliverable could
         // guess, so a surface handing it back cannot be a stale server, a warm
@@ -2644,7 +2658,10 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
             try {
               probe = await attest(spec, {
                 verifyPort: req.verifyPort,
-                driverPort: req.verifyDriverPort,
+                // The attestation seam still types `driverPort: number`; the
+                // only kinds that READ it are CDP-mediated, which a portless
+                // (mobile) request never declares.
+                driverPort: req.verifyDriverPort ?? 0,
                 nonce: attestNonce,
               });
             } catch (err) {

@@ -84,6 +84,7 @@ import type {
   VerdictV1,
   VlmJudge,
 } from '../../../../../shared/types/visualVerification';
+import { VISUAL_VERIFY_DEFAULTS } from '../../../../../shared/types/visualVerification';
 
 // ---------------------------------------------------------------------------
 // The DB: real migrations, not a hand-rolled schema
@@ -186,6 +187,10 @@ const CONFIG: ResolvedVisualVerifyConfig = {
   simulatorDevices: [],
   queuedAgeCeilingMs: 15 * 60 * 1000,
   agentSlots: 2,
+  mobileSimSlots: VISUAL_VERIFY_DEFAULTS.mobileSimSlots,
+  mobileSimDeviceType: VISUAL_VERIFY_DEFAULTS.mobileSimDeviceType,
+  mobileSimRuntime: VISUAL_VERIFY_DEFAULTS.mobileSimRuntime,
+  mobileDeadlineFloorMs: VISUAL_VERIFY_DEFAULTS.mobileDeadlineFloorMs,
   autoBootstrapRunbook: false,
 };
 

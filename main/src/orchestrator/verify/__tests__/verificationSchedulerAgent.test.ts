@@ -24,6 +24,7 @@ import {
   type OnVerdict,
 } from '../verificationScheduler';
 import { VerifyCapabilityStore, CAPABILITY_BREAKER_THRESHOLD } from '../capabilityStore';
+import { MOBILE_TOOLCHAIN_UNPROBED_DETAIL } from '../mobileGates';
 import { VerifyRunbookStore } from '../runbookStore';
 import type { VerifyRunbookV1 } from '../../../../../shared/types/verifyRunbook';
 import { Mutex } from '../../../utils/mutex';
@@ -43,6 +44,7 @@ import type {
   VlmJudge,
   VerdictV1,
 } from '../../../../../shared/types/visualVerification';
+import { VISUAL_VERIFY_DEFAULTS } from '../../../../../shared/types/visualVerification';
 
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
@@ -151,6 +153,10 @@ const CONFIG: ResolvedVisualVerifyConfig = {
   simulatorDevices: [],
   queuedAgeCeilingMs: 15 * 60 * 1000,
   agentSlots: 2,
+  mobileSimSlots: VISUAL_VERIFY_DEFAULTS.mobileSimSlots,
+  mobileSimDeviceType: VISUAL_VERIFY_DEFAULTS.mobileSimDeviceType,
+  mobileSimRuntime: VISUAL_VERIFY_DEFAULTS.mobileSimRuntime,
+  mobileDeadlineFloorMs: VISUAL_VERIFY_DEFAULTS.mobileDeadlineFloorMs,
   autoBootstrapRunbook: false,
 };
 
@@ -906,7 +912,7 @@ describe('VerificationScheduler — §3.3 unsupported modality + suppression (pr
     );
   });
 
-  it("a mobile-flow request skips with the 'deferred — pending Xcode MCP' reason", async () => {
+  it('a mobile-flow request on an UNPROBED host still skips, now naming the missing probe', async () => {
     seedRun(db, 'run-mobile', JSON.stringify(['agent']));
     const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
     const scheduler = VerificationScheduler.initialize({
@@ -932,8 +938,48 @@ describe('VerificationScheduler — §3.3 unsupported modality + suppression (pr
     const row = requestRow(db);
     expect(row.status).toBe('skipped');
     expect(row.modality).toBe('mobile');
-    expect(row.error_message).toContain('Xcode MCP');
+    // The baseline is unchanged in SHAPE; only the literal moved off the retired
+    // 'deferred — pending Xcode MCP' wording (mobile-verification-tier §10).
+    expect(row.error_message).toBe(
+      `unsupported modality 'mobile': ${MOBILE_TOOLCHAIN_UNPROBED_DETAIL}`,
+    );
+    expect(row.error_message).not.toContain('Xcode MCP');
     expect(row.failure_class).toBe('env');
+  });
+
+  it('a mobile-flow request on a CAPABLE host deploys portless, under the mobile deadline floor', async () => {
+    seedRun(db, 'run-mobile-ok', JSON.stringify(['agent']));
+    const { runner, run } = stubRunner({ status: 'passed', fileNames: [], deployed: true });
+    const scheduler = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/artifacts',
+      config: { ...CONFIG, mobileDeadlineFloorMs: 900_000 },
+      leasePool: new ResourceLeasePool(new Mutex()),
+      agentRunner: runner,
+      capabilityStore: new VerifyCapabilityStore(dbAdapter(db)),
+      mobileToolchainProbe: async () => true,
+    });
+    scheduler.enqueue({
+      runId: 'run-mobile-ok',
+      projectId: 1,
+      type: 'mobile-flow',
+      input: { intent: 'x' },
+      chain: [],
+    });
+    await flushDrain();
+
+    expect(run).toHaveBeenCalledTimes(1);
+    const req = run.mock.calls[0][0] as VerificationAgentRequest;
+    expect(req.modality).toBe('mobile');
+    // M1 — no port lease at all, so neither port is exported to the agent.
+    expect(req.verifyPort).toBeNull();
+    expect(req.verifyDriverPort).toBeNull();
+    // M9 — the composer's guess can only RAISE the deadline; the mobile floor is
+    // the harness's own number for a cold xcodebuild + first simulator boot.
+    expect(req.timeoutMs).toBeGreaterThanOrEqual(900_000);
+    expect(requestRow(db).status).toBe('passed');
   });
 
   it('an ACTIVE suppression short-circuits the request before any lease', async () => {
