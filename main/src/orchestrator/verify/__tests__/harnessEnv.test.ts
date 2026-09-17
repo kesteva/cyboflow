@@ -103,13 +103,31 @@ describe('resolveHarnessNodePath', () => {
     expect(found).toBe(join(repo, 'main/node_modules'));
   });
 
-  // The packaged shape: asarUnpack unpacks the driver JS but NOT
-  // node_modules/playwright*, so the marker is nowhere on the walk. An absent
-  // NODE_PATH is the honest answer — see the function's caveat.
+  // The packaged shape: asarUnpack unpacks the driver JS AND node_modules/
+  // playwright*, so the walk from the unpacked driver reaches the unpacked
+  // node_modules (smoked against a real arm64 build, 9/10).
+  const UNPACKED = join('/Applications/Cyboflow.app/Contents/Resources', 'app.asar.unpacked');
+
+  it('finds the unpacked node_modules in a packaged app', async () => {
+    // Spelled through `join` like the sibling cases: the walk probes
+    // `join(dir, marker)`, which is backslash-separated on Windows, so a fake
+    // tree keyed on POSIX literals is never hit there.
+    const found = await resolveHarnessNodePath(
+      join(UNPACKED, 'main/dist/driver/driverCli.js'),
+      world([join(UNPACKED, 'node_modules/playwright/package.json')]),
+    );
+    expect(found).toBe(join(UNPACKED, 'node_modules'));
+  });
+
+  // A packaged build whose asarUnpack lost the playwright entries: the marker
+  // is nowhere on the walk (inside app.asar is unreadable to plain node), and
+  // an absent NODE_PATH is the honest answer — see the function's doc.
   it('answers null when no node_modules on the walk carries playwright', async () => {
     const found = await resolveHarnessNodePath(
-      '/Applications/Cyboflow.app/Contents/Resources/app.asar.unpacked/main/dist/driver/driverCli.js',
-      world(['/somewhere/else/node_modules/playwright/package.json']),
+      join(UNPACKED, 'main/dist/driver/driverCli.js'),
+      // Present, but off the walk. Spelled through `join` so this stays a real
+      // negative on Windows rather than passing because nothing can match.
+      world([join('/somewhere/else', 'node_modules/playwright/package.json')]),
     );
     expect(found).toBeNull();
   });

@@ -9,6 +9,7 @@ import {
   type ReprioritizeResultJson,
   type EditWorkflowResultJson,
   type CreateBacklogResultJson,
+  type CreateWorkflowResultJson,
 } from './proposalExecutor';
 import { computeSpecHash } from './specHash';
 import type {
@@ -17,6 +18,7 @@ import type {
   AgentProposalPreconditions,
   AgentProposalStatus,
   CreateBacklogItem,
+  CreateWorkflowAgent,
 } from '../../../../shared/types/agentThread';
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 
@@ -117,6 +119,11 @@ function baseDeps(store: FakeStore, over: Partial<ProposalExecutorDeps> = {}): P
     runInTransaction: <T>(fn: () => T): T => fn(),
     readEffectiveWorkflowSpec: () => CURRENT_SPEC,
     applyWorkflowSpec: () => {},
+    createCustomAgent: async (_projectId, agent) => ({ agentKey: agent.name.toLowerCase().replace(/[^a-z0-9]+/g, '-') }),
+    deleteCustomAgent: async () => {},
+    createWorkflow: () => ({ workflowId: 'wf-7-custom-abcd1234' }),
+    findWorkflowIdByName: () => null,
+    customAgentExists: () => false,
     ...over,
   };
 }
@@ -524,6 +531,216 @@ describe('executeProposal — create-backlog-items', () => {
     expect(first.ok).toBe(true);
     expect(second).toEqual({ ok: false, reason: 'claimed' });
     expect(createBacklogItem).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// create-workflow
+// ---------------------------------------------------------------------------
+
+const DOCS_FLOW: WorkflowDefinition = {
+  id: 'docs-review',
+  phases: [
+    {
+      id: 'review',
+      label: 'Review',
+      color: '#3b6dd6',
+      steps: [
+        { id: 'write', name: 'Write', agent: 'docs-writer', mcps: [], retries: 0 },
+        { id: 'check', name: 'Check', agent: 'docs-checker', mcps: [], retries: 0 },
+      ],
+    },
+  ],
+};
+
+const DOCS_AGENTS: CreateWorkflowAgent[] = [
+  { name: 'Docs Writer', description: 'Writes docs.', systemPrompt: 'Write docs.', tools: ['Read', 'Edit'] },
+  { name: 'Docs Checker', description: 'Checks docs.', systemPrompt: 'Check docs.', tools: ['Read'] },
+];
+
+function createWorkflowProposal(over: { scope?: 'project' | 'global'; agents?: CreateWorkflowAgent[] } = {}): AgentProposal {
+  return makeProposal({
+    kind: 'create-workflow',
+    projectId: 7,
+    name: 'Docs Review',
+    definitionJson: JSON.stringify(DOCS_FLOW),
+    agents: over.agents ?? DOCS_AGENTS,
+    permissionMode: 'acceptEdits',
+    ...(over.scope !== undefined ? { scope: over.scope } : {}),
+  });
+}
+
+describe('executeProposal — create-workflow', () => {
+  it('mints every agent in order, then the flow, finalizing executed', async () => {
+    const store = new FakeStore();
+    store.add(createWorkflowProposal());
+    const order: string[] = [];
+    const createCustomAgent = vi.fn(async (projectId: number, agent: CreateWorkflowAgent) => {
+      order.push(`agent:${projectId}:${agent.name}`);
+      return { agentKey: agent.name === 'Docs Writer' ? 'docs-writer' : 'docs-checker' };
+    });
+    const createWorkflow = vi.fn((args: { projectId: number | null; name: string; definition: WorkflowDefinition; permissionMode?: string }) => {
+      order.push(`flow:${args.projectId}:${args.name}:${args.permissionMode}`);
+      return { workflowId: 'wf-7-custom-1' };
+    });
+
+    const result = await executeProposal(baseDeps(store, { createCustomAgent, createWorkflow }), 'p1');
+
+    if (!result.ok) throw new Error('expected ok');
+    expect(result.status).toBe('executed');
+    // Agents BEFORE the flow, so its step bindings resolve on the first run; the
+    // project scope (the default) pins the flow to the agents' project.
+    expect(order).toEqual(['agent:7:Docs Writer', 'agent:7:Docs Checker', 'flow:7:Docs Review:acceptEdits']);
+    expect(createWorkflow.mock.calls[0][0].definition).toEqual(DOCS_FLOW);
+
+    const rj = store.proposals.get('p1')?.result as CreateWorkflowResultJson;
+    expect(rj).toEqual({
+      kind: 'create-workflow',
+      status: 'executed',
+      name: 'Docs Review',
+      workflowId: 'wf-7-custom-1',
+      agents: [
+        { index: 0, name: 'Docs Writer', ok: true, agentKey: 'docs-writer' },
+        { index: 1, name: 'Docs Checker', ok: true, agentKey: 'docs-checker' },
+      ],
+    });
+  });
+
+  it('a global-scoped flow with no agents is created with projectId null', async () => {
+    const store = new FakeStore();
+    store.add(createWorkflowProposal({ scope: 'global', agents: [] }));
+    const createCustomAgent = vi.fn(async () => ({ agentKey: 'x' }));
+    const createWorkflow = vi.fn((_args: { projectId: number | null; name: string }) => ({ workflowId: 'wf-global-custom-1' }));
+
+    const result = await executeProposal(baseDeps(store, { createCustomAgent, createWorkflow }), 'p1');
+
+    if (!result.ok) throw new Error('expected ok');
+    expect(result.status).toBe('executed');
+    expect(createCustomAgent).not.toHaveBeenCalled();
+    expect(createWorkflow.mock.calls[0][0]).toMatchObject({ projectId: null, name: 'Docs Review' });
+  });
+
+  it('saga: agent 2 of 2 fails → agent 1 is deleted again, the flow is never created, finalized failed', async () => {
+    const store = new FakeStore();
+    store.add(createWorkflowProposal());
+    const createCustomAgent = vi.fn(async (_projectId: number, agent: CreateWorkflowAgent) => {
+      if (agent.name === 'Docs Checker') throw new Error('duplicate_key');
+      return { agentKey: 'docs-writer' };
+    });
+    const deleteCustomAgent = vi.fn(async () => {});
+    const createWorkflow = vi.fn(() => ({ workflowId: 'never' }));
+
+    const result = await executeProposal(baseDeps(store, { createCustomAgent, deleteCustomAgent, createWorkflow }), 'p1');
+
+    if (!result.ok) throw new Error('expected ok');
+    expect(result.status).toBe('failed');
+    expect(createWorkflow).not.toHaveBeenCalled();
+    expect(deleteCustomAgent).toHaveBeenCalledWith(7, 'docs-writer');
+
+    const rj = store.proposals.get('p1')?.result as CreateWorkflowResultJson;
+    expect(rj.status).toBe('failed');
+    expect(rj.error).toMatch(/Docs Checker.*duplicate_key/);
+    expect(rj.agents).toEqual([
+      { index: 0, name: 'Docs Writer', ok: true, agentKey: 'docs-writer' },
+      { index: 1, name: 'Docs Checker', ok: false, error: 'duplicate_key' },
+    ]);
+    expect(rj.compensations).toEqual([{ agentKey: 'docs-writer', ok: true }]);
+    expect(rj.workflowId).toBeUndefined();
+  });
+
+  it('saga: the flow fails after both agents landed → both are unwound in reverse; a failed unwind is recorded', async () => {
+    const store = new FakeStore();
+    store.add(createWorkflowProposal());
+    const deleted: string[] = [];
+    const deleteCustomAgent = vi.fn(async (_projectId: number, agentKey: string) => {
+      deleted.push(agentKey);
+      if (agentKey === 'docs-writer') throw new Error('referenced by workflow(s): other-flow');
+    });
+    const createWorkflow = vi.fn(() => {
+      throw new Error("a workflow named 'Docs Review' already exists in this project");
+    });
+
+    const result = await executeProposal(baseDeps(store, { deleteCustomAgent, createWorkflow }), 'p1');
+
+    if (!result.ok) throw new Error('expected ok');
+    expect(result.status).toBe('failed');
+    expect(deleted).toEqual(['docs-checker', 'docs-writer']);
+    const rj = store.proposals.get('p1')?.result as CreateWorkflowResultJson;
+    expect(rj.error).toMatch(/already exists/);
+    expect(rj.compensations).toEqual([
+      { agentKey: 'docs-checker', ok: true },
+      { agentKey: 'docs-writer', ok: false, error: 'referenced by workflow(s): other-flow' },
+    ]);
+  });
+
+  it('rejects a double-confirm: the loser never re-mints anything', async () => {
+    const store = new FakeStore();
+    store.add(createWorkflowProposal());
+    const createWorkflow = vi.fn(() => ({ workflowId: 'wf-1' }));
+    const deps = baseDeps(store, { createWorkflow });
+
+    const first = await executeProposal(deps, 'p1');
+    const second = await executeProposal(deps, 'p1');
+
+    expect(first.ok).toBe(true);
+    expect(second).toEqual({ ok: false, reason: 'claimed' });
+    expect(createWorkflow).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('reconcileOrphanedExecutingProposals — create-workflow', () => {
+  it('flow present under its name AND every agent key present → executed; never re-mints', async () => {
+    const store = new FakeStore();
+    store.add({ ...createWorkflowProposal(), status: 'executing' });
+    const createWorkflow = vi.fn(() => ({ workflowId: 'never' }));
+    const createCustomAgent = vi.fn(async () => ({ agentKey: 'never' }));
+
+    const summary = await reconcileOrphanedExecutingProposals(
+      baseDeps(store, {
+        createWorkflow,
+        createCustomAgent,
+        findWorkflowIdByName: (projectId, name) => (projectId === 7 && name === 'Docs Review' ? 'wf-7-custom-1' : null),
+        customAgentExists: (projectId, key) => projectId === 7 && (key === 'docs-writer' || key === 'docs-checker'),
+      }),
+    );
+
+    expect(summary.outcomes[0].finalizedTo).toBe('executed');
+    expect(createWorkflow).not.toHaveBeenCalled();
+    expect(createCustomAgent).not.toHaveBeenCalled();
+    const rj = store.proposals.get('p1')?.result as CreateWorkflowResultJson;
+    expect(rj).toMatchObject({ status: 'executed', workflowId: 'wf-7-custom-1', reconciled: true });
+    expect(rj.agents.map((a) => a.ok)).toEqual([true, true]);
+  });
+
+  it('flow present but one agent missing → failed crashed-mid-execution, listing what landed', async () => {
+    const store = new FakeStore();
+    store.add({ ...createWorkflowProposal(), status: 'executing' });
+
+    const summary = await reconcileOrphanedExecutingProposals(
+      baseDeps(store, {
+        findWorkflowIdByName: () => 'wf-7-custom-1',
+        customAgentExists: (_projectId, key) => key === 'docs-writer',
+      }),
+    );
+
+    expect(summary.outcomes[0].finalizedTo).toBe('failed');
+    expect(summary.outcomes[0].note).toMatch(/crashed-mid-execution/);
+    const rj = store.proposals.get('p1')?.result as CreateWorkflowResultJson;
+    expect(rj.agents.map((a) => [a.agentKey, a.ok])).toEqual([
+      ['docs-writer', true],
+      ['docs-checker', false],
+    ]);
+    expect(rj.error).toBe('crashed-mid-execution');
+  });
+
+  it('no flow under the name → failed crashed-mid-execution', async () => {
+    const store = new FakeStore();
+    store.add({ ...createWorkflowProposal({ agents: [] }), status: 'executing' });
+
+    const summary = await reconcileOrphanedExecutingProposals(baseDeps(store));
+
+    expect(summary.outcomes[0].finalizedTo).toBe('failed');
+    expect(summary.outcomes[0].note).toMatch(/no workflow named "Docs Review"/);
   });
 });
 

@@ -64,6 +64,7 @@ import type {
   EvalReportPayload,
   RecommendationsArtifactPayload,
   VerifyRunbookArtifactPayload,
+  AdversarialReviewArtifactPayload,
   ScreenshotsArtifactPayload,
 } from '../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../shared/types/tasks';
@@ -148,6 +149,7 @@ export type ArtifactContent =
   | { kind: 'recommendations'; payload: RecommendationsPayload }
   | { kind: 'eval-report'; payload: EvalReportArtifactPayload }
   | { kind: 'verify-runbook'; payload: VerifyRunbookArtifactPayload }
+  | { kind: 'adversarial-review'; payload: AdversarialReviewArtifactPayload }
   | { kind: 'brief'; payload: ProjectBriefPayload }
   | { kind: 'canvas'; payload: CanvasPayload };
 
@@ -223,6 +225,19 @@ export function useArtifactData(artifact: Artifact, projectId: number | null): A
         loading: false,
         error: null,
         data: { kind: 'verify-runbook', payload: parsePayload(payloadJson) },
+      });
+      return;
+    }
+    // adversarial-review is payload-backed for the same reason: the planner /
+    // launch / ship orchestrator composed the reviewer's Blocking + Findings
+    // markdown into payload_json.markdown (one artifact per run, ENRICHED on a
+    // re-review), so there is no entity to re-derive from and it resolves
+    // synchronously.
+    if (atype === 'adversarial-review') {
+      setState({
+        loading: false,
+        error: null,
+        data: { kind: 'adversarial-review', payload: parsePayload(payloadJson) },
       });
       return;
     }

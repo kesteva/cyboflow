@@ -379,13 +379,22 @@ export class MessageProjection {
 
     if (segments.length === 0) return null;
 
-    // Detect synthetic error messages (model === '<synthetic>').
-    const isSyntheticError = event.message.model === '<synthetic>' &&
+    // The SDK's structured cause (SDKAssistantMessageError, e.g.
+    // 'authentication_failed') rides on a synthetic error message as a bare
+    // string. Surface it on metadata so a consumer can act on the CODE (the
+    // chat's sign-in card) instead of pattern-matching the prose.
+    const assistantError = typeof event.error === 'string' ? event.error : undefined;
+
+    // Detect synthetic error messages (model === '<synthetic>'). A structured
+    // error code is authoritative; the text sniff covers CLIs that omit it.
+    const isSyntheticError = event.message.model === '<synthetic>' && (
+      assistantError !== undefined ||
       segments.some(seg => seg.type === 'text' && (
         seg.content.includes('Prompt is too long') ||
         seg.content.includes('API Error') ||
         seg.content.includes('error')
-      ));
+      ))
+    );
 
     const usage = event.message.usage;
     const tokens = usage
@@ -423,6 +432,7 @@ export class MessageProjection {
         model: event.message.model,
         tokens: tokens && tokens > 0 ? tokens : undefined,
         systemSubtype: isSyntheticError ? 'error' : undefined,
+        ...(assistantError !== undefined ? { assistantError } : {}),
       }
     };
 

@@ -47,8 +47,12 @@ mirror the app never reads.**
   cross-arch install **with `--force`** (see
   `[[project_cross_arch_build_foreign_binaries]]` / the memory note):
   ```bash
-  ls -d node_modules/@anthropic-ai/claude-agent-sdk-darwin-{arm64,x64} \
-        node_modules/@openai/codex-darwin-{arm64,x64}
+  # Test the BINARIES, not the package dirs: the node_modules entries are pnpm
+  # symlinks that survive a prune as DANGLING links, so `ls -d` on them passes
+  # while the x64 build dies at preflight ("the x64 Claude Code binary is
+  # missing") — 0.4.1, 9/16.
+  ls -l node_modules/@anthropic-ai/claude-agent-sdk-darwin-{arm64,x64}/claude \
+        node_modules/@openai/codex-darwin-{arm64,x64}/vendor/*-apple-darwin/bin/codex
   # if missing:
   pnpm install --config.supportedArchitectures.os=darwin \
     --config.supportedArchitectures.cpu=x64 \
@@ -89,6 +93,67 @@ git push origin --delete release-gate/$V
 
 If the branch push also matches the workflow's `push` path filter, a second
 (push-triggered, unit + installer) run appears; both must be green.
+
+#### When the Windows job goes red: iterate on the Azure VM, not on CI
+
+CI stays the authoritative gate, but it is a terrible debugger — ~15 min per
+attempt, of which the actual failing test is seconds. The cost is runner queue,
+a cold `pnpm install`, and running all 738 files to learn about one. A
+fix-push-wait loop over two or three Windows defects burns an hour.
+
+`cyboflow-win11` (resource group `cyboflow-wintest-w3`, `westus2`,
+`Standard_D4s_v6`) exists for this. Drive it with `az vm run-command` — no RDP,
+so it scripts from the Mac. **Measured 2026-09-14: 33 s wall per targeted run
+(9 s of test) versus ~15 min on CI.**
+
+```bash
+az vm start -g cyboflow-wintest-w3 -n cyboflow-win11        # ~40 s from deallocated
+# one-time per boot (~4 min): pnpm, clone, install — see scripts in the release skill
+az vm run-command invoke -g cyboflow-wintest-w3 -n cyboflow-win11 \
+  --command-id RunPowerShellScript --scripts @vm-test.ps1 \
+  --query 'value[0].message' -o tsv
+```
+
+> **DEALLOCATE THE VM WHEN YOU ARE DONE — this is not optional.**
+>
+> ```bash
+> az vm deallocate -g cyboflow-wintest-w3 -n cyboflow-win11
+> az vm list -g cyboflow-wintest-w3 -d --query '[].powerState' -o tsv   # must read "VM deallocated"
+> ```
+>
+> A D4s_v6 bills for every hour it is *running*, whether or not anything is
+> using it — stopping it from inside Windows is **not** enough, only
+> `az vm deallocate` releases the compute. Verify the power state rather than
+> trusting the deallocate call; do it as soon as the Windows work is proven,
+> not at the end of the release, because the rest of the cut is another hour
+> of macOS builds during which the box would sit idle and billing. This is
+> also the single easiest step in this runbook to walk away from, since
+> nothing downstream fails if you forget.
+
+Notes that cost time to rediscover:
+
+- `run-command` executes as **SYSTEM**, not the interactive user, so an earlier
+  RDP session's checkout is invisible. Clone to `C:\cyboflow` and stay there.
+- The box has git + node preinstalled but **not pnpm**; `npm i -g pnpm@10.11.1`
+  matches the lockfile.
+- `git fetch origin <branch> --depth 1 && git checkout -f FETCH_HEAD` is enough —
+  the gate branch is already pushed, so there is nothing to re-push.
+- Set `core.autocrlf false`; a CRLF checkout blanks every bundled agent binary.
+- Only `Dsv6` has quota on this subscription — v3/v4/B sizes all return
+  `SkuNotAvailable`.
+- **`run-command` is serialized per VM.** A second invoke while one is running
+  fails outright with `(Conflict) Run command extension execution is in
+  progress`, so a long background full-suite run blocks the targeted loop. Pick
+  one at a time, or start a second VM.
+- `az` buffers the invoke's output until the command completes — a background
+  run's log stays 0 bytes for its whole duration. That is normal, not a hang.
+- Run the **full** suite there too (`npx vitest run`, ~10 min) once targeted
+  fixes pass. It finds the *next* Windows failure immediately instead of one
+  CI round later, which is what turns a three-defect cycle from an hour into
+  ten minutes.
+
+Push the fixes and let CI confirm — a green VM run is strong evidence, not the
+gate.
 
 ### Local gate
 

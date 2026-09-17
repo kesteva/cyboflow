@@ -122,6 +122,25 @@ describe('TuningLevelSelector', () => {
     expect(screen.queryByTestId('wizard-tuning-estimate-caption')).not.toBeInTheDocument();
   });
 
+  it('(i) renders no stamp hint by default', () => {
+    render(<TuningLevelSelector value="standard" customSlotAvailable={false} onChange={vi.fn()} />);
+    expect(screen.queryByTestId('wizard-tuning-level-stamp-hint')).not.toBeInTheDocument();
+  });
+
+  it('(j) renders the stamp hint verbatim when supplied', () => {
+    render(
+      <TuningLevelSelector
+        value="standard"
+        customSlotAvailable={false}
+        onChange={vi.fn()}
+        stampHint="Defaulted from project thoroughness: v1 → standard"
+      />,
+    );
+    expect(screen.getByTestId('wizard-tuning-level-stamp-hint')).toHaveTextContent(
+      'Defaulted from project thoroughness: v1 → standard',
+    );
+  });
+
   it('(h) renders a per-level helper sentence that tracks the selected level', () => {
     const { rerender } = render(
       <TuningLevelSelector

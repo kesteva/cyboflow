@@ -124,6 +124,7 @@ function makeHarness(
     getDb: () => db,
     quickSession: {
       taskQueue: {
+        onSessionJobFailed: () => () => {},
         createSession: async (data) => {
           rec.quickCoreCalls += 1;
           rec.createdSessionNames.push(data.worktreeTemplate);

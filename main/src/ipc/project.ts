@@ -5,7 +5,8 @@ import type { Project } from '../database/models';
 import type { DatabaseService } from '../database/database';
 import { scriptExecutionTracker } from '../services/scriptExecutionTracker';
 import { panelManager } from '../services/panelManager';
-import { ensureGitignoreEntry } from '../utils/gitignoreWriter';
+import { ensureGitExcludeEntries } from '../utils/gitExcludeWriter';
+import { makeLoggerLike } from '../orchestrator/loggerAdapter';
 import { seedDemoProjectEntities } from '../services/demo/demoSeed';
 import { seedDemoInsightsHistory } from '../services/demo/demoInsightsSeed';
 import { projectSettingsContainAllowRules } from '../orchestrator/permissionRules';
@@ -274,23 +275,30 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
         }
       }
 
-      // Ensure the worktree directories are in the project's .gitignore so that
-      // worktrees do not appear as untracked changes. Flow runs live under
+      // Ensure the worktree directories are excluded from git so that worktrees
+      // do not appear as untracked changes. Flow runs live under
       // `.cyboflow/worktrees/`; quick sessions use the legacy top-level
       // `worktrees/` folder (the project's configured worktree_folder, default
-      // `worktrees`). Both must be ignored — the legacy folder is created
-      // eagerly on project add, so it was showing up untracked.
+      // `worktrees`). Both must be excluded — the legacy folder is created
+      // eagerly on project add, so it was showing up untracked. Uses the
+      // repo's LOCAL git exclude (`$GIT_DIR/info/exclude`), never the tracked
+      // `.gitignore` — a generated/plumbing path has no business in a diff the
+      // user commits.
       try {
-        ensureGitignoreEntry(projectData.path, '.cyboflow/worktrees/');
+        const excludeEntries = ['.cyboflow/worktrees/'];
         const legacyWorktreeFolder = (project?.worktree_folder || 'worktrees').trim();
         // Only ignore a project-relative folder (skip absolute custom paths).
         if (legacyWorktreeFolder && !legacyWorktreeFolder.startsWith('/') && !legacyWorktreeFolder.includes(':')) {
-          ensureGitignoreEntry(projectData.path, `${legacyWorktreeFolder.replace(/\/$/, '')}/`);
+          excludeEntries.push(`${legacyWorktreeFolder.replace(/\/$/, '')}/`);
         }
+        ensureGitExcludeEntries(projectData.path, excludeEntries, {
+          logger: makeLoggerLike(services.logger),
+          label: 'Main',
+        });
       } catch (error) {
-        // Should never reach here — ensureGitignoreEntry swallows its own errors.
+        // Should never reach here — ensureGitExcludeEntries swallows its own errors.
         // Belt-and-suspenders: log and continue so project creation always succeeds.
-        console.error('[Main] Unexpected error from ensureGitignoreEntry:', error);
+        console.error('[Main] Unexpected error from ensureGitExcludeEntries:', error);
       }
 
       return { success: true, data: project };

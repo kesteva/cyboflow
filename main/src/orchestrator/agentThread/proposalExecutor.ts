@@ -20,6 +20,8 @@
  *      versions where the target supports them. launch-run runs a COMPENSATION SAGA:
  *      created resources are tracked and unwound in reverse on any post-session
  *      failure, with each compensation step's outcome persisted for reconciliation.
+ *      create-workflow runs the same saga shape: agents first, then the flow, and
+ *      every agent minted so far is deleted again when a later step fails.
  *   4. TERMINAL TRANSITION — store.finalizeProposal to 'executed' | 'failed' with a
  *      typed result_json (the card renders it: per-item ✓/✕, saga detail, etc.).
  *   5. BOOT RECONCILIATION — reconcileOrphanedExecutingProposals verifies OBSERVABLE
@@ -40,8 +42,9 @@
  */
 import { computeSpecHash } from './specHash';
 import { workflowDefinitionSchema } from '../workflowDefinitionSchema';
+import { deriveAgentKey } from '../agents/agentValidation';
 import type { LoggerLike } from '../types';
-import type { WorkflowDefinition, CyboflowWorkflowName } from '../../../../shared/types/workflows';
+import type { PermissionMode, WorkflowDefinition, CyboflowWorkflowName } from '../../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 import type { Priority } from '../../../../shared/types/tasks';
 import type {
@@ -50,6 +53,8 @@ import type {
   AgentProposalStatus,
   CreateBacklogItem,
   CreateBacklogItemsProposalPayload,
+  CreateWorkflowAgent,
+  CreateWorkflowProposalPayload,
   EditWorkflowProposalPayload,
   LaunchRunProposalPayload,
   ReprioritizeBacklogProposalPayload,
@@ -154,6 +159,29 @@ export interface ProposalExecutorDeps {
   /** Persist the validated definition (WorkflowRegistry.updateSpec) — caller has already validated. */
   applyWorkflowSpec: (workflowId: string, definition: WorkflowDefinition) => void;
 
+  // --- create-workflow: mint the agents, then the flow; unwind the agents on failure ---
+  /**
+   * One AgentOverrideRouter.applyChange createCustom for `projectId`; resolves to
+   * the minted kebab key and throws (AgentOverrideError) on rejection.
+   */
+  createCustomAgent: (projectId: number, agent: CreateWorkflowAgent) => Promise<{ agentKey: string }>;
+  /** Compensation: AgentOverrideRouter.applyChange deleteCustom for an agent this confirm minted. */
+  deleteCustomAgent: (projectId: number, agentKey: string) => Promise<void>;
+  /**
+   * WorkflowRegistry.createCustom — `projectId` null mints a GLOBAL flow. Throws
+   * on a name collision / reserved name (the registry's own guards).
+   */
+  createWorkflow: (args: {
+    projectId: number | null;
+    name: string;
+    definition: WorkflowDefinition;
+    permissionMode?: PermissionMode;
+  }) => { workflowId: string };
+  /** Reconciliation: the id of the workflow named `name` in that scope, or null. */
+  findWorkflowIdByName: (projectId: number | null, name: string) => string | null;
+  /** Reconciliation: does `projectId` carry a custom agent under `agentKey`? */
+  customAgentExists: (projectId: number, agentKey: string) => boolean;
+
   logger?: LoggerLike;
 }
 
@@ -225,11 +253,38 @@ export interface CreateBacklogResultJson {
   reconciled?: boolean;
 }
 
+export interface CreateWorkflowAgentResultJson {
+  /** Position in the proposed batch (the only stable identity before the key is minted). */
+  index: number;
+  name: string;
+  ok: boolean;
+  /** Present once the chokepoint minted it (or, on compensation, the key that was unwound). */
+  agentKey?: string;
+  error?: string;
+}
+
+export interface CreateWorkflowResultJson {
+  kind: 'create-workflow';
+  status: 'executed' | 'failed';
+  name: string;
+  /** Present on success: the registry-minted workflow id. */
+  workflowId?: string;
+  agents: CreateWorkflowAgentResultJson[];
+  /** The step that failed, when one did. */
+  error?: string;
+  /** Agents unwound after a later failure, with each delete's outcome. */
+  compensations?: Array<{ agentKey: string; ok: boolean; error?: string }>;
+  /** Set by boot reconciliation (not the live confirm path). */
+  reconciled?: boolean;
+  verified?: string;
+}
+
 export type ProposalResultJson =
   | LaunchRunResultJson
   | ReprioritizeResultJson
   | EditWorkflowResultJson
-  | CreateBacklogResultJson;
+  | CreateBacklogResultJson
+  | CreateWorkflowResultJson;
 
 // ---------------------------------------------------------------------------
 // Result
@@ -337,6 +392,8 @@ export async function executeProposal(
         proposal.payload as CreateBacklogItemsProposalPayload,
         proposalId,
       );
+    case 'create-workflow':
+      return runCreateWorkflow(deps, proposal, proposal.payload as CreateWorkflowProposalPayload, proposalId);
     default:
       // Unreachable: open-session is handled above, and the union is closed. Finalize
       // failed defensively so a future kind never strands the claimed row.
@@ -519,6 +576,98 @@ async function runCreateBacklogItems(
 }
 
 // ---------------------------------------------------------------------------
+// create-workflow — agents first, then the flow, with an agent-unwind saga
+// ---------------------------------------------------------------------------
+
+async function runCreateWorkflow(
+  deps: ProposalExecutorDeps,
+  proposal: AgentProposal,
+  payload: CreateWorkflowProposalPayload,
+  proposalId: string,
+): Promise<ExecuteProposalResult> {
+  const scopeProjectId = payload.scope === 'global' ? null : payload.projectId;
+  const agents: CreateWorkflowAgentResultJson[] = [];
+  const minted: string[] = [];
+
+  // Unwind every agent minted so far, in reverse. Each delete's outcome is
+  // recorded (never thrown away) so a half-unwound confirm is legible to the
+  // human and to reconciliation — the same posture as launch-run's saga.
+  const compensate = async (): Promise<CreateWorkflowResultJson['compensations']> => {
+    const outcomes: NonNullable<CreateWorkflowResultJson['compensations']> = [];
+    for (const agentKey of [...minted].reverse()) {
+      try {
+        await deps.deleteCustomAgent(payload.projectId, agentKey);
+        outcomes.push({ agentKey, ok: true });
+      } catch (err) {
+        outcomes.push({ agentKey, ok: false, error: errMsg(err) });
+      }
+    }
+    return outcomes;
+  };
+
+  const fail = async (error: string): Promise<ExecuteProposalResult> => {
+    const compensations = await compensate();
+    const result: CreateWorkflowResultJson = {
+      kind: 'create-workflow',
+      status: 'failed',
+      name: payload.name,
+      agents,
+      error,
+      ...(compensations && compensations.length > 0 ? { compensations } : {}),
+    };
+    deps.store.finalizeProposal(proposalId, 'failed', JSON.stringify(result));
+    return { ok: true, proposalId, kind: proposal.kind, status: 'failed', result };
+  };
+
+  // 1. Agents, in order. The flow's steps bind these keys, so they must exist
+  // BEFORE the flow does — a flow whose bindings dangle would spawn nothing on
+  // its first run. Unlike create-backlog-items this is all-or-nothing: a flow
+  // with half its agents is not a usable deliverable.
+  for (const [index, agent] of (payload.agents ?? []).entries()) {
+    try {
+      const { agentKey } = await deps.createCustomAgent(payload.projectId, agent);
+      minted.push(agentKey);
+      agents.push({ index, name: agent.name, ok: true, agentKey });
+    } catch (err) {
+      agents.push({ index, name: agent.name, ok: false, error: errMsg(err) });
+      return fail(`agent "${agent.name}" was not created: ${errMsg(err)}`);
+    }
+  }
+
+  // 2. The flow. Re-parse what prepareProposal validated; a definition that no
+  // longer parses here is a persisted-row corruption, not a user error.
+  let definition: WorkflowDefinition;
+  try {
+    const parsed = workflowDefinitionSchema.safeParse(JSON.parse(payload.definitionJson));
+    if (!parsed.success) return fail(`definition did not validate: ${formatZodIssues(parsed.error.issues).join('; ')}`);
+    definition = parsed.data;
+  } catch (err) {
+    return fail(`definitionJson is not valid JSON: ${errMsg(err)}`);
+  }
+  let workflowId: string;
+  try {
+    ({ workflowId } = deps.createWorkflow({
+      projectId: scopeProjectId,
+      name: payload.name,
+      definition,
+      ...(payload.permissionMode !== undefined ? { permissionMode: payload.permissionMode } : {}),
+    }));
+  } catch (err) {
+    return fail(`workflow "${payload.name}" was not created: ${errMsg(err)}`);
+  }
+
+  const result: CreateWorkflowResultJson = {
+    kind: 'create-workflow',
+    status: 'executed',
+    name: payload.name,
+    workflowId,
+    agents,
+  };
+  deps.store.finalizeProposal(proposalId, 'executed', JSON.stringify(result));
+  return { ok: true, proposalId, kind: proposal.kind, status: 'executed', result };
+}
+
+// ---------------------------------------------------------------------------
 // edit-workflow — spec-hash CAS + safeParse + updateSpec inside one transaction
 // ---------------------------------------------------------------------------
 
@@ -659,6 +808,11 @@ export interface ReconcileSummary {
  *     hash ⇒ the edit landed ⇒ executed; otherwise 'crashed-mid-execution'.
  *   - create-backlog-items: NOT verifiable (a created entity carries no back-link to
  *     the proposal) ⇒ always 'crashed-mid-execution', never a re-run.
+ *   - create-workflow: a flow under the proposed name exists in the proposed scope
+ *     AND every proposed agent key exists ⇒ executed (the name was free at propose
+ *     time, so its presence is the confirm's own trace); otherwise
+ *     'crashed-mid-execution' — with whatever landed listed, since a half-minted
+ *     agent set is exactly what the human has to clean up by hand.
  */
 export async function reconcileOrphanedExecutingProposals(deps: ProposalExecutorDeps): Promise<ReconcileSummary> {
   const orphans = deps.store.listProposalsByStatus('executing');
@@ -782,6 +936,39 @@ async function reconcileOne(deps: ProposalExecutorDeps, proposal: AgentProposal)
         kind: proposal.kind,
         finalizedTo: 'failed',
         note: 'crashed-mid-execution: entity creation is not verifiable — check the board for partially created items',
+      };
+    }
+
+    case 'create-workflow': {
+      const payload = proposal.payload as CreateWorkflowProposalPayload;
+      const scopeProjectId = payload.scope === 'global' ? null : payload.projectId;
+      const workflowId = deps.findWorkflowIdByName(scopeProjectId, payload.name);
+      const agents: CreateWorkflowAgentResultJson[] = (payload.agents ?? []).map((agent, index) => {
+        // The confirm derives the key through the chokepoint; reconciliation has no
+        // chokepoint call to make, so it re-derives it the same way the propose
+        // path did (agentValidation.deriveAgentKey) via the existence probe.
+        const agentKey = deriveAgentKey(agent.name);
+        return { index, name: agent.name, agentKey, ok: deps.customAgentExists(payload.projectId, agentKey) };
+      });
+      const applied = workflowId !== null && agents.every((a) => a.ok);
+      const status: 'executed' | 'failed' = applied ? 'executed' : 'failed';
+      const verified = workflowId !== null ? `workflow ${workflowId} exists` : `no workflow named "${payload.name}"`;
+      const result: CreateWorkflowResultJson = {
+        kind: 'create-workflow',
+        status,
+        name: payload.name,
+        ...(workflowId !== null ? { workflowId } : {}),
+        agents,
+        reconciled: true,
+        verified,
+        ...(applied ? {} : { error: 'crashed-mid-execution' }),
+      };
+      deps.store.finalizeProposal(proposal.id, status, JSON.stringify(result));
+      return {
+        proposalId: proposal.id,
+        kind: proposal.kind,
+        finalizedTo: status,
+        note: applied ? verified : `crashed-mid-execution: ${verified}; check the Agents pane for partially created agents`,
       };
     }
 

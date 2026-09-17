@@ -14,8 +14,7 @@
  * (runQueueRegistry) constructor parameters preserve backward compatibility
  * with all existing call sites that omit them.
  */
-import * as fs from 'fs/promises';
-import * as path from 'path';
+import { ensureGitExcludeEntries } from '../utils/gitExcludeWriter';
 import type { WorkflowRegistry } from './workflowRegistry';
 import { QUICK_WORKFLOW_NAME } from './workflowRegistry';
 import { loadVerifyConfig } from './verifyConfigLoader';
@@ -219,7 +218,7 @@ export class RunLauncher {
 
   /**
    * Launch a workflow run:
-   *   1. ensureGitignoreEntry — idempotent; adds `.cyboflow/worktrees/` if absent
+   *   1. ensureGitExcludeEntry — idempotent; excludes `.cyboflow/worktrees/` if absent
    *   2. createRun — inserts workflow_runs row (status='queued')
    *   3. Worktree resolution (SESSION-HOSTED only, slice 1b): reuse the EXISTING
    *      session's worktree. No new worktree/branch is created; base_sha is
@@ -417,7 +416,7 @@ export class RunLauncher {
     requestedAgentProvider?: AgentProvider,
     requestedAgentRuntime?: WorkflowAgentRuntime,
   ): Promise<{ runId: string; worktreePath: string; branchName: string; permissionMode: PermissionMode }> {
-    await this.ensureGitignoreEntry(projectPath);
+    await this.ensureGitExcludeEntry(projectPath);
 
     const workflow = this.workflowRegistry.getById(workflowId);
     if (!workflow) throw new Error(`RunLauncher.launch: workflow ${workflowId} not found`);
@@ -1213,37 +1212,19 @@ export class RunLauncher {
 
   /**
    * Idempotently ensure `.cyboflow/worktrees/` is present in the project's
-   * `.gitignore`.  Three cases:
-   *   - File missing   → create it with the single entry
-   *   - Entry absent   → append the entry (preserving existing content)
-   *   - Entry present  → no-op
+   * LOCAL git exclude (`$GIT_DIR/info/exclude`, never the tracked
+   * `.gitignore` — a generated path has no business in a diff the user
+   * commits). Delegates to the shared `gitExcludeWriter` (also used by
+   * `ipc/project.ts` and the three services/panels exclude call sites).
+   * Fail-soft on a non-git `projectPath` — never throws.
    */
-  async ensureGitignoreEntry(projectPath: string): Promise<void> {
-    const gitignorePath = path.join(projectPath, '.gitignore');
-    const targetLine = '.cyboflow/worktrees/';
-
-    let content = '';
-    try {
-      content = await fs.readFile(gitignorePath, 'utf-8');
-    } catch (err: unknown) {
-      const e = err as NodeJS.ErrnoException;
-      if (e.code !== 'ENOENT') throw e;
-      // .gitignore does not exist — create it with just the target line
-      await fs.writeFile(gitignorePath, targetLine + '\n', 'utf-8');
-      this.logger.info(`RunLauncher: created ${gitignorePath} with .cyboflow/worktrees/ entry`);
-      return;
+  async ensureGitExcludeEntry(projectPath: string): Promise<void> {
+    const result = ensureGitExcludeEntries(projectPath, ['.cyboflow/worktrees/'], {
+      logger: this.logger,
+      label: 'RunLauncher',
+    });
+    if (result !== null && result.added.length > 0) {
+      this.logger.info(`RunLauncher: excluded .cyboflow/worktrees/ via git exclude in ${projectPath}`);
     }
-
-    // Match the line exactly (with or without trailing slash)
-    const lines = content.split(/\r?\n/);
-    const present = lines.some(
-      (l) => l.trim() === '.cyboflow/worktrees/' || l.trim() === '.cyboflow/worktrees',
-    );
-    if (present) return;
-
-    // Append — ensure there's a newline separator before the new line
-    const suffix = content.endsWith('\n') || content === '' ? '' : '\n';
-    await fs.writeFile(gitignorePath, content + suffix + targetLine + '\n', 'utf-8');
-    this.logger.info(`RunLauncher: appended .cyboflow/worktrees/ to ${gitignorePath}`);
   }
 }

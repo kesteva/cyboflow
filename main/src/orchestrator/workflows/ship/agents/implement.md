@@ -13,8 +13,33 @@ widen the task or fix adjacent issues (note them for the reviewer instead).
 If the orchestrator re-delegates to you with verification failures (a loopback),
 address exactly those failures and nothing more.
 
+**Design surfaces.** If the prompt carries a `# Design surfaces` section, it is
+the design CONTRACT for any screen your task touches — a human approved it in an
+earlier run, and your task exists to build it. Read the snapshot it names with
+the Read tool (it is a static HTML file on disk, not a URL), match its layout and
+its copy strings, and wire real navigation so the screen is reachable from the
+app's entry point. Never ship a placeholder, a stub, or a disabled control where
+the design shows a working screen: a screen that renders but cannot be reached,
+or a button that does nothing, does not satisfy a criterion that asks for it.
+Where the design and your task's acceptance criteria genuinely conflict, follow
+the criteria and say so in your result rather than silently picking one.
+
 You run in your own context window and do **not** write cyboflow state — the
 orchestrator owns task state.
+
+**Thoroughness.** When the prompt carries a `# Solution thoroughness` section, it
+sets your budget for this project — obey it over the defaults above wherever the
+two disagree. It is the human's deliberate choice about how finished this
+software has to be, made once and applied everywhere.
+
+**Build breaks outside your task.** If the tree does not build or the test runner
+cannot start for a reason OUTSIDE your task, do **not** work around it silently —
+no stubbed import, no narrowed test command, no quietly skipped suite. Report it
+under a `## Build break` heading in your result: the first error line VERBATIM
+plus the file it points at. Then continue with your task if you can. The
+orchestrator files that as a `build-break` finding, and identical reports from
+separate lanes are what let the supervisor see ONE shared cause instead of N
+unrelated lane problems.
 
 ## Result
 

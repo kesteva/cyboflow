@@ -118,6 +118,7 @@ export const CYBOFLOW_MCP_SERVER_NAME = 'cyboflow';
  */
 export const CYBOFLOW_MCP_TOOL_NAMES: readonly string[] = [
   'cyboflow_add_task_dependency',
+  'cyboflow_agents',
   'cyboflow_await_verification',
   'cyboflow_backlog',
   'cyboflow_commit_artifact',
@@ -126,6 +127,7 @@ export const CYBOFLOW_MCP_TOOL_NAMES: readonly string[] = [
   'cyboflow_create_variant',
   'cyboflow_create_workflow',
   'cyboflow_db_query',
+  'cyboflow_db_schema',
   'cyboflow_delete_variant',
   'cyboflow_delete_workflow',
   'cyboflow_design_ack_feedback',
@@ -169,6 +171,8 @@ export const CYBOFLOW_MCP_TOOL_NAMES: readonly string[] = [
   'cyboflow_update_task',
   'cyboflow_update_variant',
   'cyboflow_update_workflow',
+  'cyboflow_widget_preview',
+  'cyboflow_widget_save',
   'cyboflow_workflow',
   'cyboflow_workflows',
 ];

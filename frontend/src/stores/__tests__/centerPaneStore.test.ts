@@ -151,6 +151,60 @@ describe('centerPaneStore', () => {
     expect(s.activeTabId).toBe('file:src/a.ts');
   });
 
+  it('opens an approved-design tab keyed by idea id, and dedupes on a second open', () => {
+    get().ensureSession(KEY);
+    get().openApprovedDesignTab(KEY, { ideaId: 'idea-1', ideaRef: 'IDEA-014', label: 'IDEA-014 · Design' });
+    let s = get().bySession[KEY];
+    expect(s.tabs).toHaveLength(2);
+    expect(s.activeTabId).toBe('design:idea-1');
+    expect(s.tabs[1]).toMatchObject({
+      kind: 'approved-design',
+      ideaId: 'idea-1',
+      ideaRef: 'IDEA-014',
+      label: 'IDEA-014 · Design',
+    });
+
+    // Re-open the same idea: no duplicate, refreshes label/ref, keeps focus.
+    get().openApprovedDesignTab(KEY, { ideaId: 'idea-1', ideaRef: 'IDEA-014', label: 'IDEA-014 · Design v2' });
+    s = get().bySession[KEY];
+    expect(s.tabs).toHaveLength(2);
+    expect(s.tabs[1].label).toBe('IDEA-014 · Design v2');
+  });
+
+  it('opens TWO approved-design tabs for two DISTINCT ideas', () => {
+    get().ensureSession(KEY);
+    get().openApprovedDesignTab(KEY, { ideaId: 'idea-1', ideaRef: 'IDEA-014', label: 'IDEA-014 · Design' });
+    get().openApprovedDesignTab(KEY, { ideaId: 'idea-2', ideaRef: 'IDEA-015', label: 'IDEA-015 · Design' });
+    const s = get().bySession[KEY];
+    expect(s.tabs.filter((t) => t.kind === 'approved-design')).toHaveLength(2);
+    expect(s.activeTabId).toBe('design:idea-2');
+  });
+
+  it('re-opening the same file path with a different baseRef updates the existing tab (no duplicate)', () => {
+    get().ensureSession(KEY);
+    get().openFileTab(KEY, { filePath: 'src/a.ts', status: 'M', baseRef: 'main', scope: 'unstaged' });
+    let s = get().bySession[KEY];
+    expect(s.tabs.filter((t) => t.kind === 'file')).toHaveLength(1);
+    expect(s.tabs.find((t) => t.kind === 'file')).toMatchObject({ baseRef: 'main', scope: 'unstaged' });
+
+    // Re-open the SAME path with a DIFFERENT base — still exactly one file tab,
+    // and its stored baseRef/scope updates to the new values.
+    get().openFileTab(KEY, { filePath: 'src/a.ts', status: 'M', baseRef: 'feature-branch', scope: 'staged' });
+    s = get().bySession[KEY];
+    expect(s.tabs.filter((t) => t.kind === 'file')).toHaveLength(1);
+    expect(s.tabs.find((t) => t.kind === 'file')).toMatchObject({ baseRef: 'feature-branch', scope: 'staged' });
+    // Path-keyed id stays unchanged — no second tab minted per base flip.
+    expect(s.tabs.find((t) => t.kind === 'file')?.id).toBe('file:src/a.ts');
+
+    // Reverting to the default base (null) after a non-null value actually
+    // stores null — proves the write is unconditional, not skipped when falsy.
+    get().openFileTab(KEY, { filePath: 'src/a.ts', status: 'M', baseRef: null });
+    s = get().bySession[KEY];
+    expect(s.tabs.filter((t) => t.kind === 'file')).toHaveLength(1);
+    const tab = s.tabs.find((t) => t.kind === 'file');
+    expect(tab?.baseRef).toBeNull();
+  });
+
   it('closing the active tab focuses the previous tab', () => {
     get().ensureSession(KEY);
     get().openFileTab(KEY, { filePath: 'a.ts' });

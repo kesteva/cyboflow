@@ -92,6 +92,19 @@ here. A failed lane never stops the sprint: the remaining lanes keep running and
 the failure is surfaced at the human gate. Batch integration of the shared worktree
 is held until **all** lanes reach `integrated`.
 
+**Pass each task's approved design down to its lane.** Before you delegate
+`implement` or `task-verify` for a task, fetch its originating idea with
+`cyboflow_get_task` (the task's own `originating_idea_id`, else its epic's). When
+the idea reports an `approved_design`, put its `snapshot_path` AND the idea body's
+`## Design spec` section into the delegation prompt verbatim. The design was
+approved in an EARLIER run whose prototype artifact this run cannot read and which
+is deleted with it — the snapshot path and the spec are the only things that
+survive, and a subagent given neither has never seen the design it is building.
+Tell the lane the same contract the design carries: match the layout and the copy
+strings, wire real navigation so every screen is reachable from the entry point,
+and never leave a placeholder where the design shows a working screen.
+
+
 **On task success** — when the task's chain drains clean (all checks pass):
 
 - Make **ONE git commit** for that task's changes in the session worktree, with a
@@ -102,6 +115,39 @@ The task's board stage sits at the derived **In development** stage for the run 
 advances to **Done** when the session is actually merged, and reverts to its entry
 stage if the run ends without merging. Do **not** move task board stages by hand;
 the lane (and the Sessions / Runs view) is where live per-task status lives.
+
+**Shared build breaks.** Lanes share ONE worktree, so a break another lane
+introduced — a half-written module, a renamed export, a test runner that will not
+start — lands in every lane at once. A lane subagent that hits one returns a
+`## Build break` section instead of routing around it; file that as a finding with
+`category: 'build-break'`, title `Build break: <first error line verbatim>`, and
+`locations` at the offending file, then let the lane carry on if it can. Identical
+reports from separate lanes are what let the run's supervisor see ONE shared cause
+rather than N unrelated lane failures.
+
+**Verification posture is a RUN-level fact, declared once.** Before the first lane
+is dispatched, the controller resolves whether ANY verification modality can serve
+this run. Three answers: the visual verifier is switched OFF (nothing is filed and
+nothing changes); a modality is available (every lane enqueues and parks at the
+merge gate as usual); or NO modality can serve the run — the run is stamped for the
+deferred mobile modality, or for `native-desktop` with no proven `native-screen`
+runbook. In that last case exactly ONE
+`No verifiable modality for this project` finding is filed for the whole run, every
+lane skips the enqueue without parking, and the per-lane
+`Visual verification did not run for …` findings are suppressed, because filing one
+per lane buries the reasons that genuinely ARE per-lane. Lanes are otherwise
+untouched: they implement, review and verify their acceptance criteria exactly as
+they would under an available posture, and `task-verify` still composes its
+verification task. Do not tell a lane to build and drive the deliverable itself
+instead — only the central verifier does that.
+
+**Shared build breaks are grouped for you.** When two or more `build-break`
+findings in a run normalize to the same error text (paths, line/column numbers and
+build hashes stripped), the supervisor files ONE additional
+`Shared build break (N lanes): …` advisory naming the group and the original
+findings. It is a DETECTOR only: the run is never paused and nothing is fixed
+automatically. Keep filing your own per-break findings — the grouping is what turns
+N of them into one readable fact, and it needs them to exist.
 
 **Lane discipline:** every lane transition goes through
 `cyboflow_update_sprint_task` at the moment it happens — when a task starts, when
@@ -187,7 +233,8 @@ is `integrated`.
       repair or revert its own fixes — at most **once** — and re-run
       sprint-verify. If it STILL fails, file a **blocking** finding via
       `cyboflow_report_finding` (`blocking: true`, category
-      `address-review-regression`) carrying the failing tests and what changed,
+      `address-review-regression`) titled exactly `address-review left the tree
+      red` and naming the failing spec, carrying the failing tests and what changed,
       and surface it at the human gate rather than merging a red tree — the
       blocking finding is what actually parks the run, prose in a summary is not.
       This is the ONE exception to "do not file new findings from this step", and

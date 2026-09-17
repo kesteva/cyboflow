@@ -33,6 +33,11 @@ const RUST = 'var(--color-interactive-primary)';
 const AMBER = 'var(--human-border)';
 const STATUS_M = 'var(--color-status-warning)';
 const STATUS_A = 'var(--color-status-success)';
+// approved-design tabs have no atype (they don't back onto the artifacts
+// table), so they get their own fixed accent/glyph rather than reading
+// ARTIFACT_COLORS/ARTIFACT_GLYPHS.
+const DESIGN_ACCENT = '#b2478a';
+const DESIGN_GLYPH = '◈';
 
 interface CenterPaneTabStripProps {
   tabs: TabItem[];
@@ -45,6 +50,7 @@ interface CenterPaneTabStripProps {
 function edgeColor(tab: TabItem): string {
   if (tab.kind === 'flow') return INK;
   if (tab.kind === 'file') return FILE_EDGE;
+  if (tab.kind === 'approved-design') return DESIGN_ACCENT;
   return ARTIFACT_COLORS[tab.atype ?? 'generic'];
 }
 
@@ -52,6 +58,7 @@ function edgeColor(tab: TabItem): string {
 function tabGlyph(tab: TabItem, canvas: boolean): string {
   if (tab.kind === 'flow') return '▦';
   if (tab.kind === 'file') return tab.status ?? '·';
+  if (tab.kind === 'approved-design') return DESIGN_GLYPH;
   return canvas ? '◳' : ARTIFACT_GLYPHS[tab.atype ?? 'generic'];
 }
 
@@ -87,11 +94,12 @@ export function CenterPaneTabStrip({
           const active = tab.id === activeTabId;
           const edge = edgeColor(tab);
           const isArtifact = tab.kind === 'artifact';
+          const isDesign = tab.kind === 'approved-design';
           const canvas = isArtifact && isCanvasArtifact(tab.atype ?? 'generic');
           const ephemeral = isArtifact && !tab.committed;
           const glyph = tabGlyph(tab, canvas);
 
-          const labelColor = active ? (isArtifact ? edge : INK) : FAINT;
+          const labelColor = active ? (isArtifact || isDesign ? edge : INK) : FAINT;
 
           const wrapStyle: React.CSSProperties = {
             display: 'flex',
@@ -119,8 +127,9 @@ export function CenterPaneTabStrip({
             ...(ephemeral ? { fontStyle: 'italic' } : null),
           };
 
-          // Artifact glyph renders inside an 18×18 chip (solid=template, dashed=canvas).
-          const glyphStyle: React.CSSProperties = isArtifact
+          // Artifact / approved-design glyphs render inside an 18×18 chip
+          // (solid=template, dashed=canvas; approved-design is always solid).
+          const glyphStyle: React.CSSProperties = isArtifact || isDesign
             ? {
                 flexShrink: 0,
                 fontSize: '10px',

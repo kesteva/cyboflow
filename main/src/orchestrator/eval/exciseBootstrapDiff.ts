@@ -125,5 +125,21 @@ export function exciseBootstrapDiff(captured: RunGitDiff, paths: readonly string
       filesChanged: Math.max(0, captured.stats.filesChanged - removedFiles),
     },
     changedFiles: captured.changedFiles.filter((file) => !excise.has(file)),
+    // Same base as the un-excised capture — excising files never changes what
+    // the diff was computed against (TASK-211).
+    resolvedBase: captured.resolvedBase,
+    // Filter membership the same way changedFiles is filtered above. Per-group
+    // additions/deletions are NOT recomputed from the excised files (no
+    // per-file breakdown is available in a DiffGroupRollup) — the same
+    // "slightly over-counts, never corrupts" tradeoff this module already makes
+    // for the rung-1 file (see module doc comment).
+    worktree: {
+      entries: captured.worktree.entries.filter((entry) => !excise.has(entry.path)),
+      groups: captured.worktree.groups.map((group) => ({
+        ...group,
+        files: group.files.filter((file) => !excise.has(file)),
+      })),
+      committedUnavailable: captured.worktree.committedUnavailable,
+    },
   };
 }

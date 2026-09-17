@@ -53,10 +53,14 @@ Work through the phases **in order** and do not skip verification.
 5. Confirm all four agent binaries are present (a plain install prunes to host
    arch):
    ```bash
-   ls -d node_modules/@anthropic-ai/claude-agent-sdk-darwin-{arm64,x64} \
-         node_modules/@openai/codex-darwin-{arm64,x64}
+   ls -l node_modules/@anthropic-ai/claude-agent-sdk-darwin-{arm64,x64}/claude \
+         node_modules/@openai/codex-darwin-{arm64,x64}/vendor/*-apple-darwin/bin/codex
    ```
-   If any are missing, run the cross-arch install **with `--force`** (see runbook).
+   Test the **binaries**, never `ls -d` on the package dirs — those are pnpm
+   symlinks that outlive a prune as dangling links and pass the check while the
+   x64 build dies at preflight (0.4.1). If any are missing, run the cross-arch
+   install **with `--force`** (see runbook), then `node node_modules/electron/install.js`
+   — the forced install strips `electron/dist`, which `gen-mac-latest-yml.mjs` needs.
 6. Windows leg prerequisites: `gh auth status` is logged in (dispatching
    `windows.yml` + downloading its artifacts), `osslsigncode` is installed
    (`brew install osslsigncode`), and the repo has the `AZURE_TENANT_ID` /
@@ -88,6 +92,46 @@ echo "Windows gate: https://github.com/kesteva/cyboflow/actions/runs/$RUN"
 path filter — then two runs appear; both must be green, and the dispatched one
 is the cheaper, unit-only run.) Continue with the local gate while it runs;
 collect the verdict at the end of this phase:
+
+**If the Windows job goes red, stop using CI as the debugger.** ~15 min per
+attempt, almost all of it queue + cold install + running 738 files to learn
+about one. Use the Azure VM instead — measured 9/14 at **33 s per targeted run
+vs ~15 min on CI**:
+
+```bash
+az vm start -g cyboflow-wintest-w3 -n cyboflow-win11        # ~40 s
+# one-time per boot (~4 min), as SYSTEM — the interactive user's checkout is invisible:
+#   npm i -g pnpm@10.11.1
+#   git clone https://github.com/kesteva/cyboflow.git C:\cyboflow   (repo is public)
+#   git config --global core.autocrlf false   # CRLF blanks the bundled agent binaries
+#   git fetch origin release-gate/$V --depth 1 && git checkout -f FETCH_HEAD
+#   pnpm install --frozen-lockfile
+az vm run-command invoke -g cyboflow-wintest-w3 -n cyboflow-win11 \
+  --command-id RunPowerShellScript --scripts @vm-test.ps1 \
+  --query 'value[0].message' -o tsv
+```
+
+**DEALLOCATE THE VM AS SOON AS THE WINDOWS WORK IS PROVEN — mandatory, and do
+not defer it to the end of the release** (the remaining macOS builds are
+another hour the box would spend idle and billing):
+
+```bash
+az vm deallocate -g cyboflow-wintest-w3 -n cyboflow-win11
+az vm list -g cyboflow-wintest-w3 -d --query '[].powerState' -o tsv   # must read "VM deallocated"
+```
+
+Verify the power state — do not trust the deallocate call. A D4s_v6 bills for
+every running hour whether or not anything uses it, and shutting Windows down
+from inside does NOT release the compute. Nothing downstream fails if you skip
+this, which is exactly why it gets forgotten.
+
+Once targeted fixes pass, run the **full** suite there (`npx vitest run`,
+~10 min) before pushing: it surfaces the *next* Windows failure immediately
+instead of one CI round later. `run-command` is serialized per VM, so a
+background full run blocks the targeted loop; `az` also buffers output until
+completion, so a running invoke's log stays empty. Push the fixes and let CI
+confirm — a green VM run is strong evidence, not the gate. Full notes:
+`docs/RELEASE-RUNBOOK.md` → "When the Windows job goes red".
 
 ```bash
 gh run watch "$RUN" --exit-status          # exit 0 = Unit tests (Windows) green

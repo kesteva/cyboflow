@@ -159,7 +159,7 @@ describe('cyboflow.agentThread read/simple procedures', () => {
     const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
     const result = await caller.cyboflow.agentThread.sendMessage({ threadId: 'thread-1', text: 'hi' });
     expect(result).toEqual({ ok: true });
-    expect(service.sendMessage).toHaveBeenCalledWith('thread-1', 'hi', undefined);
+    expect(service.sendMessage).toHaveBeenCalledWith('thread-1', 'hi', undefined, undefined);
   });
 
   it('sendMessage forwards an optional contextHint to the service', async () => {
@@ -171,7 +171,68 @@ describe('cyboflow.agentThread read/simple procedures', () => {
       contextHint: 'ctx',
     });
     expect(result).toEqual({ ok: true });
-    expect(service.sendMessage).toHaveBeenCalledWith('thread-1', 'hi', 'ctx');
+    expect(service.sendMessage).toHaveBeenCalledWith('thread-1', 'hi', 'ctx', undefined);
+  });
+
+  // -------------------------------------------------------------------------
+  // Image attachments — the wire schema is the LAST gate before the bytes reach
+  // a provider, so it re-validates what the composer already narrowed.
+  // -------------------------------------------------------------------------
+
+  const PNG_B64 = 'iVBORw0KGgo=';
+
+  it('sendMessage forwards image attachments to the service', async () => {
+    const service = makeService();
+    const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
+    const images = [{ name: 'shot.png', mediaType: 'image/png' as const, base64: PNG_B64 }];
+
+    await caller.cyboflow.agentThread.sendMessage({ threadId: 'thread-1', text: '', images });
+
+    expect(service.sendMessage).toHaveBeenCalledWith('thread-1', '', undefined, images);
+  });
+
+  it('sendMessage rejects more than four images', async () => {
+    const service = makeService();
+    const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
+    const images = Array.from({ length: 5 }, (_, i) => ({
+      name: `shot-${i}.png`,
+      mediaType: 'image/png' as const,
+      base64: PNG_B64,
+    }));
+
+    await expect(
+      caller.cyboflow.agentThread.sendMessage({ threadId: 'thread-1', text: 'hi', images }),
+    ).rejects.toThrow();
+    expect(service.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('sendMessage rejects a media type outside the accepted set', async () => {
+    const service = makeService();
+    const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
+
+    await expect(
+      caller.cyboflow.agentThread.sendMessage({
+        threadId: 'thread-1',
+        text: 'hi',
+        // A real image type the Anthropic image block does not accept.
+        images: [{ name: 'diagram.svg', mediaType: 'image/svg+xml', base64: PNG_B64 }],
+      } as unknown as { threadId: string; text: string }),
+    ).rejects.toThrow();
+    expect(service.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('sendMessage rejects an empty base64 payload', async () => {
+    const service = makeService();
+    const caller = appRouter.createCaller(createContext({ agentThreadService: service }));
+
+    await expect(
+      caller.cyboflow.agentThread.sendMessage({
+        threadId: 'thread-1',
+        text: 'hi',
+        images: [{ name: 'shot.png', mediaType: 'image/png' as const, base64: '' }],
+      }),
+    ).rejects.toThrow();
+    expect(service.sendMessage).not.toHaveBeenCalled();
   });
 
   it('listProposals returns the store rows for the thread', async () => {

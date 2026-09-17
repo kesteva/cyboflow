@@ -35,6 +35,7 @@ import type {
   LaneTriageFailure,
   StepRunResult,
   StepRunner,
+  SystemicPauseVerdict,
   TaskEnqueueResult,
   VisualGateOutcome,
   VisualVerifyGate,
@@ -171,6 +172,8 @@ interface TriageHost {
   consults: LaneTriageFailure[];
   /** The `attempt` of every visual-verification enqueue, in call order. */
   enqueueAttempts: number[];
+  /** Every systemic-park consult, in call order (empty unless `pauses` is set). */
+  pauseCalls: Array<{ stepId: string; error: string | undefined }>;
 }
 
 /**
@@ -185,11 +188,15 @@ function makeTriageHost(opts: {
   visualGate?: VisualVerifyGate;
   deps?: Map<string, string[]>;
   maxConcurrency?: number;
+  /** Wires `awaitSystemicPause`, replaying these verdicts (default 'giveup'). */
+  pauses?: SystemicPauseVerdict[];
 }): TriageHost {
   const driver = makeDriver(opts.items, opts.deps);
   const queue = [...(opts.outcomes ?? [])];
   const consults: LaneTriageFailure[] = [];
   const enqueueAttempts: number[] = [];
+  const pauseQueue = [...(opts.pauses ?? [])];
+  const pauseCalls: Array<{ stepId: string; error: string | undefined }> = [];
   const host: ControllerHost = {
     reportStep: () => undefined,
     async requestHumanGate() {
@@ -211,6 +218,14 @@ function makeTriageHost(opts: {
           },
         }
       : {}),
+    ...(opts.pauses
+      ? {
+          async awaitSystemicPause(s: WorkflowStep, _ctx: ControllerStepContext, error?: string) {
+            pauseCalls.push({ stepId: s.id, error });
+            return pauseQueue.shift() ?? 'giveup';
+          },
+        }
+      : {}),
     ...(opts.triage === false
       ? {}
       : {
@@ -220,7 +235,7 @@ function makeTriageHost(opts: {
           },
         }),
   };
-  return { host, driver, consults, enqueueAttempts };
+  return { host, driver, consults, enqueueAttempts, pauseCalls };
 }
 
 /** A visual gate that replays scripted verdicts (default 'advance'). */
@@ -580,7 +595,7 @@ describe('WorkflowController — autonomous lane rescue', () => {
     expect(consults).toHaveLength(0);
   });
 
-  it('never consults for a lane blocked by a failed PREREQUISITE (markBlocked)', async () => {
+  it('never consults for a lane BLOCKED by a failed prerequisite (markBlocked)', async () => {
     const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
     const runner = makeRunner({ 't1:implement': [{ status: 'failed', error: 'boom' }] });
     const deps = new Map<string, string[]>([['t2', ['t1']]]);
@@ -591,7 +606,9 @@ describe('WorkflowController — autonomous lane rescue', () => {
 
     // Exactly ONE consult — t1's own exhaustion. t2 never reaches a budget.
     expect(consults.map((c) => c.itemId)).toEqual(['t1']);
-    expect(laneStatus(driver.lanes, 't2')).toBe('failed');
+    // …and t2 settles 'blocked' (never started), not 'failed' — it has no defect
+    // to triage, and reporting one would manufacture a second failure.
+    expect(laneStatus(driver.lanes, 't2')).toBe('blocked');
   });
 
   it('never consults for a task-verify OUTPUT-CONTRACT exhaustion', async () => {
@@ -613,6 +630,169 @@ describe('WorkflowController — autonomous lane rescue', () => {
     await new WorkflowController(runner, host).run('r', d);
 
     expect(consults).toHaveLength(0);
+    expect(laneStatus(driver.lanes, 't1')).toBe('failed');
+  });
+
+  // ── Systemic triage: the consult itself died on the environment ───────────
+
+  /** The verbatim 2026-09-05 sprint-2 cascade text the supervisor's own turn hit. */
+  const LIMIT = "You've hit your session limit · resets 6pm (America/Los_Angeles)";
+
+  /** Every 'failed' status this driver ever persisted, in write order. */
+  function failedWrites(lanes: LaneWrite[]): string[] {
+    return lanes.filter((l) => l.status === 'failed').map((l) => l.itemId);
+  }
+
+  it('PARKS the fan-out (never fails the lane) when lane triage dies on a systemic condition', async () => {
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }, { id: 'verify' }])])]);
+    // `implement` declares no loopback, so its first failure IS exhaustion and
+    // the lane consults triage — whose own SDK turn hits the session limit.
+    const runner = makeRunner({ implement: [{ status: 'failed', error: 'tsc: 4 errors' }] });
+    const { host, driver, consults, pauseCalls } = makeTriageHost({
+      items: ['t1'],
+      outcomes: [{ kind: 'systemic', error: LIMIT }],
+      pauses: ['retry'],
+    });
+
+    const result = await new WorkflowController(runner, host).run('r', d);
+
+    expect(result.outcome).toBe('completed');
+    expect(consults).toHaveLength(1);
+    // The fan-out parked on the triage error — not on the lane's own failure text.
+    expect(pauseCalls).toEqual([{ stepId: 'execute', error: LIMIT }]);
+    // The environment is not this task's defect: the lane was NEVER written failed…
+    expect(failedWrites(driver.lanes)).toEqual([]);
+    // …and it re-dispatched after 'retry', completing on the second traversal.
+    expect(laneStatus(driver.lanes, 't1')).toBe('integrated');
+    expect(runner.calls.filter((c) => c.id === 'implement')).toHaveLength(2);
+  });
+
+  it('LATCHES the systemic verdict for the whole park epoch: five failing lanes, one pause, no lane failed', async () => {
+    // Regression: MONITOR_RUN_RESCUE_CAP is 4, so without the latch five concurrent
+    // lanes make four doomed consults against a dead quota and the fifth lane —
+    // refused a consult because the budget is "spent" — settles 'failed' on an
+    // environment condition no task caused.
+    const items = ['t1', 't2', 't3', 't4', 't5'];
+    const d = def([
+      phase('p', [fanStep('execute', [{ id: 'implement' }, { id: 'review' }, { id: 'verify' }], 5)]),
+    ]);
+    // t1 fails FIRST (at step 0) so its consult resolves while the siblings are
+    // still working; they then fail two steps later and hit the latch.
+    const runner = makeRunner({
+      't1:implement': [{ status: 'failed', error: 'tsc: 4 errors' }],
+      ...Object.fromEntries(
+        items.slice(1).map((id) => [`${id}:verify`, [{ status: 'failed', error: 'tsc: 4 errors' }]]),
+      ),
+    });
+    const { host, driver, consults, pauseCalls } = makeTriageHost({
+      items,
+      // ONE systemic outcome: any further consult would drain to `give_up` and
+      // fail its lane, which is exactly what the latch must prevent.
+      outcomes: [{ kind: 'systemic', error: LIMIT }],
+      pauses: ['retry'],
+      maxConcurrency: 5,
+    });
+
+    const result = await new WorkflowController(runner, host).run('r', d);
+
+    expect(result.outcome).toBe('completed');
+    // The siblings park on the latch instead of consulting (and instead of
+    // burning the run's rescue budget on a monitor that cannot answer).
+    expect(consults.length).toBeLessThanOrEqual(2);
+    // ONE park for the whole epoch, carrying the triage error.
+    expect(pauseCalls).toEqual([{ stepId: 'execute', error: LIMIT }]);
+    // No lane blamed for the environment — including the one past the cap.
+    expect(failedWrites(driver.lanes)).toEqual([]);
+    for (const id of items) expect(laneStatus(driver.lanes, id)).toBe('integrated');
+  });
+
+  it('SERIALIZES consults so five lanes failing BEFORE the first consult resolves still park as one', async () => {
+    // Regression (Codex F1): the latch is read before the consult, and lanes
+    // fail concurrently — five lanes that all fail at step 0 pass the latch
+    // check together. Unserialized, four consults reserve MONITOR_RUN_RESCUE_CAP
+    // and the fifth is refused on a "spent" budget and settles 'failed'.
+    // Corroboration cannot rescue it either: every lane fails with DIFFERENT
+    // text, and the systemic lanes carry the monitor's error, not the step's.
+    const items = ['t1', 't2', 't3', 't4', 't5'];
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }, { id: 'verify' }], 5)])]);
+    const runner = makeRunner(
+      Object.fromEntries(items.map((id, n) => [`${id}:implement`, [{ status: 'failed', error: `tsc: ${n + 1} errors` }]])),
+    );
+    const { host, driver, consults, pauseCalls } = makeTriageHost({
+      items,
+      outcomes: [{ kind: 'systemic', error: LIMIT }],
+      pauses: ['retry'],
+      maxConcurrency: 5,
+    });
+
+    const result = await new WorkflowController(runner, host).run('r', d);
+
+    expect(result.outcome).toBe('completed');
+    // Exactly ONE consult: the four that queued behind it re-read the latch.
+    expect(consults).toHaveLength(1);
+    expect(pauseCalls).toEqual([{ stepId: 'execute', error: LIMIT }]);
+    expect(failedWrites(driver.lanes)).toEqual([]);
+    for (const id of items) expect(laneStatus(driver.lanes, id)).toBe('integrated');
+  });
+
+  it('CLEARS the latch when a park ends WITHOUT a resume: a later unrelated failure is still consulted', async () => {
+    // The park arm is skipped entirely when there is no `awaitSystemicPause`
+    // seam (and equally when the pause budget is spent, or give-up has latched):
+    // the parked lanes fall straight through to 'failed' with no resume event.
+    // If the triage latch survived that, every later lane in the run would park
+    // un-consulted and then fail — a 15-lane sprint losing lane triage for lanes
+    // 3-15 because lane 2's consult hit a transient quota error once.
+    const d = def([phase('p', [fanStep('execute', [{ id: 'implement' }])])]);
+    const runner = makeRunner({
+      't1:implement': [{ status: 'failed', error: 'tsc: 4 errors' }],
+      't2:implement': [{ status: 'failed', error: 'eslint: 2 problems' }],
+    });
+    // No `pauses` ⇒ no awaitSystemicPause seam at all. t1's consult dies
+    // systemically; t2 then fails for an entirely unrelated reason.
+    const { host, driver, consults } = makeTriageHost({
+      items: ['t1', 't2'],
+      outcomes: [{ kind: 'systemic', error: LIMIT }, { kind: 'give_up' }],
+    });
+
+    const result = await new WorkflowController(runner, host).run('r', d);
+
+    expect(result.outcome).toBe('completed');
+    // TWO consults: t1's (which died) and t2's, which the cleared latch allowed.
+    expect(consults).toHaveLength(2);
+    expect(consults.map((c) => c.itemId)).toEqual(['t1', 't2']);
+    // Both settled failed — t1 through the seam-less park, t2 through its consult.
+    expect(failedWrites(driver.lanes)).toEqual(['t1', 't2']);
+  });
+
+  it('treats a systemic triage verdict at the MERGE GATE exactly like a give_up', async () => {
+    // The gate already PERSISTED this lane 'failed' and the verification request
+    // it just resolved owns the lane's current attempt number, so a park would
+    // re-drive it at attempt 1 and dedup onto that terminal request. The lane
+    // settles failed there; only the non-gate arms park.
+    const d = def([
+      phase('p', [
+        fanStep('execute', [
+          { id: 'implement' },
+          { id: 'task-verify' },
+          { id: 'visual-verify', loopback: 'implement' },
+        ]),
+      ]),
+    ]);
+    const runner = makeRunner({
+      'task-verify': [{ status: 'ok', resultText: verifyWithFence() }],
+    });
+    const { host, driver, consults, pauseCalls } = makeTriageHost({
+      items: ['t1'],
+      outcomes: [{ kind: 'systemic', error: LIMIT }],
+      pauses: ['retry'],
+      visualGate: makeVisualGate([{ kind: 'failed' }]),
+    });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(consults).toHaveLength(1);
+    expect(consults[0]).toMatchObject({ failureKind: 'merge-gate' });
+    expect(pauseCalls).toEqual([]);
     expect(laneStatus(driver.lanes, 't1')).toBe('failed');
   });
 

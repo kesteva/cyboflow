@@ -928,7 +928,7 @@ describe('WorkflowController', () => {
       expect(new Set(seen.map((s) => s.spawnKey))).toEqual(new Set(['run-xyz:t1', 'run-xyz:t2']));
     });
 
-    it('settles every lane to canceled (no integration) when the signal aborts mid-wave', async () => {
+    it('settles every lane to canceled (no integration) when the signal aborts mid-flight', async () => {
       const d = def([phase('p1', [fanStep('execute', ['implement', 'verify'])])]);
       const driver = makeFanOutDriver(['t1', 't2']);
       const ac = new AbortController();
@@ -949,7 +949,7 @@ describe('WorkflowController', () => {
       expect(driver.lanes.some((l) => l.status === 'integrated')).toBe(false);
     });
 
-    it('respects the SPRINT_BATCH_CAP DEFAULT concurrency cap when the step declares no maxConcurrency (items run in waves)', async () => {
+    it('respects the SPRINT_BATCH_CAP DEFAULT concurrency cap when the step declares no maxConcurrency (surplus items wait for a free slot)', async () => {
       // More items than the cap → at most SPRINT_BATCH_CAP run concurrently.
       const items = Array.from({ length: SPRINT_BATCH_CAP + 3 }, (_, k) => `t${k}`);
       const d = def([phase('p1', [fanStep('execute', ['implement'])])]); // no maxConcurrency ⇒ default
@@ -2108,9 +2108,9 @@ describe('WorkflowController', () => {
       expect(host.gateCalls).toEqual(['human-review']);
     });
 
-    // ── DAG-aware wave scheduling (driver.dependencies) ─────────────────────────
+    // ── DAG-aware pool scheduling (driver.dependencies) ─────────────────────────
     it('dispatches a task only after its blocking prerequisite integrates', async () => {
-      // t2 and t3 both depend on t1 ⇒ wave 1 = [t1], wave 2 = [t2, t3].
+      // t2 and t3 both depend on t1 ⇒ t1 dispatches alone; t2 and t3 only once it integrates.
       const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
       const base = makeFanOutDriver(['t1', 't2', 't3']);
       const driver: FanOutDriver = {
@@ -2141,7 +2141,7 @@ describe('WorkflowController', () => {
       expect(new Set(integrated)).toEqual(new Set(['t1', 't2', 't3']));
     });
 
-    it('blocks (fails) a dependent task when its prerequisite fails — never dispatching it', async () => {
+    it("settles a dependent task 'blocked' (never 'failed') when its prerequisite fails", async () => {
       const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
       const base = makeFanOutDriver(['t1', 't2']);
       const driver: FanOutDriver = { ...base, dependencies: () => new Map([['t2', ['t1']]]) };
@@ -2159,11 +2159,129 @@ describe('WorkflowController', () => {
       expect(result.outcome).toBe('completed'); // a failed/blocked lane is non-terminal
       // t1 ran (and failed); t2 was NEVER dispatched (blocked by t1).
       expect(order).toEqual(['t1']);
-      const failedLanes = base.lanes.filter((l) => l.status === 'failed').map((l) => l.itemId);
-      expect(new Set(failedLanes)).toEqual(new Set(['t1', 't2']));
+      // Only the lane that actually ran is 'failed'. t2 never started, so it is
+      // 'blocked' — one real failure must not read as two.
+      expect(base.lanes.filter((l) => l.status === 'failed').map((l) => l.itemId)).toEqual(['t1']);
+      expect(base.lanes.filter((l) => l.status === 'blocked').map((l) => l.itemId)).toEqual(['t2']);
+      // …and the prune is DEFERRED: t2 is written only once nothing is
+      // dispatchable, i.e. after t1 settled and the pool drained, never during the dispatch pass.
+      const t2Write = base.lanes.findIndex((l) => l.itemId === 't2' && l.status !== undefined);
+      const t1Failed = base.lanes.findIndex((l) => l.itemId === 't1' && l.status === 'failed');
+      expect(t2Write).toBeGreaterThan(t1Failed);
     });
 
-    it('fails tasks with unresolvable (cyclic) dependencies instead of spinning', async () => {
+    it('re-runs a SELF-looping first step at attempt 2 and integrates the lane', async () => {
+      // The built-in sprint/ship chains declare `loopback: 'implement'` on
+      // `implement` itself. Pin the controller behavior that makes that
+      // declaration worth having: a first-step failure is retried, not fatal.
+      const selfLoop = step({
+        id: 'execute',
+        agent: 'orchestrate',
+        fanOut: {
+          over: 'tasks',
+          inner: [{ id: 'implement', agent: 'implement', loopback: 'implement' }],
+        },
+      });
+      const d = def([phase('p1', [selfLoop])]);
+      const base = makeFanOutDriver(['t1']);
+      const attempts: number[] = [];
+      let calls = 0;
+      const runner: StepRunner = {
+        async runStep(_s, ctx) {
+          attempts.push(ctx.attempt);
+          calls += 1;
+          return calls === 1 ? { status: 'failed', error: 'spawn flaked' } : { status: 'ok' };
+        },
+      };
+
+      const result = await new WorkflowController(runner, makeFanHost(base)).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      expect(attempts).toEqual([1, 2]);
+      expect(base.lanes.some((l) => l.status === 'failed')).toBe(false);
+      expect(base.lanes.filter((l) => l.status === 'integrated').map((l) => l.itemId)).toEqual(['t1']);
+    });
+
+    it('still fails a SELF-looping first step once the lane attempt cap is spent', async () => {
+      const selfLoop = step({
+        id: 'execute',
+        agent: 'orchestrate',
+        fanOut: {
+          over: 'tasks',
+          inner: [{ id: 'implement', agent: 'implement', loopback: 'implement' }],
+        },
+      });
+      const d = def([phase('p1', [selfLoop])]);
+      const base = makeFanOutDriver(['t1']);
+      const attempts: number[] = [];
+      const runner: StepRunner = {
+        async runStep(_s, ctx) {
+          attempts.push(ctx.attempt);
+          return { status: 'failed', error: 'genuinely broken' };
+        },
+      };
+
+      await new WorkflowController(runner, makeFanHost(base)).run('r', d);
+
+      // The self-loopback grants retries up to the cap, then the lane settles.
+      expect(attempts).toEqual([1, 2, 3]);
+      expect(base.lanes.filter((l) => l.status === 'failed').map((l) => l.itemId)).toEqual(['t1']);
+    });
+
+    it('keeps dispatching independent lanes before pruning the ones a failure stranded', async () => {
+      // A→B plus an independent C, serialized (cap 1). The old readiness pass
+      // settled B the instant A failed; the deferred prune must let C run first,
+      // so an operator still has the whole fan-out's worth of time to rewind A.
+      const d = def([phase('p1', [fanStep('execute', ['implement'], 1)])]);
+      const base = makeFanOutDriver(['t1', 't2', 't3']);
+      const driver: FanOutDriver = { ...base, dependencies: () => new Map([['t2', ['t1']]]) };
+      const order: string[] = [];
+      const runner: StepRunner = {
+        async runStep(_s, ctx) {
+          if (ctx.item) order.push(ctx.item.id);
+          return ctx.item?.id === 't1' ? { status: 'failed', error: 'boom' } : { status: 'ok' };
+        },
+      };
+      const host = makeFanHost(driver);
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      // t3 ran even though t1 had already failed; t2 never did.
+      expect(order).toEqual(['t1', 't3']);
+      expect(base.lanes.filter((l) => l.status === 'blocked').map((l) => l.itemId)).toEqual(['t2']);
+      const t3Integrated = base.lanes.findIndex((l) => l.itemId === 't3' && l.status === 'integrated');
+      const t2Blocked = base.lanes.findIndex((l) => l.itemId === 't2' && l.status === 'blocked');
+      expect(t3Integrated).toBeGreaterThanOrEqual(0);
+      expect(t2Blocked).toBeGreaterThan(t3Integrated);
+    });
+
+    it('names the culprit transitively down a chain: A fails, B blocked by A, C blocked by B', async () => {
+      const d = def([phase('p1', [fanStep('execute', ['implement'], 1)])]);
+      const base = makeFanOutDriver(['t1', 't2', 't3']);
+      const driver: FanOutDriver = {
+        ...base,
+        dependencies: () =>
+          new Map([
+            ['t2', ['t1']],
+            ['t3', ['t2']],
+          ]),
+      };
+      const runner: StepRunner = {
+        async runStep(_s, ctx) {
+          return ctx.item?.id === 't1' ? { status: 'failed', error: 'boom' } : { status: 'ok' };
+        },
+      };
+      const host = makeFanHost(driver);
+
+      await new WorkflowController(runner, host).run('r', d);
+
+      // The whole tail is 'blocked' — a cycle diagnosis here would be a lie.
+      expect(base.lanes.filter((l) => l.status === 'blocked').map((l) => l.itemId)).toEqual(['t2', 't3']);
+      expect(base.lanes.filter((l) => l.status === 'failed').map((l) => l.itemId)).toEqual(['t1']);
+    });
+
+    it('blocks tasks with unresolvable (cyclic) dependencies instead of spinning', async () => {
       const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
       const base = makeFanOutDriver(['t1', 't2']);
       const driver: FanOutDriver = {
@@ -2181,11 +2299,13 @@ describe('WorkflowController', () => {
 
       expect(result.outcome).toBe('completed');
       expect(runner.calls.length).toBe(0); // neither task could ever run
-      const failedLanes = base.lanes.filter((l) => l.status === 'failed').map((l) => l.itemId);
-      expect(new Set(failedLanes)).toEqual(new Set(['t1', 't2']));
+      // Neither lane ever started, so neither is 'failed'.
+      const blockedLanes = base.lanes.filter((l) => l.status === 'blocked').map((l) => l.itemId);
+      expect(new Set(blockedLanes)).toEqual(new Set(['t1', 't2']));
+      expect(base.lanes.some((l) => l.status === 'failed')).toBe(false);
     });
 
-    it('separates overlapping expected files into later waves while disjoint tasks still run concurrently', async () => {
+    it('holds an overlapping lane out of the pool until the file\'s holder settles, while disjoint tasks run concurrently', async () => {
       const d = def([phase('p1', [fanStep('execute', ['implement'], 3)])]);
       const base = makeFanOutDriver(['t1', 't2', 't3']);
       const expectedFiles = new Map([
@@ -2219,9 +2339,159 @@ describe('WorkflowController', () => {
 
       expect(result.outcome).toBe('completed');
       expect(overlapObserved).toBe(false);
-      // t1 and t3 share the first wave, proving the conflict guard did not make
-      // the entire fan-out serial merely because t2 overlaps t1.
+      // t1 and t3 run together, proving the conflict guard did not make the
+      // entire fan-out serial merely because t2 overlaps t1.
       expect(maxInFlight).toBe(2);
+    });
+
+    // ── rolling dispatch pool (no wave barrier) ───────────────────────────────
+    describe('rolling dispatch pool', () => {
+      /** A promise plus its resolver, so a test can hold one lane open on purpose. */
+      function gate(): { wait: Promise<void>; open: () => void } {
+        let open: () => void = () => undefined;
+        const wait = new Promise<void>((resolve) => {
+          open = resolve;
+        });
+        return { wait, open };
+      }
+
+      /**
+       * Hold until `g` opens, but never longer than `ms` — so a REGRESSION (the
+       * lane that was supposed to open the gate never dispatching) fails the
+       * assertion instead of hanging the suite.
+       */
+      const holdUntil = (g: { wait: Promise<void> }, ms = 40): Promise<unknown> =>
+        Promise.race([g.wait, new Promise((resolve) => setTimeout(resolve, ms))]);
+
+      it('dispatches a dependent the MOMENT its prerequisite integrates, without waiting for the slowest sibling', async () => {
+        // t3 depends on t1; t2 is the slow lane and depends on nothing. The wave
+        // barrier made t3 wait for t1 AND t2 — the pool only owes it t1.
+        const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+        const base = makeFanOutDriver(['t1', 't2', 't3']);
+        const driver: FanOutDriver = { ...base, dependencies: () => new Map([['t3', ['t1']]]) };
+        const slow = gate();
+        let slowFinished = false;
+        let dependentStartedWhileSlowRan = false;
+        const runner: StepRunner = {
+          async runStep(_s, ctx) {
+            const id = ctx.item?.id;
+            if (id === 't2') {
+              await holdUntil(slow);
+              slowFinished = true;
+              return { status: 'ok' };
+            }
+            if (id === 't3') {
+              dependentStartedWhileSlowRan = !slowFinished;
+              slow.open();
+            }
+            return { status: 'ok' };
+          },
+        };
+
+        const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        // The whole point of the pool: t1 freed a slot and t3 took it immediately.
+        expect(dependentStartedWhileSlowRan).toBe(true);
+        const integrated = base.lanes.filter((l) => l.status === 'integrated').map((l) => l.itemId);
+        expect(new Set(integrated)).toEqual(new Set(['t1', 't2', 't3']));
+      });
+
+      it("releases a lane's expected-file claim the instant it settles, not at a batch boundary", async () => {
+        // t1 & t2 both touch src/shared.ts; t3 is disjoint and slow. The wave loop
+        // pushed t2 into the NEXT wave — i.e. behind t3, which it never conflicted
+        // with. Here the claim is held by the live lane and freed on its settle.
+        const d = def([phase('p1', [fanStep('execute', ['implement'], 3)])]);
+        const base = makeFanOutDriver(['t1', 't2', 't3']);
+        const expectedFiles = new Map([
+          ['t1', ['src/shared.ts']],
+          ['t2', ['src/shared.ts']],
+          ['t3', ['src/disjoint.ts']],
+        ]);
+        const driver: FanOutDriver = { ...base, expectedFiles: () => expectedFiles };
+        const slow = gate();
+        const active = new Set<string>();
+        let overlapObserved = false;
+        let slowFinished = false;
+        let blockedLaneStartedWhileSlowRan = false;
+        const runner: StepRunner = {
+          async runStep(_s, ctx) {
+            const id = ctx.item?.id;
+            if (id === undefined) return { status: 'ok' };
+            const files = expectedFiles.get(id) ?? [];
+            for (const other of active) {
+              const otherFiles = expectedFiles.get(other) ?? [];
+              if (files.some((file) => otherFiles.includes(file))) overlapObserved = true;
+            }
+            active.add(id);
+            if (id === 't3') {
+              await holdUntil(slow);
+              slowFinished = true;
+            }
+            if (id === 't2') {
+              blockedLaneStartedWhileSlowRan = !slowFinished;
+              slow.open();
+            }
+            active.delete(id);
+            return { status: 'ok' };
+          },
+        };
+
+        const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        // The exclusion is still real: t1 and t2 never overlapped on shared.ts.
+        expect(overlapObserved).toBe(false);
+        // …but t2 started as soon as t1 let the file go, not after t3 finished.
+        expect(blockedLaneStartedWhileSlowRan).toBe(true);
+      });
+
+      it('never prunes a lane whose prerequisite is STILL IN FLIGHT', async () => {
+        // Nothing is dispatchable the moment t3 settles — t2 waits on the slow t1
+        // — but t1 is live and goes on to integrate. A prune that fires on
+        // "nothing ready" alone would settle t2 'blocked' on a prerequisite that
+        // succeeds, and name it a dependency cycle.
+        const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+        const base = makeFanOutDriver(['t1', 't2', 't3']);
+        const driver: FanOutDriver = { ...base, dependencies: () => new Map([['t2', ['t1']]]) };
+        const slow = gate();
+        const runner: StepRunner = {
+          async runStep(_s, ctx) {
+            const id = ctx.item?.id;
+            if (id === 't1') await holdUntil(slow);
+            if (id === 't3') slow.open();
+            return { status: 'ok' };
+          },
+        };
+
+        const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(base.lanes.some((l) => l.status === 'blocked')).toBe(false);
+        const integrated = base.lanes.filter((l) => l.status === 'integrated').map((l) => l.itemId);
+        expect(new Set(integrated)).toEqual(new Set(['t1', 't2', 't3']));
+      });
+
+      it("fails ONLY the throwing lane when a lane's walk throws outright", async () => {
+        // The wave loop awaited every lane through one Promise.all, so a throw
+        // rejected the whole call: siblings were abandoned mid-walk and every
+        // held write was lost. Each lane now carries its own rejection guard.
+        const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+        const driver = makeFanOutDriver(['t1', 't2', 't3']);
+        const runner: StepRunner = {
+          async runStep(_s, ctx) {
+            if (ctx.item?.id === 't1') throw new Error('runner exploded');
+            return { status: 'ok' };
+          },
+        };
+
+        const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(driver.lanes.filter((l) => l.status === 'failed').map((l) => l.itemId)).toEqual(['t1']);
+        const integrated = driver.lanes.filter((l) => l.status === 'integrated').map((l) => l.itemId);
+        expect(new Set(integrated)).toEqual(new Set(['t2', 't3']));
+      });
     });
 
     // ── operator skip of a fan-out INNER step (RunDirectives) ─────────────────
@@ -2253,10 +2523,10 @@ describe('WorkflowController', () => {
       }
     });
 
-    // ── live fan-out RE-RESOLUTION at wave boundaries (add/remove enabler) ─────
+    // ── live fan-out RE-RESOLUTION at every pool iteration (add/remove enabler) ─
     describe('live re-resolution', () => {
       /**
-       * A FanOutDriver whose resolved item set is MUTABLE between waves (via
+       * A FanOutDriver whose resolved item set is MUTABLE mid-run (via
        * setItems) — models add_task/remove_task on the batch mid-run. Records the
        * lane writes like makeFanOutDriver. Optional static `dependencies`.
        */
@@ -2287,9 +2557,9 @@ describe('WorkflowController', () => {
       ): Set<string> =>
         new Set(lanes.filter((l) => l.status === 'integrated').map((l) => l.itemId));
 
-      it('produces identical waves for a STATIC batch (re-resolution is a no-op)', async () => {
-        // Sequential deps force one lane per wave, so re-resolution runs between
-        // every wave — yet with no mutation the outcome is byte-identical.
+      it('produces an identical dispatch order for a STATIC batch (re-resolution is a no-op)', async () => {
+        // Sequential deps force one lane at a time, so re-resolution runs between
+        // every dispatch — yet with no mutation the outcome is byte-identical.
         const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
         const deps = new Map([
           ['t2', ['t1']],
@@ -2311,8 +2581,8 @@ describe('WorkflowController', () => {
         expect(integratedOf(driver.lanes)).toEqual(new Set(['t1', 't2', 't3']));
       });
 
-      it('picks up a lane ADDED between waves and dispatches it in a later wave', async () => {
-        // t2 depends on t1 ⇒ wave 1 = [t1]. While t1 runs, the operator adds t3.
+      it('picks up a lane ADDED mid-run and dispatches it at the next free slot', async () => {
+        // t2 depends on t1, so t1 dispatches alone. While t1 runs, the operator adds t3.
         const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
         const driver = makeMutableDriver(['t1', 't2'], new Map([['t2', ['t1']]]));
         const order: string[] = [];
@@ -2334,9 +2604,9 @@ describe('WorkflowController', () => {
         expect(integratedOf(driver.lanes)).toEqual(new Set(['t1', 't2', 't3']));
       });
 
-      it('drops a QUEUED lane removed between waves — it is never dispatched', async () => {
-        // t2 & t3 depend on t1 ⇒ wave 1 = [t1], wave 2 = [t2, t3]. While t1 runs,
-        // the operator removes the still-queued t3 before it is ever dispatched.
+      it('drops a QUEUED lane removed mid-run — it is never dispatched', async () => {
+        // t2 & t3 depend on t1, so t1 dispatches alone and t2/t3 follow it. While
+        // t1 runs, the operator removes the still-queued t3 before it is dispatched.
         const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
         const driver = makeMutableDriver(
           ['t1', 't2', 't3'],
@@ -2366,8 +2636,8 @@ describe('WorkflowController', () => {
       });
 
       it('never re-dispatches an already-dispatched lane still present in the re-resolved set', async () => {
-        // t2 depends on t1 ⇒ two waves; t1 stays in the (naive) resolved set across
-        // both, yet the controller's own settled-tracking prevents a re-dispatch.
+        // t2 depends on t1 ⇒ two dispatch rounds; t1 stays in the (naive) resolved
+        // set across both, yet the controller's settled-tracking prevents a re-dispatch.
         const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
         const driver = makeMutableDriver(['t1', 't2'], new Map([['t2', ['t1']]]));
         const counts = new Map<string, number>();
@@ -2869,5 +3139,150 @@ describe('WorkflowController shouldSkipHumanGate (optional human gates)', () => 
 
     expect(result.outcome).toBe('completed');
     expect(host.gateCalls).toEqual(['approve-design']);
+  });
+});
+
+describe('WorkflowController — gate revision threading', () => {
+  /**
+   * A design phase shaped like Planner's refine phase: a spec step, a design step,
+   * then a gate that loops back to the spec step.
+   */
+  function reviseDef(): WorkflowDefinition {
+    return def([
+      phase('refine', [
+        step({ id: 'expand-spec' }),
+        step({ id: 'ui-prototype' }),
+        step({ id: 'approve-design', agent: 'human', human: true, loopback: 'expand-spec' }),
+      ]),
+    ]);
+  }
+
+  /** Records the gateRevision each step turn actually received. */
+  function recordingRunner(): StepRunner & {
+    seen: Array<{ id: string; gateRevision?: { gateStepId: string; note?: string } }>;
+  } {
+    const seen: Array<{ id: string; gateRevision?: { gateStepId: string; note?: string } }> = [];
+    return {
+      seen,
+      async runStep(s, ctx) {
+        seen.push({
+          id: s.id,
+          ...(ctx.gateRevision ? { gateRevision: ctx.gateRevision } : {}),
+        });
+        return { status: 'ok' };
+      },
+    };
+  }
+
+  it("threads the human's note into every step the gate's loopback re-drives", async () => {
+    const runner = recordingRunner();
+    const base = makeHost({ 'approve-design': ['revise', 'approve'] });
+    const host: ControllerHost = {
+      ...base,
+      readGateResolutionNote: (stepId) =>
+        stepId === 'approve-design' ? 'the spend screen has no way back to Home' : undefined,
+    };
+
+    const result = await new WorkflowController(runner, host).run('run-rev', reviseDef());
+    expect(result.outcome).toBe('completed');
+
+    // First pass has no revision; the re-run of BOTH steps carries it, because the
+    // note describes what the whole re-run must do differently.
+    expect(runner.seen.map((s) => s.id)).toEqual([
+      'expand-spec',
+      'ui-prototype',
+      'expand-spec',
+      'ui-prototype',
+    ]);
+    expect(runner.seen[0].gateRevision).toBeUndefined();
+    expect(runner.seen[1].gateRevision).toBeUndefined();
+    for (const turn of runner.seen.slice(2)) {
+      expect(turn.gateRevision).toEqual({
+        gateStepId: 'approve-design',
+        note: 'the spend screen has no way back to Home',
+      });
+    }
+  });
+
+  it('re-presents the gate after the loop and clears the revision once it is answered', async () => {
+    // Two revisions in a row, with different notes: the second round must carry the
+    // SECOND note, never a stale first one, and an approve must leave nothing armed.
+    const runner = recordingRunner();
+    const notes = ['first note', 'second note'];
+    const base = makeHost({ 'approve-design': ['revise', 'revise', 'approve'] });
+    const host: ControllerHost = {
+      ...base,
+      readGateResolutionNote: () => notes.shift(),
+    };
+
+    const result = await new WorkflowController(runner, host).run('run-rev2', reviseDef());
+    expect(result.outcome).toBe('completed');
+    // The gate opened three times: once per round plus the final approve.
+    expect(base.gateCalls).toEqual(['approve-design', 'approve-design', 'approve-design']);
+    expect(runner.seen.map((s) => s.gateRevision?.note)).toEqual([
+      undefined,
+      undefined,
+      'first note',
+      'first note',
+      'second note',
+      'second note',
+    ]);
+  });
+
+  it('arms nothing when the gate has no loopback target, and survives a note read that throws', async () => {
+    // A targetless revise RE-PRESENTS the gate rather than re-running anything, so
+    // there is no step to hand feedback to; and a throwing host seam must degrade
+    // to "no note" rather than aborting a walk that is mid-loopback.
+    const noTarget = def([
+      phase('p', [step({ id: 'a' }), step({ id: 'gate', agent: 'human', human: true })]),
+    ]);
+    const runner = recordingRunner();
+    const base = makeHost({ gate: ['revise', 'approve'] });
+    let consulted = 0;
+    const host: ControllerHost = {
+      ...base,
+      readGateResolutionNote: () => {
+        consulted += 1;
+        throw new Error('db read failed');
+      },
+    };
+
+    const result = await new WorkflowController(runner, host).run('run-rev3', noTarget);
+    expect(result.outcome).toBe('completed');
+    // 'a' ran once — the targetless revise re-presented the gate at the same index.
+    expect(runner.seen.map((s) => s.id)).toEqual(['a']);
+    expect(runner.seen[0].gateRevision).toBeUndefined();
+    // Targetless ⇒ the seam is never consulted at all.
+    expect(consulted).toBe(0);
+  });
+
+  it('leaves the fan-out lane path untouched', async () => {
+    // Lanes carry their own per-lane channels (laneGuidance / loopbackFeedback);
+    // a run-level gate revision must never leak into an inner lane step.
+    const fanDef = def([
+      phase('exec', [
+        step({
+          id: 'execute-tasks',
+          agent: 'orchestrate',
+          fanOut: {
+            over: 'tasks',
+            maxConcurrency: 1,
+            inner: [{ id: 'implement', agent: 'implement', loopback: 'implement' }],
+          },
+        }),
+      ]),
+    ]);
+    const runner = recordingRunner();
+    const host = makeHost();
+    host.fanOut = { resolveItems: () => ['TASK-1', 'TASK-2'], driveLane: () => {} };
+
+    const result = await new WorkflowController(runner, host).run('run-fan', fanDef);
+    expect(result.outcome).toBe('completed');
+    // The fan-out really ran (one inner turn per lane), and no lane turn carried a
+    // run-level gate revision — lanes have their own per-lane channels.
+    expect(runner.seen.map((s) => s.id)).toEqual(['implement', 'implement']);
+    for (const turn of runner.seen) {
+      expect(turn.gateRevision).toBeUndefined();
+    }
   });
 });

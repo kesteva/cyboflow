@@ -1,0 +1,32 @@
+-- Migration 134: per-project SOLUTION THOROUGHNESS — how finished the software
+-- this project is building has to be.
+--
+-- WHY. Launch's interview now asks, as its FIRST dimension, how thorough the
+-- solution must be: 'prototype' (throwaway, prove the idea), 'v1' (working
+-- software one person relies on), 'production' (others depend on it — hardening,
+-- recovery, data durability). The answer prunes the rest of the interview, sizes
+-- the architecture/tasks/review contracts the flow steps render, and defaults the
+-- session wizard's tuning level (prototype→efficient, v1→standard,
+-- production→thorough). It is a property of the PROJECT, not of one run, so it
+-- outlives the Launch run that established it and every later Sprint/Ship run
+-- reads it back.
+--
+-- NULL = never established (no Launch run has cleared its approve-brief gate for
+-- this project, or its brief carried no `THOROUGHNESS:` flag) — the safe default,
+-- byte-identical to today's behaviour: no `# Solution thoroughness` section is
+-- rendered into any step prompt and the wizard keeps defaulting from the
+-- workflow's stored tuning level.
+--
+-- Shape follows the 127_project_permission_trust precedent verbatim: a single
+-- idempotent `ALTER TABLE ... ADD COLUMN` with a NULL-tolerant CHECK. The runner
+-- tolerates `duplicate column name` per statement, so a ledger-wiped replay
+-- converges. Mirrored in main/src/database/models.ts (`Project`) and
+-- frontend/src/types/project.ts in the same change.
+--
+-- SCHEMA PARITY: none required. main/src/database/schema.sql holds only the five
+-- Crystal-baseline tables (sessions, session_outputs, conversation_messages,
+-- workflows, workflow_runs) — `projects` is migration-only there, exactly as it
+-- was for 127's permission_trust.
+ALTER TABLE projects
+  ADD COLUMN solution_thoroughness TEXT
+  CHECK (solution_thoroughness IS NULL OR solution_thoroughness IN ('prototype', 'v1', 'production'));

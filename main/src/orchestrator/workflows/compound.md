@@ -95,7 +95,11 @@ from plugin state files:
   the listed findings, in the listed order, and **skip the open-ended git-mining
   of Phase 1** (`load-sprint` / `extract`). The seeded branch below replaces
   Phase 1's discovery work; the human did the discovery. When the section is
-  absent, run the unseeded Phase 1 git-mining path as the fallback.
+  absent, run the unseeded Phase 1 git-mining path as the fallback. The block is
+  delivered under a top-level `# Selected findings` heading on BOTH execution
+  planes — prepended to the main prompt on the orchestrated plane, and rendered
+  into each scoped step prompt on the programmatic one, where there is no main
+  prompt to prepend to. Key the branch on the heading, not on where it came from.
 
 ### Phase 1 — Compound
 

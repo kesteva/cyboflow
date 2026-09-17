@@ -26,7 +26,7 @@
  * 025), mirroring mcpQueryHandler.test.ts's buildTaskDb so the tasks LEFT JOIN
  * is exercised against the real entity schema.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -111,6 +111,10 @@ function buildReadyLaneDb(): Database.Database {
     '024_archive_in_place.sql',
     '025_sprint_lane_attempts.sql',
     '042_collapse_board.sql',
+    // 137 adds tasks.executor (agent|human) — filterEligibleTaskIds gates its
+    // `executor != 'human'` clause on the column existing, so the fixture
+    // carries it to exercise the PRESENT path, not the pre-137 fallback.
+    '137_task_executor.sql',
   ]) {
     db.exec(readFileSync(join(migDir, file), 'utf-8'));
   }
@@ -127,14 +131,14 @@ function seedReadyTask(
   id: string,
   ref: string,
   title: string,
-  opts: { position?: number; approved?: boolean; archived?: boolean } = {},
+  opts: { position?: number; approved?: boolean; archived?: boolean; executor?: 'agent' | 'human' } = {},
 ): void {
   const position = opts.position ?? 6;
   const approved = opts.approved ?? true;
   const now = new Date().toISOString();
   db.prepare(
-    `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id, approved_at, archived_at)
-     VALUES (?, 1, ?, ?, 'board-1-default', ?, ?, ?)`,
+    `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id, approved_at, archived_at, executor)
+     VALUES (?, 1, ?, ?, 'board-1-default', ?, ?, ?, ?)`,
   ).run(
     id,
     ref,
@@ -142,6 +146,7 @@ function seedReadyTask(
     `stage-board-1-default-${position}`,
     approved ? now : null,
     opts.archived ? now : null,
+    opts.executor ?? 'agent',
   );
 }
 
@@ -223,6 +228,66 @@ describe('SprintLaneStore', () => {
       } catch (err) {
         expect((err as SprintLaneError).code).toBe('bad_request');
       }
+    });
+
+    // -------------------------------------------------------------------------
+    // Batch cap (Item 7) — the store's OWN enforcement, independent of every
+    // pre-check its callers already run (runs.start, experiments.start, the
+    // MCP backstop). Default per-substrate caps: sdk=15, interactive=10
+    // (SPRINT_BATCH_MAX_TASKS_DEFAULTS).
+    // -------------------------------------------------------------------------
+
+    it('throws batch_too_large when the ELIGIBLE selection exceeds the default sdk cap (15)', () => {
+      const taskIds = Array.from({ length: 16 }, (_, i) => `tsk_${i}`);
+      expect(() => store.createForRun(1, 'sdk', taskIds)).toThrowError(SprintLaneError);
+      try {
+        store.createForRun(1, 'sdk', taskIds);
+      } catch (err) {
+        expect((err as SprintLaneError).code).toBe('batch_too_large');
+      }
+    });
+
+    it('passes at exactly the default sdk cap (15)', () => {
+      const taskIds = Array.from({ length: 15 }, (_, i) => `tsk_${i}`);
+      const { batchId } = store.createForRun(1, 'sdk', taskIds);
+      const count = db
+        .prepare('SELECT COUNT(*) AS n FROM sprint_batch_tasks WHERE batch_id = ?')
+        .get(batchId) as { n: number };
+      expect(count.n).toBe(15);
+    });
+
+    it('throws batch_too_large when the ELIGIBLE selection exceeds the default interactive cap (10)', () => {
+      const taskIds = Array.from({ length: 11 }, (_, i) => `tsk_${i}`);
+      expect(() => store.createForRun(1, 'interactive', taskIds)).toThrowError(SprintLaneError);
+    });
+
+    it('honours a getSprintMaxTasks override passed at initialize time', () => {
+      // Re-initialize the singleton (same db) with a tighter sdk cap of 2.
+      store = SprintLaneStore.initialize(dbAdapter(db), undefined, {
+        getSprintMaxTasks: () => ({ sdk: 2 }),
+      });
+
+      expect(() => store.createForRun(1, 'sdk', ['tsk_a', 'tsk_b', 'tsk_c'])).toThrowError(SprintLaneError);
+      try {
+        store.createForRun(1, 'sdk', ['tsk_a', 'tsk_b', 'tsk_c']);
+      } catch (err) {
+        expect((err as SprintLaneError).code).toBe('batch_too_large');
+      }
+
+      // At the overridden cap (2) it still passes.
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_x', 'tsk_y']);
+      const count = db
+        .prepare('SELECT COUNT(*) AS n FROM sprint_batch_tasks WHERE batch_id = ?')
+        .get(batchId) as { n: number };
+      expect(count.n).toBe(2);
+    });
+
+    it('with no getter, falls back to the built-in default rather than treating the cap as optional', () => {
+      // No deps passed at all (mirrors most of this file's `store`) — the cap
+      // must still apply, never silently disable.
+      const bareStore = SprintLaneStore.initialize(dbAdapter(db));
+      const taskIds = Array.from({ length: 16 }, (_, i) => `tsk_${i}`);
+      expect(() => bareStore.createForRun(1, 'sdk', taskIds)).toThrowError(SprintLaneError);
     });
   });
 
@@ -1427,6 +1492,23 @@ describe('SprintLaneStore', () => {
       expect(laneB?.currentStepId).toBe('implement');
     });
 
+    it('also re-queues a blocked lane (Item 6: blocked lanes never started and must rejoin a retry)', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a', 'tsk_b', 'tsk_c']);
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'failed', currentStepId: 'implement' });
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_b', status: 'blocked' });
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_c', status: 'running', currentStepId: 'implement' });
+      seedOwningRun(batchId);
+
+      const count = store.resetFailedLanes(batchId);
+
+      expect(count).toBe(2);
+      const lanes = store.listLanes(batchId);
+      expect(lanes.find((l) => l.taskId === 'tsk_a')?.status).toBe('queued');
+      expect(lanes.find((l) => l.taskId === 'tsk_b')?.status).toBe('queued');
+      // Untouched — 'tsk_c' was never failed/blocked.
+      expect(lanes.find((l) => l.taskId === 'tsk_c')?.status).toBe('running');
+    });
+
     it('emits a SprintLaneChangedEvent per reset lane on the owning run channel', () => {
       const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
       store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'failed', currentStepId: 'implement' });
@@ -1983,3 +2065,132 @@ describe('SprintLaneStore — visualVerification derivation (F8)', () => {
     bare.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Human tasks (migration 137): excluded from every batch, reported separately
+// ---------------------------------------------------------------------------
+
+describe('SprintLaneStore — human tasks never become lanes', () => {
+  let rdb: Database.Database;
+  let rstore: SprintLaneStore;
+
+  beforeEach(() => {
+    rdb = buildReadyLaneDb();
+    rstore = SprintLaneStore.initialize(dbAdapter(rdb));
+  });
+
+  afterEach(() => {
+    SprintLaneStore._resetForTesting();
+    rdb.close();
+  });
+
+  function laneTaskIds(batchId: string): string[] {
+    return (
+      rdb
+        .prepare('SELECT task_id FROM sprint_batch_tasks WHERE batch_id = ? ORDER BY id ASC')
+        .all(batchId) as Array<{ task_id: string }>
+    ).map((r) => r.task_id);
+  }
+
+  it('filterEligibleTaskIds drops a human task that is otherwise perfectly eligible', () => {
+    seedReadyTask(rdb, 'tsk_agent', 'TASK-001', 'Agent work');
+    seedReadyTask(rdb, 'tsk_human', 'TASK-009', 'Buy the domain', { executor: 'human' });
+
+    expect(rstore.filterEligibleTaskIds(1, ['tsk_agent', 'tsk_human'])).toEqual(['tsk_agent']);
+  });
+
+  it('createForRun never seeds a lane for a human task', () => {
+    seedReadyTask(rdb, 'tsk_agent', 'TASK-001', 'Agent work');
+    seedReadyTask(rdb, 'tsk_human', 'TASK-009', 'Buy the domain', { executor: 'human' });
+
+    const { batchId } = rstore.createForRun(1, 'sdk', ['tsk_agent', 'tsk_human']);
+    expect(laneTaskIds(batchId)).toEqual(['tsk_agent']);
+  });
+
+  it('a selection of ONLY human tasks is rejected with no_eligible_tasks', () => {
+    seedReadyTask(rdb, 'tsk_human', 'TASK-009', 'Buy the domain', { executor: 'human' });
+    expect(() => rstore.createForRun(1, 'sdk', ['tsk_human'])).toThrow(SprintLaneError);
+  });
+
+  it('findHumanTaskIds returns exactly the human subset, preserving input order', () => {
+    seedReadyTask(rdb, 'tsk_a', 'TASK-001', 'Agent');
+    seedReadyTask(rdb, 'tsk_h1', 'TASK-008', 'Human one', { executor: 'human' });
+    seedReadyTask(rdb, 'tsk_h2', 'TASK-009', 'Human two', { executor: 'human' });
+
+    expect(rstore.findHumanTaskIds(1, ['tsk_h2', 'tsk_a', 'tsk_h1'])).toEqual(['tsk_h2', 'tsk_h1']);
+    expect(rstore.findHumanTaskIds(1, [])).toEqual([]);
+    expect(rstore.findHumanTaskIds(1, ['tsk_a'])).toEqual([]);
+  });
+
+  it('findHumanTaskIds is project-scoped and degrades to [] on a pre-137 schema', () => {
+    seedReadyTask(rdb, 'tsk_h', 'TASK-009', 'Human', { executor: 'human' });
+    expect(rstore.findHumanTaskIds(2, ['tsk_h'])).toEqual([]);
+
+    // Pre-137: the column is simply not there.
+    const legacy = new Database(':memory:');
+    legacy.exec('CREATE TABLE tasks (id TEXT PRIMARY KEY, project_id INTEGER)');
+    legacy.prepare('INSERT INTO tasks (id, project_id) VALUES (?, 1)').run('tsk_h');
+    const legacyStore = new SprintLaneStore(dbAdapter(legacy));
+    expect(legacyStore.findHumanTaskIds(1, ['tsk_h'])).toEqual([]);
+    legacy.close();
+  });
+
+  it('a pre-137 schema keeps the OTHER eligibility guards working (the clause is gated, not the query)', () => {
+    // Rebuild without 137 so `executor` is absent. The approval guard must still
+    // filter — the whole point of gating the clause rather than letting the
+    // permissive catch swallow every predicate at once.
+    rdb.exec('ALTER TABLE tasks RENAME COLUMN executor TO executor_gone');
+    const store = new SprintLaneStore(dbAdapter(rdb));
+    seedReadyTaskLegacy(rdb, 'tsk_ok', 'TASK-001', true);
+    seedReadyTaskLegacy(rdb, 'tsk_pending', 'TASK-002', false);
+
+    expect(store.filterEligibleTaskIds(1, ['tsk_ok', 'tsk_pending'])).toEqual(['tsk_ok']);
+  });
+
+  it('onBatchMinted fires once after createForRun commits, with the ELIGIBLE ids', () => {
+    const onBatchMinted = vi.fn();
+    SprintLaneStore._resetForTesting();
+    const store = SprintLaneStore.initialize(dbAdapter(rdb), undefined, { onBatchMinted });
+    seedReadyTask(rdb, 'tsk_agent', 'TASK-001', 'Agent work');
+    seedReadyTask(rdb, 'tsk_human', 'TASK-009', 'Human', { executor: 'human' });
+
+    const { batchId } = store.createForRun(1, 'sdk', ['tsk_agent', 'tsk_human']);
+
+    expect(onBatchMinted).toHaveBeenCalledTimes(1);
+    expect(onBatchMinted).toHaveBeenCalledWith({
+      projectId: 1,
+      batchId,
+      // The human task is NOT in the batch — the hook sees what materialized.
+      taskIds: ['tsk_agent'],
+    });
+    // The hook runs POST-COMMIT: the lane rows are already durable when it fires.
+    expect(laneTaskIds(batchId)).toEqual(['tsk_agent']);
+  });
+
+  it('a throwing onBatchMinted never fails the batch', () => {
+    const onBatchMinted = vi.fn(() => {
+      throw new Error('review queue on fire');
+    });
+    SprintLaneStore._resetForTesting();
+    const store = SprintLaneStore.initialize(dbAdapter(rdb), undefined, { onBatchMinted });
+    seedReadyTask(rdb, 'tsk_agent', 'TASK-001', 'Agent work');
+
+    const { batchId } = store.createForRun(1, 'sdk', ['tsk_agent']);
+    expect(laneTaskIds(batchId)).toEqual(['tsk_agent']);
+  });
+});
+
+/** seedReadyTask for a fixture whose `executor` column has been renamed away. */
+function seedReadyTaskLegacy(
+  db: Database.Database,
+  id: string,
+  ref: string,
+  approved: boolean,
+): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id, approved_at, archived_at)
+     VALUES (?, 1, ?, ?, 'board-1-default', 'stage-board-1-default-6', ?, NULL)`,
+  ).run(id, ref, ref, approved ? now : null);
+}
+

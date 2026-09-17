@@ -1,0 +1,412 @@
+/**
+ * ViewSurface — the render tail both landing-family pages hand their sections
+ * to (docs/proposals/CUSTOM-VIEWS.md §5.2).
+ *
+ * The page keeps everything it already owned: its early returns, its header,
+ * its dialogs, every section component and every prop and callback those
+ * components take. What changes is only the ORDER those section nodes are
+ * emitted in, and whether extra widgets are interleaved. That is the whole
+ * refactor, and it is why the page passes a `Record<sectionId, ReactNode|null>`
+ * rather than JSX: a map can be reordered, JSX cannot.
+ *
+ * ## Default mode is the page, not a reconstruction of it
+ *
+ * With no custom view active — and equally while the store has not loaded yet,
+ * so there is never a flash of empty — the surface emits `chrome.afterHeader`,
+ * then the canonical section order from the catalog, each `null` entry
+ * rendering nothing exactly as the page's own conditional did. Section nodes
+ * are emitted BARE, inside fragments: no wrapper element, so the flex column's
+ * `gap` and every existing DOM query keep working.
+ *
+ * ## Chrome: two slots, and why
+ *
+ * The plan sketched a single `afterHeader` slot for the page's state wells. The
+ * queue's wells are not all adjacent to the header: the caught-up / all-idle
+ * strips sit BELOW the usage cards, and the "no sessions" well sits between
+ * Recommended actions and the session sections. Collapsing them into
+ * `afterHeader` would silently reorder the Default view, which is precisely the
+ * thing §5.2 forbids. So chrome has a second slot, `afterSection`, keyed by the
+ * section id the chrome currently follows:
+ *
+ *   - `afterHeader` renders once, first, always.
+ *   - `afterSection[id]` renders immediately after section `id`.
+ *
+ * In a CUSTOM view a chrome anchor may not be placed at all. Page state wells
+ * are not decoration — "you are all caught up" is the page's answer to its own
+ * question — so they are never dropped: anchored chrome whose section is absent
+ * from the layout (or hidden) falls back into the top block, right after
+ * `afterHeader`, in canonical section order. Anchored chrome whose section IS
+ * placed still trails it.
+ *
+ * ## Custom mode
+ *
+ * Layout items render in order. `hidden` renders nothing. A catalog SECTION ref
+ * pulls its node from `sections`; a ref this surface does not own (a `queue.*`
+ * id on the overview page, or a catalog id this build dropped) renders the
+ * "not available" chip rather than vanishing, so the user can see why their
+ * view looks short. Everything else mounts a `WidgetHost`.
+ *
+ * ## Customize mode (S5)
+ *
+ * Customize mode renders the OPEN DRAFT (`customViewsStore`'s `draft`), never
+ * the saved active view — the two can differ the instant the user makes an
+ * edit. Every item is wrapped in `EditableBlock` (grip / eye / gear / trash),
+ * `InsertBar`s sit between items and at both ends, and `hidden` items render
+ * COLLAPSED rather than vanishing (there has to be something to click "eye"
+ * back on). `ViewIdentityContext.editing` flips true, which disables every
+ * widget's action controls regardless of `viewId`/`viewRevision` — see
+ * `viewContext.ts`'s `actionsEnabled`. Page-state chrome (`afterSection`) is
+ * NOT rendered while editing: those wells answer the page's live state, not
+ * the layout being edited, and re-deriving which ones would apply to a
+ * not-yet-saved layout is not worth the complexity for a transient mode.
+ * Per-item live payloads are collected here (via `WidgetHost`'s `onPayload`)
+ * and handed to each `EditableBlock` so its settings popover's Reads row can
+ * show real source names + warnings instead of only the catalog's static
+ * description.
+ */
+import React, { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import type { CustomViewSurface, CustomWidget, LayoutItem, WidgetDataPayload } from '../../../shared/types/customViews';
+import { catalogEntry, sectionOrderFor } from './catalog';
+import {
+  useCustomViewsStore,
+  useActiveView,
+  useDraft,
+  useSurfaceLoaded,
+  type AuthoringSlot,
+} from '../stores/customViewsStore';
+import { useAgentThreadStore } from '../stores/agentThreadStore';
+import { useLayoutStore } from '../stores/layoutStore';
+import { ViewIdentityContext, type ViewIdentity } from './viewContext';
+import { WidgetFrame, UnavailableBody } from './WidgetFrame';
+import { WidgetHost } from './WidgetHost';
+import { EditableBlock } from './edit/EditableBlock';
+import { InsertBar } from './edit/InsertBar';
+import { PlaceholderSlot } from './edit/PlaceholderSlot';
+import { startAuthoring } from './authoring/startAuthoring';
+
+export interface ViewSurfaceChrome {
+  /** Page chrome rendered once, before every section. */
+  afterHeader?: ReactNode;
+  /** Page chrome rendered immediately after the named section. */
+  afterSection?: Record<string, ReactNode | null | undefined>;
+}
+
+export interface ViewSurfaceProps {
+  surface: CustomViewSurface;
+  /** Every section this page can render, by catalog id. `null` = "off right now". */
+  sections: Record<string, ReactNode | null>;
+  /** Run context handed to every widget's query and action. */
+  context: { projectId: number | null };
+  chrome?: ViewSurfaceChrome;
+}
+
+/** True when the page declared this section id at all (a `null` value counts). */
+function declares(sections: Record<string, ReactNode | null>, id: string): boolean {
+  return Object.prototype.hasOwnProperty.call(sections, id);
+}
+
+/** ViewSurface — see {@link ViewSurfaceProps}. */
+export function ViewSurface({
+  surface,
+  sections,
+  context,
+  chrome,
+}: ViewSurfaceProps): React.JSX.Element {
+  // Ref-counted: both landing pages may be mounted at once and each holds its
+  // own release.
+  useEffect(() => useCustomViewsStore.getState().init(surface), [surface]);
+
+  const activeView = useActiveView(surface);
+  const loaded = useSurfaceLoaded(surface);
+  const draft = useDraft(surface);
+  const order = sectionOrderFor(surface);
+  const editing = draft !== null;
+  const authoring = useCustomViewsStore((s) => s.authoring);
+  const widgets = useCustomViewsStore((s) => s.widgets);
+  // What "Edit with assistant" / the create-widget kickoff put in the
+  // contextHint envelope (§7.1) — the active view's name, else "Default".
+  const viewName = activeView?.name ?? 'Default';
+
+  const handleCreateCustom = useCallback(
+    (at: number) => {
+      startAuthoring(
+        useCustomViewsStore.getState(),
+        useAgentThreadStore.getState(),
+        useLayoutStore.getState(),
+        { mode: 'create', surface, at, viewName, projectId: context.projectId },
+      );
+    },
+    [surface, viewName, context.projectId],
+  );
+
+  const identity: ViewIdentity = useMemo(
+    () => ({
+      // Editing has no legitimate action identity of its own regardless of
+      // which view it started from — see `viewContext.ts`'s `actionsEnabled`.
+      viewId: editing ? null : (activeView?.id ?? null),
+      viewRevision: editing ? null : (activeView?.revision ?? null),
+      editing,
+    }),
+    [editing, activeView],
+  );
+
+  // Per-instance latest payload, fed by each WidgetHost's `onPayload` while
+  // editing — S5's settings popover reads it for the Reads row. Never
+  // populated outside customize mode; nothing reads it there.
+  const [payloadByInstance, setPayloadByInstance] = useState<Record<string, WidgetDataPayload | null>>({});
+  const handlePayload = useCallback((instanceId: string, payload: WidgetDataPayload | null): void => {
+    setPayloadByInstance((prev) => (prev[instanceId] === payload ? prev : { ...prev, [instanceId]: payload }));
+  }, []);
+
+  // Not loaded yet, Default selected, or the active view turned out corrupt →
+  // the page as it has always been. Editing always wins: the draft is what
+  // customize mode edits, whatever the saved active view says.
+  const items = editing ? draft.layout.items : loaded && activeView !== null ? activeView.layout.items : null;
+
+  const body = editing
+    ? renderEditing({
+        items: items as LayoutItem[],
+        sections,
+        context,
+        chrome,
+        surface,
+        viewName,
+        payloadByInstance,
+        onPayload: handlePayload,
+        authoring,
+        widgets,
+        onCreateCustom: handleCreateCustom,
+      })
+    : items === null
+      ? renderDefault(order, sections, chrome)
+      : renderCustom(items, order, sections, context, chrome);
+
+  return <ViewIdentityContext.Provider value={identity}>{body}</ViewIdentityContext.Provider>;
+}
+
+// ---------------------------------------------------------------------------
+// Default mode
+// ---------------------------------------------------------------------------
+
+function renderDefault(
+  order: readonly string[],
+  sections: Record<string, ReactNode | null>,
+  chrome: ViewSurfaceChrome | undefined,
+): React.JSX.Element {
+  const afterSection = chrome?.afterSection;
+  return (
+    <>
+      {chrome?.afterHeader}
+      {order.map((id) => {
+        const node = sections[id] ?? null;
+        const trailing = afterSection?.[id] ?? null;
+        if (node === null && trailing === null) return null;
+        return (
+          <Fragment key={id}>
+            {node}
+            {trailing}
+          </Fragment>
+        );
+      })}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Custom mode
+// ---------------------------------------------------------------------------
+
+function renderCustom(
+  items: LayoutItem[],
+  order: readonly string[],
+  sections: Record<string, ReactNode | null>,
+  context: { projectId: number | null },
+  chrome: ViewSurfaceChrome | undefined,
+): React.JSX.Element {
+  const afterSection = chrome?.afterSection;
+
+  // Which chrome anchors this layout actually places (visible section refs).
+  const placedAnchors = new Set<string>();
+  for (const item of items) {
+    if (item.hidden === true) continue;
+    if (item.widget.type !== 'catalog') continue;
+    if (!declares(sections, item.widget.catalogId)) continue;
+    placedAnchors.add(item.widget.catalogId);
+  }
+
+  const orphanedChrome = order.filter(
+    (id) => !placedAnchors.has(id) && (afterSection?.[id] ?? null) !== null,
+  );
+
+  return (
+    <>
+      {chrome?.afterHeader}
+      {orphanedChrome.map((id) => (
+        <Fragment key={`chrome:${id}`}>{afterSection?.[id]}</Fragment>
+      ))}
+      {items.map((item) => {
+        const anchorId =
+          item.hidden !== true && item.widget.type === 'catalog' && placedAnchors.has(item.widget.catalogId)
+            ? item.widget.catalogId
+            : null;
+        return (
+          <Fragment key={item.instanceId}>
+            {renderItem(item, sections, context)}
+            {anchorId !== null ? (afterSection?.[anchorId] ?? null) : null}
+          </Fragment>
+        );
+      })}
+    </>
+  );
+}
+
+function renderItem(
+  item: LayoutItem,
+  sections: Record<string, ReactNode | null>,
+  context: { projectId: number | null },
+): ReactNode {
+  if (item.hidden === true) return null;
+
+  if (item.widget.type === 'catalog') {
+    const id = item.widget.catalogId;
+    const entry = catalogEntry(id);
+    // Tier-2 spec widget: run it.
+    if (entry !== null && entry.spec !== undefined) {
+      return <WidgetHost item={item} context={context} />;
+    }
+    // Tier-1 section this page renders (a declared `null` means "off in this
+    // page state" — same as the page's own conditional).
+    if (declares(sections, id)) return sections[id];
+    // A section from the other surface, or an id this build dropped.
+    return unavailable(item, entry?.title ?? id);
+  }
+
+  return <WidgetHost item={item} context={context} />;
+}
+
+function unavailable(item: LayoutItem, title: string): React.JSX.Element {
+  return (
+    <WidgetFrame title={item.title ?? title} testId={`widget-frame-${item.instanceId}`}>
+      <UnavailableBody reason="Not available on this page" />
+    </WidgetFrame>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Customize mode
+// ---------------------------------------------------------------------------
+
+interface RenderEditingArgs {
+  items: LayoutItem[];
+  sections: Record<string, ReactNode | null>;
+  context: { projectId: number | null };
+  chrome: ViewSurfaceChrome | undefined;
+  surface: CustomViewSurface;
+  /** The active view's name, or `'Default'` — threaded to `EditableBlock` for the "Edit with assistant" kickoff (§7.1). */
+  viewName: string;
+  payloadByInstance: Record<string, WidgetDataPayload | null>;
+  onPayload: (instanceId: string, payload: WidgetDataPayload | null) => void;
+  /** The open authoring slot, or `null` — decides which single item (if any) renders a placeholder/draft preview (§7.3). */
+  authoring: AuthoringSlot | null;
+  widgets: CustomWidget[];
+  /** S6's "Create a custom widget" kickoff — threaded to every `InsertBar`. */
+  onCreateCustom: (at: number) => void;
+}
+
+function renderEditing({
+  items,
+  sections,
+  context,
+  chrome,
+  surface,
+  viewName,
+  payloadByInstance,
+  onPayload,
+  authoring,
+  widgets,
+  onCreateCustom,
+}: RenderEditingArgs): React.JSX.Element {
+  return (
+    <>
+      {chrome?.afterHeader}
+      <InsertBar surface={surface} at={0} onCreateCustom={onCreateCustom} />
+      {items.map((item, index) => (
+        <Fragment key={item.instanceId}>
+          <EditableBlock
+            item={item}
+            index={index}
+            total={items.length}
+            payload={payloadByInstance[item.instanceId] ?? null}
+            surface={surface}
+            viewName={viewName}
+            projectId={context.projectId}
+          >
+            {item.hidden === true ? null : renderEditingItemBody(item, sections, context, authoring, widgets, onPayload)}
+          </EditableBlock>
+          <InsertBar surface={surface} at={index + 1} onCreateCustom={onCreateCustom} />
+        </Fragment>
+      ))}
+    </>
+  );
+}
+
+function renderEditingItemBody(
+  item: LayoutItem,
+  sections: Record<string, ReactNode | null>,
+  context: { projectId: number | null },
+  authoring: AuthoringSlot | null,
+  widgets: CustomWidget[],
+  onPayload: (instanceId: string, payload: WidgetDataPayload | null) => void,
+): ReactNode {
+  if (item.widget.type === 'catalog') {
+    const id = item.widget.catalogId;
+    const entry = catalogEntry(id);
+    if (entry !== null && entry.spec !== undefined) {
+      return (
+        <WidgetHost
+          item={item}
+          context={context}
+          editing
+          onPayload={(payload) => onPayload(item.instanceId, payload)}
+        />
+      );
+    }
+    if (declares(sections, id)) return sections[id];
+    return unavailable(item, entry?.title ?? id);
+  }
+
+  // item.widget.type === 'custom' from here.
+  const isAuthoringSlot = authoring !== null && authoring.instanceId === item.instanceId;
+
+  // Not yet bound to a widget: this is the placeholder an assistant-built
+  // widget hasn't landed in yet (§7.1) — never the generic "unavailable" chip.
+  if (isAuthoringSlot && item.widget.widgetId.length === 0) {
+    return <PlaceholderSlot testId={frameTestIdFor(item)} />;
+  }
+
+  // Bound but still unpublished: render the DRAFT spec/document, not the
+  // (nonexistent, or stale) published one (§7.3).
+  if (isAuthoringSlot && authoring.draftPreview) {
+    const widgetId = item.widget.widgetId;
+    const draftSpec = widgets.find((w) => w.id === widgetId)?.draftSpec ?? null;
+    return (
+      <WidgetHost
+        item={item}
+        spec={draftSpec}
+        context={context}
+        editing
+        draft
+        onPayload={(payload) => onPayload(item.instanceId, payload)}
+      />
+    );
+  }
+
+  return (
+    <WidgetHost item={item} context={context} editing onPayload={(payload) => onPayload(item.instanceId, payload)} />
+  );
+}
+
+/** Mirrors `WidgetHost`'s internal frame test id so the placeholder's test hook matches what a bound widget would use. */
+function frameTestIdFor(item: LayoutItem): string {
+  return `widget-frame-${item.instanceId}`;
+}

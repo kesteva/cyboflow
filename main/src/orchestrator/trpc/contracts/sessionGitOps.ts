@@ -32,6 +32,7 @@
  * which `rebaseMainIntoWorktree` calls directly.
  */
 import type { GitStatus } from '../../../types/session';
+import type { WorktreeStatusPayload, DiffGroupScope } from '../../../../../shared/types/runFiles';
 
 /** The failure half every one of these envelopes shares. */
 export type SessionGitError = { success: false; error: string };
@@ -51,6 +52,16 @@ export interface SessionGitDiffStats {
  * Structural mirror of GitDiffManager's `GitDiffResult` (source of truth:
  * main/src/services/gitDiffManager.ts). The wire twin the renderer already
  * declares is frontend/src/types/diff.ts `GitDiffResult`.
+ *
+ * `resolvedBase` and `worktree` are Seam B (TASK-212) additions, both
+ * REQUIRED — a loud exhaustive tripwire rather than an optional field an
+ * `undefined` could silently satisfy, which would let the center pane derive
+ * its own base and reintroduce a live bug. `resolvedBase` is the concrete SHA
+ * (never a branch name) the response was actually computed against, `null`
+ * only for the working-dir-vs-HEAD rung (no base to anchor on). `worktree` is
+ * the same `getWorktreeStatus` + `getDiffGroups` (TASK-209/210) payload every
+ * one of these three methods assembles, for the grouped Diff-tab view
+ * alongside whichever single diff blob the method itself returns.
  */
 export interface SessionGitDiffResult {
   diff: string;
@@ -58,6 +69,8 @@ export interface SessionGitDiffResult {
   changedFiles: string[];
   beforeHash?: string;
   afterHash?: string;
+  resolvedBase: string | null;
+  worktree: WorktreeStatusPayload;
 }
 
 /**
@@ -189,10 +202,20 @@ export interface SessionGitOpsLike {
    * Mirrors legacy `sessions:get-combined-diff`. `executionIds` selects what to
    * diff: omitted/empty = everything including uncommitted; `[0]` = uncommitted
    * only; a pair = the range; more than two = first..last.
+   *
+   * Seam B (TASK-212) additions, both wire fields (not merely hook arguments):
+   * `comparisonRef` overrides the base the response is computed against
+   * (resolved to a SHA before it reaches git argv; falls back to the session
+   * default on an unresolvable ref, never throws). `scope`, when present,
+   * takes precedence over `executionIds` and selects one `DiffGroupScope`'s
+   * own git query for the returned diff blob (see gitOps.ts's
+   * getCombinedDiff for the per-scope command mapping).
    */
   getCombinedDiff(request: {
     sessionId: string;
     executionIds?: number[];
+    comparisonRef?: string;
+    scope?: DiffGroupScope;
   }): Promise<{ success: true; data: SessionGitDiffResult } | SessionGitError>;
 
   /**
@@ -350,4 +373,55 @@ export interface SessionGitOpsLike {
    * work for every non-archived session in the project.
    */
   cancelStatusForProject(request: { projectId: number }): Promise<{ success: true } | SessionGitError>;
+
+  /**
+   * New (TASK-216): the data source for the diff panel's future BaseSelector
+   * menu — every candidate base the picker can offer, resolved server-side so
+   * the renderer never runs git itself. Each leg degrades independently to
+   * `null` rather than throwing or fabricating an answer:
+   *   • `branchPoint` — the session's recorded branch point
+   *     (`resolveSessionDiffBaseRef(worktreePath, [session.baseCommit])`),
+   *     `null` when `baseCommit` is unset or no longer resolves.
+   *   • `defaultBranch` — the resolved project default branch name (via
+   *     `origin/HEAD`'s symref, falling back to
+   *     `worktreeManager.getProjectMainBranch`), `null` on a detached-HEAD
+   *     project root or any other unresolvable case.
+   *   • `localDefault` — that branch's LOCAL tip in this worktree plus how far
+   *     HEAD trails it, `null` when `defaultBranch` is null or the local
+   *     branch does not exist in this worktree.
+   *   • `originDefault` — the branch's `origin/<name>` twin plus its trailing
+   *     count and the freshness of the last fetch (`FETCH_HEAD`'s mtime, read
+   *     only — this method NEVER runs `git fetch`), `null` when `defaultBranch`
+   *     is null or there is no such origin ref.
+   */
+  getComparisonBases(request: { sessionId: string }): Promise<
+    | {
+        success: true;
+        data: {
+          branchPoint: { ref: string; shortSha: string } | null;
+          defaultBranch: string | null;
+          localDefault: { ref: string; behind: number } | null;
+          originDefault: { ref: string; behind: number; fetchedAt: string | null } | null;
+        };
+      }
+    | SessionGitError
+  >;
+
+  /**
+   * Start delivering "this session's worktree changed" notifications to
+   * `listener` — files edited/created/removed in the worktree, and index /
+   * HEAD / MERGE_HEAD movement in its git dir (`git add`, commit, a merge
+   * starting or ending). The listener carries no payload: the consumer
+   * refetches `getCombinedDiff` and lets THAT response be the truth.
+   *
+   * The returned `unsubscribe` tears the watcher down when the last listener
+   * for the session leaves — the `sessionGit.onWorktreeChanged` subscription
+   * calls it on abort, so a watcher lives exactly as long as a Diff tab is
+   * mounted for that session and never for a session nobody is looking at.
+   * `success: false` when the session or its worktree cannot be found.
+   */
+  subscribeWorktreeChanges(
+    request: { sessionId: string },
+    listener: () => void,
+  ): Promise<{ success: true; unsubscribe: () => void } | SessionGitError>;
 }

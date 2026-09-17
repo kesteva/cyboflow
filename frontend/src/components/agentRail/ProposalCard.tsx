@@ -49,12 +49,15 @@ import {
   OpenSessionBody,
   CreateBacklogItemsBody,
   CreateBacklogRows,
+  CreateWorkflowBody,
+  CreateWorkflowAgentRows,
 } from './ProposalCardBodies';
 import {
   parseLaunchRunResult,
   parseReprioritizeResult,
   parseEditWorkflowResult,
   parseCreateBacklogResult,
+  parseCreateWorkflowResult,
 } from './proposalResultTypes';
 import { navigateToProposalTarget } from './proposalNavigation';
 
@@ -225,6 +228,53 @@ function CreateBacklogResolved({ proposal }: { proposal: AgentProposal }): React
   );
 }
 
+function CreateWorkflowResolved({ proposal }: { proposal: AgentProposal }): React.ReactElement {
+  if (proposal.status === 'dismissed') {
+    return <ResolvedLine tone="neutral" glyph="✕" verb="Dismissed." />;
+  }
+  const payload = proposal.payload.kind === 'create-workflow' ? proposal.payload : null;
+  const result = parseCreateWorkflowResult(proposal.result);
+  if (payload === null || result === null) {
+    return <ResolvedLine tone={proposal.status === 'failed' ? 'error' : 'success'} glyph={proposal.status === 'failed' ? '✕' : '✓'} verb="Resolved." />;
+  }
+  const agents = payload.agents ?? [];
+  if (result.status === 'executed') {
+    return (
+      <div className="flex flex-col gap-2 p-2.5">
+        <div className="flex items-center gap-2.5">
+          <StatusCircle tone="success" glyph="✓" />
+          <span className="text-[11px] font-bold text-text-primary">
+            Workflow "{result.name}" created{agents.length > 0 ? ` with ${agents.length} agent${agents.length === 1 ? '' : 's'}` : ''}.
+          </span>
+        </div>
+        {result.workflowId != null && <div className="ml-7 text-[10.5px] text-text-tertiary">{result.workflowId}</div>}
+        <CreateWorkflowAgentRows agents={agents} result={result} />
+      </div>
+    );
+  }
+  // Failed: the executor's saga unwinds every agent it minted, so say whether
+  // that unwind itself completed — a failed unwind is the one case the human
+  // has to clean up by hand.
+  const unwindFailed = result.compensations?.some((c) => !c.ok) ?? false;
+  return (
+    <div className="flex flex-col gap-2 p-2.5" data-testid="proposal-create-workflow-failed">
+      <div className="flex items-center gap-2.5">
+        <StatusCircle tone="error" glyph="✕" />
+        <span className="text-[11px] font-bold text-text-primary">Workflow not created.</span>
+      </div>
+      {result.error != null && <p className="ml-7 text-[10.5px] text-text-tertiary">{result.error}</p>}
+      <CreateWorkflowAgentRows agents={agents} result={result} />
+      {result.compensations != null && (
+        <p className="ml-7 text-[10.5px] italic text-text-tertiary" data-testid="proposal-create-workflow-unwind">
+          {unwindFailed
+            ? 'Some created agents could not be removed again — check the Agents pane.'
+            : 'The agents created before the failure were removed again.'}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function OpenSessionResolved({ proposal }: { proposal: AgentProposal }): React.ReactElement {
   if (proposal.status === 'dismissed') {
     return <ResolvedLine tone="neutral" glyph="✕" verb="Dismissed." />;
@@ -324,6 +374,9 @@ export function ProposalCard({ proposal }: ProposalCardProps): React.ReactElemen
           {proposal.kind === 'create-backlog-items' && proposal.payload.kind === 'create-backlog-items' && (
             <CreateBacklogItemsBody payload={proposal.payload} />
           )}
+          {proposal.kind === 'create-workflow' && proposal.payload.kind === 'create-workflow' && (
+            <CreateWorkflowBody payload={proposal.payload} />
+          )}
         </div>
       )}
 
@@ -357,6 +410,7 @@ export function ProposalCard({ proposal }: ProposalCardProps): React.ReactElemen
           {proposal.kind === 'edit-workflow' && <EditWorkflowResolved proposal={proposal} />}
           {proposal.kind === 'open-session' && <OpenSessionResolved proposal={proposal} />}
           {proposal.kind === 'create-backlog-items' && <CreateBacklogResolved proposal={proposal} />}
+          {proposal.kind === 'create-workflow' && <CreateWorkflowResolved proposal={proposal} />}
         </>
       )}
 

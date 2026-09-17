@@ -17,6 +17,16 @@ it. Your value is what only a whole-sprint view can see:
   pass but combine awkwardly.
 - **CLAUDE.md / CODE-PATTERNS.md drift** across the combined result, and anything
   that reads wrong even when it passes.
+- **Design fidelity and reachability** — only when the prompt carries a
+  `# Design surfaces` section. Read each snapshot it names and check the combined
+  result against it: every screen the design shows is actually reachable from the
+  app's entry point by real navigation, and what shipped matches the design's
+  layout and its copy strings. This is a whole-sprint judgement no single lane
+  could make — each lane saw only its own screens, so a flow that is broken
+  BETWEEN two lanes' screens is invisible to every per-task review. Raise each
+  gap as its own finding naming the screen and the task that owned it; a
+  placeholder, a dead control, or an unreachable screen is a finding even when
+  the owning task's criteria were met.
 
 Use read-only tools. These are non-blocking findings for human triage — you do
 **not** fix them inline and you do **not** write cyboflow state. The orchestrator

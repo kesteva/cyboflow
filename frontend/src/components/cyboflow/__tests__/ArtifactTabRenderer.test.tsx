@@ -22,6 +22,7 @@ import { useArtifactsList, type UseArtifactsListResult } from '../../../hooks/us
 import { useFeedback, type UseFeedbackResult } from '../../../hooks/useFeedback';
 import { useCenterPaneStore } from '../../../stores/centerPaneStore';
 import { useActiveRunsStore, type ActiveRunRow } from '../../../stores/activeRunsStore';
+import { ARTIFACT_COLORS } from '../../../../../shared/types/artifacts';
 import type { Artifact, ArtifactType, TaskVerificationReportEntry } from '../../../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../../../shared/types/tasks';
 import type { IdeaComponentState } from '../../../../../shared/types/ideaComponents';
@@ -130,6 +131,14 @@ vi.mock('../../../trpc/client', () => ({
       design: {
         draftStatus: { query: (...args: unknown[]) => designDraftStatusQuery(...args) },
         approve: { mutate: (...args: unknown[]) => designApproveMutate(...args) },
+        // DesignAffordance (mounted inside TaskDetailModal, opened from
+        // idea-spec/idea-summary/decomposed-stories rows) resolves via
+        // forEntity — no bound design by default so it renders nothing.
+        forEntity: { query: vi.fn().mockResolvedValue(null) },
+        snapshotHtml: { query: vi.fn().mockResolvedValue(null) },
+      },
+      ideaComponents: {
+        onComponentsChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
       },
     },
   },
@@ -224,6 +233,7 @@ function makeIdea(overrides: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
     body: '# Problem\n\nThe center column stacks.',
     priority: 'P1',
     category: 'feature',
+    executor: 'agent',
     repo: null,
     parent_epic_id: null,
     originating_idea_id: null,
@@ -431,6 +441,33 @@ describe('ArtifactTabRenderer', () => {
     render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'verify-runbook', sourceRef: null })} {...PROPS} />);
 
     expect(screen.getByTestId('artifact-verify-runbook-empty')).toHaveTextContent('No runbook drafted yet.');
+    expect(screen.queryByTestId('md-preview')).not.toBeInTheDocument();
+  });
+
+  // --- adversarial-review -----------------------------------------------------
+
+  it('renders the adversarial-review doc with its own eyebrow and accent', () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: { kind: 'adversarial-review', payload: { markdown: '### AR-1 — Blocking finding' } },
+    });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'adversarial-review', sourceRef: null })} {...PROPS} />);
+
+    // Its own tab identity, distinct from verify-runbook/compound — this is the
+    // surface the two-way approve-design gate points at.
+    expect(screen.getByTestId('artifact-adversarial-review')).toBeInTheDocument();
+    const eyebrow = screen.getByTestId('artifact-eyebrow');
+    expect(eyebrow).toHaveTextContent('Artifact · adversarial review');
+    expect(eyebrow).toHaveStyle({ color: ARTIFACT_COLORS['adversarial-review'] });
+    expect(screen.getByTestId('md-preview')).toHaveTextContent('AR-1 — Blocking finding');
+  });
+
+  it('shows the adversarial-review empty state when the payload has no markdown', () => {
+    setHook({ loading: false, error: null, data: { kind: 'adversarial-review', payload: {} } });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'adversarial-review', sourceRef: null })} {...PROPS} />);
+
+    expect(screen.getByTestId('artifact-adversarial-review-empty')).toHaveTextContent('No adversarial review filed yet.');
     expect(screen.queryByTestId('md-preview')).not.toBeInTheDocument();
   });
 
@@ -1579,6 +1616,7 @@ describe('ArtifactTabRenderer', () => {
       { atype: 'compound-recommendations', mode: 'template', testid: 'artifact-compound-recommendations', data: { loading: false, error: null, data: { kind: 'recommendations', payload: { markdown: '## x' } } } },
       { atype: 'eval-report', mode: 'template', testid: 'artifact-eval-report', data: { loading: false, error: null, data: { kind: 'eval-report', payload: { markdown: '## x' } } } },
       { atype: 'verify-runbook', mode: 'template', testid: 'artifact-verify-runbook', data: { loading: false, error: null, data: { kind: 'verify-runbook', payload: { markdown: '## x' } } } },
+      { atype: 'adversarial-review', mode: 'template', testid: 'artifact-adversarial-review', data: { loading: false, error: null, data: { kind: 'adversarial-review', payload: { markdown: '## x' } } } },
       { atype: 'project-brief', mode: 'template', testid: 'artifact-project-brief', data: { loading: false, error: null, data: { kind: 'brief', payload: { markdown: '## x' } } } },
     ];
     for (const c of cases) {

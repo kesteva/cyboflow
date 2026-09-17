@@ -33,8 +33,45 @@ reports the written file as the run's `ui-prototype` artifact.
 
 ## Result
 
-Return a `## Prototype` section confirming you wrote
-`$CYBOFLOW_RUN_ARTIFACTS_DIR/prototype/index.html`, which screen(s)/state(s) it
-shows, what it demonstrates, and which spec points it covers. On revise rounds,
-edit `index.html` in place — the same file path stays the artifact — and say what
-changed.
+Return TWO sections, in this order.
+
+### `## Prototype`
+
+Confirm you wrote `$CYBOFLOW_RUN_ARTIFACTS_DIR/prototype/index.html`, which
+screen(s)/state(s) it shows, what it demonstrates, and which spec points it
+covers. On revise rounds, edit `index.html` in place — the same file path stays
+the artifact — and say what changed.
+
+### `## Design spec` (REQUIRED)
+
+A prose description of the design you just drew, under a heading line that reads
+exactly `## Design spec` — two hashes, that wording, nothing appended. The
+orchestrator finds the section by that exact line, so a renamed or re-levelled
+heading is a section nothing downstream can locate.
+
+The mockup is a run artifact that the builder who implements these screens will
+never open; this section is the design CONTRACT that outlives it — the
+orchestrator folds it verbatim into the idea body (or the project brief), and
+later flows read it back as the specification of what to build.
+
+`## Design spec` is the idea's single design-prose section; whichever pathway
+wrote it last owns it. Do not invent a second heading and do not nest the
+content under the prototype section.
+
+For EACH screen the mockup shows:
+
+- its name;
+- its purpose in one line;
+- **how it is reached** — the navigation path from the app's entry screen
+  (e.g. "Home → tap Spend → Add entry"). A screen with no stated path is a
+  screen nobody can build a route to;
+- its states (empty, loading, populated, error) as the mockup shows them;
+- the exact copy strings rendered on it — headings, labels, button text,
+  empty-state text — quoted verbatim, because the builder matches these
+  character for character;
+- the primary interaction: what the user does on this screen and what happens.
+
+Keep the whole section to at most 80 lines. Return exactly this section — the
+orchestrator folds it verbatim into the idea body and later builders read it as
+the design contract, so anything you leave out of it is lost when the run's
+artifacts are gone.

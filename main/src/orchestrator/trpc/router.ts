@@ -8,6 +8,9 @@
 import { router } from './trpc';
 import { agentThreadRouter } from './routers/agentThread';
 import { agentsRouter } from './routers/agents';
+import { claudeAuthRouter } from './routers/claudeAuth';
+import { customViewsRouter } from './routers/customViews';
+import { customWidgetServerRouter } from './routers/customWidgetServer';
 import { configRouter } from './routers/config';
 import { designRouter } from './routers/design';
 import { runsRouter } from './routers/runs';
@@ -17,6 +20,7 @@ import { dynamicWorkflowsRouter } from './routers/dynamicWorkflows';
 import { eventsRouter } from './routers/events';
 import { feedbackRouter } from './routers/feedback';
 import { filesRouter } from './routers/files';
+import { gitPrerequisiteRouter } from './routers/gitPrerequisite';
 import { healthRouter } from './routers/health';
 import { ideaComponentsRouter } from './routers/ideaComponents';
 import { insightsRouter } from './routers/insights';
@@ -46,12 +50,16 @@ export const appRouter = router({
     approvals: approvalsRouter,
     design: designRouter,
     artifacts: artifactsRouter,
+    claudeAuth: claudeAuthRouter,
     config: configRouter,
+    customViews: customViewsRouter,
+    customWidgetServer: customWidgetServerRouter,
     dynamicWorkflows: dynamicWorkflowsRouter,
     events: eventsRouter,
     experiments: experimentsRouter,
     feedback: feedbackRouter,
     files: filesRouter,
+    gitPrerequisite: gitPrerequisiteRouter,
     health: healthRouter,
     ideaComponents: ideaComponentsRouter,
     insights: insightsRouter,

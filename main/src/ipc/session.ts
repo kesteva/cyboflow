@@ -7,6 +7,8 @@ import { existsSync } from 'fs';
 import type { AppServices } from './types';
 import type { CreateSessionRequest } from '../types/session';
 import { getCyboflowSubdirectory } from '../utils/cyboflowDirectory';
+import { safeRunId } from '../orchestrator/artifactSnapshot';
+import { attachmentExtension, isPendingAttachmentOwner } from './attachmentNaming';
 import { panelManager } from '../services/panelManager';
 import { trackUsage } from '../services/telemetry';
 import { reportEagerSpawnFailure } from './eagerSpawnFailure';
@@ -60,6 +62,7 @@ import {
   QUICK_OMP_PTY_BRIEFING,
   QUICK_PI_PTY_BRIEFING,
 } from './quickSessionBriefings';
+import { restInteractiveSessionIdle } from './interactiveSessionRest';
 import { relayOrSpawnPtyPanel } from './ptyPanelDispatch';
 import { agentProviderDisabledMessage, assertAgentProviderAllowed } from '../../../shared/agents/agentProviderGuard';
 import { resolveSubstrate } from '../orchestrator/substrateResolver';
@@ -1593,13 +1596,15 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               panel.id,
               session.id,
               session.worktreePath,
-              QUICK_PTY_BRIEFING,
+              '', // prompt — the briefing rides --append-system-prompt, so the REPL opens idle
               session.permissionMode,
               requestedModel, // pinned to a concrete snapshot at the spawn seam
               requestedEffort, // 'ultracode' → `--settings {ultracode:true}` (Ultracode card)
               requestedFastMode, // default off; opts this session into fast mode
               undefined, // resumeSessionId — not applicable to a fresh eager spawn
               requestedReasoningEffort,
+              undefined, // userAcknowledgedProviderDisabled — not a resume prompt
+              QUICK_PTY_BRIEFING, // session context, NOT a user turn
             )
             .catch((err: unknown) => {
               eagerSpawnFailed = true;
@@ -1619,13 +1624,18 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
                 sessionManager,
                 sessionId: session.id,
               });
+              // The error status is written HERE, where the failure is known —
+              // not only in the post-rest re-assert below, whose ordering
+              // relative to this catch depends on whether the rest yields.
+              void sessionManager.updateSession(session.id, { status: 'error' });
             });
-          // Mirror sessions:input — the REPL is live; show the session as running.
-          await sessionManager.updateSession(session.id, { status: 'running' });
-          // …unless the spawn already rejected inside the microtask window that
-          // await opened (a cached "not available" probe rejects on the next
-          // tick), in which case this write just clobbered the catch's error
-          // status. Re-assert it.
+          // The REPL is live but IDLE — the briefing rides the system prompt, so
+          // this spawn starts no turn. See restInteractiveSessionIdle for why it
+          // rests at the turn-end value rather than 'running' or 'stopped'.
+          restInteractiveSessionIdle(sessionManager, session.id);
+          // …unless the spawn already rejected before this point (a cached "not
+          // available" probe rejects on the next tick), in which case the rest
+          // just clobbered the catch's error status. Re-assert it.
           if (eagerSpawnFailed) {
             await sessionManager.updateSession(session.id, { status: 'error' });
           }
@@ -1906,8 +1916,10 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           }
         }
 
-        // Clean up session artifacts (images)
-        const artifactsDir = getCyboflowSubdirectory('artifacts', sessionId);
+        // Clean up session artifacts (images). safeRunId is defense in depth —
+        // a no-op for every id this app mints, a containment guarantee for
+        // anything else — matching the join used when the artifacts were saved.
+        const artifactsDir = getCyboflowSubdirectory('artifacts', safeRunId(sessionId));
         if (existsSync(artifactsDir)) {
           try {
             // Update progress: cleaning artifacts
@@ -2210,6 +2222,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               panelFastMode,
               undefined, // resumeSessionId — a fresh-fallback respawn, not an explicit resume
               panelReasoningEffort,
+              undefined, // userAcknowledgedProviderDisabled — not a resume prompt
+              QUICK_PTY_BRIEFING, // a fresh REPL needs its session context too
             )
             .catch((err: unknown) => {
               console.error(`[IPC] Interactive REPL re-spawn failed for session ${sessionId}:`, err);
@@ -2394,11 +2408,17 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           claudeSessionId, // → `--resume <uuid>` (no fork)
           panelReasoningEffort,
           acknowledgeProviderDisabled === true,
+          // The briefing is a system-prompt flag now, not conversation content,
+          // so a resumed REPL must be handed it again — the CLI's recorded
+          // system prompt survives only until the conversation compacts.
+          QUICK_PTY_BRIEFING,
         )
         .catch((err: unknown) => {
           console.error(`[IPC] Interactive resume spawn failed for session ${sessionId}:`, err);
         });
-      await sessionManager.updateSession(sessionId, { status: 'running' });
+      // No turn is forced on resume, so nothing would ever rest a 'running'
+      // mark — rest it idle; the first typed turn marks it running.
+      restInteractiveSessionIdle(sessionManager, sessionId);
       return { success: true };
     } catch (error) {
       console.error('[IPC] Failed to resume interactive session:', error);
@@ -2475,23 +2495,34 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           claudePanelId,
           sessionId,
           session.worktreePath,
-          QUICK_PTY_BRIEFING,
+          '', // prompt — the briefing rides --append-system-prompt, so the REPL opens idle
           session.permissionMode,
           panelModel,
           undefined, // effort — the ultracode card setting is a launch-time choice
           panelFastMode,
           undefined, // resumeSessionId — a restart is a FRESH conversation
           panelReasoningEffort,
+          undefined, // userAcknowledgedProviderDisabled — not a resume prompt
+          QUICK_PTY_BRIEFING, // session context, NOT a user turn
         )
         .catch((err: unknown) => {
           restartSpawnFailed = true;
           console.error(`[IPC] Interactive restart spawn failed for session ${sessionId}:`, err);
           reportEagerSpawnFailure(err, 'interactive', 'claude', { sessionManager, sessionId });
+          // Written here, where the failure is known (see the create-quick twin).
+          void sessionManager.updateSession(sessionId, { status: 'error' });
         });
-      await sessionManager.updateSession(sessionId, { status: 'running' });
+      // Idle, not running: the restart's briefing rides the system prompt and
+      // starts no turn, so nothing would ever rest a 'running' mark here. But
+      // session status is SHARED across the session's panels — restarting one
+      // dead added panel while the primary is mid-turn must not rest the whole
+      // session under it. Rest only when no panel of this session holds a turn.
+      if (!interactiveCliManager.hasTurnInFlightForSession(sessionId)) {
+        restInteractiveSessionIdle(sessionManager, sessionId);
+      }
       // Same microtask race as the create-quick eager spawns: a rejection inside
-      // the await above already wrote the error status, which this 'running'
-      // write then clobbered. Re-assert it.
+      // the spawn's microtask window already wrote the error status, which the
+      // rest above may have clobbered. Re-assert it.
       if (restartSpawnFailed) {
         await sessionManager.updateSession(sessionId, { status: 'error' });
       }
@@ -3604,7 +3635,13 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
    * The id is used ONLY as the `artifacts/<id>` directory key, but it must still
    * name something this app owns so a renderer can never write an arbitrary path
    * segment. Three owners are legal:
-   *   - `pending_*`  — a session id minted before the session row exists.
+   *   - `pending_*`  — an owner key minted before its backing row exists. Today
+   *     only the idea-attachment dialogs mint one (and they go through
+   *     ideas:save-attachments, not these handlers), so this arm is kept for
+   *     parity rather than live traffic. It must match the exact minted shape
+   *     (isPendingAttachmentOwner) — a malformed pending id (e.g. one carrying
+   *     `..`/`/` segments) does NOT short-circuit here and instead falls through
+   *     to the session/run lookups below, where it is rejected as unknown.
    *   - a session id — quick-session chat (useClaudePanel / QuickSessionComposer).
    *   - a WORKFLOW RUN id — the run-chat composer, the AskUserQuestion card, and
    *     the question-gate answer path all namespace by runId. A run id is NOT a
@@ -3613,7 +3650,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
    *     which is why attaching an image to a flow run's chat failed outright.
    */
   const assertAttachmentOwner = async (ownerId: string): Promise<void> => {
-    if (ownerId.startsWith('pending_')) return;
+    if (isPendingAttachmentOwner(ownerId)) return;
     if (await sessionManager.getSession(ownerId)) return;
     if (cyboflow.workflowRegistry.getRunById(ownerId)) return;
     throw new Error('Attachment owner not found');
@@ -3623,19 +3660,22 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     try {
       await assertAttachmentOwner(ownerId);
 
-      // Create images directory in CYBOFLOW_DIR/artifacts/{ownerId}
-      const imagesDir = getCyboflowSubdirectory('artifacts', ownerId);
+      // Create images directory in CYBOFLOW_DIR/artifacts/{ownerId}.
+      // safeRunId is defense in depth here — a no-op for every id this app
+      // mints (session/run UUIDs, pending_<base36>), and a containment
+      // guarantee against anything else that reached this point.
+      const imagesDir = getCyboflowSubdirectory('artifacts', safeRunId(ownerId));
       if (!existsSync(imagesDir)) {
         await fs.mkdir(imagesDir, { recursive: true });
       }
 
       const savedPaths: string[] = [];
-      
+
       for (const image of images) {
         // Generate unique filename
         const timestamp = Date.now();
         const randomStr = Math.random().toString(36).substring(2, 9);
-        const extension = image.type.split('/')[1] || 'png';
+        const extension = attachmentExtension(image.name, image.type, 'png');
         const filename = `${timestamp}_${randomStr}.${extension}`;
         const filePath = path.join(imagesDir, filename);
 
@@ -3663,7 +3703,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       await assertAttachmentOwner(ownerId);
 
       // Create text directory in CYBOFLOW_DIR/artifacts/{ownerId}
-      const textDir = getCyboflowSubdirectory('artifacts', ownerId);
+      const textDir = getCyboflowSubdirectory('artifacts', safeRunId(ownerId));
       if (!existsSync(textDir)) {
         await fs.mkdir(textDir, { recursive: true });
       }

@@ -1,0 +1,33 @@
+-- Migration 132: drop stale `run_usage` rollups for every run that still has
+-- raw_events, so the next boot backfill (backfillRunUsageRollups, wired at
+-- index.ts) re-materializes them with the corrected cost-ladder semantics
+-- (insightsQueries.ts's scanRawEventRollups).
+--
+-- WHY. Before this migration, `result.total_cost_usd` was SUMmed across every
+-- `result` event for a run. That field is CUMULATIVE PER SDK PROCESS, not
+-- per query — a resumed run reuses the same `session_id` and restarts the
+-- counter near 0, so any run that was ever resumed had its persisted
+-- `run_usage.cost_usd` badly overcounted (verified against a real session:
+-- ~$1977 materialized for what the per-process ladder resolves to ~$100).
+-- The FIX lives entirely in the read/derivation path; this migration's only
+-- job is to invalidate the STALE materialized rows so they get recomputed
+-- against the fixed logic instead of continuing to serve the old, wrong sum
+-- forever (a `run_usage` row, once written, is never re-derived except by an
+-- explicit re-terminal transition or this kind of forced sweep).
+--
+-- SCOPE. Only runs that still have raw_events are touched — those are exactly
+-- the runs backfillRunUsageRollups (runRecovery.ts) can recompute from
+-- scratch on the next boot (it materializes any terminal run with raw_events
+-- and no row, via INSERT OR IGNORE). A run whose raw_events have since been
+-- pruned keeps its existing row: there is nothing to recompute it from, and a
+-- stale-but-present value beats no rollup at all for that historic run.
+--
+-- IDEMPOTENT. A plain DELETE keyed on a SELECT DISTINCT is naturally
+-- idempotent per statement: the first run deletes every matching row, and a
+-- replay finds nothing left to delete (a no-op, not an error) — same
+-- convergence guarantee the runner requires of every other migration file,
+-- just via a DML statement rather than the usual "duplicate column"/"already
+-- exists" DDL signal.
+--
+-- DATA-ONLY: no schema change, so no schema.sql update is required.
+DELETE FROM run_usage WHERE run_id IN (SELECT DISTINCT run_id FROM raw_events);

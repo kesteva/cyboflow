@@ -12,6 +12,7 @@ import type { OpenIdeaSessionRequest } from '../../../shared/types/ideaSession';
 import type { ReasoningEffort } from '../../../shared/types/reasoningEffort';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { RunTypeDefaults, RunTypeDefaultsOp } from '../../../shared/types/sessionDefaults';
+import type { DiffGroupScope } from '../../../shared/types/runFiles';
 import type { AppConfig } from '../types/config';
 import { trpc } from '../trpc/client';
 
@@ -238,8 +239,13 @@ export class API {
       return trpc.cyboflow.sessionGit.diff.query({ sessionId });
     },
 
-    async getCombinedDiff(sessionId: string, executionIds?: number[]) {
-      return trpc.cyboflow.sessionGit.getCombinedDiff.query({ sessionId, executionIds });
+    async getCombinedDiff(
+      sessionId: string,
+      executionIds?: number[],
+      comparisonRef?: string,
+      scope?: DiffGroupScope,
+    ) {
+      return trpc.cyboflow.sessionGit.getCombinedDiff.query({ sessionId, executionIds, comparisonRef, scope });
     },
 
     // Main repo session
@@ -732,6 +738,7 @@ export class API {
       return window.electronAPI.providers.detect(provider);
     },
   };
+
 
 
   static models = {

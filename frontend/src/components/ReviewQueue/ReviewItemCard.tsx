@@ -299,6 +299,22 @@ function isApproveIdeasGateItem(item: ReviewItem): boolean {
   return Boolean(payload && payload.kind === 'decision' && payload.gate === 'approve-ideas');
 }
 
+/**
+ * Tier 2, item 12b: true for the two-way approve-design gate — Approve logs
+ * every remaining adversarial-review entry as a non-blocking accepted-risk
+ * finding and continues; Revise reruns the design steps with those findings
+ * as feedback (a loopback, not a rejection). The generic "Approve & resume" /
+ * "Reject" labels below read as a plain accept/deny, which is wrong for a
+ * revision loop — this keys the button copy on the gate the same way
+ * {@link isApproveIdeasGateItem} does.
+ */
+function isApproveDesignGateItem(item: ReviewItem): boolean {
+  if (item.kind !== 'decision') return false;
+  if (item.source === 'gate:human-step:approve-design') return true;
+  const payload = item.payload;
+  return Boolean(payload && payload.kind === 'decision' && payload.gate === 'approve-design');
+}
+
 export function ReviewItemCard({
   item,
   isFocused = false,
@@ -349,7 +365,11 @@ export function ReviewItemCard({
   // 'reject' tears down rejected drafts and lets the controller end the run
   // 'rejected'. Both route through reviewItems.resolve via the `outcome` field so
   // the WorkflowController's parseGateVerdict is deterministic, not a free-text sniff.
-  const handleGateDecision = (outcome: 'approve' | 'reject'): void => {
+  // 'revise' is the approve-design gate's SECOND choice ("Rerun planning with
+  // findings"): the controller loops back to the design steps with the
+  // adversarial review threaded in. It is never 'reject' — that verdict ends the
+  // run, which the 2026-09-15 launch smoke hit from this very button.
+  const handleGateDecision = (outcome: 'approve' | 'reject' | 'revise'): void => {
     void resolve(item.project_id, item.id, { outcome }).then((r) => {
       if (r !== null) {
         trackEvent('review_item_resolved', { kind: item.kind, action: outcome, blocking: item.blocking });
@@ -704,14 +724,17 @@ export function ReviewItemCard({
         if (usesDefaultActions) return defaultEscalationActions();
         // Explicit gate verdict via reviewItems.resolve `outcome`. Approve reveals
         // the run's drafts (approve-plan) + auto-resumes; Reject tears down rejected
-        // drafts and ends the run 'rejected' (no resume).
+        // drafts and ends the run 'rejected' (no resume). The two-way approve-design
+        // gate (Tier 2, item 12b) is a REVISION loop, not a plain accept/deny — its
+        // "reject" outcome reruns planning with the adversarial-review findings as
+        // feedback, so the generic copy would read backwards for it.
         return (
           <>
             <Button variant="primary" size="sm" disabled={busy} onClick={() => handleGateDecision('approve')} data-testid="decision-resolve">
-              Approve &amp; resume
+              {isApproveDesignGateItem(item) ? 'Continue, log as findings' : 'Approve & resume'}
             </Button>
-            <Button variant="secondary" size="sm" disabled={busy} onClick={() => handleGateDecision('reject')} data-testid="decision-reject">
-              Reject
+            <Button variant="secondary" size="sm" disabled={busy} onClick={() => handleGateDecision(isApproveDesignGateItem(item) ? 'revise' : 'reject')} data-testid="decision-reject">
+              {isApproveDesignGateItem(item) ? 'Rerun planning with findings' : 'Reject'}
             </Button>
           </>
         );

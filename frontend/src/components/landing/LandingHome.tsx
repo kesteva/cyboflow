@@ -70,6 +70,11 @@ import type { ExperimentRow } from '../../../../shared/types/experiments';
 import type { SessionSettleState } from '../../../../shared/types/cyboflow';
 import { countApprovals, selectReadyToReviewRuns } from './queueSelectors';
 import { useTaskRunLauncher } from '../Backlog/useTaskRunLauncher';
+import { ViewSurface } from '../../customViews/ViewSurface';
+import { scrollToSectionOrTop } from '../../customViews/scrollToSectionOrTop';
+import { useSectionPlaced } from '../../customViews/useSectionPlaced';
+import { ViewHeaderControls } from '../../customViews/edit/ViewHeaderControls';
+import { DraftBanner } from '../../customViews/edit/DraftBanner';
 import { ProviderUsageCards } from '../ReviewQueue/ProviderUsageCards';
 import { SessionMergeDialog } from '../cyboflow/SessionMergeDialog';
 import { SessionDismissDialog } from '../cyboflow/SessionDismissDialog';
@@ -430,6 +435,14 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
   // -------------------------------------------------------------------------
   const needsInputRef = React.useRef<HTMLElement>(null);
   const readyRef = React.useRef<HTMLDivElement>(null);
+  // The page's own scroll container — the shell's center pane scrolls this
+  // element, not `window`, so the scroll-to-top fallback has to target it.
+  const pageScrollRef = React.useRef<HTMLDivElement>(null);
+  // Whether the ACTIVE view places each jump target at all. In Default mode
+  // both are always true, so the latch below keeps its original "wait for the
+  // data" behaviour; under a custom view that dropped the section, waiting
+  // would never end, so the jump falls back to the top of the page instead.
+  const needsInputPlaced = useSectionPlaced('review-queue', 'queue.needs-input');
   const [flashing, setFlashing] = React.useState(false);
   const flashTimer = React.useRef<number | null>(null);
 
@@ -446,20 +459,28 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
   // renders satisfy the request without re-scrolling on every state change.
   const focusHandled = React.useRef(false);
   React.useEffect(() => {
-    if (!focusQueue || focusHandled.current || needsInputRef.current === null) return;
+    if (!focusQueue || focusHandled.current) return;
+    // Still waiting for the section's data to arrive — try again next render.
+    if (needsInputPlaced && needsInputRef.current === null) return;
     focusHandled.current = true;
-    needsInputRef.current.scrollIntoView({ block: 'start' });
+    scrollToSectionOrTop(needsInputRef, pageScrollRef.current);
   });
 
   const jumpToNeedsInput = (): void => {
-    needsInputRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    const outcome = scrollToSectionOrTop(needsInputRef, pageScrollRef.current, {
+      block: 'start',
+      behavior: 'smooth',
+    });
+    // The flash highlights the section; with no section to highlight it would
+    // just be an unexplained blink at the top of the page.
+    if (outcome !== 'section') return;
     setFlashing(true);
     if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
     flashTimer.current = window.setTimeout(() => setFlashing(false), FLASH_MS);
   };
 
   const jumpToReady = (): void => {
-    readyRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    scrollToSectionOrTop(readyRef, pageScrollRef.current, { block: 'start', behavior: 'smooth' });
   };
 
   // -------------------------------------------------------------------------
@@ -610,7 +631,12 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
   const showEmptyWells = state === 'all-idle';
 
   const page = (children: React.ReactNode): React.JSX.Element => (
-    <div className="h-full w-full overflow-y-auto" style={GRAPH_PAPER_STYLE}>
+    <div
+      ref={pageScrollRef}
+      data-scroll-container
+      className="h-full w-full overflow-y-auto"
+      style={GRAPH_PAPER_STYLE}
+    >
       <div className="mx-auto w-full max-w-[1120px] px-6 py-8">
         <div className="flex flex-col gap-7 border border-border-primary bg-surface-primary px-11 py-9 font-mono shadow-[0_1px_3px_rgba(0,0,0,0.06)]">
           {children}
@@ -660,16 +686,13 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
     );
   }
 
-  return page(
-    <>
-      <QueueHeader waitingCount={waitingCount} state={state} />
-      <ProviderUsageCards />
-
-      {state === 'caught-up' && (
-        <CaughtUpWell workingCount={workingCount} onStartSession={startSession} />
-      )}
-      {state === 'all-idle' && <AllIdleStrip sessionCount={sessionsCount} />}
-
+  // The view-aware tail (docs/proposals/CUSTOM-VIEWS.md §5.2). Every section
+  // keeps the component, props and callbacks it had; what changes is that the
+  // ORDER is now data. A `null` entry renders nothing, exactly as the
+  // conditional it replaces did.
+  const sections: Record<string, React.ReactNode | null> = {
+    'queue.usage-cards': <ProviderUsageCards />,
+    'queue.recommended': (
       <RecommendedActionsSection
         visible={recommended.visible}
         hidden={recommended.hidden}
@@ -678,63 +701,65 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
         onDismiss={dismissAction}
         busyActionId={busyActionId}
       />
-
-      {state === 'no-sessions' && <NoSessionsWell onStartSession={startSession} />}
-
-      {showSessionSections && (
-        <>
-          <NeedsInputSection
-            ref={needsInputRef}
-            quickRows={triage.needsInput}
-            reviewItems={decisionItems}
-            approvals={approvals}
-            projectNameById={projectNameById}
-            runProjectMap={runProjectMap}
-            runSessionMap={runSessionMap}
-            nowMs={nowMs}
-            showWhenEmpty={showEmptyWells}
-            flashing={flashing}
-            onOpenQuickSession={openQuickSession}
-            onOpenReviewItem={openReviewItem}
-            onApprovalDecided={afterLifecycleAction}
-          />
-
-          <BlockedRunsSection
-            runs={blockedRunRows}
-            projectNameById={projectNameById}
-            nowMs={nowMs}
-            onOpenRun={(run) => openRunSession(run.id, run.project_id)}
-          />
-
-          <HumanTasksSection
-            items={humanTaskItems}
-            projectNameById={projectNameById}
-            nowMs={nowMs}
-            onResolved={afterLifecycleAction}
-          />
-
-          <div ref={readyRef} className="scroll-mt-4">
-            <ReadyForReviewSection
-              rows={readyRows}
-              projectNameById={projectNameById}
-              guardedSessionIds={guardedSessionIds}
-              nowMs={nowMs}
-              onOpenQuickSession={openQuickSession}
-              onOpenRun={(run) => openRunSession(run.id, run.project_id)}
-              onMergeSession={requestMerge}
-              onDismissSession={setDismissTargetId}
-            />
-          </div>
-
-          <NotificationsSection
-            items={notificationItems}
-            projectNameById={projectNameById}
-            nowMs={nowMs}
-            onDismissed={afterLifecycleAction}
-          />
-        </>
-      )}
-
+    ),
+    'queue.needs-input': showSessionSections ? (
+      <NeedsInputSection
+        ref={needsInputRef}
+        quickRows={triage.needsInput}
+        reviewItems={decisionItems}
+        approvals={approvals}
+        projectNameById={projectNameById}
+        runProjectMap={runProjectMap}
+        runSessionMap={runSessionMap}
+        nowMs={nowMs}
+        showWhenEmpty={showEmptyWells}
+        flashing={flashing}
+        onOpenQuickSession={openQuickSession}
+        onOpenReviewItem={openReviewItem}
+        onApprovalDecided={afterLifecycleAction}
+      />
+    ) : null,
+    'queue.blocked-runs': showSessionSections ? (
+      <BlockedRunsSection
+        runs={blockedRunRows}
+        projectNameById={projectNameById}
+        nowMs={nowMs}
+        onOpenRun={(run) => openRunSession(run.id, run.project_id)}
+      />
+    ) : null,
+    'queue.human-tasks': showSessionSections ? (
+      <HumanTasksSection
+        items={humanTaskItems}
+        projectNameById={projectNameById}
+        nowMs={nowMs}
+        onResolved={afterLifecycleAction}
+      />
+    ) : null,
+    // The wrapper div carries the scroll ref and its offset — it is part of the
+    // section, not of the surface, so it travels with it into a custom view.
+    'queue.ready-for-review': showSessionSections ? (
+      <div ref={readyRef} className="scroll-mt-4">
+        <ReadyForReviewSection
+          rows={readyRows}
+          projectNameById={projectNameById}
+          guardedSessionIds={guardedSessionIds}
+          nowMs={nowMs}
+          onOpenQuickSession={openQuickSession}
+          onOpenRun={(run) => openRunSession(run.id, run.project_id)}
+          onMergeSession={requestMerge}
+          onDismissSession={setDismissTargetId}
+        />
+      </div>
+    ) : null,
+    'queue.notifications': showSessionSections ? (
+      <NotificationsSection
+        items={notificationItems}
+        projectNameById={projectNameById}
+        nowMs={nowMs}
+        onDismissed={afterLifecycleAction}
+      />
+    ) : null,
+    'queue.working': (
       <WorkingSection
         rows={workingRows}
         nowMs={nowMs}
@@ -749,7 +774,8 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
           })
         }
       />
-
+    ),
+    'queue.backlog': (
       <BacklogSection
         tasks={backlogTasks}
         boards={backlogBoards}
@@ -761,6 +787,40 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
         onAddIdea={openAddIdea}
         onLaunchPlanner={(ideaIds, projectId) => void launchPlannerBatch('rq-ideas', ideaIds, projectId)}
         onLaunchSprint={(taskIds, projectId) => void launchSprintBatch('rq-tasks', taskIds, projectId)}
+      />
+    ),
+  };
+
+  // Page state wells are page CHROME, not widgets — they answer the page's own
+  // question and must survive any layout. Each is anchored to the section it
+  // currently follows so the Default view is byte-for-byte today's page; a
+  // custom view that drops the anchor floats the well up to the top instead of
+  // losing it (see ViewSurface's header comment).
+  const chrome = {
+    afterSection: {
+      'queue.usage-cards':
+        state === 'caught-up' ? (
+          <CaughtUpWell workingCount={workingCount} onStartSession={startSession} />
+        ) : state === 'all-idle' ? (
+          <AllIdleStrip sessionCount={sessionsCount} />
+        ) : null,
+      'queue.recommended': state === 'no-sessions' ? <NoSessionsWell onStartSession={startSession} /> : null,
+    },
+  };
+
+  return page(
+    <>
+      <QueueHeader
+        waitingCount={waitingCount}
+        state={state}
+        controls={<ViewHeaderControls surface="review-queue" />}
+      />
+      <DraftBanner surface="review-queue" />
+      <ViewSurface
+        surface="review-queue"
+        sections={sections}
+        context={{ projectId: null }}
+        chrome={chrome}
       />
 
       {mergeTargetId !== null && (

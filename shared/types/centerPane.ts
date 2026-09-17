@@ -15,11 +15,19 @@
  * localStorage). It persists across sequential runs within a session and resets
  * on app refresh. The durable source of truth for artifacts is the artifacts DB
  * table — closed artifact tabs are reopened from the right-rail Artifacts panel.
+ *
+ * `approved-design` (Tier 2, item 8c) is a fifth surface bolted onto the same
+ * strip: it does NOT back onto the `artifacts` table at all (an approved design
+ * durably survives the run/artifact cascade delete precisely because it lives
+ * in `approved_designs` + an on-disk snapshot, not an artifact row — see
+ * `cyboflow.design.forEntity`/`snapshotHtml`), so it gets its own tab kind
+ * rather than riding `artifact`'s atype-keyed identity.
  */
 import { isPerEntityArtifact, type ArtifactType } from './artifacts';
+import type { DiffGroupScope } from './runFiles';
 
 /** Tab kind discriminant. */
-export type TabKind = 'flow' | 'file' | 'artifact';
+export type TabKind = 'flow' | 'file' | 'artifact' | 'approved-design';
 
 /** Which right-rail tab is showing (Workflow steps vs. Artifacts). */
 export type RightRailTab = 'steps' | 'arts';
@@ -29,9 +37,10 @@ export type FileTabStatus = 'M' | 'A' | '?';
 
 /**
  * A single center-pane tab. The optional fields are populated per `kind`:
- *   - `flow`     → `pinned: true`; no `status` / `atype` / file fields.
- *   - `file`     → `filePath`, `worktreePath`, `status`.
- *   - `artifact` → `atype`, `artifactId`, `committed`.
+ *   - `flow`             → `pinned: true`; no `status` / `atype` / file fields.
+ *   - `file`             → `filePath`, `worktreePath`, `status`.
+ *   - `artifact`         → `atype`, `artifactId`, `committed`.
+ *   - `approved-design`  → `ideaId`, `ideaRef`.
  * `isNew` (artifact tabs) drives the pulsing rust dot until the tab is focused.
  */
 export interface TabItem {
@@ -52,6 +61,13 @@ export interface TabItem {
   filePath?: string;
   /** Git status letter for the glyph (file tabs). */
   status?: FileTabStatus;
+  /**
+   * Base ref/SHA the file's diff should be computed against (file tabs).
+   * `null`/`undefined` means the default (working-directory-vs-HEAD) base.
+   */
+  baseRef?: string | null;
+  /** Which diff-group scope the tab's diff belongs to (file tabs). */
+  scope?: DiffGroupScope;
 
   // --- artifact tabs ---
   /** Artifact kind (artifact tabs). */
@@ -83,6 +99,12 @@ export interface TabItem {
    *     would close the tab the instant it opened.
    */
   external?: boolean;
+
+  // --- approved-design tabs ---
+  /** The idea whose approved design this tab shows (approved-design tabs). */
+  ideaId?: string;
+  /** The idea's display ref (e.g. `IDEA-014`), shown in the tab header. */
+  ideaRef?: string;
 }
 
 /** Per-session center-pane state. */
@@ -130,4 +152,13 @@ export function artifactTabId(atype: ArtifactType, artifactId?: string, external
     return `art:${atype}:${artifactId}`;
   }
   return `art:${atype}`;
+}
+
+/**
+ * Stable id for an approved-design tab — one tab per idea within a session
+ * (`design:<ideaId>`). Unlike artifact tabs, there is no atype/committed
+ * axis: the approved design is keyed purely by the idea it belongs to.
+ */
+export function approvedDesignTabId(ideaId: string): string {
+  return `design:${ideaId}`;
 }

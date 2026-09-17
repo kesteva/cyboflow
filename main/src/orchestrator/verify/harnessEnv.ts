@@ -162,13 +162,13 @@ const defaultExists = async (absPath: string): Promise<boolean> => {
  * install", and a deliverable-controlled playwright would BE the driver's
  * implementation — a verification the code under test can rewrite.
  *
- * PACKAGED-BUILD CAVEAT: `asarUnpack` in `package.json` unpacks the driver JS
- * but NOT `node_modules/playwright*`, and a plain-node child cannot read inside
- * `app.asar` — so the walk finds no marker there and this answers `null`. That
- * is honest (an unset NODE_PATH beats one pointing at an unreadable directory);
- * making the packaged driver loadable needs `node_modules/playwright/**` +
- * `node_modules/playwright-core/**` added to `asarUnpack`, a build-config
- * change deliberately NOT made by this change set (F3).
+ * PACKAGED BUILDS: `asarUnpack` in `package.json` unpacks the driver JS AND
+ * `node_modules/playwright*` (a plain-node child cannot read inside
+ * `app.asar`, so anything the driver requires must be a real file), and the
+ * walk from the unpacked driver finds `app.asar.unpacked/node_modules`. Should
+ * that entry ever be dropped, the walk answers `null` — honest (an unset
+ * NODE_PATH beats one pointing at an unreadable directory) but the driver's
+ * `import('playwright')` then fails, masked as "CDP endpoint not reachable".
  */
 export async function resolveHarnessNodePath(
   driverCliPath: string,

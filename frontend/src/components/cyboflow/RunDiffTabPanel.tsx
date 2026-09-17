@@ -10,22 +10,26 @@
  *
  * tRPC: vanilla createTRPCProxyClient — `.query()` returns a Promise (there are
  * no React-Query hooks in this app). The fetch mirrors useSprintLanes: an effect
- * keyed by runId, a `cancelled` guard on unmount/runId-change, and the
+ * keyed by `[runId, comparisonRef]` (TASK-218 — selecting a new comparison base
+ * refetches), a `cancelled` guard on unmount/dep-change, and the
  * AppRouter-inferred output type (never a local mirror).
  *
  * States:
  *   - loading                     → muted "Loading diff…"
  *   - error                       → muted error line
  *   - null / empty diff / no files → muted "No changes in this run's worktree yet."
- *   - otherwise                   → RunDiffFileList (flat changed-files list;
+ *   - otherwise                   → RunDiffFileList — grouped (Unstaged / Staged /
+ *                                    Untracked / Committed) via the response's
+ *                                    `worktree` payload passed as `groups`;
  *                                    clicking a row opens the file in the center
- *                                    pane where the Diff / Split / Preview lives).
+ *                                    pane where the Diff / Split / Preview lives.
  */
 import { useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
 import type { inferRouterOutputs } from '@trpc/server';
 import { trpc } from '../../trpc/client';
 import type { AppRouter } from '../../../../shared/types/trpc';
+import type { DiffGroupScope, WorktreeStatusPayload } from '../../../../shared/types/runFiles';
 import { RunDiffFileList } from './RunDiffFileList';
 
 type RouterOutputs = inferRouterOutputs<AppRouter>;
@@ -46,36 +50,85 @@ const INITIAL_STATE: RunDiffState = {
 
 export function RunDiffTabPanel({
   runId,
+  comparisonRef,
+  refreshNonce,
   onOpenFile,
+  onResolvedBase,
+  onWorktree,
 }: {
   runId: string;
-  /** Forwarded to DiffViewer — click a file header to open it (vs. toggle). */
-  onOpenFile?: (filePath: string) => void;
+  /**
+   * The user-selected comparison base (BaseSelector / TASK-218), lifted by the
+   * rail and forwarded verbatim into `cyboflow.runs.gitDiff`'s `comparisonRef`
+   * input (undefined/null both mean "use the run's own default"). Included in
+   * the fetch effect's deps — selecting a new base DOES refetch.
+   */
+  comparisonRef?: string | null;
+  /**
+   * Forwarded to DiffViewer — click a file header to open it (vs. toggle). The
+   * grouped arm additionally passes the clicked row's group scope.
+   */
+  onOpenFile?: (filePath: string, scope?: DiffGroupScope) => void;
+  /**
+   * Echoes the base this panel's diff was actually resolved against — called
+   * once per successful fetch (including a null/no-worktree result), never on
+   * the error arm. Lets the rail lift the SAME base into openFileTab so a file
+   * tab opened from this panel (or the File Explorer) resolves against the
+   * base the rail is currently showing, not a separately-derived one.
+   */
+  onResolvedBase?: (base: string | null) => void;
+  /**
+   * Bumped by the rail after a working-tree MUTATION (WorktreeStrip's Commit
+   * / Restore) so this panel refetches the same [runId, comparisonRef] and
+   * the grouped list + the strip's count move together. Undefined/unchanged
+   * = no extra fetch.
+   */
+  refreshNonce?: number;
+  /**
+   * Echoes the fetched response's `worktree` payload (the SAME snapshot the
+   * grouped list renders) so the rail can lift it into WorktreeStrip instead
+   * of the strip issuing a second, possibly disagreeing, request. Unlike
+   * onResolvedBase this IS called on the error arm — with `undefined` — so a
+   * consumer never keeps a stale snapshot that would enable Commit.
+   */
+  onWorktree?: (worktree: WorktreeStatusPayload | undefined) => void;
 }): ReactElement {
   const [state, setState] = useState<RunDiffState>(INITIAL_STATE);
 
   useEffect(() => {
     let cancelled = false;
-    setState({ ...INITIAL_STATE, isLoading: true });
+    // Keep the last successful result on screen while refetching (see
+    // SessionDiffTabPanel's twin) — the placeholder shows only until the
+    // FIRST result lands.
+    setState((prev) => ({ ...prev, isLoading: true, error: null }));
 
-    trpc.cyboflow.runs.gitDiff.query({ runId }).then(
+    trpc.cyboflow.runs.gitDiff.query({ runId, comparisonRef: comparisonRef ?? undefined }).then(
       (result) => {
         if (cancelled) return;
         setState({ diff: result, isLoading: false, error: null });
+        onResolvedBase?.(result?.resolvedBase ?? null);
+        onWorktree?.(result?.worktree);
       },
       (err: unknown) => {
         if (cancelled) return;
         const error = err instanceof Error ? err : new Error(String(err));
         setState({ diff: null, isLoading: false, error });
+        onWorktree?.(undefined);
       },
     );
 
     return () => {
       cancelled = true;
     };
-  }, [runId]);
+    // onResolvedBase/onWorktree are per-render callbacks from the rail; keying
+    // the fetch on them would refetch on every rail render (D-8: single fetch
+    // per [runId, comparisonRef] pair). comparisonRef IS a dep on purpose — a
+    // new selection must refetch — as is refreshNonce (a post-mutation
+    // refetch signal).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runId, comparisonRef, refreshNonce]);
 
-  if (state.isLoading) {
+  if (state.isLoading && state.diff === null) {
     return (
       <div
         data-testid="run-right-rail-diff-loading"
@@ -99,10 +152,11 @@ export function RunDiffTabPanel({
 
   const diffText = state.diff?.diff ?? '';
 
-  // Flat changed-files list — the diff body itself opens in the center pane.
+  // Grouped changed-files list (worktree payload) — the diff body itself
+  // opens in the center pane.
   return (
     <div data-testid="run-right-rail-diff" className="h-full">
-      <RunDiffFileList diff={diffText} onOpenFile={onOpenFile} />
+      <RunDiffFileList diff={diffText} onOpenFile={onOpenFile} groups={state.diff?.worktree} />
     </div>
   );
 }

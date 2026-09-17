@@ -110,7 +110,7 @@ const panel = (id: string, sessionId = 'sess', substrate?: 'sdk' | 'interactive'
 beforeEach(() => vi.clearAllMocks());
 
 describe('relayOrSpawnPtyPanel — interactive Claude', () => {
-  it('eager-spawns an added interactive panel under its OWN id (identity registration + briefing)', async () => {
+  it('eager-spawns an added interactive panel under its OWN id, briefing on the system prompt', async () => {
     const { deps, interactive, registerLivePanel } = makeDeps({ substrate: 'interactive', chat_run_id: 'chat-run' });
 
     const handled = await relayOrSpawnPtyPanel(deps, panel('added-P'), null);
@@ -121,7 +121,11 @@ describe('relayOrSpawnPtyPanel — interactive Claude', () => {
     expect(interactive.startPanel).toHaveBeenCalledTimes(1);
     const args = interactive.startPanel.mock.calls[0];
     expect(args[0]).toBe('added-P'); // panelId
-    expect(args[3]).toBe(QUICK_PTY_BRIEFING); // first prompt = briefing (eager spawn)
+    // The briefing is session CONTEXT, not a turn: it rides
+    // --append-system-prompt and the REPL opens idle rather than spending its
+    // first turn acknowledging a message the user never sent.
+    expect(args[3]).toBe(''); // prompt — no user turn on an eager spawn
+    expect(args[11]).toBe(QUICK_PTY_BRIEFING); // sessionBriefing
     expect(interactive.relayUserTurn).not.toHaveBeenCalled();
   });
 
@@ -132,6 +136,17 @@ describe('relayOrSpawnPtyPanel — interactive Claude', () => {
     expect(interactive.startPanel).toHaveBeenCalledTimes(1);
     // Fresh spawn with the user's text as the first prompt.
     expect(interactive.startPanel.mock.calls[0][3]).toBe('hi');
+  });
+
+  it('a spawn carrying a user turn STILL gets the briefing (the old `input ?? briefing` gap)', async () => {
+    // Keying the briefing off `input ?? …` meant the common add-a-chat path —
+    // a panel spawned BY the user's first message — silently ran with no
+    // session context at all. Separate channels make both reachable at once.
+    const { deps, interactive } = makeDeps({ substrate: 'interactive' });
+    await relayOrSpawnPtyPanel(deps, panel('with-input-P'), 'fix the parser');
+    const args = interactive.startPanel.mock.calls[0];
+    expect(args[3]).toBe('fix the parser');
+    expect(args[11]).toBe(QUICK_PTY_BRIEFING);
   });
 
   it('relays a real user turn into a LIVE panel (no re-spawn)', async () => {

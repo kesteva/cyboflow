@@ -129,6 +129,14 @@ vi.mock('../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
       experiments: { listForProject: { query: vi.fn().mockResolvedValue([]) } },
+      // Custom Views: the surface always init()s the store, which reads these.
+      // An empty view list is the Default view — today's page.
+      customViews: {
+        listViews: { query: vi.fn().mockResolvedValue([]) },
+        getActiveView: { query: vi.fn().mockResolvedValue({ viewId: 'default' }) },
+        listWidgets: { query: vi.fn().mockResolvedValue([]) },
+        onWidgetDraft: { subscribe: vi.fn(() => ({ unsubscribe: vi.fn() })) },
+      },
     },
   },
 }));
@@ -265,6 +273,7 @@ function makeReadyTask(overrides: Partial<BacklogTaskItem> & { id: string }): Ba
     body: null,
     priority: 'P2',
     category: 'feature',
+    executor: 'agent',
     repo: null,
     parent_epic_id: null,
     originating_idea_id: null,

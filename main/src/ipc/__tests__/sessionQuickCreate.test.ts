@@ -291,6 +291,10 @@ function makeServices(opts?: {
     getSession: vi.fn(() => fakeSession),
     refreshSessionFromDatabase: vi.fn(() => fakeSession),
     updateSession: vi.fn(),
+    // The idle-rest seam (restInteractiveSessionIdle) writes the turn-end
+    // resting value through the DB seam, exactly like index.ts's rester.
+    db: { updateSession: vi.fn() },
+    emit: vi.fn(),
     addSessionError: vi.fn(),
     addSessionOutput: vi.fn(),
     addPanelConversationMessage: vi.fn(),
@@ -299,6 +303,7 @@ function makeServices(opts?: {
 
   const fakeTaskQueue = {
     createSession: vi.fn().mockResolvedValue({ id: 'job-001' }),
+    onSessionJobFailed: vi.fn(() => () => {}),
   };
 
   const fakeDatabaseService = {
@@ -660,13 +665,15 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
       'panel-quick-1',
       'sess-001',
       `/tmp/project/${TEST_BRANCH}`,
-      expect.stringContaining('cyboflow'),
+      '', // prompt — the eager spawn opens an idle REPL, it starts no turn
       undefined,
       'sonnet',
       undefined,
       true,
       undefined, // resumeSessionId — fresh eager spawn, not a resume
       undefined, // reasoningEffort — no persisted setting in this test
+      undefined, // userAcknowledgedProviderDisabled — not a resume prompt
+      expect.stringContaining('cyboflow'), // sessionBriefing
     );
   });
 
@@ -750,13 +757,12 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
     expect(details).toContain('PATH');
     expect(details).toContain('Settings');
 
-    // …and the status must END as 'error'. The rejection lands inside the
-    // microtask window the 'running' write opens, so without the re-assert the
-    // running write silently wins and the session looks healthy.
+    // …and the status must END as 'error': the idle rest (a 'completed' write
+    // through the DB seam) must never be what the session is left showing.
+    expect(fakeSessionManager.db.updateSession).toHaveBeenCalledWith('sess-001', { status: 'completed' });
     const statuses = fakeSessionManager.updateSession.mock.calls
       .filter((c) => (c as unknown as [string, { status?: string }])[0] === 'sess-001')
       .map((c) => (c as unknown as [string, { status?: string }])[1]?.status);
-    expect(statuses).toContain('running');
     expect(statuses[statuses.length - 1]).toBe('error');
   });
 
@@ -782,16 +788,26 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
       title: 'Chat',
     });
     expect(fakeInteractiveCliManager.startPanel).toHaveBeenCalledTimes(1);
-    const [panelId, sessionId, worktreePath, briefing] =
-      fakeInteractiveCliManager.startPanel.mock.calls[0] as unknown as [string, string, string, string];
+    const spawnArgs = fakeInteractiveCliManager.startPanel.mock.calls[0] as unknown as unknown[];
+    const [panelId, sessionId, worktreePath, prompt] = spawnArgs as [string, string, string, string];
+    const briefing = spawnArgs[11] as string;
     expect(panelId).toBe('panel-quick-1');
     expect(sessionId).toBe('sess-001');
     expect(worktreePath).toBe(`/tmp/project/${TEST_BRANCH}`);
+    // The briefing is session CONTEXT and rides --append-system-prompt: it must
+    // NOT open the transcript as a user message or spend the session's first turn.
+    expect(prompt).toBe('');
     expect(briefing).toContain('cyboflow');
     // That keyword is the USER's to type — never cyboflow-authored prompt text.
     expect(briefing).not.toMatch(/ultracode/i);
 
-    expect(fakeSessionManager.updateSession).toHaveBeenCalledWith('sess-001', { status: 'running' });
+    // Idle, not running: nothing rests a 'running' mark when no turn ran. The
+    // rest is the turn-end value via the DB seam — NOT 'stopped', which the
+    // board labels "stopped by you".
+    expect(fakeSessionManager.db.updateSession).toHaveBeenCalledWith('sess-001', { status: 'completed' });
+    expect(fakeSessionManager.emit).toHaveBeenCalledWith('session-updated', expect.anything());
+    expect(fakeSessionManager.updateSession).not.toHaveBeenCalledWith('sess-001', { status: 'running' });
+    expect(fakeSessionManager.updateSession).not.toHaveBeenCalledWith('sess-001', { status: 'stopped' });
 
     // At-spawn runId→panelId registration fires BEFORE the fire-and-forget
     // startPanel (deterministic facade translation — no first-PTY-byte race).
@@ -1608,8 +1624,11 @@ describe('sessions:input handler - substrate routing', () => {
       false, // fastMode — default off (no persisted opt-in)
       undefined, // resumeSessionId — fresh-fallback respawn, not an explicit resume
       undefined, // reasoningEffort — no persisted setting in this test
+      undefined, // userAcknowledgedProviderDisabled — not a resume prompt
+      expect.stringContaining('cyboflow'), // sessionBriefing — a fresh REPL needs its context
     );
     expect(fakeClaudeCodeManager.startPanel).not.toHaveBeenCalled();
+    // The user's input IS a turn, so 'running' is right here.
     expect(fakeSessionManager.updateSession).toHaveBeenCalledWith(SESSION_ID, { status: 'running' });
 
     // At-spawn runId→panelId registration (mirrors create-quick) fires BEFORE

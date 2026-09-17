@@ -54,6 +54,7 @@ import type {
   TaskActor,
   TaskChangeAction,
   TaskChangedEvent,
+  TaskExecutor,
   TaskType,
 } from '../../../shared/types/tasks';
 import { resolveStepAgentKey } from '../../../shared/types/agentIdentity';
@@ -103,6 +104,8 @@ interface EntityTableDescriptor {
   hasEntryStage: boolean;
   /** This entity may carry a scope (only ideas). */
   hasScope: boolean;
+  /** This entity may carry an executor (only tasks — migration 137). */
+  hasExecutor: boolean;
   /** This entity may carry image attachments (only ideas, migration 028). */
   hasAttachments: boolean;
   /** This entity may carry a decomposed_at retire stamp (only ideas, migration 042). */
@@ -112,9 +115,9 @@ interface EntityTableDescriptor {
 }
 
 const ENTITY_TABLES: Record<TaskType, EntityTableDescriptor> = {
-  idea: { table: 'ideas', idPrefix: 'ide', hasParentEpic: false, hasOriginatingIdea: false, hasEntryStage: false, hasScope: true, hasAttachments: true, hasDecomposed: true, hasApproval: false },
-  epic: { table: 'epics', idPrefix: 'epc', hasParentEpic: false, hasOriginatingIdea: true, hasEntryStage: false, hasScope: false, hasAttachments: false, hasDecomposed: false, hasApproval: true },
-  task: { table: 'tasks', idPrefix: 'tsk', hasParentEpic: true, hasOriginatingIdea: true, hasEntryStage: true, hasScope: false, hasAttachments: false, hasDecomposed: false, hasApproval: true },
+  idea: { table: 'ideas', idPrefix: 'ide', hasParentEpic: false, hasOriginatingIdea: false, hasEntryStage: false, hasScope: true, hasExecutor: false, hasAttachments: true, hasDecomposed: true, hasApproval: false },
+  epic: { table: 'epics', idPrefix: 'epc', hasParentEpic: false, hasOriginatingIdea: true, hasEntryStage: false, hasScope: false, hasExecutor: false, hasAttachments: false, hasDecomposed: false, hasApproval: true },
+  task: { table: 'tasks', idPrefix: 'tsk', hasParentEpic: true, hasOriginatingIdea: true, hasEntryStage: true, hasScope: false, hasExecutor: true, hasAttachments: false, hasDecomposed: false, hasApproval: true },
 };
 
 /** Resolve a descriptor for an entity type. */
@@ -135,6 +138,11 @@ export type TaskChangeErrorCode =
   | 'concurrency'
   | 'invalid_dependency'
   | 'dependency_cycle'
+  // An `executor` was supplied for an entity that does not execute. Only TASKS
+  // carry the column (migration 137) — an idea/epic create or update naming one
+  // is a caller bug, not a field to silently drop, because the caller believes
+  // it just marked work as human-only.
+  | 'invalid_executor'
   // IDEA-NEEDS-EPIC invariant: a write would leave an idea with two-or-more tasks
   // parented straight to it (no epic). A multi-task idea must group its tasks under
   // an epic — the caller mints the fallback epic (named after the idea) and parents
@@ -183,6 +191,12 @@ export interface TaskFieldChanges {
   repo?: string | null;
   /** Idea size hint — only valid on type='idea'. */
   scope?: IdeaScope | null;
+  /**
+   * WHO performs this task (migration 137) — only valid on type='task'
+   * (`invalid_executor` otherwise). Flipping it to 'human' takes the task out of
+   * every future sprint batch; it does NOT touch a batch already materialized.
+   */
+  executor?: TaskExecutor;
   /**
    * Image attachments — only valid on type='idea' (migration 028). The whole
    * array is replaced wholesale (the editor sends the full desired set); null or
@@ -300,6 +314,16 @@ export interface TaskChange {
   dependsOnTaskId?: string;
   /** Edge kind for the add-dependency path. Defaults to 'blocking'. */
   dependencyKind?: TaskDependencyKind;
+  /**
+   * REMOVE-DEPENDENCY path: set alongside `taskId` + `dependsOnTaskId` to DELETE
+   * that edge instead of recording it. Idempotent (removing an absent edge is a
+   * no-op that still returns cleanly, with `removed: false`), and it mints a
+   * `dependency-removed` entity_events row on the blocked task when an edge
+   * actually went away. Deliberately a separate flag rather than a separate
+   * top-level field so both dependency paths share one endpoint-resolution and
+   * one sandbox guard.
+   */
+  removeDependency?: boolean;
   // ----- create-only fields (ignored on update) -----
   /** @deprecated use entityType. Kept so existing callers compile; entityType wins. */
   type?: TaskType;
@@ -317,6 +341,8 @@ export interface TaskChange {
   repo?: string | null;
   /** Initial scope for the create path (ideas only). */
   scope?: IdeaScope | null;
+  /** Initial executor for the create path (tasks only, migration 137). Defaults to 'agent'. */
+  executor?: TaskExecutor;
   /** Initial image attachments for the create path (ideas only, migration 028). */
   attachments?: IdeaAttachment[] | null;
   /** Board to create the entity on. Defaults to the project's default board. */
@@ -347,6 +373,8 @@ interface EntityDbRow {
   scope: IdeaScope | null;
   priority: Priority;
   category: EntityCategory;
+  /** WHO performs the work (migration 137, tasks-only); ideas/epics read 'agent'. */
+  executor: TaskExecutor;
   repo: string | null;
   archived_at: string | null;
   /** Retire stamp (ideas-only, migration 042); NULL on epics/tasks + when on-board. */
@@ -580,18 +608,27 @@ export class TaskChangeRouter {
   async applyChange(
     projectId: number,
     change: TaskChange,
-  ): Promise<{ taskId: string; dependsOnTaskId?: string; event: { id: number; seq: number } }> {
+  ): Promise<{
+    taskId: string;
+    dependsOnTaskId?: string;
+    removed?: boolean;
+    event: { id: number; seq: number };
+  }> {
     const result = (await this.getProjectQueue(projectId).add(() => {
       if (change.taskId === undefined) {
         return this.runCreate(projectId, change);
       }
       if (change.dependsOnTaskId !== undefined) {
-        return this.runAddDependency(projectId, change);
+        return change.removeDependency === true
+          ? this.runRemoveDependency(projectId, change)
+          : this.runAddDependency(projectId, change);
       }
       return this.runUpdate(projectId, change);
     })) as {
       taskId: string;
       dependsOnTaskId?: string;
+      /** Only present on the remove-dependency path — whether an edge actually went away. */
+      removed?: boolean;
       event: { id: number; seq: number };
       previousParentEpicId?: string | null;
       wontDoRunIds?: string[];
@@ -1247,6 +1284,18 @@ export class TaskChangeRouter {
       const category: EntityCategory = change.category ?? change.fields?.category ?? 'feature';
       const repo = change.repo ?? change.fields?.repo ?? null;
       const scope = desc.hasScope ? (change.scope ?? change.fields?.scope ?? null) : null;
+      // Executor (migration 137, tasks-only). Unlike `scope` — which is silently
+      // dropped on an epic/task create — a misplaced executor is REJECTED: the
+      // caller believes it just marked work as human-only, and quietly making it
+      // an agent idea would put that work back in a sprint's path.
+      const requestedExecutor = change.executor ?? change.fields?.executor;
+      if (requestedExecutor !== undefined && !desc.hasExecutor) {
+        throw new TaskChangeError(
+          'invalid_executor',
+          `executor is only valid on type='task' (got type='${type}')`,
+        );
+      }
+      const executor: TaskExecutor = desc.hasExecutor ? (requestedExecutor ?? 'agent') : 'agent';
       // Attachments (ideas-only): serialize the array to JSON for the column; a
       // null/empty set stays NULL so the no-attachments case has no JSON noise.
       const attachmentsArr = desc.hasAttachments
@@ -1288,6 +1337,7 @@ export class TaskChangeRouter {
         body,
         priority,
         category,
+        executor,
         repo,
         boardId,
         stageId,
@@ -1309,6 +1359,11 @@ export class TaskChangeRouter {
       if (parentEpicId !== null) changes.push({ field: 'parent_epic_id', from: null, to: parentEpicId });
       if (originatingIdeaId !== null) changes.push({ field: 'originating_idea_id', from: null, to: originatingIdeaId });
       if (scope !== null) changes.push({ field: 'scope', from: null, to: scope });
+      // Only log a NON-default executor — an 'agent' task is the unremarkable
+      // case and a delta on every create would be pure changelog noise.
+      if (desc.hasExecutor && executor !== 'agent') {
+        changes.push({ field: 'executor', from: null, to: executor });
+      }
       if (attachments !== null) changes.push({ field: 'attachments', from: null, to: attachments });
 
       const ev = this.insertEvent(type, taskId, change.kind ?? 'created', change.actor, change.runId ?? null, changes, now);
@@ -1333,6 +1388,8 @@ export class TaskChangeRouter {
       body: string | null;
       priority: Priority;
       category: EntityCategory;
+      /** WHO performs the work (migration 137); only written when the table carries the column. */
+      executor: TaskExecutor;
       repo: string | null;
       boardId: string;
       stageId: string;
@@ -1356,6 +1413,13 @@ export class TaskChangeRouter {
     if (desc.hasScope) {
       cols.push('scope');
       vals.push(v.scope);
+    }
+    // Executor (migration 137, tasks-only). Gated on the column existing so a
+    // pre-137 / partial-migration test DB keeps inserting instead of throwing
+    // 'no such column' — same posture as approved_at / experiment_id below.
+    if (desc.hasExecutor && this.columnExists(desc.table, 'executor')) {
+      cols.push('executor');
+      vals.push(v.executor);
     }
     if (desc.hasAttachments) {
       cols.push('attachments');
@@ -1702,6 +1766,13 @@ export class TaskChangeRouter {
       const params: unknown[] = [];
       /** Default event kind for the archive toggle ('archived'|'unarchived'); change.kind still wins. */
       let archiveKind: string | null = null;
+      /**
+       * True once this update actually flips `executor` (migration 137). It gives
+       * the event its own kind — 'executor-changed' — so a consumer scanning the
+       * changelog for "when did this become human work?" reads one kind instead
+       * of grepping every 'updated' row's deltas.
+       */
+      let executorChanged = false;
 
       // ----- stage move -----
       if (change.stageId !== undefined && change.stageId !== current.stage_id) {
@@ -1953,6 +2024,23 @@ export class TaskChangeRouter {
           params.push(f.scope);
           deltas.push({ field: 'scope', from: current.scope, to: f.scope });
         }
+        // Executor (migration 137) — REJECTED rather than dropped on a non-task
+        // (see the create path's rationale). An unchanged value is a no-op, so
+        // the no-orphan-UPDATE invariant is preserved.
+        if (f.executor !== undefined) {
+          if (!desc.hasExecutor) {
+            throw new TaskChangeError(
+              'invalid_executor',
+              `executor is only valid on type='task' (got type='${type}')`,
+            );
+          }
+          if (f.executor !== current.executor) {
+            sets.push('executor = ?');
+            params.push(f.executor);
+            deltas.push({ field: 'executor', from: current.executor, to: f.executor });
+            executorChanged = true;
+          }
+        }
         if (f.attachments !== undefined && desc.hasAttachments) {
           // Whole-array replace; serialize to JSON (null/[] -> NULL) and compare
           // against the stored JSON so an unchanged set is a no-op.
@@ -1994,7 +2082,7 @@ export class TaskChangeRouter {
       const ev = this.insertEvent(
         type,
         taskId,
-        change.kind ?? archiveKind ?? action,
+        change.kind ?? archiveKind ?? (executorChanged ? 'executor-changed' : null) ?? action,
         change.actor,
         change.runId ?? null,
         deltas,
@@ -2395,6 +2483,141 @@ export class TaskChangeRouter {
     return { taskId: blockedId, dependsOnTaskId: prereqId, event: { id: eventId, seq: eventSeq } };
   }
 
+  // --------------------------------------------------------------------------
+  // Remove-dependency path (DELETE a task->task edge)
+  // --------------------------------------------------------------------------
+
+  /**
+   * Delete a task->task dependency edge. `taskId` is the BLOCKED task,
+   * `change.dependsOnTaskId` the PREREQUISITE — the same endpoints, resolved the
+   * same id-or-ref way, as {@link runAddDependency}, so the two paths can never
+   * disagree about which edge a caller meant.
+   *
+   * IDEMPOTENT: removing an edge that is not there is a clean no-op returning
+   * `removed: false` (with the blocked task's most recent event, mirroring
+   * runAddDependency's dup-re-add behaviour). That matters because the only
+   * writers are a human clicking "Remove" on a dependency row and a retry behind
+   * it — neither should see an error for having already succeeded.
+   *
+   * There is DELIBERATELY no MCP tool for this. An agent that could cut its own
+   * prerequisites could unblock itself out of an ordering the dependency
+   * analysis put there on purpose; removing an edge is a human judgment.
+   *
+   * The A/B sandbox guard is the same BIDIRECTIONAL one runAddDependency
+   * applies, for the same reason: deleting an edge mutates the blocked task's
+   * dependency state and mints an event on it.
+   */
+  private runRemoveDependency(
+    projectId: number,
+    change: TaskChange,
+  ): { taskId: string; dependsOnTaskId: string; removed: boolean; event: { id: number; seq: number } } {
+    const rawTaskId = change.taskId as string;
+    const rawDependsOn = change.dependsOnTaskId as string;
+    const now = new Date().toISOString();
+
+    let blockedId = '';
+    let prereqId = '';
+    let eventId = 0;
+    let eventSeq = 0;
+    let removed = false;
+
+    const txn = this.db.transaction(() => {
+      const blocked = this.resolveTaskByRefOrId(projectId, rawTaskId);
+      if (!blocked) {
+        throw new TaskChangeError('invalid_dependency', `task ${rawTaskId} not found`);
+      }
+      if (blocked.project_id !== projectId) {
+        throw new TaskChangeError('invalid_dependency', `task ${rawTaskId} belongs to a different project`);
+      }
+      const prereq = this.resolveTaskByRefOrId(projectId, rawDependsOn);
+      if (!prereq) {
+        throw new TaskChangeError('invalid_dependency', `prerequisite task ${rawDependsOn} not found`);
+      }
+      if (prereq.project_id !== projectId) {
+        throw new TaskChangeError(
+          'invalid_dependency',
+          `prerequisite task ${rawDependsOn} belongs to a different project`,
+        );
+      }
+      blockedId = blocked.id;
+      prereqId = prereq.id;
+
+      // A/B SANDBOX GUARD — identical to runAddDependency's (see its comment for
+      // the full rationale); the orchestrator is exempt.
+      if (change.actor !== 'orchestrator') {
+        const runExperimentId = this.runExperimentIdFor(change.runId);
+        const blockedExperimentId = this.taskExperimentIdFor(blockedId);
+        const prereqExperimentId = this.taskExperimentIdFor(prereqId);
+        if (runExperimentId !== null) {
+          const runArm = this.runExperimentArmFor(change.runId);
+          const blockedArm = this.taskExperimentArmFor(blockedId);
+          const prereqArm = this.taskExperimentArmFor(prereqId);
+          const sameArm = (arm: ExperimentArm | null): boolean => runArm !== null && arm === runArm;
+          if (
+            blockedExperimentId !== runExperimentId ||
+            prereqExperimentId !== runExperimentId ||
+            !sameArm(blockedArm) ||
+            !sameArm(prereqArm)
+          ) {
+            throw new TaskChangeError(
+              'experiment_sandboxed',
+              "dependency endpoints are outside this experiment arm's sandbox — both tasks must belong to this experiment and arm",
+            );
+          }
+        } else if (blockedExperimentId !== null || prereqExperimentId !== null) {
+          throw new TaskChangeError(
+            'experiment_sandboxed',
+            'cannot remove a dependency touching an experiment-sandboxed task until the experiment is decided',
+          );
+        }
+      }
+
+      // Read the kind BEFORE the delete so the event can record what went away.
+      const existing = this.db
+        .prepare('SELECT kind FROM task_dependencies WHERE task_id = ? AND depends_on_task_id = ?')
+        .get(blockedId, prereqId) as { kind: TaskDependencyKind } | undefined;
+      if (!existing) {
+        return; // removed stays false — idempotent no-op.
+      }
+
+      this.db
+        .prepare('DELETE FROM task_dependencies WHERE task_id = ? AND depends_on_task_id = ?')
+        .run(blockedId, prereqId);
+
+      const deltas: FieldDelta[] = [
+        { field: 'depends_on_task_id', from: prereqId, to: null },
+        { field: 'dependency_kind', from: existing.kind, to: null },
+      ];
+      const ev = this.insertEvent(
+        'task',
+        blockedId,
+        change.kind ?? 'dependency-removed',
+        change.actor,
+        change.runId ?? null,
+        deltas,
+        now,
+      );
+      eventId = ev.id;
+      eventSeq = ev.seq;
+      removed = true;
+    });
+    (txn as () => void)();
+
+    if (!removed) {
+      const last = this.db
+        .prepare(
+          'SELECT id, seq FROM entity_events WHERE entity_type = ? AND entity_id = ? ORDER BY seq DESC LIMIT 1',
+        )
+        .get('task', blockedId) as { id: number; seq: number } | undefined;
+      eventId = last?.id ?? 0;
+      eventSeq = last?.seq ?? 0;
+    } else {
+      this.emitChange(projectId, 'task', blockedId, 'updated', change.actor);
+    }
+
+    return { taskId: blockedId, dependsOnTaskId: prereqId, removed, event: { id: eventId, seq: eventSeq } };
+  }
+
   /**
    * Resolve a task identifier that may be EITHER the opaque `tasks.id` (`tsk_…`)
    * OR its display `ref` (`TASK-001`) to the canonical row. Opaque id wins (an
@@ -2477,9 +2700,17 @@ export class TaskChangeRouter {
     const reopenedAt = this.columnExists(desc.table, 'reopened_at')
       ? 'reopened_at'
       : 'NULL AS reopened_at';
+    // Executor (migration 137, tasks-only). Ideas/epics and pre-137 DBs read back
+    // the literal 'agent' rather than NULL — EntityDbRow.executor is non-nullable
+    // because "who does this" always has an answer, and for a non-executing
+    // entity that answer is the default.
+    const executor =
+      desc.hasExecutor && this.columnExists(desc.table, 'executor')
+        ? 'executor'
+        : "'agent' AS executor";
     const row = this.db
       .prepare(
-        `SELECT id, project_id, ref, title, summary, body, priority, category, repo, board_id, stage_id, archived_at,
+        `SELECT id, project_id, ref, title, summary, body, priority, category, ${executor}, repo, board_id, stage_id, archived_at,
                 ${decomposedAt}, ${approvedAt}, ${experimentId}, ${experimentArm}, ${causedByRunId}, ${sortOrder}, ${reopenedAt}, version, created_at, updated_at, ${parentEpic}, ${originatingIdea}, ${entryStage}, ${scope}, ${attachments}
            FROM ${desc.table} WHERE id = ? AND project_id = ?`,
       )
@@ -3350,6 +3581,10 @@ export class TaskChangeRouter {
       body: row.body,
       priority: row.priority,
       category: row.category,
+      // WHO performs the work (migration 137). MUST be projected on the emit
+      // path: the picker EXCLUDES human tasks and the card badges them, so an
+      // omitted value would silently re-agent a human task on a live upsert.
+      executor: row.executor,
       repo: row.repo,
       parent_epic_id: row.parent_epic_id,
       originating_idea_id: row.originating_idea_id,

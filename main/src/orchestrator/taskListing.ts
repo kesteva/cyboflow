@@ -56,6 +56,7 @@ import type {
   FlowOverlay,
   IdeaAttachment,
   TaskDependencyRef,
+  TaskExecutor,
 } from '../../../shared/types/tasks';
 import type { IdeaComponentState } from '../../../shared/types/ideaComponents';
 import type { SprintBatchStatus } from '../../../shared/types/sprintBatch';
@@ -169,6 +170,8 @@ interface TaskDbRow {
   parent_epic_id: string | null;
   originating_idea_id: string | null;
   scope: 'small' | 'large' | null;
+  /** WHO performs the work (137, tasks-only); the ideas/epics branches project 'agent'. */
+  executor: TaskExecutor;
   board_id: string;
   stage_id: string;
   archived_at: string | null;
@@ -193,7 +196,7 @@ interface TaskDbRow {
  * column ORDER is fixed and shared by every branch (SQLite unions positionally).
  */
 const UNION_COLUMNS =
-  'id, project_id, type, ref, title, summary, body, priority, category, repo, parent_epic_id, originating_idea_id, scope, board_id, stage_id, archived_at, decomposed_at, approved_at, experiment_id, sort_order, version, created_at, updated_at';
+  'id, project_id, type, ref, title, summary, body, priority, category, repo, parent_epic_id, originating_idea_id, scope, executor, board_id, stage_id, archived_at, decomposed_at, approved_at, experiment_id, sort_order, version, created_at, updated_at';
 
 /**
  * UNION_COLUMNS prefixed with a subquery alias for joined outer SELECTs — the
@@ -205,6 +208,16 @@ function aliasedUnionColumns(alias: string): string {
     .join(', ');
 }
 
+/**
+ * The `executor` projection for a TASK branch (migration 137), fail-soft on a
+ * pre-137 schema: the literal keeps every task 'agent', which is exactly the
+ * pre-137 reading. Ideas/epics have no such column at all and always project
+ * the literal — the union is positional, so every branch must emit the slot.
+ */
+function taskExecutorColumn(db: DatabaseLike, alias: string): string {
+  return columnExists(db, 'tasks', 'executor') ? `${alias}executor` : "'agent' AS executor";
+}
+
 /** The per-branch filters entityUnionSql can emit ('' = unscoped, all projects). */
 type EntityUnionFilter = '' | 'WHERE project_id = ?' | 'WHERE id = ?';
 
@@ -214,21 +227,22 @@ type EntityUnionFilter = '' | 'WHERE project_id = ?' | 'WHERE id = ?';
  * parameterized filters and nothing for '' (positional bind discipline — the
  * bind count must match the emitted SQL).
  */
-function entityUnionSql(filter: EntityUnionFilter): string {
+function entityUnionSql(filter: EntityUnionFilter, hasExecutor: boolean): string {
   const where = filter === '' ? '' : ` ${filter}`;
+  const taskExecutor = hasExecutor ? 'executor' : "'agent' AS executor";
   return `
     SELECT id, project_id, 'idea' AS type, ref, title, summary, body, priority, category, repo,
-           NULL AS parent_epic_id, NULL AS originating_idea_id, scope,
+           NULL AS parent_epic_id, NULL AS originating_idea_id, scope, 'agent' AS executor,
            board_id, stage_id, archived_at, decomposed_at, NULL AS approved_at, experiment_id, sort_order, version, created_at, updated_at
       FROM ideas${where}
     UNION ALL
     SELECT id, project_id, 'epic' AS type, ref, title, summary, body, priority, category, repo,
-           NULL AS parent_epic_id, originating_idea_id, NULL AS scope,
+           NULL AS parent_epic_id, originating_idea_id, NULL AS scope, 'agent' AS executor,
            board_id, stage_id, archived_at, NULL AS decomposed_at, approved_at, experiment_id, sort_order, version, created_at, updated_at
       FROM epics${where}
     UNION ALL
     SELECT id, project_id, 'task' AS type, ref, title, summary, body, priority, category, repo,
-           parent_epic_id, originating_idea_id, NULL AS scope,
+           parent_epic_id, originating_idea_id, NULL AS scope, ${taskExecutor},
            board_id, stage_id, archived_at, NULL AS decomposed_at, approved_at, experiment_id, sort_order, version, created_at, updated_at
       FROM tasks${where}`;
 }
@@ -780,6 +794,13 @@ interface DependencyEdgeRow {
   dep_title: string;
   /** The prerequisite's stage position (null when the stage row is missing). */
   dep_position: number | null;
+  /**
+   * The prerequisite's OWN executor (migration 137). 'human' makes this edge
+   * non-gating — see foldDependencyRows. Reads back 'agent' on a pre-137 DB
+   * (the SELECT substitutes the literal), so the old behaviour is preserved
+   * exactly where the column does not exist.
+   */
+  dep_executor: TaskExecutor;
 }
 
 /**
@@ -791,6 +812,12 @@ export interface DependencyOverlay {
   blockedBy: TaskDependencyRef[];
   relatedTo: TaskDependencyRef[];
   readyToWork: boolean;
+  /**
+   * Refs of the blocking prerequisites whose executor is 'human' (migration
+   * 137) — recorded, but NOT counted against `readyToWork`. See
+   * {@link foldDependencyRows}.
+   */
+  waitingOnHuman: string[];
 }
 
 /**
@@ -799,7 +826,7 @@ export interface DependencyOverlay {
  * Each `task_dependencies` row is LEFT JOINed to the prerequisite task (for
  * ref/title) and its board stage (for the position used by the readyToWork
  * predicate). A task with no rows is absent from the map; callers default it to
- * `{ blockedBy: [], relatedTo: [], readyToWork: true }` (no blockers ⇒ ready).
+ * `{ blockedBy: [], relatedTo: [], readyToWork: true, waitingOnHuman: [] }` (no blockers ⇒ ready).
  *
  * @param db        - Narrow DatabaseLike interface.
  * @param projectId - Project whose tasks' dependency edges to load, or null to
@@ -810,10 +837,16 @@ function loadProjectDependencyOverlays(
   projectId: number | null,
 ): Map<string, DependencyOverlay> {
   const scoped = projectId !== null;
+  // Fail-soft on a pre-137 schema: the literal keeps every prerequisite 'agent',
+  // which is exactly the pre-137 behaviour (no edge is ever non-gating).
+  const depExecutor = columnExists(db, 'tasks', 'executor')
+    ? 'dep.executor AS dep_executor'
+    : "'agent' AS dep_executor";
   const stmt = db.prepare(
     `SELECT d.task_id, d.depends_on_task_id, d.kind,
             dep.ref   AS dep_ref,
             dep.title AS dep_title,
+            ${depExecutor},
             s.position AS dep_position
        FROM task_dependencies d
        JOIN tasks t   ON t.id = d.task_id
@@ -831,11 +864,16 @@ function loadProjectDependencyOverlays(
  * which projects one row without a full project scan).
  */
 function loadTaskDependencyOverlay(db: DatabaseLike, taskId: string): DependencyOverlay {
+  // Same pre-137 fail-soft as loadProjectDependencyOverlays.
+  const depExecutor = columnExists(db, 'tasks', 'executor')
+    ? 'dep.executor AS dep_executor'
+    : "'agent' AS dep_executor";
   const rows = db
     .prepare(
       `SELECT d.task_id, d.depends_on_task_id, d.kind,
               dep.ref   AS dep_ref,
               dep.title AS dep_title,
+              ${depExecutor},
               s.position AS dep_position
          FROM task_dependencies d
          JOIN tasks dep ON dep.id = d.depends_on_task_id
@@ -844,20 +882,29 @@ function loadTaskDependencyOverlay(db: DatabaseLike, taskId: string): Dependency
     )
     .all(taskId) as DependencyEdgeRow[];
 
-  return foldDependencyRows(rows).get(taskId) ?? { blockedBy: [], relatedTo: [], readyToWork: true };
+  return foldDependencyRows(rows).get(taskId) ?? { blockedBy: [], relatedTo: [], readyToWork: true, waitingOnHuman: [] };
 }
 
 /**
  * Fold dependency-edge rows into a per-blocked-task overlay map. readyToWork is
  * true when a task has NO blocking edges, or EVERY blocking prerequisite sits at
  * the Done position (9). `related` edges are advisory and never gate readiness.
+ *
+ * A blocking prerequisite whose OWN executor is 'human' (migration 137) is the
+ * third case: the edge is real board truth and stays in `blockedBy`, but it does
+ * NOT clear `readyToWork`. Nothing in a sprint ever moves a human task to Done —
+ * no lane is created for it — so counting it would pin every dependent to
+ * "blocked" permanently, on the board, in the batch picker, and in the
+ * `ready_to_work` field every agent reads from `cyboflow_list_tasks`. Its ref is
+ * surfaced separately in `waitingOnHuman` so a consumer can say "waits on
+ * TASK-009 (human)" instead of showing the blocked chip.
  */
 function foldDependencyRows(rows: DependencyEdgeRow[]): Map<string, DependencyOverlay> {
   const byTask = new Map<string, DependencyOverlay>();
   for (const r of rows) {
     let overlay = byTask.get(r.task_id);
     if (!overlay) {
-      overlay = { blockedBy: [], relatedTo: [], readyToWork: true };
+      overlay = { blockedBy: [], relatedTo: [], readyToWork: true, waitingOnHuman: [] };
       byTask.set(r.task_id, overlay);
     }
     const ref: TaskDependencyRef = {
@@ -867,8 +914,11 @@ function foldDependencyRows(rows: DependencyEdgeRow[]): Map<string, DependencyOv
     };
     if (r.kind === 'blocking') {
       overlay.blockedBy.push(ref);
-      // A blocking prereq not yet at the Done position keeps the task blocked.
-      if (r.dep_position !== DONE_POSITION) {
+      if (r.dep_executor === 'human') {
+        // Non-gating by construction — see the docblock. Recorded, never counted.
+        overlay.waitingOnHuman.push(ref.ref);
+      } else if (r.dep_position !== DONE_POSITION) {
+        // A blocking AGENT prereq not yet at the Done position keeps the task blocked.
         overlay.readyToWork = false;
       }
     } else {
@@ -883,6 +933,7 @@ function applyDependencyOverlay(item: BacklogTaskItem, overlay: DependencyOverla
   item.blockedBy = overlay.blockedBy;
   item.relatedTo = overlay.relatedTo;
   item.readyToWork = overlay.readyToWork;
+  item.waitingOnHuman = overlay.waitingOnHuman;
 }
 
 /**
@@ -950,6 +1001,9 @@ function projectTaskItem(db: DatabaseLike, row: TaskDbRow): BacklogTaskItem {
     body: row.body,
     priority: row.priority,
     category: row.category,
+    // WHO performs the work (137). Same silent-drop rationale as the stamps
+    // below: the picker excludes human tasks and the card badges them.
+    executor: row.executor ?? 'agent',
     repo: row.repo,
     parent_epic_id: row.parent_epic_id,
     originating_idea_id: row.originating_idea_id,
@@ -993,7 +1047,7 @@ export function selectTaskById(db: DatabaseLike, taskId: string): BacklogTaskIte
   // full table scan when we only want one row.
   const row =
     (db.prepare(`SELECT ${aliasedUnionColumns('e')}, COALESCE(bs.position, 0) AS stage_position
-       FROM (${entityUnionSql('WHERE id = ?')}) e
+       FROM (${entityUnionSql('WHERE id = ?', columnExists(db, 'tasks', 'executor'))}) e
        LEFT JOIN board_stages bs ON bs.id = e.stage_id`)
       .get(taskId, taskId, taskId) as TaskDbRow | undefined);
   if (!row) return null;
@@ -1015,7 +1069,7 @@ export function selectTaskById(db: DatabaseLike, taskId: string): BacklogTaskIte
     const childRows = db
       .prepare(
         `SELECT t.id, t.project_id, 'task' AS type, t.ref, t.title, t.summary, t.body, t.priority, t.category, t.repo,
-                t.parent_epic_id, t.originating_idea_id, NULL AS scope,
+                t.parent_epic_id, t.originating_idea_id, NULL AS scope, ${taskExecutorColumn(db, 't.')},
                 t.board_id, t.stage_id, t.archived_at, NULL AS decomposed_at, t.approved_at, t.experiment_id, t.sort_order, t.version, t.created_at, t.updated_at,
                 COALESCE(bs.position, 0) AS stage_position
            FROM tasks t
@@ -1071,7 +1125,7 @@ export function selectIdeaDecomposition(db: DatabaseLike, ideaId: string): Backl
       `SELECT ${aliasedUnionColumns('e')}, COALESCE(bs.position, 0) AS stage_position
          FROM (
            SELECT id, project_id, 'idea' AS type, ref, title, summary, body, priority, category, repo,
-                  NULL AS parent_epic_id, NULL AS originating_idea_id, scope,
+                  NULL AS parent_epic_id, NULL AS originating_idea_id, scope, 'agent' AS executor,
                   board_id, stage_id, archived_at, decomposed_at, NULL AS approved_at, experiment_id, sort_order, version, created_at, updated_at
              FROM ideas WHERE id = ?
          ) e
@@ -1088,7 +1142,7 @@ export function selectIdeaDecomposition(db: DatabaseLike, ideaId: string): Backl
   const epicRows = db
     .prepare(
       `SELECT e.id, e.project_id, 'epic' AS type, e.ref, e.title, e.summary, e.body, e.priority, e.category, e.repo,
-              NULL AS parent_epic_id, e.originating_idea_id, NULL AS scope,
+              NULL AS parent_epic_id, e.originating_idea_id, NULL AS scope, 'agent' AS executor,
               e.board_id, e.stage_id, e.archived_at, NULL AS decomposed_at, e.approved_at, e.experiment_id, e.sort_order, e.version, e.created_at, e.updated_at,
               COALESCE(bs.position, 0) AS stage_position
          FROM epics e
@@ -1106,7 +1160,7 @@ export function selectIdeaDecomposition(db: DatabaseLike, ideaId: string): Backl
     const taskRows = db
       .prepare(
         `SELECT t.id, t.project_id, 'task' AS type, t.ref, t.title, t.summary, t.body, t.priority, t.category, t.repo,
-                t.parent_epic_id, t.originating_idea_id, NULL AS scope,
+                t.parent_epic_id, t.originating_idea_id, NULL AS scope, ${taskExecutorColumn(db, 't.')},
                 t.board_id, t.stage_id, t.archived_at, NULL AS decomposed_at, t.approved_at, t.experiment_id, t.sort_order, t.version, t.created_at, t.updated_at,
                 COALESCE(bs.position, 0) AS stage_position
            FROM tasks t
@@ -1137,7 +1191,7 @@ export function selectIdeaDecomposition(db: DatabaseLike, ideaId: string): Backl
   const directTaskRows = db
     .prepare(
       `SELECT t.id, t.project_id, 'task' AS type, t.ref, t.title, t.summary, t.body, t.priority, t.category, t.repo,
-              t.parent_epic_id, t.originating_idea_id, NULL AS scope,
+              t.parent_epic_id, t.originating_idea_id, NULL AS scope, ${taskExecutorColumn(db, 't.')},
               t.board_id, t.stage_id, t.archived_at, NULL AS decomposed_at, t.approved_at, t.experiment_id, t.sort_order, t.version, t.created_at, t.updated_at,
               COALESCE(bs.position, 0) AS stage_position
          FROM tasks t
@@ -1263,7 +1317,7 @@ export function selectProjectBacklog(
   const scoped = projectId !== null;
   const stmt = db.prepare(
     `SELECT ${aliasedUnionColumns('e')}, COALESCE(bs.position, 0) AS stage_position
-       FROM (${entityUnionSql(scoped ? 'WHERE project_id = ?' : '')}) e
+       FROM (${entityUnionSql(scoped ? 'WHERE project_id = ?' : '', columnExists(db, 'tasks', 'executor'))}) e
        LEFT JOIN board_stages bs ON bs.id = e.stage_id
       ORDER BY (e.sort_order IS NULL) ASC, e.sort_order ASC, e.created_at ASC, e.ref ASC`,
   );
@@ -1299,7 +1353,7 @@ export function selectProjectBacklog(
     if (row.type === 'task') {
       applyDependencyOverlay(
         item,
-        depOverlays.get(row.id) ?? { blockedBy: [], relatedTo: [], readyToWork: true },
+        depOverlays.get(row.id) ?? { blockedBy: [], relatedTo: [], readyToWork: true, waitingOnHuman: [] },
       );
       applyMembershipsOverlay(item, membershipsByTask.get(row.id) ?? []);
     }

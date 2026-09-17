@@ -389,6 +389,67 @@ export class ReviewItemRouter {
     }) as Promise<{ reviewItemId: string; event: { id: number; seq: number } }>;
   }
 
+  /**
+   * The id of a PENDING review item in `projectId` carrying exactly `source`, or
+   * null. A plain read — it does NOT enter the per-project queue, so a caller
+   * that needs check-and-create to be atomic must use
+   * {@link createIfNoPending}, not this followed by applyReviewItem.
+   *
+   * `source` is the codebase's de-facto idempotency key for machine-minted items
+   * (`idle-session:<id>` in drainLegacyIdleReviewItems, `systemic-pause:<runId>`
+   * in systemicPauseGate). There is no unique index behind it — the table allows
+   * duplicates and always has — so uniqueness is a discipline of the writers,
+   * which is exactly what createIfNoPending exists to hold.
+   */
+  findPendingBySource(projectId: number, source: string): string | null {
+    const row = this.db
+      .prepare(
+        `SELECT id FROM review_items
+          WHERE project_id = ? AND source = ? AND status = 'pending'
+          ORDER BY created_at ASC LIMIT 1`,
+      )
+      .get(projectId, source) as { id: string } | undefined;
+    return row?.id ?? null;
+  }
+
+  /**
+   * Create a review item ONLY when no pending item already carries its `source`.
+   *
+   * The check and the create run as ONE task on the per-project queue (which has
+   * concurrency 1), so two callers racing on the same source cannot both see
+   * "no pending item" and both insert. That is the whole point: `review_items`
+   * has no unique index on `source`, and adding a partial one would change the
+   * insert semantics of every other source producer in the codebase — a much
+   * larger blast radius than serializing the two writers who need the guarantee.
+   *
+   * `change.source` is REQUIRED (a null source has nothing to dedupe on) and is
+   * rejected with code 'invalid_payload' when missing.
+   *
+   * @returns the existing or newly-minted id, plus `created` saying which. On
+   *          the already-exists path `event` is a zero pair — no event was
+   *          written, because nothing changed.
+   */
+  async createIfNoPending(
+    projectId: number,
+    change: ReviewItemCreate,
+  ): Promise<{ reviewItemId: string; created: boolean; event: { id: number; seq: number } }> {
+    const source = change.source;
+    if (source === undefined || source === null || source === '') {
+      throw new ReviewItemError(
+        'invalid_payload',
+        'createIfNoPending requires a non-empty `source` — it is the dedupe key',
+      );
+    }
+    return this.getProjectQueue(projectId).add(() => {
+      const existing = this.findPendingBySource(projectId, source);
+      if (existing !== null) {
+        return { reviewItemId: existing, created: false, event: { id: 0, seq: 0 } };
+      }
+      const { reviewItemId, event } = this.runCreate(projectId, change);
+      return { reviewItemId, created: true, event };
+    }) as Promise<{ reviewItemId: string; created: boolean; event: { id: number; seq: number } }>;
+  }
+
   // --------------------------------------------------------------------------
   // Create path
   // --------------------------------------------------------------------------

@@ -35,4 +35,11 @@ export interface UpdateCheckResult {
   currentVersion: string;
   updateAvailable: boolean;
   latestVersion?: string;
+  /**
+   * The version a scheduled (boot/daily) check already downloaded and staged
+   * this session, if any. Lets a later manual check — or a freshly mounted
+   * consumer — render "Restart to update" directly instead of re-offering the
+   * download.
+   */
+  downloadedVersion?: string;
 }
