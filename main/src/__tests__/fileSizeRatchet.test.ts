@@ -26,11 +26,11 @@ import * as path from 'node:path';
  * this ratchet existed on main). The planned extractions, in order (see the
  * plan on issue #19): the McpQueryMessage/Deps type contract out of
  * mcpQueryHandler (~950 lines), then its workflow-config and global-agent
- * families, then index.ts's verify/eval composition. Entries may decrease or
- * disappear, never grow. */
+ * families, then index.ts's verify/eval composition (all four landed 2026-09-15
+ * to 09-17). Entries may decrease or disappear, never grow. */
 const FROZEN_LINE_CAPS: Record<string, number> = {
   'orchestrator/mcpServer/mcpQueryHandler.ts': 5717, // steps 1-3: type contract → mcpQueryMessages.ts; workflow-config + global-agent read/propose tools → handlers/; backlog projections → backlogProjection.ts
-  'index.ts': 7338, // seeded-finding reader → orchestrator/seededFindingReader.ts; onBatchMinted hook → humanPrerequisiteSink; workflow-shaped proposal deps → agentThread/proposalExecutorWorkflowDeps.ts; §5.3 drift probes → services/visualVerify/verifyDriftProbes.ts
+  'index.ts': 6409, // step 4: verify + eval composition → verifyComposition.ts / evalComposition.ts (siblings); seeded-finding reader → orchestrator/seededFindingReader.ts; onBatchMinted hook → humanPrerequisiteSink; workflow-shaped proposal deps → agentThread/proposalExecutorWorkflowDeps.ts
   'orchestrator/verify/verificationScheduler.ts': 5702,
   'services/panels/claude/claudeCodeManager.ts': 4818,
   'database/database.ts': 4249,
