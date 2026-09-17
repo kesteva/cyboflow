@@ -69,6 +69,17 @@ function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((x) => typeof x === 'string');
 }
 
+// A workflow definition arrives as a JSON STRING per the contract, but a model
+// composing `payload_json` nests it as a plain object just as readily (the
+// first live create-workflow attempt did exactly that, five times in a row,
+// and got back an opaque 'invalid_payload' each time). Accept both: an object
+// is re-encoded so the validator downstream sees the one shape it expects.
+function readDefinitionJson(v: unknown): string | null {
+  if (typeof v === 'string') return v.length > 0 ? v : null;
+  if (v !== null && typeof v === 'object' && !Array.isArray(v)) return JSON.stringify(v);
+  return null;
+}
+
 function isAgentPriority(v: unknown): v is Priority {
   return v === 'P0' || v === 'P1' || v === 'P2' || v === 'P3' || v === 'P4' || v === 'P5' || v === 'P6';
 }
@@ -285,9 +296,9 @@ export function parseAgentProposalPayload(raw: unknown): AgentProposalPayload | 
     }
     case 'edit-workflow': {
       const workflowId = raw.workflowId;
-      const definitionJson = raw.definitionJson;
+      const definitionJson = readDefinitionJson(raw.definitionJson);
       if (typeof workflowId !== 'string' || workflowId.length === 0) return null;
-      if (typeof definitionJson !== 'string' || definitionJson.length === 0) return null;
+      if (definitionJson === null) return null;
       const payload: EditWorkflowProposalPayload = { kind: 'edit-workflow', workflowId, definitionJson };
       const summary = raw.summary;
       if (summary !== undefined) {
@@ -320,10 +331,10 @@ export function parseAgentProposalPayload(raw: unknown): AgentProposalPayload | 
     case 'create-workflow': {
       const projectId = raw.projectId;
       const name = raw.name;
-      const definitionJson = raw.definitionJson;
+      const definitionJson = readDefinitionJson(raw.definitionJson);
       if (typeof projectId !== 'number') return null;
       if (typeof name !== 'string' || name.trim().length === 0) return null;
-      if (typeof definitionJson !== 'string' || definitionJson.length === 0) return null;
+      if (definitionJson === null) return null;
       const payload: CreateWorkflowProposalPayload = { kind: 'create-workflow', projectId, name, definitionJson };
 
       const scope = raw.scope;
