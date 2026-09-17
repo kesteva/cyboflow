@@ -1,9 +1,10 @@
 name: macOS
 
-# Hosted macOS builds — the off-device twin of windows.yml. Dispatch-only while
-# it earns a track record against the local `pnpm build:mac:*` recipe in
-# docs/RELEASE-RUNBOOK.md §3; the plan is for a push-to-main dev release and a
-# tag-driven stable release to call this same job once its DMGs match.
+# Hosted macOS builds — the off-device twin of windows-installer.yml. Called
+# by dev-release.yml for the continuous dev build on every push to main, and
+# dispatchable by hand for a stable/dev build of any ref. The local
+# `pnpm build:mac:*` recipe in docs/RELEASE-RUNBOOK.md §3 is still the stable
+# release path until a tag-driven stable release calls this job instead.
 #
 # One NATIVE runner per arch (macos-latest = arm64, macos-15-intel = x64): every
 # build is a clean checkout on a host whose arch IS the target arch, so the
@@ -24,6 +25,39 @@ name: macOS
 # no keychain setup step is needed.
 
 on:
+  workflow_call:
+    inputs:
+      variant:
+        description: 'dev (Cyboflow Dev, polls the /dev feed) or stable (Cyboflow)'
+        type: string
+        default: dev
+      arch:
+        description: 'both | arm64 | x64'
+        type: string
+        default: both
+      build_version:
+        description: 'CYBOFLOW_BUILD_VERSION override (e.g. 0.4.3-dev.12); empty = package.json'
+        type: string
+        default: ''
+      ref:
+        description: 'Git ref to build; empty = the ref that triggered the caller'
+        type: string
+        default: ''
+    secrets:
+      CSC_LINK:
+        required: false
+      CSC_KEY_PASSWORD:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      APPLE_APP_SPECIFIC_PASSWORD:
+        required: false
+      SENTRY_DSN:
+        required: false
+      APTABASE_APP_KEY:
+        required: false
   workflow_dispatch:
     inputs:
       variant:
@@ -36,6 +70,10 @@ on:
         type: choice
         options: [both, arm64, x64]
         default: both
+      build_version:
+        description: 'CYBOFLOW_BUILD_VERSION override (e.g. 0.4.3-dev.12); empty = package.json'
+        type: string
+        default: ''
   # workflow_dispatch only resolves files on the default branch, so a branch
   # that edits this file runs it on push (dev variant, both arches) — the only
   # way to exercise a change here before it reaches main.
@@ -72,6 +110,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
 
       # All-or-nothing on the Apple secrets (see the header). Sets SIGNED for
       # the verify step so the notarization checks only run when they can pass.
@@ -109,10 +149,17 @@ jobs:
       # electron-builder --<arch> → afterSign (packaging verifier). With the
       # secrets present electron-builder signs, notarizes via notarytool, and
       # staples; each build logs `notarization successful`.
+      #
+      # TELEMETRY: SENTRY_DSN / APTABASE_APP_KEY are BAKED into buildInfo.json
+      # by inject-build-info.js; a build without them ships with both SDKs
+      # silently no-op'd.
       - name: Build DMG
         run: pnpm run build:mac:${{ env.MAC_VARIANT == 'dev' && 'dev:' || '' }}${{ matrix.arch }}
         env:
           CI: true
+          CYBOFLOW_BUILD_VERSION: ${{ inputs.build_version }}
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          APTABASE_APP_KEY: ${{ secrets.APTABASE_APP_KEY }}
         timeout-minutes: 45
 
       # The runbook's §4 checks, as assertions. Inventory, not size, proves no
