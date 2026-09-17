@@ -109,8 +109,19 @@ export const BOOTSTRAP_PROOF_AWAIT_MS = 15 * 60 * 1000;
 
 /** Why a bootstrap did not happen. Each is a different sentence to a human. */
 export type BootstrapDeclineKind =
-  /** The modality has no portable-runbook representation at all ('mobile', §4 defers it). */
+  /** The modality is not a portable-runbook modality at all — the contract has no room for it. */
   | 'undeclarable-modality'
+  /**
+   * The modality IS declarable, and the lane still does not author it: `mobile`,
+   * whose runbooks come from the verify-setup flow (see
+   * `BootstrapDeclineReason['auto-derive-unsupported']` in bootstrapEligibility
+   * for why the npm-shaped derivation cannot produce one).
+   *
+   * DEFENSIVE. The preflight declines for this before a controller is ever
+   * constructed, so reaching it here means a caller bypassed the preflight —
+   * which is exactly when a guard has to hold rather than assume.
+   */
+  | 'auto-derive-unsupported'
   /** A prior attempt on THESE inputs and THIS host already answered "not possible" (§10). */
   | 'suppressed'
   /** Another lane in this run holds the single-flight (§9). */
@@ -366,6 +377,13 @@ export function composeBootstrapProofTask(
     attestation: entry.attestation,
     ...(entry.build !== undefined ? { build: entry.build } : {}),
     ...(entry.serve !== undefined ? { serve: entry.serve } : {}),
+    // The simulator stand-up, carried VERBATIM for exactly the reason `serve` is:
+    // what this proof asks is whether the runbook's OWN stand-up works, and a
+    // proof task that dropped `app` would ask the question of a mobile entry
+    // that has no way to come up at all. A lane never reaches here with a mobile
+    // entry today (both guards above decline first) — this keeps the composer
+    // honest about the entry it was handed rather than about who called it.
+    ...(entry.app !== undefined ? { app: entry.app } : {}),
   };
 }
 
@@ -582,14 +600,23 @@ async function bootstrap(
 ): Promise<BootstrapRunOutcome> {
   const { projectId, runId, laneTaskRef, worktreePath } = args;
 
-  // (0) The modality must be one a PORTABLE runbook can express. 'mobile' is
-  // deferred by §4 and has no representation at all, so there is nothing to
-  // derive — deriving anyway would register a record no execution path could
-  // satisfy.
+  // (0) Two separate modality questions, which used to be one. CAN a portable
+  // runbook express this modality, and WILL the lane author one for it?
   if (!isVerifyRunbookModality(args.modality)) {
     return declined(
       'undeclarable-modality',
       `a portable runbook cannot declare the "${args.modality}" modality, so there is nothing to derive`,
+    );
+  }
+  // `mobile` is declarable (the contract carries an `app` block for it) and is
+  // still not something a lane drafts: the derivation is npm-shaped and would
+  // register a verification runbook no execution path could satisfy. Zero
+  // drafts, no stamp — the claim below is never taken.
+  if (args.modality === 'mobile') {
+    return declined(
+      'auto-derive-unsupported',
+      'mobile verification runbooks are authored and proven by the verify-setup flow; lane ' +
+        'auto-derive is npm-shaped and does not draft them',
     );
   }
   const modality: VerifyRunbookModality = args.modality;
@@ -1073,12 +1100,22 @@ async function reprove(
 ): Promise<BootstrapRunOutcome> {
   const { projectId, runId, laneTaskRef } = args;
 
-  // (0) The same modality guard as derive: a modality a portable runbook cannot
-  // express has no entry to compose a proof from either.
+  // (0) The same two modality guards as derive. A modality a portable runbook
+  // cannot express has no entry to compose a proof from; and `mobile`, which it
+  // CAN express, still belongs to the verify-setup flow — that flow proves its
+  // own runbooks, so a lane re-proving one here would spend a deployment and a
+  // budget charge on a record it does not own.
   if (!isVerifyRunbookModality(args.modality)) {
     return declined(
       'undeclarable-modality',
       `a portable runbook cannot declare the "${args.modality}" modality, so there is nothing to re-prove`,
+    );
+  }
+  if (args.modality === 'mobile') {
+    return declined(
+      'auto-derive-unsupported',
+      'mobile verification runbooks are authored and proven by the verify-setup flow; lane ' +
+        'auto-derive does not re-prove them either',
     );
   }
   const modality: VerifyRunbookModality = args.modality;

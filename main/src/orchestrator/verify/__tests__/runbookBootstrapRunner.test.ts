@@ -36,6 +36,7 @@ import { RunbookBootstrapStampStore } from '../bootstrapStampStore';
 import { BootstrapSuppressionStore } from '../bootstrapSuppressionStore';
 import type { DatabaseLike } from '../../types';
 import { VERIFY_RUNBOOK_RELATIVE_PATH } from '../../../../../shared/types/verifyRunbook';
+import type { VerificationModality } from '../../../../../shared/types/visualVerification';
 import type { VerifyRunbookV1 } from '../../../../../shared/types/verifyRunbook';
 
 /** Recorders for the two optional reporting seams, typed off the deps themselves. */
@@ -270,11 +271,36 @@ describe('runRunbookBootstrap — the happy path', () => {
 });
 
 describe('runRunbookBootstrap — the refusals', () => {
-  it('declines a modality a portable runbook cannot even express', async () => {
-    // 'mobile' is deferred by §4 and has no representation; deriving anyway would
-    // register a record no execution path could satisfy.
+  it('declines MOBILE — declarable, but not something a lane authors', async () => {
+    // The portable contract CAN express `mobile` now (the `app` block), so this
+    // is no longer an "undeclarable modality". What stops it is that the
+    // derivation is npm-shaped and could never discover an Xcode scheme or a
+    // bundle id, so a lane that derived one would register a verification
+    // runbook no execution path could satisfy. Zero drafts, and the claim below
+    // step (0) is never taken, so no stamp either.
     const h = harness();
     const outcome = await runRunbookBootstrap({ ...ARGS, modality: 'mobile' }, h.deps);
+    expect(outcome).toMatchObject({ kind: 'declined', reason: 'auto-derive-unsupported' });
+    if (outcome.kind !== 'declined') throw new Error('unreachable');
+    expect(outcome.detail).toContain('verify-setup flow');
+    // The `isNoModalityDeclineReason` text match keys on this literal, so a
+    // reword that drops it stops collapsing per-lane findings into one card.
+    expect(outcome.detail).toContain('verification runbook');
+    expect(h.drafts).toBe(0);
+    expect(h.stamps.read('run-1', 1, 'mobile')).toBeNull();
+    h.db.close();
+  });
+
+  it('still declines a string that is no runbook modality at all, separately', async () => {
+    // The two guards were one `if` before the mobile widening. Keeping the
+    // narrower case pinned is what stops a future simplification from folding
+    // an unknown value back into the mobile arm and telling a human to run
+    // verification setup for a typo.
+    const h = harness();
+    const outcome = await runRunbookBootstrap(
+      { ...ARGS, modality: 'holograph' as VerificationModality },
+      h.deps,
+    );
     expect(outcome).toMatchObject({ kind: 'declined', reason: 'undeclarable-modality' });
     expect(h.drafts).toBe(0);
     h.db.close();
@@ -590,6 +616,47 @@ describe('runRunbookBootstrap — the proof', () => {
       build: ['pnpm run build'],
       serve: { cmd: 'pnpm run preview --port ${PORT}' },
     });
+  });
+
+  it('carries the mobile `app` block into the proof, verbatim', async () => {
+    // A simulator entry has no `serve` — `app` IS its stand-up. A composer that
+    // dropped it would emit a proof task with nothing to launch, and the proof
+    // would fail for a reason that has nothing to do with the runbook. A lane
+    // never reaches here with a mobile entry (both step-(0) guards decline
+    // first); the composer is still correct about the entry it was handed.
+    const mobile: VerifyRunbookV1 = {
+      version: 1,
+      modalities: {
+        mobile: {
+          build: ['xcodebuild -scheme Demo -destination "generic/platform=iOS Simulator" build'],
+          app: {
+            platform: 'ios-simulator',
+            bundleId: 'com.example.demo',
+            scheme: 'Demo',
+            productGlob: 'Build/Products/Debug-iphonesimulator/Demo.app',
+          },
+          attestation: { kind: 'bundle-identity', bundleId: 'com.example.demo' },
+        },
+      },
+    };
+    const task = composeBootstrapProofTask(mobile, 'mobile');
+    expect(task).toMatchObject({
+      modality: 'mobile',
+      behaviors: [],
+      attestation: { kind: 'bundle-identity', bundleId: 'com.example.demo' },
+      app: {
+        platform: 'ios-simulator',
+        bundleId: 'com.example.demo',
+        scheme: 'Demo',
+        productGlob: 'Build/Products/Debug-iphonesimulator/Demo.app',
+      },
+    });
+    // A simulator run has no port to lease and no endpoint to attach to.
+    expect(task?.serve).toBeUndefined();
+  });
+
+  it('leaves `app` off a web proof rather than emitting an empty one', () => {
+    expect(composeBootstrapProofTask(RUNBOOK, 'web')).not.toHaveProperty('app');
   });
 
   it('pins the proof to the revision it just registered', async () => {
@@ -1053,11 +1120,28 @@ describe('runRunbookBootstrap — the RE-PROVE mode', () => {
     h.db.close();
   });
 
-  it('declines a modality a portable runbook cannot express, without touching the stamp', async () => {
+  it('declines MOBILE without touching the stamp — that flow proves its own runbooks', async () => {
+    // The derive twin, on the reprove arm. A lane re-proving a mobile runbook
+    // would spend a deployment and a budget charge on a record the verify-setup
+    // flow owns and proves itself.
     const h = harness();
     const outcome = await runRunbookBootstrap({ ...REPROVE_ARGS, modality: 'mobile' }, h.deps);
-    expect(outcome).toMatchObject({ kind: 'declined', reason: 'undeclarable-modality' });
+    expect(outcome).toMatchObject({ kind: 'declined', reason: 'auto-derive-unsupported' });
+    if (outcome.kind !== 'declined') throw new Error('unreachable');
+    expect(outcome.detail).toContain('verification runbook');
+    expect(h.proofs).toEqual([]);
     expect(h.stamps.read('run-1', 1, 'mobile')).toBeNull();
+    h.db.close();
+  });
+
+  it('still declines an unexpressible modality separately, without touching the stamp', async () => {
+    const h = harness();
+    const outcome = await runRunbookBootstrap(
+      { ...REPROVE_ARGS, modality: 'holograph' as VerificationModality },
+      h.deps,
+    );
+    expect(outcome).toMatchObject({ kind: 'declined', reason: 'undeclarable-modality' });
+    expect(h.proofs).toEqual([]);
     h.db.close();
   });
 

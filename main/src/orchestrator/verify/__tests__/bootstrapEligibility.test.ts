@@ -19,11 +19,13 @@
 import { describe, it, expect } from 'vitest';
 import {
   bootstrapRemedyText,
+  bootstrapSupportsModality,
   decideRunbookBootstrap,
   declineForRunbookStatus,
   taskDerivesEnvironment,
   type BootstrapDeclineReason,
 } from '../bootstrapEligibility';
+import type { VerificationModality } from '../../../../../shared/types/visualVerification';
 import type { VerifyRunbookStatusDetail, VerifyRunbookStatusReason } from '../runbookStore';
 
 function status(reason: VerifyRunbookStatusReason): VerifyRunbookStatusDetail {
@@ -86,8 +88,34 @@ describe('declineForRunbookStatus', () => {
   });
 });
 
+describe('bootstrapSupportsModality', () => {
+  it.each<[VerificationModality, boolean]>([
+    ['web', true],
+    ['cdp-app', true],
+    ['native-screen', true],
+    // Declarable by the portable contract since the mobile widening, and still
+    // not something a lane authors — the verify-setup flow owns it.
+    ['mobile', false],
+  ])('%s → %s', (modality, expected) => {
+    expect(bootstrapSupportsModality(modality)).toBe(expected);
+  });
+
+  it('is the SAME predicate the preflight skips its status read by', () => {
+    // Exported precisely so the preflight does not restate the policy as a
+    // second `if` — the drift this module exists to prevent. Pinned here so a
+    // refactor that inlines one copy fails rather than diverges.
+    expect(decideRunbookBootstrap({
+      enabled: true,
+      derivesEnvironment: true,
+      modality: 'mobile',
+      status: status('no-record'),
+    })).toMatchObject({ proceed: false, reason: 'auto-derive-unsupported' });
+    expect(bootstrapSupportsModality('mobile')).toBe(false);
+  });
+});
+
 describe('decideRunbookBootstrap', () => {
-  const on = { enabled: true, derivesEnvironment: true };
+  const on = { enabled: true, derivesEnvironment: true, modality: 'web' as const };
 
   it('proceeds on a project that has nothing, deriving a new runbook', () => {
     expect(decideRunbookBootstrap({ ...on, status: status('no-record') })).toEqual({
@@ -194,7 +222,7 @@ describe('decideRunbookBootstrap', () => {
     // exactly like a derive does. A project with the feature off must not get one
     // through the back door of having once been proven.
     expect(
-      decideRunbookBootstrap({ enabled: false, derivesEnvironment: true, status: status('drifted') }),
+      decideRunbookBootstrap({ ...on, enabled: false, status: status('drifted') }),
     ).toEqual({ proceed: false, reason: 'disabled' });
   });
 
@@ -203,13 +231,73 @@ describe('decideRunbookBootstrap', () => {
     // needs setting up, and describing it that way would put a runbook CTA in
     // front of someone who deliberately turned this off.
     expect(
-      decideRunbookBootstrap({ enabled: false, derivesEnvironment: true, status: status('no-record') }),
+      decideRunbookBootstrap({ ...on, enabled: false, status: status('no-record') }),
     ).toEqual({ proceed: false, reason: 'disabled' });
   });
 
+  it('declines a MOBILE lane outright — the verify-setup flow owns those runbooks', () => {
+    // The portable contract CAN declare `mobile` now (the `app` block), so the
+    // old "undeclarable" reasoning no longer holds and nothing about the
+    // project's runbook state is what stops this. What stops it is that the
+    // derivation machinery surveys npm scripts and could never discover an
+    // Xcode scheme, a bundle id, or a simulator destination — so a lane that
+    // "derived" one would register a record no execution path could satisfy.
+    expect(decideRunbookBootstrap({ ...on, modality: 'mobile', status: status('no-record') })).toEqual({
+      proceed: false,
+      reason: 'auto-derive-unsupported',
+    });
+  });
+
+  it('the mobile decline holds whatever the runbook state says', () => {
+    // Keyed on the modality, not on the situation: a mobile project with a
+    // draft, or with a drifted proof, must not slip into derive or reprove
+    // through a status arm that never looked at the modality.
+    for (const reason of ['no-record', 'file-only', 'draft', 'drifted'] as const) {
+      expect(
+        decideRunbookBootstrap({ ...on, modality: 'mobile', status: status(reason) }),
+      ).toEqual({ proceed: false, reason: 'auto-derive-unsupported' });
+    }
+  });
+
+  it('the mobile decline is reported ahead of the task shape', () => {
+    // A mobile task carries `app`, not `serve`, so whether taskDerivesEnvironment
+    // is true for it is an accident of its `build` array. "This task derives
+    // nothing" would be the wrong sentence to hand someone asking why their
+    // mobile verification never ran.
+    expect(
+      decideRunbookBootstrap({
+        ...on,
+        modality: 'mobile',
+        derivesEnvironment: false,
+        status: status('no-record'),
+      }),
+    ).toEqual({ proceed: false, reason: 'auto-derive-unsupported' });
+  });
+
+  it('the toggle still beats the modality policy', () => {
+    // Same ordering rule as everywhere else here: a project with the feature off
+    // is not a project that needs a runbook CTA of any flavour.
+    expect(
+      decideRunbookBootstrap({ ...on, enabled: false, modality: 'mobile', status: status('no-record') }),
+    ).toEqual({ proceed: false, reason: 'disabled' });
+  });
+
+  it.each<VerificationModality>(['web', 'cdp-app', 'native-screen'])(
+    'still proceeds normally on %s',
+    (modality) => {
+      // The allow-list is the change; the three modalities the lane has always
+      // derived for must be untouched by it.
+      expect(decideRunbookBootstrap({ ...on, modality, status: status('no-record') })).toEqual({
+        proceed: true,
+        mode: 'derive',
+        adopt: false,
+      });
+    },
+  );
+
   it('a degenerate task declines as no-environment, not as a runbook problem', () => {
     expect(
-      decideRunbookBootstrap({ enabled: true, derivesEnvironment: false, status: status('no-record') }),
+      decideRunbookBootstrap({ ...on, derivesEnvironment: false, status: status('no-record') }),
     ).toEqual({ proceed: false, reason: 'no-environment' });
   });
 });
@@ -228,6 +316,12 @@ describe('bootstrapRemedyText', () => {
     // …and, for the content-drift half of the same decline, that the file has
     // to be re-registered first — the one thing a re-prove cannot do.
     expect(bootstrapRemedyText('stale-proof') ?? '').toContain('re-registered');
+  });
+
+  it('points an unsupported modality at verification setup, not at a missing runbook', () => {
+    const text = bootstrapRemedyText('auto-derive-unsupported') ?? '';
+    expect(text).toContain('verification runbook');
+    expect(text).toContain('Run verification setup');
   });
 
   it.each<BootstrapDeclineReason>(['disabled', 'no-environment', 'already-proven'])(
