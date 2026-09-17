@@ -1258,7 +1258,10 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: ['filesystem'],
             retries: 0,
             optional: true,
-            desc: 'Stress-test spec + prototype + architecture; must-fix auto-revised once, remaining critique surfaced (non-blocking) at the design gate. Runs only when a prototype or architecture exists.',
+            // Same automatic revision as Planner: a `REVIEW: BLOCKING` result
+            // re-runs the refine phase from `expand-spec` once, then the gate.
+            loopback: 'expand-spec',
+            desc: 'Stress-test spec + prototype + architecture; a blocking verdict re-runs the refine phase once automatically, remaining critique surfaced (non-blocking) at the design gate. Runs only when a prototype or architecture exists.',
             outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
           },
           {
@@ -1613,7 +1616,11 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: ['filesystem'],
             retries: 0,
             optional: true,
-            desc: 'Stress-test the brief + concept design surfaces; must-fix auto-revised once, remaining critique surfaced (non-blocking) at the design gate.',
+            // Same automatic revision as Planner, targeting the design pass
+            // itself (`ui-prototype`) — the brief is already approved, exactly
+            // as the gate's own revise below.
+            loopback: 'ui-prototype',
+            desc: 'Stress-test the brief + concept design surfaces; a blocking verdict re-runs the design pass once automatically, remaining critique surfaced (non-blocking) at the design gate.',
             outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
           },
           {

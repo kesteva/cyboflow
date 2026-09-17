@@ -214,6 +214,23 @@ own design. There are no per-idea design flags.
    becomes a finding: Approve logs every entry as an accepted-risk finding,
    Revise re-runs the design steps against them. Filing them here pre-empts a
    decision the very next gate is about to make.
+   **Automatic revision on a blocking review — ONCE.** When the reported doc's
+   `## Blocking` section has one or more entries and this is the FIRST review
+   round of the run, do not open the gate over them yet: loop back to step 4
+   (`ui-prototype`) and re-run steps 4–6 with the review as the specification —
+   the brief is already approved, so the design pass is what re-runs, exactly as
+   the gate's own Revise. Re-delegate each step's subagent with the full
+   `## Blocking` list (and `## Findings` as advisory), telling it which `AR-n`
+   entries fall in its remit: `Area: prototype|spec|criteria` →
+   `cyboflow-ui-prototype` (re-report the `ui-prototype` artifact and re-report
+   the brief with the refreshed `## Design spec`), `Area: architecture` →
+   `cyboflow-architecture` (REPLACE the brief's `## Architecture design` section
+   and re-report the brief). Then re-run `cyboflow-adversarial-review` over the
+   revised surfaces as a RE-REVIEW (pass the previous round's doc and tell it
+   so) and re-report the `adversarial-review` artifact. A second round that is
+   STILL blocking does **not** loop again — proceed to the gate with the
+   refreshed doc; a second disagreement is the human's call. A clean first round
+   proceeds to the gate directly.
 7. **approve-design** → **human gate — ONLY when `ui-prototype` or
    `architecture` ran**; otherwise continue straight to ideas. Open the gate as
    a blocking `decision` review item — `cyboflow_report_finding(kind:
@@ -401,11 +418,12 @@ Approve, so nothing user-visible lands before sign-off. Create each proposal
   NULL with a warning.
 - **Adversarial review never adds a gate, and never files a finding.** It and
   `approve-design` run only when a UI prototype or architecture ran. The review
-  step REPORTS its result as the `adversarial-review` artifact and stops — it
-  does not auto-revise, does not loop, and does not call
-  `cyboflow_report_finding`. The `approve-design` gate is what routes: Approve
-  logs every entry as an accepted-risk finding, Revise re-runs the design steps
-  against them.
+  step REPORTS its result as the `adversarial-review` artifact and never calls
+  `cyboflow_report_finding`. A BLOCKING first round loops the design pass back
+  to `ui-prototype` exactly ONCE, automatically, with the review as the
+  specification (step 6); after that the `approve-design` gate is what routes:
+  Approve logs every entry as an accepted-risk finding, Revise re-runs the design
+  steps against them.
 - **Re-fetch entity bodies after every gate.** While you are parked at a gate,
   in-artifact feedback can revise an idea's spec or `## Architecture design`
   through a host-side revision agent. After ANY gate resolution, re-fetch via
