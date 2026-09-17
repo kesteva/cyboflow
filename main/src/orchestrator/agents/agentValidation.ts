@@ -71,6 +71,20 @@ export interface AgentDraft {
 const KEBAB_RE = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 
 /**
+ * Slugify a display name to the canonical kebab agent key — the ONE derivation
+ * the createCustom chokepoint (`AgentOverrideRouter`) and the assistant's
+ * create-workflow propose path share, so a key the proposal checked a step
+ * binding against is the key the confirm actually mints.
+ */
+export function deriveAgentKey(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+/**
  * Any `cyboflow_`-prefixed token — used for the MCP-server-name checks below,
  * where NO reference is permitted. The description/prompt checks instead use
  * {@link referencesForbiddenWriterTool}, which exempts the one sanctioned

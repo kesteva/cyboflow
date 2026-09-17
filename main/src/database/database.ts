@@ -2131,6 +2131,10 @@ export class DatabaseService {
       fields.push('permission_trust = ?');
       values.push(updates.permission_trust);
     }
+    if (updates.solution_thoroughness !== undefined) {
+      fields.push('solution_thoroughness = ?');
+      values.push(updates.solution_thoroughness);
+    }
     if (updates.active !== undefined) {
       fields.push('active = ?');
       values.push(updates.active ? 1 : 0);

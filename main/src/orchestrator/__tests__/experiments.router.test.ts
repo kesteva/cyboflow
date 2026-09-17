@@ -138,6 +138,9 @@ function buildDb(): Database.Database {
   // Migration 059: category (feature|bug|chore) — an unconditional column in
   // insertEntity/readEntity now (mirrors priority), so every create needs it.
   db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
+  // Migration 137: tasks.executor (agent|human) — readSeedTask now SELECTs it
+  // and rejects a human seed; cloneSeedTask carries it onto each arm clone.
+  db.exec(readFileSync(join(migDir, '137_task_executor.sql'), 'utf-8'));
   return db;
 }
 
@@ -868,6 +871,53 @@ describe('experiments router orchestration (slice B)', () => {
       }),
     ).rejects.toThrow(/not eligible for a sprint experiment/i);
     expect(h.launches).toHaveLength(0);
+  });
+
+  it('rejects a HUMAN seed task (migration 137) — an experiment cannot run work only a person can do', async () => {
+    const h = makeHarness();
+    const good = await seedEligibleTask(h, 'good', 'b');
+    const human = await seedEligibleTask(h, 'human', 'b');
+    await h.deps.taskChangeRouter.applyChange(1, {
+      actor: 'user',
+      entityType: 'task',
+      taskId: human,
+      fields: { executor: 'human' },
+    });
+
+    await expect(
+      startExperiment(h.deps, {
+        projectId: 1,
+        workflowId: 'wf-sprint',
+        variantAId: 'vA-sprint',
+        variantBId: 'vB-sprint',
+        seedTaskIds: [good, human],
+      }),
+    ).rejects.toThrow(/not eligible for a sprint experiment/i);
+    expect(h.launches).toHaveLength(0);
+  });
+
+  it('an AGENT seed clones with executor agent (cloneSeedTask carries the field, never defaults it away)', async () => {
+    const h = makeHarness();
+    const t1 = await seedEligibleTask(h, 'T1', 'body-1');
+
+    const res = await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf-sprint',
+      variantAId: 'vA-sprint',
+      variantBId: 'vB-sprint',
+      seedTaskIds: [t1],
+    });
+
+    const clones = h.db
+      .prepare('SELECT clone_task_id FROM experiment_seed_tasks WHERE experiment_id = ?')
+      .all(res.experimentId) as Array<{ clone_task_id: string }>;
+    expect(clones).toHaveLength(2);
+    for (const { clone_task_id } of clones) {
+      const row = h.db.prepare('SELECT executor FROM tasks WHERE id = ?').get(clone_task_id) as {
+        executor: string;
+      };
+      expect(row.executor).toBe('agent');
+    }
   });
 
   it('rejects a seed task already in development via a DIRECT active run (double-pull guard, migration 066)', async () => {

@@ -123,7 +123,13 @@ work never done. The per-step stamps are called out below.
    confirming the written file, surface it: call `cyboflow_report_artifact` with
    `atype: 'ui-prototype'`, a short label, and `payload_json`
    `{"fileName": "prototype/index.html"}` — the static mockup renders in a
-   sandboxed frame from that file. Skip this step entirely when the flag is `no`.
+   sandboxed frame from that file. The subagent ALSO returns a `## Design spec`
+   section; reporting the artifact does NOT persist it. Fold it into the idea's
+   body via `cyboflow_update_task` — REPLACE an existing `## Design spec` section,
+   never stack a second copy. That section is the design contract every later
+   builder reads (the prototype file is a run artifact no sprint lane can open),
+   and `## Design spec` is the idea's single design-prose section — whichever
+   pathway wrote it last owns it. Skip this step entirely when the flag is `no`.
    **Stamp** `prototype` `complete` once the artifact is reported — or `skipped`
    when you skip the step.
 5. **architecture** (optional) → run ONLY when context returned `ARCH_DESIGN: yes`
@@ -140,21 +146,32 @@ work never done. The per-step stamps are called out below.
    `architecture` ran — the exact same condition as `approve-design`. Delegate to
    `cyboflow-adversarial-review` with the full spec, prototype URL/notes when
    present, and architecture section when present.
-   - For each item in `### Blocking`, re-delegate the relevant spec or design
-     agent exactly ONCE with the concrete fix, then refresh the idea body and/or
-     prototype artifact. Never re-run the adversarial reviewer and never loop a
-     fix. Track a short note describing what was auto-fixed.
-   - Record every `### Findings` item — plus any must-fix defect that remains after
-     its one revision — with `cyboflow_report_finding` and **`blocking: false`**.
-     Never emit a blocking review item from this phase. Carry these non-blocking
-     findings into the design-gate preview.
+   - Compose ONE markdown doc from its `## Result` — a `## Blocking` section and a
+     `## Findings` section, every entry keeping its `#### AR-n — <title>` heading
+     and its Severity / Area / What / Why it matters / Fix fields verbatim, with
+     `None.` under an empty heading — and report it:
+     `cyboflow_report_artifact(atype: 'adversarial-review', label: 'Adversarial
+     review', payload_json: {"markdown": "<the doc>"})`. That doc is the ONLY
+     surface the `approve-design` gate reviews; re-reporting the same atype
+     ENRICHES the same tab, so a re-review after a revision replaces it.
+   - Do **NOT** call `cyboflow_report_finding` at this step — not for a blocking
+     entry, not for an advisory one. The `approve-design` gate decides what
+     becomes a finding: Approve logs every entry as an accepted-risk finding,
+     Revise re-runs the design steps against them. Filing them here pre-empts a
+     decision the very next gate is about to make.
 7. **approve-design** → **human gate, inline — ONLY when `ui-prototype` or `architecture` ran.** When
-   neither ran, do **not** ask — continue straight to epics. Use
-   **AskUserQuestion** (header `Approve design`, options Approve / Revise ONLY;
-   point the user at the `ui-prototype` artifact tab for the mockup and/or put
-   the architecture section, all adversarial findings, and a short note of what
-   was auto-fixed in the option markdown preview).
-   - **Approve** → continue to epics.
+   neither ran, do **not** ask — continue straight to epics. Open the gate as a
+   blocking `decision` review item — `cyboflow_report_finding(kind: 'decision',
+   blocking: true, payload_json: {"kind":"decision","gate":"approve-design"})` —
+   with a title and a body pointing at the `ui-prototype` artifact tab, the
+   architecture section, and the `Adversarial review` tab's `## Blocking` entries
+   by their `AR-n` ids. Then STOP and end the turn. Do NOT use an inline
+   AskUserQuestion here: an inline answer lives only in your context and reaches
+   no server seam, so the approved design never gets bound to the idea and the
+   accepted-risk findings are never filed. `approve-ideas` already works this
+   way, which is why its side-effects land on both planes.
+   - **Approve** → every adversarial-review entry is logged as a non-blocking,
+     accepted-risk finding linked to the review; continue to epics.
    - **Revise** → re-delegate the relevant subagent(s) with the feedback, refresh
      the artifact (a repeat `cyboflow_report_artifact` call with the same atype
      enriches the same tab) / re-fold the body (REPLACING the existing
@@ -290,6 +307,19 @@ Edit the chain, the cap, or the dispatch mode in the **workflow editor** — not
 here. A failed lane never stops the sprint: the remaining lanes keep running and
 the failure is surfaced at the human gate.
 
+**Pass each task's approved design down to its lane.** Before you delegate
+`implement` or `task-verify` for a task, fetch its originating idea with
+`cyboflow_get_task` (the task's own `originating_idea_id`, else its epic's). When
+the idea reports an `approved_design`, put its `snapshot_path` AND the idea body's
+`## Design spec` section into the delegation prompt verbatim. The design was
+approved in an EARLIER run whose prototype artifact this run cannot read and which
+is deleted with it — the snapshot path and the spec are the only things that
+survive, and a subagent given neither has never seen the design it is building.
+Tell the lane the same contract the design carries: match the layout and the copy
+strings, wire real navigation so every screen is reachable from the entry point,
+and never leave a placeholder where the design shows a working screen.
+
+
 **On task success** — when the task's chain drains clean (all checks pass):
 
 - Make **ONE git commit** for that task's changes in the session worktree, with a
@@ -300,6 +330,39 @@ The task's board stage sits at the derived **In development** stage for the run 
 advances to **Done** when the session is actually merged, and reverts to its entry
 stage if the run ends without merging. Do **not** move task board stages by hand;
 the lane (and the Sessions / Runs view) is where live per-task status lives.
+
+**Shared build breaks.** Lanes share ONE worktree, so a break another lane
+introduced — a half-written module, a renamed export, a test runner that will not
+start — lands in every lane at once. A lane subagent that hits one returns a
+`## Build break` section instead of routing around it; file that as a finding with
+`category: 'build-break'`, title `Build break: <first error line verbatim>`, and
+`locations` at the offending file, then let the lane carry on if it can. Identical
+reports from separate lanes are what let the run's supervisor see ONE shared cause
+rather than N unrelated lane failures.
+
+**Verification posture is a RUN-level fact, declared once.** Before the first lane
+is dispatched, the controller resolves whether ANY verification modality can serve
+this run. Three answers: the visual verifier is switched OFF (nothing is filed and
+nothing changes); a modality is available (every lane enqueues and parks at the
+merge gate as usual); or NO modality can serve the run — the run is stamped for the
+deferred mobile modality, or for `native-desktop` with no proven `native-screen`
+runbook. In that last case exactly ONE
+`No verifiable modality for this project` finding is filed for the whole run, every
+lane skips the enqueue without parking, and the per-lane
+`Visual verification did not run for …` findings are suppressed, because filing one
+per lane buries the reasons that genuinely ARE per-lane. Lanes are otherwise
+untouched: they implement, review and verify their acceptance criteria exactly as
+they would under an available posture, and `task-verify` still composes its
+verification task. Do not tell a lane to build and drive the deliverable itself
+instead — only the central verifier does that.
+
+**Shared build breaks are grouped for you.** When two or more `build-break`
+findings in a run normalize to the same error text (paths, line/column numbers and
+build hashes stripped), the supervisor files ONE additional
+`Shared build break (N lanes): …` advisory naming the group and the original
+findings. It is a DETECTOR only: the run is never paused and nothing is fixed
+automatically. Keep filing your own per-break findings — the grouping is what turns
+N of them into one readable fact, and it needs them to exist.
 
 **Lane discipline:** every lane transition goes through
 `cyboflow_update_sprint_task` at the moment it happens — when a task starts, when
@@ -360,7 +423,8 @@ Run steps 14-16 normally ONLY when every lane is `integrated`.
        repair or revert its own fixes — at most **once** — and re-run
        sprint-verify. If it STILL fails, file a **blocking** finding via
        `cyboflow_report_finding` (`blocking: true`, category
-       `address-review-regression`) carrying the failing tests and what changed,
+       `address-review-regression`) titled exactly `address-review left the tree
+       red` and naming the failing spec, carrying the failing tests and what changed,
        and surface it at the human gate rather than merging a red tree — the
        blocking finding is what actually parks the run, prose in a summary is not.
        This is the ONE exception to "do not file new findings from this step", and
@@ -430,13 +494,23 @@ Run steps 14-16 normally ONLY when every lane is `integrated`.
   names so the lane auto-advances.
 - Subagents never call `cyboflow_*` tools and never call **AskUserQuestion** —
   only this session asks the user anything and only this session writes state.
+- **`approve-design` is a review item, not an inline question.** Open it with
+  `cyboflow_report_finding(kind: 'decision', blocking: true, payload_json:
+  {"kind":"decision","gate":"approve-design"})` and end the turn. It carries
+  server-side side-effects — binding the approved design to the idea, filing the
+  accepted-risk findings — that fire only when the decision passes through that
+  seam, so an inline AskUserQuestion there silently drops them.
 - **Expansion is ungated and additive.** `expand-spec` must preserve the approved
-  stub's problem, solution, scope, and design flags. A required material change
-  reopens `approve-idea`; it is never folded in silently.
-- **Adversarial review never adds a gate.** It and `approve-design` run only when a
-  UI prototype or architecture ran. Auto-revise each must-fix once, never loop,
-  and report every remaining issue with `blocking: false` for the existing design
-  gate preview.
+  stub's problem, solution, scope, and design flags — plus any `## Architecture
+  design` or `## Design spec` section already on the body, VERBATIM. A required
+  material change reopens `approve-idea`; it is never folded in silently.
+- **Adversarial review never adds a gate, and never files a finding.** It and
+  `approve-design` run only when a UI prototype or architecture ran. The review
+  step REPORTS its result as the `adversarial-review` artifact and stops — it
+  does not auto-revise, does not loop, and does not call
+  `cyboflow_report_finding`. The `approve-design` gate is what routes: Approve
+  logs every entry as an accepted-risk finding, Revise re-runs the design steps
+  against them.
 - **No design fork.** `cyboflow-context` may return `DESIGN_MODE: yes` (it is the
   same subagent Planner uses) — ignore it. Ship never offers a design-mode option
   at `approve-idea`; forking to an interactive design session mid-flow would split

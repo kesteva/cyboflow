@@ -57,7 +57,20 @@ export class GitFileWatcher extends EventEmitter {
     '#*#'
   ];
 
-  constructor(private logger?: Logger) {
+  /**
+   * @param mode `'dirty-check'` (default, the git-status badge's contract):
+   *   after the debounce, run `fastCheckWorkingDirectory` and emit
+   *   `needs-refresh` only when the tree is dirty — a clean tree needs no badge
+   *   update. `'always'`: emit on every debounced change without the git
+   *   probe. The diff rail needs this: its consumer's own fetch IS the check,
+   *   and a tree that just became CLEAN (the last edit reverted, `git commit`
+   *   from a terminal) is exactly the transition the dirty-check would swallow
+   *   while the rail still shows the stale "N uncommitted".
+   */
+  constructor(
+    private logger?: Logger,
+    private readonly mode: 'dirty-check' | 'always' = 'dirty-check',
+  ) {
     super();
     this.setMaxListeners(100);
   }
@@ -303,7 +316,8 @@ export class GitFileWatcher extends EventEmitter {
         session.pendingRefresh = false;
         session.dirtyWhileInFlight = false;
 
-        const needsRefresh = await this.checkIfRefreshNeeded(session.worktreePath);
+        const needsRefresh =
+          this.mode === 'always' ? true : await this.checkIfRefreshNeeded(session.worktreePath);
 
         // The session may have been stopped, or replaced by a new
         // startWatching() call, while the check was in flight — either way

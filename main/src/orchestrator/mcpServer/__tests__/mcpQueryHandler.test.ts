@@ -22,7 +22,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { join, isAbsolute, resolve } from 'node:path';
 import * as os from 'node:os';
 import { setCyboflowDirectory, getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
@@ -889,6 +889,9 @@ describe('McpQueryHandler', () => {
       // Migration 059: category (feature|bug|chore) — an unconditional column in
       // insertEntity/readEntity now (mirrors priority), so every create needs it.
       taskDb.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
+      // Migration 137: tasks.executor (agent|human) — the create/update arms
+      // thread it, and toCompactTask/toFullTask project it.
+      taskDb.exec(readFileSync(join(migDir, '137_task_executor.sql'), 'utf-8'));
       return taskDb;
     }
 
@@ -1316,6 +1319,86 @@ describe('McpQueryHandler', () => {
     // -----------------------------------------------------------------------
     // update
     // -----------------------------------------------------------------------
+
+    describe('executor (migration 137)', () => {
+      function seedRun(): void {
+        seedTaskRun(taskDb, {
+          runId: 'run-1',
+          currentStepId: 'plan',
+          stepsSnapshot: { plan: 'planner' },
+        });
+      }
+
+      async function createTask(
+        requestId: string,
+        extra: Record<string, unknown> = {},
+      ): Promise<string> {
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-create-task',
+            requestId,
+            runId: 'run-1',
+            title: 'A task',
+            taskType: 'task',
+            ...extra,
+          } as Parameters<typeof taskHandler.handleMessage>[0],
+          socket,
+        );
+        const res = parseLastWrite(writes);
+        expect(res.ok).toBe(true);
+        return (res.data as { task_id: string }).task_id;
+      }
+
+      function executorOf(taskId: string): string {
+        return (taskDb.prepare('SELECT executor FROM tasks WHERE id = ?').get(taskId) as {
+          executor: string;
+        }).executor;
+      }
+
+      it('mcp-create-task threads executor through to the row (default agent)', async () => {
+        seedRun();
+        expect(executorOf(await createTask('ct-a'))).toBe('agent');
+        expect(executorOf(await createTask('ct-h', { executor: 'human' }))).toBe('human');
+      });
+
+      it('mcp-create-task REJECTS executor on an idea with invalid_executor', async () => {
+        seedRun();
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-create-task',
+            requestId: 'ct-bad',
+            runId: 'run-1',
+            title: 'An idea',
+            taskType: 'idea',
+            executor: 'human',
+          } as Parameters<typeof taskHandler.handleMessage>[0],
+          socket,
+        );
+        const res = parseLastWrite(writes);
+        expect(res.ok).toBe(false);
+        expect(res.error).toBe('invalid_executor');
+      });
+
+      it('mcp-update-task flips executor on an existing task', async () => {
+        seedRun();
+        const taskId = await createTask('ct-u');
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-update-task',
+            requestId: 'ut-h',
+            runId: 'run-1',
+            taskId,
+            executor: 'human',
+          } as Parameters<typeof taskHandler.handleMessage>[0],
+          socket,
+        );
+        expect(parseLastWrite(writes).ok).toBe(true);
+        expect(executorOf(taskId)).toBe('human');
+      });
+    });
 
     describe('mcp-update-task', () => {
       it('happy path: updates title + priority, bumps version, reflects in the row', async () => {
@@ -1889,27 +1972,38 @@ describe('McpQueryHandler', () => {
       // Migration 059: category (feature|bug|chore) — an unconditional column in
       // insertEntity/readEntity now (mirrors priority), so every create needs it.
       db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
+      // Migration 137: tasks.executor (agent|human) — toCompactTask/toFullTask
+      // project it, and the dependency overlay reads it to decide gating.
+      db.exec(readFileSync(join(migDir, '137_task_executor.sql'), 'utf-8'));
       // Migration 085 (Design Mode v0): handleGetTask now unconditionally reads
       // approved_designs for every idea — the table must exist even for tests
       // that never touch design sessions. The fixture's minimal schema has no
       // `sessions`/`artifacts` tables (006 doesn't create them), so this seeds
       // ONLY the approved_designs table verbatim from migration 085 (its other
-      // statements ALTER those two tables and would fail against this fixture).
+      // statements ALTER those two tables and would fail against this fixture),
+      // in its POST-134 shape: handoff_id/session_id NULLable, plus the
+      // `source`/`source_run_id` provenance columns the read model now SELECTs
+      // (an omission here reads back as "no such column: source" on EVERY
+      // mcp-get-task, not just the design ones).
       db.exec(`
         CREATE TABLE approved_designs (
           id TEXT PRIMARY KEY,
           idea_id TEXT NOT NULL,
           project_id INTEGER NOT NULL,
-          handoff_id TEXT NOT NULL,
-          session_id TEXT NOT NULL,
-          draft_revision INTEGER NOT NULL,
+          handoff_id TEXT,
+          session_id TEXT,
+          draft_revision INTEGER NOT NULL DEFAULT 0,
           prototype_artifact_id TEXT NOT NULL,
           prototype_revision INTEGER NOT NULL,
           snapshot_path TEXT NOT NULL,
           approved_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-          superseded_at DATETIME
+          superseded_at DATETIME,
+          source TEXT NOT NULL DEFAULT 'design-mode' CHECK (source IN ('design-mode','flow')),
+          source_run_id TEXT
         );
         CREATE INDEX idx_approved_designs_idea ON approved_designs(idea_id);
+        CREATE UNIQUE INDEX idx_approved_designs_current
+          ON approved_designs(idea_id) WHERE superseded_at IS NULL;
       `);
       // Migration 101 (idea component ledger): handleGetTask now unconditionally
       // resolves cyboflow_get_task's 'components' for every idea via
@@ -2291,6 +2385,90 @@ describe('McpQueryHandler', () => {
       });
     });
 
+    describe('executor + waiting_on_human (migration 137)', () => {
+      it('get_task exposes executor; list_tasks exposes executor and reconciles ready_to_work with blocked_by', async () => {
+        listSeedRun(listDb, 'run-x');
+        const consumer = await createEntity('run-x', 'Consumer', 'task');
+        const human = await createEntity('run-x', 'Buy the domain', 'task');
+        listDb.prepare("UPDATE tasks SET executor = 'human' WHERE id = ?").run(human.id);
+        // A blocking edge onto the HUMAN task: real board truth, but non-gating.
+        listDb
+          .prepare(
+            "INSERT INTO task_dependencies (task_id, depends_on_task_id, kind) VALUES (?, ?, 'blocking')",
+          )
+          .run(consumer.id, human.id);
+
+        const got = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-get-task', requestId: 'gt-exec', runId: 'run-x', taskId: human.id },
+          got.socket,
+        );
+        const full = parseLastWrite(got.writes);
+        expect(full.ok).toBe(true);
+        expect((full.data as { task: { executor: string } }).task.executor).toBe('human');
+
+        const gotConsumer = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-get-task', requestId: 'gt-cons', runId: 'run-x', taskId: consumer.id },
+          gotConsumer.socket,
+        );
+        expect(
+          (parseLastWrite(gotConsumer.writes).data as { task: { waitingOnHuman: string[] } }).task
+            .waitingOnHuman,
+        ).toEqual([human.ref]);
+
+        const listed = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-list-tasks', requestId: 'lt-exec', runId: 'run-x' },
+          listed.socket,
+        );
+        const tasks = (
+          parseLastWrite(listed.writes).data as {
+            tasks: Array<{
+              id: string;
+              executor: string;
+              ready_to_work: boolean;
+              blocked_by: string[];
+              waiting_on_human: string[];
+            }>;
+          }
+        ).tasks;
+
+        expect(tasks.find((t) => t.id === human.id)!.executor).toBe('human');
+        const row = tasks.find((t) => t.id === consumer.id)!;
+        expect(row.executor).toBe('agent');
+        // The contradiction an agent must be able to resolve: blocked_by is
+        // non-empty, yet the task IS ready. waiting_on_human says why.
+        expect(row.ready_to_work).toBe(true);
+        expect(row.blocked_by).toEqual([human.ref]);
+        expect(row.waiting_on_human).toEqual([human.ref]);
+      });
+
+      it('an AGENT prerequisite still clears ready_to_work and never appears in waiting_on_human', async () => {
+        listSeedRun(listDb, 'run-y');
+        const consumer = await createEntity('run-y', 'Consumer', 'task');
+        const producer = await createEntity('run-y', 'Producer', 'task');
+        listDb
+          .prepare(
+            "INSERT INTO task_dependencies (task_id, depends_on_task_id, kind) VALUES (?, ?, 'blocking')",
+          )
+          .run(consumer.id, producer.id);
+
+        const listed = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-list-tasks', requestId: 'lt-agent', runId: 'run-y' },
+          listed.socket,
+        );
+        const row = (
+          parseLastWrite(listed.writes).data as {
+            tasks: Array<{ id: string; ready_to_work: boolean; waiting_on_human: string[] }>;
+          }
+        ).tasks.find((t) => t.id === consumer.id)!;
+        expect(row.ready_to_work).toBe(false);
+        expect(row.waiting_on_human).toEqual([]);
+      });
+    });
+
     // -----------------------------------------------------------------------
     // IDEA-006: idea attachments read-through on cyboflow_get_task.
     // -----------------------------------------------------------------------
@@ -2457,10 +2635,43 @@ describe('McpQueryHandler', () => {
           draft_revision: seeded.draftRevision,
           prototype_revision: seeded.prototypeRevision,
           snapshot_path: resolve(seeded.snapshotPath),
+          // Provenance (migration 134): a reading agent uses it to tell a
+          // hand-refined Design Mode approval from a flow's generated concept
+          // mockup. A design-mode row names no run.
+          source: 'design-mode',
+          source_run_id: null,
         });
         expect(isAbsolute((data.task['approved_design'] as Record<string, unknown>)['snapshot_path'] as string)).toBe(
           true,
         );
+      });
+
+      it('surfaces the FLOW provenance for a design a workflow run bound', async () => {
+        listSeedRun(listDb, 'run-get-des-flow');
+        const idea = await createEntity('run-get-des-flow', 'Idea a flow designed');
+        listDb
+          .prepare(
+            `INSERT INTO approved_designs
+               (id, idea_id, project_id, handoff_id, session_id, draft_revision,
+                prototype_artifact_id, prototype_revision, snapshot_path, approved_at,
+                superseded_at, source, source_run_id)
+             VALUES ('apd_flow', ?, 1, NULL, NULL, 0, 'art_flow', 4,
+                     '/tmp/design-snapshots/flow.html', '2026-09-15T00:00:00.000Z', NULL,
+                     'flow', 'run-get-des-flow')`,
+          )
+          .run(idea.id);
+
+        const { socket, writes } = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-get-task', requestId: 'gt-des-flow', runId: 'run-get-des-flow', taskId: idea.id },
+          socket,
+        );
+
+        const data = parseLastWrite(writes).data as { task: Record<string, unknown> };
+        expect(data.task['approved_design']).toMatchObject({
+          source: 'flow',
+          source_run_id: 'run-get-des-flow',
+        });
       });
 
       it('omits approved_design for an idea that has never been approved', async () => {
@@ -7319,8 +7530,21 @@ describe('bootstrap_proof is not a wire field (migration 107 tripwire)', () => {
    * schema "for symmetry with setup_proof". A behavioral test would pass right
    * up until that happens and then start testing the new path instead.
    */
-  it('the MCP query handler never references the bootstrap-proof flag', () => {
-    const source = readFileSync(join(__dirname, '..', 'mcpQueryHandler.ts'), 'utf-8');
+  // The handler family, not just mcpQueryHandler.ts: the wire contract
+  // (McpQueryMessage) lives in mcpQueryMessages.ts and the extracted handler
+  // modules under handlers/ since the issue-#19 split, and threading the flag
+  // through any of them would defeat the invariant just the same.
+  const HANDLER_FAMILY = [
+    'mcpQueryHandler.ts',
+    'mcpQueryMessages.ts',
+    'globalAgentContext.ts',
+    ...readdirSync(join(__dirname, '..', 'handlers'))
+      .filter((name) => name.endsWith('.ts'))
+      .map((name) => join('handlers', name)),
+  ];
+
+  it.each(HANDLER_FAMILY)('%s never references the bootstrap-proof flag', (rel) => {
+    const source = readFileSync(join(__dirname, '..', rel), 'utf-8');
     // Comments are allowed to NAME it (explaining why it is absent is useful);
     // strip line comments and block comments before scanning for real references.
     const code = source
@@ -7328,6 +7552,12 @@ describe('bootstrap_proof is not a wire field (migration 107 tripwire)', () => {
       .replace(/^\s*\/\/.*$/gm, '');
     expect(code).not.toMatch(/bootstrap_proof/);
     expect(code).not.toMatch(/bootstrapProof/);
+  });
+
+  it('the handler family scan covers every extracted handler module', () => {
+    // Guards the list above against a new handlers/ file that is not a .ts
+    // source, and against the directory moving out from under it.
+    expect(HANDLER_FAMILY.length).toBeGreaterThanOrEqual(5);
   });
 
   it('the MCP server tool schema never exposes a bootstrap-proof input', () => {

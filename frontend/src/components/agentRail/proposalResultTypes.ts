@@ -1,7 +1,8 @@
 /**
  * proposalResultTypes — local, DEFENSIVE mirrors of the proposal executor's
  * `result_json` shapes (main/src/orchestrator/agentThread/proposalExecutor.ts
- * — `LaunchRunResultJson` / `ReprioritizeResultJson` / `EditWorkflowResultJson`).
+ * — `LaunchRunResultJson` / `ReprioritizeResultJson` / `EditWorkflowResultJson` /
+ * `CreateBacklogResultJson` / `CreateWorkflowResultJson`).
  *
  * `AgentProposal.result` is typed `unknown` (shared/types/agentThread.ts) —
  * deliberately, since the executor's typed result interfaces live main-only
@@ -225,6 +226,66 @@ export function parseCreateBacklogResult(result: unknown): CreateBacklogResultJs
     kind: 'create-backlog-items',
     status: result.status,
     items: result.items.filter(isCreateBacklogItemResult),
+    reconciled: typeof result.reconciled === 'boolean' ? result.reconciled : undefined,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// create-workflow
+// ---------------------------------------------------------------------------
+
+export interface CreateWorkflowAgentResultJson {
+  index: number;
+  name: string;
+  ok: boolean;
+  agentKey?: string;
+  error?: string;
+}
+
+export interface CreateWorkflowCompensationJson {
+  agentKey: string;
+  ok: boolean;
+  error?: string;
+}
+
+export interface CreateWorkflowResultJson {
+  kind: 'create-workflow';
+  status: 'executed' | 'failed';
+  name: string;
+  workflowId?: string;
+  agents: CreateWorkflowAgentResultJson[];
+  error?: string;
+  compensations?: CreateWorkflowCompensationJson[];
+  reconciled?: boolean;
+}
+
+function isCreateWorkflowAgentResult(v: unknown): v is CreateWorkflowAgentResultJson {
+  if (!isRecord(v)) return false;
+  return typeof v.index === 'number' && typeof v.name === 'string' && typeof v.ok === 'boolean';
+}
+
+function isCreateWorkflowCompensation(v: unknown): v is CreateWorkflowCompensationJson {
+  if (!isRecord(v)) return false;
+  return typeof v.agentKey === 'string' && typeof v.ok === 'boolean';
+}
+
+/** Parse a proposal's `result` as a create-workflow result, or null if it doesn't match. */
+export function parseCreateWorkflowResult(result: unknown): CreateWorkflowResultJson | null {
+  if (!isRecord(result) || result.kind !== 'create-workflow') return null;
+  if (result.status !== 'executed' && result.status !== 'failed') return null;
+  if (typeof result.name !== 'string') return null;
+  if (!Array.isArray(result.agents)) return null;
+  const compensations = Array.isArray(result.compensations)
+    ? result.compensations.filter(isCreateWorkflowCompensation)
+    : undefined;
+  return {
+    kind: 'create-workflow',
+    status: result.status,
+    name: result.name,
+    workflowId: typeof result.workflowId === 'string' ? result.workflowId : undefined,
+    agents: result.agents.filter(isCreateWorkflowAgentResult),
+    error: typeof result.error === 'string' ? result.error : undefined,
+    compensations: compensations && compensations.length > 0 ? compensations : undefined,
     reconciled: typeof result.reconciled === 'boolean' ? result.reconciled : undefined,
   };
 }

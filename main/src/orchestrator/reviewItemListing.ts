@@ -815,3 +815,38 @@ export function selectRunFindingsForRuns(
 export function selectRunFindings(db: DatabaseLike, runId: string): RunFindingRow[] {
   return selectRunFindingsForRuns(db, [runId]);
 }
+
+/**
+ * How many pending findings a run has filed — the SAME predicate as
+ * {@link selectRunFindingsForRuns}, as a real `COUNT(*)`.
+ *
+ * Exists because the only consumer needs the number, not the rows: every human
+ * gate's body now ends with "N finding(s) filed by this run still await triage",
+ * so a human closing out a run is told what is waiting instead of discovering it
+ * afterwards. `selectRunFindings(...).length` would answer the same question by
+ * materializing and shaping every row (JSON-parsing each payload) inside the
+ * gate-open transaction, for a number.
+ *
+ * NOT `countPendingBlockingReviewItems`: that one is scoped to `blocking = 1`,
+ * and these findings are deliberately non-blocking — it would always answer 0.
+ *
+ * Fail-soft: no review_items table, or any thrown query, yields 0. The count is an
+ * enrichment on a gate body, and a gate that cannot open because a COUNT failed
+ * would be a far worse outcome than a gate that omits one line.
+ */
+export function countRunPendingFindings(db: DatabaseLike, runId: string): number {
+  if (!hasReviewItemsTable(db)) return 0;
+  try {
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM review_items
+          WHERE run_id = ? AND kind = 'finding' AND status = 'pending'
+            AND (audience IS NULL OR audience != 'machine')
+            AND source LIKE 'agent:%'`,
+      )
+      .get(runId) as { n?: number } | undefined;
+    return typeof row?.n === 'number' && row.n > 0 ? row.n : 0;
+  } catch {
+    return 0;
+  }
+}

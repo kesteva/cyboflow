@@ -26,6 +26,16 @@ export interface Project {
    * main/src/orchestrator/permissionRules.ts's trust-model doc comment.
    */
   permission_trust?: 'trusted' | 'untrusted' | null;
+  /**
+   * How finished the software this project builds has to be (migration 135).
+   * NULL = never established (no Launch run has cleared its approve-brief gate
+   * for this project, or its brief carried no `THOROUGHNESS:` flag). Stamped by
+   * the Launch approve-brief gate side effect; read back by the step-prompt
+   * budget renderer and the session wizard's tuning-level default
+   * (prototype→efficient, v1→standard, production→thorough). See
+   * shared/types/thoroughness.ts.
+   */
+  solution_thoroughness?: 'prototype' | 'v1' | 'production' | null;
 }
 
 export interface ProjectRunCommand {
@@ -387,6 +397,11 @@ export interface TaskRow {
   body: string | null;
   priority: 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6'; // migration 117 widen
   category: 'feature' | 'bug' | 'chore'; // 059 ALTER appends
+  /**
+   * WHO performs the work (migration 137): 'agent' (the default — a sprint lane
+   * drives it) or 'human' (work only a person can do; never becomes a lane).
+   */
+  executor: 'agent' | 'human'; // 137 ALTER appends
   repo: string | null;
   board_id: string;
   stage_id: string;
@@ -955,14 +970,30 @@ export interface ApprovedDesignRow {
   id: string;
   idea_id: string;
   project_id: number;
-  handoff_id: string;
-  session_id: string;
+  /**
+   * The `design_handoffs` row this approval came from — NULL for a
+   * `source='flow'` row (migration 134): a Launch/Planner/Ship gate approval has
+   * no draft, no CAS target, and therefore no handoff.
+   */
+  handoff_id: string | null;
+  /** The Design Mode session — NULL for a `source='flow'` row (migration 134). */
+  session_id: string | null;
   draft_revision: number;
   prototype_artifact_id: string;
   prototype_revision: number;
   snapshot_path: string;
   approved_at: string;
   superseded_at: string | null;
+  /**
+   * Which pathway approved this design (migration 134). 'design-mode' is the
+   * Approve state machine; 'flow' is a Launch/Planner/Ship run whose
+   * approve-design / approve-ideas gate cleared. A 'design-mode' row always
+   * outranks a flow prototype — the flow binder skips an idea whose current row
+   * is design-mode rather than superseding it.
+   */
+  source: 'design-mode' | 'flow';
+  /** The workflow run that bound a `source='flow'` row; NULL for design-mode. */
+  source_run_id: string | null;
 }
 
 /**

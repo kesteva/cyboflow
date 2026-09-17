@@ -51,6 +51,45 @@ export interface TranscriptTailSourceOptions {
    * so tests can exercise the give-up path without a real 2-minute wait.
    */
   lateDiscoveryWindowMs?: number;
+  /**
+   * Defer the discovery deadline until {@link TranscriptTailSource.armDiscoveryDeadline}
+   * is called, instead of starting it at `start()`.
+   *
+   * The soft timeout + extended window bound the spawn -> first-`.jsonl` race,
+   * but `claude` writes NO transcript while its REPL sits idle — the file appears
+   * only once a turn begins. When the spawn carries an initial prompt those two
+   * moments coincide and the default (false) is correct. When it does NOT (a
+   * prompt-less REPL waiting on the user), a deadline started at `start()` is
+   * timing the USER, and its give-up would detach the structured pipeline
+   * permanently over a session that is merely idle. Such a source defers; the
+   * manager arms it on the turn-start edge.
+   *
+   * A deferred source still watches + polls (at the low-frequency background
+   * cadence). It also NEVER latches a give-up: the turn-start edge that arms it
+   * is a keystroke heuristic that fires for slash commands and pastes too, so an
+   * armed window that finds nothing returns to unarmed instead of detaching the
+   * pipeline for good (see giveUpDiscovery). `onGiveUp` is never called for a
+   * deferred source.
+   */
+  deferDeadlineUntilArmed?: boolean;
+  /**
+   * PIN discovery to one exact file: `<expectedSessionUuid>.jsonl`. The manager
+   * mints this uuid and hands it to claude as `--session-id`, so the transcript
+   * claude writes is named by US before it exists — discovery becomes "wait for
+   * that file", with no snapshot-diff and no candidate ambiguity.
+   *
+   * This is what makes a long-lived (deferred) source safe. Unpinned discovery
+   * binds the first NEW `.jsonl` in the key dir, and the key dir is shared by
+   * every process whose cwd encodes to it: two in-place quick sessions on the
+   * same project, an added chat panel beside an idle primary, the user's own
+   * terminal `claude`, an SDK flow run hosted in the same worktree. Matching
+   * the transcript's `cwd` cannot tell those apart — they share it. A source
+   * that watches for a session's whole idle life would bind whichever of them
+   * wrote first and persist a stranger's uuid as this session's.
+   *
+   * Omitted → legacy snapshot-diff discovery (tests; never production spawns).
+   */
+  expectedSessionUuid?: string;
   /** REQUIRED structural logger (CODE-PATTERNS.md optional-logger rule). */
   logger: StructuralLogger;
   /**
@@ -112,6 +151,18 @@ export class TranscriptTailSource implements TranscriptSource {
   private rejectFirstLine: ((err: Error) => void) | undefined;
   private settled = false;
 
+  /**
+   * Constructed with a DEFERRED deadline (see `deferDeadlineUntilArmed`). Stays
+   * true for the source's whole life: it also marks every bind as out-of-band,
+   * because the spawn that created this source never awaited `waitForFirstLine`
+   * and has long since returned.
+   */
+  private readonly deferDeadline: boolean;
+  /** The pinned transcript basename (`<uuid>.jsonl`), or undefined for snapshot-diff. */
+  private readonly expectedBasename: string | undefined;
+  /** The discovery deadline is running (always true from `start()` unless deferred). */
+  private deadlineArmed = false;
+
   /** The soft timeout fired: a subsequent bind is a LATE recovery. */
   private softTimedOut = false;
   /** Discovery is permanently abandoned (true give-up or stop()). */
@@ -141,6 +192,9 @@ export class TranscriptTailSource implements TranscriptSource {
     this.discoveryTimeoutMs = opts.discoveryTimeoutMs;
     this.lateDiscoveryWindowMs =
       opts.lateDiscoveryWindowMs ?? DEFAULT_LATE_DISCOVERY_WINDOW_MS;
+    this.deferDeadline = opts.deferDeadlineUntilArmed === true;
+    this.expectedBasename =
+      opts.expectedSessionUuid !== undefined ? `${opts.expectedSessionUuid}.jsonl` : undefined;
     this.logger = opts.logger;
     this.onLateBind = opts.onLateBind;
     this.onGiveUp = opts.onGiveUp;
@@ -182,15 +236,60 @@ export class TranscriptTailSource implements TranscriptSource {
       );
     }
 
-    this.discoveryInterval = setInterval(() => {
-      this.tryDiscover();
-    }, POLL_INTERVAL_MS);
+    // A DEFERRED source has no deadline yet, so it polls at the low-frequency
+    // background cadence: nothing is expected to appear until a turn starts, and
+    // a 50ms poll held for the whole idle life of the session would be pure
+    // wakeups. armDiscoveryDeadline() upshifts to POLL_INTERVAL_MS.
+    this.discoveryInterval = setInterval(
+      () => {
+        this.tryDiscover();
+      },
+      this.deferDeadline ? LATE_POLL_INTERVAL_MS : POLL_INTERVAL_MS,
+    );
 
+    if (this.deferDeadline) {
+      this.logger.verbose?.(
+        `[Cyboflow Transcript] discovery deadline DEFERRED in ${this.keyDir} — the spawn starts no turn, so there is nothing to time until one does`,
+      );
+    } else {
+      this.deadlineArmed = true;
+      this.discoveryTimer = setTimeout(() => {
+        this.onDiscoveryTimeout();
+      }, this.discoveryTimeoutMs);
+    }
+
+    // Attempt an immediate discovery in case the file already appeared.
+    this.tryDiscover();
+  }
+
+  /**
+   * Start the deferred discovery deadline (see `deferDeadlineUntilArmed`) and
+   * upshift the background poll to the fast cadence. Called by the manager on the
+   * turn-start edge — the first moment `claude` is actually expected to write a
+   * transcript, and therefore the first moment a timeout would mean a real
+   * failure rather than an idle user.
+   *
+   * Idempotent; inert once bound, stopped, given up, or already armed.
+   */
+  armDiscoveryDeadline(): void {
+    if (this.deadlineArmed || this.bound || this.stopped || this.discoveryGaveUp) return;
+    // Unpinned: "new" is measured from the turn start, not from spawn — anything
+    // that appeared while we were idle belongs to another process.
+    if (this.expectedBasename === undefined) this.snapshot = this.listJsonlBasenames();
+    this.deadlineArmed = true;
+    // Upshift the poll: a turn is in flight, so the transcript is imminent.
+    if (this.discoveryInterval !== undefined) {
+      clearInterval(this.discoveryInterval);
+      this.discoveryInterval = setInterval(() => {
+        this.tryDiscover();
+      }, POLL_INTERVAL_MS);
+    }
     this.discoveryTimer = setTimeout(() => {
       this.onDiscoveryTimeout();
     }, this.discoveryTimeoutMs);
-
-    // Attempt an immediate discovery in case the file already appeared.
+    this.logger.verbose?.(
+      `[Cyboflow Transcript] discovery deadline ARMED in ${this.keyDir} — expecting ${this.expectedBasename ?? 'a new *.jsonl'} within ${this.discoveryTimeoutMs}ms`,
+    );
     this.tryDiscover();
   }
 
@@ -202,6 +301,10 @@ export class TranscriptTailSource implements TranscriptSource {
         new Error('[Cyboflow Transcript] waitForFirstLine called before start()'),
       );
     }
+    // Awaiting the first line IS the declaration that one is expected now, so an
+    // unarmed deferred source arms here rather than handing back a promise with
+    // no deadline behind it, which would hang the caller forever.
+    this.armDiscoveryDeadline();
     return this.firstLinePromise;
   }
 
@@ -257,7 +360,26 @@ export class TranscriptTailSource implements TranscriptSource {
     // or stop()) is the terminal guard instead.
     if (this.bound || this.stopped || this.discoveryGaveUp) return;
 
+    // PINNED: the only file that can be ours is the one claude was told to
+    // write. Its appearance is proof of ownership regardless of arm state.
+    if (this.expectedBasename !== undefined) {
+      if (fs.existsSync(path.join(this.keyDir, this.expectedBasename))) {
+        this.bindFile(this.expectedBasename);
+      }
+      return;
+    }
+
     const current = this.listJsonlBasenames();
+
+    // UNPINNED + UNARMED: nothing of ours can appear — every turn of ours passes
+    // through the arming edge first — so a new file now is somebody else's.
+    // Absorb it into the snapshot instead of binding it, so that when we DO arm,
+    // "new" means "since the turn started".
+    if (this.deferDeadline && !this.deadlineArmed) {
+      this.snapshot = current;
+      return;
+    }
+
     const candidates: string[] = [];
     for (const name of current) {
       if (!this.snapshot.has(name)) candidates.push(name);
@@ -336,18 +458,24 @@ export class TranscriptTailSource implements TranscriptSource {
       this.inode = undefined;
     }
     this.clearDiscovery();
-    // Captured BEFORE settle(true): if the soft timeout already fired, this bind
-    // is a LATE recovery — the firstLine promise was already rejected and the
-    // spawn moved on, so we notify the manager to re-attach downstream state.
-    const late = this.softTimedOut;
+    // Captured BEFORE settle(true). `onLateBind` is the "the spawn is not waiting
+    // on this bind, re-attach downstream state yourself" channel, and TWO shapes
+    // need it: (a) the soft timeout already fired, so the firstLine promise was
+    // rejected and the spawn moved on; (b) a DEFERRED source, whose spawn never
+    // awaited waitForFirstLine at all and returned long before the user's first
+    // turn produced this file. Without (b) a deferred session would bind its
+    // transcript and still never persist `claude_session_id`.
+    const outOfBand = this.softTimedOut || this.deferDeadline;
     this.logger.verbose?.(
       `[Cyboflow Transcript] bound session ${this.sessionUuid} (${this.boundPath})`,
     );
     this.settle(true); // no-op if the soft timeout already settled(false)
     this.startTail();
-    if (late) {
+    if (outOfBand) {
       this.logger.warn(
-        `[Cyboflow Transcript] late-bound session ${this.sessionUuid} after discovery timeout — structured pipeline recovered`,
+        this.softTimedOut
+          ? `[Cyboflow Transcript] late-bound session ${this.sessionUuid} after discovery timeout — structured pipeline recovered`
+          : `[Cyboflow Transcript] bound session ${this.sessionUuid} on the session's first turn (deferred discovery) — structured pipeline attached`,
       );
       if (this.sessionUuid !== undefined) this.onLateBind?.(this.sessionUuid);
     }
@@ -401,7 +529,10 @@ export class TranscriptTailSource implements TranscriptSource {
    * (the window elapses with no file) is surfaced as a seam-worthy failure.
    */
   private onDiscoveryTimeout(): void {
-    if (this.settled || this.bound) return;
+    // NOT guarded on `settled`: a deferred source that re-deferred after its
+    // window can be armed again, and its firstLine promise settled long ago.
+    // settle() is idempotent, so reaching this twice is harmless.
+    if (this.bound || this.stopped || this.softTimedOut) return;
     this.softTimedOut = true;
     this.logger.warn(
       `[Cyboflow Transcript] discovery timeout after ${this.discoveryTimeoutMs}ms in ${this.keyDir} — keeping a background poll alive for ${this.lateDiscoveryWindowMs}ms in case claude is still bootstrapping`,
@@ -423,18 +554,63 @@ export class TranscriptTailSource implements TranscriptSource {
   }
 
   /**
-   * TRUE give-up: the extended window elapsed with no transcript ever appearing.
-   * This is the genuinely-actionable failure (claude never engaged the prompt),
-   * so it logs at error and fires `onGiveUp` for the manager to report as a seam.
+   * The extended window elapsed with no transcript appearing. What that MEANS
+   * depends on how the clock was started:
+   *
+   * - A source armed at `start()` (the spawn carried an argv prompt) knows a
+   *   turn was in flight the whole time, so this is the genuinely-actionable
+   *   failure — claude never engaged the prompt. It latches (`discoveryGaveUp`),
+   *   logs at error, and fires `onGiveUp` for the manager to report as a seam.
+   *
+   * - A DEFERRED source was armed by the manager's turn-start edge, which is a
+   *   keystroke heuristic: a submitted line with a body. That fires for things
+   *   that never produce a transcript — a local slash command (`/help`,
+   *   `/status`, `/model`; verified: none writes a `.jsonl`), or a bracketed
+   *   paste carrying its own newlines. Latching here would permanently detach
+   *   the pipeline from a session whose REAL first prompt is still to come. So a
+   *   deferred source never gives up: it drops back to the unarmed low-frequency
+   *   state and waits for the next turn-start to arm it again. It logs at warn
+   *   each time so a genuine never-engages case is still visible in the logs,
+   *   just not as a latched failure.
    */
   private giveUpDiscovery(): void {
     if (this.bound || this.stopped || this.discoveryGaveUp) return;
-    this.discoveryGaveUp = true;
+    // One last look before concluding nothing appeared: the low-frequency poll
+    // can be up to LATE_POLL_INTERVAL_MS behind a file that landed just inside
+    // the window, and a deferred re-defer would otherwise absorb that file as a
+    // stranger's on its next unarmed tick.
+    this.tryDiscover();
+    if (this.bound) return;
     this.clearLateDiscovery();
+    if (this.deferDeadline) {
+      this.redefer();
+      return;
+    }
+    this.discoveryGaveUp = true;
     this.logger.error(
       `[Cyboflow Transcript] discovery gave up after ${this.discoveryTimeoutMs + this.lateDiscoveryWindowMs}ms — no new *.jsonl ever appeared in ${this.keyDir}; session runs without the structured pipeline`,
     );
     this.onGiveUp?.();
+  }
+
+  /**
+   * Return a deferred source to its unarmed state after an armed window found
+   * nothing: clock off, background poll back on, ready for the next
+   * `armDiscoveryDeadline()`. The firstLine promise stays settled (nobody awaits
+   * a deferred source's promise), and the soft-timeout flag is cleared so the
+   * next arm can time out again rather than short-circuiting.
+   */
+  private redefer(): void {
+    this.deadlineArmed = false;
+    this.softTimedOut = false;
+    this.logger.warn(
+      `[Cyboflow Transcript] armed discovery window (${this.discoveryTimeoutMs + this.lateDiscoveryWindowMs}ms) found no transcript in ${this.keyDir} — the submitted line started no turn (slash command / paste?); returning to unarmed and waiting for the next one`,
+    );
+    if (this.discoveryInterval === undefined) {
+      this.discoveryInterval = setInterval(() => {
+        this.tryDiscover();
+      }, LATE_POLL_INTERVAL_MS);
+    }
   }
 
   private clearDiscovery(): void {

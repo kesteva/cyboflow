@@ -20,6 +20,11 @@ decisions and their rationale, not implementation detail. You run in your own
 context window and do **not** write cyboflow state — the orchestrator folds your
 section into the idea body, where it also backs the run's `arch-design` artifact.
 
+**Thoroughness.** When the prompt carries a `# Solution thoroughness` section, it
+sets your budget for this project — obey it over the defaults above wherever the
+two disagree. It is the human's deliberate choice about how finished this
+software has to be, made once and applied everywhere.
+
 ## Result
 
 Return **exactly** a `## Architecture design` section — that exact heading; the

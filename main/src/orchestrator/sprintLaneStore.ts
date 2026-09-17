@@ -48,6 +48,8 @@ import {
   SPRINT_BATCH_CAP,
   SPRINT_LANE_STEP_IDS,
   TERMINAL_BATCH_STATUSES,
+  resolveSprintMaxTasks,
+  type SprintMaxTasksOverrides,
 } from '../../../shared/types/sprintBatch';
 import { resolveRunFanOutInner } from './laneChainResolution';
 import { isAgentDispatchToolName } from '../../../shared/types/agentIdentity';
@@ -146,7 +148,7 @@ export function sprintLaneChannel(runId: string): string {
 // Errors
 // ---------------------------------------------------------------------------
 
-export type SprintLaneErrorCode = 'lane_not_found' | 'bad_request' | 'no_eligible_tasks';
+export type SprintLaneErrorCode = 'lane_not_found' | 'bad_request' | 'no_eligible_tasks' | 'batch_too_large';
 
 /** Discriminated error for all lane-write rejections. */
 export class SprintLaneError extends Error {
@@ -243,6 +245,35 @@ function parseLaneAttemptFromEnqueueKey(enqueueKey: string | null): number | nul
 // SprintLaneStore
 // ---------------------------------------------------------------------------
 
+/**
+ * Optional collaborators injected at initialize time. `getSprintMaxTasks`
+ * reads the LIVE per-substrate override (ConfigManager.getSprintMaxTasks) so
+ * createForRun's cap enforcement (Item 7) never drifts from the picker /
+ * runs.start / experiments.start / MCP-backstop checks that already call
+ * `resolveSprintMaxTasks` over the same live override — this is the FIFTH
+ * (and truly final) enforcement point, inside the write chokepoint itself, so
+ * no other caller of createForRun can ever bypass the cap. Omitted in tests
+ * and any caller that hasn't wired ConfigManager — resolveSprintMaxTasks
+ * falls back to the built-in per-substrate defaults either way, so the cap is
+ * NEVER optional, only its user-configured override is.
+ */
+export interface SprintLaneStoreDeps {
+  getSprintMaxTasks?: () => SprintMaxTasksOverrides;
+  /**
+   * Fired once, AFTER `createForRun`'s transaction commits, with the batch that
+   * was just minted. The hook exists so work that must observe a materialized
+   * batch — surfacing the HUMAN prerequisites its tasks depend on as standing
+   * review items (migration 137) — can run without this store taking a
+   * dependency on the review-item chokepoint.
+   *
+   * FAIL-SOFT by contract: the store wraps the call in try/catch and swallows
+   * anything it throws. A batch that materialized must never be undone by a
+   * side-effect, and a sprint must never fail to launch because a review item
+   * could not be written.
+   */
+  onBatchMinted?: (args: { projectId: number; batchId: string; taskIds: string[] }) => void;
+}
+
 export class SprintLaneStore {
   private static instance: SprintLaneStore | null = null;
 
@@ -266,9 +297,13 @@ export class SprintLaneStore {
    */
   private readonly tableExistsCache = new Map<string, boolean>();
 
+  /** Cached column-existence checks. Same rationale as {@link tableExistsCache}. */
+  private readonly columnExistsCache = new Map<string, boolean>();
+
   constructor(
     private readonly db: DatabaseLike,
     private readonly logger?: LoggerLike,
+    private readonly deps?: SprintLaneStoreDeps,
   ) {}
 
   /**
@@ -293,6 +328,28 @@ export class SprintLaneStore {
     return exists;
   }
 
+  /**
+   * True when `table.column` exists. Gates the `executor != 'human'` clause in
+   * filterEligibleTaskIds (migration 137) for the SAME reason tableExists gates
+   * the experiment-seed clause: a pre-137 schema must keep filtering on
+   * approval/stage/active-run, not fall into the permissive catch and disable
+   * every guard at once. Fail-closed to false on any error.
+   */
+  private columnExists(table: string, column: string): boolean {
+    const key = `${table}.${column}`;
+    const cached = this.columnExistsCache.get(key);
+    if (cached !== undefined) return cached;
+    let exists = false;
+    try {
+      const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: unknown }>;
+      exists = rows.some((r) => r.name === column);
+    } catch {
+      exists = false;
+    }
+    this.columnExistsCache.set(key, exists);
+    return exists;
+  }
+
   /** Cached resolveRunFanOutInner — see fanOutInnerCache's doc for why. */
   private resolveFanOutInnerCached(runId: string): readonly FanOutInnerStep[] | null {
     const cached = this.fanOutInnerCache.get(runId);
@@ -306,8 +363,8 @@ export class SprintLaneStore {
   // Lifecycle (singleton, mirroring TaskChangeRouter)
   // --------------------------------------------------------------------------
 
-  static initialize(db: DatabaseLike, logger?: LoggerLike): SprintLaneStore {
-    SprintLaneStore.instance = new SprintLaneStore(db, logger);
+  static initialize(db: DatabaseLike, logger?: LoggerLike, deps?: SprintLaneStoreDeps): SprintLaneStore {
+    SprintLaneStore.instance = new SprintLaneStore(db, logger, deps);
     return SprintLaneStore.instance;
   }
 
@@ -343,7 +400,11 @@ export class SprintLaneStore {
    * with concurrency = SPRINT_BATCH_CAP and integration_branch NULL (all work
    * happens in the SHARED session worktree — there is no integration branch).
    * Duplicate task ids are collapsed (UNIQUE(batch_id, task_id)); an empty
-   * selection is rejected with 'bad_request'.
+   * selection is rejected with 'bad_request'; an ELIGIBLE selection larger
+   * than the live per-substrate cap (resolveSprintMaxTasks, layered over the
+   * `deps.getSprintMaxTasks` override passed at initialize time) is rejected
+   * with 'batch_too_large' — the store's OWN enforcement, so no caller can
+   * seed an over-cap batch by skipping its own pre-check (Item 7).
    */
   createForRun(projectId: number, substrate: CliSubstrate, taskIds: string[]): { batchId: string } {
     const uniqueTaskIds = [...new Set(taskIds)];
@@ -377,6 +438,30 @@ export class SprintLaneStore {
       throw new SprintLaneError('no_eligible_tasks', reason);
     }
 
+    // Batch cap (Item 7): the store OWNS this check now, not just its callers.
+    // Every existing pre-check (the batch picker's client-side disable,
+    // runs.start's 400, experiments.start's 400, the MCP
+    // cyboflow_create_sprint_batch backstop) calls resolveSprintMaxTasks over
+    // the SAME live override BEFORE reaching here — those exist purely for a
+    // fast, friendly failure. This is the one check that can never be
+    // bypassed by a caller that forgets its own pre-check, so it runs against
+    // the FINAL eligible count (post-filter), not the raw selection size —
+    // an over-selection that eligibility filtering trims back under the cap
+    // must not be rejected for a size it no longer has.
+    const maxTasks = resolveSprintMaxTasks(this.deps?.getSprintMaxTasks?.(), substrate);
+    if (eligibleTaskIds.length > maxTasks) {
+      const reason =
+        `createForRun: ${eligibleTaskIds.length} eligible task(s) exceed the ${substrate} ` +
+        `batch cap of ${maxTasks}`;
+      this.logger?.warn('[SprintLaneStore] eligible selection exceeds the batch cap', {
+        projectId,
+        substrate,
+        eligible: eligibleTaskIds.length,
+        maxTasks,
+      });
+      throw new SprintLaneError('batch_too_large', reason);
+    }
+
     const batchId = randomUUID().replace(/-/g, '');
 
     const txn = this.db.transaction(() => {
@@ -403,6 +488,21 @@ export class SprintLaneStore {
       tasks: eligibleTaskIds.length,
       dropped: uniqueTaskIds.length - eligibleTaskIds.length,
     });
+
+    // POST-COMMIT HOOK (migration 137): the batch exists and its lanes are
+    // durable, so a consumer may now read it. FAIL-SOFT by contract — a batch
+    // that materialized must not be undone, and no side-effect may stop a sprint
+    // from launching, so anything this throws is logged and swallowed.
+    try {
+      this.deps?.onBatchMinted?.({ projectId, batchId, taskIds: eligibleTaskIds });
+    } catch (err) {
+      this.logger?.warn('[SprintLaneStore] onBatchMinted hook failed (ignored)', {
+        batchId,
+        projectId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     return { batchId };
   }
 
@@ -414,8 +514,11 @@ export class SprintLaneStore {
    * (archived_at IS NULL), and sitting at a ready-or-later, NON-terminal board
    * stage (board_stages.position >= 6 — '>= 6' tolerates in-dev movement per the
    * ship promote-before-batch ordering — AND is_terminal = 0, which drops both
-   * 'Done' (pos 9) and 'Won't do' (pos 10)). Candidate ids with no tasks row are
-   * dropped (inner JOIN). Input order is preserved; duplicates are collapsed.
+   * 'Done' (pos 9) and 'Won't do' (pos 10)), and driven by an AGENT
+   * (tasks.executor != 'human', migration 137 — human work never becomes a lane;
+   * see findHumanTaskIds for the reason the launch boundary reports separately).
+   * Candidate ids with no tasks row are dropped (inner JOIN). Input order is
+   * preserved; duplicates are collapsed.
    *
    * Called by createForRun (the materialization chokepoint) and the runs.start
    * pre-check. On a pre-042 schema lacking approved_at/archived_at the filter
@@ -436,6 +539,12 @@ export class SprintLaneStore {
       // GATED on experiment_seed_tasks existing so a post-042 / pre-049 schema keeps
       // filtering the OTHER predicates instead of tripping the permissive catch (the
       // A/B tables being merely absent must not disable approval/stage/run guards).
+      // HUMAN EXECUTOR (migration 137). Gated on the column existing for the same
+      // reason as expSeedClause below: on a pre-137 schema the OTHER guards must
+      // keep working rather than the whole filter degrading permissively.
+      const humanClause = this.columnExists('tasks', 'executor')
+        ? "AND t.executor != 'human'"
+        : '';
       const expSeedClause = this.tableExists('experiment_seed_tasks')
         ? `AND NOT EXISTS (
                 SELECT 1 FROM experiment_seed_tasks est
@@ -458,6 +567,7 @@ export class SprintLaneStore {
               AND t.id IN (${placeholders})
               AND t.approved_at IS NOT NULL
               AND t.archived_at IS NULL
+              ${humanClause}
               AND bs.position >= 6
               AND bs.is_terminal = 0
               AND NOT EXISTS (
@@ -477,7 +587,7 @@ export class SprintLaneStore {
       return unique.filter((id) => eligible.has(id));
     } catch (err) {
       if (err instanceof Error && /no such (column|table)/i.test(err.message)) {
-        this.logger?.debug('[SprintLaneStore] eligibility filter skipped (pre-042/pre-022/pre-049 schema)', {
+        this.logger?.debug('[SprintLaneStore] eligibility filter skipped (pre-042/pre-022/pre-049/pre-137 schema)', {
           error: err.message,
         });
         return unique;
@@ -522,6 +632,45 @@ export class SprintLaneStore {
     } catch (err) {
       if (err instanceof Error && /no such (column|table)/i.test(err.message)) {
         this.logger?.debug('[SprintLaneStore] live-experiment-seed scope skipped (pre-049/051 schema)', {
+          error: err.message,
+        });
+        return [];
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Return the subset of `taskIds` whose executor is 'human' (migration 137).
+   *
+   * Used ONLY by the runs.start launch boundary. `filterEligibleTaskIds` now
+   * drops human tasks, and without this query they would fall into the
+   * pre-check's generic `other` bucket and be reported as "must be approved + at
+   * 'Ready for development' or later, not archived/done" — which is false for an
+   * approved, ready-staged human task and sends the user looking for a state
+   * problem that is not there. Same fail-soft separate-query shape as
+   * findActiveRunTaskIds / findLiveExperimentSeedTaskIds; degrades to EMPTY on a
+   * pre-137 schema, which is correct (no task can be human before the column).
+   */
+  findHumanTaskIds(projectId: number, taskIds: string[]): string[] {
+    const unique = [...new Set(taskIds)];
+    if (unique.length === 0) return [];
+    try {
+      const placeholders = unique.map(() => '?').join(', ');
+      const rows = this.db
+        .prepare(
+          `SELECT t.id AS id
+             FROM tasks t
+            WHERE t.project_id = ?
+              AND t.id IN (${placeholders})
+              AND t.executor = 'human'`,
+        )
+        .all(projectId, ...unique) as Array<{ id: string }>;
+      const human = new Set(rows.map((r) => r.id));
+      return unique.filter((id) => human.has(id));
+    } catch (err) {
+      if (err instanceof Error && /no such (column|table)/i.test(err.message)) {
+        this.logger?.debug('[SprintLaneStore] human-task scope skipped (pre-137 schema)', {
           error: err.message,
         });
         return [];
@@ -1321,13 +1470,16 @@ export class SprintLaneStore {
   // --------------------------------------------------------------------------
 
   /**
-   * Re-queue every 'failed' lane of a batch back to 'queued' (clearing
-   * current_step_id), so a fan-out RETRY re-dispatches them instead of
-   * instantly re-settling with the same failures. The production fan-out
+   * Re-queue every 'failed' OR 'blocked' lane of a batch back to 'queued'
+   * (clearing current_step_id), so a fan-out RETRY re-dispatches them instead
+   * of instantly re-settling with the same failures. The production fan-out
    * driver (fanOutDriverFactory.resolveItems, main/src/index.ts) filters OUT
-   * lanes already marked 'integrated' or 'failed' — without this reset, a
-   * retried fanOut step would see zero eligible items for every
-   * previously-failed lane.
+   * lanes already marked 'integrated', 'failed' or 'blocked' — without this
+   * reset, a retried fanOut step would see zero eligible items for every
+   * previously-failed-or-blocked lane. 'blocked' lanes are included because
+   * they never started (Item 6: a lane blocks when a prerequisite failed) —
+   * a retry needs them back in the dispatchable pool exactly like a lane that
+   * DID run and failed.
    *
    * Routes each reset through `updateLane` (rather than a raw batch UPDATE) so
    * the write + SprintLaneChangedEvent emit pipeline is IDENTICAL to every
@@ -1341,17 +1493,19 @@ export class SprintLaneStore {
    * `RetryRunDeps.resetFailedLanes` signature.
    *
    * Fail-soft: never throws. Returns the number of lanes reset, or 0 when
-   * there are no failed lanes, the batch has no owning run, or anything in
-   * between errors (logged at 'warn').
+   * there are no failed/blocked lanes, the batch has no owning run, or
+   * anything in between errors (logged at 'warn').
    */
   resetFailedLanes(batchId: string): number {
     try {
-      const failedTaskIds = (
+      const resetTaskIds = (
         this.db
-          .prepare(`SELECT task_id AS taskId FROM sprint_batch_tasks WHERE batch_id = ? AND status = 'failed'`)
+          .prepare(
+            `SELECT task_id AS taskId FROM sprint_batch_tasks WHERE batch_id = ? AND status IN ('failed', 'blocked')`,
+          )
           .all(batchId) as Array<{ taskId: string }>
       ).map((r) => r.taskId);
-      if (failedTaskIds.length === 0) return 0;
+      if (resetTaskIds.length === 0) return 0;
 
       const runRow = this.db
         .prepare('SELECT id FROM workflow_runs WHERE batch_id = ?')
@@ -1364,11 +1518,11 @@ export class SprintLaneStore {
       }
 
       let reset = 0;
-      for (const taskId of failedTaskIds) {
+      for (const taskId of resetTaskIds) {
         this.updateLane({ runId: runRow.id, batchId, taskId, status: 'queued', currentStepId: null });
         reset += 1;
       }
-      this.logger?.info('[SprintLaneStore] reset failed fan-out lanes for retry', {
+      this.logger?.info('[SprintLaneStore] reset failed/blocked fan-out lanes for retry', {
         batchId,
         runId: runRow.id,
         count: reset,

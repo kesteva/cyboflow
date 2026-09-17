@@ -27,7 +27,13 @@ function buildDb(): Database.Database {
     CREATE TABLE approved_designs (
       id TEXT PRIMARY KEY,
       idea_id TEXT NOT NULL,
-      superseded_at TEXT
+      superseded_at TEXT,
+      -- Migration 134's provenance columns. Derivation is deliberately BLIND to
+      -- them (a current row completes 'prototype' whichever pathway wrote it);
+      -- they are here so the flow-vs-design-mode test below can assert exactly
+      -- that.
+      source TEXT NOT NULL DEFAULT 'design-mode',
+      source_run_id TEXT
     );
     CREATE TABLE epics (id TEXT PRIMARY KEY, originating_idea_id TEXT);
     CREATE TABLE tasks (
@@ -329,6 +335,35 @@ describe('resolveIdeaComponents / resolveIdeaComponentsBatch', () => {
     const prototype = pick(resolveIdeaComponents(dbAdapter(db), 'idea-1'), 'prototype');
     expect(prototype.state).toBe('complete');
     expect(prototype.source).toBe('derived');
+  });
+
+  it('a FLOW-sourced approved_designs row derives prototype exactly like a design-mode one', () => {
+    // Migration 134 added `source`; derivation must stay blind to it. The read
+    // model's WHERE clause is `superseded_at IS NULL` and nothing else, so a
+    // Launch/Planner/Ship bind completes the component the same way a Design
+    // Mode approval does — the provenance only matters to the BINDER (which
+    // refuses to overwrite a design-mode row), never to this read.
+    const flowDb = buildDb();
+    insertIdea(flowDb, 'idea-1', null);
+    flowDb
+      .prepare(
+        'INSERT INTO approved_designs (id, idea_id, superseded_at, source, source_run_id) VALUES (?, ?, NULL, ?, ?)',
+      )
+      .run('ad-flow', 'idea-1', 'flow', 'run-launch');
+
+    const designModeDb = buildDb();
+    insertIdea(designModeDb, 'idea-1', null);
+    designModeDb
+      .prepare(
+        'INSERT INTO approved_designs (id, idea_id, superseded_at, source, source_run_id) VALUES (?, ?, NULL, ?, NULL)',
+      )
+      .run('ad-dm', 'idea-1', 'design-mode');
+
+    const flow = pick(resolveIdeaComponents(dbAdapter(flowDb), 'idea-1'), 'prototype');
+    const designMode = pick(resolveIdeaComponents(dbAdapter(designModeDb), 'idea-1'), 'prototype');
+    expect(flow).toEqual(designMode);
+    expect(flow.state).toBe('complete');
+    expect(flow.source).toBe('derived');
   });
 
   it('a SUPERSEDED approved_designs row does NOT complete prototype on its own', () => {

@@ -3908,12 +3908,27 @@ describe('cyboflow.runs.listFiles / readFile', () => {
 // The diff capture is performed via the injected ctx.gitDiff closure (backed by
 // GitDiffManager in index.ts), so the tests stub it and assert the router:
 //   (a) resolves workflow_runs.worktree_path and forwards it to ctx.gitDiff,
-//       returning the dep's payload verbatim;
+//       returning the dep's payload verbatim (including resolvedBase/worktree,
+//       TASK-211);
+//   (a2) forwards the run base_sha so committed work is diffed against launch;
+//   (a3) forwards comparisonRef as the THIRD ctx.gitDiff argument (TASK-211) —
+//       proves zod did not strip it;
 //   (b) returns null when the run has no worktree_path (without calling the dep);
 //   (c) throws NOT_FOUND for an unknown run;
 //   (d) throws PRECONDITION_FAILED when ctx.db is missing;
 //   (e) throws PRECONDITION_FAILED when ctx.gitDiff is not wired.
 // ---------------------------------------------------------------------------
+
+const EMPTY_GIT_DIFF_WORKTREE = {
+  entries: [],
+  groups: [
+    { scope: 'unstaged', files: [], additions: 0, deletions: 0 },
+    { scope: 'staged', files: [], additions: 0, deletions: 0 },
+    { scope: 'untracked', files: [], additions: 0, deletions: 0 },
+    { scope: 'committed', files: [], additions: 0, deletions: 0 },
+  ],
+  committedUnavailable: true,
+};
 
 describe('cyboflow.runs.gitDiff (run-scoped Diff tab)', () => {
   let db: Database.Database;
@@ -3927,21 +3942,26 @@ describe('cyboflow.runs.gitDiff (run-scoped Diff tab)', () => {
     db.close();
   });
 
-  it('(a) resolves worktree_path → forwards to ctx.gitDiff (base_sha undefined) and returns its payload', async () => {
+  it('(a) resolves worktree_path → forwards to ctx.gitDiff (base_sha undefined) and returns its payload verbatim (resolvedBase + worktree included)', async () => {
     const { runId } = seedRun(db, { worktreePath: '/tmp/run-worktree' });
     const payload = {
       diff: 'diff --git a/x.ts b/x.ts\n@@ -0,0 +1 @@\n+hi\n',
       stats: { additions: 1, deletions: 0, filesChanged: 1 },
       changedFiles: ['x.ts'],
+      resolvedBase: null,
+      worktree: EMPTY_GIT_DIFF_WORKTREE,
     };
     const gitDiff = vi.fn().mockResolvedValue(payload);
 
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db), gitDiff }));
     const result = await caller.cyboflow.runs.gitDiff({ runId });
 
-    // No base_sha seeded → forwarded as undefined (working-directory fallback).
-    expect(gitDiff).toHaveBeenCalledWith('/tmp/run-worktree', undefined);
+    // No base_sha seeded, no comparisonRef passed → forwarded as undefined
+    // (working-directory fallback), with comparisonRef also undefined.
+    expect(gitDiff).toHaveBeenCalledWith('/tmp/run-worktree', undefined, undefined);
     expect(result).toEqual(payload);
+    expect(result?.resolvedBase).toBeNull();
+    expect(result?.worktree).toEqual(EMPTY_GIT_DIFF_WORKTREE);
   });
 
   it('(a2) forwards the run base_sha so committed work is diffed against launch', async () => {
@@ -3950,13 +3970,35 @@ describe('cyboflow.runs.gitDiff (run-scoped Diff tab)', () => {
       diff: 'diff --git a/y.ts b/y.ts\n@@ -0,0 +1 @@\n+yo\n',
       stats: { additions: 1, deletions: 0, filesChanged: 1 },
       changedFiles: ['y.ts'],
+      resolvedBase: 'base123',
+      worktree: EMPTY_GIT_DIFF_WORKTREE,
     };
     const gitDiff = vi.fn().mockResolvedValue(payload);
 
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db), gitDiff }));
     const result = await caller.cyboflow.runs.gitDiff({ runId });
 
-    expect(gitDiff).toHaveBeenCalledWith('/tmp/run-worktree', 'base123');
+    expect(gitDiff).toHaveBeenCalledWith('/tmp/run-worktree', 'base123', undefined);
+    expect(result).toEqual(payload);
+  });
+
+  it('(a3) forwards input.comparisonRef as the THIRD ctx.gitDiff argument', async () => {
+    const { runId } = seedRun(db, { worktreePath: '/tmp/run-worktree', baseSha: 'base123' });
+    const payload = {
+      diff: 'diff --git a/z.ts b/z.ts\n@@ -0,0 +1 @@\n+zz\n',
+      stats: { additions: 1, deletions: 0, filesChanged: 1 },
+      changedFiles: ['z.ts'],
+      resolvedBase: 'some-other-sha',
+      worktree: EMPTY_GIT_DIFF_WORKTREE,
+    };
+    const gitDiff = vi.fn().mockResolvedValue(payload);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db), gitDiff }));
+    const result = await caller.cyboflow.runs.gitDiff({ runId, comparisonRef: 'some-other-ref' });
+
+    // base_sha is STILL forwarded as the second arg (the resolver's job is to
+    // pick between them); comparisonRef must survive zod as the third arg.
+    expect(gitDiff).toHaveBeenCalledWith('/tmp/run-worktree', 'base123', 'some-other-ref');
     expect(result).toEqual(payload);
   });
 
@@ -3969,6 +4011,8 @@ describe('cyboflow.runs.gitDiff (run-scoped Diff tab)', () => {
       diff: '',
       stats: { additions: 0, deletions: 0, filesChanged: 0 },
       changedFiles: [],
+      resolvedBase: null,
+      worktree: EMPTY_GIT_DIFF_WORKTREE,
     });
 
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db), gitDiff }));

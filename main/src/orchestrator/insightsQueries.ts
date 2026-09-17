@@ -16,9 +16,19 @@
  *     `subagent_usage` payloads' `message.usage`. We never add `result.usage`
  *     tokens — `result` events restate per-turn totals and summing both
  *     double-counts (FIND-class double-count guard).
- *   - `costUsd` / `numTurns` come from `result` payloads' `total_cost_usd` /
- *     `num_turns`, SUMMED across results (a resumed run emits one `result` per
- *     turn-session). Null when no result ever carried the field.
+ *   - `numTurns` comes from `result` payloads' `num_turns`, SUMMED across
+ *     results — it is per-QUERY, not cumulative (verified against the raw DB).
+ *   - `costUsd`: `result.total_cost_usd` is CUMULATIVE PER SDK PROCESS, not
+ *     per query — a resumed run reuses the same `session_id` and restarts the
+ *     counter at 0. For `event_type === 'result'` payloads carrying a string
+ *     `session_id`, we LADDER instead of sum: track a running max per
+ *     `(runId, session_id)` "segment" and only add a segment's max into
+ *     `costUsd` once a NEW segment (i.e. a new underlying process) is
+ *     detected, via a cost-decrease or a broken cumulative-output-token
+ *     invariant (see the `scanRawEventRollups` doc for the exact test).
+ *     Everything else — `agent_result` (OMP reports per-turn cost) and any
+ *     `result` without a string `session_id` — keeps the old SUM behavior.
+ *     Null when no result ever carried the field.
  *
  * Materialized-row contract (migration 026): a `run_usage` row, when present,
  * is the precomputed projection of the same `assistant`/`result` scan above —
@@ -523,6 +533,51 @@ function fetchMaterializedRollups(
   return out;
 }
 
+/** Per-`(runId, session_id)` cost-ladder segment state — see scanRawEventRollups doc. */
+interface CostLadderSegment {
+  /** Carried alongside the map key so the final flush needs no key-parsing
+   *  (a session_id could itself contain the key's separator). */
+  runId: string;
+  /** This segment's most recently observed `total_cost_usd`. */
+  lastCost: number;
+  /** This segment's running max `total_cost_usd` — flushed into costUsd when the segment ends. */
+  segMaxCost: number;
+  /**
+   * This segment's most recently observed `Σ modelUsage[*].outputTokens` —
+   * null until a result carries a COMPLETE counter set (see
+   * resultModelUsageOutputTokens), so an unavailable total can never be
+   * mistaken for a total of zero.
+   */
+  lastOutTotal: number | null;
+}
+
+/**
+ * Σ `modelUsage[*].outputTokens` for a `result` payload (camelCase SDK field,
+ * cumulative per process), or null when the counters are NOT comparable:
+ * `modelUsage` absent / not an object / empty, or any model entry without a
+ * finite `outputTokens`. Null must stay distinct from 0 — an empty
+ * `modelUsage` (the SDK fixtures emit one) folded to 0 would satisfy the
+ * ladder's "total grew by less than this query's output" test on EVERY result
+ * and restore the per-result overcount the ladder exists to remove.
+ * Used only by the cost ladder's token-increment invariant (see doc above);
+ * mirrors the `modelUsage[*].contextWindow` reads in liveContextUsage.ts /
+ * runContextUsageListing.ts.
+ */
+function resultModelUsageOutputTokens(payload: Record<string, unknown>): number | null {
+  const modelUsage = payload.modelUsage;
+  if (!isRecord(modelUsage)) return null;
+  const entries = Object.values(modelUsage);
+  if (entries.length === 0) return null;
+  let total = 0;
+  for (const modelData of entries) {
+    if (!isRecord(modelData)) return null;
+    const outputTokens = modelData.outputTokens;
+    if (typeof outputTokens !== 'number' || !Number.isFinite(outputTokens)) return null;
+    total += outputTokens;
+  }
+  return total;
+}
+
 /**
  * Live raw_events scan for the runs WITHOUT a materialized row — the original
  * Phase-1 aggregation, now scoped to the fallback cohort. Seeds a zeroed rollup
@@ -536,8 +591,30 @@ function fetchMaterializedRollups(
  *   - subagent_usage → the same nested message.usage token fields, WITHOUT
  *     incrementing assistantMessageCount (it is a cumulative agent snapshot,
  *     not a primary assistant message).
- *   - result → total_cost_usd (SUMmed; null when never present) and num_turns
- *     (SUMmed; null when never present).
+ *   - result → num_turns (SUMmed; null when never present, per-query).
+ *     total_cost_usd is SUMmed too UNLESS the event is a `result` with a
+ *     string `session_id` — SDK results restart their cumulative counter on
+ *     every process resume (same `session_id`, `total_cost_usd` back to
+ *     ~0), so a plain sum overcounts a run with any resume. For that laddered
+ *     cohort we track, per `(runId, session_id)` segment: `lastCost` (this
+ *     segment's most recent cost), `segMaxCost` (its running max — a result
+ *     can occasionally under-report vs. the previous one without a real
+ *     process restart) and `lastOutTotal` (the most recent
+ *     `Σ modelUsage[*].outputTokens`, 0 when `modelUsage` is absent/empty). A
+ *     new result starts a NEW segment when EITHER `cost < lastCost` (equal
+ *     costs stay in the same segment — never double count) OR the
+ *     cumulative-output-token invariant breaks: `outTotal < lastOutTotal +
+ *     usage.output_tokens` (a continuing process's cumulative output total
+ *     always grows by at least this query's own output tokens; a restarted
+ *     process fails that unless the old segment was smaller than this
+ *     query's tokens, the conservative direction). The token test only runs
+ *     when both `modelUsage` and `usage.output_tokens` are present as finite
+ *     numbers on this row; otherwise only the cost-decrease test applies. On
+ *     a new segment, `segMaxCost` is flushed into `costUsd` and the segment
+ *     resets to this result's cost; otherwise `segMaxCost = max(segMaxCost,
+ *     cost)`. Every still-open segment is flushed into `costUsd` once the row
+ *     scan completes. `agent_result` (OMP's per-turn cost) and any `result`
+ *     without a string `session_id` are unaffected and keep the plain SUM.
  *   - result.usage → token fallback used only when the run has no assistant usage
  *     blocks. Codex reports turn usage on its terminal result, while Claude
  *     normally reports it on assistant messages; the fallback avoids both zeroed
@@ -555,6 +632,11 @@ function scanRawEventRollups(
     cacheCreationTokens: number;
     messageCount: number;
   }>();
+  // Cost-ladder segment state, keyed by `${runId}::${session_id}` — see the
+  // doc above. A given runId's rows are always processed together (one chunk,
+  // ORDER BY run_id, id), so a single map spanning every chunk is safe; the
+  // final flush loop below drains whatever segments are still open.
+  const costSegments = new Map<string, CostLadderSegment>();
   // Per-model buckets, seeded per requested run id so every run (even those with
   // no usage) gets a (possibly empty) perModelUsage array below.
   const modelBuckets = new Map<string, Map<string, ModelUsageAccumulator>>();
@@ -609,13 +691,60 @@ function scanRawEventRollups(
           foldModelUsage(buckets, bucketModelId(row.eventType, payload), usage);
         }
       } else {
-        // result: SUM total_cost_usd + num_turns when present (null stays null
-        // until the first numeric value lands — distinguishes "never reported").
-        if (typeof payload.total_cost_usd === 'number' && Number.isFinite(payload.total_cost_usd)) {
-          target.costUsd = (target.costUsd ?? 0) + payload.total_cost_usd;
-        }
+        // result/agent_result: num_turns is always SUMmed (per-query; null
+        // stays null until the first numeric value lands).
         if (typeof payload.num_turns === 'number' && Number.isFinite(payload.num_turns)) {
           target.numTurns = (target.numTurns ?? 0) + payload.num_turns;
+        }
+        const hasFiniteCost =
+          typeof payload.total_cost_usd === 'number' && Number.isFinite(payload.total_cost_usd);
+        if (hasFiniteCost && row.eventType === 'result' && typeof payload.session_id === 'string') {
+          // Laddered cohort: total_cost_usd is cumulative PER SDK PROCESS, not
+          // per query, so a plain sum overcounts any resumed process. Track a
+          // running max per (runId, session_id) "segment" and only fold a
+          // segment's max into costUsd once a new segment (a fresh process) is
+          // detected — see the doc above scanRawEventRollups for the exact test.
+          const cost = payload.total_cost_usd as number;
+          const segmentKey = `${row.runId}::${payload.session_id}`;
+          const resultUsage = payload.usage;
+          const hasOutputTokensField =
+            isRecord(resultUsage) &&
+            typeof resultUsage.output_tokens === 'number' &&
+            Number.isFinite(resultUsage.output_tokens);
+          // null ⇒ this result's counters are not comparable; the token test is
+          // skipped for it and the segment's last comparable total is kept (the
+          // invariant still holds across a skipped result because the counter
+          // is cumulative).
+          const outTotal = resultModelUsageOutputTokens(payload);
+          const outputTokensThisResult = hasOutputTokensField
+            ? (resultUsage as Record<string, unknown>).output_tokens as number
+            : 0;
+
+          const segment = costSegments.get(segmentKey);
+          if (segment === undefined) {
+            // First result ever seen for this segment — open it; nothing to
+            // flush yet (there is no prior segment).
+            costSegments.set(segmentKey, { runId: row.runId, lastCost: cost, segMaxCost: cost, lastOutTotal: outTotal });
+          } else {
+            const isNewSegment =
+              cost < segment.lastCost ||
+              (outTotal !== null &&
+                segment.lastOutTotal !== null &&
+                hasOutputTokensField &&
+                outTotal < segment.lastOutTotal + outputTokensThisResult);
+            if (isNewSegment) {
+              target.costUsd = (target.costUsd ?? 0) + segment.segMaxCost;
+              costSegments.set(segmentKey, { runId: row.runId, lastCost: cost, segMaxCost: cost, lastOutTotal: outTotal });
+            } else {
+              segment.lastCost = cost;
+              segment.segMaxCost = Math.max(segment.segMaxCost, cost);
+              if (outTotal !== null) segment.lastOutTotal = outTotal;
+            }
+          }
+        } else if (hasFiniteCost) {
+          // agent_result (OMP's per-turn cost), or a `result` with no string
+          // session_id: unchanged SUM behavior.
+          target.costUsd = (target.costUsd ?? 0) + (payload.total_cost_usd as number);
         }
         const usage = payload.usage;
         if (isRecord(usage)) {
@@ -635,6 +764,15 @@ function scanRawEventRollups(
         }
       }
     }
+  }
+
+  // Flush every still-open cost-ladder segment — the last process a run's
+  // (runId, session_id) pair was in never triggers a "new segment" boundary,
+  // so its running max is only added here.
+  for (const segment of costSegments.values()) {
+    const target = acc.get(segment.runId);
+    if (target === undefined) continue; // defensive — should always exist
+    target.costUsd = (target.costUsd ?? 0) + segment.segMaxCost;
   }
 
   for (const rollup of acc.values()) {

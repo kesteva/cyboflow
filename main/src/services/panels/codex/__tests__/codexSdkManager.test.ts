@@ -682,6 +682,47 @@ describe('CodexSdkManager app-server runtime', () => {
     }
   });
 
+  it('projects the failure result and rethrows the ORIGINAL error with no error listener', async () => {
+    // Production wiring registers no 'error' listener on this manager, and
+    // EventEmitter throws ERR_UNHANDLED_ERROR on an unlistened 'error' — which
+    // used to replace the real failure and skip the failure-result projection
+    // (2026-09-16 smoke: thread/start timeout -> "Unhandled error.", no result).
+    const db = createDb();
+    try {
+      const { manager } = makeManager(db, (method) => {
+        if (method === 'account/read') {
+          return {
+            account: { type: 'chatgpt', email: null, planType: 'plus' },
+            requiresOpenaiAuth: true,
+          };
+        }
+        if (method === 'thread/start') throw new Error('Codex app-server thread start timed out after 15000ms');
+        throw new Error(`Unexpected request: ${method}`);
+      });
+      expect(manager.listenerCount('error')).toBe(0);
+
+      await expect(manager.spawnCliProcess({
+        panelId: 'run-1',
+        sessionId: 'run-1',
+        runId: 'run-1',
+        worktreePath: '/tmp/worktree',
+        prompt: 'fail it',
+      })).rejects.toThrow('thread start timed out');
+
+      const resultRows = db
+        .prepare("SELECT payload_json AS payloadJson FROM raw_events WHERE event_type = 'agent_result'")
+        .all() as Array<{ payloadJson: string }>;
+      expect(resultRows).toHaveLength(1);
+      expect(JSON.parse(resultRows[0].payloadJson)).toMatchObject({
+        subtype: 'error_during_execution',
+        is_error: true,
+        result: expect.stringContaining('thread start timed out'),
+      });
+    } finally {
+      db.close();
+    }
+  });
+
   it('interrupts an active quick turn by run id when panel and run ids differ', async () => {
     const db = createDb();
     try {

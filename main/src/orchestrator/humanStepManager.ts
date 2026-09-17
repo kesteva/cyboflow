@@ -35,8 +35,13 @@ import {
   resolveReviewItemById,
   dismissReviewItemById,
   countPendingBlockingReviewItems,
+  countRunPendingFindings,
   hasReviewItemsTable,
 } from './reviewItemListing';
+import {
+  APPROVE_DESIGN_STEP_ID,
+  composeAdversarialReviewGateBody,
+} from './adversarialReviewGateBody';
 import { emitReviewItemChangedById } from './reviewItemRouter';
 import { handleEntityWrite } from './autoMintArtifacts';
 import { composePartialSprintGateBody } from './partialSprintGateSummary';
@@ -174,17 +179,16 @@ export class HumanStepManager {
         gateOpened = true;
 
         // Item 2: a sprint/ship run that reaches its terminal human gate with
-        // failed lanes gets a per-lane partial-sprint summary in the gate body
-        // (ref/title + failing step + attempts) instead of the generic prompt.
+        // INCOMPLETE lanes gets a per-lane partial-sprint summary in the gate body
+        // (failed lanes with their failing step + attempts, never-started lanes
+        // with the prerequisite that stranded them) instead of the generic prompt.
         // Fail-soft — a null summary (non-sprint run, clean sprint, or read error)
         // falls back to the generic body, so the gate always opens.
         const enrichedBody = composePartialSprintGateBody(this.db, runId, stepName);
         reviewItemId = coWriteDecisionReviewItem(this.db, {
           runId,
           title: `Human gate: ${stepName}`,
-          body:
-            enrichedBody ??
-            `Workflow step '${stepId}' requires a human decision before the run can advance.`,
+          body: this.composeGateBody(runId, stepId, enrichedBody),
           source: this.sourceForStep(stepId),
           payload: this.composeGatePayload(runId, stepId),
           now,
@@ -471,6 +475,39 @@ export class HumanStepManager {
    * covers the gate's refs exactly. Fail-soft: no refs (helper fail-soft, or a
    * run with no owned ideas) → null payload, the gate still opens.
    */
+  /**
+   * The full body text a gate opens with: the step-specific lead, then the
+   * pending-findings tail that EVERY gate carries.
+   *
+   * Three layers, most specific first:
+   *   1. `approve-design` — the adversarial reviewer's counts, blocking titles,
+   *      remaining revision budget, and what each button actually does
+   *      (adversarialReviewGateBody.ts). Null when the run has no critique.
+   *   2. A sprint/ship run's partial-lane summary (`partialSprintGateSummary`),
+   *      already composed by the caller and passed in.
+   *   3. The generic "this step requires a human decision" fallback.
+   *
+   * Then, for every gate alike: "N finding(s) filed by this run still await
+   * triage." A human resolving a run's LAST gate is the person who decides what
+   * happens to those findings, and until now the gate never mentioned they
+   * existed — they were discoverable only by opening the review queue, and a run
+   * that ends without a delivered outcome loses them at session archive.
+   *
+   * Fail-soft by construction: every collaborator here swallows its own errors and
+   * degrades to "say less". This runs INSIDE the gate-open transaction, so a throw
+   * would mean a run that cannot pause for its human at all.
+   */
+  private composeGateBody(runId: string, stepId: string, partialSprintBody: string | null): string {
+    const lead =
+      (stepId === APPROVE_DESIGN_STEP_ID ? composeAdversarialReviewGateBody(this.db, runId) : null) ??
+      partialSprintBody ??
+      `Workflow step '${stepId}' requires a human decision before the run can advance.`;
+
+    const pending = countRunPendingFindings(this.db, runId);
+    if (pending === 0) return lead;
+    return `${lead}\n\n**Pending findings:** ${pending} finding${pending === 1 ? '' : 's'} filed by this run still await triage.`;
+  }
+
   private composeGatePayload(runId: string, stepId: string): DecisionPayload | null {
     if (stepId !== 'approve-ideas') return null;
     const ideaRefs = listApproveIdeasBatchRows(this.db, runId).map((row) => row.ref);

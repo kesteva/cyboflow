@@ -60,10 +60,10 @@ function commitFile(dir: string, name: string, content: string, message: string)
   return execSync('git rev-parse HEAD', { cwd: dir, encoding: 'utf8' }).trim();
 }
 
-function makeServices(worktreePath: string): AppServices {
+function makeServices(worktreePath: string, sessionOverrides: Record<string, unknown> = {}): AppServices {
   return {
     sessionManager: {
-      getSession: vi.fn(() => ({ id: 's1', worktreePath, isMainRepo: false, archived: false })),
+      getSession: vi.fn(() => ({ id: 's1', worktreePath, isMainRepo: false, archived: false, ...sessionOverrides })),
       getProjectForSession: vi.fn(() => ({ id: 7, name: 'Proj', path: worktreePath })),
     },
     gitDiffManager: new GitDiffManager(),
@@ -84,6 +84,9 @@ function makeServices(worktreePath: string): AppServices {
   } as unknown as AppServices;
 }
 
+/** A 40-hex-char string is a resolved git SHA — never a branch/ref name. */
+const SHA_RE = /^[0-9a-f]{40}$/;
+
 describe('sessionGit ops getCombinedDiff (async git plumbing, real repo)', () => {
   it('executionIds=[0]: returns the uncommitted working-directory diff', async () => {
     await withTempDir('combined-diff-uncommitted-', async (repo) => {
@@ -94,11 +97,16 @@ describe('sessionGit ops getCombinedDiff (async git plumbing, real repo)', () =>
       const ops = createGitOps(makeServices(repo));
       const result = (await ops.getCombinedDiff({ sessionId: 's1', executionIds: [0] })) as {
         success: boolean;
-        data: { diff: string };
+        data: { diff: string; resolvedBase: string | null; worktree: { entries: unknown[]; groups: unknown[]; committedUnavailable: boolean } };
       };
 
       expect(result.success).toBe(true);
       expect(result.data.diff).toContain('+a2-working');
+      // executionIds=[0] is the working-dir-vs-HEAD rung — resolvedBase is
+      // null, never undefined and never a branch name (TASK-212).
+      expect(result.data.resolvedBase).toBeNull();
+      expect(result.data.worktree).toBeDefined();
+      expect(Array.isArray(result.data.worktree.groups)).toBe(true);
     });
   });
 
@@ -113,13 +121,16 @@ describe('sessionGit ops getCombinedDiff (async git plumbing, real repo)', () =>
       const ops = createGitOps(makeServices(repo));
       const result = (await ops.getCombinedDiff({ sessionId: 's1' })) as {
         success: boolean;
-        data: { diff: string; changedFiles: string[]; stats: { filesChanged: number } };
+        data: { diff: string; changedFiles: string[]; stats: { filesChanged: number }; resolvedBase: string | null };
       };
 
       expect(result.success).toBe(true);
       expect(result.data.changedFiles).toEqual(expect.arrayContaining(['a.txt', 'b.txt']));
       expect(result.data.diff).toContain('+a1');
       expect(result.data.diff).toContain('+b1');
+      // No baseCommit recorded — falls back to the resolved 'main' branch tip,
+      // which must be echoed back as a resolved SHA, not the branch name.
+      expect(result.data.resolvedBase).toMatch(SHA_RE);
     });
   });
 
@@ -135,13 +146,134 @@ describe('sessionGit ops getCombinedDiff (async git plumbing, real repo)', () =>
       // Commits are newest-first: id 1 = feature commit 2, id 2 = feature commit 1.
       const result = (await ops.getCombinedDiff({ sessionId: 's1', executionIds: [1, 2] })) as {
         success: boolean;
-        data: { diff: string; changedFiles: string[] };
+        data: { diff: string; changedFiles: string[]; resolvedBase: string | null };
       };
 
       expect(result.success).toBe(true);
       expect(result.data.changedFiles).toEqual(['a.txt']);
       expect(result.data.diff).toContain('+a1');
       expect(result.data.diff).toContain('+a2');
+      // The commit-range branch reports its OWN from-hash as resolvedBase.
+      expect(result.data.resolvedBase).toMatch(SHA_RE);
     });
   });
+
+  it('no executionIds, zero commits on the branch: uncommitted edits still render (TASK-207)', async () => {
+    await withTempDir('combined-diff-zero-commits-', async (repo) => {
+      initRepoMain(repo);
+      const baseSha = commitFile(repo, 'base.txt', 'base\n', 'base commit');
+      execSync('git checkout -b feature', { cwd: repo, stdio: 'pipe' });
+
+      // Zero commits of its own on `feature` — only uncommitted work: an edit to
+      // the tracked file and a new untracked file.
+      fs.writeFileSync(path.join(repo, 'base.txt'), 'base\nedited-in-place\n');
+      fs.writeFileSync(path.join(repo, 'c.txt'), 'new-untracked\n');
+
+      const ops = createGitOps(makeServices(repo, { baseCommit: baseSha }));
+      const result = (await ops.getCombinedDiff({ sessionId: 's1' })) as {
+        success: boolean;
+        data: { diff: string; changedFiles: string[]; resolvedBase: string | null; worktree: { committedUnavailable: boolean } };
+      };
+
+      expect(result.success).toBe(true);
+      expect(result.data.diff).not.toBe('');
+      expect(result.data.changedFiles.length).toBeGreaterThan(0);
+      expect(result.data.changedFiles).toEqual(expect.arrayContaining(['base.txt', 'c.txt']));
+      expect(result.data.diff).toContain('+edited-in-place');
+      expect(result.data.diff).toContain('+new-untracked');
+      // session.baseCommit is already a resolved 40-char SHA and is echoed
+      // back as resolvedBase verbatim (TASK-212).
+      expect(result.data.resolvedBase).toBe(baseSha);
+      expect(result.data.worktree.committedUnavailable).toBe(false);
+    });
+  });
+
+  it('no executionIds, repo with no commits at all: degrades without throwing', async () => {
+    await withTempDir('combined-diff-no-commits-at-all-', async (repo) => {
+      // git init only — no commits, so HEAD is unborn and no branch exists yet.
+      execSync('git init', { cwd: repo, stdio: 'pipe' });
+      execSync('git config user.email "test@example.com"', { cwd: repo, stdio: 'pipe' });
+      execSync('git config user.name "Test"', { cwd: repo, stdio: 'pipe' });
+      fs.writeFileSync(path.join(repo, 'untracked.txt'), 'hello\n');
+
+      const ops = createGitOps(makeServices(repo));
+      const result = (await ops.getCombinedDiff({ sessionId: 's1' })) as {
+        success: boolean;
+        data?: { diff: string; changedFiles: string[]; resolvedBase: string | null; worktree: { committedUnavailable: boolean } };
+        error?: string;
+      };
+
+      expect(result.success).toBe(true);
+      // Nothing resolves (no baseCommit, no main branch, unborn HEAD) — this
+      // degrades to the working-dir-vs-HEAD rung, so resolvedBase is null and
+      // the Committed group comes back unavailable rather than a stand-in.
+      expect(result.data?.resolvedBase).toBeNull();
+      expect(result.data?.worktree.committedUnavailable).toBe(true);
+    });
+  });
+
+  describe('scope routing (TASK-212)', () => {
+    it("scope: 'staged' returns only the staged hunk; scope: 'unstaged' returns only the unstaged hunk, for a file dirty both ways", async () => {
+      await withTempDir('combined-diff-scope-', async (repo) => {
+        initRepoMain(repo);
+        commitFile(repo, 'a.txt', 'a1\n', 'base');
+
+        // Stage one change, then make a SEPARATE unstaged edit on top — the
+        // file is both staged and unstaged simultaneously (porcelain `MM`).
+        fs.writeFileSync(path.join(repo, 'a.txt'), 'a1\nstaged-line\n');
+        execSync('git add a.txt', { cwd: repo, stdio: 'pipe' });
+        fs.writeFileSync(path.join(repo, 'a.txt'), 'a1\nstaged-line\nunstaged-line\n');
+
+        const ops = createGitOps(makeServices(repo));
+
+        const staged = (await ops.getCombinedDiff({ sessionId: 's1', scope: 'staged' })) as {
+          success: boolean;
+          data: { diff: string; resolvedBase: string | null };
+        };
+        expect(staged.success).toBe(true);
+        expect(staged.data.diff).toContain('+staged-line');
+        expect(staged.data.diff).not.toContain('+unstaged-line');
+
+        const unstaged = (await ops.getCombinedDiff({ sessionId: 's1', scope: 'unstaged' })) as {
+          success: boolean;
+          data: { diff: string; resolvedBase: string | null };
+        };
+        expect(unstaged.success).toBe(true);
+        expect(unstaged.data.diff).toContain('+unstaged-line');
+        expect(unstaged.data.diff).not.toContain('+staged-line');
+      });
+    });
+  });
+});
+
+describe("sessionGit ops getCombinedDiff scope: 'untracked' — symlink containment (SEC-9)", () => {
+  it.runIf(process.platform !== 'win32')(
+    'an untracked symlink to a file outside the worktree is not rendered into the scoped blob',
+    async () => {
+      await withTempDir('combined-diff-symlink-outside-', async (outside) => {
+        const secretPath = path.join(outside, 'secret.txt');
+        fs.writeFileSync(secretPath, 'SUPER-SECRET-TOKEN-do-not-leak\n');
+
+        await withTempDir('combined-diff-symlink-repo-', async (repo) => {
+          initRepoMain(repo);
+          commitFile(repo, 'a.txt', 'a1\n', 'base');
+          fs.symlinkSync(secretPath, path.join(repo, 'leak.txt'));
+          fs.writeFileSync(path.join(repo, 'real.txt'), 'r1\n');
+
+          const ops = createGitOps(makeServices(repo));
+          const result = (await ops.getCombinedDiff({ sessionId: 's1', scope: 'untracked' })) as {
+            success: boolean;
+            data: { diff: string; stats: { additions: number } };
+          };
+
+          expect(result.success).toBe(true);
+          expect(result.data.diff).not.toContain('SUPER-SECRET-TOKEN');
+          expect(result.data.diff).not.toContain('+++ b/leak.txt');
+          expect(result.data.diff).toContain('+++ b/real.txt');
+          // real.txt = "r1\n" → 2 split elements; the link adds nothing.
+          expect(result.data.stats.additions).toBe(2);
+        });
+      });
+    },
+  );
 });

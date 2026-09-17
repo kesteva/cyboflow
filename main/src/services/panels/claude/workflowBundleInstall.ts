@@ -16,12 +16,9 @@
  * this helper bridges DB + resolver + writer, so it MAY import better-sqlite3 and
  * the orchestrator resolver (same latitude as the managers that call it).
  */
-import { execFileSync } from 'child_process';
-import * as fs from 'fs';
-import * as path from 'path';
 import type Database from 'better-sqlite3';
 import type { LoggerLike } from '../../../orchestrator/types';
-import { resolveGitCommand } from '../../../utils/gitExeFinder';
+import { ensureGitExcludeEntries } from '../../../utils/gitExcludeWriter';
 import { resolveWorkflowBundle } from '../../../orchestrator/workflows/workflowBundle';
 import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
 import {
@@ -58,82 +55,36 @@ const CYBOFLOW_EXCLUDE_PATTERNS = [
 const CYBOFLOW_SCRIPT_EXCLUDE_PATTERN = '.claude/workflows/cyboflow-*.js';
 
 /**
- * True when a failed `git` invocation failed *because the cwd is not a git
- * repository* — the expected, uninteresting case (see ensureBundleExcluded).
- * Node puts the child's stderr on `err.stderr` when it is piped, and also folds
- * it into `err.message` ("Command failed: <cmd>\n<stderr>"); both are checked so
- * this holds regardless of how the spawn's stdio is configured. `LC_ALL=C` at
- * the call site pins git's wording to English so this match is locale-stable.
- */
-function isNotAGitRepositoryError(err: unknown): boolean {
-  const candidate = err as { stderr?: unknown; message?: unknown } | null;
-  const stderr = typeof candidate?.stderr === 'string' ? candidate.stderr : '';
-  const message = typeof candidate?.message === 'string' ? candidate.message : '';
-  return /not a git repository/i.test(stderr) || /not a git repository/i.test(message);
-}
-
-/**
  * Add the cyboflow bundle globs to the worktree's LOCAL git exclude
  * (`$GIT_DIR/info/exclude`, NOT the tracked `.gitignore`) so the generated
  * `cyboflow-*.md` files never surface in the run diff (`git ls-files --others
  * --exclude-standard` / `git status` both honor it) or get accidentally
  * committed. Idempotent (skips patterns already present) and fail-soft — a git
- * or fs error here must not break a spawn.
+ * or fs error here must not break a spawn. Delegates the git-path resolution,
+ * idempotent append and fail-soft error handling to the shared
+ * `gitExcludeWriter` (also used by interactiveClaudeManager's `.cyboflow/` and
+ * OMP's `.omp/` excludes).
  *
  * A NON-REPO target is expected, not a fault: the global-agent chat thread's
  * home (`<dataDir>/agent-home/<threadId>`, AgentThreadService's `homeDirBase`)
  * goes through this same install seam and is deliberately a neutral directory
  * with no repo. It has no run diff to keep the bundle out of, so there is
- * nothing to exclude. That case is logged at debug and returns; every OTHER git
- * or fs failure still warns, because those are real and worth seeing.
+ * nothing to exclude — the shared writer logs that case at debug and returns
+ * `null`; every OTHER git or fs failure still warns, because those are real
+ * and worth seeing.
  */
 function ensureBundleExcluded(worktreePath: string, extraPatterns: string[], logger?: LoggerLike): void {
   const patterns = [...CYBOFLOW_EXCLUDE_PATTERNS, ...extraPatterns];
-  try {
-    const raw = execFileSync(resolveGitCommand(), ['rev-parse', '--git-path', 'info/exclude'], {
-      cwd: worktreePath,
-      encoding: 'utf8',
-      windowsHide: true,
-      // Pin git's message language for isNotAGitRepositoryError, and capture
-      // stderr rather than letting the child's `fatal:` line leak to the app's
-      // own stderr on the (expected) non-repo path.
-      env: { ...process.env, LC_ALL: 'C' },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    }).trim();
-    if (raw.length === 0) return;
-    const excludePath = path.isAbsolute(raw) ? raw : path.join(worktreePath, raw);
-
-    let existing = '';
-    try {
-      existing = fs.readFileSync(excludePath, 'utf8');
-    } catch {
-      /* file absent — created below */
-    }
-    const lines = existing.split(/\r?\n/);
-    const missing = patterns.filter((p) => !lines.includes(p));
-    if (missing.length === 0) return;
-
-    const parts: string[] = [];
-    if (existing.length > 0 && !existing.endsWith('\n')) parts.push(''); // close a dangling line
-    if (!lines.includes(CYBOFLOW_EXCLUDE_MARKER)) parts.push(CYBOFLOW_EXCLUDE_MARKER);
-    parts.push(...missing, '');
-
-    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
-    fs.appendFileSync(excludePath, parts.join('\n'), 'utf8');
+  const result = ensureGitExcludeEntries(worktreePath, patterns, {
+    marker: CYBOFLOW_EXCLUDE_MARKER,
+    logger,
+    label: 'WorkflowBundleInstall',
+  });
+  if (result !== null && result.added.length > 0) {
     logger?.debug('[WorkflowBundleInstall] excluded cyboflow bundle from git', {
       worktreePath,
-      added: missing,
+      added: result.added,
     });
-  } catch (err) {
-    if (isNotAGitRepositoryError(err)) {
-      logger?.debug('[WorkflowBundleInstall] skipped git exclude — not a git repository', {
-        worktreePath,
-      });
-      return;
-    }
-    logger?.warn(
-      `[WorkflowBundleInstall] could not update git exclude for ${worktreePath}: ${err instanceof Error ? err.message : String(err)}`,
-    );
   }
 }
 

@@ -107,13 +107,15 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Re
 }
 
 describe('cyboflowMcpServer ListTools (CYBOFLOW_MCP_SCOPE=global-agent)', () => {
-  it('advertises EXACTLY the 13-tool global-agent family — no run-scoped tool leaks in', async () => {
+  it('advertises EXACTLY the 17-tool global-agent family — no run-scoped tool leaks in', async () => {
     const tools = await listTools();
     const names = tools.map((t) => t.name).sort();
     expect(names).toEqual(
       [
+        'cyboflow_agents',
         'cyboflow_backlog',
         'cyboflow_db_query',
+        'cyboflow_db_schema',
         'cyboflow_entity',
         'cyboflow_fs_grep',
         'cyboflow_fs_list',
@@ -123,6 +125,8 @@ describe('cyboflowMcpServer ListTools (CYBOFLOW_MCP_SCOPE=global-agent)', () => 
         'cyboflow_propose_action',
         'cyboflow_queue',
         'cyboflow_reference',
+        'cyboflow_widget_preview',
+        'cyboflow_widget_save',
         'cyboflow_workflow',
         'cyboflow_workflows',
       ].sort(),

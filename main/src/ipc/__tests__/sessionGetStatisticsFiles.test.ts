@@ -54,6 +54,13 @@ const { mockRunGitAsync } = vi.hoisted(() => ({
 vi.mock('../../utils/runGit', () => ({
   runGitAsync: mockRunGitAsync,
   runGit: vi.fn(),
+  END_OF_OPTIONS: '--end-of-options',
+  assertNotOptionLike: (value: string, label: string) => {
+    if (value.startsWith('-')) {
+      throw new Error(`Refusing to pass ${label} "${value}" to git: values starting with "-" are parsed as options`);
+    }
+    return value;
+  },
 }));
 
 import { createSessionOps } from '../sessionOps';
@@ -156,8 +163,16 @@ async function invoke(ops: SessionOpsLike) {
 describe('sessionOps.getStatistics — file statistics', () => {
   beforeEach(() => {
     mockRunGitAsync.mockReset();
-    // Every ref candidate resolves unless a test says otherwise.
-    mockRunGitAsync.mockResolvedValue('');
+    // Every ref candidate resolves to itself unless a test says otherwise —
+    // mirrors real `git rev-parse --verify <ref>^{commit}` succeeding with the
+    // resolved sha on stdout (TASK-208: resolveSessionDiffBaseRef never treats
+    // an empty/failed resolve as success, so the mock must return a real,
+    // non-empty resolved value here rather than '').
+    mockRunGitAsync.mockImplementation(async (_cwd: string, args: string[]) => {
+      const revArg = args[args.length - 1];
+      const match = typeof revArg === 'string' ? revArg.match(/^(.*)\^\{commit\}$/) : null;
+      return match ? match[1] : '';
+    });
   });
 
   it('reports the git diff against the session base commit, not the execution_diffs sum', async () => {
@@ -247,7 +262,9 @@ describe('sessionOps.getStatistics — file statistics', () => {
   it('falls back to the project main branch when the recorded base commit no longer resolves', async () => {
     mockRunGitAsync.mockImplementation(async (_cwd: string, args: string[]) => {
       if (args.includes(`${BASE_COMMIT}^{commit}`)) throw new Error('unknown revision');
-      return '';
+      const revArg = args[args.length - 1];
+      const match = typeof revArg === 'string' ? revArg.match(/^(.*)\^\{commit\}$/) : null;
+      return match ? match[1] : '';
     });
     const getDiffStatsAgainstRef = vi.fn(async () => ({
       stats: { additions: 4, deletions: 1, filesChanged: 2 },
@@ -259,5 +276,40 @@ describe('sessionOps.getStatistics — file statistics', () => {
 
     expect(getDiffStatsAgainstRef).toHaveBeenCalledWith(WORKTREE, 'main');
     expect(result.data.files.totalFilesChanged).toBe(2);
+  });
+
+  it('resolves the base-commit candidate via a real rev-parse with END_OF_OPTIONS (TASK-208 argv guard)', async () => {
+    mockRunGitAsync.mockImplementation(async (_cwd: string, args: string[]) => {
+      if (args.includes(`${BASE_COMMIT}^{commit}`)) return BASE_COMMIT;
+      return '';
+    });
+    const getDiffStatsAgainstRef = vi.fn(async () => ({
+      stats: { additions: 1, deletions: 0, filesChanged: 1 },
+      changedFiles: ['a.ts'],
+    }));
+    const ops = makeServices({ getDiffStatsAgainstRef, baseCommit: BASE_COMMIT });
+
+    await invoke(ops);
+
+    expect(mockRunGitAsync).toHaveBeenCalledWith(
+      WORKTREE,
+      expect.arrayContaining(['rev-parse', '--verify', '--end-of-options', `${BASE_COMMIT}^{commit}`]),
+    );
+  });
+
+  it('never issues a rev-parse for a `-`-prefixed base-commit candidate (option injection)', async () => {
+    const optionLikeCandidate = '--output=/tmp/cyboflow-pwn';
+    const getDiffStatsAgainstRef = vi.fn(async () => ({
+      stats: { additions: 0, deletions: 0, filesChanged: 0 },
+      changedFiles: [],
+    }));
+    const ops = makeServices({ getDiffStatsAgainstRef, baseCommit: optionLikeCandidate });
+
+    await invoke(ops);
+
+    expect(mockRunGitAsync).not.toHaveBeenCalledWith(
+      WORKTREE,
+      expect.arrayContaining([`${optionLikeCandidate}^{commit}`]),
+    );
   });
 });

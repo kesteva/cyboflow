@@ -85,6 +85,13 @@ vi.mock('../trpc/client', () => ({
       approvals: {
         listPending: { query: vi.fn().mockResolvedValue([]) },
       },
+      // Right-rail Diff tab liveness — RunRightRail subscribes to worktree
+      // changes for the selected session while its Diff tab is mounted. Inert
+      // by default (never emits) so any test that opens the Diff tab renders
+      // without a per-file mock; files asserting on the subscription override.
+      sessionGit: {
+        onWorktreeChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+      },
       // Live AskUserQuestion queue (questionStore) — RunPendingInputStrip mounts
       // unconditionally inside RunCenterPane, so any test rendering it needs this
       // stubbed even without a dedicated trpc mock. Empty by default.
@@ -98,6 +105,20 @@ vi.mock('../trpc/client', () => ({
       reviewItems: {
         list: { query: vi.fn().mockResolvedValue([]) },
         onReviewItemChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+      },
+      // Approved-design lookup (Tier 2, item 8c) — DesignAffordance mounts
+      // unconditionally on every non-idea TaskCard/TaskDetailModal and, given a
+      // sessionKey, every sprint swimlane lane header. No bound design by
+      // default so it renders nothing without every test file needing its own
+      // mock.
+      design: {
+        forEntity: { query: vi.fn().mockResolvedValue(null) },
+        snapshotHtml: { query: vi.fn().mockResolvedValue(null) },
+      },
+      // Idea component ledger live channel — also read by DesignAffordance /
+      // ApprovedDesignTab for their live refresh. No-op by default.
+      ideaComponents: {
+        onComponentsChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
       },
     },
   },

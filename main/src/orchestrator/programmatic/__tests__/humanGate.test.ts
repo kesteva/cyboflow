@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'events';
 import { parseGateVerdict, ReviewQueueHumanGate, type HumanGateOpener } from '../humanGate';
 import type { WorkflowStep } from '../../../../../shared/types/workflows';
+import type { LoggerLike } from '../../types';
 
 function step(p: Partial<WorkflowStep> & { id: string }): WorkflowStep {
   return { name: p.id, agent: 'human', mcps: [], retries: 0, human: true, ...p };
@@ -239,5 +240,110 @@ describe('ReviewQueueHumanGate', () => {
     ).resolves.toBe('abort');
     expect(opener.openHumanGate).not.toHaveBeenCalled();
     expect(events.listenerCount('review-project-1')).toBe(0);
+  });
+  it('AWAITS onGateResolved before the gate promise settles, passing the raw resolution', async () => {
+    // The ordering this hook exists for: ReviewItemRouter emits 'resolved'
+    // synchronously, this resolver settles the controller's gate promise off that
+    // emit, and the walk then spawns the next step. Anything the resumed step must
+    // SEE (a design bound to its ideas, a level stamped on the project) has to land
+    // before the promise resolves or it is a race that only SDK-spawn latency wins.
+    const events = new EventEmitter();
+    const sideEffects = makeDeferred<void>();
+    const order: string[] = [];
+    const seen: Array<{ runId: string; stepId: string; resolution: string | null; dismissed: boolean }> = [];
+    const opener: HumanGateOpener = {
+      openHumanGate: vi.fn<HumanGateOpener['openHumanGate']>().mockResolvedValue('ri-se'),
+      onGateResolved: vi.fn(async (args) => {
+        seen.push(args);
+        order.push('side-effects:start');
+        await sideEffects.promise;
+        order.push('side-effects:done');
+      }),
+      maybeResumeRun: vi.fn(async () => {
+        order.push('resume');
+        return true;
+      }),
+    };
+    const gate = new ReviewQueueHumanGate(opener, events, channelFor);
+
+    const pending = gate
+      .resolve({ runId: 'r', projectId: 1, step: step({ id: 'approve-design' }) })
+      .then((verdict) => {
+        order.push('settled');
+        return verdict;
+      });
+    await Promise.resolve();
+
+    events.emit('review-project-1', {
+      reviewItemId: 'ri-se',
+      action: 'resolved',
+      item: { resolution: 'revise — the spend screen has no way back to Home' },
+    });
+    await flush();
+
+    // Still parked: the hook has not finished, so neither the resume nor the
+    // verdict has happened.
+    expect(order).toEqual(['side-effects:start']);
+
+    sideEffects.resolve();
+    await expect(pending).resolves.toBe('revise');
+    expect(order).toEqual(['side-effects:start', 'side-effects:done', 'resume', 'settled']);
+    // The RAW resolution, not the reduced verdict — the free text is the only
+    // thing a side-effect (or a later revision) can act on.
+    expect(seen).toEqual([
+      {
+        runId: 'r',
+        stepId: 'approve-design',
+        resolution: 'revise — the spend screen has no way back to Home',
+        dismissed: false,
+      },
+    ]);
+  });
+
+  it('still settles the gate when onGateResolved rejects (fail-soft)', async () => {
+    // Stranding a run at a gate the human already answered is worse than a missing
+    // side-effect, so a throwing hook must not hold the walk.
+    const events = new EventEmitter();
+    const opener: HumanGateOpener = {
+      openHumanGate: vi.fn<HumanGateOpener['openHumanGate']>().mockResolvedValue('ri-boom'),
+      onGateResolved: vi.fn().mockRejectedValue(new Error('bind failed')),
+    };
+    const warn = vi.fn();
+    const logger: LoggerLike = { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() };
+    const gate = new ReviewQueueHumanGate(opener, events, channelFor, logger);
+
+    const pending = gate.resolve({ runId: 'r', projectId: 1, step: step({ id: 'approve-design' }) });
+    await Promise.resolve();
+    events.emit('review-project-1', {
+      reviewItemId: 'ri-boom',
+      action: 'resolved',
+      item: { resolution: 'approve' },
+    });
+
+    await expect(pending).resolves.toBe('approve');
+    expect(warn).toHaveBeenCalled();
+  });
+
+  it('fires onGateResolved for a DISMISSED gate too, with a null resolution', async () => {
+    // A dismissal is a rejection, and a rejection still has to unwind whatever the
+    // gate armed — so the hook runs on both terminal actions, not just 'resolved'.
+    const events = new EventEmitter();
+    const calls: Array<{ resolution: string | null; dismissed: boolean }> = [];
+    const opener: HumanGateOpener = {
+      openHumanGate: vi.fn<HumanGateOpener['openHumanGate']>().mockResolvedValue('ri-dis'),
+      onGateResolved: vi.fn(async (args) => {
+        calls.push({ resolution: args.resolution, dismissed: args.dismissed });
+      }),
+    };
+    const gate = new ReviewQueueHumanGate(opener, events, channelFor);
+
+    const pending = gate.resolve({ runId: 'r', projectId: 1, step: step({ id: 'g' }) });
+    await Promise.resolve();
+    events.emit('review-project-1', { reviewItemId: 'ri-dis', action: 'dismissed' });
+
+    await expect(pending).resolves.toBe('reject');
+    // `dismissed` is the discriminant the side-effects need: a null resolution alone
+    // also describes a note-less resolve, which is an APPROVE.
+    expect(calls).toEqual([{ resolution: null, dismissed: true }]);
   });
 });

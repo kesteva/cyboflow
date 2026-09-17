@@ -728,14 +728,20 @@ describe('composeStepPrompt', () => {
     expect(out).toContain("component: 'architecture', state: 'complete'");
   });
 
-  it('stamps architecture but never prototype on the launch ideas step', () => {
+  it('stamps architecture on the launch ideas step, and prototype only where evidenced', () => {
     const out = composeStepPrompt({
       step: step({ id: 'ideas', name: 'Decompose into ideas', agent: 'interview' }),
       workflowName: 'launch',
       attempt: 1,
     });
     expect(out).toContain("component: 'architecture', state: 'complete'");
-    expect(out).toContain('Do NOT stamp `prototype`');
+    // The blanket "never stamp prototype" rule is gone: the approve-ideas gate now
+    // binds the concept design to every approved idea, so an idea that received
+    // its OWN design-spec section truthfully has designed screens. The narrowing
+    // survives — every other idea stays unstamped rather than inheriting a claim
+    // one whole-concept mockup cannot support (a ledger row beats derivation).
+    expect(out).toContain('Never stamp `prototype` on an idea with no design-spec section of its own');
+    expect(out).not.toContain('Do NOT stamp `prototype` on any idea');
   });
 
   it('defers the epics stamp off the launch epics step', () => {
@@ -747,19 +753,25 @@ describe('composeStepPrompt', () => {
     expect(out).toContain('Do NOT stamp the `epics` component here');
   });
 
-  it('omits the ledger contract outside launch and on unrelated launch steps', () => {
-    const planner = composeStepPrompt({
-      step: step({ id: 'tasks', name: 'Fill out task details', agent: 'tasks' }),
-      workflowName: 'planner',
-      attempt: 1,
-    });
-    expect(planner).not.toContain('## Component ledger');
-    const gate = composeStepPrompt({
-      step: step({ id: 'approve-plan', name: 'Approve task plan', agent: 'human' }),
-      workflowName: 'launch',
-      attempt: 1,
-    });
-    expect(gate).not.toContain('## Component ledger');
+  it('omits the ledger contract on flows without a ledger and on unrelated steps', () => {
+    // Planner and ship DO carry a ledger contract now (see their own block
+    // below); sprint / compound / verify-setup have no ideas to stamp.
+    for (const workflowName of ['sprint', 'compound', 'verify-setup']) {
+      const out = composeStepPrompt({
+        step: step({ id: 'tasks', name: 'Fill out task details', agent: 'tasks' }),
+        workflowName,
+        attempt: 1,
+      });
+      expect(out, workflowName).not.toContain('## Component ledger');
+    }
+    for (const workflowName of ['launch', 'planner', 'ship']) {
+      const gate = composeStepPrompt({
+        step: step({ id: 'approve-plan', name: 'Approve task plan', agent: 'human' }),
+        workflowName,
+        attempt: 1,
+      });
+      expect(gate, workflowName).not.toContain('## Component ledger');
+    }
   });
 
   it('omits the persistence contract on unrelated steps', () => {
@@ -963,5 +975,535 @@ describe('composeStepPrompt', () => {
       attempt: 1,
     });
     expect(derive).not.toContain('Prove-step contract');
+  });
+  // ── item 9: the Design spec fold ────────────────────────────────────────────
+
+  it('tells ui-prototype to fold the Design spec into each idea (planner/ship) or the brief (launch)', () => {
+    const proto = (workflowName: string): string =>
+      composeStepPrompt({
+        step: step({
+          id: 'ui-prototype',
+          name: 'UI prototype',
+          agent: 'ui-prototype',
+          outputArtifact: { atype: 'ui-prototype', label: 'UI prototype' },
+        }),
+        workflowName,
+        attempt: 1,
+      });
+
+    for (const flow of ['planner', 'ship']) {
+      const out = proto(flow);
+      // Reporting the artifact is NOT enough: the prototype file dies with the
+      // run, so the prose must send the prose section to a durable body.
+      expect(out, flow).toContain('## Design spec');
+      expect(out, flow).toContain('cyboflow_update_task');
+      expect(out, flow).toContain('REPLACE that section (never stack a second copy)');
+      expect(out, flow).not.toContain('re-report the brief');
+    }
+
+    const launch = proto('launch');
+    // No idea exists on launch at design time, so the brief is the carrier.
+    expect(launch).toContain('## Design spec');
+    expect(launch).toContain("atype: 'project-brief'");
+    expect(launch).not.toContain('cyboflow_update_task');
+  });
+
+  it('names Design spec in the expand-spec preserve-list so the rewrite cannot clobber it', () => {
+    // Launch writes the section at `ideas` and rewrites the same body at
+    // `expand-spec`; a preserve-list that does not name it destroys it, and the
+    // rewrite also materializes stale ledger rows that beat derivation forever.
+    const out = composeStepPrompt({
+      step: step({ id: 'expand-spec', name: 'Expand spec', agent: 'context' }),
+      workflowName: 'launch',
+      attempt: 1,
+    });
+    expect(out).toContain('## Design spec');
+    expect(out).toContain('## Architecture design');
+    expect(out).toContain('MUST preserve those VERBATIM');
+  });
+
+  it('re-stamps prototype at expand-spec only for an idea with BOTH a bound design and a Design spec', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'expand-spec', name: 'Expand spec', agent: 'context' }),
+      workflowName: 'launch',
+      attempt: 1,
+    });
+    expect(out).toContain("component: 'prototype', state: 'complete'");
+    expect(out).toContain('approved_design');
+    expect(out).toContain('Do NOT stamp `prototype` on an idea missing either half');
+  });
+
+  it('gates the launch ideas-step prototype stamp on the idea carrying its own Design spec', () => {
+    // C9: the gate binds one whole-concept mockup to EVERY approved idea, but a
+    // ledger row is authoritative over derivation — so "complete" must mean "this
+    // idea's screens are designed", not "some mockup exists".
+    const out = composeStepPrompt({
+      step: step({ id: 'ideas', name: 'Ideas', agent: 'interview' }),
+      workflowName: 'launch',
+      attempt: 1,
+    });
+    expect(out).toContain('Never stamp `prototype` on an idea with no design-spec section of its own');
+    // The ideas step is also where the brief's one spec is divided among ideas,
+    // and where the de-placeholder rule reaches idea bodies.
+    expect(out).toContain("Split the brief's spec across the ideas");
+    expect(out).toContain("reachable from the app's entry point");
+    expect(out).toContain('never write that a control is a placeholder');
+  });
+
+  // ── item 10: design surfaces ────────────────────────────────────────────────
+
+  it('renders the design-surfaces block right after the project brief, and omits it when absent', () => {
+    const base = {
+      step: step({ id: 'implement', name: 'Implement', agent: 'implement' }),
+      workflowName: 'sprint',
+      attempt: 1,
+    };
+    const bare = composeStepPrompt(base);
+    expect(bare).not.toContain('# Design surfaces');
+
+    const withBrief = composeStepPrompt({
+      ...base,
+      projectBrief: 'BRIEF BODY',
+      designSurfaces: '# Design surfaces\n\nSURFACE BODY',
+    });
+    expect(withBrief).toContain('# Design surfaces');
+    expect(withBrief).toContain('SURFACE BODY');
+    expect(withBrief.indexOf('# Project brief')).toBeLessThan(withBrief.indexOf('# Design surfaces'));
+
+    // Whitespace-only is treated as absent — byte-identical to no value at all.
+    expect(composeStepPrompt({ ...base, designSurfaces: '   \n  ' })).toBe(bare);
+  });
+
+  // ── item 12a: the adversarial-review artifact ───────────────────────────────
+
+  it('tells adversarial-review to report an artifact and file NO findings', () => {
+    const out = composeStepPrompt({
+      step: step({
+        id: 'adversarial-review',
+        name: 'Adversarial review',
+        agent: 'adversarial-review',
+        outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
+      }),
+      workflowName: 'planner',
+      attempt: 1,
+    });
+    expect(out).toContain("atype: 'adversarial-review'");
+    expect(out).toContain('#### AR-n');
+    expect(out).toContain('## Blocking');
+    expect(out).toContain('## Findings');
+    // The gate decides what becomes a finding; filing here pre-empts it and
+    // parks the run behind items the next gate was about to triage.
+    expect(out).toContain('Do NOT call `cyboflow_report_finding` at this step');
+    expect(out).toContain('Do not renumber');
+  });
+
+  // ── item 12b: the gate-revision channel ─────────────────────────────────────
+
+  it('renders a gate revision with the human note and the review, distinct from the visual loopback', () => {
+    const base = {
+      step: step({ id: 'ui-prototype', name: 'UI prototype', agent: 'ui-prototype' }),
+      workflowName: 'launch',
+      attempt: 1,
+    };
+    const bare = composeStepPrompt(base);
+    expect(bare).not.toContain('Design gate: revision requested');
+
+    const revised = composeStepPrompt({
+      ...base,
+      gateRevision: {
+        gateStepId: 'approve-design',
+        note: 'the spend screen has no way back to Home',
+        reviewMarkdown: '## Blocking\n\n#### AR-1 — no back navigation',
+      },
+    });
+    expect(revised).toContain('## Design gate: revision requested');
+    expect(revised).toContain('`approve-design`');
+    expect(revised).toContain('> the spend screen has no way back to Home');
+    expect(revised).toContain('AR-1 — no back navigation');
+    expect(revised).toContain('which `AR-n` ids you resolved');
+    // The visual-verification loopback wording must NOT leak into a design revision.
+    expect(revised).not.toContain('Visual verification failed');
+
+    // A revision with no note leans on the review instead of quoting silence.
+    const noNote = composeStepPrompt({
+      ...base,
+      gateRevision: { gateStepId: 'approve-design', reviewMarkdown: '## Blocking\n\n#### AR-1 — x' },
+    });
+    expect(noNote).toContain('left no note beyond the decision');
+    expect(noNote).not.toContain('>  ');
+
+    // Neither a note nor a review: the prompt must not point at a review that is
+    // not there, and must still forbid re-emitting the same output.
+    const nothing = composeStepPrompt({ ...base, gateRevision: { gateStepId: 'approve-design' } });
+    expect(nothing).toContain('## Design gate: revision requested');
+    expect(nothing).toContain('no adversarial review to work from');
+    expect(nothing).not.toContain('the adversarial review below');
+  });
+
+  // ── item 13b: thoroughness budgets ──────────────────────────────────────────
+
+  it('renders only the running agent\'s thoroughness budget, and nothing without a level', () => {
+    const arch = (level?: 'prototype' | 'v1' | 'production'): string =>
+      composeStepPrompt({
+        step: step({ id: 'architecture', name: 'Architecture', agent: 'architecture' }),
+        workflowName: 'planner',
+        attempt: 1,
+        ...(level ? { solutionThoroughness: level } : {}),
+      });
+
+    expect(arch()).not.toContain('# Solution thoroughness');
+
+    const proto = arch('prototype');
+    expect(proto).toContain('# Solution thoroughness: prototype');
+    expect(proto).toContain('at most 40 lines');
+    expect(proto).toContain('OVERRIDES');
+    // Another agent's budget must not bleed into this prompt.
+    expect(proto).not.toContain('HAPPY-PATH acceptance criteria');
+
+    const prod = arch('production');
+    expect(prod).toContain('# Solution thoroughness: production');
+    expect(prod).toContain('failure modes');
+    expect(prod).not.toContain('at most 40 lines');
+
+    // An agent with no entry at this level gets the level, not a budget.
+    const epics = composeStepPrompt({
+      step: step({ id: 'epics', name: 'Epics', agent: 'epics' }),
+      workflowName: 'planner',
+      attempt: 1,
+      solutionThoroughness: 'prototype',
+    });
+    expect(epics).toContain('# Solution thoroughness: prototype');
+    expect(epics).not.toContain('OVERRIDES');
+  });
+  // -------------------------------------------------------------------------
+  // Planner / Ship component ledger (survey D P5 / P6 / P18) — the obligations
+  // that were prose-only for as long as ideaLedgerContract was launch-guarded.
+  // -------------------------------------------------------------------------
+
+  describe('planner / ship component ledger', () => {
+    for (const workflowName of ['planner', 'ship'] as const) {
+      it(`tells ${workflowName}'s context step to READ the ledger before planning`, () => {
+        const out = composeStepPrompt({
+          step: step({ id: 'context', name: 'Gather context', agent: 'context' }),
+          workflowName,
+          attempt: 1,
+        });
+        expect(out).toContain('## Component ledger');
+        expect(out).toContain('`cyboflow_get_task` on EVERY idea in scope');
+        // The three-way read is the part a step agent cannot infer.
+        expect(out).toContain('settled work. Do NOT redo it');
+        expect(out).toContain('needs RE-VERIFICATION, not a redo');
+        expect(out).toContain('genuinely not started');
+        expect(out).toContain('never silently un-skip it');
+      });
+
+      it(`stamps idea-spec at ${workflowName}'s expand-spec step, after the body write`, () => {
+        const out = composeStepPrompt({
+          step: step({ id: 'expand-spec', name: 'Complete idea spec', agent: 'context' }),
+          workflowName,
+          attempt: 1,
+        });
+        expect(out).toContain("component: 'idea-spec', state: 'complete'");
+        expect(out).toContain('never before the write');
+        expect(out).toContain("component: 'architecture', state: 'complete'");
+        expect(out).toContain("component: 'prototype', state: 'complete'");
+      });
+
+      it(`defers the epics stamp off ${workflowName}'s epics step`, () => {
+        const out = composeStepPrompt({
+          step: step({ id: 'epics', name: 'Create epics', agent: 'epics' }),
+          workflowName,
+          attempt: 1,
+        });
+        expect(out).toContain('Do NOT stamp the `epics` component here');
+      });
+
+      it(`closes the ledger out at ${workflowName}'s tasks step`, () => {
+        const out = composeStepPrompt({
+          step: step({ id: 'tasks', name: 'Fill out task details', agent: 'tasks' }),
+          workflowName,
+          attempt: 1,
+        });
+        expect(out).toContain("component: 'stories', state: 'complete'");
+        expect(out).toContain("component: 'epics', state: …");
+        // P18 — the closeout, not just the two stamps.
+        expect(out).toContain("ledger's CLOSEOUT");
+        expect(out).toContain('account for all five components');
+      });
+    }
+
+    it('keeps launch on its own heading and strings', () => {
+      const launch = composeStepPrompt({
+        step: step({ id: 'tasks', name: 'Fill out task details', agent: 'tasks' }),
+        workflowName: 'launch',
+        attempt: 1,
+      });
+      expect(launch).toContain('## Component ledger (launch)');
+      // Launch's tasks string is the pre-existing one — no closeout paragraph.
+      expect(launch).not.toContain("ledger's CLOSEOUT");
+      // And launch has no context-step ledger section at all.
+      const launchContext = composeStepPrompt({
+        step: step({ id: 'context', name: 'Gather context', agent: 'context' }),
+        workflowName: 'launch',
+        attempt: 1,
+      });
+      expect(launchContext).not.toContain('## Component ledger');
+    });
+
+    it('never renders the planner/ship heading on launch, nor launch’s on planner', () => {
+      const launch = composeStepPrompt({
+        step: step({ id: 'expand-spec', name: 'Expand', agent: 'context' }),
+        workflowName: 'launch',
+        attempt: 1,
+      });
+      // Launch's heading carries the "(launch)" qualifier; planner/ship's does not.
+      expect(launch).toContain('## Component ledger (launch)');
+      const planner = composeStepPrompt({
+        step: step({ id: 'expand-spec', name: 'Expand', agent: 'context' }),
+        workflowName: 'planner',
+        attempt: 1,
+      });
+      expect(planner).not.toContain('## Component ledger (launch)');
+      expect(planner).toContain('## Component ledger');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Planner idea-size guard (survey D P3)
+  // -------------------------------------------------------------------------
+
+  describe('idea-size guard', () => {
+    it('fires on a BATCHED planner context step', () => {
+      const out = composeStepPrompt({
+        step: step({ id: 'context', name: 'Gather context', agent: 'context' }),
+        workflowName: 'planner',
+        attempt: 1,
+        runOwnedIdeaIds: ['idea-1', 'idea-2', 'idea-3'],
+      });
+      expect(out).toContain('## Idea-size guard (batched run)');
+      expect(out).toContain('seeded with 3 ideas');
+      expect(out).toContain('`idea-size-guard: <the idea’s ref>`'.replace('’', "'"));
+      expect(out).toContain('"gate":"idea-size-guard"');
+      expect(out).toContain('DROP that idea from this run’s working set'.replace('’', "'"));
+    });
+
+    it('stays absent on a single-seed planner run (a dedicated run by construction)', () => {
+      const out = composeStepPrompt({
+        step: step({ id: 'context', name: 'Gather context', agent: 'context' }),
+        workflowName: 'planner',
+        attempt: 1,
+        runOwnedIdeaIds: ['idea-1'],
+      });
+      expect(out).not.toContain('Idea-size guard');
+    });
+
+    it('stays absent on other flows and other steps', () => {
+      const ship = composeStepPrompt({
+        step: step({ id: 'context', name: 'Gather context', agent: 'context' }),
+        workflowName: 'ship',
+        attempt: 1,
+        runOwnedIdeaIds: ['a', 'b'],
+      });
+      expect(ship).not.toContain('Idea-size guard');
+      const laterStep = composeStepPrompt({
+        step: step({ id: 'tasks', name: 'Tasks', agent: 'tasks' }),
+        workflowName: 'planner',
+        attempt: 1,
+        runOwnedIdeaIds: ['a', 'b'],
+      });
+      expect(laterStep).not.toContain('Idea-size guard');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Launch: decompose everything approved (survey D L15)
+  // -------------------------------------------------------------------------
+
+  describe('decompose everything approved', () => {
+    for (const id of ['ideas', 'expand-spec', 'tasks'] as const) {
+      it(`binds on launch's ${id} step`, () => {
+        const out = composeStepPrompt({
+          step: step({ id, name: id, agent: 'tasks' }),
+          workflowName: 'launch',
+          attempt: 1,
+        });
+        expect(out).toContain('## Decompose everything approved');
+        expect(out).toContain('Never narrow the set to save time');
+        expect(out).toContain('`BUILD_ORDER` as a cut line');
+        expect(out).toContain('DENIED at the approve-ideas gate');
+      });
+    }
+
+    it('stays absent on other launch steps and other flows', () => {
+      const epics = composeStepPrompt({
+        step: step({ id: 'epics', name: 'Epics', agent: 'epics' }),
+        workflowName: 'launch',
+        attempt: 1,
+      });
+      expect(epics).not.toContain('Decompose everything approved');
+      const planner = composeStepPrompt({
+        step: step({ id: 'tasks', name: 'Tasks', agent: 'tasks' }),
+        workflowName: 'planner',
+        attempt: 1,
+      });
+      expect(planner).not.toContain('Decompose everything approved');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Ship: no design fork (survey D H2)
+  // -------------------------------------------------------------------------
+
+  describe('ship has no design fork', () => {
+    it('suppresses DESIGN_MODE on ship context', () => {
+      const out = composeStepPrompt({
+        step: step({ id: 'context', name: 'Gather context', agent: 'context' }),
+        workflowName: 'ship',
+        attempt: 1,
+      });
+      expect(out).toContain('## No design fork on this flow');
+      expect(out).toContain('`DESIGN_MODE: yes`');
+      expect(out).toContain('IGNORE it');
+    });
+
+    it('leaves planner (which DOES fork) and later ship steps alone', () => {
+      const planner = composeStepPrompt({
+        step: step({ id: 'context', name: 'Gather context', agent: 'context' }),
+        workflowName: 'planner',
+        attempt: 1,
+      });
+      expect(planner).not.toContain('No design fork');
+      const later = composeStepPrompt({
+        step: step({ id: 'expand-spec', name: 'Expand', agent: 'context' }),
+        workflowName: 'ship',
+        attempt: 1,
+      });
+      expect(later).not.toContain('No design fork');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Shared build breaks (Tier 3 detector's input channel)
+  // -------------------------------------------------------------------------
+
+  describe('build-break contract', () => {
+    for (const workflowName of ['sprint', 'ship'] as const) {
+      for (const agent of ['implement', 'write-tests', 'task-verify'] as const) {
+        it(`binds on ${workflowName}'s ${agent} lane step`, () => {
+          const out = composeStepPrompt({
+            step: step({ id: agent, name: agent, agent }),
+            workflowName,
+            attempt: 1,
+          });
+          expect(out).toContain('## Build breaks outside your task');
+          expect(out).toContain("`category: 'build-break'`");
+          expect(out).toContain('Build break: <first error line verbatim>');
+          expect(out).toContain('The supervisor groups identical reports across lanes.');
+          // The subagent cannot file it — the step agent relays.
+          expect(out).toContain('`## Build break` section, YOU file it');
+        });
+      }
+    }
+
+    it('stays off non-lane steps and non-lane flows', () => {
+      const review = composeStepPrompt({
+        step: step({ id: 'sprint-review', name: 'Sprint review', agent: 'sprint-review' }),
+        workflowName: 'sprint',
+        attempt: 1,
+      });
+      expect(review).not.toContain('Build breaks outside your task');
+      const planner = composeStepPrompt({
+        step: step({ id: 'implement', name: 'Implement', agent: 'implement' }),
+        workflowName: 'planner',
+        attempt: 1,
+      });
+      expect(planner).not.toContain('Build breaks outside your task');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Compound seeded branch (survey D C1)
+  // -------------------------------------------------------------------------
+
+  describe('compound seeded branch', () => {
+    const seed = 'Act ONLY on these findings.\n\n## P0 A real bug\n\nTarget: quick';
+
+    it('renders the seed under the same heading the orchestrated plane prepends', () => {
+      const out = composeStepPrompt({
+        step: step({ id: 'load-sprint', name: 'Load merged work', agent: 'compound-load' }),
+        workflowName: 'compound',
+        attempt: 1,
+        selectedFindings: seed,
+      });
+      expect(out).toContain('# Selected findings');
+      expect(out).toContain('## P0 A real bug');
+    });
+
+    for (const id of ['load-sprint', 'extract'] as const) {
+      it(`tells ${id} the seed IS the input`, () => {
+        const out = composeStepPrompt({
+          step: step({ id, name: id, agent: 'compounder' }),
+          workflowName: 'compound',
+          attempt: 1,
+          selectedFindings: seed,
+        });
+        expect(out).toContain('## This run is SEEDED — the findings above are the input');
+        expect(out).toContain('Do NOT rediscover');
+        expect(out).toContain('do not mine the merge for additional learnings');
+      });
+    }
+
+    it('self-skips approve-learnings on a seeded run', () => {
+      const out = composeStepPrompt({
+        step: step({ id: 'approve-learnings', name: 'Approve learnings', agent: 'compounder' }),
+        workflowName: 'compound',
+        attempt: 1,
+        selectedFindings: seed,
+      });
+      expect(out).toContain('## This run is SEEDED — this gate does not apply');
+      expect(out).toContain('SKIPPED: seeded');
+    });
+
+    it('is byte-identical to the unseeded prompt when no seed is threaded', () => {
+      const args = {
+        step: step({ id: 'extract', name: 'Extract learnings', agent: 'compounder' }),
+        workflowName: 'compound',
+        attempt: 1,
+      } as const;
+      const bare = composeStepPrompt(args);
+      expect(composeStepPrompt({ ...args, selectedFindings: '' })).toBe(bare);
+      expect(composeStepPrompt({ ...args, selectedFindings: '   \n ' })).toBe(bare);
+      expect(bare).not.toContain('# Selected findings');
+      expect(bare).not.toContain('This run is SEEDED');
+    });
+
+    it('never branches a non-compound flow that somehow carries a seed', () => {
+      const out = composeStepPrompt({
+        step: step({ id: 'implement', name: 'Implement', agent: 'implement' }),
+        workflowName: 'sprint',
+        attempt: 1,
+        selectedFindings: seed,
+      });
+      // The block still renders (it is grounding), but no seeded branch fires.
+      expect(out).toContain('# Selected findings');
+      expect(out).not.toContain('This run is SEEDED');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // address-review: the tree must not reach the gate red (survey D S15)
+  // -------------------------------------------------------------------------
+
+  it('pins the address-review regression finding to one recognizable title', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'address-review', name: 'Address review', agent: 'address-review' }),
+      workflowName: 'sprint',
+      attempt: 1,
+    });
+    expect(out).toContain('`address-review left the tree red`');
+    expect(out).toContain('NAMING the failing spec');
+    expect(out).toContain('`blocking: true`');
+    // The pre-existing resolve-last rule survives.
+    expect(out).toContain('Never resolve a finding before its fix is verified and committed');
   });
 });

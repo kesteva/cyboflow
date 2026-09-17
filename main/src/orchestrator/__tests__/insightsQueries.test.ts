@@ -490,13 +490,30 @@ function subagentUsagePayload(
   };
 }
 
-/** Construct a result payload with cost/turns (and a usage block to prove it's ignored). */
-function resultPayload(cost: number | null, turns: number | null): Record<string, unknown> {
+/**
+ * Construct a result payload with cost/turns (and a usage block to prove it's
+ * ignored by the TOKEN sums). `opts.sessionId` opts the payload into the cost
+ * LADDER (see insightsQueries.ts); `opts.outputTokens` overrides the default
+ * `usage.output_tokens` (used by the ladder's token-increment invariant when
+ * `sessionId` is set); `opts.modelUsage` seeds the cumulative
+ * `modelUsage[*].outputTokens` the same invariant reads.
+ */
+function resultPayload(
+  cost: number | null,
+  turns: number | null,
+  opts: {
+    sessionId?: string;
+    outputTokens?: number;
+    modelUsage?: Record<string, { outputTokens?: number }>;
+  } = {},
+): Record<string, unknown> {
   const payload: Record<string, unknown> = { type: 'result', subtype: 'success', is_error: false };
   if (cost !== null) payload.total_cost_usd = cost;
   if (turns !== null) payload.num_turns = turns;
   // A usage block on the result MUST be ignored by the token sums.
-  payload.usage = { input_tokens: 99999, output_tokens: 88888 };
+  payload.usage = { input_tokens: 99999, output_tokens: opts.outputTokens ?? 88888 };
+  if (opts.sessionId !== undefined) payload.session_id = opts.sessionId;
+  if (opts.modelUsage !== undefined) payload.modelUsage = opts.modelUsage;
   return payload;
 }
 
@@ -983,6 +1000,158 @@ describe('selectRunUsageRollups', () => {
     const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
     expect(rollup.costUsd).toBeCloseTo(0.05, 5);
     expect(rollup.numTurns).toBe(5);
+  });
+
+  describe('cost ladder — result payloads carrying a string session_id', () => {
+    it('takes the MAX cost within one continuing session instead of summing', () => {
+      seedWorkflow(db, { id: 'wf-1' });
+      seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+      // Same process, growing cumulative cost — the ladder keeps only the max.
+      seedEvent(db, 'r1', 'result', resultPayload(0.5, 1, { sessionId: 's1' }));
+      seedEvent(db, 'r1', 'result', resultPayload(1.5, 2, { sessionId: 's1' }));
+      seedEvent(db, 'r1', 'result', resultPayload(2.0, 3, { sessionId: 's1' }));
+
+      const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+      expect(rollup.costUsd).toBeCloseTo(2.0, 5);
+      // num_turns stays a plain SUM regardless of the cost ladder.
+      expect(rollup.numTurns).toBe(6);
+    });
+
+    it('a cost decrease within the same session_id starts a new segment — sums segment maxima', () => {
+      seedWorkflow(db, { id: 'wf-1' });
+      seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+      // First process: 5.00 -> 18.88, resumed process restarts the counter at 3.69.
+      seedEvent(db, 'r1', 'result', resultPayload(5.0, 1, { sessionId: 's1' }));
+      seedEvent(db, 'r1', 'result', resultPayload(18.88, 2, { sessionId: 's1' }));
+      seedEvent(db, 'r1', 'result', resultPayload(3.69, 3, { sessionId: 's1' }));
+
+      const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+      expect(rollup.costUsd).toBeCloseTo(18.88 + 3.69, 5);
+    });
+
+    it('an EQUAL consecutive cost stays in the same segment — never double counted', () => {
+      seedWorkflow(db, { id: 'wf-1' });
+      seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+      seedEvent(db, 'r1', 'result', resultPayload(1.0, 1, { sessionId: 's1' }));
+      seedEvent(db, 'r1', 'result', resultPayload(1.0, 2, { sessionId: 's1' }));
+
+      const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+      expect(rollup.costUsd).toBeCloseTo(1.0, 5);
+    });
+
+    it('a resumed process whose cost does not drop is still caught by the token-increment invariant', () => {
+      seedWorkflow(db, { id: 'wf-1' });
+      seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+      // Old segment ends at 1.00 with a cumulative modelUsage output total of 1000.
+      seedEvent(
+        db,
+        'r1',
+        'result',
+        resultPayload(1.0, 1, { sessionId: 's1', modelUsage: { 'claude-x': { outputTokens: 1000 } } }),
+      );
+      // Resumed process's FIRST result: cost went UP to 2.00 (cost-decrease test
+      // would miss this), but its cumulative modelUsage total (200) is lower than
+      // the old segment's total (1000) plus this query's own output tokens (50) —
+      // a continuing process could never regress like that, so this is caught as
+      // a new segment. 1.00 (old max) + 2.00 (new segment) = 3.00.
+      seedEvent(
+        db,
+        'r1',
+        'result',
+        resultPayload(2.0, 2, {
+          sessionId: 's1',
+          outputTokens: 50,
+          modelUsage: { 'claude-x': { outputTokens: 200 } },
+        }),
+      );
+
+      const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+      expect(rollup.costUsd).toBeCloseTo(3.0, 5);
+    });
+
+    it('an EMPTY modelUsage never trips the token-increment test (unavailable ≠ zero)', () => {
+      // Regression (Codex F2): `{}` summed to 0, and 0 < 0 + output_tokens held on
+      // every result — re-opening a segment per result and restoring the
+      // per-result overcount. Same process, cost 1.00 → 2.00: ladder max is 2.00.
+      seedWorkflow(db, { id: 'wf-1' });
+      seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+      seedEvent(db, 'r1', 'result', resultPayload(1.0, 1, { sessionId: 's1', outputTokens: 10, modelUsage: {} }));
+      seedEvent(db, 'r1', 'result', resultPayload(2.0, 1, { sessionId: 's1', outputTokens: 10, modelUsage: {} }));
+
+      const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+      expect(rollup.costUsd).toBeCloseTo(2.0, 5);
+    });
+
+    it('a modelUsage entry WITHOUT a finite outputTokens is treated as not comparable', () => {
+      // A partial counter set is not a cumulative total. Only the cost-decrease
+      // test applies to such a result — and 1.00 → 2.00 is not a decrease.
+      seedWorkflow(db, { id: 'wf-1' });
+      seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+      seedEvent(
+        db,
+        'r1',
+        'result',
+        resultPayload(1.0, 1, { sessionId: 's1', outputTokens: 10, modelUsage: { 'claude-x': { outputTokens: 500 } } }),
+      );
+      seedEvent(
+        db,
+        'r1',
+        'result',
+        resultPayload(2.0, 1, { sessionId: 's1', outputTokens: 10, modelUsage: { 'claude-x': {} } }),
+      );
+      // A later COMPLETE counter is compared against the last complete one
+      // (500): 600 ≥ 500 + 10 ⇒ still the same process.
+      seedEvent(
+        db,
+        'r1',
+        'result',
+        resultPayload(2.5, 1, { sessionId: 's1', outputTokens: 10, modelUsage: { 'claude-x': { outputTokens: 600 } } }),
+      );
+
+      const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+      expect(rollup.costUsd).toBeCloseTo(2.5, 5);
+    });
+
+    it('two interleaved session_ids ladder independently within the same run', () => {
+      seedWorkflow(db, { id: 'wf-1' });
+      seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+      seedEvent(db, 'r1', 'result', resultPayload(1.0, 1, { sessionId: 's1' }));
+      seedEvent(db, 'r1', 'result', resultPayload(0.5, 1, { sessionId: 's2' }));
+      seedEvent(db, 'r1', 'result', resultPayload(2.0, 1, { sessionId: 's1' }));
+      seedEvent(db, 'r1', 'result', resultPayload(0.8, 1, { sessionId: 's2' }));
+
+      const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+      // s1 ladders to 2.0, s2 ladders to 0.8 — 2.8 total, not the 4.3 plain sum.
+      expect(rollup.costUsd).toBeCloseTo(2.8, 5);
+    });
+
+    it('an agent_result beside a laddered result keeps summing (agent_result is never laddered)', () => {
+      seedWorkflow(db, { id: 'wf-1' });
+      seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+      seedEvent(db, 'r1', 'result', resultPayload(1.0, 1, { sessionId: 's1' }));
+      seedEvent(db, 'r1', 'result', resultPayload(2.0, 2, { sessionId: 's1' }));
+      seedEvent(db, 'r1', 'agent_result', {
+        type: 'agent_result',
+        provider: 'codex',
+        total_cost_usd: 0.3,
+        num_turns: 1,
+        usage: { input_tokens: 10, output_tokens: 5 },
+      });
+
+      const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+      // Ladder max (2.0) + agent_result's own SUMmed cost (0.3).
+      expect(rollup.costUsd).toBeCloseTo(2.3, 5);
+    });
+
+    it('a result WITHOUT a string session_id is unaffected by the ladder and keeps SUMming', () => {
+      seedWorkflow(db, { id: 'wf-1' });
+      seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+      seedEvent(db, 'r1', 'result', resultPayload(1.0, 1)); // no sessionId
+      seedEvent(db, 'r1', 'result', resultPayload(0.5, 1)); // no sessionId — a "decrease" that must still SUM
+
+      const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+      expect(rollup.costUsd).toBeCloseTo(1.5, 5);
+    });
   });
 
   it('keeps costUsd/numTurns null when no result ever carried them', () => {

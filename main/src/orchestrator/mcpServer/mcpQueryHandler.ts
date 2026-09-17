@@ -74,43 +74,21 @@
  */
 import * as net from 'net';
 import * as path from 'path';
-import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, realpathSync, statSync, lstatSync, openSync, readSync, closeSync } from 'fs';
-import type { Dirent, Stats } from 'fs';
-import {
-  isPathWithinRoots,
-  isSecretPath,
-  bufferLooksBinary,
-  compileBasenameGlob,
-  matchesBasenameGlob,
-  FS_READ_MAX_BYTES,
-  FS_LIST_MAX_ENTRIES,
-  FS_GREP_MAX_RESULTS,
-  FS_GREP_MAX_FILES,
-  FS_GREP_MAX_LINE_LEN,
-  FS_GREP_MAX_FILE_BYTES,
-  BINARY_SNIFF_BYTES,
-  GREP_SKIP_DIRS,
-} from './fsAccessGuard';
-// Only cyboflow_db_query's readonly sibling connection needs a real
-// better-sqlite3 handle — every other query in this file goes through the
-// injected DatabaseLike `this.db`. This file carries no standalone-typecheck
-// invariant (unlike orchSocketServer.ts, which must stay import-clean of
-// 'better-sqlite3'/'electron' so runLauncher.ts's structural boundary holds).
-import BetterSqlite3Database from 'better-sqlite3';
+import { randomUUID, createHash, randomBytes } from 'node:crypto';
+import { existsSync, readFileSync, realpathSync, statSync, lstatSync } from 'fs';
+import { z } from 'zod';
+import { scalarSchema, widgetSpecSchema } from '../../../../shared/customViews/validate';
+import { WIDGET_LIMITS, type Scalar } from '../../../../shared/types/customViews';
+import { CustomViewsStoreError } from '../customViews/types';
 import type { DatabaseLike, LoggerLike } from '../types';
 import { getCyboflowSubdirectory } from '../../utils/cyboflowDirectory';
 import {
-  hasCustomSpecSlot,
   resolveWorkflowDefinition,
   isPermissionMode,
-  isCyboflowWorkflowName,
   VERIFY_SETUP_WORKFLOW_NAME,
 } from '../../../../shared/types/workflows';
-import { resolveEffectiveDefinition, type TuningLevel } from '../../../../shared/tuning/workflowTuning';
 import { resolveRunFrozenSpec } from '../runFrozenSpec';
-import type { PermissionMode, WorkflowDefinition, WorkflowRow } from '../../../../shared/types/workflows';
-import { workflowDefinitionSchema } from '../workflowDefinitionSchema';
+import type { PermissionMode } from '../../../../shared/types/workflows';
 import { buildStepTransitionEvent } from '../stepTransitionBridge';
 import { handleEntityWrite } from '../autoMintArtifacts';
 import { listRunDecomposedIdeaIds, listRunCreatedTaskIds } from '../runEntityOwnership';
@@ -119,7 +97,7 @@ import type { ApprovalDecision } from '../../../../shared/types/approval';
 import { isToolAllowed, loadMergedPermissionRules } from '../permissionRules';
 import { isAcceptEditsAutoApprovable } from '../permissionModeMapper';
 import { TaskChangeRouter, TaskChangeError } from '../taskChangeRouter';
-import type { TaskChange, TaskActor, TaskDependencyKind } from '../taskChangeRouter';
+import type { TaskChange, TaskActor } from '../taskChangeRouter';
 import { ReviewItemRouter, ReviewItemError } from '../reviewItemRouter';
 import type { ReviewItemCreate, ReviewItemTriage, ReviewItemDbRow } from '../reviewItemRouter';
 import { selectFindingForSeed, selectRunFindingsForRuns } from '../reviewItemListing';
@@ -129,37 +107,12 @@ import { selectProjectBacklog, selectTaskById, resolveBacklogRef, selectIdeaAtta
 import { getCurrentApprovedDesign } from '../design/approvedDesigns';
 import { resolveIdeaComponents } from '../ideaComponents/resolveIdeaComponents';
 import { IdeaComponentRouter, IdeaComponentError } from '../ideaComponents/ideaComponentRouter';
-import type { IdeaComponentKey, IdeaComponentStateValue } from '../../../../shared/types/ideaComponents';
 import { ArtifactRouter, ArtifactError } from '../artifactRouter';
 import { FeedbackRouter, FeedbackError } from '../feedbackRouter';
 import type { ArtifactActor } from '../artifactRouter';
 import type { ArtifactType } from '../../../../shared/types/artifacts';
 import { PROTOTYPE_HTML_RELPATH, MAX_PROTOTYPE_HTML_BYTES, ARTIFACT_POLICIES } from '../../../../shared/types/artifacts';
-import { QUICK_WORKFLOW_NAME, LEGACY_DROPPED_WORKFLOW_NAMES } from '../workflowRegistry';
-import { AgentThreadDbStore } from '../agentThread/agentThreadDbStore';
-import { computeSpecHash } from '../agentThread/specHash';
-import {
-  extractTurnText,
-  excerptAround,
-  truncateHead,
-  TURN_TEXT_MAX_CHARS,
-} from '../agentThread/transcriptSearch';
-import {
-  AGENT_PROPOSAL_KINDS,
-  AGENT_THREAD_SPAWN_PREFIX,
-  isAgentThreadSpawnId,
-  type AgentNavigationTarget,
-  type AgentProposalKind,
-  type AgentProposalPayload,
-  type AgentProposalPreconditions,
-  type CreateBacklogItem,
-  type CreateBacklogItemsProposalPayload,
-  type EditWorkflowProposalPayload,
-  type LaunchRunProposalPayload,
-  type OpenSessionProposalPayload,
-  type ReprioritizeBacklogItem,
-  type ReprioritizeBacklogProposalPayload,
-} from '../../../../shared/types/agentThread';
+import { QUICK_WORKFLOW_NAME } from '../workflowRegistry';
 import {
   AGENT_REQUEST_TIMEOUT_CEILING_MS,
   VerificationScheduler,
@@ -168,7 +121,6 @@ import { resolveVisualVerification, SHIPPED_VERIFY_BACKENDS } from '../visualVer
 import { loadVerifyConfig } from '../verifyConfigLoader';
 import { laneEnqueueKeyFor, prepareVerificationEnqueue } from '../verify/enqueueFromTask';
 import { captureSnapshotSha, isRunbookCommittedAtHead, isWorktreeDirty } from '../verify/snapshotProvisioner';
-import type { VerifyRunbookStore } from '../verify/runbookStore';
 import { isVerifyRunbookModality, VERIFY_RUNBOOK_RELATIVE_PATH } from '../../../../shared/types/verifyRunbook';
 import {
   FALLBACK_CHAINS,
@@ -183,39 +135,51 @@ import type {
   VerificationTaskV1,
   VisualBackendId,
   VerifyChainEntry,
-  ResolvedVisualVerifyConfig,
 } from '../../../../shared/types/visualVerification';
 import type { AdHocSnapshotResult } from '../eval/snapshotRunForEval';
 import { SprintLaneStore, SprintLaneError } from '../sprintLaneStore';
+import { toCompactTask, toFullTask } from './backlogProjection';
 import type { SprintLaneRow } from '../../../../shared/types/sprintBatch';
-import {
-  resolveSprintMaxTasks,
-  AWAITING_VERIFY_STEP,
-  type SprintMaxTasksOverrides,
-} from '../../../../shared/types/sprintBatch';
-import type { SprintBatchTaskStatus } from '../../../../shared/types/sprintBatch';
+import { resolveSprintMaxTasks, AWAITING_VERIFY_STEP } from '../../../../shared/types/sprintBatch';
 import { resolveRunFanOutInner, runHasControllerVisualVerify } from '../laneChainResolution';
-import { isCliSubstrate, type CliSubstrate } from '../../../../shared/types/substrate';
+import type { CliSubstrate } from '../../../../shared/types/substrate';
 import { runStatusEvents } from '../trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../../../shared/types/cyboflow';
-import type { BacklogTaskItem, EntityCategory, IdeaAttachment, IdeaScope, Priority, TaskType } from '../../../../shared/types/tasks';
-import type { ExperimentArm, WorkflowVariantRow, WorkflowVariantStatus } from '../../../../shared/types/experiments';
-import type { QuestionPayload } from '../../../../shared/types/questions';
+import type { BacklogTaskItem, IdeaAttachment, TaskType } from '../../../../shared/types/tasks';
+import type { ExperimentArm } from '../../../../shared/types/experiments';
 import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import { QuestionRouter } from '../questionRouter';
 import type {
   FindingPayload,
   FindingProposedTarget,
-  ReviewItemEntityType,
   ReviewItemKind,
   ReviewItemPayload,
-  ReviewItemSeverity,
 } from '../../../../shared/types/reviews';
 import {
   RESOLUTION_PREFIX_FIXED,
   RESOLUTION_PREFIX_TRIAGED,
   RESOLUTION_PREFIX_PROMOTED,
 } from '../../../../shared/types/reviews';
+import type { McpQueryMessage, McpQueryResponse, McpQueryHandlerDeps } from './mcpQueryMessages';
+import { resolveGlobalAgentContext } from './globalAgentContext';
+import type { WorkflowConfigHandlerContext } from './handlers/workflowConfigHandlers';
+import {
+  handleListWorkflows,
+  handleGetWorkflow,
+  handleUpdateWorkflow,
+  handleResetWorkflow,
+  handleCreateWorkflow,
+  handleDeleteWorkflow,
+  handleListVariants,
+  handleCreateVariant,
+  handleUpdateVariant,
+  handleSetVariantStatus,
+  handleDeleteVariant,
+  handleSetBaselineRotation,
+} from './handlers/workflowConfigHandlers';
+import { GlobalAgentToolHandlers } from './handlers/globalAgentToolHandlers';
+export type { McpQueryMessage, McpQueryResponse, McpQueryHandlerDeps, WorkflowConfigLike } from './mcpQueryMessages';
+export { resolveGlobalAgentContext } from './globalAgentContext';
 
 /**
  * The workflow step id whose Approve answer flips a plan-gated run's drafted
@@ -274,1177 +238,16 @@ const AD_HOC_EVAL_REJECTION_ERRORS: Record<
 const AWAIT_VERIFICATION_DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
-// Public types
+// cyboflow_db_query statement-shape validation + execution (S0.4 global-agent).
+//
+// The pure pieces now live in `../readOnlyQuery` so the custom-views widget
+// engine (docs/proposals/CUSTOM-VIEWS.md §4.1) executes user SQL through
+// exactly the same validator, readonly sibling connection and iterate loop
+// rather than a second implementation. This handler keeps the observable
+// contract: scope check, the unavailable-database path, sanitization, the
+// non-reader empty response and the WARN logging.
 // ---------------------------------------------------------------------------
 
-export type McpQueryMessage =
-  | { type: 'mcp-list-pending-approvals'; requestId: string; runId: string }
-  | { type: 'mcp-get-run'; requestId: string; runId: string; targetRunId: string }
-  | { type: 'mcp-submit-checkpoint'; requestId: string; runId: string; label: string; note?: string }
-  | { type: 'mcp-report-step'; requestId: string; runId: string; stepId: string; status?: 'running' | 'done' }
-  | {
-      type: 'mcp-request-user-input';
-      requestId: string;
-      runId: string;
-      questions: QuestionPayload[];
-    }
-  | {
-      type: 'mcp-create-task';
-      requestId: string;
-      runId: string;
-      title: string;
-      taskType?: TaskType;
-      summary?: string;
-      /** Full markdown body — the canonical rich detail (idea spec / task description + ACs). */
-      body?: string;
-      priority?: Priority;
-      /**
-       * Entity CLASSIFICATION — feature/bug/chore (migration 059). Distinct from
-       * the free-text finding-grouping `category` on 'mcp-report-finding'.
-       */
-      category?: EntityCategory;
-      repo?: string;
-      parentEpicId?: string;
-      boardId?: string;
-      initialStageId?: string;
-      /** Idea size hint — only meaningful for taskType='idea' (ignored on epic/task entities). */
-      scope?: IdeaScope;
-      /**
-       * Project-scoped idea ref-or-id this epic/task originates from — only
-       * meaningful for taskType='epic'|'task' (ignored on idea creates, mirroring
-       * how scope is dropped on epic/task creates rather than rejected).
-       */
-      originatingIdeaId?: string;
-    }
-  | {
-      type: 'mcp-update-task';
-      requestId: string;
-      runId: string;
-      taskId: string;
-      /** Entity-table discriminator (idea|epic|task). Optional — falls back to a 3-table id lookup. */
-      entityType?: TaskType;
-      title?: string;
-      summary?: string;
-      /** Full markdown body — the canonical rich detail (idea spec / task description + ACs). */
-      body?: string;
-      priority?: Priority;
-      /**
-       * Entity CLASSIFICATION — feature/bug/chore (migration 059). Distinct from
-       * the free-text finding-grouping `category` on 'mcp-report-finding'.
-       */
-      category?: EntityCategory;
-      repo?: string;
-      parentEpicId?: string;
-      expectedVersion?: number;
-      /** Idea size hint — only meaningful for idea entities (ignored on epic/task entities). */
-      scope?: IdeaScope;
-    }
-  | {
-      type: 'mcp-set-task-stage';
-      requestId: string;
-      runId: string;
-      taskId: string;
-      /** Entity-table discriminator (idea|epic|task). Optional — falls back to a 3-table id lookup. */
-      entityType?: TaskType;
-      stageId: string;
-      expectedVersion?: number;
-    }
-  | {
-      type: 'mcp-add-task-dependency';
-      requestId: string;
-      runId: string;
-      /** The BLOCKED task id. */
-      taskId: string;
-      /** The PREREQUISITE task id that must finish first. */
-      dependsOnTaskId: string;
-      /** Edge kind; defaults to 'blocking' at the chokepoint. */
-      dependencyKind?: TaskDependencyKind;
-    }
-  | {
-      /**
-       * WRITE: set one idea component's ledger state via
-       * IdeaComponentRouter.applyChange's 'set-component-state' op
-       * (source:'flow'). `ideaId` is an opaque idea id OR its display ref
-       * (e.g. 'IDEA-009') — resolved the same way as mcp-get-task
-       * (selectTaskById-by-id first, then resolveBacklogRef-by-ref), scoped to
-       * THIS run's project. `sourceRunId` (this run's id) and
-       * `builtAgainstVersion` (the idea's CURRENT `version` at call time) are
-       * resolved by handleSetIdeaComponent itself — the calling agent never
-       * supplies either.
-       */
-      type: 'mcp-set-idea-component';
-      requestId: string;
-      runId: string;
-      /** Opaque idea id OR display ref (e.g. 'IDEA-009'). */
-      ideaId: string;
-      component: IdeaComponentKey;
-      state: IdeaComponentStateValue;
-    }
-  | {
-      /**
-       * READ-ONLY: list the backlog (ideas/epics/tasks) for THIS run's project.
-       * Run-bound (no project argument — derived from CYBOFLOW_RUN_ID). Filters
-       * apply after flattening selectProjectBacklog's tree (see handleListTasks).
-       */
-      type: 'mcp-list-tasks';
-      requestId: string;
-      runId: string;
-      /** Optional filter to one entity type; omitted = all three. */
-      taskType?: TaskType;
-      /** Include archived items (archived_at set). Defaults to false. */
-      includeArchived?: boolean;
-      /** Include done/retired items (isDone or decomposed_at set). Defaults to false. */
-      includeDone?: boolean;
-    }
-  | {
-      /**
-       * READ-ONLY: fetch ONE backlog entity (with its full body) by opaque id OR
-       * display ref (e.g. 'TASK-014'). Run-bound project-scoped — see
-       * handleGetTask for the id/ref resolution order and the cross-project guard.
-       */
-      type: 'mcp-get-task';
-      requestId: string;
-      runId: string;
-      /** Opaque backlog id OR display ref (e.g. 'TASK-014', 'IDEA-009'). */
-      taskId: string;
-    }
-  | {
-      type: 'mcp-update-sprint-task';
-      requestId: string;
-      runId: string;
-      /** The lane's task id (sprint_batch_tasks.task_id). */
-      taskId: string;
-      /** New lane status; at least one of status/currentStepId must be set. */
-      status?: SprintBatchTaskStatus;
-      /**
-       * New lane step id; at least one of status/currentStepId must be set.
-       * NOT narrowed to SprintLaneStepId — the MCP tool now accepts any non-empty
-       * string (cyboflowMcpServer.ts's CallTool check) and this handler validates
-       * it against the CALLING RUN's resolved chain-derived vocabulary
-       * (resolveRunFanOutInner), falling back to SPRINT_LANE_STEP_IDS. A narrower
-       * type here would misrepresent the wire contract this handler enforces.
-       */
-      currentStepId?: string;
-      /** 1-based attempt counter (integer >= 1) — reported when implement is re-delegated after a verify failure. */
-      attempt?: number;
-    }
-  | {
-      type: 'mcp-create-sprint-batch';
-      requestId: string;
-      runId: string;
-      /**
-       * OPTIONAL human-approved task subset to materialize into the batch (the
-       * approve-plan selection). Each id is intersected with the run's
-       * created-task projection; ids the run did not create are dropped. When
-       * omitted, ALL run-created tasks are materialized.
-       */
-      taskIds?: string[];
-    }
-  | {
-      type: 'mcp-report-finding';
-      requestId: string;
-      runId: string;
-      title: string;
-      body: string;
-      /** Only meaningful for findings; stored on the row as given. */
-      severity?: ReviewItemSeverity;
-      /**
-       * Item kind; the MCP tool excludes 'permission' (folded via the approval
-       * path) AND 'notification' (orchestrator-minted only — agents cannot file
-       * a notification). Defaults to 'finding'.
-       */
-      kind?: Exclude<ReviewItemKind, 'permission' | 'notification'>;
-      /** Whether this item gates run resume; defaults to false (findings are non-blocking). */
-      blocking?: boolean;
-      /** Soft polymorphic entity link — both must be set together or both omitted. */
-      entityType?: ReviewItemEntityType;
-      entityId?: string;
-      /**
-       * Structured finding extras (camelCase wire). Each is `unknown` because the
-       * MCP tool passes them through unvalidated; handleReportFinding unknown-guards
-       * the shape and DROPS any malformed member rather than failing the write.
-       *
-       * NOTE: `category` here is the FREE-TEXT review-queue grouping tag (e.g.
-       * 'security'/'perf') — NOT the typed EntityCategory classification enum
-       * (feature|bug|chore) on the create/update-task messages above.
-       */
-      category?: unknown;
-      locations?: unknown;
-      suggestedFix?: unknown;
-      proposedTarget?: unknown;
-      impact?: unknown;
-      /** Per-kind payload JSON; its discriminant must equal `kind`. */
-      payloadJson?: string;
-    }
-  | {
-      type: 'mcp-get-selected-findings';
-      requestId: string;
-      runId: string;
-    }
-  | {
-      /** Read the code-review eval's full verdict + jury reasoning for a run. */
-      type: 'mcp-get-eval';
-      requestId: string;
-      runId: string;
-      /**
-       * Which run to read. Optional: absent means "this session's runs", which
-       * is what a chat turn wants, since its own runId is a `__quick__`
-       * sentinel that was never graded.
-       */
-      targetRunId?: string;
-    }
-  | {
-      /** Read THIS session's still-open findings, with their resolve handles. */
-      type: 'mcp-list-run-findings';
-      requestId: string;
-      runId: string;
-    }
-  | {
-      type: 'mcp-resolve-finding';
-      requestId: string;
-      runId: string;
-      /** The review_items.id of the finding the run consumed. */
-      reviewItemId: string;
-      /** How the finding was resolved — maps to the matching resolution prefix. */
-      resolutionKind: 'fixed' | 'triaged' | 'promoted';
-      /** Optional free-text note appended to the resolution (e.g. 'compound'). */
-      note?: string;
-      /** Optional minted task id; recorded when resolutionKind='promoted'. */
-      taskId?: string;
-    }
-  | {
-      /** Create (or idempotently re-derive) a run artifact via the ArtifactRouter
-       *  chokepoint. UPSERTS by (run, atype); replies with the artifact id. */
-      type: 'mcp-report-artifact';
-      requestId: string;
-      runId: string;
-      atype: ArtifactType;
-      label: string;
-      payloadJson?: string;
-    }
-  | {
-      /** Commit a run artifact (flip committed). Replies with the artifact id. */
-      type: 'mcp-commit-artifact';
-      requestId: string;
-      runId: string;
-      artifactId: string;
-      payloadJson?: string;
-    }
-  | {
-      /**
-       * Design Mode v0 (design-mode.md) — return the design session's linked
-       * idea (ref/title/body/version). No args beyond the run; the idea is
-       * resolved from the session's design_idea_id and re-validated every call.
-       */
-      type: 'mcp-design-get-idea';
-      requestId: string;
-      runId: string;
-    }
-  | {
-      /**
-       * Design Mode v0 — persist the current design-spec draft for the session
-       * with a monotonic draft_revision bound to the CURRENT ui-prototype
-       * artifact revision. Replies { draftRevision, boundArtifactRevision }.
-       */
-      type: 'mcp-design-update-draft';
-      requestId: string;
-      runId: string;
-      specMarkdown: string;
-    }
-  | {
-      /**
-       * Design Mode v1 (design-mode.md "Design feedback v1 — acknowledged
-       * durable outbox") — the agent's acknowledgement of a delivered feedback
-       * batch, echoing the batch + attempt ids the revision turn carried plus the
-       * prototype revision that addressed it. Routed through FeedbackRouter's
-       * one-result CAS: replies { applied: true } for the winner and
-       * { applied: false, note } for a duplicate/late ack (never an error).
-       */
-      type: 'mcp-design-ack-feedback';
-      requestId: string;
-      runId: string;
-      batchId: string;
-      attemptId: string;
-      prototypeRevision: number;
-    }
-  | {
-      /**
-       * FIRE-AND-CONTINUE visual-verification request. Resolves the run's stamped
-       * verify posture (migration 055), enqueues a verification_requests row, and
-       * replies { requestId } synchronously — the lane NEVER blocks on the verdict.
-       * A disabled run replies { skipped:true } (never an error). typeOverride only
-       * NARROWS within the run's resolved chain; it cannot enable a disabled run.
-       */
-      type: 'mcp-request-verification';
-      requestId: string;
-      runId: string;
-      /** Natural-language acceptance the VlmJudge checks (required). */
-      intent: string;
-      /**
-       * PREFERRED dual-format form (redesign §5.2): the composed VerificationTaskV1
-       * fence object, UNVALIDATED at the wire (loose — strict validation happens
-       * here via parseVerificationTaskV1). When present it is authoritative for the
-       * deliverable — the handler derives the legacy `input` FROM the task
-       * (deriveLegacyInputFromTask) rather than from `intent`/`url`/`htmlPath`, and
-       * both `deliverable_json` AND `task_json` are persisted (dual-write). Absent
-       * ⇒ behavior is byte-identical to the pre-redesign legacy path.
-       */
-      task?: unknown;
-      /** Agent-declared verification type. Narrows only — invalid/out-of-chain is dropped. */
-      typeOverride?: VerificationType;
-      url?: string;
-      htmlPath?: string;
-      /** Responsive viewport list (camelCase wire); passed through UNVALIDATED — narrowed by the handler. */
-      viewports?: unknown;
-      baselineKey?: string;
-      /**
-       * The lane's display ref (e.g. "TASK-008") or opaque task id — verdict→lane
-       * attribution for the visual merge-gate (locked decision #2). Carried into
-       * deliverable_json so the async verdict can be driven onto the right lane in a
-       * multi-lane sprint batch. Optional (single-lane batches attribute by being
-       * the only lane; non-sprint runs have no gate).
-       */
-      taskRef?: string;
-      /**
-       * §3.6 (docs/proposals/verification-setup-flow.md) — this request is the
-       * phase-2 setup flow's PROOF run, not ordinary lane traffic: exempt from the
-       * project's lifetime judge budget, drained at lower priority, allowed to
-       * execute an UNPROVEN draft (proving it is how a project stops being
-       * unproven), and — when it PASSES with a pin — the trigger for the engine's
-       * own `markProven` flip. Defaults to false.
-       */
-      setupProof?: boolean;
-      /**
-       * §5.2 seam 3 — the caller-supplied PIN: the portable half's content hash
-       * and the machine-local record's CAS version, as returned by
-       * `mcp-register-verify-runbook`. Only a setup proof supplies these (it pins
-       * the DRAFT it is trying to prove); an ordinary request leaves them absent
-       * and the handler resolves the project's PROVEN revision instead. Both must
-       * be present together — half a pin is not a pin.
-       */
-      runbookHash?: string;
-      runbookLocalVersion?: number;
-    }
-  | {
-      /**
-       * BLOCKING (§5.2 seam 2): wait until a previously-enqueued verification
-       * request settles and return its verdict inline. `verificationRequestId` is
-       * the id `mcp-request-verification` replied with; `requestId` is this
-       * message's own wire correlation id (the two are unrelated). Run-bound like
-       * every other tool: a request belonging to a DIFFERENT run is rejected.
-       */
-      type: 'mcp-await-verification';
-      requestId: string;
-      runId: string;
-      /** The verification_requests.id to wait on. */
-      verificationRequestId: string;
-      /** Wait budget in ms; defaults to 15 min and is clamped to a 20-min ceiling. */
-      timeoutMs?: number;
-    }
-  | {
-      /**
-       * NON-BLOCKING COLD READ: list THIS run's verification requests and their
-       * outcomes. The complement to `mcp-await-verification`, which can only
-       * answer for an id the caller is still holding — after a context compaction
-       * there is otherwise no way to enumerate what a run has already verified.
-       * Run-bound like every other tool on this socket.
-       */
-      type: 'mcp-get-verifications';
-      requestId: string;
-      runId: string;
-      /** Optional verification_requests.id to narrow to a single row. Still run-scoped. */
-      verificationRequestId?: string;
-    }
-  | {
-      /**
-       * §5.2 seam 1 — register (or refresh) the MACHINE-LOCAL half of this
-       * project's verification runbook from the portable file committed in THIS
-       * run's worktree. Replies { hash, version } (the content-addressed portable
-       * hash + the record's CAS version) or the store's error verbatim.
-       */
-      type: 'mcp-register-verify-runbook';
-      requestId: string;
-      runId: string;
-      /** One of the three declarable modalities; validated server-side. */
-      modality: string;
-      /** Host-stable resolved lever bindings (binary paths, data-dir lever name, ABI facts). */
-      bindingsJson?: string;
-    }
-  | {
-      /**
-       * FIRE-AND-CONTINUE ad-hoc code-review eval request (cyboflow_run_eval).
-       * No parameters beyond the transport envelope: the run is the CALLER's own
-       * run (CYBOFLOW_RUN_ID) and the graded artifact is its current working-tree
-       * diff. Replies { status, rubricVersion } synchronously; the 3-slot jury
-       * grades asynchronously and posts its verdict to the review queue.
-       */
-      type: 'mcp-run-eval';
-      requestId: string;
-      runId: string;
-    }
-  // -------------------------------------------------------------------------
-  // Workflow + variant configuration writes (cyboflow_*_workflow / _variant).
-  //
-  // These reach the WorkflowRegistry through the injected `workflowConfig` dep
-  // (McpQueryHandlerDeps) rather than a direct import — the ORCHESTRATOR
-  // LAYERING RULE forbids main/src/services imports, and the deps-injection
-  // pattern (mirroring onInteractiveTurnEnd + the experiments router) keeps the
-  // handler decoupled + unit-testable. When the dep is absent every handler
-  // returns 'workflow_config_unavailable' (documented no-op fallback).
-  //
-  // Scope note: workflows are GLOBAL (a built-in edit touches the single
-  // `wf-global-<name>` row shared across every project) — unlike task writes,
-  // which are project-scoped. Only mcp-list-workflows needs the run's projectId
-  // (for the built-in reconcile + union); the id-keyed writes operate on global
-  // handles. All still reject the 'orchestrator' sentinel / terminal runs via
-  // resolveTaskRunContext for parity with the task writes.
-  // -------------------------------------------------------------------------
-  | {
-      /** READ-ONLY: list this run's project workflows (built-ins reconciled). */
-      type: 'mcp-list-workflows';
-      requestId: string;
-      runId: string;
-    }
-  | {
-      /** READ-ONLY: one workflow's resolved definition + meta + baseline rotation. */
-      type: 'mcp-get-workflow';
-      requestId: string;
-      runId: string;
-      workflowId: string;
-    }
-  | {
-      /** Persist an edited definition onto the workflow's spec_json ("Save").
-       *  `definitionJson` is a JSON-encoded WorkflowDefinition, re-validated by
-       *  workflowDefinitionSchema in the handler (parity with the tRPC input). */
-      type: 'mcp-update-workflow';
-      requestId: string;
-      runId: string;
-      workflowId: string;
-      definitionJson: string;
-    }
-  | {
-      /** Reset a BUILT-IN workflow's spec to its static default. */
-      type: 'mcp-reset-workflow';
-      requestId: string;
-      runId: string;
-      workflowId: string;
-    }
-  | {
-      /** Create a new custom workflow. `scope` chooses global (product default)
-       *  vs a project-scoped copy; `definitionJson` (optional) is a JSON-encoded
-       *  WorkflowDefinition validated in the handler. */
-      type: 'mcp-create-workflow';
-      requestId: string;
-      runId: string;
-      name: string;
-      definitionJson?: string;
-      permissionMode?: PermissionMode;
-      scope?: 'global' | 'project';
-    }
-  | {
-      /** Delete a workflow (refused for reserved built-ins / flows with runs). */
-      type: 'mcp-delete-workflow';
-      requestId: string;
-      runId: string;
-      workflowId: string;
-    }
-  | {
-      /** READ-ONLY: a workflow's variants (newest-first). */
-      type: 'mcp-list-variants';
-      requestId: string;
-      runId: string;
-      workflowId: string;
-    }
-  | {
-      /** Create a variant snapshotting the workflow's resolved definition at
-       *  `tuningLevel` (migration 126 — the level the variant challenges;
-       *  omitted = the workflow's saved stamp) — or, when `definitionJson` is
-       *  supplied (a JSON-encoded WorkflowDefinition, validated in the handler
-       *  like update_workflow), that edited graph instead. Status stays 'draft'
-       *  either way. */
-      type: 'mcp-create-variant';
-      requestId: string;
-      runId: string;
-      workflowId: string;
-      label: string;
-      tuningLevel?: TuningLevel;
-      definitionJson?: string;
-    }
-  | {
-      /** Patch a variant in place. `definitionJson` (JSON-encoded
-       *  WorkflowDefinition) is validated in the handler; `agentOverridesJson`
-       *  (JSON string or null) is stored verbatim; the rest map 1:1 to the
-       *  registry patch. Every field optional. */
-      type: 'mcp-update-variant';
-      requestId: string;
-      runId: string;
-      variantId: string;
-      definitionJson?: string;
-      agentOverridesJson?: string | null;
-      model?: string | null;
-      executionModel?: 'orchestrated' | 'programmatic' | null;
-      weight?: number;
-      label?: string;
-    }
-  | {
-      /** Transition a variant's rotation status. */
-      type: 'mcp-set-variant-status';
-      requestId: string;
-      runId: string;
-      variantId: string;
-      status: WorkflowVariantStatus;
-    }
-  | {
-      /** Delete a variant (refused when workflow_runs reference it). */
-      type: 'mcp-delete-variant';
-      requestId: string;
-      runId: string;
-      variantId: string;
-    }
-  | {
-      /** Opt the workflow's live baseline into/out of rotation + set its weight. */
-      type: 'mcp-set-baseline-rotation';
-      requestId: string;
-      runId: string;
-      workflowId: string;
-      inRotation?: boolean;
-      weight?: number;
-    }
-  // -------------------------------------------------------------------------
-  // Global-agent tool family (S0.4). runId carries the 'agent:<threadId>'
-  // sentinel (see resolveGlobalAgentContext), NEVER a workflow_runs row — a
-  // run-scoped runId is rejected by every handler below. Every read is
-  // cross-project (no CYBOFLOW_RUN_ID project binding, unlike the run-scoped
-  // tools above); mcp-propose-action is the ONLY write, and it only ever
-  // inserts a proposal row — it never reaches TaskChangeRouter /
-  // ReviewItemRouter / WorkflowRegistry directly.
-  // -------------------------------------------------------------------------
-  | {
-      /** READ-ONLY, cross-project: sessions + runs digest + blocked-gate/question counts per project. */
-      type: 'mcp-overview';
-      requestId: string;
-      runId: string;
-    }
-  | {
-      /** READ-ONLY, cross-project backlog listing. Omitted projectId = every project merged. */
-      type: 'mcp-backlog';
-      requestId: string;
-      runId: string;
-      projectId?: number;
-      taskType?: TaskType;
-      includeArchived?: boolean;
-      includeDone?: boolean;
-    }
-  | {
-      /**
-       * READ-ONLY: one entity's full body by opaque id or display ref. A ref
-       * (e.g. 'TASK-014') is unique only WITHIN a project — pass projectId to
-       * disambiguate; omitted, the first cross-project match wins.
-       */
-      type: 'mcp-entity';
-      requestId: string;
-      runId: string;
-      taskId: string;
-      projectId?: number;
-    }
-  | {
-      /** READ-ONLY, cross-project review_items inbox. Defaults to pending items only. */
-      type: 'mcp-queue';
-      requestId: string;
-      runId: string;
-      projectId?: number;
-      includeResolved?: boolean;
-    }
-  | {
-      /** READ-ONLY, cross-project workflow listing. Omitted projectId = every workflow row. */
-      type: 'mcp-workflows';
-      requestId: string;
-      runId: string;
-      projectId?: number;
-    }
-  | {
-      /** READ-ONLY: one workflow's effective definition + a server-computed spec_hash (propose-action CAS material). */
-      type: 'mcp-workflow';
-      requestId: string;
-      runId: string;
-      workflowId: string;
-    }
-  | {
-      /**
-       * THE ONLY write-shaped global-agent tool. payloadJson is a JSON-encoded
-       * AgentProposalPayload (shared/types/agentThread.ts) — validated + narrowed
-       * server-side by kind; preconditions (spec hash / task versions) are ALWAYS
-       * captured server-side, never trusted from the caller. Inserts an
-       * agent_proposals row via AgentThreadDbStore and appends a
-       * 'proposal-created' transcript marker event. NEVER executes anything —
-       * confirmation is a separate human-gated flow (proposalExecutor, S0.5).
-       */
-      type: 'mcp-propose-action';
-      requestId: string;
-      runId: string;
-      payloadJson: string;
-    }
-  | {
-      /**
-       * READ-ONLY, cross-project ad-hoc SQL diagnostic query. Executed on a
-       * DEDICATED readonly better-sqlite3 connection (opened `{ readonly:
-       * true }` against the same on-disk file the orchestrator db already
-       * points at) — read-only is enforced BY CONSTRUCTION, not merely by the
-       * statement-shape validation the handler also applies as
-       * defense-in-depth. A single SELECT/WITH/EXPLAIN statement only;
-       * results capped at 200 rows / ~100KB serialized.
-       */
-      type: 'mcp-db-query';
-      requestId: string;
-      runId: string;
-      sql: string;
-    }
-  | {
-      /**
-       * READ-ONLY, FOLDER-SCOPED file read. Scoped to the registered project
-       * folders + user-configured extras (assistantFolderAccess); the target is
-       * canonicalized with realpathSync and required to sit inside one of those
-       * roots (symlink escapes are defeated by resolving first). Secret files
-       * (.env / private keys / credential stores) are refused even in-scope;
-       * binary files (NUL in the first 8KB) are refused; content is capped at
-       * FS_READ_MAX_BYTES with optional 1-based offsetLine/limitLines paging.
-       */
-      type: 'mcp-fs-read';
-      requestId: string;
-      runId: string;
-      path: string;
-      /** 1-based line to start from (with limitLines) for large-file paging. */
-      offsetLine?: number;
-      limitLines?: number;
-    }
-  | {
-      /**
-       * READ-ONLY, FOLDER-SCOPED directory listing. Same scope guard as
-       * mcp-fs-read. Unlike read/grep, listing is NOT secret-filtered — a
-       * secret file's NAME is metadata, so it still appears in the entries (its
-       * content is unreachable via read/grep). Capped at FS_LIST_MAX_ENTRIES.
-       */
-      type: 'mcp-fs-list';
-      requestId: string;
-      runId: string;
-      path: string;
-    }
-  | {
-      /**
-       * READ-ONLY, FOLDER-SCOPED recursive regex grep. Same scope guard. The
-       * walk never follows symlinks and skips GREP_SKIP_DIRS (.git/node_modules/
-       * dist/build/.venv/__pycache__); secret + binary files are skipped;
-       * optional basename `glob` (e.g. *.ts) narrows the file set. Caps:
-       * FS_GREP_MAX_RESULTS matches, FS_GREP_MAX_FILES scanned, per-line text
-       * truncated to FS_GREP_MAX_LINE_LEN. Invalid regex → 'invalid_regex'.
-       */
-      type: 'mcp-fs-grep';
-      requestId: string;
-      runId: string;
-      pattern: string;
-      path: string;
-      glob?: string;
-      /** Case-insensitive by default; set true for a case-sensitive match. */
-      caseSensitive?: boolean;
-      /** Clamped to [1, FS_GREP_MAX_RESULTS]. */
-      maxResults?: number;
-    }
-  | {
-      /**
-       * READ-ONLY search/paging over the CALLING assistant thread's own durable
-       * transcript (`agent_thread_events`) — the assistant's LONG-TERM MEMORY.
-       * Its live SDK context is reset daily, but every turn it ever exchanged
-       * with the user persists in that table forever, and this is the only way
-       * back to it.
-       *
-       * THREAD-SCOPED, always: the thread comes from
-       * resolveGlobalAgentContext(runId), never from a caller argument, so one
-       * assistant thread can never read another's transcript.
-       *
-       * `query` is a case-insensitive PLAIN-TEXT substring — deliberately NOT a
-       * regex, unlike mcp-fs-grep: the pattern is model-authored and this
-       * handler runs synchronously on the Electron main thread, so a
-       * backtracking blowup in a caller regex would wedge the whole app
-       * (measured: one pathological 15-char pattern froze it for ~110s against
-       * a 61-char turn). indexOf is O(n) unconditionally. Omitted, the tool
-       * BROWSES newest-first instead. `beforeId` is the id-descending paging
-       * cursor (`id < beforeId`) returned as nextBeforeId. Rows are paged in
-       * batches — the table is never loaded whole — under a hard scan cap, a
-       * limit clamped to [1, HISTORY_MAX_LIMIT], and a ~100KB
-       * serialized-payload ceiling.
-       */
-      type: 'mcp-history';
-      requestId: string;
-      runId: string;
-      /** Case-insensitive plain-text substring; omitted/empty = browse mode (no filtering). */
-      query?: string;
-      /** Narrow to one side of the conversation. */
-      role?: 'user' | 'assistant';
-      /** Only turns newer than N days ago (bound into datetime('now', ?)). */
-      daysBack?: number;
-      /** Id-descending cursor: return only turns with id < beforeId. */
-      beforeId?: number;
-      /** Matches to return; clamped to [1, HISTORY_MAX_LIMIT], default HISTORY_DEFAULT_LIMIT. */
-      limit?: number;
-    }
-  | {
-      type: 'shell-approval-request';
-      requestId: string;
-      runId: string;
-      toolName: string;
-      toolInput: Record<string, unknown>;
-      /**
-       * Which substrate is asking. The interactive-Claude hook omits it; the OMP
-       * gate extension stamps 'omp'. Read ONLY by the socket-died disposition —
-       * see {@link McpQueryHandler.registerInFlightShellApproval}.
-       */
-      substrate?: 'omp';
-    }
-  | {
-      /**
-       * Deterministic turn-end signal from the INTERACTIVE substrate's Stop
-       * hook (stopShellHook.ts, IDEA-030 turn-end-detection fix). Fire-and-ack
-       * — unlike shell-approval-request, this ALWAYS writeResponses
-       * synchronously; there is no verdict to defer.
-       */
-      type: 'interactive-turn-end';
-      requestId: string;
-      runId: string;
-    }
-  | {
-      /**
-       * "Parked on an AskUserQuestion gate" signal from the INTERACTIVE
-       * substrate's PreToolUse(AskUserQuestion) notify hook (questionShellHook.ts).
-       * Fire-and-ack — like interactive-turn-end, ALWAYS writeResponses
-       * synchronously; there is no verdict to defer (the hook never gates the
-       * question). Flips the run's quick-session board state to `blocked`.
-       */
-      type: 'interactive-question-open';
-      requestId: string;
-      runId: string;
-    };
-
-export interface McpQueryResponse {
-  type: 'mcp-query-response';
-  requestId: string;
-  ok: boolean;
-  data?: unknown;
-  error?: string;
-}
-
-/**
- * Parse the global-agent sentinel form 'agent:<threadId>' out of a
- * CYBOFLOW_RUN_ID. Accepts ONLY this exact shape — a bare workflow_runs id (or
- * the 'orchestrator' health-check sentinel) is rejected. The reverse also
- * holds with NO code change required on the run-scoped side:
- * resolveTaskRunContext / resolveReviewItemRunContext do a strict
- * `SELECT ... FROM workflow_runs WHERE id = ?` lookup, and an
- * 'agent:<threadId>' string never matches a real run row, so those resolvers
- * fall through to their existing 'run_not_found' branch — see
- * mcpQueryHandler.test.ts for the two-way coverage.
- *
- * A free function (not a class method): it touches no DB/state, so every
- * global-agent handler below calls it directly and every unit test can call
- * it directly too.
- */
-export function resolveGlobalAgentContext(
-  runId: string,
-): { ok: true; threadId: string } | { ok: false; error: string } {
-  if (!isAgentThreadSpawnId(runId)) {
-    return { ok: false, error: 'not_a_global_agent_run' };
-  }
-  return { ok: true, threadId: runId.slice(AGENT_THREAD_SPAWN_PREFIX.length) };
-}
-
-// ---------------------------------------------------------------------------
-// cyboflow_history caps (mcp-history). The transcript table grows without
-// bound — it is the assistant's permanent memory — so every read of it is
-// bounded on FOUR independent axes: how many turns come back (limit), how many
-// rows may be examined to find them (scan cap), how many rows are pulled per
-// round-trip (batch), and how large the serialized reply may get (payload
-// ceiling). Whichever binds first stops the walk and sets `truncated`, with
-// `nextBeforeId` telling the caller exactly where to resume.
-// ---------------------------------------------------------------------------
-
-/** Default number of turns returned when the caller passes no `limit`. */
-const HISTORY_DEFAULT_LIMIT = 20;
-/** Hard ceiling on `limit` — a memory search is a lookup, not a bulk export. */
-const HISTORY_MAX_LIMIT = 50;
-/** Rows fetched per SQL round-trip while paging id-descending. */
-const HISTORY_BATCH_ROWS = 500;
-/** Rows examined before the walk gives up (mostly-plumbing threads page fast). */
-const HISTORY_MAX_SCAN_ROWS = 10_000;
-/** Serialized-turn budget for one reply, mirroring cyboflow_db_query's ceiling. */
-const HISTORY_MAX_PAYLOAD_BYTES = 100_000;
-/**
- * Ceiling on `daysBack` (~100 years). Not a usability limit — a guard against
- * SQLite's datetime() overflow: datetime('now', '-N days') silently returns
- * NULL once N leaves the julian-day range (measured: N=3,650,000 → NULL), and
- * `created_at >= NULL` filters out EVERY row, so an assistant reaching for a
- * huge number to mean "search everything" would get a confident false
- * "no memory of it". Clamped, the widest window just includes the whole table.
- */
-const HISTORY_MAX_DAYS_BACK = 36_500;
-
-/** One row of the transcript scan (the four columns mcp-history selects). */
-interface AgentThreadEventScanRow {
-  id: number;
-  event_type: string;
-  payload_json: string;
-  created_at: string;
-}
-
-/** One turn as returned to the assistant by cyboflow_history. */
-interface HistoryTurn {
-  eventId: number;
-  at: string;
-  role: 'user' | 'assistant';
-  text: string;
-  /** Present (true) only in search mode, where `text` is a match excerpt. */
-  matched?: boolean;
-}
-
-// ---------------------------------------------------------------------------
-// cyboflow_db_query statement-shape validation (S0.4 global-agent) — pure,
-// throws nothing. This is DEFENSE-IN-DEPTH: the primary read-only guarantee
-// comes from executing on a dedicated `{ readonly: true }` better-sqlite3
-// connection (see getGlobalAgentReadonlyDb below), which SQLite itself
-// refuses to write through regardless of what slips past this validator.
-// ---------------------------------------------------------------------------
-
-const DB_QUERY_MAX_ROWS = 200;
-const DB_QUERY_MAX_PAYLOAD_BYTES = 100_000;
-const DB_QUERY_MAX_STRING_LEN = 2000;
-
-const READER_KEYWORD_RE = /^(SELECT|WITH|EXPLAIN)\b/i;
-const FORBIDDEN_KEYWORD_RE = /\b(ATTACH|PRAGMA)\b/i;
-
-/** Strips leading whitespace and leading `--`/`/* *\/` comments (repeatedly,
- * since a query may open with several comment lines before the keyword). */
-function stripLeadingSqlComments(sql: string): string {
-  let s = sql;
-  for (;;) {
-    const trimmed = s.replace(/^\s+/, '');
-    if (trimmed.startsWith('--')) {
-      const nl = trimmed.indexOf('\n');
-      s = nl === -1 ? '' : trimmed.slice(nl + 1);
-      continue;
-    }
-    if (trimmed.startsWith('/*')) {
-      const end = trimmed.indexOf('*/');
-      s = end === -1 ? '' : trimmed.slice(end + 2);
-      continue;
-    }
-    return trimmed;
-  }
-}
-
-/**
- * True when non-whitespace, non-comment SQL content follows the first
- * top-level `;` — i.e. more than one statement was submitted. Skips over
- * single-quoted string literals (SQL's `''` escape) and comments while
- * scanning so a `;` inside a string literal doesn't false-positive.
- */
-function hasTrailingStatement(sql: string): boolean {
-  let i = 0;
-  let inString = false;
-  while (i < sql.length) {
-    const ch = sql[i];
-    if (inString) {
-      if (ch === "'") {
-        if (sql[i + 1] === "'") { i += 2; continue; }
-        inString = false;
-      }
-      i += 1;
-      continue;
-    }
-    if (ch === "'") { inString = true; i += 1; continue; }
-    if (ch === '-' && sql[i + 1] === '-') {
-      const nl = sql.indexOf('\n', i);
-      i = nl === -1 ? sql.length : nl + 1;
-      continue;
-    }
-    if (ch === '/' && sql[i + 1] === '*') {
-      const end = sql.indexOf('*/', i + 2);
-      i = end === -1 ? sql.length : end + 2;
-      continue;
-    }
-    if (ch === ';') {
-      return stripLeadingSqlComments(sql.slice(i + 1)).length > 0;
-    }
-    i += 1;
-  }
-  return false;
-}
-
-type DbQueryValidation =
-  | { ok: true; sql: string }
-  | { ok: false; reason: 'empty_sql' | 'not_a_select' | 'multiple_statements' | 'forbidden_keyword' };
-
-function validateReadonlySql(rawSql: unknown): DbQueryValidation {
-  if (typeof rawSql !== 'string' || rawSql.trim().length === 0) {
-    return { ok: false, reason: 'empty_sql' };
-  }
-  const stripped = stripLeadingSqlComments(rawSql);
-  if (stripped.length === 0) {
-    return { ok: false, reason: 'empty_sql' };
-  }
-  if (!READER_KEYWORD_RE.test(stripped)) {
-    return { ok: false, reason: 'not_a_select' };
-  }
-  // Scanned over the WHOLE raw string (not just the stripped head) — ATTACH /
-  // PRAGMA are rejected wherever they appear, including mid-statement.
-  if (FORBIDDEN_KEYWORD_RE.test(rawSql)) {
-    return { ok: false, reason: 'forbidden_keyword' };
-  }
-  if (hasTrailingStatement(rawSql)) {
-    return { ok: false, reason: 'multiple_statements' };
-  }
-  return { ok: true, sql: rawSql };
-}
-
-/** Row-value sanitization shared by the cyboflow_db_query result path. */
-function sanitizeDbQueryValue(value: unknown): unknown {
-  if (typeof value === 'string') {
-    return value.length > DB_QUERY_MAX_STRING_LEN
-      ? `${value.slice(0, DB_QUERY_MAX_STRING_LEN)}…[truncated]`
-      : value;
-  }
-  if (typeof value === 'bigint') {
-    return Number.isSafeInteger(Number(value)) ? Number(value) : value.toString();
-  }
-  if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
-    return `<blob ${value.length} bytes>`;
-  }
-  return value;
-}
-
-function sanitizeDbQueryRow(row: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(row)) {
-    out[key] = sanitizeDbQueryValue(value);
-  }
-  return out;
-}
-
-// ---------------------------------------------------------------------------
-// cyboflow_propose_action payload validation (S0.4) — narrows an unknown JSON
-// value into an AgentProposalPayload, dispatching on `kind`. Every branch
-// extracts each field to a local const BEFORE narrowing it so TypeScript's
-// control-flow analysis reliably narrows a `Record<string, unknown>` property
-// access (narrowing a bare `raw.foo` expression across a guard is fragile;
-// binding it to a local first is not). Returns null (never throws) on any
-// malformed shape or unrecognized kind — the caller responds ok:false
-// 'invalid_payload' rather than propagate a parse exception.
-// ---------------------------------------------------------------------------
-
-function isStringArray(v: unknown): v is string[] {
-  return Array.isArray(v) && v.every((x) => typeof x === 'string');
-}
-
-function isAgentPriority(v: unknown): v is Priority {
-  return v === 'P0' || v === 'P1' || v === 'P2' || v === 'P3' || v === 'P4' || v === 'P5' || v === 'P6';
-}
-
-function isAgentTaskType(v: unknown): v is TaskType {
-  return v === 'idea' || v === 'epic' || v === 'task';
-}
-
-function isAgentCategory(v: unknown): v is EntityCategory {
-  return v === 'feature' || v === 'bug' || v === 'chore';
-}
-
-function isAgentIdeaScope(v: unknown): v is IdeaScope {
-  return v === 'small' || v === 'large';
-}
-
-/**
- * Ceiling on one create-backlog-items proposal. A proposal card is a single
- * human decision — a 50-entity dump is not reviewable, and the executor writes
- * them one chokepoint call at a time on the confirm path.
- */
-const CREATE_BACKLOG_MAX_ITEMS = 20;
-
-/**
- * Narrow one create-backlog-items entry. Every optional field is validated
- * strictly (a malformed member REJECTS the whole payload rather than being
- * dropped) — unlike the finding-extras parsers below, a create is a durable
- * entity write the human is being asked to approve, so a silently dropped
- * body/priority would have the card describe something other than what
- * Confirm would produce.
- */
-function parseCreateBacklogItem(raw: unknown): CreateBacklogItem | null {
-  if (!isRecord(raw)) return null;
-  const taskType = raw.taskType;
-  const title = raw.title;
-  if (!isAgentTaskType(taskType)) return null;
-  if (typeof title !== 'string' || title.trim().length === 0) return null;
-  const item: CreateBacklogItem = { taskType, title };
-
-  const summary = raw.summary;
-  if (summary !== undefined) {
-    if (typeof summary !== 'string') return null;
-    item.summary = summary;
-  }
-  const body = raw.body;
-  if (body !== undefined) {
-    if (typeof body !== 'string') return null;
-    item.body = body;
-  }
-  const priority = raw.priority;
-  if (priority !== undefined) {
-    if (!isAgentPriority(priority)) return null;
-    item.priority = priority;
-  }
-  const category = raw.category;
-  if (category !== undefined) {
-    if (!isAgentCategory(category)) return null;
-    item.category = category;
-  }
-  const scope = raw.scope;
-  if (scope !== undefined) {
-    if (!isAgentIdeaScope(scope)) return null;
-    item.scope = scope;
-  }
-  const parentEpicId = raw.parentEpicId;
-  if (parentEpicId !== undefined) {
-    if (typeof parentEpicId !== 'string' || parentEpicId.length === 0) return null;
-    item.parentEpicId = parentEpicId;
-  }
-  const originatingIdeaId = raw.originatingIdeaId;
-  if (originatingIdeaId !== undefined) {
-    if (typeof originatingIdeaId !== 'string' || originatingIdeaId.length === 0) return null;
-    item.originatingIdeaId = originatingIdeaId;
-  }
-  return item;
-}
-
-function parseAgentNavigationTarget(raw: unknown): AgentNavigationTarget | null {
-  if (!isRecord(raw)) return null;
-  const target = raw.target;
-  if (target === 'run') {
-    const runId = raw.runId;
-    if (typeof runId !== 'string' || runId.length === 0) return null;
-    return { target: 'run', runId };
-  }
-  if (target === 'quick-session') {
-    const sessionId = raw.sessionId;
-    if (typeof sessionId !== 'string' || sessionId.length === 0) return null;
-    const navRunId = raw.runId;
-    if (navRunId !== undefined && (typeof navRunId !== 'string' || navRunId.length === 0)) return null;
-    return navRunId !== undefined
-      ? { target: 'quick-session', sessionId, runId: navRunId }
-      : { target: 'quick-session', sessionId };
-  }
-  return null;
-}
-
-function parseAgentProposalPayload(raw: unknown): AgentProposalPayload | null {
-  if (!isRecord(raw)) return null;
-  const kindRaw = raw.kind;
-  if (typeof kindRaw !== 'string' || !(AGENT_PROPOSAL_KINDS as readonly string[]).includes(kindRaw)) {
-    return null;
-  }
-  const kind = kindRaw as AgentProposalKind;
-
-  switch (kind) {
-    case 'launch-run': {
-      const projectId = raw.projectId;
-      const workflowName = raw.workflowName;
-      if (typeof projectId !== 'number') return null;
-      if (typeof workflowName !== 'string' || !isCyboflowWorkflowName(workflowName)) return null;
-      const payload: LaunchRunProposalPayload = { kind: 'launch-run', projectId, workflowName };
-
-      const substrate = raw.substrate;
-      if (substrate !== undefined) {
-        if (!isCliSubstrate(substrate)) return null;
-        payload.substrate = substrate;
-      }
-      const taskIds = raw.taskIds;
-      if (taskIds !== undefined) {
-        if (!isStringArray(taskIds)) return null;
-        payload.taskIds = taskIds;
-      }
-      const ideaIds = raw.ideaIds;
-      if (ideaIds !== undefined) {
-        if (!isStringArray(ideaIds)) return null;
-        payload.ideaIds = ideaIds;
-      }
-      const findingIds = raw.findingIds;
-      if (findingIds !== undefined) {
-        if (!isStringArray(findingIds)) return null;
-        payload.findingIds = findingIds;
-      }
-      const note = raw.note;
-      if (note !== undefined) {
-        if (typeof note !== 'string') return null;
-        payload.note = note;
-      }
-      return payload;
-    }
-    case 'reprioritize-backlog': {
-      const projectId = raw.projectId;
-      const itemsRaw = raw.items;
-      if (typeof projectId !== 'number') return null;
-      if (!Array.isArray(itemsRaw) || itemsRaw.length === 0) return null;
-      const items: ReprioritizeBacklogItem[] = [];
-      for (const entryRaw of itemsRaw) {
-        if (!isRecord(entryRaw)) return null;
-        const taskId = entryRaw.taskId;
-        if (typeof taskId !== 'string' || taskId.length === 0) return null;
-        const item: ReprioritizeBacklogItem = { taskId };
-        const priority = entryRaw.priority;
-        if (priority !== undefined) {
-          if (!isAgentPriority(priority)) return null;
-          item.priority = priority;
-        }
-        const stageId = entryRaw.stageId;
-        if (stageId !== undefined) {
-          if (typeof stageId !== 'string' || stageId.length === 0) return null;
-          item.stageId = stageId;
-        }
-        if (item.priority === undefined && item.stageId === undefined) return null; // no-op row
-        items.push(item);
-      }
-      const payload: ReprioritizeBacklogProposalPayload = { kind: 'reprioritize-backlog', projectId, items };
-      return payload;
-    }
-    case 'edit-workflow': {
-      const workflowId = raw.workflowId;
-      const definitionJson = raw.definitionJson;
-      if (typeof workflowId !== 'string' || workflowId.length === 0) return null;
-      if (typeof definitionJson !== 'string' || definitionJson.length === 0) return null;
-      const payload: EditWorkflowProposalPayload = { kind: 'edit-workflow', workflowId, definitionJson };
-      const summary = raw.summary;
-      if (summary !== undefined) {
-        if (typeof summary !== 'string') return null;
-        payload.summary = summary;
-      }
-      return payload;
-    }
-    case 'open-session': {
-      const navigation = parseAgentNavigationTarget(raw.navigation);
-      if (!navigation) return null;
-      const payload: OpenSessionProposalPayload = { kind: 'open-session', navigation };
-      return payload;
-    }
-    case 'create-backlog-items': {
-      const projectId = raw.projectId;
-      const itemsRaw = raw.items;
-      if (typeof projectId !== 'number') return null;
-      if (!Array.isArray(itemsRaw) || itemsRaw.length === 0) return null;
-      if (itemsRaw.length > CREATE_BACKLOG_MAX_ITEMS) return null;
-      const items: CreateBacklogItem[] = [];
-      for (const entryRaw of itemsRaw) {
-        const item = parseCreateBacklogItem(entryRaw);
-        if (!item) return null;
-        items.push(item);
-      }
-      const payload: CreateBacklogItemsProposalPayload = { kind: 'create-backlog-items', projectId, items };
-      return payload;
-    }
-  }
-}
 
 
 // ---------------------------------------------------------------------------
@@ -1636,204 +439,6 @@ function stableJson(value: unknown): string {
   return JSON.stringify(value) ?? 'null';
 }
 
-/**
- * Callback deps this handler needs from main/src/services — ORCHESTRATOR
- * LAYERING RULE: mcpQueryHandler must NOT import from main/src/services, so
- * every such dependency is injected as a plain function rather than a
- * concrete class import. All members optional: a caller (test or a stripped-
- * down OrchSocketServer) that omits a dep gets the handler's documented
- * "unavailable" fallback for that message type, never a crash.
- */
-export interface McpQueryHandlerDeps {
-  /**
-   * Deliver a Stop-hook turn-end notification (IDEA-030) to the live
-   * InteractiveClaudeManager. Returns true if a tracked interactive run for
-   * `runId` was found and notified, false otherwise. Wired in main/src/index.ts
-   * to `interactiveCliManager.notifyTurnEnd`.
-   */
-  onInteractiveTurnEnd?: (runId: string) => boolean;
-
-  /**
-   * Deliver a "parked on an AskUserQuestion gate" notification from the
-   * interactive PreToolUse(AskUserQuestion) notify hook (questionShellHook.ts) to
-   * the live InteractiveClaudeManager. Wired in main/src/index.ts to
-   * `interactiveCliManager.notifyQuestionOpen`. Absent → the PTY session simply
-   * won't show `blocked` on the quick-session board (best-effort).
-   */
-  onInteractiveQuestionOpen?: (runId: string) => void;
-
-  /**
-   * WorkflowRegistry surface for the workflow/variant configuration tools
-   * (cyboflow_*_workflow / _variant). Injected as a narrow STRUCTURAL type
-   * (never the concrete WorkflowRegistry class) in main/src/index.ts so this
-   * handler stays decoupled + unit-testable. Absent → every config tool returns
-   * 'workflow_config_unavailable'. Method contracts mirror the workflows /
-   * variants tRPC routers exactly; distinguishable Error messages ('not found' /
-   * 'reserved' / 'run history' / 'already exists' / 'unresolvable') are mapped to
-   * ok:false error codes by writeWorkflowConfigError.
-   */
-  workflowConfig?: WorkflowConfigLike;
-
-  /**
-   * Persistence for the global-agent chat thread (agent_threads /
-   * agent_thread_events / agent_proposals — migration 071). Concrete class
-   * import (NOT a structural WorkflowConfigLike-style interface): unlike
-   * workflowConfig, AgentThreadDbStore lives under main/src/orchestrator/
-   * agentThread/ — orchestrator layer, not main/src/services — so the
-   * ORCHESTRATOR LAYERING RULE does not require an injected structural
-   * surface here. Injected via the deps bag anyway (mirroring the
-   * workflowConfig precedent) purely for test ergonomics: a test can hand in
-   * a store built against an in-memory fixture DB without constructing the
-   * whole McpQueryHandler's `db`. Absent → cyboflow_propose_action returns
-   * 'agent_thread_store_unavailable'; every other handler is unaffected.
-   */
-  agentThreadStore?: AgentThreadDbStore;
-
-  /**
-   * Extra absolute folder paths the global-agent filesystem tools
-   * (cyboflow_fs_read / _list / _grep) may read, BEYOND the always-included
-   * registered project paths. Wired in main/src/index.ts to
-   * `configManager.getAssistantFolderAccess()`. Absent (or returning []) ⇒ only
-   * project folders are readable — keeps existing tests compiling without
-   * declaring the dep. Never trusted as canonical: the handler realpathSync's
-   * every entry and drops any that don't exist.
-   */
-  getAssistantFolderAccess?: () => string[];
-
-  /**
-   * Registered project folders the user has EXCLUDED from the fs tools (each an
-   * exact `projects.path`). Subtracted from the always-included project roots in
-   * resolveFsAllowedRoots, so a toggled-off project becomes unreadable. Wired in
-   * main/src/index.ts to `configManager.getAssistantExcludedProjectPaths()`.
-   * Absent (or returning []) ⇒ every project folder stays readable (the
-   * default). Only affects PROJECT roots — configured extras are never excluded.
-   */
-  getAssistantExcludedProjectPaths?: () => string[];
-
-  /**
-   * Request an AD-HOC code-review eval of a run's current diff (the
-   * `cyboflow_run_eval` tool). Wired in main/src/index.ts to
-   * `EvalWorker.getInstance().runAdHoc` — a CALLBACK rather than the worker
-   * itself because EvalWorker's boot wiring reaches main/src/services
-   * (GitDiffManager, ConfigManager, ReviewItemRouter) and the ORCHESTRATOR
-   * LAYERING RULE forbids importing those from here. The result TYPE is imported
-   * (type-only, from the orchestrator-layer eval module) purely so the mapping
-   * below is exhaustively checked.
-   *
-   * FIRE-AND-CONTINUE: the callback resolves as soon as the snapshot lands and
-   * the jury is enqueued — never after the verdict. Absent ⇒ 'eval_unavailable'
-   * (the documented degrade pattern shared with workflowConfig / agentThreadStore).
-   */
-  runAdHocEval?: (runId: string) => Promise<AdHocSnapshotResult>;
-
-  /**
-   * The MACHINE-LOCAL verification-runbook store (§5.2 seam 1), backing
-   * `cyboflow_register_verify_runbook`. Concrete class rather than a structural
-   * surface, for the same reason as `agentThreadStore` above: VerifyRunbookStore
-   * lives under main/src/orchestrator/verify/ — orchestrator layer, not
-   * main/src/services — so the ORCHESTRATOR LAYERING RULE does not demand an
-   * injected interface, and the deps bag is used purely so a test can hand in a
-   * store built over its own fixture DB.
-   *
-   * It MUST be the same instance the VerificationScheduler was initialized with
-   * (main/src/index.ts wires one `verifyRunbookStore` into both): the setup flow
-   * registers a draft through this tool and the ENGINE proves that exact record
-   * on a passing setup-proof run, so two stores over the same table would still
-   * work but two stores over different DBs would silently never agree.
-   *
-   * Absent ⇒ the register tool returns 'runbook_store_unavailable'; nothing else
-   * is affected.
-   */
-  verifyRunbookStore?: VerifyRunbookStore;
-
-  /**
-   * The GLOBAL visual-verification config (the master switch + default type),
-   * read LIVE — the same `configManager.getVisualVerifyConfig()` the
-   * WorkflowRegistry injects into `createRun`.
-   *
-   * Needed because a `__quick__` chat sentinel's verify posture cannot come from
-   * its run stamp. The sentinel is minted ONCE on the session's first chat turn
-   * and reused for the session's whole life, and `verify_chain` has no UPDATE
-   * path by design (visualVerificationResolver.ts:5-7) — so a session that
-   * existed before the master switch was turned on would be stamped disabled
-   * forever. Quick runs therefore resolve posture at CALL time through this dep;
-   * every other run keeps reading its frozen stamp, untouched.
-   *
-   * Absent ⇒ the quick branch falls back to the frozen stamp (i.e. the
-   * pre-existing behavior), so the dozens of fixtures that build a deps bag
-   * without it keep passing unchanged.
-   */
-  getVisualVerifyConfig?(): ResolvedVisualVerifyConfig;
-
-  /**
-   * The user's per-substrate sprint task-cap override
-   * (ConfigManager.getSprintMaxTasks), already clamped — read LIVE for the same
-   * reason getVisualVerifyConfig is: the cap is a Settings value, not something
-   * frozen onto the run at launch, so `cyboflow_create_sprint_batch` must honor
-   * what the setting says NOW rather than what it said when the run started.
-   *
-   * Absent ⇒ resolveSprintMaxTasks falls back to the built-in per-substrate
-   * defaults (the pre-setting behavior), so every fixture that builds a deps bag
-   * without it keeps passing unchanged.
-   */
-  getSprintMaxTasks?(): SprintMaxTasksOverrides;
-}
-
-/**
- * Narrow structural surface over WorkflowRegistry — exactly the methods the
- * workflow/variant MCP tools call. Kept in lockstep with the registry by the
- * wiring in main/src/index.ts (which forwards the real methods). Every method
- * may throw a distinguishable Error the handler maps to an ok:false code.
- */
-export interface WorkflowConfigLike {
-  getById(workflowId: string): WorkflowRow | null;
-  /**
-   * `includeArchived` (migration 078) is optional and defaults to `true` at
-   * the registry — every existing caller here omits it, so behavior is
-   * unchanged (archived rows still surface over MCP for now).
-   */
-  listByProject(projectId: number, includeArchived?: boolean): WorkflowRow[];
-  /** Reconcile the in-repo built-ins as global rows (mirrors the tRPC list). */
-  ensureGlobalBuiltIns(): void;
-  getBaselineRotation(workflowId: string): { inRotation: boolean; weight: number } | null;
-  /**
-   * The workflow's EFFECTIVE definition (migration 122): the tuning level's
-   * materialized graph, or the custom slot at level `'custom'`.
-   */
-  getEffectiveDefinition(workflowId: string): WorkflowDefinition | null;
-  /** Writes the custom slot AND stamps `tuning_level = 'custom'` atomically. */
-  updateSpec(workflowId: string, definition: WorkflowDefinition): void;
-  /** Clears the custom slot AND flips a `'custom'` level back to `'standard'`. */
-  resetSpec(workflowId: string): void;
-  createCustom(params: {
-    projectId: number | null;
-    name: string;
-    specJson?: string;
-    permissionMode?: PermissionMode;
-  }): WorkflowRow;
-  deleteWorkflow(workflowId: string): void;
-  listVariants(workflowId: string, opts?: { includeArchived?: boolean }): WorkflowVariantRow[];
-  createVariantFromCurrent(
-    workflowId: string,
-    label: string,
-    opts?: { definition?: WorkflowDefinition; tuningLevel?: TuningLevel },
-  ): WorkflowVariantRow;
-  updateVariant(
-    variantId: string,
-    patch: {
-      specJson?: string;
-      agentOverridesJson?: string | null;
-      model?: string | null;
-      executionModel?: 'orchestrated' | 'programmatic' | null;
-      weight?: number;
-      label?: string;
-    },
-  ): void;
-  setVariantStatus(variantId: string, status: WorkflowVariantStatus): void;
-  deleteVariant(variantId: string): void;
-  setBaselineRotation(workflowId: string, patch: { inRotation?: boolean; weight?: number }): void;
-}
-
 // ---------------------------------------------------------------------------
 // McpQueryHandler
 // ---------------------------------------------------------------------------
@@ -1854,14 +459,19 @@ export class McpQueryHandler {
   private readonly ompDeferredApprovals = new Map<string, Map<string, DeferredOmpApproval>>();
 
   /**
-   * Lazily-opened, cached readonly sibling connection backing
-   * cyboflow_db_query (mcp-db-query). Opened once on first use against
-   * `this.db.name` (the on-disk file path the injected DatabaseLike wraps)
-   * and reused for the process lifetime — mirrors the main db connection's
-   * own lifetime, so no explicit dispose path is needed here (this class has
-   * no existing close()/dispose() to hook into).
+   * Built once here and handed to every workflowConfigHandlers free function
+   * as its `ctx` — arrow wrappers so `writeResponse` / `resolveTaskRunContext`
+   * stay private methods on this class while still binding `this` correctly
+   * when called through the context object.
    */
-  private globalAgentReadonlyDb: BetterSqlite3Database.Database | null = null;
+  private readonly workflowConfigCtx: WorkflowConfigHandlerContext;
+
+  /**
+   * The global-agent db-query/fs/history tool family — a class (not free
+   * functions) because it owns the lazily-opened readonly sibling sqlite
+   * connection, which must stay cached for this handler's process lifetime.
+   */
+  private readonly globalAgentTools: GlobalAgentToolHandlers;
 
   /**
    * @param db     Orchestrator DB surface.
@@ -1877,7 +487,20 @@ export class McpQueryHandler {
     private readonly db: DatabaseLike,
     private readonly logger?: LoggerLike,
     private readonly deps: McpQueryHandlerDeps = {},
-  ) {}
+  ) {
+    this.workflowConfigCtx = {
+      logger: this.logger,
+      deps: this.deps,
+      writeResponse: (client, response) => this.writeResponse(client, response),
+      resolveTaskRunContext: (runId) => this.resolveTaskRunContext(runId),
+    };
+    this.globalAgentTools = new GlobalAgentToolHandlers({
+      db: this.db,
+      logger: this.logger,
+      deps: this.deps,
+      writeResponse: (client, response) => this.writeResponse(client, response),
+    });
+  }
 
   // --------------------------------------------------------------------------
   // Public entry point
@@ -2014,40 +637,40 @@ export class McpQueryHandler {
           await this.handleRunEval(msg, client);
           break;
         case 'mcp-list-workflows':
-          this.handleListWorkflows(msg, client);
+          handleListWorkflows(this.workflowConfigCtx, msg, client);
           break;
         case 'mcp-get-workflow':
-          this.handleGetWorkflow(msg, client);
+          handleGetWorkflow(this.workflowConfigCtx, msg, client);
           break;
         case 'mcp-update-workflow':
-          this.handleUpdateWorkflow(msg, client);
+          handleUpdateWorkflow(this.workflowConfigCtx, msg, client);
           break;
         case 'mcp-reset-workflow':
-          this.handleResetWorkflow(msg, client);
+          handleResetWorkflow(this.workflowConfigCtx, msg, client);
           break;
         case 'mcp-create-workflow':
-          this.handleCreateWorkflow(msg, client);
+          handleCreateWorkflow(this.workflowConfigCtx, msg, client);
           break;
         case 'mcp-delete-workflow':
-          this.handleDeleteWorkflow(msg, client);
+          handleDeleteWorkflow(this.workflowConfigCtx, msg, client);
           break;
         case 'mcp-list-variants':
-          this.handleListVariants(msg, client);
+          handleListVariants(this.workflowConfigCtx, msg, client);
           break;
         case 'mcp-create-variant':
-          this.handleCreateVariant(msg, client);
+          handleCreateVariant(this.workflowConfigCtx, msg, client);
           break;
         case 'mcp-update-variant':
-          this.handleUpdateVariant(msg, client);
+          handleUpdateVariant(this.workflowConfigCtx, msg, client);
           break;
         case 'mcp-set-variant-status':
-          this.handleSetVariantStatus(msg, client);
+          handleSetVariantStatus(this.workflowConfigCtx, msg, client);
           break;
         case 'mcp-delete-variant':
-          this.handleDeleteVariant(msg, client);
+          handleDeleteVariant(this.workflowConfigCtx, msg, client);
           break;
         case 'mcp-set-baseline-rotation':
-          this.handleSetBaselineRotation(msg, client);
+          handleSetBaselineRotation(this.workflowConfigCtx, msg, client);
           break;
         case 'mcp-overview':
           this.handleAgentOverview(msg, client);
@@ -2062,28 +685,40 @@ export class McpQueryHandler {
           this.handleAgentQueue(msg, client);
           break;
         case 'mcp-workflows':
-          this.handleAgentWorkflows(msg, client);
+          this.globalAgentTools.handleAgentWorkflows(msg, client);
           break;
         case 'mcp-workflow':
-          this.handleAgentWorkflow(msg, client);
+          this.globalAgentTools.handleAgentWorkflow(msg, client);
+          break;
+        case 'mcp-agents':
+          this.globalAgentTools.handleAgentAgents(msg, client);
           break;
         case 'mcp-propose-action':
-          this.handleProposeAction(msg, client);
+          this.globalAgentTools.handleProposeAction(msg, client);
           break;
         case 'mcp-db-query':
-          this.handleAgentDbQuery(msg, client);
+          this.globalAgentTools.handleAgentDbQuery(msg, client);
           break;
         case 'mcp-fs-read':
-          this.handleFsRead(msg, client);
+          this.globalAgentTools.handleFsRead(msg, client);
           break;
         case 'mcp-fs-list':
-          this.handleFsList(msg, client);
+          this.globalAgentTools.handleFsList(msg, client);
           break;
         case 'mcp-fs-grep':
-          this.handleFsGrep(msg, client);
+          this.globalAgentTools.handleFsGrep(msg, client);
           break;
         case 'mcp-history':
-          this.handleAgentHistory(msg, client);
+          this.globalAgentTools.handleAgentHistory(msg, client);
+          break;
+        case 'mcp-db-schema':
+          this.handleDbSchema(msg, client);
+          break;
+        case 'mcp-widget-preview':
+          await this.handleWidgetPreview(msg, client);
+          break;
+        case 'mcp-widget-save':
+          this.handleWidgetSave(msg, client);
           break;
         case 'shell-approval-request':
           // Async-deferred — the FIRST handler that does NOT writeResponse
@@ -2136,7 +771,11 @@ export class McpQueryHandler {
       // a throw here is by construction a caller error and does not belong on
       // the channel reserved for app faults. Every other message type builds its
       // own SQL and keeps ERROR, where a throw IS ours.
-      const logAtWarn = msg.type === 'mcp-db-query';
+      //
+      // mcp-widget-preview extends the same exemption (docs/proposals/
+      // CUSTOM-VIEWS.md §7.2): its `sql` sources are agent-authored WidgetSpec
+      // content, same caller-error shape as mcp-db-query's raw SQL.
+      const logAtWarn = msg.type === 'mcp-db-query' || msg.type === 'mcp-widget-preview';
       const summary = `[Cyboflow MCP Query] ${msg.type} threw; returned to client as ok:false:`;
       if (logAtWarn) {
         console.warn(`${summary} ${error} (agent-authored SQL — caller error, not an app fault)`);
@@ -2690,6 +1329,7 @@ export class McpQueryHandler {
       initialStageId: msg.initialStageId,
       scope: msg.scope,
       originatingIdeaId,
+      executor: msg.executor,
     };
 
     try {
@@ -2756,6 +1396,7 @@ export class McpQueryHandler {
         category: msg.category,
         repo: msg.repo,
         scope: msg.scope,
+        executor: msg.executor,
       },
       ...(msg.parentEpicId !== undefined ? { parentEpicId: msg.parentEpicId } : {}),
       expectedVersion: msg.expectedVersion,
@@ -3030,88 +1671,6 @@ export class McpQueryHandler {
   // --------------------------------------------------------------------------
 
   /**
-   * The compact projection cyboflow_list_tasks returns per item — deliberately
-   * WITHOUT `body` / `inFlow` / `children` (an agent enumerating the backlog
-   * does not need the full markdown spec or the live-run overlay for every
-   * row; cyboflow_get_task fetches one item's full body on demand).
-   */
-  private static toCompactTask(item: BacklogTaskItem): Record<string, unknown> {
-    return {
-      id: item.id,
-      ref: item.ref,
-      type: item.type,
-      title: item.title,
-      summary: item.summary,
-      priority: item.priority,
-      category: item.category,
-      stage_id: item.stage_id,
-      stage_position: item.stage_position,
-      parent_epic_id: item.parent_epic_id,
-      originating_idea_id: item.originating_idea_id,
-      archived: item.archived_at !== null,
-      decomposed: item.decomposed_at !== null,
-      approved: item.approved_at !== null,
-      is_done: item.isDone,
-      awaiting_review: item.awaitingReview,
-      // Only tasks carry a computed dependency overlay (selectProjectBacklog
-      // applies it to type='task' rows only); ideas/epics are never blocked,
-      // so an absent overlay defaults to "ready" rather than "unknown".
-      ready_to_work: item.readyToWork ?? true,
-      blocked_by: (item.blockedBy ?? []).map((dep) => dep.ref),
-      version: item.version,
-      updated_at: item.updated_at,
-    };
-  }
-
-  /**
-   * Project a full BacklogTaskItem for cyboflow_get_task. A CURATED ALLOW-LIST,
-   * not a pass-through: the fields below are the tool's external contract, and a
-   * field newly added to `BacklogTaskItem` is absent here until it is added
-   * DELIBERATELY. It does include `body`, `blockedBy`/`relatedTo`/`readyToWork`
-   * and (for an epic) `children`/`childCount`/`pendingTasks`.
-   *
-   * Deliberately omitted:
-   *  - `inFlow` — an internal live-run overlay with no stable external contract;
-   *  - `memberships` (sprint/experiment labels, TASK-190) — a backlog-UI filter
-   *    overlay; no flow agent consumes it, and widening an agent-facing payload
-   *    is a product decision, not a projection detail.
-   */
-  private static toFullTask(item: BacklogTaskItem): Record<string, unknown> {
-    return {
-      id: item.id,
-      project_id: item.project_id,
-      type: item.type,
-      ref: item.ref,
-      title: item.title,
-      summary: item.summary,
-      body: item.body,
-      priority: item.priority,
-      category: item.category,
-      repo: item.repo,
-      parent_epic_id: item.parent_epic_id,
-      originating_idea_id: item.originating_idea_id,
-      scope: item.scope,
-      board_id: item.board_id,
-      stage_id: item.stage_id,
-      archived_at: item.archived_at,
-      decomposed_at: item.decomposed_at,
-      approved_at: item.approved_at,
-      version: item.version,
-      stage_position: item.stage_position,
-      awaitingReview: item.awaitingReview,
-      isDone: item.isDone,
-      blockedBy: item.blockedBy,
-      relatedTo: item.relatedTo,
-      readyToWork: item.readyToWork,
-      children: item.children,
-      childCount: item.childCount,
-      pendingTasks: item.pendingTasks,
-      created_at: item.created_at,
-      updated_at: item.updated_at,
-    };
-  }
-
-  /**
    * Project an idea's image attachments (migration 028) into the MCP read shape
    * for cyboflow_get_task: [{ id, label, mimeType, path }], `path` RESOLVED to
    * an absolute on-disk path — never base64/dataURLs (flow agents fetch bytes
@@ -3200,7 +1759,7 @@ export class McpQueryHandler {
       return true;
     });
 
-    const tasks = filtered.map((item) => McpQueryHandler.toCompactTask(item));
+    const tasks = filtered.map((item) => toCompactTask(item));
 
     this.writeResponse(client, {
       type: 'mcp-query-response',
@@ -3285,7 +1844,7 @@ export class McpQueryHandler {
       }
     }
 
-    const task = McpQueryHandler.toFullTask(item);
+    const task = toFullTask(item);
     // Ideas-only (migration 028 / IDEA-006): epics/tasks carry no attachments
     // column at all, so they get no `attachments` key; an idea with none gets
     // the empty array (a stable, documented shape either way).
@@ -3308,10 +1867,18 @@ export class McpQueryHandler {
           prototype_revision: approvedDesign.prototypeRevision,
           // RESOLVED absolute on-disk path (mirrors toMcpAttachments below) so a
           // planner/sprint agent can Read the file directly with no export step.
-          // Host-written only (Approve's snapshot step, never agent-supplied),
-          // so no containment check is needed here — snapshotBaseDir is already
-          // an absolute CYBOFLOW_DIR path (main/src/index.ts).
+          // Host-written only (Approve's snapshot step OR flowDesignBinding's,
+          // never agent-supplied), so no containment check is needed here —
+          // snapshotBaseDir is already an absolute CYBOFLOW_DIR path
+          // (main/src/index.ts).
           snapshot_path: path.resolve(approvedDesign.snapshotPath),
+          // Provenance (migration 134): 'design-mode' is a Design Mode Approve;
+          // 'flow' is a Launch/Planner/Ship run whose design gate cleared, with
+          // `source_run_id` naming that run. A reading agent uses it to tell a
+          // hand-refined design from a flow's generated concept mockup — and the
+          // flow binder uses it to leave a design-mode approval alone.
+          source: approvedDesign.source,
+          source_run_id: approvedDesign.sourceRunId,
         };
       }
 
@@ -3488,6 +2055,24 @@ export class McpQueryHandler {
           requestId,
           ok: false,
           error: 'ship_no_tasks_to_materialize',
+        });
+        return;
+      }
+      // createForRun's OWN batch-cap enforcement (Item 7) — the handler's step-5
+      // pre-check above already returns this same 'ship_batch_too_large' code for
+      // the common case, so this branch only fires when something changed the
+      // eligible count BETWEEN that pre-check and the transaction (e.g. a
+      // concurrent eligibility change) and the store's cap is what actually
+      // caught it. Same wire code either way — callers see ONE signal.
+      if (err.code === 'batch_too_large') {
+        this.logger?.warn('[Cyboflow MCP Query] create-sprint-batch: batch too large', {
+          detail: err.message,
+        });
+        this.writeResponse(client, {
+          type: 'mcp-query-response',
+          requestId,
+          ok: false,
+          error: 'ship_batch_too_large',
         });
         return;
       }
@@ -6687,457 +5272,6 @@ export class McpQueryHandler {
     });
   }
 
-  // --------------------------------------------------------------------------
-  // Workflow + variant configuration (cyboflow_*_workflow / _variant)
-  //
-  // All reach the WorkflowRegistry through the injected `workflowConfig` dep
-  // (absent → 'workflow_config_unavailable'). Reads/writes are keyed by global
-  // workflow/variant ids; only handleListWorkflows uses the run's projectId (for
-  // the built-in reconcile + union). Registry guard Errors are mapped to ok:false
-  // codes by writeWorkflowConfigError, mirroring the workflows/variants tRPC
-  // routers. WARNING: editing a built-in edits the single global row shared by
-  // every project — the tool descriptions call this out.
-  // --------------------------------------------------------------------------
-
-  /**
-   * Shared preamble for the config handlers: require the injected dep AND a real,
-   * non-terminal run (resolveTaskRunContext rejects the 'orchestrator' sentinel /
-   * missing / terminal runs). Returns the config surface + projectId, or null
-   * after writing the appropriate ok:false response.
-   */
-  private resolveWorkflowConfig(
-    msg: Extract<McpQueryMessage, { runId: string; requestId: string }>,
-    client: net.Socket,
-  ): { cfg: WorkflowConfigLike; projectId: number } | null {
-    const cfg = this.deps.workflowConfig;
-    if (!cfg) {
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: false,
-        error: 'workflow_config_unavailable',
-      });
-      return null;
-    }
-    const ctx = this.resolveTaskRunContext(msg.runId);
-    if (!ctx.ok) {
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: false,
-        error: ctx.error,
-      });
-      return null;
-    }
-    return { cfg, projectId: ctx.projectId };
-  }
-
-  /** Compact workflow projection (no spec_json blob — see get_workflow for the definition). */
-  private static toCompactWorkflow(row: WorkflowRow): Record<string, unknown> {
-    return {
-      id: row.id,
-      name: row.name,
-      project_id: row.project_id,
-      scope: row.project_id === null ? 'global' : 'project',
-      is_built_in: row.project_id === null && isCyboflowWorkflowName(row.name),
-      permission_mode: row.permission_mode,
-      // A non-empty, non-'{}' spec_json means the row's CUSTOM SLOT is filled
-      // (migration 122) — i.e. `tuning_level: 'custom'` has something to
-      // resolve. The full graph is on get_workflow, not here.
-      has_custom_spec: hasCustomSpecSlot(row.spec_json),
-      // Which definition this flow resolves (migration 122). Reported alongside
-      // has_custom_spec because the two answer different questions: a flow can
-      // hold a custom definition while running 'efficient'.
-      tuning_level: row.tuning_level,
-      // Which provider runs each step (migration 128). Orthogonal to the level;
-      // the mix is materialized only into a RUN's frozen spec, so get_workflow's
-      // definition stays mix-free and this stamp is the only place a reader sees it.
-      runtime_mix: row.runtime_mix,
-      created_at: row.created_at,
-    };
-  }
-
-  /** Compact variant projection (omits the spec_json / agent_overrides_json blobs). */
-  private static toCompactVariant(row: WorkflowVariantRow): Record<string, unknown> {
-    return {
-      id: row.id,
-      workflow_id: row.workflow_id,
-      label: row.label,
-      model: row.model,
-      execution_model: row.execution_model,
-      weight: row.weight,
-      status: row.status,
-      tuning_level: row.tuning_level,
-      has_agent_overrides: row.agent_overrides_json !== null,
-      created_at: row.created_at,
-      updated_at: row.updated_at,
-    };
-  }
-
-  /**
-   * Parse + validate a JSON-encoded WorkflowDefinition with the SAME strict
-   * schema the tRPC write path runs as `.input()`. Returns the parsed definition
-   * or null after writing an ok:false response (bad JSON → 'invalid_json',
-   * schema violation → 'invalid_definition').
-   */
-  private parseDefinitionJson(
-    definitionJson: string,
-    requestId: string,
-    client: net.Socket,
-  ): WorkflowDefinition | null {
-    let raw: unknown;
-    try {
-      raw = JSON.parse(definitionJson);
-    } catch {
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId,
-        ok: false,
-        error: 'invalid_json',
-      });
-      return null;
-    }
-    const parsed = workflowDefinitionSchema.safeParse(raw);
-    if (!parsed.success) {
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId,
-        ok: false,
-        error: 'invalid_definition',
-      });
-      return null;
-    }
-    return parsed.data;
-  }
-
-  /**
-   * Map a WorkflowRegistry guard Error to an ok:false code by its distinguishable
-   * message substring (parity with the workflows/variants tRPC error mapping):
-   *   'not found' → not_found; 'run history' → run_history;
-   *   'already exists' → already_exists; 'reserved' → reserved;
-   *   otherwise → workflow_config_failed (logged).
-   */
-  private writeWorkflowConfigError(client: net.Socket, requestId: string, err: unknown): void {
-    const message = err instanceof Error ? err.message : String(err);
-    let error = 'workflow_config_failed';
-    if (message.includes('not found')) error = 'not_found';
-    else if (message.includes('run history')) error = 'run_history';
-    else if (message.includes('already exists')) error = 'already_exists';
-    else if (message.includes('reserved')) error = 'reserved';
-    else if (message.includes('unresolvable')) error = 'unresolvable';
-    else if (message.includes('cannot reset')) error = 'not_a_builtin';
-    else {
-      this.logger?.error('[Cyboflow MCP Query] workflow config change failed', { error: message });
-    }
-    this.writeResponse(client, { type: 'mcp-query-response', requestId, ok: false, error });
-  }
-
-  private handleListWorkflows(
-    msg: Extract<McpQueryMessage, { type: 'mcp-list-workflows' }>,
-    client: net.Socket,
-  ): void {
-    const resolved = this.resolveWorkflowConfig(msg, client);
-    if (!resolved) return;
-    const { cfg, projectId } = resolved;
-    // Reconcile the in-repo built-ins as global rows first (mirrors the tRPC
-    // list) so a fresh project sees planner/sprint/compound/ship.
-    cfg.ensureGlobalBuiltIns();
-    const rows = cfg.listByProject(projectId);
-    this.writeResponse(client, {
-      type: 'mcp-query-response',
-      requestId: msg.requestId,
-      ok: true,
-      data: { workflows: rows.map((r) => McpQueryHandler.toCompactWorkflow(r)) },
-    });
-  }
-
-  private handleGetWorkflow(
-    msg: Extract<McpQueryMessage, { type: 'mcp-get-workflow' }>,
-    client: net.Socket,
-  ): void {
-    const resolved = this.resolveWorkflowConfig(msg, client);
-    if (!resolved) return;
-    const { cfg } = resolved;
-    const row = cfg.getById(msg.workflowId);
-    if (!row) {
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: false,
-        error: 'not_found',
-      });
-      return;
-    }
-    // The EFFECTIVE definition the editor seeds from — the one this flow's
-    // TUNING LEVEL selects (migration 122): a preset level's transform over the
-    // built-in, the custom slot at 'custom', null for a broken custom flow.
-    // The level itself rides along on the compact workflow projection, so a
-    // caller can tell what it is looking at before editing it back.
-    const definition = cfg.getEffectiveDefinition(msg.workflowId);
-    const baselineRotation = cfg.getBaselineRotation(msg.workflowId);
-    this.writeResponse(client, {
-      type: 'mcp-query-response',
-      requestId: msg.requestId,
-      ok: true,
-      data: {
-        workflow: McpQueryHandler.toCompactWorkflow(row),
-        definition,
-        baseline_rotation: baselineRotation,
-      },
-    });
-  }
-
-  private handleUpdateWorkflow(
-    msg: Extract<McpQueryMessage, { type: 'mcp-update-workflow' }>,
-    client: net.Socket,
-  ): void {
-    const resolved = this.resolveWorkflowConfig(msg, client);
-    if (!resolved) return;
-    const definition = this.parseDefinitionJson(msg.definitionJson, msg.requestId, client);
-    if (!definition) return;
-    try {
-      resolved.cfg.updateSpec(msg.workflowId, definition);
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: true,
-        data: { workflow_id: msg.workflowId },
-      });
-    } catch (err) {
-      this.writeWorkflowConfigError(client, msg.requestId, err);
-    }
-  }
-
-  private handleResetWorkflow(
-    msg: Extract<McpQueryMessage, { type: 'mcp-reset-workflow' }>,
-    client: net.Socket,
-  ): void {
-    const resolved = this.resolveWorkflowConfig(msg, client);
-    if (!resolved) return;
-    try {
-      resolved.cfg.resetSpec(msg.workflowId);
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: true,
-        data: { workflow_id: msg.workflowId },
-      });
-    } catch (err) {
-      this.writeWorkflowConfigError(client, msg.requestId, err);
-    }
-  }
-
-  private handleCreateWorkflow(
-    msg: Extract<McpQueryMessage, { type: 'mcp-create-workflow' }>,
-    client: net.Socket,
-  ): void {
-    const resolved = this.resolveWorkflowConfig(msg, client);
-    if (!resolved) return;
-    // Optional definition — omit to seed a default '{}' flow (createCustom's own
-    // default). A supplied definition is validated with the strict schema.
-    let specJson: string | undefined;
-    if (msg.definitionJson !== undefined) {
-      const definition = this.parseDefinitionJson(msg.definitionJson, msg.requestId, client);
-      if (!definition) return;
-      specJson = JSON.stringify(definition);
-    }
-    // scope 'project' pins the copy to THIS run's project; 'global' (default,
-    // the product default per the tRPC router) mints a cross-project flow.
-    const projectId = msg.scope === 'project' ? resolved.projectId : null;
-    try {
-      const row = resolved.cfg.createCustom({
-        projectId,
-        name: msg.name,
-        ...(specJson !== undefined ? { specJson } : {}),
-        ...(msg.permissionMode !== undefined ? { permissionMode: msg.permissionMode } : {}),
-      });
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: true,
-        data: { workflow: McpQueryHandler.toCompactWorkflow(row) },
-      });
-    } catch (err) {
-      this.writeWorkflowConfigError(client, msg.requestId, err);
-    }
-  }
-
-  private handleDeleteWorkflow(
-    msg: Extract<McpQueryMessage, { type: 'mcp-delete-workflow' }>,
-    client: net.Socket,
-  ): void {
-    const resolved = this.resolveWorkflowConfig(msg, client);
-    if (!resolved) return;
-    try {
-      resolved.cfg.deleteWorkflow(msg.workflowId);
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: true,
-        data: { workflow_id: msg.workflowId, deleted: true },
-      });
-    } catch (err) {
-      this.writeWorkflowConfigError(client, msg.requestId, err);
-    }
-  }
-
-  private handleListVariants(
-    msg: Extract<McpQueryMessage, { type: 'mcp-list-variants' }>,
-    client: net.Socket,
-  ): void {
-    const resolved = this.resolveWorkflowConfig(msg, client);
-    if (!resolved) return;
-    const rows = resolved.cfg.listVariants(msg.workflowId);
-    this.writeResponse(client, {
-      type: 'mcp-query-response',
-      requestId: msg.requestId,
-      ok: true,
-      data: { variants: rows.map((r) => McpQueryHandler.toCompactVariant(r)) },
-    });
-  }
-
-  private handleCreateVariant(
-    msg: Extract<McpQueryMessage, { type: 'mcp-create-variant' }>,
-    client: net.Socket,
-  ): void {
-    const resolved = this.resolveWorkflowConfig(msg, client);
-    if (!resolved) return;
-    // An explicit definition seeds the variant's frozen graph instead of the
-    // workflow's resolved one; validated the same way update_workflow validates
-    // its payload (invalid_json / invalid_definition), so a malformed graph
-    // never reaches the registry.
-    let definition: WorkflowDefinition | undefined;
-    if (msg.definitionJson !== undefined) {
-      const parsed = this.parseDefinitionJson(msg.definitionJson, msg.requestId, client);
-      if (!parsed) return;
-      definition = parsed;
-    }
-    try {
-      const row = resolved.cfg.createVariantFromCurrent(msg.workflowId, msg.label, {
-        ...(definition !== undefined ? { definition } : {}),
-        ...(msg.tuningLevel !== undefined ? { tuningLevel: msg.tuningLevel } : {}),
-      });
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: true,
-        data: { variant: McpQueryHandler.toCompactVariant(row) },
-      });
-    } catch (err) {
-      this.writeWorkflowConfigError(client, msg.requestId, err);
-    }
-  }
-
-  private handleUpdateVariant(
-    msg: Extract<McpQueryMessage, { type: 'mcp-update-variant' }>,
-    client: net.Socket,
-  ): void {
-    const resolved = this.resolveWorkflowConfig(msg, client);
-    if (!resolved) return;
-    // A supplied definition is validated + re-serialized; agent_overrides_json is
-    // stored verbatim (already a JSON string or explicit null clearing it).
-    let specJson: string | undefined;
-    if (msg.definitionJson !== undefined) {
-      const definition = this.parseDefinitionJson(msg.definitionJson, msg.requestId, client);
-      if (!definition) return;
-      specJson = JSON.stringify(definition);
-    }
-    try {
-      resolved.cfg.updateVariant(msg.variantId, {
-        ...(specJson !== undefined ? { specJson } : {}),
-        ...(msg.agentOverridesJson !== undefined ? { agentOverridesJson: msg.agentOverridesJson } : {}),
-        ...(msg.model !== undefined ? { model: msg.model } : {}),
-        ...(msg.executionModel !== undefined ? { executionModel: msg.executionModel } : {}),
-        ...(msg.weight !== undefined ? { weight: msg.weight } : {}),
-        ...(msg.label !== undefined ? { label: msg.label } : {}),
-      });
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: true,
-        data: { variant_id: msg.variantId },
-      });
-    } catch (err) {
-      this.writeWorkflowConfigError(client, msg.requestId, err);
-    }
-  }
-
-  private handleSetVariantStatus(
-    msg: Extract<McpQueryMessage, { type: 'mcp-set-variant-status' }>,
-    client: net.Socket,
-  ): void {
-    const resolved = this.resolveWorkflowConfig(msg, client);
-    if (!resolved) return;
-    try {
-      resolved.cfg.setVariantStatus(msg.variantId, msg.status);
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: true,
-        data: { variant_id: msg.variantId, status: msg.status },
-      });
-    } catch (err) {
-      this.writeWorkflowConfigError(client, msg.requestId, err);
-    }
-  }
-
-  private handleDeleteVariant(
-    msg: Extract<McpQueryMessage, { type: 'mcp-delete-variant' }>,
-    client: net.Socket,
-  ): void {
-    const resolved = this.resolveWorkflowConfig(msg, client);
-    if (!resolved) return;
-    try {
-      resolved.cfg.deleteVariant(msg.variantId);
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: true,
-        data: { variant_id: msg.variantId, deleted: true },
-      });
-    } catch (err) {
-      this.writeWorkflowConfigError(client, msg.requestId, err);
-    }
-  }
-
-  private handleSetBaselineRotation(
-    msg: Extract<McpQueryMessage, { type: 'mcp-set-baseline-rotation' }>,
-    client: net.Socket,
-  ): void {
-    const resolved = this.resolveWorkflowConfig(msg, client);
-    if (!resolved) return;
-    try {
-      resolved.cfg.setBaselineRotation(msg.workflowId, {
-        ...(msg.inRotation !== undefined ? { inRotation: msg.inRotation } : {}),
-        ...(msg.weight !== undefined ? { weight: msg.weight } : {}),
-      });
-      const updated = resolved.cfg.getBaselineRotation(msg.workflowId);
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: true,
-        data: { workflow_id: msg.workflowId, baseline_rotation: updated },
-      });
-    } catch (err) {
-      this.writeWorkflowConfigError(client, msg.requestId, err);
-    }
-  }
-
-  // --------------------------------------------------------------------------
-  // Global-agent tool family (S0.4)
-  // --------------------------------------------------------------------------
-
-  /** Read a raw `workflows` row directly (no WorkflowConfigLike dep needed for a read). Null when absent. */
-  private readWorkflowRow(workflowId: string): WorkflowRow | null {
-    const row = this.db
-      .prepare(
-        `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, tuning_level, runtime_mix, created_at, archived_at
-           FROM workflows WHERE id = ?`,
-      )
-      .get(workflowId) as WorkflowRow | undefined;
-    return row ?? null;
-  }
-
   /**
    * Resolve a display ref (e.g. 'TASK-014') to its opaque id in ANY project.
    * Unlike resolveBacklogRef (single-project-scoped — used by the run-write
@@ -7302,7 +5436,7 @@ export class McpQueryHandler {
     // toCompactTask omits it — a single-project caller already knows its own
     // project); spread + add rather than duplicate the whole projection.
     const tasks = filtered.map((item) => ({
-      ...McpQueryHandler.toCompactTask(item),
+      ...toCompactTask(item),
       project_id: item.project_id,
     }));
 
@@ -7347,7 +5481,7 @@ export class McpQueryHandler {
       return;
     }
 
-    const task = McpQueryHandler.toFullTask(item);
+    const task = toFullTask(item);
     if (item.type === 'idea') {
       const attachments = selectIdeaAttachments(this.db, item.id);
       task['attachments'] = McpQueryHandler.toMcpAttachments(attachments);
@@ -7390,8 +5524,15 @@ export class McpQueryHandler {
     });
   }
 
-  private handleAgentWorkflows(
-    msg: Extract<McpQueryMessage, { type: 'mcp-workflows' }>,
+  // --------------------------------------------------------------------------
+  // Custom-widget authoring tools (cyboflow_db_schema / _widget_preview /
+  // _widget_save) — docs/proposals/CUSTOM-VIEWS.md §7.2 / §9 row S6. All three
+  // fail closed with 'custom_views_unavailable' when the `customViews` dep is
+  // absent, mirroring the workflowConfig / agentThreadStore precedent above.
+  // --------------------------------------------------------------------------
+
+  private handleDbSchema(
+    msg: Extract<McpQueryMessage, { type: 'mcp-db-schema' }>,
     client: net.Socket,
   ): void {
     const ctx = resolveGlobalAgentContext(msg.runId);
@@ -7399,934 +5540,171 @@ export class McpQueryHandler {
       this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
       return;
     }
-
-    // Same exclusion + "must resolve to a usable definition" filter as
-    // WorkflowRegistry.listByProject, but scanning every project at once
-    // (or one project when msg.projectId narrows) rather than unioning
-    // (project_id = ? OR project_id IS NULL) per-project — there is no
-    // per-project repetition to dedupe here.
-    const excluded = [QUICK_WORKFLOW_NAME, ...LEGACY_DROPPED_WORKFLOW_NAMES];
-    const placeholders = excluded.map(() => '?').join(', ');
-    const clauses = [`name NOT IN (${placeholders})`];
-    const params: unknown[] = [...excluded];
-    if (msg.projectId !== undefined) {
-      clauses.push('(project_id = ? OR project_id IS NULL)');
-      params.push(msg.projectId);
+    const customViews = this.deps.customViews;
+    if (!customViews) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'custom_views_unavailable' });
+      return;
     }
-    const rows = this.db
-      .prepare(
-        `SELECT id, project_id, name, workflow_path, permission_mode, spec_json, tuning_level, runtime_mix, created_at, archived_at
-           FROM workflows
-          WHERE ${clauses.join(' AND ')}
-          ORDER BY name`,
-      )
-      .all(...params) as WorkflowRow[];
-    const usable = rows.filter(
-      (row) => resolveEffectiveDefinition(row.name, row.spec_json, row.tuning_level) !== null,
-    );
-
-    this.writeResponse(client, {
-      type: 'mcp-query-response',
-      requestId: msg.requestId,
-      ok: true,
-      data: { workflows: usable.map((r) => McpQueryHandler.toCompactWorkflow(r)) },
-    });
+    const tables = customViews.dbSchema();
+    const filtered = msg.table ? tables.filter((t) => t.table === msg.table) : tables;
+    this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: true, data: { tables: filtered } });
   }
 
-  private handleAgentWorkflow(
-    msg: Extract<McpQueryMessage, { type: 'mcp-workflow' }>,
+  private async handleWidgetPreview(
+    msg: Extract<McpQueryMessage, { type: 'mcp-widget-preview' }>,
     client: net.Socket,
-  ): void {
+  ): Promise<void> {
     const ctx = resolveGlobalAgentContext(msg.runId);
     if (!ctx.ok) {
       this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
       return;
     }
-
-    const row = this.readWorkflowRow(msg.workflowId);
-    if (!row) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'not_found' });
-      return;
-    }
-    const definition = resolveEffectiveDefinition(row.name, row.spec_json, row.tuning_level);
-    const baselineRow = this.db
-      .prepare(
-        'SELECT baseline_in_rotation AS inRotation, baseline_rotation_weight AS weight FROM workflows WHERE id = ?',
-      )
-      .get(msg.workflowId) as { inRotation: number; weight: number } | undefined;
-
-    this.writeResponse(client, {
-      type: 'mcp-query-response',
-      requestId: msg.requestId,
-      ok: true,
-      data: {
-        workflow: McpQueryHandler.toCompactWorkflow(row),
-        definition,
-        baseline_rotation: baselineRow ? { inRotation: baselineRow.inRotation === 1, weight: baselineRow.weight } : null,
-        // CAS material for a future cyboflow_propose_action{kind:'edit-workflow'}
-        // call — null only when the row is a broken custom flow with no
-        // resolvable definition (definition is also null in that case).
-        spec_hash: definition !== null ? computeSpecHash(definition) : null,
-      },
-    });
-  }
-
-  private handleProposeAction(
-    msg: Extract<McpQueryMessage, { type: 'mcp-propose-action' }>,
-    client: net.Socket,
-  ): void {
-    const ctx = resolveGlobalAgentContext(msg.runId);
-    if (!ctx.ok) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
-      return;
-    }
-    const store = this.deps.agentThreadStore;
-    if (!store) {
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: false,
-        error: 'agent_thread_store_unavailable',
-      });
+    const customViews = this.deps.customViews;
+    if (!customViews) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'custom_views_unavailable' });
       return;
     }
 
-    let raw: unknown;
+    let rawSpec: unknown;
     try {
-      raw = JSON.parse(msg.payloadJson);
+      rawSpec = JSON.parse(msg.specJson);
     } catch {
       this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_json' });
       return;
     }
-    const payload = parseAgentProposalPayload(raw);
-    if (!payload) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_payload' });
-      return;
-    }
-
-    // Preconditions are ALWAYS captured server-side here — the wire payload
-    // carries no precondition field for the caller to even attempt to spoof;
-    // this re-read is what makes that true rather than merely documented.
-    let preconditions: AgentProposalPreconditions | null = null;
-    if (payload.kind === 'edit-workflow') {
-      const row = this.readWorkflowRow(payload.workflowId);
-      if (!row) {
-        this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'workflow_not_found' });
-        return;
-      }
-      // The EFFECTIVE definition (migration 122) — must match what the proposal
-      // executor's `readEffectiveWorkflowSpec` re-reads at apply time, or the
-      // CAS hash never matches and every edit-workflow proposal is refused.
-      const definition = resolveEffectiveDefinition(row.name, row.spec_json, row.tuning_level);
-      if (definition === null) {
-        this.writeResponse(client, {
-          type: 'mcp-query-response',
-          requestId: msg.requestId,
-          ok: false,
-          error: 'workflow_unresolvable',
-        });
-        return;
-      }
-      preconditions = { kind: 'edit-workflow', specHash: computeSpecHash(definition) };
-    } else if (payload.kind === 'reprioritize-backlog') {
-      const expectedVersions: Record<string, number> = {};
-      for (const item of payload.items) {
-        const identity = this.readTaskIdentity(item.taskId);
-        if (!identity) {
-          this.writeResponse(client, {
-            type: 'mcp-query-response',
-            requestId: msg.requestId,
-            ok: false,
-            error: `task_not_found:${item.taskId}`,
-          });
-          return;
-        }
-        expectedVersions[item.taskId] = identity.version;
-      }
-      preconditions = { kind: 'reprioritize-backlog', expectedVersions };
-    } else if (payload.kind === 'open-session') {
-      // No preconditions (shared type contract), but the navigation target IS
-      // enriched here with its OWNING project, resolved server-side from the
-      // run/session row itself — never trust a caller-supplied projectId
-      // (parseAgentNavigationTarget never even copies one out of the wire
-      // payload, so this is the only source). The renderer
-      // (frontend/src/components/agentRail/proposalNavigation.ts) activates
-      // this project before dispatching navigation, since the global agent is
-      // cross-project by design and the target run/session may not belong to
-      // whatever project happens to be active when the card is confirmed. A
-      // target that does not resolve to a real row is an agent mistake, not
-      // something to persist as a broken card — reject the proposal outright
-      // rather than let it round-trip a stale/typo'd id.
-      const nav = payload.navigation;
-      if (nav.target === 'run') {
-        const row = this.db.prepare('SELECT project_id FROM workflow_runs WHERE id = ?').get(nav.runId) as
-          | { project_id?: unknown }
-          | undefined;
-        if (!row || typeof row.project_id !== 'number') {
-          this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'run_not_found' });
-          return;
-        }
-        payload.navigation = { target: 'run', runId: nav.runId, projectId: row.project_id };
-      } else {
-        const row = this.db.prepare('SELECT project_id FROM sessions WHERE id = ?').get(nav.sessionId) as
-          | { project_id?: unknown }
-          | undefined;
-        if (!row || typeof row.project_id !== 'number') {
-          this.writeResponse(client, {
-            type: 'mcp-query-response',
-            requestId: msg.requestId,
-            ok: false,
-            error: 'session_not_found',
-          });
-          return;
-        }
-        payload.navigation =
-          nav.runId !== undefined
-            ? { target: 'quick-session', sessionId: nav.sessionId, runId: nav.runId, projectId: row.project_id }
-            : { target: 'quick-session', sessionId: nav.sessionId, projectId: row.project_id };
-      }
-    } else if (payload.kind === 'create-backlog-items') {
-      // No preconditions (a create has no prior version to race against), but the
-      // project and every EXISTING entity the batch links to are validated here —
-      // and each link is normalized from a display ref to an opaque id, the same
-      // resolveBacklogRef pass handleCreateTask makes. Rejecting now, at propose
-      // time, is what keeps a confirmed card from dying on a typo'd parent long
-      // after the human approved it.
-      const projectExists =
-        this.db.prepare('SELECT 1 FROM projects WHERE id = ?').get(payload.projectId) !== undefined;
-      if (!projectExists) {
-        this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'project_not_found' });
-        return;
-      }
-      for (const item of payload.items) {
-        if (item.parentEpicId !== undefined) {
-          const resolved = this.resolveExistingEntity(payload.projectId, item.parentEpicId, 'epic');
-          if (!resolved) {
-            this.writeResponse(client, {
-              type: 'mcp-query-response',
-              requestId: msg.requestId,
-              ok: false,
-              error: `parent_epic_not_found:${item.parentEpicId}`,
-            });
-            return;
-          }
-          item.parentEpicId = resolved;
-        }
-        if (item.originatingIdeaId !== undefined) {
-          const resolved = this.resolveExistingEntity(payload.projectId, item.originatingIdeaId, 'idea');
-          if (!resolved) {
-            this.writeResponse(client, {
-              type: 'mcp-query-response',
-              requestId: msg.requestId,
-              ok: false,
-              error: `originating_idea_not_found:${item.originatingIdeaId}`,
-            });
-            return;
-          }
-          item.originatingIdeaId = resolved;
-        }
-      }
-    }
-    // launch-run carries no preconditions (shared type contract).
-
-    const proposal = store.createProposal({ threadId: ctx.threadId, payload, preconditions });
-    store.appendEvent(
-      ctx.threadId,
-      'proposal-created',
-      JSON.stringify({ proposalId: proposal.id, kind: proposal.kind }),
-    );
-
-    this.writeResponse(client, {
-      type: 'mcp-query-response',
-      requestId: msg.requestId,
-      ok: true,
-      data: { proposalId: proposal.id },
-    });
-  }
-
-  /**
-   * Returns the cached readonly sibling connection, opening it on first use.
-   * Throws (never returns a connection able to write) when `this.db.name` is
-   * absent/empty or ':memory:' — an in-memory or adapter-less DatabaseLike
-   * has no on-disk file for a sibling connection to point at (this is the
-   * common shape in unit tests that don't go through makeDatabaseLike/
-   * dbAdapter). Read-only is enforced BY CONSTRUCTION here via `{ readonly:
-   * true }` — SQLite itself refuses any write attempted through this handle,
-   * independent of validateReadonlySql's statement-shape checks.
-   */
-  private getGlobalAgentReadonlyDb(): BetterSqlite3Database.Database {
-    if (this.globalAgentReadonlyDb) return this.globalAgentReadonlyDb;
-    const dbPath = this.db.name;
-    if (!dbPath || dbPath === ':memory:') {
-      throw new Error('db_query_unavailable: no on-disk database file for this connection');
-    }
-    this.globalAgentReadonlyDb = new BetterSqlite3Database(dbPath, { readonly: true, fileMustExist: true });
-    return this.globalAgentReadonlyDb;
-  }
-
-  private handleAgentDbQuery(
-    msg: Extract<McpQueryMessage, { type: 'mcp-db-query' }>,
-    client: net.Socket,
-  ): void {
-    const ctx = resolveGlobalAgentContext(msg.runId);
-    if (!ctx.ok) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
-      return;
-    }
-
-    const validation = validateReadonlySql(msg.sql);
-    if (!validation.ok) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: validation.reason });
-      return;
-    }
-
-    // Errors from here (unreachable db file, sqlite syntax errors, unknown
-    // tables, or SQLite's own readonly-connection write refusal) are left to
-    // propagate — handleMessage's outer try/catch turns them into a
-    // structured ok:false response carrying sqlite's message, same as every
-    // other handler in this file.
-    const readonlyDb = this.getGlobalAgentReadonlyDb();
-    const stmt = readonlyDb.prepare(validation.sql);
-
-    if (!stmt.reader) {
-      // A non-reader statement (e.g. a write form that slipped past
-      // validateReadonlySql, such as `WITH x AS (SELECT 1) INSERT ...`) is
-      // NEVER executed — calling .run() is exactly the write attempt the
-      // readonly connection exists to prevent, so we simply decline rather
-      // than let SQLite throw mid-write.
-      this.writeResponse(client, {
-        type: 'mcp-query-response',
-        requestId: msg.requestId,
-        ok: true,
-        data: { columns: [], rows: [], rowCount: 0, truncated: false, note: 'statement returned no rows' },
-      });
-      return;
-    }
-
-    const columns = stmt.columns().map((c) => c.name);
-    const rows: Array<Record<string, unknown>> = [];
-    let truncated = false;
-    let payloadBytes = 0;
-    for (const rawRow of stmt.iterate()) {
-      if (rows.length >= DB_QUERY_MAX_ROWS) {
-        truncated = true;
-        break;
-      }
-      const sanitized = sanitizeDbQueryRow(rawRow as Record<string, unknown>);
-      const size = Buffer.byteLength(JSON.stringify(sanitized), 'utf8');
-      if (rows.length > 0 && payloadBytes + size > DB_QUERY_MAX_PAYLOAD_BYTES) {
-        truncated = true;
-        break;
-      }
-      rows.push(sanitized);
-      payloadBytes += size;
-    }
-
-    this.writeResponse(client, {
-      type: 'mcp-query-response',
-      requestId: msg.requestId,
-      ok: true,
-      data: { columns, rows, rowCount: rows.length, truncated },
-    });
-  }
-
-  // --------------------------------------------------------------------------
-  // Global-agent filesystem tools (cyboflow_fs_read / _list / _grep)
-  //
-  // READ-ONLY and FOLDER-SCOPED. Enforcement is entirely server-side here — the
-  // agent's isolation contract (tools:[], PreToolUse allowing only
-  // mcp__cyboflow__*) is untouched. The allowed roots are the registered
-  // project paths PLUS the user-configured assistantFolderAccess extras; every
-  // target is canonicalized with realpathSync and must land inside a
-  // canonicalized root (defeating symlink escapes), and read/grep content
-  // access additionally refuses secret files even when they are in scope.
-  // --------------------------------------------------------------------------
-
-  /**
-   * The canonicalized set of folders the fs tools may read: every registered
-   * `projects.path` plus every `getAssistantFolderAccess()` extra, each passed
-   * through realpathSync (so a symlinked root is compared as its real target).
-   * Roots that don't exist on disk are DROPPED rather than throwing — a stale
-   * project row must never break the tools for the live folders. Cheap enough
-   * to recompute per call (no caching).
-   */
-  private resolveFsAllowedRoots(): string[] {
-    const raw = new Set<string>();
-    // Project folders the user toggled off — subtracted from the project roots
-    // below (compared by the raw stored path, exactly what the Settings UI
-    // toggles off). Extras are never excluded.
-    const excludedProjects = new Set(this.deps.getAssistantExcludedProjectPaths?.() ?? []);
-    try {
-      const rows = this.db.prepare('SELECT path FROM projects').all() as Array<{ path?: unknown }>;
-      for (const row of rows) {
-        if (typeof row.path === 'string' && row.path.length > 0 && !excludedProjects.has(row.path)) {
-          raw.add(row.path);
-        }
-      }
-    } catch {
-      // A missing projects table (bare test fixture) simply yields no project
-      // roots — the configured extras still apply.
-    }
-    const extras = this.deps.getAssistantFolderAccess?.() ?? [];
-    for (const entry of extras) {
-      if (typeof entry === 'string' && entry.length > 0) raw.add(entry);
-    }
-    const canonical: string[] = [];
-    for (const root of raw) {
-      try {
-        canonical.push(realpathSync(root));
-      } catch {
-        // Skip a root that no longer exists — never throw.
-      }
-    }
-    return canonical;
-  }
-
-  /**
-   * Resolve + scope-check a requested path for the fs tools. Canonicalizes with
-   * realpathSync (a nonexistent target throws → 'not_found') then requires the
-   * real path to be inside one of the allowed roots (else 'scope_denied', whose
-   * message names the roots so the model can self-correct). Shared by all three
-   * fs handlers.
-   */
-  private resolveFsTarget(
-    requestedPath: unknown,
-  ):
-    | { ok: true; real: string; roots: string[] }
-    | { ok: false; error: string } {
-    if (typeof requestedPath !== 'string' || requestedPath.length === 0) {
-      return { ok: false, error: 'invalid_arguments: path must be a non-empty string' };
-    }
-    const roots = this.resolveFsAllowedRoots();
-    let real: string;
-    try {
-      real = realpathSync(requestedPath);
-    } catch {
-      return { ok: false, error: 'not_found' };
-    }
-    if (!isPathWithinRoots(real, roots)) {
-      const rootList = roots.length > 0 ? roots.join(', ') : '(none registered)';
-      return { ok: false, error: `scope_denied (allowed roots: ${rootList})` };
-    }
-    return { ok: true, real, roots };
-  }
-
-  /** True when a file's first BINARY_SNIFF_BYTES contain a NUL byte. */
-  private fileLooksBinary(absPath: string): boolean {
-    const fd = openSync(absPath, 'r');
-    try {
-      const buf = Buffer.alloc(BINARY_SNIFF_BYTES);
-      const read = readSync(fd, buf, 0, BINARY_SNIFF_BYTES, 0);
-      return bufferLooksBinary(buf.subarray(0, read));
-    } finally {
-      closeSync(fd);
-    }
-  }
-
-  private handleFsRead(
-    msg: Extract<McpQueryMessage, { type: 'mcp-fs-read' }>,
-    client: net.Socket,
-  ): void {
-    const ctx = resolveGlobalAgentContext(msg.runId);
-    if (!ctx.ok) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
-      return;
-    }
-    const resolved = this.resolveFsTarget(msg.path);
-    if (!resolved.ok) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: resolved.error });
-      return;
-    }
-    if (isSecretPath(resolved.real)) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'denied_secret_pattern' });
-      return;
-    }
-    let stat: Stats;
-    try {
-      stat = statSync(resolved.real);
-    } catch {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'not_found' });
-      return;
-    }
-    if (stat.isDirectory()) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'is_a_directory' });
-      return;
-    }
-    if (this.fileLooksBinary(resolved.real)) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'binary_file' });
-      return;
-    }
-
-    const buffer = readFileSync(resolved.real);
-    const totalBytes = buffer.length;
-
-    // Line-window paging (1-based offsetLine) for large files, else a raw
-    // byte-capped slice. Either way the returned content is floored at
-    // FS_READ_MAX_BYTES with `truncated` set when content was dropped.
-    let content: string;
-    let truncated = false;
-    const hasLineWindow =
-      (typeof msg.offsetLine === 'number' && msg.offsetLine > 0) ||
-      (typeof msg.limitLines === 'number' && msg.limitLines > 0);
-    if (hasLineWindow) {
-      const lines = buffer.toString('utf8').split('\n');
-      const start = typeof msg.offsetLine === 'number' && msg.offsetLine > 0 ? msg.offsetLine - 1 : 0;
-      const count = typeof msg.limitLines === 'number' && msg.limitLines > 0 ? msg.limitLines : lines.length;
-      const windowText = lines.slice(start, start + count).join('\n');
-      if (start + count < lines.length || start > 0) truncated = true;
-      const windowBuf = Buffer.from(windowText, 'utf8');
-      if (windowBuf.length > FS_READ_MAX_BYTES) {
-        content = windowBuf.subarray(0, FS_READ_MAX_BYTES).toString('utf8');
-        truncated = true;
-      } else {
-        content = windowText;
-      }
-    } else if (totalBytes > FS_READ_MAX_BYTES) {
-      content = buffer.subarray(0, FS_READ_MAX_BYTES).toString('utf8');
-      truncated = true;
-    } else {
-      content = buffer.toString('utf8');
-    }
-
-    this.writeResponse(client, {
-      type: 'mcp-query-response',
-      requestId: msg.requestId,
-      ok: true,
-      data: { path: resolved.real, content, truncated, totalBytes },
-    });
-  }
-
-  private handleFsList(
-    msg: Extract<McpQueryMessage, { type: 'mcp-fs-list' }>,
-    client: net.Socket,
-  ): void {
-    const ctx = resolveGlobalAgentContext(msg.runId);
-    if (!ctx.ok) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
-      return;
-    }
-    const resolved = this.resolveFsTarget(msg.path);
-    if (!resolved.ok) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: resolved.error });
-      return;
-    }
-    let stat: Stats;
-    try {
-      stat = statSync(resolved.real);
-    } catch {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'not_found' });
-      return;
-    }
-    if (!stat.isDirectory()) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'not_a_directory' });
-      return;
-    }
-
-    // Listing is metadata-only (NOT secret-filtered): a secret file's name is
-    // surfaced but its content stays unreachable via read/grep.
-    const dirents = readdirSync(resolved.real, { withFileTypes: true });
-    const entries: Array<{ name: string; type: 'file' | 'dir' | 'symlink'; size: number }> = [];
-    let truncated = false;
-    for (const dirent of dirents) {
-      if (entries.length >= FS_LIST_MAX_ENTRIES) {
-        truncated = true;
-        break;
-      }
-      let type: 'file' | 'dir' | 'symlink';
-      if (dirent.isSymbolicLink()) type = 'symlink';
-      else if (dirent.isDirectory()) type = 'dir';
-      else type = 'file';
-      let size = 0;
-      try {
-        // lstat so a symlink (esp. a broken one) reports its own size, never
-        // its (possibly out-of-scope / missing) target.
-        size = lstatSync(path.join(resolved.real, dirent.name)).size;
-      } catch {
-        size = 0;
-      }
-      entries.push({ name: dirent.name, type, size });
-    }
-
-    this.writeResponse(client, {
-      type: 'mcp-query-response',
-      requestId: msg.requestId,
-      ok: true,
-      data: { path: resolved.real, entries, truncated },
-    });
-  }
-
-  private handleFsGrep(
-    msg: Extract<McpQueryMessage, { type: 'mcp-fs-grep' }>,
-    client: net.Socket,
-  ): void {
-    const ctx = resolveGlobalAgentContext(msg.runId);
-    if (!ctx.ok) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
-      return;
-    }
-    if (typeof msg.pattern !== 'string' || msg.pattern.length === 0) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_arguments: pattern must be a non-empty string' });
-      return;
-    }
-    const resolved = this.resolveFsTarget(msg.path);
-    if (!resolved.ok) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: resolved.error });
-      return;
-    }
-
-    let regex: RegExp;
-    try {
-      regex = new RegExp(msg.pattern, msg.caseSensitive === true ? '' : 'i');
-    } catch {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_regex' });
-      return;
-    }
-
-    const maxResults = Math.max(
-      1,
-      Math.min(
-        typeof msg.maxResults === 'number' && msg.maxResults > 0 ? Math.floor(msg.maxResults) : FS_GREP_MAX_RESULTS,
-        FS_GREP_MAX_RESULTS,
-      ),
-    );
-    const globRe = compileBasenameGlob(typeof msg.glob === 'string' ? msg.glob : '');
-
-    const matches: Array<{ file: string; line: number; text: string }> = [];
-    let filesScanned = 0;
-    let truncated = false;
-
-    // Grep a single file's content into `matches`. Returns false to signal the
-    // caller to stop the whole walk (a cap was hit).
-    const grepFile = (absPath: string): boolean => {
-      let content: string;
-      try {
-        content = readFileSync(absPath, 'utf8');
-      } catch {
-        return true; // unreadable — skip, keep walking
-      }
-      const lines = content.split('\n');
-      for (let i = 0; i < lines.length; i++) {
-        regex.lastIndex = 0;
-        if (!regex.test(lines[i])) continue;
-        if (matches.length >= maxResults) {
-          truncated = true;
-          return false;
-        }
-        const raw = lines[i];
-        matches.push({
-          file: absPath,
-          line: i + 1,
-          text: raw.length > FS_GREP_MAX_LINE_LEN ? `${raw.slice(0, FS_GREP_MAX_LINE_LEN)}…` : raw,
-        });
-      }
-      return true;
-    };
-
-    // Depth-first walk with its OWN recursion — never follows symlinks (dir or
-    // file) and skips GREP_SKIP_DIRS. Returns false when a cap stops the walk.
-    const walk = (dir: string): boolean => {
-      let dirents: Dirent[];
-      try {
-        dirents = readdirSync(dir, { withFileTypes: true });
-      } catch {
-        return true; // unreadable dir — skip
-      }
-      for (const dirent of dirents) {
-        if (dirent.isSymbolicLink()) continue; // never follow symlinks
-        const full = path.join(dir, dirent.name);
-        if (dirent.isDirectory()) {
-          if (GREP_SKIP_DIRS.has(dirent.name)) continue;
-          if (!walk(full)) return false;
-          continue;
-        }
-        if (!dirent.isFile()) continue;
-        if (!matchesBasenameGlob(dirent.name, globRe)) continue;
-        if (isSecretPath(full)) continue; // deny content of secret files
-        if (filesScanned >= FS_GREP_MAX_FILES) {
-          truncated = true;
-          return false;
-        }
-        filesScanned += 1;
-        try {
-          // Oversized files are skipped outright — grepFile reads the whole
-          // file into memory, so a giant in-scope log must not balloon the
-          // main process.
-          if (lstatSync(full).size > FS_GREP_MAX_FILE_BYTES) continue;
-          if (this.fileLooksBinary(full)) continue; // skip binaries
-        } catch {
-          continue;
-        }
-        if (!grepFile(full)) return false;
-      }
-      return true;
-    };
-
-    let rootStat: Stats;
-    try {
-      rootStat = statSync(resolved.real);
-    } catch {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'not_found' });
-      return;
-    }
-    if (rootStat.isDirectory()) {
-      walk(resolved.real);
-    } else if (rootStat.isFile()) {
-      // A single-file grep target: apply the same secret guard directly.
-      if (isSecretPath(resolved.real)) {
-        this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'denied_secret_pattern' });
-        return;
-      }
-      if (matchesBasenameGlob(path.basename(resolved.real), globRe)) {
-        filesScanned += 1;
-        try {
-          if (
-            lstatSync(resolved.real).size <= FS_GREP_MAX_FILE_BYTES &&
-            !this.fileLooksBinary(resolved.real)
-          ) {
-            grepFile(resolved.real);
-          }
-        } catch {
-          /* unreadable — leave matches empty */
-        }
-      }
-    }
-
-    this.writeResponse(client, {
-      type: 'mcp-query-response',
-      requestId: msg.requestId,
-      ok: true,
-      data: { matches, truncated, filesScanned },
-    });
-  }
-
-  /**
-   * cyboflow_history (mcp-history) — READ-ONLY search/paging over the CALLING
-   * assistant thread's own `agent_thread_events` rows.
-   *
-   * THREAD SCOPING IS THE LOAD-BEARING GUARANTEE: `thread_id` is bound from
-   * resolveGlobalAgentContext(msg.runId), which rejects any non-`agent:` runId
-   * BEFORE a single DB read (mirroring handleAgentQueue). There is no
-   * caller-supplied thread argument at all, so no argument can widen the scope
-   * past the thread that is asking.
-   *
-   * TWO MODES over one walk:
-   *   search (query given) — keep turns whose decoded text contains the
-   *                          case-insensitive substring, each returned as an
-   *                          excerpt around its FIRST occurrence, `matched:
-   *                          true`. Plain indexOf, NEVER a caller regex — see
-   *                          the mcp-history union member's doc for why.
-   *   browse (no query)    — keep every decoded turn, head-truncated.
-   *
-   * The walk pages id-DESCENDING in HISTORY_BATCH_ROWS batches (never
-   * `SELECT *` over the whole table — this table is append-only and permanent)
-   * and stops at the first cap it hits: HISTORY_MAX_SCAN_ROWS rows examined,
-   * HISTORY_MAX_PAYLOAD_BYTES of serialized turns, or a (limit+1)th qualifying
-   * turn FOUND — the page is full and that unreturned find is the proof more
-   * exists. Any of those sets `truncated` and reports `nextBeforeId` — the id
-   * of the last FULLY PROCESSED row — so a follow-up call resumes exactly
-   * where this one stopped, never re-emitting and never skipping. A walk that
-   * fills the page exactly and then runs out of rows is NOT truncated: the
-   * scan keeps going after the limit is reached purely to learn whether more
-   * qualifying turns exist (bounded by the same scan cap), so `truncated:true`
-   * always means "there is more". Rows running out ends the walk with
-   * `truncated:false`, `nextBeforeId:null`.
-   *
-   * Rows whose payload carries no turn text (SDK tool_result plumbing, tool_use
-   * -only assistant events, corrupt JSON) decode to null and are skipped — they
-   * still count toward `scanned`, which is why the scan cap exists separately
-   * from `limit`.
-   */
-  private handleAgentHistory(
-    msg: Extract<McpQueryMessage, { type: 'mcp-history' }>,
-    client: net.Socket,
-  ): void {
-    const ctx = resolveGlobalAgentContext(msg.runId);
-    if (!ctx.ok) {
-      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
-      return;
-    }
-
-    // --- argument validation ------------------------------------------------
-    if (msg.role !== undefined && msg.role !== 'user' && msg.role !== 'assistant') {
+    const parsedSpec = widgetSpecSchema.safeParse(rawSpec);
+    if (!parsedSpec.success) {
       this.writeResponse(client, {
         type: 'mcp-query-response',
         requestId: msg.requestId,
         ok: false,
-        error: "invalid_arguments: role must be 'user' or 'assistant'",
+        error: 'invalid_spec',
+        data: { detail: parsedSpec.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`) },
       });
       return;
     }
-    for (const [name, value] of [
-      ['daysBack', msg.daysBack],
-      ['beforeId', msg.beforeId],
-      ['limit', msg.limit],
-    ] as const) {
-      if (value === undefined) continue;
-      if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
-        this.writeResponse(client, {
-          type: 'mcp-query-response',
-          requestId: msg.requestId,
-          ok: false,
-          error: `invalid_arguments: ${name} must be a positive finite number`,
-        });
+
+    let settings: Record<string, Scalar> = {};
+    if (msg.settingsJson !== undefined) {
+      let rawSettings: unknown;
+      try {
+        rawSettings = JSON.parse(msg.settingsJson);
+      } catch {
+        this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_settings' });
         return;
       }
-    }
-
-    // An omitted OR empty query means browse mode (an empty needle would match
-    // every turn, making the two modes differ only in excerpt shape — browsing
-    // is the clearer contract for "no search term"). The needle is matched as
-    // a case-insensitive PLAIN SUBSTRING via indexOf on lowercased text —
-    // deliberately not a RegExp: this handler runs synchronously on the main
-    // process, and a model-authored pattern with catastrophic backtracking
-    // would wedge the entire app (see the mcp-history union member's doc).
-    let needle: string | null = null;
-    if (msg.query !== undefined) {
-      if (typeof msg.query !== 'string') {
-        this.writeResponse(client, {
-          type: 'mcp-query-response',
-          requestId: msg.requestId,
-          ok: false,
-          error: 'invalid_arguments: query must be a string',
-        });
+      const parsedSettings = z.record(scalarSchema).safeParse(rawSettings);
+      if (!parsedSettings.success) {
+        this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_settings' });
         return;
       }
-      if (msg.query.length > 0) {
-        needle = msg.query.toLowerCase();
-      }
+      settings = parsedSettings.data;
     }
 
-    const limit = Math.max(
-      1,
-      Math.min(msg.limit !== undefined ? Math.floor(msg.limit) : HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT),
-    );
-    const roleFilter = msg.role;
-    // Bound as a PARAMETER to datetime('now', ?) — never interpolated into the
-    // SQL text, even though it is derived from a validated number. Clamped to
-    // HISTORY_MAX_DAYS_BACK: past the julian-day range datetime() returns NULL
-    // and `created_at >= NULL` silently filters out EVERY row (see the
-    // constant's doc) — a clamped huge value instead means "the whole table".
-    const dayModifier =
-      msg.daysBack !== undefined
-        ? `-${Math.min(Math.max(1, Math.floor(msg.daysBack)), HISTORY_MAX_DAYS_BACK)} days`
-        : null;
+    // Errors from here (e.g. `invalid_spec:<message>` when a setting doesn't
+    // resolve against the spec's declared settings) propagate to
+    // handleMessage's outer try/catch, which — via the WARN exemption above —
+    // logs this as a caller error, not an app fault: the spec is agent-authored.
+    const payload = await customViews.runWidget({
+      widget: { inline: parsedSpec.data },
+      settings,
+      refreshSec: WIDGET_LIMITS.minRefreshSec,
+      context: { projectId: msg.projectId ?? null },
+    });
 
-    // --- the id-descending walk ---------------------------------------------
-    const turns: HistoryTurn[] = [];
-    let cursor: number | null = msg.beforeId !== undefined ? Math.floor(msg.beforeId) : null;
-    /** Id of the last row processed to completion — the resume point. */
-    let lastProcessedId: number | null = null;
-    let scanned = 0;
-    let payloadBytes = 0;
-    let truncated = false;
-    let stopped = false;
-
-    while (!stopped) {
-      const clauses = [
-        'thread_id = ?',
-        "event_type IN ('user', 'assistant', 'agent_user', 'agent_assistant')",
-      ];
-      const params: unknown[] = [ctx.threadId];
-      if (cursor !== null) {
-        clauses.push('id < ?');
-        params.push(cursor);
+    // Cap each source's rows to 50 for the transcript — the real page is not
+    // capped this way; this only bounds what goes back over the wire to the
+    // model.
+    const sources: Record<string, unknown> = {};
+    for (const [name, outcome] of Object.entries(payload.sources)) {
+      if ('error' in outcome) {
+        sources[name] = outcome;
+        continue;
       }
-      if (dayModifier !== null) {
-        clauses.push("created_at >= datetime('now', ?)");
-        params.push(dayModifier);
-      }
-      params.push(HISTORY_BATCH_ROWS);
-
-      const rows = this.db
-        .prepare(
-          `SELECT id, event_type, payload_json, created_at
-             FROM agent_thread_events
-            WHERE ${clauses.join(' AND ')}
-            ORDER BY id DESC
-            LIMIT ?`,
-        )
-        .all(...params) as AgentThreadEventScanRow[];
-      if (rows.length === 0) break; // exhausted — no more transcript to page
-
-      for (const row of rows) {
-        if (scanned >= HISTORY_MAX_SCAN_ROWS) {
-          truncated = true;
-          stopped = true;
-          break;
-        }
-        scanned += 1;
-        cursor = row.id;
-
-        const turn = extractTurnText(row.event_type, row.payload_json);
-        if (turn !== null && (roleFilter === undefined || turn.role === roleFilter)) {
-          let text: string;
-          let matched = false;
-          if (needle !== null) {
-            // Lowercase-both indexOf: unconditionally O(n), immune to the
-            // backtracking blowups a caller regex could smuggle in. The rare
-            // Unicode where toLowerCase changes string length can drift the
-            // excerpt window a few chars — excerptAround clamps, so the worst
-            // case is a slightly off-center excerpt, never a crash or a miss.
-            const matchIndex = turn.text.toLowerCase().indexOf(needle);
-            if (matchIndex === -1) {
-              lastProcessedId = row.id;
-              continue; // searched and missed — row is fully processed
-            }
-            text = excerptAround(turn.text, matchIndex);
-            matched = true;
-          } else {
-            text = truncateHead(turn.text, TURN_TEXT_MAX_CHARS);
-          }
-
-          // Page already full? Then THIS qualifying turn is the proof that
-          // more exists: report truncated WITHOUT emitting it, leaving
-          // lastProcessedId pointing above it so the next page starts here.
-          // (The scan deliberately continues past `limit` to reach this point
-          // — an exact-limit walk that runs out of rows instead is complete,
-          // not truncated, and never costs the caller a wasted empty page.)
-          if (turns.length >= limit) {
-            truncated = true;
-            stopped = true;
-            break;
-          }
-
-          const entry: HistoryTurn = {
-            eventId: row.id,
-            at: row.created_at,
-            role: turn.role,
-            text,
-            ...(matched ? { matched: true } : {}),
-          };
-          const entryBytes = Buffer.byteLength(JSON.stringify(entry), 'utf8');
-          // A single oversized turn is still returned when it would otherwise
-          // be the empty answer — returning nothing would look like "no such
-          // memory" rather than "one very long memory".
-          if (turns.length > 0 && payloadBytes + entryBytes > HISTORY_MAX_PAYLOAD_BYTES) {
-            truncated = true;
-            stopped = true;
-            break; // row NOT processed — lastProcessedId still points above it
-          }
-          turns.push(entry);
-          payloadBytes += entryBytes;
-        }
-
-        lastProcessedId = row.id;
-      }
-
-      if (!stopped && rows.length < HISTORY_BATCH_ROWS) break; // short batch = exhausted
+      const cappedRows = outcome.rows.slice(0, 50);
+      sources[name] = {
+        columns: outcome.columns,
+        rows: cappedRows,
+        truncated: outcome.truncated,
+        tookMs: outcome.tookMs,
+        ...(cappedRows.length < outcome.rows.length ? { truncatedForTranscript: true } : {}),
+      };
     }
 
     this.writeResponse(client, {
       type: 'mcp-query-response',
       requestId: msg.requestId,
       ok: true,
-      data: {
-        turns,
-        truncated,
-        nextBeforeId: truncated ? lastProcessedId : null,
-        scanned,
-      },
+      data: { sources, warnings: payload.warnings, plan: payload.plan, paused: payload.paused },
     });
+  }
+
+  private handleWidgetSave(
+    msg: Extract<McpQueryMessage, { type: 'mcp-widget-save' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = resolveGlobalAgentContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+    const customViews = this.deps.customViews;
+    if (!customViews) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'custom_views_unavailable' });
+      return;
+    }
+
+    let rawSpec: unknown;
+    try {
+      rawSpec = JSON.parse(msg.specJson);
+    } catch {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'invalid_json' });
+      return;
+    }
+    const parsedSpec = widgetSpecSchema.safeParse(rawSpec);
+    if (!parsedSpec.success) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'invalid_spec',
+        data: { detail: parsedSpec.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`) },
+      });
+      return;
+    }
+
+    // No authoring session = the user asked from the rail, not from
+    // Customize -> Create a custom widget. Publish straight into the library
+    // under a throwaway session id: publishDraft clears authoring_session_id,
+    // so nothing is left claimed, and the library refresh the draft event
+    // triggers on every surface makes it show up under "Mine". A draft-only
+    // save has no slot to render in, so it is refused rather than orphaned.
+    if (msg.sessionId === undefined && !msg.publish) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: 'draft_needs_session' });
+      return;
+    }
+    const authoringSessionId = msg.sessionId ?? `library:${randomUUID()}`;
+
+    try {
+      const widget = customViews.saveWidget({
+        id: msg.widgetId,
+        name: msg.name,
+        description: msg.description ?? null,
+        spec: parsedSpec.data,
+        authoringSessionId,
+        threadId: ctx.threadId,
+        publish: msg.publish,
+      });
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { widgetId: widget.id, revision: widget.revision },
+      });
+    } catch (err) {
+      const error = err instanceof CustomViewsStoreError ? err.code : err instanceof Error ? err.message : String(err);
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error });
+    }
   }
 
   // --------------------------------------------------------------------------

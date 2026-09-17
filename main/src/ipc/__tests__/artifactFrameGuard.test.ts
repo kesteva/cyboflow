@@ -131,6 +131,53 @@ describe('scripted-frame origin registry + shell.openExternal invariant', () => 
   });
 });
 
+// Custom Views tier-3 widget document server (docs/proposals/CUSTOM-VIEWS.md
+// §5.4, §9 row S3) — CustomWidgetServerManager registers its origin through the
+// SAME registerScriptedFrameOrigin/unregisterScriptedFrameOrigin the design
+// prototype server uses (main/src/services/customWidgetServer.ts). The guard
+// functions above are origin-shaped and already generic; this block confirms
+// that holds for a widget-server-style path (`/<token>/widget/<id>/<rev>`) too:
+// a registered widget origin is confined exactly like a prototype origin, and
+// a blocked navigation is NEVER offered to shell.openExternal.
+describe('scripted-frame guard — Custom Views widget-server origin', () => {
+  const WIDGET_URL = `${ORIGIN}/tok/widget/w1/3`;
+
+  it('BLOCKS a widget frame navigating cross-origin http(s) (no external open path)', () => {
+    registerScriptedFrameOrigin(ORIGIN);
+    expect(shouldBlockScriptedFrameNavigation(WIDGET_URL, 'https://attacker.example/beacon', false, origins)).toBe(true);
+    expect(shouldBlockScriptedFrameNavigationFromRegistry(WIDGET_URL, 'https://attacker.example/beacon', false)).toBe(true);
+    unregisterScriptedFrameOrigin(ORIGIN);
+  });
+
+  it('ALLOWS a same-origin reload of the widget document', () => {
+    registerScriptedFrameOrigin(ORIGIN);
+    expect(shouldBlockScriptedFrameNavigationFromRegistry(WIDGET_URL, WIDGET_URL, false)).toBe(false);
+    unregisterScriptedFrameOrigin(ORIGIN);
+  });
+
+  it('NEVER offers a blocked widget-frame target to shell.openExternal', () => {
+    registerScriptedFrameOrigin(ORIGIN);
+    const openExternal = vi.fn();
+    const handle = (frameUrl: string, targetUrl: string, isMainFrame: boolean): void => {
+      if (shouldBlockScriptedFrameNavigationFromRegistry(frameUrl, targetUrl, isMainFrame)) {
+        return; // preventDefault + nothing else
+      }
+      if (shouldBlockArtifactFrameNavigation(frameUrl, targetUrl, isMainFrame)) {
+        if (isExternallyOpenable(targetUrl)) openExternal(targetUrl);
+      }
+    };
+    handle(WIDGET_URL, 'https://attacker.example/beacon?data=1', false);
+    handle(WIDGET_URL, 'http://evil/x', false);
+    expect(openExternal).not.toHaveBeenCalled();
+    unregisterScriptedFrameOrigin(ORIGIN);
+  });
+
+  it('once unregistered, a widget origin is no longer confined (defers to other guards)', () => {
+    expect(scriptedFrameOriginsSnapshot()).not.toContain(ORIGIN);
+    expect(shouldBlockScriptedFrameNavigationFromRegistry(WIDGET_URL, 'https://evil/x', false)).toBe(false);
+  });
+});
+
 // Design Mode v1 comment mode — the frozen-capture frame, hosted on the SAME
 // loopback origin as the prototype but confined harder (design-mode.md "Comment
 // mode": CSP does not govern document navigation, so the guard is what keeps a

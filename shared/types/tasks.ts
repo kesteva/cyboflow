@@ -38,6 +38,23 @@ export type Priority = 'P0' | 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6';
 export type EntityCategory = 'feature' | 'bug' | 'chore';
 
 /**
+ * WHO performs a task (migration 137). TASKS ONLY — ideas and epics do not
+ * execute, so they carry no executor column and read back 'agent'.
+ *
+ * 'human' marks work no agent can do (an account, a purchase, a physical
+ * device, a legal sign-off, a credential the agent must never hold). A human
+ * task is still a first-class backlog task with acceptance criteria, and agent
+ * tasks may legitimately depend on its output — but it NEVER becomes a sprint
+ * lane (SprintLaneStore.filterEligibleTaskIds excludes it), and a blocking edge
+ * pointing at it does not gate its dependents' readiness. The work surfaces as
+ * a standing non-blocking `human_task` review item instead.
+ */
+export type TaskExecutor = 'agent' | 'human';
+
+/** Every {@link TaskExecutor}, for enum-shaped UI + zod schemas. */
+export const TASK_EXECUTORS: readonly TaskExecutor[] = ['agent', 'human'];
+
+/**
  * One user-attached file on an idea (migration 028) — any file type, not just
  * images. The file BYTES live on disk (CYBOFLOW_DIR/artifacts/ideas/<ideaId>/<file>,
  * written by the ideas:save-attachments IPC); only this metadata is persisted, as
@@ -168,6 +185,14 @@ export interface BacklogTaskItem {
   priority: Priority;
   /** Entity classification (migration 059). */
   category: EntityCategory;
+  /**
+   * WHO performs this task (migration 137). REQUIRED on every constructor —
+   * same silent-drop rationale as `decomposed_at`/`approved_at`/`sort_order`:
+   * the picker EXCLUDES human tasks and the card badges them, so an emit path
+   * that omitted it would silently turn a human task back into an agent task on
+   * a live upsert. Ideas/epics have no executor column and always read 'agent'.
+   */
+  executor: TaskExecutor;
   repo: string | null;
   /** Lineage: only ever set on type='task' (FK->epics). */
   parent_epic_id: string | null;
@@ -245,6 +270,17 @@ export interface BacklogTaskItem {
    * shape parity; consumers should treat `undefined` as "unknown / not gated".
    */
   readyToWork?: boolean;
+  /**
+   * Refs of this task's blocking prerequisites whose own executor is 'human'
+   * (migration 137). Such an edge is board TRUTH but not a gate: it stays in
+   * `blockedBy` and does NOT clear `readyToWork`, because nothing in a sprint
+   * will ever move a human task to Done — pinning its dependents to "blocked"
+   * forever would be a lie the picker, the board, and every agent reading
+   * `cyboflow_list_tasks` would all repeat. Consumers render it as neutral
+   * "waits on TASK-009 (human)" text, never the orange blocked chip. Optional
+   * for shape parity with `blockedBy`/`readyToWork`; absent ⇒ not computed.
+   */
+  waitingOnHuman?: string[];
   /**
    * Exact sprint-batch / experiment memberships this task belongs to RIGHT NOW
    * (IDEA-053, TASK-202) — [] when none apply. REQUIRED on every constructor

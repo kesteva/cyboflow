@@ -18,7 +18,8 @@ const COLUMNS =
   'id, idea_id AS ideaId, project_id AS projectId, handoff_id AS handoffId, session_id AS sessionId, ' +
   'draft_revision AS draftRevision, prototype_artifact_id AS prototypeArtifactId, ' +
   'prototype_revision AS prototypeRevision, snapshot_path AS snapshotPath, ' +
-  'approved_at AS approvedAt, superseded_at AS supersededAt';
+  'approved_at AS approvedAt, superseded_at AS supersededAt, ' +
+  'source AS source, source_run_id AS sourceRunId';
 
 /**
  * The camelCase read-model shape returned to callers (the DB row is snake_case).
@@ -28,15 +29,29 @@ export interface ApprovedDesign {
   id: string;
   ideaId: string;
   projectId: number;
-  handoffId: string;
-  sessionId: string;
+  /** NULL for a `source:'flow'` row — a flow approval has no design handoff (migration 134). */
+  handoffId: string | null;
+  /** NULL for a `source:'flow'` row — a flow approval has no Design Mode session. */
+  sessionId: string | null;
   draftRevision: number;
   prototypeArtifactId: string;
   prototypeRevision: number;
   snapshotPath: string;
   approvedAt: string;
   supersededAt: string | null;
+  /**
+   * Which pathway approved this design (migration 134). A 'design-mode' row
+   * OUTRANKS a flow prototype: flowDesignBinding skips an idea whose current row
+   * is design-mode rather than superseding it ("arrived with an approved design →
+   * leave it alone").
+   */
+  source: ApprovedDesignSource;
+  /** The workflow run that bound a 'flow' row; null for 'design-mode'. */
+  sourceRunId: string | null;
 }
+
+/** The two pathways that can publish an approved design (migration 134). */
+export type ApprovedDesignSource = 'design-mode' | 'flow';
 
 /** Row shape as SELECTed with the aliased columns above. */
 type ApprovedDesignSelectRow = ApprovedDesign;
@@ -55,6 +70,12 @@ function shape(row: ApprovedDesignSelectRow): ApprovedDesign {
     snapshotPath: row.snapshotPath,
     approvedAt: row.approvedAt,
     supersededAt: row.supersededAt ?? null,
+    // Defensive defaults: a pre-134 row read through a stale connection would
+    // carry neither column. 'design-mode' is the safe reading — it makes the
+    // binder LEAVE the row alone rather than overwrite an approval it cannot
+    // classify.
+    source: row.source === 'flow' ? 'flow' : 'design-mode',
+    sourceRunId: row.sourceRunId ?? null,
   };
 }
 

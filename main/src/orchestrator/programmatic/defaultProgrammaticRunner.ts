@@ -32,14 +32,29 @@ import {
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { WorkflowAgentRuntime } from '../../../../shared/types/agentRuntime';
 import type { ReasoningEffort } from '../../../../shared/types/reasoningEffort';
-import type { VerificationTaskV1 } from '../../../../shared/types/visualVerification';
+import {
+  isVerificationType,
+  type VerificationTaskV1,
+} from '../../../../shared/types/visualVerification';
 import type { ClaudeSpawnerLike, ProgrammaticRunner, ProgrammaticRunContext } from '../runExecutor';
 import type { DatabaseLike, LoggerLike } from '../types';
 import { enqueueTaskVerification } from '../verify/enqueueFromTask';
+import {
+  resolveVerificationPosture,
+  type VerificationRunStamp,
+  type VerificationPostureDeps,
+} from '../verify/verificationPosture';
+import { sweepBuildBreaks } from './buildBreakDetector';
 import type { FanOutDriver, StepReport, VisualVerifyGate } from './types';
 import { WorkflowController } from './workflowController';
 import { createRunDirectives } from './runDirectives';
 import { SpawnStepRunner, programmaticDisallowedTools } from './spawnStepRunner';
+import { composeDesignSurfaces } from './designSurfaces';
+import {
+  isSolutionThoroughness,
+  parseThoroughnessFlag,
+  type SolutionThoroughness,
+} from '../../../../shared/types/thoroughness';
 import {
   ProgrammaticRunHost,
   type LaneTriageAdjustResult,
@@ -51,6 +66,8 @@ import type { BlockingItemsResolver } from './blockingItemsGate';
 import type { SystemicPauseResolver } from './systemicPauseGate';
 import { MonitorRegistry, type MonitorContext, type MonitorSession } from './monitor';
 import { readApproveIdeasDecisionLines } from '../resolveReviewItemHandler';
+import { selectFindingForSeed } from '../reviewItemListing';
+import { findingBucket, type FindingTagBucket } from '../../../../shared/types/reviews';
 import { ReviewItemRouter } from '../reviewItemRouter';
 import { hasReviewableDesignSurface } from '../runEntityOwnership';
 
@@ -224,7 +241,82 @@ export interface DefaultProgrammaticRunnerDeps {
    * always reaches the human's review queue. Absent ⇒ rescues are logged only.
    */
   laneTriageFindingSink?: (runId: string, input: { title: string; body: string }) => Promise<void>;
+  /**
+   * The project's runbook-status resolver — the SAME closure the scheduler's
+   * `runbookStatus` dependency and the verify health panel share (index.ts builds
+   * one and hands it to all three). Feeds the RUN-LEVEL verification posture
+   * (CD1); absent ⇒ the posture never reads a runbook, so a `native-desktop` run
+   * resolves 'available' and behaves exactly as it did before the seam.
+   */
+  verifyRunbookStatus?: VerificationPostureDeps['runbookStatus'];
   logger?: LoggerLike;
+}
+
+/**
+ * Read the run's IMMUTABLE verification stamp (migration 055) plus the worktree
+ * the runbook probe should look at — the input half of the run-level posture.
+ *
+ * Fail-soft to `null`, which the posture resolver reads as 'available': an
+ * unreadable stamp is not evidence that a project cannot be verified.
+ */
+export function readVerificationRunStamp(db: DatabaseLike, runId: string): VerificationRunStamp | null {
+  try {
+    const row = db
+      .prepare(
+        `SELECT project_id AS projectId, verify_enabled AS verifyEnabled,
+                verify_type AS verifyType, worktree_path AS worktreePath
+           FROM workflow_runs WHERE id = ?`,
+      )
+      .get(runId) as
+      | {
+          projectId?: number | null;
+          verifyEnabled?: number | boolean | null;
+          verifyType?: string | null;
+          worktreePath?: string | null;
+        }
+      | undefined;
+    if (!row || typeof row.projectId !== 'number') return null;
+    const worktreePath =
+      typeof row.worktreePath === 'string' && row.worktreePath.trim().length > 0 ? row.worktreePath : null;
+    const rawType: unknown = row.verifyType;
+    return {
+      projectId: row.projectId,
+      verifyEnabled: row.verifyEnabled === 1 || row.verifyEnabled === true,
+      verifyType: isVerificationType(rawType) ? rawType : null,
+      worktreePath,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * File one RUN-SCOPED declaration through `ReviewItemRouter.createIfNoPending`,
+ * whose check-and-create runs as ONE task on the per-project queue.
+ *
+ * `source` IS the dedupe key (there is no unique index behind it), which is why
+ * it is a parameter: the two callers — the "no verifiable modality" declaration
+ * and a shared-build-break group — need the same once-only guarantee under
+ * different keys. NON-BLOCKING and severity 'warning' for the same reason the
+ * F8 skip finding is: these describe something a human should SEE, never
+ * something the run should stop for.
+ */
+async function fileRunScopedFinding(
+  projectId: number,
+  runId: string,
+  input: { source: string; title: string; body: string },
+): Promise<void> {
+  await ReviewItemRouter.getInstance().createIfNoPending(projectId, {
+    op: 'create',
+    actor: 'orchestrator',
+    kind: 'finding',
+    title: input.title,
+    body: input.body,
+    blocking: false,
+    severity: 'warning',
+    source: input.source,
+    runId,
+  });
 }
 
 /**
@@ -331,6 +423,91 @@ export function readRunbookProposalMarkdown(db: DatabaseLike, runId: string): st
 }
 
 /**
+ * Render the COMPOUND run's `# Selected findings` block body from its
+ * `seed_finding_ids` (migration 034) — the human's explicit selection from the
+ * review-queue triage tray.
+ *
+ * REPLICATES `RunExecutor.buildSelectedFindingsBlock`, deliberately rather than
+ * sharing it: that method is private to an executor the programmatic plane does
+ * not hold, it resolves findings through an injected `FindingReaderLike` wired
+ * only for the orchestrated prompt path, and widening either to reach here would
+ * put an orchestrated-prompt collaborator on the controller's critical path. Both
+ * render from the SAME two sources — the run's `seed_finding_ids` and
+ * `selectFindingForSeed` — and both emit the same heading, ordering, and
+ * per-finding shape, which is what `compound.md` keys its seeded branch on.
+ *
+ * Ordering matches the orchestrated block: priority (P0 < P1 < P2, null LAST)
+ * then bucket (quick < doc < task), with the seeded order as the stable tiebreak.
+ *
+ * Fail-soft at every step like its siblings above: no ids, unparseable JSON, or
+ * a finding that no longer resolves ⇒ that finding is skipped, and an empty
+ * result yields undefined so the step prompt simply omits the section.
+ */
+export function readSelectedFindingsBlock(
+  db: DatabaseLike,
+  rawSeedFindingIds: string | null | undefined,
+): string | undefined {
+  if (!rawSeedFindingIds) return undefined;
+  let ids: string[];
+  try {
+    const parsed: unknown = JSON.parse(rawSeedFindingIds);
+    if (!Array.isArray(parsed)) return undefined;
+    ids = parsed.filter((v): v is string => typeof v === 'string' && v.length > 0);
+  } catch {
+    return undefined;
+  }
+  if (ids.length === 0) return undefined;
+
+  type ResolvedFinding = NonNullable<ReturnType<typeof selectFindingForSeed>>;
+  const resolved: ResolvedFinding[] = [];
+  for (const id of ids) {
+    try {
+      const finding = selectFindingForSeed(db, id);
+      if (finding) resolved.push(finding);
+    } catch {
+      // Fail-soft per id — one unresolvable finding never sinks the prompt.
+    }
+  }
+  if (resolved.length === 0) return undefined;
+
+  const priorityRank = (p: 'P0' | 'P1' | 'P2' | null): number =>
+    p === 'P0' ? 0 : p === 'P1' ? 1 : p === 'P2' ? 2 : 3;
+  const bucketRank: Record<FindingTagBucket, number> = { quick: 0, doc: 1, task: 2 };
+  resolved.sort((a, b) => {
+    const byPriority = priorityRank(a.priority) - priorityRank(b.priority);
+    if (byPriority !== 0) return byPriority;
+    return bucketRank[findingBucket(a.proposedTarget)] - bucketRank[findingBucket(b.proposedTarget)];
+  });
+
+  const sections = resolved.map((f) => {
+    const badge = f.priority ?? '—';
+    const title = f.title?.trim() || '(untitled finding)';
+    const bucket = findingBucket(f.proposedTarget);
+    const sourceTail = f.source?.trim() || 'unknown';
+    const parts: string[] = [
+      `## ${badge} ${title}`,
+      `Target: ${bucket} · Source: ${sourceTail} · id: \`${f.id}\``,
+    ];
+    const body = f.body?.trim();
+    if (body) parts.push(body);
+    const suggestedFix = f.suggestedFix?.trim();
+    if (suggestedFix) parts.push(`### Suggested fix\n${suggestedFix}`);
+    const locations = (f.locations ?? []).filter((l) => l.path?.trim());
+    if (locations.length > 0) {
+      const lines = locations.map(
+        (l) => `- ${l.path.trim()}${typeof l.line === 'number' ? `:${l.line}` : ''}`,
+      );
+      parts.push(['### Locations', ...lines].join('\n'));
+    }
+    return parts.join('\n\n');
+  });
+
+  const directive =
+    'Act ONLY on these findings, in the order listed. For each, apply the action for its target bucket, then IMMEDIATELY call `cyboflow_resolve_finding` with its id and the matching resolution kind — do not batch resolves to the end.';
+  return [directive, ...sections].join('\n\n');
+}
+
+/**
  * Read the raw resolution string of this run's RESOLVED `approve-runbook` gate.
  *
  * Unlike launch's approve-ideas fold there is nothing structured to parse: the
@@ -356,6 +533,99 @@ export function readApproveRunbookResolution(db: DatabaseLike, runId: string): s
       .get(runId) as { resolution?: string | null } | undefined;
     const resolution = row?.resolution;
     return typeof resolution === 'string' && resolution.trim().length > 0 ? resolution : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Read the run's `adversarial-review` artifact markdown — the design critique the
+ * approve-design gate was composed from.
+ *
+ * A gate 'revise' sends the design steps back to re-run, and a programmatic step
+ * turn is a fresh SDK session that remembers nothing: the re-run agent has never
+ * seen the review whose entries it is being asked to address. The artifact is the
+ * only durable copy (one per atype per run, ENRICHED by a re-review rather than
+ * duplicated), so the revision section quotes it back verbatim.
+ *
+ * Fail-soft like readProjectBriefMarkdown: a missing table or unparseable payload
+ * yields undefined and the revision section simply carries the note alone.
+ */
+export function readAdversarialReviewMarkdown(db: DatabaseLike, runId: string): string | undefined {
+  try {
+    const row = db
+      .prepare(
+        "SELECT payload_json AS payloadJson FROM artifacts WHERE run_id = ? AND atype = 'adversarial-review' LIMIT 1",
+      )
+      .get(runId) as { payloadJson?: string | null } | undefined;
+    if (typeof row?.payloadJson !== 'string' || row.payloadJson.length === 0) return undefined;
+    const parsed: unknown = JSON.parse(row.payloadJson);
+    if (typeof parsed !== 'object' || parsed === null) return undefined;
+    const markdown = (parsed as { markdown?: unknown }).markdown;
+    return typeof markdown === 'string' && markdown.trim().length > 0 ? markdown : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The raw resolution text of this run's most recent RESOLVED gate for `stepId`.
+ *
+ * The gate resolver reduces a resolution to approve/reject/revise/abort and drops
+ * the text; on a 'revise' that text is the only thing distinguishing "do it again"
+ * from "the spend screen has no way back to Home". Generalizes
+ * readApproveRunbookResolution's query to any gate step id.
+ *
+ * Returns undefined for a bare verdict word — rendering "> Revise" as the human's
+ * guidance is noise that reads like an instruction when there is none — and for
+ * any thrown query.
+ */
+export function readGateResolutionNote(
+  db: DatabaseLike,
+  runId: string,
+  stepId: string,
+): string | undefined {
+  try {
+    const row = db
+      .prepare(
+        `SELECT resolution FROM review_items
+          WHERE run_id = ? AND kind = 'decision' AND status = 'resolved'
+            AND source = ?
+          ORDER BY rowid DESC LIMIT 1`,
+      )
+      .get(runId, `gate:human-step:${stepId}`) as { resolution?: string | null } | undefined;
+    const resolution = (row?.resolution ?? '').trim();
+    if (resolution.length === 0) return undefined;
+    return /^(approve|approved|reject|rejected|revise|retry)$/i.test(resolution) ? undefined : resolution;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Read the project's stamped SOLUTION THOROUGHNESS (migration 135), for a run
+ * whose project already carries one.
+ *
+ * Raw SQL rather than the project read model for the same reason
+ * readProjectBriefMarkdown is: this runner holds a narrow DatabaseLike, not the
+ * Database service, and a per-step read has to stay cheap and dependency-free.
+ *
+ * Fail-soft: a pre-135 DB (no column), a missing row, or an unexpected value all
+ * yield undefined, and the step prompt simply omits its thoroughness section.
+ */
+export function readProjectThoroughness(
+  db: DatabaseLike,
+  runId: string,
+): SolutionThoroughness | undefined {
+  try {
+    const row = db
+      .prepare(
+        `SELECT p.solution_thoroughness AS level
+           FROM workflow_runs r JOIN projects p ON p.id = r.project_id
+          WHERE r.id = ? LIMIT 1`,
+      )
+      .get(runId) as { level?: unknown } | undefined;
+    return isSolutionThoroughness(row?.level) ? row.level : undefined;
   } catch {
     return undefined;
   }
@@ -424,6 +694,22 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       return readProjectBriefMarkdown(this.deps.db, ctx.runId);
     };
 
+    // Re-read this run's APPROVED DESIGN SURFACES per step (sprint / ship). The
+    // design was approved in a DIFFERENT run whose prototype artifact this run
+    // cannot read and which is cascade-deleted with it; what survives is the
+    // approved_designs snapshot path plus each idea's `## Design spec` section,
+    // and composeDesignSurfaces reads both off the batch's tasks. A thunk, not a
+    // snapshot, for the same reason taskScope is one: a lane added mid-run brings
+    // its own originating idea. Flow-gated by name — planner/launch have no batch,
+    // so the read would be a guaranteed miss, and every other flow's prompt stays
+    // byte-identical.
+    const designSurfaces = (): string | undefined => {
+      if ((ctx.workflow.name !== 'sprint' && ctx.workflow.name !== 'ship') || !this.deps.db) {
+        return undefined;
+      }
+      return composeDesignSurfaces(this.deps.db, ctx.runId);
+    };
+
     // Re-read the verify-setup run's approved runbook proposal + its gate note per
     // step. Naturally undefined on `inspect`/`derive` (they run BEFORE the artifact
     // exists) and on every other flow ⇒ no section, so all other prompts stay
@@ -438,6 +724,49 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       if (ctx.workflow.name !== VERIFY_SETUP_WORKFLOW_NAME || !this.deps.db) return undefined;
       return readApproveRunbookResolution(this.deps.db, ctx.runId);
     };
+
+    // Re-render the COMPOUND run's human-curated seed per step. Flow-gated by
+    // name for the same reason designSurfaces is: only compound is ever launched
+    // with `seed_finding_ids`, and gating keeps every other flow's prompt
+    // byte-identical without paying for a guaranteed-miss read. The ids come off
+    // the run row snapshot because the launcher stamps them once at launch and
+    // nothing ever rewrites them mid-run.
+    const selectedFindings = (): string | undefined => {
+      if (ctx.workflow.name !== 'compound' || !this.deps.db) return undefined;
+      return readSelectedFindingsBlock(this.deps.db, ctx.run.seed_finding_ids);
+    };
+
+    // The project's SOLUTION THOROUGHNESS, re-read per step. Two sources, because
+    // the level is stamped on the project only when Launch's approve-brief gate
+    // resolves: DURING a launch run the brief's own `THOROUGHNESS:` flag is the
+    // live answer (and is what the post-brief steps must obey), while every later
+    // sprint/ship run reads the stamped column. Reading the flag first on launch
+    // also makes the level available to the design steps that run before the
+    // stamp's gate side-effect has necessarily landed. Absent ⇒ no section, so
+    // every project predating the stamp keeps today's prompts byte-for-byte.
+    const solutionThoroughness = (): SolutionThoroughness | undefined => {
+      if (!this.deps.db) return undefined;
+      if (ctx.workflow.name === 'launch') {
+        const brief = readProjectBriefMarkdown(this.deps.db, ctx.runId);
+        return parseThoroughnessFlag(brief) ?? undefined;
+      }
+      if (ctx.workflow.name !== 'sprint' && ctx.workflow.name !== 'ship') return undefined;
+      return readProjectThoroughness(this.deps.db, ctx.runId);
+    };
+
+    // The design critique the approve-design gate reviewed, re-read per step. Only
+    // the gate-revision section renders it, and only on a run that reported the
+    // artifact — every other prompt is byte-identical.
+    const adversarialReviewMarkdown = (): string | undefined =>
+      this.deps.db ? readAdversarialReviewMarkdown(this.deps.db, ctx.runId) : undefined;
+
+    // The human's free-text note on a resolved gate, run-bound for the host. The
+    // controller asks for it when a gate 'revise' arms a loopback; the verdict
+    // channel itself carries only the four-way decision.
+    const gateResolutionNote = this.deps.db
+      ? (stepId: string): string | undefined =>
+          readGateResolutionNote(this.deps.db!, ctx.runId, stepId)
+      : undefined;
 
     // Live operator steering for this run (RunDirectives). RunExecutor owns the
     // per-run object and threads it in; absent (tests / no monitor wiring) ⇒ an
@@ -484,8 +813,12 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         runOwnedIdeaIds,
         approveIdeasDecisions,
         projectBrief,
+        designSurfaces,
+        solutionThoroughness,
+        adversarialReviewMarkdown,
         runbookProposal,
         approveRunbookResolution,
+        selectedFindings,
         bootstrapProtectedPaths,
         ...(resolveStepAgent ? { resolveStepAgent } : {}),
       },
@@ -564,6 +897,11 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     const laneTriageTaskReader = this.deps.laneTriageTaskReader;
     const laneTriageAdjustTask = this.deps.laneTriageAdjustTask;
     const laneTriageFindingSink = this.deps.laneTriageFindingSink;
+    // Narrowed once here so the two conditional spreads below close over a
+    // definitely-defined handle rather than re-narrowing `this.deps` inside a
+    // callback (where TS cannot keep the narrowing).
+    const postureDb = this.deps.db;
+    const verifyRunbookStatus = this.deps.verifyRunbookStatus;
 
     const host = new ProgrammaticRunHost({
       runId: ctx.runId,
@@ -571,6 +909,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       reporter: this.deps.reporter,
       gate: this.deps.gate,
       humanGateSkip,
+      ...(gateResolutionNote ? { readGateResolutionNote: gateResolutionNote } : {}),
       ...(this.deps.blockingGate ? { blockingGate: this.deps.blockingGate } : {}),
       ...(this.deps.systemicGate ? { systemicGate: this.deps.systemicGate } : {}),
       ...(monitor ? { monitor } : {}),
@@ -601,6 +940,32 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       // so both kinds of "it did not run" land in one place in the review queue.
       fileVerificationSkipFinding: (input: { title: string; body: string }) =>
         fileVerificationSkipFinding(ctx.run.project_id, ctx.runId, input),
+      // CD1/CD3 — the two RUN-SCOPED declarations, both deduped on `source`
+      // through createIfNoPending. Wired unconditionally (the sink itself is
+      // cheap and idempotent); the POSTURE resolver and the BUILD-BREAK sweep are
+      // each gated on the dep they actually need, so a runner built without a DB
+      // (or without the shared runbook-status closure) keeps its pre-seam
+      // behaviour rather than resolving a posture from nothing.
+      fileRunScopedFinding: (input: { source: string; title: string; body: string }) =>
+        fileRunScopedFinding(ctx.run.project_id, ctx.runId, input),
+      ...(postureDb !== undefined && verifyRunbookStatus !== undefined
+        ? {
+            resolveVerificationPosture: () =>
+              resolveVerificationPosture(
+                {
+                  readRunStamp: (runId: string) => readVerificationRunStamp(postureDb, runId),
+                  runbookStatus: verifyRunbookStatus,
+                },
+                ctx.runId,
+              ),
+          }
+        : {}),
+      ...(postureDb !== undefined
+        ? {
+            sweepBuildBreaks: () =>
+              sweepBuildBreaks(postureDb, { runId: ctx.runId, projectId: ctx.run.project_id }),
+          }
+        : {}),
       logger: this.deps.logger,
     });
 

@@ -11,7 +11,7 @@
  *     `TASK-NNN.md` references.
  */
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'fs';
+import { existsSync, readFileSync, readdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { buildBuiltInWorkflows } from '../builtInWorkflows';
 import { CYBOFLOW_WORKFLOW_NAMES, WORKFLOW_DEFINITIONS } from '../../../../../shared/types/workflows';
@@ -598,6 +598,106 @@ describe('buildBuiltInWorkflows', () => {
       expect(body, `${label}: closes the file-identity loophole for a served deliverable`).toMatch(
         /file-identity/,
       );
+    }
+  });
+
+  it('gives approve-design an intra-phase loopback and an adversarial-review artifact in all three design flows', () => {
+    // The two halves of the two-way design gate. `loopback` is what makes a
+    // 'revise' decision RE-RUN anything: the controller reads it literally, and
+    // an undeclared one means "no target", which merely re-presents the same
+    // gate — the reviewer presses Revise and nothing changes. `outputArtifact` is
+    // what gives the gate something to review and a revision something to address;
+    // without it the adversarial reviewer's result is discarded when its turn ends.
+    const expectedLoopback: Record<string, string> = {
+      // Launch's design phase has no spec step to return to (the brief was
+      // approved at its own gate), so a revise re-runs the design pass itself.
+      launch: 'ui-prototype',
+      planner: 'expand-spec',
+      ship: 'expand-spec',
+    };
+    for (const name of ['launch', 'planner', 'ship'] as const) {
+      const phases = WORKFLOW_DEFINITIONS[name].phases;
+      const gatePhase = phases.find((ph) => ph.steps.some((s) => s.id === 'approve-design'));
+      expect(gatePhase, `${name}: has an approve-design gate`).toBeDefined();
+      const gate = gatePhase!.steps.find((s) => s.id === 'approve-design');
+      expect(gate?.loopback, `${name}: approve-design loops back`).toBe(expectedLoopback[name]);
+      // The target must be INTRA-PHASE — the controller searches only the gate's
+      // own phase for it, so a cross-phase id silently resolves to "no target".
+      expect(
+        gatePhase!.steps.map((s) => s.id),
+        `${name}: the loopback target is in the gate's own phase`,
+      ).toContain(expectedLoopback[name]);
+
+      const review = phases
+        .flatMap((ph) => ph.steps)
+        .find((s) => s.id === 'adversarial-review');
+      expect(review, `${name}: has an adversarial-review step`).toBeDefined();
+      expect(review?.outputArtifact?.atype, `${name}: adversarial-review reports its artifact`).toBe(
+        'adversarial-review',
+      );
+      expect(review?.outputArtifact?.label).toBe('Adversarial review');
+    }
+  });
+
+  it('keeps every shared agent file byte-identical across the flows that ship it', () => {
+    // The repo's convention is that an agent file appearing under more than one
+    // flow is the SAME file. Nothing enforced it, so an edit could land in two of
+    // three copies and ship green — the flow with the stale copy then runs a
+    // subtly different contract, which is invisible until a run misbehaves.
+    // Derived from a descriptor's own .md path, like every other path in this
+    // suite — the flows' prompt bodies and their `agents/` dirs are siblings.
+    const descriptors = buildBuiltInWorkflows();
+    expect(descriptors.length, 'built-in descriptors resolved').toBeGreaterThan(0);
+    const agentsRoot = dirname(descriptors[0].path);
+    const flows = readdirSync(agentsRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && e.name !== '__tests__')
+      .map((e) => e.name)
+      .filter((flow) => existsSync(join(agentsRoot, flow, 'agents')));
+    expect(flows.length, 'found the built-in flow directories').toBeGreaterThan(0);
+
+    // agent file name -> [ '<flow>/agents/<file>' ]
+    const copies = new Map<string, string[]>();
+    for (const flow of flows) {
+      for (const file of readdirSync(join(agentsRoot, flow, 'agents'))) {
+        if (!file.endsWith('.md')) continue;
+        const list = copies.get(file) ?? [];
+        list.push(join(agentsRoot, flow, 'agents', file));
+        copies.set(file, list);
+      }
+    }
+
+    const shared = [...copies.entries()].filter(([, paths]) => paths.length > 1);
+    expect(shared.length, 'at least one agent file is shared across flows').toBeGreaterThan(0);
+    for (const [file, paths] of shared) {
+      const [first, ...rest] = paths;
+      const expected = readFileSync(first, 'utf-8');
+      for (const other of rest) {
+        expect(
+          readFileSync(other, 'utf-8'),
+          `${file}: ${other} must be byte-identical to ${first}`,
+        ).toBe(expected);
+      }
+    }
+  });
+
+  it("declares a SELF-loopback on every fan-out's implement step (sprint + ship)", () => {
+    // A first-step failure must get the same second chance every later inner step
+    // gets. The programmatic controller reads `loopback` literally — an undeclared
+    // one means "no target", so `implement`'s FIRST failure used to exhaust the
+    // lane outright. Declaring it here (rather than special-casing the first step
+    // in the controller) leaves every custom chain's semantics untouched.
+    for (const name of ['sprint', 'ship'] as const) {
+      const fanOuts = WORKFLOW_DEFINITIONS[name].phases
+        .flatMap((phase) => phase.steps)
+        .filter((s) => s.fanOut !== undefined);
+      expect(fanOuts.length, `${name}: has a fan-out step`).toBeGreaterThan(0);
+      for (const step of fanOuts) {
+        const implement = step.fanOut?.inner.find((inner) => inner.id === 'implement');
+        expect(implement, `${name}/${step.id}: has an implement inner step`).toBeDefined();
+        expect(implement?.loopback, `${name}/${step.id}: implement loops back to itself`).toBe(
+          'implement',
+        );
+      }
     }
   });
 });

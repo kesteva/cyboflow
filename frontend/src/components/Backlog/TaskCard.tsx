@@ -51,6 +51,7 @@ import {
   PriorityTag,
   CategoryTag,
   ScopeTag,
+  ExecutorBadge,
   ArchivedChip,
   ExperimentBadge,
   ProjectChip,
@@ -65,6 +66,7 @@ import { LedgerExpand } from './LedgerExpand';
 import { IdeaDetailEditor } from '../IdeaDetailEditor';
 import { EpicDetailEditor } from '../EpicDetailEditor';
 import { TaskDetailModal } from '../cyboflow/TaskDetailModal';
+import { DesignAffordance } from '../cyboflow/DesignAffordance';
 
 interface TaskBodyProps {
   task: BacklogTaskItem;
@@ -219,6 +221,14 @@ function CardFooter({
           <Pencil className="h-3 w-3" strokeWidth={2.5} />
           Edit
         </button>
+        {/* Design affordance — opens the approved design bound to this
+            epic/task's originating idea (Tier 2, item 8c). Ideas are excluded:
+            an idea's OWN design is reached via its "Open" home session, not a
+            back-link button. No sessionKey here (the Backlog board has no
+            running-session context), so the affordance opens its own preview
+            modal instead of a center-pane tab. Renders nothing until
+            forEntity resolves a bound design. */}
+        {!isIdea && <DesignAffordance entityId={task.id} projectId={task.project_id} />}
         {/* Ideas: "Open" — find-or-create the idea's persistent home session
             (idea sessions plan, Stage 4). Epics/tasks: "Run" — launch a new
             workflow run, unchanged. Same Play glyph + position; the label,
@@ -364,6 +374,8 @@ export function TaskBody({
         <PriorityTag priority={task.priority} />
         <CategoryTag category={task.category} />
         {task.scope !== null && <ScopeTag scope={task.scope} />}
+        {/* Human task (migration 137) — no badge on the 'agent' default. */}
+        {task.executor === 'human' && <ExecutorBadge />}
         {task.experimentSeed && <ExperimentBadge />}
         <span className="ml-auto font-mono text-[10px] text-text-tertiary">{task.ref}</span>
       </div>
@@ -381,6 +393,17 @@ export function TaskBody({
       )}
 
       <MarkerRow task={task} />
+
+      {/* Human prerequisites (migration 137). These edges are real but NON-gating
+          — nothing in a sprint moves a human task to Done — so they read as
+          neutral prose here, never as a blocked state. */}
+      {task.waitingOnHuman && task.waitingOnHuman.length > 0 && (
+        <p className="text-[10.5px] text-text-tertiary" data-testid="waiting-on-human">
+          {task.waitingOnHuman.length === 1
+            ? `waits on ${task.waitingOnHuman[0]} (human)`
+            : `waits on ${task.waitingOnHuman.join(', ')} (human)`}
+        </p>
+      )}
 
       {/* Title */}
       <div className="text-[13px] font-semibold leading-snug text-text-primary">{task.title}</div>

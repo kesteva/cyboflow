@@ -906,6 +906,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             optional: true,
             desc: 'Stress-test spec + prototype + architecture; must-fix auto-revised once, remaining critique surfaced (non-blocking) at the design gate. Runs only when a prototype or architecture exists.',
+            outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
           },
           {
             id: 'approve-design',
@@ -915,7 +916,13 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             optional: true,
             human: true,
-            desc: 'You review the prototype and/or architecture before decomposition. Skipped when neither ran.',
+            // 'revise' at this gate re-runs the refine phase from `expand-spec`
+            // (intra-phase, so legal under the v1 loopback invariant) with the
+            // human's note + the adversarial-review artifact threaded into every
+            // re-run step. Without a target, 'revise' merely RE-PRESENTS the same
+            // gate — the reviewer presses Revise and nothing changes.
+            loopback: 'expand-spec',
+            desc: 'You review the prototype and/or architecture before decomposition. Revise re-runs the refine phase from the spec with your note and the adversarial review. Skipped when neither ran.',
           },
           {
             id: 'epics',
@@ -1009,7 +1016,21 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             fanOut: {
               over: 'tasks',
               inner: [
-                { id: 'implement', agent: 'implement', name: 'Implement' },
+                {
+                  id: 'implement',
+                  agent: 'implement',
+                  name: 'Implement',
+                  // SELF-loopback: a first-step failure gets the same second
+                  // chance every later inner step already gets. Without it,
+                  // `implement` was the one stage whose FIRST failure was
+                  // immediate lane exhaustion — a transient spawn/tool failure at
+                  // the head of the chain failed the lane outright while the very
+                  // same failure at `write-tests` would have been retried. The
+                  // controller already supports a self-targeting loopback (it
+                  // re-drives from the target index and bumps the attempt, capped
+                  // by FAN_OUT_LANE_ATTEMPT_CAP); this only declares it.
+                  loopback: 'implement',
+                },
                 { id: 'write-tests', agent: 'write-tests', name: 'Write tests', loopback: 'implement' },
                 { id: 'code-review', agent: 'code-review', name: 'Code review', loopback: 'implement' },
                 { id: 'task-verify', agent: 'task-verify', name: 'Verify', loopback: 'implement' },
@@ -1231,6 +1252,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             optional: true,
             desc: 'Stress-test spec + prototype + architecture; must-fix auto-revised once, remaining critique surfaced (non-blocking) at the design gate. Runs only when a prototype or architecture exists.',
+            outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
           },
           {
             id: 'approve-design',
@@ -1240,7 +1262,13 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             optional: true,
             human: true,
-            desc: 'You review the prototype and/or architecture before decomposition. Skipped when neither ran.',
+            // 'revise' at this gate re-runs the refine phase from `expand-spec`
+            // (intra-phase, so legal under the v1 loopback invariant) with the
+            // human's note + the adversarial-review artifact threaded into every
+            // re-run step. Without a target, 'revise' merely RE-PRESENTS the same
+            // gate — the reviewer presses Revise and nothing changes.
+            loopback: 'expand-spec',
+            desc: 'You review the prototype and/or architecture before decomposition. Revise re-runs the refine phase from the spec with your note and the adversarial review. Skipped when neither ran.',
           },
           {
             id: 'epics',
@@ -1318,7 +1346,21 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             fanOut: {
               over: 'tasks',
               inner: [
-                { id: 'implement', agent: 'implement', name: 'Implement' },
+                {
+                  id: 'implement',
+                  agent: 'implement',
+                  name: 'Implement',
+                  // SELF-loopback: a first-step failure gets the same second
+                  // chance every later inner step already gets. Without it,
+                  // `implement` was the one stage whose FIRST failure was
+                  // immediate lane exhaustion — a transient spawn/tool failure at
+                  // the head of the chain failed the lane outright while the very
+                  // same failure at `write-tests` would have been retried. The
+                  // controller already supports a self-targeting loopback (it
+                  // re-drives from the target index and bumps the attempt, capped
+                  // by FAN_OUT_LANE_ATTEMPT_CAP); this only declares it.
+                  loopback: 'implement',
+                },
                 { id: 'write-tests', agent: 'write-tests', name: 'Write tests', loopback: 'implement' },
                 { id: 'code-review', agent: 'code-review', name: 'Code review', loopback: 'implement' },
                 { id: 'task-verify', agent: 'task-verify', name: 'Verify', loopback: 'implement' },
@@ -1565,6 +1607,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             optional: true,
             desc: 'Stress-test the brief + concept design surfaces; must-fix auto-revised once, remaining critique surfaced (non-blocking) at the design gate.',
+            outputArtifact: { atype: 'adversarial-review', label: 'Adversarial review' },
           },
           {
             id: 'approve-design',
@@ -1574,7 +1617,11 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             optional: true,
             human: true,
-            desc: 'You review the concept prototype and/or architecture before decomposition. Skipped when neither ran.',
+            // Launch's design phase has no spec step to return to — the brief was
+            // already approved at its own gate — so 'revise' re-runs the design
+            // pass itself from `ui-prototype` (same phase, legal target).
+            loopback: 'ui-prototype',
+            desc: 'You review the concept prototype and/or architecture before decomposition. Revise re-runs the design pass with your note and the adversarial review. Skipped when neither ran.',
           },
         ],
       },

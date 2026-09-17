@@ -5,6 +5,7 @@ import { randomUUID, createHash } from 'crypto';
 import { app } from 'electron';
 import { loadSdkQuery } from '../../../utils/lazyAgentSdk';
 import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
+import type { AgentThreadImageAttachment } from '../../../../../shared/types/agentThread';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
 import { orchTokenEnv } from '../../../orchestrator/orchAuthToken';
 import { readInstalledPluginIds, buildExclusiveEnabledPluginsMap } from '../../../orchestrator/integrations/installedPlugins';
@@ -724,6 +725,18 @@ export interface ClaudeSpawnOptions {
   sessionId: string;
   worktreePath: string;
   prompt: string;
+  /**
+   * Image attachments for THIS turn, sent to the model as real Anthropic
+   * `image`/`base64` content blocks alongside the prompt text (the global
+   * assistant composer's paste/drop/paperclip path). Set ONLY by
+   * AgentThreadService — every other caller omits it and its turn's
+   * `message.content` stays the plain string it has always been.
+   *
+   * Deliberately NOT part of `buildSdkOptions` output, so it never reaches
+   * `computeOptionsFingerprint`: attaching an image must not bust a warm SDK
+   * process (the images ride the turn's input message, not the process config).
+   */
+  images?: readonly AgentThreadImageAttachment[];
   /**
    * The prompt is orchestration plumbing, not a user-authored chat turn (wire
    * parity with `ClaudeSpawnerOptions.hidePromptFromTranscript`). The Claude SDK
@@ -1483,6 +1496,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // pipeline, tracker, or processes entry has been installed yet.
       const dbSession = this.sessionManager.getDbSession(sessionId);
       const finalPrompt = options.prompt;
+      // Turn-scoped image attachments (assistant composer only). Threaded into
+      // BOTH the warm persistent input and the cold single-shot input below so
+      // either path sends them as content blocks; absent everywhere else.
+      const promptImages =
+        options.images !== undefined && options.images.length > 0 ? options.images : undefined;
 
       // Build SDK options (uses runId for the approval-router hook). Built from
       // effectiveOptions so a lane spawn's stripped resume signals (M5(1)) reach
@@ -1677,7 +1695,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
         steeredThisTurn: false,
         warm: warmEnabled
           ? {
-              input: createPersistentPromptInput(finalPrompt),
+              input: createPersistentPromptInput(finalPrompt, promptImages),
               claudeSessionId: null,
               fingerprint,
               idleTimer: null,
@@ -1698,6 +1716,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
         router,
         runId,
         run,
+        promptImages,
       );
       run.iteratorDone = iteratorDone;
 
@@ -1889,7 +1908,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // by a concurrent teardown — do NOT set currentTurn/turnInFlight (that would
     // make the dying process-death boundary settle a phantom turn) and signal the
     // caller to cold-respawn so the message is not dropped.
-    if (!warm.input.push(finalPrompt)) {
+    // Attachments ride the pushed message itself, so a warm session serves an
+    // image turn without respawning (they are not part of the options fingerprint).
+    const warmImages =
+      options.images !== undefined && options.images.length > 0 ? options.images : undefined;
+    if (!warm.input.push(finalPrompt, warmImages === undefined ? undefined : { images: warmImages })) {
       return { dispatched: false };
     }
     run.currentTurn = turn;
@@ -1939,6 +1962,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     router: EventRouter,
     runId: string,
     run: ClaudeSdkRun,
+    promptImages?: readonly AgentThreadImageAttachment[],
   ): Promise<void> {
     // PROCESS exit code — 1 only on a THROWN SDK error that ends the process. A
     // per-turn terminal is_error result emits its own exitCode=1 at the turn
@@ -2034,7 +2058,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
         // fingerprint respawn / idle-TTL / kill closes it. A lane / disabled run uses
         // a SINGLE-SHOT input that closes at the result event (today's behavior),
         // tearing the subprocess down at turn end.
-        const promptInput = run.warm ? run.warm.input : createStreamingPromptInput(prompt);
+        const promptInput = run.warm ? run.warm.input : createStreamingPromptInput(prompt, promptImages);
         // Publish THIS turn's input as the live steer target (both warm and lane
         // paths) so injectSteering can push an operator message into the running
         // turn. Cleared in this loop's finally so a steer never races a torn-down
@@ -2099,7 +2123,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
                 // has already yielded its initial message. For a warm run update the
                 // record so the NEXT push feeds the retry's input; for a single-shot
                 // run the top-of-loop re-reads a fresh createStreamingPromptInput.
-                if (run.warm) run.warm.input = createPersistentPromptInput(prompt);
+                if (run.warm) run.warm.input = createPersistentPromptInput(prompt, promptImages);
                 continue retry;
               }
             }

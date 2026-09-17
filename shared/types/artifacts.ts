@@ -58,7 +58,18 @@ export type ArtifactType =
    * autoMintArtifacts (reportable:false) — an agent-reported hub would arrive
    * with no source_ref/ledger context and render broken.
    */
-  | 'idea-summary';
+  | 'idea-summary'
+  /**
+   * The Launch/Planner/Ship `adversarial-review` step's critique, as a
+   * payload-backed markdown doc (the `verify-runbook` shape). ONE per run: it
+   * reviews the whole design surface — spec + prototype + architecture together
+   * — so a re-report after a Revise ENRICHES the same row rather than minting a
+   * sibling. Its existence is what lets the `approve-design` gate show the human
+   * what they are approving, and what lets Approve file each remaining entry as
+   * a non-blocking accepted-risk finding instead of losing it with the step's
+   * turn. Widened into the DB CHECK by migration 136.
+   */
+  | 'adversarial-review';
 
 /** How an artifact tab renders: a bespoke template vs. an embedded live canvas. */
 export type ArtifactRenderMode = 'template' | 'canvas';
@@ -366,6 +377,29 @@ export const ARTIFACT_POLICIES: Record<ArtifactType, ArtifactPolicy> = {
     color: '#6b6b6b',
     glyph: '◈',
     perEntity: true,
+  },
+  // Appended LAST (see verify-runbook's note above) so every historically
+  // advertised reportable atype keeps its position in REPORTABLE_ARTIFACT_ATYPES,
+  // and thus in the MCP report tool's enum.
+  'adversarial-review': {
+    renderMode: 'template',
+    canvasKind: null,
+    htmlLoadable: false,
+    csp: null,
+    blessing: 'none',
+    requiresPrototypeBytes: false,
+    // Agent-reported, unlike the auto-minted gate surfaces: the step agent
+    // composes the doc from its subagent's `## Result` and reports it, which is
+    // the ONLY channel by which the approve-design gate and a later Revise can
+    // see what the reviewer said (every step is a fresh turn with no memory).
+    reportable: true,
+    // Rose — the critique register. Deliberately apart from every deliverable
+    // accent (blue/indigo/teal/rust/violet/amber/gold) and from eval-report's
+    // amber: this tab is an argument ABOUT the deliverables, not one of them.
+    color: '#c2415f',
+    glyph: '⚑',
+    // ONE critique per run covering the whole design surface — not per idea.
+    perEntity: false,
   },
 };
 
@@ -1081,6 +1115,23 @@ export interface EvalReportPayload {
  */
 export interface VerifyRunbookArtifactPayload {
   /** The full proposal doc, rendered through MarkdownPreview. */
+  markdown?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Parsed `payload_json` shape of an `adversarial-review` artifact — the
+ * Launch/Planner/Ship adversarial reviewer's critique as ONE markdown doc
+ * (`## Blocking` / `## Findings`, each entry under its `#### AR-n` heading).
+ * Payload-backed exactly like {@link VerifyRunbookArtifactPayload}: the step
+ * agent composes the doc from the reviewer's `## Result` and reports it
+ * verbatim in `markdown`; one per run, ENRICHED on a post-Revise re-review.
+ * The approve-design gate summarises it and Approve logs its entries as
+ * accepted-risk findings (see main/src/orchestrator/gateSideEffects.ts);
+ * `parseAdversarialReviewDoc` (shared/types/adversarialReview.ts) reads it.
+ */
+export interface AdversarialReviewArtifactPayload {
+  /** The full critique doc, rendered through MarkdownPreview. */
   markdown?: string;
   [key: string]: unknown;
 }

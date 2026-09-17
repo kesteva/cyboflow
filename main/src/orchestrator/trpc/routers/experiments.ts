@@ -89,7 +89,7 @@ import {
   setRotationLineage,
 } from '../../experimentStore';
 import { resolveSprintMaxTasks, type SprintMaxTasksOverrides } from '../../../../../shared/types/sprintBatch';
-import type { EntityCategory, Priority } from '../../../../../shared/types/tasks';
+import type { EntityCategory, Priority, TaskExecutor } from '../../../../../shared/types/tasks';
 import { listRunCreatedEpicIds, listRunCreatedIdeaIds, listRunCreatedTaskIds } from '../../runEntityOwnership';
 import {
   selectRunUsageRollups,
@@ -370,6 +370,13 @@ interface SeedTaskFields {
   body: string | null;
   priority: Priority;
   category: EntityCategory;
+  /**
+   * WHO performs the work (migration 137). Carried through the clone so an arm
+   * clone can never come out 'agent' when its seed was 'human'. In practice
+   * readSeedTask rejects human seeds outright, so this is the belt to that
+   * braces: if the predicate is ever relaxed, the clone still tells the truth.
+   */
+  executor: TaskExecutor;
   repo: string | null;
 }
 
@@ -447,7 +454,8 @@ function readSeedTask(db: DatabaseLike, taskId: string, projectId: number): Seed
   const row = db
     .prepare(
       `SELECT t.title AS title, t.summary AS summary, t.body AS body, t.priority AS priority,
-              t.category AS category, t.repo AS repo, t.project_id AS project_id, t.experiment_id AS experiment_id,
+              t.category AS category, t.executor AS executor, t.repo AS repo,
+              t.project_id AS project_id, t.experiment_id AS experiment_id,
               t.approved_at AS approved_at, t.archived_at AS archived_at,
               bs.position AS stage_position, bs.is_terminal AS is_terminal
          FROM tasks t
@@ -461,6 +469,7 @@ function readSeedTask(db: DatabaseLike, taskId: string, projectId: number): Seed
         body?: unknown;
         priority?: unknown;
         category?: unknown;
+        executor?: unknown;
         repo?: unknown;
         project_id?: unknown;
         experiment_id?: unknown;
@@ -477,6 +486,11 @@ function readSeedTask(db: DatabaseLike, taskId: string, projectId: number): Seed
   // Sprint-eligibility (mirror filterEligibleTaskIds).
   if (row.approved_at === null || row.approved_at === undefined) return null;
   if (row.archived_at !== null && row.archived_at !== undefined) return null;
+  // HUMAN EXECUTOR (migration 137): lockstep with filterEligibleTaskIds'
+  // `executor != 'human'` arm. An experiment's whole premise is that both arms
+  // RUN the task two ways — there is no way to run work only a person can do, so
+  // seeding one would mint two clones that can never be compared.
+  if (row.executor === 'human') return null;
   if (typeof row.stage_position !== 'number' || row.stage_position < 6) return null;
   if (row.is_terminal === 1) return null;
   // DOUBLE-PULL GUARD (migration 066): lockstep with filterEligibleTaskIds' active-
@@ -494,6 +508,10 @@ function readSeedTask(db: DatabaseLike, taskId: string, projectId: number): Seed
     body: typeof row.body === 'string' ? row.body : null,
     priority: (typeof row.priority === 'string' ? row.priority : 'P2') as Priority,
     category: (typeof row.category === 'string' ? row.category : 'feature') as EntityCategory,
+    // Only 'agent' can reach here (the human guard above rejects the other
+    // value), but read it rather than hardcoding it so a relaxed guard cannot
+    // silently make the clone lie.
+    executor: (row.executor === 'human' ? 'human' : 'agent') as TaskExecutor,
     repo: typeof row.repo === 'string' ? row.repo : null,
   };
 }
@@ -522,6 +540,7 @@ async function cloneSeedTask(
     body: seed.body,
     priority: seed.priority,
     category: seed.category,
+    executor: seed.executor,
     repo: seed.repo,
     experimentId,
     experimentArm: arm,

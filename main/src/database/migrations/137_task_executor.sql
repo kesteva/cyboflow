@@ -1,0 +1,32 @@
+-- 137: `executor` on tasks — WHO performs the work, agent (the default) or human.
+--
+-- A `human` task is work no agent can do: creating an account, buying a domain,
+-- signing a legal document, handling a physical device, holding a credential the
+-- agent must never see. It stays a first-class backlog task (it is real work, it
+-- carries acceptance criteria, agent tasks legitimately depend on its output),
+-- but it NEVER becomes a sprint lane — SprintLaneStore.filterEligibleTaskIds
+-- excludes it, so the fan-out never sees it and the closing-stage gate never
+-- counts it incomplete. A blocking edge pointing AT a human task stays recorded
+-- (it is board truth) but does not clear `readyToWork` for its dependents; the
+-- work surfaces instead as a standing non-blocking `human_task` review item.
+--
+-- tasks ONLY. Ideas and epics do not execute, so an executor on them would be a
+-- field with no consumer (see 059, which DID need all three because `category`
+-- classifies every entity).
+--
+-- NOT-NULL-with-default + a column-level CHECK is legal on ADD COLUMN and needs
+-- no table recreate — 059's recipe verbatim. (A CHECK widen on an EXISTING
+-- column is the hard case that needs the rebuild-and-copy dance; this is not
+-- that.) DEFAULT 'agent' backfills every existing row, which is the correct
+-- reading of history: everything in the backlog before this migration was
+-- planned for an agent.
+--
+-- Idempotence: one statement, and the runner tolerates "duplicate column name"
+-- per statement — so a renumbered re-apply of this file is a no-op.
+--
+-- No `schema.sql` mirror: that file is the legacy pre-entity-model Crystal doc
+-- (sessions / workflows / custom_views only) and carries no entity tables, so
+-- `pnpm run verify:schema` is migration-neutral here. The parity gate for this
+-- column is `entitySchemaParity.test.ts` (TaskRow <-> PRAGMA table_info).
+
+ALTER TABLE tasks ADD COLUMN executor TEXT NOT NULL DEFAULT 'agent' CHECK (executor IN ('agent','human'));

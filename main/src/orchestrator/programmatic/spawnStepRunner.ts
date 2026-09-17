@@ -30,6 +30,7 @@ import type { ClaudeSpawnerLike } from '../runExecutor';
 import type { LoggerLike } from '../types';
 import type { StepRunner, StepRunResult, ControllerStepContext } from './types';
 import { composeStepPrompt } from './stepPrompt';
+import type { SolutionThoroughness } from '../../../../shared/types/thoroughness';
 import { isSystemicStepError } from './systemicError';
 import type { WorkflowStep, WorkflowDefinition } from '../../../../shared/types/workflows';
 import { definitionHasControllerVisualVerify } from '../laneChainResolution';
@@ -156,6 +157,28 @@ export interface SpawnStepRunnerOptions {
    */
   projectBrief?: () => string | undefined;
   /**
+   * The `# Design surfaces` block for this sprint/ship run (composeDesignSurfaces).
+   * A thunk re-read per step for the same reason taskScope is: a lane the monitor
+   * adds mid-run brings its own originating idea, and a run-start snapshot would
+   * omit that idea's design. Undefined on every run with no batch or no approved
+   * design ⇒ no section (byte-identical prompts).
+   */
+  designSurfaces?: () => string | undefined;
+  /**
+   * The run's `adversarial-review` artifact markdown, read per step. Consumed
+   * ONLY by the gate-revision section — a step re-driven by an approve-design
+   * 'revise' has no memory of the critique it must address — so it is resolved
+   * lazily there rather than rendered on every turn.
+   */
+  adversarialReviewMarkdown?: () => string | undefined;
+  /**
+   * The project's declared solution thoroughness. A thunk re-read per step: on a
+   * launch run the level comes off the brief, which only exists from the
+   * project-brief step onward, so a construction-time snapshot would be undefined
+   * for the whole run. Absent ⇒ no section (byte-identical prompts).
+   */
+  solutionThoroughness?: () => SolutionThoroughness | undefined;
+  /**
    * The verify-setup run's approved runbook-proposal markdown, and the raw
    * `approve-runbook` gate resolution. Thunks re-read per step: both are
    * undefined on `inspect`/`derive` (which run before the artifact and the gate
@@ -164,6 +187,14 @@ export interface SpawnStepRunnerOptions {
    */
   runbookProposal?: () => string | undefined;
   approveRunbookResolution?: () => string | undefined;
+  /**
+   * The COMPOUND run's human-curated `# Selected findings` block body (migration
+   * 034's `seed_finding_ids`, rendered). A thunk for consistency with every other
+   * resolver here, though the seed itself is stamped at launch and never changes
+   * mid-run. Undefined on an unseeded compound run and on every other flow ⇒ no
+   * section and no seeded branch (byte-identical prompts).
+   */
+  selectedFindings?: () => string | undefined;
   /**
    * Provider/runtime prompt envelope for this run. Claude is identity; Codex gets
    * the compatibility adapter around each fresh per-step prompt.
@@ -240,11 +271,35 @@ export class SpawnStepRunner implements StepRunner {
     // Re-read the project brief per step — undefined until the brief artifact
     // is reported, then every later step turn carries the grounding section.
     const projectBrief = this.opts.projectBrief?.();
+    // Re-read the run's approved design surfaces per step — a mid-run lane brings
+    // its own idea, so a construction-time snapshot would miss that idea's design.
+    const designSurfaces = this.opts.designSurfaces?.();
+    // Re-read the project's thoroughness per step — on launch it is parsed from a
+    // brief that does not exist until mid-run.
+    const solutionThoroughness = this.opts.solutionThoroughness?.();
+    // A gate 'revise' threads the human's note onto the ctx; pair it with the
+    // review the gate was composed from, which the re-run agent cannot otherwise
+    // see (fresh turn, no artifact-reading MCP tool). Resolved ONLY when a
+    // revision is actually in flight, so no other turn pays for the read.
+    const gateRevision = ctx.gateRevision
+      ? (() => {
+          const reviewMarkdown = this.opts.adversarialReviewMarkdown?.();
+          return {
+            ...ctx.gateRevision,
+            ...(reviewMarkdown !== undefined && reviewMarkdown.trim().length > 0
+              ? { reviewMarkdown }
+              : {}),
+          };
+        })()
+      : undefined;
     // Re-read the verify-setup proposal + gate note per step — undefined until
     // `derive` publishes the artifact and the human resolves the gate, so in
     // practice only `prove` receives them.
     const runbookProposal = this.opts.runbookProposal?.();
     const approveRunbookResolution = this.opts.approveRunbookResolution?.();
+    // Re-read the compound run's human-curated seed per step. Undefined on every
+    // unseeded compound run and on every other flow ⇒ no section, no seeded branch.
+    const selectedFindings = this.opts.selectedFindings?.();
     // Re-resolve the bootstrap's written paths per step: the bootstrap fires
     // mid-run at a lane's visual-verify, so a value read at construction would be
     // empty on exactly the run that needs the denylist.
@@ -299,9 +354,13 @@ export class SpawnStepRunner implements StepRunner {
       attempt: ctx.attempt,
       ...(ctx.item ? { item: ctx.item } : {}),
       ...(taskScope ? { taskScope } : {}),
+      ...(selectedFindings ? { selectedFindings } : {}),
       ...(runOwnedIdeaIds && runOwnedIdeaIds.length > 0 ? { runOwnedIdeaIds } : {}),
       ...(approveIdeasDecisions ? { approveIdeasDecisions } : {}),
       ...(projectBrief ? { projectBrief } : {}),
+      ...(designSurfaces ? { designSurfaces } : {}),
+      ...(solutionThoroughness ? { solutionThoroughness } : {}),
+      ...(gateRevision ? { gateRevision } : {}),
       ...(runbookProposal ? { runbookProposal } : {}),
       ...(approveRunbookResolution ? { approveRunbookResolution } : {}),
       ...(userGuidance ? { userGuidance } : {}),

@@ -1,0 +1,174 @@
+/**
+ * adversarialReviewGateBody — what the `approve-design` gate actually SAYS.
+ *
+ * The gate used to open with the generic "step 'approve-design' requires a human
+ * decision" body, which asks someone to approve a design while telling them
+ * nothing about it. Meanwhile the adversarial reviewer's critique was written,
+ * read by nobody, and discarded with the step's turn. Now the critique is a real
+ * artifact (`adversarial-review`, migration 136) and this module turns it into the
+ * gate's opening text: how many defects were raised, which ones are blocking, how
+ * much revision budget is left, and — the part that is genuinely non-obvious —
+ * what each button DOES.
+ *
+ * That last part matters because the two choices are not "yes" and "no". Approve
+ * does not discard the findings: it LOGS every one as a non-blocking accepted-risk
+ * finding. Revise does not just re-ask: it re-runs the design steps with these
+ * findings as feedback, and it is BOUNDED — the sixth one ends the run as
+ * `rejected`, which is not a delivered outcome, so the run's findings are swept at
+ * session archive. Neither is discoverable from a button label.
+ *
+ * Pure functions over an injected DatabaseLike: no singletons, no writes, no
+ * throwing. `HumanStepManager.openHumanGate` composes the body inside the
+ * gate-open transaction, so anything here that threw would fail the gate open
+ * itself — every read is wrapped and degrades to "say less" rather than "say
+ * nothing at all".
+ *
+ * Standalone-typecheck invariant: no imports from 'electron', 'better-sqlite3', or
+ * main/src/services/*.
+ */
+import type { DatabaseLike } from './types';
+import {
+  parseAdversarialReviewDoc,
+  type AdversarialFinding,
+} from '../../../shared/types/adversarialReview';
+
+/** The step id whose gate this module speaks for. */
+export const APPROVE_DESIGN_STEP_ID = 'approve-design';
+
+/** Source stamped on a programmatic human-gate decision item for that step. */
+const APPROVE_DESIGN_GATE_SOURCE = `gate:human-step:${APPROVE_DESIGN_STEP_ID}`;
+
+/**
+ * The controller's per-step revise budget.
+ *
+ * CANONICAL HOME: `MAX_STEP_LOOPBACKS` in
+ * main/src/orchestrator/programmatic/workflowController.ts. Duplicated here as a
+ * bare literal deliberately — the same reason humanStepManager.ts keeps its own
+ * copy of `SYSTEMIC_PAUSE_SOURCE` — to keep this module (and, transitively, the
+ * gate-open path) free of a `programmatic/` import. If that constant ever moves,
+ * this copy is wrong in the direction of showing the human a budget larger or
+ * smaller than the real one, so keep the two in lockstep.
+ */
+const MAX_GATE_REVISIONS = 5;
+
+/**
+ * The markdown of this run's `adversarial-review` artifact, or undefined when the
+ * run has none (the step is optional and self-skips when there is no prototype or
+ * architecture to review) or its payload is unreadable.
+ *
+ * Reads the run's CURRENT critique, not one pinned at gate-open: the artifact is
+ * one-per-run and a post-Revise re-review ENRICHES it, which is exactly what the
+ * re-presented gate should be showing.
+ */
+export function readAdversarialReviewMarkdown(db: DatabaseLike, runId: string): string | undefined {
+  try {
+    const row = db
+      .prepare(
+        "SELECT payload_json AS payloadJson FROM artifacts WHERE run_id = ? AND atype = 'adversarial-review' LIMIT 1",
+      )
+      .get(runId) as { payloadJson?: string | null } | undefined;
+    if (typeof row?.payloadJson !== 'string' || row.payloadJson.length === 0) return undefined;
+    const parsed: unknown = JSON.parse(row.payloadJson);
+    if (typeof parsed !== 'object' || parsed === null) return undefined;
+    const markdown = (parsed as { markdown?: unknown }).markdown;
+    return typeof markdown === 'string' && markdown.trim().length > 0 ? markdown : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * How many times this run's `approve-design` gate has ALREADY been resolved.
+ *
+ * Every prior resolution of this gate was a Revise: an Approve advances the walk
+ * and the gate never re-opens, so a resolved item that is being followed by
+ * another gate-open can only have been a revise. Fail-soft — an unreadable count
+ * yields 0, which understates the budget used and therefore never shows a scarier
+ * number than the truth.
+ */
+export function countApproveDesignRevisionsUsed(db: DatabaseLike, runId: string): number {
+  try {
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM review_items
+          WHERE run_id = ? AND kind = 'decision' AND status = 'resolved' AND source = ?`,
+      )
+      .get(runId, APPROVE_DESIGN_GATE_SOURCE) as { n?: number } | undefined;
+    return typeof row?.n === 'number' && row.n > 0 ? row.n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function pluralize(n: number, one: string, many: string): string {
+  return n === 1 ? one : many;
+}
+
+/** `**AR-1** — The spend flow has no error state _(blocker · prototype)_` */
+function renderBlockingLine(entry: AdversarialFinding): string {
+  const qualifiers = entry.area ? `${entry.severity} · ${entry.area}` : entry.severity;
+  return `- **${entry.id}** — ${entry.title} _(${qualifiers})_`;
+}
+
+/**
+ * The revision-budget sentence, or null when nothing has been revised yet (saying
+ * "0 of 5 used" on a first visit is noise that implies a countdown nobody started).
+ */
+function renderBudget(used: number): string | null {
+  if (used <= 0) return null;
+  const remaining = Math.max(0, MAX_GATE_REVISIONS - used);
+  if (remaining === 0) {
+    return `**Revision budget: ${used} of ${MAX_GATE_REVISIONS} used — this is the last one.** Choosing Revise again ends this run as \`rejected\` rather than looping back, and a rejected run is not a delivered outcome, so the findings it filed are swept when the session is archived.`;
+  }
+  if (remaining === 1) {
+    return `**Revision budget: ${used} of ${MAX_GATE_REVISIONS} used.** One revision remains; after it, a further Revise ends the run as \`rejected\`.`;
+  }
+  return `**Revision budget: ${used} of ${MAX_GATE_REVISIONS} used.**`;
+}
+
+/**
+ * Compose the `approve-design` gate body from this run's adversarial review.
+ *
+ * Returns null when the run has NO adversarial-review artifact, which is the
+ * honest answer for a run whose optional review step self-skipped: the caller then
+ * keeps whatever body it would otherwise have used. A review that raised nothing
+ * still returns a body — "the reviewer found nothing blocking" is information the
+ * human is entitled to before approving.
+ */
+export function composeAdversarialReviewGateBody(db: DatabaseLike, runId: string): string | null {
+  const markdown = readAdversarialReviewMarkdown(db, runId);
+  if (markdown === undefined) return null;
+
+  const { blocking, findings } = parseAdversarialReviewDoc(markdown);
+  const lines: string[] = [];
+
+  if (blocking.length === 0 && findings.length === 0) {
+    lines.push('The adversarial reviewer raised nothing — no blocking defects and no advisory findings.');
+  } else {
+    const parts: string[] = [];
+    if (blocking.length > 0) {
+      parts.push(`**${blocking.length} blocking ${pluralize(blocking.length, 'defect', 'defects')}**`);
+    }
+    if (findings.length > 0) {
+      parts.push(`${findings.length} advisory ${pluralize(findings.length, 'finding', 'findings')}`);
+    }
+    lines.push(`The adversarial reviewer raised ${parts.join(' and ')}. Full detail is in the Adversarial review tab.`);
+  }
+
+  if (blocking.length > 0) {
+    lines.push('', '**Blocking:**', ...blocking.map(renderBlockingLine));
+  }
+
+  const budget = renderBudget(countApproveDesignRevisionsUsed(db, runId));
+  if (budget !== null) lines.push('', budget);
+
+  lines.push(
+    '',
+    '**Your two choices:**',
+    '',
+    '- **Revise** — rerun planning. The design steps run again with these findings as feedback, and the reviewer re-reviews the result. Use this when a blocking defect has to be fixed before anything is built.',
+    '- **Approve** — continue. Every finding above is logged as a non-blocking accepted-risk finding in the review queue, linked to the Adversarial review tab, so nothing is lost — it just stops holding the run up.',
+  );
+
+  return lines.join('\n');
+}

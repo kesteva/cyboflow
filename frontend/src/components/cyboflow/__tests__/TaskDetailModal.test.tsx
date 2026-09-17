@@ -20,15 +20,35 @@ vi.mock('../../MarkdownPreview', () => ({
   MarkdownPreview: ({ content }: { content: string }) => <div data-testid="md-preview">{content}</div>,
 }));
 
-const { mockUpdate } = vi.hoisted(() => ({ mockUpdate: vi.fn() }));
+const { mockUpdate, mockForEntity, mockRemoveDependency } = vi.hoisted(() => ({
+  mockUpdate: vi.fn(),
+  mockForEntity: vi.fn(),
+  mockRemoveDependency: vi.fn(),
+}));
 vi.mock('../../../trpc/client', () => ({
-  trpc: { cyboflow: { tasks: { update: { mutate: mockUpdate } } } },
+  trpc: {
+    cyboflow: {
+      tasks: {
+        update: { mutate: mockUpdate },
+        removeDependency: { mutate: mockRemoveDependency },
+      },
+      // DesignAffordance (mounted in the header row) resolves via
+      // design.forEntity — default to null (no button) so existing assertions
+      // below are unaffected; its own tests override this.
+      design: { forEntity: { query: mockForEntity }, snapshotHtml: { query: vi.fn() } },
+      ideaComponents: {
+        onComponentsChanged: { subscribe: () => ({ unsubscribe: vi.fn() }) },
+      },
+    },
+  },
 }));
 
 beforeEach(() => {
   // Matches the real tRPC contract: tasks.update returns { taskId } only (the
   // component does not read the return — it bumps the version locally).
   mockUpdate.mockReset().mockResolvedValue({ taskId: 'TASK-1' });
+  mockForEntity.mockReset().mockResolvedValue(null);
+  mockRemoveDependency.mockReset().mockResolvedValue({ taskId: 'TASK-1', removed: true });
 });
 
 function makeTask(overrides: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
@@ -42,6 +62,7 @@ function makeTask(overrides: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
     body: '## Acceptance\n\nRender a horizontal tab strip.',
     priority: 'P0',
     category: 'feature',
+    executor: 'agent',
     repo: null,
     parent_epic_id: 'EPIC-1',
     originating_idea_id: 'IDEA-018',
@@ -81,6 +102,28 @@ describe('TaskDetailModal', () => {
     expect(screen.getByTestId('task-detail-summary')).toHaveTextContent('Tab strip across the top.');
     expect(screen.getByTestId('md-preview')).toHaveTextContent('Render a horizontal tab strip.');
     expect(screen.queryByTestId('task-detail-nobody')).not.toBeInTheDocument();
+  });
+
+  it('shows the Design affordance once a bound design resolves for this entity', async () => {
+    mockForEntity.mockResolvedValue({
+      ideaId: 'idea-1',
+      ideaRef: 'IDEA-018',
+      ideaTitle: 'Spend flow',
+      approvedAt: '2026-01-01T00:00:00.000Z',
+      source: 'flow',
+      sourceRunId: 'run-1',
+    });
+    render(<TaskDetailModal task={makeTask()} onClose={vi.fn()} />);
+
+    expect(await screen.findByTestId('design-affordance')).toBeInTheDocument();
+    expect(mockForEntity).toHaveBeenCalledWith({ entityId: 'TASK-1' });
+  });
+
+  it('renders no Design affordance when the entity has no bound design', async () => {
+    render(<TaskDetailModal task={makeTask()} onClose={vi.fn()} />);
+
+    await waitFor(() => expect(mockForEntity).toHaveBeenCalled());
+    expect(screen.queryByTestId('design-affordance')).not.toBeInTheDocument();
   });
 
   it('shows the No-additional-detail state for a null body', () => {
@@ -186,3 +229,104 @@ describe('TaskDetailModal', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Executor chip + dependency rows (migration 137)
+// ---------------------------------------------------------------------------
+
+describe('TaskDetailModal — executor chip', () => {
+  it('renders the chip for a TASK and saves through tasks.update, patching optimistically', async () => {
+    render(<TaskDetailModal task={makeTask()} onClose={vi.fn()} />);
+    const select = screen.getByTestId('task-detail-executor') as HTMLSelectElement;
+    expect(select.value).toBe('agent');
+
+    fireEvent.change(select, { target: { value: 'human' } });
+
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
+    expect(mockUpdate).toHaveBeenCalledWith({
+      projectId: 1,
+      taskId: 'TASK-1',
+      executor: 'human',
+      expectedVersion: 1,
+    });
+    await waitFor(() => expect(select.value).toBe('human'));
+  });
+
+  it('surfaces a save failure without changing the chip', async () => {
+    mockUpdate.mockRejectedValueOnce(new Error('stale version'));
+    render(<TaskDetailModal task={makeTask()} onClose={vi.fn()} />);
+    const select = screen.getByTestId('task-detail-executor') as HTMLSelectElement;
+
+    fireEvent.change(select, { target: { value: 'human' } });
+
+    expect(await screen.findByText('stale version')).toBeInTheDocument();
+    expect(select.value).toBe('agent');
+  });
+
+  it('is NOT rendered for an idea or an epic — only tasks execute', () => {
+    const { rerender } = render(
+      <TaskDetailModal task={makeTask({ type: 'idea' })} onClose={vi.fn()} />,
+    );
+    expect(screen.queryByTestId('task-detail-executor')).not.toBeInTheDocument();
+
+    rerender(<TaskDetailModal task={makeTask({ type: 'epic' })} onClose={vi.fn()} />);
+    expect(screen.queryByTestId('task-detail-executor')).not.toBeInTheDocument();
+  });
+});
+
+describe('TaskDetailModal — dependency rows', () => {
+  const blockedByOne = {
+    blockedBy: [{ taskId: 'tsk_h', ref: 'TASK-009', title: 'Buy the domain' }],
+  };
+
+  it('renders nothing when the task has no blocking prerequisites', () => {
+    render(<TaskDetailModal task={makeTask()} onClose={vi.fn()} />);
+    expect(screen.queryByTestId('task-detail-dependencies')).not.toBeInTheDocument();
+  });
+
+  it('lists each prerequisite and removes one through tasks.removeDependency', async () => {
+    render(<TaskDetailModal task={makeTask(blockedByOne)} onClose={vi.fn()} />);
+    expect(screen.getByTestId('task-detail-dependency-tsk_h')).toHaveTextContent('TASK-009');
+
+    fireEvent.click(screen.getByTestId('task-detail-dependency-remove-tsk_h'));
+
+    await waitFor(() => expect(mockRemoveDependency).toHaveBeenCalledTimes(1));
+    expect(mockRemoveDependency).toHaveBeenCalledWith({
+      projectId: 1,
+      taskId: 'TASK-1',
+      dependsOnTaskId: 'tsk_h',
+    });
+    // Optimistic: the row (and the whole section) disappears.
+    await waitFor(() =>
+      expect(screen.queryByTestId('task-detail-dependencies')).not.toBeInTheDocument(),
+    );
+  });
+
+  it('labels a HUMAN prerequisite as non-blocking', () => {
+    render(
+      <TaskDetailModal
+        task={makeTask({ ...blockedByOne, waitingOnHuman: ['TASK-009'] })}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId('task-detail-dependency-human-tsk_h')).toHaveTextContent(
+      'human · does not block',
+    );
+  });
+
+  it('does NOT label an agent prerequisite', () => {
+    render(<TaskDetailModal task={makeTask(blockedByOne)} onClose={vi.fn()} />);
+    expect(screen.queryByTestId('task-detail-dependency-human-tsk_h')).not.toBeInTheDocument();
+  });
+
+  it('surfaces a removal failure and keeps the row', async () => {
+    mockRemoveDependency.mockRejectedValueOnce(new Error('edge is gone'));
+    render(<TaskDetailModal task={makeTask(blockedByOne)} onClose={vi.fn()} />);
+
+    fireEvent.click(screen.getByTestId('task-detail-dependency-remove-tsk_h'));
+
+    expect(await screen.findByText('edge is gone')).toBeInTheDocument();
+    expect(screen.getByTestId('task-detail-dependency-tsk_h')).toBeInTheDocument();
+  });
+});
+
