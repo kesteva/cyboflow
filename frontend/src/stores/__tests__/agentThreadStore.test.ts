@@ -84,9 +84,11 @@ beforeEach(() => {
   mockConfirmProposalMutate = vi.fn().mockResolvedValue({ ok: true, dismissed: false });
   mockDismissProposalMutate = vi.fn().mockResolvedValue({ ok: true, dismissed: true });
   mockOnThreadEventUnsubscribe = vi.fn();
-  mockOnThreadEventSubscribe = vi.fn().mockReturnValue({ unsubscribe: mockOnThreadEventUnsubscribe });
+  // A fresh handle per call: the store tells a superseded subscription from
+  // the live one by handle identity.
+  mockOnThreadEventSubscribe = vi.fn().mockImplementation(() => ({ unsubscribe: mockOnThreadEventUnsubscribe }));
   mockOnProposalUpdateUnsubscribe = vi.fn();
-  mockOnProposalUpdateSubscribe = vi.fn().mockReturnValue({ unsubscribe: mockOnProposalUpdateUnsubscribe });
+  mockOnProposalUpdateSubscribe = vi.fn().mockImplementation(() => ({ unsubscribe: mockOnProposalUpdateUnsubscribe }));
 
   useAgentThreadStore.setState({
     thread: null,
@@ -193,6 +195,97 @@ describe('onThreadEvent live-tail', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Subscription self-healing — a server-ended or errored subscription reopens
+// ---------------------------------------------------------------------------
+
+describe('subscription self-healing', () => {
+  type Handlers = {
+    onData: (value: unknown) => void;
+    onError: (err: unknown) => void;
+    onStopped: () => void;
+    onComplete: () => void;
+  };
+
+  it('reopens onThreadEvent after the server stops it (trpc-electron abort → stopped + complete)', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    unsub = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().thread).not.toBeNull());
+    expect(mockOnThreadEventSubscribe).toHaveBeenCalledTimes(1);
+
+    const first = mockOnThreadEventSubscribe.mock.calls[0][1] as Handlers;
+    // The main side aborts the subscription: the link delivers `stopped` then
+    // completes the observer. Exactly ONE reopen must be scheduled for the pair.
+    first.onStopped();
+    first.onComplete();
+    expect(mockOnThreadEventSubscribe).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toContain('onThreadEvent subscription ended');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(mockOnThreadEventSubscribe).toHaveBeenCalledTimes(2);
+    expect(mockOnThreadEventSubscribe.mock.calls[1][0]).toEqual({ threadId: 'thread-1' });
+
+    // Events on the reopened subscription drive the live tail again.
+    const second = mockOnThreadEventSubscribe.mock.calls[1][1] as Handlers;
+    second.onData(undefined);
+    await vi.advanceTimersByTimeAsync(150);
+    expect(useAgentThreadStore.getState().liveTailTick).toBe(1);
+
+    // A late callback from the SUPERSEDED subscription is ignored.
+    first.onData(undefined);
+    await vi.advanceTimersByTimeAsync(150);
+    expect(useAgentThreadStore.getState().liveTailTick).toBe(1);
+    warn.mockRestore();
+  });
+
+  it('reopens onProposalUpdate after an error', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    unsub = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().thread).not.toBeNull());
+    expect(mockOnProposalUpdateSubscribe).toHaveBeenCalledTimes(1);
+
+    const first = mockOnProposalUpdateSubscribe.mock.calls[0][1] as Handlers;
+    first.onError(new Error('boom'));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(mockOnProposalUpdateSubscribe).toHaveBeenCalledTimes(2);
+    expect(String(warn.mock.calls[0][0])).toContain('error: boom');
+    warn.mockRestore();
+  });
+
+  it('does NOT reopen after the store\'s own teardown', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const teardown = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().thread).not.toBeNull());
+    const first = mockOnThreadEventSubscribe.mock.calls[0][1] as Handlers;
+
+    teardown();
+    expect(mockOnThreadEventUnsubscribe).toHaveBeenCalledTimes(1);
+    // The link completes the observer on unsubscribe — that must stay silent.
+    first.onComplete();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(mockOnThreadEventSubscribe).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('a pending reopen is cancelled by teardown', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const teardown = useAgentThreadStore.getState().init();
+    await vi.waitFor(() => expect(useAgentThreadStore.getState().thread).not.toBeNull());
+    const first = mockOnThreadEventSubscribe.mock.calls[0][1] as Handlers;
+    first.onStopped();
+    teardown();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(mockOnThreadEventSubscribe).toHaveBeenCalledTimes(1);
+    vi.restoreAllMocks();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // onProposalUpdate — targeted, unthrottled proposals-only refetch
 // ---------------------------------------------------------------------------
 
@@ -260,6 +353,15 @@ describe('sendMessage', () => {
       threadId: 'thread-1',
       text: 'hello',
     });
+  });
+
+  it('forces one transcript + proposals refetch when the turn settles, without the live tail', async () => {
+    useAgentThreadStore.setState({ thread: makeThread() });
+    expect(useAgentThreadStore.getState().liveTailTick).toBe(0);
+    await useAgentThreadStore.getState().sendMessage('hello');
+    expect(useAgentThreadStore.getState().liveTailTick).toBe(1);
+    await vi.waitFor(() => expect(mockListProposalsQuery).toHaveBeenCalledTimes(1));
+    expect(mockListProposalsQuery).toHaveBeenCalledWith({ threadId: 'thread-1' });
   });
 
   it('is a no-op (warns, does not call the mutation) before the thread has loaded', async () => {

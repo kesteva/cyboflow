@@ -39,7 +39,7 @@ patchedDependencies:
     hash: 81033cdc92e226b8296e3eccecc2700e36cfc03e05a29a1d4e696ca32d2281b4
     path: patches/app-builder-lib@26.0.20.patch
   trpc-electron@0.1.2:
-    hash: 38d21f7f14450ca05504e55fcf0b84260ce33012225e8e190cfd194a22ff0a19
+    hash: 7831fa7f1d21b31a42889f5d8f0e407e77aa43f49d9897db360a549b2eda65a3
     path: patches/trpc-electron@0.1.2.patch
 
 importers:
@@ -96,7 +96,7 @@ importers:
         version: 2.2.6
       trpc-electron:
         specifier: 0.1.2
-        version: 0.1.2(patch_hash=38d21f7f14450ca05504e55fcf0b84260ce33012225e8e190cfd194a22ff0a19)(@trpc/client@11.17.0(@trpc/server@11.17.0(typescript@5.8.3))(typescript@5.8.3))(@trpc/server@11.17.0(typescript@5.8.3))(electron@44.1.1)
+        version: 0.1.2(patch_hash=7831fa7f1d21b31a42889f5d8f0e407e77aa43f49d9897db360a549b2eda65a3)(@trpc/client@11.17.0(@trpc/server@11.17.0(typescript@5.8.3))(typescript@5.8.3))(@trpc/server@11.17.0(typescript@5.8.3))(electron@44.1.1)
       uuid:
         specifier: ^13.0.2
         version: 13.0.2
@@ -260,7 +260,7 @@ importers:
         version: 1.0.7(tailwindcss@3.4.17)
       trpc-electron:
         specifier: 0.1.2
-        version: 0.1.2(patch_hash=38d21f7f14450ca05504e55fcf0b84260ce33012225e8e190cfd194a22ff0a19)(@trpc/client@11.17.0(@trpc/server@11.17.0(typescript@5.8.3))(typescript@5.8.3))(@trpc/server@11.17.0(typescript@5.8.3))(electron@44.1.1)
+        version: 0.1.2(patch_hash=7831fa7f1d21b31a42889f5d8f0e407e77aa43f49d9897db360a549b2eda65a3)(@trpc/client@11.17.0(@trpc/server@11.17.0(typescript@5.8.3))(typescript@5.8.3))(@trpc/server@11.17.0(typescript@5.8.3))(electron@44.1.1)
       uuid:
         specifier: ^13.0.2
         version: 13.0.2
@@ -387,7 +387,7 @@ importers:
         version: 2.2.6
       trpc-electron:
         specifier: 0.1.2
-        version: 0.1.2(patch_hash=38d21f7f14450ca05504e55fcf0b84260ce33012225e8e190cfd194a22ff0a19)(@trpc/client@11.17.0(@trpc/server@11.17.0(typescript@5.8.3))(typescript@5.8.3))(@trpc/server@11.17.0(typescript@5.8.3))(electron@44.1.1)
+        version: 0.1.2(patch_hash=7831fa7f1d21b31a42889f5d8f0e407e77aa43f49d9897db360a549b2eda65a3)(@trpc/client@11.17.0(@trpc/server@11.17.0(typescript@5.8.3))(typescript@5.8.3))(@trpc/server@11.17.0(typescript@5.8.3))(electron@44.1.1)
       zod:
         specifier: ^3.23.8
         version: 3.25.76
@@ -12226,7 +12226,7 @@ snapshots:
 
   trough@2.2.0: {}
 
-  trpc-electron@0.1.2(patch_hash=38d21f7f14450ca05504e55fcf0b84260ce33012225e8e190cfd194a22ff0a19)(@trpc/client@11.17.0(@trpc/server@11.17.0(typescript@5.8.3))(typescript@5.8.3))(@trpc/server@11.17.0(typescript@5.8.3))(electron@44.1.1):
+  trpc-electron@0.1.2(patch_hash=7831fa7f1d21b31a42889f5d8f0e407e77aa43f49d9897db360a549b2eda65a3)(@trpc/client@11.17.0(@trpc/server@11.17.0(typescript@5.8.3))(typescript@5.8.3))(@trpc/server@11.17.0(typescript@5.8.3))(electron@44.1.1):
     dependencies:
       '@trpc/client': 11.17.0(@trpc/server@11.17.0(typescript@5.8.3))(typescript@5.8.3)
       '@trpc/server': 11.17.0(typescript@5.8.3)
