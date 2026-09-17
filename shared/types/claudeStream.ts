@@ -173,7 +173,13 @@ export interface AssistantEvent {
   parent_tool_use_id?: string | null;
   session_id?: string;
   uuid?: string;
-  error?: { message?: string; [k: string]: unknown };
+  /**
+   * The SDK's `SDKAssistantMessageError` — a bare string code such as
+   * `'authentication_failed'` on a synthetic (`model: '<synthetic>'`) error
+   * message. The object form is a legacy shape kept so a stored event from
+   * before the string code was modelled still parses.
+   */
+  error?: string | { message?: string; [k: string]: unknown };
 }
 
 /**

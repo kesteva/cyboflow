@@ -162,6 +162,7 @@ import type { SessionGitOpsLike } from './orchestrator/trpc/contracts/sessionGit
 import type { SessionOpsLike } from './orchestrator/trpc/contracts/sessionOps';
 import { createConfigOps } from './ipc/configOps';
 import { createGitPrerequisiteOps } from './ipc/gitPrerequisite';
+import { createClaudeAuthOps } from './ipc/claudeAuth';
 import { createFileOps } from './ipc/fileOps';
 import { createGitOps } from './ipc/gitOps';
 import { createSessionOps } from './ipc/sessionOps';
@@ -541,6 +542,9 @@ let runExecutor: RunExecutor;
 // guards on it.
 let agentThreadStore: AgentThreadDbStore;
 let agentThreadService: AgentThreadService | null = null;
+// The in-app Claude sign-in runner (main/src/ipc/claudeAuth.ts). Module-level
+// so before-quit can kill a `claude auth login` still waiting on its stdin.
+let claudeAuthOps: ReturnType<typeof createClaudeAuthOps> | null = null;
 // Custom Views (migration 132, docs/proposals/CUSTOM-VIEWS.md §9 row S3).
 // Built in initializeServices() right after agentThreadStore (same cyboflowDb,
 // same "store before anything reaches for it" ordering) and read later by the
@@ -1062,6 +1066,10 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
   const ompCommand = buildOmpCommandAdapter();
   const configOps = createConfigOps({ configManager, claudeCodeManager: defaultCliManager });
   const gitPrerequisiteOps = createGitPrerequisiteOps();
+  claudeAuthOps = createClaudeAuthOps({
+    getConfiguredClaudePath: () => configManager.getConfig()?.claudeExecutablePath,
+    log: (message) => logger.info(message),
+  });
   const workspaceFileOps = createFileOps({ sessionManager, databaseService, gitStatusManager, configManager });
   attachOrchestratorTrpc({
     window: win,
@@ -1071,6 +1079,7 @@ function attachOrchestratorTrpcToWindow(win: BrowserWindow): void {
         db,
         configOps,
         gitPrerequisiteOps,
+        claudeAuthOps: claudeAuthOps ?? undefined,
         workspaceFileOps,
         setDockBadge: (count) => dockBadgeService.setBadgeCount(count),
         workflowRegistry,
@@ -7312,6 +7321,13 @@ app.on('before-quit', (event) => {
     tryGetProviderUsageStore()?.flush();
   } catch (error) {
     console.warn('[Main] providerUsage flush on quit failed:', error);
+  }
+
+  // A `claude auth login` parked on its code prompt would outlive the app.
+  try {
+    claudeAuthOps?.dispose();
+  } catch (error) {
+    console.warn('[Main] claude sign-in dispose on quit failed:', error);
   }
 
   // Check if there are active archive tasks

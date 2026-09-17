@@ -510,4 +510,46 @@ describe('TypedEventNarrowing', () => {
       }
     }
   });
+
+  // -------------------------------------------------------------------------
+  // assistant.error as a bare string code (SDKAssistantMessageError)
+  // -------------------------------------------------------------------------
+
+  it('narrows an assistant event whose error is a string code instead of dropping it', () => {
+    const raw = {
+      type: 'assistant',
+      message: {
+        id: 'msg_auth',
+        model: '<synthetic>',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Not logged in · Please run /login' }],
+      },
+      parent_tool_use_id: null,
+      session_id: 'sess-1',
+      uuid: 'uuid-1',
+      error: 'authentication_failed',
+    };
+    const event = narrower.narrow(raw);
+    expect('kind' in event).toBe(false);
+    if ('kind' in event) throw new Error('Expected typed variant');
+    if (event.type !== 'assistant') throw new Error('Expected AssistantEvent');
+    expect(event.error).toBe('authentication_failed');
+  });
+
+  it('still narrows the legacy object form of assistant.error', () => {
+    const raw = {
+      type: 'assistant',
+      message: {
+        id: 'msg_legacy',
+        model: '<synthetic>',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'API Error: boom' }],
+      },
+      error: { message: 'boom' },
+    };
+    const event = narrower.narrow(raw);
+    if ('kind' in event) throw new Error('Expected typed variant');
+    if (event.type !== 'assistant') throw new Error('Expected AssistantEvent');
+    expect(event.error).toEqual({ message: 'boom' });
+  });
 });

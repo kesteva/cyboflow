@@ -284,7 +284,10 @@ const assistantEventSchema = z.object({
   parent_tool_use_id: z.union([z.string(), z.null()]).optional(),
   session_id: z.string().optional(),
   uuid: z.string().optional(),
-  error: z.object({ message: z.string().optional() }).passthrough().optional(),
+  // SDKAssistantMessageError is a bare string code ('authentication_failed',
+  // 'rate_limit', …); the object form is the legacy shape. Accepting only the
+  // object used to demote every synthetic auth-failure message to __unknown__.
+  error: z.union([z.string(), z.object({ message: z.string().optional() }).passthrough()]).optional(),
 });
 
 // ---------------------------------------------------------------------------

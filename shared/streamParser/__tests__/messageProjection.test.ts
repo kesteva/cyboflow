@@ -575,6 +575,43 @@ describe('MessageProjection', () => {
     expect(msg.metadata?.systemSubtype).toBe('error');
   });
 
+  it('carries the SDK\'s structured error code (assistant.error) onto metadata.assistantError', () => {
+    // The CLI's auth-failure shape: a synthetic message whose text does NOT
+    // contain "error", so the text sniff alone would render it as an ordinary
+    // assistant turn — the string code is what marks it.
+    const authFailedEvent: AssistantEvent = {
+      type: 'assistant',
+      message: {
+        id: 'msg_auth_failed',
+        model: '<synthetic>',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Not logged in · Please run /login' }],
+      },
+      error: 'authentication_failed',
+    };
+
+    const msg = projection.project(authFailedEvent) as UnifiedMessage;
+    expect(msg).not.toBeNull();
+    expect(msg.role).toBe('system');
+    expect(msg.metadata?.systemSubtype).toBe('error');
+    expect(msg.metadata?.assistantError).toBe('authentication_failed');
+  });
+
+  it('leaves metadata.assistantError absent on an ordinary assistant turn', () => {
+    const plain: AssistantEvent = {
+      type: 'assistant',
+      message: {
+        id: 'msg_plain',
+        model: 'claude-opus-4-5',
+        role: 'assistant',
+        content: [{ type: 'text', text: 'Hello' }],
+      },
+    };
+    const msg = projection.project(plain) as UnifiedMessage;
+    expect(msg.role).toBe('assistant');
+    expect('assistantError' in (msg.metadata ?? {})).toBe(false);
+  });
+
   // -------------------------------------------------------------------------
   // 16. Empty assistant message → null
   // -------------------------------------------------------------------------

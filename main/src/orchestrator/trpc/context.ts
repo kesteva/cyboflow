@@ -32,6 +32,7 @@ import type {
 import type { ExecuteProposalResult } from '../agentThread/proposalExecutor';
 import type { ConfigOpsLike } from './contracts/configOps';
 import type { GitPrerequisiteOpsLike } from './contracts/gitPrerequisiteOps';
+import type { ClaudeAuthOpsLike } from './contracts/claudeAuthOps';
 import type { WorkspaceFileOpsLike } from './contracts/workspaceFileOps';
 import type { SessionGitOpsLike } from './contracts/sessionGitOps';
 import type { SessionOpsLike } from './contracts/sessionOps';
@@ -530,6 +531,14 @@ export interface ContextDeps {
   gitPrerequisiteOps?: GitPrerequisiteOpsLike;
 
   /**
+   * The in-app Claude sign-in (the `claudeAuth` router's business logic —
+   * `claude auth login` driven from the chat's sign-in card). Injected from
+   * `main/src/index.ts` via `createClaudeAuthOps()`; `undefined` (the
+   * unit-test default) ⇒ PRECONDITION_FAILED.
+   */
+  claudeAuthOps?: ClaudeAuthOpsLike;
+
+  /**
    * Live workspace-file-ops implementation (the `workspaceFiles` router's
    * business logic — session-worktree and project-directory file I/O, plus
    * the worktree/project-scoped git mutations that have always lived
@@ -665,6 +674,7 @@ export function createContext(deps: ContextDeps = {}): {
   verifyRunbookStatus?: VerifyRunbookStatusLike;
   configOps?: ConfigOpsLike;
   gitPrerequisiteOps?: GitPrerequisiteOpsLike;
+  claudeAuthOps?: ClaudeAuthOpsLike;
   workspaceFileOps?: WorkspaceFileOpsLike;
   sessionGitOps?: SessionGitOpsLike;
   sessionOps?: SessionOpsLike;
@@ -692,6 +702,7 @@ export function createContext(deps: ContextDeps = {}): {
     verifyRunbookStatus,
     configOps,
     gitPrerequisiteOps,
+    claudeAuthOps,
     workspaceFileOps,
     sessionGitOps,
     sessionOps,
@@ -726,6 +737,7 @@ export function createContext(deps: ContextDeps = {}): {
     verifyRunbookStatus,
     configOps,
     gitPrerequisiteOps,
+    claudeAuthOps,
     workspaceFileOps,
     sessionGitOps,
     sessionOps,

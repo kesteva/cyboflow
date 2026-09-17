@@ -8,6 +8,7 @@
 import { router } from './trpc';
 import { agentThreadRouter } from './routers/agentThread';
 import { agentsRouter } from './routers/agents';
+import { claudeAuthRouter } from './routers/claudeAuth';
 import { customViewsRouter } from './routers/customViews';
 import { customWidgetServerRouter } from './routers/customWidgetServer';
 import { configRouter } from './routers/config';
@@ -49,6 +50,7 @@ export const appRouter = router({
     approvals: approvalsRouter,
     design: designRouter,
     artifacts: artifactsRouter,
+    claudeAuth: claudeAuthRouter,
     config: configRouter,
     customViews: customViewsRouter,
     customWidgetServer: customWidgetServerRouter,
