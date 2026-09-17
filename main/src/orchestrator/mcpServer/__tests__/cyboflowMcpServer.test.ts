@@ -881,13 +881,13 @@ describe('cyboflowMcpServer ListTools verify-setup tools', () => {
     expect(Object.keys(tool!.inputSchema.properties).sort()).toEqual(['request_id', 'timeout_ms']);
   });
 
-  it('declares the runbook-registration tool with the three declarable modalities', async () => {
+  it('declares the runbook-registration tool with the four declarable modalities', async () => {
     const tool = (await listTools()).find((t) => t.name === 'cyboflow_register_verify_runbook');
     expect(tool).toBeDefined();
     expect(tool!.description).toContain('verify-setup');
     expect(tool!.inputSchema.required).toEqual(['modality']);
-    // 'mobile' is deferred (§4) and must never be offered as registrable.
-    expect(tool!.inputSchema.properties['modality'].enum).toEqual(['web', 'cdp-app', 'native-screen']);
+    // 'mobile' is registrable too — the iOS Simulator tier declares app + no serve.
+    expect(tool!.inputSchema.properties['modality'].enum).toEqual(['web', 'cdp-app', 'native-screen', 'mobile']);
   });
 
   it('cyboflow_request_verification gains setup_proof + the two pin halves', async () => {
@@ -918,7 +918,7 @@ describe('cyboflowMcpServer CallTool verify-setup validation', () => {
 
   it('cyboflow_register_verify_runbook rejects a missing/out-of-enum modality and non-string bindings', async () => {
     expect(await callTool('cyboflow_register_verify_runbook', {})).toMatchObject({ error: 'invalid_arguments' });
-    expect(await callTool('cyboflow_register_verify_runbook', { modality: 'mobile' })).toMatchObject({
+    expect(await callTool('cyboflow_register_verify_runbook', { modality: 'android' })).toMatchObject({
       error: 'invalid_arguments',
     });
     expect(
@@ -931,6 +931,11 @@ describe('cyboflowMcpServer CallTool verify-setup validation', () => {
       modality: 'cdp-app',
       bindings_json: '{"dataDirLever":"CYBOFLOW_DIR"}',
     });
+    expect(res['error']).not.toBe('invalid_arguments');
+  });
+
+  it('cyboflow_register_verify_runbook passes validation for the mobile modality (mocked connection error)', async () => {
+    const res = await callTool('cyboflow_register_verify_runbook', { modality: 'mobile' });
     expect(res['error']).not.toBe('invalid_arguments');
   });
 

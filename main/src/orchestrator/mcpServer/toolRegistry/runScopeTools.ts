@@ -41,6 +41,7 @@ import { z } from 'zod';
 import { compact, defineTool, type RegisteredTool } from './defineTool';
 import { declareAs } from './toolSchema';
 import { TUNING_LEVELS } from '../../../../../shared/tuning/workflowTuning';
+import { VERIFY_RUNBOOK_MODALITIES, type VerifyRunbookModality } from '../../../../../shared/types/verifyRunbook';
 
 /**
  * IPC budget for the BLOCKING `cyboflow_await_verification` call
@@ -641,7 +642,11 @@ export const RUN_SCOPE_TOOLS: readonly RegisteredTool[] = [
     description:
       'Register (or refresh) the MACHINE-LOCAL half of THIS project\'s verification runbook and return { hash, version, committed, warning? } — the content-addressed hash of the committed portable half and the CAS version of the local record. Meaningful for the verify-setup flow. It reads `.cyboflow/verify-runbook.json` from THIS run\'s worktree itself (there is no content argument — COMMIT the file first, then register: the returned hash addresses what you actually committed, which is what a later request is pinned to). `committed: false` is a WARNING, not a blocker on proving: the proof executes the REGISTERED content (this record\'s `portable_json`, fetched by hash), never the snapshot\'s file, so an uncommitted runbook still proves. What it means is that the human-reviewable EXPORT is not present at HEAD — the usual cause is a project that ignores or locally-excludes `.cyboflow/`, which makes a plain `git add` a silent no-op; re-add with `git add -f`, commit, and register again so the committed file matches the record. Registering always produces an \'unproven-draft\': new content is by definition unproven, and only a PASSING setup_proof verification promotes it. Re-register after every edit — the hash changes, so the old record no longer describes what you are proving. Errors come back verbatim and name the offending file or key (e.g. "portable runbook is not valid JSON: …", "portable runbook declares no \\"cdp-app\\" modality") so you can fix the file and retry.',
     input: z.object({
-      modality: z.enum(['web', 'cdp-app', 'native-screen']).describe('Which modality\'s record to register; the portable runbook must declare an entry for it. \'mobile\' is not registrable — it is deferred (pending the Xcode MCP) and no execution path could satisfy it.'),
+      modality: z
+        .enum(VERIFY_RUNBOOK_MODALITIES as unknown as [VerifyRunbookModality, ...VerifyRunbookModality[]])
+        .describe(
+          'Which modality\'s record to register; the portable runbook must declare an entry for it. mobile = iOS Simulator on Apple\'s command-line toolchain; the entry declares build[] + app + a bundle-identity attestation and no serve; authored by the verify-setup flow, never auto-derived by a lane.',
+        ),
       bindings_json: z.string().describe('Optional JSON object of HOST-STABLE resolved lever bindings — binary paths, the data-dir lever name, ABI facts. NEVER request-scoped values: ports and temp dirs are leased per request by the scheduler, and a persisted one would go stale or collide. Validated as parseable JSON.').optional(),
     }),
     envelope: 'mcp-register-verify-runbook',
