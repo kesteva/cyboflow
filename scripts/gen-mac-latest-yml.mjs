@@ -40,7 +40,10 @@ import { createRequire } from 'node:module';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = join(__dirname, '..', 'dist-electron');
 const require = createRequire(import.meta.url);
-const { version } = require('../package.json');
+// CYBOFLOW_BUILD_VERSION is the dev-release stamp the DMGs were built under
+// (configure-build.js → extraMetadata.version); the manifest must name the
+// same version or the updater compares against the wrong one.
+const version = process.env.CYBOFLOW_BUILD_VERSION || require('../package.json').version;
 
 function fail(message) {
   console.error(`\n✗ ${message}\n`);

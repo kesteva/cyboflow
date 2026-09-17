@@ -197,6 +197,16 @@ jobs:
             echo "--- unsigned build: skipping notarization checks"
           fi
 
+      # The macOS floor of this build, for the merged manifest's
+      # minimumSystemVersion: gen-mac-latest-yml.mjs reads it from Electron.app
+      # on a Mac, but the publish job runs on ubuntu and has no Electron.app,
+      # so the build ships the value it actually packaged (the app's own
+      # Info.plist carries Electron's LSMinimumSystemVersion).
+      - name: Record minimum macOS version
+        run: |
+          /usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "dist-electron/$STAGING/$APP_NAME.app/Contents/Info.plist" \
+            | tee dist-electron/min-macos.txt
+
       # Per-arch latest-mac.yml: electron-builder writes one per build, each
       # naming only its own arch's files. Publishing merges them (the runbook's
       # gen step) — that is the publish job's concern, not this one's.
@@ -209,5 +219,6 @@ jobs:
             dist-electron/*.zip
             dist-electron/*.blockmap
             dist-electron/latest-mac.yml
+            dist-electron/min-macos.txt
           if-no-files-found: error
           retention-days: 7

@@ -1,0 +1,202 @@
+name: Dev release
+
+# Continuous dev channel: every push to main that passes the Code Quality gate
+# becomes a Cyboflow Dev release on updates.cyboflow.com/dev — three signed
+# installers (macOS arm64 + x64, Windows x64) built on hosted runners, merged
+# into one feed, published with the same publish-update.mjs the runbook uses.
+#
+# VERSION: `<package.json patch+1>-dev.<run_number>`. main keeps holding the
+# LAST RELEASED version (the release runbook never pre-bumps), so the next
+# patch with a prerelease tag is always above the current stable AND below
+# the next release: 0.4.2 < 0.4.3-dev.7 < 0.4.3-dev.8 < 0.4.3 (or 0.5.0).
+# run_number is monotonic per workflow file, so the feed only moves forward.
+# The stamp rides CYBOFLOW_BUILD_VERSION (extraMetadata) — package.json is
+# never edited, buildInfo.gitCommit is the real main SHA.
+#
+# TRIGGER: workflow_run on "Code Quality" rather than `push`, so a red gate
+# never ships. github.sha is main's tip AT DISPATCH, not the graded SHA —
+# every job checks out `workflow_run.head_sha`. quality.yml cancels its
+# in-progress run on a newer push (conclusion 'cancelled' → no release), so a
+# burst of pushes yields one dev release, from the newest green SHA.
+#
+# SECRETS: the build secrets (CSC_*/APPLE_*, AZURE_*, SENTRY_DSN,
+# APTABASE_APP_KEY) are inherited by the reusable build workflows; publish
+# needs R2_ACCOUNT_ID + R2_ACCESS_KEY_ID + R2_SECRET_ACCESS_KEY (the
+# publish-update.mjs trio — NOT the R2_ANALYTICS_* pair, which is read-only).
+#
+# The stable feed is untouched: releases still follow docs/RELEASE-RUNBOOK.md.
+
+on:
+  workflow_run:
+    workflows: ["Code Quality"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Commit/branch to release to the dev feed (must be on main)'
+        type: string
+        default: main
+
+# Serialize, never cancel: cancelling mid-publish would leave a feed whose
+# manifest names files that were never uploaded. A queued run just waits.
+concurrency:
+  group: dev-release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: Resolve SHA + version
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      version: ${{ steps.resolve.outputs.version }}
+      base: ${{ steps.resolve.outputs.base }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || inputs.ref }}
+          fetch-depth: 0
+
+      - name: Resolve
+        id: resolve
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse HEAD)
+          # Only main's history ships to the dev feed — a dispatched ref that
+          # is not an ancestor of origin/main is refused.
+          git merge-base --is-ancestor "$sha" origin/main || { echo "::error::$sha is not on origin/main"; exit 1; }
+          base=$(node -p "require('./package.json').version")
+          [[ "$base" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || { echo "::error::package.json version '$base' is not a plain X.Y.Z"; exit 1; }
+          next="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$(( BASH_REMATCH[3] + 1 ))"
+          version="$next-dev.${{ github.run_number }}"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Dev release $version from ${sha:0:9} (main is at $base)"
+
+  macos:
+    name: macOS
+    needs: version
+    uses: ./.github/workflows/macos.yml
+    with:
+      variant: dev
+      arch: both
+      build_version: ${{ needs.version.outputs.version }}
+      ref: ${{ needs.version.outputs.sha }}
+    secrets: inherit
+
+  windows:
+    name: Windows
+    needs: version
+    uses: ./.github/workflows/windows-installer.yml
+    with:
+      variant: dev
+      build_version: ${{ needs.version.outputs.version }}
+      ref: ${{ needs.version.outputs.sha }}
+    secrets: inherit
+
+  publish:
+    name: Publish to updates.cyboflow.com/dev
+    needs: [version, macos, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      V: ${{ needs.version.outputs.version }}
+      SHA: ${{ needs.version.outputs.sha }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.15.1'
+          cache: 'pnpm'
+
+      # publish-update.mjs + gen-mac-latest-yml.mjs need only root deps
+      # (@aws-sdk). --ignore-scripts skips the Electron download and the
+      # native rebuilds — nothing here runs the app.
+      - name: Install dependencies
+        run: pnpm install --ignore-scripts
+
+      # The three build artifacts of THIS run (the reusable workflows upload
+      # into the caller's run): macOS arm64 + x64 (each with its own
+      # latest-mac.yml and min-macos.txt, both overwritten harmlessly — the
+      # manifest is regenerated below) and the Windows trio.
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cyboflow-*-dev
+          merge-multiple: true
+          path: dist-electron
+
+      - name: Merge the macOS manifest + assert the file set
+        run: |
+          set -euo pipefail
+          cd dist-electron
+          ls -lh
+          MAC="Cyboflow-Dev-$V-macOS"
+          WIN="Cyboflow-Dev-$V-Windows-x64.exe"
+          for f in $MAC-arm64.dmg $MAC-arm64.dmg.blockmap $MAC-arm64.zip $MAC-arm64.zip.blockmap \
+                   $MAC-x64.dmg $MAC-x64.dmg.blockmap $MAC-x64.zip $MAC-x64.zip.blockmap \
+                   $WIN $WIN.blockmap latest.yml min-macos.txt; do
+            test -f "$f" || { echo "::error::missing $f"; exit 1; }
+          done
+          grep -q "url: $WIN" latest.yml || { echo "::error::latest.yml does not name $WIN"; cat latest.yml; exit 1; }
+          grep -q "version: $V" latest.yml || { echo "::error::latest.yml version is not $V"; cat latest.yml; exit 1; }
+          cd ..
+          # arm64 zip first: electron-updater's primary `path` is the first entry.
+          CYBOFLOW_BUILD_VERSION="$V" CYBOFLOW_MIN_MACOS="$(cat dist-electron/min-macos.txt)" \
+            node scripts/gen-mac-latest-yml.mjs dist-electron/latest-mac.yml \
+              $MAC-arm64.zip $MAC-arm64.dmg $MAC-x64.zip $MAC-x64.dmg
+          cat dist-electron/latest-mac.yml
+          grep -q "^version: $V$" dist-electron/latest-mac.yml
+          grep -q '^minimumSystemVersion:' dist-electron/latest-mac.yml
+
+      - name: Publish (dry run, then real)
+        env:
+          BUILD_VARIANT: dev
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          MAC="Cyboflow-Dev-$V-macOS"
+          WIN="Cyboflow-Dev-$V-Windows-x64.exe"
+          files=(
+            "$MAC-arm64.dmg" "$MAC-arm64.dmg.blockmap" "$MAC-arm64.zip" "$MAC-arm64.zip.blockmap"
+            "$MAC-x64.dmg"   "$MAC-x64.dmg.blockmap"   "$MAC-x64.zip"   "$MAC-x64.zip.blockmap"
+            latest-mac.yml "$WIN" "$WIN.blockmap" latest.yml
+          )
+          export PUBLISH_ONLY=$(IFS=,; echo "${files[*]}")
+          echo "PUBLISH_ONLY=$PUBLISH_ONLY"
+          UPDATE_DRY_RUN=true pnpm publish:r2
+          pnpm publish:r2
+
+      # The manifests are served uncached; give the edge a few seconds anyway.
+      - name: Verify the live feed
+        run: |
+          set -euo pipefail
+          for f in latest-mac.yml latest.yml; do
+            for i in 1 2 3 4 5 6; do
+              live=$(curl -fsS "https://updates.cyboflow.com/dev/$f" | grep -m1 '^version:' | awk '{print $2}' | tr -d "'\"")
+              [ "$live" = "$V" ] && break
+              echo "$f says $live, want $V — retry $i"; sleep 10
+            done
+            [ "$live" = "$V" ] || { echo "::error::$f still says $live"; exit 1; }
+          done
+          {
+            echo "### Dev release \`$V\`"
+            echo
+            echo "- commit \`${SHA:0:9}\` (main was \`${{ needs.version.outputs.base }}\`)"
+            echo "- feed: https://updates.cyboflow.com/dev/latest-mac.yml · https://updates.cyboflow.com/dev/latest.yml"
+            echo "- installers: https://dl.cyboflow.com/dev/Cyboflow-Dev-latest-macOS-arm64.dmg · …-x64.dmg · …-Windows-x64.exe"
+          } >> "$GITHUB_STEP_SUMMARY"
