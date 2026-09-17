@@ -380,6 +380,23 @@ function configureBuild() {
     config.publish = { ...(config.publish || {}), url: 'https://updates.cyboflow.com/dev' };
   }
 
+  // Build-version override. The continuous dev release
+  // (.github/workflows/dev-release.yml) stamps `<next-patch>-dev.<run>` on
+  // every main push; it must not edit the committed package.json (the tree
+  // would read dirty and buildInfo.gitCommit would carry "(modified)"), so the
+  // version rides electron-builder's extraMetadata instead — that is what the
+  // packaged app's package.json, `app.getVersion()`, the artifact names and
+  // latest*.yml all read. inject-build-info.js honours the same variable.
+  const buildVersion = process.env.CYBOFLOW_BUILD_VERSION;
+  if (buildVersion) {
+    if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(buildVersion)) {
+      console.error(`Error: CYBOFLOW_BUILD_VERSION "${buildVersion}" is not a semver version`);
+      process.exit(1);
+    }
+    config.extraMetadata = { ...(config.extraMetadata || {}), version: buildVersion };
+    console.log(`Build version override: ${buildVersion} (package.json says ${packageJson.version})`);
+  }
+
   // Windows ships prebuilt native modules (docs/WINDOWS-BUILD.md), so they are
   // packaged as-is: a rebuild needs MSVC, which a Windows dev host may not
   // have, and would clobber the verified prebuilds.
