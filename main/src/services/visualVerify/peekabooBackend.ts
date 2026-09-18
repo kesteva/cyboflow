@@ -41,9 +41,12 @@
  * legacy chains going forward and boot-terminalizes any stranded agent-chain
  * request. The default v1 engine (verify_chain=['agent']) never reaches this
  * file — VerificationScheduler.processRow's isAgentStampedRun dispatch routes
- * those requests to VerificationAgentRunner instead. `native-desktop`/
- * `mobile-flow` verify types remain out of scope for the agent engine (§5.14),
- * so this stays the only live backend for those types on the legacy chain.
+ * those requests to VerificationAgentRunner instead. `native-desktop` verify
+ * type remains out of scope for this backend's capture path on the agent
+ * engine (§5.14), so this stays the only live backend for that type on the
+ * legacy chain. (`mobile-flow` now runs on the agent engine via
+ * `xcodeToolchainBackend.ts` — see `docs/proposals/mobile-verification-tier.md`
+ * — and never reaches this file.)
  * Re-enable as the default by reverting the isAgentStampedRun dispatch
  * (verificationScheduler.ts) or by leaving the kill switch set.
  *

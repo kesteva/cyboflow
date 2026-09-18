@@ -682,6 +682,42 @@ async function grantRows(probes: VerifyHostProbesLike): Promise<VerifyProbeRow[]
   ];
 }
 
+/**
+ * The `'mobile-simulator'` row — the iOS-Simulator toolchain, rolled up the way
+ * `'browser-driving'` rolls up the browser one.
+ *
+ * `grantRows`' fail-open discipline, applied to a row that arrives pre-folded:
+ * no composition wired, or a composition that threw, is `'inconclusive'` and
+ * NEVER `'missing'`. The mapping from the three-way toolchain verdict to this
+ * state lives in `mobileComposition.ts` (an Xcode-shaped type cannot cross into
+ * this standalone-typechecked tree); the discipline over a probe that could not
+ * answer at all lives here, next to the other rows that keep it.
+ *
+ * `fix` is forced to `null` in EVERY state, including one the composition
+ * reported as `'missing'`. Neither Xcode nor Maestro is something this app can
+ * install, so there is no state of this row with an action behind it, and
+ * offering one would be a button that opens a download page and calls it a fix.
+ */
+async function mobileRow(probes: VerifyHostProbesLike): Promise<VerifyProbeRow> {
+  if (probes.mobileSimulator === undefined) {
+    return {
+      id: 'mobile-simulator',
+      state: 'inconclusive',
+      detail: detail('no mobile toolchain probe wired on this host'),
+      fix: null,
+    };
+  }
+  try {
+    const row = await probes.mobileSimulator();
+    return { ...row, id: 'mobile-simulator', detail: detail(row.detail), fix: null };
+  } catch (err) {
+    // The composition's contract says it never throws; honour the fail-open
+    // rule anyway rather than letting a contract violation read as a host that
+    // affirmatively has no Xcode.
+    return { id: 'mobile-simulator', state: 'inconclusive', detail: detail(errorText(err)), fix: null };
+  }
+}
+
 /** Read the grants, mapping an unwired backend and a thrown probe alike to a reason string. */
 async function readGrants(probes: VerifyHostProbesLike): Promise<NativeGrantProbe> {
   if (probes.nativeGrants === undefined) {
@@ -697,15 +733,17 @@ async function readGrants(probes: VerifyHostProbesLike): Promise<NativeGrantProb
 }
 
 /**
- * Run the host probes and shape them into the three panel rows.
+ * Run the host probes and shape them into the four panel rows.
  *
  * The fail-open rule from `preflight.ts` is reproduced EXACTLY here: a probe
  * that rejects is `'inconclusive'`, never `'missing'`. The single exception is
  * `resolveNode` — "node is unresolvable" is itself the fact being checked, and
  * there is no state in which the harness could proceed without it.
  *
- * All three rows are UNCONDITIONAL, and none of them is softened by what the
- * project happens to need. The grants used to appear only once some runbook
+ * All four rows are UNCONDITIONAL, and none of them is softened by what the
+ * project happens to need — the mobile row included: whether this host can
+ * stand up an iOS Simulator is exactly the question asked while deciding
+ * whether to declare the `mobile` modality at all. The grants used to appear only once some runbook
  * declared `native-screen`, which meant the one moment you needed to know
  * whether screen capture works here — while deciding whether to declare it —
  * was the one moment the panel would not say. Making the ANSWER conditional
@@ -714,13 +752,14 @@ async function readGrants(probes: VerifyHostProbesLike): Promise<NativeGrantProb
  * when you first try to use it.
  */
 async function runHostProbes(probes: VerifyHostProbesLike): Promise<VerifyProbeRow[]> {
-  const [node, chromium, cli, grants] = await Promise.all([
+  const [node, chromium, cli, grants, mobile] = await Promise.all([
     probeNodePart(probes),
     probeChromiumPart(probes),
     probeDriverCliPart(probes),
     grantRows(probes),
+    mobileRow(probes),
   ]);
-  return [foldDrivingParts([node, chromium, cli]), ...grants];
+  return [foldDrivingParts([node, chromium, cli]), ...grants, mobile];
 }
 
 export const verificationRequestsRouter = router({

@@ -39,7 +39,9 @@ import {
   createTranscriptAccumulator,
   makeDependencyCommandCanUseTool,
   makeVerificationAgentQuery,
+  VERIFICATION_REPORT_JSON_SCHEMA,
 } from '../verificationAgentQuery';
+import { ATTESTATION_KINDS } from '../../../../../shared/types/visualVerification';
 
 let lastOptions: Record<string, unknown> | undefined;
 
@@ -281,6 +283,31 @@ describe('makeVerificationAgentQuery — sandbox wiring', () => {
     const allowed = await decide(canUseTool, 'Bash', { command: 'pnpm run build' });
     expect(allowed?.behavior).toBe('allow');
   });
+
+  // Property, not a list: whatever the runner hands over, NO `mcp__*` name may
+  // ever be auto-approved (an allowedTools entry bypasses canUseTool entirely),
+  // while the availability list may carry it. Inert today — nothing composes an
+  // MCP server into this query — so a future grant lands on a closed trap.
+  it('never auto-approves an mcp__ tool, and canUseTool denies it per call', async () => {
+    install(makeFakeQuery([sdkResultSuccess({ structuredOutput: { version: 1 } })]));
+    const fn = makeVerificationAgentQuery(FAKE_CLAUDE_EXECUTABLE_PATH);
+    const handed = ['Bash', 'Read', 'mcp__xcode__GetBuildLog', 'Grep', 'mcp__xcode__DocumentationSearch'];
+
+    await fn({ prompt: 'p', systemPrompt: 's', cwd: '/wt', allowedTools: handed, env: {} });
+
+    const opts = lastOptions ?? {};
+    expect(opts.tools).toEqual(handed);
+    const autoApproved = opts.allowedTools as string[];
+    expect(autoApproved).toEqual(['Read', 'Grep']);
+    expect(autoApproved.some((t) => t.startsWith('mcp__'))).toBe(false);
+
+    const canUseTool = opts.canUseTool as CanUseTool | undefined;
+    if (!canUseTool) throw new Error('expected canUseTool to be installed');
+    const denied = await decide(canUseTool, 'mcp__xcode__GetBuildLog', {});
+    expect(denied?.behavior).toBe('deny');
+    const read = await decide(canUseTool, 'Read', {});
+    expect(read?.behavior).toBe('allow');
+  });
 });
 
 describe('makeVerificationAgentQuery — the harness env reaches the deployed session', () => {
@@ -319,5 +346,30 @@ describe('makeVerificationAgentQuery — the harness env reaches the deployed se
       else process.env.PATH = previousPath;
       delete process.env.CYBOFLOW_QUERY_ENV_PROBE;
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The structured-output schema's attestation echo (B5)
+// ---------------------------------------------------------------------------
+
+describe('VERIFICATION_REPORT_JSON_SCHEMA — the attestation kind enum', () => {
+  /** Walk to `properties.attestation.properties.kind.enum` without an `any` in sight. */
+  function attestationKindEnum(): string[] {
+    const asRecord = (v: unknown): Record<string, unknown> => v as Record<string, unknown>;
+    const props = asRecord(asRecord(VERIFICATION_REPORT_JSON_SCHEMA).properties);
+    const kind = asRecord(asRecord(asRecord(props.attestation).properties).kind);
+    return kind.enum as string[];
+  }
+
+  it('accepts bundle-identity — the mobile tier\'s channel', () => {
+    expect(attestationKindEnum()).toContain('bundle-identity');
+  });
+
+  // The echo is never load-bearing, but a kind the schema rejects is dropped at
+  // the SDK boundary: a mobile agent reporting honestly would have its whole
+  // structured output refused for naming the only channel it can run.
+  it('mirrors the closed AttestationSpec union exactly, in both directions', () => {
+    expect([...attestationKindEnum()].sort()).toEqual([...ATTESTATION_KINDS].sort());
   });
 });

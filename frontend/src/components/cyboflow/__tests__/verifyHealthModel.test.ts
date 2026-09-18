@@ -13,6 +13,7 @@ import type {
   VerifyProbeRow,
 } from '../../../../../shared/types/visualVerification';
 import {
+  PROBE_LABEL,
   PROBE_STATUS_CLASS,
   attemptsText,
   capabilityLine,
@@ -221,6 +222,15 @@ describe('probeFixPendingLabel', () => {
     expect(probeFixPendingLabel('request-accessibility')).toBeNull();
     expect(probeFixPendingLabel('open-screen-recording-settings')).toBeNull();
     expect(probeFixPendingLabel(null)).toBeNull();
+  });
+});
+
+describe('PROBE_LABEL', () => {
+  it('names the iOS simulator row for the capability, not the mechanism', () => {
+    // Matches the browser/screen/accessibility rows: a user deciding whether
+    // their project can be verified cares that a simulator can be driven,
+    // not that `xcrun simctl` resolved.
+    expect(PROBE_LABEL['mobile-simulator']).toBe('iOS simulator control');
   });
 });
 

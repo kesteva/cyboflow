@@ -104,7 +104,6 @@ import type {
 } from './verificationSchedulerContracts';
 import {
   ResourceLeasePool,
-  VERIFY_SCREEN_LEASE,
   raceWithAbort,
   sprintVerifyBatchLease,
   verifyAgentSlot,
@@ -120,6 +119,7 @@ import {
   VERIFY_UNPROVEN_SKIP_BLOCKED,
   skipReasonForRunbookDecline,
 } from './verificationSkipReasons';
+import { acquireModalityLeases, mobileToolchainDetail, resolveAgentDeadlineMs } from './mobileGates';
 import {
   AWAIT_TERMINAL_NOT_FOUND_MESSAGE,
   AWAIT_TERMINAL_POLL_INTERVAL_MS,
@@ -254,6 +254,7 @@ export class VerificationScheduler {
   private readonly runbookStore?: VerifyRunbookStore;
   private readonly capabilityFinding?: CapabilityBreakerFindingFn;
   private readonly nativeCaptureProbe?: () => Promise<boolean>;
+  private readonly mobileToolchainProbe?: () => Promise<boolean>;
   private readonly runbookBootstrap?: (args: RunbookBootstrapArgs) => Promise<BootstrapRunOutcome>;
 
   /**
@@ -335,6 +336,7 @@ export class VerificationScheduler {
     // §4: deliberately NOT defaulted to an always-true thunk — absent means "no
     // probe ran", which the gate reads as unsupported (phase-0 behavior).
     this.nativeCaptureProbe = deps.nativeCaptureProbe;
+    this.mobileToolchainProbe = deps.mobileToolchainProbe;
     this.runbookBootstrap = deps.runbookBootstrap;
   }
 
@@ -1803,14 +1805,16 @@ export class VerificationScheduler {
    * static table (§4), and folding an await into the gate's precedence chain
    * would obscure that only ONE of the three gates does I/O.
    *
-   * `mobile` and any future table entry are unconditional. `native-screen`:
-   * no probe wired ⇒ the table's phase-0 detail (unprobed is not capable);
-   * probe true ⇒ null (proceed, observe-only); probe false or throwing ⇒
-   * {@link NATIVE_CAPTURE_UNAVAILABLE_DETAIL}.
+   * Any future table entry is unconditional. `native-screen`: no probe wired ⇒
+   * the table's phase-0 detail (unprobed is not capable); probe true ⇒ null
+   * (proceed, observe-only); probe false or throwing ⇒
+   * {@link NATIVE_CAPTURE_UNAVAILABLE_DETAIL}. `mobile` is the exact same shape
+   * over its own probe — see {@link mobileToolchainDetail}.
    */
   private async unsupportedModalityDetail(modality: VerificationModality): Promise<string | null> {
     const tableDetail = UNSUPPORTED_MODALITY_REASONS[modality];
     if (tableDetail === undefined) return null;
+    if (modality === 'mobile') return mobileToolchainDetail(this.mobileToolchainProbe, this.logger);
     if (modality !== 'native-screen' || !this.nativeCaptureProbe) return tableDetail;
     try {
       const capable = await this.nativeCaptureProbe();
@@ -1835,9 +1839,9 @@ export class VerificationScheduler {
    * `native-screen` only — the injected host-capability probe; the sole write is
    * the ledger's `markUnsupported`).
    *
-   *  1. UNSUPPORTED MODALITY (§3.3/§4). `mobile` has no executable path on the
-   *     agent engine — the agent path never consults `verify_type` at all
-   *     (dispatch keys solely on the run's chain stamp), so a `mobile-flow`
+   *  1. UNSUPPORTED MODALITY (§3.3/§4). A modality with no executable path on
+   *     THIS HOST — the agent path never consults `verify_type` at all
+   *     (dispatch keys solely on the run's chain stamp), so such a
    *     request would otherwise be deployed and left to fail organically ten
    *     minutes later with an unhelpful message. This states the fact up front
    *     AND records it in the ledger, so the next request for the same
@@ -2024,35 +2028,27 @@ export class VerificationScheduler {
       });
       return { work: null };
     }
-    // (2) SCREEN EXCLUSIVITY (§4). A native-screen deployment observes the one
-    // real display, so it additionally takes the count-1 screen lease — the SAME
-    // named lease the legacy Peekaboo backend uses, over the SAME shared mutex,
-    // so a native agent run and a legacy native capture can never overlap either.
-    // Non-native modalities take nothing here and stay fully parallel.
-    let screenLease: LeaseHandle | null = null;
-    if (modality === 'native-screen') {
-      screenLease = await this.leasePool.tryAcquire(VERIFY_SCREEN_LEASE);
-      if (!screenLease) {
-        agentLease.release();
-        this.logger?.debug('[VerificationScheduler] screen lease held; leaving native-screen row queued', {
-          requestId: row.id,
-        });
-        return { work: null };
-      }
-    }
-    // (3) One pooled port (VERIFY_PORT for a serve, and its +1 for the driver CDP).
-    const portLease = await this.leasePool.tryAcquireOneOf(
-      this.config.devServerPorts.map(verifyPortLease),
-    );
-    if (!portLease) {
-      screenLease?.release();
+    // (2)+(3) The modality-shaped leases — screen (native-screen, exclusive),
+    // simulator slot (mobile, bounded) or verify port (everything but mobile).
+    // `null` ⇒ some lease was held: everything the call took is already
+    // released, so only the agent slot remains to give back.
+    const leases = await acquireModalityLeases({
+      leasePool: this.leasePool,
+      modality,
+      mobileSimSlots: this.config.mobileSimSlots,
+      devServerPorts: this.config.devServerPorts,
+      portFromLease: (name) => this.portFromLease(name),
+      requestId: row.id,
+      logger: this.logger,
+    });
+    if (leases === null) {
       agentLease.release();
-      this.logger?.debug('[VerificationScheduler] no free verify port; leaving queued', { requestId: row.id });
       return { work: null };
     }
-    const leasedPort = this.portFromLease(portLease.name);
-    if (leasedPort === null) {
+    const { screenLease, mobileLease, portLease, leasedPort } = leases;
+    if (portLease !== null && leasedPort === null) {
       portLease.release();
+      mobileLease?.release();
       screenLease?.release();
       agentLease.release();
       await this.markTerminalAndDeliver(
@@ -2070,7 +2066,8 @@ export class VerificationScheduler {
     // during the lease awaits above makes this a 0-change no-op → release + skip.
     const leasedChanges = this.markAgentLeased(row.id);
     if (leasedChanges === 0) {
-      portLease.release();
+      portLease?.release();
+      mobileLease?.release();
       screenLease?.release();
       agentLease.release();
       this.logger?.debug('[VerificationScheduler] agent row no longer queued at lease time; releasing', {
@@ -2088,6 +2085,7 @@ export class VerificationScheduler {
         task,
         agentLease,
         screenLease,
+        mobileLease,
         portLease,
         leasedPort,
         servesPort,
@@ -2133,28 +2131,6 @@ export class VerificationScheduler {
   }
 
   /**
-   * The agent row's effective deadline: the composed `task.timeoutMs` (when
-   * positive) FLOORED at the configured default and capped by the ceiling.
-   *
-   * F2 (RC5, docs/proposals/visual-verification-brittleness-fixes.md) added the
-   * floor. The outer `timeoutMs` used to be able to LOWER the deadline without
-   * limit, while being documented on no composer-facing surface (only the
-   * nested `serve.readyWhen.timeoutMs` is) — so a task-verify composer that
-   * guessed `180000` had vr_addb4401 killed at 180s mid-attestation with the
-   * build passed and the app already booted; the identical task at `1200000`
-   * passed in 7m18s. 2 of the 7 all-time timeouts are that. A composer may now
-   * only ever RAISE the deadline toward the ceiling; it can never take it below
-   * the default the harness knows a real build → serve → drive → attest cycle
-   * needs. Tests inject a small `agentRequestTimeoutMs`, so the floor is that
-   * INJECTED default, not the 10-minute production constant.
-   */
-  private agentDeadlineMs(task: VerificationTaskV1): number {
-    const requested =
-      typeof task.timeoutMs === 'number' && task.timeoutMs > 0 ? task.timeoutMs : this.agentRequestTimeoutMs;
-    return Math.min(this.agentRequestCeilingMs, Math.max(this.agentRequestTimeoutMs, requested));
-  }
-
-  /**
    * The DETACHED agent-deployment work for a row already leased + 'running'. Acquires
    * the same batch worktree-sync mutex the legacy path uses, enforces the per-run
    * agent-deployment budget (reusing the judge-call counter), deploys the runner
@@ -2178,8 +2154,11 @@ export class VerificationScheduler {
     agentLease: LeaseHandle,
     /** The count-1 screen lease for a `native-screen` row; null for every other modality (§4). */
     screenLease: LeaseHandle | null,
-    portLease: LeaseHandle,
-    leasedPort: number,
+    /** One `verify:mobile:<i>` slot for a `mobile` row; null for every other modality (§8). */
+    mobileLease: LeaseHandle | null,
+    /** Both null for a `mobile` row — that tier leases no port at all (§8, M1). */
+    portLease: LeaseHandle | null,
+    leasedPort: number | null,
     servesPort: boolean,
     snapshotSha: string | null,
     modality: VerificationModality,
@@ -2197,15 +2176,25 @@ export class VerificationScheduler {
     const controller = new AbortController();
     this.inFlight.set(row.id, controller);
 
+    // ONE evaluation, reused by the abort timer and the runner request, so the
+    // mobile floor's warn (see agentDeadlineMs) fires once per deployment.
+    const deadlineMs = resolveAgentDeadlineMs({
+      task,
+      modality,
+      defaultMs: this.agentRequestTimeoutMs,
+      ceilingMs: this.agentRequestCeilingMs,
+      mobileFloorMs: this.config.mobileDeadlineFloorMs,
+      logger: this.logger,
+    });
     let timedOut = false;
     const deadline = setTimeout(() => {
       timedOut = true;
       this.logger?.warn('[VerificationScheduler] agent request timed out — aborting', {
         requestId: row.id,
-        timeoutMs: this.agentDeadlineMs(task),
+        timeoutMs: deadlineMs,
       });
       controller.abort();
-    }, this.agentDeadlineMs(task));
+    }, deadlineMs);
     if (typeof deadline === 'object' && deadline !== null && 'unref' in deadline) {
       (deadline as { unref: () => void }).unref();
     }
@@ -2288,11 +2277,11 @@ export class VerificationScheduler {
         ...(setupProof || bootstrapProof ? { setupProof: true } : {}),
         artifactsDir: this.artifactsDirResolver(row.run_id),
         verifyPort: servesPort ? leasedPort : null,
-        verifyDriverPort: leasedPort + 1,
+        verifyDriverPort: leasedPort === null ? null : leasedPort + 1,
         // Thread the effective deadline into the query boundary so its internal
         // deadline matches this method's abort timer — a task-supplied timeoutMs
         // above the query default is honored instead of silently cut to 10 min.
-        timeoutMs: this.agentDeadlineMs(task),
+        timeoutMs: deadlineMs,
         // §4 — the SAME modality the pre-lease gates and the screen-lease decision
         // used, handed to the runner rather than re-derived there. Only the
         // scheduler can know it (it owns `verify_type` and the stamped column,
@@ -2387,7 +2376,13 @@ export class VerificationScheduler {
       if (batchLease) {
         batchLease.release();
       }
-      await this.releaseOrQuarantinePort(portLease, leasedPort);
+      if (portLease !== null && leasedPort !== null) {
+        await this.releaseOrQuarantinePort(portLease, leasedPort);
+      }
+      // The mobile slot releases UNCONDITIONALLY too, and for the screen lease's
+      // reason: the per-request simulator is created and destroyed inside the
+      // runner, so nothing this deployment leaves behind can occupy the slot.
+      mobileLease?.release();
       // The screen lease releases UNCONDITIONALLY and never quarantines: unlike a
       // port (which a leaked dev server can keep genuinely occupied past
       // teardown), the display is not a resource this deployment can leave dirty

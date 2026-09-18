@@ -79,8 +79,43 @@ describe('parseRunbookDraftResult — runbook', () => {
     expect(parsed.error).toContain('cdp-app');
   });
 
-  it('rejects a modality outside the three a portable runbook can declare', () => {
-    expect(parseRunbookDraftResult(draft({ modality: 'mobile' })).ok).toBe(false);
+  it('ACCEPTS a well-shaped mobile draft — the portable contract declares four modalities now', () => {
+    // The mobile widening added `app` to the entry, so `mobile` is no longer a
+    // modality the parser refuses. Whether a LANE may draft one is a separate
+    // question, answered in the eligibility layer
+    // (`bootstrapSupportsModality` / `'auto-derive-unsupported'`) — this parser
+    // is shared with the verify-setup flow, which DOES author mobile runbooks,
+    // and rejecting here would break that flow to enforce a lane policy.
+    const parsed = parseRunbookDraftResult(
+      draft({
+        modality: 'mobile',
+        runbook: {
+          version: 1,
+          modalities: {
+            mobile: {
+              build: ['xcodebuild -scheme Demo -destination "generic/platform=iOS Simulator" build'],
+              // No `serve`: a simulator run has no port to lease. `app` replaces it.
+              app: { platform: 'ios-simulator', bundleId: 'com.example.demo', scheme: 'Demo' },
+              attestation: { kind: 'bundle-identity', bundleId: 'com.example.demo' },
+            },
+          },
+        },
+      }),
+    );
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok || parsed.result.decision !== 'runbook') throw new Error('unreachable');
+    expect(parsed.result.modality).toBe('mobile');
+    expect(parsed.result.runbook.modalities.mobile?.app?.bundleId).toBe('com.example.demo');
+  });
+
+  it('still rejects a modality the portable contract has no room for', () => {
+    // The negative control the mobile case above used to be. Without it, the
+    // widening reads as "the modality check was removed" rather than "one value
+    // moved from the reject list to the accept list".
+    const parsed = parseRunbookDraftResult(draft({ modality: 'android' }));
+    expect(parsed.ok).toBe(false);
+    if (parsed.ok) throw new Error('unreachable');
+    expect(parsed.error).toContain('android');
   });
 
   it('delegates the runbook half to the SAME parser the store reads it back with', () => {

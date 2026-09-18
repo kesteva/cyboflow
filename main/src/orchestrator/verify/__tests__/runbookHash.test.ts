@@ -41,13 +41,34 @@ function baseRunbook(): VerifyRunbookV1 {
   };
 }
 
+/** A valid single-modality MOBILE runbook — app block + matching bundle-identity. */
+function mobileRunbook(): VerifyRunbookV1 {
+  return {
+    version: 1,
+    modalities: {
+      mobile: {
+        build: ['xcodebuild -scheme Demo -destination "generic/platform=iOS Simulator" -derivedDataPath "$VERIFY_DERIVED_DATA" build'],
+        app: {
+          platform: 'ios-simulator',
+          bundleId: 'com.example.demo',
+          scheme: 'Demo',
+        },
+        attestation: { kind: 'bundle-identity', bundleId: 'com.example.demo' },
+      },
+    },
+    levers: { simUdidEnv: 'VERIFY_SIM_UDID', derivedDataEnv: 'VERIFY_DERIVED_DATA' },
+  };
+}
+
 describe('verifyRunbook contract', () => {
   it('pins the committed portable path and the declarable modality set', () => {
     expect(VERIFY_RUNBOOK_RELATIVE_PATH).toBe('.cyboflow/verify-runbook.json');
-    // 'mobile' is §4-deferred and deliberately NOT declarable.
-    expect([...VERIFY_RUNBOOK_MODALITIES]).toEqual(['web', 'cdp-app', 'native-screen']);
-    expect(isVerifyRunbookModality('mobile')).toBe(false);
+    // 'mobile' (iOS Simulator on xcodebuild + simctl) IS declarable.
+    expect([...VERIFY_RUNBOOK_MODALITIES]).toEqual(['web', 'cdp-app', 'native-screen', 'mobile']);
+    expect(VERIFY_RUNBOOK_MODALITIES).toHaveLength(4);
+    expect(isVerifyRunbookModality('mobile')).toBe(true);
     expect(isVerifyRunbookModality('cdp-app')).toBe(true);
+    expect(isVerifyRunbookModality('ios')).toBe(false);
   });
 
   it('accepts a well-formed runbook and rebuilds it field-by-field', () => {
@@ -94,14 +115,162 @@ describe('verifyRunbook contract', () => {
   it('requires at least one KNOWN modality key', () => {
     expect(parseVerifyRunbookV1({ version: 1, modalities: {} })).toEqual({
       ok: false,
-      error: 'modalities: expected at least one of web|cdp-app|native-screen',
+      error: 'modalities: expected at least one of web|cdp-app|native-screen|mobile',
     });
-    // 'mobile' is not a declarable key — a map containing only it declares nothing.
-    const mobileOnly = parseVerifyRunbookV1({
-      version: 1,
-      modalities: { mobile: { attestation: { kind: 'file-identity' } } },
+    // The literal is JOINED from the const, so it widened with it.
+    expect(parseVerifyRunbookV1({ version: 1, modalities: { nope: {} } })).toEqual({
+      ok: false,
+      error: `modalities: expected at least one of ${VERIFY_RUNBOOK_MODALITIES.join('|')}`,
     });
-    expect(mobileOnly.ok).toBe(false);
+  });
+
+  describe('the mobile modality (iOS Simulator — xcodebuild + simctl)', () => {
+    it('accepts a mobile-only runbook with an app block and a matching bundle-identity', () => {
+      const parsed = parseVerifyRunbookV1(mobileRunbook());
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      expect(Object.keys(parsed.runbook.modalities)).toEqual(['mobile']);
+      expect(parsed.runbook.modalities.mobile?.app).toEqual({
+        platform: 'ios-simulator',
+        bundleId: 'com.example.demo',
+        scheme: 'Demo',
+      });
+      expect(parsed.runbook.modalities.mobile?.attestation).toEqual({
+        kind: 'bundle-identity',
+        bundleId: 'com.example.demo',
+      });
+      // Lever NAMES round-trip (never values).
+      expect(parsed.runbook.levers).toEqual({
+        simUdidEnv: 'VERIFY_SIM_UDID',
+        derivedDataEnv: 'VERIFY_DERIVED_DATA',
+      });
+    });
+
+    it('round-trips an optional relative productGlob and rejects an escaping one', () => {
+      const rb = mobileRunbook();
+      rb.modalities.mobile = {
+        ...rb.modalities.mobile!,
+        app: { ...rb.modalities.mobile!.app!, productGlob: 'Build/Products/Debug-iphonesimulator/Demo.app' },
+      };
+      const ok = parseVerifyRunbookV1(rb);
+      expect(ok.ok).toBe(true);
+      if (ok.ok) {
+        expect(ok.runbook.modalities.mobile?.app?.productGlob).toBe(
+          'Build/Products/Debug-iphonesimulator/Demo.app',
+        );
+      }
+
+      for (const bad of ['/abs/Demo.app', '~/Demo.app', 'Build/../../Demo.app', '   ']) {
+        const rejected = parseVerifyRunbookV1({
+          ...mobileRunbook(),
+          modalities: {
+            mobile: {
+              ...mobileRunbook().modalities.mobile!,
+              app: { ...mobileRunbook().modalities.mobile!.app!, productGlob: bad },
+            },
+          },
+        });
+        expect(rejected).toEqual({
+          ok: false,
+          error:
+            "modalities[\"mobile\"].app.productGlob: expected a non-empty relative path (no leading '/', no '~', no '..' segment)",
+        });
+      }
+    });
+
+    it('requires an app block on the mobile entry', () => {
+      expect(
+        parseVerifyRunbookV1({
+          version: 1,
+          modalities: {
+            mobile: { attestation: { kind: 'bundle-identity', bundleId: 'com.example.demo' } },
+          },
+        }),
+      ).toEqual({ ok: false, error: 'modalities["mobile"].app: required on the mobile modality' });
+    });
+
+    it('rejects a serve block on the mobile entry (no port, nothing to attach to)', () => {
+      const rb = mobileRunbook();
+      rb.modalities.mobile = { ...rb.modalities.mobile!, serve: { cmd: 'pnpm dev --port ${PORT}' } };
+      expect(parseVerifyRunbookV1(rb)).toEqual({
+        ok: false,
+        error:
+          'modalities["mobile"].serve: not valid on the mobile modality (a simulator run has no port to serve on — use app)',
+      });
+    });
+
+    it('pins the mobile attestation to bundle-identity', () => {
+      const rb = mobileRunbook();
+      rb.modalities.mobile = {
+        ...rb.modalities.mobile!,
+        attestation: { kind: 'window-identity', titlePattern: 'Demo', app: 'Demo' },
+      };
+      expect(parseVerifyRunbookV1(rb)).toEqual({
+        ok: false,
+        error: "modalities[\"mobile\"].attestation.kind: expected 'bundle-identity' on the mobile modality",
+      });
+    });
+
+    it('requires the attested bundle id to equal the launched one', () => {
+      const rb = mobileRunbook();
+      rb.modalities.mobile = {
+        ...rb.modalities.mobile!,
+        attestation: { kind: 'bundle-identity', bundleId: 'com.example.OTHER' },
+      };
+      expect(parseVerifyRunbookV1(rb)).toEqual({
+        ok: false,
+        error: 'modalities["mobile"].attestation.bundleId: must equal modalities["mobile"].app.bundleId',
+      });
+    });
+
+    it('rejects a malformed app block field-by-field, path-named', () => {
+      const bad = (app: unknown) =>
+        parseVerifyRunbookV1({
+          version: 1,
+          modalities: {
+            mobile: { app, attestation: { kind: 'bundle-identity', bundleId: 'com.example.demo' } },
+          },
+        });
+      expect(bad('nope')).toEqual({ ok: false, error: 'modalities["mobile"].app: expected an object' });
+      expect(bad({ platform: 'android-emulator', bundleId: 'x', scheme: 'y' })).toEqual({
+        ok: false,
+        error: "modalities[\"mobile\"].app.platform: expected the string 'ios-simulator'",
+      });
+      expect(bad({ platform: 'ios-simulator', bundleId: '  ', scheme: 'Demo' })).toEqual({
+        ok: false,
+        error: 'modalities["mobile"].app.bundleId: expected non-empty string',
+      });
+      expect(bad({ platform: 'ios-simulator', bundleId: 'com.example.demo', scheme: 7 })).toEqual({
+        ok: false,
+        error: 'modalities["mobile"].app.scheme: expected non-empty string',
+      });
+    });
+
+    it('rejects an app block on a NON-mobile entry', () => {
+      expect(
+        parseVerifyRunbookV1({
+          version: 1,
+          modalities: {
+            web: {
+              app: { platform: 'ios-simulator', bundleId: 'com.example.demo', scheme: 'Demo' },
+              attestation: { kind: 'file-identity' },
+            },
+          },
+        }),
+      ).toEqual({ ok: false, error: 'modalities["web"].app: app is only valid on the mobile modality' });
+    });
+
+    it('leaves non-mobile entries byte-identical (no app, serve and attestation unconstrained)', () => {
+      const parsed = parseVerifyRunbookV1(baseRunbook());
+      expect(parsed.ok).toBe(true);
+      if (!parsed.ok) return;
+      expect(parsed.runbook.modalities.web?.app).toBeUndefined();
+      expect(parsed.runbook.modalities['cdp-app']?.app).toBeUndefined();
+      expect(parsed.runbook.modalities.web?.attestation).toEqual({
+        kind: 'http-endpoint',
+        urlPath: '/__cyboflow_verify__',
+      });
+    });
   });
 
   it('requires an attestation on every declared modality (§7.1 — no attestation, no pass)', () => {
@@ -193,6 +362,16 @@ describe('verifyRunbook contract', () => {
         levers: { portEnv: 4521 },
       }),
     ).toEqual({ ok: false, error: 'levers.portEnv: expected string' });
+
+    for (const field of ['simUdidEnv', 'derivedDataEnv'] as const) {
+      expect(
+        parseVerifyRunbookV1({
+          version: 1,
+          modalities: { web: { attestation: { kind: 'file-identity' } } },
+          levers: { [field]: 12 },
+        }),
+      ).toEqual({ ok: false, error: `levers.${field}: expected string` });
+    }
   });
 });
 

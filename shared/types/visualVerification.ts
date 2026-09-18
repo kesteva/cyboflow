@@ -314,6 +314,49 @@ export interface VerdictV1 {
 // ===========================================================================
 
 /**
+ * How a `mobile` verification stands its deliverable up: an iOS Simulator run
+ * on Apple's own command-line toolchain, with no Xcode MCP in the loop. The
+ * agent builds with `xcodebuild` into this request's private DerivedData, then
+ * uses `simctl` to create/boot a simulator, install the staged `.app` and
+ * launch it — all through Bash, exactly as it shells out for a web build.
+ *
+ * This block REPLACES `serve` for the mobile modality rather than joining it: a
+ * simulator run has no port to lease, no URL to `goto` and no endpoint to
+ * attach to, so a `serve` alongside it would describe a stand-up that cannot
+ * happen. {@link resolveTaskModality} reads `platform` to resolve the modality,
+ * and the runbook parser enforces the `app`-xor-`serve` split per entry.
+ */
+export interface MobileAppSpec {
+  /** The only platform this tier covers today; a literal so widening it is a compile error, not a silent accept. */
+  platform: 'ios-simulator';
+  /**
+   * The bundle identifier that is installed, launched and then ATTESTED — the
+   * `bundle-identity` channel reads the installed executable back out of the
+   * simulator's container and checks it byte-for-byte against the one product
+   * staged in this request's private DerivedData, and checks this id matches.
+   */
+  bundleId: string;
+  /** The `xcodebuild -scheme` value, recorded so a human reading the committed runbook can reproduce the build by hand. */
+  scheme: string;
+  /**
+   * Where the built `.app` lands, relative to `$VERIFY_DERIVED_DATA`. Must be a
+   * RELATIVE path — no leading `/`, no `~`, no `..` segment — because it is
+   * resolved inside this request's private DerivedData and an escaping glob
+   * would let a runbook attest a bundle the build never produced. Defaults to
+   * {@link DEFAULT_MOBILE_PRODUCT_GLOB} when absent.
+   */
+  productGlob?: string;
+}
+
+/**
+ * The default `.app` location under `$VERIFY_DERIVED_DATA` — the standard
+ * `xcodebuild` output layout for an iOS Simulator destination. A named constant
+ * so the parser's documentation, the runbook writer and the runner agree on one
+ * spelling.
+ */
+export const DEFAULT_MOBILE_PRODUCT_GLOB = 'Build/Products/*-iphonesimulator/*.app';
+
+/**
  * The composed visual-verification task (§5.1). `behaviors` is the core
  * payload — the acceptance-criteria-derived steps the verification agent
  * independently drives and judges — and MAY be an empty array (a degenerate
@@ -347,6 +390,12 @@ export interface VerificationTaskV1 {
      */
     attach?: 'cdp';
   };
+  /**
+   * The iOS-Simulator stand-up (see {@link MobileAppSpec}), mutually exclusive
+   * with `serve`: present, it resolves this task's modality to `'mobile'` via
+   * {@link resolveTaskModality} regardless of the requested `VerificationType`.
+   */
+  app?: MobileAppSpec;
   /** Pre-live target (degenerate path — no build/serve). */
   target?: { url?: string; htmlPath?: string };
   /**
@@ -452,6 +501,66 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 
+/**
+ * True for a non-empty path that stays INSIDE the directory it is resolved
+ * against — no leading `/`, no `~`, no `..` segment. Used for
+ * {@link MobileAppSpec.productGlob}, which is resolved under this request's
+ * private `$VERIFY_DERIVED_DATA`: an escaping glob would let a runbook attest a
+ * bundle the build never produced, which is exactly the identity claim the
+ * `bundle-identity` channel exists to make impossible.
+ */
+function isRelativeContainedPath(value: unknown): value is string {
+  if (!isNonEmptyString(value)) return false;
+  if (value.startsWith('/') || value.startsWith('~')) return false;
+  return !value.split('/').includes('..');
+}
+
+/**
+ * Validate a {@link MobileAppSpec} block field-by-field, naming the offending
+ * path. Shared by BOTH hand-rolled parsers that accept one —
+ * {@link parseVerificationTaskV1} here (`path` = `'app'`) and
+ * `parseModalityEntry` in ./verifyRunbook.ts (`path` =
+ * `'modalities["mobile"].app'`) — so the accept/reject boundary cannot drift
+ * between the composed task and the committed runbook that composes it.
+ *
+ * REBUILDS the block rather than casting the input, matching this file's
+ * posture: unknown extra keys are tolerated on input but never ride through.
+ */
+export function parseMobileAppSpec(
+  value: unknown,
+  path: string,
+): { ok: true; app: MobileAppSpec } | { ok: false; error: string } {
+  if (!isRecord(value)) return { ok: false, error: `${path}: expected an object` };
+  if (value.platform !== 'ios-simulator') {
+    return { ok: false, error: `${path}.platform: expected the string 'ios-simulator'` };
+  }
+  if (!isNonEmptyString(value.bundleId)) {
+    return { ok: false, error: `${path}.bundleId: expected non-empty string` };
+  }
+  if (!isNonEmptyString(value.scheme)) {
+    return { ok: false, error: `${path}.scheme: expected non-empty string` };
+  }
+  let productGlob: string | undefined;
+  if (value.productGlob !== undefined) {
+    if (!isRelativeContainedPath(value.productGlob)) {
+      return {
+        ok: false,
+        error: `${path}.productGlob: expected a non-empty relative path (no leading '/', no '~', no '..' segment)`,
+      };
+    }
+    productGlob = value.productGlob;
+  }
+  return {
+    ok: true,
+    app: {
+      platform: 'ios-simulator',
+      bundleId: value.bundleId,
+      scheme: value.scheme,
+      ...(productGlob !== undefined ? { productGlob } : {}),
+    },
+  };
+}
+
 // ===========================================================================
 // AttestationSpec — per-modality verified-artifact identity (§7.1). Declares
 // the CONCRETE channel a verification proves the surface it drove IS this
@@ -499,6 +608,17 @@ function isStringArray(value: unknown): value is string[] {
  *     separates "the app we launched is showing this window" from "something
  *     on this machine has a window with a matching title", and the second is
  *     not an identity check at all.
+ *   - `'bundle-identity'` — `mobile`: the executable INSIDE the app the
+ *     simulator actually installed is read back out of its container and
+ *     compared byte-for-byte against the exactly-one `.app` staged in this
+ *     request's private `$VERIFY_DERIVED_DATA`, and `bundleId` must match the
+ *     launched bundle. STRENGTH: the installed executable is byte-identical to
+ *     the exactly-one product staged in this request's private DerivedData, and
+ *     the bundle id is verified — `simctl install` is byte-preserving, so this
+ *     is a real identity check, not a name match. RESIDUAL RISK: it proves the
+ *     identity of what was STAGED, not that the staged bundle was compiled from
+ *     this snapshot; the agent runs the build through Bash exactly as it does
+ *     for `web`, and inherits exactly that much trust in the build step.
  *   - `'file-identity'`   — the degenerate pre-live path (`target.htmlPath`):
  *     identity BY CONSTRUCTION, because the runner itself writes/owns the
  *     path being opened. No live process, no nonce, nothing to race.
@@ -510,15 +630,30 @@ export type AttestationSpec =
   | { kind: 'dom-marker'; selector: string }
   | { kind: 'cdp-token'; expression: string; expected: string }
   | { kind: 'window-identity'; titlePattern: string; app: string }
+  | { kind: 'bundle-identity'; bundleId: string }
   | { kind: 'file-identity' };
 
-/** True for one of AttestationSpec's five `kind` literals. Private — shared by isAttestationSpec and normalizeVerificationReportV1's tolerant echo check. */
+/**
+ * The six AttestationSpec `kind` literals, for iteration (tests, UI, the roster
+ * table) without re-listing the union by hand.
+ */
+export const ATTESTATION_KINDS: readonly AttestationSpec['kind'][] = [
+  'http-endpoint',
+  'dom-marker',
+  'cdp-token',
+  'window-identity',
+  'bundle-identity',
+  'file-identity',
+] as const;
+
+/** True for one of AttestationSpec's six `kind` literals. Private — shared by isAttestationSpec and normalizeVerificationReportV1's tolerant echo check. */
 function isAttestationKind(value: unknown): value is AttestationSpec['kind'] {
   return (
     value === 'http-endpoint' ||
     value === 'dom-marker' ||
     value === 'cdp-token' ||
     value === 'window-identity' ||
+    value === 'bundle-identity' ||
     value === 'file-identity'
   );
 }
@@ -544,6 +679,8 @@ export function isAttestationSpec(v: unknown): v is AttestationSpec {
       return isNonEmptyString(v.expression) && isNonEmptyString(v.expected);
     case 'window-identity':
       return isNonEmptyString(v.titlePattern) && isNonEmptyString(v.app);
+    case 'bundle-identity':
+      return isNonEmptyString(v.bundleId);
     case 'file-identity':
       return true;
   }
@@ -565,6 +702,12 @@ export function isAttestationSpec(v: unknown): v is AttestationSpec {
  * member; `attestation`, when present, must satisfy
  * {@link isAttestationSpec} (an unrecognized `kind` is rejected); each
  * behavior's `requiresDrive`, when present, must be a boolean.
+ *
+ * Mobile tier: `app`, when present, must be a valid {@link MobileAppSpec}
+ * (validated by {@link parseMobileAppSpec}, path-named as `app.*`). This
+ * validator does NOT reject an `app` alongside a `serve` — the composed task is
+ * tolerant by design and {@link resolveTaskModality} settles the modality; the
+ * xor is enforced where it is authored, in the runbook parser.
  */
 export function parseVerificationTaskV1(
   value: unknown,
@@ -620,6 +763,13 @@ export function parseVerificationTaskV1(
       ...(readyWhen !== undefined ? { readyWhen } : {}),
       ...(attach !== undefined ? { attach } : {}),
     };
+  }
+
+  let app: VerificationTaskV1['app'];
+  if (value.app !== undefined) {
+    const parsedApp = parseMobileAppSpec(value.app, 'app');
+    if (!parsedApp.ok) return { ok: false, error: parsedApp.error };
+    app = parsedApp.app;
   }
 
   let target: VerificationTaskV1['target'];
@@ -734,6 +884,7 @@ export function parseVerificationTaskV1(
     ...(taskRef !== undefined ? { taskRef } : {}),
     ...(build !== undefined ? { build } : {}),
     ...(serve !== undefined ? { serve } : {}),
+    ...(app !== undefined ? { app } : {}),
     ...(target !== undefined ? { target } : {}),
     ...(modality !== undefined ? { modality } : {}),
     ...(attestation !== undefined ? { attestation } : {}),
@@ -760,7 +911,7 @@ export function parseVerificationTaskV1(
  *
  * Modality-roster widening (§4/§7.1): `attestation`, when present, is
  * validated tolerantly — shape-checked (`verified` boolean, `kind` one of
- * {@link AttestationSpec}'s five members, `detail` a string) but never
+ * {@link AttestationSpec}'s six members, `detail` a string) but never
  * treated as proof. Per {@link VerificationReportV1.attestation}'s doc, this
  * is the agent's HUMAN-facing echo only; the runner's actual attestation
  * verdict comes from the driver-written state file, never this field.
@@ -1193,9 +1344,14 @@ export interface VerificationFailureEvidence {
  *   - `'native-screen'` — Peekaboo screen capture of the real running app;
  *                          DRIVE support is a designed prerequisite, not yet
  *                          live (§4 footnote 2) — currently observe-only.
- *   - `'mobile'`        — deferred (§4 scope decision); rests in the
- *                          `unsupported` state with an explicit reason until an
- *                          Xcode MCP lands.
+ *   - `'mobile'`        — iOS Simulator, stood up on Apple's own command-line
+ *                          toolchain (`xcodebuild` to build, `simctl` to create,
+ *                          boot, install and launch). Declared through the
+ *                          {@link MobileAppSpec} `app` block rather than
+ *                          `serve` — there is no port and nothing to attach to
+ *                          — and attested by `bundle-identity`. No Xcode MCP is
+ *                          required: the agent shells out exactly as it does for
+ *                          a web build.
  */
 export type VerificationModality = 'web' | 'cdp-app' | 'native-screen' | 'mobile';
 
@@ -1224,8 +1380,14 @@ export function isVerificationModality(v: unknown): v is VerificationModality {
  * (§4). Pure, no defaulting beyond the stated precedence:
  *   - `'native-desktop'` → `'native-screen'` — the ONLY path FALLBACK_CHAINS
  *     grants it (Peekaboo).
- *   - `'mobile-flow'`    → `'mobile'` — deferred; always `unsupported` until
- *     phase 1 ships a simulator pool.
+ *   - `'mobile-flow'`    → `'mobile'` — the iOS Simulator tier (`xcodebuild` +
+ *     `simctl`), attested by `bundle-identity`.
+ *   - `task?.app?.platform === 'ios-simulator'` → `'mobile'`, checked AFTER the
+ *     two type rules and BEFORE the attach rule below. An app-shaped task IS a
+ *     simulator run whatever web-shaped `VerificationType` the caller asked for,
+ *     and a mobile task carries no `serve` block for the attach rule to read —
+ *     so without this arm every simulator task composed under the default type
+ *     would silently resolve to `'web'`.
  *   - otherwise: `task?.serve?.attach === 'cdp'` → `'cdp-app'` (the deliverable
  *     app itself exposes a CDP endpoint the driver attaches to); else `'web'`
  *     (driver launches its own headless chromium). `task` is `null` for the
@@ -1235,10 +1397,11 @@ export function isVerificationModality(v: unknown): v is VerificationModality {
  */
 export function resolveTaskModality(
   type: VerificationType,
-  task: Pick<VerificationTaskV1, 'serve'> | null,
+  task: Pick<VerificationTaskV1, 'serve' | 'app'> | null,
 ): VerificationModality {
   if (type === 'native-desktop') return 'native-screen';
   if (type === 'mobile-flow') return 'mobile';
+  if (task?.app?.platform === 'ios-simulator') return 'mobile';
   return task?.serve?.attach === 'cdp' ? 'cdp-app' : 'web';
 }
 
@@ -1272,8 +1435,39 @@ export interface VisualVerifyConfig {
   maxPerRunJudgeCalls?: number;
   /** Dev-server port pool the ResourceLeasePool serializes web captures over (verify:port:<p>). */
   devServerPorts?: number[];
-  /** Simulator device ids for the maestro/mobile pool. Default [] (mobile inert until provisioned). */
+  /**
+   * Simulator device ids for the maestro pool. Default [].
+   * LEGACY-ENGINE ONLY: this is the old maestro backend's device list and has
+   * no bearing on the `mobile` modality's iOS-Simulator tier, which creates and
+   * boots its own simulator per request via `simctl` and is configured by the
+   * `mobileSim*` members below.
+   */
   simulatorDevices?: string[];
+  /**
+   * How many `mobile` verifications may hold a simulator at once. Default 1.
+   * Clamped to [1,4] by the scheduler: each slot is a booted iOS Simulator, and
+   * a host running more than a handful starves the user's own work.
+   */
+  mobileSimSlots?: number;
+  /**
+   * `simctl` device type for the simulator this tier creates, e.g.
+   * `'iPhone 16 Pro'`. Default `''`, meaning resolve the newest device type
+   * compatible with the chosen runtime at request time rather than pinning a
+   * name that ages out with each Xcode release.
+   */
+  mobileSimDeviceType?: string;
+  /**
+   * `simctl` runtime for the created simulator, e.g. `'iOS 26.0'`. Default
+   * `''`, meaning the newest iOS runtime installed on this host.
+   */
+  mobileSimRuntime?: string;
+  /**
+   * Deadline FLOOR (ms) for a `mobile` request. Default 900000 (15 min). A
+   * simulator run pays for an `xcodebuild` plus a cold boot, install and launch
+   * before the first behavior is driven, so the web-shaped default deadline
+   * kills healthy runs mid-stand-up.
+   */
+  mobileDeadlineFloorMs?: number;
   /**
    * Enqueue-age ceiling (ms) covering a request's QUEUED + lease-wait time,
    * measured from `enqueued_at` (redesign §5.6). A row that has not acquired its
@@ -1334,6 +1528,10 @@ export interface ResolvedVisualVerifyConfig {
   maxPerRunJudgeCalls: number;
   devServerPorts: number[];
   simulatorDevices: string[];
+  mobileSimSlots: number;
+  mobileSimDeviceType: string;
+  mobileSimRuntime: string;
+  mobileDeadlineFloorMs: number;
   queuedAgeCeilingMs: number;
   agentSlots: number;
   autoBootstrapRunbook: boolean;
@@ -1381,6 +1579,21 @@ export const DEFAULT_QUEUED_AGE_CEILING_MS = 15 * 60 * 1000;
 export const DEFAULT_VERIFY_AGENT_SLOTS = 2;
 
 /**
+ * The default concurrent-simulator count for the `mobile` modality — 1. A
+ * booted iOS Simulator is a full OS image, not a headless page; the scheduler
+ * clamps any configured value to [1,4].
+ */
+export const DEFAULT_MOBILE_SIM_SLOTS = 1;
+
+/**
+ * The default deadline FLOOR for a `mobile` request — 15 minutes. `xcodebuild`
+ * from cold plus `simctl` create/boot/install/launch routinely costs several
+ * minutes before the first behavior is driven, so a mobile request floors well
+ * above the web-shaped default agent deadline.
+ */
+export const DEFAULT_MOBILE_DEADLINE_FLOOR_MS = 900_000;
+
+/**
  * The floors ConfigManager.getVisualVerifyConfig() applies when a member of the
  * persisted block is absent. `enabled` floors to false (master switch OFF by
  * default); the rest mirror the design doc (#7), EXCEPT `autoBootstrapRunbook`,
@@ -1398,6 +1611,10 @@ export const VISUAL_VERIFY_DEFAULTS: ResolvedVisualVerifyConfig = {
   maxPerRunJudgeCalls: 4,
   devServerPorts: [...DEFAULT_VERIFY_DEV_PORTS],
   simulatorDevices: [],
+  mobileSimSlots: DEFAULT_MOBILE_SIM_SLOTS,
+  mobileSimDeviceType: '',
+  mobileSimRuntime: '',
+  mobileDeadlineFloorMs: DEFAULT_MOBILE_DEADLINE_FLOOR_MS,
   queuedAgeCeilingMs: DEFAULT_QUEUED_AGE_CEILING_MS,
   agentSlots: DEFAULT_VERIFY_AGENT_SLOTS,
   autoBootstrapRunbook: true,
@@ -1905,8 +2122,18 @@ export type NativeGrantProbe =
  * reported that OUR drive machinery is unbuilt, which is not a fact about the
  * user's machine and does not belong in a table of them. That disclosure now
  * rides the `'accessibility'` row, whose grant is the one driving would need.
+ *
+ * `'mobile-simulator'` is the fourth row, and rolls up the whole iOS-Simulator
+ * toolchain the way `'browser-driving'` rolls up the browser one: `xcodebuild`,
+ * `simctl`, and at least one installed iOS runtime are not three decisions —
+ * this host either stands a simulator up or it does not — so the row names
+ * whichever part fell over in its detail.
  */
-export type VerifyProbeId = 'browser-driving' | 'screen-recording' | 'accessibility';
+export type VerifyProbeId =
+  | 'browser-driving'
+  | 'screen-recording'
+  | 'accessibility'
+  | 'mobile-simulator';
 
 /**
  * The outcome of one probe.

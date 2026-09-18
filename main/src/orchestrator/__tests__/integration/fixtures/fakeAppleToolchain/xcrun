@@ -1,0 +1,250 @@
+#!/bin/sh
+# Fake `xcrun` for mobileVerification.itest.ts (T14).
+#
+# It honours EXACTLY the argv shapes the production modules build — nothing
+# more — so a drift in either direction shows up as a test failure rather than a
+# shim that quietly accepts anything:
+#
+#   simctl list -j                              mobileSimulatorSession.acquire / XcodeToolchainBackend
+#   simctl list -j devices                      mobileSimulatorSession sweep + lookup-by-name
+#   simctl create <name> <deviceTypeId> <rtId>   -> prints a fresh udid
+#   simctl boot <udid>
+#   simctl bootstatus <udid> -b
+#   simctl status_bar <udid> override ...        (cosmetic, always 0)
+#   simctl ui <udid> appearance light            (cosmetic, always 0)
+#   simctl shutdown <udid>
+#   simctl delete <udid>
+#   simctl install <udid> <path-to.app>          mobileCommands.mobileInstall
+#   simctl get_app_container <udid> <id> app     mobileInstall + harnessAttestation
+#   simctl launch <udid> <bundleId>              -> prints "<bundleId>: <pid>"
+#   simctl terminate <udid> <bundleId>
+#   simctl io <udid> screenshot <out>            readiness loop + mobile-screenshot
+#   simctl openurl <udid> <url>
+#
+# ALL state lives under $FAKE_APPLE_STATE, which the test owns:
+#   fail-boot            present  -> boot/bootstatus exit non-zero
+#   frame.png            the bytes `simctl io ... screenshot` copies to <out>
+#   devices/<udid>/      one created device (name, state)
+#   containers/<udid>/<bundleId>.app/   what `install` copied; `get_app_container` prints it
+#   pids/<udid>          the live `sleep` pid standing in for the launched app
+#   pids/all             every pid ever launched, so the suite can reap them
+#   udid-seq             the udid counter
+set -u
+
+: "${FAKE_APPLE_STATE:?fake xcrun: FAKE_APPLE_STATE is not set}"
+STATE="$FAKE_APPLE_STATE"
+RUNTIME_ID="com.apple.CoreSimulator.SimRuntime.iOS-26-2"
+
+die() {
+  printf '%s\n' "$1" >&2
+  exit "${2:-2}"
+}
+
+# Read one <key>/<string> pair out of an XML plist. The fake `.app` bundles this
+# fixture builds are always XML, so no binary-plist reader is needed.
+plist_value() {
+  awk -v want="$2" '
+    /<key>/  { line = $0; sub(/^[^<]*<key>/, "", line); sub(/<\/key>.*$/, "", line); key = line; next }
+    /<string>/ {
+      line = $0; sub(/^[^<]*<string>/, "", line); sub(/<\/string>.*$/, "", line)
+      if (key == want) { print line; exit }
+    }
+  ' "$1"
+}
+
+kill_device_pid() {
+  _pidfile="$STATE/pids/$1"
+  if [ -f "$_pidfile" ]; then
+    _pid=$(cat "$_pidfile")
+    [ -n "$_pid" ] && kill "$_pid" 2>/dev/null
+    rm -f "$_pidfile"
+  fi
+}
+
+emit_full_list() {
+  # Two runtimes so `compareSimVersions` has something to order, and two device
+  # types per runtime so `pickNewestIPhone` has something to pick. The flat
+  # `devicetypes` list deliberately leads with an OLD device, which is what the
+  # intersection rule in resolveSimTarget exists to survive.
+  cat <<JSON
+{
+  "runtimes": [
+    {
+      "name": "iOS 18.5",
+      "identifier": "com.apple.CoreSimulator.SimRuntime.iOS-18-5",
+      "version": "18.5",
+      "platform": "iOS",
+      "isAvailable": true,
+      "supportedDeviceTypes": [
+        { "name": "iPhone 15", "identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-15", "productFamily": "iPhone" }
+      ]
+    },
+    {
+      "name": "iOS 26.2",
+      "identifier": "$RUNTIME_ID",
+      "version": "26.2",
+      "platform": "iOS",
+      "isAvailable": true,
+      "supportedDeviceTypes": [
+        { "name": "iPhone 16e", "identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-16e", "productFamily": "iPhone" },
+        { "name": "iPhone 17 Pro", "identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro", "productFamily": "iPhone" }
+      ]
+    }
+  ],
+  "devicetypes": [
+    { "name": "iPhone 6s Plus", "identifier": "com.apple.CoreSimulator.SimDeviceType.iPhone-6s-Plus", "productFamily": "iPhone" },
+    { "name": "iPad Pro", "identifier": "com.apple.CoreSimulator.SimDeviceType.iPad-Pro", "productFamily": "iPad" }
+  ],
+  "devices": {}
+}
+JSON
+}
+
+emit_devices_list() {
+  printf '{\n  "devices": {\n    "%s": [\n' "$RUNTIME_ID"
+  _first=1
+  if [ -d "$STATE/devices" ]; then
+    for _dir in "$STATE"/devices/*; do
+      [ -d "$_dir" ] || continue
+      _udid=$(basename "$_dir")
+      _name=$(cat "$_dir/name" 2>/dev/null || printf '')
+      _state=$(cat "$_dir/state" 2>/dev/null || printf 'Shutdown')
+      [ "$_first" -eq 1 ] || printf ',\n'
+      _first=0
+      printf '      { "name": "%s", "udid": "%s", "state": "%s", "isAvailable": true }' \
+        "$_name" "$_udid" "$_state"
+    done
+  fi
+  printf '\n    ]\n  }\n}\n'
+}
+
+tool="${1:-}"
+[ "$tool" = "simctl" ] || die "fake xcrun: unsupported tool \"$tool\"" 64
+shift
+
+sub="${1:-}"
+[ -n "$sub" ] || die "fake xcrun: simctl needs a subcommand" 64
+shift
+
+case "$sub" in
+  list)
+    case "${1:-}" in
+      -j)
+        if [ "${2:-}" = "devices" ]; then emit_devices_list; else emit_full_list; fi
+        ;;
+      *) die "fake simctl list: expected -j, got \"${1:-}\"" 64 ;;
+    esac
+    ;;
+
+  create)
+    name="${1:?fake simctl create: no device name}"
+    devtype="${2:?fake simctl create: no device type}"
+    runtime="${3:?fake simctl create: no runtime}"
+    case "$devtype" in
+      com.apple.CoreSimulator.SimDeviceType.*) ;;
+      *) die "fake simctl create: Invalid device type: $devtype" 2 ;;
+    esac
+    case "$runtime" in
+      com.apple.CoreSimulator.SimRuntime.*) ;;
+      *) die "fake simctl create: Invalid runtime: $runtime" 2 ;;
+    esac
+    seq=$(cat "$STATE/udid-seq" 2>/dev/null || printf '0')
+    seq=$((seq + 1))
+    printf '%s' "$seq" > "$STATE/udid-seq"
+    udid=$(printf 'FAKE0000-0000-4000-8000-%012d' "$seq")
+    mkdir -p "$STATE/devices/$udid"
+    printf '%s' "$name" > "$STATE/devices/$udid/name"
+    printf 'Shutdown' > "$STATE/devices/$udid/state"
+    printf '%s' "$runtime" > "$STATE/devices/$udid/runtime"
+    printf '%s\n' "$udid"
+    ;;
+
+  boot|bootstatus)
+    udid="${1:?fake simctl $sub: no udid}"
+    [ -d "$STATE/devices/$udid" ] || die "fake simctl $sub: Invalid device: $udid" 2
+    if [ -f "$STATE/fail-boot" ]; then
+      die "fake simctl $sub: Unable to boot device $udid: the fake toolchain is flagged fail-boot" 149
+    fi
+    printf 'Booted' > "$STATE/devices/$udid/state"
+    ;;
+
+  status_bar|ui)
+    # Cosmetic determinism only — always succeeds, never inspected.
+    exit 0
+    ;;
+
+  shutdown)
+    udid="${1:?fake simctl shutdown: no udid}"
+    kill_device_pid "$udid"
+    [ -d "$STATE/devices/$udid" ] && printf 'Shutdown' > "$STATE/devices/$udid/state"
+    exit 0
+    ;;
+
+  delete)
+    udid="${1:?fake simctl delete: no udid}"
+    kill_device_pid "$udid"
+    rm -rf "$STATE/devices/$udid" "$STATE/containers/$udid"
+    exit 0
+    ;;
+
+  install)
+    udid="${1:?fake simctl install: no udid}"
+    app="${2:?fake simctl install: no app path}"
+    [ -d "$STATE/devices/$udid" ] || die "fake simctl install: Invalid device: $udid" 2
+    [ -d "$app" ] || die "fake simctl install: no bundle at $app" 2
+    bundle_id=$(plist_value "$app/Info.plist" CFBundleIdentifier)
+    [ -n "$bundle_id" ] || die "fake simctl install: $app/Info.plist declares no CFBundleIdentifier" 2
+    dest="$STATE/containers/$udid/$bundle_id.app"
+    rm -rf "$dest"
+    mkdir -p "$dest"
+    cp -R "$app/." "$dest/"
+    ;;
+
+  get_app_container)
+    udid="${1:?fake simctl get_app_container: no udid}"
+    bundle_id="${2:?fake simctl get_app_container: no bundle id}"
+    [ "${3:-app}" = "app" ] || die "fake simctl get_app_container: unsupported container \"${3:-}\"" 64
+    dest="$STATE/containers/$udid/$bundle_id.app"
+    [ -d "$dest" ] || die "fake simctl get_app_container: No such file or directory ($bundle_id on $udid)" 2
+    printf '%s\n' "$dest"
+    ;;
+
+  launch)
+    udid="${1:?fake simctl launch: no udid}"
+    bundle_id="${2:?fake simctl launch: no bundle id}"
+    [ -d "$STATE/containers/$udid/$bundle_id.app" ] || \
+      die "fake simctl launch: The request to open \"$bundle_id\" failed: it is not installed" 2
+    # A REAL long-lived pid, because mobile-launch's readiness loop calls
+    # process.kill(pid, 0) and a fabricated number would read as "the app
+    # crashed". stdio is detached from this shim's pipes so the driver's
+    # runTool sees `close` the moment the shim exits, not when the sleep ends.
+    sleep 600 >/dev/null 2>&1 </dev/null &
+    app_pid=$!
+    mkdir -p "$STATE/pids"
+    printf '%s' "$app_pid" > "$STATE/pids/$udid"
+    printf '%s\n' "$app_pid" >> "$STATE/pids/all"
+    printf '%s: %s\n' "$bundle_id" "$app_pid"
+    ;;
+
+  terminate)
+    udid="${1:?fake simctl terminate: no udid}"
+    kill_device_pid "$udid"
+    ;;
+
+  io)
+    udid="${1:?fake simctl io: no udid}"
+    [ "${2:-}" = "screenshot" ] || die "fake simctl io: unsupported operation \"${2:-}\"" 64
+    out="${3:?fake simctl io screenshot: no output path}"
+    [ -d "$STATE/devices/$udid" ] || die "fake simctl io: Invalid device: $udid" 2
+    [ -f "$STATE/frame.png" ] || die "fake simctl io: the fixture has no frame.png to serve" 2
+    cp "$STATE/frame.png" "$out"
+    ;;
+
+  openurl)
+    exit 0
+    ;;
+
+  *)
+    die "fake simctl: unsupported subcommand \"$sub\"" 64
+    ;;
+esac

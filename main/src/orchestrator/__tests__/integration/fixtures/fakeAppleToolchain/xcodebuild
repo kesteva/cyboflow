@@ -1,0 +1,69 @@
+#!/bin/sh
+# Fake `xcodebuild` for mobileVerification.itest.ts (T14). Two shapes:
+#
+#   xcodebuild -version
+#       the version block XcodeToolchainBackend.parseXcodeVersion reads.
+#
+#   xcodebuild ... -derivedDataPath <dir> ...
+#       "builds" by STAGING a fake `.app` at the standard iOS-Simulator output
+#       location — Build/Products/Debug-iphonesimulator/FakeApp.app — which is
+#       what DEFAULT_MOBILE_PRODUCT_GLOB ('Build/Products/*-iphonesimulator/*.app')
+#       resolves to. Every other flag is accepted and ignored; the point is the
+#       artifact, not the build.
+#
+# State levers under $FAKE_APPLE_STATE:
+#   bundle-id   CFBundleIdentifier to stamp (default com.cyboflow.fakeapp)
+#   app-bytes   the executable's contents (default: a fixed marker string)
+set -u
+
+: "${FAKE_APPLE_STATE:?fake xcodebuild: FAKE_APPLE_STATE is not set}"
+STATE="$FAKE_APPLE_STATE"
+
+die() {
+  printf '%s\n' "$1" >&2
+  exit "${2:-2}"
+}
+
+if [ "${1:-}" = "-version" ]; then
+  printf 'Xcode 26.2\nBuild version 17C52\n'
+  exit 0
+fi
+
+derived=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-derivedDataPath" ]; then
+    derived="${2:-}"
+    break
+  fi
+  shift
+done
+[ -n "$derived" ] || die "fake xcodebuild: no -derivedDataPath in argv" 64
+
+bundle_id=$(cat "$STATE/bundle-id" 2>/dev/null || printf 'com.cyboflow.fakeapp')
+product="$derived/Build/Products/Debug-iphonesimulator/FakeApp.app"
+rm -rf "$product"
+mkdir -p "$product"
+
+cat > "$product/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>$bundle_id</string>
+	<key>CFBundleExecutable</key>
+	<string>FakeApp</string>
+	<key>CFBundleName</key>
+	<string>FakeApp</string>
+</dict>
+</plist>
+PLIST
+
+if [ -f "$STATE/app-bytes" ]; then
+  cp "$STATE/app-bytes" "$product/FakeApp"
+else
+  printf 'fake-mach-o-executable\n' > "$product/FakeApp"
+fi
+chmod 755 "$product/FakeApp"
+
+printf '** BUILD SUCCEEDED **\n'

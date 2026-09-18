@@ -35,6 +35,7 @@ import type { VerificationModality, VerificationTaskV1 } from '../../../../share
 import type { LoggerLike } from '../types';
 import type { VerifyRunbookStatusDetail } from './runbookStore';
 import {
+  bootstrapSupportsModality,
   decideRunbookBootstrap,
   taskDerivesEnvironment,
   type BootstrapDecision,
@@ -92,12 +93,16 @@ export async function runbookBootstrapPreflight(
 ): Promise<BootstrapDecision> {
   const derivesEnvironment = taskDerivesEnvironment(args.task);
 
-  // Ask about the runbook ONLY when the answer could matter. A disabled feature
-  // or a degenerate target-only task decides this on its own, and the status
-  // read is a file read plus a project input hash — real work to reach a
-  // conclusion already in hand.
+  // Ask about the runbook ONLY when the answer could matter. A disabled feature,
+  // a modality the lane never authors for (`mobile` — the verify-setup flow owns
+  // those), or a degenerate target-only task decides this on its own, and the
+  // status read is a file read plus a project input hash — real work to reach a
+  // conclusion already in hand. The modality test is the SAME predicate
+  // `decideRunbookBootstrap` declines by, not a second copy of the policy.
   let status: VerifyRunbookStatusDetail = { status: 'absent', reason: 'indeterminate' };
-  if (deps.enabled && derivesEnvironment) {
+  let consulted = false;
+  if (deps.enabled && bootstrapSupportsModality(args.modality) && derivesEnvironment) {
+    consulted = true;
     try {
       status = await deps.status(args.projectId, args.modality, args.probePath);
     } catch (err) {
@@ -114,6 +119,7 @@ export async function runbookBootstrapPreflight(
 
   const decision = decideRunbookBootstrap({
     enabled: deps.enabled,
+    modality: args.modality,
     derivesEnvironment,
     status,
   });
@@ -144,7 +150,11 @@ export async function runbookBootstrapPreflight(
     laneTaskRef: args.laneTaskRef,
     modality: args.modality,
     probePath: args.probePath ?? null,
-    runbookReason: status.reason,
+    // `null` rather than the seeded `'indeterminate'` when the read was skipped:
+    // 'indeterminate' is a real answer meaning "the store could not tell", and
+    // logging it for a decision that never asked would send whoever reads this
+    // line hunting a store fault that does not exist.
+    runbookReason: consulted ? status.reason : null,
   };
   if (quiet) deps.logger?.debug(line, detail);
   else deps.logger?.info(line, detail);

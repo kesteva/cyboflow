@@ -25,7 +25,7 @@
  * the callers already hold, which is what lets the gate call it while holding a
  * lease and the preflight call it before anything exists.
  */
-import type { VerificationTaskV1 } from '../../../../shared/types/visualVerification';
+import type { VerificationModality, VerificationTaskV1 } from '../../../../shared/types/visualVerification';
 import type { VerifyRunbookStatusDetail, VerifyRunbookStatusReason } from './runbookStore';
 
 /**
@@ -94,6 +94,28 @@ export type BootstrapDeclineReason =
    *    only the Verify Setup flow does, which is what the text below says.
    */
   | 'stale-proof'
+  /**
+   * The MODALITY is one the lane bootstrap does not author, whatever the
+   * project's runbook state says.
+   *
+   * Today that is `mobile`, and the reason is not that a portable runbook cannot
+   * express it — since the mobile widening it can, `app` block and all. It is
+   * that the DERIVATION machinery is npm-shaped end to end: the drafting agent
+   * surveys `package.json` scripts, the rung-1 operations add npm scripts, and
+   * the validators reason about build/serve command shapes. None of that can
+   * discover an Xcode scheme, a bundle id, or a simulator destination, so a lane
+   * that "derived" a mobile runbook would either refuse late (after spending an
+   * agent deployment) or register a plausible-looking record no execution path
+   * could satisfy. Mobile runbooks are AUTHORED and PROVEN by the verify-setup
+   * flow, where a human reviews the result before it becomes the project's
+   * singleton record.
+   *
+   * Distinct from the runner's `'undeclarable-modality'`, which is the narrower
+   * "this string is not a runbook modality at all" case: that one says the
+   * contract has no room for the value, this one says the contract has room and
+   * the lane still declines to fill it.
+   */
+  | 'auto-derive-unsupported'
   /** The store could not observe enough to answer. Never write on a guess. */
   | 'unobservable';
 
@@ -141,6 +163,30 @@ const BOOTSTRAPPABLE: ReadonlySet<VerifyRunbookStatusReason> = new Set([
   'file-only',
   'draft',
 ]);
+
+/**
+ * The modalities the LANE bootstrap is allowed to author a runbook for.
+ *
+ * An explicit allow-list, in the same spirit as {@link BOOTSTRAPPABLE} and for
+ * the same reason: a modality added to `VerificationModality` later defaults to
+ * NOT being auto-derived, which is the correct direction to fail. The derivation
+ * machinery is npm-shaped (see `'auto-derive-unsupported'`), so a new modality
+ * is presumed outside it until someone teaches the drafting agent otherwise.
+ *
+ * Exported so the PREFLIGHT can skip a runbook-status read whose answer cannot
+ * change the outcome, without re-stating the policy as a second `if` — the exact
+ * drift this module exists to prevent.
+ */
+const AUTO_DERIVABLE_MODALITIES: ReadonlySet<VerificationModality> = new Set<VerificationModality>([
+  'web',
+  'cdp-app',
+  'native-screen',
+]);
+
+/** True when the lane bootstrap may author a runbook for this modality at all. */
+export function bootstrapSupportsModality(modality: VerificationModality): boolean {
+  return AUTO_DERIVABLE_MODALITIES.has(modality);
+}
 
 /**
  * The runbook-state half of the decision, on its own: why deriving is refused
@@ -206,10 +252,24 @@ export function declineForRunbookStatus(
 export function decideRunbookBootstrap(args: {
   /** The resolved toggle AND kill switch, already combined by the caller. */
   enabled: boolean;
+  /**
+   * The modality this request would verify in. Checked BEFORE the task shape and
+   * before the runbook state, because the answer for an unsupported modality is
+   * the same whatever those say — see `'auto-derive-unsupported'`.
+   */
+  modality: VerificationModality;
   derivesEnvironment: boolean;
   status: VerifyRunbookStatusDetail;
 }): BootstrapDecision {
   if (!args.enabled) return { proceed: false, reason: 'disabled' };
+  // Ahead of `no-environment` on purpose. A mobile lane's task carries `app`
+  // rather than `serve`, so whether `taskDerivesEnvironment` happens to be true
+  // for it is an accident of the task's `build` array — and "this task derives
+  // nothing" would be the wrong sentence to hand someone asking why their mobile
+  // verification never ran. The modality policy is the real answer either way.
+  if (!bootstrapSupportsModality(args.modality)) {
+    return { proceed: false, reason: 'auto-derive-unsupported' };
+  }
   if (!args.derivesEnvironment) return { proceed: false, reason: 'no-environment' };
 
   const decline = declineForRunbookStatus(args.status);
@@ -254,6 +314,13 @@ export function bootstrapRemedyText(reason: BootstrapDeclineReason): string | nu
         'The runbook itself is probably still right; it needs to be re-proven — and if the runbook ' +
         'FILE is what changed, re-registered against this revision first. Re-run verification setup ' +
         'to register and prove the current revision.'
+      );
+    case 'auto-derive-unsupported':
+      return (
+        'This modality is not one a lane can draft a verification runbook for on its own — the ' +
+        'auto-derivation surveys npm scripts, which cannot discover an Xcode scheme, a bundle id, ' +
+        'or a simulator destination. Run verification setup, which authors and proves the runbook ' +
+        'for this modality with a human reviewing the result.'
       );
     case 'unobservable':
       return (

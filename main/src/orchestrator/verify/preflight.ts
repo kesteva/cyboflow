@@ -52,9 +52,28 @@ import type {
   VerificationModality,
 } from '../../../../shared/types/visualVerification';
 
-/** One preflight check's outcome. Only checks that RAN appear in {@link AgentPreflightResult.checks}. */
+/**
+ * One preflight check's outcome. Only checks that RAN appear in
+ * {@link AgentPreflightResult.checks}.
+ *
+ * `'mobile-simulator'` is NOT emitted by anything in this module — preflight
+ * is allocation-free and the simulator is acquired later, by the runner, not
+ * here. The id exists only so the runner can synthesize a
+ * {@link PreflightCheckResult}-shaped, env-classified failure row (source
+ * `'preflight'` via the generic `failureClassifier.ts` loop) when simulator
+ * acquisition itself throws — this module never constructs one.
+ */
 export interface PreflightCheckResult {
-  id: 'node' | 'chromium' | 'driver-cli' | 'data-dir' | 'port-free' | 'driver-port-free' | 'native-capture';
+  id:
+    | 'node'
+    | 'chromium'
+    | 'driver-cli'
+    | 'data-dir'
+    | 'port-free'
+    | 'driver-port-free'
+    | 'native-capture'
+    | 'mobile-toolchain'
+    | 'mobile-simulator';
   ok: boolean;
   /** Bounded human-readable detail — what was resolved, or why the check failed / was inconclusive. */
   detail: string;
@@ -99,6 +118,27 @@ export interface AgentPreflightDeps {
    */
   nativeCaptureProbe?: () => Promise<boolean>;
   /**
+   * `true` when this host's Xcode toolchain can actually drive the `mobile`
+   * modality — Xcode Command Line Tools installed, at least one iOS
+   * Simulator runtime downloaded, AND at least one compatible iPhone device
+   * type available to pair with it. Mirrors `nativeCaptureProbe` exactly:
+   * OPTIONAL, and absence is NOT a failure — an unwired probe means the
+   * 'mobile-toolchain' check is simply NOT RUN (the scheduler-side
+   * capability gate is what should have kept a `mobile` request from
+   * arriving on a host with no proven toolchain in the first place).
+   *
+   * This probe is DISTINCT from simulator ACQUISITION: it answers "can this
+   * host do mobile work at all" (Xcode/runtime/device-type presence), never
+   * "is a simulator instance available right now" — that allocation happens
+   * later, in the runner, deliberately outside preflight (see
+   * `PreflightCheckResult`'s 'mobile-simulator' doc).
+   *
+   * An AFFIRMATIVE `false` fails the check — the harness-derived `'env'`
+   * evidence a mobile skip needs. A THROW is INCONCLUSIVE (fail-open), the
+   * same rule every probe but `resolveNode`/`prepareDataDir` follows.
+   */
+  mobileToolchainProbe?: () => Promise<boolean>;
+  /**
    * Provision the request's FRESH, EMPTY `VERIFY_DATA_DIR` at the absolute path
    * the runner derived (F3 / RC4): leave it existing and empty. OPTIONAL like
    * `nativeCaptureProbe` — absent (or no `dataDir` in the args) ⇒ the
@@ -136,13 +176,15 @@ async function checkNode(deps: AgentPreflightDeps): Promise<PreflightCheckResult
 }
 
 /**
- * 'chromium' — applicable ONLY when `task.serve?.attach !== 'cdp'`. In
- * attach mode the driver ATTACHES to the deliverable app's OWN CDP endpoint
- * (`VERIFY_DRIVER_ATTACH_ONLY` — driverCore.ts's attach-only mode never
- * launches a browser, its "launch fallback is DISABLED"); no chromium is
- * ever needed. Every other shape — a web serve, a static build, or a bare
- * pre-live target (the degenerate path, `task.serve` absent entirely) —
- * drives via a chromium the driver launches itself, so the check runs.
+ * 'chromium' — applicable ONLY when `task.serve?.attach !== 'cdp'` AND
+ * `modality !== 'mobile'`. In attach mode the driver ATTACHES to the
+ * deliverable app's OWN CDP endpoint (`VERIFY_DRIVER_ATTACH_ONLY` —
+ * driverCore.ts's attach-only mode never launches a browser, its "launch
+ * fallback is DISABLED"); no chromium is ever needed. `mobile` drives the
+ * iOS Simulator, never a browser, so chromium is equally irrelevant there.
+ * Every other shape — a web serve, a static build, or a bare pre-live
+ * target (the degenerate path, `task.serve` absent entirely) — drives via a
+ * chromium the driver launches itself, so the check runs.
  * `resolveChromium()` returning `null` is affirmative evidence (absent);
  * a throw is inconclusive (fail-open).
  */
@@ -192,6 +234,41 @@ async function checkNativeCapture(probe: () => Promise<boolean>): Promise<Prefli
       id: 'native-capture',
       ok: true,
       detail: `native-capture probe inconclusive (fail-open): ${errorDetail(err)}`,
+    };
+  }
+}
+
+/**
+ * 'mobile-toolchain' — applicable ONLY when the request's modality is
+ * `'mobile'` AND a {@link AgentPreflightDeps.mobileToolchainProbe} is wired.
+ * Every other modality never touches Xcode; an unwired probe omits the
+ * check entirely (see the dep's doc for why an unwired probe is not a
+ * failure).
+ *
+ * An AFFIRMATIVE `false` fails it — the harness-derived fact that this host
+ * cannot drive `mobile` at all (Xcode Command Line Tools absent, no iOS
+ * Simulator runtime downloaded, or no compatible iPhone device type), which
+ * is exactly the §3.1 `'env'` evidence a mobile skip needs. A THROW is
+ * inconclusive ⇒ `ok:true`, the same fail-open rule `checkNativeCapture`
+ * follows.
+ */
+async function checkMobileToolchain(probe: () => Promise<boolean>): Promise<PreflightCheckResult> {
+  try {
+    const capable = await probe();
+    if (!capable) {
+      return {
+        id: 'mobile-toolchain',
+        ok: false,
+        detail:
+          'mobile toolchain unavailable (probe returned false — missing one of: Xcode Command Line Tools, an available iOS Simulator runtime, a compatible iPhone device type)',
+      };
+    }
+    return { id: 'mobile-toolchain', ok: true, detail: 'mobile toolchain available' };
+  } catch (err) {
+    return {
+      id: 'mobile-toolchain',
+      ok: true,
+      detail: `mobile-toolchain probe inconclusive (fail-open): ${errorDetail(err)}`,
     };
   }
 }
@@ -255,24 +332,37 @@ async function checkPortFree(
 
 /**
  * Run every APPLICABLE preflight check for a composed task, in order:
- * node → chromium (conditional) → native-capture (conditional) → driver-cli →
- * data-dir (conditional) → port-free (conditional) → driver-port-free. See
- * each check's own doc for its
- * applicability rule. `ok` is the conjunction of every check that RAN; an
- * inapplicable check is simply absent from `checks`, never counted for or
- * against `ok`.
+ * node → chromium (conditional) → native-capture (conditional) →
+ * mobile-toolchain (conditional) → driver-cli → data-dir (conditional) →
+ * port-free (conditional) → driver-port-free (conditional). See each
+ * check's own doc for its applicability rule. `ok` is the conjunction of
+ * every check that RAN; an inapplicable check is simply absent from
+ * `checks`, never counted for or against `ok`.
  *
- * `modality` (§4 roster) is OPTIONAL: it gates only the `native-capture`
- * check, so a caller that has not yet resolved a modality runs exactly the
- * pre-roster check set.
+ * `modality` (§4 roster) is OPTIONAL: it gates the `native-capture` and
+ * `mobile-toolchain` checks, so a caller that has not yet resolved a
+ * modality runs exactly the pre-roster check set.
  */
 export async function runAgentPreflight(
   deps: AgentPreflightDeps,
   args: {
     task: VerificationTaskV1;
     driverCliPath: string;
-    leasedPort: number;
-    driverPort: number;
+    /**
+     * The leased dev-server port the agent must BIND, or `null` when the
+     * scheduler leased no port pair at all (a `mobile` request: the iOS
+     * Simulator tier serves nothing over HTTP, so there is no slot to
+     * recover and no number to invent). `null` skips the 'port-free' check
+     * exactly as a task with no `serve` step does — this module never
+     * probes a port it was not given.
+     */
+    leasedPort: number | null;
+    /**
+     * The driver's own CDP port, or `null` for a `mobile` task — mobile has
+     * NO serve and NO ports at all pre-deploy (the simulator is acquired
+     * later, by the runner, not here); `null` skips both port checks.
+     */
+    driverPort: number | null;
     modality?: VerificationModality;
     /** The request's `VERIFY_DATA_DIR`; with `deps.prepareDataDir`, enables the 'data-dir' check. */
     dataDir?: string;
@@ -280,16 +370,21 @@ export async function runAgentPreflight(
 ): Promise<AgentPreflightResult> {
   const { task, driverCliPath, leasedPort, driverPort, modality, dataDir } = args;
   const isAttachCdp = task.serve?.attach === 'cdp';
+  const isMobile = modality === 'mobile';
   const checks: PreflightCheckResult[] = [];
 
   checks.push(await checkNode(deps));
 
-  if (!isAttachCdp) {
+  if (!isAttachCdp && !isMobile) {
     checks.push(await checkChromium(deps));
   }
 
   if (modality === 'native-screen' && deps.nativeCaptureProbe) {
     checks.push(await checkNativeCapture(deps.nativeCaptureProbe));
+  }
+
+  if (isMobile && deps.mobileToolchainProbe) {
+    checks.push(await checkMobileToolchain(deps.mobileToolchainProbe));
   }
 
   checks.push(await checkDriverCli(deps, driverCliPath));
@@ -299,14 +394,20 @@ export async function runAgentPreflight(
   }
 
   // The agent must BIND the leased port itself only when there is a serve
-  // step it is NOT attaching to an existing CDP endpoint for.
-  if (task.serve !== undefined && !isAttachCdp) {
+  // step it is NOT attaching to an existing CDP endpoint for, AND a port was
+  // actually leased. A mobile task satisfies neither: it declares an `app`
+  // block instead of a serve, and the scheduler leases it no ports at all.
+  if (task.serve !== undefined && !isAttachCdp && leasedPort !== null) {
     checks.push(await checkPortFree(deps, 'port-free', leasedPort));
   }
 
   // The driver's own CDP port (or, in attach mode, the app's own CDP
-  // endpoint) must always be free pre-launch.
-  checks.push(await checkPortFree(deps, 'driver-port-free', driverPort));
+  // endpoint) must be free pre-launch — EXCEPT for `mobile`, which has no
+  // ports at all pre-deploy (`driverPort` is `null`): the simulator is
+  // acquired later, by the runner, not in this allocation-free module.
+  if (driverPort !== null) {
+    checks.push(await checkPortFree(deps, 'driver-port-free', driverPort));
+  }
 
   return { ok: checks.every((c) => c.ok), checks };
 }

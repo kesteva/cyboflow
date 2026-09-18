@@ -192,18 +192,20 @@ the runbook declares what the project's UI is, the roster declares what this
 host can do, and the request resolves against both — the only fall-through is
 skip-with-reason.
 
-Scope decision (Krishna, 2026-07-30): **Playwright/CDP + Peekaboo. Maestro/
-mobile deferred** — Xcode has a new MCP coming; `mobile-flow` stays in the
-type union and rests in the phase-0 `unsupported` state with reason
-"deferred — pending Xcode MCP". The roster design keeps the slot open so it
-lands later as a new modality entry + tool grant, no rearchitecting.
+Scope decision (Krishna, 2026-07-30): **Playwright/CDP + Peekaboo**, with
+Maestro and mobile held back at the time pending clarity on Apple's own MCP
+for Xcode. That MCP turned out unable to create, boot, install, launch,
+screenshot or drive a simulator on any host, so `mobile` ships instead on
+`xcodebuild` + `xcrun simctl`, the toolchain already present on the owner's
+machine (`docs/proposals/mobile-verification-tier.md`, §3). The roster row
+below is that shipped shape, not a placeholder.
 
 | Modality | Drives via | Drive? | Observe? | Grants | Concurrency (target¹) |
 |---|---|---|---|---|---|
 | `web` | driver launches headless chromium (CDP) | yes | yes | none | parallel (port lease) |
 | `cdp-app` | attach to app's own CDP endpoint (`attach:"cdp"`, `VERIFY_DRIVER_ATTACH_ONLY`) | yes | yes | none | parallel (port lease + isolated data dir) |
 | `native-screen` | Peekaboo (capture today; drive is a **designed prerequisite**²) | prereq² | yes | Screen Recording + Accessibility | **exclusive** (`VERIFY_SCREEN_LEASE`, count 1) |
-| `mobile` | — deferred | — | — | — | `unsupported (deferred — Xcode MCP)` |
+| `mobile` | harness-owned driver commands (`mobile-install`/`mobile-launch`) on `xcrun simctl`; observe via `simctl io screenshot` | probe-gated² (Maestro present ⇒ tap/type/swipe/press/flow; absent ⇒ observe-only) | yes | Xcode CLT + ≥1 iOS runtime + ≥1 device type — **no TCC grant, no MCP grant** | bounded `verify:mobile:<i>` pool, default **1**, clamped [1,4]; **no port lease** |
 
 ¹ **[v2] "Parallel" is the design target, not current behavior.** Today every
 agent verification serializes behind the count-1 `VERIFY_AGENT_LEASE`
@@ -621,6 +623,18 @@ each wider than the panel and deliberately not folded into it:
      where no navigation happens.
    - `native-screen`: window-title/process-identity assertion of the launched
      app (weakest channel; recorded as such on the verdict).
+   - `mobile`: `bundle-identity` — the harness sha256-compares the executable
+     staged under the request's private DerivedData against the executable
+     actually installed on the leased simulator, plus a bundle-id and
+     realpath-confinement check (`docs/proposals/mobile-verification-tier.md`
+     §9). Strength: stronger than `window-identity` against *accidental*
+     mis-targeting — byte identity, not a spoofable title match, on a device
+     created seconds earlier for this request alone. Residual, in two parts:
+     (a) it does not prove the staged product was compiled from this
+     snapshot — a sufficiently determined agent could stage a prebuilt
+     bundle, since the agent runs `build[]` through Bash exactly as every
+     other modality does; and (b) it proves what is installed, not that the
+     screenshots were of its foreground.
    No attestation ⇒ **no `passed`, period** (v1's low-confidence escape hatch
    is removed — it weakened the invariant). A missing/mismatched attestation
    with foreign-occupancy evidence is env-class; without evidence it is

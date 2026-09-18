@@ -155,6 +155,15 @@ describe('ConfigManager.getVisualVerifyConfig', () => {
       maxPerRunJudgeCalls: 8,
       devServerPorts: [1234, 5678],
       simulatorDevices: ['udid-A'],
+      // Not overridden above → floored to the mobile-tier defaults
+      // (mobile-verification-tier.md §8). Asserted INSIDE this exact-shape
+      // expectation on purpose: a knob added to the resolved type but never
+      // materialized here would otherwise typecheck and silently never reach
+      // the scheduler.
+      mobileSimSlots: 1,
+      mobileSimDeviceType: '',
+      mobileSimRuntime: '',
+      mobileDeadlineFloorMs: 900_000,
       // Not overridden above → floored to the default (§5.6 queued-age ceiling).
       queuedAgeCeilingMs: 15 * 60 * 1000,
       // Not overridden above → floored to the default (§4 roster footnote 1).
@@ -162,6 +171,49 @@ describe('ConfigManager.getVisualVerifyConfig', () => {
       // Not overridden above → floored ON (F9 / lane-runbook-bootstrap.md §12).
       autoBootstrapRunbook: true,
     });
+  });
+
+  it('floors all four mobile knobs when the block omits them', async () => {
+    await fs.writeFile(
+      path.join(tempDir, 'config.json'),
+      JSON.stringify({ gitRepoPath: '/some/repo', visualVerify: { enabled: true } }, null, 2),
+    );
+    const mgr = new ConfigManager('/tmp/test-git-path');
+    await mgr.initialize();
+
+    const cfg = mgr.getVisualVerifyConfig();
+    expect(cfg.mobileSimSlots).toBe(VISUAL_VERIFY_DEFAULTS.mobileSimSlots);
+    // '' is the ACTIVE default, not a missing value: it means "resolve the
+    // newest compatible device type / runtime live", which is the only answer
+    // that survives an Xcode release.
+    expect(cfg.mobileSimDeviceType).toBe('');
+    expect(cfg.mobileSimRuntime).toBe('');
+    expect(cfg.mobileDeadlineFloorMs).toBe(VISUAL_VERIFY_DEFAULTS.mobileDeadlineFloorMs);
+  });
+
+  it('honors an explicit override of each mobile knob', async () => {
+    const mgr = new ConfigManager('/tmp/test-git-path');
+    await mgr.initialize();
+    await mgr.updateConfig({
+      visualVerify: {
+        mobileSimSlots: 3,
+        mobileSimDeviceType: 'iPhone 16 Pro',
+        mobileSimRuntime: 'iOS 26.0',
+        mobileDeadlineFloorMs: 1_200_000,
+      },
+    });
+
+    const reloaded = new ConfigManager('/tmp/test-git-path');
+    await reloaded.initialize();
+    const cfg = reloaded.getVisualVerifyConfig();
+    expect(cfg.mobileSimSlots).toBe(3);
+    expect(cfg.mobileSimDeviceType).toBe('iPhone 16 Pro');
+    expect(cfg.mobileSimRuntime).toBe('iOS 26.0');
+    expect(cfg.mobileDeadlineFloorMs).toBe(1_200_000);
+    // The clamp to [1,4] belongs to the scheduler, not to this getter: the
+    // getter's contract is materialize-what-was-configured, and moving the
+    // clamp here would hide a bad value from the one place that logs it.
+    expect(cfg.agentSlots).toBe(VISUAL_VERIFY_DEFAULTS.agentSlots);
   });
 
   it('honors an explicit agentSlots override and floors it when absent', async () => {

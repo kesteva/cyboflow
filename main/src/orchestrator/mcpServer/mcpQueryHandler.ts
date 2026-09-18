@@ -121,7 +121,7 @@ import { resolveVisualVerification, SHIPPED_VERIFY_BACKENDS } from '../visualVer
 import { loadVerifyConfig } from '../verifyConfigLoader';
 import { laneEnqueueKeyFor, prepareVerificationEnqueue } from '../verify/enqueueFromTask';
 import { captureSnapshotSha, isRunbookCommittedAtHead, isWorktreeDirty } from '../verify/snapshotProvisioner';
-import { isVerifyRunbookModality, VERIFY_RUNBOOK_RELATIVE_PATH } from '../../../../shared/types/verifyRunbook';
+import { isVerifyRunbookModality, VERIFY_RUNBOOK_MODALITIES, VERIFY_RUNBOOK_RELATIVE_PATH } from '../../../../shared/types/verifyRunbook';
 import {
   FALLBACK_CHAINS,
   isVerificationType,
@@ -4369,9 +4369,9 @@ export class McpQueryHandler {
         type: 'mcp-query-response',
         requestId: msg.requestId,
         ok: false,
-        // 'mobile' is deliberately NOT accepted: §4 defers it entirely, so a
-        // record declaring it could never be satisfied by any execution path.
-        error: "invalid_modality: expected 'web' | 'cdp-app' | 'native-screen'",
+        // mobile is registrable too — it declares build[] + app + a
+        // bundle-identity attestation and no serve (see VERIFY_RUNBOOK_MODALITIES).
+        error: `invalid_modality: expected ${VERIFY_RUNBOOK_MODALITIES.map((m) => `'${m}'`).join(' | ')}`,
       });
       return;
     }

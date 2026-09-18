@@ -71,6 +71,14 @@ Everything in the survey is **evidence** — a `package.json` script, a line in 
 README or CLAUDE.md, an actual `app.commandLine.appendSwitch` in the source. A
 command nobody documented is not a finding; say the lever is missing instead.
 
+For an iOS project the survey's evidence is Xcode's own metadata, read with
+READ-ONLY commands that build nothing: `xcodebuild -list -json` for the scheme
+names, and `xcodebuild -showBuildSettings -json -scheme <s> -sdk
+iphonesimulator` for `PRODUCT_BUNDLE_IDENTIFIER` (the bundle id) and
+`FULL_PRODUCT_NAME` (which fixes the `productGlob`). Neither compiles anything.
+Never run a real build during `inspect`, and never guess a bundle id from the
+target's name.
+
 Decide, from the survey, WHICH MODALITIES this project declares. They compose —
 a desktop app commonly declares `cdp-app` for its web-view content *and*
 `native-screen` for OS chrome (menus, dialogs, tray):
@@ -84,8 +92,14 @@ a desktop app commonly declares `cdp-app` for its web-view content *and*
   **driving does not** (it is a designed prerequisite that has not landed), so
   this modality is observe-only and behaviors needing a click are reported
   `not_testable (drive-unsupported)` rather than attempted.
-- **`mobile`** — deferred pending an Xcode MCP. Never declare it; it is
-  permanently `unsupported` with that reason.
+- **`mobile`** — an iOS app built with Apple's command-line toolchain
+  (`xcodebuild`) and run on a simulator the harness leases per request. No Xcode
+  MCP and no third-party tool is required; tapping and typing are an OPTIONAL,
+  probe-gated rung, so capture always works and drive-requiring behaviors are
+  reported `not_testable (drive-unsupported)` where it is not available. It is
+  declared with an `app` block and a `bundle-identity` attestation instead of a
+  `serve` — see the mobile shape below. Declare it only on the evidence: an
+  `.xcodeproj` / `.xcworkspace` / `Package.swift` with an iOS app target.
 
 ### 2. derive — draft the runbook + the rung ladder
 
@@ -187,6 +201,14 @@ Now, and only now, touch the repo. In order:
    })
    ```
 
+   Carry the runbook's own shape across verbatim — its build steps, its `serve`
+   form OR (for `mobile`) its `app` block, its attestation. **A mobile proof
+   task without the `app` block resolves to the wrong modality** and the
+   setup-proof authorization is rejected with `setup_proof_requires_pin`, so a
+   mobile proof reads `task: { ..., modality: "mobile", build: [...], app:
+   {...}, attestation: { kind: "bundle-identity", ... }, behaviors: [...] }` and
+   carries no `serve` at all.
+
    `setup_proof: true` is not cosmetic: proof runs are **exempt from the project's
    lifetime judge budget**, they **drain at lower priority** than live sprint
    lanes, and they **bypass the "no proven runbook" gate** — which would otherwise
@@ -279,17 +301,20 @@ schema — there is nothing else in it:
 ```ts
 {
   version: 1,                      // the literal 1
-  modalities: {                    // at least one key; ONLY these three exist
+  modalities: {                    // at least one key; ONLY these four exist
     "web"?:           ModalityEntry,
     "cdp-app"?:       ModalityEntry,
     "native-screen"?: ModalityEntry,
+    "mobile"?:        ModalityEntry,
   },
-  levers?: { portEnv?: string, nonceEnv?: string, dataDirEnv?: string, cdpPortFlag?: string, notes?: string },
+  levers?: { portEnv?: string, nonceEnv?: string, dataDirEnv?: string, cdpPortFlag?: string,
+             simUdidEnv?: string, derivedDataEnv?: string, notes?: string },
 }
 
 ModalityEntry = {
   build?: string[],
   serve?: { cmd: string, attach?: "cdp", readyWhen?: { urlPath?: string, timeoutMs?: number } },
+  app?: { platform: "ios-simulator", bundleId: string, scheme: string, productGlob?: string },
   attestation: AttestationSpec,    // REQUIRED
   notes?: string,
   viewports?: Array<{ width: number, height: number, label?: string }>,
@@ -297,16 +322,56 @@ ModalityEntry = {
 ```
 
 Field names are literal: `serve.cmd` (not `command`), `serve.readyWhen` (not
-`readiness`), `attestation.kind` (not `type`). `mobile` is not a declarable
-modality. **`behaviors` is not a runbook field** — behaviors belong to the
+`readiness`), `attestation.kind` (not `type`). **`behaviors` is not a runbook
+field** — behaviors belong to the
 `VerificationTaskV1` you compose at the prove step; putting them in the file is
 a silent no-op at best (unknown keys are dropped before hashing).
+
+### The mobile entry's shape
+
+A `mobile` entry is the one that does not serve anything. It has **no `serve`**
+— the app runs under the simulator's own launchd, so there is no port, no URL
+and nothing to attach to — and instead carries an `app` block plus a
+`bundle-identity` attestation whose `bundleId` is the SAME string as
+`app.bundleId`. Its `build` is ONE line, in this exact shape:
+
+```
+xcodebuild build -scheme <scheme> -configuration Debug -sdk iphonesimulator \
+  -destination "id=$VERIFY_SIM_UDID" -derivedDataPath "$VERIFY_DERIVED_DATA" \
+  -clonedSourcePackagesDirPath "$VERIFY_DERIVED_DATA/SourcePackages" \
+  -skipPackagePluginValidation -skipMacroValidation \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO
+```
+
+`$VERIFY_SIM_UDID` and `$VERIFY_DERIVED_DATA` are placeholders like `${PORT}`:
+the simulator and the DerivedData root are leased per request, so never write a
+device name, a UDID or an absolute path into the file. Installing and launching
+are NOT build steps — the harness owns both, and the runbook never mentions
+`simctl`. Two levers exist for a project whose own tooling reads other names:
+`levers.simUdidEnv` and `levers.derivedDataEnv` name env vars (names only,
+never values), exactly like `portEnv`.
+
+A worked mobile entry:
+
+```json
+{
+  "version": 1,
+  "modalities": {
+    "mobile": {
+      "build": ["xcodebuild build -scheme MyApp -configuration Debug -sdk iphonesimulator -destination \"id=$VERIFY_SIM_UDID\" -derivedDataPath \"$VERIFY_DERIVED_DATA\" -clonedSourcePackagesDirPath \"$VERIFY_DERIVED_DATA/SourcePackages\" -skipPackagePluginValidation -skipMacroValidation CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO"],
+      "app": { "platform": "ios-simulator", "bundleId": "com.example.MyApp", "scheme": "MyApp", "productGlob": "Build/Products/Debug-iphonesimulator/*.app" },
+      "attestation": { "kind": "bundle-identity", "bundleId": "com.example.MyApp" },
+      "notes": "Scheme from `xcodebuild -list -json`; bundle id from PRODUCT_BUNDLE_IDENTIFIER in `-showBuildSettings -json`."
+    }
+  }
+}
+```
 
 **Attestation is REQUIRED per modality, not a nice-to-have.** A verification
 proves the surface it drove IS this deliverable, or it does not pass — there is
 no low-confidence escape hatch. Readiness alone is not identity: a port answering
 `200` may be a stale dev server from an unrelated worktree, or the user's own
-running app. There are **exactly five** kinds, and a sixth is a parse error:
+running app. There are **exactly six** kinds, and a seventh is a parse error:
 
 - `web` → `{ "kind": "http-endpoint", "urlPath": "/__cyboflow_verify__" }` (the
   serve step exposes a route echoing the per-request nonce) or
@@ -321,6 +386,14 @@ running app. There are **exactly five** kinds, and a sixth is a parse error:
   window listing, and a match against any window on the machine would not be an
   identity check. Record that it is the WEAKEST channel; a window title is
   spoofable and coincidental in a way an in-page nonce is not.
+- `mobile` → `{ "kind": "bundle-identity", "bundleId": "com.example.MyApp" }` —
+  after the session the harness re-hashes the executable inside the installed
+  app container and requires it to be byte-identical to the exactly-one product
+  staged under this request's DerivedData, with that `CFBundleIdentifier`. It
+  must equal `app.bundleId`; a mismatch is a registration error. Record what it
+  does NOT prove: the agent ran `xcodebuild` itself through Bash, exactly as it
+  runs a web build, so this channel proves the identity of what was STAGED, not
+  who compiled it.
 - `{ "kind": "file-identity" }` — ONLY for the degenerate pre-live path, a
   `target.htmlPath` the runner itself wrote and opens. A project you SERVE over a
   leased port is a live process on a socket you do not own, even if it is a

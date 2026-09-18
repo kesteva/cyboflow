@@ -8,6 +8,7 @@
  */
 import type { VerificationModality } from '../../../../shared/types/visualVerification';
 import type { BootstrapDeclineReason } from './bootstrapEligibility';
+import { MOBILE_TOOLCHAIN_UNPROBED_DETAIL } from './mobileGates';
 
 // ---------------------------------------------------------------------------
 // Phase-0 gate vocabulary (docs/proposals/verification-setup-flow.md §3.2/§3.3)
@@ -25,14 +26,16 @@ import type { BootstrapDeclineReason } from './bootstrapEligibility';
  * A modality ABSENT from this map is supported. Typed as a partial record so
  * adding a member to the shared union makes this a compile-visible decision.
  *
- * `native-screen` is now CONDITIONALLY unsupported: its entry is the answer for
- * a deployment with NO {@link VerificationSchedulerDeps.nativeCaptureProbe}
- * wired (the phase-0 posture — an unprobed host cannot be assumed capable), and
- * the probe overrides it when it answers true. `mobile` is unconditional.
+ * `native-screen` and `mobile` are both CONDITIONALLY unsupported: each entry is
+ * the answer for a deployment with NO probe wired (the phase-0 posture — an
+ * unprobed host cannot be assumed capable), and the matching probe
+ * ({@link VerificationSchedulerDeps.nativeCaptureProbe} /
+ * {@link VerificationSchedulerDeps.mobileToolchainProbe}) overrides it when it
+ * answers true.
  */
 export const UNSUPPORTED_MODALITY_REASONS: Partial<Record<VerificationModality, string>> = {
   'native-screen': 'native-screen capture/drive not yet wired on the agent path (proposal §4)',
-  mobile: 'deferred — pending Xcode MCP',
+  mobile: MOBILE_TOOLCHAIN_UNPROBED_DETAIL,
 };
 
 /**

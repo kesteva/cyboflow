@@ -247,9 +247,15 @@ Each item names the seam, the change, and the invariant it must keep.
 - Precedence: (1) the run's verify type — `native-desktop` → `native-screen`,
   `mobile-flow` → `mobile`, unchanged; (2) the composer's declared `task.modality` when it
   is `web` or `cdp-app` (the field already exists — `visualVerification.ts:353-359` — and
-  the task-verify prompt already asks for it); (3) `serve.attach === 'cdp'` → `cdp-app`;
-  (4) otherwise probe the proven records for this project/probe path in the order
-  `cdp-app`, `web` and take the first proven one; (5) default `web`.
+  the task-verify prompt already asks for it); (3) shape discriminants —
+  `app.platform === 'ios-simulator'` → `mobile`, else `serve.attach === 'cdp'` → `cdp-app`
+  (mobile's `app` block is checked first because it, like `attach`, is a shape on the
+  composed task itself, not a probe against project history); (4) otherwise probe the
+  proven records for this project/probe path in `RECORD_PROBE_ORDER`
+  (`['cdp-app', 'web', 'mobile']`, mobile deliberately LAST — first-hit-wins, so a React
+  Native / Expo project that legitimately proves both a web and a mobile runbook keeps
+  resolving its undeclared web lanes to `web`, never silently flipping to `mobile`) and take
+  the first proven one; (5) default `web`.
 - Both proven with nothing declared: `cdp-app` wins (a project with a proven cdp-app entry
   is an app; a composer that wants its web surface says so). Declared-but-not-proven keeps
   today's behavior: the gate skips with the existing reason naming the modality.

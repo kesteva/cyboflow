@@ -34,6 +34,7 @@ export const PROBE_LABEL: Readonly<Record<VerifyProbeId, string>> = {
   'browser-driving': 'Playwright browser control',
   'screen-recording': 'Screen recording',
   accessibility: 'Computer control (accessibility)',
+  'mobile-simulator': 'iOS simulator control',
 };
 
 /**
