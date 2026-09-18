@@ -202,7 +202,7 @@ vi.mock('../../../utils/api', () => ({
       // delivered" keeps the plain confirm path (see SessionDismissDialog).
       getDeliveryState: vi.fn().mockResolvedValue({
         success: true,
-        data: { delivered: false, landed: false, ownCommits: 0 },
+        data: { delivered: false, landed: false, ownCommits: 0, completedNoCode: false },
       }),
       markComplete: vi.fn().mockResolvedValue({ success: true, data: { stamped: 1 } }),
       // Merge-dialog prefill probe fires when the dialog opens.

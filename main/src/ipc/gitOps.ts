@@ -38,6 +38,7 @@ import {
   stampSessionRunsPrOpen,
   stampSessionRunsCompleted,
   sessionDeliveredWork,
+  sessionCompletedNoCodeWork,
 } from '../orchestrator/runRecovery';
 import { trackUsage } from '../services/telemetry';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
@@ -1780,19 +1781,30 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
   };
 
   /**
-   * Whether this session's work has been DELIVERED, answered from both sides:
+   * Whether this session's work has been DELIVERED, answered from three sides:
    *
-   *   delivered — a run this session hosted carries a DELIVERED_RUN_OUTCOMES
-   *               stamp (our own merge / create-PR path ran).
-   *   landed    — git says the branch has nothing left to give main
-   *               (WorktreeManager.getBranchLandingState), which is how the
-   *               "the agent merged it in chat" case is visible at all.
+   *   delivered      — a run this session hosted carries a
+   *                     DELIVERED_RUN_OUTCOMES stamp (our own merge /
+   *                     create-PR path ran).
+   *   landed         — git says the branch has nothing left to give main
+   *                     (WorktreeManager.getBranchLandingState), which is how
+   *                     the "the agent merged it in chat" case is visible at
+   *                     all.
+   *   completedNoCode — the session hosted a COMPLETED run of a workflow that
+   *                     never touches the repo (Planner / Launch — see
+   *                     sessionCompletedNoCodeWork) and the worktree has zero
+   *                     own commits. Such a run's "delivery" is the backlog
+   *                     rows it wrote via the MCP tools, so delivered/landed
+   *                     never fire for it even though the run genuinely
+   *                     finished — without this signal it is indistinguishable
+   *                     from a session nobody ever touched.
    *
-   * Read by the dismiss dialog: either signal turns Dismiss into a choice
+   * Read by the dismiss dialog: any of the three turns Dismiss into a choice
    * between Mark complete and dismissing anyway, because dismissing a session
-   * whose code IS in the tree also throws away findings that still apply.
-   * Fail-soft on every axis — an unreadable worktree reports landed=false and
-   * the operator simply gets the plain confirmation.
+   * whose work already landed (in the tree OR the backlog) also throws away
+   * findings that still apply. Fail-soft on every axis — an unreadable
+   * worktree reports landed=false and the operator simply gets the plain
+   * confirmation.
    */
   const getDeliveryState = async ({ sessionId }: OpsInput<'getDeliveryState'>): Promise<OpsResult<'getDeliveryState'>> => {
     try {
@@ -1817,7 +1829,12 @@ export function createGitOps(services: AppServices): SessionGitOpsLike {
         }
       }
 
-      return { success: true, data: { delivered, landed, ownCommits } };
+      // Only meaningful when the worktree genuinely has no own commits —
+      // ownCommits > 0 means git already has a real answer via landed/delivered.
+      const completedNoCode = ownCommits === 0
+        && sessionCompletedNoCodeWork(makeDatabaseLike(databaseService), sessionId);
+
+      return { success: true, data: { delivered, landed, ownCommits, completedNoCode } };
     } catch (error: unknown) {
       return {
         success: false,

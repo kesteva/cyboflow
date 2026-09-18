@@ -162,7 +162,11 @@ export const sessionGitRouter = router({
       ctx,
       input,
     }): Promise<
-      { success: true; data: { delivered: boolean; landed: boolean; ownCommits: number } } | SessionGitError
+      | {
+          success: true;
+          data: { delivered: boolean; landed: boolean; ownCommits: number; completedNoCode: boolean };
+        }
+      | SessionGitError
     > => {
       return requireOps(ctx.sessionGitOps).getDeliveryState(input);
     }),

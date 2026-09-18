@@ -142,6 +142,55 @@ export function sessionDeliveredWork(db: DatabaseLike, sessionId: string): boole
 }
 
 /**
+ * Names of built-in workflows whose steps never touch the git worktree — the
+ * DB-side signal {@link sessionCompletedNoCodeWork} keys on. Planner
+ * decomposes an idea into epics/tasks; Launch interviews the user into a
+ * project brief/idea/epic/task backlog — both write ONLY cyboflow entity rows
+ * via the MCP tools, so the git-side `delivered`/`landed` signals never fire
+ * for them even when the run genuinely completed. A future workflow sharing
+ * that shape should be added here.
+ */
+const NO_CODE_WORKFLOW_NAMES: readonly string[] = ['planner', 'launch'];
+
+/**
+ * Whether this session hosted a COMPLETED run of a workflow that never
+ * touches the repo (see {@link NO_CODE_WORKFLOW_NAMES}) — the DB-only sibling
+ * of {@link sessionDeliveredWork} for the dismiss dialog's third choice. A run
+ * still parked at a gate (`awaiting_review`) or otherwise in flight does NOT
+ * count: only `status = 'completed'` means the run actually produced its
+ * backlog rows and is done.
+ *
+ * Mirrors sessionDeliveredWork's session-shape handling (both the direct
+ * `workflow_runs.session_id` link and the LEGACY `sessions.run_id` shape), so
+ * the two DB-side probes never disagree about which shape they are reading.
+ *
+ * Fail-soft: a query failure reports false, which only ever costs the
+ * operator an extra confirmation.
+ */
+export function sessionCompletedNoCodeWork(db: DatabaseLike, sessionId: string): boolean {
+  try {
+    const placeholders = NO_CODE_WORKFLOW_NAMES.map(() => '?').join(', ');
+    const row = db
+      .prepare(
+        `SELECT 1 AS complete
+           FROM workflow_runs r
+           JOIN workflows w ON w.id = r.workflow_id
+          WHERE (
+                  r.session_id = ?
+                  OR EXISTS (SELECT 1 FROM sessions s WHERE s.id = ? AND s.run_id = r.id)
+                )
+            AND r.status = 'completed'
+            AND w.name IN (${placeholders})
+          LIMIT 1`,
+      )
+      .get(sessionId, sessionId, ...NO_CODE_WORKFLOW_NAMES) as { complete: number } | undefined;
+    return row !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Dismiss the pending review items attached to any run hosted by one session,
  * EXCEPT the findings of a session whose work was delivered (see
  * {@link DELIVERED_SESSION_FINDING_CARVE_OUT}).

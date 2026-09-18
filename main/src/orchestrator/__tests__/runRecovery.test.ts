@@ -31,6 +31,7 @@ import {
   dismissPendingReviewItemsForSession,
   backfillArchivedSessionReviewItems,
   sessionDeliveredWork,
+  sessionCompletedNoCodeWork,
   stampSessionRunsCompleted,
   backfillInterruptedOutcomes,
   backfillTerminalOutcomes,
@@ -1029,6 +1030,67 @@ describe('archived-session review-item sweeps', () => {
     expect(result).toEqual({ itemsDismissed: 1, itemsFailed: 0 });
     expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get(findingId) as { status: string }).status).toBe('pending');
     expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get(gateId) as { status: string }).status).toBe('dismissed');
+  });
+
+  // -------------------------------------------------------------------------
+  // sessionCompletedNoCodeWork — the DB-only sibling of sessionDeliveredWork
+  // for a completed Planner/Launch run (TASK-276). Read by the dismiss
+  // dialog's getDeliveryState probe to unlock the three-way Mark-complete
+  // choice for a session whose "delivery" is backlog rows, not code.
+  // -------------------------------------------------------------------------
+
+  it("reports true for a session hosting a COMPLETED 'planner' run", () => {
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    seedRun(db, { id: 'run-planner', workflowId: 'wf-planner', workflowName: 'planner', status: 'completed' });
+    db.prepare(`UPDATE workflow_runs SET session_id = 'sess-archived' WHERE id = 'run-planner'`).run();
+
+    expect(sessionCompletedNoCodeWork(adapter, 'sess-archived')).toBe(true);
+  });
+
+  it("reports true for a session hosting a COMPLETED 'launch' run", () => {
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    seedRun(db, { id: 'run-launch', workflowId: 'wf-launch', workflowName: 'launch', status: 'completed' });
+    db.prepare(`UPDATE workflow_runs SET session_id = 'sess-archived' WHERE id = 'run-launch'`).run();
+
+    expect(sessionCompletedNoCodeWork(adapter, 'sess-archived')).toBe(true);
+  });
+
+  it("reports false for a 'sprint' run (touches the repo) even when completed", () => {
+    // buildReviewSweepDb seeds run-direct as a completed 'sprint' run under
+    // sess-archived — the workflow-name filter, not just status, must gate this.
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+
+    expect(sessionCompletedNoCodeWork(adapter, 'sess-archived')).toBe(false);
+  });
+
+  it("reports false for a 'planner' run still parked at a gate (awaiting_review)", () => {
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    seedRun(db, { id: 'run-planner-gate', workflowId: 'wf-planner', workflowName: 'planner', status: 'awaiting_review' });
+    db.prepare(`UPDATE workflow_runs SET session_id = 'sess-archived' WHERE id = 'run-planner-gate'`).run();
+
+    expect(sessionCompletedNoCodeWork(adapter, 'sess-archived')).toBe(false);
+  });
+
+  it('also sees the LEGACY shape (session.run_id, no run.session_id)', () => {
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    seedRun(db, { id: 'run-planner-legacy', workflowId: 'wf-planner', workflowName: 'planner', status: 'completed' });
+    db.prepare(`UPDATE sessions SET run_id = 'run-planner-legacy' WHERE id = 'sess-archived'`).run();
+
+    expect(sessionCompletedNoCodeWork(adapter, 'sess-archived')).toBe(true);
+  });
+
+  it('answers for the session, not a different one', () => {
+    const db = buildReviewSweepDb();
+    const adapter = dbAdapter(db);
+    seedRun(db, { id: 'run-planner-other', workflowId: 'wf-planner', workflowName: 'planner', status: 'completed' });
+    db.prepare(`UPDATE workflow_runs SET session_id = 'sess-archived' WHERE id = 'run-planner-other'`).run();
+
+    expect(sessionCompletedNoCodeWork(adapter, 'sess-active')).toBe(false);
   });
 });
 
