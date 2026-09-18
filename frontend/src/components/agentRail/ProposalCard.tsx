@@ -41,6 +41,7 @@ import { Loader2 } from 'lucide-react';
 import type { AgentProposal, AgentProposalStatus } from '../../../../shared/types/agentThread';
 import { useAgentThreadStore } from '../../stores/agentThreadStore';
 import { useRunSessionMap } from '../../stores/landingStore';
+import { useSessionStore } from '../../stores/sessionStore';
 import {
   PROPOSAL_KIND_LABEL,
   LaunchRunBody,
@@ -128,27 +129,46 @@ function ResolvedLine({
 // Resolved-state renderers per kind
 // ---------------------------------------------------------------------------
 
+/**
+ * Muted detail for an executed launch-run row. NEVER the opaque run id
+ * (TASK-221): the executor's result carries the minted `sessionId`, so the
+ * session name resolves straight off the session store even before
+ * activeRunsStore has hydrated the new run (the run-keyed map is only a
+ * fallback for legacy results without a sessionId). While neither has caught
+ * up — the normal state in the seconds right after Confirm, since proposal
+ * finalization and run/session hydration are separate reactive paths — the
+ * row names the workflow and says the session is still loading.
+ */
+function launchRunResolvedDetail(opts: {
+  sessionName: string | null;
+  workflowLabel: string | null;
+}): string | undefined {
+  const { sessionName, workflowLabel } = opts;
+  if (sessionName != null && sessionName !== '') {
+    return workflowLabel != null ? `${sessionName} · ${workflowLabel}` : sessionName;
+  }
+  return workflowLabel != null ? `${workflowLabel} · loading session…` : 'loading session…';
+}
+
 function LaunchRunResolved({ proposal }: { proposal: AgentProposal }): React.ReactElement {
   const sessionMap = useRunSessionMap();
+  const r = parseLaunchRunResult(proposal.result);
+  const resultSessionId = r?.sessionId ?? null;
+  const sessionNameById = useSessionStore((s) =>
+    resultSessionId != null ? (s.sessions.find((session) => session.id === resultSessionId)?.name ?? null) : null,
+  );
   if (proposal.status === 'dismissed') {
     return <ResolvedLine tone="neutral" glyph="✕" verb="Dismissed." />;
   }
-  const r = parseLaunchRunResult(proposal.result);
   if (r === null) {
     return <ResolvedLine tone={proposal.status === 'failed' ? 'error' : 'success'} verb="Resolved." glyph={proposal.status === 'failed' ? '✕' : '✓'} />;
   }
   if (r.status === 'executed') {
     const payload = proposal.payload.kind === 'launch-run' ? proposal.payload : null;
-    const sessionName = r.runId != null ? (sessionMap[r.runId]?.sessionName ?? null) : null;
+    const sessionName =
+      sessionNameById ?? (r.runId != null ? (sessionMap[r.runId]?.sessionName ?? null) : null);
     const workflowLabel = payload != null ? workflowNameLabel(payload.workflowName) : null;
-    const detail =
-      sessionName != null
-        ? workflowLabel != null
-          ? `${sessionName} · ${workflowLabel}`
-          : sessionName
-        : r.runId != null
-          ? `run ${r.runId}`
-          : undefined;
+    const detail = launchRunResolvedDetail({ sessionName, workflowLabel });
     if (r.runId != null) {
       const runId = r.runId;
       return (
@@ -190,7 +210,7 @@ function ReprioritizeResolved({ proposal }: { proposal: AgentProposal }): React.
           Reprioritized {okCount} of {total} task{total === 1 ? '' : 's'}.
         </span>
       </div>
-      <ReprioritizeBacklogRows items={payload.items} result={result} />
+      <ReprioritizeBacklogRows projectId={payload.projectId} items={payload.items} result={result} />
     </div>
   );
 }

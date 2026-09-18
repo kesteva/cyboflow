@@ -110,6 +110,15 @@ vi.mock('../trpc/client', () => ({
         get: { query: vi.fn().mockResolvedValue(null) },
         onReviewItemChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
       },
+      // Dynamic-workflow mirror (dynamicWorkflowStore) — DraggableProjectTreeView
+      // joins the store's singleton subscription for its collapsed-project
+      // running badge (TASK-223), so every test rendering the sidebar tree
+      // needs these to exist. Inert by default (empty seed, never emits).
+      dynamicWorkflows: {
+        list: { query: vi.fn().mockResolvedValue([]) },
+        onChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        onRemoved: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+      },
       // Approved-design lookup (Tier 2, item 8c) — DesignAffordance mounts
       // unconditionally on every non-idea TaskCard/TaskDetailModal and, given a
       // sessionKey, every sprint swimlane lane header. No bound design by

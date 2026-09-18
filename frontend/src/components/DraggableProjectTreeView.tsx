@@ -4,7 +4,8 @@ import { useErrorStore } from '../stores/errorStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useCyboflowStore } from '../stores/cyboflowStore';
 import { isTerminalRunStatus, useActiveRunsStore, type ActiveRunRow } from '../stores/activeRunsStore';
-import { classifyRun } from '../utils/homeClassify';
+import { deriveCollapsedProjectActivity } from '../utils/collapsedProjectActivity';
+import { useActiveDynamicWorkflows, useDynamicWorkflowStore } from '../stores/dynamicWorkflowStore';
 import { useSessionStore } from '../stores/sessionStore';
 import { useOnboardingStore } from '../stores/onboardingStore';
 import { ONBOARDING_PROJECT_HOME_STEP } from '../utils/onboarding';
@@ -550,6 +551,15 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
   const activeRunId = useCyboflowStore((state) => state.activeRunId);
   const runsByProject = useActiveRunsStore((state) => state.runsByProject);
   const refreshActiveRuns = useActiveRunsStore((state) => state.refresh);
+  // Live dynamic workflows feed the collapsed-project running badge (TASK-223):
+  // a detached in-session Workflow-tool run shows under Landing's Working
+  // section, so the badge must see it too. The store's init is idempotent and
+  // its subscription is a shared singleton (see dynamicWorkflowStore) — joining
+  // it here just guarantees the feed is live even before the review home mounts.
+  const activeDynamicWorkflows = useActiveDynamicWorkflows();
+  useEffect(() => {
+    useDynamicWorkflowStore.getState().init();
+  }, []);
   // Guided step 9 ("Your project lives here") pairs its callouts with markers on
   // the guided project's row and its "Start new session" button below.
   const guidedProjectId = useOnboardingStore((s) => s.guidedProject?.id ?? null);
@@ -1753,30 +1763,17 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
               const parentlessRunCount = parentlessRuns.length;
               // Collapsed-header badge counts (TASK-223) — a running-agents count so a
               // running agent is never fully invisible once its project is collapsed,
-              // not just at boot. Reuses `classifyRun` (homeClassify), the SAME
-              // active/blocked/terminal split the landing page's Working section uses,
-              // so the badge and the review-home page always agree on what "running"
-              // means. A session already spoken for by one of its own non-terminal runs
-              // is not double-counted off its raw `session.status` — the run IS the
-              // thing being reported (mirrors LandingHome's workingRows dedup).
-              const runSessionIdsNonTerminal = new Set(
-                visibleRunRows
-                  .filter((r) => classifyRun(r.status) !== 'terminal')
-                  .map((r) => r.session_id)
-                  .filter((id): id is string => id != null),
-              );
-              let collapsedRunningCount = 0;
-              let collapsedBlockedCount = 0;
-              for (const run of visibleRunRows) {
-                const activity = classifyRun(run.status);
-                if (activity === 'active') collapsedRunningCount += 1;
-                else if (activity === 'blocked') collapsedBlockedCount += 1;
-              }
-              for (const session of projectSessions) {
-                if (runSessionIdsNonTerminal.has(session.id)) continue;
-                if (session.status === 'running') collapsedRunningCount += 1;
-                else if (session.status === 'waiting') collapsedBlockedCount += 1;
-              }
+              // not just at boot. `deriveCollapsedProjectActivity` mirrors the landing
+              // page's Working-section derivation (classifyRun split, run > dynamic
+              // > session dedup, live dynamic workflows counted) so the badge and the
+              // review-home page agree on what "running" means for a project.
+              const { running: collapsedRunningCount, blocked: collapsedBlockedCount } =
+                deriveCollapsedProjectActivity({
+                  projectId: project.id,
+                  runs: visibleRunRows,
+                  sessions: projectSessions,
+                  activeDynamicWorkflows,
+                });
               // A/B experiment group rows: collapse an experiment's two arm sessions
               // into ONE parent group (see railExperimentGrouping). Claimed arm
               // sessions drop out of the flat `flatSessions` list, but `sessionIdSet`

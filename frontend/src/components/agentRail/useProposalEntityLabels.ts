@@ -14,12 +14,21 @@
  * task/idea seeds of launch-run ever hit this path.
  *
  * Findings (review_items, id prefix `rvw_`) have no equivalent standing
- * store, so those ids are resolved via a small batched
- * `reviewItems.get` fetch — fired once per distinct set of finding ids this
- * hook is asked to resolve, deduped module-wide so two cards referencing the
- * same finding never issue two queries, and never refetched once resolved
- * (successful AND not-found are both cached — a permanently-deleted finding
- * should not re-query on every render).
+ * store, and the reviewItems router has no by-id batch procedure (`list` is a
+ * project inbox query that hides orphaned/machine-audience rows, so it cannot
+ * stand in for a by-id lookup), so those ids are resolved via one
+ * `reviewItems.get` per DISTINCT finding id — deduped module-wide so two cards
+ * referencing the same finding never issue two queries. Authoritative answers
+ * (found / not-found) are cached for the renderer lifetime — a permanently-
+ * deleted finding should not re-query on every render. A TRANSPORT FAILURE is
+ * NOT cached: it leaves the id unresolved for this mount and re-queries on the
+ * next mount / id-set change, so a transient IPC hiccup never sticks.
+ *
+ * PROJECT SCOPING: every lookup is filtered to `projectId` — the proposal's
+ * own project. This is a human confirmation surface, so an id from ANOTHER
+ * project must degrade to the muted unresolved marker rather than resolve to
+ * a convincing ref/title. Tasks/epics/ideas filter on `project_id`, stages on
+ * the owning board's `project_id`, and a fetched finding on its `project_id`.
  *
  * Unresolved ids (deleted entity, cross-project reference, or a finding fetch
  * still in flight / that came back null) are simply ABSENT from the returned
@@ -35,6 +44,8 @@ const FINDING_ID_PREFIX = 'rvw_';
 
 export interface ResolvedProposalEntity {
   id: string;
+  /** Owning project — every lookup is scoped to the proposal's project. */
+  projectId: number;
   /** Display ref (e.g. "TASK-208"); empty for a finding, which has no ref. */
   ref: string;
   type: BacklogTaskItem['type'] | 'finding';
@@ -61,9 +72,13 @@ function flattenTasks(items: BacklogTaskItem[]): BacklogTaskItem[] {
   return out;
 }
 
-function flattenStages(boards: { stages: BoardStage[] }[]): Map<string, ResolvedStage> {
+function flattenStages(
+  boards: { project_id: number; stages: BoardStage[] }[],
+  projectId: number,
+): Map<string, ResolvedStage> {
   const map = new Map<string, ResolvedStage>();
   for (const board of boards) {
+    if (board.project_id !== projectId) continue;
     for (const stage of board.stages) {
       map.set(stage.id, { id: stage.id, label: stage.label, colorOklch: stage.color_oklch });
     }
@@ -72,17 +87,23 @@ function flattenStages(boards: { stages: BoardStage[] }[]): Map<string, Resolved
 }
 
 // ---------------------------------------------------------------------------
-// Findings — batched, deduped, module-cached `reviewItems.get` fetch.
+// Findings — deduped, module-cached `reviewItems.get` fetch (one per distinct
+// id; see the module doc for why there is no batch procedure to use).
 // ---------------------------------------------------------------------------
 
+/**
+ * Authoritative answers only: a resolved entity (with its owning project) or
+ * `null` for a confirmed not-found. A transport failure is deliberately NOT
+ * written here so the next mount retries it.
+ */
 const findingCache = new Map<string, ResolvedProposalEntity | null>();
 const findingInflight = new Map<string, Promise<void>>();
 
 function fetchFinding(id: string): Promise<void> {
-  // Already resolved (success OR not-found) by a prior fetch — per this
-  // module's contract, never re-query. Without this check a fresh mount
-  // referencing an already-cached finding id would re-fire the query, since
-  // `findingInflight` alone only dedupes CONCURRENT fetches, not resolved ones.
+  // Already answered (found OR not-found) by a prior fetch — never re-query.
+  // Without this check a fresh mount referencing an already-cached finding id
+  // would re-fire the query, since `findingInflight` alone only dedupes
+  // CONCURRENT fetches, not answered ones.
   if (findingCache.has(id)) return Promise.resolve();
   const cached = findingInflight.get(id);
   if (cached) return cached;
@@ -91,11 +112,15 @@ function fetchFinding(id: string): Promise<void> {
     .then((item) => {
       findingCache.set(
         id,
-        item !== null ? { id, ref: '', type: 'finding', title: item.title } : null,
+        item !== null
+          ? { id, projectId: item.project_id, ref: '', type: 'finding', title: item.title }
+          : null,
       );
     })
     .catch(() => {
-      findingCache.set(id, null);
+      // Transient (transport) failure: leave the id unanswered so it renders
+      // as unresolved for THIS mount and is retried on the next one, instead
+      // of pinning "unresolved" for the renderer's lifetime.
     })
     .finally(() => {
       findingInflight.delete(id);
@@ -104,12 +129,20 @@ function fetchFinding(id: string): Promise<void> {
   return promise;
 }
 
+/** Test-only: drop every cached finding answer (the cache is module-global). */
+export function resetProposalFindingCacheForTests(): void {
+  findingCache.clear();
+  findingInflight.clear();
+}
+
 /**
- * Resolve `ids` (task/epic/idea/finding ids) into a Map<id, ResolvedProposalEntity>,
- * plus every board stage the live backlogStore knows about (Map<stageId, ResolvedStage>).
- * Missing entries mean "not (yet) resolvable" — render the unresolved fallback.
+ * Resolve `ids` (task/epic/idea/finding ids) belonging to `projectId` into a
+ * Map<id, ResolvedProposalEntity>, plus every board stage of that project the
+ * live backlogStore knows about (Map<stageId, ResolvedStage>). Missing entries
+ * mean "not (yet) resolvable" — or not this project's — render the unresolved
+ * fallback.
  */
-export function useProposalEntityLabels(ids: string[]): {
+export function useProposalEntityLabels(ids: string[], projectId: number): {
   entities: Map<string, ResolvedProposalEntity>;
   stages: Map<string, ResolvedStage>;
 } {
@@ -136,17 +169,22 @@ export function useProposalEntityLabels(ids: string[]): {
 
   const entities = useMemo(() => {
     const map = new Map<string, ResolvedProposalEntity>();
-    const byId = new Map(flattenTasks(tasks).map((t) => [t.id, t]));
+    const byId = new Map(
+      flattenTasks(tasks)
+        .filter((t) => t.project_id === projectId)
+        .map((t) => [t.id, t]),
+    );
     for (const id of ids) {
       if (id.startsWith(FINDING_ID_PREFIX)) {
         const cached = findingCache.get(id);
-        if (cached) map.set(id, cached);
+        if (cached && cached.projectId === projectId) map.set(id, cached);
         continue;
       }
       const task = byId.get(id);
       if (task) {
         map.set(id, {
           id,
+          projectId,
           ref: task.ref,
           type: task.type,
           title: task.title,
@@ -160,9 +198,9 @@ export function useProposalEntityLabels(ids: string[]): {
     // idsKey is `ids`' stable identity; `tick` re-reads the finding cache once
     // an in-flight fetch settles (the cache itself isn't reactive state).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tasks, idsKey, tick]);
+  }, [tasks, idsKey, projectId, tick]);
 
-  const stages = useMemo(() => flattenStages(boards), [boards]);
+  const stages = useMemo(() => flattenStages(boards, projectId), [boards, projectId]);
 
   return { entities, stages };
 }

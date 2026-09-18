@@ -172,7 +172,9 @@ export function LaunchRunBody({ payload }: { payload: LaunchRunProposalPayload }
     { label: 'findings', ids: payload.findingIds ?? [] },
   ].filter((r) => r.ids.length > 0);
   const allSeedIds = [...(payload.taskIds ?? []), ...(payload.ideaIds ?? []), ...(payload.findingIds ?? [])];
-  const { entities } = useProposalEntityLabels(allSeedIds);
+  // Scoped to the proposal's own project — a seed id from another project
+  // must degrade to the muted unresolved marker, not resolve (TASK-221).
+  const { entities } = useProposalEntityLabels(allSeedIds, payload.projectId);
 
   return (
     <div className="flex flex-col gap-2 text-[11px]" data-testid="proposal-body-launch-run">
@@ -280,13 +282,16 @@ function planReprioritizeRows(
 }
 
 export function ReprioritizeBacklogRows({
+  projectId,
   items,
   result,
 }: {
+  /** The proposal's project — task AND stage lookups are scoped to it. */
+  projectId: number;
   items: ReprioritizeBacklogItem[];
   result: ReprioritizeResultJson | null;
 }): React.ReactElement {
-  const { entities, stages } = useProposalEntityLabels(items.map((i) => i.taskId));
+  const { entities, stages } = useProposalEntityLabels(items.map((i) => i.taskId), projectId);
   const plan = planReprioritizeRows(items, entities);
   return (
     <div className="flex flex-col gap-1.5 text-[11px]" data-testid="proposal-body-reprioritize">
@@ -337,7 +342,7 @@ export function ReprioritizeBacklogBody({
     <div className="flex flex-col gap-2">
       <div className="text-[13px] font-bold text-text-primary">Reprioritize backlog</div>
       <div className="text-[10px] text-text-tertiary">{projectName}</div>
-      <ReprioritizeBacklogRows items={payload.items} result={null} />
+      <ReprioritizeBacklogRows projectId={payload.projectId} items={payload.items} result={null} />
     </div>
   );
 }

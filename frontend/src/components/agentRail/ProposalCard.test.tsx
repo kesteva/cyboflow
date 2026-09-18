@@ -359,6 +359,7 @@ describe('ProposalCard — open state, per-kind body', () => {
     // can never mask this one actually calling the query.
     mockReviewItemsGet.mockResolvedValueOnce({
       id: 'rvw_findings_test',
+      project_id: 1,
       title: 'Stale worktree lock leaks on crash',
     } as unknown as Awaited<ReturnType<typeof trpc.cyboflow.reviewItems.get.query>>);
     const proposal = makeLaunchRunProposal({
@@ -413,6 +414,50 @@ describe('ProposalCard — open state, per-kind body', () => {
     expect(screen.queryByText('TASK-2', { exact: false })).not.toBeInTheDocument();
     // No result yet — no per-row outcome markers in the open state.
     expect(screen.queryByTestId('reprioritize-outcome')).not.toBeInTheDocument();
+  });
+
+  it('launch-run: a seed id that belongs to ANOTHER project degrades to the muted unresolved marker, never a convincing ref', () => {
+    useBacklogStore.setState({
+      tasks: [makeBacklogTask({ id: 'tsk_foreign', ref: 'TASK-900', title: 'Someone else\'s task', project_id: 2 })],
+    });
+    render(<ProposalCard proposal={makeLaunchRunProposal({ payload: { taskIds: ['tsk_foreign'] } })} />);
+
+    expect(screen.getByTestId('proposal-entity-unresolved')).toHaveTextContent('tsk_foreign (unresolved)');
+    expect(screen.queryByText('TASK-900')).not.toBeInTheDocument();
+  });
+
+  it('launch-run: a finding that belongs to ANOTHER project degrades to the muted unresolved marker', async () => {
+    mockReviewItemsGet.mockResolvedValueOnce({
+      id: 'rvw_findings_foreign',
+      project_id: 2,
+      title: 'Cross-project finding',
+    } as unknown as Awaited<ReturnType<typeof trpc.cyboflow.reviewItems.get.query>>);
+    render(<ProposalCard proposal={makeLaunchRunProposal({ payload: { taskIds: [], findingIds: ['rvw_findings_foreign'] } })} />);
+
+    await waitFor(() => expect(mockReviewItemsGet).toHaveBeenCalledWith({ reviewItemId: 'rvw_findings_foreign' }));
+    expect(await screen.findByTestId('proposal-entity-unresolved')).toHaveTextContent('rvw_findings_foreign (unresolved)');
+    expect(screen.queryByText('Cross-project finding')).not.toBeInTheDocument();
+  });
+
+  it('reprioritize-backlog: a task and a stage from ANOTHER project degrade to the muted unresolved markers', () => {
+    useBacklogStore.setState({
+      tasks: [makeBacklogTask({ id: 'TASK-1', ref: 'TASK-001', title: 'Foreign task', project_id: 2 })],
+      boards: [
+        makeBoard({
+          id: 'board-2',
+          project_id: 2,
+          stages: [
+            { id: 'in-progress', label: 'Foreign in progress', color_oklch: 'oklch(0.7 0.15 250)', hint: null, position: 7, write_policy: 'asserted', is_terminal: false, hidden_by_default: false },
+          ],
+        }),
+      ],
+    });
+    render(<ProposalCard proposal={makeReprioritizeProposal()} />);
+
+    const rows = screen.getAllByTestId('reprioritize-row');
+    expect(within(rows[0]).getByTestId('proposal-entity-unresolved')).toHaveTextContent('TASK-1 (unresolved)');
+    expect(within(rows[1]).getByTestId('proposal-stage-unresolved')).toHaveTextContent('in-progress (unresolved)');
+    expect(screen.queryByText('Foreign in progress')).not.toBeInTheDocument();
   });
 
   it('reprioritize-backlog: an id absent from the backlog degrades to a muted unresolved marker, never a blank cell', () => {
@@ -700,14 +745,42 @@ describe('ProposalCard — launch-run resolved', () => {
     expect(useNavigationStore.getState().view).toBe('session');
   });
 
-  it('falls back to the raw run id (muted) when no session identity resolves', () => {
+  it('names the session off result.sessionId before activeRunsStore has hydrated the new run', () => {
+    // The normal state right after Confirm: the executor's result already
+    // carries the minted sessionId + runId, the session row is in the session
+    // store, but the run has not yet landed in activeRunsStore.
+    useSessionStore.setState({ sessions: [makeSession({ id: 'sess-new', name: 'calm-heron' })] });
+    const setActiveRun = vi.fn();
+    useCyboflowStore.setState({ setActiveRun });
+
     const proposal = makeLaunchRunProposal({
       status: 'executed',
-      result: { kind: 'launch-run', status: 'executed', runId: 'run-unknown' },
+      result: { kind: 'launch-run', status: 'executed', runId: 'run-new', sessionId: 'sess-new' },
     });
     render(<ProposalCard proposal={proposal} />);
 
-    expect(screen.getByTestId('proposal-card-resolved-row')).toHaveTextContent('run run-unknown');
+    const row = screen.getByTestId('proposal-card-resolved-row');
+    expect(row).toHaveTextContent('Run launched.');
+    expect(row).toHaveTextContent('calm-heron');
+    expect(row).toHaveTextContent('Sprint');
+    expect(row).not.toHaveTextContent('run-new');
+
+    fireEvent.click(row);
+    expect(setActiveRun).toHaveBeenCalledWith('run-new');
+  });
+
+  it('shows a readable workflow + "loading session" label — never the opaque run id — while nothing has hydrated yet', () => {
+    const proposal = makeLaunchRunProposal({
+      status: 'executed',
+      result: { kind: 'launch-run', status: 'executed', runId: 'run-unknown', sessionId: 'sess-unknown' },
+    });
+    render(<ProposalCard proposal={proposal} />);
+
+    const row = screen.getByTestId('proposal-card-resolved-row');
+    expect(row).toHaveTextContent('Run launched.');
+    expect(row).toHaveTextContent('Sprint · loading session…');
+    expect(row).not.toHaveTextContent('run-unknown');
+    expect(row).not.toHaveTextContent('sess-unknown');
   });
 });
 

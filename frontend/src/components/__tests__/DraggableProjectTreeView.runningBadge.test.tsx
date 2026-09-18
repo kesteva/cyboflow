@@ -190,6 +190,16 @@ vi.mock('../../hooks/useRailExperiments', () => ({
   useRailExperiments: () => ({ byProject: mockRailByProject, refetch: vi.fn() }),
 }));
 
+// Dynamic workflows (the in-session Workflow tool) — the badge must count a
+// DETACHED workflow the same way Landing's Working section does, even though
+// its host session's own status reads idle/stopped while it runs.
+let mockActiveDynamicWorkflows: { sessionId: string; projectId: number }[] = [];
+const mockDynamicInit = vi.fn(() => () => {});
+vi.mock('../../stores/dynamicWorkflowStore', () => ({
+  useActiveDynamicWorkflows: () => mockActiveDynamicWorkflows,
+  useDynamicWorkflowStore: { getState: () => ({ byWfRunId: {}, init: mockDynamicInit }) },
+}));
+
 function makeElectronAPI(expandedProjects: number[] = []) {
   return {
     uiState: {
@@ -232,6 +242,8 @@ beforeEach(() => {
   mockRunsByProject = {};
   mockRailByProject = {};
   mockSessions = [];
+  mockActiveDynamicWorkflows = [];
+  mockDynamicInit.mockClear();
 });
 
 function setExpanded(expandedProjects: number[]): void {
@@ -396,6 +408,41 @@ describe('DraggableProjectTreeView — collapsed running-agents badge (TASK-223)
 
     expect(await waitFor(() => screen.getByTitle('1 agent running — click to expand'))).toBeInTheDocument();
     expect(screen.getByTitle('1 awaiting you — click to expand')).toBeInTheDocument();
+  });
+
+  it('counts a detached dynamic workflow whose host session reads stopped (Landing Working-section parity)', async () => {
+    setCollapsed();
+    // The session parked its PTY turn (status 'stopped') while the Workflow tool
+    // runs detached — Landing lists it under Working via the dynamic row, so the
+    // collapsed badge must show 1 too, and the store feed must be joined.
+    mockSessions = [makeSession({ id: 'sess-dyn', name: 'dyn-host', status: 'stopped' })];
+    mockActiveDynamicWorkflows = [{ sessionId: 'sess-dyn', projectId: 1 }];
+
+    await act(async () => {
+      render(<DraggableProjectTreeView />);
+    });
+    await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
+
+    const badge = await waitFor(() => screen.getByTitle('1 agent running — click to expand'));
+    expect(badge).toBeInTheDocument();
+    expect(mockDynamicInit).toHaveBeenCalled();
+  });
+
+  it('a dynamic workflow in another project does not count here, and one in a session already hosting a flow run is not stacked', async () => {
+    setCollapsed();
+    mockSessions = [makeSession({ id: 'sess-host', name: 'host-session', status: 'running' })];
+    mockRunsByProject = { 1: [makeRun({ id: 'run-active', session_id: 'sess-host', status: 'running' })] };
+    mockActiveDynamicWorkflows = [
+      { sessionId: 'sess-host', projectId: 1 }, // spoken for by run-active
+      { sessionId: 'sess-elsewhere', projectId: 2 }, // another project
+    ];
+
+    await act(async () => {
+      render(<DraggableProjectTreeView />);
+    });
+    await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
+
+    expect(await waitFor(() => screen.getByTitle('1 agent running — click to expand'))).toBeInTheDocument();
   });
 
   it('clicking the running badge expands the project', async () => {
