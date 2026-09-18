@@ -7,7 +7,7 @@
  * unchanged.
  */
 import { REQUEST_STATUS } from '../../../../shared/types/visualVerification';
-import type { RequestStatus } from '../../../../shared/types/visualVerification';
+import type { RequestStatus, VerificationRequestInput } from '../../../../shared/types/visualVerification';
 
 // ---------------------------------------------------------------------------
 // Row shape
@@ -229,3 +229,24 @@ export const AWAIT_TERMINAL_TIMEOUT_MESSAGE = 'await timeout';
  * — the caller must not read it as a pass, and must not loop back on it either.
  */
 export const AWAIT_TERMINAL_NOT_FOUND_MESSAGE = 'request not found';
+
+// ---------------------------------------------------------------------------
+// deliverable_json
+// ---------------------------------------------------------------------------
+
+/** Parse deliverable_json into a VerificationRequestInput; null on malformed JSON / shape. */
+export function parseRequestInput(json: string): VerificationRequestInput | null {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    if (
+      parsed !== null &&
+      typeof parsed === 'object' &&
+      typeof (parsed as { intent?: unknown }).intent === 'string'
+    ) {
+      return parsed as VerificationRequestInput;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
