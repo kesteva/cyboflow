@@ -140,6 +140,41 @@ is **rejected** — which is why an unsigned CI artifact must never be published
 
 ---
 
+## The dev feed is continuous
+
+Since 2026-09-17 the `dev/` feed is **not** only written at release time.
+`.github/workflows/dev-release.yml` runs after every green **Code Quality** run
+on `main` (`workflow_run`, so a red gate never ships), builds the three Dev
+installers on hosted runners — `macos.yml` (arm64 on `macos-latest`, x64 on
+`macos-15-intel`, signed + notarized from the `CSC_*`/`APPLE_*` secrets) and
+`windows-installer.yml` (Azure-signed) — merges the per-arch `latest-mac.yml`
+with `gen-mac-latest-yml.mjs`, and publishes to `dev/` with the same
+`publish:r2` + `PUBLISH_ONLY` recipe as a release. The `-latest-` aliases move
+with it, so `dl.cyboflow.com/dev/…` always serves the newest green main.
+
+- **Version:** `<package.json patch+1>-dev.<run_number>` — `main` keeps holding
+  the last *released* version, so `0.4.2 < 0.4.3-dev.7 < 0.4.3-dev.8 < 0.4.3`.
+  The stamp rides `CYBOFLOW_BUILD_VERSION` → electron-builder `extraMetadata`
+  (`configure-build.js`) and `buildInfo.json` (`inject-build-info.js`);
+  `package.json` is never edited, so `buildInfo.gitCommit` is the real SHA.
+  `isNewerVersion` in `appUpdater.ts` orders prerelease ids per semver, so the
+  Dev app moves forward through dev builds and never offers its own version or
+  a rolled-back feed.
+- **Concurrency:** one dev release at a time, never cancelled mid-run (a
+  cancelled publish would leave a manifest naming files that were never
+  uploaded). A burst of pushes yields one release from the newest green SHA,
+  because `quality.yml` cancels its own superseded runs.
+- **Secrets it needs beyond the build ones:** `R2_ACCOUNT_ID`,
+  `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` (the publish trio — not the
+  read-only `R2_ANALYTICS_*` pair). Build-time telemetry keys `SENTRY_DSN` and
+  `APTABASE_APP_KEY` are baked by `inject-build-info.js`; without them a build
+  ships with both SDKs silently no-op'd.
+- **Manual:** `gh workflow run dev-release.yml -f ref=<sha-on-main>` publishes
+  any main commit to the dev feed (a ref off main is refused).
+- **Releases still publish `dev/`** as the runbook describes — the release build
+  (`0.4.3`) lands on the dev feed too, and the next main push moves it on to
+  `0.4.4-dev.N`. Nothing about the `stable/` feed changed.
+
 ## How the app consumes it
 
 - `main/src/services/appUpdater.ts` wraps `electron-updater`. It is a **no-op in

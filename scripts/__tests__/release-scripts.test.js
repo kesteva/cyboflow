@@ -338,6 +338,29 @@ test('inject-build-info stamps environment from CYBOFLOW_BUILD_ENV, else the var
   }
 });
 
+// The dev-release stamp: CYBOFLOW_BUILD_VERSION replaces the package.json
+// version in buildInfo.json (configure-build.js hands the same value to
+// electron-builder's extraMetadata) — and, like every other input, never
+// touches package.json itself.
+test('inject-build-info honours CYBOFLOW_BUILD_VERSION without touching package.json', () => {
+  const pkgPath = path.join(REPO_ROOT, 'package.json');
+  const pkgBefore = fs.readFileSync(pkgPath);
+  const biPath = path.join(REPO_ROOT, 'main', 'dist', 'buildInfo.json');
+  const biExisted = fs.existsSync(biPath);
+  const biBackup = biExisted ? fs.readFileSync(biPath) : null;
+
+  try {
+    const inject = run('scripts/inject-build-info.js', [], { CYBOFLOW_BUILD_VERSION: '0.4.3-dev.12' });
+    assert.equal(inject.status, 0, `inject-build-info failed: ${inject.stderr}`);
+    const buildInfo = JSON.parse(fs.readFileSync(biPath, 'utf-8'));
+    assert.equal(buildInfo.version, '0.4.3-dev.12');
+    assert.ok(pkgBefore.equals(fs.readFileSync(pkgPath)), 'inject-build-info mutated package.json');
+  } finally {
+    if (biBackup) fs.writeFileSync(biPath, biBackup);
+    else fs.rmSync(biPath, { force: true });
+  }
+});
+
 function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 }

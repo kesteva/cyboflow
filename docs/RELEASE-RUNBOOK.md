@@ -20,9 +20,15 @@ mirror the app never reads.**
 - Clean `main`, all release-worthy commits merged.
 - Signing **and** R2 credentials live in **`~/Developer/cyboflow/.envrc.local`**
   (gitignored, and present only in the primary repo checkout — a worktree has
-  no copy of its own) — 8 vars total: Apple (`APPLE_ID`, `APPLE_TEAM_ID`,
+  no copy of its own) — 10 vars total: Apple (`APPLE_ID`, `APPLE_TEAM_ID`,
   `APPLE_APP_SPECIFIC_PASSWORD`, `CSC_LINK`, `CSC_KEY_PASSWORD`) + R2
-  (`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`). R2 is the
+  (`R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) + build-time
+  telemetry (`SENTRY_DSN`, `APTABASE_APP_KEY` — baked into `buildInfo.json`; a
+  build without them ships with telemetry silently off). The same 10 exist as
+  GitHub Actions secrets for the hosted builds (`macos.yml`,
+  `windows-installer.yml`, `dev-release.yml` — see `docs/UPDATES.md` → "The dev
+  feed is continuous"); `CSC_LINK` there is the **base64** of the `.p12`, not
+  the local file path. R2 is the
   **in-app auto-update channel** — see `docs/UPDATES.md`. **Env vars are
   shell-scoped, not worktree-scoped**: once sourced, the same shell can build
   from the primary checkout or any worktree — see `docs/UPDATES.md`

@@ -33,7 +33,10 @@ try {
 
 // Check if this is a canary build
 const isCanaryBuild = process.env.CANARY_BUILD === 'true';
-let version = packageJson.version;
+// CYBOFLOW_BUILD_VERSION is the dev-release stamp (`<next-patch>-dev.<run>`);
+// configure-build.js feeds the same value to electron-builder's extraMetadata,
+// so buildInfo.version and app.getVersion() agree without touching package.json.
+let version = process.env.CYBOFLOW_BUILD_VERSION || packageJson.version;
 
 if (isCanaryBuild) {
   // For canary builds, append -canary.{git-hash}

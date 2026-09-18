@@ -70,6 +70,7 @@ function runCase(label, envOverrides, assertFn, preConfigure) {
     'CYBOFLOW_AZURE_ENDPOINT',
     'CYBOFLOW_AZURE_ACCOUNT',
     'CYBOFLOW_AZURE_PROFILE',
+    'CYBOFLOW_BUILD_VERSION',
   ];
 
   for (const key of managedKeys) {
@@ -612,6 +613,53 @@ try {
   console.log('\nPASS: Case G3 (partial Azure credentials hard-fail)');
 } catch (err) {
   console.error('FAIL: Case G3 — ' + err.message);
+  failed = true;
+}
+
+try {
+  // Case H: CYBOFLOW_BUILD_VERSION rides extraMetadata (the dev-release
+  // stamp), never package.json — runCase already proves package.json is
+  // byte-identical afterwards.
+  runCase(
+    'Case H: CYBOFLOW_BUILD_VERSION → extraMetadata.version',
+    { CYBOFLOW_BUILD_VERSION: '0.4.3-dev.12' },
+    function (config) {
+      assert(
+        config.extraMetadata && config.extraMetadata.version === '0.4.3-dev.12',
+        'extraMetadata.version must carry the override'
+      );
+    }
+  );
+  runCase('Case H2: no CYBOFLOW_BUILD_VERSION → no extraMetadata.version', {}, function (config) {
+    assert(
+      !config.extraMetadata || !('version' in config.extraMetadata),
+      'extraMetadata.version must be absent without the override'
+    );
+  });
+  console.log('PASS: Case H');
+} catch (err) {
+  console.error('FAIL: Case H — ' + err.message);
+  failed = true;
+}
+
+try {
+  // Case H3: a non-semver override hard-fails rather than producing an
+  // installer whose manifest the updater rejects.
+  const packageJsonBefore = fs.readFileSync(PACKAGE_JSON, 'utf8');
+  const result = require('child_process').spawnSync(
+    process.execPath,
+    [path.join(__dirname, 'configure-build.js')],
+    {
+      env: Object.assign({}, process.env, { CYBOFLOW_BUILD_VERSION: 'not-a-version', CSC_DISABLE: 'true' }),
+      encoding: 'utf8',
+    }
+  );
+  assert(result.status === 1, 'a non-semver CYBOFLOW_BUILD_VERSION must exit with code 1');
+  assert(/not a semver version/.test(result.stderr), 'the error must name the bad version');
+  assert(fs.readFileSync(PACKAGE_JSON, 'utf8') === packageJsonBefore, 'package.json must not be mutated');
+  console.log('PASS: Case H3');
+} catch (err) {
+  console.error('FAIL: Case H3 — ' + err.message);
   failed = true;
 }
 
