@@ -1,17 +1,14 @@
 /**
- * DraggableProjectTreeView — collapsed-project running-agents badge (TASK-223).
+ * DraggableProjectTreeView — collapsed-project session-count badge (TASK-223).
  *
- * A collapsed project header shows a pulsing running-count badge whenever it
- * hides at least one running thing (flow run active-status rows, or a quick
- * session whose own status is 'running'), so a running agent is never fully
- * hidden just because its project got collapsed post-boot. The badge:
- *   - only renders while the project is COLLAPSED (expanded rows already carry
- *     the state themselves);
- *   - counts via the SAME active/blocked/terminal split the landing page's
- *     Working section uses (`classifyRun`, homeClassify.ts) — terminal runs
- *     never count;
- *   - a session already spoken for by its own non-terminal run is not
- *     double-counted off its raw session.status;
+ * A collapsed project header shows a badge with the number of open sessions
+ * in that project, so a collapsed project never hides that it has work in
+ * it. The badge:
+ *   - only renders while the project is COLLAPSED (expanded rows already
+ *     list the sessions themselves);
+ *   - counts every open (non-archived, non-main-repo) session regardless of
+ *     its status — running, idle, or waiting all count the same, since the
+ *     point is "there's something here", not "something is active";
  *   - clicking the badge expands the project (same action as the chevron).
  */
 import '@testing-library/jest-dom';
@@ -168,7 +165,10 @@ vi.mock('../../utils/performanceUtils', () => ({
 // Mock the activeRunsStore, same shape/semantics as
 // DraggableProjectTreeView.runs.test.tsx — `isTerminalRunStatus` mirrors the
 // real helper (terminal = completed/failed/canceled); everything else,
-// including 'awaiting_review'/'stuck'/'paused', is non-terminal.
+// including 'awaiting_review'/'stuck'/'paused', is non-terminal. Run rows no
+// longer feed the collapsed badge (that's session-count only now), but the
+// component still renders nested run rows while expanded, so the store stays
+// mocked.
 let mockRunsByProject: Record<number, unknown[]> = {};
 vi.mock('../../stores/activeRunsStore', () => {
   const state = () => ({
@@ -188,16 +188,6 @@ vi.mock('../../stores/activeRunsStore', () => {
 
 vi.mock('../../hooks/useRailExperiments', () => ({
   useRailExperiments: () => ({ byProject: mockRailByProject, refetch: vi.fn() }),
-}));
-
-// Dynamic workflows (the in-session Workflow tool) — the badge must count a
-// DETACHED workflow the same way Landing's Working section does, even though
-// its host session's own status reads idle/stopped while it runs.
-let mockActiveDynamicWorkflows: { sessionId: string; projectId: number }[] = [];
-const mockDynamicInit = vi.fn(() => () => {});
-vi.mock('../../stores/dynamicWorkflowStore', () => ({
-  useActiveDynamicWorkflows: () => mockActiveDynamicWorkflows,
-  useDynamicWorkflowStore: { getState: () => ({ byWfRunId: {}, init: mockDynamicInit }) },
 }));
 
 function makeElectronAPI(expandedProjects: number[] = []) {
@@ -242,8 +232,6 @@ beforeEach(() => {
   mockRunsByProject = {};
   mockRailByProject = {};
   mockSessions = [];
-  mockActiveDynamicWorkflows = [];
-  mockDynamicInit.mockClear();
 });
 
 function setExpanded(expandedProjects: number[]): void {
@@ -307,134 +295,27 @@ function makeRun(overrides: Record<string, unknown> = {}) {
   };
 }
 
-describe('DraggableProjectTreeView — collapsed running-agents badge (TASK-223)', () => {
-  it('shows the running badge on a collapsed project with an active flow run', async () => {
+describe('DraggableProjectTreeView — collapsed session-count badge (TASK-223)', () => {
+  it('shows the session count on a collapsed project with one open session', async () => {
     setCollapsed();
-    mockRunsByProject = { 1: [makeRun({ status: 'running' })] };
+    mockSessions = [makeSession({ status: 'ready' })];
 
     await act(async () => {
       render(<DraggableProjectTreeView />);
     });
     await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
 
-    const badge = await waitFor(() => screen.getByTitle('1 agent running — click to expand'));
+    const badge = await waitFor(() => screen.getByTitle('1 session — click to expand'));
     expect(badge).toBeInTheDocument();
     expect(badge.textContent).toContain('1');
   });
 
-  it('omits the badge once the project is expanded (rows carry the state instead)', async () => {
-    setExpanded([1]); // project 1 pre-expanded
-    mockRunsByProject = { 1: [makeRun({ status: 'running' })] };
-
-    await act(async () => {
-      render(<DraggableProjectTreeView />);
-    });
-    await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
-    // The nested run row itself is visible while expanded.
-    await waitFor(() => expect(screen.getByText(/planner/)).toBeInTheDocument());
-
-    expect(screen.queryByTitle(/agent(s)? running/)).not.toBeInTheDocument();
-  });
-
-  it('shows nothing on a collapsed idle project (count is 0)', async () => {
-    setCollapsed();
-    mockSessions = [makeSession({ name: 'idle-session', status: 'ready' })];
-
-    await act(async () => {
-      render(<DraggableProjectTreeView />);
-    });
-    await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
-
-    expect(screen.queryByTitle(/agent(s)? running/)).not.toBeInTheDocument();
-    expect(screen.queryByTitle(/awaiting you/)).not.toBeInTheDocument();
-  });
-
-  it('counts a mix of an active flow run + a running quick session, excluding a terminal run', async () => {
+  it('counts every open session regardless of status — running, idle, and waiting all count', async () => {
     setCollapsed();
     mockSessions = [
-      makeSession({ id: 'sess-quick', name: 'quick-running', status: 'running' }),
-      makeSession({ id: 'sess-host', name: 'host-session', status: 'ready' }),
-    ];
-    mockRunsByProject = {
-      1: [
-        // Active run hosted by sess-host — counted.
-        makeRun({ id: 'run-active', session_id: 'sess-host', status: 'running' }),
-        // Terminal run (own unrelated session) — excluded from the count.
-        makeRun({ id: 'run-done', session_id: null, status: 'completed' }),
-      ],
-    };
-
-    await act(async () => {
-      render(<DraggableProjectTreeView />);
-    });
-    await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
-
-    // 1 active run + 1 running quick session (sess-quick has no run of its own) = 2.
-    const badge = await waitFor(() => screen.getByTitle('2 agents running — click to expand'));
-    expect(badge).toBeInTheDocument();
-    expect(badge.textContent).toContain('2');
-  });
-
-  it('does not double-count a session already represented by its own non-terminal run', async () => {
-    setCollapsed();
-    mockSessions = [makeSession({ id: 'sess-host', name: 'host-session', status: 'running' })];
-    mockRunsByProject = {
-      1: [makeRun({ id: 'run-active', session_id: 'sess-host', status: 'running' })],
-    };
-
-    await act(async () => {
-      render(<DraggableProjectTreeView />);
-    });
-    await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
-
-    // Only the run counts once, not the run PLUS the session's own 'running' status.
-    const badge = await waitFor(() => screen.getByTitle('1 agent running — click to expand'));
-    expect(badge).toBeInTheDocument();
-  });
-
-  it('shows the amber blocked badge alongside the running badge when both are non-zero', async () => {
-    setCollapsed();
-    mockRunsByProject = {
-      1: [
-        makeRun({ id: 'run-active', status: 'running' }),
-        makeRun({ id: 'run-blocked', status: 'awaiting_review' }),
-      ],
-    };
-
-    await act(async () => {
-      render(<DraggableProjectTreeView />);
-    });
-    await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
-
-    expect(await waitFor(() => screen.getByTitle('1 agent running — click to expand'))).toBeInTheDocument();
-    expect(screen.getByTitle('1 awaiting you — click to expand')).toBeInTheDocument();
-  });
-
-  it('counts a detached dynamic workflow whose host session reads stopped (Landing Working-section parity)', async () => {
-    setCollapsed();
-    // The session parked its PTY turn (status 'stopped') while the Workflow tool
-    // runs detached — Landing lists it under Working via the dynamic row, so the
-    // collapsed badge must show 1 too, and the store feed must be joined.
-    mockSessions = [makeSession({ id: 'sess-dyn', name: 'dyn-host', status: 'stopped' })];
-    mockActiveDynamicWorkflows = [{ sessionId: 'sess-dyn', projectId: 1 }];
-
-    await act(async () => {
-      render(<DraggableProjectTreeView />);
-    });
-    await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
-
-    const badge = await waitFor(() => screen.getByTitle('1 agent running — click to expand'));
-    expect(badge).toBeInTheDocument();
-    expect(mockDynamicInit).toHaveBeenCalled();
-  });
-
-  it('a dynamic workflow in another project does not count here, and one in a session already hosting a flow run is not stacked', async () => {
-    setCollapsed();
-    mockSessions = [makeSession({ id: 'sess-host', name: 'host-session', status: 'running' })];
-    mockRunsByProject = { 1: [makeRun({ id: 'run-active', session_id: 'sess-host', status: 'running' })] };
-    mockActiveDynamicWorkflows = [
-      { sessionId: 'sess-host', projectId: 1 }, // spoken for by run-active
-      { sessionId: 'sess-elsewhere', projectId: 2 }, // another project
+      makeSession({ status: 'running' }),
+      makeSession({ status: 'ready' }),
+      makeSession({ status: 'waiting' }),
     ];
 
     await act(async () => {
@@ -442,11 +323,54 @@ describe('DraggableProjectTreeView — collapsed running-agents badge (TASK-223)
     });
     await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
 
-    expect(await waitFor(() => screen.getByTitle('1 agent running — click to expand'))).toBeInTheDocument();
+    const badge = await waitFor(() => screen.getByTitle('3 sessions — click to expand'));
+    expect(badge).toBeInTheDocument();
+    expect(badge.textContent).toContain('3');
   });
 
-  it('clicking the running badge expands the project', async () => {
+  it('omits the badge once the project is expanded (the session rows carry the list instead)', async () => {
+    setExpanded([1]); // project 1 pre-expanded
+    mockSessions = [makeSession({ name: 'expanded-session', status: 'running' })];
+
+    await act(async () => {
+      render(<DraggableProjectTreeView />);
+    });
+    await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('expanded-session')).toBeInTheDocument());
+
+    expect(screen.queryByTitle(/session(s)? — click to expand/)).not.toBeInTheDocument();
+  });
+
+  it('shows nothing on a collapsed project with no open sessions', async () => {
     setCollapsed();
+
+    await act(async () => {
+      render(<DraggableProjectTreeView />);
+    });
+    await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
+
+    expect(screen.queryByTitle(/session(s)? — click to expand/)).not.toBeInTheDocument();
+  });
+
+  it('excludes archived sessions from the count', async () => {
+    setCollapsed();
+    mockSessions = [
+      makeSession({ status: 'ready' }),
+      makeSession({ status: 'ready', archived: true }),
+    ];
+
+    await act(async () => {
+      render(<DraggableProjectTreeView />);
+    });
+    await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
+
+    const badge = await waitFor(() => screen.getByTitle('1 session — click to expand'));
+    expect(badge.textContent).toContain('1');
+  });
+
+  it('a run with no matching session does not affect the count (session-count only, not run-count)', async () => {
+    setCollapsed();
+    mockSessions = [makeSession({ status: 'ready' })];
     mockRunsByProject = { 1: [makeRun({ status: 'running' })] };
 
     await act(async () => {
@@ -454,11 +378,24 @@ describe('DraggableProjectTreeView — collapsed running-agents badge (TASK-223)
     });
     await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
 
-    const badge = await waitFor(() => screen.getByTitle('1 agent running — click to expand'));
+    const badge = await waitFor(() => screen.getByTitle('1 session — click to expand'));
+    expect(badge.textContent).toContain('1');
+  });
+
+  it('clicking the badge expands the project', async () => {
+    setCollapsed();
+    mockSessions = [makeSession({ name: 'clicked-session', status: 'ready' })];
+
+    await act(async () => {
+      render(<DraggableProjectTreeView />);
+    });
+    await waitFor(() => expect(screen.getByText('Alpha Project')).toBeInTheDocument());
+
+    const badge = await waitFor(() => screen.getByTitle('1 session — click to expand'));
     fireEvent.click(badge);
 
-    // Expanding surfaces the nested run row and drops the badge (no double display).
-    await waitFor(() => expect(screen.getByText(/planner/)).toBeInTheDocument());
-    expect(screen.queryByTitle(/agent(s)? running/)).not.toBeInTheDocument();
+    // Expanding surfaces the session row itself and drops the badge (no double display).
+    await waitFor(() => expect(screen.getByText('clicked-session')).toBeInTheDocument());
+    expect(screen.queryByTitle(/session(s)? — click to expand/)).not.toBeInTheDocument();
   });
 });

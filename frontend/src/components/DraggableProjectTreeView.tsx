@@ -4,8 +4,6 @@ import { useErrorStore } from '../stores/errorStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useCyboflowStore } from '../stores/cyboflowStore';
 import { isTerminalRunStatus, useActiveRunsStore, type ActiveRunRow } from '../stores/activeRunsStore';
-import { deriveCollapsedProjectActivity } from '../utils/collapsedProjectActivity';
-import { useActiveDynamicWorkflows, useDynamicWorkflowStore } from '../stores/dynamicWorkflowStore';
 import { useSessionStore } from '../stores/sessionStore';
 import { useOnboardingStore } from '../stores/onboardingStore';
 import { ONBOARDING_PROJECT_HOME_STEP } from '../utils/onboarding';
@@ -551,15 +549,6 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
   const activeRunId = useCyboflowStore((state) => state.activeRunId);
   const runsByProject = useActiveRunsStore((state) => state.runsByProject);
   const refreshActiveRuns = useActiveRunsStore((state) => state.refresh);
-  // Live dynamic workflows feed the collapsed-project running badge (TASK-223):
-  // a detached in-session Workflow-tool run shows under Landing's Working
-  // section, so the badge must see it too. The store's init is idempotent and
-  // its subscription is a shared singleton (see dynamicWorkflowStore) — joining
-  // it here just guarantees the feed is live even before the review home mounts.
-  const activeDynamicWorkflows = useActiveDynamicWorkflows();
-  useEffect(() => {
-    useDynamicWorkflowStore.getState().init();
-  }, []);
   // Guided step 9 ("Your project lives here") pairs its callouts with markers on
   // the guided project's row and its "Start new session" button below.
   const guidedProjectId = useOnboardingStore((s) => s.guidedProject?.id ?? null);
@@ -1761,19 +1750,13 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                 (r) => r.session_id == null || !sessionIdSet.has(r.session_id),
               );
               const parentlessRunCount = parentlessRuns.length;
-              // Collapsed-header badge counts (TASK-223) — a running-agents count so a
-              // running agent is never fully invisible once its project is collapsed,
-              // not just at boot. `deriveCollapsedProjectActivity` mirrors the landing
-              // page's Working-section derivation (classifyRun split, run > dynamic
-              // > session dedup, live dynamic workflows counted) so the badge and the
-              // review-home page agree on what "running" means for a project.
-              const { running: collapsedRunningCount, blocked: collapsedBlockedCount } =
-                deriveCollapsedProjectActivity({
-                  projectId: project.id,
-                  runs: visibleRunRows,
-                  sessions: projectSessions,
-                  activeDynamicWorkflows,
-                });
+              // Collapsed-header badge count (TASK-223) — the number of open
+              // sessions in the project, so a collapsed project never hides
+              // that it has work in it. Deliberately status-agnostic: it
+              // counts every open session regardless of whether it's actively
+              // running, since a collapsed project can hide idle-but-open
+              // work just as easily as running work.
+              const collapsedSessionCount = sessionCount;
               // A/B experiment group rows: collapse an experiment's two arm sessions
               // into ONE parent group (see railExperimentGrouping). Claimed arm
               // sessions drop out of the flat `flatSessions` list, but `sessionIdSet`
@@ -1876,39 +1859,19 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                       )}
                     </div>
 
-                    {/* Collapsed-header running/blocked badges (TASK-223) — only shown
-                        while collapsed; the rows themselves carry this state once
-                        expanded, so showing it twice would be noise. */}
-                    {!isExpanded && (collapsedRunningCount > 0 || collapsedBlockedCount > 0) && (
-                      <div className="flex items-center gap-1 flex-shrink-0">
-                        {collapsedRunningCount > 0 && (
-                          <button
-                            type="button"
-                            onClick={(e) => { e.stopPropagation(); e.preventDefault(); toggleProject(project.id, e); }}
-                            onMouseDown={(e) => e.stopPropagation()}
-                            className="rounded-badge flex items-center gap-1 border border-border-primary bg-bg-secondary px-1.5 py-px text-[10px] font-medium text-text-secondary hover:bg-surface-hover transition-colors"
-                            title={`${collapsedRunningCount} agent${collapsedRunningCount === 1 ? '' : 's'} running — click to expand`}
-                          >
-                            <span
-                              className="h-1.5 w-1.5 rounded-full bg-status-success animate-pulse"
-                              aria-hidden="true"
-                            />
-                            {collapsedRunningCount}
-                          </button>
-                        )}
-                        {collapsedBlockedCount > 0 && (
-                          <button
-                            type="button"
-                            onClick={(e) => { e.stopPropagation(); e.preventDefault(); toggleProject(project.id, e); }}
-                            onMouseDown={(e) => e.stopPropagation()}
-                            className="rounded-badge flex items-center gap-1 border border-border-primary bg-bg-secondary px-1.5 py-px text-[10px] font-medium text-status-warning hover:bg-surface-hover transition-colors"
-                            title={`${collapsedBlockedCount} awaiting you — click to expand`}
-                          >
-                            <span className="h-1.5 w-1.5 rounded-full bg-status-warning" aria-hidden="true" />
-                            {collapsedBlockedCount}
-                          </button>
-                        )}
-                      </div>
+                    {/* Collapsed-header session-count badge (TASK-223) — only shown
+                        while collapsed; the rows themselves carry the session list
+                        once expanded, so showing it twice would be noise. */}
+                    {!isExpanded && collapsedSessionCount > 0 && (
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); e.preventDefault(); toggleProject(project.id, e); }}
+                        onMouseDown={(e) => e.stopPropagation()}
+                        className="rounded-badge flex-shrink-0 border border-border-primary bg-bg-secondary px-1.5 py-px text-[10px] font-medium text-text-secondary hover:bg-surface-hover transition-colors"
+                        title={`${collapsedSessionCount} session${collapsedSessionCount === 1 ? '' : 's'} — click to expand`}
+                      >
+                        {collapsedSessionCount}
+                      </button>
                     )}
 
                     <button
