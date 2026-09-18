@@ -19,6 +19,7 @@ import type { ActiveRunRow } from '../../../stores/activeRunsStore';
 import type { ReviewItem } from '../../../../../shared/types/reviews';
 import type { BacklogTaskItem, Board } from '../../../../../shared/types/tasks';
 import type { AgentProviderAccess } from '../../../../../shared/types/agentRuntime';
+import { IDLE_REVIEW_SOURCE_PREFIX } from '../../../../../shared/types/reviews';
 
 // ---------------------------------------------------------------------------
 // Shared mutable mock state — reset in beforeEach
@@ -797,6 +798,47 @@ describe('LandingHome — page states', () => {
 
     expect(mockSetActiveQuickSession).toHaveBeenCalledWith('swift-bison-20260917', 'wf-6-__quick__');
     expect(mockSetActiveRun).not.toHaveBeenCalled();
+  });
+
+  it('TASK-226: an idle-session decision review item routes Answer -> to the live flow run, not the dead quick chat', async () => {
+    // openReviewItem is a SEPARATE call site from the triage-row Open-> buttons
+    // above (it resolves an `idle-session:<id>` review-item source instead of a
+    // QuickSessionRow), but it must funnel through the same
+    // resolveOpenTarget/openSessionRow precedence — otherwise a review item
+    // filed against a session whose quick chat has since gone dead would still
+    // reopen that dead chat instead of the live flow run sitting beside it.
+    const user = userEvent.setup();
+    mockProviderAccess = CONNECTED_ACCESS;
+    mockProjectsCount = 1;
+    mockProjects = [makeProject({ id: 1 })];
+    mockReviewItems = [
+      makeReviewItem({
+        id: 'rvw-idle',
+        kind: 'decision',
+        title: 'Pick a direction',
+        blocking: true,
+        run_id: 'wf-6-__quick__',
+        project_id: 1,
+        source: `${IDLE_REVIEW_SOURCE_PREFIX}swift-bison-20260917`,
+      }),
+    ];
+    mockRuns = [
+      makeRun({
+        id: 'wf-global-planner',
+        status: 'running',
+        workflowName: 'planner',
+        session_id: 'swift-bison-20260917',
+      }),
+    ];
+
+    render(<LandingHome />);
+    await act(async () => {});
+
+    const needsInput = screen.getByTestId('rq-needs-input-section');
+    await user.click(within(needsInput).getByText('Answer →'));
+
+    expect(mockSetActiveRun).toHaveBeenCalledWith('wf-global-planner');
+    expect(mockSetActiveQuickSession).not.toHaveBeenCalled();
   });
 
   it('TASK-226: dedupe invariant — no session id appears in more than one of Needs-input / Working / Ready-for-review', async () => {
