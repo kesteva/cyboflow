@@ -1674,7 +1674,16 @@ describe('mobile modality guard', () => {
   });
 });
 
-describe('attest bundle', () => {
+/*
+ * iOS Simulator only, so these model a DARWIN host: the fixtures are POSIX
+ * absolute paths (`/Users/tester/...`, `/sim/data/Containers/...`) and the code
+ * under test joins them with `node:path`. On a win32 runner that join yields
+ * `\Users\tester\...`, which can never match the fixture — the suite would be
+ * measuring the runner's path separator, not the behaviour. The production
+ * paths are already darwin-gated (`if (this.platform !== 'darwin') return
+ * null`), so there is nothing here for Windows to cover.
+ */
+describe.skipIf(process.platform === 'win32')('attest bundle', () => {
   beforeEach(() => {
     fakeFiles.clear();
   });
