@@ -1,0 +1,35 @@
+#!/bin/sh
+# Fake `plutil` for mobileVerification.itest.ts (T14).
+#
+# mobileCommands.readInfoPlist shells `plutil -convert json -o - <plist>` because
+# a real `.app`'s Info.plist is a BINARY plist. Shimming it (rather than leaning
+# on the host's own plutil) keeps the suite identical on macOS and on a Linux CI
+# box, where there is no plutil at all.
+#
+# Only the two keys the install path reads are emitted; anything else in the
+# plist is ignored on purpose, so a future key that mobileInstall starts needing
+# fails here loudly instead of silently reading as undefined.
+set -u
+
+die() {
+  printf '%s\n' "$1" >&2
+  exit "${2:-2}"
+}
+
+[ "${1:-}" = "-convert" ] || die "fake plutil: expected -convert, got \"${1:-}\"" 64
+[ "${2:-}" = "json" ] || die "fake plutil: only -convert json is supported, got \"${2:-}\"" 64
+[ "${3:-}" = "-o" ] || die "fake plutil: expected -o, got \"${3:-}\"" 64
+[ "${4:-}" = "-" ] || die "fake plutil: only -o - is supported, got \"${4:-}\"" 64
+plist="${5:-}"
+[ -n "$plist" ] || die "fake plutil: no plist path" 64
+[ -f "$plist" ] || die "fake plutil: $plist: No such file or directory" 1
+
+awk '
+  /<key>/  { line = $0; sub(/^[^<]*<key>/, "", line); sub(/<\/key>.*$/, "", line); key = line; next }
+  /<string>/ {
+    line = $0; sub(/^[^<]*<string>/, "", line); sub(/<\/string>.*$/, "", line)
+    if (key == "CFBundleIdentifier") id = line
+    if (key == "CFBundleExecutable") exe = line
+  }
+  END { printf "{\"CFBundleIdentifier\":\"%s\",\"CFBundleExecutable\":\"%s\"}\n", id, exe }
+' "$plist"

@@ -1,0 +1,72 @@
+#!/bin/sh
+# Fake `maestro` for mobileVerification.itest.ts (T14).
+#
+#   maestro --version        -> XcodeToolchainBackend.describeMaestro
+#   maestro test --help      -> parseMaestroPinFlag / resolveMaestroPinFlag both
+#                               read the TEXT (not the exit code) for --udid
+#   maestro test --udid <udid> <flow.yaml>
+#                            -> the ONE drive shape mobileCommands builds.
+#                               An INVOCATION WITHOUT A PIN FLAG IS REFUSED, so
+#                               the "never drive an unpinned device" invariant
+#                               fails loudly here rather than passing silently.
+#
+# Every accepted drive is appended to $FAKE_APPLE_STATE/maestro-invocations, one
+# line per run, so the test can assert what was driven and against which udid.
+set -u
+
+: "${FAKE_APPLE_STATE:?fake maestro: FAKE_APPLE_STATE is not set}"
+STATE="$FAKE_APPLE_STATE"
+
+die() {
+  printf '%s\n' "$1" >&2
+  exit "${2:-2}"
+}
+
+case "${1:-}" in
+  --version)
+    printf '1.39.9\n'
+    exit 0
+    ;;
+  test) ;;
+  *) die "fake maestro: unsupported command \"${1:-}\"" 64 ;;
+esac
+shift
+
+if [ "${1:-}" = "--help" ]; then
+  cat <<'HELP'
+Usage: maestro test [-c] [--continuous] [--debug-output=<debugOutput>]
+                    [--device=<deviceId>] [--udid=<deviceId>]
+                    [--format=<format>] <flowFile>
+
+  --device=<deviceId>   (deprecated) device name to run on
+  --udid=<deviceId>     device UDID to run on
+HELP
+  exit 0
+fi
+
+pin=""
+udid=""
+flow=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --udid|--device)
+      pin="$1"
+      udid="${2:-}"
+      shift 2
+      ;;
+    -*) shift ;;
+    *)
+      flow="$1"
+      shift
+      ;;
+  esac
+done
+
+[ -n "$pin" ] || die "fake maestro: refusing an UNPINNED \`maestro test\` — no --udid/--device in argv" 2
+[ -n "$udid" ] || die "fake maestro: $pin was given no value" 2
+[ -n "$flow" ] || die "fake maestro: no flow file in argv" 2
+[ -f "$flow" ] || die "fake maestro: flow file not found: $flow" 2
+[ -d "$STATE/devices/$udid" ] || die "fake maestro: no such device: $udid" 2
+
+printf '%s %s %s\n' "$pin" "$udid" "$flow" >> "$STATE/maestro-invocations"
+printf '[Passed] flow (%s)\n' "$flow"
