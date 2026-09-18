@@ -1583,19 +1583,43 @@ throwaway `CYBOFLOW_DIR`, on Xcode 26.2:
    them against `mobileDeadlineFloorMs`'s 15-minute default. Recording only — no
    source constant moves in this task.
 
-*Status 2026-09-17 (build day):* T0–T15 landed one commit per task and the
-settled-tree gate is green. **T16 is blocked on the host, not the code.** The
-reference machine now carries Xcode 27.0 (27A266a) but its CoreSimulator
-framework is still 1051.17.7; Xcode 27's `simctl` is a wrapper script that,
-on that mismatch, runs `xcodebuild -runFirstLaunch` (admin-privileged) before
-answering and blocks there from any non-interactive process. Live probe result
-on that host: `mobile-simulator` row `inconclusive` after the 15 s exec
-timeout (~18 s wall), gate 1 closed, nothing leased — the fail-closed design
-held, and the probe detail now names the fix (`sudo xcodebuild
--runFirstLaunch`). T16 items 1–8, including the cold `xcodebuild` and
-create+boot timings, remain to be recorded once first-launch has been run.
-The fake-toolchain itest (T14) grew a fourth shim, `plutil`, because
-`mobile-install` reads `Info.plist` through `plutil -convert json`.
+*Status 2026-09-18:* T0–T15 landed one commit per task; gate green. On the
+build day the reference host had just moved to Xcode 27.0 (27A266a) with
+CoreSimulator still at 1051.17.7; Xcode 27's `simctl` is a wrapper script that
+on that mismatch runs `xcodebuild -runFirstLaunch` (admin-privileged) before
+answering and blocks there from any non-interactive process. The probe failed
+closed exactly as designed (`inconclusive` after the 15 s exec timeout, gate 1
+shut, nothing leased) and its detail now names the fix. The fake-toolchain
+itest (T14) grew a fourth shim, `plutil`, because `mobile-install` reads
+`Info.plist` through `plutil -convert json`.
+
+**T16 measures, once first-launch had run** (Xcode 27.0, iOS 26.2 runtime,
+iPhone 17, Maestro 2.3.0; Distractodo, a 4-target SwiftUI app with three
+app extensions, SPM package already resolved; harness pieces driven directly
+outside Electron — items 1, 2-partial, 4, 5-partial, 7 and 8 covered; the
+sprint-lane row (3) and the hidden-runtime `markUnsupported` ledger case (6)
+are the itest's arms (c) and the scheduler unit suites, not yet live):
+
+| Step | Wall time |
+|---|---|
+| `simctl create` + boot to `bootstatus` | 45.8 s |
+| cold `xcodebuild … -sdk iphonesimulator` (Debug, signing off) | 38.2 s |
+| `mobile-install` (glob, plist, install, two hashes) | 6.4 s |
+| `mobile-launch` to the first stable non-uniform frame | 8.0 s (ready at 6.0 s) |
+| `mobile-screenshot` | 0.5 s |
+| `mobile-press home` (Maestro, JVM cold) | 20.3 s |
+| `mobile-tap` on a missing element (Maestro's own wait) | 30.0 s, exit 2 |
+| `bundle-identity` probe | 0.4 s |
+| `dispose` (shutdown, delete, request dir) | 3.7 s |
+
+The negative attestation case (a same-bundle-id app with one byte appended to
+its executable installed behind the driver's back) came back `verified:false`
+with "NOT the product staged for this request". Teardown left zero
+`cyboflow-verify-*` devices and no request dir. ~2.5 min end to end for a
+small app puts `mobileDeadlineFloorMs`'s 15-minute default at roughly 6× the
+observed cost; a project that resolves SPM dependencies cold or carries a
+large Swift module graph is the case the floor exists for. No default moves
+on this evidence.
 
 No `cyboflow_*` MCP tool is called at any point in T0–T16 — per CLAUDE.md's
 two-layers rule, those write to the user's real backlog.
