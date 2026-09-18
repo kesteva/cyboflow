@@ -1861,7 +1861,7 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                           type="button"
                           onClick={(e) => { e.stopPropagation(); e.preventDefault(); toggleProject(project.id, e); }}
                           onMouseDown={(e) => e.stopPropagation()}
-                          className="rounded-badge flex-shrink-0 border border-interactive/30 bg-interactive/10 px-1.5 py-px text-[10px] font-medium text-interactive hover:bg-interactive/20 transition-colors"
+                          className="min-w-[20px] flex-shrink-0 rounded-[9px] bg-interactive px-1.5 py-px text-center text-[10px] font-bold text-text-on-interactive transition-colors hover:opacity-90"
                           title={`${collapsedSessionCount} session${collapsedSessionCount === 1 ? '' : 's'} — click to expand`}
                         >
                           {collapsedSessionCount}
