@@ -20,6 +20,7 @@ import {
   XcodeToolchainBackend,
   parseMaestroPinFlag,
   parseXcodeVersion,
+  SIMCTL_FIRST_LAUNCH_HINT,
   type AppleCliExecResult,
 } from '../xcodeToolchainBackend';
 
@@ -287,6 +288,18 @@ describe('XcodeToolchainBackend.probeDetail — inconclusive, never absent', () 
     const probe = await backend.probeDetail();
     expect(probe.status).toBe('inconclusive');
     expect(probe.xcodeVersion).toBe('26.2');
+  });
+
+  it('names the pending first-launch install when simctl times out — the cause seen after an Xcode upgrade', async () => {
+    const { backend } = makeBackend((command) => {
+      if (command === 'xcodebuild') return ok('Xcode 27.0\n');
+      if (command === 'xcrun') return new Error('timed out after 15000ms');
+      return fail(1, '');
+    });
+    const probe = await backend.probeDetail();
+    expect(probe.status).toBe('inconclusive');
+    expect(probe.detail).toContain(SIMCTL_FIRST_LAUNCH_HINT);
+    expect(probe.detail).toContain('xcodebuild -runFirstLaunch');
   });
 
   it('is inconclusive when simctl exits non-zero — a refusal to answer is not a "no"', async () => {

@@ -102,6 +102,10 @@ export interface XcodeToolchainBackendDeps {
   commandTimeoutMs?: number;
 }
 
+/** Appended when `simctl` cannot answer: the usual cause is a pending Xcode first-launch install. */
+export const SIMCTL_FIRST_LAUNCH_HINT =
+  ' (a simctl that never answers usually means Xcode has not finished its first-launch component install — run `sudo xcodebuild -runFirstLaunch` once, or open Xcode and accept the components prompt)';
+
 function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -298,8 +302,14 @@ export class XcodeToolchainBackend {
     try {
       listed = await this.run('xcrun', ['simctl', 'list', '-j']);
     } catch (err) {
+      // Observed 2026-09-17 on the reference host right after an Xcode major
+      // upgrade: `simctl` is a wrapper script that, when CoreSimulator is older
+      // than the Xcode it ships with, runs `xcodebuild -runFirstLaunch` (an
+      // admin-privileged component install) BEFORE answering — and blocks there
+      // indefinitely from a non-interactive process. It surfaces here as a
+      // timeout, so the one actionable cause is named rather than guessed.
       return this.inconclusive(
-        `\`xcrun simctl list -j\` could not run: ${errorText(err)}`,
+        `\`xcrun simctl list -j\` could not run: ${errorText(err)}${SIMCTL_FIRST_LAUNCH_HINT}`,
         maestro,
         xcodeVersion,
       );
