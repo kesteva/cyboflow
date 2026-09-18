@@ -1750,6 +1750,13 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                 (r) => r.session_id == null || !sessionIdSet.has(r.session_id),
               );
               const parentlessRunCount = parentlessRuns.length;
+              // Collapsed-header badge count (TASK-223) — the number of open
+              // sessions in the project, so a collapsed project never hides
+              // that it has work in it. Deliberately status-agnostic: it
+              // counts every open session regardless of whether it's actively
+              // running, since a collapsed project can hide idle-but-open
+              // work just as easily as running work.
+              const collapsedSessionCount = sessionCount;
               // A/B experiment group rows: collapse an experiment's two arm sessions
               // into ONE parent group (see railExperimentGrouping). Claimed arm
               // sessions drop out of the flat `flatSessions` list, but `sessionIdSet`
@@ -1843,6 +1850,23 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                       <span className="text-sm font-semibold text-text-primary truncate text-left" title={project.name}>
                         {project.name}
                       </span>
+                      {/* Collapsed-header session-count badge (TASK-223) — sits right
+                          next to the name so it reads as part of the project's
+                          identity, not a status pill drifting toward the row's
+                          controls. Only shown while collapsed; the rows themselves
+                          carry the session list once expanded, so showing it twice
+                          would be noise. */}
+                      {!isExpanded && collapsedSessionCount > 0 && (
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); e.preventDefault(); toggleProject(project.id, e); }}
+                          onMouseDown={(e) => e.stopPropagation()}
+                          className="min-w-[20px] flex-shrink-0 rounded-[9px] bg-interactive px-1.5 py-px text-center text-[10px] font-bold text-text-on-interactive transition-colors hover:opacity-90"
+                          title={`${collapsedSessionCount} session${collapsedSessionCount === 1 ? '' : 's'} — click to expand`}
+                        >
+                          {collapsedSessionCount}
+                        </button>
+                      )}
                       {isProjectHomeMarked && (
                         <GuidedMarker
                           step={ONBOARDING_PROJECT_HOME_STEP}
