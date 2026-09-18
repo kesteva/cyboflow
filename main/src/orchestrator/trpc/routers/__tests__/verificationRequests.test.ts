@@ -1012,6 +1012,7 @@ type ProbeOverrides = Partial<{
   ensureChromium: () => Promise<boolean>;
   requestAccessibility: (() => Promise<void>) | undefined;
   openScreenRecordingSettings: (() => Promise<void>) | undefined;
+  mobileSimulator: (() => Promise<VerifyProbeRow>) | undefined;
 }>;
 
 type ProbeStub = {
@@ -1022,6 +1023,7 @@ type ProbeStub = {
   ensureChromium: () => Promise<boolean>;
   requestAccessibility?: () => Promise<void>;
   openScreenRecordingSettings?: () => Promise<void>;
+  mobileSimulator?: () => Promise<VerifyProbeRow>;
 };
 
 /** Keys whose explicit `undefined` must leave the key ABSENT, not present-and-undefined. */
@@ -1029,6 +1031,7 @@ const OPTIONAL_PROBE_KEYS = [
   'nativeGrants',
   'requestAccessibility',
   'openScreenRecordingSettings',
+  'mobileSimulator',
 ] as const;
 
 function probeStub(overrides: ProbeOverrides = {}): ProbeStub {
@@ -1040,6 +1043,12 @@ function probeStub(overrides: ProbeOverrides = {}): ProbeStub {
     ensureChromium: async () => true,
     requestAccessibility: async () => {},
     openScreenRecordingSettings: async () => {},
+    mobileSimulator: async (): Promise<VerifyProbeRow> => ({
+      id: 'mobile-simulator',
+      state: 'ok',
+      detail: 'Xcode 26.2 · iOS 26.2 · maestro /opt/homebrew/bin/maestro',
+      fix: null,
+    }),
     ...overrides,
   };
   // An explicit `undefined` means "not wired on this host" — the router
@@ -1083,7 +1092,7 @@ describe('verificationRequests.hostProbes', () => {
     return { caller, db };
   }
 
-  it('reports exactly the three actionable rows on a healthy host', async () => {
+  it('reports exactly the four actionable rows on a healthy host', async () => {
     const { caller } = setup();
     const report = await caller.cyboflow.verificationRequests.hostProbes();
 
@@ -1091,6 +1100,7 @@ describe('verificationRequests.hostProbes', () => {
       'browser-driving',
       'screen-recording',
       'accessibility',
+      'mobile-simulator',
     ]);
     expect(report.probes.every((p) => p.state === 'ok')).toBe(true);
   });
@@ -1266,6 +1276,100 @@ describe('verificationRequests.hostProbes', () => {
 
     expect(row.state).toBe('inconclusive');
     expect(row.detail).toMatch(/probe exploded/);
+  });
+
+  // -------------------------------------------------------------------------
+  // The 'mobile-simulator' row (mobile-verification-tier.md §10, T15)
+  // -------------------------------------------------------------------------
+
+  it('reports the composed mobile row verbatim, detail bounded, on a capable host', async () => {
+    const { caller } = setup();
+    const row = probeRow(await caller.cyboflow.verificationRequests.hostProbes(), 'mobile-simulator');
+
+    expect(row.state).toBe('ok');
+    expect(row.detail).toMatch(/Xcode 26\.2/);
+    expect(row.detail).toMatch(/iOS 26\.2/);
+    expect(row.detail).toMatch(/maestro/);
+    // Nothing about the Xcode MCP: Stage 1 runs on Apple's own CLI tools, and
+    // the MCP grant is design-only (§11).
+    expect(row.detail.toLowerCase()).not.toMatch(/mcpbridge/);
+    expect(row.fix).toBeNull();
+  });
+
+  it('passes an AFFIRMATIVE absence through as missing, still with no fix', async () => {
+    const { caller } = setup({
+      probes: {
+        mobileSimulator: async () => ({
+          id: 'mobile-simulator' as const,
+          state: 'missing' as const,
+          detail: 'Xcode 26.2 · no available iOS runtime · maestro not found',
+          fix: null,
+        }),
+      },
+    });
+    const row = probeRow(await caller.cyboflow.verificationRequests.hostProbes(), 'mobile-simulator');
+
+    expect(row.state).toBe('missing');
+    // The app can install neither Xcode nor Maestro, so no state of this row
+    // has an action behind it.
+    expect(row.fix).toBeNull();
+  });
+
+  it('forces fix to null even when a composition offers one', async () => {
+    const { caller } = setup({
+      probes: {
+        mobileSimulator: async () => ({
+          id: 'mobile-simulator' as const,
+          state: 'missing' as const,
+          detail: 'no Xcode',
+          // A fix the panel would render as a button with nothing behind it.
+          fix: 'provision-chromium' as const,
+        }),
+      },
+    });
+
+    expect(
+      probeRow(await caller.cyboflow.verificationRequests.hostProbes(), 'mobile-simulator').fix,
+    ).toBeNull();
+  });
+
+  it('reports inconclusive — never missing — when no mobile composition is wired', async () => {
+    const { caller } = setup({ probes: { mobileSimulator: undefined } });
+    const report = await caller.cyboflow.verificationRequests.hostProbes();
+    const row = probeRow(report, 'mobile-simulator');
+
+    // The row is UNCONDITIONAL: an unwired probe still reports, honestly.
+    expect(report.probes.map((p) => p.id)).toContain('mobile-simulator');
+    expect(row.state).toBe('inconclusive');
+    expect(row.detail).toMatch(/no mobile toolchain probe wired/);
+    expect(row.fix).toBeNull();
+  });
+
+  it('honours the fail-open rule when the mobile probe violates its no-throw contract', async () => {
+    const { caller } = setup({
+      probes: { mobileSimulator: async () => { throw new Error('simctl exploded'); } },
+    });
+    const row = probeRow(await caller.cyboflow.verificationRequests.hostProbes(), 'mobile-simulator');
+
+    // A contract violation is not evidence that this host has no Xcode.
+    expect(row.state).toBe('inconclusive');
+    expect(row.detail).toMatch(/simctl exploded/);
+    expect(row.fix).toBeNull();
+  });
+
+  it('does not let a thrown mobile probe take down the other three rows', async () => {
+    const { caller } = setup({
+      probes: { mobileSimulator: async () => { throw new Error('boom'); } },
+    });
+    const report = await caller.cyboflow.verificationRequests.hostProbes();
+
+    expect(report.probes.map((p) => p.id)).toEqual([
+      'browser-driving',
+      'screen-recording',
+      'accessibility',
+      'mobile-simulator',
+    ]);
+    expect(probeRow(report, 'browser-driving').state).toBe('ok');
   });
 
   it('PRECONDITION_FAILEDs when probes are unwired instead of reporting a bare host', async () => {

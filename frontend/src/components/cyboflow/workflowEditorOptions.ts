@@ -29,6 +29,10 @@ export const MCP_OPTIONS = [
   'linear',
   'bash',
   'git',
+  // Legacy backend id, kept as a free-text suggestion only — the `mobile`
+  // verification modality drives Maestro through the harness driver CLI
+  // (`mobile-*` driver commands), never through an MCP grant. No mobile
+  // request is ever granted an MCP server.
   'maestro',
   'playwright',
 ] as const;

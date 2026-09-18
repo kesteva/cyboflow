@@ -184,9 +184,9 @@ export function FeatureControlsSettings({
           />
           <p className="text-xs text-text-tertiary mt-1 mb-3">
             When enabled, workflow runs can request a visual check of a UI deliverable: Cyboflow
-            captures a screenshot (offscreen render, headless browser, or the live app) and a
-            vision model judges it against the stated intent. Off by default; no captures run
-            while disabled.
+            captures a screenshot (offscreen render, headless browser, the iOS Simulator, or the
+            live app) and a vision model judges it against the stated intent. Off by default; no
+            captures run while disabled.
           </p>
           <Checkbox
             label="Let runs set up verification themselves"

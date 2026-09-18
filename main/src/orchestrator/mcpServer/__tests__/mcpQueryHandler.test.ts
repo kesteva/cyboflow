@@ -6317,6 +6317,74 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     expect(count.n).toBe(0);
   });
 
+  it('setup_proof for a mobile task (app block, no serve) resolves the pin lookup under the mobile modality, not web', async () => {
+    seedVerifyRun(vdb, 'run-vproof-mobile', {
+      enabled: true,
+      type: 'mobile-flow',
+      chain: ['xcode-toolchain'],
+      workflowId: VERIFY_SETUP_WORKFLOW_ID,
+      worktreePath: gitRepo,
+    });
+    // Seeded under modality 'mobile' directly (not via seedRunbookDraft, whose
+    // default entry shape is `serve`-based and invalid on 'mobile' — a mobile
+    // entry is app-shaped, no serve, attested by bundle-identity). A 'web'
+    // draft sharing the same hash string would let a wrongly-web-scoped lookup
+    // pass for the wrong reason.
+    vdb
+      .prepare(
+        `INSERT INTO verify_runbook_local (project_id, modality, portable_hash, portable_json, version, status)
+         VALUES (1, 'mobile', ?, ?, 3, 'unproven-draft')`,
+      )
+      .run(
+        'hash-mobile',
+        JSON.stringify({
+          version: 1,
+          modalities: {
+            mobile: {
+              app: { platform: 'ios-simulator', bundleId: 'com.acme.ios', scheme: 'Acme' },
+              attestation: { kind: 'bundle-identity', bundleId: 'com.acme.ios' },
+            },
+          },
+        }),
+      );
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-proof-mobile',
+        runId: 'run-vproof-mobile',
+        intent: 'the app boots in the simulator',
+        task: {
+          version: 1,
+          summary: 'the app boots in the simulator',
+          behaviors: [{ id: 'b1', description: 'boots', expected: 'home screen visible' }],
+          app: { platform: 'ios-simulator', bundleId: 'com.acme.ios', scheme: 'Acme' },
+        },
+        setupProof: true,
+        runbookHash: 'hash-mobile',
+        runbookLocalVersion: 3,
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    const data = response.data as { requestId: string };
+    const row = vdb
+      .prepare('SELECT setup_proof, runbook_hash, runbook_local_version, modality FROM verification_requests WHERE id = ?')
+      .get(data.requestId) as {
+      setup_proof: number;
+      runbook_hash: string | null;
+      runbook_local_version: number | null;
+      modality: string | null;
+    };
+    expect(row.setup_proof).toBe(1);
+    expect(row.runbook_hash).toBe('hash-mobile');
+    expect(row.runbook_local_version).toBe(3);
+    expect(row.modality).toBe('mobile');
+  });
+
   it('an ordinary request stamps no pin and no setup-proof flag', async () => {
     seedVerifyRun(vdb, 'run-vplain', {
       enabled: true,
@@ -7270,14 +7338,30 @@ describe('McpQueryHandler — mcp-register-verify-runbook', () => {
 
     const { socket, writes } = makeSocketDouble();
     await makeHandler().handleMessage(
-      // 'mobile' is deferred (§4) — deliberately NOT registrable.
-      { type: 'mcp-register-verify-runbook', requestId: 'rb-6', runId: 'run-rb', modality: 'mobile' },
+      // 'android' is not one of VERIFY_RUNBOOK_MODALITIES at all.
+      { type: 'mcp-register-verify-runbook', requestId: 'rb-6', runId: 'run-rb', modality: 'android' },
       socket,
     );
 
     const response = parseLastWrite(writes);
     expect(response.ok).toBe(false);
     expect(response.error).toMatch(/^invalid_modality:/);
+    const count = rdb.prepare('SELECT COUNT(*) AS n FROM verify_runbook_local').get() as { n: number };
+    expect(count.n).toBe(0);
+  });
+
+  it('a mobile modality is a VALID enum value and reaches the file read (rejected only because this runbook declares no mobile entry)', async () => {
+    writeRunbook(JSON.stringify(VALID_RUNBOOK));
+
+    const { socket, writes } = makeSocketDouble();
+    await makeHandler().handleMessage(
+      { type: 'mcp-register-verify-runbook', requestId: 'rb-6b', runId: 'run-rb', modality: 'mobile' },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toContain('declares no "mobile" modality');
     const count = rdb.prepare('SELECT COUNT(*) AS n FROM verify_runbook_local').get() as { n: number };
     expect(count.n).toBe(0);
   });

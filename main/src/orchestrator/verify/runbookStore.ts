@@ -89,8 +89,133 @@ import {
   parseVerifyRunbookV1,
   type VerifyRunbookV1,
   type VerifyRunbookModality,
+  type VerifyRunbookModalityEntry,
 } from '../../../../shared/types/verifyRunbook';
 import { runbookPortableHash } from './runbookHash';
+
+// ---------------------------------------------------------------------------
+// §7.2 mobile command-isolation guard — registration-chokepoint half.
+// ---------------------------------------------------------------------------
+//
+// `dependencyCommandGuard.ts` covers the cross-modality "no dependency
+// mutation" rule for every composed task, runbook-sourced or agent-composed
+// alike. The mobile tier has a SECOND, mobile-specific isolation rule that
+// module cannot express: a `build[]` step must resolve its DerivedData
+// directory and its simulator target through the request-scoped LEVERS
+// (`$VERIFY_DERIVED_DATA` / `$VERIFY_SIM_UDID`, or the runbook's own declared
+// lever names), never a fixed path or a hardcoded device — because those two
+// values are what make one request's simulator run isolated from every
+// other's, the mobile equivalent of the web tier's per-request port lease.
+// A hardcoded UDID or an absolute DerivedData path silently defeats that
+// isolation the exact way an install spelled through indirection defeats
+// `dependencyCommandGuard`'s pattern, so this lives at the SAME registration
+// chokepoint (`registerDraft`) rather than in `runbookDraftValidation.ts`,
+// which the shape/cross-field parser already owns and which has exactly one
+// caller — command-level content is not its job.
+
+const XCODEBUILD_INVOCATION_PATTERN = /\bxcodebuild\b/i;
+const CODE_SIGNING_DISABLED_PATTERN = /\bCODE_SIGNING_ALLOWED=NO\b/;
+const LITERAL_UDID_PATTERN = /\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b/;
+const SIMCTL_LIFECYCLE_PATTERN = /\bxcrun\s+simctl\s+(?:install|launch|boot|create|delete|shutdown)\b/i;
+
+/** Fallback lever env-var names when the runbook does not declare its own — see `levers.derivedDataEnv`/`simUdidEnv`. */
+const DEFAULT_DERIVED_DATA_ENV = 'VERIFY_DERIVED_DATA';
+const DEFAULT_SIM_UDID_ENV = 'VERIFY_SIM_UDID';
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Whether `text` references one of `varNames` in any of the three accepted
+ * spellings — `$VAR`, `${VAR}`, or `"$VAR"`. The quoted form needs no special
+ * case: `"$VAR"` already CONTAINS the substring `$VAR`, so the same pattern
+ * matches all three without knowing which one was used.
+ */
+function referencesEnvVar(text: string, varNames: readonly string[]): boolean {
+  return varNames.some((name) => new RegExp(`\\$\\{?${escapeRegExp(name)}\\}?(?![A-Za-z0-9_])`).test(text));
+}
+
+/** The token immediately following `flag`, unwrapping a `"..."`/`'...'` quote when present. */
+function extractFlagValue(command: string, flag: string): string | null {
+  const match = command.match(new RegExp(`${escapeRegExp(flag)}\\s+(?:"([^"]*)"|'([^']*)'|(\\S+))`));
+  if (!match) return null;
+  return match[1] ?? match[2] ?? match[3] ?? null;
+}
+
+/** Whether `command` carries `-destination` with an `id=` referencing one of `varNames`. */
+function hasLeveredDestination(command: string, varNames: readonly string[]): boolean {
+  if (!/-destination\b/.test(command)) return false;
+  return varNames.some((name) => new RegExp(`id=\\$\\{?${escapeRegExp(name)}\\}?(?![A-Za-z0-9_])`).test(command));
+}
+
+/**
+ * §7.2 mobile isolation check over one `mobile` modality entry's `build[]`.
+ * Returns the first offending step's detail (naming the step index and the
+ * missing/forbidden token) or `null` when every step is clean.
+ *
+ * Two tiers of rule, per step:
+ *   - EVERY step (xcodebuild or not) is refused for a literal simulator/device
+ *     UDID, and for any `xcrun simctl install|launch|boot|create|delete|
+ *     shutdown` — device lifecycle and app install/launch are HARNESS-OWNED
+ *     (the driver's own `mobile-install` / `mobile-launch` commands), never a
+ *     build step's job.
+ *   - An `xcodebuild` step ADDITIONALLY must lever its DerivedData directory
+ *     (`-derivedDataPath`, relative, referencing the lever) and its simulator
+ *     target (`-destination id=<lever>`), and must disable code signing
+ *     (`CODE_SIGNING_ALLOWED=NO`) so a snapshot never touches the developer's
+ *     real signing identity. A non-xcodebuild pre-step (e.g. `swift build`
+ *     resolving a package ahead of the real build) is not held to these
+ *     three — it has no DerivedData/destination/signing concept of its own.
+ */
+function checkMobileBuildIsolation(
+  entry: VerifyRunbookModalityEntry,
+  levers: VerifyRunbookV1['levers'],
+): string | null {
+  const derivedDataVars = [levers?.derivedDataEnv, DEFAULT_DERIVED_DATA_ENV].filter(
+    (v): v is string => typeof v === 'string' && v.length > 0,
+  );
+  const simUdidVars = [levers?.simUdidEnv, DEFAULT_SIM_UDID_ENV].filter(
+    (v): v is string => typeof v === 'string' && v.length > 0,
+  );
+
+  const steps = entry.build ?? [];
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    const label = `modalities["mobile"].build[${i}]`;
+
+    const udidMatch = step.match(LITERAL_UDID_PATTERN);
+    if (udidMatch) {
+      return `${label}: contains a literal simulator/device UDID ("${udidMatch[0]}") — the UDID must come from the request-scoped simUdidEnv lever, never be hardcoded: ${step}`;
+    }
+    const simctlMatch = step.match(SIMCTL_LIFECYCLE_PATTERN);
+    if (simctlMatch) {
+      return `${label}: runs "${simctlMatch[0]}" — simulator install/launch (the harness's own mobile-install/mobile-launch) and device lifecycle are harness-owned, not a build step's job: ${step}`;
+    }
+
+    if (!XCODEBUILD_INVOCATION_PATTERN.test(step)) continue;
+
+    const derivedDataValue = extractFlagValue(step, '-derivedDataPath');
+    if (derivedDataValue === null) {
+      return `${label}: missing "-derivedDataPath" referencing the DerivedData lever ($${DEFAULT_DERIVED_DATA_ENV} or the runbook's levers.derivedDataEnv): ${step}`;
+    }
+    if (derivedDataValue.startsWith('/') || derivedDataValue.startsWith('~')) {
+      return `${label}: -derivedDataPath is an absolute path ("${derivedDataValue}") — it must reference the request-scoped DerivedData lever, not a fixed location: ${step}`;
+    }
+    if (!referencesEnvVar(derivedDataValue, derivedDataVars)) {
+      return `${label}: -derivedDataPath does not reference the DerivedData lever ($${DEFAULT_DERIVED_DATA_ENV} or the runbook's levers.derivedDataEnv): ${step}`;
+    }
+
+    if (!hasLeveredDestination(step, simUdidVars)) {
+      return `${label}: missing "-destination" with "id=$${DEFAULT_SIM_UDID_ENV}" (or the runbook's levers.simUdidEnv) — the simulator target must be the request-scoped lever, never a fixed device: ${step}`;
+    }
+
+    if (!CODE_SIGNING_DISABLED_PATTERN.test(step)) {
+      return `${label}: missing "CODE_SIGNING_ALLOWED=NO" — an xcodebuild build step must disable code signing so a snapshot never touches the developer's signing identity: ${step}`;
+    }
+  }
+  return null;
+}
 
 /**
  * The persisted state of one (project, modality) runbook record — the same
@@ -438,7 +563,7 @@ export class VerifyRunbookStore {
     worktreePath: string,
     modality: VerificationModality,
     bindingsJson?: string,
-  ): Promise<{ hash: string; version: number } | { error: string }> {
+  ): Promise<{ hash: string; version: number } | { error: string; kind?: 'unisolated-command' }> {
     try {
       const raw = await this.deps.readPortableFile(worktreePath);
       if (raw === null) {
@@ -454,10 +579,21 @@ export class VerifyRunbookStore {
       if (!parsed.ok) return { error: `portable runbook is invalid — ${parsed.error}` };
 
       // Registering a modality the runbook never declared would persist a
-      // record no execution path could ever satisfy (and, for 'mobile', one the
-      // portable contract cannot even express — §4 defers it).
+      // record no execution path could ever satisfy.
       if (!this.declaresModality(parsed.runbook, modality)) {
         return { error: `portable runbook declares no "${modality}" modality` };
+      }
+
+      // §7.2 mobile isolation, enforced HERE regardless of which modality was
+      // asked for: `parsed.runbook` — the WHOLE portable file, every declared
+      // modality — is what gets persisted as `portable_json` under every
+      // (project, modality) row this file registers, so a mobile entry riding
+      // along on a `web` registration must be checked exactly as if it were
+      // registered directly, or it would reach the runner unvetted.
+      const mobileEntry = parsed.runbook.modalities.mobile;
+      if (mobileEntry) {
+        const violation = checkMobileBuildIsolation(mobileEntry, parsed.runbook.levers);
+        if (violation) return { error: violation, kind: 'unisolated-command' };
       }
 
       const hash = runbookPortableHash(parsed.runbook);
@@ -827,8 +963,11 @@ export class VerifyRunbookStore {
   /**
    * Whether the parsed portable half declares an entry for this modality. The
    * cast is safe by construction: `parseVerifyRunbookV1` only ever populates
-   * keys from {@link VERIFY_RUNBOOK_MODALITIES}, so a `VerificationModality`
-   * outside that subset (`'mobile'`, §4-deferred) simply misses.
+   * keys from {@link VERIFY_RUNBOOK_MODALITIES}, which today equals the full
+   * {@link VerificationModality} union (`'mobile'` included, no longer
+   * deferred) — the cast exists so a FUTURE `VerificationModality` member
+   * added ahead of this file's declarable set would simply miss here rather
+   * than throw.
    */
   private declaresModality(runbook: VerifyRunbookV1, modality: VerificationModality): boolean {
     return runbook.modalities[modality as VerifyRunbookModality] !== undefined;

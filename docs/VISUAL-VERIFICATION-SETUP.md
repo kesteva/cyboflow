@@ -24,6 +24,11 @@ Peekaboo fallback — that guidance is engine-independent and remains fully
 current regardless of the section above. Exception: "Deliverable `htmlPath`
 capture" further down is LEGACY-ENGINE-ONLY, not the dogfooding path.
 
+(Separately, cyboflow the *product* now also ships a `mobile` modality —
+iOS Simulator, on `xcodebuild`/`xcrun simctl` — for verifying a project's own
+iOS app; that is the agent engine's concern, not this dogfooding CDP/Peekaboo
+path, and is documented in `docs/proposals/mobile-verification-tier.md`.)
+
 This project is an Electron app. The Vite renderer at `http://localhost:4521`
 depends on `preload`-injected `electronTRPC` and cannot bootstrap standalone,
 so a Playwright MCP that spawns its own Chromium would return an empty page

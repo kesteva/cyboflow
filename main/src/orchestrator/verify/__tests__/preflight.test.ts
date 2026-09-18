@@ -268,6 +268,117 @@ describe("runAgentPreflight — 'native-capture' applicability", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// 'mobile-toolchain' — the mobile modality's toolchain-gated check
+// ---------------------------------------------------------------------------
+
+describe("runAgentPreflight — 'mobile-toolchain' applicability", () => {
+  // A mobile request is leased NEITHER port, so both are null in real traffic.
+  const mobileArgs = {
+    driverCliPath: '/opt/cyboflow/driver-cli',
+    leasedPort: null,
+    driverPort: null,
+  };
+
+  it('runs ONLY for modality mobile, and only when a probe is wired', async () => {
+    const probe = async (): Promise<boolean> => true;
+    const task = makeTask({ target: { url: 'https://example.com' } });
+
+    const wired = await runAgentPreflight(happyDeps({ mobileToolchainProbe: probe }), {
+      task,
+      ...mobileArgs,
+      modality: 'mobile',
+    });
+    expect(checkFor(wired, 'mobile-toolchain')?.ok).toBe(true);
+    expect(wired.ok).toBe(true);
+
+    for (const modality of ['web', 'cdp-app', 'native-screen'] as const) {
+      const other = await runAgentPreflight(happyDeps({ mobileToolchainProbe: probe }), {
+        task,
+        ...ARGS,
+        modality,
+      });
+      expect(checkFor(other, 'mobile-toolchain')).toBeUndefined();
+    }
+  });
+
+  it('is omitted entirely when no modality is supplied', async () => {
+    const task = makeTask({ target: { url: 'https://example.com' } });
+    const result = await runAgentPreflight(happyDeps({ mobileToolchainProbe: async () => false }), {
+      task,
+      ...ARGS,
+    });
+    expect(checkFor(result, 'mobile-toolchain')).toBeUndefined();
+    expect(result.ok).toBe(true);
+  });
+
+  it('an ABSENT probe means the check does not run — never a failure', async () => {
+    const task = makeTask({ target: { url: 'https://example.com' } });
+    const result = await runAgentPreflight(happyDeps(), { task, ...mobileArgs, modality: 'mobile' });
+    expect(checkFor(result, 'mobile-toolchain')).toBeUndefined();
+    expect(result.ok).toBe(true);
+  });
+
+  it('an affirmative false FAILS the check, naming Xcode CLT / iOS runtime / device type', async () => {
+    const task = makeTask({ target: { url: 'https://example.com' } });
+    const result = await runAgentPreflight(happyDeps({ mobileToolchainProbe: async () => false }), {
+      task,
+      ...mobileArgs,
+      modality: 'mobile',
+    });
+    const check = checkFor(result, 'mobile-toolchain');
+    expect(check?.ok).toBe(false);
+    expect(check?.detail).toMatch(/Xcode Command Line Tools/);
+    expect(check?.detail).toMatch(/iOS Simulator runtime/);
+    expect(check?.detail).toMatch(/iPhone device type/);
+    expect(result.ok).toBe(false);
+  });
+
+  it('a THROWING probe is INCONCLUSIVE (ok:true) — the same fail-open rule as every other probe', async () => {
+    const task = makeTask({ target: { url: 'https://example.com' } });
+    const result = await runAgentPreflight(
+      happyDeps({
+        mobileToolchainProbe: async () => {
+          throw new Error('xcrun simctl wedged');
+        },
+      }),
+      { task, ...mobileArgs, modality: 'mobile' },
+    );
+    const check = checkFor(result, 'mobile-toolchain');
+    expect(check?.ok).toBe(true);
+    expect(check?.detail).toMatch(/inconclusive/i);
+    expect(result.ok).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mobile task shape: no serve, driverPort: null — chromium/port checks skip
+// ---------------------------------------------------------------------------
+
+describe('runAgentPreflight — mobile task shape (no serve, driverPort: null)', () => {
+  it('a mobile task has no chromium, no port-free, no driver-port-free rows', async () => {
+    const task = makeTask({ target: { url: 'https://example.com' } });
+    const result = await runAgentPreflight(happyDeps(), {
+      task,
+      driverCliPath: '/opt/cyboflow/driver-cli',
+      leasedPort: 29260,
+      driverPort: null,
+      modality: 'mobile',
+    });
+    expect(checkFor(result, 'chromium')).toBeUndefined();
+    expect(checkFor(result, 'port-free')).toBeUndefined();
+    expect(checkFor(result, 'driver-port-free')).toBeUndefined();
+    expect(result.checks.map((c) => c.id).sort()).toEqual(['driver-cli', 'node'].sort());
+    expect(result.ok).toBe(true);
+  });
+
+  it('a web task with a numeric driverPort still has driver-port-free', async () => {
+    const task = makeTask({ serve: { cmd: 'pnpm dev --port ${PORT}' } });
+    const result = await runAgentPreflight(happyDeps(), { task, ...ARGS });
+    expect(checkFor(result, 'driver-port-free')).toBeDefined();
+  });
+});
+
 describe("runAgentPreflight — 'data-dir' (conditional, affirmative on throw)", () => {
   const task = makeTask({ serve: { cmd: 'pnpm dev --port ${PORT}', attach: 'cdp' } });
 
@@ -305,5 +416,50 @@ describe("runAgentPreflight — 'data-dir' (conditional, affirmative on throw)",
       ok: false,
       detail: 'could not provision VERIFY_DATA_DIR at /artifacts/data/abcd1234: EROFS: read-only file system',
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A null leased port — the portless (mobile) request
+// ---------------------------------------------------------------------------
+
+describe('runAgentPreflight — a null leasedPort', () => {
+  const portless = { driverCliPath: '/opt/cyboflow/driver-cli', leasedPort: null, driverPort: null };
+
+  it('runs neither port check, and probes no port at all', async () => {
+    const probed: number[] = [];
+    const result = await runAgentPreflight(
+      happyDeps({
+        portFreeProbe: async (port: number) => {
+          probed.push(port);
+          return true;
+        },
+      }),
+      { task: makeTask({ target: { url: 'https://example.com' } }), ...portless, modality: 'mobile' },
+    );
+
+    expect(checkFor(result, 'port-free')).toBeUndefined();
+    expect(checkFor(result, 'driver-port-free')).toBeUndefined();
+    expect(probed).toEqual([]);
+    expect(result.ok).toBe(true);
+  });
+
+  // The 'port-free' check is gated on `task.serve` too, but a task that somehow
+  // declares one with no port leased must SKIP rather than probe an invented
+  // number — this module never dials a port it was not given.
+  it('skips the port check even for a task that declares a serve', async () => {
+    const probed: number[] = [];
+    const result = await runAgentPreflight(
+      happyDeps({
+        portFreeProbe: async (port: number) => {
+          probed.push(port);
+          return true;
+        },
+      }),
+      { task: makeTask({ serve: { cmd: 'pnpm dev' } }), ...portless },
+    );
+
+    expect(checkFor(result, 'port-free')).toBeUndefined();
+    expect(probed).toEqual([]);
   });
 });

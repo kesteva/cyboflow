@@ -812,13 +812,244 @@ describe('VerifyRunbookStore.registerDraft rejections', () => {
     h.db.close();
   });
 
-  it('refuses a modality the runbook never declared — including the §4-deferred mobile', async () => {
+  it('refuses a modality the runbook never declared — including mobile, when this fixture declares no mobile entry', async () => {
     const h = makeHarness();
     const notDeclared = await h.store.registerDraft(1, WORKTREE, 'native-screen');
     expect('error' in notDeclared && notDeclared.error).toContain('declares no "native-screen" modality');
 
     const mobile = await h.store.registerDraft(1, WORKTREE, 'mobile');
     expect('error' in mobile && mobile.error).toContain('declares no "mobile" modality');
+    h.db.close();
+  });
+});
+
+/**
+ * §7.2 mobile isolation, enforced at THIS chokepoint (`registerDraft`) rather
+ * than in `runbookDraftValidation.ts` — see the guard's own header. The shared
+ * parser (shared/types/verifyRunbook.ts) enforces SHAPE and cross-field
+ * invariants only (app required, serve forbidden, attestation.bundleId
+ * matches); it never inspects a `build[]` command's CONTENT, which is what
+ * this suite exercises.
+ */
+describe('VerifyRunbookStore.registerDraft — §7.2 mobile command isolation', () => {
+  /** A well-formed mobile entry's build[], parameterized so each test can break exactly one rule. */
+  function mobileRunbook(build: string[]): VerifyRunbookV1 {
+    return {
+      version: 1,
+      modalities: {
+        mobile: {
+          build,
+          app: { platform: 'ios-simulator', bundleId: 'com.example.app', scheme: 'MyApp' },
+          attestation: { kind: 'bundle-identity', bundleId: 'com.example.app' },
+        },
+      },
+    };
+  }
+
+  const CLEAN_STEP =
+    'xcodebuild build -scheme MyApp -destination "id=$VERIFY_SIM_UDID" ' +
+    '-derivedDataPath "$VERIFY_DERIVED_DATA" CODE_SIGNING_ALLOWED=NO';
+
+  it('registers a well-formed mobile entry successfully', async () => {
+    const h = makeHarness();
+    h.files.set(WORKTREE, JSON.stringify(mobileRunbook([CLEAN_STEP])));
+
+    const result = await h.store.registerDraft(1, WORKTREE, 'mobile');
+    expect('error' in result).toBe(false);
+    if ('error' in result) return;
+    expect(await h.store.status(1, WORKTREE, 'mobile')).toBe('unproven-draft');
+    h.db.close();
+  });
+
+  it.each([
+    ['bare $VAR', '-derivedDataPath $VERIFY_DERIVED_DATA -destination "id=$VERIFY_SIM_UDID"'],
+    ['braced ${VAR}', '-derivedDataPath ${VERIFY_DERIVED_DATA} -destination "id=${VERIFY_SIM_UDID}"'],
+    ['quoted "$VAR"', '-derivedDataPath "$VERIFY_DERIVED_DATA" -destination "id=$VERIFY_SIM_UDID"'],
+  ])('accepts the %s lever spelling', async (_label, flags) => {
+    const h = makeHarness();
+    const step = `xcodebuild build -scheme MyApp ${flags} CODE_SIGNING_ALLOWED=NO`;
+    h.files.set(WORKTREE, JSON.stringify(mobileRunbook([step])));
+
+    const result = await h.store.registerDraft(1, WORKTREE, 'mobile');
+    expect('error' in result).toBe(false);
+    h.db.close();
+  });
+
+  it('rejects a build step missing -derivedDataPath entirely', async () => {
+    const h = makeHarness();
+    const step = 'xcodebuild build -scheme MyApp -destination "id=$VERIFY_SIM_UDID" CODE_SIGNING_ALLOWED=NO';
+    h.files.set(WORKTREE, JSON.stringify(mobileRunbook([step])));
+
+    const result = await h.store.registerDraft(1, WORKTREE, 'mobile');
+    expect('error' in result).toBe(true);
+    if (!('error' in result)) return;
+    expect(result.kind).toBe('unisolated-command');
+    expect(result.error).toContain(
+      'modalities["mobile"].build[0]: missing "-derivedDataPath" referencing the DerivedData lever ($VERIFY_DERIVED_DATA or the runbook\'s levers.derivedDataEnv)',
+    );
+    expect(persistedStatus(h.db, 'mobile')).toBeUndefined();
+    h.db.close();
+  });
+
+  it('rejects an ABSOLUTE -derivedDataPath', async () => {
+    const h = makeHarness();
+    const step = 'xcodebuild build -scheme MyApp -destination "id=$VERIFY_SIM_UDID" -derivedDataPath /tmp/dd CODE_SIGNING_ALLOWED=NO';
+    h.files.set(WORKTREE, JSON.stringify(mobileRunbook([step])));
+
+    const result = await h.store.registerDraft(1, WORKTREE, 'mobile');
+    expect('error' in result).toBe(true);
+    if (!('error' in result)) return;
+    expect(result.kind).toBe('unisolated-command');
+    expect(result.error).toContain(
+      'modalities["mobile"].build[0]: -derivedDataPath is an absolute path ("/tmp/dd") — it must reference the request-scoped DerivedData lever, not a fixed location',
+    );
+    h.db.close();
+  });
+
+  it('rejects a home-relative (~) -derivedDataPath the same way', async () => {
+    const h = makeHarness();
+    const step = 'xcodebuild build -scheme MyApp -destination "id=$VERIFY_SIM_UDID" -derivedDataPath ~/dd CODE_SIGNING_ALLOWED=NO';
+    h.files.set(WORKTREE, JSON.stringify(mobileRunbook([step])));
+
+    const result = await h.store.registerDraft(1, WORKTREE, 'mobile');
+    expect('error' in result).toBe(true);
+    if (!('error' in result)) return;
+    expect(result.error).toContain('-derivedDataPath is an absolute path ("~/dd")');
+    h.db.close();
+  });
+
+  it('rejects a build step missing -destination with the sim-UDID lever', async () => {
+    const h = makeHarness();
+    const step = 'xcodebuild build -scheme MyApp -derivedDataPath "$VERIFY_DERIVED_DATA" CODE_SIGNING_ALLOWED=NO';
+    h.files.set(WORKTREE, JSON.stringify(mobileRunbook([step])));
+
+    const result = await h.store.registerDraft(1, WORKTREE, 'mobile');
+    expect('error' in result).toBe(true);
+    if (!('error' in result)) return;
+    expect(result.kind).toBe('unisolated-command');
+    expect(result.error).toContain(
+      'modalities["mobile"].build[0]: missing "-destination" with "id=$VERIFY_SIM_UDID" (or the runbook\'s levers.simUdidEnv) — the simulator target must be the request-scoped lever, never a fixed device',
+    );
+    h.db.close();
+  });
+
+  it('rejects a build step missing CODE_SIGNING_ALLOWED=NO', async () => {
+    const h = makeHarness();
+    const step = 'xcodebuild build -scheme MyApp -destination "id=$VERIFY_SIM_UDID" -derivedDataPath "$VERIFY_DERIVED_DATA"';
+    h.files.set(WORKTREE, JSON.stringify(mobileRunbook([step])));
+
+    const result = await h.store.registerDraft(1, WORKTREE, 'mobile');
+    expect('error' in result).toBe(true);
+    if (!('error' in result)) return;
+    expect(result.kind).toBe('unisolated-command');
+    expect(result.error).toContain(
+      'modalities["mobile"].build[0]: missing "CODE_SIGNING_ALLOWED=NO" — an xcodebuild build step must disable code signing',
+    );
+    h.db.close();
+  });
+
+  it('rejects a literal simulator/device UDID anywhere in a build step', async () => {
+    const h = makeHarness();
+    const step =
+      'xcodebuild build -scheme MyApp -destination "id=1F2E3D4C-5B6A-4321-9876-ABCDEF012345" ' +
+      '-derivedDataPath "$VERIFY_DERIVED_DATA" CODE_SIGNING_ALLOWED=NO';
+    h.files.set(WORKTREE, JSON.stringify(mobileRunbook([step])));
+
+    const result = await h.store.registerDraft(1, WORKTREE, 'mobile');
+    expect('error' in result).toBe(true);
+    if (!('error' in result)) return;
+    expect(result.kind).toBe('unisolated-command');
+    expect(result.error).toContain(
+      'modalities["mobile"].build[0]: contains a literal simulator/device UDID ("1F2E3D4C-5B6A-4321-9876-ABCDEF012345") — the UDID must come from the request-scoped simUdidEnv lever, never be hardcoded',
+    );
+    h.db.close();
+  });
+
+  it.each(['install', 'launch', 'boot', 'create', 'delete', 'shutdown'])(
+    'rejects "xcrun simctl %s" as a build step — device lifecycle is harness-owned',
+    async (verb) => {
+      const h = makeHarness();
+      const step = `xcrun simctl ${verb} $VERIFY_SIM_UDID com.example.app`;
+      h.files.set(WORKTREE, JSON.stringify(mobileRunbook([step])));
+
+      const result = await h.store.registerDraft(1, WORKTREE, 'mobile');
+      expect('error' in result).toBe(true);
+      if (!('error' in result)) return;
+      expect(result.kind).toBe('unisolated-command');
+      expect(result.error).toContain(
+        `modalities["mobile"].build[0]: runs "xcrun simctl ${verb}" — simulator install/launch (the harness's own mobile-install/mobile-launch) and device lifecycle are harness-owned, not a build step's job`,
+      );
+      h.db.close();
+    },
+  );
+
+  it('a non-xcodebuild pre-step is NOT held to the derivedDataPath/destination/signing rules', async () => {
+    const h = makeHarness();
+    h.files.set(WORKTREE, JSON.stringify(mobileRunbook(['swift build', CLEAN_STEP])));
+
+    const result = await h.store.registerDraft(1, WORKTREE, 'mobile');
+    expect('error' in result).toBe(false);
+    h.db.close();
+  });
+
+  it('a non-xcodebuild pre-step is STILL held to the literal-UDID rule', async () => {
+    const h = makeHarness();
+    const badPreStep = 'swift build --triple 1F2E3D4C-5B6A-4321-9876-ABCDEF012345';
+    h.files.set(WORKTREE, JSON.stringify(mobileRunbook([badPreStep, CLEAN_STEP])));
+
+    const result = await h.store.registerDraft(1, WORKTREE, 'mobile');
+    expect('error' in result).toBe(true);
+    if (!('error' in result)) return;
+    expect(result.error).toContain('modalities["mobile"].build[0]: contains a literal simulator/device UDID');
+    h.db.close();
+  });
+
+  it('checks a riding-along mobile entry even when registering a DIFFERENT modality', async () => {
+    const h = makeHarness();
+    const combined: VerifyRunbookV1 = {
+      version: 1,
+      modalities: {
+        ...baseRunbook().modalities,
+        mobile: {
+          build: ['xcodebuild build -scheme MyApp -derivedDataPath /tmp/dd'],
+          app: { platform: 'ios-simulator', bundleId: 'com.example.app', scheme: 'MyApp' },
+          attestation: { kind: 'bundle-identity', bundleId: 'com.example.app' },
+        },
+      },
+    };
+    h.files.set(WORKTREE, JSON.stringify(combined));
+
+    // Registering 'web' would otherwise persist the WHOLE portable_json —
+    // mobile entry included — unvetted.
+    const result = await h.store.registerDraft(1, WORKTREE, 'web');
+    expect('error' in result).toBe(true);
+    if (!('error' in result)) return;
+    expect(result.kind).toBe('unisolated-command');
+    expect(result.error).toContain('-derivedDataPath is an absolute path ("/tmp/dd")');
+    expect(persistedStatus(h.db, 'web')).toBeUndefined();
+    h.db.close();
+  });
+
+  it('honors a runbook-declared derivedDataEnv/simUdidEnv lever name instead of the defaults', async () => {
+    const h = makeHarness();
+    const custom: VerifyRunbookV1 = {
+      version: 1,
+      modalities: {
+        mobile: {
+          build: [
+            'xcodebuild build -scheme MyApp -destination "id=$MY_SIM_UDID" ' +
+              '-derivedDataPath "$MY_DERIVED_DATA" CODE_SIGNING_ALLOWED=NO',
+          ],
+          app: { platform: 'ios-simulator', bundleId: 'com.example.app', scheme: 'MyApp' },
+          attestation: { kind: 'bundle-identity', bundleId: 'com.example.app' },
+        },
+      },
+      levers: { derivedDataEnv: 'MY_DERIVED_DATA', simUdidEnv: 'MY_SIM_UDID' },
+    };
+    h.files.set(WORKTREE, JSON.stringify(custom));
+
+    const result = await h.store.registerDraft(1, WORKTREE, 'mobile');
+    expect('error' in result).toBe(false);
     h.db.close();
   });
 });

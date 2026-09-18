@@ -30,7 +30,13 @@ import {
   SERVE_BINDING_FAILED_PREFIX,
   TRANSPORT_MID_SESSION_MESSAGE,
   VERIFY_HARNESS_CONTRACT,
+  DEFAULT_MOBILE_BOOT_TIMEOUT_MS,
+  DEFAULT_MOBILE_READY_TIMEOUT_MS,
+  MOBILE_ACQUIRE_FAILED_PREFIX,
+  MOBILE_NO_APP_BLOCK_DETAIL,
+  MOBILE_SESSION_UNWIRED_DETAIL,
   type VerificationAgentRunnerDeps,
+  type VerificationAgentRunnerMobileDeps,
   type VerificationAgentRequest,
   type ResolvedVerifyAgent,
   type VerificationAgentQueryOutcome,
@@ -45,7 +51,10 @@ import type { EffectiveAgent } from '../../agents/effectiveAgents';
 import type {
   VerificationTaskV1,
   VerificationReportV1,
+  MobileAppSpec,
 } from '../../../../../shared/types/visualVerification';
+import { DEFAULT_MOBILE_PRODUCT_GLOB } from '../../../../../shared/types/visualVerification';
+import type { MobileSimulatorHandle } from '../mobileSimulatorSession';
 
 const CLAUDE_DEFAULT = 'claude-opus-4-8';
 
@@ -1063,7 +1072,11 @@ describe('resolveRequestModality', () => {
     expect(warn).toHaveBeenCalled();
   });
 
-  it('NEVER logs a mismatch for native-screen/mobile — those are structurally underivable from a task', () => {
+  // The carve-out is kept for two DIFFERENT reasons now: native-screen is still
+  // structurally underivable, while mobile IS derivable from `task.app` and is
+  // instead refused by name in run() before a device is ever created — logging
+  // here too would file the same defect twice, in the weaker place.
+  it('NEVER logs a mismatch for native-screen/mobile', () => {
     const warn = vi.fn();
     const logger = { info: vi.fn(), warn, error: vi.fn(), debug: vi.fn() };
     resolveRequestModality({ task: makeTask({ modality: 'native-screen' }) }, logger);
@@ -1154,12 +1167,32 @@ describe('coerceDriveUnsupportedBehaviors', () => {
     ],
   });
 
-  it('is a no-op on every modality but native-screen', () => {
-    for (const modality of ['web', 'cdp-app', 'mobile'] as const) {
+  it('is a no-op by DEFAULT on every modality but native-screen', () => {
+    for (const modality of ['web', 'cdp-app'] as const) {
       const out = coerceDriveUnsupportedBehaviors(report, task, modality);
       expect(out.coerced).toBe(0);
       expect(out.report).toBe(report);
     }
+  });
+
+  // `mobile` left the default no-op list when its drive rung became a PROBED
+  // fact: Maestro present means every behavior is genuinely drivable, Maestro
+  // absent means none are, and the modality alone cannot tell you which.
+  it('coerces on mobile when this host resolved no drive rung', () => {
+    const out = coerceDriveUnsupportedBehaviors(report, task, 'mobile', true);
+    expect(out.coerced).toBe(1);
+    expect(out.report.behaviors[1].result).toBe('not_testable');
+  });
+
+  it('leaves mobile alone when Maestro IS the drive rung', () => {
+    const out = coerceDriveUnsupportedBehaviors(report, task, 'mobile', false);
+    expect(out.coerced).toBe(0);
+    expect(out.report).toBe(report);
+  });
+
+  // The default is what keeps every pre-existing caller behaving identically.
+  it('still coerces native-screen when the caller passes no explicit flag', () => {
+    expect(coerceDriveUnsupportedBehaviors(report, task, 'native-screen').coerced).toBe(1);
   });
 
   it('forces requiresDrive behaviors to not_testable with a coercion note, leaving the others alone', () => {
@@ -2347,5 +2380,601 @@ describe('VerificationAgentRunner.run — transport failures, narrowed by sessio
     const result = await runner.run(makeReq());
     expect(result.status).toBe('skipped');
     expect(result.transportFailure).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §8 / §9 the MOBILE tier — acquisition, the env map, teardown, attestation
+// ---------------------------------------------------------------------------
+
+const SIM_UDID = 'B1C0FFEE-0000-4000-8000-0123456789AB';
+const SIM_DERIVED = '/data/verify-mobile/vr-1/DerivedData';
+const MAESTRO_BIN = '/Users/dev/.maestro/bin/maestro';
+
+const APP: MobileAppSpec = {
+  platform: 'ios-simulator',
+  bundleId: 'com.acme.ios',
+  scheme: 'Acme',
+  productGlob: 'Build/Products/Debug-iphonesimulator/Acme.app',
+};
+
+/** A composed mobile task: an `app` block, NO serve, and the one channel it may declare. */
+function makeMobileTask(overrides: Partial<VerificationTaskV1> = {}): VerificationTaskV1 {
+  return makeTask({
+    app: APP,
+    serve: undefined,
+    attestation: { kind: 'bundle-identity', bundleId: APP.bundleId },
+    ...overrides,
+  });
+}
+
+/** A mobile REQUEST as the scheduler builds it: modality declared, and NO ports leased at all. */
+function makeMobileReq(overrides: Partial<VerificationAgentRequest> = {}): VerificationAgentRequest {
+  return makeReq({
+    task: makeMobileTask(),
+    modality: 'mobile',
+    verifyPort: null,
+    verifyDriverPort: null,
+    ...overrides,
+  });
+}
+
+function makeHandle(overrides: Partial<MobileSimulatorHandle> = {}): MobileSimulatorHandle {
+  return {
+    udid: SIM_UDID,
+    name: 'cyboflow-verify-vr-1',
+    runtimeName: 'iOS 26.2',
+    runtimeId: 'com.apple.CoreSimulator.SimRuntime.iOS-26-2',
+    deviceTypeId: 'com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro',
+    derivedDataDir: SIM_DERIVED,
+    requestDir: '/data/verify-mobile/vr-1',
+    dispose: async () => {},
+    ...overrides,
+  };
+}
+
+interface MobileFakes {
+  deps: VerificationAgentRunnerMobileDeps;
+  acquire: ReturnType<typeof vi.fn>;
+  dispose: ReturnType<typeof vi.fn>;
+  handle: MobileSimulatorHandle;
+}
+
+/**
+ * The mobile wiring, with a Maestro drive rung by default. `maestroBin: null`
+ * (or `pinFlag: null`) is the observe-only host; `acquire` may be overridden to
+ * throw, which is the boot-failure path.
+ */
+function makeMobileDeps(
+  opts: {
+    maestroBin?: string | null;
+    pinFlag?: '--udid' | '--device' | null;
+    acquire?: () => Promise<MobileSimulatorHandle>;
+    dispose?: () => Promise<void>;
+    healthCheck?: () => Promise<boolean>;
+  } = {},
+): MobileFakes {
+  const dispose = vi.fn(opts.dispose ?? (async (): Promise<void> => {}));
+  const handle = makeHandle({ dispose });
+  const acquire = vi.fn(opts.acquire ?? (async (): Promise<MobileSimulatorHandle> => handle));
+  const maestroBin = opts.maestroBin === undefined ? MAESTRO_BIN : opts.maestroBin;
+  const pinFlag = opts.pinFlag === undefined ? '--udid' : opts.pinFlag;
+  const deps: VerificationAgentRunnerMobileDeps = {
+    session: {
+      acquire,
+      sweepStaleSimulators: vi.fn(async () => ({ deleted: [], skipped: [] })),
+    },
+    toolchain: {
+      resolveMaestroBin: vi.fn(async () => maestroBin),
+      resolvePinFlag: vi.fn(async () => pinFlag),
+      healthCheck: vi.fn(opts.healthCheck ?? (async (): Promise<boolean> => true)),
+    },
+    dataDir: '/data',
+  };
+  return { deps, acquire, dispose, handle };
+}
+
+/**
+ * A runner wired for mobile, with the attestation probe verifying by default.
+ *
+ * The probe spy is built HERE and returned as `bundleAttest`: `makeRunner`
+ * returns the spy it created itself, which an `attest` override replaces in the
+ * deps — asserting on the returned one would be asserting on a function nothing
+ * ever called.
+ */
+function makeMobileRunner(
+  mobile: VerificationAgentRunnerMobileDeps,
+  overrides: Partial<VerificationAgentRunnerDeps> = {},
+): ReturnType<typeof makeRunner> & { bundleAttest: ReturnType<typeof vi.fn> } {
+  const bundleAttest = vi.fn(async () => ({
+    verified: true,
+    kind: 'bundle-identity' as const,
+    detail: 'bundle-identity: the installed app is this request staged product',
+  }));
+  const built = makeRunner({ mobile, attest: bundleAttest, ...overrides });
+  return { ...built, bundleAttest };
+}
+
+describe('VerificationAgentRunner.run — mobile env', () => {
+  it('exports the whole mobile name set and NEITHER port', async () => {
+    const mobile = makeMobileDeps();
+    const { runner, query } = makeMobileRunner(mobile.deps);
+    await runner.run(makeMobileReq());
+
+    const env = query.mock.calls[0][0].env;
+    expect(env).toMatchObject({
+      VERIFY_MODALITY: 'mobile',
+      VERIFY_SIM_UDID: SIM_UDID,
+      VERIFY_SIM_NAME: 'cyboflow-verify-vr-1',
+      VERIFY_SIM_RUNTIME: 'iOS 26.2',
+      VERIFY_DERIVED_DATA: SIM_DERIVED,
+      VERIFY_APP_BUNDLE_ID: 'com.acme.ios',
+      VERIFY_APP_PRODUCT_GLOB: 'Build/Products/Debug-iphonesimulator/Acme.app',
+      VERIFY_MOBILE_DRIVE: 'maestro',
+      VERIFY_MAESTRO_BIN: MAESTRO_BIN,
+      VERIFY_MOBILE_READY_TIMEOUT_MS: String(DEFAULT_MOBILE_READY_TIMEOUT_MS),
+    });
+    // §6.2/M1 — a simulator run serves nothing and attaches to nothing.
+    expect(env.VERIFY_PORT).toBeUndefined();
+    expect(env.VERIFY_DRIVER_PORT).toBeUndefined();
+  });
+
+  it('falls back to the shared default product glob when the app block omits one', async () => {
+    const mobile = makeMobileDeps();
+    const { runner, query } = makeMobileRunner(mobile.deps);
+    await runner.run(
+      makeMobileReq({ task: makeMobileTask({ app: { ...APP, productGlob: undefined } }) }),
+    );
+    expect(query.mock.calls[0][0].env.VERIFY_APP_PRODUCT_GLOB).toBe(DEFAULT_MOBILE_PRODUCT_GLOB);
+  });
+
+  it('honors a configured readiness bound', async () => {
+    const mobile = makeMobileDeps();
+    const { runner, query } = makeMobileRunner({ ...mobile.deps, readyTimeoutMs: 45_000 });
+    await runner.run(makeMobileReq());
+    expect(query.mock.calls[0][0].env.VERIFY_MOBILE_READY_TIMEOUT_MS).toBe('45000');
+  });
+
+  // The whole drive rung turns on BOTH facts: a resolvable binary AND a build of
+  // it that accepts a device pin. An unpinned `maestro test` lands on whichever
+  // simulator is booted — the developer's own, in the worst case.
+  it.each([
+    { label: 'no maestro on this host', maestroBin: null, pinFlag: '--udid' as const },
+    { label: 'maestro that names no pin flag', maestroBin: MAESTRO_BIN, pinFlag: null },
+  ])('reports VERIFY_MOBILE_DRIVE=none for $label', async ({ maestroBin, pinFlag }) => {
+    const mobile = makeMobileDeps({ maestroBin, pinFlag });
+    const { runner, query } = makeMobileRunner(mobile.deps);
+    await runner.run(makeMobileReq());
+
+    const env = query.mock.calls[0][0].env;
+    expect(env.VERIFY_MOBILE_DRIVE).toBe('none');
+    expect(env.VERIFY_MAESTRO_BIN).toBeUndefined();
+  });
+
+  it('degrades to observe-only rather than failing when the maestro probe throws', async () => {
+    const mobile = makeMobileDeps();
+    mobile.deps.toolchain.resolveMaestroBin = vi.fn(async () => {
+      throw new Error('spawn EACCES');
+    });
+    const { runner, query } = makeMobileRunner(mobile.deps);
+    const result = await runner.run(makeMobileReq());
+
+    expect(result.status).toBe('passed');
+    expect(query.mock.calls[0][0].env.VERIFY_MOBILE_DRIVE).toBe('none');
+  });
+
+  it('exports NONE of the mobile names on a non-mobile request', async () => {
+    const mobile = makeMobileDeps();
+    const { runner, query } = makeMobileRunner(mobile.deps, { ...servedBy('pnpm dev') });
+    await runner.run(makeReq());
+
+    const env = query.mock.calls[0][0].env;
+    for (const name of [
+      'VERIFY_SIM_UDID',
+      'VERIFY_SIM_NAME',
+      'VERIFY_SIM_RUNTIME',
+      'VERIFY_DERIVED_DATA',
+      'VERIFY_APP_BUNDLE_ID',
+      'VERIFY_APP_PRODUCT_GLOB',
+      'VERIFY_MOBILE_DRIVE',
+      'VERIFY_MAESTRO_BIN',
+      'VERIFY_MOBILE_READY_TIMEOUT_MS',
+    ]) {
+      expect(env[name]).toBeUndefined();
+    }
+    expect(mobile.acquire).not.toHaveBeenCalled();
+  });
+
+  // §6.3 — the two mobile levers, bound by the harness to per-request values
+  // that are never persisted anywhere.
+  it('binds a runbook simUdidEnv / derivedDataEnv to the leased device', async () => {
+    const mobile = makeMobileDeps();
+    const runbook: VerifyRunbookV1 = {
+      version: 1,
+      levers: { simUdidEnv: 'ACME_SIM', derivedDataEnv: 'ACME_DERIVED' },
+      modalities: {
+        mobile: { app: APP, attestation: { kind: 'bundle-identity', bundleId: APP.bundleId } },
+      },
+    };
+    const { runner, query } = makeMobileRunner(mobile.deps, {
+      resolveRunbookByHash: (): PinnedRunbookRecord => ({ runbook, version: 1, status: 'proven' }),
+    });
+    await runner.run(
+      makeMobileReq({
+        task: makeMobileTask({ build: undefined }),
+        runbookHash: 'f'.repeat(64),
+      }),
+    );
+
+    const env = query.mock.calls[0][0].env;
+    expect(env.ACME_SIM).toBe(SIM_UDID);
+    expect(env.ACME_DERIVED).toBe(SIM_DERIVED);
+  });
+});
+
+describe('VerificationAgentRunner.run — mobile acquisition', () => {
+  it('acquires with this request id, the instance data dir and the boot bound', async () => {
+    const mobile = makeMobileDeps();
+    const { runner } = makeMobileRunner({ ...mobile.deps, deviceType: 'iPhone 17 Pro', runtime: 'iOS 26.2' });
+    await runner.run(makeMobileReq());
+
+    expect(mobile.acquire).toHaveBeenCalledWith({
+      requestId: 'vr-1',
+      dataDir: '/data',
+      deviceType: 'iPhone 17 Pro',
+      runtime: 'iOS 26.2',
+      bootTimeoutMs: DEFAULT_MOBILE_BOOT_TIMEOUT_MS,
+    });
+  });
+
+  it('skips WITHOUT deploying when this host wired no simulator session', async () => {
+    const { runner, query } = makeRunner();
+    const result = await runner.run(makeMobileReq());
+
+    expect(result.status).toBe('skipped');
+    expect(result.deployed).toBe(false);
+    expect(query).not.toHaveBeenCalled();
+    // The synthetic row is what makes the §3.1 classifier answer 'env' with no
+    // classifier change — preflight itself never emits this id.
+    expect(result.preflight?.ok).toBe(false);
+    expect(result.preflight?.checks).toContainEqual({
+      id: 'mobile-simulator',
+      ok: false,
+      detail: MOBILE_SESSION_UNWIRED_DETAIL,
+    });
+  });
+
+  it('skips WITHOUT deploying when acquire() throws, naming the boot failure', async () => {
+    const mobile = makeMobileDeps({
+      acquire: async () => {
+        throw new Error('simctl bootstatus timed out after 180000ms');
+      },
+    });
+    const { runner, query } = makeMobileRunner(mobile.deps);
+    const result = await runner.run(makeMobileReq());
+
+    expect(result).toMatchObject({ status: 'skipped', deployed: false });
+    expect(query).not.toHaveBeenCalled();
+    const check = result.preflight?.checks.find((c) => c.id === 'mobile-simulator');
+    expect(check?.ok).toBe(false);
+    expect(check?.detail).toBe(`${MOBILE_ACQUIRE_FAILED_PREFIX}simctl bootstatus timed out after 180000ms`);
+  });
+
+  it('refuses a mobile request composed with no app block, before creating a device', async () => {
+    const mobile = makeMobileDeps();
+    const { runner, query } = makeMobileRunner(mobile.deps);
+    const result = await runner.run(makeMobileReq({ task: makeTask({ modality: 'mobile' }) }));
+
+    expect(result).toMatchObject({ status: 'skipped', deployed: false });
+    expect(mobile.acquire).not.toHaveBeenCalled();
+    expect(query).not.toHaveBeenCalled();
+    expect(result.preflight?.checks).toContainEqual({
+      id: 'mobile-simulator',
+      ok: false,
+      detail: MOBILE_NO_APP_BLOCK_DETAIL,
+    });
+  });
+
+  // THE LEAK CASES (B2). Acquisition sits after every early return that used to
+  // sit between preflight and the try; each of these must create NO device.
+  it('creates no device when the runbook pin is rejected', async () => {
+    const mobile = makeMobileDeps();
+    const { runner } = makeMobileRunner(mobile.deps, {
+      resolveRunbookByHash: () => null,
+    });
+    const result = await runner.run(makeMobileReq({ runbookHash: 'a'.repeat(64) }));
+
+    expect(result.errorMessage).toContain(RUNBOOK_MISMATCH_PREFIX);
+    expect(mobile.acquire).not.toHaveBeenCalled();
+  });
+
+  it('creates no device when the provider has no wired verify seam', async () => {
+    const mobile = makeMobileDeps();
+    const { runner } = makeMobileRunner(mobile.deps, {
+      codexQuery: undefined,
+      resolveVerifyAgent: () => ({
+        agent: makeAgent({ runtime: 'codex-sdk' }),
+        runProvider: 'codex',
+        runModel: null,
+      }),
+    });
+    const result = await runner.run(makeMobileReq());
+
+    expect(result).toMatchObject({ status: 'skipped', deployed: false });
+    expect(mobile.acquire).not.toHaveBeenCalled();
+  });
+
+  it('creates no device when preflight already failed the host', async () => {
+    const mobile = makeMobileDeps({ healthCheck: async () => false });
+    const { runner } = makeMobileRunner(mobile.deps);
+    const result = await runner.run(makeMobileReq());
+
+    expect(result).toMatchObject({ status: 'skipped', deployed: false });
+    expect(result.preflight?.checks).toContainEqual(
+      expect.objectContaining({ id: 'mobile-toolchain', ok: false }),
+    );
+    expect(mobile.acquire).not.toHaveBeenCalled();
+  });
+});
+
+describe('VerificationAgentRunner.run — mobile teardown (§8.1)', () => {
+  it('disposes the simulator on the happy path, BEFORE the snapshot', async () => {
+    const mobile = makeMobileDeps();
+    const order: string[] = [];
+    mobile.deps.session.acquire = vi.fn(async () =>
+      makeHandle({
+        dispose: async () => {
+          order.push('sim');
+        },
+      }),
+    );
+    const { runner } = makeMobileRunner(mobile.deps, {
+      provision: async () => ({
+        worktreePath: '/snap',
+        sha: 'abc123',
+        dispose: async () => {
+          order.push('snapshot');
+        },
+      }),
+    });
+    await runner.run(makeMobileReq());
+    expect(order).toEqual(['sim', 'snapshot']);
+  });
+
+  it('disposes the simulator when the QUERY throws', async () => {
+    const mobile = makeMobileDeps();
+    const { runner } = makeMobileRunner(mobile.deps, {
+      query: vi.fn(async () => {
+        throw new VerificationAgentQueryError('socket hang up', null);
+      }),
+    });
+    await runner.run(makeMobileReq());
+    expect(mobile.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('disposes the simulator when the ATTESTATION probe throws', async () => {
+    const mobile = makeMobileDeps();
+    const { runner } = makeMobileRunner(mobile.deps, {
+      attest: vi.fn(async () => {
+        throw new Error('the probe is mis-wired');
+      }),
+    });
+    const result = await runner.run(makeMobileReq());
+
+    expect(mobile.dispose).toHaveBeenCalledTimes(1);
+    // An escaping throw would have fail-OPEN skipped; the runner's backstop
+    // turns it into the unproven pass it is.
+    expect(result.status).toBe('failed');
+  });
+
+  it('disposes the simulator when the request is aborted mid-flight', async () => {
+    const mobile = makeMobileDeps();
+    const controller = new AbortController();
+    const { runner } = makeMobileRunner(mobile.deps, {
+      query: vi.fn(async () => {
+        controller.abort();
+        throw new VerificationAgentQueryError('aborted', null);
+      }),
+    });
+    const result = await runner.run(makeMobileReq({ signal: controller.signal }));
+
+    expect(result.status).toBe('timeout');
+    expect(mobile.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  // (c) of §8.1: each step is independently caught, so a hanging simctl cannot
+  // suppress the snapshot's own disposal.
+  it('still disposes the snapshot when the simulator dispose throws', async () => {
+    const snapshotDispose = vi.fn(async () => {});
+    const mobile = makeMobileDeps({
+      dispose: async () => {
+        throw new Error('simctl delete hung');
+      },
+    });
+    const { runner, warn } = makeMobileRunner(mobile.deps, {
+      provision: async () => ({ worktreePath: '/snap', sha: 'abc123', dispose: snapshotDispose }),
+    });
+    const result = await runner.run(makeMobileReq());
+
+    expect(result.status).toBe('passed');
+    expect(snapshotDispose).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('simulator dispose threw'),
+      expect.anything(),
+    );
+  });
+});
+
+describe('VerificationAgentRunner.run — mobile attestation + coercion', () => {
+  it('hands the probe the simulator context and a NULL driver port', async () => {
+    const mobile = makeMobileDeps();
+    const { runner, bundleAttest } = makeMobileRunner(mobile.deps);
+    await runner.run(makeMobileReq());
+
+    expect(bundleAttest).toHaveBeenCalledWith(
+      { kind: 'bundle-identity', bundleId: 'com.acme.ios' },
+      expect.objectContaining({
+        verifyPort: null,
+        driverPort: null,
+        mobile: {
+          artifactsDir: '/artifacts',
+          derivedDataDir: SIM_DERIVED,
+          simUdid: SIM_UDID,
+        },
+      }),
+    );
+  });
+
+  it('fails a pass the bundle-identity probe did not verify', async () => {
+    const mobile = makeMobileDeps();
+    const { runner } = makeMobileRunner(mobile.deps, {
+      attest: vi.fn(async () => ({
+        verified: false,
+        kind: 'bundle-identity' as const,
+        detail: 'the app on the device is NOT the product staged for this request',
+      })),
+    });
+    const result = await runner.run(makeMobileReq());
+
+    expect(result.status).toBe('failed');
+    expect(result.errorMessage).toContain(ATTESTATION_MISSING_MESSAGE);
+    expect(result.errorMessage).toContain('NOT the product staged');
+  });
+
+  // End to end: no drive rung on this host ⇒ a claimed pass on a requiresDrive
+  // behavior is coerced, and the verdict caps at low_confidence.
+  it('coerces drive-required behaviors when the host resolved no drive rung', async () => {
+    const mobile = makeMobileDeps({ maestroBin: null });
+    const task = makeMobileTask({
+      behaviors: [
+        { id: 'b1', description: 'renders', expected: 'visible' },
+        { id: 'b2', description: 'tap opens settings', expected: 'settings', requiresDrive: true },
+      ],
+    });
+    const { runner } = makeMobileRunner(mobile.deps, {
+      query: vi.fn(async () =>
+        makeOutcome(
+          validReport({
+            behaviors: [
+              { id: 'b1', result: 'pass', evidence: { screenshots: ['s.png'], notes: 'ok' } },
+              { id: 'b2', result: 'pass', evidence: { screenshots: ['s.png'], notes: 'tapped' } },
+            ],
+          }),
+        ),
+      ),
+    });
+    const result = await runner.run(makeMobileReq({ task }));
+
+    expect(result.status).toBe('low_confidence');
+    expect(result.report?.behaviors[1].result).toBe('not_testable');
+    expect(result.report?.behaviors[1].evidence.notes).toContain('coerced: drive-unsupported');
+  });
+
+  it('leaves a drive-required behavior alone when Maestro IS the drive rung', async () => {
+    const mobile = makeMobileDeps();
+    const task = makeMobileTask({
+      behaviors: [{ id: 'b1', description: 'tap opens settings', expected: 's', requiresDrive: true }],
+    });
+    const { runner } = makeMobileRunner(mobile.deps);
+    const result = await runner.run(makeMobileReq({ task }));
+
+    expect(result.status).toBe('passed');
+    expect(result.report?.behaviors[0].result).toBe('pass');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B5 — the pin fingerprint covers the `app` block
+// ---------------------------------------------------------------------------
+
+describe('checkRunbookPin — the mobile app block', () => {
+  const entry = {
+    build: ['xcodebuild build -scheme Acme'],
+    app: APP,
+    attestation: { kind: 'bundle-identity' as const, bundleId: APP.bundleId },
+  };
+  const record = (): PinnedRunbookRecord => ({
+    runbook: { version: 1, modalities: { mobile: entry } },
+    version: 3,
+    status: 'proven',
+  });
+  const hash = 'a'.repeat(64);
+  const task = (app: MobileAppSpec): VerificationTaskV1 =>
+    makeTask({ build: entry.build, app, serve: undefined, attestation: entry.attestation });
+
+  it('accepts a task whose app block equals the pinned entry', () => {
+    expect(checkRunbookPin(record(), 'mobile', task(APP), hash)).toEqual({ ok: true });
+  });
+
+  // Every one of these decides what gets installed, hashed or attested, so a
+  // pin blind to them would let the request execute a different product than
+  // the revision it was composed against.
+  it.each([
+    { field: 'bundleId', app: { ...APP, bundleId: 'com.other.ios' } },
+    { field: 'scheme', app: { ...APP, scheme: 'AcmeStaging' } },
+    { field: 'productGlob', app: { ...APP, productGlob: 'Build/Products/Release-iphonesimulator/Acme.app' } },
+    {
+      field: 'platform',
+      // `MobileAppSpec.platform` is a single literal today, so a real drift is
+      // unconstructable in TypeScript — the double assertion stands in for the
+      // day the literal widens, and proves the fingerprint already carries the
+      // field rather than leaving that to be discovered by a second platform.
+      app: { ...APP, platform: 'android-emulator' } as unknown as MobileAppSpec,
+    },
+  ])('rejects a task whose app.$field drifted from the pin', ({ app }) => {
+    const r = checkRunbookPin(record(), 'mobile', task(app), hash);
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.detail).toContain('build/serve/app/attestation');
+  });
+
+  it('rejects a mobile task that dropped its app block entirely', () => {
+    const r = checkRunbookPin(record(), 'mobile', makeTask({ build: entry.build, serve: undefined, attestation: entry.attestation }), hash);
+    expect(r.ok).toBe(false);
+  });
+
+  // The fingerprint gained a key; every pre-existing WEB pin carries `app: null`
+  // on both sides and must still compare equal.
+  it('leaves a web pin with no app block unaffected', () => {
+    const webEntry = {
+      build: ['pnpm build'],
+      serve: { cmd: 'pnpm preview -- --port ${PORT}' },
+      attestation: { kind: 'http-endpoint' as const, urlPath: '/__cyboflow_verify__' },
+    };
+    const webRecord: PinnedRunbookRecord = {
+      runbook: { version: 1, modalities: { web: webEntry } },
+      version: 1,
+      status: 'proven',
+    };
+    const webTask = makeTask({ ...webEntry });
+    expect(checkRunbookPin(webRecord, 'web', webTask, hash)).toEqual({ ok: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The harness contract's MOBILE block
+// ---------------------------------------------------------------------------
+
+describe('VERIFY_HARNESS_CONTRACT — the MOBILE block', () => {
+  it('documents the install → launch → readiness sequence through the driver', () => {
+    expect(VERIFY_HARNESS_CONTRACT).toContain('mobile-install');
+    expect(VERIFY_HARNESS_CONTRACT).toContain('mobile-launch');
+    expect(VERIFY_HARNESS_CONTRACT).toContain('VERIFY_APP_PRODUCT_GLOB');
+  });
+
+  it('keys both drive arms on VERIFY_MOBILE_DRIVE and calls openurl navigation', () => {
+    expect(VERIFY_HARNESS_CONTRACT).toContain('VERIFY_MOBILE_DRIVE');
+    expect(VERIFY_HARNESS_CONTRACT).toContain('maestro');
+    expect(VERIFY_HARNESS_CONTRACT).toContain('mobile-openurl');
+    expect(VERIFY_HARNESS_CONTRACT).toContain('NAVIGATION, not driving');
+  });
+
+  it('states that a readiness timeout is not_testable, never a fail', () => {
+    expect(VERIFY_HARNESS_CONTRACT).toContain('readiness-timeout');
+    expect(VERIFY_HARNESS_CONTRACT).toContain('NEVER a fail');
+  });
+
+  it('says the mobile tier has no port and that attestation is harness-owned', () => {
+    expect(VERIFY_HARNESS_CONTRACT).toContain('NO port, no VERIFY_PORT');
+    expect(VERIFY_HARNESS_CONTRACT).toContain('bundle-identity');
   });
 });

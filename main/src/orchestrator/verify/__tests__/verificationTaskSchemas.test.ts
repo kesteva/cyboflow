@@ -10,6 +10,9 @@ import {
   normalizeVerificationReportV1,
   deriveLegacyInputFromTask,
   isAttestationSpec,
+  resolveTaskModality,
+  ATTESTATION_KINDS,
+  DEFAULT_MOBILE_PRODUCT_GLOB,
   type VerificationTaskV1,
   type AttestationSpec,
 } from '../../../../../shared/types/visualVerification';
@@ -28,6 +31,7 @@ const ATTESTATION_SPECS: AttestationSpec[] = [
   { kind: 'dom-marker', selector: '[data-verify-nonce]' },
   { kind: 'cdp-token', expression: 'window.__CYBOFLOW_BUILD_TOKEN__', expected: 'abc123' },
   { kind: 'window-identity', titlePattern: 'MyApp — dev', app: 'MyApp' },
+  { kind: 'bundle-identity', bundleId: 'com.example.demo' },
   { kind: 'file-identity' },
 ];
 
@@ -261,6 +265,102 @@ describe('parseVerificationTaskV1', () => {
   });
 });
 
+describe('parseVerificationTaskV1 — the mobile app block', () => {
+  const APP = { platform: 'ios-simulator', bundleId: 'com.example.demo', scheme: 'Demo' } as const;
+
+  it('round-trips an app block, with and without productGlob', () => {
+    const bare = parseVerificationTaskV1({ ...VALID_TASK, app: APP });
+    expect(bare.ok).toBe(true);
+    if (bare.ok) expect(bare.task.app).toEqual(APP);
+
+    const globbed = parseVerificationTaskV1({
+      ...VALID_TASK,
+      app: { ...APP, productGlob: DEFAULT_MOBILE_PRODUCT_GLOB },
+    });
+    expect(globbed.ok).toBe(true);
+    if (globbed.ok) {
+      expect(globbed.task.app?.productGlob).toBe(DEFAULT_MOBILE_PRODUCT_GLOB);
+      expect(DEFAULT_MOBILE_PRODUCT_GLOB).toBe('Build/Products/*-iphonesimulator/*.app');
+    }
+  });
+
+  it('drops unknown extra keys from the app block (rebuilt, not cast)', () => {
+    const result = parseVerificationTaskV1({ ...VALID_TASK, app: { ...APP, xcodeMcp: true } });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.task.app).toEqual(APP);
+  });
+
+  it('rejects a bad platform', () => {
+    const result = parseVerificationTaskV1({ ...VALID_TASK, app: { ...APP, platform: 'android' } });
+    expect(result).toEqual({ ok: false, error: "app.platform: expected the string 'ios-simulator'" });
+  });
+
+  it('rejects a non-object app, and empty bundleId / scheme, path-named', () => {
+    expect(parseVerificationTaskV1({ ...VALID_TASK, app: [] })).toEqual({
+      ok: false,
+      error: 'app: expected an object',
+    });
+    expect(parseVerificationTaskV1({ ...VALID_TASK, app: { ...APP, bundleId: '' } })).toEqual({
+      ok: false,
+      error: 'app.bundleId: expected non-empty string',
+    });
+    expect(parseVerificationTaskV1({ ...VALID_TASK, app: { ...APP, scheme: '   ' } })).toEqual({
+      ok: false,
+      error: 'app.scheme: expected non-empty string',
+    });
+  });
+
+  it('rejects a productGlob that escapes the private DerivedData directory', () => {
+    for (const bad of ['/Users/me/Demo.app', '~/Demo.app', '../Demo.app', 'a/../../b.app', '']) {
+      expect(parseVerificationTaskV1({ ...VALID_TASK, app: { ...APP, productGlob: bad } })).toEqual({
+        ok: false,
+        error:
+          "app.productGlob: expected a non-empty relative path (no leading '/', no '~', no '..' segment)",
+      });
+    }
+  });
+
+  it('leaves serve.attach a literal cdp (the app block did not widen it)', () => {
+    expect(
+      parseVerificationTaskV1({ ...VALID_TASK, serve: { cmd: 'x', attach: 'simctl' } }),
+    ).toEqual({ ok: false, error: "serve.attach: expected the string 'cdp' when present" });
+  });
+});
+
+describe('resolveTaskModality', () => {
+  const appTask: Pick<VerificationTaskV1, 'serve' | 'app'> = {
+    app: { platform: 'ios-simulator', bundleId: 'com.example.demo', scheme: 'Demo' },
+  };
+
+  it('keeps every pre-existing row unchanged', () => {
+    expect(resolveTaskModality('native-desktop', null)).toBe('native-screen');
+    expect(resolveTaskModality('mobile-flow', null)).toBe('mobile');
+    expect(resolveTaskModality('static-render-snapshot', null)).toBe('web');
+    expect(resolveTaskModality('interactive-web-behavior', { serve: { cmd: 'x' } })).toBe('web');
+    expect(resolveTaskModality('interactive-web-behavior', { serve: { cmd: 'x', attach: 'cdp' } })).toBe(
+      'cdp-app',
+    );
+    expect(resolveTaskModality('responsive-multi-viewport', { serve: { cmd: 'x', attach: 'cdp' } })).toBe(
+      'cdp-app',
+    );
+  });
+
+  it('resolves an app-shaped task to mobile whatever web-shaped type was requested', () => {
+    expect(resolveTaskModality('static-render-snapshot', appTask)).toBe('mobile');
+    expect(resolveTaskModality('interactive-web-behavior', appTask)).toBe('mobile');
+    expect(resolveTaskModality('mobile-flow', appTask)).toBe('mobile');
+  });
+
+  it('checks the app arm AFTER the type rules and BEFORE the attach rule', () => {
+    // native-desktop wins over an app block (type rule first)...
+    expect(resolveTaskModality('native-desktop', appTask)).toBe('native-screen');
+    // ...and an app block wins over a cdp attach (app arm before the attach rule).
+    expect(
+      resolveTaskModality('static-render-snapshot', { ...appTask, serve: { cmd: 'x', attach: 'cdp' } }),
+    ).toBe('mobile');
+  });
+});
+
 describe('isAttestationSpec', () => {
   it.each(ATTESTATION_SPECS)('accepts a valid "$kind" spec', (spec) => {
     expect(isAttestationSpec(spec)).toBe(true);
@@ -268,6 +368,23 @@ describe('isAttestationSpec', () => {
 
   it('rejects an unrecognized kind', () => {
     expect(isAttestationSpec({ kind: 'magic-word' })).toBe(false);
+  });
+
+  it('lists exactly the six kinds, and ATTESTATION_KINDS matches the fixtures', () => {
+    expect([...ATTESTATION_KINDS].sort()).toEqual(ATTESTATION_SPECS.map((a) => a.kind).sort());
+    expect(new Set(ATTESTATION_KINDS).size).toBe(6);
+  });
+
+  it('accepts bundle-identity with a bundleId and nothing else required', () => {
+    expect(isAttestationSpec({ kind: 'bundle-identity', bundleId: 'com.example.demo' })).toBe(true);
+    // The type carries NO markerPath / path field; an extra key is tolerated on
+    // the wire (open shape) and does not change the verdict either way.
+    expect(
+      isAttestationSpec({ kind: 'bundle-identity', bundleId: 'com.example.demo', markerPath: '/x' }),
+    ).toBe(true);
+    expect(isAttestationSpec({ kind: 'bundle-identity' })).toBe(false);
+    expect(isAttestationSpec({ kind: 'bundle-identity', bundleId: '  ' })).toBe(false);
+    expect(isAttestationSpec({ kind: 'bundle-identity', bundleId: 42 })).toBe(false);
   });
 
   it('rejects a window-identity with no app to scope it to', () => {

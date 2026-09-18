@@ -86,6 +86,40 @@ describe('FORBIDDEN_DEP_COMMAND_PATTERN — position independence', () => {
   });
 });
 
+describe('FORBIDDEN_DEP_COMMAND_PATTERN — mobile-tier dependency mutation', () => {
+  it('matches CocoaPods dependency verbs', () => {
+    expect(matches('pod install')).toBe(true);
+    expect(matches('pod update')).toBe(true);
+    expect(matches('pod repo update')).toBe(true);
+    expect(matches('cd ios && pod install')).toBe(true);
+  });
+
+  it('matches SwiftPM\'s standalone resolve/update subcommand', () => {
+    expect(matches('swift package resolve')).toBe(true);
+    expect(matches('swift package update')).toBe(true);
+  });
+
+  it('matches xcodebuild\'s explicit SwiftPM re-resolve flag', () => {
+    expect(matches('xcodebuild -resolvePackageDependencies -scheme MyApp')).toBe(true);
+  });
+
+  it('does NOT match an ordinary xcodebuild build that resolves SwiftPM into its own clonedSourcePackagesDirPath', () => {
+    expect(
+      matches(
+        'xcodebuild build -scheme MyApp -destination "id=$VERIFY_SIM_UDID" ' +
+          '-derivedDataPath "$VERIFY_DERIVED_DATA" ' +
+          '-clonedSourcePackagesDirPath "$VERIFY_DERIVED_DATA/SourcePackages" ' +
+          'CODE_SIGNING_ALLOWED=NO',
+      ),
+    ).toBe(false);
+  });
+
+  it('does NOT match a bare "pod" invocation that is not a dependency verb', () => {
+    expect(matches('pod --version')).toBe(false);
+    expect(matches('pod lib lint')).toBe(false);
+  });
+});
+
 describe('FORBIDDEN_DEP_COMMAND_PATTERN — innocuous lookalikes must NOT match', () => {
   const innocuous = [
     'pnpm run build',

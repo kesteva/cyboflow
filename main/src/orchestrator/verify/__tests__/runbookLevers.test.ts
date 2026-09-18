@@ -2,7 +2,21 @@ import { describe, expect, it } from 'vitest';
 import { resolveLeverEnv } from '../runbookLevers';
 
 const BASE = Object.freeze({ VERIFY_PORT: '4300', VERIFY_ATTEST_NONCE: 'nonce-1', VERIFY_MODALITY: 'web' });
-const VALUES = { port: '4300', nonce: 'nonce-1', dataDir: '/artifacts/data/vr-1' } as const;
+const VALUES = {
+  port: '4300',
+  nonce: 'nonce-1',
+  dataDir: '/artifacts/data/vr-1',
+  simUdid: null,
+  derivedData: null,
+} as const;
+
+/** The mobile half: a leased device and its private DerivedData, as one request sees them. */
+const MOBILE_VALUES = {
+  ...VALUES,
+  port: null,
+  simUdid: 'B1C0FFEE-0000-4000-8000-0123456789AB',
+  derivedData: '/data/verify-mobile/vr-1/DerivedData',
+} as const;
 
 describe('resolveLeverEnv', () => {
   it('exports a declared portEnv bound to the leased port', () => {
@@ -19,8 +33,15 @@ describe('resolveLeverEnv', () => {
   it('exports every bindable lever at once, and never the CLI flag', () => {
     const { additions } = resolveLeverEnv(
       BASE,
-      { portEnv: 'PORT', nonceEnv: 'APP_BUILD_ID', dataDirEnv: 'CYBOFLOW_DIR', cdpPortFlag: '--x' },
-      VALUES,
+      {
+        portEnv: 'PORT',
+        nonceEnv: 'APP_BUILD_ID',
+        dataDirEnv: 'CYBOFLOW_DIR',
+        simUdidEnv: 'ACME_SIM',
+        derivedDataEnv: 'ACME_DERIVED',
+        cdpPortFlag: '--x',
+      },
+      { ...MOBILE_VALUES, port: '4300' },
     );
     // cdpPortFlag is a CLI flag, not an env var — there is no environment for
     // this seam to put it in, so it stays permanently unbound.
@@ -28,6 +49,82 @@ describe('resolveLeverEnv', () => {
       PORT: '4300',
       APP_BUILD_ID: 'nonce-1',
       CYBOFLOW_DIR: '/artifacts/data/vr-1',
+      ACME_SIM: MOBILE_VALUES.simUdid,
+      ACME_DERIVED: MOBILE_VALUES.derivedData,
+    });
+  });
+
+  // §6.3 — the mobile tier's two levers. NAMES only: a persisted UDID is exactly
+  // the resolved value §5.3 forbids, so these bind per request and nowhere else.
+  describe('the mobile levers', () => {
+    it('binds a declared simUdidEnv to THIS request leased device', () => {
+      const { additions, dropped } = resolveLeverEnv(BASE, { simUdidEnv: 'ACME_SIM' }, MOBILE_VALUES);
+      expect(additions).toEqual({ ACME_SIM: MOBILE_VALUES.simUdid });
+      expect(dropped).toEqual([]);
+    });
+
+    it('binds a declared derivedDataEnv to this request private DerivedData', () => {
+      const { additions, dropped } = resolveLeverEnv(
+        BASE,
+        { derivedDataEnv: 'ACME_DERIVED' },
+        MOBILE_VALUES,
+      );
+      expect(additions).toEqual({ ACME_DERIVED: MOBILE_VALUES.derivedData });
+      expect(dropped).toEqual([]);
+    });
+
+    // Off the mobile path there is no device and no DerivedData, so a runbook
+    // that declares both levers is a silent no-op rather than a drop.
+    it('exports neither when the request leased no simulator', () => {
+      const { additions, dropped } = resolveLeverEnv(
+        BASE,
+        { simUdidEnv: 'ACME_SIM', derivedDataEnv: 'ACME_DERIVED' },
+        VALUES,
+      );
+      expect(additions).toEqual({});
+      expect(dropped).toEqual([]);
+    });
+
+    // The newer levers go through the SAME bind as the older ones — a runbook
+    // cannot reach the execution environment by coming in through this door.
+    it.each(['PATH', 'DYLD_INSERT_LIBRARIES'])('drops a simUdidEnv naming %s', (name) => {
+      const { additions, dropped } = resolveLeverEnv(BASE, { simUdidEnv: name }, MOBILE_VALUES);
+      expect(additions).toEqual({});
+      expect(dropped).toEqual([{ lever: 'simUdidEnv', name, reason: 'denied' }]);
+    });
+
+    it('drops a malformed derivedDataEnv name', () => {
+      const { additions, dropped } = resolveLeverEnv(
+        BASE,
+        { derivedDataEnv: 'derived data' },
+        MOBILE_VALUES,
+      );
+      expect(additions).toEqual({});
+      expect(dropped).toEqual([
+        { lever: 'derivedDataEnv', name: 'derived data', reason: 'malformed' },
+      ]);
+    });
+
+    it('refuses to let simUdidEnv shadow a harness variable', () => {
+      const { additions, dropped } = resolveLeverEnv(
+        { ...BASE, VERIFY_SIM_UDID: 'harness-owned' },
+        { simUdidEnv: 'VERIFY_SIM_UDID' },
+        MOBILE_VALUES,
+      );
+      expect(additions).toEqual({});
+      expect(dropped).toEqual([
+        { lever: 'simUdidEnv', name: 'VERIFY_SIM_UDID', reason: 'shadows-harness' },
+      ]);
+    });
+
+    it('treats simUdidEnv naming the harness var that already carries the udid as a no-op', () => {
+      const { additions, dropped } = resolveLeverEnv(
+        { ...BASE, VERIFY_SIM_UDID: MOBILE_VALUES.simUdid },
+        { simUdidEnv: 'VERIFY_SIM_UDID' },
+        MOBILE_VALUES,
+      );
+      expect(additions).toEqual({});
+      expect(dropped).toEqual([]);
     });
   });
 
@@ -78,7 +175,7 @@ describe('resolveLeverEnv', () => {
     const { additions, dropped } = resolveLeverEnv(
       BASE,
       { portEnv: 'PORT' },
-      { port: null, nonce: 'n', dataDir: null },
+      { port: null, nonce: 'n', dataDir: null, simUdid: null, derivedData: null },
     );
     expect(additions).toEqual({});
     expect(dropped).toEqual([]);

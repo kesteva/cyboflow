@@ -79,6 +79,19 @@
  *    must fail loudly rather than silently drive the WRONG surface — the CDP
  *    `screenshot` refuses for the same reason (there is no page to shoot).
  *
+ *  - `mobile-*` — the iOS Simulator family, which lives in the sibling
+ *    `mobileCommands.ts` rather than here. It shares this file's dispatcher,
+ *    deps bag and `attest` surface but nothing else: the `mobile` modality has
+ *    no port, no server and no CDP endpoint (the app runs under the simulator's
+ *    own launchd), so the whole connect-or-launch machinery above is
+ *    inapplicable to it. The same GUARD SYMMETRY as native-screen applies, in
+ *    BOTH directions — under `VERIFY_MODALITY=mobile` the CDP commands refuse
+ *    and point at the `mobile-*` family, and a `mobile-*` command under any
+ *    other modality refuses too, because a simulator command issued on a `web`
+ *    request would drive a device this request never leased. `attest bundle`
+ *    is the one mobile word that stays HERE, because it is an attest channel
+ *    like the other four.
+ *
  * Everything here is pure/injectable: `runDriverCommand(argv, env, deps)`
  * takes a `DriverDeps` bag so unit tests can fake connect/launch/page
  * operations with no real browser. `playwright` itself is imported ONLY as a
@@ -95,10 +108,19 @@ import { killPidSync } from '../../../utils/platformProcess';
 import { cmdExeInvocation } from '../../../utils/win32CmdLine';
 import { ShellDetector } from '../../../utils/shellDetector';
 import { closeSync, existsSync, openSync } from 'node:fs';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import type { Browser, Page } from 'playwright';
 import type { AttestationSpec } from '../../../../../shared/types/visualVerification';
+import {
+  MOBILE_INSTALL_RECORD_NAME,
+  MOBILE_USAGE,
+  parseMobileArgv,
+  runMobileCommand,
+  type MobileCommand,
+  type MobileDeps,
+  type MobileInstallRecord,
+} from './mobileCommands';
 
 /** Subdirectory (under VERIFY_ARTIFACTS_DIR) holding driver-owned state. */
 const DRIVER_STATE_DIR = '.driver';
@@ -147,6 +169,26 @@ export const DEFAULT_PEEKABOO_BIN = 'peekaboo';
 export const NATIVE_SCREEN_DRIVE_REFUSAL =
   'drive-unsupported on native-screen (observe-only — proposal §4 fn.²)';
 
+/**
+ * The refusal a CDP drive command gets under `VERIFY_MODALITY=mobile`. A
+ * SEPARATE string from {@link NATIVE_SCREEN_DRIVE_REFUSAL} because the two mean
+ * opposite things to the agent: native-screen has no drive path at all and its
+ * behaviors are `not_testable`, whereas mobile has a perfectly good one under a
+ * different set of words. Conflating them would send an agent that could have
+ * driven the app to report it untestable instead.
+ */
+export const MOBILE_CDP_REFUSAL =
+  'the mobile modality has no CDP surface — the iOS Simulator exposes no debugging port, so goto/click/type/screenshot cannot act on it';
+
+/**
+ * The refusal a `mobile-*` command gets on any modality but `mobile`. Issuing
+ * one elsewhere is not merely useless: `$VERIFY_SIM_UDID` is unset outside a
+ * mobile request, so the command would either fail confusingly or — worse, if a
+ * stale value were ever exported — act on a simulator this request does not own.
+ */
+export const MOBILE_WRONG_MODALITY_REFUSAL =
+  'the mobile-* commands require VERIFY_MODALITY=mobile — this request leased no simulator';
+
 export const USAGE = `Usage:
   serve <cmd...>
   goto <url>
@@ -154,10 +196,12 @@ export const USAGE = `Usage:
   type <selector> <text...>
   screenshot <name> [--viewport WxH]
   native-screenshot <name> [--app <appTarget>]
+${MOBILE_USAGE}
   attest http <urlPath>
   attest dom <selector>
   attest cdp <expression> <expected>
   attest window <titlePattern> <app>
+  attest bundle
   stop`;
 
 // ---------------------------------------------------------------------------
@@ -175,7 +219,15 @@ export type AttestCommand =
   | { kind: 'attest'; channel: 'http'; urlPath: string }
   | { kind: 'attest'; channel: 'dom'; selector: string }
   | { kind: 'attest'; channel: 'cdp'; expression: string; expected: string }
-  | { kind: 'attest'; channel: 'window'; titlePattern: string; app: string };
+  | { kind: 'attest'; channel: 'window'; titlePattern: string; app: string }
+  /**
+   * `mobile` only, and ARGUMENT-FREE by construction: every other channel takes
+   * the value it compares against, but this one's comparison (staged sha256 ===
+   * installed sha256) was already made by `mobile-install` and recorded. The
+   * subcommand only ECHOES that record, so there is nothing for the agent to
+   * pass — and therefore nothing for it to pass wrong.
+   */
+  | { kind: 'attest'; channel: 'bundle' };
 
 export type DriverCommand =
   | { kind: 'serve'; command: string }
@@ -184,6 +236,7 @@ export type DriverCommand =
   | { kind: 'type'; selector: string; text: string }
   | { kind: 'screenshot'; name: string; viewport?: { width: number; height: number } }
   | { kind: 'native-screenshot'; name: string; appTarget?: string }
+  | MobileCommand
   | AttestCommand
   | { kind: 'stop' };
 
@@ -193,6 +246,7 @@ export const ATTEST_KIND_BY_CHANNEL: Record<AttestCommand['channel'], Attestatio
   dom: 'dom-marker',
   cdp: 'cdp-token',
   window: 'window-identity',
+  bundle: 'bundle-identity',
 };
 
 /**
@@ -309,8 +363,16 @@ export function parseArgv(argv: string[]): ParseArgvResult {
       }
       return { ok: true, command: { kind: 'stop' } };
     }
-    default:
+    default: {
+      // The `mobile-*` family parses in its own module (see this file's header).
+      // It is consulted BEFORE the unknown-command message so a mobile word with
+      // bad arguments gets its own specific complaint rather than
+      // "unknown command: mobile-swipe", which would read like the driver does
+      // not have the command at all.
+      const mobile = cmd ? parseMobileArgv(cmd, rest) : null;
+      if (mobile) return mobile;
       return { ok: false, message: cmd ? `unknown command: ${cmd}` : 'no command given' };
+    }
   }
 }
 
@@ -363,12 +425,17 @@ function parseAttestArgv(rest: string[]): ParseArgvResult {
         ok: true,
         command: { kind: 'attest', channel: 'window', titlePattern: args[0], app: args[1] },
       };
+    case 'bundle':
+      if (args.length !== 0) {
+        return { ok: false, message: 'attest bundle takes no arguments' };
+      }
+      return { ok: true, command: { kind: 'attest', channel: 'bundle' } };
     default:
       return {
         ok: false,
         message: channel
-          ? `unknown attest channel: ${channel} (expected http|dom|cdp|window)`
-          : 'attest requires a channel: http|dom|cdp|window',
+          ? `unknown attest channel: ${channel} (expected http|dom|cdp|window|bundle)`
+          : 'attest requires a channel: http|dom|cdp|window|bundle',
       };
   }
 }
@@ -399,7 +466,14 @@ export function sanitizeScreenshotName(raw: string): string | null {
 // Dependency seam (the "playwright-like object" tests inject)
 // ---------------------------------------------------------------------------
 
-export interface DriverDeps {
+/**
+ * The driver's full dependency bag. It EXTENDS {@link MobileDeps} rather than
+ * duplicating it, so there is one bag at runtime and the four members both
+ * families need (`ensureDir`, `isProcessAlive`, `stdout`, `stderr`) are declared
+ * exactly once — in the mobile module, which is the one that can be reasoned
+ * about without playwright in scope.
+ */
+export interface DriverDeps extends MobileDeps {
   /** `chromium.connectOverCDP(endpointUrl)` — rejects when nothing is listening. */
   connectOverCDP(endpointUrl: string): Promise<Browser>;
   /** Resolve a real chromium binary path, or null when none is installed. */
@@ -637,11 +711,13 @@ function requireEnv(env: NodeJS.ProcessEnv): EnvCheck {
 
 /**
  * True for the two attestation channels that need a live CDP page. The other
- * two are deliberately PAGELESS: `http-endpoint` reads the serve step's
+ * three are deliberately PAGELESS: `http-endpoint` reads the serve step's
  * injected marker route with a plain GET (no page, no navigation, no chromium
- * — it must work for an attach-mode deliverable too), and `window-identity` is
- * peekaboo-only by construction. Demanding a browser for those would make them
- * unrunnable on exactly the hosts they exist to serve.
+ * — it must work for an attach-mode deliverable too), `window-identity` is
+ * peekaboo-only by construction, and `bundle-identity` reads a file
+ * `mobile-install` already wrote. Demanding a browser for those would make them
+ * unrunnable on exactly the hosts they exist to serve — the mobile one most of
+ * all, since that modality has no CDP endpoint to demand.
  */
 function attestNeedsPage(command: AttestCommand): boolean {
   return command.channel === 'dom' || command.channel === 'cdp';
@@ -654,6 +730,13 @@ function isDriveCommand(command: DriverCommand): boolean {
     command.kind === 'click' ||
     command.kind === 'type' ||
     command.kind === 'screenshot'
+  );
+}
+
+/** True when this invocation targets the iOS Simulator family (including `attest bundle`). */
+function isMobileScopedCommand(command: DriverCommand): boolean {
+  return (
+    command.kind === 'mobile' || (command.kind === 'attest' && command.channel === 'bundle')
   );
 }
 
@@ -702,6 +785,29 @@ export async function runDriverCommand(
     deps.stderr(NATIVE_SCREEN_DRIVE_REFUSAL);
     deps.stderr('native-screen surface: "native-screenshot <name>" to observe, "attest window <titlePattern>" to attest.');
     return 1;
+  }
+
+  // MOBILE GUARD, both directions. A CDP command on a mobile request refuses
+  // with a pointer at the family that CAN act (the agent has a real drive path
+  // here, unlike native-screen); a mobile command anywhere else refuses because
+  // no simulator was leased for that request. Both fire before env validation
+  // for the same reason the native-screen guard does: the incidental error a
+  // mis-modality command would otherwise hit ("VERIFY_SIM_UDID is required")
+  // reads like a harness hiccup rather than the deliberate refusal it is.
+  if (env.VERIFY_MODALITY === 'mobile' && isDriveCommand(command)) {
+    deps.stderr(MOBILE_CDP_REFUSAL);
+    deps.stderr(
+      'mobile surface: "mobile-screenshot <name>" to observe, "mobile-tap"/"mobile-type"/"mobile-swipe"/"mobile-press"/"mobile-flow" to drive (when VERIFY_MOBILE_DRIVE=maestro), "mobile-openurl <url>" to navigate.',
+    );
+    return 1;
+  }
+  if (env.VERIFY_MODALITY !== 'mobile' && isMobileScopedCommand(command)) {
+    deps.stderr(MOBILE_WRONG_MODALITY_REFUSAL);
+    return 1;
+  }
+
+  if (command.kind === 'mobile') {
+    return runMobileCommand(command, env, deps);
   }
 
   // `serve` is PAGELESS and modality-agnostic: it starts the deliverable (a dev
@@ -840,7 +946,11 @@ async function launchAndConnect(port: number, artifactsDir: string, deps: Driver
 async function executeCommand(
   command: Exclude<
     DriverCommand,
-    { kind: 'stop' } | { kind: 'attest' } | { kind: 'native-screenshot' } | { kind: 'serve' }
+    | { kind: 'stop' }
+    | { kind: 'attest' }
+    | { kind: 'native-screenshot' }
+    | { kind: 'serve' }
+    | { kind: 'mobile' }
   >,
   page: Page,
   artifactsDir: string,
@@ -1014,7 +1124,7 @@ async function runAttestCommand(
   const kind = ATTEST_KIND_BY_CHANNEL[command.channel];
   let outcome: AttestOutcome;
   try {
-    outcome = await evaluateAttestation(command, env, deps, getPage);
+    outcome = await evaluateAttestation(command, env, deps, getPage, artifactsDir);
   } catch (err) {
     outcome = {
       ok: false,
@@ -1060,6 +1170,7 @@ async function evaluateAttestation(
   env: NodeJS.ProcessEnv,
   deps: DriverDeps,
   getPage: (() => Promise<Page>) | null,
+  artifactsDir: string,
 ): Promise<AttestOutcome> {
   switch (command.channel) {
     case 'http': {
@@ -1148,7 +1259,71 @@ async function evaluateAttestation(
         detail: `window-identity (weakest channel): matched window title "${truncateDetail(matched)}"`,
       };
     }
+    case 'bundle':
+      return evaluateBundleAttestation(artifactsDir, deps);
   }
+}
+
+/**
+ * `bundle-identity` — the only channel that PROBES NOTHING. It reads back the
+ * record `mobile-install` wrote and reports whether the two hashes in it agree.
+ *
+ * That is deliberate and it is why this channel is an ECHO rather than evidence.
+ * The comparison it reports was made at install time, by the one command that
+ * could make it: the staged product no longer exists in a form this process
+ * could re-hash independently once the app is running, and re-reading only the
+ * INSTALLED side would prove nothing at all. The authoritative check is the
+ * harness's own, run after the session ends against the live container — same
+ * division of labour as every other channel in this file (see the header on why
+ * `attest.json` is a self-check aid, not evidence). What this subcommand buys
+ * the agent is the ability to notice a failed install while there is still time
+ * to re-run `mobile-install`, instead of discovering it in the verdict.
+ */
+async function evaluateBundleAttestation(
+  artifactsDir: string,
+  deps: DriverDeps,
+): Promise<AttestOutcome> {
+  const recordPath = join(artifactsDir, MOBILE_INSTALL_RECORD_NAME);
+  let raw: string;
+  try {
+    raw = (await deps.readFileBytes(recordPath)).toString('utf8');
+  } catch {
+    return {
+      ok: false,
+      detail: `bundle-identity: no ${MOBILE_INSTALL_RECORD_NAME} in this request's artifacts — nothing has been installed yet (run "$VERIFY_DRIVER mobile-install" first)`,
+    };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, detail: `bundle-identity: ${MOBILE_INSTALL_RECORD_NAME} is not valid JSON` };
+  }
+  if (typeof parsed !== 'object' || parsed === null) {
+    return { ok: false, detail: `bundle-identity: ${MOBILE_INSTALL_RECORD_NAME} is not an object` };
+  }
+  const record = parsed as Partial<MobileInstallRecord>;
+  if (
+    typeof record.bundleId !== 'string' ||
+    typeof record.executable !== 'string' ||
+    typeof record.builtSha256 !== 'string' ||
+    typeof record.installedSha256 !== 'string'
+  ) {
+    return {
+      ok: false,
+      detail: `bundle-identity: ${MOBILE_INSTALL_RECORD_NAME} is missing one of bundleId/executable/builtSha256/installedSha256`,
+    };
+  }
+  if (record.builtSha256 !== record.installedSha256) {
+    return {
+      ok: false,
+      detail: `bundle-identity: ${record.executable} hashes ${record.builtSha256} under this request's DerivedData but ${record.installedSha256} inside the device container — the installed app is NOT the product staged here`,
+    };
+  }
+  return {
+    ok: true,
+    detail: `bundle-identity: ${record.bundleId} (${record.executable} sha256 ${record.builtSha256}) installed at ${record.installedPath ?? '(path not recorded)'} matches the product staged under this request's DerivedData`,
+  };
 }
 
 /**
@@ -1715,6 +1890,73 @@ async function defaultWriteAttestFile(path: string, record: DriverAttestRecord):
   await writeFile(path, JSON.stringify(record), 'utf8');
 }
 
+/**
+ * Spawn `bin` with an ARGV ARRAY and resolve its exit code plus both streams —
+ * the mobile family's one subprocess primitive.
+ *
+ * Unlike {@link defaultRunPeekaboo} it does NOT reject on a non-zero exit. The
+ * mobile commands quote a tool's own stderr in their refusal lines (`simctl
+ * install exited 1: …`), and a rejection would discard exactly that text; a
+ * non-zero exit is a FACT to report there, not an exception. Spawn errors and
+ * the timeout still reject, because those mean the command never ran.
+ *
+ * There is no shell anywhere on this path, so a bundle id, URL or tap target
+ * coming out of a task can never be word-split or interpolated into a command
+ * line.
+ */
+function defaultRunTool(
+  bin: string,
+  args: string[],
+  timeoutMs: number,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    const finish = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    const timer = setTimeout(() => {
+      finish(() => {
+        try {
+          child.kill('SIGKILL');
+        } catch {
+          /* already gone */
+        }
+        reject(new Error(`${bin} timed out after ${timeoutMs}ms`));
+      });
+    }, timeoutMs);
+    child.stdout?.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString();
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', (err: Error) => finish(() => reject(err)));
+    child.on('close', (code: number | null) => finish(() => resolve({ code: code ?? -1, stdout, stderr })));
+  });
+}
+
+/**
+ * `lstat`-based kind probe. `lstat`, never `stat`: the whole point at the
+ * `mobile-install` call site is to notice that the matched `.app` IS a symlink,
+ * which `stat` would silently follow and report as a directory.
+ */
+async function defaultPathKind(path: string): Promise<'file' | 'dir' | 'symlink' | null> {
+  try {
+    const st = await lstat(path);
+    if (st.isSymbolicLink()) return 'symlink';
+    if (st.isDirectory()) return 'dir';
+    return 'file';
+  } catch {
+    return null;
+  }
+}
+
 /** Builds the real DriverDeps used by driverCli.ts. Never used by tests. */
 export function createDefaultDriverDeps(): DriverDeps {
   return {
@@ -1748,6 +1990,23 @@ export function createDefaultDriverDeps(): DriverDeps {
     httpGet: defaultHttpGet,
     runPeekaboo: defaultRunPeekaboo,
     writeAttestFile: defaultWriteAttestFile,
+    // --- the MobileDeps half (see mobileCommands.ts) ---
+    runTool: defaultRunTool,
+    readDir: (path) => readdir(path),
+    pathKind: defaultPathKind,
+    realpath: (path) => realpath(path),
+    readFileBytes: (path) => readFile(path),
+    writeTextFile: async (path, contents) => {
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, contents, 'utf8');
+    },
+    copyFile: async (from, to) => {
+      await mkdir(dirname(to), { recursive: true });
+      await copyFile(from, to);
+    },
+    now: () => Date.now(),
+    sleep,
+    cwd: () => process.cwd(),
     stdout: (line) => {
       process.stdout.write(`${line}\n`);
     },

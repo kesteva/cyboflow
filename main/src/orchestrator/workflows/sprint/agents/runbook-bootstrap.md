@@ -96,7 +96,7 @@ a strict parser that rejects on the first structural problem:
 ```ts
 {
   version: 1,                      // the literal 1
-  modalities: {                    // ONLY these three keys exist
+  modalities: {                    // the three keys YOU may draft
     "web"?: ModalityEntry, "cdp-app"?: ModalityEntry, "native-screen"?: ModalityEntry,
   },
   levers?: { portEnv?: string, nonceEnv?: string, dataDirEnv?: string, cdpPortFlag?: string, notes?: string },
@@ -118,6 +118,17 @@ ModalityEntry = {
 Field names are literal: `serve.cmd` not `command`, `serve.readyWhen` not
 `readiness`, `attestation.kind` not `type`. There is **no `behaviors` field** — a
 runbook says how the project stands up, never what is being checked.
+
+**`mobile` is declarable, but not by you.** The runbook format has a fourth
+modality — an iOS app built with `xcodebuild` and run on a simulator, declared
+with an `app` block and a `bundle-identity` attestation instead of a `serve` —
+and this agent does not draft it. It needs a leased simulator, a private
+DerivedData path and a scheme/bundle-id survey no read-only pass over one lane
+can stand behind, so auto-derive does not support it: the eligibility layer
+declines a `mobile` candidate before you are ever deployed. If you were asked
+for `mobile` anyway, the honest answer is `not-possible` with exactly that
+reason — "mobile runbooks are not auto-derived; run the Verify Setup flow for
+this project" — not an improvised iOS entry.
 
 Host-specific values are **placeholders, never resolved values**: `${PORT}` for a
 leased web port, `$VERIFY_DRIVER_PORT` for a debugging port in attach mode,
@@ -165,8 +176,9 @@ from another worktree, or the developer's own running app.
 | `cdp-token` | `expression`, `expected` | `cdp-app` | `Runtime.evaluate(expression)` equals `expected` — a build-stamped global. The only channel that works in attach mode. |
 | `window-identity` | `titlePattern`, `app` | `native-screen` | The named application has an OS window whose title matches. The weakest channel; say so in `notes`. |
 | `file-identity` | *(none)* | a pre-live `htmlPath` only | Identity by construction — the runner wrote the file it opens. |
+| `bundle-identity` | `bundleId` | `mobile` | The installed app matches the product staged for this request. Not yours to draft — see `mobile` above. |
 
-You may not invent a sixth kind, and you may not name a route, selector, or global
+You may not invent a seventh kind, and you may not name a route, selector, or global
 that **does not already exist**. An attestation that points at something absent
 fails the proof in the most confusing possible way. If this project has nothing to
 attest with, the honest answers are: propose adding a `data-verify-build`
