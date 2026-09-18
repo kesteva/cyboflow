@@ -1,5 +1,10 @@
 # Release Runbook
 
+> **Claude Code agents:** don't drive a release from this document by hand — invoke the
+> `/release` skill (`.claude/skills/release/SKILL.md`), which is the executable checklist
+> for this runbook. This file is the authoritative procedure and rationale the skill
+> follows; other runtimes (Codex, OMP, pi) work from it directly.
+
 The end-to-end procedure for cutting a Cyboflow release: **gate → version bump +
 changelog → four signed macOS builds + two CI-built Windows installers → verify →
 publish to R2 (the in-app update channel) → push + GitHub release**. Every macOS
