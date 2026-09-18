@@ -35,9 +35,9 @@
  */
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, writeFile, chmod, access, readFile, rm } from 'node:fs/promises';
-import { readFileSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { mkdir, writeFile, chmod, access, readFile, realpath, rm } from 'node:fs/promises';
+import { createReadStream, readFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import type { LoggerLike } from '../types';
 import { emitSeamError } from '../telemetrySink';
@@ -51,6 +51,8 @@ import {
   type VerificationModality,
   type VerificationType,
   type AttestationSpec,
+  type MobileAppSpec,
+  DEFAULT_MOBILE_PRODUCT_GLOB,
   normalizeVerificationReportV1,
   resolveTaskModality,
 } from '../../../../shared/types/visualVerification';
@@ -95,7 +97,10 @@ import {
   performHarnessAttestation,
   type HarnessAttestationDeps,
   type HarnessAttestationResult,
+  type MobileAttestationContext,
 } from './harnessAttestation';
+import type { MobileSimulatorHandle, MobileSimulatorSessionFactory } from './mobileSimulatorSession';
+import type { XcodeToolchainBackend } from '../../services/visualVerify/xcodeToolchainBackend';
 
 const execFileAsync = promisify(execFile);
 
@@ -377,6 +382,63 @@ export interface VerificationAgentRunnerLike {
 // Injected deps
 // ---------------------------------------------------------------------------
 
+/**
+ * The §8 mobile tier's collaborators. The SESSION FACTORY owns the whole
+ * lifecycle of one request's simulator (create → boot → dispose); the TOOLCHAIN
+ * answers the two questions the env map turns on (is Maestro resolvable, and
+ * does this build of it accept a device pin) plus the preflight's own capability
+ * probe. Nothing here is constructed by the runner — a `simctl` spawn at module
+ * scope would break this file's Electron-free posture and its unit suite.
+ */
+export interface VerificationAgentRunnerMobileDeps {
+  session: MobileSimulatorSessionFactory;
+  /**
+   * `healthCheck` is threaded into preflight as the `'mobile-toolchain'` probe;
+   * `resolveMaestroBin`/`resolvePinFlag` decide `VERIFY_MOBILE_DRIVE` — and
+   * therefore whether a drive-required behavior can be anything but
+   * `not_testable`. All three come off ONE backend instance on purpose (§5.4):
+   * a gate that probed one Maestro while the driver shelled another is the exact
+   * 2026-08-05 peekaboo lesson this tier was told not to repeat.
+   */
+  toolchain: Pick<XcodeToolchainBackend, 'resolveMaestroBin' | 'resolvePinFlag' | 'healthCheck'>;
+  /** The cyboflow data dir this instance owns; `verify-mobile/<requestId>` is created under it. */
+  dataDir: string;
+  /** Optional device-type pin from config (`mobileSimDeviceType`). Absent ⇒ the newest compatible iPhone. */
+  deviceType?: string;
+  /** Optional runtime pin from config (`mobileSimRuntime`). Absent ⇒ the newest available iOS runtime. */
+  runtime?: string;
+  /** Bound on `simctl bootstatus`. Defaults to {@link DEFAULT_MOBILE_BOOT_TIMEOUT_MS}. */
+  bootTimeoutMs?: number;
+  /** Exported as `VERIFY_MOBILE_READY_TIMEOUT_MS`. Defaults to {@link DEFAULT_MOBILE_READY_TIMEOUT_MS}. */
+  readyTimeoutMs?: number;
+}
+
+/** §5.5 — how long `mobile-launch` may wait for a first stable, non-uniform frame. */
+export const DEFAULT_MOBILE_READY_TIMEOUT_MS = 90_000;
+
+/** §8 — how long `simctl bootstatus` may run before acquisition rolls itself back. */
+export const DEFAULT_MOBILE_BOOT_TIMEOUT_MS = 180_000;
+
+/**
+ * The detail on the synthetic `'mobile-simulator'` preflight row when this
+ * deployment never wired the mobile tier at all. Exported so the scheduler's
+ * tests and the health panel key on ONE string.
+ */
+export const MOBILE_SESSION_UNWIRED_DETAIL = 'no simulator session factory is wired on this host';
+
+/** The prefix on the synthetic row when `acquire()` itself threw. */
+export const MOBILE_ACQUIRE_FAILED_PREFIX = 'simulator acquisition failed: ';
+
+/**
+ * The detail when a `mobile` request arrived with no `app` block. The enqueue
+ * path and the runbook parser both require one, so this is unreachable in
+ * practice — but a silently unset `VERIFY_APP_BUNDLE_ID` would send the agent
+ * to a driver refusal ten minutes and one simulator boot later, and the honest
+ * answer is to refuse before spending either.
+ */
+export const MOBILE_NO_APP_BLOCK_DETAIL =
+  'the composed task declares no app block, so there is nothing to install, launch or attest';
+
 export interface VerificationAgentRunnerDeps {
   query: VerificationAgentQueryFn;
   /**
@@ -500,7 +562,14 @@ export interface VerificationAgentRunnerDeps {
    */
   attest?: (
     spec: AttestationSpec,
-    args: { verifyPort: number | null; driverPort: number; nonce: string },
+    args: {
+      verifyPort: number | null;
+      /** `null` for a `mobile` request — the scheduler leases it no ports at all. */
+      driverPort: number | null;
+      nonce: string;
+      /** The leased simulator's world; present only on the `mobile` path (the `bundle-identity` channel). */
+      mobile?: MobileAttestationContext;
+    },
   ) => Promise<HarnessAttestationResult>;
   /**
    * §7.1 SERVE-IDENTITY BINDING, probe 0 of 3: read the pid the driver's
@@ -584,6 +653,19 @@ export interface VerificationAgentRunnerDeps {
    * probe — the surface has to be alive to be proven.
    */
   reapServe?: (artifactsDir: string) => void;
+  /**
+   * THE MOBILE TIER'S WIRING, absent on every host that cannot run it and on
+   * every deployment that has not opted in. Absence is not a silent
+   * degradation: a `mobile` request that reaches a runner with no `mobile`
+   * deps returns a pre-deploy `skipped` carrying a synthetic
+   * `'mobile-simulator'` preflight check, so the §3.1 classifier answers
+   * `'env'` and the budget is never charged (see
+   * {@link VerificationAgentRunner.run}).
+   *
+   * The composition root owns the wiring; this module imports TYPES only, so it
+   * keeps its Electron-free / `simctl`-free posture at module scope.
+   */
+  mobile?: VerificationAgentRunnerMobileDeps;
   /**
    * Write the harness-captured transcript to `<artifactsDir>/<fileName>` (creating
    * the directory as needed). Injected so tests can assert the call without
@@ -686,6 +768,28 @@ ATTESTATION (the harness proves identity; you cannot):
 - You may echo what you saw in the report's optional "attestation" field
   ({ "verified": bool, "kind": "...", "detail": "..." }) — that is for humans reading
   the verdict; it is never treated as proof.
+
+MOBILE (VERIFY_MODALITY "mobile") — an iOS Simulator leased for this request alone:
+- NO port, no VERIFY_PORT, nothing to serve; goto/click/type/screenshot are refused.
+  The device is already created and booted (VERIFY_SIM_UDID / _NAME / _RUNTIME).
+- Build with the task's build steps into VERIFY_DERIVED_DATA — this request's private
+  DerivedData, and the only place a product may be staged. Then, in order:
+    "$VERIFY_DRIVER" mobile-install   # exactly one .app under VERIFY_APP_PRODUCT_GLOB,
+                                      # confined to DerivedData, bundle id must equal
+                                      # VERIFY_APP_BUNDLE_ID; refuses loudly otherwise
+    "$VERIFY_DRIVER" mobile-launch    # launches it and WAITS for the first stable,
+                                      # non-blank frame
+- mobile-launch OWNS readiness: do not sleep, do not invent a poll. Exit 3 is a
+  readiness timeout (bounded by VERIFY_MOBILE_READY_TIMEOUT_MS) — report EVERY behavior
+  "not_testable" and say readiness-timeout, NEVER a fail. "The app did not render" is
+  not evidence that it rendered the wrong thing.
+- Observe with "$VERIFY_DRIVER" mobile-screenshot <name>. "$VERIFY_DRIVER" mobile-openurl
+  <url> is NAVIGATION, not driving — available on both arms below.
+- DRIVING is keyed on VERIFY_MOBILE_DRIVE. "maestro": mobile-tap / mobile-type /
+  mobile-swipe / mobile-press / mobile-flow <yaml>. "none": every drive command is
+  refused, so a behavior you cannot exercise without driving MUST be "not_testable".
+- Attestation ("bundle-identity") is harness-owned here too: it re-hashes the installed
+  app itself after your session. Install THROUGH the driver or there is nothing to attest.
 
 NATIVE-SCREEN IS OBSERVE-ONLY:
 - When VERIFY_MODALITY is "native-screen" the goto/click/type/screenshot commands are
@@ -877,8 +981,16 @@ const MODALITY_DERIVATION_TYPE: VerificationType = 'interactive-web-behavior';
  * either direction would hide a composer bug (a `cdp-app` task composed with
  * no `attach: 'cdp'` serve drives the wrong surface; a `web` declaration on an
  * attach task launches a blank chromium). A declared `native-screen`/`mobile`
- * NEVER logs a mismatch — those are structurally underivable from a task, so
- * the "disagreement" carries no information.
+ * NEVER logs a mismatch, and the two reasons now DIFFER — the carve-out is kept
+ * deliberately rather than by oversight:
+ *
+ *  - `native-screen` remains structurally underivable from a task shape, so a
+ *    "disagreement" there carries no information at all.
+ *  - `mobile` IS derivable now (`resolveTaskModality` reads `task.app.platform`),
+ *    but the one shape that would log — a scheduler-declared `mobile` on a task
+ *    with no `app` block — is already refused in `run()` with a named
+ *    `'mobile-simulator'` check before a device is created. Logging it here as
+ *    well would file the same defect twice, in the weaker of the two places.
  */
 export function resolveRequestModality(
   req: Pick<VerificationAgentRequest, 'modality' | 'task'>,
@@ -910,11 +1022,21 @@ export function resolveRequestModality(
 export const RUNBOOK_MISMATCH_PREFIX = 'runbook/sha mismatch';
 
 /**
- * The three fields of a runbook modality entry that decide HOW the deliverable
- * is stood up and how its identity is proven — i.e. everything the runner would
+ * The four fields of a runbook modality entry that decide HOW the deliverable is
+ * stood up and how its identity is proven — i.e. everything the runner would
  * actually EXECUTE. Compared structurally (not by reference or key order) via
  * the same canonicalizer the portable hash is built on, so a re-serialized or
  * re-ordered runbook compares equal while any semantic change does not.
+ *
+ * `app` IS EXECUTION (B5), which is why it joined `build`/`serve`/`attestation`
+ * here rather than being read as metadata. On the mobile tier `app` is what
+ * `serve` is everywhere else: `bundleId` decides what gets installed, launched
+ * and attested, `productGlob` decides which staged bundle is hashed, and
+ * `scheme`/`platform` decide what the build was even supposed to produce. A pin
+ * blind to it would let a runbook silently re-point the request at a different
+ * product between enqueue and deploy — the exact hybrid-of-two-revisions verdict
+ * the pin exists to refuse. Every non-mobile entry carries `app: null` on BOTH
+ * sides, so nothing about the web fingerprints changes.
  *
  * `viewports`/`notes` are deliberately outside the comparison: they are capture
  * framing and human prose, not execution. Widening a pin to reject on them
@@ -924,11 +1046,13 @@ export const RUNBOOK_MISMATCH_PREFIX = 'runbook/sha mismatch';
 function executableFingerprint(source: {
   build?: string[];
   serve?: { cmd: string; attach?: 'cdp'; readyWhen?: { urlPath?: string; timeoutMs?: number } };
+  app?: MobileAppSpec;
   attestation?: AttestationSpec;
 }): string {
   return canonicalJsonStringify({
     build: source.build ?? null,
     serve: source.serve ?? null,
+    app: source.app ?? null,
     attestation: source.attestation ?? null,
   });
 }
@@ -1020,7 +1144,7 @@ export function checkRunbookPin(
   if (expected !== actual) {
     return {
       ok: false,
-      detail: `the composed task's build/serve/attestation do not match pinned runbook ${hash.slice(0, 12)} (record v${record.version}, status "${record.status}") — expected ${expected}, task carries ${actual}`,
+      detail: `the composed task's build/serve/app/attestation do not match pinned runbook ${hash.slice(0, 12)} (record v${record.version}, status "${record.status}") — expected ${expected}, task carries ${actual}`,
     };
   }
   if (expectations.setupProof) {
@@ -1415,13 +1539,21 @@ export function evaluateAttestationFloor(
 }
 
 /**
- * §4 fn.² coercion: on `native-screen` — which is observe-only until a native
- * drive API exists — every behavior the TASK marked `requiresDrive` must land
- * as `not_testable`, whatever the agent claimed. The agent is told this in the
- * harness contract, but the harness must not DEPEND on it: a model that
- * "passed" a click-through it could not possibly have performed is exactly the
- * fabricated evidence this whole path exists to prevent, and a driver refusal
- * it papered over is invisible in a screenshot.
+ * §4 fn.² coercion: when the deliverable's surface CANNOT be driven, every
+ * behavior the TASK marked `requiresDrive` must land as `not_testable`,
+ * whatever the agent claimed. The agent is told this in the harness contract,
+ * but the harness must not DEPEND on it: a model that "passed" a click-through
+ * it could not possibly have performed is exactly the fabricated evidence this
+ * whole path exists to prevent, and a driver refusal it papered over is
+ * invisible in a screenshot.
+ *
+ * WHO IS UNDRIVABLE IS NO LONGER A PROPERTY OF THE MODALITY ALONE. It was, while
+ * `native-screen` was the only observe-only tier; `mobile` is the case that
+ * broke the equivalence, because its drive rung is PROBED (§5.4) — Maestro
+ * present with a device-pin flag means every behavior is drivable, and Maestro
+ * absent means none are. So the decision moved into a parameter the caller
+ * computes from the live probe, defaulted to the old rule so every existing call
+ * site (and every existing test) keeps its exact former behavior.
  *
  * Deliberately does NOT re-derive `report.outcome`. Coercion only ever removes
  * a claim; letting it turn an agent-reported `fail` back into a `pass` would
@@ -1435,8 +1567,9 @@ export function coerceDriveUnsupportedBehaviors(
   report: VerificationReportV1,
   task: VerificationTaskV1,
   modality: VerificationModality,
+  driveUnsupported: boolean = modality === 'native-screen',
 ): { report: VerificationReportV1; coerced: number } {
-  if (modality !== 'native-screen') return { report, coerced: 0 };
+  if (!driveUnsupported) return { report, coerced: 0 };
   const driveIds = new Set(task.behaviors.filter((b) => b.requiresDrive === true).map((b) => b.id));
   if (driveIds.size === 0) return { report, coerced: 0 };
 
@@ -1641,6 +1774,38 @@ const buildHarnessAttestationDeps = (
       extractWindowTitles(
         await driver.runPeekaboo(peekabooBin, peekabooListWindowsArgs(app), PEEKABOO_TIMEOUT_MS),
       ),
+    // The `bundle-identity` probes. `sha256File` streams rather than slurping:
+    // an iOS Mach-O is routinely 100 MB+, and the harness has no reason to hold
+    // one in memory to hash it.
+    readTextFile: (absPath) => readFile(absPath, 'utf8'),
+    realpath: (absPath) => realpath(absPath),
+    sha256File: (absPath) =>
+      new Promise<string>((resolve, reject) => {
+        const hash = createHash('sha256');
+        const stream = createReadStream(absPath);
+        stream.on('error', reject);
+        stream.on('data', (chunk) => hash.update(chunk));
+        stream.on('end', () => resolve(hash.digest('hex')));
+      }),
+    exec: async (command, args, timeoutMs) => {
+      try {
+        const { stdout, stderr } = await execFileAsync(command, [...args], {
+          timeout: timeoutMs,
+          windowsHide: true,
+          maxBuffer: 1024 * 1024,
+        });
+        return { code: 0, stdout, stderr };
+      } catch (err) {
+        // A NON-ZERO exit resolves rather than rejects: "no container for that
+        // bundle id" is evidence the arm must read, not a broken probe.
+        const e = err as { code?: number | string; stdout?: string; stderr?: string; message?: string };
+        return {
+          code: typeof e.code === 'number' ? e.code : 1,
+          stdout: e.stdout ?? '',
+          stderr: e.stderr ?? e.message ?? '',
+        };
+      }
+    },
     ...(logger ? { logger } : {}),
   };
 };
@@ -1978,6 +2143,75 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
   }
 
   /**
+   * The §10 SYNTHETIC `'mobile-simulator'` row. Preflight is allocation-free by
+   * design (B2), so it never emits this id itself — but a simulator that could
+   * not be acquired is exactly the harness-derived, host-shaped evidence the
+   * §3.1 classifier needs to answer `'env'` (an ADVANCING skip that charges the
+   * lane no attempt), and the classifier reads `preflight.checks` generically.
+   * Appending the row is therefore how acquisition failure reaches the right
+   * class with no classifier change at all.
+   */
+  private static withMobileSimulatorFailure(
+    preflight: AgentPreflightResult,
+    detail: string,
+  ): AgentPreflightResult {
+    return {
+      ok: false,
+      checks: [...preflight.checks, { id: 'mobile-simulator', ok: false, detail }],
+    };
+  }
+
+  /**
+   * The §5.1/§5.4 MOBILE ENVIRONMENT — the eight-or-nine names that exist for a
+   * `mobile` request and for no other modality.
+   *
+   * `VERIFY_MOBILE_DRIVE` is the load-bearing one: it is `'maestro'` only when a
+   * Maestro binary resolved AND that build's own `--help` named a device-pin
+   * flag, because an unpinned `maestro test` lands on whichever simulator
+   * happens to be booted — which, with a developer's own device open, is the
+   * silent mis-targeting §5.4 refuses to ship. Anything less than both facts is
+   * `'none'`, and `'none'` is what makes every `requiresDrive` behavior coerce
+   * to `not_testable` downstream.
+   *
+   * Both toolchain calls are caught rather than allowed to propagate: a probe
+   * that cannot answer must degrade the drive rung, never fail the request. The
+   * observe-only arm is a real, useful verification.
+   */
+  private async buildMobileEnv(
+    app: MobileAppSpec,
+    mobile: VerificationAgentRunnerMobileDeps,
+    handle: MobileSimulatorHandle,
+    logger: LoggerLike | undefined,
+  ): Promise<Record<string, string>> {
+    let maestroBin: string | null = null;
+    try {
+      const bin = await mobile.toolchain.resolveMaestroBin();
+      maestroBin = bin !== null && (await mobile.toolchain.resolvePinFlag(bin)) !== null ? bin : null;
+      if (bin !== null && maestroBin === null) {
+        logger?.info('[VerificationAgentRunner] maestro resolved but names no device-pin flag; observe-only', {
+          maestro: bin,
+        });
+      }
+    } catch (err) {
+      logger?.info('[VerificationAgentRunner] maestro probe failed; mobile runs observe-only', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      maestroBin = null;
+    }
+    return {
+      VERIFY_SIM_UDID: handle.udid,
+      VERIFY_SIM_NAME: handle.name,
+      VERIFY_SIM_RUNTIME: handle.runtimeName,
+      VERIFY_DERIVED_DATA: handle.derivedDataDir,
+      VERIFY_APP_BUNDLE_ID: app.bundleId,
+      VERIFY_APP_PRODUCT_GLOB: app.productGlob ?? DEFAULT_MOBILE_PRODUCT_GLOB,
+      VERIFY_MOBILE_DRIVE: maestroBin === null ? 'none' : 'maestro',
+      ...(maestroBin === null ? {} : { VERIFY_MAESTRO_BIN: maestroBin }),
+      VERIFY_MOBILE_READY_TIMEOUT_MS: String(mobile.readyTimeoutMs ?? DEFAULT_MOBILE_READY_TIMEOUT_MS),
+    };
+  }
+
+  /**
    * §7.1 serve-identity binding for ONE request: resolve whether it applies
    * ({@link serveBindingTarget}) and, when it does, run
    * {@link checkServeIdentityBinding} against the injected probes. Returns
@@ -2117,6 +2351,7 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
     modality: VerificationModality,
   ): Promise<AgentPreflightResult> {
     const nativeCaptureProbe = this.deps.nativeCaptureProbe;
+    const mobile = this.deps.mobile;
     return runAgentPreflight(
       {
         resolveNode: this.deps.resolveNode,
@@ -2127,16 +2362,20 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         // 'native-capture' check does not run at all (see the dep's doc), so
         // no default may be substituted here.
         ...(nativeCaptureProbe ? { nativeCaptureProbe } : {}),
+        // Same rule for the mobile capability probe, and the SAME backend the
+        // env map's Maestro resolution reads — one instance answers "can this
+        // host do mobile" and "is there a drive rung", so the two can never
+        // disagree about which toolchain was measured.
+        ...(mobile ? { mobileToolchainProbe: (): Promise<boolean> => mobile.toolchain.healthCheck() } : {}),
         prepareDataDir: this.deps.prepareDataDir ?? defaultPrepareDataDir,
       },
       {
         task: req.task,
         driverCliPath: this.deps.driverCliPath,
-        // `runAgentPreflight.leasedPort` is still `number`: it is read ONLY by
-        // the `port-free` check, which a portless (mobile) request cannot reach
-        // — that check is gated on `task.serve`, and a mobile task declares an
-        // `app` block and no serve. The 0 is therefore never probed.
-        leasedPort: req.verifyPort ?? (req.verifyDriverPort === null ? 0 : req.verifyDriverPort - 1),
+        // `null` when the scheduler leased no port pair at all (mobile): there
+        // is no slot to recover, and preflight skips the 'port-free' check
+        // rather than probing an invented number.
+        leasedPort: req.verifyPort ?? (req.verifyDriverPort === null ? null : req.verifyDriverPort - 1),
         driverPort: req.verifyDriverPort,
         modality,
         dataDir: verifyDataDirPath(req.artifactsDir, req.requestId),
@@ -2296,6 +2535,15 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
     let snapshot: SnapshotProvision | null = null;
     let driverScriptPath: string | null = null;
     let env: Record<string, string> | null = null;
+    // §8 — the leased simulator, hoisted so the `finally` can dispose it on
+    // EVERY exit path from the try, including a throw and an abort. It is
+    // acquired INSIDE that try (see the acquisition block), never in preflight:
+    // preflight runs before pin validation, provider resolution and several
+    // early returns, and a device acquired there leaks on every one of them (B2).
+    let mobileHandle: MobileSimulatorHandle | null = null;
+    // `'maestro' | 'none'` once a mobile request has resolved its drive rung;
+    // `null` on every other modality. Read once, at coercion time.
+    let mobileDrive: 'maestro' | 'none' | null = null;
     // §7.1: the per-REQUEST identity secret. Minted HERE, before the env is
     // built, because two consumers need the same value: the agent's environment
     // (so its serve step can inject it into the deliverable) and the HARNESS's
@@ -2373,6 +2621,88 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       // and the var can never expand to a path an app would fall back from
       // into the developer's own real state directory.
       const dataDir = verifyDataDirPath(req.artifactsDir, req.requestId);
+
+      // (b1) §8 SIMULATOR ACQUISITION — the last thing before the env is built
+      // and the query deployed, and deliberately INSIDE this try. Everything
+      // that can cheaply refuse this request (the host preflight, the runbook
+      // pin, agent resolution, provider dispatch) has already refused it, so
+      // this is the first moment a 2 GB device boot is not speculative; and
+      // from here every exit runs the `finally`, which disposes it.
+      //
+      // NEITHER FAILURE BELOW IS A FAIL, AND NEITHER IS DEPLOYED. An unwired
+      // tier and a device that would not boot are both facts about this HOST,
+      // so each returns `deployed:false` (no budget charged, §3.6) carrying a
+      // synthetic `'mobile-simulator'` preflight row — which is what makes the
+      // §3.1 classifier answer `'env'` without a classifier change.
+      let mobileEnv: Record<string, string> = {};
+      if (modality === 'mobile') {
+        const mobile = this.deps.mobile;
+        if (!mobile) {
+          logger?.warn('[VerificationAgentRunner] mobile request on a runner with no simulator wiring', {
+            runId: req.runId,
+            requestId: req.requestId,
+          });
+          return {
+            status: 'skipped',
+            deployed: false,
+            preflight: VerificationAgentRunner.withMobileSimulatorFailure(
+              preflight,
+              MOBILE_SESSION_UNWIRED_DETAIL,
+            ),
+            provisionMode: mode,
+            errorMessage: MOBILE_SESSION_UNWIRED_DETAIL,
+            fileNames: [],
+          };
+        }
+        const app = req.task.app;
+        if (app === undefined) {
+          logger?.warn('[VerificationAgentRunner] mobile request composed without an app block', {
+            runId: req.runId,
+            requestId: req.requestId,
+          });
+          return {
+            status: 'skipped',
+            deployed: false,
+            preflight: VerificationAgentRunner.withMobileSimulatorFailure(
+              preflight,
+              MOBILE_NO_APP_BLOCK_DETAIL,
+            ),
+            provisionMode: mode,
+            errorMessage: MOBILE_NO_APP_BLOCK_DETAIL,
+            fileNames: [],
+          };
+        }
+        try {
+          mobileHandle = await mobile.session.acquire({
+            requestId: req.requestId,
+            dataDir: mobile.dataDir,
+            ...(mobile.deviceType !== undefined ? { deviceType: mobile.deviceType } : {}),
+            ...(mobile.runtime !== undefined ? { runtime: mobile.runtime } : {}),
+            bootTimeoutMs: mobile.bootTimeoutMs ?? DEFAULT_MOBILE_BOOT_TIMEOUT_MS,
+          });
+        } catch (err) {
+          // `acquire()` rolls its OWN partial state back (it deletes the device
+          // and the request dir before it throws), so there is nothing to
+          // dispose here and `mobileHandle` is still null for the `finally`.
+          const detail = `${MOBILE_ACQUIRE_FAILED_PREFIX}${err instanceof Error ? err.message : String(err)}`;
+          logger?.warn('[VerificationAgentRunner] simulator acquisition failed; skipping without deploy', {
+            runId: req.runId,
+            requestId: req.requestId,
+            detail,
+          });
+          return {
+            status: 'skipped',
+            deployed: false,
+            preflight: VerificationAgentRunner.withMobileSimulatorFailure(preflight, detail),
+            provisionMode: mode,
+            errorMessage: detail,
+            fileNames: [],
+          };
+        }
+        mobileEnv = await this.buildMobileEnv(app, mobile, mobileHandle, logger);
+        mobileDrive = mobileEnv.VERIFY_MOBILE_DRIVE === 'maestro' ? 'maestro' : 'none';
+      }
+
       env = {
         VERIFY_ARTIFACTS_DIR: req.artifactsDir,
         // The login-shell PATH, not the GUI one a packaged app inherits, with
@@ -2406,6 +2736,9 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         // driver must ATTACH and never launch its own chromium (a blank chromium
         // there would screenshot the wrong surface). driverCore honors this flag.
         ...(req.task.serve?.attach === 'cdp' ? { VERIFY_DRIVER_ATTACH_ONLY: '1' } : {}),
+        // Empty on every non-mobile modality, so none of the VERIFY_SIM_* /
+        // VERIFY_APP_* / VERIFY_MOBILE_* names exist there at all.
+        ...mobileEnv,
       };
 
       // The runbook's declared levers, bound to this request's leased values and
@@ -2425,6 +2758,8 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         port: req.verifyPort !== null ? String(req.verifyPort) : null,
         nonce: attestNonce,
         dataDir,
+        simUdid: mobileHandle?.udid ?? null,
+        derivedData: mobileHandle?.derivedDataDir ?? null,
       });
       if (leverEnv.dropped.length > 0) {
         logger?.warn('[VerificationAgentRunner] runbook lever(s) not exported', {
@@ -2588,7 +2923,16 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
       // mutation demotion, the not_testable→low_confidence rule) sees the same
       // honest behavior set. A claimed pass/fail on a behavior the driver would
       // have REFUSED to drive is not evidence of anything.
-      const { report, coerced } = coerceDriveUnsupportedBehaviors(normalized.report, req.task, modality);
+      // `native-screen` is undrivable by construction; `mobile` is undrivable
+      // only when this host's Maestro probe came back empty, which is a fact
+      // resolved live a few dozen lines above rather than implied by the
+      // modality (see `coerceDriveUnsupportedBehaviors`).
+      const { report, coerced } = coerceDriveUnsupportedBehaviors(
+        normalized.report,
+        req.task,
+        modality,
+        modality === 'native-screen' || (modality === 'mobile' && mobileDrive === 'none'),
+      );
       if (coerced > 0) {
         logger?.info('[VerificationAgentRunner] coerced drive-required behaviors to not_testable', {
           runId: req.runId,
@@ -2658,11 +3002,24 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
             try {
               probe = await attest(spec, {
                 verifyPort: req.verifyPort,
-                // The attestation seam still types `driverPort: number`; the
-                // only kinds that READ it are CDP-mediated, which a portless
-                // (mobile) request never declares.
-                driverPort: req.verifyDriverPort ?? 0,
+                // Nullable now, and passed through rather than coerced to 0: a
+                // portless (mobile) request has no DevTools endpoint, and the
+                // two CDP-mediated kinds say so plainly instead of dialling a
+                // port number nobody leased.
+                driverPort: req.verifyDriverPort,
                 nonce: attestNonce,
+                // The `bundle-identity` channel's whole world — the record the
+                // driver wrote, the DerivedData root the staged product must
+                // resolve under, and the device to read the container out of.
+                ...(mobileHandle
+                  ? {
+                      mobile: {
+                        artifactsDir: req.artifactsDir,
+                        derivedDataDir: mobileHandle.derivedDataDir,
+                        simUdid: mobileHandle.udid,
+                      },
+                    }
+                  : {}),
               });
             } catch (err) {
               // performHarnessAttestation never throws by contract; this catch is
@@ -2783,6 +3140,23 @@ export class VerificationAgentRunner implements VerificationAgentRunnerLike {
         reapServe(req.artifactsDir);
       } catch {
         // best-effort
+      }
+      // §8.1 — the simulator goes LAST among the mobile steps and still BEFORE
+      // `snapshot.dispose()`, which is this block's unwrapped final statement:
+      // anything appended after it is skipped when it throws. The handle's own
+      // dispose already catches terminate/shutdown/delete/rm independently, so
+      // one `simctl` that hangs cannot mask the next; this outer catch is the
+      // guarantee that none of them can mask the snapshot either.
+      if (mobileHandle) {
+        try {
+          await mobileHandle.dispose();
+        } catch (err) {
+          logger?.warn('[VerificationAgentRunner] simulator dispose threw (ignored)', {
+            runId: req.runId,
+            requestId: req.requestId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
       if (snapshot) {
         await snapshot.dispose();

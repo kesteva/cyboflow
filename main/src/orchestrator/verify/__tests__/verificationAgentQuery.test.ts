@@ -39,7 +39,9 @@ import {
   createTranscriptAccumulator,
   makeDependencyCommandCanUseTool,
   makeVerificationAgentQuery,
+  VERIFICATION_REPORT_JSON_SCHEMA,
 } from '../verificationAgentQuery';
+import { ATTESTATION_KINDS } from '../../../../../shared/types/visualVerification';
 
 let lastOptions: Record<string, unknown> | undefined;
 
@@ -344,5 +346,30 @@ describe('makeVerificationAgentQuery — the harness env reaches the deployed se
       else process.env.PATH = previousPath;
       delete process.env.CYBOFLOW_QUERY_ENV_PROBE;
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The structured-output schema's attestation echo (B5)
+// ---------------------------------------------------------------------------
+
+describe('VERIFICATION_REPORT_JSON_SCHEMA — the attestation kind enum', () => {
+  /** Walk to `properties.attestation.properties.kind.enum` without an `any` in sight. */
+  function attestationKindEnum(): string[] {
+    const asRecord = (v: unknown): Record<string, unknown> => v as Record<string, unknown>;
+    const props = asRecord(asRecord(VERIFICATION_REPORT_JSON_SCHEMA).properties);
+    const kind = asRecord(asRecord(asRecord(props.attestation).properties).kind);
+    return kind.enum as string[];
+  }
+
+  it('accepts bundle-identity — the mobile tier\'s channel', () => {
+    expect(attestationKindEnum()).toContain('bundle-identity');
+  });
+
+  // The echo is never load-bearing, but a kind the schema rejects is dropped at
+  // the SDK boundary: a mobile agent reporting honestly would have its whole
+  // structured output refused for naming the only channel it can run.
+  it('mirrors the closed AttestationSpec union exactly, in both directions', () => {
+    expect([...attestationKindEnum()].sort()).toEqual([...ATTESTATION_KINDS].sort());
   });
 });

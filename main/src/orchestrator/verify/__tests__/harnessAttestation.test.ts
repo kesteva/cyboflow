@@ -20,7 +20,10 @@ import {
   performHarnessAttestation,
   HARNESS_ATTEST_ATTEMPTS,
   HARNESS_ATTEST_RETRY_DELAY_MS,
+  BUNDLE_IDENTITY_RESIDUAL,
+  MOBILE_INSTALL_RECORD_FILE,
   type HarnessAttestationDeps,
+  type MobileAttestationContext,
 } from '../harnessAttestation';
 import type { AttestationSpec } from '../../../../../shared/types/visualVerification';
 
@@ -316,5 +319,261 @@ describe('performHarnessAttestation — probe failures', () => {
     await expect(run({ kind: 'http-endpoint', urlPath: '/x' }, probes)).resolves.toMatchObject({
       verified: false,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// §9 bundle-identity — the mobile channel. The harness re-derives what it can
+// and treats the driver's own record as a CLAIM, so a forged record can only
+// make this probe FAIL.
+// ---------------------------------------------------------------------------
+
+const SIM_UDID = 'B1C0FFEE-0000-4000-8000-0123456789AB';
+const DERIVED = '/data/verify-mobile/vr-1/DerivedData';
+const BUILT = `${DERIVED}/Build/Products/Debug-iphonesimulator/Acme.app`;
+const INSTALLED = '/sim/data/Containers/Bundle/Application/ABC/Acme.app';
+const SHA = 'a'.repeat(64);
+const SPEC = { kind: 'bundle-identity', bundleId: 'com.acme.ios' } as const;
+
+interface InstallRecordOverrides {
+  builtPath?: string;
+  installedPath?: string;
+  builtSha256?: string;
+  installedSha256?: string;
+  bundleId?: string;
+  executable?: string;
+}
+
+function installRecord(overrides: InstallRecordOverrides = {}): string {
+  return JSON.stringify({
+    builtPath: BUILT,
+    installedPath: INSTALLED,
+    builtSha256: SHA,
+    installedSha256: SHA,
+    bundleId: 'com.acme.ios',
+    executable: 'Acme',
+    installedAt: '2026-09-17T00:00:00.000Z',
+    ...overrides,
+  });
+}
+
+interface MobileAnswers {
+  /** What the record file read answers; a rejection means "no record on disk". */
+  readTextFile?: (absPath: string) => Promise<string>;
+  realpath?: (absPath: string) => Promise<string>;
+  sha256File?: (absPath: string) => Promise<string>;
+  exec?: (
+    command: string,
+    args: readonly string[],
+    timeoutMs: number,
+  ) => Promise<{ code: number | null; stdout: string; stderr: string }>;
+}
+
+/** The happy-path mobile probes, each overridable one at a time. */
+function makeMobileProbes(answers: MobileAnswers = {}): Probes & {
+  readTextFile: ReturnType<typeof vi.fn>;
+  sha256File: ReturnType<typeof vi.fn>;
+  exec: ReturnType<typeof vi.fn>;
+} {
+  const base = makeProbes();
+  const readTextFile = vi.fn(answers.readTextFile ?? (async (): Promise<string> => installRecord()));
+  const realpath = vi.fn(answers.realpath ?? (async (p: string): Promise<string> => p));
+  const sha256File = vi.fn(answers.sha256File ?? (async (): Promise<string> => SHA));
+  const exec = vi.fn(
+    answers.exec ??
+      (async (): Promise<{ code: number | null; stdout: string; stderr: string }> => ({
+        code: 0,
+        stdout: `${INSTALLED}\n`,
+        stderr: '',
+      })),
+  );
+  const deps: HarnessAttestationDeps = { ...base.deps, readTextFile, realpath, sha256File, exec };
+  return { ...base, deps, readTextFile, sha256File, exec };
+}
+
+const MOBILE_CTX: MobileAttestationContext = {
+  artifactsDir: '/artifacts/run-1',
+  derivedDataDir: DERIVED,
+  simUdid: SIM_UDID,
+};
+
+// `null` (not `undefined`) is the no-context spelling: passing `undefined`
+// explicitly would re-trigger the default and silently test the happy path.
+function runBundle(probes: Probes, mobile: MobileAttestationContext | null = MOBILE_CTX) {
+  return performHarnessAttestation(SPEC, {
+    verifyPort: null,
+    driverPort: null,
+    nonce: NONCE,
+    ...(mobile ? { mobile } : {}),
+    deps: probes.deps,
+  });
+}
+
+describe('performHarnessAttestation — bundle-identity', () => {
+  it('verifies when staged, recorded and RE-HASHED live all agree', async () => {
+    const probes = makeMobileProbes();
+    const result = await runBundle(probes);
+
+    expect(result).toMatchObject({ verified: true, kind: 'bundle-identity' });
+    // The record is READ from the artifacts dir, and the container is ASKED for
+    // rather than taken from the record's own `installedPath`.
+    expect(probes.readTextFile).toHaveBeenCalledWith(`/artifacts/run-1/${MOBILE_INSTALL_RECORD_FILE}`);
+    expect(probes.exec).toHaveBeenCalledWith(
+      'xcrun',
+      ['simctl', 'get_app_container', SIM_UDID, 'com.acme.ios', 'app'],
+      expect.any(Number),
+    );
+    // The live hash is taken of the CONTAINER's executable, never the staged one.
+    expect(probes.sha256File).toHaveBeenCalledWith(`${INSTALLED}/Acme`);
+  });
+
+  it('records both paths, both hashes and the two-part residual on the verdict', async () => {
+    const result = await runBundle(makeMobileProbes());
+    expect(result.detail).toContain(BUILT);
+    expect(result.detail).toContain(INSTALLED);
+    expect(result.detail).toContain(SHA);
+    expect(result.detail).toContain(BUNDLE_IDENTITY_RESIDUAL);
+  });
+
+  it('does not verify when mobile-install never ran (no record on disk)', async () => {
+    const probes = makeMobileProbes({
+      readTextFile: async (): Promise<string> => {
+        throw new Error('ENOENT');
+      },
+    });
+    const result = await runBundle(probes);
+    expect(result.verified).toBe(false);
+    expect(result.detail).toContain('nothing was installed through the driver');
+    expect(probes.exec).not.toHaveBeenCalled();
+  });
+
+  it('treats an unparseable / wrong-shaped record the same as no record', async () => {
+    for (const body of ['not json at all', '{"builtPath":"/x"}']) {
+      const result = await runBundle(makeMobileProbes({ readTextFile: async (): Promise<string> => body }));
+      expect(result.verified).toBe(false);
+      expect(result.detail).toContain('nothing was installed through the driver');
+    }
+  });
+
+  // The escape this closes: a prebuilt bundle staged OUTSIDE the request dir,
+  // reached through a symlink, would otherwise hash consistently on both sides.
+  it('does not verify a staged product whose realpath escapes DerivedData', async () => {
+    const probes = makeMobileProbes({
+      realpath: async (p: string): Promise<string> =>
+        p === BUILT ? '/Users/dev/prebuilt/Acme.app' : p,
+    });
+    const result = await runBundle(probes);
+    expect(result.verified).toBe(false);
+    expect(result.detail).toContain('escapes');
+    expect(probes.exec).not.toHaveBeenCalled();
+  });
+
+  it('does not verify when the staged product is gone', async () => {
+    const result = await runBundle(
+      makeMobileProbes({
+        realpath: async (p: string): Promise<string> => {
+          if (p === BUILT) throw new Error('ENOENT');
+          return p;
+        },
+      }),
+    );
+    expect(result.verified).toBe(false);
+    expect(result.detail).toContain('is gone');
+  });
+
+  // The recorded `installedSha256` is never TRUSTED — it is cross-checked, and
+  // the live re-hash is what decides.
+  it('does not verify when the live installed hash differs from the recorded one', async () => {
+    const result = await runBundle(makeMobileProbes({ sha256File: async (): Promise<string> => 'b'.repeat(64) }));
+    expect(result.verified).toBe(false);
+    expect(result.detail).toContain('NOT the product staged for this request');
+    expect(result.detail).toContain('b'.repeat(64));
+  });
+
+  it("does not verify when the driver's own two recorded hashes disagree", async () => {
+    const result = await runBundle(
+      makeMobileProbes({ readTextFile: async (): Promise<string> => installRecord({ installedSha256: 'c'.repeat(64) }) }),
+    );
+    expect(result.verified).toBe(false);
+    expect(result.detail).toContain('disagrees with itself');
+  });
+
+  it('does not verify when the installed bundle id is not the declared one', async () => {
+    const probes = makeMobileProbes({
+      readTextFile: async (): Promise<string> => installRecord({ bundleId: 'com.other.app' }),
+    });
+    const result = await runBundle(probes);
+    expect(result.verified).toBe(false);
+    expect(result.detail).toContain('com.other.app');
+    expect(probes.exec).not.toHaveBeenCalled();
+  });
+
+  it('does not verify when simctl cannot name a container', async () => {
+    const result = await runBundle(
+      makeMobileProbes({
+        exec: async (): Promise<{ code: number | null; stdout: string; stderr: string }> => ({
+          code: 2,
+          stdout: '',
+          stderr: 'No such file or directory',
+        }),
+      }),
+    );
+    expect(result.verified).toBe(false);
+    expect(result.detail).toContain('get_app_container');
+    expect(result.detail).toContain('No such file or directory');
+  });
+
+  it('does not verify when the harness holds no simulator context at all', async () => {
+    const probes = makeMobileProbes();
+    const result = await runBundle(probes, null);
+    expect(result.verified).toBe(false);
+    expect(result.detail).toContain('no simulator context');
+    expect(probes.readTextFile).not.toHaveBeenCalled();
+  });
+
+  it('does not verify when the mobile probes were never wired', async () => {
+    const result = await performHarnessAttestation(SPEC, {
+      verifyPort: null,
+      driverPort: null,
+      nonce: NONCE,
+      mobile: MOBILE_CTX,
+      deps: makeProbes().deps,
+    });
+    expect(result.verified).toBe(false);
+    expect(result.detail).toContain('no simulator context');
+  });
+
+  it('NEVER throws, whatever a probe does', async () => {
+    const result = await runBundle(
+      makeMobileProbes({
+        exec: async (): Promise<{ code: number | null; stdout: string; stderr: string }> => {
+          throw new Error('xcrun exploded');
+        },
+      }),
+    );
+    expect(result).toMatchObject({ verified: false, kind: 'bundle-identity' });
+    expect(result.detail).toContain('xcrun exploded');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A portless request — the two CDP-mediated channels have nothing to talk to
+// ---------------------------------------------------------------------------
+
+describe('performHarnessAttestation — a null driver port', () => {
+  it.each([
+    { kind: 'dom-marker', selector: '#root' } as const,
+    { kind: 'cdp-token', expression: 'window.__B__', expected: 'x' } as const,
+  ])('does not verify $kind, and never dials CDP', async (spec) => {
+    const probes = makeProbes({ cdpEvaluate: (async () => NONCE) });
+    const result = await performHarnessAttestation(spec, {
+      verifyPort: null,
+      driverPort: null,
+      nonce: NONCE,
+      deps: probes.deps,
+    });
+    expect(result.verified).toBe(false);
+    expect(result.detail).toContain('no driver port was leased');
+    expect(probes.cdpEvaluate).not.toHaveBeenCalled();
   });
 });

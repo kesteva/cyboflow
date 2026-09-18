@@ -348,7 +348,15 @@ export async function runAgentPreflight(
   args: {
     task: VerificationTaskV1;
     driverCliPath: string;
-    leasedPort: number;
+    /**
+     * The leased dev-server port the agent must BIND, or `null` when the
+     * scheduler leased no port pair at all (a `mobile` request: the iOS
+     * Simulator tier serves nothing over HTTP, so there is no slot to
+     * recover and no number to invent). `null` skips the 'port-free' check
+     * exactly as a task with no `serve` step does — this module never
+     * probes a port it was not given.
+     */
+    leasedPort: number | null;
     /**
      * The driver's own CDP port, or `null` for a `mobile` task — mobile has
      * NO serve and NO ports at all pre-deploy (the simulator is acquired
@@ -386,9 +394,10 @@ export async function runAgentPreflight(
   }
 
   // The agent must BIND the leased port itself only when there is a serve
-  // step it is NOT attaching to an existing CDP endpoint for. A mobile task
-  // never has a serve step (driverPort is null in that case anyway).
-  if (task.serve !== undefined && !isAttachCdp) {
+  // step it is NOT attaching to an existing CDP endpoint for, AND a port was
+  // actually leased. A mobile task satisfies neither: it declares an `app`
+  // block instead of a serve, and the scheduler leases it no ports at all.
+  if (task.serve !== undefined && !isAttachCdp && leasedPort !== null) {
     checks.push(await checkPortFree(deps, 'port-free', leasedPort));
   }
 

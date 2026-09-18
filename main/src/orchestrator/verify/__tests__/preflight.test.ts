@@ -273,7 +273,12 @@ describe("runAgentPreflight — 'native-capture' applicability", () => {
 // ---------------------------------------------------------------------------
 
 describe("runAgentPreflight — 'mobile-toolchain' applicability", () => {
-  const mobileArgs = { driverCliPath: '/opt/cyboflow/driver-cli', leasedPort: 29260, driverPort: null };
+  // A mobile request is leased NEITHER port, so both are null in real traffic.
+  const mobileArgs = {
+    driverCliPath: '/opt/cyboflow/driver-cli',
+    leasedPort: null,
+    driverPort: null,
+  };
 
   it('runs ONLY for modality mobile, and only when a probe is wired', async () => {
     const probe = async (): Promise<boolean> => true;
@@ -411,5 +416,50 @@ describe("runAgentPreflight — 'data-dir' (conditional, affirmative on throw)",
       ok: false,
       detail: 'could not provision VERIFY_DATA_DIR at /artifacts/data/abcd1234: EROFS: read-only file system',
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A null leased port — the portless (mobile) request
+// ---------------------------------------------------------------------------
+
+describe('runAgentPreflight — a null leasedPort', () => {
+  const portless = { driverCliPath: '/opt/cyboflow/driver-cli', leasedPort: null, driverPort: null };
+
+  it('runs neither port check, and probes no port at all', async () => {
+    const probed: number[] = [];
+    const result = await runAgentPreflight(
+      happyDeps({
+        portFreeProbe: async (port: number) => {
+          probed.push(port);
+          return true;
+        },
+      }),
+      { task: makeTask({ target: { url: 'https://example.com' } }), ...portless, modality: 'mobile' },
+    );
+
+    expect(checkFor(result, 'port-free')).toBeUndefined();
+    expect(checkFor(result, 'driver-port-free')).toBeUndefined();
+    expect(probed).toEqual([]);
+    expect(result.ok).toBe(true);
+  });
+
+  // The 'port-free' check is gated on `task.serve` too, but a task that somehow
+  // declares one with no port leased must SKIP rather than probe an invented
+  // number — this module never dials a port it was not given.
+  it('skips the port check even for a task that declares a serve', async () => {
+    const probed: number[] = [];
+    const result = await runAgentPreflight(
+      happyDeps({
+        portFreeProbe: async (port: number) => {
+          probed.push(port);
+          return true;
+        },
+      }),
+      { task: makeTask({ serve: { cmd: 'pnpm dev' } }), ...portless },
+    );
+
+    expect(checkFor(result, 'port-free')).toBeUndefined();
+    expect(probed).toEqual([]);
   });
 });

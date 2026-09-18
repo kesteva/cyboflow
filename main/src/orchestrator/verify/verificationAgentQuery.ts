@@ -105,7 +105,14 @@ export const VERIFICATION_REPORT_JSON_SCHEMA: Record<string, unknown> = {
         verified: { type: 'boolean' },
         kind: {
           type: 'string',
-          enum: ['http-endpoint', 'dom-marker', 'cdp-token', 'window-identity', 'file-identity'],
+          enum: [
+            'http-endpoint',
+            'dom-marker',
+            'cdp-token',
+            'window-identity',
+            'file-identity',
+            'bundle-identity',
+          ],
         },
         detail: { type: 'string' },
       },
