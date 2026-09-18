@@ -1,6 +1,6 @@
 ---
 name: release
-description: Cut a Cyboflow release end-to-end — run the full test gate (local + the Windows unit leg on CI), bump the version + changelog, build four signed/notarized macOS DMGs (stable + dev, arm64 + x64) plus two Azure-signed Windows installers on CI, publish both R2 update feeds (macOS + Windows manifests) (the in-app update channel), and cut the GitHub release. Use when asked to cut/ship/publish a release, make a release build, or roll a new version. Follows docs/RELEASE-RUNBOOK.md.
+description: Cut a Cyboflow release end-to-end — bump the version + changelog, tag, push, and watch stable-release.yml rebuild the stable variant on hosted runners, publish the R2 update feed (the in-app update channel) and cut the GitHub release. Carries the manual build/publish recipe as a fallback for when CI cannot run. Use when asked to cut/ship/publish a release, make a release build, or roll a new version. Follows docs/RELEASE-RUNBOOK.md.
 ---
 
 # Release
@@ -8,6 +8,11 @@ description: Cut a Cyboflow release end-to-end — run the full test gate (local
 Execute a Cyboflow release. The authoritative procedure and its rationale live in
 `docs/RELEASE-RUNBOOK.md` — read it first; this skill is the executable checklist.
 Work through the phases **in order** and do not skip verification.
+
+**A release is a tag push.** Phases 0–2 prepare the commit; Phase 3 tags and
+pushes it; `.github/workflows/stable-release.yml` does the building, verifying,
+publishing and the GitHub release. The hand-built path is kept below as a
+fallback for when CI cannot run.
 
 ## Guardrails
 
@@ -33,9 +38,15 @@ Work through the phases **in order** and do not skip verification.
    what's shipping (`git log --oneline v<last>..HEAD`).
 2. Decide the new version. Default is a patch bump of the current
    `package.json` version; **ask the user** if a minor/major bump is intended.
-3. Confirm creds exist in `./.envrc.local` (8 vars): Apple `APPLE_ID`,
-   `APPLE_TEAM_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `CSC_LINK`, `CSC_KEY_PASSWORD`
-   + R2 `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`.
+3. The default path needs **no local creds** — CI holds all ten secrets. Confirm
+   they are on GitHub instead: `gh secret list` must show `CSC_LINK`,
+   `CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_TEAM_ID`,
+   `APPLE_APP_SPECIFIC_PASSWORD`, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`,
+   `AZURE_CLIENT_SECRET`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
+   `R2_SECRET_ACCESS_KEY`, `SENTRY_DSN`, `APTABASE_APP_KEY`. (The GitHub
+   `CSC_LINK` is the **base64 of the .p12**; the `.envrc.local` variable of the
+   same name is a filesystem *path*.) Steps 4–6 below are only needed for the
+   manual fallback — skip them otherwise.
 4. **Re-resolve the dependency tree before gating** — the gate is otherwise
    blind to lockfile defects:
    ```bash
@@ -68,6 +79,11 @@ Work through the phases **in order** and do not skip verification.
    (`gh secret list | grep AZURE_` shows all three).
 
 ## Phase 1 — Full test gate (all must pass)
+
+> The tag workflow gates on **Code Quality for the bump commit**, which covers
+> the same unit/integration/Windows legs on CI. Run this locally anyway when the
+> release carries risky changes — but a green local gate is no longer what
+> authorises the release, and a red CI gate stops it regardless.
 
 **Start the Windows leg FIRST** — it runs on a hosted runner for ~15 min, in
 parallel with everything below. The `skipIf(process.platform !== 'win32')`
@@ -180,7 +196,60 @@ Mac can never run those suites.
   Build **after** this commit — the DMGs stamp `buildInfo.gitCommit` from it, and
   the tag must point here.
 
-## Phase 3 — Four signed macOS builds + two Windows installers
+## Phase 3 — Tag + push (CONFIRM FIRST)
+
+This is the whole release. `.github/workflows/stable-release.yml` builds,
+verifies, publishes to R2 and cuts the GitHub release from the tag.
+
+```bash
+V=<version>
+git tag "v$V"
+git push origin main --follow-tags     # main + the tag in one push
+```
+
+Do NOT tag before the bump commit exists — the tag must point at it.
+
+## Phase 4 — Watch it (do NOT skip)
+
+```bash
+RUN=$(gh run list --workflow stable-release.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+gh run watch "$RUN" --exit-status
+```
+
+The first job waits for **this SHA's** Code Quality run, which `--follow-tags`
+starts moments earlier — a few minutes of "waiting for Code Quality" is the
+normal path, not a hang. The workflow refuses the release outright if the tag is
+not `vX.Y.Z`, if any of the four `package.json` files disagree with it, if
+`CHANGELOG.md` has no section for it, if the commit is not on `origin/main`, or
+if the gate is red.
+
+Then confirm the channel yourself — never take the workflow's word for the one
+step that ships the update:
+
+```bash
+curl -s https://updates.cyboflow.com/stable/latest-mac.yml | grep -m1 version
+curl -s https://updates.cyboflow.com/stable/latest.yml     | grep -m1 version
+gh release view "v$V" --json assets --jq '.assets[].name'
+```
+
+**If the workflow fails after the R2 publish step, the release already shipped** —
+the GitHub release is a mirror. Re-run with `gh workflow run stable-release.yml
+-f tag=v$V`, or cut the release by hand from the fallback below. If it fails
+before, nothing reached the feed: fix and re-run.
+
+The dev feed is deliberately untouched — it is continuous now, and dev users move
+forward on the next push to main.
+
+## Manual fallback — build and publish by hand
+
+Only when CI cannot run (GitHub down, a runner label retired, a secret rotated
+mid-release). Everything below is what Phase 3 automates; `docs/RELEASE-RUNBOOK.md`
+§3–§6 is the authority.
+
+<details>
+<summary>Local builds, verification, R2 publish, GitHub release</summary>
+
+### Phase 3 — Four signed macOS builds + two Windows installers
 
 **Dispatch the Windows installers FIRST** — they build on `windows-latest` (~10 min
 each, the only host that can Azure-sign) in parallel with the macOS builds. They
@@ -211,7 +280,7 @@ pnpm run build:mac:dev:x64
 Each must log `notarization successful`. `AfterSign: Claude Code path not found`
 is benign.
 
-## Phase 4 — Verify (do NOT skip)
+### Phase 4 — Verify (do NOT skip)
 
 The dev builds **reuse and overwrite** the stable staging dirs
 (`dist-electron/mac-arm64/`, `dist-electron/mac/`), so by now only the **Dev**
@@ -261,7 +330,7 @@ Both must print `CN=Raimundo Esteva` and `Succeeded`. `No signature found` means
 the `AZURE_*` secrets were absent on the runner — **stop**; an unsigned installer
 is never published (the installed app's updater would reject it anyway).
 
-## Phase 5 — Publish to R2, the in-app update channel (CONFIRM FIRST) — THE release
+### Phase 5 — Publish to R2, the in-app update channel (CONFIRM FIRST) — THE release
 
 **This is the step that actually ships the update.** The app polls
 `updates.cyboflow.com/<variant>/latest-mac.yml` (macOS) / `latest.yml` (Windows)
@@ -306,7 +375,7 @@ permission classifier may block it; if so, have the user run it (`!` prefix) or
 grant the Bash rule. Do not report the release as done until both feeds show
 `<version>` in **both** manifests (`latest-mac.yml` and `latest.yml`).
 
-## Phase 6 — Push + GitHub release, archival mirror (CONFIRM FIRST)
+### Phase 6 — Push + GitHub release, archival mirror (CONFIRM FIRST)
 
 Independent of Phase 5 — the updater never touches GitHub.
 
@@ -329,9 +398,10 @@ git push origin --delete release-build/<version>    # Phase 3 throwaway branch
 All six assets must read `[uploaded]`. The repo is public — the URLs are
 anonymously downloadable.
 
+</details>
+
 ## Wrap-up
 
-Report: both R2 feeds live at `<version>` in both manifests (the update channel),
-the GitHub release URL, the six artifact names/sizes, and that `main` + tag are
-pushed and `release-build/<version>` is deleted. If branch
-protection was bypassed on the direct push, say so.
+Report: both `stable/` manifests live at `<version>` (the update channel), the
+GitHub release URL and its three assets, the workflow run URL, and that `main` +
+the tag are pushed. If branch protection was bypassed on the direct push, say so.
