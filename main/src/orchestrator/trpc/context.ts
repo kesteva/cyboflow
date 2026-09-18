@@ -10,7 +10,11 @@
  * this single file (or injecting a session resolver at server-init time).
  */
 import type { DatabaseLike } from '../types';
-import type { NativeGrantProbe, VerificationModality } from '../../../../shared/types/visualVerification';
+import type {
+  NativeGrantProbe,
+  VerificationModality,
+  VerifyProbeRow,
+} from '../../../../shared/types/visualVerification';
 import type { VerifyRunbookStatusDetail } from '../verify/runbookStore';
 import type { PermissionMode, WorkflowRow, WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { TuningLevel } from '../../../../shared/tuning/workflowTuning';
@@ -311,6 +315,24 @@ export interface VerifyHostProbesLike {
    * switch is genuinely the most the app can do. Absent off macOS.
    */
   openScreenRecordingSettings?: () => Promise<void>;
+  /**
+   * The `'mobile-simulator'` row, already folded
+   * (`mobileComposition.composeMobileVerification`).
+   *
+   * WHY A COMPOSED ROW AND NOT A RAW PROBE, unlike every member above. The
+   * mobile verdict is a three-way `XcodeToolchainProbe` whose type lives in
+   * `services/visualVerify/`, and this tree is standalone-typechecked — it may
+   * not import from `services/**` at all. Folding the verdict where the backend
+   * is built, and handing this boundary the finished row, is what keeps the
+   * mapping rule in one tested place instead of duplicating an Xcode-shaped
+   * type across the seam.
+   *
+   * The router still applies the fail-open discipline over it: absent (no
+   * composition wired) or a throw ⇒ `'inconclusive'`, never `'missing'`, and
+   * `fix` is forced to `null` — the app can install neither Xcode nor Maestro,
+   * so no state of this row has an action behind it.
+   */
+  mobileSimulator?: () => Promise<VerifyProbeRow>;
 }
 
 /**
