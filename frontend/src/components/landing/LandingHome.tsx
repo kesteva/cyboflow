@@ -754,6 +754,7 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
         onOpenQuickSession={(row) => openSessionRow(row, flowRunBySession)}
         onOpenReviewItem={openReviewItem}
         onApprovalDecided={afterLifecycleAction}
+        onQuickSessionAskDismissed={afterLifecycleAction}
       />
     ) : null,
     'queue.blocked-runs': showSessionSections ? (

@@ -11,6 +11,7 @@ import {
   IllegalSessionTransitionError,
   isSessionTransitionAllowed,
 } from '../../../shared/workflows/sessionStateMachine';
+import { hashAskText } from '../orchestrator/sessionAskHash';
 
 /**
  * A .sql migration file did not apply. Thrown by runFileBasedMigrations() and
@@ -2887,6 +2888,14 @@ export class DatabaseService {
       INSERT INTO conversation_messages (session_id, message_type, content)
       VALUES (?, ?, ?)
     `).run(sessionId, messageType, content);
+    // TASK-225 auto-clear: a fresh USER turn is the clearest signal the
+    // session's previously-summarized ask is stale — the user is already
+    // answering it (or moving on) in-chat, so there is no reason to make them
+    // also hit Dismiss. See clearSessionAsk's doc for why this does not stamp
+    // a suppression hash the way the manual dismiss does.
+    if (messageType === 'user') {
+      this.clearSessionAsk(sessionId);
+    }
   }
 
   getConversationMessages(sessionId: string): ConversationMessage[] {
@@ -4101,6 +4110,58 @@ export class DatabaseService {
       return true;
     });
     return persist();
+  }
+
+  // Manual "Dismiss" action on a quick-session ask card (TASK-225, migration
+  // 140). Clears `state`/`waiting_on` (so the row drops out of the
+  // needs-input bucket right away, same effect as clearSessionAsk) AND stamps
+  // `ask_dismissed_at` + a hash of the waiting_on text that was cleared, so
+  // quickSessionListing.ts's read-time filter can keep the card hidden if the
+  // summarizer later writes back the SAME question — a genuinely different
+  // question hashes differently and resurfaces normally. Upserts: a session
+  // with no session_summaries row yet (e.g. a live 'blocked' gate the
+  // summarizer has never touched) still gets a dismissal stamped, with a null
+  // hash (nothing to suppress against). Returns false without writing when the
+  // session does not exist, mirroring persistSessionSummaryResult.
+  dismissSessionAsk(sessionId: string): boolean {
+    const dismiss = this.db.transaction(() => {
+      const session = this.db.prepare('SELECT 1 FROM sessions WHERE id = ?').get(sessionId);
+      if (!session) return false;
+
+      const row = this.db
+        .prepare('SELECT waiting_on FROM session_summaries WHERE session_id = ?')
+        .get(sessionId) as { waiting_on: string | null } | undefined;
+      const currentWaitingOn = row ? normalizeWaitingOn(row.waiting_on) : null;
+      const hash = currentWaitingOn !== null ? hashAskText(currentWaitingOn) : null;
+
+      this.db.prepare(`
+        INSERT INTO session_summaries (session_id, state, waiting_on, ask_dismissed_at, ask_dismissed_hash, updated_at)
+        VALUES (?, NULL, NULL, datetime('now'), ?, datetime('now'))
+        ON CONFLICT(session_id) DO UPDATE SET
+          state = NULL,
+          waiting_on = NULL,
+          ask_dismissed_at = excluded.ask_dismissed_at,
+          ask_dismissed_hash = excluded.ask_dismissed_hash,
+          updated_at = excluded.updated_at
+      `).run(sessionId, hash);
+      return true;
+    });
+    return dismiss();
+  }
+
+  // Auto-clear: fires when fresh activity makes a session's summarized ask
+  // moot WITHOUT a manual dismiss (TASK-225) — currently wired from
+  // addConversationMessage('user', …) below, since a new user turn is the
+  // clearest "the user is already handling this" signal. Unlike
+  // dismissSessionAsk, this does NOT stamp ask_dismissed_at/hash: activity is
+  // not a suppression decision, so if the summarizer produces the identical
+  // question again later it is free to resurface. A no-op (no row, or already
+  // clear) touches nothing.
+  clearSessionAsk(sessionId: string): void {
+    this.db.prepare(`
+      UPDATE session_summaries SET state = NULL, waiting_on = NULL
+      WHERE session_id = ? AND (state IS NOT NULL OR waiting_on IS NOT NULL)
+    `).run(sessionId);
   }
 
   getSessionToolUsage(sessionId: string): {

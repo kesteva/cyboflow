@@ -5,6 +5,7 @@ import {
   listQuickSessions,
   type QuickSessionCandidateRow,
 } from '../quickSessionListing';
+import { hashAskText } from '../sessionAskHash';
 import type { DatabaseLike, PreparedStatement } from '../types';
 
 function row(overrides: Partial<QuickSessionCandidateRow> = {}): QuickSessionCandidateRow {
@@ -23,6 +24,7 @@ function row(overrides: Partial<QuickSessionCandidateRow> = {}): QuickSessionCan
     summary: null,
     summary_state: null,
     waiting_on: null,
+    ask_dismissed_hash: null,
     ...overrides,
   };
 }
@@ -174,6 +176,63 @@ describe('toQuickSessionRow', () => {
   });
 });
 
+describe('TASK-225 ask-dismiss read-time suppression', () => {
+  it('hides a needs_input row whose waiting_on hashes to the stored dismissed hash', () => {
+    const waitingOn = 'Ship as a boot check or a settings dialog?';
+    const r = toQuickSessionRow(
+      row({ summary_state: 'needs_input', waiting_on: waitingOn, ask_dismissed_hash: hashAskText(waitingOn) }),
+      new Set(),
+    );
+    expect(r.summaryState).toBeNull();
+    expect(r.waitingOn).toBeNull();
+  });
+
+  it('shows a genuinely new question even when a (different) dismissal hash is stored', () => {
+    const dismissedText = 'Ship as a boot check or a settings dialog?';
+    const r = toQuickSessionRow(
+      row({
+        summary_state: 'needs_input',
+        waiting_on: 'Postgres or SQLite for the cache?',
+        ask_dismissed_hash: hashAskText(dismissedText),
+      }),
+      new Set(),
+    );
+    expect(r.summaryState).toBe('needs_input');
+    expect(r.waitingOn).toBe('Postgres or SQLite for the cache?');
+  });
+
+  it('a null ask_dismissed_hash never suppresses', () => {
+    const r = toQuickSessionRow(
+      row({ summary_state: 'needs_input', waiting_on: 'Which branch?', ask_dismissed_hash: null }),
+      new Set(),
+    );
+    expect(r.summaryState).toBe('needs_input');
+    expect(r.waitingOn).toBe('Which branch?');
+  });
+
+  it('a live blocked row is never suppressed by a stale dismissal hash — the pending gate still shows', () => {
+    // Nothing to hash (no waiting_on yet), so the hash comparison can't match —
+    // and even if it somehow did, a real pending gate must never be hidden.
+    const r = toQuickSessionRow(
+      row({ status: 'running', waiting_on: null, ask_dismissed_hash: 'irrelevant-hash' }),
+      new Set(['run-1']),
+    );
+    expect(r.state).toBe('blocked');
+  });
+
+  it('does not suppress a non-needs_input state even if the hash happens to match', () => {
+    const waitingOn = 'Ship as a boot check or a settings dialog?';
+    // Contrived: state is 'complete', not 'needs_input' — suppression only
+    // ever applies to the needs_input bucket.
+    const r = toQuickSessionRow(
+      row({ summary_state: 'complete', waiting_on: waitingOn, ask_dismissed_hash: hashAskText(waitingOn) }),
+      new Set(),
+    );
+    expect(r.summaryState).toBe('complete');
+    expect(r.waitingOn).toBe(waitingOn);
+  });
+});
+
 describe('listQuickSessions', () => {
   function fakeDb(rows: QuickSessionCandidateRow[], capture: { sql: string[]; params: unknown[][] }): DatabaseLike {
     const stmt: PreparedStatement = {
@@ -235,5 +294,11 @@ describe('listQuickSessions', () => {
     for (const sql of capture.sql) {
       expect(sql).toContain('LEFT JOIN session_summaries ss ON ss.session_id = s.id');
     }
+  });
+
+  it('selects ask_dismissed_hash from the join (TASK-225)', () => {
+    const capture = { sql: [] as string[], params: [] as unknown[][] };
+    listQuickSessions(fakeDb([row()], capture), new Set());
+    expect(capture.sql[0]).toContain('ss.ask_dismissed_hash AS ask_dismissed_hash');
   });
 });

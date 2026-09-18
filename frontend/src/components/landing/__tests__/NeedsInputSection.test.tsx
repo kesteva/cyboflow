@@ -12,10 +12,11 @@ import type { ReviewItem } from '../../../../../shared/types/reviews';
 import type { QueueItem } from '../../../utils/reviewQueueSelectors';
 import type { Approval } from '../../../../../shared/types/approvals';
 
-const { approveMock, rejectMock, approveRestOfRunMock } = vi.hoisted(() => ({
+const { approveMock, rejectMock, approveRestOfRunMock, dismissAskMock } = vi.hoisted(() => ({
   approveMock: vi.fn().mockResolvedValue({ ok: true }),
   rejectMock: vi.fn().mockResolvedValue({ ok: true }),
   approveRestOfRunMock: vi.fn().mockResolvedValue({ ok: true }),
+  dismissAskMock: vi.fn().mockResolvedValue({ success: true }),
 }));
 
 vi.mock('../../../trpc/client', () => ({
@@ -25,6 +26,9 @@ vi.mock('../../../trpc/client', () => ({
         approve: { mutate: approveMock },
         reject: { mutate: rejectMock },
         approveRestOfRun: { mutate: approveRestOfRunMock },
+      },
+      sessions: {
+        dismissAsk: { mutate: dismissAskMock },
       },
     },
   },
@@ -113,12 +117,15 @@ const baseProps = {
   onOpenQuickSession: vi.fn(),
   onOpenReviewItem: vi.fn(),
   onApprovalDecided: vi.fn(),
+  onQuickSessionAskDismissed: vi.fn(),
 };
 
 beforeEach(() => {
   approveMock.mockClear();
   rejectMock.mockClear();
   approveRestOfRunMock.mockClear();
+  dismissAskMock.mockClear();
+  dismissAskMock.mockResolvedValue({ success: true });
 });
 
 describe('NeedsInputSection', () => {
@@ -297,6 +304,77 @@ describe('NeedsInputSection', () => {
     expect(screen.getByText('Bash · 2 identical requests')).toBeInTheDocument();
     await user.click(screen.getByText('Approve'));
     expect(approveRestOfRunMock).toHaveBeenCalledWith({ runId: 'run-1' });
+  });
+
+  it('clicking Dismiss on a quick session calls dismissAsk and then onQuickSessionAskDismissed', async () => {
+    const user = userEvent.setup();
+    const onQuickSessionAskDismissed = vi.fn();
+    const row = quickRow({ sessionId: 'sess-dismiss' });
+    render(
+      <NeedsInputSection
+        {...baseProps}
+        quickRows={[row]}
+        onQuickSessionAskDismissed={onQuickSessionAskDismissed}
+      />,
+    );
+
+    await user.click(screen.getByText('Dismiss'));
+    expect(dismissAskMock).toHaveBeenCalledWith({ sessionId: 'sess-dismiss' });
+    await vi.waitFor(() => expect(onQuickSessionAskDismissed).toHaveBeenCalled());
+  });
+
+  it('the top-right ✕ on a quick session card also dismisses it', async () => {
+    const user = userEvent.setup();
+    const onQuickSessionAskDismissed = vi.fn();
+    const row = quickRow({ sessionId: 'sess-x' });
+    render(
+      <NeedsInputSection
+        {...baseProps}
+        quickRows={[row]}
+        onQuickSessionAskDismissed={onQuickSessionAskDismissed}
+      />,
+    );
+
+    await user.click(screen.getByTestId('rq-needs-input-dismiss-x'));
+    expect(dismissAskMock).toHaveBeenCalledWith({ sessionId: 'sess-x' });
+    await vi.waitFor(() => expect(onQuickSessionAskDismissed).toHaveBeenCalled());
+  });
+
+  it('does NOT call onQuickSessionAskDismissed when the dismiss mutation rejects', async () => {
+    dismissAskMock.mockRejectedValueOnce(new Error('boom'));
+    const user = userEvent.setup();
+    const onQuickSessionAskDismissed = vi.fn();
+    render(
+      <NeedsInputSection
+        {...baseProps}
+        quickRows={[quickRow()]}
+        onQuickSessionAskDismissed={onQuickSessionAskDismissed}
+      />,
+    );
+
+    await user.click(screen.getByText('Dismiss'));
+    await vi.waitFor(() => expect(dismissAskMock).toHaveBeenCalled());
+    expect(onQuickSessionAskDismissed).not.toHaveBeenCalled();
+  });
+
+  it('renders the Dismiss action ONLY for quick-session rows, not decision items or approvals', () => {
+    const item = makeReviewItem();
+    const approvalItem: QueueItem = { kind: 'single', approval: makeApproval(), isBlocking: true };
+    render(
+      <NeedsInputSection
+        {...baseProps}
+        quickRows={[quickRow()]}
+        reviewItems={[item]}
+        approvals={[approvalItem]}
+      />,
+    );
+
+    // Exactly one Dismiss action in the whole section — the quick-session row's.
+    expect(screen.getAllByText('Dismiss')).toHaveLength(1);
+    // The decision item and the approval card offer Answer/Approve/Reject, no Dismiss.
+    expect(screen.getByText('Approve workflow output')).toBeInTheDocument();
+    expect(screen.getByText('Approve')).toBeInTheDocument();
+    expect(screen.getByText('Reject')).toBeInTheDocument();
   });
 
   it('shows the total count and flashing ring class in the header', () => {

@@ -242,6 +242,17 @@ export interface SessionOpsLike {
   markViewed(request: { sessionId: string }): Promise<{ success: true } | SessionOpsError>;
 
   /**
+   * TASK-225: dismiss a quick session's stale summarizer ask (the "Dismiss"
+   * action on a Needs-your-input card). Clears `session_summaries.state` /
+   * `waiting_on` and stamps a dismissal hash of the cleared `waiting_on` text
+   * so `listQuick`'s read-time filter keeps the card hidden if the summarizer
+   * later repeats the exact same question — a genuinely different question
+   * still resurfaces. No legacy IPC channel; new to this batch. The failure
+   * envelope is `createValidationError`'s (mirrors `getSummary`).
+   */
+  dismissAsk(request: { sessionId: string }): Promise<{ success: true } | SessionOpsError>;
+
+  /**
    * Mirrors legacy `sessions:rename`. Persists the name, mirrors it onto the
    * runtime session and emits 'session-updated'; echoes the updated DB row back.
    */
