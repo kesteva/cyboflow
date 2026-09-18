@@ -2943,7 +2943,7 @@ export class VerificationScheduler {
       // Codex #2 — see RunbookBootstrapArgs).
       return await this.runbookBootstrap(
         decision.mode === 'derive'
-          ? { ...common, mode: 'derive', adopt: decision.adopt }
+          ? { ...common, mode: 'derive', adopt: decision.adopt, proveRegistered: decision.proveRegistered }
           : { ...common, mode: 'reprove' },
       );
     } catch (err) {

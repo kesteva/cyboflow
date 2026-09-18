@@ -96,6 +96,15 @@ import { renderBootstrapArtifact, renderRung1Finding } from './bootstrapArtifact
 export const MAX_BOOTSTRAP_ROUNDS = 2;
 
 /**
+ * The round number reserved for proving an ALREADY-REGISTERED draft record
+ * (`proveRegistered`). Zero on purpose: the enqueue key carries
+ * `:bootstrap:<round>`, so this must be distinct from every draft round, and
+ * a resumed owner computes its next draft round as `stamp.round + 1`, which
+ * lands on round 1 — the first draft round — with no special case.
+ */
+const REGISTERED_PROOF_ROUND = 0;
+
+/**
  * How long the controller waits for one proof to reach a terminal.
  *
  * A proof builds and serves a real project, so it is a MINUTES-scale operation,
@@ -170,6 +179,30 @@ export interface RunbookDraftRequest {
   feedback: string | null;
 }
 
+/**
+ * What one drafting deployment came back with.
+ *
+ * A TAGGED union rather than `unknown | null`, because the failures are not
+ * interchangeable and the stamp detail a human reads is built from this. Before
+ * the tag, a deployment that hit its deadline returned `null`, the parser
+ * reported `null` as "expected an object", and the bootstrap stamp said "the
+ * drafting agent returned an unusable result" — about an agent that had
+ * returned nothing at all. Three lanes on 2026-09-17 carried that stamp; each
+ * had timed out mid-survey.
+ *
+ *  - `'output'` — the structured object, still to be validated by
+ *    `parseRunbookDraftResult` (the tag says the agent ANSWERED, not that the
+ *    answer is usable).
+ *  - `'timeout'` — the deployment hit its deadline before answering.
+ *  - `'no-output'` — the session ended normally without a structured result.
+ *  - `'error'` — the SDK call itself failed (spawn, auth, transport).
+ */
+export type RunbookDraftResponse =
+  | { kind: 'output'; value: unknown }
+  | { kind: 'timeout'; timeoutMs: number }
+  | { kind: 'no-output' }
+  | { kind: 'error'; message: string };
+
 /** The terminal a proof reached, as `awaitTerminal` reports it. */
 export interface BootstrapProofOutcome {
   status: string;
@@ -192,8 +225,8 @@ type ProofConsumption = { settled: BootstrapRunOutcome } | { retryWith: string }
 export interface RunbookBootstrapDeps {
   stamps: RunbookBootstrapStampStore;
   suppression: BootstrapSuppressionStore;
-  /** Deploy the READ-ONLY drafting agent; returns its raw structured output. */
-  draft: (request: RunbookDraftRequest) => Promise<unknown>;
+  /** Deploy the READ-ONLY drafting agent; returns its structured output, or how it failed to produce one. */
+  draft: (request: RunbookDraftRequest) => Promise<RunbookDraftResponse>;
   /** Read a repo-relative file from the run's worktree; null when absent/unreadable. */
   readFile: (worktreePath: string, relativePath: string) => Promise<string | null>;
   /** Write a repo-relative file into the run's worktree. */
@@ -321,6 +354,19 @@ export type RunbookBootstrapArgs =
       mode: 'derive';
       /** §4's adopt-vs-author distinction, decided by the preflight. */
       adopt: boolean;
+      /**
+       * A DRAFT record is already registered for this (project, modality) —
+       * the store answered `'draft'` — so before any agent is deployed the
+       * bootstrap PROVES that record as it stands (round 0). Only if that proof
+       * fails does the draft loop run, informed by the failure. Observed
+       * 2026-09-17: cyboflow's own cdp-app record sat as an unproven draft
+       * (re-registered by the setup flow after an earlier pass) and every lane
+       * spent a full drafting deployment re-deriving a runbook that was
+       * already registered, then timed out. Proving what is registered costs
+       * one verification and no agent; deriving costs an agent and MIGHT
+       * produce the same runbook.
+       */
+      proveRegistered: boolean;
     })
   | (RunbookBootstrapCommonArgs & { mode: 'reprove' });
 
@@ -655,6 +701,19 @@ async function bootstrap(
       /* clearsSuppression */ true,
     );
     if ('settled' in resumed) {
+      if (stamp.round === REGISTERED_PROOF_ROUND) {
+        // The in-flight proof was of the ALREADY-REGISTERED record: nothing was
+        // drafted or committed, so the derive artifact's every sentence about
+        // "the runbook this lane committed" would be false.
+        await publishReproveArtifact(
+          { ...args, modality },
+          deps,
+          resumed.settled,
+          stamp.runbookHash,
+          stamp.runbookVersion,
+        );
+        return resumed.settled;
+      }
       // This call drafted nothing — the runbook it is reporting on was written by
       // the pre-restart attempt, so it is read back off the tree rather than
       // reconstructed. An unreadable file yields an empty body rather than no
@@ -705,13 +764,24 @@ async function bootstrap(
   progress.rung1 = lastRung1;
   progress.commitSha = lastCommitSha;
 
+  // (2b) A record is already REGISTERED as a draft: prove it before deploying
+  // anything (see `proveRegistered`). Only on a FRESH claim — a resumed owner
+  // either awaited its in-flight proof above or is past this point already.
+  if (args.proveRegistered && claim.kind === 'claimed') {
+    const proved = await proveRegisteredRecord({ ...args, modality }, deps);
+    if (proved !== null) {
+      if ('settled' in proved) return proved.settled;
+      feedback = proved.retryWith;
+    }
+  }
+
   for (let round = startRound; round <= MAX_BOOTSTRAP_ROUNDS; round += 1) {
     progress.rounds = round;
     // (3) The read-only drafting agent.
     const existingRunbookRaw = args.adopt
       ? await deps.readFile(worktreePath, VERIFY_RUNBOOK_RELATIVE_PATH)
       : null;
-    const raw = await deps.draft({
+    const response = await deps.draft({
       projectId,
       runId,
       laneTaskRef,
@@ -722,8 +792,25 @@ async function bootstrap(
       existingRunbookRaw,
       feedback,
     });
+    if (response.kind !== 'output') {
+      // The agent never ANSWERED — a deadline, a transport failure, a session
+      // that drained without a result. That is not a malformed draft and must
+      // not be stamped as one: the detail names what actually happened, and
+      // the reason is 'infrastructure' rather than 'rejected' because nothing
+      // about this project or this draft was judged.
+      return await refuse(
+        { ...args, modality },
+        deps,
+        progress,
+        'infrastructure',
+        describeDraftFailure(response),
+        inputHash,
+        hostFingerprint,
+        /* suppress */ false,
+      );
+    }
 
-    const parsed = parseRunbookDraftResult(raw);
+    const parsed = parseRunbookDraftResult(response.value);
     if (!parsed.ok) {
       // A malformed draft is an agent contract failure, and retrying costs
       // another deployment for a project whose real problem may be that it
@@ -1462,6 +1549,104 @@ async function consumeProof(
     return { settled: { kind: 'unproven', detail, commitSha, rung1: rung1Summary(rung1) } };
   }
   return { retryWith: detail };
+}
+
+/** The stamp detail for a deployment that produced no draft at all. */
+function describeDraftFailure(response: Exclude<RunbookDraftResponse, { kind: 'output' }>): string {
+  switch (response.kind) {
+    case 'timeout':
+      return (
+        `the drafting agent timed out after ${Math.round(response.timeoutMs / 1000)}s without returning ` +
+        'a proposal (it was still surveying the project when the deadline hit)'
+      );
+    case 'no-output':
+      return 'the drafting agent finished without returning a structured proposal';
+    case 'error':
+      return `the drafting agent could not be deployed: ${response.message}`;
+  }
+}
+
+/**
+ * Prove the (project, modality) record the store already holds as a draft,
+ * with no agent deployed, no file written, no commit, no registration — the
+ * same proof a `'reprove'` fires, but feeding a FAILURE into the derive loop
+ * rather than settling on it (`finalRound: false`), because here a draft round
+ * is still available and the failure is exactly the feedback it wants.
+ *
+ * Returns `null` when there is nothing provable — no record, a record that is
+ * already proven (the store would not have said `'draft'`, but the read is not
+ * the store's), or one that declares no entry for this modality — so the caller
+ * falls through to drafting exactly as before. An enqueue failure is likewise a
+ * fall-through rather than a refusal: the draft path may still succeed, and a
+ * refusal here would turn "could not prove the shortcut" into "could not
+ * bootstrap".
+ */
+async function proveRegisteredRecord(
+  args: DeriveArgs & { modality: VerifyRunbookModality },
+  deps: RunbookBootstrapDeps,
+): Promise<ProofConsumption | null> {
+  const { projectId, runId, laneTaskRef, modality } = args;
+  const record = deps.currentRecord(projectId, modality);
+  if (record === null || record.status !== 'unproven-draft') return null;
+  const proofTask = composeBootstrapProofTask(record.runbook, modality);
+  if (proofTask === null) return null;
+
+  const round = REGISTERED_PROOF_ROUND;
+  const enqueued = await deps.enqueueProof({
+    runId,
+    laneTaskRef,
+    task: proofTask,
+    round,
+    runbookHash: record.hash,
+    runbookLocalVersion: record.version,
+  });
+  if ('error' in enqueued) {
+    deps.logger?.warn('[runbookBootstrap] the registered draft could not be proven; deriving instead', {
+      runId,
+      projectId,
+      modality,
+      laneTaskRef,
+      error: enqueued.error,
+    });
+    return null;
+  }
+  deps.stamps.advance({
+    runId,
+    projectId,
+    modality,
+    ownerTaskRef: laneTaskRef,
+    state: 'proving',
+    round,
+    requestId: enqueued.requestId,
+    runbookHash: record.hash,
+    runbookVersion: record.version,
+  });
+  deps.logger?.info('[runbookBootstrap] proving the already-registered draft record before deriving', {
+    runId,
+    projectId,
+    modality,
+    laneTaskRef,
+    requestId: enqueued.requestId,
+    runbookHash: record.hash,
+    runbookVersion: record.version,
+  });
+
+  const consumed = await consumeProof(
+    args,
+    deps,
+    enqueued.requestId,
+    round,
+    record.hash,
+    record.version,
+    /* commitSha */ null,
+    /* rung1 */ null,
+    /* finalRound */ false,
+    /* clearsSuppression */ true,
+  );
+  if ('settled' in consumed) {
+    await publishReproveArtifact(args, deps, consumed.settled, record.hash, record.version);
+  }
+  return consumed;
 }
 
 function describeProofFailure(outcome: BootstrapProofOutcome): string {

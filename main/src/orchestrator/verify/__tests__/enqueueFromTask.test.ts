@@ -891,7 +891,7 @@ describe('enqueueTaskVerification — the runbook bootstrap', () => {
     // `mode` since F4 stage 2 (Codex #2): a proceed now says WHICH action —
     // 'derive' authors a runbook, 'reprove' re-proves a drifted record and writes
     // nothing.
-    ).resolves.toEqual({ proceed: true, mode: 'derive', adopt: false });
+    ).resolves.toEqual({ proceed: true, mode: 'derive', adopt: false, proveRegistered: false });
   });
 
   it('declines with the toggle OFF, which is the shipped default', async () => {

@@ -26,6 +26,12 @@ export interface RunbookDraftPromptArgs {
   feedback: string | null;
   /** The lane whose verification is waiting on this. */
   laneTaskRef: string;
+  /**
+   * The deployment's deadline, so the agent budgets its survey instead of
+   * being killed mid-read. Three from-scratch drafts on 2026-09-17 spent their
+   * whole budget surveying and never answered.
+   */
+  timeBudgetMs: number;
 }
 
 export function composeRunbookDraftPrompt(args: RunbookDraftPromptArgs): string {
@@ -38,7 +44,12 @@ export function composeRunbookDraftPrompt(args: RunbookDraftPromptArgs): string 
       'SKIPPED and nothing would be checked. Your job is to work out, from the project itself, how it ' +
       'is built and served, and return that as a runbook.\n\n' +
       'You write nothing. You have no Write, no Edit, and a read-only shell. Everything you return is ' +
-      'validated and applied by the harness.',
+      'validated and applied by the harness.\n\n' +
+      `You have about ${Math.max(1, Math.round(args.timeBudgetMs / 60_000))} minutes. A deployment that ` +
+      'hits that deadline returns NOTHING and the lane skips, so read what decides the answer ' +
+      '(`package.json` scripts, the dev/serve entry, an existing `.cyboflow/verify-runbook.json`) and ' +
+      'answer well before then — a good-enough runbook returned in time beats a perfect one that never ' +
+      'arrives, and the harness will prove it for real and hand you the failure if it is wrong.',
   );
 
   if (args.adopt && args.existingRunbookRaw !== null) {

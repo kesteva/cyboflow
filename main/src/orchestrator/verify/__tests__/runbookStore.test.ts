@@ -881,12 +881,23 @@ describe('VerifyRunbookStore.statusDetail', () => {
     h.db.close();
   });
 
-  it('an unproven record is draft', async () => {
+  it('an unproven record is draft, and says whether this tree carries the file beside it', async () => {
     const h = makeHarness();
     await h.store.registerDraft(1, WORKTREE, 'web');
+    // Registered FROM this tree's file, so the file is here and declares 'web':
+    // the bootstrap adopts it rather than deriving a rival (the same §4 case as
+    // 'file-only', with the record merely registered first).
     expect(await h.store.statusDetail(1, WORKTREE, 'web')).toEqual({
       status: 'unproven-draft',
       reason: 'draft',
+      fileDeclaresModality: true,
+    });
+    // A tree WITHOUT the file (another branch, pre-merge) answers the same
+    // reason with nothing to adopt.
+    expect(await h.store.statusDetail(1, '/no-file-here', 'web')).toEqual({
+      status: 'unproven-draft',
+      reason: 'draft',
+      fileDeclaresModality: false,
     });
     h.db.close();
   });
