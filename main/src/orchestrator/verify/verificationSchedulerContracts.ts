@@ -664,6 +664,16 @@ export interface VerificationSchedulerDeps {
    */
   nativeCaptureProbe?: () => Promise<boolean>;
   /**
+   * The mobile twin of `nativeCaptureProbe` (mobile-verification-tier §10): can
+   * this host stand up an iOS Simulator verification at all — Xcode
+   * command-line tools present, an iOS runtime available, and a device type that
+   * runtime supports. Same injection shape, same never-throws contract, same
+   * ABSENT semantics (an unprobed host is not a capable host, so every `mobile`
+   * request is skipped without asking). A throw is FAIL-CLOSED — see
+   * `mobileToolchainDetail` in ./mobileGates.
+   */
+  mobileToolchainProbe?: () => Promise<boolean>;
+  /**
    * The ACTING half of the lane runbook bootstrap
    * (docs/proposals/lane-runbook-bootstrap.md §12 steps 3–8): derive, commit,
    * register, and prove a runbook for a lane whose verification would otherwise

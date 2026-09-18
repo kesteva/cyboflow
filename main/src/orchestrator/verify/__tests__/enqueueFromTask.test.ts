@@ -28,9 +28,9 @@ import {
 } from '../enqueueFromTask';
 import { VerifyRunbookStore } from '../runbookStore';
 import { checkRunbookPin } from '../verificationAgentRunner';
-import { parseVerificationTaskV1 } from '../../../../../shared/types/visualVerification';
+import { parseVerificationTaskV1, VISUAL_VERIFY_DEFAULTS } from '../../../../../shared/types/visualVerification';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
-import type { VerificationModality, VerificationTaskV1, ResolvedVisualVerifyConfig, VlmJudge } from '../../../../../shared/types/visualVerification';
+import type { MobileAppSpec, VerificationModality, VerificationTaskV1, ResolvedVisualVerifyConfig, VlmJudge } from '../../../../../shared/types/visualVerification';
 import type { VerifyRunbookModalityEntry, VerifyRunbookV1 } from '../../../../../shared/types/verifyRunbook';
 import type { ProvenRunbookRevision } from '../verificationScheduler';
 
@@ -46,13 +46,18 @@ const fakeJudge: VlmJudge = {
   }),
 };
 
+/**
+ * Built by OVERRIDING the shipped defaults rather than by re-listing the shape:
+ * this suite cares about four knobs (enabled, the port pool, the agent slots and
+ * the bootstrap toggle) and nothing else, so a field added to
+ * `ResolvedVisualVerifyConfig` later — the mobile simulator knobs were exactly
+ * that — arrives here with its real default instead of breaking the build.
+ */
 const baseConfig: ResolvedVisualVerifyConfig = {
+  ...VISUAL_VERIFY_DEFAULTS,
   enabled: true,
   defaultType: 'static-render-snapshot',
-  vlmConfidenceThreshold: 0.7,
-  maxPerRunJudgeCalls: 4,
   devServerPorts: [5173],
-  simulatorDevices: [],
   queuedAgeCeilingMs: 15 * 60 * 1000,
   agentSlots: 2,
   autoBootstrapRunbook: false,
@@ -185,6 +190,18 @@ const task: VerificationTaskV1 = {
   version: 1,
   summary: 'Check the login form renders',
   behaviors: [{ id: 'b1', description: 'renders', expected: 'form visible' }],
+};
+
+/**
+ * The iOS-Simulator stand-up block. Its mere PRESENCE is what makes a task
+ * mobile-shaped — `resolveTaskModality` reads `app.platform` before it reads
+ * `serve.attach` — which is why every mobile case below can be written under an
+ * ordinary web-shaped `VerificationType`.
+ */
+const MOBILE_APP: MobileAppSpec = {
+  platform: 'ios-simulator',
+  bundleId: 'com.acme.Widgets',
+  scheme: 'Widgets',
 };
 
 /** A real throwaway git repo so captureSnapshotSha resolves a real HEAD sha. */
@@ -1111,6 +1128,41 @@ describe('declaredWebModality — the pure precedence table', () => {
       task: { modality: 'native-screen' },
       expected: null,
     },
+    // (2-mobile) A declared `mobile` is honoured exactly when the task SHAPE
+    // expresses it — i.e. when it carries the `app` block. Declared AND
+    // expressed is the case the task-verify prompt asks for.
+    {
+      name: 'task.modality mobile is honoured when the task carries an app block',
+      type: 'static-render-snapshot',
+      task: { modality: 'mobile', app: MOBILE_APP },
+      expected: 'mobile',
+    },
+    // Declared but NOT expressed, and deliberately the SAME answer a declared
+    // native-screen has always had: the word alone cannot move the modality,
+    // because the row's stamp is re-derived from (type, task) at the INSERT and
+    // a task with no `app` re-derives to the web axis. No new decline — the lane
+    // simply resolves as if it had declared nothing.
+    {
+      name: 'task.modality mobile WITHOUT an app block declares nothing (the not-expressed rule)',
+      type: 'static-render-snapshot',
+      task: { modality: 'mobile', serve: { cmd: 'pnpm dev --port ${PORT}' } },
+      expected: null,
+    },
+    // (3) The mobile tier's SHAPE discriminant, read before the attach rung: an
+    // app-shaped task IS a simulator run whatever web-shaped type it was
+    // composed under, and it carries no `serve` for the attach rung to read.
+    {
+      name: 'a bare app-shape with no declaration → mobile',
+      type: 'static-render-snapshot',
+      task: { app: MOBILE_APP },
+      expected: 'mobile',
+    },
+    {
+      name: 'a declared web outranks an app-shape (the declaration rung is above the shape rung)',
+      type: 'static-render-snapshot',
+      task: { modality: 'web', app: MOBILE_APP },
+      expected: 'web',
+    },
     // (3) The legacy shape discriminant, still authoritative.
     {
       name: 'serve.attach cdp → cdp-app',
@@ -1186,6 +1238,64 @@ describe('resolveEnqueueModality — declaration first, then the proven record',
     await expect(
       resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
     ).resolves.toBe('cdp-app');
+  });
+
+  // -------------------------------------------------------------------------
+  // MOBILE IS PROBED LAST. A React Native / Expo project holds BOTH a proven web
+  // record and a proven mobile one, and a task that declared nothing is by
+  // construction web-shaped (an app-shaped one declares itself through
+  // `declaredWebModality`'s app rung and never reaches the probe list at all).
+  // Probing mobile first would take that plain browser check, merge a simulator
+  // stand-up into it and run `xcodebuild`, on the strength of a record that
+  // merely exists.
+  // -------------------------------------------------------------------------
+
+  it('BOTH web and mobile proven, nothing declared → web (mobile is never even asked)', async () => {
+    const { asked } = fakeRecords(['web', 'mobile']);
+    await expect(
+      resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
+    ).resolves.toBe('web');
+    expect(asked).toEqual(['cdp-app', 'web']);
+    expect(asked).not.toContain('mobile');
+  });
+
+  it('mobile proven ALONE, nothing declared → mobile (it is in the order, just last)', async () => {
+    const { asked } = fakeRecords(['mobile']);
+    await expect(
+      resolveEnqueueModality({ type: 'interactive-web-behavior', task: envTask, projectId: 1, runId: 'run-mod' }),
+    ).resolves.toBe('mobile');
+    expect(asked).toEqual(['cdp-app', 'web', 'mobile']);
+  });
+
+  it('an app-shaped task declares its OWN modality and never probes', async () => {
+    // The declaration rung answers `mobile` from the shape itself, and the shape
+    // agrees, so step 1 of the precedence returns before any record is read.
+    const { asked } = fakeRecords(['web']);
+    await expect(
+      resolveEnqueueModality({
+        type: 'static-render-snapshot',
+        task: { ...task, build: ['xcodebuild build -scheme Widgets'], app: MOBILE_APP },
+        projectId: 1,
+        runId: 'run-mod',
+      }),
+    ).resolves.toBe('mobile');
+    expect(asked).toEqual([]);
+  });
+
+  it('a DECLARED mobile with NO app block is resolved as if nothing were declared', async () => {
+    // The word alone cannot move the modality — the row's stamp is re-derived
+    // from the persisted task, which has no `app` to re-derive from. So the lane
+    // falls into the ordinary undeclared probe, in the ordinary order.
+    const { asked } = fakeRecords(['web']);
+    await expect(
+      resolveEnqueueModality({
+        type: 'interactive-web-behavior',
+        task: { ...envTask, modality: 'mobile' },
+        projectId: 1,
+        runId: 'run-mod',
+      }),
+    ).resolves.toBe('web');
+    expect(asked).toEqual(['cdp-app', 'web']);
   });
 
   it('nothing proven, nothing declared → web (the pre-F5 default)', async () => {
@@ -1331,6 +1441,17 @@ describe('enqueueTaskVerification — one modality, resolved before the bootstra
     build: ['pnpm run build:web'],
     serve: { cmd: 'pnpm run preview -- --port ${PORT}' },
     attestation: { kind: 'http-endpoint', urlPath: '/__cyboflow_verify__' },
+  };
+  /**
+   * A mobile entry: `app` in place of `serve` (the runbook parser enforces that
+   * split per entry), attested by `bundle-identity` on the SAME bundle id the
+   * `app` block names — the one channel that can prove the installed executable
+   * is the product this request staged.
+   */
+  const MOBILE_ENTRY: VerifyRunbookModalityEntry = {
+    build: ['xcodebuild build -scheme Widgets -destination "generic/platform=iOS Simulator"'],
+    app: MOBILE_APP,
+    attestation: { kind: 'bundle-identity', bundleId: MOBILE_APP.bundleId },
   };
 
   /**
@@ -1516,6 +1637,86 @@ describe('enqueueTaskVerification — one modality, resolved before the bootstra
     const row = readModalityRow(result.requestId);
     expect(row.modality).toBe('cdp-app');
     expect(row.hash).toBe('h-cdp');
+  });
+
+  it('an app-shaped task on a mobile-proven project merges the entry APP, drops serve, and stamps mobile', async () => {
+    // The mobile tier's whole record-resolved path in one row. The stand-up slot
+    // is replaced WHOLE: the entry's `app` wins over the composer's guess at it,
+    // and the stray `serve` the composer wrote alongside is dropped — a simulator
+    // run has no port to lease and nothing to attach to, and a surviving `serve`
+    // would describe a stand-up that cannot happen. The stamp-consistency guard
+    // is the thing that makes this safe rather than assumed: it re-derives the
+    // modality from the MERGED task, and `resolveTaskModality` reads `app` before
+    // `serve.attach`, so the merged task re-derives to `mobile` and the injection
+    // survives instead of being dropped as a self-contradicting record.
+    seedRun(db, { runId: 'run-f5-mob' });
+    initScheduler(db);
+    const order = wireRecords({ mobile: { hash: 'h-mob', version: 4, entry: MOBILE_ENTRY } });
+
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      task: {
+        ...task,
+        build: ['xcodebuild build -scheme Guessed'],
+        // A composer's own guess at the app block, plus a leftover web serve —
+        // both must be replaced by the record's single stand-up declaration.
+        app: { platform: 'ios-simulator', bundleId: 'com.acme.Guessed', scheme: 'Guessed' },
+        serve: { cmd: 'pnpm dev --port ${PORT}' },
+      },
+      runId: 'run-f5-mob',
+      laneTaskRef: 'TASK-015',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+
+    expect(result.outcome).toBe('enqueued');
+    if (result.outcome !== 'enqueued') return;
+    // The task declared its own modality through its shape, so nothing was
+    // probed before the bootstrap — and the bootstrap ran on `mobile`, not on
+    // the `web` a serve-only reading would have produced.
+    expect(order).toEqual(['bootstrap:mobile', 'resolve:mobile']);
+
+    const row = readModalityRow(result.requestId);
+    expect(row.modality).toBe('mobile');
+    expect(row.hash).toBe('h-mob');
+    const persisted = JSON.parse(row.taskJson) as VerificationTaskV1;
+    expect(persisted.app).toEqual(MOBILE_ENTRY.app);
+    expect(persisted.serve).toBeUndefined();
+    expect(persisted.build).toEqual(MOBILE_ENTRY.build);
+    expect(persisted.attestation).toEqual(MOBILE_ENTRY.attestation);
+    // The behaviors half of the split of authority is untouched.
+    expect(persisted.behaviors).toEqual(task.behaviors);
+  });
+
+  it('a web-shaped task on a project with BOTH a web and a mobile record stays WEB', async () => {
+    // The React Native / Expo regression: mobile is probed LAST, so an undeclared
+    // browser check on a project that also ships an app is never turned into an
+    // `xcodebuild` by the mere existence of a mobile record.
+    seedRun(db, { runId: 'run-f5-both' });
+    initScheduler(db);
+    const order = wireRecords({
+      web: { hash: 'h-web', version: 7, entry: WEB_ENTRY },
+      mobile: { hash: 'h-mob', version: 4, entry: MOBILE_ENTRY },
+    });
+
+    const result = await enqueueTaskVerification({
+      db: dbAdapter(db),
+      task: { ...task, build: ['pnpm run build'], serve: { cmd: 'pnpm dev --port ${PORT}' } },
+      runId: 'run-f5-both',
+      laneTaskRef: 'TASK-016',
+      attempt: 1,
+      worktreePath: gitRepo,
+    });
+
+    expect(result.outcome).toBe('enqueued');
+    if (result.outcome !== 'enqueued') return;
+    expect(order).toEqual(['resolve:cdp-app', 'resolve:web', 'bootstrap:web', 'resolve:web']);
+    const row = readModalityRow(result.requestId);
+    expect(row.modality).toBe('web');
+    expect(row.hash).toBe('h-web');
+    const persisted = JSON.parse(row.taskJson) as VerificationTaskV1;
+    expect(persisted.app).toBeUndefined();
+    expect(persisted.serve?.cmd).toBe(WEB_ENTRY.serve?.cmd);
   });
 
   it('a record whose entry contradicts its own modality falls back to the SHAPE rather than stamping past the skipped injection', async () => {

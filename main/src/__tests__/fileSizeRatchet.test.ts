@@ -31,7 +31,7 @@ import * as path from 'node:path';
 const FROZEN_LINE_CAPS: Record<string, number> = {
   'orchestrator/mcpServer/mcpQueryHandler.ts': 5717, // steps 1-3: type contract → mcpQueryMessages.ts; workflow-config + global-agent read/propose tools → handlers/; backlog projections → backlogProjection.ts
   'index.ts': 6409, // step 4: verify + eval composition → verifyComposition.ts / evalComposition.ts (siblings); seeded-finding reader → orchestrator/seededFindingReader.ts; onBatchMinted hook → humanPrerequisiteSink; workflow-shaped proposal deps → agentThread/proposalExecutorWorkflowDeps.ts
-  'orchestrator/verify/verificationScheduler.ts': 2229, // steps 5-8: preamble → four re-exported siblings; terminal write + delivery → TerminalDelivery; legacy capture engine → CapturePipeline; agent engine → AgentEngine
+  'orchestrator/verify/verificationScheduler.ts': 2230, // steps 5-8 (+1: mobileToolchainProbe threaded into AgentEngine): preamble → four re-exported siblings; terminal write + delivery → TerminalDelivery; legacy capture engine → CapturePipeline; agent engine → AgentEngine
   'services/panels/claude/claudeCodeManager.ts': 4818,
   'database/database.ts': 4249,
   'ipc/session.ts': 3732,

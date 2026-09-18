@@ -330,7 +330,6 @@ describe('planner × efficient', () => {
       'approve-design',
       'epics',
       'approve-plan',
-      'decompose',
     ]);
   });
 

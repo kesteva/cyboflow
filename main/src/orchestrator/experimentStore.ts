@@ -25,6 +25,8 @@ import type {
   ExperimentStatus,
 } from '../../../shared/types/experiments';
 import { isExperimentArmSettled, BASELINE_VARIANT_SENTINEL } from '../../../shared/types/experiments';
+import { resolveWorkflowDefinition } from '../../../shared/types/workflows';
+import { resolveRunFrozenSpec } from './runFrozenSpec';
 import type { TuningLevel } from '../../../shared/tuning/workflowTuning';
 
 /** Fields required to seed a new experiments row (status defaults to 'running'). */
@@ -334,16 +336,46 @@ function readRunStatus(db: DatabaseLike, runId: string | null): string | null {
 /** Source prefix a programmatic human gate stamps on its `decision` review_item. */
 const HUMAN_GATE_SOURCE_PREFIX = 'gate:human-step:';
 /**
- * Human-gate step ids that END the run (the "run-completion" gates). An arm resting
- * at one of these has DRAINED its work and is awaiting the human's final merge/finish
- * decision — grading SHOULD proceed (this is the "both branches reached final work
- * state" moment, mirroring eval Path A's `human-review` trigger). Every OTHER
- * `gate:human-step` gate (approve-plan / approve-idea / approve-design /
- * approve-learnings) is a MID-RUN pause that RESUMES the run, so a pending one means
- * the arm is not done. 'human-review' = sprint/ship/compound terminal; 'decompose' =
- * planner's run-completion gate.
+ * Human-gate step ids that ALWAYS end the run (the "run-completion" gates). An arm
+ * resting at one of these has DRAINED its work and is awaiting the human's final
+ * merge/finish decision — grading SHOULD proceed (this is the "both branches reached
+ * final work state" moment, mirroring eval Path A's `human-review` trigger).
+ * 'human-review' = sprint/ship/compound terminal.
+ *
+ * A gate NOT in this set is terminal iff it is the LAST step of the run's frozen
+ * definition ({@link isTerminalHumanGate}): planner/launch end at `approve-plan`
+ * (approving the plan reveals the tasks, retires the idea, and completes the run),
+ * whereas ship's `approve-plan` is a MID-RUN pause (materialize + lanes follow it).
+ * The same step id is terminal in one flow and mid-run in another, so the step id
+ * alone cannot decide — the frozen spec's step order does. Every other
+ * `gate:human-step` gate (approve-idea / approve-design / approve-learnings) is a
+ * mid-run pause that RESUMES the run, so a pending one means the arm is not done.
  */
-const TERMINAL_HUMAN_GATE_STEPS = new Set<string>(['human-review', 'decompose']);
+const TERMINAL_HUMAN_GATE_STEPS = new Set<string>(['human-review']);
+
+/**
+ * The id of the last step of a run's frozen workflow definition, or null when the
+ * run / its spec cannot be resolved (minimal test schemas without a `workflows`
+ * table degrade to null → only {@link TERMINAL_HUMAN_GATE_STEPS} applies).
+ */
+function resolveRunLastStepId(db: DatabaseLike, runId: string): string | null {
+  try {
+    const frozen = resolveRunFrozenSpec(db, runId);
+    if (!frozen) return null;
+    const definition = resolveWorkflowDefinition(frozen.workflowName, frozen.specJson);
+    if (!definition) return null;
+    const steps = definition.phases.flatMap((phase) => phase.steps);
+    return steps[steps.length - 1]?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** True when a pending `gate:human-step:<step>` gate is the run's run-completion gate. */
+function isTerminalHumanGate(db: DatabaseLike, runId: string, step: string): boolean {
+  if (TERMINAL_HUMAN_GATE_STEPS.has(step)) return true;
+  return resolveRunLastStepId(db, runId) === step;
+}
 
 /**
  * True when a run parked at `awaiting_review` still has an OPEN MID-RUN gate — one
@@ -380,7 +412,7 @@ function hasOpenMidRunGate(db: DatabaseLike, runId: string): boolean {
     for (const r of rows) {
       if (typeof r.source !== 'string') continue;
       const step = r.source.slice(HUMAN_GATE_SOURCE_PREFIX.length);
-      if (!TERMINAL_HUMAN_GATE_STEPS.has(step)) return true;
+      if (!isTerminalHumanGate(db, runId, step)) return true;
     }
   } catch {
     // No review_items table (minimal schema) — treat as no open human gate.
@@ -395,8 +427,9 @@ function hasOpenMidRunGate(db: DatabaseLike, runId: string): boolean {
  * mid-run human gate like approve-plan) is NOT finished: treating it as settled would
  * flip the experiment to `grading` and snapshot a premature verdict (e.g. an empty-diff
  * "Both arms produced no changes" tie) while the arm is really mid-flight and will
- * resume to `running` once the gate is cleared. A TERMINAL human gate (human-review /
- * decompose) does NOT block — that is the final work-complete rest where grading is
+ * resume to `running` once the gate is cleared. A TERMINAL human gate (human-review, or
+ * the last step of the run's frozen definition — planner/launch's approve-plan) does
+ * NOT block — that is the final work-complete rest where grading is
  * meant to fire. Used by both readiness deciders — reconcileExperimentStatus and the
  * pairwise snapshot gate — so the two never drift.
  */

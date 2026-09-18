@@ -97,34 +97,24 @@ const READY_FOR_DEVELOPMENT_POSITION = 6;
 const PLAN_GATED_WORKFLOW_NAMES = new Set(['planner', 'ship', 'launch']);
 
 /**
- * FIX-STAGE-MODEL (decompose): the planner step id whose answer is the separate
- * final gate (Archive vs Keep the decomposed ideas + finish). Choosing Archive
- * retires the run's owned ideas OFF the board by stamping `decomposed_at` (the
- * gate-driven retire path — TaskChangeRouter.retireIdeaToDecomposed), NOT a
- * board-position move; a retired idea keeps its stage and is reachable only via
- * its children.
- */
-const DECOMPOSE_STEP_ID = 'decompose';
-
-/**
  * The planner's single-idea `approve-idea` gate step id (planner.md step 2),
  * where — only when context flagged `DESIGN_MODE: yes` — the human may pick
  * the DESIGN FORK option ("Approve → design mode") instead of a plain Approve.
  * Verified against planner.md's "## Step reporting" step-id list. Distinct
- * from both APPROVE_PLAN_STEP_ID and DECOMPOSE_STEP_ID, which is what keeps
- * launchDesignModeOnFork from ever interacting with promoteTasksOnPlanApproval
- * / retireShipIdeasOnPlanApproval / deletePendingDraftsOnPlanDecline /
- * finalizePlannerRun — those are gated on the OTHER step ids and never fire
- * for an approve-idea answer regardless of its text.
+ * from APPROVE_PLAN_STEP_ID, which is what keeps launchDesignModeOnFork from
+ * ever interacting with promoteTasksOnPlanApproval /
+ * retireShipIdeasOnPlanApproval / deletePendingDraftsOnPlanDecline /
+ * completePlannerRunOnPlanApproval — those are gated on the OTHER step id and
+ * never fire for an approve-idea answer regardless of its text.
  */
 const APPROVE_IDEA_STEP_ID = 'approve-idea';
 
 /**
- * Ship (defense-in-depth): the `ship` workflow concatenates planner → sprint in
- * one orchestrated run and drops planner's terminal `decompose` step, so the
- * planner finalizer must never seal a ship run. Guarded by workflow name so a
- * future ship spec edit that reuses the `decompose` step id can't complete the
- * run before its sprint tasks execute.
+ * Ship: the `ship` workflow concatenates planner → sprint in one orchestrated
+ * run, so its `approve-plan` gate is MID-RUN (materialize + lanes follow it) and
+ * the planner completion that fires on an approve-plan Approve must never seal
+ * a ship run. Guarded by workflow name — the step id alone cannot tell the two
+ * apart.
  */
 const SHIP_WORKFLOW_NAME = 'ship';
 
@@ -814,10 +804,10 @@ export class QuestionRouter extends EventEmitter {
 
       // These follow-ons run AFTER the resume — none gates the agent's ability to
       // proceed on an approved plan (they retire the ship seed idea, tear down
-      // rejected drafts, or finalize the planner run). All are fail-soft + idempotent.
+      // rejected drafts, or complete the planner run). All are fail-soft + idempotent.
       await this.retireShipIdeasOnPlanApproval(request.runId, effectiveAnswer);
       await this.deletePendingDraftsOnPlanDecline(request.runId, effectiveAnswer, request.questions);
-      await this.finalizePlannerRun(request.runId, effectiveAnswer);
+      await this.completePlannerRunOnPlanApproval(request.runId, effectiveAnswer);
       await this.launchDesignModeOnFork(request.runId, effectiveAnswer, request.questions);
     });
   }
@@ -1028,18 +1018,15 @@ export class QuestionRouter extends EventEmitter {
 
       // F8: the plan is approved — the run's DECOMPOSED idea(s) are now realized in
       // the revealed plan (its epics + tasks carry the flow), so retire them OFF the
-      // board HERE (stamp decomposed_at) rather than only at a later gate. Previously
-      // idea retirement was exclusively gate-driven (planner's final decompose gate /
-      // ship's approve-plan), so a planner run interrupted after plan approval but
-      // before its decompose gate stranded the seed idea on the board forever next to
-      // its revealed children. Retire only the genuinely-decomposed subset
-      // (listRunDecomposedIdeaIds, the same resolver finalizePlannerRun uses): an
-      // owned idea with >=1 run-created child carrying its originating_idea_id
-      // lineage. In a multi-idea planner run a seeded-but-childless idea stays on the
-      // board. Idempotent (retireIdeaToDecomposed no-ops once decomposed_at is
-      // stamped, so the later decompose gate / ship materialize re-assert harmlessly)
-      // + failure-isolated per-idea — the reveal already happened; retirement must
-      // never undo it or throw.
+      // board HERE (stamp decomposed_at). Approving the plan IS the decomposition;
+      // for planner/launch this gate is also the run's final one, so there is no
+      // later gate to defer the retirement to. Retire only the genuinely-decomposed
+      // subset (listRunDecomposedIdeaIds): an owned idea with >=1 run-created child
+      // carrying its originating_idea_id lineage. In a multi-idea planner run a
+      // seeded-but-childless idea stays on the board. Idempotent
+      // (retireIdeaToDecomposed no-ops once decomposed_at is stamped, so ship's
+      // later materialize re-asserts harmlessly) + failure-isolated per-idea — the
+      // reveal already happened; retirement must never undo it or throw.
       for (const ideaId of listRunDecomposedIdeaIds(this.db, runId)) {
         await router.retireIdeaToDecomposed(projectId, ideaId).catch(() => {
           /* per-idea best-effort */
@@ -1075,9 +1062,9 @@ export class QuestionRouter extends EventEmitter {
   /**
    * Ship: retire the run's DECOMPOSED idea(s) to the terminal Decomposed stage when
    * the just-answered gate is `approve-plan` and the human chose Approve — i.e. the
-   * moment the tasks are approved. The ship workflow concatenates planner → sprint
-   * and DROPS planner's separate terminal decompose/Archive gate, so without this
-   * the seed idea lingers in its planning stage forever: a ship run interrupted any
+   * moment the tasks are approved. The ship workflow concatenates planner → sprint,
+   * so approve-plan is mid-run there and without this the seed idea lingers in its
+   * planning stage forever: a ship run interrupted any
    * time after plan approval (before the create-sprint-batch materialize seam, or
    * mid-execution, or before the final human-review gate) never reaches the agent's
    * retirement. Approving the plan IS the decomposition — its tasks now carry the
@@ -1085,8 +1072,9 @@ export class QuestionRouter extends EventEmitter {
    * agent surviving to a later step.
    *
    * Scoped to the `ship` workflow by name: planner runs ALSO answer an
-   * `approve-plan` gate, but a planner idea must retire only at its own later
-   * decompose/Archive gate (finalizePlannerRun), NEVER here.
+   * `approve-plan` gate, and their ideas retire through the F8 branch of
+   * revealRunDrafts (the same lineage-filtered set) — this ship-specific stage
+   * move never applies to them.
    *
    * Backend-deterministic + idempotent (retireIdeaToDecomposed is a no-op once the
    * idea is at Decomposed, so the later materialize seam / human-review retirement
@@ -1105,7 +1093,7 @@ export class QuestionRouter extends EventEmitter {
       if (run.currentStepId !== APPROVE_PLAN_STEP_ID) return;
       if (!this.isApproveAnswer(answer)) return;
 
-      // Ship-only — see finalizePlannerRun for the symmetric planner guard. The
+      // Ship-only — see completePlannerRunOnPlanApproval for the symmetric planner guard. The
       // workflow-name lookup is a LEFT JOIN read (a missing workflows row yields a
       // null name → no retire), matching the defensive pattern there.
       const wf = this.db
@@ -1191,66 +1179,46 @@ export class QuestionRouter extends EventEmitter {
   }
 
   /**
-   * FIX-STAGE-MODEL (decompose): the planner's separate FINAL gate, answered at
-   * the `decompose` step. The gate offers two options:
-   *  - "Archive & finish": the run's DECOMPOSED ideas (listRunDecomposedIdeaIds —
-   *    the owned ideas with >=1 run-created child carrying originating_idea_id
-   *    lineage; a seeded-but-childless idea in a multi-idea run is NOT retired) are
-   *    retired OFF the board by stamping `decomposed_at`
-   *    (TaskChangeRouter.retireIdeaToDecomposed — the idea keeps its stage), then the
-   *    run completes.
-   *  - "Keep ideas & finish": the ideas stay on the board; the run completes.
+   * The planner's `approve-plan` gate is its FINAL gate: an Approve answer both
+   * reveals the plan (promoteTasksOnPlanApproval — the drafts land on the board and
+   * the decomposed idea(s) retire off it) AND completes the run. There is no
+   * separate "archive idea" gate any more — the retirement already happens on
+   * approval (F8, lineage-filtered via listRunDecomposedIdeaIds), so the old
+   * `decompose` gate's Archive/Keep choice had nothing left to decide.
    *
-   * In BOTH cases the run then COMPLETES — respond() has already flipped the run
-   * back to 'running' (the standard answer transition), so a guarded UPDATE here
-   * lands it in its terminal 'completed' state. The completion is gated by the
-   * aggregate-unblock invariant: if any blocking review_item is still pending the
-   * run must NOT complete yet (it waits for the human to clear the inbox).
+   * respond() has already flipped the run back to 'running' (the standard answer
+   * transition), so a guarded UPDATE here lands it in its terminal 'completed'
+   * state. The completion is gated by the aggregate-unblock invariant: if any
+   * blocking review_item is still pending (e.g. an idea-size guard minted earlier)
+   * the run must NOT complete yet — it stays open until the human clears the inbox.
+   *
+   * Revise / Reject never reach here (isApproveAnswer): a revised plan re-presents
+   * the gate, and a rejected one leaves the agent to end its turn and rest.
    *
    * Backend-deterministic + idempotent + fail-soft: reads current_step_id
    * defensively (older DBs lack the column → the SELECT throws → caught → no-op);
-   * idea retirement routes through TaskChangeRouter.retireIdeaToDecomposed (a
-   * no-op when the idea is already stamped decomposed_at); the completion UPDATE
-   * is guarded by `status='running'` so a re-answer is a no-op. NEVER throws —
-   * respond() is unaffected.
+   * the completion UPDATE is guarded by `status='running'` so a re-answer is a
+   * no-op. NEVER throws — respond() is unaffected.
    */
-  private async finalizePlannerRun(runId: string, answer: QuestionAnswer): Promise<void> {
+  private async completePlannerRunOnPlanApproval(runId: string, answer: QuestionAnswer): Promise<void> {
     try {
       const run = this.db
         .prepare(
-          'SELECT project_id AS projectId, current_step_id AS currentStepId FROM workflow_runs WHERE id = ?',
+          `SELECT r.current_step_id AS currentStepId, w.name AS workflowName
+             FROM workflow_runs r
+             LEFT JOIN workflows w ON w.id = r.workflow_id
+            WHERE r.id = ?`,
         )
-        .get(runId) as { projectId?: unknown; currentStepId?: unknown } | undefined;
+        .get(runId) as { currentStepId?: unknown; workflowName?: unknown } | undefined;
       if (!run) return;
-      if (run.currentStepId !== DECOMPOSE_STEP_ID) return;
+      if (run.currentStepId !== APPROVE_PLAN_STEP_ID) return;
+      if (!this.isApproveAnswer(answer)) return;
 
-      // Defense-in-depth (Ship): the `ship` workflow concatenates planner →
-      // sprint in one run and DROPS planner's terminal `decompose` step, so this
-      // finalizer never fires for ship today. Guard anyway so a future ship spec
-      // edit that reuses the `decompose` step id can't seal a ship run before its
-      // sprint tasks execute. Defensive + fail-soft: the workflow-name lookup is
-      // a LEFT JOIN read (a missing workflows row yields a null name → no skip),
-      // and any throw is caught below → no-op.
-      const wf = this.db
-        .prepare(
-          `SELECT w.name AS workflowName
-           FROM workflow_runs r
-           LEFT JOIN workflows w ON w.id = r.workflow_id
-           WHERE r.id = ?`,
-        )
-        .get(runId) as { workflowName?: unknown } | undefined;
-      if (typeof wf?.workflowName === 'string' && wf.workflowName === SHIP_WORKFLOW_NAME) return;
-
-      const projectId = typeof run.projectId === 'number' ? run.projectId : Number(run.projectId);
-
-      if (this.isArchiveAnswer(answer)) {
-        const router = TaskChangeRouter.getInstance();
-        for (const ideaId of listRunDecomposedIdeaIds(this.db, runId)) {
-          await router.retireIdeaToDecomposed(projectId, ideaId).catch(() => {
-            /* per-idea best-effort */
-          });
-        }
-      }
+      // Ship shares the `approve-plan` step id but its gate is MID-RUN (materialize
+      // + sprint lanes follow it): never seal a ship run here. The workflow-name
+      // lookup is a LEFT JOIN read (a missing workflows row yields a null name →
+      // treated as planner-shaped, which is what every other plan-gated built-in is).
+      if (typeof run.workflowName === 'string' && run.workflowName === SHIP_WORKFLOW_NAME) return;
 
       // Aggregate-unblock gate: a run may only complete once ALL its blocking
       // review items are resolved/dismissed. If any remain pending, leave the run
@@ -1270,7 +1238,7 @@ export class QuestionRouter extends EventEmitter {
       }
     } catch (err) {
       console.warn(
-        `[QuestionRouter] finalizePlannerRun skipped for run ${runId} (fail-soft): ${err instanceof Error ? err.message : String(err)}`,
+        `[QuestionRouter] completePlannerRunOnPlanApproval skipped for run ${runId} (fail-soft): ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }
@@ -1327,15 +1295,6 @@ export class QuestionRouter extends EventEmitter {
 
     // Fallback (options unavailable): exact-match a canonical reject token only.
     return values.some((v) => v === 'reject' || v === 'reject plan');
-  }
-
-  /**
-   * Decide whether a decompose-gate answer is the Archive option (vs Keep).
-   * Case-insensitive: at least one answer value (trimmed, lowercased) starts
-   * with 'archive'. So 'Archive & finish' → true; 'Keep ideas & finish' → false.
-   */
-  private isArchiveAnswer(answer: QuestionAnswer): boolean {
-    return Object.values(answer.answers).some((v) => v.trim().toLowerCase().startsWith('archive'));
   }
 
   /**

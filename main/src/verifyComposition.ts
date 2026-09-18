@@ -28,7 +28,7 @@
 import { app, shell, systemPreferences } from 'electron';
 import * as path from 'path';
 import { isModelUsable } from './services/modelAvailabilityService';
-import { getCyboflowSubdirectory } from './utils/cyboflowDirectory';
+import { getCyboflowDirectory, getCyboflowSubdirectory } from './utils/cyboflowDirectory';
 import { resolveRunEffectiveAgents } from './services/panels/claude/agentOverlayWriter';
 import { bareModelId } from '../../shared/agents/modelContext';
 import { ReviewItemRouter } from './orchestrator/reviewItemRouter';
@@ -63,6 +63,7 @@ import {
   makeDriverCliProbe,
   makeScreenRecordingSettingsOpener,
 } from './services/visualVerify/hostProbeAdapters';
+import { composeMobileVerification } from './services/visualVerify/mobileComposition';
 import { PeekabooBackend } from './services/visualVerify/peekabooBackend';
 import { resolvePeekabooExecutable } from './services/visualVerify/peekabooExecutablePath';
 import { VlmJudgeImpl, DEFAULT_JUDGE_MODEL } from './services/visualVerify/vlmJudge';
@@ -142,6 +143,31 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
   // invariant: the scheduler imports no electron/service code — the verdict
   // delivery hook (which calls the electron-free routers) is INJECTED here.
   const visualVerifyConfig = configManager.getVisualVerifyConfig();
+  // ------------------------------------------------------------------------
+  // The §8 MOBILE tier's host objects — built ONCE, darwin-gated, here.
+  //
+  // Three consumers share this one composition: the scheduler's gate 1
+  // (`mobileToolchainProbe`), the runner's pre-deploy preflight + simulator
+  // acquisition (`mobile`), and the §6 health panel's `'mobile-simulator'` row
+  // (`verifyHostProbes.mobileSimulator`). They must share ONE backend instance,
+  // not three: the backend memoizes its verdict for 60 s and its Maestro path
+  // for the process, and two instances could report different Maestro binaries
+  // to the gate and to the driver — the exact 2026-08-05 peekaboo divergence
+  // this tier was told not to repeat.
+  //
+  // `dataDir` is the per-instance cyboflow data dir (the same one
+  // `getCyboflowSubdirectory` resolves under), because `verify-mobile/` holds
+  // the §8.2 OWNERSHIP MARKERS: the boot sweep may only reclaim devices whose
+  // marker lives under the data dir THIS instance owns, so a dev instance can
+  // never delete a packaged instance's live simulator.
+  //
+  // Off darwin this constructs nothing and spawns nothing — see
+  // mobileComposition.ts's off-darwin contract.
+  // ------------------------------------------------------------------------
+  const mobileVerification = composeMobileVerification({
+    dataDir: getCyboflowDirectory(),
+    logger: cyboflowLogger,
+  });
   const realVlmJudge: VlmJudge = new VlmJudgeImpl({
     confidenceThreshold: visualVerifyConfig.vlmConfidenceThreshold,
     logger: cyboflowLogger,
@@ -501,6 +527,29 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
     // cannot come from the tree under test.
     resolveRunbookByHash: (projectId, modality, hash) =>
       verifyRunbookStore.getByHash(projectId, modality, hash),
+    // §8 mobile collaborators. Present only on darwin: absent, a mobile request
+    // returns a pre-deploy `skipped` carrying the synthetic 'mobile-simulator'
+    // check, which the §3.1 classifier reads as `env` and never charges.
+    //
+    // The two pins floor to ABSENT when config leaves them '' — '' means
+    // "resolve the newest compatible device type / runtime live at request
+    // time", and passing it through as a literal would hand `simctl create` an
+    // empty name to match.
+    ...(mobileVerification.session !== null && mobileVerification.toolchain !== null
+      ? {
+          mobile: {
+            session: mobileVerification.session,
+            toolchain: mobileVerification.toolchain,
+            dataDir: getCyboflowDirectory(),
+            ...(visualVerifyConfig.mobileSimDeviceType !== ''
+              ? { deviceType: visualVerifyConfig.mobileSimDeviceType }
+              : {}),
+            ...(visualVerifyConfig.mobileSimRuntime !== ''
+              ? { runtime: visualVerifyConfig.mobileSimRuntime }
+              : {}),
+          },
+        }
+      : {}),
     logger: cyboflowLogger,
   });
 
@@ -514,6 +563,13 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
   // — this file boots Electron and cannot be imported by a unit test, so
   // anything with a rule worth asserting does not belong inline here.
   const verifyHostProbes: VerifyHostProbesLike = {
+    // The SAME composition the scheduler's gate and the runner's preflight read
+    // — the panel is not a second opinion. Wired UNCONDITIONALLY, unlike the two
+    // macOS grant probes below: off darwin this reports an honest
+    // `'inconclusive'` row without spawning anything, and a host that can never
+    // run the tier is exactly what a user deciding whether to declare `mobile`
+    // needs told.
+    mobileSimulator: mobileVerification.probeRow,
     resolveNode: findNodeExecutable,
     resolveChromium: probeChromiumExecutable,
     probeDriverCli: makeDriverCliProbe(verifyDriverCliPath, (p) => fs.promises.access(p)),
@@ -816,12 +872,29 @@ export function composeVerification(deps: VerifyCompositionDeps): VerifyComposit
     // SAME backend instance registered above, so the agent path and the legacy
     // capture path can never disagree about this host's screen capability.
     nativeCaptureProbe: () => peekabooBackend.healthCheck(),
+    // §8 gate 1 for the `mobile` modality — the SAME probe instance the runner's
+    // preflight and the health panel read. The two layers keep OPPOSITE, correct
+    // rules over it (§10): this gate fails CLOSED (an unanswerable toolchain must
+    // not lease a 2 GB simulator boot), while preflight fails OPEN. Both are
+    // satisfied by one probe because `healthCheck` already folds `absent` and
+    // `inconclusive` alike to `false` and never throws.
+    mobileToolchainProbe: mobileVerification.probe,
     // §12 steps 3–8: derive, commit, register and PROVE a runbook for a lane
     // whose verification would otherwise be skipped. The scheduler owns the
     // DECISION (it holds the toggle and the runbook status); this closure is the
     // ACTING half, assembled above out of IO the scheduler must not hold.
     runbookBootstrap: runbookBootstrapRunner,
   });
+
+  // §8.2 boot sweep — reclaim simulators and DerivedData whose owning process is
+  // PROVABLY dead (marker pid gone, or its start time no longer matches). Fired
+  // AFTER the scheduler exists so a request that arrives mid-sweep already has a
+  // queue to land in, and deliberately NOT awaited: reclaiming disk is
+  // best-effort housekeeping, and `simctl delete` on a stale device can take
+  // seconds that boot must not spend. It never throws (the factory catches and
+  // logs), so the `.catch` here is belt-and-braces against an unhandled
+  // rejection rather than a real branch.
+  void mobileVerification.sweepAtBoot().catch(() => {});
 
   return { verifyRunbookStore, verifyRunbookStatus, verifyHostProbes, runbookBootstrapStamps };
 }

@@ -209,22 +209,31 @@ describe('experimentStore', () => {
     expect(getExperiment(db, exp.id)?.status).toBe('grading');
   });
 
-  it('reconcile: planner arms resting at the TERMINAL decompose gate DO grade', () => {
+  it('reconcile: planner arms resting at their TERMINAL approve-plan gate (last step of the frozen def) DO grade', () => {
     const raw = buildDb();
     raw.exec(
       `CREATE TABLE review_items (id TEXT PRIMARY KEY, run_id TEXT, kind TEXT, status TEXT, blocking INTEGER, source TEXT);`,
     );
+    // The terminal-gate decision reads the run's FROZEN definition (resolveRunFrozenSpec
+    // → workflows.name + spec_json), so seed a real workflows row + workflow_id link.
+    raw.exec(`CREATE TABLE workflows (id TEXT PRIMARY KEY, name TEXT NOT NULL, spec_json TEXT);`);
+    raw.exec(`ALTER TABLE workflow_runs ADD COLUMN workflow_id TEXT;`);
+    raw.prepare(`INSERT INTO workflows (id, name, spec_json) VALUES ('wf-planner', 'planner', NULL)`).run();
     const db = dbAdapter(raw);
     seedRun(raw, 'runA', 'awaiting_review');
     seedRun(raw, 'runB', 'awaiting_review');
+    raw.prepare(`UPDATE workflow_runs SET workflow_id = 'wf-planner'`).run();
     const exp = insertExperiment(db, {
-      projectId: 1, workflowId: 'planner', baseBranch: 'main', baseSha: 's', variantAId: 'a', variantBId: 'b',
+      projectId: 1, workflowId: 'wf-planner', baseBranch: 'main', baseSha: 's', variantAId: 'a', variantBId: 'b',
     });
     setExperimentRuns(db, exp.id, { runAId: 'runA', runBId: 'runB' });
-    // 'decompose' is planner's run-completion gate — treated as terminal, so grading fires.
+    // 'approve-plan' is planner's LAST step (approving reveals the tasks, retires the
+    // idea, and completes the run) — terminal for planner, so grading fires. The same
+    // step id is MID-RUN for ship (see the test above), which is why the decision reads
+    // the frozen definition rather than the step id alone.
     raw
       .prepare(
-        `INSERT INTO review_items (id, run_id, kind, status, blocking, source) VALUES ('d1', 'runA', 'decision', 'pending', 1, 'gate:human-step:decompose'), ('d2', 'runB', 'decision', 'pending', 1, 'gate:human-step:decompose')`,
+        `INSERT INTO review_items (id, run_id, kind, status, blocking, source) VALUES ('d1', 'runA', 'decision', 'pending', 1, 'gate:human-step:approve-plan'), ('d2', 'runB', 'decision', 'pending', 1, 'gate:human-step:approve-plan')`,
       )
       .run();
     expect(reconcileExperimentStatus(db, exp.id)).toEqual({ changed: true, status: 'grading', halfCreated: false });

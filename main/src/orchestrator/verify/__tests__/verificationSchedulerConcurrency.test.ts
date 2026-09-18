@@ -26,6 +26,11 @@ import {
   verifyPortLease,
 } from '../verificationScheduler';
 import { VerifyCapabilityStore } from '../capabilityStore';
+import {
+  MOBILE_TOOLCHAIN_UNAVAILABLE_DETAIL,
+  MOBILE_TOOLCHAIN_UNPROBED_DETAIL,
+  verifyMobileSlot,
+} from '../mobileGates';
 import { Mutex } from '../../../utils/mutex';
 import { setSeamErrorSink } from '../../telemetrySink';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
@@ -40,6 +45,7 @@ import type {
   VerdictV1,
   VlmJudge,
 } from '../../../../../shared/types/visualVerification';
+import { VISUAL_VERIFY_DEFAULTS } from '../../../../../shared/types/visualVerification';
 
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
@@ -126,6 +132,10 @@ const CONFIG: ResolvedVisualVerifyConfig = {
   simulatorDevices: [],
   queuedAgeCeilingMs: 15 * 60 * 1000,
   agentSlots: 2,
+  mobileSimSlots: VISUAL_VERIFY_DEFAULTS.mobileSimSlots,
+  mobileSimDeviceType: VISUAL_VERIFY_DEFAULTS.mobileSimDeviceType,
+  mobileSimRuntime: VISUAL_VERIFY_DEFAULTS.mobileSimRuntime,
+  mobileDeadlineFloorMs: VISUAL_VERIFY_DEFAULTS.mobileDeadlineFloorMs,
   autoBootstrapRunbook: false,
 };
 
@@ -521,18 +531,202 @@ describe('VerificationScheduler — native-screen lane (§4 screen exclusivity)'
     );
   });
 
-  it("'mobile' stays unconditionally unsupported even on a capable host", async () => {
-    seedRun(db, 'run-mobile');
+  // ── mobile: the same four shapes as native-screen above. The modality used to
+  //    be an unconditional table skip; the iOS-Simulator tier made it a HOST
+  //    question, answered by its own probe (mobile-verification-tier §10).
+  it("with NO mobile probe wired a 'mobile' row skips with the table detail byte-for-byte", async () => {
+    seedRun(db, 'run-mobile-noprobe');
     const { runner, run } = gatedRunner();
-    const probe = vi.fn(async () => true);
-    const scheduler = initScheduler({ agentRunner: runner, nativeCaptureProbe: probe });
+    const nativeProbe = vi.fn(async () => true);
+    const scheduler = initScheduler({ agentRunner: runner, nativeCaptureProbe: nativeProbe });
 
-    const id = enqueueOne(scheduler, 'run-mobile', 'mobile-flow');
+    const id = enqueueOne(scheduler, 'run-mobile-noprobe', 'mobile-flow');
     await flushDrain();
 
     expect(run).not.toHaveBeenCalled();
-    expect(probe).not.toHaveBeenCalled(); // the probe is native-screen's alone
-    expect(rowOf(id).error_message).toContain('Xcode MCP');
+    expect(nativeProbe).not.toHaveBeenCalled(); // that probe is native-screen's alone
+    const row = rowOf(id);
+    expect(row.status).toBe('skipped');
+    expect(row.modality).toBe('mobile');
+    expect(row.failure_class).toBe('env');
+    expect(row.error_message).toBe(
+      `unsupported modality 'mobile': ${MOBILE_TOOLCHAIN_UNPROBED_DETAIL}`,
+    );
+  });
+
+  it('a CAPABLE host deploys the mobile row, takes a verify:mobile slot and leases NO port', async () => {
+    seedRun(db, 'run-mobile-ok');
+    const { runner, run, releaseAll } = gatedRunner();
+    const probe = vi.fn(async () => true);
+    const scheduler = initScheduler({ agentRunner: runner, mobileToolchainProbe: probe });
+
+    const id = enqueueOne(scheduler, 'run-mobile-ok', 'mobile-flow');
+    await flushDrain();
+
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(statusOf(id)).toBe('running');
+    expect(mutex.isLocked(verifyMobileSlot(0))).toBe(true);
+    expect(mutex.isLocked(verifyAgentSlot(0))).toBe(true);
+    // M1: mobile serves nothing over HTTP and drives no CDP endpoint.
+    expect(mutex.isLocked(VERIFY_SCREEN_LEASE)).toBe(false);
+    for (const port of CONFIG.devServerPorts) expect(mutex.isLocked(verifyPortLease(port))).toBe(false);
+    const req = run.mock.calls[0][0] as VerificationAgentRequest;
+    expect(req.modality).toBe('mobile');
+    expect(req.verifyPort).toBeNull();
+    expect(req.verifyDriverPort).toBeNull();
+
+    releaseAll();
+    await flushDrain();
+    expect(statusOf(id)).toBe('passed');
+    expect(mutex.isLocked(verifyMobileSlot(0))).toBe(false);
+  });
+
+  it('an INCAPABLE host (probe false) skips as unsupported, naming the three separable facts', async () => {
+    seedRun(db, 'run-mobile-nohost');
+    const { runner, run } = gatedRunner();
+    const store = new VerifyCapabilityStore(dbAdapter(db));
+    const markUnsupported = vi.spyOn(store, 'markUnsupported');
+    const scheduler = initScheduler({
+      agentRunner: runner,
+      capabilityStore: store,
+      mobileToolchainProbe: async () => false,
+    });
+
+    const id = enqueueOne(scheduler, 'run-mobile-nohost', 'mobile-flow');
+    await flushDrain();
+
+    expect(run).not.toHaveBeenCalled();
+    const row = rowOf(id);
+    expect(row.status).toBe('skipped');
+    expect(row.failure_class).toBe('env');
+    expect(row.error_message).toBe(
+      `unsupported modality 'mobile': ${MOBILE_TOOLCHAIN_UNAVAILABLE_DETAIL}`,
+    );
+    expect(markUnsupported).toHaveBeenCalledWith(
+      1,
+      'mobile',
+      expect.stringContaining('command-line tools'),
+      '',
+    );
+    // Pre-lease: an incapable host never holds a simulator slot even momentarily.
+    expect(mutex.isLocked(verifyMobileSlot(0))).toBe(false);
+    expect(mutex.isLocked(verifyAgentSlot(0))).toBe(false);
+  });
+
+  it('a THROWING mobile probe fails closed — never onto a simulator create + boot', async () => {
+    seedRun(db, 'run-mobile-throw');
+    const { runner, run } = gatedRunner();
+    const scheduler = initScheduler({
+      agentRunner: runner,
+      mobileToolchainProbe: async () => {
+        throw new Error('xcrun exploded');
+      },
+    });
+
+    const id = enqueueOne(scheduler, 'run-mobile-throw', 'mobile-flow');
+    await flushDrain();
+
+    expect(run).not.toHaveBeenCalled();
+    expect(rowOf(id).status).toBe('skipped');
+    expect(rowOf(id).error_message).toContain(MOBILE_TOOLCHAIN_UNAVAILABLE_DETAIL);
+    expect(mutex.isLocked(verifyMobileSlot(0))).toBe(false);
+  });
+
+  it('leaves the (N+1)th mobile row QUEUED and releases its agent slot when every simulator slot is held', async () => {
+    seedRun(db, 'run-mobile-full');
+    const { runner, run, gateFor } = gatedRunner();
+    const scheduler = initScheduler({
+      agentRunner: runner,
+      mobileToolchainProbe: async () => true,
+      // One simulator, two agent slots: the pool under test is the MOBILE one.
+      config: { ...CONFIG, mobileSimSlots: 1 },
+    });
+
+    const ids = [
+      enqueueOne(scheduler, 'run-mobile-full', 'mobile-flow'),
+      enqueueOne(scheduler, 'run-mobile-full', 'mobile-flow'),
+    ];
+    await flushDrain();
+
+    const running = ids.filter((id) => statusOf(id) === 'running');
+    const queued = ids.filter((id) => statusOf(id) === 'queued');
+    expect(running).toHaveLength(1);
+    expect(queued).toHaveLength(1);
+    expect(run).toHaveBeenCalledTimes(1);
+    // The agent slot the queued row briefly held was GIVEN BACK — otherwise a
+    // full simulator pool would also strangle every web lane.
+    expect(mutex.isLocked(verifyAgentSlot(1))).toBe(false);
+
+    gateFor(running[0]).resolve();
+    await flushDrain();
+    expect(statusOf(queued[0])).toBe('running');
+    expect(mutex.isLocked(verifyMobileSlot(0))).toBe(true);
+  });
+
+  it('clamps mobileSimSlots into [1,4] — 0 yields one slot, 9 yields four', async () => {
+    for (const [configured, expectedSlots] of [
+      [0, 1],
+      [9, 4],
+    ] as const) {
+      db.close();
+      db = buildDb();
+      mutex = new Mutex();
+      VerificationScheduler._resetForTesting();
+      seedRun(db, 'run-clamp');
+      const { runner, releaseAll } = gatedRunner();
+      const scheduler = initScheduler({
+        agentRunner: runner,
+        mobileToolchainProbe: async () => true,
+        config: { ...CONFIG, mobileSimSlots: configured, agentSlots: 8 },
+      });
+
+      for (let i = 0; i < 5; i++) enqueueOne(scheduler, 'run-clamp', 'mobile-flow');
+      await flushDrain();
+
+      const held = [0, 1, 2, 3, 4].filter((i) => mutex.isLocked(verifyMobileSlot(i)));
+      expect(held).toEqual(Array.from({ length: expectedSlots }, (_, i) => i));
+      releaseAll();
+      await flushDrain();
+    }
+  });
+
+  it('runs a mobile row on a port-EXHAUSTED pool (it needs no port at all)', async () => {
+    seedRun(db, 'run-mobile-noports');
+    const { runner, run, releaseAll } = gatedRunner();
+    const scheduler = initScheduler({
+      agentRunner: runner,
+      mobileToolchainProbe: async () => true,
+      config: { ...CONFIG, devServerPorts: [] },
+    });
+
+    const id = enqueueOne(scheduler, 'run-mobile-noports', 'mobile-flow');
+    await flushDrain();
+
+    // An empty port pool makes tryAcquireOneOf answer null forever — which is
+    // exactly why the mobile path must not consult it.
+    expect(statusOf(id)).toBe('running');
+    expect(run).toHaveBeenCalledTimes(1);
+    releaseAll();
+    await flushDrain();
+  });
+
+  it('releases the simulator slot when the runner THROWS', async () => {
+    seedRun(db, 'run-mobile-boom');
+    const scheduler = initScheduler({
+      agentRunner: {
+        run: vi.fn(async () => {
+          throw new Error('simctl exploded');
+        }),
+      },
+      mobileToolchainProbe: async () => true,
+    });
+
+    const id = enqueueOne(scheduler, 'run-mobile-boom', 'mobile-flow');
+    await flushDrain();
+
+    expect(statusOf(id)).toBe('skipped');
+    expect(mutex.isLocked(verifyMobileSlot(0))).toBe(false);
+    expect(mutex.isLocked(verifyAgentSlot(0))).toBe(false);
   });
 });
 

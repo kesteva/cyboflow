@@ -319,6 +319,7 @@ export class VerificationScheduler {
       // §4: deliberately NOT defaulted to an always-true thunk — absent means "no
       // probe ran", which the gate reads as unsupported (phase-0 behavior).
       nativeCaptureProbe: deps.nativeCaptureProbe,
+      mobileToolchainProbe: deps.mobileToolchainProbe,
       runbookStatus: this.runbookStatus,
       runbookStore: this.runbookStore,
       delivery: this.delivery,
