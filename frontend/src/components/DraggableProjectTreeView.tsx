@@ -1850,6 +1850,23 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                       <span className="text-sm font-semibold text-text-primary truncate text-left" title={project.name}>
                         {project.name}
                       </span>
+                      {/* Collapsed-header session-count badge (TASK-223) — sits right
+                          next to the name so it reads as part of the project's
+                          identity, not a status pill drifting toward the row's
+                          controls. Only shown while collapsed; the rows themselves
+                          carry the session list once expanded, so showing it twice
+                          would be noise. */}
+                      {!isExpanded && collapsedSessionCount > 0 && (
+                        <button
+                          type="button"
+                          onClick={(e) => { e.stopPropagation(); e.preventDefault(); toggleProject(project.id, e); }}
+                          onMouseDown={(e) => e.stopPropagation()}
+                          className="rounded-badge flex-shrink-0 border border-interactive/30 bg-interactive/10 px-1.5 py-px text-[10px] font-medium text-interactive hover:bg-interactive/20 transition-colors"
+                          title={`${collapsedSessionCount} session${collapsedSessionCount === 1 ? '' : 's'} — click to expand`}
+                        >
+                          {collapsedSessionCount}
+                        </button>
+                      )}
                       {isProjectHomeMarked && (
                         <GuidedMarker
                           step={ONBOARDING_PROJECT_HOME_STEP}
@@ -1858,21 +1875,6 @@ function DraggableProjectTreeViewImpl(_props: DraggableProjectTreeViewProps) {
                         />
                       )}
                     </div>
-
-                    {/* Collapsed-header session-count badge (TASK-223) — only shown
-                        while collapsed; the rows themselves carry the session list
-                        once expanded, so showing it twice would be noise. */}
-                    {!isExpanded && collapsedSessionCount > 0 && (
-                      <button
-                        type="button"
-                        onClick={(e) => { e.stopPropagation(); e.preventDefault(); toggleProject(project.id, e); }}
-                        onMouseDown={(e) => e.stopPropagation()}
-                        className="rounded-badge flex-shrink-0 border border-border-primary bg-bg-secondary px-1.5 py-px text-[10px] font-medium text-text-secondary hover:bg-surface-hover transition-colors"
-                        title={`${collapsedSessionCount} session${collapsedSessionCount === 1 ? '' : 's'} — click to expand`}
-                      >
-                        {collapsedSessionCount}
-                      </button>
-                    )}
 
                     <button
                       onClick={(e) => handleRefreshProjectGitStatus(project, e)}
